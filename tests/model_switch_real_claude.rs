@@ -79,7 +79,7 @@ impl Drop for Mgr {
 }
 
 fn switch(model: Option<&str>, effort: Option<EffortChoice>) -> SwitchRequest {
-    SwitchRequest { model: model.map(str::to_owned), effort, actor: Actor::User, set_as_agent_default: false }
+    SwitchRequest { model: model.map(str::to_owned), effort, actor: Actor::User, set_as_agent_default: false, request_id: None }
 }
 
 struct Chat {

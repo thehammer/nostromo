@@ -543,7 +543,7 @@ async fn settle(ticket: SwitchTicket) -> ModelRequestOutcome {
 }
 
 fn req(model: Option<&str>, effort: Option<EffortChoice>, actor: Actor) -> SwitchRequest {
-    SwitchRequest { model: model.map(str::to_owned), effort, actor, set_as_agent_default: false }
+    SwitchRequest { model: model.map(str::to_owned), effort, actor, set_as_agent_default: false, request_id: None }
 }
 
 fn to_model(model: &str) -> SwitchRequest {
@@ -1346,7 +1346,7 @@ async fn use_for_new_focuses_sets_the_agent_default_and_a_default_change_never_t
     rig.seed("sibling", "sonnet", None);
     rig.spawn(TAG, "cody");
 
-    let ticket = rig.request(TAG, SwitchRequest { model: Some("opus".into()), effort: None, actor: Actor::User, set_as_agent_default: true });
+    let ticket = rig.request(TAG, SwitchRequest { model: Some("opus".into()), effort: None, actor: Actor::User, set_as_agent_default: true, request_id: None });
     let switched = settle(ticket).await;
 
     assert_eq!(switched.status, ModelRequestStatus::Applied);

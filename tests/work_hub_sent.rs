@@ -60,6 +60,8 @@ fn marker(kind: &str, target: &str) -> SentMarker {
 /// What the Mac pushes (and the daemon keeps) for a focus.
 fn registry_meta(tag: &str) -> FocusMeta {
     FocusMeta {
+        initial_model: None,
+        initial_effort: None,
         tag: tag.into(),
         display_name: tag.into(),
         agent_name: "cody".into(),

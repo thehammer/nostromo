@@ -129,6 +129,24 @@ pub fn display_model(model: &str, catalog: &ModelCatalog) -> String {
     }
 }
 
+/// Is a session reporting `running` on the model `asked` for? A full name
+/// must match exactly; a family alias matches any model of that family (the
+/// alias may resolve differently in a CLI updated since the session started).
+/// `None` when it can't be told (an unknown name and no catalogue entry).
+pub fn runs_as(asked: &str, running: &str, catalog: &ModelCatalog) -> Option<bool> {
+    if asked.starts_with("claude-") {
+        return Some(asked == running);
+    }
+    let family = catalog
+        .family_for_resolved(running)
+        .map(|e| e.value.as_str())
+        .or_else(|| cost::known_family_of(running));
+    match family {
+        Some(family) => Some(family == asked),
+        None => catalog.resolved(asked).map(|resolved| resolved == running),
+    }
+}
+
 /// `"Opus"`, or `"Opus · effort high"` when `with_effort`.
 pub fn label(target: &ModelTarget, with_effort: bool, catalog: &ModelCatalog) -> String {
     let model = display_model(&target.model, catalog);
@@ -222,5 +240,44 @@ pub mod copy {
             super::display_model(gone, catalog),
             super::display_model(now, catalog)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catalog::ModelEntry;
+
+    fn catalog() -> ModelCatalog {
+        let row = |value: &str, resolved: &str| ModelEntry {
+            value: value.into(),
+            resolved_model: Some(resolved.into()),
+            ..ModelEntry::default()
+        };
+        ModelCatalog::from_rows(
+            vec![row("sonnet", "claude-sonnet-5-5"), row("opus", "claude-opus-5-5")],
+            chrono::Utc::now(),
+        )
+    }
+
+    #[test]
+    fn a_family_matches_any_model_of_that_family_even_one_a_newer_cli_no_longer_resolves_to() {
+        let c = catalog();
+        assert_eq!(runs_as("sonnet", "claude-sonnet-5-5", &c), Some(true));
+        // A session started before a CLI update still runs the older Sonnet.
+        assert_eq!(runs_as("sonnet", "claude-sonnet-4-6", &c), Some(true));
+        assert_eq!(runs_as("opus", "claude-sonnet-5-5", &c), Some(false));
+    }
+
+    #[test]
+    fn a_full_name_must_match_exactly() {
+        let c = catalog();
+        assert_eq!(runs_as("claude-sonnet-4-6", "claude-sonnet-4-6", &c), Some(true));
+        assert_eq!(runs_as("claude-sonnet-4-6", "claude-sonnet-5-5", &c), Some(false));
+    }
+
+    #[test]
+    fn an_unknown_family_with_no_catalogue_entry_cannot_be_judged() {
+        assert_eq!(runs_as("zeta", "claude-zeta-1", &ModelCatalog::default()), None);
     }
 }

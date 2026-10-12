@@ -1077,6 +1077,8 @@ mod tests {
     #[test]
     fn network_peers_never_see_a_focus_project_path() {
         let meta = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: "t".into(),
             display_name: "T".into(),
             agent_name: "cody".into(),
@@ -1211,6 +1213,8 @@ mod tests {
     fn a_sensitive_focus_shows_a_network_peer_only_its_agent_and_an_opaque_tag() {
         let tags = tags_with("cody-secret-jira-title");
         let meta = |tag: &str, agent: &str| FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: tag.into(),
             display_name: "Cody on SECRET".into(),
             agent_name: agent.into(),
@@ -1295,6 +1299,8 @@ mod tests {
         for tags in [SensitiveTags::persisted(path), SensitiveTags::in_memory()] {
             for (tag, agent) in [("cody-secret-title", "cody"), ("x:fred", "cody"), ("anything", "teri:teri")] {
                 let meta = FocusMeta {
+                    initial_model: None,
+                    initial_effort: None,
                     tag: tag.into(),
                     display_name: "SECRET".into(),
                     agent_name: agent.into(),

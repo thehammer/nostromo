@@ -138,6 +138,8 @@ fn register_focuses(harness: &Harness, tags: &[&str]) {
     let metas = tags
         .iter()
         .map(|t| FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: t.to_string(),
             display_name: t.to_string(),
             agent_name: t.to_string(),

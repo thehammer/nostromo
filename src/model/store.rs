@@ -69,6 +69,32 @@ fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
         .unwrap_or_default()
 }
 
+/// [`load_json`] for a read-modify-write: a file that exists but does not
+/// parse is moved aside (`<name>.corrupt-<timestamp>`) rather than being
+/// overwritten with only the one entry being written, so the other entries
+/// can still be recovered by hand.
+fn load_json_for_update<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    let Ok(bytes) = std::fs::read(path) else {
+        return T::default();
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(e) => {
+            let aside = path.with_extension(format!(
+                "corrupt-{}",
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            ));
+            tracing::warn!(
+                path = %path.display(),
+                aside = %aside.display(),
+                "model store does not parse ({e}); moving it aside"
+            );
+            let _ = std::fs::rename(path, &aside);
+            T::default()
+        }
+    }
+}
+
 /// Write `value` as pretty JSON to `path` atomically: a sibling temp file
 /// renamed over the target (rename within one directory is atomic).
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -103,7 +129,7 @@ pub fn update_focus_record(
     change: impl FnOnce(Option<FocusModelRecord>) -> Option<FocusModelRecord>,
 ) -> Result<Option<FocusModelRecord>> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut all = load_focus_models(path);
+    let mut all: BTreeMap<String, FocusModelRecord> = load_json_for_update(path);
     let updated = change(all.remove(tag));
     if let Some(record) = &updated {
         all.insert(tag.to_owned(), record.clone());
@@ -116,7 +142,7 @@ pub fn update_focus_record(
 /// for each one cleared.
 pub fn clear_all_pending(path: &Path) -> Result<Vec<(String, FocusModelRecord)>> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut all = load_focus_models(path);
+    let mut all: BTreeMap<String, FocusModelRecord> = load_json_for_update(path);
     let mut cleared = Vec::new();
     for (tag, record) in all.iter_mut() {
         if record.pending.is_some() {
@@ -138,7 +164,7 @@ pub fn load_defaults(path: &Path) -> BTreeMap<String, AgentDefault> {
 /// Set (`Some`) or clear (`None`) `agent`'s default.
 pub fn set_default(path: &Path, agent: &str, default: Option<AgentDefault>) -> Result<()> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut all = load_defaults(path);
+    let mut all: BTreeMap<String, AgentDefault> = load_json_for_update(path);
     match default {
         Some(d) => {
             all.insert(agent.to_owned(), d);
@@ -148,4 +174,31 @@ pub fn set_default(path: &Path, agent: &str, default: Option<AgentDefault>) -> R
         }
     }
     write_json_atomic(path, &all)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_store_that_does_not_parse_is_moved_aside_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("focus-models.json");
+        std::fs::write(&path, b"{ \"cody-1\": {\"model\": \"opus\"} TRUNCATED").unwrap();
+
+        update_focus_record(&path, "cody-2", |_| {
+            Some(FocusModelRecord { model: "sonnet".into(), ..FocusModelRecord::default() })
+        })
+        .unwrap();
+
+        let aside: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "the unreadable store is kept for recovery");
+        let kept = std::fs::read_to_string(aside[0].path()).unwrap();
+        assert!(kept.contains("cody-1"), "{kept}");
+        assert_eq!(focus_record(&path, "cody-2").unwrap().model, "sonnet");
+    }
 }

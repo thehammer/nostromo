@@ -138,7 +138,10 @@ struct PendingMessage {
 /// back-reference to the manager.
 ///
 /// Lock order, wherever more than one is held: `state` → `model` → `pending`.
-/// `stdin`, `transcript` and `waiters` are only ever taken on their own.
+/// `stdin`, `note_prefix`, `transcript` and `waiters` are leaf locks: they may
+/// be taken while holding the others (a user frame is written under `state`;
+/// `begin_switch` adds its note under `state` + `model`), but nothing else is
+/// ever acquired while one of them is held.
 #[derive(Clone)]
 struct Shared {
     transcript: Arc<Mutex<SessionTranscript>>,
@@ -1923,7 +1926,7 @@ fn finish_apply(shared: &Shared) {
 fn step(shared: &Shared, finished_apply: bool) {
     enum Next {
         Apply(ModelTarget, Actor),
-        Write(PendingMessage),
+        Wrote,
         Idle,
     }
     let next = {
@@ -1941,10 +1944,24 @@ fn step(shared: &Shared, finished_apply: bool) {
             Next::Apply(target, actor)
         } else {
             drop(rt);
-            match shared.pending.lock().unwrap().pop_front() {
+            // The next message is taken and written under the state lock, and
+            // only while the process is up: `take_carry` (restart and crash
+            // recovery) takes the same lock, so a message is either written
+            // here or still queued for the respawned session, never dropped
+            // between the two.
+            let mut pending = shared.pending.lock().unwrap();
+            let msg = if shared.exited.load(Ordering::SeqCst) { None } else { pending.pop_front() };
+            match msg {
                 Some(msg) => {
-                    *state = SessionState::MidTurn;
-                    Next::Write(msg)
+                    drop(pending);
+                    if write_user_message(shared, &msg).is_ok() {
+                        *state = SessionState::MidTurn;
+                        Next::Wrote
+                    } else {
+                        shared.pending.lock().unwrap().push_front(msg);
+                        *state = SessionState::Idle;
+                        Next::Idle
+                    }
                 }
                 None => {
                     *state = SessionState::Idle;
@@ -1958,16 +1975,7 @@ fn step(shared: &Shared, finished_apply: bool) {
             shared.broadcast(SessionEvent::State(SessionState::Idle));
             spawn_apply(shared, target, actor, None);
         }
-        Next::Write(msg) => {
-            if write_user_message(shared, &msg).is_ok() {
-                shared.broadcast(SessionEvent::State(SessionState::MidTurn));
-            } else {
-                // Not delivered: keep it first in line for the respawned
-                // session (`restart` carries the queue over).
-                shared.pending.lock().unwrap().push_front(msg);
-                shared.set_state(SessionState::Idle);
-            }
-        }
+        Next::Wrote => shared.broadcast(SessionEvent::State(SessionState::MidTurn)),
         Next::Idle => shared.broadcast(SessionEvent::State(SessionState::Idle)),
     }
     if finished_apply {
@@ -2777,6 +2785,8 @@ mod tests {
 
     fn focus(tag: &str) -> FocusMeta {
         FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: tag.into(),
             display_name: tag.into(),
             agent_name: tag.into(),
@@ -3173,6 +3183,8 @@ mod tests {
     fn an_event_with_a_focus_tag_the_daemon_knows_is_attributed_to_that_focus() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
         mgr.set_focus_registry(vec![FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: "fred".into(),
             display_name: "Fred".into(),
             agent_name: "fred".into(),
@@ -3858,6 +3870,8 @@ mod work_send_scope_tests {
 
     fn focus(tag: &str) -> FocusMeta {
         FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: tag.into(),
             display_name: "Cody on SECRET".into(),
             agent_name: "cody".into(),

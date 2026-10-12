@@ -18,6 +18,9 @@ pub struct ModelHub {
     catalog: RwLock<ModelCatalog>,
     broadcast: Mutex<Option<broadcast::Sender<ServerMsg>>>,
     last_requests: Mutex<HashMap<String, LastModelRequest>>,
+    /// The `request_id` of the latest request per tag, stamped on every
+    /// `last_request` recorded for it from then on.
+    request_ids: Mutex<HashMap<String, Option<String>>>,
 }
 
 impl ModelHub {
@@ -29,6 +32,7 @@ impl ModelHub {
             catalog: RwLock::new(catalog),
             broadcast: Mutex::new(None),
             last_requests: Mutex::new(HashMap::new()),
+            request_ids: Mutex::new(HashMap::new()),
         }
     }
 
@@ -89,6 +93,11 @@ impl ModelHub {
         }
     }
 
+    /// A new request for `tag` arrived, carrying `request_id` (if any).
+    pub fn begin_request(&self, tag: &str, request_id: Option<String>) {
+        self.request_ids.lock().unwrap().insert(tag.to_owned(), request_id);
+    }
+
     /// Remember the latest request for `tag` (shown as `last_request`).
     pub fn record_request(
         &self,
@@ -108,6 +117,7 @@ impl ModelHub {
                 to,
                 status,
                 ts: chrono::Utc::now(),
+                request_id: self.request_ids.lock().unwrap().get(tag).cloned().flatten(),
             },
         );
     }

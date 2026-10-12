@@ -2127,6 +2127,8 @@ async fn a_unix_client_that_subscribed_to_everything_is_not_replayed_retained_fr
 
 fn meta(tag: &str, display_name: &str, agent: &str, built_in: bool) -> FocusMeta {
     FocusMeta {
+        initial_model: None,
+        initial_effort: None,
         tag: tag.into(),
         display_name: display_name.into(),
         agent_name: agent.into(),
@@ -3276,6 +3278,8 @@ impl WorkService for AnnouncingWorkService {
         self.go.notified().await;
 
         let secret_meta = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: tag.clone(),
             display_name: "Cody on SECRET-DISPLAY".into(),
             agent_name: "cody".into(),
@@ -3397,6 +3401,8 @@ async fn nothing_a_work_send_creates_reaches_a_tcp_client_even_before_the_send_h
 
 fn junk_focus(i: usize) -> FocusMeta {
     FocusMeta {
+        initial_model: None,
+        initial_effort: None,
         tag: format!("{i:03}{}:fred", "j".repeat(3_999_000)),
         display_name: "x".into(),
         agent_name: "cody".into(),
@@ -4658,6 +4664,7 @@ mod model_switching {
             running: false,
             warnings: vec![],
             last_request: None,
+            posture: None,
         }
     }
 
@@ -4756,9 +4763,9 @@ mod model_switching {
     #[tokio::test]
     async fn a_model_state_broadcast_for_a_sensitive_focus_never_reaches_a_tcp_client() {
         let h = spawn_server().await;
-        let (mut unix, _) = h.unix(vec![]).await;
+        let (mut unix, _) = h.unix(vec![Topic::Model]).await;
         spawn_fake_session(&mut unix, "fred", "fred", "v-model-fred-bc").await;
-        let (mut tcp, _) = h.tcp(vec![]).await;
+        let (mut tcp, _) = h.tcp(vec![Topic::Model]).await;
 
         h.broadcast(ServerMsg::SessionModelState(model_state("fred")));
         // Control: the ordinary focus's state still flows, so the test cannot pass by dropping every state.
@@ -4775,7 +4782,7 @@ mod model_switching {
         isolated_activity_log();
         let h = spawn_server().await;
         seed_model_state(&h);
-        let (mut unix, _) = h.unix(vec![]).await;
+        let (mut unix, _) = h.unix(vec![Topic::Model]).await;
         spawn_fake_session_with_id(&mut unix, FOCUS, "cody", "v-model-gate-unix", Some(FOCUS_SID)).await;
         spawn_fake_session(&mut unix, "fred", "fred", "v-model-fred-unix").await;
 

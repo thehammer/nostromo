@@ -593,6 +593,8 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
     }
     fn focus(tag: &str) -> nostromo::ipc::protocol::FocusMeta {
         nostromo::ipc::protocol::FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: tag.into(),
             display_name: tag.into(),
             agent_name: tag.into(),

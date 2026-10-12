@@ -494,7 +494,7 @@ where
     // ── Model replay — catalogue, defaults and every focus's model state ──────
     // Every peer: a network peer is withheld the state of a sensitive focus by
     // the same filter as that focus's transcript.
-    if subscribed(&topics, Topic::Model) {
+    if wants_model(&topics) {
         let frames = model_replay(&session_mgr);
         replay_messages(&mut writer, frames.into_iter().filter_map(|m| outbound(trust, m, &sensitive)))
             .await;
@@ -556,6 +556,9 @@ where
                 let Some(msg) = outbound(trust, msg, &sensitive) else {
                     continue;
                 };
+                let Some(msg) = without_notes_unless_model(msg, &topics) else {
+                    continue;
+                };
                 let bytes = match serde_json::to_vec(&msg) {
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
@@ -591,7 +594,7 @@ where
                             } else {
                                 retained_matching(&retained, &new_topics, Some(&topics))
                             };
-                            if subscribed(&new_topics, Topic::Model) && !subscribed(&topics, Topic::Model) {
+                            if wants_model(&new_topics) && !wants_model(&topics) {
                                 frames.extend(
                                     model_replay(&session_mgr)
                                         .into_iter()
@@ -1294,6 +1297,7 @@ fn handle_client_msg(
                 effort,
                 actor: crate::model::Actor::from_wire(actor.as_deref()),
                 set_as_agent_default,
+                request_id: Some(request_id.clone()),
             };
             let ticket = session_mgr.lock().unwrap().request_switch(&tag, request);
             let tx = targeted_tx.clone();
@@ -1315,6 +1319,38 @@ fn handle_client_msg(
 
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
+    }
+}
+
+/// Does this client take model frames? Only by naming `Topic::Model`: unlike
+/// other topics, the empty "everything" list does not include it, because a
+/// client that predates model switching can't decode a transcript carrying a
+/// `TurnBlock::Note` (it drops the whole `SessionTurns` frame).
+fn wants_model(topics: &[Topic]) -> bool {
+    topics.contains(&Topic::Model)
+}
+
+/// A session frame as a client that has not asked for model frames gets it:
+/// without transcript notes (see [`wants_model`]).
+fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<ServerMsg> {
+    use crate::ipc::stream_json::{Turn, TurnBlock, TurnDelta};
+    fn strip(turn: &mut Turn) {
+        turn.blocks.retain(|b| !matches!(b, TurnBlock::Note { .. }));
+    }
+    if wants_model(topics) {
+        return Some(msg);
+    }
+    match msg {
+        ServerMsg::SessionTurns { tag, mut turns } => {
+            turns.iter_mut().for_each(strip);
+            Some(ServerMsg::SessionTurns { tag, turns })
+        }
+        ServerMsg::SessionTurnDelta { delta: TurnDelta::Note { .. }, .. } => None,
+        ServerMsg::SessionTurnDelta { tag, delta: TurnDelta::TurnStarted { mut turn } } => {
+            strip(&mut turn);
+            Some(ServerMsg::SessionTurnDelta { tag, delta: TurnDelta::TurnStarted { turn } })
+        }
+        other => Some(other),
     }
 }
 
@@ -1671,7 +1707,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         }
         ServerMsg::ModelCatalog { .. }
         | ServerMsg::ModelDefaults { .. }
-        | ServerMsg::SessionModelState(_) => subscribed(topics, Topic::Model),
+        | ServerMsg::SessionModelState(_) => wants_model(topics),
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,
@@ -1906,6 +1942,56 @@ mod tests {
                 assert!(last_event_at.is_some());
             }
             other => panic!("expected ActivityHealth, got {other:?}"),
+        }
+    }
+
+    // ── model topic: only clients that name it get model frames and notes ──
+
+    fn note_block() -> crate::ipc::stream_json::TurnBlock {
+        crate::ipc::stream_json::TurnBlock::Note {
+            note_kind: crate::model::notes::NoteKind::ModelChanged,
+            text: "Model changed to Opus (from Sonnet) by you.".into(),
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    fn turn_with_note() -> crate::ipc::stream_json::Turn {
+        crate::ipc::stream_json::Turn {
+            id: "t0".into(),
+            user_input: "hi".into(),
+            timestamp: None,
+            blocks: vec![note_block(), crate::ipc::stream_json::TurnBlock::Text { text: "hello".into() }],
+            is_complete: true,
+        }
+    }
+
+    #[test]
+    fn model_frames_go_only_to_clients_that_name_the_model_topic() {
+        let catalog = ServerMsg::ModelCatalog { families: vec![], stale: false, fetched_at: None };
+        assert!(message_matches_topics(&catalog, &[Topic::Model]));
+        assert!(!message_matches_topics(&catalog, &[]), "the everything-list predates model frames");
+        assert!(!message_matches_topics(&catalog, &[Topic::Activity]));
+    }
+
+    #[test]
+    fn a_client_that_has_not_asked_for_model_frames_gets_transcripts_without_notes() {
+        let turns = ServerMsg::SessionTurns { tag: "cody-1".into(), turns: vec![turn_with_note()] };
+        match without_notes_unless_model(turns.clone(), &[Topic::Activity]) {
+            Some(ServerMsg::SessionTurns { turns, .. }) => {
+                assert_eq!(turns[0].blocks, vec![crate::ipc::stream_json::TurnBlock::Text { text: "hello".into() }]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let note = ServerMsg::SessionTurnDelta {
+            tag: "cody-1".into(),
+            delta: crate::ipc::stream_json::TurnDelta::Note { turn_id: Some("t0".into()), block: note_block() },
+        };
+        assert!(without_notes_unless_model(note.clone(), &[]).is_none());
+        // A client that names the topic gets both untouched.
+        assert!(without_notes_unless_model(note, &[Topic::Model]).is_some());
+        match without_notes_unless_model(turns, &[Topic::Model]) {
+            Some(ServerMsg::SessionTurns { turns, .. }) => assert_eq!(turns[0].blocks.len(), 2),
+            other => panic!("{other:?}"),
         }
     }
 }

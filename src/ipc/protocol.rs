@@ -91,8 +91,11 @@ pub enum Topic {
     /// message.
     Decision,
     /// Model switching: `ModelCatalog`, `ModelDefaults` and every focus's
-    /// `SessionModelState`, broadcast on change and replayed on subscribe.
-    /// Advertised as the `model` feature in `Welcome.features`.
+    /// `SessionModelState`, broadcast on change and replayed on subscribe, and
+    /// the `TurnBlock::Note` markers in transcripts. Advertised as the `model`
+    /// feature in `Welcome.features`. Delivered only to a client that names
+    /// it: the empty "everything" list does not include it (an older client
+    /// fails to decode a transcript carrying a note).
     Model,
     /// A topic this build does not know (a newer client's). Decoded rather
     /// than rejected so a future topic never makes an older daemon drop the
@@ -301,7 +304,8 @@ pub enum SwitchPhase {
 /// A warning attached to a candidate model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelWarning {
-    /// The candidate it concerns (family alias).
+    /// The candidate it concerns: a family alias (`"opus"`) for a model row,
+    /// or `"effort:<level>"` (`"effort:max"`) for an effort row.
     pub target: String,
     pub text: String,
 }
@@ -316,6 +320,10 @@ pub enum ModelRequestStatus {
     Refused,
     Failed,
     AwaitingUser,
+    /// An agent's upgrade request the user denied (or dismissed).
+    Denied,
+    /// An agent's upgrade request nobody answered in time.
+    Expired,
 }
 
 /// The most recent request to change a focus's model.
@@ -327,6 +335,10 @@ pub struct LastModelRequest {
     pub to: String,
     pub status: ModelRequestStatus,
     pub ts: chrono::DateTime<chrono::Utc>,
+    /// The `request_id` of the `SessionModelSet` that made it, so a client
+    /// waiting on a switch that applies later can recognise its outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// One focus's model state (`ServerMsg::SessionModelState`).
@@ -353,6 +365,9 @@ pub struct SessionModelState {
     pub warnings: Vec<ModelWarning>,
     #[serde(default)]
     pub last_request: Option<LastModelRequest>,
+    /// Bishop's budget posture when this state was built (`None`: unknown).
+    #[serde(default)]
+    pub posture: Option<String>,
 }
 
 /// A per-agent default model.
@@ -419,6 +434,14 @@ pub struct FocusMeta {
     /// `client_id` whose windows should select this focus when it appears.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub select_for_client: Option<String>,
+    /// The model chosen when the focus was created (family alias or full
+    /// name). Read by the daemon only when it creates the focus's model
+    /// record; absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub initial_model: Option<String>,
+    /// The effort chosen when the focus was created (`None`: the default).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub initial_effort: Option<String>,
 }
 
 // ── agent-authored pane layout (Phase 1: agent-driven-pane-layout) ───────────
@@ -2131,6 +2154,8 @@ mod tests {
     fn focus_meta_round_trips() {
         // All optionals Some
         let full = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag:             "cody-abc12345".into(),
             display_name:    "Cody in Admin Portal".into(),
             agent_name:      "cody".into(),
@@ -2148,6 +2173,8 @@ mod tests {
 
         // All optionals None
         let minimal = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag:             "fred".into(),
             display_name:    "Fred".into(),
             agent_name:      "fred".into(),
@@ -2252,6 +2279,8 @@ mod tests {
     #[test]
     fn focus_registry_messages_round_trip() {
         let meta = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag:             "fred".into(),
             display_name:    "Fred".into(),
             agent_name:      "fred".into(),
@@ -2326,6 +2355,8 @@ mod tests {
         });
         round_trip_server(ServerMsg::FocusCreated {
             meta: FocusMeta {
+                initial_model: None,
+                initial_effort: None,
                 tag: "cody-core-1234".into(),
                 display_name: "CORE-1234".into(),
                 agent_name: "cody".into(),

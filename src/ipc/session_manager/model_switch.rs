@@ -112,6 +112,8 @@ pub struct SwitchRequest {
     pub actor: Actor,
     /// Also make the result the default for new focuses of this agent.
     pub set_as_agent_default: bool,
+    /// The client's id for this request, echoed in `last_request`.
+    pub request_id: Option<String>,
 }
 
 /// What became of a model request (the body of `ModelRequestResult`).
@@ -260,6 +262,7 @@ impl SessionManager {
     /// - No running session: only the record changes.
     pub fn request_switch(&mut self, tag: &str, req: SwitchRequest) -> SwitchTicket {
         let hub = Arc::clone(&self.model_hub);
+        hub.begin_request(tag, req.request_id.clone());
         let catalog = hub.catalog();
         let agent = self.agent_of(tag);
         let record = model_store::focus_record(&hub.paths.focus_models, tag);
@@ -362,8 +365,13 @@ impl SessionManager {
         let catalog = hub.catalog();
         let text = copy::stored(current.as_ref(), &target, &catalog);
         if let Some(session) = self.sessions.get(tag) {
-            session.shared.model.lock().unwrap().recorded =
-                model_store::focus_record(&hub.paths.focus_models, tag);
+            {
+                // This choice supersedes a switch the dead process still had
+                // waiting, which a crash recovery would otherwise apply.
+                let mut rt = session.shared.model.lock().unwrap();
+                rt.recorded = model_store::focus_record(&hub.paths.focus_models, tag);
+                rt.waiting = None;
+            }
             emit_note(&session.shared, NoteKind::ModelChanged, text.clone());
         } else if !ctx.session_id.is_empty() {
             note_while_stopped(
@@ -591,10 +599,14 @@ impl SessionManager {
     /// and a switch still waiting for its turn to end.
     pub(super) fn take_carry(&self, tag: &str) -> Carry {
         match self.sessions.get(tag) {
-            Some(s) => Carry {
-                messages: s.shared.pending.lock().unwrap().drain(..).collect(),
-                waiting: s.shared.model.lock().unwrap().waiting.take(),
-            },
+            Some(s) => {
+                // Same locks, in the same order, as `step`: a message is
+                // either written by the old process or carried, never neither.
+                let _state = s.shared.state.lock().unwrap();
+                let waiting = s.shared.model.lock().unwrap().waiting.take();
+                let messages = s.shared.pending.lock().unwrap().drain(..).collect();
+                Carry { messages, waiting }
+            }
             None => Carry::default(),
         }
     }
@@ -638,9 +650,9 @@ pub(super) fn on_model_report(shared: &Shared, model: &str) {
         rt.reported = Some(model.to_owned());
         let mut mismatch = None;
         if let Some(record) = &rt.recorded {
-            match catalog.resolved(&record.model) {
-                Some(expected) if expected != model => {
-                    let key = (expected, model.to_owned());
+            match crate::model::runs_as(&record.model, model, &catalog) {
+                Some(false) => {
+                    let key = (record.model.clone(), model.to_owned());
                     if rt.noted_mismatch.as_ref() != Some(&key) {
                         mismatch = Some(copy::mismatch(
                             &record.model,
@@ -651,7 +663,7 @@ pub(super) fn on_model_report(shared: &Shared, model: &str) {
                         rt.noted_mismatch = Some(key);
                     }
                 }
-                Some(_) => rt.noted_mismatch = None,
+                Some(true) => rt.noted_mismatch = None,
                 None => {}
             }
         }
@@ -797,6 +809,7 @@ pub(super) fn model_state(
         running,
         warnings: vec![],
         last_request: hub.last_request(tag),
+        posture: model_activity::current_posture(),
     }
 }
 
@@ -1152,13 +1165,15 @@ async fn run_switch_requests(
         let applied = find_key(&reply.body, "applied").cloned().unwrap_or_default();
         let applied_model = applied.get("model").and_then(|m| m.as_str()).map(str::to_owned);
         let applied_effort = applied.get("effort").and_then(|e| e.as_str()).map(str::to_owned);
-        if let Some(expected) = catalog.resolved(&target.model) {
-            if applied_model.as_deref() != Some(expected.as_str()) {
-                return Err(format!(
-                    "the session reports {}",
-                    applied_model.as_deref().unwrap_or("no model")
-                ));
-            }
+        let switched = match &applied_model {
+            Some(applied) => crate::model::runs_as(&target.model, applied, catalog),
+            None => catalog.resolved(&target.model).map(|_| false),
+        };
+        if switched == Some(false) {
+            return Err(format!(
+                "the session reports {}",
+                applied_model.as_deref().unwrap_or("no model")
+            ));
         }
         if let Some(effort) = &target.effort {
             if applied_effort.as_deref() != Some(effort.as_str()) {
