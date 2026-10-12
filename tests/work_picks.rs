@@ -494,6 +494,60 @@ fn a_bare_domain_with_a_path_is_removed_like_a_url() {
 }
 
 #[test]
+fn a_bare_domain_with_a_query_or_a_fragment_is_removed_like_a_url() {
+    let cases = [
+        ("See evil.com?x=1 now", "See now"),
+        ("See evil.com#frag now", "See now"),
+        ("see sub.evil.co.uk?q=1&r=2", "see"),
+        ("Go EVIL.COM#Login now", "Go now"),
+        ("Fetch evil.example:8080?x=1 today", "Fetch today"),
+        ("Open evil.io/a?b#c then", "Open then"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+    assert_eq!(sr("evil.com?x=1"), None);
+}
+
+#[test]
+fn an_internationalised_domain_with_a_path_query_or_fragment_is_removed() {
+    let cases = [
+        ("See b\u{fc}cher.example/x now", "See now"),
+        ("See \u{43f}\u{440}\u{438}\u{43c}\u{435}\u{440}.\u{440}\u{444}/x now", "See now"),
+        ("See \u{4f8b}\u{3048}.\u{30c6}\u{30b9}\u{30c8}?x=1 now", "See now"),
+        ("See xn--bcher-kva.example#frag now", "See now"),
+        ("See evil.xn--p1ai/x now", "See now"),
+        ("See caf\u{e9}.com/menu now", "See now"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+}
+
+#[test]
+fn an_ideographic_full_stop_counts_as_a_dot_in_a_domain() {
+    let cases = [
+        ("See evil\u{3002}com/x now", "See now"),
+        ("See evil\u{3002}com?x=1 now", "See now"),
+        ("See sub\u{3002}evil\u{3002}co\u{3002}uk#f now", "See now"),
+        ("See \u{ff45}\u{ff56}\u{ff49}\u{ff4c}\u{3002}\u{ff43}\u{ff4f}\u{ff0f}x now", "See now"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sr(raw), Some(expected.into()), "{raw:?}");
+    }
+    // A sentence that merely ends in U+3002, and a plain bare host, stay.
+    assert_eq!(sr("\u{5b8c}\u{4e86}\u{3002}"), Some("\u{5b8c}\u{4e86}\u{3002}".into()));
+    assert_eq!(sr("Ask about evil\u{3002}com"), Some("Ask about evil\u{3002}com".into()), "no path, query or fragment: kept as today");
+}
+
+#[test]
+fn a_file_name_followed_by_a_question_mark_is_still_prose() {
+    for text in ["Is it main.py?", "Did foo.rs change? Check README.md.", "Fix evil.com. Then ship"] {
+        assert_eq!(sr(text), Some(text.into()), "{text:?}");
+    }
+}
+
+#[test]
 fn a_bare_host_without_a_path_is_kept_because_it_cannot_be_told_from_a_file_name() {
     // `foo.rs`, `main.py` and `README.md` are also valid host names (Serbia, Paraguay, Moldova), so a
     // dotted word with no scheme, no `www.` and no path is ordinary prose, not a link.

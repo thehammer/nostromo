@@ -135,7 +135,7 @@ pub const MANUAL_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const ALIVE_POLL: Duration = Duration::from_millis(500);
 
 /// `reason` as it may be stored and shown: one line, no control, format, bidi or
-/// tag characters, no URLs, no markdown links (kept as their link text) and no
+/// tag characters, no URLs (a bare `host.tld` followed by a path, query or fragment counts), no markdown links (kept as their link text) and no
 /// backticks. `None` when nothing is left, or when more than
 /// [`MAX_REASON_CHARS`] is: a reason is a sentence, and an over-long one is the
 /// agent's mistake to fix, not ours to cut.
@@ -157,11 +157,16 @@ pub fn sanitize_reason(raw: &str) -> Option<String> {
         Regex::new(r"(?i)\b(?:[a-z][a-z0-9+.\-]*://|www\.|mailto:|javascript:|data:|vbscript:|file:|tel:|sms:)\S*")
             .expect("static regex")
     });
-    // `host.tld/...`: a domain with a path is a link. A bare `host.tld` is kept: it cannot
-    // be told from a file name (`main.py`, `README.md` and `foo.rs` are country domains).
+    // `host.tld/...`, `host.tld?...` and `host.tld#...`: a domain with a path, query or fragment is a
+    // link. A bare `host.tld` is kept: it cannot be told from a file name (`main.py`, `README.md` and
+    // `foo.rs` are country domains). Labels may be non-ASCII (internationalised hosts, or punycode
+    // `xn--`), and U+3002 (ideographic full stop) separates labels like a dot does; NFKC leaves it alone.
     let bare_domain = BARE_DOMAIN.get_or_init(|| {
-        Regex::new(r"(?i)\b[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?)*\.[a-z]{2,}(?::\d+)?/\S*")
-            .expect("static regex")
+        let label = r"[\p{L}\p{N}\p{M}](?:[\p{L}\p{N}\p{M}\-]*[\p{L}\p{N}\p{M}])?";
+        let tld = r"(?:[\p{L}\p{M}]{2,}|xn--[a-z0-9\-]+)";
+        let dot = r"[.\u{3002}]";
+        let tail = r"(?::\d+)?(?:/\S*|\?\S+|\#\S+)";
+        Regex::new(&format!(r"(?i)\b{label}(?:{dot}{label})*{dot}{tld}{tail}")).expect("static regex")
     });
     let text = markdown_link.replace_all(&flat, "$1");
     let text = url.replace_all(&text, " ");
