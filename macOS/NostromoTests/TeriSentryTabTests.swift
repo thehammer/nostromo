@@ -339,8 +339,8 @@ final class TeriSentryViewTrackerTests: XCTestCase {
         second.didShow()
 
         XCTAssertEqual(second.baseline, leftAt)
-        XCTAssertEqual(defaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date, clock.now,
-                       "showing records the new last-viewed time")
+        XCTAssertEqual(defaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date, leftAt,
+                       "showing does not restamp: a crash now must leave the previous view as the baseline")
     }
 
     func testTheLastViewedTimeIsStoredUnderThePublishedKey() {
@@ -350,7 +350,7 @@ final class TeriSentryViewTrackerTests: XCTestCase {
         let tracker = tracker(defaults, clock)
 
         tracker.didShow()
-        XCTAssertEqual(defaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date, t0)
+        XCTAssertNil(defaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date, "showing stores nothing")
 
         clock.advance(90)
         tracker.didLeave()
@@ -556,9 +556,8 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         let rig = makeRig()
         XCTAssertNil(lastViewed(), "the Todos tab is showing; Sentry has not been viewed")
 
-        let shownAt = clock.now
         rig.surface.select(.sentry)
-        XCTAssertEqual(lastViewed(), shownAt)
+        XCTAssertNil(lastViewed(), "showing stores nothing; only a leave or the minute timer does")
 
         clock.advance(120)
         rig.surface.select(.todos)
@@ -604,18 +603,17 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         let rig = makeRig(defaults: defaults)
 
         XCTAssertEqual(rig.surface.selectedTab, .sentry)
-        XCTAssertEqual(lastViewed(), clock.now)
+        XCTAssertNil(lastViewed(), "a show stores nothing")
     }
 
     func testReselectingTheVisibleSentryTabIsNotALeaveAndReturn() {
         let rig = makeRig()
         rig.surface.select(.sentry)
-        let shownAt = clock.now
         clock.advance(300)
 
         rig.surface.select(.sentry)
 
-        XCTAssertEqual(lastViewed(), shownAt)
+        XCTAssertNil(lastViewed())
         _ = rig
     }
 
@@ -675,7 +673,7 @@ final class TeriSentryTrackerReferenceCountTests: XCTestCase {
         tracker.didShow()
 
         XCTAssertEqual(tracker.baseline, earlier)
-        XCTAssertEqual(lastViewed(defaults), t0, "still the time of the first show")
+        XCTAssertEqual(lastViewed(defaults), earlier, "showing stores nothing")
         XCTAssertTrue(tracker.isNew(created), "the marker survives the second show")
     }
 
@@ -688,7 +686,7 @@ final class TeriSentryTrackerReferenceCountTests: XCTestCase {
         clock.advance(120)
         tracker.didLeave()
 
-        XCTAssertEqual(lastViewed(defaults), t0, "one surface is still showing the tab")
+        XCTAssertEqual(lastViewed(defaults), t0.addingTimeInterval(-3600), "one surface is still showing the tab")
     }
 
     func testLeavingTheLastShownSurfaceStoresTheLeaveTime() {
@@ -733,7 +731,7 @@ final class TeriSentryTrackerReferenceCountTests: XCTestCase {
         tracker.didShow()           // a third arrives
 
         XCTAssertEqual(tracker.baseline, earlier)
-        XCTAssertEqual(lastViewed(defaults), t0)
+        XCTAssertEqual(lastViewed(defaults), earlier)
     }
 
     func testAnUnbalancedLeaveNeverDrivesTheCountBelowZero() {
@@ -743,13 +741,98 @@ final class TeriSentryTrackerReferenceCountTests: XCTestCase {
         tracker.didLeave()
 
         tracker.didShow()
-        let shownAt = clock.now
         tracker.didShow()
         clock.advance(120)
         tracker.didLeave()          // two shows, one leave: still showing
 
-        XCTAssertEqual(lastViewed(defaults), shownAt,
+        XCTAssertEqual(lastViewed(defaults), t0.addingTimeInterval(-3600),
                        "stray leaves must not leave the count negative and make this leave look final")
+    }
+
+    // MARK: Crash safety: the time is stored on leave and by the minute timer, never on show
+
+    private func timedTracker(_ clock: FakeClock, _ manual: ManualScheduler) -> (TeriSentryViewTracker, UserDefaults, Date) {
+        let defaults = makeDefaults()
+        let earlier = t0.addingTimeInterval(-3600)
+        defaults.set(earlier, forKey: TeriSentryViewTracker.lastViewedKey)
+        return (TeriSentryViewTracker(defaults: defaults, now: { clock.now }, scheduler: manual.scheduler), defaults, earlier)
+    }
+
+    func testShowingStoresNothingSoACrashLeavesThePreviousViewAsTheNextBaseline() {
+        let clock = FakeClock(t0)
+        let manual = ManualScheduler()
+        let (tracker, defaults, earlier) = timedTracker(clock, manual)
+
+        tracker.didShow()
+
+        XCTAssertEqual(lastViewed(defaults), earlier, "nothing stored on show")
+        XCTAssertEqual(manual.pendingDelays, [60], "the minute timer is armed instead")
+    }
+
+    func testTheMinuteTimerStoresTheTimeWhileShownAndRearmsItself() {
+        let clock = FakeClock(t0)
+        let manual = ManualScheduler()
+        let (tracker, defaults, earlier) = timedTracker(clock, manual)
+        tracker.didShow()
+
+        clock.advance(60)
+        manual.fireAll()
+        XCTAssertEqual(lastViewed(defaults), t0.addingTimeInterval(60))
+        XCTAssertEqual(manual.pendingDelays, [60], "armed again")
+        XCTAssertEqual(tracker.baseline, earlier, "the timer never moves what is shown as new")
+
+        clock.advance(60)
+        manual.fireAll()
+        XCTAssertEqual(lastViewed(defaults), t0.addingTimeInterval(120))
+    }
+
+    func testASurfaceShownTwiceHasOneTimerAndItStopsOnlyWhenTheLastOneLeaves() {
+        let clock = FakeClock(t0)
+        let manual = ManualScheduler()
+        let (tracker, defaults, earlier) = timedTracker(clock, manual)
+        tracker.didShow()
+        tracker.didShow()
+        XCTAssertEqual(manual.pendingCount, 1)
+
+        clock.advance(30)
+        tracker.didLeave()
+        XCTAssertEqual(manual.pendingCount, 1, "one surface still shows the tab")
+        XCTAssertEqual(lastViewed(defaults), earlier)
+
+        clock.advance(30)
+        tracker.didLeave()
+        XCTAssertEqual(manual.pendingCount, 0, "the timer is cancelled with the last leave")
+        XCTAssertEqual(lastViewed(defaults), t0.addingTimeInterval(60), "the leave stores the time")
+    }
+
+    func testATimerThatFiresAfterTheLastLeaveStoresNothing() {
+        let clock = FakeClock(t0)
+        let manual = ManualScheduler()
+        let (tracker, defaults, _) = timedTracker(clock, manual)
+        tracker.didShow()
+        clock.advance(10)
+        tracker.didLeave()
+
+        clock.advance(500)
+        manual.fireAll()
+
+        XCTAssertEqual(lastViewed(defaults), t0.addingTimeInterval(10), "the cancelled timer did not restamp")
+    }
+
+    func testShowingAgainAfterALeaveArmsANewTimer() {
+        let clock = FakeClock(t0)
+        let manual = ManualScheduler()
+        let (tracker, defaults, _) = timedTracker(clock, manual)
+        tracker.didShow()
+        tracker.didLeave()
+        clock.advance(100)
+        tracker.didShow()
+        XCTAssertEqual(manual.pendingCount, 1)
+
+        clock.advance(60)
+        manual.fireAll()
+
+        XCTAssertEqual(lastViewed(defaults), t0.addingTimeInterval(160))
     }
 
     // MARK: Explicit "mark seen"
@@ -918,7 +1001,7 @@ final class TeriSentryTwoSurfaceTests: TeriSentryClockedTestCase {
         XCTAssertEqual(row(second.live, "Fresh")?.statusText, "new",
                        "the second surface compares with the same earlier view")
         XCTAssertEqual(row(first.live, "Fresh")?.statusText, "new", "and the first surface is not wiped either")
-        XCTAssertEqual(lastViewed(), t0, "opening the second surface does not restamp the last view")
+        XCTAssertEqual(lastViewed(), t0.addingTimeInterval(-3600), "opening the second surface does not restamp the last view")
     }
 
     func testReleasingOneSurfaceDoesNotRecordALeaveWhileAnotherStillShowsTheTab() {
@@ -929,13 +1012,13 @@ final class TeriSentryTwoSurfaceTests: TeriSentryClockedTestCase {
         first.select(.sentry)
         clock.advance(300)
         second.select(.sentry)
-        XCTAssertEqual(lastViewed(), t0)
+        XCTAssertEqual(lastViewed(), t0.addingTimeInterval(-3600))
 
         clock.advance(300)
         second.release()
 
         XCTAssertTrue(second.isGone, "precondition: the surface was deallocated")
-        XCTAssertEqual(lastViewed(), t0, "the first surface is still looking at Sentry")
+        XCTAssertEqual(lastViewed(), t0.addingTimeInterval(-3600), "the first surface is still looking at Sentry")
     }
 
     func testOnceBothSurfacesAreGoneTheLastViewedTimeIsWhenTheLastOneLeft() {
@@ -1006,6 +1089,7 @@ final class TeriSentryTwoSurfaceTests: TeriSentryClockedTestCase {
 
         holder.select(.sentry)
 
+        holder.select(.todos)
         XCTAssertEqual(otherDefaults.object(forKey: TeriSentryViewTracker.lastViewedKey) as? Date, t0)
         XCTAssertNil(lastViewed(), "the original tracker's defaults were not touched")
     }
