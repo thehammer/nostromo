@@ -1523,14 +1523,15 @@ async fn live_updates_unavailable_is_published_without_a_doc_changing_and_is_wit
 // ── hub integration ──────────────────────────────────────────────────────────
 
 /// The hub reads (and prunes) the process-wide sent ledger, which defaults to
-/// `~/.nostromo/teri/sent.json`: point it, and the teri dir, at a temp dir once
-/// per test process so these tests never touch the real one.
+/// `~/.nostromo/teri/sent.json`: install a ledger in a temp dir once per test
+/// process so these tests never touch the real one. (No env var is set: that is
+/// process-wide and racy with parallel tests; nothing here writes elsewhere in
+/// the teri dir.)
 fn isolate_sent_ledger() {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("nostromo-repo-docs-teri-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp teri dir");
-        std::env::set_var("NOSTROMO_TERI_DIR", &dir);
         nostromo::data::work::sent::install_ledger(Arc::new(nostromo::data::work::sent::SentLedger::new(
             dir.join("sent.json"),
         )));

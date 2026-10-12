@@ -1518,8 +1518,6 @@ struct Live {
     env: PathBuf,
     poke: Arc<Notify>,
     rx: watch::Receiver<SourceUpdate>,
-    /// Taken just before the poke that triggers the limited answer.
-    poked_at: tokio::time::Instant,
 }
 
 /// Good data (`RL-1`), then one `limited` answer to the next fetch (which a
@@ -1535,10 +1533,9 @@ async fn limited_after_good(limited: ResponseTemplate, backoff: Duration) -> (Li
     let poke = Arc::new(Notify::new());
     let mut rx = source_with_backoff(&env, &server, LONG, backoff).spawn(poke.clone());
     wait_state(&mut rx, SourceState::Fresh).await;
-    let poked_at = tokio::time::Instant::now();
     poke.notify_one();
     let update = wait_state(&mut rx, SourceState::RateLimited).await;
-    (Live { server, _dir: dir, env, poke, rx, poked_at }, update)
+    (Live { server, _dir: dir, env, poke, rx }, update)
 }
 
 /// How long after the source's (fixed) now the status says it will try again.
@@ -1597,11 +1594,8 @@ async fn assert_short_hold(value: &str) {
     assert_eq!(retry_in(&limited), chrono::Duration::seconds(1), "Retry-After {value:?} is a one second hold");
     let update = wait_for(&mut live.rx, "the retry after a short hold", |u| u.0.state == SourceState::Fresh).await;
     assert_eq!(ids(&flat(&update)), vec!["jira:RL-2"], "the loop still works afterwards");
-    assert!(
-        live.poked_at.elapsed() >= Duration::from_millis(950),
-        "a hold is at least a second, but the retry came {:?} after the request that was limited",
-        live.poked_at.elapsed()
-    );
+    // The length of the hold is what the status said, worked out from the injected clock above;
+    // how long the poller really waited is for the simulated-time tests in `jira.rs`, not here.
 }
 
 #[tokio::test]
