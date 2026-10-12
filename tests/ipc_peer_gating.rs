@@ -304,6 +304,7 @@ fn send_preview(item_id: &str) -> SendPreview {
         agent: "cody".into(),
         working_directory: None,
         label: "fake-preview".into(),
+        instruction: "fake instruction".into(),
         context: "fake context".into(),
         existing: vec![],
     }
@@ -575,7 +576,7 @@ async fn a_tcp_client_s_work_and_fred_requests_are_refused_with_requires_secure_
             agent: "cody".into(),
             working_directory: None,
             label: "x".into(),
-            context: "ctx".into(),
+            instruction: "ctx".into(),
             allow_duplicate: false,
         },
     )
@@ -673,7 +674,7 @@ async fn a_unix_client_s_work_requests_reach_the_work_service_and_get_its_answer
             agent: "cody".into(),
             working_directory: Some("/tmp/repo".into()),
             label: "lbl".into(),
-            context: "ctx".into(),
+            instruction: "ctx".into(),
             allow_duplicate: true,
         },
     )
@@ -1134,7 +1135,7 @@ impl WorkService for ScriptedWorkService {
             let mut mgr = mgr.lock().unwrap();
             mgr.spawn_session(tag.clone(), agent.clone(), view.clone(), None, Some(format!("sid-{view}")), false)
                 .map_err(|e| WorkError::new("spawn_failed", e.to_string()))?;
-            mgr.send_user_message(tag, &request.context, &[])
+            mgr.send_user_message(tag, &request.instruction, &[])
                 .map_err(|e| WorkError::new("seed_failed", e.to_string()))?;
         }
         Ok(self.outcome.clone())
@@ -1154,7 +1155,7 @@ async fn work_send_via(unix: &mut UnixStream, service: ScriptedWorkService, dest
             agent: "cody".into(),
             working_directory: None,
             label: "SECRET-JIRA-TITLE".into(),
-            context: "WORK-CONTEXT: summarise the confidential ticket".into(),
+            instruction: "WORK-CONTEXT: summarise the confidential ticket".into(),
             allow_duplicate: false,
         },
     )
@@ -1916,6 +1917,64 @@ async fn a_tcp_client_cannot_cancel_or_answer_a_mother_job_that_a_work_item_star
     assert_refused(&cancel, "mother_action on a work-derived job");
     let resume = attack(&mut tcp, ClientMsg::MotherResume { job_id: "job-work".into(), answer: "do it".into() }).await;
     assert_refused(&resume, "mother_resume on a work-derived job");
+}
+
+/// A job as `mother list --json` reports it, with the `--label` it was added under.
+fn labelled_mother_job(id: &str, label: &str) -> nostromo::mother::MotherJob {
+    serde_json::from_value(json!({
+        "id": id,
+        "state": "awaiting",
+        "title": format!("title of {id}"),
+        "origin": {"label": label},
+    }))
+    .expect("mother job")
+}
+
+/// Job ids a raw frame list names: `(listed in mother_jobs, announced by mother_await_detected)`.
+fn raw_mother_ids(frames: &[Value]) -> (Vec<String>, Vec<String>) {
+    let (mut listed, mut awaiting) = (vec![], vec![]);
+    for f in frames {
+        match f["type"].as_str() {
+            Some("mother_jobs") => {
+                listed.extend(f["jobs"].as_array().expect("jobs").iter().map(|j| j["id"].as_str().unwrap().to_owned()))
+            }
+            Some("mother_await_detected") => awaiting.push(f["id"].as_str().expect("job id").to_owned()),
+            _ => {}
+        }
+    }
+    (listed, awaiting)
+}
+
+#[tokio::test]
+async fn a_job_queued_from_a_work_item_is_withheld_from_a_tcp_peer_by_its_label_even_before_its_id_was_ever_registered() {
+    let h = spawn_server().await;
+    // Nothing has `mark_job`-ed `job-labelled`: the job feed has only the label to go on, as in the
+    // gap between `mother add` returning and the daemon recording the new job's id.
+    let jobs = || vec![labelled_mother_job("job-labelled", "teri-send"), labelled_mother_job("job-ordinary", "nightly")];
+    let (mut tcp, mut unix) = (raw_tcp(&h).await, raw_unix(&h).await);
+    let everything = json!({"type": "subscribe", "topics": [], "renders_decisions": false});
+    raw_handshake(&mut tcp, everything.clone()).await.expect("tcp handshake");
+    raw_handshake(&mut unix, everything).await.expect("unix handshake");
+
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    for job in jobs() {
+        h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
+    }
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+    let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
+
+    assert_eq!(
+        raw_mother_ids(&unix_frames),
+        (vec!["job-labelled".to_owned(), "job-ordinary".to_owned()], vec!["job-labelled".to_owned(), "job-ordinary".to_owned()]),
+        "control: a Unix peer sees both jobs in the list and in the await announcements"
+    );
+    assert_eq!(
+        raw_mother_ids(&tcp_frames),
+        (vec!["job-ordinary".to_owned()], vec!["job-ordinary".to_owned()]),
+        "a TCP peer sees the ordinary job and nothing of the `teri-send` one: {tcp_frames:?}"
+    );
+    let wire = serde_json::to_string(&tcp_frames).unwrap();
+    assert!(!wire.contains("job-labelled") && !wire.contains("title of job-labelled"), "no trace of the withheld job: {wire}");
 }
 
 #[tokio::test]
@@ -3283,7 +3342,7 @@ async fn nothing_a_work_send_creates_reaches_a_tcp_client_even_before_the_send_h
                 agent: "cody".into(),
                 working_directory: None,
                 label: "SECRET-JIRA-TITLE".into(),
-                context: "WORK-CONTEXT".into(),
+                instruction: "WORK-CONTEXT".into(),
                 allow_duplicate: false,
             },
         )

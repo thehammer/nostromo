@@ -206,6 +206,12 @@ pub struct SendPreview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
     pub label: String,
+    /// The user's directive, pre-filled for the sheet to edit.
+    #[serde(default)]
+    pub instruction: String,
+    /// What the agent will also receive, fenced as untrusted data: the item's
+    /// own text, rebuilt by the daemon at send time. The sheet shows it
+    /// READ-ONLY; it is never sent back, so editing cannot change it.
     pub context: String,
     /// Live markers for this item (duplicate warning).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

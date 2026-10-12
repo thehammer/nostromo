@@ -133,6 +133,8 @@ pub struct WorkHub {
     picks: Arc<PicksStore>,
     /// Runs picks generations; `None` when there is no session host.
     picks_generator: Option<Arc<PicksGenerator>>,
+    /// Answers to recent sends, so a retried request id does not send twice.
+    recent_sends: send::RecentSends,
 }
 
 struct State {
@@ -259,6 +261,7 @@ impl WorkHub {
             repo_docs_root: repo_docs_root.clone(),
             picks: picks.clone(),
             picks_generator,
+            recent_sends: Default::default(),
         });
 
         let jira_refresh = hub.refresh[&WorkSource::Jira].clone();
@@ -315,6 +318,47 @@ impl WorkHub {
             out.extend(query::default_order(&matching, source));
         }
         out
+    }
+
+    /// The held item with this id.
+    pub(crate) fn item(&self, item_id: &str) -> Option<WorkItem> {
+        let state = self.state.lock().unwrap();
+        state
+            .slots
+            .values()
+            .flat_map(|slot| slot.groups.values().flatten())
+            .find(|item| item.id == item_id)
+            .cloned()
+    }
+
+    /// The folder whose children are the repos Repo docs reads.
+    pub(crate) fn repo_docs_root(&self) -> &std::path::Path {
+        &self.repo_docs_root
+    }
+
+    /// Where the Sentry project -> repo mapping lives, when Sentry is configured.
+    pub(crate) fn sentry_repos_path(&self) -> Option<&std::path::Path> {
+        self.sentry.as_ref().map(|config| config.repos_path.as_path())
+    }
+
+    /// The markers a resend of `item_id` would run into, judged by the rule
+    /// `send` applies (`sent::focus_marker_may_be_live`), so the sheet's
+    /// "already sent" notice and the send's `existing` answer agree. Right after
+    /// a daemon restart, before the Mac has pushed its focus registry, that
+    /// includes a focus this daemon has no session entry for yet.
+    pub(crate) fn live_markers_for_send(&self, item_id: &str) -> Vec<SentMarker> {
+        sent::ledger().live_markers(item_id, &|m| match m.kind.as_str() {
+            "focus" => self
+                .ctx
+                .session_mgr
+                .as_ref()
+                .is_some_and(|mgr| sent::focus_marker_may_be_live(&mgr.lock().unwrap(), m)),
+            _ => true,
+        })
+    }
+
+    pub(crate) fn recent_sends(&self) -> &send::RecentSends {
+        &self.recent_sends
     }
 
     /// Teri's picks.
@@ -720,10 +764,10 @@ impl WorkService for WorkHub {
     }
 
     async fn send_preview(&self, item_id: &str) -> Result<SendPreview, WorkError> {
-        send::preview(&self.ctx, item_id).await
+        send::preview(self, item_id).await
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendOutcome, WorkError> {
-        send::send(&self.ctx, request).await
+        send::send(self, request).await
     }
 }

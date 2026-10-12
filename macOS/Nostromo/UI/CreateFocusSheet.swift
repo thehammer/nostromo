@@ -180,14 +180,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
     // MARK: - Data discovery
 
     private func loadData() {
-        // Agents: ~/.claude/agents/*.md — filename sans extension is the agent tag
-        let agentsDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/agents")
-        agents = (try? FileManager.default.contentsOfDirectory(
-            at: agentsDir, includingPropertiesForKeys: nil))?
-            .filter { $0.pathExtension == "md" }
-            .map { $0.deletingPathExtension().lastPathComponent }
-            .sorted() ?? []
-
+        agents = Self.discoverAgents()
         agentPopup.removeAllItems()
         agentPopup.addItems(withTitles: agents)
         // Default to claudia if present
@@ -195,11 +188,31 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
             agentPopup.selectItem(at: idx)
         }
 
-        // Projects: ~/Code/ subdirectories, excluding git worktrees.
-        // A worktree has `.git` as a plain file; a normal repo has `.git` as a directory.
+        projects = Self.discoverProjects()
+        projectPopup.removeAllItems()
+        projectPopup.addItems(withTitles: projects.map { URL(fileURLWithPath: $0).lastPathComponent })
+
+        createBtn.isEnabled = !agents.isEmpty
+    }
+
+    /// Agents: ~/.claude/agents/*.md — filename sans extension is the agent tag.
+    /// Also the agent list of the Send to agent sheet.
+    static func discoverAgents() -> [String] {
+        let agentsDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/agents")
+        return (try? FileManager.default.contentsOfDirectory(
+            at: agentsDir, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "md" }
+            .map { $0.deletingPathExtension().lastPathComponent }
+            .sorted() ?? []
+    }
+
+    /// Projects: ~/Code/ subdirectories, excluding git worktrees.
+    /// A worktree has `.git` as a plain file; a normal repo has `.git` as a directory.
+    /// Also the project list of the Send to agent sheet.
+    static func discoverProjects() -> [String] {
         let codeDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Code")
         let fm = FileManager.default
-        projects = (try? fm.contentsOfDirectory(
+        return (try? fm.contentsOfDirectory(
             at: codeDir,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: .skipsHiddenFiles))?
@@ -216,11 +229,6 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
             }
             .map { $0.path }
             .sorted() ?? []
-
-        projectPopup.removeAllItems()
-        projectPopup.addItems(withTitles: projects.map { URL(fileURLWithPath: $0).lastPathComponent })
-
-        createBtn.isEnabled = !agents.isEmpty
     }
 
     // MARK: - Preview

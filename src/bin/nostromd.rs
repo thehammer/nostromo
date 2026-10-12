@@ -406,11 +406,12 @@ async fn main() -> Result<()> {
     // ── Mother pollers ────────────────────────────────────────────────────────
     // (`jobs_feed` was created earlier so the MCP state shares the poller's channel.)
     let btx_mother = broadcast_tx.clone();
-    tokio::spawn(run_mother_pollers(btx_mother, jobs_feed.clone()));
+    let sensitive_tags = session_mgr.lock().unwrap().sensitive_tags();
+    tokio::spawn(run_mother_pollers(btx_mother, jobs_feed.clone(), sensitive_tags.clone()));
 
     // ── Mother peek poller ────────────────────────────────────────────────────
     let btx_peek = broadcast_tx.clone();
-    tokio::spawn(run_peek_poller(btx_peek, jobs_feed.jobs_rx()));
+    tokio::spawn(run_peek_poller(btx_peek, jobs_feed.jobs_rx(), sensitive_tags));
 
     // ── Fred broadcaster ──────────────────────────────────────────────────────
     let btx_fred = broadcast_tx.clone();
@@ -452,9 +453,10 @@ async fn main() -> Result<()> {
 async fn run_mother_pollers(
     tx: broadcast::Sender<ServerMsg>,
     jobs_feed: nostromo::mother::JobsFeed,
+    sensitive: nostromo::ipc::peer::SensitiveTags,
 ) {
     let tx2 = tx.clone();
-    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2, jobs_feed),);
+    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2, jobs_feed, sensitive),);
 }
 
 async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
@@ -507,6 +509,7 @@ async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
 async fn run_job_poller(
     tx: broadcast::Sender<ServerMsg>,
     jobs_feed: nostromo::mother::JobsFeed,
+    sensitive: nostromo::ipc::peer::SensitiveTags,
 ) {
     let mut seen_awaiting: HashSet<String> = HashSet::new();
     let mut last_states: HashMap<String, String> = HashMap::new();
@@ -523,6 +526,9 @@ async fn run_job_poller(
         match mother::list_jobs().await {
             Ok(jobs) => {
                 tracing::debug!(count = jobs.len(), "mother poll ok");
+                // A job queued from a work item is registered work-derived
+                // before anything about it is published or broadcast.
+                sensitive.note_jobs(&jobs);
                 for job in &jobs {
                     let prev_state = last_states
                         .get(&job.id)
@@ -579,6 +585,7 @@ async fn run_job_poller(
 async fn run_peek_poller(
     tx: broadcast::Sender<ServerMsg>,
     jobs_rx: tokio::sync::watch::Receiver<Vec<nostromo::mother::MotherJob>>,
+    sensitive: nostromo::ipc::peer::SensitiveTags,
 ) {
     let mut active: HashSet<String> = HashSet::new();
 
@@ -590,6 +597,9 @@ async fn run_peek_poller(
 
         // Snapshot the current job list.
         let jobs = jobs_rx.borrow().clone();
+        // The list can come from a mutator's refresh, which does not register
+        // work-derived jobs: do it before any peek for them is broadcast.
+        sensitive.note_jobs(&jobs);
 
         let currently_active: HashSet<String> = jobs
             .iter()

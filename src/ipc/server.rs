@@ -582,7 +582,7 @@ where
                             replay_messages(&mut writer, frames).await;
                             continue;
                         }
-                        handle_client_msg(msg, trust, &sensitive, &conn_key, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
+                        handle_client_msg(msg, trust, &sensitive, &conn_key, &claimed_id, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -666,7 +666,8 @@ where
 // ── PTY command dispatch ──────────────────────────────────────────────────────
 
 /// `conn_key` is the server-minted UUID for this connection (not the
-/// client-supplied `client_id` from the Hello frame).
+/// client-supplied `client_id` from the Hello frame, which is `client_id`:
+/// identification for "select this focus in that client", never a credential).
 ///
 /// Eight shared-state handles, one per subsystem this dispatch touches —
 /// matches the existing precedent on `McpSharedState::new` (ten arguments,
@@ -678,6 +679,7 @@ fn handle_client_msg(
     trust: PeerTrust,
     sensitive: &SensitiveTags,
     conn_key: &str,
+    client_id: &str,
     pty_mgr: &Arc<Mutex<PtyManager>>,
     session_mgr: &Arc<Mutex<SessionManager>>,
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
@@ -1193,18 +1195,20 @@ fn handle_client_msg(
             agent,
             working_directory,
             label,
-            context,
+            instruction,
             allow_duplicate,
         } => {
             let tx = targeted_tx.clone();
             let request = SendRequest {
+                request_id: request_id.clone(),
                 item_id,
                 destination,
                 agent,
                 working_directory,
                 label,
-                context,
+                instruction,
                 allow_duplicate,
+                client_id: Some(client_id.to_owned()),
             };
             let sensitive = sensitive.clone();
             tokio::spawn(async move {
@@ -1215,7 +1219,9 @@ fn handle_client_msg(
                 let result = within_work_send(work_service().send(request)).await;
                 // The send's outcome names what it created; registering it here
                 // as well covers a service that did not go through the session
-                // manager, and the Mother job (whose id is not known sooner).
+                // manager, and the Mother job (whose id is not known sooner). Until
+                // then the job is withheld from a network peer by its
+                // `teri-send` label (`MotherJob::is_work_send`).
                 if let Ok(outcome) = &result {
                     if let Some(tag) = &outcome.focus_tag {
                         sensitive.mark_tag(tag);

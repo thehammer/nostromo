@@ -104,6 +104,7 @@ fn handle_event(
                     kind: None,
                     phases: Vec::new(),
                     cycles: Vec::new(),
+                    origin: None,
                 }
             });
 

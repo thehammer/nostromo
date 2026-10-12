@@ -22,12 +22,16 @@ struct WorkRowContent: Equatable {
     /// Overdue or due today: drawn in the alert colour.
     var dueIsUrgent: Bool
     var statusText: String?
+    /// "sent to <label>" / "queued as Mother job" while a live focus or job holds the item.
+    /// Filled by the list from the item's sent markers, never by a tab.
+    var sentText: String?
     /// What VoiceOver reads: source, type, title, priority, age.
     var accessibilityLabel: String
 
     init(priorityText: String? = nil, priorityRank: Int? = nil, kindText: String? = nil, title: String,
          dueText: String? = nil, dueIsUrgent: Bool = false, statusText: String? = nil,
-         accessibilityLabel: String) {
+         sentText: String? = nil, accessibilityLabel: String) {
+        self.sentText = sentText
         self.priorityText = priorityText
         self.priorityRank = priorityRank
         self.kindText = kindText
@@ -82,6 +86,8 @@ struct WorkListConfig {
 
 final class WorkListView: NSView {
     var onSelectionChange: ((WorkItem?) -> Void)?
+    /// The user clicked a row's "sent to …" marker: go to that focus or job.
+    var onOpenSent: ((WorkItem, SentMarker) -> Void)?
     /// Return (or double-click) on a row.
     var onOpen: ((WorkItem) -> Void)?
     var onFilterChange: ((WorkFilter, WorkSortKey) -> Void)?
@@ -376,7 +382,11 @@ final class WorkListView: NSView {
             if let cached = rowCache[item.id], cached.item == item {
                 return Node(item: item, content: cached.content)
             }
-            let content = config.rowContent(item)
+            var content = config.rowContent(item)
+            if let marker = item.sent.last {
+                content.sentText = marker.markerText
+                content.accessibilityLabel += ", \(marker.markerText)"
+            }
             rowCache[item.id] = (item, content)
             return Node(item: item, content: content)
         }
@@ -578,6 +588,25 @@ final class WorkListView: NSView {
 
     @objc private func rowDoubleClicked() { openSelected() }
 
+    /// Click the "sent to …" marker of `itemId`'s row (tests). False when it has none.
+    @discardableResult
+    func clickSentMarker(itemId: String) -> Bool {
+        guard let item = item(withId: itemId), let marker = item.sent.last else { return false }
+        onOpenSent?(item, marker)
+        return true
+    }
+
+    private func item(withId id: String) -> WorkItem? {
+        func find(_ nodes: [Node]) -> WorkItem? {
+            for node in nodes {
+                if let item = node.item, item.id == id { return item }
+                if let found = find(node.children) { return found }
+            }
+            return nil
+        }
+        return find(roots)
+    }
+
     private func openSelected() {
         if let item = selectedItem { onOpen?(item) }
     }
@@ -620,7 +649,10 @@ extension WorkListView: NSOutlineViewDataSource, NSOutlineViewDelegate {
         guard let content = node.content else { return nil }
         let id = NSUserInterfaceItemIdentifier("row")
         let cell = outlineView.makeView(withIdentifier: id, owner: self) as? WorkRowCellView ?? WorkRowCellView(identifier: id)
-        cell.configure(content)
+        let item = node.item
+        cell.configure(content) { [weak self] in
+            if let item, let marker = item.sent.last { self?.onOpenSent?(item, marker) }
+        }
         return cell
     }
 
@@ -694,6 +726,8 @@ private final class WorkRowCellView: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let due = NSTextField(labelWithString: "")
     private let status = NSTextField(labelWithString: "")
+    private let sent = NSButton()
+    private var onSentClick: (() -> Void)?
     private var content: WorkRowContent?
 
     init(identifier: NSUserInterfaceItemIdentifier) {
@@ -710,7 +744,13 @@ private final class WorkRowCellView: NSTableCellView {
         due.font = NSFont.systemFont(ofSize: 11)
         status.font = NSFont.systemFont(ofSize: 11)
         status.textColor = Theme.fgMuted
-        let trailing = NSStackView(views: [due, status])
+        sent.isBordered = false
+        sent.font = NSFont.systemFont(ofSize: 11)
+        sent.lineBreakMode = .byTruncatingTail
+        sent.target = self
+        sent.action = #selector(sentClicked)
+        sent.isHidden = true
+        let trailing = NSStackView(views: [sent, due, status])
         trailing.orientation = .horizontal
         trailing.spacing = 8
         for v in [priority, kind, title, trailing] as [NSView] {
@@ -735,8 +775,14 @@ private final class WorkRowCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func configure(_ content: WorkRowContent) {
+    @objc private func sentClicked() { onSentClick?() }
+
+    func configure(_ content: WorkRowContent, onSentClick: @escaping () -> Void) {
         self.content = content
+        self.onSentClick = onSentClick
+        sent.isHidden = content.sentText == nil
+        sent.title = content.sentText ?? ""
+        sent.setAccessibilityLabel(content.sentText.map { "\($0), open" })
         kind.stringValue = content.kindText ?? ""
         kindWidth.constant = content.kindText == nil ? 0 : 66
         title.stringValue = content.title
@@ -768,15 +814,24 @@ private final class WorkRowCellView: NSTableCellView {
         guard let content else { return }
         if backgroundStyle == .emphasized {
             for field in [priority, kind, title, due, status] { field.textColor = .white }
+            setSentColor(.white)
         } else if isInSelectedRow {
             for field in [priority, kind, title, due, status] { field.textColor = .labelColor }
+            setSentColor(.labelColor)
         } else {
+            setSentColor(Theme.cornflower)
             priority.textColor = Self.color(forRank: content.priorityRank)
             kind.textColor = Theme.fgMuted
             title.textColor = Theme.fg
             due.textColor = content.dueIsUrgent ? Theme.redSweater : Theme.fgMuted
             status.textColor = Theme.fgMuted
         }
+    }
+
+    private func setSentColor(_ color: NSColor) {
+        sent.attributedTitle = NSAttributedString(
+            string: sent.title,
+            attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 11)])
     }
 
     private var isInSelectedRow: Bool {

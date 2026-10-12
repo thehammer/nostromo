@@ -455,7 +455,7 @@ async fn lookup_token(env: &Arc<EnvFile>) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-async fn read_repos(path: &std::path::Path) -> HashMap<String, String> {
+pub(crate) async fn read_repos(path: &std::path::Path) -> HashMap<String, String> {
     let Ok(raw) = tokio::fs::read_to_string(path).await else { return HashMap::new() };
     serde_json::from_str(&raw).unwrap_or_default()
 }

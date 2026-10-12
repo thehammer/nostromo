@@ -275,11 +275,16 @@ struct SendPreview: Decodable, Hashable {
     let agent: String
     let workingDirectory: String?
     let label: String
+    /// The user's directive, pre-filled for the sheet to edit. Empty from a daemon that
+    /// predates the split (it then fills in its own default when sent empty).
+    let instruction: String
+    /// What the agent is also given: the item's own text, rebuilt by the daemon at send
+    /// time. Shown read-only; never sent back.
     let context: String
     let existing: [SentMarker]
 
     enum CodingKeys: String, CodingKey {
-        case agent, label, context, existing
+        case agent, label, instruction, context, existing
         case itemId           = "item_id"
         case workingDirectory = "working_directory"
     }
@@ -290,6 +295,7 @@ struct SendPreview: Decodable, Hashable {
         agent            = try c.decode(String.self, forKey: .agent)
         workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
         label            = try c.decode(String.self, forKey: .label)
+        instruction      = try c.decodeIfPresent(String.self, forKey: .instruction) ?? ""
         context          = try c.decode(String.self, forKey: .context)
         existing         = try c.decodeIfPresent([SentMarker].self, forKey: .existing) ?? []
     }
@@ -351,8 +357,18 @@ struct WorkSendRequest: Equatable {
     let agent: String
     let workingDirectory: String?
     let label: String
-    let context: String
+    /// The user's own words: the agent's directive. The item's text is not part of the
+    /// request; the daemon rebuilds it by `itemId`.
+    let instruction: String
     let allowDuplicate: Bool
+
+    /// Is `other` the same send apart from its request id? A retry after a timeout reuses
+    /// the id of the attempt it repeats only when nothing the user can edit changed.
+    func isSameSend(as other: WorkSendRequest) -> Bool {
+        itemId == other.itemId && destination == other.destination && agent == other.agent
+            && workingDirectory == other.workingDirectory && label == other.label
+            && instruction == other.instruction && allowDuplicate == other.allowDuplicate
+    }
 }
 
 /// Every client → daemon frame added for the work views. Encodes to the wire
@@ -379,7 +395,7 @@ enum WorkClientMessage: Encodable, Equatable {
     }
 
     private enum K: String, CodingKey {
-        case type, source, fred, reason, text, destination, agent, label, context
+        case type, source, fred, reason, text, destination, agent, label, instruction
         case requestId        = "request_id"
         case itemId           = "item_id"
         case workingDirectory = "working_directory"
@@ -406,7 +422,7 @@ enum WorkClientMessage: Encodable, Equatable {
             try c.encode(r.agent, forKey: .agent)
             try c.encodeIfPresent(r.workingDirectory, forKey: .workingDirectory)
             try c.encode(r.label, forKey: .label)
-            try c.encode(r.context, forKey: .context)
+            try c.encode(r.instruction, forKey: .instruction)
             try c.encode(r.allowDuplicate, forKey: .allowDuplicate)
         case .fredSeed(let requestId, let text):
             try c.encode(requestId, forKey: .requestId)
