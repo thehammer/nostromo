@@ -208,7 +208,7 @@ fn parse_row(v: &Value) -> Option<ModelEntry> {
 }
 
 /// Depth-first search for the first value stored under `key`.
-fn find_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+pub(crate) fn find_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
         Value::Object(map) => map
             .get(key)
