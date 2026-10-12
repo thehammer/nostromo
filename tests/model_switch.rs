@@ -1,0 +1,1497 @@
+//! Model switching, daemon side (slice M1): which Claude model (and effort) each
+//! focus's session runs on, how it is switched live, and what the user sees of it.
+//!
+//! Everything is observed from the outside: the argument vector and the stdin
+//! frames a fake `claude` receives, the files the daemon keeps (focus model
+//! store, per-agent defaults, notes ledger, activity log), the frames clients
+//! receive, and the transcript. Nothing here looks inside the session manager.
+//!
+//! The fake `claude` (a POSIX sh script, installed once per test process) speaks
+//! just enough of the stream-json control protocol: `initialize`, `set_model`,
+//! `apply_flag_settings`, `get_settings`, user frames. It writes every argv and
+//! every stdin line, in arrival order, to `events.log` in `$FAKE_DIR`, and marks
+//! each turn's `result` and each control answer in that same file BEFORE writing
+//! it to stdout, so "the daemon wrote X before the turn ended" is detectable.
+//!
+//! Knobs (all inside `$FAKE_DIR` unless an env var, so a test can change them
+//! mid-run):
+//! - `hold.<text>` / `release.<text>`: the turn for the user message `<text>`
+//!   does not end until `release.<text>` exists.
+//! - `hold.set_model` / `release.set_model`: the `set_model` answer waits for the
+//!   release file (with `FAKE_SET_MODEL=exit` the process dies on release).
+//! - `set_model_mode` file, else `$FAKE_SET_MODEL`: unset = switch for real;
+//!   `error:<code>`; `hang` (never answer); `exit`; `noop` (success, no change).
+//! - `$FAKE_REPORT_MODEL`: the model named in init / assistant events.
+//! - `$FAKE_INITIAL_MODEL`: the model with no `--model` (default claude-sonnet-4-6).
+//! - `$FAKE_FALLBACK_REASON`: emit a `model_fallback` system event each turn.
+//! - `$FAKE_IGNORE_EFFORT`: `apply_flag_settings` succeeds but changes nothing.
+//!
+//! No test asserts on wall-clock time. Waits are event-driven with generous
+//! timeouts. Env vars are process-global, so every test holds one lock.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+use chrono::Utc;
+use nostromo::data::work::picks::{picks_restrictions, PICKS_TAG};
+use nostromo::ipc::protocol::{
+    EffortChoice, ModelRequestStatus, ServerMsg, SessionModelState, SwitchPhase,
+};
+use nostromo::ipc::session_manager::{ModelRequestOutcome, SwitchRequest, SwitchTicket, CLAUDE_BIN_ENV};
+use nostromo::ipc::stream_json::{transcript_from_jsonl, Turn, TurnBlock, TurnDelta};
+use nostromo::ipc::SessionManager;
+use nostromo::model::catalog::ModelCatalog;
+use nostromo::model::notes::{self, LedgerNote, NoteKind};
+use nostromo::model::store::{self, FocusModelRecord, ModelSource};
+use nostromo::model::{Actor, ModelPaths, ModelTarget};
+use serde_json::{json, Value};
+use tokio::sync::{broadcast, mpsc};
+
+const WAIT: Duration = Duration::from_secs(30);
+const TAG: &str = "focus-a";
+
+// ── the fake claude ───────────────────────────────────────────────────────────
+
+const FAKE_CLAUDE: &str = r##"#!/bin/sh
+D="$FAKE_DIR"
+S="$D/state.$$"
+mkdir -p "$S"
+{ for a in "$@"; do printf '%s\n' "$a"; done; printf '%s\n' '--END--'; } >> "$D/argv.log"
+printf 'START\n' >> "$D/events.log"
+
+log() { printf '%s\t%s\n' "$1" "$2" >> "$D/events.log"; }
+
+resolve() {
+  case "$1" in
+    opus) echo claude-opus-5-5 ;;
+    fable) echo claude-fable-5-1 ;;
+    sonnet|default) echo claude-sonnet-5-5 ;;
+    haiku) echo claude-haiku-5-5 ;;
+    *) echo "$1" ;;
+  esac
+}
+
+model=""; effort=""; sid="sid-fake"; prev=""
+for a in "$@"; do
+  case "$prev" in
+    --model) model="$a" ;;
+    --effort) effort="$a" ;;
+    --session-id|--resume) sid="$a" ;;
+  esac
+  prev="$a"
+done
+if [ -n "$model" ]; then cur=$(resolve "$model"); else cur="${FAKE_INITIAL_MODEL:-claude-sonnet-4-6}"; fi
+printf '%s' "$cur" > "$S/cur"
+printf '%s' "$effort" > "$S/effort"
+
+wait_for() {
+  i=0
+  while [ ! -e "$1" ]; do
+    i=$((i + 1))
+    [ "$i" -gt 2400 ] && return 1
+    kill -0 $$ 2>/dev/null || exit 0
+    case "$(ps -o stat= -p $$ 2>/dev/null)" in Z*|"") exit 0 ;; esac
+    sleep 0.05
+  done
+  return 0
+}
+
+ctl_ok() { log ANSWER "$2"; printf '%s\n' "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$1\"$3}}"; }
+ctl_err() { log ANSWER "$2"; printf '%s\n' "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$1\",\"error\":\"Model 'x' not found\",\"error_code\":\"$3\"}}"; }
+
+do_set_model() {
+  rid="$1"; req="$2"; mode="$3"
+  case "$mode" in
+    hang) return 0 ;;
+    error:*) ctl_err "$rid" set_model "${mode#error:}" ;;
+    noop) ctl_ok "$rid" set_model ;;
+    *)
+      res=$(resolve "$req")
+      case "$res" in
+        claude-*)
+          printf '%s' "$res" > "$S/cur"
+          printf '%s\n' '{"type":"user","isMeta":true,"isReplay":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands. DO NOT respond to these messages or otherwise consider them in your response unless the user explicitly asks you to.</local-command-caveat>"}}'
+          printf '%s\n' '{"type":"user","isReplay":true,"message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>x</command-args>"}}'
+          printf '%s\n' "{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"<local-command-stdout>Set model to $req ($res)</local-command-stdout>\"}}"
+          ctl_ok "$rid" set_model ;;
+        *) ctl_err "$rid" set_model catalog_unknown ;;
+      esac ;;
+  esac
+}
+
+handle_set_model() {
+  rid="$1"; req="$2"
+  mode=$(cat "$D/set_model_mode" 2>/dev/null)
+  [ -n "$mode" ] || mode="$FAKE_SET_MODEL"
+  if [ -e "$D/hold.set_model" ]; then
+    ( wait_for "$D/release.set_model"
+      if [ "$mode" = exit ]; then kill -TERM $$; else do_set_model "$rid" "$req" "$mode"; fi ) </dev/null &
+  else
+    if [ "$mode" = exit ]; then exit 1; fi
+    do_set_model "$rid" "$req" "$mode"
+  fi
+}
+
+finish() {
+  log RESULT "$1"
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0}'
+}
+
+turn() {
+  text="$1"
+  cur=$(cat "$S/cur")
+  rep="${FAKE_REPORT_MODEL:-$cur}"
+  printf '%s\n' "{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"$text\"}}"
+  if [ -n "$FAKE_FALLBACK_REASON" ]; then
+    printf '%s\n' "{\"type\":\"system\",\"subtype\":\"model_fallback\",\"original_model\":\"$cur\",\"fallback_model\":\"$rep\",\"content\":\"$FAKE_FALLBACK_REASON\",\"trigger\":\"overloaded\"}"
+  fi
+  printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"$rep\"}"
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"$rep\",\"content\":[{\"type\":\"text\",\"text\":\"reply to $text\"}]}}"
+  if [ -e "$D/hold.$text" ]; then
+    ( wait_for "$D/release.$text"; finish "$text" ) </dev/null &
+  else
+    finish "$text"
+  fi
+}
+
+while IFS= read -r line; do
+  log IN "$line"
+  case "$line" in
+    *'"type":"control_request"'*)
+      rid=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'"subtype":"initialize"'*)
+          log ANSWER initialize
+          tr -d '\n' < "$FAKE_CATALOG" | sed "s/\"request_id\" *: *\"init-1\"/\"request_id\":\"$rid\"/"
+          printf '\n' ;;
+        *'"subtype":"set_model"'*)
+          req=$(printf '%s' "$line" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')
+          handle_set_model "$rid" "$req" ;;
+        *'"subtype":"apply_flag_settings"'*)
+          e=$(printf '%s' "$line" | sed -n 's/.*"effortLevel":"\([^"]*\)".*/\1/p')
+          [ -n "$FAKE_IGNORE_EFFORT" ] || printf '%s' "$e" > "$S/effort"
+          ctl_ok "$rid" apply_flag_settings ;;
+        *'"subtype":"get_settings"'*)
+          cur=$(cat "$S/cur"); e=$(cat "$S/effort"); [ -n "$e" ] || e=medium
+          ctl_ok "$rid" get_settings ",\"response\":{\"applied\":{\"model\":\"$cur\",\"effort\":\"$e\"}}" ;;
+        *)
+          ctl_ok "$rid" other ;;
+      esac ;;
+    *'"type":"user"'*)
+      text=$(printf '%s' "$line" | sed -n 's/.*"content":"\([^"]*\)".*/\1/p')
+      turn "$text" ;;
+  esac
+done
+"##;
+
+static FAKE_DIR_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Installs the fake `claude` once per test process; returns its path.
+fn fake_claude_script() -> PathBuf {
+    FAKE_DIR_ROOT
+        .get_or_init(|| {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("nostromo-fake-claude-modelswitch-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("fake claude dir");
+            let script = dir.join("claude");
+            std::fs::write(&script, FAKE_CLAUDE).expect("write fake claude");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            dir
+        })
+        .join("claude")
+}
+
+fn fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model_catalog_initialize.json")
+}
+
+fn fixture_json() -> Value {
+    serde_json::from_slice(&std::fs::read(fixture_path()).expect("fixture")).expect("fixture is JSON")
+}
+
+fn fixture_catalog() -> ModelCatalog {
+    ModelCatalog::from_initialize_response(&fixture_json(), Utc::now()).expect("fixture has models")
+}
+
+// ── the rig ───────────────────────────────────────────────────────────────────
+
+/// One lock for the whole file: env vars and the fake's log directory are process-global.
+static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct Rig {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+    _root: tempfile::TempDir,
+    /// Where the fake claude keeps its logs and knob files.
+    fake: PathBuf,
+    /// The daemon's session-id store; every model file lives beside it.
+    store_path: PathBuf,
+    paths: ModelPaths,
+    activity: PathBuf,
+    agents: PathBuf,
+    cwd: PathBuf,
+    mgr: SessionManager,
+    model_rx: broadcast::Receiver<ServerMsg>,
+    saved: Vec<(&'static str, Option<OsString>)>,
+    snaps: usize,
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        // The sessions' blocking reader threads end only when their children do.
+        self.mgr.kill_all_on_shutdown();
+        for (key, prev) in self.saved.drain(..).rev() {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+/// Every knob the fake reads from the environment.
+const KNOBS: [&str; 5] =
+    ["FAKE_SET_MODEL", "FAKE_REPORT_MODEL", "FAKE_INITIAL_MODEL", "FAKE_FALLBACK_REASON", "FAKE_IGNORE_EFFORT"];
+
+impl Rig {
+    async fn new() -> Rig {
+        let guard = LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let fake = root.path().join("fake");
+        let state = root.path().join("state");
+        let agents = root.path().join("agents");
+        let cwd = root.path().join("cwd");
+        for d in [&fake, &state, &agents, &cwd] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let store_path = state.join("sessions.json");
+        let activity = root.path().join("activity.jsonl");
+
+        let mut mgr = SessionManager::with_store_path(store_path.clone());
+        let (tx, model_rx) = broadcast::channel(256);
+        mgr.configure_model_broadcast(tx);
+        mgr.set_model_catalog(fixture_catalog());
+
+        let mut rig = Rig {
+            _guard: guard,
+            paths: ModelPaths::beside(&store_path),
+            _root: root,
+            fake,
+            store_path,
+            activity,
+            agents,
+            cwd,
+            mgr,
+            model_rx,
+            saved: Vec::new(),
+            snaps: 0,
+        };
+        rig.env(CLAUDE_BIN_ENV, Some(fake_claude_script().into()));
+        rig.env("FAKE_DIR", Some(rig.fake.clone().into()));
+        rig.env("FAKE_CATALOG", Some(fixture_path().into()));
+        rig.env("NOSTROMO_ACTIVITY_PATH", Some(rig.activity.clone().into()));
+        rig.env("NOSTROMO_AGENTS_DIR", Some(rig.agents.clone().into()));
+        for knob in KNOBS {
+            rig.env(knob, None);
+        }
+        rig
+    }
+
+    /// Set (or clear) an env var for the rest of the test; restored on drop.
+    fn env(&mut self, key: &'static str, value: Option<OsString>) {
+        if !self.saved.iter().any(|(k, _)| *k == key) {
+            self.saved.push((key, std::env::var_os(key)));
+        }
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    // ── store / agents ────────────────────────────────────────────────────────
+
+    fn seed(&self, tag: &str, model: &str, effort: Option<&str>) {
+        let record = FocusModelRecord {
+            model: model.to_owned(),
+            effort: effort.map(str::to_owned),
+            source: ModelSource::Focus,
+            pending: None,
+        };
+        store::update_focus_record(&self.paths.focus_models, tag, |_| Some(record)).unwrap();
+    }
+
+    fn record(&self, tag: &str) -> Option<FocusModelRecord> {
+        store::focus_record(&self.paths.focus_models, tag)
+    }
+
+    /// An agent definition with front matter `model: <model>`.
+    fn declare_agent(&self, agent: &str, model: &str) {
+        std::fs::write(
+            self.agents.join(format!("{agent}.md")),
+            format!("---\nname: {agent}\ndescription: test agent\nmodel: {model}\n---\nYou are {agent}.\n"),
+        )
+        .unwrap();
+    }
+
+    // ── sessions ──────────────────────────────────────────────────────────────
+
+    /// Starts the tag's session; returns the claude session id.
+    fn spawn(&mut self, tag: &str, agent: &str) -> String {
+        self.mgr
+            .spawn_session(tag.into(), agent.into(), format!("view-{tag}"), Some(self.cwd.clone()), None, false)
+            .expect("the session starts")
+            .expect("a session id")
+    }
+
+    fn send(&mut self, tag: &str, text: &str) {
+        self.mgr.send_user_message(tag, text, &[]).expect("message accepted");
+    }
+
+    fn request(&mut self, tag: &str, req: SwitchRequest) -> SwitchTicket {
+        self.mgr.request_switch(tag, req)
+    }
+
+    fn state(&self, tag: &str) -> SessionModelState {
+        self.mgr.session_model_state(tag)
+    }
+
+    // ── the fake's logs ───────────────────────────────────────────────────────
+
+    /// Every argument vector the fake was started with, oldest first.
+    fn runs(&self) -> Vec<Vec<String>> {
+        let text = std::fs::read_to_string(self.fake.join("argv.log")).unwrap_or_default();
+        text.split("--END--\n")
+            .filter(|c| !c.is_empty())
+            .map(|c| c.lines().map(String::from).collect())
+            .collect()
+    }
+
+    async fn wait_for_runs(&self, n: usize) -> Vec<Vec<String>> {
+        eventually(&format!("{n} process start(s)"), || {
+            let runs = self.runs();
+            (runs.len() >= n).then_some(runs)
+        })
+        .await
+    }
+
+    /// What the fake saw and did, in order: `start`, `user:<text>`,
+    /// `set_model:<model>`, `effort:<level|null>`, `get_settings`, other control
+    /// subtypes by name, `answer:<subtype>`, `result:<text>`.
+    fn labels(&self) -> Vec<String> {
+        let text = std::fs::read_to_string(self.fake.join("events.log")).unwrap_or_default();
+        text.lines()
+            .filter_map(|l| {
+                let (kind, rest) = l.split_once('\t').unwrap_or((l, ""));
+                Some(match kind {
+                    "START" => "start".to_owned(),
+                    "ANSWER" => format!("answer:{rest}"),
+                    "RESULT" => format!("result:{rest}"),
+                    "IN" => {
+                        let v: Value = serde_json::from_str(rest).ok()?;
+                        match v["type"].as_str()? {
+                            "user" => format!("user:{}", v["message"]["content"].as_str().unwrap_or("?")),
+                            "control_request" => match v["request"]["subtype"].as_str()? {
+                                "set_model" => format!("set_model:{}", v["request"]["model"].as_str().unwrap_or("?")),
+                                "apply_flag_settings" => format!(
+                                    "effort:{}",
+                                    v["request"]["settings"]["effortLevel"].as_str().unwrap_or("null")
+                                ),
+                                other => other.to_owned(),
+                            },
+                            other => other.to_owned(),
+                        }
+                    }
+                    _ => return None,
+                })
+            })
+            .collect()
+    }
+
+    /// What the daemon wrote and what ended a turn: [`Self::labels`] without
+    /// process starts, control answers and `initialize`.
+    fn wire(&self) -> Vec<String> {
+        self.labels()
+            .into_iter()
+            .filter(|l| l != "start" && l != "initialize" && !l.starts_with("answer:"))
+            .collect()
+    }
+
+    async fn wait_for(&self, label: &str) {
+        eventually(label, || self.labels().iter().any(|l| l == label).then_some(())).await
+    }
+
+    fn hold(&self, what: &str) {
+        std::fs::write(self.fake.join(format!("hold.{what}")), "").unwrap();
+    }
+
+    fn release(&self, what: &str) {
+        std::fs::write(self.fake.join(format!("release.{what}")), "").unwrap();
+    }
+
+    /// Change how the fake answers `set_model` from now on.
+    fn set_model_mode(&self, mode: &str) {
+        std::fs::write(self.fake.join("set_model_mode"), mode).unwrap();
+    }
+
+    // ── what the daemon recorded ──────────────────────────────────────────────
+
+    fn ledger(&self, sid: &str) -> Vec<LedgerNote> {
+        notes::load(&self.paths.notes_dir, sid)
+    }
+
+    fn ledger_of_kind(&self, sid: &str, kind: NoteKind) -> Vec<LedgerNote> {
+        self.ledger(sid).into_iter().filter(|n| n.kind == kind).collect()
+    }
+
+    fn activity_lines(&self) -> Vec<Value> {
+        std::fs::read_to_string(&self.activity)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    fn model_switch_lines(&self) -> Vec<Value> {
+        self.activity_lines().into_iter().filter(|l| l["kind"] == "model_switch").collect()
+    }
+
+    /// Every `SessionModelState` broadcast so far, oldest first.
+    fn state_broadcasts(&mut self) -> Vec<SessionModelState> {
+        let mut out = Vec::new();
+        loop {
+            match self.model_rx.try_recv() {
+                Ok(ServerMsg::SessionModelState(s)) => out.push(s),
+                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    // ── what a client sees ────────────────────────────────────────────────────
+
+    /// Attach a client to the tag and keep what it receives.
+    fn observe(&mut self, tag: &str, client: &str) -> Observer {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.mgr.client_sender_registry().lock().unwrap().insert(client.to_owned(), tx);
+        self.mgr.attach(tag, client).expect("attach");
+        Observer { rx, seen: Vec::new() }
+    }
+
+    /// The transcript as a freshly attaching client receives it.
+    fn snapshot(&mut self, tag: &str) -> Vec<Turn> {
+        self.snaps += 1;
+        let client = format!("snapshot-{}", self.snaps);
+        let mut obs = self.observe(tag, &client);
+        obs.drain();
+        let turns = obs
+            .seen
+            .iter()
+            .find_map(|m| match m {
+                ServerMsg::SessionTurns { turns, .. } => Some(turns.clone()),
+                _ => None,
+            })
+            .expect("attach sends the transcript");
+        self.mgr.detach(tag, &client);
+        turns
+    }
+}
+
+struct Observer {
+    rx: mpsc::UnboundedReceiver<ServerMsg>,
+    seen: Vec<ServerMsg>,
+}
+
+impl Observer {
+    fn drain(&mut self) {
+        while let Ok(m) = self.rx.try_recv() {
+            self.seen.push(m);
+        }
+    }
+
+    /// Note deltas received so far, in order.
+    fn notes(&mut self) -> Vec<(NoteKind, String)> {
+        self.drain();
+        self.seen
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::SessionTurnDelta { delta: TurnDelta::Note { block: TurnBlock::Note { note_kind, text, .. }, .. }, .. } => {
+                    Some((*note_kind, text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Poll until `f` yields (30 s at most): events, not sleeps, decide when a test proceeds.
+async fn eventually<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A ticket's outcome, bounded: a switch that never finishes fails the test instead of hanging it.
+async fn settle(ticket: SwitchTicket) -> ModelRequestOutcome {
+    tokio::time::timeout(WAIT, ticket.outcome()).await.expect("the switch never finished")
+}
+
+fn req(model: Option<&str>, effort: Option<EffortChoice>, actor: Actor) -> SwitchRequest {
+    SwitchRequest { model: model.map(str::to_owned), effort, actor, set_as_agent_default: false }
+}
+
+fn to_model(model: &str) -> SwitchRequest {
+    req(Some(model), None, Actor::User)
+}
+
+/// The argument following `flag`, if present.
+fn arg_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let at = args.iter().position(|a| a == flag)?;
+    args.get(at + 1).map(String::as_str)
+}
+
+/// A transcript flattened to `user:<input>`, `text:<text>`, `note:<kind>:<text>` in order.
+fn flat(turns: &[Turn]) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in turns {
+        out.push(format!("user:{}", t.user_input));
+        for b in &t.blocks {
+            match b {
+                TurnBlock::Text { text } => out.push(format!("text:{text}")),
+                TurnBlock::Note { note_kind, text, .. } => out.push(format!("note:{note_kind:?}:{text}")),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn notes_of(turns: &[Turn], kind: NoteKind) -> Vec<String> {
+    turns
+        .iter()
+        .flat_map(|t| t.blocks.iter())
+        .filter_map(|b| match b {
+            TurnBlock::Note { note_kind, text, .. } if *note_kind == kind => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn position(flat: &[String], needle: &str) -> usize {
+    flat.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle:?} not in transcript: {flat:#?}"))
+}
+
+// ── the catalogue ─────────────────────────────────────────────────────────────
+
+#[test]
+fn the_catalogue_lists_families_cheapest_first_without_default_and_splits_out_pinned_versions() {
+    let catalog = fixture_catalog();
+
+    let families: Vec<&str> = catalog.families.iter().map(|e| e.value.as_str()).collect();
+    assert_eq!(families, ["haiku", "sonnet", "opus", "fable"], "cost order, `default` excluded");
+    let mut pinned: Vec<&str> = catalog.pinned.iter().map(|e| e.value.as_str()).collect();
+    pinned.sort();
+    assert_eq!(pinned, ["claude-haiku-4-5-20251001", "claude-opus-4-6"]);
+    assert!(!catalog.stale, "a catalogue parsed from a live answer is not stale");
+
+    let opus = catalog.family("opus").expect("opus row");
+    assert_eq!(opus.resolved_model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(opus.display_name.as_deref(), Some("Opus 5.5"));
+    assert_eq!(opus.supported_effort_levels, ["low", "medium", "high", "xhigh", "max"]);
+    assert!(opus.supports_effort);
+
+    let old_haiku = catalog.entry("claude-haiku-4-5-20251001").expect("pinned row");
+    assert!(!old_haiku.supports_effort);
+    assert!(old_haiku.supported_effort_levels.is_empty());
+    let old_opus = catalog.entry("claude-opus-4-6").expect("pinned row");
+    assert_eq!(old_opus.supported_effort_levels, ["low", "medium", "high", "max"]);
+}
+
+#[test]
+fn a_family_the_cli_starts_offering_appears_after_the_known_ones() {
+    let mut answer = fixture_json();
+    let models = answer["response"]["response"]["models"].as_array_mut().unwrap();
+    models.push(json!({"value": "zeta", "resolvedModel": "claude-zeta-1", "displayName": "Zeta", "supportedEffortLevels": [], "supportsEffort": false}));
+    models.insert(0, json!({"value": "alpha", "resolvedModel": "claude-alpha-1", "displayName": "Alpha", "supportedEffortLevels": [], "supportsEffort": false}));
+
+    let catalog = ModelCatalog::from_initialize_response(&answer, Utc::now()).unwrap();
+
+    let families: Vec<&str> = catalog.families.iter().map(|e| e.value.as_str()).collect();
+    assert_eq!(families, ["haiku", "sonnet", "opus", "fable", "alpha", "zeta"]);
+}
+
+#[test]
+fn an_answer_without_a_model_list_is_not_a_catalogue() {
+    let answer = json!({"type": "control_response", "response": {"subtype": "success", "request_id": "x", "response": {"commands": []}}});
+    assert!(ModelCatalog::from_initialize_response(&answer, Utc::now()).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probing_the_cli_reads_its_initialize_answer() {
+    let rig = Rig::new().await;
+
+    let catalog = nostromo::model::catalog::probe(&fake_claude_script()).await.expect("the probe succeeds");
+
+    let families: Vec<&str> = catalog.families.iter().map(|e| e.value.as_str()).collect();
+    assert_eq!(families, ["haiku", "sonnet", "opus", "fable"]);
+    assert!(!catalog.stale);
+    drop(rig);
+}
+
+// ── spawn arguments ───────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_focus_with_no_model_record_starts_with_no_model_flag_at_all() {
+    let mut rig = Rig::new().await;
+    assert!(!rig.paths.focus_models.exists(), "no store file at all");
+
+    rig.spawn(TAG, "");
+
+    let runs = rig.wait_for_runs(1).await;
+    assert!(!runs[0].iter().any(|a| a == "--model"), "unchanged argv for existing focuses: {:?}", runs[0]);
+    assert!(!runs[0].iter().any(|a| a == "--effort"), "{:?}", runs[0]);
+    let state = rig.state(TAG);
+    assert!(state.recorded.is_none(), "nothing chosen yet and nothing reported");
+    assert!(state.running);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorded_model_and_effort_are_passed_at_every_start() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "opus", Some("high"));
+    rig.spawn(TAG, "");
+    rig.wait_for_runs(1).await; // a child killed before its shell logged its start would leave no trace
+    rig.mgr.restart(TAG).unwrap();
+    rig.wait_for_runs(2).await;
+    rig.seed("other", "haiku", None);
+    rig.spawn("other", "");
+
+    let runs = rig.wait_for_runs(3).await;
+
+    for run in &runs[..2] {
+        assert_eq!(arg_of(run, "--model"), Some("opus"), "{run:?}");
+        assert_eq!(arg_of(run, "--effort"), Some("high"), "{run:?}");
+    }
+    assert_eq!(arg_of(&runs[2], "--model"), Some("haiku"), "{:?}", runs[2]);
+    assert!(!runs[2].iter().any(|a| a == "--effort"), "--effort only when an effort is recorded: {:?}", runs[2]);
+}
+
+// ── (a) the idle switch ───────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_switch_changes_the_model_live_records_one_note_and_survives_a_restart() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    let mut observer = rig.observe(TAG, "window-1");
+
+    let outcome = settle(rig.request(TAG, to_model("opus"))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Applied);
+    assert_eq!(rig.wire(), ["set_model:opus", "get_settings"], "one set_model, no effort change, one verification");
+    let record = rig.record(TAG).expect("a record");
+    assert_eq!((record.model.as_str(), record.effort.clone(), record.source), ("opus", None, ModelSource::Focus));
+    assert_eq!(record.pending, None);
+
+    let ledger = rig.ledger(&sid);
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    assert_eq!(ledger[0].kind, NoteKind::ModelChanged);
+    assert_eq!(ledger[0].text, "Model changed to Opus (from Sonnet) by you.");
+    assert_eq!(ledger[0].after_prompt, 0);
+    eventually("the note delta", || (!observer.notes().is_empty()).then_some(())).await;
+    assert_eq!(observer.notes(), [(NoteKind::ModelChanged, "Model changed to Opus (from Sonnet) by you.".to_owned())]);
+
+    let state = rig.state(TAG);
+    assert_eq!(state.phase, SwitchPhase::Steady);
+    assert_eq!(state.pending, None);
+    assert!(state.running);
+    assert_eq!(state.recorded.as_ref().map(|r| r.model.as_str()), Some("opus"));
+    let reported = state.reported.expect("the switch confirmed what the session runs");
+    assert_eq!(reported.model, "claude-opus-5-5");
+    assert_eq!(reported.family.as_deref(), Some("opus"));
+    eventually("a state broadcast for the new model", || {
+        rig.state_broadcasts()
+            .iter()
+            .any(|s| s.tag == TAG && s.recorded.as_ref().map(|r| r.model.as_str()) == Some("opus") && s.phase == SwitchPhase::Steady)
+            .then_some(())
+    })
+    .await;
+
+    // The conversation goes on on the new model; the CLI's three /model replay frames made no turn.
+    rig.send(TAG, "after-switch");
+    rig.wait_for("result:after-switch").await;
+    assert_eq!(rig.state(TAG).reported.unwrap().model, "claude-opus-5-5");
+    let turns = rig.snapshot(TAG);
+    assert_eq!(turns.len(), 1, "no bubble for the /model replay frames: {:?}", flat(&turns));
+    assert_eq!(turns[0].user_input, "after-switch");
+
+    // A restart (or crash recovery) starts on the switched model.
+    rig.mgr.restart(TAG).unwrap();
+    let runs = rig.wait_for_runs(2).await;
+    assert_eq!(arg_of(&runs[1], "--model"), Some("opus"), "{:?}", runs[1]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_change_goes_through_apply_flag_settings_only_when_the_effort_changes() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+
+    let first = settle(rig.request(TAG, req(Some("opus"), Some(EffortChoice::High), Actor::User))).await;
+
+    assert_eq!(first.status, ModelRequestStatus::Applied);
+    assert_eq!(rig.wire(), ["set_model:opus", "effort:high", "get_settings"]);
+    assert_eq!(rig.ledger(&sid)[0].text, "Model changed to Opus · effort high (from Sonnet) by you.");
+    assert_eq!(rig.record(TAG).unwrap().effort.as_deref(), Some("high"));
+    assert_eq!(rig.state(TAG).effective_effort.as_deref(), Some("high"));
+
+    // Effort alone: no set_model.
+    let second = settle(rig.request(TAG, req(None, Some(EffortChoice::Low), Actor::User))).await;
+    assert_eq!(second.status, ModelRequestStatus::Applied);
+    assert_eq!(&rig.wire()[3..], ["effort:low", "get_settings"]);
+    assert_eq!(rig.state(TAG).effective_effort.as_deref(), Some("low"));
+
+    // Back to the model's default: null.
+    let third = settle(rig.request(TAG, req(None, Some(EffortChoice::Default), Actor::User))).await;
+    assert_eq!(third.status, ModelRequestStatus::Applied);
+    assert_eq!(&rig.wire()[5..], ["effort:null", "get_settings"]);
+    assert_eq!(rig.record(TAG).unwrap().effort, None);
+
+    // Model alone with an unchanged effort: no apply_flag_settings.
+    let fourth = settle(rig.request(TAG, to_model("haiku"))).await;
+    assert_eq!(fourth.status, ModelRequestStatus::Applied);
+    assert_eq!(&rig.wire()[7..], ["set_model:haiku", "get_settings"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_script_switch_is_attributed_to_the_script() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+
+    let outcome = settle(rig.request(TAG, req(Some("opus"), None, Actor::Script))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Applied);
+    assert_eq!(rig.ledger(&sid)[0].text, "Model changed to Opus (from Sonnet) by script.");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_name_of_a_family_the_catalogue_does_not_list_goes_to_the_cli_and_reads_as_the_family() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+
+    let outcome = settle(rig.request(TAG, to_model("claude-opus-4-1"))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Applied, "{outcome:?}");
+    assert_eq!(rig.wire(), ["set_model:claude-opus-4-1", "get_settings"]);
+    assert_eq!(rig.record(TAG).unwrap().model, "claude-opus-4-1");
+    assert_eq!(rig.ledger(&sid)[0].text, "Model changed to Opus (from Sonnet) by you.");
+}
+
+// ── (b) a switch during a turn waits for it ───────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_during_a_turn_waits_for_the_turn_then_the_queue_drains_one_message_per_turn_on_the_new_model() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    let mut observer = rig.observe(TAG, "window-1");
+    rig.hold("user1");
+    rig.send(TAG, "user1");
+    rig.wait_for("user:user1").await;
+
+    let ticket = rig.request(TAG, to_model("opus"));
+
+    let immediate = ticket.immediate().expect("a mid-turn switch answers at once");
+    assert_eq!(immediate.status, ModelRequestStatus::PendingTurnEnd);
+    let state = rig.state(TAG);
+    assert_eq!(state.phase, SwitchPhase::Waiting);
+    assert_eq!(state.pending.as_ref().map(|p| p.model.as_str()), Some("opus"));
+    assert_eq!(state.recorded.as_ref().map(|r| r.model.as_str()), Some("sonnet"), "still on the old model");
+    assert_eq!(rig.record(TAG).unwrap().pending, Some(ModelTarget { model: "opus".into(), effort: None }));
+
+    rig.send(TAG, "user2");
+    rig.send(TAG, "user3");
+    assert_eq!(rig.wire(), ["user:user1"], "nothing is written while the turn runs");
+
+    rig.release("user1");
+    rig.wait_for("result:user3").await;
+
+    assert_eq!(
+        rig.wire(),
+        [
+            "user:user1",
+            "result:user1",
+            "set_model:opus",
+            "get_settings",
+            "user:user2",
+            "result:user2",
+            "user:user3",
+            "result:user3"
+        ],
+        "the switch lands between turns, then one queued message per turn, each exactly once"
+    );
+    let turns = rig.snapshot(TAG);
+    assert_eq!(turns.iter().map(|t| t.user_input.as_str()).collect::<Vec<_>>(), ["user1", "user2", "user3"]);
+    let flat = flat(&turns);
+    assert_eq!(flat.iter().filter(|l| l.starts_with("text:reply to")).count(), 3, "{flat:#?}");
+    assert_eq!(notes_of(&turns, NoteKind::ModelChanged), ["Model changed to Opus (from Sonnet) by you."]);
+    assert_eq!(notes_of(&turns, NoteKind::ModelPending), ["Switching to Opus after this turn"]);
+    assert!(position(&flat, "Model changed") < position(&flat, "user:user2"), "the note sits before the queued messages: {flat:#?}");
+    let changed = rig.ledger_of_kind(&sid, NoteKind::ModelChanged);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].after_prompt, 1, "after the first prompt's turn");
+    assert_eq!(rig.state(TAG).reported.unwrap().model, "claude-opus-5-5");
+    assert_eq!(rig.state(TAG).phase, SwitchPhase::Steady);
+    assert_eq!(rig.record(TAG).unwrap().pending, None);
+    eventually("the pending note delta", || {
+        observer.notes().iter().any(|(k, _)| *k == NoteKind::ModelPending).then_some(())
+    })
+    .await;
+    let kinds: Vec<NoteKind> = observer.notes().into_iter().map(|(k, _)| k).collect();
+    assert_eq!(kinds, [NoteKind::ModelPending, NoteKind::ModelChanged]);
+}
+
+// ── (c) re-selecting while waiting ────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn choosing_again_while_a_switch_waits_replaces_the_target() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    rig.hold("user1");
+    rig.send(TAG, "user1");
+    rig.wait_for("user:user1").await;
+
+    let first = rig.request(TAG, to_model("opus"));
+    let second = rig.request(TAG, to_model("fable"));
+
+    assert_eq!(first.immediate().unwrap().status, ModelRequestStatus::PendingTurnEnd);
+    assert_eq!(second.immediate().unwrap().status, ModelRequestStatus::PendingTurnEnd);
+    assert_eq!(rig.state(TAG).pending.as_ref().map(|p| p.model.as_str()), Some("fable"));
+
+    rig.release("user1");
+    eventually("the switch to apply", || (!rig.ledger_of_kind(&sid, NoteKind::ModelChanged).is_empty()).then_some(())).await;
+
+    assert_eq!(rig.wire(), ["user:user1", "result:user1", "set_model:fable", "get_settings"], "only the last choice is applied");
+    assert_eq!(rig.record(TAG).unwrap().model, "fable");
+    let changed = rig.ledger_of_kind(&sid, NoteKind::ModelChanged);
+    assert_eq!(changed.len(), 1, "at most one Model changed note: {changed:?}");
+    assert_eq!(changed[0].text, "Model changed to Fable (from Sonnet) by you.");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn choosing_the_current_model_while_a_switch_waits_cancels_it_silently() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    rig.hold("user1");
+    rig.send(TAG, "user1");
+    rig.wait_for("user:user1").await;
+    assert_eq!(rig.request(TAG, to_model("opus")).immediate().unwrap().status, ModelRequestStatus::PendingTurnEnd);
+
+    let cancel = settle(rig.request(TAG, to_model("sonnet"))).await;
+
+    assert_eq!(cancel.status, ModelRequestStatus::Unchanged);
+    let state = rig.state(TAG);
+    assert_eq!(state.pending, None);
+    assert_eq!(state.phase, SwitchPhase::Steady);
+    assert_eq!(rig.record(TAG).unwrap().pending, None);
+
+    rig.release("user1");
+    rig.wait_for("result:user1").await;
+    // A message after the turn: anything the daemon wrongly sent at turn end would sit before it.
+    rig.send(TAG, "user2");
+    rig.wait_for("result:user2").await;
+
+    assert_eq!(rig.wire(), ["user:user1", "result:user1", "user:user2", "result:user2"], "nothing was sent for the cancelled switch");
+    assert!(rig.ledger_of_kind(&sid, NoteKind::ModelChanged).is_empty());
+    assert!(rig.ledger_of_kind(&sid, NoteKind::ModelFailed).is_empty());
+    assert_eq!(rig.record(TAG).unwrap().model, "sonnet");
+    assert!(rig.model_switch_lines().is_empty(), "a cancel is not logged: {:?}", rig.activity_lines());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn choosing_the_model_already_in_use_does_nothing() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+
+    let outcome = settle(rig.request(TAG, to_model("sonnet"))).await;
+    let effort_same = settle(rig.request(TAG, req(None, Some(EffortChoice::Default), Actor::User))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Unchanged);
+    assert_eq!(effort_same.status, ModelRequestStatus::Unchanged);
+    assert!(rig.wire().is_empty(), "nothing sent: {:?}", rig.wire());
+    assert!(rig.ledger(&sid).is_empty(), "no note");
+    assert!(rig.activity_lines().is_empty(), "no activity entry");
+}
+
+// ── (d) a rejected switch ─────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_the_cli_rejects_leaves_the_session_on_the_old_model_and_delivers_queued_messages_once_after_the_note() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_SET_MODEL", Some("error:catalog_unknown".into()));
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    rig.hold("set_model");
+
+    let ticket = rig.request(TAG, to_model("opus"));
+    rig.wait_for("set_model:opus").await;
+    assert_eq!(rig.state(TAG).phase, SwitchPhase::Applying);
+    rig.send(TAG, "queued1");
+    rig.release("set_model");
+    let outcome = settle(ticket).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Failed);
+    assert!(outcome.message.as_deref().unwrap_or("").contains("not found"), "the CLI's reason reaches the caller: {outcome:?}");
+    rig.wait_for("result:queued1").await;
+    assert_eq!(
+        rig.wire().iter().filter(|l| l.starts_with("set_model:") || l.starts_with("user:") || l.starts_with("result:")).cloned().collect::<Vec<_>>(),
+        ["set_model:opus", "user:queued1", "result:queued1"],
+        "the queued message is written once, after the switch ended, never during it"
+    );
+    let events = rig.labels();
+    assert!(
+        position(&events, "answer:set_model") < position(&events, "user:queued1"),
+        "the user frame was written only after the control answer: {events:?}"
+    );
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.pending.clone()), ("sonnet", None), "the recorded choice did not change");
+    let state = rig.state(TAG);
+    assert_eq!(state.phase, SwitchPhase::Steady);
+    assert_eq!(state.recorded.unwrap().model, "sonnet");
+    let failed = rig.ledger_of_kind(&sid, NoteKind::ModelFailed);
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].text.starts_with("Couldn't switch to Opus: "), "{}", failed[0].text);
+    assert!(failed[0].text.contains("not found"), "{}", failed[0].text);
+    assert!(failed[0].text.ends_with("Still on Sonnet."), "{}", failed[0].text);
+    let transcript = flat(&rig.snapshot(TAG));
+    assert!(position(&transcript, "Couldn't switch to Opus") < position(&transcript, "text:reply to queued1"), "note first, then the queued reply: {transcript:#?}");
+    assert!(rig.ledger_of_kind(&sid, NoteKind::ModelChanged).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_the_cli_accepts_but_does_not_perform_is_a_failure_not_a_success() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_SET_MODEL", Some("noop".into()));
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+
+    let outcome = settle(rig.request(TAG, to_model("opus"))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Failed, "get_settings still says sonnet");
+    assert_eq!(rig.record(TAG).unwrap().model, "sonnet");
+    assert!(rig.ledger_of_kind(&sid, NoteKind::ModelChanged).is_empty());
+    let failed = rig.ledger_of_kind(&sid, NoteKind::ModelFailed);
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].text.ends_with("Still on Sonnet."), "{}", failed[0].text);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_the_cli_silently_ignores_is_a_failure_and_the_recorded_effort_stays() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_IGNORE_EFFORT", Some("1".into()));
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+
+    let outcome = settle(rig.request(TAG, req(None, Some(EffortChoice::High), Actor::User))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Failed);
+    assert_eq!(&rig.wire()[..2], ["effort:high", "get_settings"]);
+    assert_eq!(rig.record(TAG).unwrap().effort, None);
+    let failed = rig.ledger_of_kind(&sid, NoteKind::ModelFailed);
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].text.starts_with("Couldn't switch to"), "{}", failed[0].text);
+    assert!(failed[0].text.ends_with("Still on Sonnet."), "{}", failed[0].text);
+}
+
+// ── (e) a CLI that never answers ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_switch_the_cli_never_answers_times_out_after_ten_seconds_and_the_session_stays_usable() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_SET_MODEL", Some("hang".into()));
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+
+    let ticket = rig.request(TAG, to_model("opus"));
+    rig.wait_for("set_model:opus").await; // real time: the request really reached the CLI
+
+    // Now the clock is ours. Time is advanced in steps until the ticket resolves; a real-time
+    // pause between steps lets the daemon's tasks and the fake's process run.
+    tokio::time::pause();
+    let mut outcome = Box::pin(ticket.outcome());
+    let started = Instant::now();
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            o = &mut outcome => break o,
+            _ = tokio::task::yield_now() => {}
+        }
+        assert!(started.elapsed() < WAIT, "the ten second timeout never fired");
+        tokio::time::advance(Duration::from_secs(11)).await;
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    tokio::time::resume();
+
+    assert_eq!(outcome.status, ModelRequestStatus::Failed);
+    let failed = rig.ledger_of_kind(&sid, NoteKind::ModelFailed);
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].text.starts_with("Couldn't switch to Opus: "), "{}", failed[0].text);
+    assert!(failed[0].text.ends_with("Still on Sonnet."), "{}", failed[0].text);
+    assert_eq!(rig.record(TAG).unwrap().model, "sonnet");
+    assert_eq!(rig.state(TAG).phase, SwitchPhase::Steady);
+    rig.send(TAG, "after-timeout");
+    rig.wait_for("result:after-timeout").await;
+    assert_eq!(rig.wire().iter().filter(|l| *l == "user:after-timeout").count(), 1);
+}
+
+// ── (f) the process dies mid-switch ───────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_that_dies_mid_switch_comes_back_on_the_old_model_with_the_queued_message_delivered_once() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_SET_MODEL", Some("exit".into()));
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    let _window = rig.observe(TAG, "window-1");
+    rig.hold("set_model");
+
+    let ticket = rig.request(TAG, to_model("opus"));
+    rig.wait_for("set_model:opus").await;
+    rig.send(TAG, "queued1");
+    assert_eq!(rig.state(TAG).phase, SwitchPhase::Applying);
+    rig.release("set_model"); // the fake dies now
+    let outcome = settle(ticket).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Failed);
+    eventually("the Couldn't switch note", || (!rig.ledger_of_kind(&sid, NoteKind::ModelFailed).is_empty()).then_some(())).await;
+    let failed = rig.ledger_of_kind(&sid, NoteKind::ModelFailed);
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].text.starts_with("Couldn't switch to Opus: "), "{}", failed[0].text);
+    assert!(failed[0].text.ends_with("Still on Sonnet."), "{}", failed[0].text);
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.pending.clone()), ("sonnet", None));
+
+    // The supervisor tick brings the session back, on the model it was recorded on.
+    let started = Instant::now();
+    let runs = loop {
+        rig.mgr.reap_and_recover();
+        let runs = rig.runs();
+        if runs.len() >= 2 {
+            break runs;
+        }
+        assert!(started.elapsed() < WAIT, "the session was never respawned");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(arg_of(&runs[1], "--model"), Some("sonnet"), "the respawn carries the OLD model: {:?}", runs[1]);
+    assert!(runs[1].iter().any(|a| a == "--resume"), "{:?}", runs[1]);
+
+    rig.wait_for("result:queued1").await;
+    let delivered: Vec<String> = rig.wire().into_iter().filter(|l| l.starts_with("user:") || l.starts_with("result:")).collect();
+    assert_eq!(delivered, ["user:queued1", "result:queued1"], "the message queued during the switch is neither lost nor duplicated");
+    let events = rig.labels();
+    let second_start = events.iter().enumerate().filter(|(_, l)| *l == "start").nth(1).map(|(i, _)| i).unwrap();
+    assert!(position(&events, "user:queued1") > second_start, "it went to the respawned session: {events:?}");
+}
+
+// ── (g) the daemon restarts mid-switch ────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_still_waiting_when_the_daemon_restarts_is_dropped_and_the_ledger_says_so() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    rig.hold("user1");
+    rig.send(TAG, "user1");
+    rig.wait_for("user:user1").await;
+    assert_eq!(rig.request(TAG, to_model("opus")).immediate().unwrap().status, ModelRequestStatus::PendingTurnEnd);
+    assert!(rig.record(TAG).unwrap().pending.is_some(), "the waiting switch is persisted");
+
+    // The daemon dies right now: what it left on disk is all a new daemon has.
+    let crashed = rig._root.path().join("after-crash");
+    std::fs::create_dir_all(&crashed).unwrap();
+    for entry in std::fs::read_dir(rig.store_path.parent().unwrap()).unwrap().flatten() {
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), crashed.join(entry.file_name())).unwrap();
+        }
+    }
+    rig.release("user1"); // let the held turn end so nothing is left holding the child's pipes
+    let new_paths = ModelPaths::beside(&crashed.join("sessions.json"));
+    assert!(store::focus_record(&new_paths.focus_models, TAG).unwrap().pending.is_some());
+
+    let mut restarted = SessionManager::with_store_path(crashed.join("sessions.json"));
+    restarted.set_model_catalog(fixture_catalog());
+    restarted.clear_persisted_pending();
+
+    let record = store::focus_record(&new_paths.focus_models, TAG).unwrap();
+    assert_eq!(record.pending, None, "no pending switch survives a daemon start");
+    assert_eq!(record.model, "sonnet");
+    let ledger = notes::load(&new_paths.notes_dir, &sid);
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    assert_eq!(ledger[0].kind, NoteKind::ModelFailed);
+    assert_eq!(ledger[0].text, "Couldn't switch to Opus: nostromd restarted. Still on Sonnet.");
+}
+
+// ── (h) the session runs something else than asked ────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_running_another_model_than_recorded_gets_exactly_one_mismatch_note() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_REPORT_MODEL", Some("claude-sonnet-5-5".into()));
+    rig.seed(TAG, "opus", None);
+    let sid = rig.spawn(TAG, "");
+
+    rig.send(TAG, "m1");
+    rig.wait_for("result:m1").await;
+    eventually("the mismatch note", || (!rig.ledger_of_kind(&sid, NoteKind::ModelMismatch).is_empty()).then_some(())).await;
+    rig.send(TAG, "m2");
+    rig.wait_for("result:m2").await;
+    rig.send(TAG, "m3");
+    rig.wait_for("result:m3").await;
+
+    let mismatch = rig.ledger_of_kind(&sid, NoteKind::ModelMismatch);
+    assert_eq!(mismatch.len(), 1, "once per distinct mismatch, not once per turn: {mismatch:?}");
+    assert!(mismatch[0].text.starts_with("Asked for Opus; the session is running Sonnet"), "{}", mismatch[0].text);
+    let state = rig.state(TAG);
+    assert_eq!(state.reported.unwrap().model, "claude-sonnet-5-5", "the chip shows what is running");
+    assert_eq!(state.recorded.unwrap().model, "opus", "the recorded choice is not rewritten by a fallback");
+    assert_eq!(notes_of(&rig.snapshot(TAG), NoteKind::ModelMismatch).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fallback_reason_the_cli_gives_is_part_of_the_mismatch_note() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_REPORT_MODEL", Some("claude-sonnet-5-5".into()));
+    rig.env("FAKE_FALLBACK_REASON", Some("Opus is overloaded".into()));
+    rig.seed(TAG, "opus", None);
+    let sid = rig.spawn(TAG, "");
+
+    rig.send(TAG, "m1");
+    rig.wait_for("result:m1").await;
+    eventually("the mismatch note", || (!rig.ledger_of_kind(&sid, NoteKind::ModelMismatch).is_empty()).then_some(())).await;
+
+    let mismatch = rig.ledger_of_kind(&sid, NoteKind::ModelMismatch);
+    assert_eq!(mismatch.len(), 1);
+    assert!(mismatch[0].text.starts_with("Asked for Opus; the session is running Sonnet"), "{}", mismatch[0].text);
+    assert!(mismatch[0].text.contains("(Opus is overloaded)"), "{}", mismatch[0].text);
+}
+
+// ── (i) the recorded model is no longer offered ───────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorded_family_the_cli_no_longer_offers_starts_on_the_agents_model_with_a_note() {
+    let mut rig = Rig::new().await;
+    let mut answer = fixture_json();
+    answer["response"]["response"]["models"].as_array_mut().unwrap().retain(|m| m["value"] != "fable");
+    rig.mgr.set_model_catalog(ModelCatalog::from_initialize_response(&answer, Utc::now()).unwrap());
+    rig.declare_agent("declarer", "sonnet");
+    rig.seed(TAG, "fable", None);
+
+    let sid = rig.spawn(TAG, "declarer");
+
+    let runs = rig.wait_for_runs(1).await;
+    assert_eq!(arg_of(&runs[0], "--model"), Some("sonnet"), "falls back to the agent's model, not a failing start: {:?}", runs[0]);
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.source), ("sonnet", ModelSource::AgentDeclared));
+    let unavailable = rig.ledger_of_kind(&sid, NoteKind::ModelUnavailable);
+    assert_eq!(unavailable.len(), 1, "{unavailable:?}");
+    assert_eq!(unavailable[0].text, "Fable is no longer available; this focus now uses Sonnet.");
+    assert_eq!(rig.state(TAG).recorded.unwrap().model, "sonnet");
+}
+
+// ── (j) existing focuses keep the model they run ──────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_focus_with_no_record_takes_the_model_its_session_first_reports_without_any_note() {
+    let mut rig = Rig::new().await;
+    let sid = rig.spawn(TAG, "plain-agent");
+
+    rig.send(TAG, "hello");
+    rig.wait_for("result:hello").await;
+
+    let record = eventually("the migrated record", || rig.record(TAG)).await;
+    assert_eq!(record.model, "claude-sonnet-4-6", "a name no family alias resolves to is kept in full");
+    assert_eq!(record.source, ModelSource::CliDefault);
+    assert_eq!(record.effort, None);
+    assert_eq!(record.pending, None);
+    assert!(rig.ledger(&sid).is_empty(), "shipping the feature changes nothing the user sees");
+    assert!(rig.activity_lines().is_empty());
+    assert!(!rig.runs()[0].iter().any(|a| a == "--model"), "the first start was unchanged");
+    assert!(rig.wire() == ["user:hello", "result:hello"], "no control traffic: {:?}", rig.wire());
+    assert_eq!(rig.state(TAG).recorded.unwrap().model, "claude-sonnet-4-6");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_migrated_focus_records_the_family_alias_and_that_its_agent_declared_the_model() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_INITIAL_MODEL", Some("claude-haiku-5-5".into()));
+    rig.declare_agent("declarer", "haiku");
+    let sid = rig.spawn(TAG, "declarer");
+
+    rig.send(TAG, "hello");
+    rig.wait_for("result:hello").await;
+
+    let record = eventually("the migrated record", || rig.record(TAG)).await;
+    assert_eq!((record.model.as_str(), record.source), ("haiku", ModelSource::AgentDeclared));
+    assert!(rig.ledger(&sid).is_empty());
+    assert!(rig.activity_lines().is_empty());
+}
+
+// ── (k) restricted sessions ───────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restricted_session_never_gets_a_model_flag_a_record_or_a_switch() {
+    let mut rig = Rig::new().await;
+    rig.mgr.restrict_tag("locked-tag", picks_restrictions());
+    // Even a record someone wrote for the picks tag is not passed on.
+    rig.seed(PICKS_TAG, "opus", None);
+    rig.spawn(PICKS_TAG, "");
+    let locked_sid = rig.spawn("locked-tag", "");
+
+    let picks = settle(rig.request(PICKS_TAG, to_model("fable"))).await;
+    let locked = settle(rig.request("locked-tag", to_model("opus"))).await;
+    rig.send("locked-tag", "hello");
+    rig.wait_for("result:hello").await;
+
+    for outcome in [&picks, &locked] {
+        assert_eq!(outcome.status, ModelRequestStatus::Refused);
+        assert_eq!(outcome.code.as_deref(), Some("not_permitted"));
+    }
+    let runs = rig.wait_for_runs(2).await;
+    for run in &runs {
+        assert!(!run.iter().any(|a| a == "--model"), "no model flag for a restricted tag: {run:?}");
+        assert!(!run.iter().any(|a| a == "--effort"), "{run:?}");
+    }
+    assert_eq!(rig.wire(), ["user:hello", "result:hello"], "nothing about models was written to either session");
+    assert!(rig.record("locked-tag").is_none(), "no record created, not even by migration");
+    assert_eq!(rig.record(PICKS_TAG).unwrap().model, "opus", "the refusal changed nothing");
+    assert!(rig.ledger(&locked_sid).is_empty());
+}
+
+// ── (l) refusals that never reach the CLI ─────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_the_model_does_not_support_is_refused_before_anything_is_sent() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "claude-haiku-4-5-20251001", None);
+    let sid = rig.spawn(TAG, "");
+
+    let outcome = settle(rig.request(TAG, req(None, Some(EffortChoice::High), Actor::User))).await;
+    let opus_old = settle(rig.request(TAG, req(Some("claude-opus-4-6"), Some(EffortChoice::Xhigh), Actor::User))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Refused);
+    assert_eq!(outcome.code.as_deref(), Some("unsupported_effort"));
+    assert_eq!(opus_old.status, ModelRequestStatus::Refused, "claude-opus-4-6 has no xhigh");
+    assert_eq!(opus_old.code.as_deref(), Some("unsupported_effort"));
+    assert!(rig.wire().is_empty(), "nothing sent: {:?}", rig.wire());
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.effort.clone()), ("claude-haiku-4-5-20251001", None));
+    assert!(rig.ledger(&sid).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_alias_the_catalogue_does_not_list_is_refused_as_an_unknown_model() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    rig.spawn(TAG, "");
+
+    let outcome = settle(rig.request(TAG, to_model("gemini"))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Refused);
+    assert_eq!(outcome.code.as_deref(), Some("unknown_model"));
+    assert!(rig.wire().is_empty(), "{:?}", rig.wire());
+    assert_eq!(rig.record(TAG).unwrap().model, "sonnet");
+}
+
+// ── session not running ───────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_on_a_session_that_is_not_running_is_stored_for_its_next_start() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    rig.wait_for_runs(1).await;
+    rig.mgr.stop(TAG);
+    assert!(!rig.state(TAG).running);
+
+    let outcome = settle(rig.request(TAG, to_model("opus"))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Applied);
+    assert_eq!(rig.record(TAG).unwrap().model, "opus");
+    let ledger = rig.ledger(&sid);
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    assert_eq!(ledger[0].text, "Model set to Opus; takes effect when the session starts.");
+    assert!(rig.wire().is_empty(), "nothing to send to a stopped session");
+    rig.mgr.restart(TAG).unwrap();
+    let runs = rig.wait_for_runs(2).await;
+    assert_eq!(arg_of(&runs[1], "--model"), Some("opus"), "{:?}", runs[1]);
+}
+
+// ── per-agent defaults ────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn use_for_new_focuses_sets_the_agent_default_and_a_default_change_never_touches_existing_focuses() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    rig.seed("sibling", "sonnet", None);
+    rig.spawn(TAG, "cody");
+
+    let ticket = rig.request(TAG, SwitchRequest { model: Some("opus".into()), effort: None, actor: Actor::User, set_as_agent_default: true });
+    let switched = settle(ticket).await;
+
+    assert_eq!(switched.status, ModelRequestStatus::Applied);
+    let defaults = store::load_defaults(&rig.paths.defaults);
+    assert_eq!(defaults.get("cody").map(|d| d.model.as_str()), Some("opus"));
+    assert_eq!(rig.record("sibling").unwrap().model, "sonnet", "other focuses of the agent are unchanged");
+
+    let changed = rig.mgr.set_agent_default("cody", Some("fable".into()), Some(EffortChoice::High), false);
+    assert_eq!(changed.status, ModelRequestStatus::Applied);
+    let defaults = store::load_defaults(&rig.paths.defaults);
+    let cody = defaults.get("cody").unwrap();
+    assert_eq!((cody.model.as_str(), cody.effort.as_deref()), ("fable", Some("high")));
+    assert_eq!(rig.record(TAG).unwrap().model, "opus", "an existing focus keeps its model");
+    assert_eq!(rig.wire(), ["set_model:opus", "get_settings"], "a running session is not switched under the user");
+
+    let refused = rig.mgr.set_agent_default("cody", Some("gemini".into()), None, false);
+    assert_eq!(refused.status, ModelRequestStatus::Refused);
+    assert_eq!(refused.code.as_deref(), Some("unknown_model"));
+    assert_eq!(store::load_defaults(&rig.paths.defaults).get("cody").unwrap().model, "fable");
+
+    let cleared = rig.mgr.set_agent_default("cody", None, None, true);
+    assert_eq!(cleared.status, ModelRequestStatus::Applied);
+    assert!(!store::load_defaults(&rig.paths.defaults).contains_key("cody"));
+}
+
+// ── (n) the audit trail ───────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_applied_failed_or_refused_switch_appends_exactly_one_activity_line() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "cody");
+
+    let applied = settle(rig.request(TAG, req(Some("opus"), None, Actor::User))).await;
+    rig.set_model_mode("error:catalog_unknown");
+    let failed = settle(rig.request(TAG, req(Some("fable"), None, Actor::Script))).await;
+    let refused = settle(rig.request(TAG, req(Some("gemini"), None, Actor::User))).await;
+    let unchanged = settle(rig.request(TAG, req(Some("opus"), None, Actor::User))).await;
+
+    assert_eq!(applied.status, ModelRequestStatus::Applied);
+    assert_eq!(failed.status, ModelRequestStatus::Failed);
+    assert_eq!(refused.status, ModelRequestStatus::Refused);
+    assert_eq!(unchanged.status, ModelRequestStatus::Unchanged);
+    let lines = rig.model_switch_lines();
+    assert_eq!(lines.len(), 3, "an unchanged request logs nothing: {lines:#?}");
+    let outcomes: Vec<&str> = lines.iter().map(|l| l["outcome"].as_str().unwrap()).collect();
+    assert_eq!(outcomes, ["applied", "failed", "refused"]);
+    let actors: Vec<&str> = lines.iter().map(|l| l["actor"].as_str().unwrap()).collect();
+    assert_eq!(actors, ["user", "script", "user"]);
+    for line in &lines {
+        assert_eq!(line["focus_tag"], TAG);
+        assert_eq!(line["session_id"], sid.as_str());
+        assert!(line["ts"].as_str().is_some_and(|t| t.ends_with('Z') || t.contains('+')), "UTC ISO-8601: {line}");
+        assert!(line["summary"].as_str().is_some_and(|s| !s.is_empty()), "{line}");
+    }
+    assert_eq!((lines[0]["from"]["model"].as_str(), lines[0]["to"]["model"].as_str()), (Some("sonnet"), Some("opus")));
+    assert_eq!((lines[1]["from"]["model"].as_str(), lines[1]["to"]["model"].as_str()), (Some("opus"), Some("fable")));
+    assert_eq!((lines[2]["from"]["model"].as_str(), lines[2]["to"]["model"].as_str()), (Some("opus"), Some("gemini")));
+
+    let before = rig.activity_lines().len();
+    let default = rig.mgr.set_agent_default("cody", Some("haiku".into()), None, false);
+    assert_eq!(default.status, ModelRequestStatus::Applied);
+    let after = rig.activity_lines();
+    assert_eq!(after.len(), before + 1);
+    assert_eq!(after.last().unwrap()["kind"], "model_default");
+    assert_eq!(rig.model_switch_lines().len(), 3);
+}
+
+// ── (m) hydration ─────────────────────────────────────────────────────────────
+
+const CAVEAT: &str = "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands. DO NOT respond to these messages or otherwise consider them in your response unless the user explicitly asks you to.</local-command-caveat>";
+
+fn stored_session() -> String {
+    let user = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}, "timestamp": "2026-10-12T10:00:00.000Z"}).to_string();
+    let reply = |text: &str| {
+        json!({"type": "assistant", "message": {"role": "assistant", "model": "claude-sonnet-5-5", "content": [{"type": "text", "text": text}]}}).to_string()
+    };
+    let caveat = json!({"type": "user", "isMeta": true, "message": {"role": "user", "content": CAVEAT}}).to_string();
+    [
+        user("first question"),
+        reply("first answer"),
+        caveat,
+        user("<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>opus</command-args>"),
+        user("<local-command-stdout>Set model to opus (claude-opus-5-5)</local-command-stdout>"),
+        user("second question"),
+        reply("second answer"),
+    ]
+    .join("\n")
+}
+
+fn ledger_note(after_prompt: u64, kind: NoteKind, text: &str) -> LedgerNote {
+    LedgerNote { after_prompt, kind, text: text.to_owned(), ts: Utc::now() }
+}
+
+#[test]
+fn the_clis_three_model_command_entries_make_no_turn_when_a_transcript_is_rebuilt() {
+    let transcript = transcript_from_jsonl(&stored_session(), 100);
+
+    let turns = transcript.snapshot();
+    assert_eq!(turns.iter().map(|t| t.user_input.as_str()).collect::<Vec<_>>(), ["first question", "second question"]);
+    assert_eq!(transcript.prompt_count(), 2);
+    assert!(
+        turns.iter().all(|t| t.blocks.iter().all(|b| !matches!(b, TurnBlock::Note { .. }))),
+        "the CLI's entries are not turned into notes either"
+    );
+}
+
+#[test]
+fn ledger_notes_are_put_back_after_the_turn_of_their_prompt_number() {
+    let mut transcript = transcript_from_jsonl(&stored_session(), 100);
+
+    transcript.merge_ledger_notes(&[
+        ledger_note(1, NoteKind::ModelChanged, "Model changed to Opus (from Sonnet) by you."),
+        ledger_note(2, NoteKind::ModelFailed, "Couldn't switch to Haiku: nope. Still on Opus."),
+    ]);
+
+    let turns = transcript.snapshot();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(notes_of(&turns[..1], NoteKind::ModelChanged), ["Model changed to Opus (from Sonnet) by you."]);
+    assert!(notes_of(&turns[1..], NoteKind::ModelChanged).is_empty());
+    assert_eq!(notes_of(&turns[1..], NoteKind::ModelFailed), ["Couldn't switch to Haiku: nope. Still on Opus."]);
+    assert_eq!(notes_of(&turns[..1], NoteKind::ModelFailed).len(), 0);
+}
+
+#[test]
+fn a_note_made_before_any_prompt_leads_the_first_turn() {
+    let mut transcript = transcript_from_jsonl("", 100);
+    transcript.merge_ledger_notes(&[ledger_note(0, NoteKind::ModelChanged, "Model changed to Opus (from Sonnet) by you.")]);
+
+    let delta = transcript.ingest_line(&json!({"type": "user", "message": {"role": "user", "content": "hello"}}).to_string());
+
+    assert_eq!(delta.len(), 1);
+    let turns = transcript.snapshot();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(notes_of(&turns, NoteKind::ModelChanged).len(), 1, "{:?}", flat(&turns));
+    assert!(matches!(turns[0].blocks.first(), Some(TurnBlock::Note { .. })), "the note leads the turn");
+}
+
+#[test]
+fn a_leading_nostromo_note_is_not_part_of_the_prompt_the_user_sees() {
+    let prompt = "<nostromo-note>Your request for Opus was approved.</nostromo-note>\n\nthird question";
+    let jsonl = [stored_session(), json!({"type": "user", "message": {"role": "user", "content": prompt}}).to_string()].join("\n");
+
+    let transcript = transcript_from_jsonl(&jsonl, 100);
+
+    let turns = transcript.snapshot();
+    assert_eq!(turns.last().unwrap().user_input, "third question");
+}

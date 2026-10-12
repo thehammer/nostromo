@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -51,10 +51,20 @@ use serde::{Deserialize, Serialize};
 use super::decisions::DecisionRegistry;
 use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
 use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
-use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
-use super::stream_json::{
-    load_scrollback, SessionState, SessionTranscript, TurnDelta, SCROLLBACK_TURNS,
+use super::protocol::{
+    EffortChoice, FocusMeta, ModelRequestStatus, PendingModel, RecordedModel, ReportedModel,
+    ServerMsg, SessionInfo, SessionModelState, SwitchPhase,
 };
+use super::stream_json::{
+    load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript, TurnBlock,
+    TurnDelta, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN, SCROLLBACK_TURNS,
+};
+use crate::model::activity::{self as model_activity, ModelActivity, ModelActivityKind, Outcome};
+use crate::model::catalog::ModelCatalog;
+use crate::model::hub::ModelHub;
+use crate::model::notes::{self, LedgerNote, NoteKind};
+use crate::model::store::{self as model_store, FocusModelRecord, ModelSource};
+use crate::model::{copy, policy, Actor, ModelPaths, ModelTarget};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
 /// operators with a non-standard install).
@@ -112,7 +122,7 @@ pub enum SessionEvent {
 
 /// A user message waiting in the pending queue, preserving image paths so they
 /// survive the queued-until-idle path without being dropped.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PendingMessage {
     text: String,
     /// Absolute file paths; daemon reads + base64-encodes at drain time.
@@ -121,8 +131,13 @@ struct PendingMessage {
 
 // ── shared, reader-thread-visible session state ───────────────────────────────
 
-/// State shared between the manager (under its Mutex) and the detached reader
-/// thread. Cloneable `Arc` handles only — no back-reference to the manager.
+/// State shared between the manager (under its Mutex), the detached reader
+/// thread and a running model-switch task. Cloneable `Arc` handles only — no
+/// back-reference to the manager.
+///
+/// Lock order, wherever more than one is held: `state` → `model` → `pending`.
+/// `stdin`, `transcript` and `waiters` are only ever taken on their own.
+#[derive(Clone)]
 struct Shared {
     transcript: Arc<Mutex<SessionTranscript>>,
     /// Child stdin for writing user-message frames (manager + reader drain).
@@ -134,6 +149,143 @@ struct Shared {
     /// Set by the reader on stdout EOF (child exited / stream closed).
     exited: Arc<AtomicBool>,
     event_tx: broadcast::Sender<SessionEvent>,
+    /// The model this session runs and any switch in progress.
+    model: Arc<Mutex<ModelRuntime>>,
+    /// Control requests awaiting their `control_response`, by request id. The
+    /// reader resolves them; it never waits on one itself.
+    waiters: Arc<Mutex<HashMap<String, oneshot::Sender<ControlReply>>>>,
+    /// Who this session is, for notes, the store and activity lines.
+    ctx: Arc<SessionCtx>,
+    /// One line for the agent's eyes, put in front of the next user message
+    /// written (`<nostromo-note>…</nostromo-note>`). Nothing sets it yet: the
+    /// agent-request slice fills it.
+    note_prefix: Arc<Mutex<Option<String>>>,
+    /// Runtime the reader thread spawns switch tasks on.
+    runtime: tokio::runtime::Handle,
+}
+
+/// Identity of one session, fixed for its life.
+struct SessionCtx {
+    tag: String,
+    agent_name: String,
+    session_id: String,
+    /// Restricted sessions have no model record and refuse switches.
+    restricted: bool,
+    hub: Arc<ModelHub>,
+}
+
+/// Per-session model state (see `Shared::model`).
+#[derive(Default)]
+struct ModelRuntime {
+    /// A switch being applied right now. No user frame is written meanwhile.
+    applying: Option<ModelTarget>,
+    /// A switch waiting for the running turn to end (and its requester).
+    waiting: Option<(ModelTarget, Actor)>,
+    /// The focus's store record as of the last write this session saw.
+    recorded: Option<FocusModelRecord>,
+    /// The model the session last reported (init, assistant or get_settings).
+    reported: Option<String>,
+    /// The effort the session last confirmed through `get_settings`.
+    effective_effort: Option<String>,
+    /// Content of the latest `model_fallback` event, for the mismatch note.
+    fallback: Option<String>,
+    /// The last (asked, running) mismatch a note was made for.
+    noted_mismatch: Option<(String, String)>,
+}
+
+impl ModelRuntime {
+    fn phase(&self) -> SwitchPhase {
+        if self.applying.is_some() {
+            SwitchPhase::Applying
+        } else if self.waiting.is_some() {
+            SwitchPhase::Waiting
+        } else {
+            SwitchPhase::Steady
+        }
+    }
+}
+
+/// A `control_response`, as handed to the task that sent the request.
+#[derive(Debug, Clone)]
+struct ControlReply {
+    ok: bool,
+    error: Option<String>,
+    error_code: Option<String>,
+    body: serde_json::Value,
+}
+
+/// How long the daemon waits for the answer to one control request.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A request to change a focus's model and/or effort. `None` keeps the
+/// current value.
+#[derive(Debug, Clone)]
+pub struct SwitchRequest {
+    pub model: Option<String>,
+    pub effort: Option<EffortChoice>,
+    pub actor: Actor,
+    /// Also make the result the default for new focuses of this agent.
+    pub set_as_agent_default: bool,
+}
+
+/// What became of a model request (the body of `ModelRequestResult`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRequestOutcome {
+    pub status: ModelRequestStatus,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub warning: Option<String>,
+}
+
+impl ModelRequestOutcome {
+    fn status(status: ModelRequestStatus) -> Self {
+        Self { status, code: None, message: None, warning: None }
+    }
+
+    fn refused(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            status: ModelRequestStatus::Refused,
+            code: Some(code.to_owned()),
+            message: Some(message.into()),
+            warning: None,
+        }
+    }
+}
+
+/// The answer to [`SessionManager::request_switch`]: known at once, or once
+/// the switch has been applied to an idle session.
+pub struct SwitchTicket(TicketInner);
+
+enum TicketInner {
+    Ready(ModelRequestOutcome),
+    Later(oneshot::Receiver<ModelRequestOutcome>),
+}
+
+impl SwitchTicket {
+    fn ready(outcome: ModelRequestOutcome) -> Self {
+        Self(TicketInner::Ready(outcome))
+    }
+
+    /// The outcome, if it was known when the request was made.
+    pub fn immediate(&self) -> Option<&ModelRequestOutcome> {
+        match &self.0 {
+            TicketInner::Ready(outcome) => Some(outcome),
+            TicketInner::Later(_) => None,
+        }
+    }
+
+    /// The outcome, waiting for the switch to be applied if need be.
+    pub async fn outcome(self) -> ModelRequestOutcome {
+        match self.0 {
+            TicketInner::Ready(outcome) => outcome,
+            TicketInner::Later(rx) => rx.await.unwrap_or_else(|_| ModelRequestOutcome {
+                status: ModelRequestStatus::Failed,
+                code: None,
+                message: Some("the switch was abandoned".into()),
+                warning: None,
+            }),
+        }
+    }
 }
 
 impl Shared {
@@ -369,6 +521,8 @@ pub struct SessionManager {
     /// (see [`SessionRestrictions`]). Looked up on EVERY spawn of the tag, so a
     /// restart, a crash recovery or a client-driven respawn is restricted too.
     restrictions: HashMap<String, SessionRestrictions>,
+    /// Model state shared by every session: files, catalogue, broadcasts.
+    model_hub: Arc<ModelHub>,
 }
 
 impl SessionManager {
@@ -390,7 +544,9 @@ impl SessionManager {
             }
             sensitive.settle_lost_history();
         }
+        let model_hub = Arc::new(ModelHub::new(ModelPaths::beside(&store_path)));
         Self {
+            model_hub,
             sessions: HashMap::new(),
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             store_path,
@@ -656,7 +812,7 @@ impl SessionManager {
         self.session_reverse.insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
-        let args = build_claude_args_with(
+        let mut args = build_claude_args_with(
             &agent_name,
             &view_name,
             remote_control,
@@ -664,6 +820,14 @@ impl SessionManager {
             resume,
             self.restrictions.get(&tag),
         );
+        // The focus's recorded model, read at every spawn (restart and crash
+        // recovery come through here too). No record: no flag, as before.
+        let (model, spawn_note) = if self.restrictions.contains_key(&tag) {
+            (None, None)
+        } else {
+            self.spawn_model(&tag, &agent_name)
+        };
+        args.extend(model_args(model.as_ref()));
 
         let managed = self.spawn_managed(
             tag.clone(),
@@ -678,6 +842,9 @@ impl SessionManager {
             None,
         )?;
 
+        if let Some(text) = spawn_note {
+            emit_note(&managed.shared, NoteKind::ModelUnavailable, text);
+        }
         self.sessions.insert(tag.clone(), managed);
 
         // A fresh (non-resume) spawn starts from a known baseline: a single REPL
@@ -712,11 +879,20 @@ impl SessionManager {
         args: Vec<String>,
         respawn_fixed: Option<(PathBuf, Vec<String>)>,
     ) -> Result<ManagedSession> {
-        // Pre-populate the transcript from stored scrollback when resuming.
+        // Pre-populate the transcript from stored scrollback when resuming,
+        // with the session's notes put back where they were made.
+        let paths = &self.model_hub.paths;
         let transcript = if resume {
-            load_scrollback(&session_id, SCROLLBACK_TURNS)
+            let mut t = load_scrollback(&session_id, SCROLLBACK_TURNS);
+            t.merge_ledger_notes(&notes::load(&paths.notes_dir, &session_id));
+            t
         } else {
             SessionTranscript::new()
+        };
+        let restricted = self.restrictions.contains_key(&tag);
+        let runtime = ModelRuntime {
+            recorded: if restricted { None } else { model_store::focus_record(&paths.focus_models, &tag) },
+            ..ModelRuntime::default()
         };
 
         let mut cmd = Command::new(&program);
@@ -786,6 +962,17 @@ impl SessionManager {
             state: Arc::new(Mutex::new(SessionState::Idle)),
             exited: Arc::new(AtomicBool::new(false)),
             event_tx,
+            model: Arc::new(Mutex::new(runtime)),
+            waiters: Arc::new(Mutex::new(HashMap::new())),
+            ctx: Arc::new(SessionCtx {
+                tag: tag.clone(),
+                agent_name: agent_name.clone(),
+                session_id: session_id.clone(),
+                restricted,
+                hub: Arc::clone(&self.model_hub),
+            }),
+            note_prefix: Arc::new(Mutex::new(None)),
+            runtime: tokio::runtime::Handle::current(),
         };
 
         // Stderr drain thread: read and log stderr lines so crash output is
@@ -817,14 +1004,7 @@ impl SessionManager {
 
         // Reader thread: parse stdout → transcript → broadcast deltas; drain
         // the pending queue on turn completion; signal exit on EOF.
-        let reader_shared = Shared {
-            transcript: Arc::clone(&shared.transcript),
-            stdin: Arc::clone(&shared.stdin),
-            pending: Arc::clone(&shared.pending),
-            state: Arc::clone(&shared.state),
-            exited: Arc::clone(&shared.exited),
-            event_tx: shared.event_tx.clone(),
-        };
+        let reader_shared = shared.clone();
         let tag_for_reader = tag.clone();
         let reader_task =
             tokio::task::spawn_blocking(move || run_reader(tag_for_reader, stdout, reader_shared));
@@ -876,24 +1056,31 @@ impl SessionManager {
             anyhow::bail!("session {tag} is not alive");
         }
 
-        // Decide under the state lock, then release it BEFORE touching stdin.
-        // The reader's drain path locks stdin then state; if we held state while
-        // acquiring stdin we'd risk an AB-BA deadlock. Acquiring each lock in a
-        // separate, non-overlapping critical section avoids that entirely.
+        // Decide under the state lock, then release it BEFORE touching stdin
+        // (stdin is never taken while another session lock is held). The
+        // message is queued, not written, while a turn runs or a model switch
+        // is being applied; queueing happens under the same lock so a turn end
+        // draining the queue can't miss it.
+        let message = PendingMessage {
+            text: text.to_string(),
+            images: images.to_vec(),
+        };
         let should_write = {
             let mut state = session.shared.state.lock().unwrap();
-            if *state == SessionState::Idle {
+            let applying = session.shared.model.lock().unwrap().applying.is_some();
+            if *state == SessionState::Idle && !applying {
                 // Optimistically mark mid-turn so a follow-up send queues rather
                 // than racing a second message onto stdin before the echo lands.
                 *state = SessionState::MidTurn;
                 true
             } else {
+                session.shared.pending.lock().unwrap().push_back(message.clone());
                 false
             }
         };
 
         if should_write {
-            if let Err(e) = write_user_frame(&session.shared.stdin, text, images) {
+            if let Err(e) = write_user_message(&session.shared, &message) {
                 // The optimistic MidTurn would otherwise wedge the session.
                 *session.shared.state.lock().unwrap() = SessionState::Idle;
                 return Err(e);
@@ -901,16 +1088,6 @@ impl SessionManager {
             session
                 .shared
                 .broadcast(SessionEvent::State(SessionState::MidTurn));
-        } else {
-            session
-                .shared
-                .pending
-                .lock()
-                .unwrap()
-                .push_back(PendingMessage {
-                    text: text.to_string(),
-                    images: images.to_vec(),
-                });
         }
         Ok(())
     }
@@ -949,7 +1126,11 @@ impl SessionManager {
         session.shared.pending.lock().unwrap().clear();
         session.shared.transcript.lock().unwrap().mark_interrupt_requested();
         let request_id = format!("interrupt-{}", chrono::Utc::now().timestamp_millis());
-        write_control_request(&session.shared.stdin, &request_id, "interrupt")?;
+        write_control_request(
+            &session.shared.stdin,
+            &request_id,
+            serde_json::json!({ "subtype": "interrupt" }),
+        )?;
         Ok(InterruptOutcome::Requested)
     }
 
@@ -1072,6 +1253,18 @@ impl SessionManager {
     /// so attached clients can clear any crash-loop indicator (this was a benign
     /// user-requested stop, not an alarm).
     pub fn stop(&mut self, tag: &str) {
+        // A switch still waiting for the turn this stop cuts short takes
+        // effect when the session next starts.
+        let waiting = self
+            .sessions
+            .get(tag)
+            .and_then(|s| s.shared.model.lock().unwrap().waiting.take());
+        if let Some((target, actor)) = waiting {
+            let agent = self.agent_of(tag);
+            let session_id = self.sessions.get(tag).and_then(|s| s.session_id.clone());
+            let current = model_store::focus_record(&self.model_hub.paths.focus_models, tag).map(|r| r.target());
+            let _ = self.switch_not_running(tag, agent, session_id, current, target, actor);
+        }
         if let Some(session) = self.sessions.get_mut(tag) {
             session.intentional_stop.store(true, Ordering::SeqCst);
             session.stop_reason = Some(StopReason::User);
@@ -1120,6 +1313,7 @@ impl SessionManager {
                 s.attached_clients.iter().cloned().collect::<Vec<_>>(),
             )
         };
+        let carry = self.take_carry(tag);
         self.stop(tag);
         self.sessions.remove(tag);
 
@@ -1153,6 +1347,9 @@ impl SessionManager {
         for client_id in attached {
             let _ = self.attach(tag, &client_id);
         }
+        // Messages queued (and a model switch waiting) on the old process go
+        // to the new one, switch first.
+        self.resume_carry(tag, carry);
         Ok(())
     }
 
@@ -1184,7 +1381,13 @@ impl SessionManager {
             .sessions
             .iter()
             .filter(|(_, s)| {
-                s.shared.exited.load(Ordering::SeqCst) && !s.intentional_stop.load(Ordering::SeqCst)
+                s.shared.exited.load(Ordering::SeqCst)
+                    && !s.intentional_stop.load(Ordering::SeqCst)
+                    // A switch being applied is finishing (its control
+                    // requests fail as soon as the process is gone): let it
+                    // record its failure first, so the queue it leaves behind
+                    // is what the respawn inherits.
+                    && s.shared.model.lock().unwrap().applying.is_none()
             })
             .map(|(tag, _)| tag.clone())
             .collect();
@@ -1296,6 +1499,7 @@ impl SessionManager {
                         s.attached_clients.iter().cloned().collect::<Vec<_>>(),
                     )
                 };
+                let carry = self.take_carry(&tag);
                 self.stop(&tag);
                 self.sessions.remove(&tag);
                 save_id(&self.store_path, &tag, None);
@@ -1304,6 +1508,7 @@ impl SessionManager {
                         for client_id in attached {
                             let _ = self.attach(&tag, &client_id);
                         }
+                        self.resume_carry(&tag, carry);
                     }
                     Err(e) => warn!(tag, "fresh restart after stale id clear failed: {e:#}"),
                 }
@@ -1647,6 +1852,376 @@ impl SessionManager {
         self.focus_registry.clone()
     }
 
+
+    // ── model switching ───────────────────────────────────────────────────────
+
+    /// Broadcast model frames (`SessionModelState`, `ModelCatalog`,
+    /// `ModelDefaults`) on the daemon's client fan-out.
+    pub fn configure_model_broadcast(&mut self, tx: broadcast::Sender<ServerMsg>) {
+        self.model_hub.set_broadcast(tx);
+    }
+
+    /// The daemon-wide model state (catalogue, files, broadcasts).
+    pub fn model_hub(&self) -> Arc<ModelHub> {
+        Arc::clone(&self.model_hub)
+    }
+
+    /// Install a model catalogue (cached on disk and broadcast).
+    pub fn set_model_catalog(&mut self, catalog: ModelCatalog) {
+        self.model_hub.set_catalog(catalog);
+    }
+
+    pub fn model_catalog(&self) -> ModelCatalog {
+        self.model_hub.catalog()
+    }
+
+    /// `ServerMsg::ModelDefaults` as of now.
+    pub fn model_defaults_msg(&self) -> ServerMsg {
+        self.model_hub.defaults_msg()
+    }
+
+    /// `tag`'s model state: its record, and what its session reports.
+    pub fn session_model_state(&self, tag: &str) -> SessionModelState {
+        match self.sessions.get(tag) {
+            Some(session) => {
+                let rt = session.shared.model.lock().unwrap();
+                model_state(&self.model_hub, tag, Some(&rt), session.alive())
+            }
+            None => model_state(&self.model_hub, tag, None, false),
+        }
+    }
+
+    /// Every tag that has a model state worth replaying to a client: live
+    /// sessions, registered focuses and recorded focuses.
+    pub fn model_state_tags(&self) -> Vec<String> {
+        let mut tags = self.known_focus_tags();
+        for tag in model_store::load_focus_models(&self.model_hub.paths.focus_models).into_keys() {
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+        tags.retain(|t| !self.restrictions.contains_key(t));
+        tags
+    }
+
+    /// Put a one-line note for the agent in front of the next user message
+    /// written to `tag`'s session (stripped from what clients display).
+    pub fn set_next_message_note(&mut self, tag: &str, note: String) -> Result<()> {
+        let session = self
+            .sessions
+            .get(tag)
+            .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
+        *session.shared.note_prefix.lock().unwrap() = Some(note);
+        Ok(())
+    }
+
+    /// Change `tag`'s model and/or effort.
+    ///
+    /// - Restricted focuses refuse (`not_permitted`); an unknown model or an
+    ///   effort the model does not support is refused before anything is sent.
+    /// - The current model again: `Unchanged`, silently; it also cancels a
+    ///   switch waiting for the turn to end.
+    /// - Idle session: applied at once (the ticket resolves when it is).
+    /// - Turn running: waits for the turn to end (`PendingTurnEnd`); choosing
+    ///   again replaces the target.
+    /// - No running session: only the record changes.
+    pub fn request_switch(&mut self, tag: &str, req: SwitchRequest) -> SwitchTicket {
+        let hub = Arc::clone(&self.model_hub);
+        let catalog = hub.catalog();
+        let agent = self.agent_of(tag);
+        let record = model_store::focus_record(&hub.paths.focus_models, tag);
+        let session = self.sessions.get(tag);
+        let reported = session.and_then(|s| s.shared.model.lock().unwrap().reported.clone());
+        let current = current_target(record.as_ref(), reported.as_deref(), &catalog);
+        let session_id = session
+            .and_then(|s| s.session_id.clone())
+            .or_else(|| load_id_store(&self.store_path).get(tag).cloned());
+
+        let refuse = |to: &ModelTarget, code: &str, message: String| {
+            let ctx = SessionCtx {
+                tag: tag.to_owned(),
+                agent_name: agent.clone().unwrap_or_default(),
+                session_id: session_id.clone().unwrap_or_default(),
+                restricted: false,
+                hub: Arc::clone(&hub),
+            };
+            log_switch(&ctx, current.as_ref(), to, &req.actor, Outcome::Refused, Some(code.to_owned()), message.clone());
+            hub.record_request(tag, &req.actor, to, ModelRequestStatus::Refused);
+            SwitchTicket::ready(ModelRequestOutcome::refused(code, message))
+        };
+
+        let model = req.model.clone().or_else(|| current.as_ref().map(|c| c.model.clone()));
+        let Some(model) = model else {
+            return refuse(&default_target(), "unknown_model", "no model given and none recorded".into());
+        };
+        let effort = match req.effort {
+            Some(choice) => choice.level().map(str::to_owned),
+            // Keep the current effort if the new model takes it.
+            None => current
+                .as_ref()
+                .and_then(|c| c.effort.clone())
+                .filter(|e| catalog.entry(&model).map(|m| m.supports_effort_level(e)).unwrap_or(true)),
+        };
+        let target = ModelTarget { model, effort };
+
+        if self.restrictions.contains_key(tag) {
+            return refuse(&target, "not_permitted", "this session's model can't be changed".into());
+        }
+        if let Err((code, message)) = validate_target(&target, &catalog) {
+            return refuse(&target, code, message);
+        }
+
+        if req.set_as_agent_default {
+            if let Some(agent) = agent.as_deref().filter(|a| !a.is_empty()) {
+                self.write_agent_default(agent, Some(&target), &req.actor);
+            }
+        }
+
+        match session.filter(|s| s.alive()) {
+            Some(session) => begin_switch(&session.shared.clone(), current, target, req.actor),
+            None => self.switch_not_running(tag, agent, session_id, current, target, req.actor),
+        }
+    }
+
+    /// A switch of a focus whose session is not running: record it for the
+    /// next start.
+    fn switch_not_running(
+        &mut self,
+        tag: &str,
+        agent: Option<String>,
+        session_id: Option<String>,
+        current: Option<ModelTarget>,
+        target: ModelTarget,
+        actor: Actor,
+    ) -> SwitchTicket {
+        let hub = Arc::clone(&self.model_hub);
+        if current.as_ref() == Some(&target) {
+            return SwitchTicket::ready(ModelRequestOutcome::status(ModelRequestStatus::Unchanged));
+        }
+        let written = model_store::update_focus_record(&hub.paths.focus_models, tag, |_| {
+            Some(FocusModelRecord {
+                model: target.model.clone(),
+                effort: target.effort.clone(),
+                source: ModelSource::Focus,
+                pending: None,
+            })
+        });
+        if let Err(e) = written {
+            warn!(tag, "could not record the focus's model: {e:#}");
+            return SwitchTicket::ready(ModelRequestOutcome {
+                status: ModelRequestStatus::Failed,
+                code: None,
+                message: Some(format!("could not record the model: {e}")),
+                warning: None,
+            });
+        }
+        let catalog = hub.catalog();
+        let text = copy::stored(current.as_ref(), &target, &catalog);
+        if let Some(session) = self.sessions.get(tag) {
+            session.shared.model.lock().unwrap().recorded = model_store::focus_record(&hub.paths.focus_models, tag);
+            emit_note(&session.shared, NoteKind::ModelChanged, text.clone());
+        } else if let Some(sid) = &session_id {
+            let after_prompt = prompt_count_of(sid);
+            let note = LedgerNote { after_prompt, kind: NoteKind::ModelChanged, text: text.clone(), ts: chrono::Utc::now() };
+            if let Err(e) = notes::append(&hub.paths.notes_dir, sid, &note) {
+                warn!(tag, "could not record a transcript note: {e:#}");
+            }
+        }
+        let ctx = SessionCtx {
+            tag: tag.to_owned(),
+            agent_name: agent.unwrap_or_default(),
+            session_id: session_id.unwrap_or_default(),
+            restricted: false,
+            hub: Arc::clone(&hub),
+        };
+        log_switch(&ctx, current.as_ref(), &target, &actor, Outcome::Applied, None, text.clone());
+        hub.record_request(tag, &actor, &target, ModelRequestStatus::Applied);
+        hub.broadcast(ServerMsg::SessionModelState(self.session_model_state(tag)));
+        SwitchTicket::ready(ModelRequestOutcome {
+            status: ModelRequestStatus::Applied,
+            code: None,
+            message: Some(text),
+            warning: None,
+        })
+    }
+
+    /// Set (or, with `clear`, remove) `agent`'s default model for new focuses.
+    pub fn set_agent_default(
+        &mut self,
+        agent: &str,
+        model: Option<String>,
+        effort: Option<EffortChoice>,
+        clear: bool,
+    ) -> ModelRequestOutcome {
+        if agent.trim().is_empty() {
+            return ModelRequestOutcome::refused("not_permitted", "no agent named");
+        }
+        if clear {
+            self.write_agent_default(agent, None, &Actor::User);
+            return ModelRequestOutcome::status(ModelRequestStatus::Applied);
+        }
+        let Some(model) = model else {
+            return ModelRequestOutcome::refused("unknown_model", "no model given");
+        };
+        let target = ModelTarget { model, effort: effort.and_then(EffortChoice::level).map(str::to_owned) };
+        if let Err((code, message)) = validate_target(&target, &self.model_hub.catalog()) {
+            return ModelRequestOutcome::refused(code, message);
+        }
+        self.write_agent_default(agent, Some(&target), &Actor::User);
+        ModelRequestOutcome::status(ModelRequestStatus::Applied)
+    }
+
+    /// Write `agent`'s default, log it, and broadcast the defaults.
+    fn write_agent_default(&self, agent: &str, target: Option<&ModelTarget>, actor: &Actor) {
+        let hub = &self.model_hub;
+        let previous = model_store::load_defaults(&hub.paths.defaults).remove(agent);
+        let default = target.map(|t| model_store::AgentDefault { model: t.model.clone(), effort: t.effort.clone() });
+        if let Err(e) = model_store::set_default(&hub.paths.defaults, agent, default) {
+            warn!(agent, "could not write the agent's default model: {e:#}");
+            return;
+        }
+        let catalog = hub.catalog();
+        let summary = match target {
+            Some(t) => format!(
+                "Default model for new {} focuses set to {}.",
+                crate::model::catalog::family_display(agent),
+                crate::model::label(t, t.effort.is_some(), &catalog)
+            ),
+            None => format!(
+                "Default model for new {} focuses cleared.",
+                crate::model::catalog::family_display(agent)
+            ),
+        };
+        model_activity::append(
+            &model_activity::activity_path(),
+            &ModelActivity {
+                agent: agent.to_owned(),
+                kind: ModelActivityKind::ModelDefault,
+                summary,
+                session_id: None,
+                agent_type: Some(agent.to_owned()),
+                focus_tag: None,
+                from: previous.map(|d| ModelTarget { model: d.model, effort: d.effort }),
+                to: target.cloned(),
+                actor: actor.wire(),
+                outcome: Outcome::Applied,
+                reason: None,
+                posture: model_activity::current_posture(),
+            },
+        );
+        hub.broadcast(hub.defaults_msg());
+    }
+
+    /// At daemon start: a switch that was waiting for a turn to end when the
+    /// daemon stopped will never apply. Clear it, and say so in the focus's
+    /// transcript.
+    pub fn clear_persisted_pending(&self) {
+        let hub = &self.model_hub;
+        let cleared = match model_store::clear_all_pending(&hub.paths.focus_models) {
+            Ok(cleared) => cleared,
+            Err(e) => {
+                warn!("could not clear pending model switches: {e:#}");
+                return;
+            }
+        };
+        let ids = load_id_store(&self.store_path);
+        let catalog = hub.catalog();
+        for (tag, record) in cleared {
+            let Some(pending) = &record.pending else { continue };
+            let text = copy::failed(&record.target(), pending, "nostromd restarted", &catalog);
+            info!(tag, "dropped a model switch pending across a daemon restart");
+            let Some(sid) = ids.get(&tag) else { continue };
+            let after_prompt = prompt_count_of(sid);
+            let note = LedgerNote { after_prompt, kind: NoteKind::ModelFailed, text: text.clone(), ts: chrono::Utc::now() };
+            if let Err(e) = notes::append(&hub.paths.notes_dir, sid, &note) {
+                warn!(tag, "could not record a transcript note: {e:#}");
+            }
+            let ctx = SessionCtx {
+                tag: tag.clone(),
+                agent_name: String::new(),
+                session_id: sid.clone(),
+                restricted: false,
+                hub: Arc::clone(hub),
+            };
+            log_switch(&ctx, Some(&record.target()), pending, &Actor::User, Outcome::Failed, Some("nostromd restarted".into()), text);
+        }
+    }
+
+    /// The agent a focus runs: its session's, else the pushed registry's.
+    fn agent_of(&self, tag: &str) -> Option<String> {
+        self.sessions
+            .get(tag)
+            .map(|s| s.agent_name.clone())
+            .or_else(|| self.focus_registry.iter().find(|f| f.tag == tag).map(|f| f.agent_name.clone()))
+    }
+
+    /// The model a spawn of `tag` runs on, and the note to make about it.
+    /// A recorded model the (fresh) catalogue no longer offers is replaced by
+    /// the agent's default: per-agent default, else its declared model, else
+    /// the CLI default (no record at all).
+    fn spawn_model(&self, tag: &str, agent: &str) -> (Option<ModelTarget>, Option<String>) {
+        let hub = &self.model_hub;
+        let Some(record) = model_store::focus_record(&hub.paths.focus_models, tag) else {
+            return (None, None);
+        };
+        let catalog = hub.catalog();
+        let offered = catalog.is_empty()
+            || catalog.stale
+            || record.model.starts_with("claude-")
+            || catalog.entry(&record.model).is_some();
+        if offered {
+            return (Some(record.target()), None);
+        }
+        let replacement = model_store::load_defaults(&hub.paths.defaults)
+            .remove(agent)
+            .map(|d| (ModelTarget { model: d.model, effort: d.effort }, ModelSource::AgentDefault))
+            .or_else(|| {
+                policy::declared_model(agent)
+                    .map(|model| (ModelTarget { model, effort: None }, ModelSource::AgentDeclared))
+            });
+        let written = model_store::update_focus_record(&hub.paths.focus_models, tag, |_| {
+            replacement.as_ref().map(|(target, source)| FocusModelRecord {
+                model: target.model.clone(),
+                effort: target.effort.clone(),
+                source: *source,
+                pending: None,
+            })
+        });
+        if let Err(e) = written {
+            warn!(tag, "could not replace a model that is no longer offered: {e:#}");
+        }
+        let now = replacement.as_ref().map(|(t, _)| t.model.clone()).unwrap_or_else(|| "default".into());
+        let note = copy::unavailable(&record.model, &now, &catalog);
+        (replacement.map(|(t, _)| t), Some(note))
+    }
+
+    /// Take what a session's replacement must inherit: messages still queued
+    /// and a switch still waiting for its turn to end.
+    fn take_carry(&self, tag: &str) -> Carry {
+        match self.sessions.get(tag) {
+            Some(s) => Carry {
+                messages: s.shared.pending.lock().unwrap().drain(..).collect(),
+                waiting: s.shared.model.lock().unwrap().waiting.take(),
+            },
+            None => Carry::default(),
+        }
+    }
+
+    /// Hand `carry` to `tag`'s (new) session and start on it.
+    fn resume_carry(&self, tag: &str, carry: Carry) {
+        if carry.messages.is_empty() && carry.waiting.is_none() {
+            return;
+        }
+        let Some(session) = self.sessions.get(tag) else {
+            return;
+        };
+        session.shared.pending.lock().unwrap().extend(carry.messages);
+        session.shared.model.lock().unwrap().waiting = carry.waiting;
+        if session.state() == SessionState::Idle {
+            advance(&session.shared);
+        }
+    }
+
     // ── shutdown ────────────────────────────────────────────────────────────
 
     /// Kill all children. Called on SIGTERM.
@@ -1743,7 +2318,9 @@ impl Default for SessionManager {
 // ── reader loop ───────────────────────────────────────────────────────────────
 
 /// Blocking stdout reader: parse each line into the transcript, broadcast
-/// deltas, drive turn state, drain the pending queue, and signal EOF.
+/// deltas, drive turn state, drain the pending queue, and signal EOF. Control
+/// responses are handed to whoever waits for them, and model reports are
+/// recorded; the reader itself never waits on anything but stdout.
 fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
@@ -1757,8 +2334,40 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
         if line.trim().is_empty() {
             continue;
         }
+        let Some(parsed) = parse_line(&line) else {
+            continue;
+        };
 
-        let deltas = shared.transcript.lock().unwrap().ingest_line(&line);
+        match &parsed {
+            ParsedLine::ControlResponse {
+                request_id,
+                ok,
+                error,
+                error_code,
+                body,
+            } => {
+                let waiter = shared.waiters.lock().unwrap().remove(request_id);
+                if let Some(tx) = waiter {
+                    let _ = tx.send(ControlReply {
+                        ok: *ok,
+                        error: error.clone(),
+                        error_code: error_code.clone(),
+                        body: body.clone(),
+                    });
+                }
+                continue;
+            }
+            ParsedLine::Model { model, .. }
+            | ParsedLine::Blocks {
+                model: Some(model), ..
+            } => on_model_report(&shared, model),
+            ParsedLine::ModelFallback { content, .. } => {
+                shared.model.lock().unwrap().fallback = content.clone();
+            }
+            _ => {}
+        }
+
+        let deltas = shared.transcript.lock().unwrap().ingest_parsed(parsed);
         for delta in deltas {
             match &delta {
                 TurnDelta::TurnStarted { .. } => {
@@ -1766,7 +2375,7 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
                 }
                 TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. } => {
                     shared.broadcast(SessionEvent::Delta(delta.clone()));
-                    drain_or_idle(&shared);
+                    advance(&shared);
                     continue;
                 }
                 _ => {}
@@ -1778,24 +2387,580 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
     // stdout closed → child exited / stream ended. The reader can't see the
     // child's exit code (it owns only stdout); reap_and_recover captures the
     // real code via child.try_wait() and re-broadcasts Exited with it.
+    // `exited` is set before the waiters are dropped, so a control request
+    // registered after this point sees it (see `control`).
     shared.exited.store(true, Ordering::SeqCst);
+    shared.waiters.lock().unwrap().clear();
     shared.broadcast(SessionEvent::Exited { exit_code: None });
+    publish_model_state(&shared);
     tracing::warn!(tag = %tag, "session reader EOF — child stdout closed (crash or clean exit)");
 }
 
-/// After a turn completes, send the next queued message (staying mid-turn) or
-/// fall back to idle.
-fn drain_or_idle(shared: &Shared) {
-    let next = shared.pending.lock().unwrap().pop_front();
+/// After a turn ends or a switch has been applied: apply a switch waiting for
+/// the turn first, else send the next queued message (staying mid-turn), else
+/// go idle. While a switch is being applied nothing is sent: the switch task
+/// calls [`finish_apply`] when it is done.
+fn advance(shared: &Shared) {
+    step(shared, false);
+}
+
+/// A switch task is done: leave `Applying` and carry on as after a turn, in
+/// one critical section, so a message sent meanwhile can't overtake the queue.
+fn finish_apply(shared: &Shared) {
+    step(shared, true);
+}
+
+fn step(shared: &Shared, finished_apply: bool) {
+    enum Next {
+        Apply(ModelTarget, Actor),
+        Write(PendingMessage),
+        Idle,
+    }
+    let next = {
+        let mut state = shared.state.lock().unwrap();
+        let mut rt = shared.model.lock().unwrap();
+        if finished_apply {
+            rt.applying = None;
+        }
+        if rt.applying.is_some() {
+            *state = SessionState::Idle;
+            Next::Idle
+        } else if let Some((target, actor)) = rt.waiting.take() {
+            rt.applying = Some(target.clone());
+            *state = SessionState::Idle;
+            Next::Apply(target, actor)
+        } else {
+            drop(rt);
+            match shared.pending.lock().unwrap().pop_front() {
+                Some(msg) => {
+                    *state = SessionState::MidTurn;
+                    Next::Write(msg)
+                }
+                None => {
+                    *state = SessionState::Idle;
+                    Next::Idle
+                }
+            }
+        }
+    };
     match next {
-        Some(msg) => {
-            if write_user_frame(&shared.stdin, &msg.text, &msg.images).is_ok() {
-                shared.set_state(SessionState::MidTurn);
+        Next::Apply(target, actor) => {
+            shared.broadcast(SessionEvent::State(SessionState::Idle));
+            spawn_apply(shared, target, actor, None);
+        }
+        Next::Write(msg) => {
+            if write_user_message(shared, &msg).is_ok() {
+                shared.broadcast(SessionEvent::State(SessionState::MidTurn));
             } else {
+                // Not delivered: keep it first in line for the respawned
+                // session (`restart` carries the queue over).
+                shared.pending.lock().unwrap().push_front(msg);
                 shared.set_state(SessionState::Idle);
             }
         }
-        None => shared.set_state(SessionState::Idle),
+        Next::Idle => shared.broadcast(SessionEvent::State(SessionState::Idle)),
+    }
+    if finished_apply {
+        publish_model_state(shared);
+    }
+}
+
+// ── model reports, notes, state ────────────────────────────────────────────────
+
+/// Record a model the session reported. The first report of a focus with no
+/// record becomes its record (focuses that predate model switching keep what
+/// they run); a report that differs from the record gets one note per
+/// distinct mismatch.
+fn on_model_report(shared: &Shared, model: &str) {
+    let ctx = &shared.ctx;
+    if ctx.restricted {
+        return;
+    }
+    let catalog = ctx.hub.catalog();
+    let (changed, needs_record, mismatch) = {
+        let mut rt = shared.model.lock().unwrap();
+        let changed = rt.reported.as_deref() != Some(model);
+        rt.reported = Some(model.to_owned());
+        let mut mismatch = None;
+        if let Some(record) = &rt.recorded {
+            match catalog.resolved(&record.model) {
+                Some(expected) if expected != model => {
+                    let key = (expected, model.to_owned());
+                    if rt.noted_mismatch.as_ref() != Some(&key) {
+                        mismatch = Some(copy::mismatch(&record.model, model, rt.fallback.as_deref(), &catalog));
+                        rt.noted_mismatch = Some(key);
+                    }
+                }
+                Some(_) => rt.noted_mismatch = None,
+                None => {}
+            }
+        }
+        (changed, rt.recorded.is_none(), mismatch)
+    };
+    if needs_record {
+        let alias = catalog
+            .family_for_resolved(model)
+            .map(|e| e.value.clone())
+            .unwrap_or_else(|| model.to_owned());
+        let source = if policy::declared_model(&ctx.agent_name).is_some() {
+            ModelSource::AgentDeclared
+        } else {
+            ModelSource::CliDefault
+        };
+        let written = model_store::update_focus_record(&ctx.hub.paths.focus_models, &ctx.tag, |existing| {
+            existing.or(Some(FocusModelRecord { model: alias, effort: None, source, pending: None }))
+        });
+        match written {
+            Ok(record) => shared.model.lock().unwrap().recorded = record,
+            Err(e) => warn!(tag = %ctx.tag, "could not record the session's model: {e:#}"),
+        }
+    }
+    if let Some(text) = mismatch {
+        emit_note(shared, NoteKind::ModelMismatch, text);
+    }
+    if changed || needs_record {
+        publish_model_state(shared);
+    }
+}
+
+/// Add a note to the session's transcript (broadcast as a delta) and ledger.
+fn emit_note(shared: &Shared, kind: NoteKind, text: String) {
+    let ts = chrono::Utc::now();
+    let block = TurnBlock::Note { note_kind: kind, text: text.clone(), ts };
+    let (delta, after_prompt) = {
+        let mut transcript = shared.transcript.lock().unwrap();
+        let delta = transcript.add_note(block);
+        (delta, transcript.prompt_count())
+    };
+    let ctx = &shared.ctx;
+    let note = LedgerNote { after_prompt, kind, text, ts };
+    if let Err(e) = notes::append(&ctx.hub.paths.notes_dir, &ctx.session_id, &note) {
+        warn!(tag = %ctx.tag, "could not record a transcript note: {e:#}");
+    }
+    shared.broadcast(SessionEvent::Delta(delta));
+}
+
+/// Broadcast the session's current model state.
+fn publish_model_state(shared: &Shared) {
+    let state = {
+        let rt = shared.model.lock().unwrap();
+        model_state(
+            &shared.ctx.hub,
+            &shared.ctx.tag,
+            Some(&rt),
+            !shared.exited.load(Ordering::SeqCst),
+        )
+    };
+    shared.ctx.hub.broadcast(ServerMsg::SessionModelState(state));
+}
+
+/// Build a focus's model state: the store record, plus what its session (if
+/// any) reports and is doing.
+fn model_state(hub: &ModelHub, tag: &str, rt: Option<&ModelRuntime>, running: bool) -> SessionModelState {
+    let record = model_store::focus_record(&hub.paths.focus_models, tag);
+    let catalog = hub.catalog();
+    let reported = rt.and_then(|rt| rt.reported.clone()).map(|model| ReportedModel {
+        family: catalog
+            .family_for_resolved(&model)
+            .map(|e| e.value.clone())
+            .or_else(|| crate::model::cost::known_family_of(&model).map(str::to_owned)),
+        model,
+    });
+    let pending = rt
+        .and_then(|rt| rt.applying.clone().or_else(|| rt.waiting.as_ref().map(|(t, _)| t.clone())))
+        .map(|t| PendingModel { model: t.model, effort: t.effort });
+    SessionModelState {
+        tag: tag.to_owned(),
+        effective_effort: rt
+            .and_then(|rt| rt.effective_effort.clone())
+            .or_else(|| record.as_ref().and_then(|r| r.effort.clone())),
+        recorded: record.map(|r| RecordedModel { model: r.model, effort: r.effort, source: r.source }),
+        reported,
+        pending,
+        phase: rt.map(ModelRuntime::phase).unwrap_or_default(),
+        running,
+        warnings: vec![],
+        last_request: hub.last_request(tag),
+    }
+}
+
+/// Append one `model_switch` activity line for `shared`'s focus.
+fn log_switch(
+    ctx: &SessionCtx,
+    from: Option<&ModelTarget>,
+    to: &ModelTarget,
+    actor: &Actor,
+    outcome: Outcome,
+    reason: Option<String>,
+    summary: String,
+) {
+    model_activity::append(
+        &model_activity::activity_path(),
+        &ModelActivity {
+            agent: agent_label(&ctx.agent_name),
+            kind: ModelActivityKind::ModelSwitch,
+            summary,
+            session_id: Some(ctx.session_id.clone()),
+            agent_type: (!ctx.agent_name.is_empty()).then(|| ctx.agent_name.clone()),
+            focus_tag: Some(ctx.tag.clone()),
+            from: from.cloned(),
+            to: Some(to.clone()),
+            actor: actor.wire(),
+            outcome,
+            reason: actor.reason().or(reason),
+            posture: model_activity::current_posture(),
+        },
+    );
+}
+
+/// The `agent` field of an activity line: the focus's agent, or `claude`.
+fn agent_label(agent_name: &str) -> String {
+    if agent_name.is_empty() {
+        "claude".to_owned()
+    } else {
+        agent_name.to_owned()
+    }
+}
+
+/// What a focus runs now: its record, else the family it reports.
+fn current_target(record: Option<&FocusModelRecord>, reported: Option<&str>, catalog: &ModelCatalog) -> Option<ModelTarget> {
+    record.map(FocusModelRecord::target).or_else(|| {
+        reported.map(|r| ModelTarget {
+            model: catalog.family_for_resolved(r).map(|e| e.value.clone()).unwrap_or_else(|| r.to_owned()),
+            effort: None,
+        })
+    })
+}
+
+/// `--model`/`--effort` for a spawn (nothing for `None`).
+fn model_args(target: Option<&ModelTarget>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(target) = target {
+        args.extend(["--model".to_owned(), target.model.clone()]);
+        if let Some(effort) = &target.effort {
+            args.extend(["--effort".to_owned(), effort.clone()]);
+        }
+    }
+    args
+}
+
+/// Check `target` against the catalogue: `Err((code, message))` when the
+/// model is not offered or the effort is not supported by it. A full
+/// `claude-…` name the catalogue does not list is left to the CLI.
+fn validate_target(target: &ModelTarget, catalog: &ModelCatalog) -> std::result::Result<(), (&'static str, String)> {
+    let entry = catalog.entry(&target.model);
+    if entry.is_none() && !catalog.is_empty() && !target.model.starts_with("claude-") {
+        return Err(("unknown_model", format!("{} is not offered by the installed Claude CLI", target.model)));
+    }
+    if let (Some(entry), Some(effort)) = (entry, &target.effort) {
+        if !entry.supports_effort_level(effort) {
+            return Err(("unsupported_effort", format!("{} does not support effort {effort}", target.model)));
+        }
+    }
+    if let Some(effort) = &target.effort {
+        if !crate::model::cost::EFFORT_LEVELS.contains(&effort.as_str()) {
+            return Err(("unsupported_effort", format!("unknown effort level {effort}")));
+        }
+    }
+    Ok(())
+}
+
+// ── switching ─────────────────────────────────────────────────────────────────
+
+/// Start a switch of a running session (the caller has checked it is alive
+/// and that the target is valid).
+fn begin_switch(shared: &Shared, current: Option<ModelTarget>, target: ModelTarget, actor: Actor) -> SwitchTicket {
+    let ctx = &shared.ctx;
+    let catalog = ctx.hub.catalog();
+    let from = current.clone().unwrap_or_else(default_target);
+    enum Plan {
+        Unchanged,
+        Cancelled,
+        Apply(oneshot::Receiver<ModelRequestOutcome>, oneshot::Sender<ModelRequestOutcome>),
+        Wait,
+    }
+    // The pending record and note are written inside the critical section: a
+    // turn ending now would otherwise start applying (and clear the persisted
+    // pending, and note the change) before they were written.
+    let plan = {
+        let state = shared.state.lock().unwrap();
+        let mut rt = shared.model.lock().unwrap();
+        let same_as_current = current.as_ref() == Some(&target);
+        let idle = *state == SessionState::Idle && rt.applying.is_none();
+        if same_as_current && rt.applying.is_none() {
+            if rt.waiting.take().is_some() {
+                persist_pending(ctx, None);
+                Plan::Cancelled
+            } else {
+                Plan::Unchanged
+            }
+        } else if idle {
+            rt.applying = Some(target.clone());
+            let (tx, rx) = oneshot::channel();
+            Plan::Apply(rx, tx)
+        } else {
+            let new = rt.waiting.as_ref().map(|(t, _)| t) != Some(&target);
+            rt.waiting = Some((target.clone(), actor.clone()));
+            if new {
+                persist_pending(ctx, Some(target.clone()));
+                emit_note(shared, NoteKind::ModelPending, copy::pending(&from, &target, &catalog));
+            }
+            Plan::Wait
+        }
+    };
+    match plan {
+        Plan::Unchanged => SwitchTicket::ready(ModelRequestOutcome::status(ModelRequestStatus::Unchanged)),
+        Plan::Cancelled => {
+            publish_model_state(shared);
+            SwitchTicket::ready(ModelRequestOutcome::status(ModelRequestStatus::Unchanged))
+        }
+        Plan::Apply(rx, tx) => {
+            spawn_apply(shared, target, actor, Some(tx));
+            SwitchTicket(TicketInner::Later(rx))
+        }
+        Plan::Wait => {
+            ctx.hub.record_request(&ctx.tag, &actor, &target, ModelRequestStatus::PendingTurnEnd);
+            publish_model_state(shared);
+            SwitchTicket::ready(ModelRequestOutcome::status(ModelRequestStatus::PendingTurnEnd))
+        }
+    }
+}
+
+/// How many user prompts a (stopped) session's stored JSONL holds: where a
+/// note made while it is not running belongs.
+fn prompt_count_of(session_id: &str) -> u64 {
+    load_scrollback(session_id, 1).prompt_count()
+}
+
+/// The "nothing recorded, nothing reported" model.
+fn default_target() -> ModelTarget {
+    ModelTarget { model: "default".to_owned(), effort: None }
+}
+
+/// Persist (or clear) the switch waiting on `ctx`'s focus.
+fn persist_pending(ctx: &SessionCtx, pending: Option<ModelTarget>) {
+    let result = model_store::update_focus_record(&ctx.hub.paths.focus_models, &ctx.tag, |record| {
+        record.map(|mut r| {
+            r.pending = pending;
+            r
+        })
+    });
+    if let Err(e) = result {
+        warn!(tag = %ctx.tag, "could not persist the pending model switch: {e:#}");
+    }
+}
+
+/// Run [`apply_switch`] on the session's runtime. `rt.applying` is already set.
+fn spawn_apply(shared: &Shared, target: ModelTarget, actor: Actor, reply: Option<oneshot::Sender<ModelRequestOutcome>>) {
+    let task_shared = shared.clone();
+    shared.runtime.spawn(async move {
+        let outcome = apply_switch(&task_shared, target, actor).await;
+        if let Some(reply) = reply {
+            let _ = reply.send(outcome);
+        }
+        finish_apply(&task_shared);
+    });
+    publish_model_state(shared);
+}
+
+/// What `get_settings` confirmed.
+struct Applied {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+/// Apply a switch to an idle session: control requests, then the store, a
+/// note, an activity line. On any failure the session is put back (best
+/// effort) and nothing is recorded but the failure.
+async fn apply_switch(shared: &Shared, target: ModelTarget, actor: Actor) -> ModelRequestOutcome {
+    let ctx = &shared.ctx;
+    let catalog = ctx.hub.catalog();
+    persist_pending(ctx, None);
+    let record = model_store::focus_record(&ctx.hub.paths.focus_models, &ctx.tag);
+    let reported = shared.model.lock().unwrap().reported.clone();
+    let current = current_target(record.as_ref(), reported.as_deref(), &catalog);
+    if current.as_ref() == Some(&target) {
+        return ModelRequestOutcome::status(ModelRequestStatus::Unchanged);
+    }
+    let from = current.clone().unwrap_or_else(default_target);
+
+    match run_switch_requests(shared, current.as_ref(), &target, &catalog).await {
+        Ok(applied) => {
+            let source = ModelSource::Focus;
+            let written = model_store::update_focus_record(&ctx.hub.paths.focus_models, &ctx.tag, |_| {
+                Some(FocusModelRecord {
+                    model: target.model.clone(),
+                    effort: target.effort.clone(),
+                    source,
+                    pending: None,
+                })
+            });
+            {
+                let mut rt = shared.model.lock().unwrap();
+                match written {
+                    Ok(record) => rt.recorded = record,
+                    Err(e) => warn!(tag = %ctx.tag, "could not record the new model: {e:#}"),
+                }
+                if applied.model.is_some() {
+                    rt.reported = applied.model;
+                }
+                rt.effective_effort = applied.effort;
+                rt.noted_mismatch = None;
+                rt.fallback = None;
+            }
+            let text = copy::changed(&from, &target, &actor, &catalog);
+            emit_note(shared, NoteKind::ModelChanged, text.clone());
+            log_switch(ctx, current.as_ref(), &target, &actor, Outcome::Applied, None, text);
+            ctx.hub.record_request(&ctx.tag, &actor, &target, ModelRequestStatus::Applied);
+            ModelRequestOutcome::status(ModelRequestStatus::Applied)
+        }
+        Err(reason) => {
+            let text = copy::failed(&from, &target, &reason, &catalog);
+            emit_note(shared, NoteKind::ModelFailed, text.clone());
+            log_switch(ctx, current.as_ref(), &target, &actor, Outcome::Failed, Some(reason.clone()), text);
+            ctx.hub.record_request(&ctx.tag, &actor, &target, ModelRequestStatus::Failed);
+            ModelRequestOutcome {
+                status: ModelRequestStatus::Failed,
+                code: None,
+                message: Some(reason),
+                warning: None,
+            }
+        }
+    }
+}
+
+/// `set_model` (if the model changes), `apply_flag_settings` (if the effort
+/// changes), then `get_settings` to verify. On failure, undo what was sent
+/// (without waiting for the answers) and return the reason.
+async fn run_switch_requests(
+    shared: &Shared,
+    current: Option<&ModelTarget>,
+    target: &ModelTarget,
+    catalog: &ModelCatalog,
+) -> std::result::Result<Applied, String> {
+    let model_changes = current.map(|c| c.model != target.model).unwrap_or(true);
+    let effort_changes = current.map(|c| c.effort != target.effort).unwrap_or(target.effort.is_some());
+    // Whether a change may have taken effect: it succeeded, or it got no
+    // answer. A change the CLI refused needs no undoing.
+    let mut model_sent = false;
+    let mut effort_sent = false;
+    let maybe_applied = |r: &std::result::Result<ControlReply, ControlFailure>| match r {
+        Ok(_) => true,
+        Err(f) => !f.refused,
+    };
+
+    let result = async {
+        if model_changes {
+            let r = control(shared, serde_json::json!({ "subtype": "set_model", "model": target.model })).await;
+            model_sent = maybe_applied(&r);
+            r?;
+        }
+        if effort_changes {
+            let r = control(
+                shared,
+                serde_json::json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": target.effort } }),
+            )
+            .await;
+            effort_sent = maybe_applied(&r);
+            r?;
+        }
+        let reply = control(shared, serde_json::json!({ "subtype": "get_settings" })).await?;
+        let applied = find_key(&reply.body, "applied").cloned().unwrap_or_default();
+        let applied_model = applied.get("model").and_then(|m| m.as_str()).map(str::to_owned);
+        let applied_effort = applied.get("effort").and_then(|e| e.as_str()).map(str::to_owned);
+        if let Some(expected) = catalog.resolved(&target.model) {
+            if applied_model.as_deref() != Some(expected.as_str()) {
+                return Err(format!(
+                    "the session reports {}",
+                    applied_model.as_deref().unwrap_or("no model")
+                ));
+            }
+        }
+        if let Some(effort) = &target.effort {
+            if applied_effort.as_deref() != Some(effort.as_str()) {
+                return Err(format!(
+                    "the session reports effort {}",
+                    applied_effort.as_deref().unwrap_or("default")
+                ));
+            }
+        }
+        Ok(Applied { model: applied_model, effort: applied_effort })
+    }
+    .await;
+
+    if result.is_err() && !shared.exited.load(Ordering::SeqCst) {
+        if let Some(current) = current {
+            if effort_sent {
+                let _ = send_control(
+                    shared,
+                    serde_json::json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": current.effort } }),
+                );
+            }
+            if model_sent && current.model != "default" {
+                let _ = send_control(shared, serde_json::json!({ "subtype": "set_model", "model": current.model }));
+            }
+        }
+    }
+    result
+}
+
+/// Depth-first search for the first value stored under `key`.
+fn find_key<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    match v {
+        serde_json::Value::Object(map) => map
+            .get(key)
+            .or_else(|| map.values().find_map(|child| find_key(child, key))),
+        serde_json::Value::Array(items) => items.iter().find_map(|child| find_key(child, key)),
+        _ => None,
+    }
+}
+
+/// Write a control request without waiting for its answer.
+fn send_control(shared: &Shared, request: serde_json::Value) -> Result<()> {
+    let id = format!("model-{}", Uuid::new_v4());
+    write_control_request(&shared.stdin, &id, request)
+}
+
+/// Why a control request failed: the reason shown to the user, and whether
+/// the CLI answered with a refusal (so nothing took effect).
+struct ControlFailure {
+    reason: String,
+    refused: bool,
+}
+
+impl From<ControlFailure> for String {
+    fn from(f: ControlFailure) -> String {
+        f.reason
+    }
+}
+
+/// Send a control request and wait (≤ [`CONTROL_TIMEOUT`]) for its answer.
+async fn control(shared: &Shared, request: serde_json::Value) -> std::result::Result<ControlReply, ControlFailure> {
+    let failure = |reason: String, refused: bool| ControlFailure { reason, refused };
+    const EXITED: &str = "the session exited";
+    let id = format!("model-{}", Uuid::new_v4());
+    let (tx, rx) = oneshot::channel();
+    shared.waiters.lock().unwrap().insert(id.clone(), tx);
+    // Checked after registering: the reader sets `exited` before it drops
+    // every waiter, so one of the two always notices an exit.
+    if shared.exited.load(Ordering::SeqCst) || write_control_request(&shared.stdin, &id, request).is_err() {
+        shared.waiters.lock().unwrap().remove(&id);
+        return Err(failure(EXITED.to_owned(), false));
+    }
+    match tokio::time::timeout(CONTROL_TIMEOUT, rx).await {
+        Ok(Ok(reply)) if reply.ok => Ok(reply),
+        Ok(Ok(reply)) => Err(failure(
+            reply
+                .error
+                .or(reply.error_code)
+                .unwrap_or_else(|| "the session refused the change".to_owned()),
+            true,
+        )),
+        Ok(Err(_)) => Err(failure(EXITED.to_owned(), false)),
+        Err(_) => {
+            shared.waiters.lock().unwrap().remove(&id);
+            Err(failure(format!("the session did not answer within {} s", CONTROL_TIMEOUT.as_secs()), false))
+        }
     }
 }
 
@@ -1857,6 +3022,14 @@ fn unreadable_images_note(failed: &[(String, String)]) -> String {
     )
 }
 
+/// Queued work a session's replacement inherits (see
+/// [`SessionManager::restart`]): nothing a crash or restart interrupts is lost.
+#[derive(Default)]
+struct Carry {
+    messages: Vec<PendingMessage>,
+    waiting: Option<(ModelTarget, Actor)>,
+}
+
 /// What [`SessionManager::interrupt`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptOutcome {
@@ -1866,17 +3039,17 @@ pub enum InterruptOutcome {
     NotRunning,
 }
 
-/// Write one stream-json `control_request` frame (`subtype` is e.g.
-/// `"interrupt"`) to the child's stdin.
+/// Write one stream-json `control_request` frame (`request` is the body, e.g.
+/// `{"subtype":"interrupt"}`) to the child's stdin.
 fn write_control_request(
     stdin: &Arc<Mutex<Option<ChildStdin>>>,
     request_id: &str,
-    subtype: &str,
+    request: serde_json::Value,
 ) -> Result<()> {
     let frame = serde_json::json!({
         "type": "control_request",
         "request_id": request_id,
-        "request": { "subtype": subtype },
+        "request": request,
     });
     let mut line = serde_json::to_string(&frame)?;
     line.push('\n');
@@ -1887,6 +3060,24 @@ fn write_control_request(
     stdin.write_all(line.as_bytes())?;
     stdin.flush()?;
     Ok(())
+}
+
+/// Write a queued or direct user message, with the pending agent note (if
+/// any) in front of it.
+fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
+    let prefix = shared.note_prefix.lock().unwrap().take();
+    match prefix {
+        Some(note) => {
+            let text = format!("{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}", msg.text);
+            let result = write_user_frame(&shared.stdin, &text, &msg.images);
+            if result.is_err() {
+                // Not delivered: the note goes with the next message instead.
+                *shared.note_prefix.lock().unwrap() = Some(note);
+            }
+            result
+        }
+        None => write_user_frame(&shared.stdin, &msg.text, &msg.images),
+    }
 }
 
 /// Write one stream-json user-message frame to the child's stdin.

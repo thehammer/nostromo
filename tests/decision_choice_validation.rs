@@ -23,7 +23,7 @@ use tokio::sync::{broadcast, oneshot};
 const TAG: &str = "cody-x";
 
 fn choice(id: &str, label: &str) -> DecisionChoice {
-    DecisionChoice { id: id.into(), label: label.into(), detail: None }
+    DecisionChoice { id: id.into(), label: label.into(), detail: None, is_default: false }
 }
 
 fn approve_reject() -> Vec<DecisionChoice> {

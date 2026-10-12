@@ -48,6 +48,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::model::notes::{LedgerNote, NoteKind};
+
 /// How many turns a fresh attach or resume is served. Do not change this
 /// value or its two call sites as part of retention work — it is a separate,
 /// already-tested concern (see `.claude/prds/bounded-transcript-memory.md`).
@@ -113,6 +115,16 @@ pub enum TurnBlock {
         options: Vec<AskOption>,
         multi_select: bool,
     },
+    /// A daemon-authored transcript marker ("Model changed to Opus (from
+    /// Sonnet) by you."). Not a message: it is never sent to the agent and
+    /// never starts a turn. Rendered inline as a system marker, and restored
+    /// from the session's notes ledger when a transcript is rebuilt.
+    /// (`note_kind`, not `kind`: `kind` is this enum's own tag.)
+    Note {
+        note_kind: NoteKind,
+        text: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,6 +189,14 @@ pub enum TurnDelta {
     },
     /// The in-flight turn was aborted (e.g. the child crashed).
     TurnErrored { turn_id: String, message: String },
+    /// A [`TurnBlock::Note`] was added after the turn `turn_id` (the latest
+    /// turn when the note was made). `turn_id: None` means the session has no
+    /// turn yet: the note is shown on its own, and it also leads the blocks of
+    /// the next `TurnStarted` turn (clients replace the standalone copy then).
+    Note {
+        turn_id: Option<String>,
+        block: TurnBlock,
+    },
 }
 
 // ── line parsing ──────────────────────────────────────────────────────────────
@@ -200,9 +220,40 @@ pub enum ParsedLine {
     Blocks {
         blocks: Vec<TurnBlock>,
         context_tokens: Option<u64>,
+        /// `message.model` of an assistant event: the model that answered.
+        model: Option<String>,
     },
     /// Turn boundary.
     Result(ResultSummary),
+    /// The model a `system`/`init` event reports (re-emitted at the start of
+    /// every turn), with the event's session id.
+    Model {
+        model: String,
+        source: ModelReportSource,
+        session_id: Option<String>,
+    },
+    /// The CLI substituted a fallback model (`system` / `model_fallback`).
+    ModelFallback {
+        original: Option<String>,
+        fallback: Option<String>,
+        content: Option<String>,
+    },
+    /// The answer to a control request the daemon sent.
+    ControlResponse {
+        request_id: String,
+        ok: bool,
+        error: Option<String>,
+        error_code: Option<String>,
+        /// The response payload (`response.response`), or `Null`.
+        body: Value,
+    },
+}
+
+/// Where a reported model came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelReportSource {
+    Init,
+    Assistant,
 }
 
 /// Parse one NDJSON line from the stream-json output. Returns `None` for lines
@@ -212,14 +263,28 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
     let obj = v.as_object()?;
 
     match obj.get("type")?.as_str()? {
-        "system" => obj
-            .get("session_id")
-            .and_then(|s| s.as_str())
-            .map(|s| ParsedLine::SessionId(s.to_string())),
+        "system" => parse_system_event(obj),
+
+        "control_response" => parse_control_response(obj),
 
         "assistant" => {
             let msg = obj.get("message")?;
-            let content = msg.get("content")?.as_array()?;
+            // A subagent's messages arrive on the parent's stdout too, carrying
+            // the subagent's model: that is not what the session runs on.
+            let from_subagent = obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true)
+                || obj.get("parent_tool_use_id").is_some_and(|p| !p.is_null());
+            let model = msg
+                .get("model")
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty() && !from_subagent && *m != "<synthetic>")
+                .map(str::to_string);
+            let Some(content) = msg.get("content").and_then(|c| c.as_array()) else {
+                return model.map(|model| ParsedLine::Blocks {
+                    blocks: vec![],
+                    context_tokens: None,
+                    model: Some(model),
+                });
+            };
             let blocks: Vec<TurnBlock> = content
                 .iter()
                 .filter_map(parse_content_block)
@@ -244,12 +309,13 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
                     None
                 }
             });
-            if blocks.is_empty() && context_tokens.is_none() {
+            if blocks.is_empty() && context_tokens.is_none() && model.is_none() {
                 None
             } else {
                 Some(ParsedLine::Blocks {
                     blocks,
                     context_tokens,
+                    model,
                 })
             }
         }
@@ -277,6 +343,45 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
     }
 }
 
+/// `system` events: the init event (session id, and the model the turn runs
+/// on), a model fallback, or anything else that carries a session id.
+fn parse_system_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
+    let str_field = |k: &str| obj.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let session_id = str_field("session_id");
+    match obj.get("subtype").and_then(|x| x.as_str()) {
+        Some("init") => match str_field("model").filter(|m| !m.is_empty()) {
+            Some(model) => Some(ParsedLine::Model {
+                model,
+                source: ModelReportSource::Init,
+                session_id,
+            }),
+            None => session_id.map(ParsedLine::SessionId),
+        },
+        Some("model_fallback") | Some("model_refusal_fallback") | Some("model_consent_fallback") => {
+            Some(ParsedLine::ModelFallback {
+                original: str_field("original_model"),
+                fallback: str_field("fallback_model"),
+                content: str_field("content"),
+            })
+        }
+        _ => session_id.map(ParsedLine::SessionId),
+    }
+}
+
+/// `{"type":"control_response","response":{"subtype":"success"|"error",
+/// "request_id":…, "error":…, "error_code":…, "response":{…}}}`.
+fn parse_control_response(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
+    let response = obj.get("response")?;
+    let str_field = |k: &str| response.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    Some(ParsedLine::ControlResponse {
+        request_id: str_field("request_id")?,
+        ok: response.get("subtype").and_then(|x| x.as_str()) == Some("success"),
+        error: str_field("error"),
+        error_code: str_field("error_code"),
+        body: response.get("response").cloned().unwrap_or(Value::Null),
+    })
+}
+
 fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
     // Sub-agent prompts are emitted on the parent process's stdout as `user`
     // events tagged `isSidechain: true`. They are NOT human input — dropping
@@ -292,12 +397,11 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
     // Plain-string content → a human prompt (new turn), unless it's a
     // harness-injected notification (see is_harness_notification below).
     if let Some(s) = content.as_str() {
-        let s = s.to_string();
-        if s.trim().is_empty() || is_harness_notification(&s) {
+        if s.trim().is_empty() || is_harness_notification(s) {
             return None;
         }
         return Some(ParsedLine::UserPrompt {
-            text: s,
+            text: strip_nostromo_note(s).to_string(),
             is_replay: obj
                 .get("isReplay")
                 .and_then(|x| x.as_bool())
@@ -325,6 +429,7 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
             Some(ParsedLine::Blocks {
                 blocks,
                 context_tokens: None,
+                model: None,
             })
         };
     }
@@ -348,7 +453,7 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
         return None;
     }
     Some(ParsedLine::UserPrompt {
-        text,
+        text: strip_nostromo_note(&text).to_string(),
         is_replay: obj
             .get("isReplay")
             .and_then(|x| x.as_bool())
@@ -368,9 +473,35 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
 /// isSidechain drop above for the same problem with sub-agent prompts).
 /// Checked as a prefix after trimming leading whitespace/newlines, since the
 /// harness sometimes leads with blank lines before the tag.
+///
+/// A model switch (`set_model`) makes the CLI write three user entries of its
+/// own, replayed live and stored in the session JSONL (contract F1): the
+/// `<local-command-caveat>` meta entry, the `<command-name>/model</command-name>`
+/// entry and the `<local-command-stdout>Set model to …` entry. The daemon
+/// records the switch as a note instead, so these are dropped too.
 fn is_harness_notification(text: &str) -> bool {
     let trimmed = text.trim_start();
-    trimmed.starts_with("<task-notification>") || trimmed.starts_with("<system-reminder>")
+    trimmed.starts_with("<task-notification>")
+        || trimmed.starts_with("<system-reminder>")
+        || trimmed.starts_with("<local-command-caveat>")
+        || trimmed.starts_with("<command-name>/model</command-name>")
+        || trimmed.starts_with("<local-command-stdout>Set model to")
+}
+
+/// Opening tag of the one-line note the daemon may put in front of a user
+/// message it writes, for the agent's eyes only (e.g. the outcome of the
+/// agent's own model request).
+pub const NOSTROMO_NOTE_OPEN: &str = "<nostromo-note>";
+/// Closing tag, followed by a blank line before the user's own text.
+pub const NOSTROMO_NOTE_CLOSE: &str = "</nostromo-note>\n\n";
+
+/// The user's own text of a prompt: a leading
+/// `<nostromo-note>…</nostromo-note>\n\n` is the daemon's, not the user's,
+/// and is never displayed.
+pub fn strip_nostromo_note(text: &str) -> &str {
+    text.strip_prefix(NOSTROMO_NOTE_OPEN)
+        .and_then(|rest| rest.find(NOSTROMO_NOTE_CLOSE).map(|end| &rest[end + NOSTROMO_NOTE_CLOSE.len()..]))
+        .unwrap_or(text)
 }
 
 fn parse_content_block(b: &Value) -> Option<TurnBlock> {
@@ -649,6 +780,13 @@ pub struct SessionTranscript {
     /// The operator asked to interrupt the in-flight turn; the next `result`
     /// is rendered as "Interrupted" and clears this.
     interrupt_pending: bool,
+    /// How many user prompts this transcript has ingested in all, trimming
+    /// notwithstanding: the absolute prompt number of the newest turn. Notes
+    /// are positioned by it (`LedgerNote::after_prompt`).
+    prompt_count: u64,
+    /// Notes made before the first turn existed. They lead the blocks of the
+    /// next turn to start.
+    orphan_notes: Vec<TurnBlock>,
 }
 
 impl SessionTranscript {
@@ -711,19 +849,96 @@ impl SessionTranscript {
         id
     }
 
+    /// Total user prompts ingested (see the `prompt_count` field).
+    pub fn prompt_count(&self) -> u64 {
+        self.prompt_count
+    }
+
+    /// Add a note after the latest turn (or, with no turn yet, ahead of the
+    /// next one) and return the delta announcing it.
+    pub fn add_note(&mut self, block: TurnBlock) -> TurnDelta {
+        let delta = match self.turns.last_mut() {
+            Some(turn) => {
+                self.retained_bytes += block_bytes(&block);
+                turn.blocks.push(block.clone());
+                TurnDelta::Note { turn_id: Some(turn.id.clone()), block }
+            }
+            None => {
+                self.orphan_notes.push(block.clone());
+                TurnDelta::Note { turn_id: None, block }
+            }
+        };
+        self.enforce_limits();
+        delta
+    }
+
+    /// Put ledger notes back in place after a rebuild from the session JSONL:
+    /// each after the turn of prompt number `after_prompt`. Notes older than
+    /// the retained turns are dropped; notes past the newest turn follow it.
+    pub fn merge_ledger_notes(&mut self, notes: &[LedgerNote]) {
+        let retained = self.turns.len() as u64;
+        let first_retained = self.prompt_count.saturating_sub(retained) + 1;
+        let mut leading = 0usize;
+        for note in notes {
+            let block = TurnBlock::Note {
+                note_kind: note.kind,
+                text: note.text.clone(),
+                ts: note.ts,
+            };
+            if note.after_prompt == 0 {
+                match self.turns.first_mut() {
+                    Some(first) if first_retained == 1 => {
+                        self.retained_bytes += block_bytes(&block);
+                        first.blocks.insert(leading, block);
+                        leading += 1;
+                    }
+                    Some(_) => {}
+                    None => self.orphan_notes.push(block),
+                }
+                continue;
+            }
+            if note.after_prompt < first_retained {
+                continue;
+            }
+            let index = ((note.after_prompt - first_retained) as usize).min(self.turns.len().saturating_sub(1));
+            match self.turns.get_mut(index) {
+                Some(turn) => {
+                    self.retained_bytes += block_bytes(&block);
+                    turn.blocks.push(block);
+                }
+                None => self.orphan_notes.push(block),
+            }
+        }
+        self.enforce_limits();
+    }
+
     /// Ingest one stream-json line, mutate the transcript, and return the
     /// deltas to broadcast (may be empty).
     pub fn ingest_line(&mut self, line: &str) -> Vec<TurnDelta> {
-        let Some(parsed) = parse_line(line) else {
-            return vec![];
-        };
+        match parse_line(line) {
+            Some(parsed) => self.ingest_parsed(parsed),
+            None => vec![],
+        }
+    }
+
+    /// [`Self::ingest_line`] for an already-parsed line. Model reports and
+    /// control responses only contribute their session id here.
+    pub fn ingest_parsed(&mut self, parsed: ParsedLine) -> Vec<TurnDelta> {
         match parsed {
-            ParsedLine::SessionId(sid) => {
+            ParsedLine::SessionId(sid)
+            | ParsedLine::Model {
+                session_id: Some(sid),
+                ..
+            } => {
                 if self.session_id.is_none() {
                     self.session_id = Some(sid);
                 }
                 vec![]
             }
+
+            ParsedLine::Model { session_id: None, .. }
+            | ParsedLine::ModelFallback { .. }
+            | ParsedLine::ControlResponse { .. } => vec![],
 
             ParsedLine::UserPrompt {
                 text, timestamp, ..
@@ -736,12 +951,13 @@ impl SessionTranscript {
                 if self.first_user_input.is_none() {
                     self.first_user_input = Some(text.clone());
                 }
+                self.prompt_count += 1;
                 let id = self.alloc_id();
                 let turn = Turn {
                     id,
                     user_input: text,
                     timestamp,
-                    blocks: vec![],
+                    blocks: std::mem::take(&mut self.orphan_notes),
                     is_complete: false,
                 };
                 self.retained_bytes += turn_bytes(&turn);
@@ -754,6 +970,7 @@ impl SessionTranscript {
             ParsedLine::Blocks {
                 blocks,
                 context_tokens,
+                ..
             } => {
                 if let Some(ct) = context_tokens {
                     self.last_context_tokens = Some(ct);
@@ -916,6 +1133,7 @@ fn block_bytes(b: &TurnBlock) -> usize {
         TurnBlock::ToolResult { content, .. } => content.len(),
         TurnBlock::ResultSummary { .. } => 0,
         TurnBlock::ErrorMessage { message } => message.len(),
+        TurnBlock::Note { text, .. } => text.len(),
         TurnBlock::AskQuestion {
             question,
             header,
@@ -1424,6 +1642,7 @@ mod tests {
                 TurnDelta::BlockAppended { .. } => "block",
                 TurnDelta::TurnCompleted { .. } => "complete",
                 TurnDelta::TurnErrored { .. } => "error",
+                TurnDelta::Note { .. } => "note",
             })
             .collect();
         let first_complete = kinds.iter().position(|k| *k == "complete").unwrap();
@@ -1667,6 +1886,7 @@ mod tests {
                         TurnBlock::ToolResult { content, .. } => content.len(),
                         TurnBlock::ResultSummary { .. } => 0,
                         TurnBlock::ErrorMessage { message } => message.len(),
+                        TurnBlock::Note { text, .. } => text.len(),
                         TurnBlock::AskQuestion {
                             question,
                             header,

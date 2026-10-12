@@ -100,6 +100,7 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
             id: c.id,
             label: c.label,
             detail: c.detail,
+            is_default: false,
         })
         .collect();
 

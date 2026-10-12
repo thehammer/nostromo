@@ -650,6 +650,8 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::Notification { tag, .. }
         | ServerMsg::ActivitySnapshot { tag, .. }
         | ServerMsg::PerriState { tag, .. } => ServerClass::Focus(tag),
+        // A focus's model is withheld exactly like its transcript.
+        ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
         ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
 
@@ -686,6 +688,13 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::ActivityHealth { .. }
         | ServerMsg::Withheld { .. }
         | ServerMsg::DaemonReconnected => ServerClass::Open,
+
+        // The CLI's model list and the per-agent defaults name agents and
+        // models, never focus content. A request result goes only to the
+        // connection that asked.
+        ServerMsg::ModelCatalog { .. }
+        | ServerMsg::ModelDefaults { .. }
+        | ServerMsg::ModelRequestResult { .. } => ServerClass::Open,
     }
 }
 
@@ -710,6 +719,7 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
             is_secure_refusal(&e.code)
         }
         ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),
+        ServerMsg::ModelRequestResult { code: Some(code), .. } => is_secure_refusal(code),
         _ => false,
     }
 }
@@ -772,6 +782,10 @@ pub enum NetworkPolicy {
 ///   activity; refused for a sensitive tag by [`targets_sensitive_session`].
 /// * `SessionDetach`/`PtyDetach`: release the peer's own attachment only (a no-op
 ///   for a peer that is not the attached client).
+/// * `ModelCatalogRequest`/`ModelDefaultsRequest`: read the CLI's model list and
+///   the per-agent defaults (agent and model names only).
+/// * `SessionModelGet`: read one focus's model; refused for a sensitive tag by
+///   [`targets_sensitive_session`].
 ///
 /// Everything else is refused, notably: `MotherResume` and every
 /// `MotherAction` (feeds attacker text to a job's agent, or cancels/retries it),
@@ -781,7 +795,9 @@ pub enum NetworkPolicy {
 /// `SessionControl`, `SessionInterrupt`, `SessionAnswerPermission`,
 /// `SessionSend`, `SessionSpawn`, `PtySpawn`, `PtyAttach` (it takes the PTY's
 /// single attachment slot from the Mac client and kills its live stream, so it
-/// is not read-only), `PtyInput`, `PtyResize`,
+/// is not read-only), `PtyInput`, `PtyResize`, every model mutation
+/// (`SessionModelSet`, `ModelDefaultSet` and `ModelCatalogRefresh`, which
+/// starts a process),
 /// `RenderedShape` (it overwrites what `get_view_state` reports to agents) and
 /// the work/picks/seed verbs. An iOS client over the LAN is therefore read-only
 /// until authentication exists.
@@ -796,7 +812,10 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::PtyList
         | ClientMsg::PtyDetach { .. }
         | ClientMsg::FocusList
-        | ClientMsg::ActivitySnapshotRequest { .. } => NetworkPolicy::Allowed,
+        | ClientMsg::ActivitySnapshotRequest { .. }
+        | ClientMsg::ModelCatalogRequest {}
+        | ClientMsg::SessionModelGet { .. }
+        | ClientMsg::ModelDefaultsRequest {} => NetworkPolicy::Allowed,
 
         ClientMsg::PtySpawn { .. }
         | ClientMsg::PtyAttach { .. }
@@ -820,7 +839,10 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::PicksRefresh { .. }
         | ClientMsg::WorkSendPreviewRequest { .. }
         | ClientMsg::WorkSend { .. }
-        | ClientMsg::FredSeed { .. } => NetworkPolicy::Refused,
+        | ClientMsg::FredSeed { .. }
+        | ClientMsg::ModelCatalogRefresh {}
+        | ClientMsg::SessionModelSet { .. }
+        | ClientMsg::ModelDefaultSet { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -851,7 +873,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SessionAnswerPermission { tag, .. }
         | ClientMsg::ClosePane { tag, .. }
         | ClientMsg::ActivitySnapshotRequest { tag }
-        | ClientMsg::RenderedShape { tag, .. } => tags.tag_is_sensitive(tag),
+        | ClientMsg::RenderedShape { tag, .. }
+        | ClientMsg::SessionModelGet { tag }
+        | ClientMsg::SessionModelSet { tag, .. } => tags.tag_is_sensitive(tag),
 
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -874,7 +898,11 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::PicksRefresh { .. }
         | ClientMsg::WorkSendPreviewRequest { .. }
         | ClientMsg::WorkSend { .. }
-        | ClientMsg::FredSeed { .. } => false,
+        | ClientMsg::FredSeed { .. }
+        | ClientMsg::ModelCatalogRequest {}
+        | ClientMsg::ModelCatalogRefresh {}
+        | ClientMsg::ModelDefaultsRequest {}
+        | ClientMsg::ModelDefaultSet { .. } => false,
     }
 }
 
@@ -1386,6 +1414,25 @@ mod tests {
                 allow_duplicate: false,
             },
             ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },
+            ClientMsg::ModelCatalogRequest {},
+            ClientMsg::ModelCatalogRefresh {},
+            ClientMsg::SessionModelGet { tag: "x1".into() },
+            ClientMsg::SessionModelSet {
+                tag: "x1".into(),
+                model: Some("opus".into()),
+                effort: None,
+                set_as_agent_default: false,
+                request_id: "r".into(),
+                actor: None,
+            },
+            ClientMsg::ModelDefaultsRequest {},
+            ClientMsg::ModelDefaultSet {
+                agent: "claudia".into(),
+                model: Some("opus".into()),
+                effort: None,
+                clear: false,
+                request_id: "r".into(),
+            },
         ]
     }
 
@@ -1398,12 +1445,15 @@ mod tests {
         "ActivitySnapshotRequest",
         "FocusList",
         "Hello",
+        "ModelCatalogRequest",
+        "ModelDefaultsRequest",
         "Ping",
         "PtyDetach",
         "PtyList",
         "SessionAttach",
         "SessionDetach",
         "SessionList",
+        "SessionModelGet",
         "Subscribe",
     ];
 
@@ -1419,7 +1469,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 33;
+    const CLIENT_MSG_VARIANTS: usize = 39;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -1457,6 +1507,12 @@ mod tests {
             ClientMsg::WorkSendPreviewRequest { .. } => 30,
             ClientMsg::WorkSend { .. } => 31,
             ClientMsg::FredSeed { .. } => 32,
+            ClientMsg::ModelCatalogRequest {} => 33,
+            ClientMsg::ModelCatalogRefresh {} => 34,
+            ClientMsg::SessionModelGet { .. } => 35,
+            ClientMsg::SessionModelSet { .. } => 36,
+            ClientMsg::ModelDefaultsRequest {} => 37,
+            ClientMsg::ModelDefaultSet { .. } => 38,
         }
     }
 

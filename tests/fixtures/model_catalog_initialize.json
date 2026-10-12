@@ -1,0 +1,60 @@
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "init-1",
+    "response": {
+      "commands": [],
+      "models": [
+        {
+          "value": "claude-opus-4-6",
+          "resolvedModel": "claude-opus-4-6",
+          "displayName": "Opus 4.6",
+          "supportedEffortLevels": ["low", "medium", "high", "max"],
+          "supportsEffort": true
+        },
+        {
+          "value": "fable",
+          "resolvedModel": "claude-fable-5-1",
+          "displayName": "Fable 5.1",
+          "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+          "supportsEffort": true
+        },
+        {
+          "value": "default",
+          "resolvedModel": "claude-sonnet-5-5",
+          "displayName": "Default (recommended)",
+          "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+          "supportsEffort": true
+        },
+        {
+          "value": "haiku",
+          "resolvedModel": "claude-haiku-5-5",
+          "displayName": "Haiku 5.5",
+          "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+          "supportsEffort": true
+        },
+        {
+          "value": "claude-haiku-4-5-20251001",
+          "resolvedModel": "claude-haiku-4-5-20251001",
+          "displayName": "Haiku 4.5",
+          "supportsEffort": false
+        },
+        {
+          "value": "opus",
+          "resolvedModel": "claude-opus-5-5",
+          "displayName": "Opus 5.5",
+          "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+          "supportsEffort": true
+        },
+        {
+          "value": "sonnet",
+          "resolvedModel": "claude-sonnet-5-5",
+          "displayName": "Sonnet 5.5",
+          "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+          "supportsEffort": true
+        }
+      ]
+    }
+  }
+}

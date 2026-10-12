@@ -1985,7 +1985,7 @@ async fn a_tcp_client_cannot_answer_a_decision_request_of_a_sensitive_focus_even
         "fred".into(),
         "Forward the 20 newest mails?".into(),
         None,
-        vec![DecisionChoice { id: "yes".into(), label: "Yes".into(), detail: None }],
+        vec![DecisionChoice { id: "yes".into(), label: "Yes".into(), detail: None, is_default: false }],
         None,
     );
     let (mut tcp, _) = h.tcp(vec![]).await;
@@ -4526,4 +4526,265 @@ async fn the_shared_harness_never_points_the_sent_ledger_at_the_real_home() {
         std::path::Path::new(&teri).display(),
         tmp.display()
     );
+}
+
+// ── model switching: network peers read, never write ──────────────────────────
+//
+// A TCP peer may read the model of a focus it is allowed to see. Every request that would change
+// a model (switch a focus, set a per-agent default, re-probe the CLI) is refused with
+// `requires_secure_connection` and changes nothing: not the focus model store, not the per-agent
+// defaults, not the session notes, not the transcript, and nothing reaches the session's stdin.
+
+mod model_switching {
+    use super::*;
+
+    use std::collections::BTreeMap;
+
+    use nostromo::ipc::protocol::{
+        AgentModelDefault, EffortChoice, ModelRequestStatus, SessionModelState, SwitchPhase,
+    };
+    use nostromo::model::notes::{self, LedgerNote, NoteKind};
+    use nostromo::model::store::{self, FocusModelRecord, ModelSource};
+    use nostromo::model::ModelPaths;
+
+    const FOCUS: &str = "cody-model-gate";
+    const FOCUS_SID: &str = "sid-model-gate";
+
+    /// The activity log, redirected once per test process: a refused request may be audited and
+    /// no test here may append to the operator's real `~/.claude/activity.jsonl`.
+    fn isolated_activity_log() -> PathBuf {
+        static LOG: OnceLock<PathBuf> = OnceLock::new();
+        LOG.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("nostromo-peer-gating-activity-{}.jsonl", std::process::id()));
+            std::env::set_var("NOSTROMO_ACTIVITY_PATH", &path);
+            path
+        })
+        .clone()
+    }
+
+    fn paths_of(h: &Harness) -> ModelPaths {
+        ModelPaths::beside(&h._tmp.path().join("sessions.json"))
+    }
+
+    /// Everything the daemon keeps about models, as bytes (`None` = no such file).
+    fn model_files(paths: &ModelPaths) -> BTreeMap<String, Option<Vec<u8>>> {
+        let mut out = BTreeMap::new();
+        out.insert("focus-models.json".to_owned(), std::fs::read(&paths.focus_models).ok());
+        out.insert("model-defaults.json".to_owned(), std::fs::read(&paths.defaults).ok());
+        if let Ok(entries) = std::fs::read_dir(&paths.notes_dir) {
+            for entry in entries.flatten() {
+                out.insert(format!("session-notes/{}", entry.file_name().to_string_lossy()), std::fs::read(entry.path()).ok());
+            }
+        }
+        out
+    }
+
+    /// A focus recorded on Sonnet, an agent default, and a ledger note for the focus's session:
+    /// something of each kind a model request could change.
+    fn seed_model_state(h: &Harness) {
+        let paths = paths_of(h);
+        store::update_focus_record(&paths.focus_models, FOCUS, |_| {
+            Some(FocusModelRecord { model: "sonnet".into(), effort: None, source: ModelSource::Focus, pending: None })
+        })
+        .unwrap();
+        store::set_default(&paths.defaults, "cody", Some(AgentModelDefault { model: "haiku".into(), effort: None })).unwrap();
+        notes::append(
+            &paths.notes_dir,
+            FOCUS_SID,
+            &LedgerNote {
+                after_prompt: 0,
+                kind: NoteKind::ModelChanged,
+                text: "Model changed to Sonnet (from Haiku) by you.".into(),
+                ts: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// The transcript of `tag` as a fresh Unix client is served it, serialised.
+    async fn transcript_of(h: &Harness, tag: &str) -> String {
+        let (mut unix, _) = h.unix(vec![]).await;
+        send(&mut unix, &ClientMsg::SessionAttach { tag: tag.into() }).await;
+        let frames = recv_until(&mut unix, |m| matches!(m, ServerMsg::SessionTurns { tag: t, .. } if t == tag)).await;
+        match frames.last() {
+            Some(ServerMsg::SessionTurns { turns, .. }) => serde_json::to_string(turns).unwrap(),
+            other => panic!("no transcript for {tag}: {other:?}"),
+        }
+    }
+
+    /// Send a model request and read until its `model_request_result`.
+    async fn model_result<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut S,
+        msg: ClientMsg,
+        request_id: &str,
+    ) -> (ModelRequestStatus, Option<String>) {
+        send(stream, &msg).await;
+        let frames = recv_until(stream, |m| {
+            matches!(m, ServerMsg::ModelRequestResult { request_id: r, .. } if r == request_id)
+        })
+        .await;
+        match frames.last() {
+            Some(ServerMsg::ModelRequestResult { status, code, .. }) => (*status, code.clone()),
+            other => panic!("no result for {request_id}: {other:?}"),
+        }
+    }
+
+    fn set_msg(tag: &str, model: Option<&str>, effort: Option<EffortChoice>, default: bool, id: &str, actor: Option<&str>) -> ClientMsg {
+        ClientMsg::SessionModelSet {
+            tag: tag.into(),
+            model: model.map(str::to_owned),
+            effort,
+            set_as_agent_default: default,
+            request_id: id.into(),
+            actor: actor.map(str::to_owned),
+        }
+    }
+
+    fn state_for(frames: &[ServerMsg], tag: &str) -> Option<SessionModelState> {
+        frames.iter().find_map(|m| match m {
+            ServerMsg::SessionModelState(s) if s.tag == tag => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    fn model_state(tag: &str) -> SessionModelState {
+        SessionModelState {
+            tag: tag.into(),
+            recorded: None,
+            reported: None,
+            effective_effort: None,
+            pending: None,
+            phase: SwitchPhase::Steady,
+            running: false,
+            warnings: vec![],
+            last_request: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tcp_client_cannot_switch_a_model_set_a_default_or_refresh_the_catalogue_and_nothing_changes() {
+        let activity = isolated_activity_log();
+        let h = spawn_server().await;
+        seed_model_state(&h);
+        let (mut unix, _) = h.unix(vec![]).await;
+        spawn_fake_session_with_id(&mut unix, FOCUS, "cody", "v-model-gate-write", Some(FOCUS_SID)).await;
+        let paths = paths_of(&h);
+        let files_before = model_files(&paths);
+        let transcript_before = transcript_of(&h, FOCUS).await;
+        let activity_before = std::fs::read_to_string(&activity).unwrap_or_default().lines().count();
+        let (mut tcp, _) = h.tcp(vec![]).await;
+
+        let attacks = [
+            // a plain switch, one that also makes the choice the agent's default, and one that
+            // claims to be the app-control script (a network peer cannot name its own actor)
+            ("r-set", set_msg(FOCUS, Some("opus"), Some(EffortChoice::High), false, "r-set", None)),
+            ("r-set-default", set_msg(FOCUS, Some("opus"), None, true, "r-set-default", None)),
+            ("r-set-script", set_msg(FOCUS, Some("fable"), None, false, "r-set-script", Some("script"))),
+            (
+                "r-default",
+                ClientMsg::ModelDefaultSet {
+                    agent: "cody".into(),
+                    model: Some("opus".into()),
+                    effort: None,
+                    clear: false,
+                    request_id: "r-default".into(),
+                },
+            ),
+            (
+                "r-default-clear",
+                ClientMsg::ModelDefaultSet {
+                    agent: "cody".into(),
+                    model: None,
+                    effort: None,
+                    clear: true,
+                    request_id: "r-default-clear".into(),
+                },
+            ),
+        ];
+        for (id, msg) in attacks {
+            let (status, code) = model_result(&mut tcp, msg, id).await;
+            assert_eq!(status, ModelRequestStatus::Refused, "{id}");
+            assert_eq!(code.as_deref(), Some("requires_secure_connection"), "{id}");
+        }
+        let refresh = attack(&mut tcp, ClientMsg::ModelCatalogRefresh {}).await;
+        assert_refused(&refresh, "model_catalog_refresh");
+
+        assert_eq!(model_files(&paths), files_before, "the model store, defaults and session notes are byte-identical");
+        assert_eq!(transcript_of(&h, FOCUS).await, transcript_before, "the transcript is unchanged");
+        let log = fake_log("v-model-gate-write");
+        assert!(!log.contains("set_model") && !log.contains("effortLevel"), "nothing reached the session: {log:?}");
+        assert_eq!(fake_starts("v-model-gate-write"), 1, "the session was not restarted: {log:?}");
+        let audited: Vec<Value> = std::fs::read_to_string(&activity)
+            .unwrap_or_default()
+            .lines()
+            .skip(activity_before)
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        for line in &audited {
+            assert_eq!(line["outcome"], "refused", "only refusals may be audited: {line}");
+            assert_eq!(line["actor"], "network", "{line}");
+        }
+
+        // Control: the gate is the transport, not a broken handler. The same request from a Unix
+        // peer reaches the daemon (here it asks for what the focus already runs: nothing to do).
+        let (status, code) = model_result(&mut unix, set_msg(FOCUS, Some("sonnet"), None, false, "r-unix", None), "r-unix").await;
+        assert_eq!(status, ModelRequestStatus::Unchanged, "{code:?}");
+    }
+
+    #[tokio::test]
+    async fn a_tcp_client_can_read_the_model_of_a_focus_it_may_see_but_not_of_a_sensitive_one() {
+        isolated_activity_log();
+        let h = spawn_server().await;
+        seed_model_state(&h);
+        let (mut unix, _) = h.unix(vec![]).await;
+        spawn_fake_session_with_id(&mut unix, FOCUS, "cody", "v-model-gate-read", Some(FOCUS_SID)).await;
+        spawn_fake_session(&mut unix, "fred", "fred", "v-model-fred").await;
+        let (mut tcp, _) = h.tcp(vec![]).await;
+
+        send(&mut tcp, &ClientMsg::SessionModelGet { tag: FOCUS.into() }).await;
+        let readable = recv_until(&mut tcp, |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == FOCUS)).await;
+        let state = state_for(&readable, FOCUS).expect("the model of an ordinary focus is readable over TCP");
+        assert_eq!(state.recorded.as_ref().map(|r| r.model.as_str()), Some("sonnet"));
+        assert!(state.running);
+
+        let withheld = attack(&mut tcp, ClientMsg::SessionModelGet { tag: "fred".into() }).await;
+        assert_refused(&withheld, "session_model_get on a sensitive focus");
+        assert!(state_for(&withheld, "fred").is_none(), "no state frame for a sensitive focus: {withheld:?}");
+        assert!(!json_of(&withheld).contains("\"tag\":\"fred\""), "nothing about the focus is revealed: {withheld:?}");
+    }
+
+    #[tokio::test]
+    async fn a_model_state_broadcast_for_a_sensitive_focus_never_reaches_a_tcp_client() {
+        let h = spawn_server().await;
+        let (mut unix, _) = h.unix(vec![]).await;
+        spawn_fake_session(&mut unix, "fred", "fred", "v-model-fred-bc").await;
+        let (mut tcp, _) = h.tcp(vec![]).await;
+
+        h.broadcast(ServerMsg::SessionModelState(model_state("fred")));
+        // Control: the ordinary focus's state still flows, so the test cannot pass by dropping every state.
+        h.broadcast(ServerMsg::SessionModelState(model_state("cody-x")));
+        h.broadcast(ServerMsg::Pong);
+        let seen = recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await;
+
+        assert!(state_for(&seen, "cody-x").is_some(), "control: an ordinary focus's model state reaches a TCP peer: {seen:?}");
+        assert!(state_for(&seen, "fred").is_none(), "a sensitive focus's model state reached a TCP peer: {seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_unix_client_can_read_the_model_of_any_focus() {
+        isolated_activity_log();
+        let h = spawn_server().await;
+        seed_model_state(&h);
+        let (mut unix, _) = h.unix(vec![]).await;
+        spawn_fake_session_with_id(&mut unix, FOCUS, "cody", "v-model-gate-unix", Some(FOCUS_SID)).await;
+        spawn_fake_session(&mut unix, "fred", "fred", "v-model-fred-unix").await;
+
+        send(&mut unix, &ClientMsg::SessionModelGet { tag: FOCUS.into() }).await;
+        let frames = recv_until(&mut unix, |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == FOCUS)).await;
+        assert_eq!(state_for(&frames, FOCUS).unwrap().recorded.map(|r| r.model), Some("sonnet".to_owned()));
+
+        send(&mut unix, &ClientMsg::SessionModelGet { tag: "fred".into() }).await;
+        let frames = recv_until(&mut unix, |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == "fred")).await;
+        assert!(state_for(&frames, "fred").is_some(), "{frames:?}");
+    }
 }

@@ -87,6 +87,10 @@ async fn main() -> Result<()> {
     // predates a fresh process's in-memory index) still attribute correctly
     // from the first event, not just after this process spawns/restarts them.
     session_mgr.lock().unwrap().seed_reverse_index();
+    // A model switch that was waiting for a turn to end when the daemon last
+    // stopped will never apply: clear it, with a note, before anything can
+    // connect and respawn the session.
+    session_mgr.lock().unwrap().clear_persisted_pending();
 
     // ── Pane registry (agent-authored layout) ──────────────────────────────────
     // Single source of truth for every focus's pane tree. Persisted to disk so
@@ -180,6 +184,22 @@ async fn main() -> Result<()> {
     // (multi-window decision-sheet fix). Must happen here, after `server.tx`
     // exists, not in the registry-construction block above.
     decisions.lock().unwrap().configure_broadcast(broadcast_tx.clone());
+
+    // ── Model switching ───────────────────────────────────────────────────────
+    // Learn which models the installed CLI offers, now and every 6 h.
+    let model_hub = {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_model_broadcast(broadcast_tx.clone());
+        mgr.model_hub()
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(nostromo::model::catalog::PROBE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let _ = nostromo::model::hub::refresh_catalog(&model_hub).await;
+        }
+    });
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─

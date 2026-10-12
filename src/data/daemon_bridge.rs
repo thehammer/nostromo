@@ -98,6 +98,11 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::WorkSendPreview { .. }
         | ServerMsg::WorkSendResult { .. }
         | ServerMsg::Withheld { .. }
+        // Model switching frames are consumed by the Swift thin-clients.
+        | ServerMsg::ModelCatalog { .. }
+        | ServerMsg::SessionModelState(_)
+        | ServerMsg::ModelDefaults { .. }
+        | ServerMsg::ModelRequestResult { .. }
         // Agent-authored pane layout messages are consumed by the Swift thin-client.
         | ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }

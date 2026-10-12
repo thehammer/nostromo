@@ -505,8 +505,8 @@ fn submit_and_broadcast_via(
         prompt.to_string(),
         None,
         vec![
-            DecisionChoice { id: "approve".into(), label: "Approve".into(), detail: None },
-            DecisionChoice { id: "reject".into(), label: "Reject".into(), detail: None },
+            DecisionChoice { id: "approve".into(), label: "Approve".into(), detail: None, is_default: false },
+            DecisionChoice { id: "reject".into(), label: "Reject".into(), detail: None, is_default: false },
         ],
         None,
     );
