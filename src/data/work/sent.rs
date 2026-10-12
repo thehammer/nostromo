@@ -301,13 +301,23 @@ fn open_private(mut options: std::fs::OpenOptions, path: &Path) -> std::io::Resu
     options.open(path)
 }
 
-/// How long to wait for `mother list` before treating the answer as unknown.
+/// How long the send path waits for `mother list` before treating the answer as unknown.
 const MOTHER_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the send sheet's preview waits for it. Shorter than the Mac's own
+/// request timeout (10 s), so a hung Mother yields the preview with its job
+/// markers kept ("unknown counts as live") and not a client-side timeout.
+pub const MOTHER_PREVIEW_TIMEOUT: Duration = Duration::from_millis(2_500);
 
 /// The ids of Mother's current jobs. `None` means unknown (the list failed or
 /// timed out): callers treat unknown as "still there", never as "no jobs".
 pub async fn mother_job_ids() -> Option<HashSet<String>> {
-    match tokio::time::timeout(MOTHER_LIST_TIMEOUT, crate::mother::list_jobs()).await {
+    mother_job_ids_within(MOTHER_LIST_TIMEOUT).await
+}
+
+/// [`mother_job_ids`] with its own bound.
+pub async fn mother_job_ids_within(limit: Duration) -> Option<HashSet<String>> {
+    match tokio::time::timeout(limit, crate::mother::list_jobs()).await {
         Ok(Ok(jobs)) => Some(jobs.into_iter().map(|j| j.id).collect()),
         Ok(Err(e)) => {
             warn!("sent ledger: could not list Mother jobs: {e}");

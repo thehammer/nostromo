@@ -153,8 +153,9 @@ counts as live for the "sent" chip, the send sheet's notice and the duplicate
 rule alike, so a resend of an item whose focus was closed returns
 `kind: "existing"` (conservative: better than a second unattended agent) until
 a second agreeing push or `allow_duplicate: true`. Mother job markers are
-checked against `mother list` instead; if Mother cannot be reached the job
-counts as live.
+checked against `mother list` instead; if Mother cannot be reached, or does not
+answer in time (2.5 s for the send sheet's notice, which the Mac itself gives up
+on after 10 s; 10 s when sending), the job counts as live.
 
 **The app and the daemon ship together.** The Mac app's `work_send` and
 `work_send_preview` frames are unknown to a daemon built before them; such a
@@ -164,9 +165,11 @@ daemon did not answer in time. Install both (`make install-daemon`,
 
 Creation is serialized per source item (or per derived tag), not globally, and
 runs to completion even if the caller goes away: a retry finds the job the
-first call queued. A focus marker is live while its session is, or (after a
-daemon restart, before the Mac re-attaches) while the pushed registry lists the
-tag; it stops being the item's focus once a later focus takes the same tag.
+first call queued. The chip, the send sheet's notice and the duplicate rule use
+one rule: a focus marker is live while its session is running, or while the
+daemon has no session entry for the tag and the focus may still exist (the
+registry is not yet known, or lists the tag); it stops being live once a later
+focus takes the same tag, or its session was stopped.
 
 A session a network (TCP) peer is steering may only create plain focuses:
 `destination: "mother_job"` and `source_item_id` are refused to it (Forbidden),

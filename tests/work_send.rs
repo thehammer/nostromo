@@ -1936,3 +1936,59 @@ async fn a_send_whose_agent_never_reads_its_first_message_is_seed_failed_and_lea
     assert_eq!(rig.ledger.markers(&big).len(), 1);
     assert!(rig.is_alive(&tag_of(&later)));
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A hung Mother must not make the sheet's preview outlast the Mac's request
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The Mac gives up on a request after this long.
+const MAC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A `mother` that accepts the call and never answers.
+const HUNG_MOTHER: &str = "#!/bin/sh\nexec sleep 600\n";
+
+/// Virtual time (the clock is paused once the rig is built, so nothing here
+/// waits on the wall clock): the preview must answer, with the job marker kept
+/// as live (unknown counts as live), strictly before the Mac's own request
+/// timeout, even when `mother list` hangs instead of failing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_hung_mother_answers_the_preview_in_time_for_the_mac_and_keeps_the_job_marker_live() {
+    let rig = Rig::local().await;
+    rig.ledger
+        .record(
+            DOC_BUG,
+            SentMarker {
+                kind: "mother_job".into(),
+                target_id: "job-hung".into(),
+                label: "queued before Mother hung".into(),
+                created_at: Utc::now(),
+                nonce: None,
+            },
+        )
+        .unwrap();
+    // The rig restores MOTHER_BIN when it drops.
+    let hung = rig.dir.path().join("hung-mother");
+    std::fs::create_dir_all(&hung).unwrap();
+    let script = hung.join("mother");
+    std::fs::write(&script, HUNG_MOTHER).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var("MOTHER_BIN", &script);
+
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let preview = rig.preview(DOC_BUG).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < MAC_REQUEST_TIMEOUT,
+        "the preview took {elapsed:?} of virtual time; the Mac gives up at {MAC_REQUEST_TIMEOUT:?}"
+    );
+    assert_eq!(
+        preview.existing.iter().map(|m| (m.kind.as_str(), m.target_id.as_str())).collect::<Vec<_>>(),
+        vec![("mother_job", "job-hung")],
+        "an unknown job list counts as live"
+    );
+}

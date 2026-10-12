@@ -349,9 +349,10 @@ impl WorkHub {
     /// includes a focus this daemon has no session entry for yet.
     pub(crate) async fn live_markers_for_send(&self, item_id: &str) -> Vec<SentMarker> {
         let ledger = sent::ledger();
-        // Asked of Mother only if a job marker needs it.
+        // Asked of Mother only if a job marker needs it, and for no longer than
+        // the Mac waits on this answer: a hung Mother is unknown, so live.
         let jobs = if ledger.markers(item_id).iter().any(|m| m.kind == "mother_job") {
-            sent::mother_job_ids().await
+            sent::mother_job_ids_within(sent::MOTHER_PREVIEW_TIMEOUT).await
         } else {
             None
         };
