@@ -2943,3 +2943,18 @@ async fn other_callers_keep_every_tool() {
         }
     }
 }
+
+// ── 1c. unspaced CJK prose is not a host ──────────────────────────────────────
+
+#[test]
+fn unspaced_japanese_prose_around_an_ideographic_full_stop_is_kept() {
+    // `修正済み。PR#233を確認`: read as host `修正済み。PR` plus a `#` fragment, the whole reason was deleted.
+    let raw = "\u{4fee}\u{6b63}\u{6e08}\u{307f}\u{3002}PR#233\u{3092}\u{78ba}\u{8a8d}";
+    assert_eq!(sr(raw), Some(raw.into()));
+}
+
+#[test]
+fn an_ascii_host_spelled_with_an_ideographic_full_stop_is_still_stripped() {
+    assert_eq!(sr("evil\u{3002}com/x"), None, "nothing but a link says nothing");
+    assert_eq!(sr("See evil\u{3002}com/x now"), Some("See now".into()));
+}

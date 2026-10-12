@@ -161,12 +161,20 @@ pub fn sanitize_reason(raw: &str) -> Option<String> {
     // link. A bare `host.tld` is kept: it cannot be told from a file name (`main.py`, `README.md` and
     // `foo.rs` are country domains). Labels may be non-ASCII (internationalised hosts, or punycode
     // `xn--`), and U+3002 (ideographic full stop) separates labels like a dot does; NFKC leaves it alone.
+    // U+3002 is also the full stop of unspaced CJK prose (`修正済み。PR#233を確認`), so when the LAST
+    // separator is U+3002 the final two labels must be plain ASCII (a letters-only TLD of 2+ chars
+    // after an ASCII label), the shape of a host someone typed with the wrong dot.
     let bare_domain = BARE_DOMAIN.get_or_init(|| {
         let label = r"[\p{L}\p{N}\p{M}](?:[\p{L}\p{N}\p{M}\-]*[\p{L}\p{N}\p{M}])?";
         let tld = r"(?:[\p{L}\p{M}]{2,}|xn--[a-z0-9\-]+)";
+        let ascii_label = r"[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?";
+        let ascii_tld = r"[a-z]{2,}";
         let dot = r"[.\u{3002}]";
         let tail = r"(?::\d+)?(?:/\S*|\?\S+|\#\S+)";
-        Regex::new(&format!(r"(?i)\b{label}(?:{dot}{label})*{dot}{tld}{tail}")).expect("static regex")
+        Regex::new(&format!(
+            r"(?i)\b(?:{label}(?:{dot}{label})*\.{tld}|(?:{label}{dot})*{ascii_label}\u{{3002}}{ascii_tld}){tail}"
+        ))
+        .expect("static regex")
     });
     let text = markdown_link.replace_all(&flat, "$1");
     let text = url.replace_all(&text, " ");
