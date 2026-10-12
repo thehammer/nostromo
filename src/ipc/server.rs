@@ -1344,27 +1344,40 @@ fn model_request_result(request_id: String, outcome: ModelRequestOutcome) -> Ser
 
 /// A network peer's model mutation is refused with no side effect but one
 /// `refused` activity line (the audit trail of who tried).
+///
+/// The peer is unauthenticated, so nothing it sent is written verbatim: the
+/// focus tag only if it names a focus the daemon knows, the agent only as that
+/// focus's own agent, the model only if the catalogue offers it. Lines are
+/// rate-limited so a peer cannot flood the log.
 fn log_network_model_refusal(msg: &ClientMsg, session_mgr: &Arc<Mutex<SessionManager>>) {
     use crate::model::activity::{activity_path, append, current_posture, ModelActivity, ModelActivityKind, Outcome};
     use crate::model::ModelTarget;
-    let effort_of = |e: &Option<crate::ipc::protocol::EffortChoice>| e.and_then(|e| e.level()).map(str::to_owned);
-    let (kind, tag, agent, to) = match msg {
-        ClientMsg::SessionModelSet { tag, model, effort, .. } => {
-            let agent = session_mgr
-                .lock()
-                .unwrap()
-                .list()
-                .into_iter()
-                .find(|s| &s.tag == tag)
-                .map(|s| s.agent_name);
-            let to = model.clone().map(|model| ModelTarget { model, effort: effort_of(effort) });
-            (ModelActivityKind::ModelSwitch, Some(tag.clone()), agent, to)
-        }
-        ClientMsg::ModelDefaultSet { agent, model, effort, .. } => {
-            let to = model.clone().map(|model| ModelTarget { model, effort: effort_of(effort) });
-            (ModelActivityKind::ModelDefault, None, Some(agent.clone()), to)
-        }
+    let kind = match msg {
+        ClientMsg::SessionModelSet { .. } => ModelActivityKind::ModelSwitch,
+        ClientMsg::ModelDefaultSet { .. } => ModelActivityKind::ModelDefault,
         _ => return,
+    };
+    if !refusal_line_allowed() {
+        return;
+    }
+    let (tag, agent, to) = {
+        let mgr = session_mgr.lock().unwrap();
+        let catalog = mgr.model_catalog();
+        let offered = |model: &Option<String>, effort: &Option<crate::ipc::protocol::EffortChoice>| {
+            model.as_ref().filter(|m| catalog.entry(m).is_some()).map(|m| ModelTarget {
+                model: m.clone(),
+                effort: effort.and_then(|e| e.level()).map(str::to_owned),
+            })
+        };
+        match msg {
+            ClientMsg::SessionModelSet { tag, model, effort, .. } => {
+                let session = mgr.list().into_iter().find(|s| &s.tag == tag);
+                let known = session.is_some() || mgr.known_focus_tags().contains(tag);
+                (known.then(|| tag.clone()), session.map(|s| s.agent_name), offered(model, effort))
+            }
+            ClientMsg::ModelDefaultSet { model, effort, .. } => (None, None, offered(model, effort)),
+            _ => return,
+        }
     };
     let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
     append(
@@ -1384,6 +1397,25 @@ fn log_network_model_refusal(msg: &ClientMsg, session_mgr: &Arc<Mutex<SessionMan
             posture: current_posture(),
         },
     );
+}
+
+/// At most [`REFUSAL_LINES_PER_MINUTE`] network-refusal activity lines per
+/// minute, daemon-wide.
+fn refusal_line_allowed() -> bool {
+    const REFUSAL_LINES_PER_MINUTE: u32 = 20;
+    static WINDOW: Mutex<Option<(std::time::Instant, u32)>> = Mutex::new(None);
+    let mut window = WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    match window.as_mut() {
+        Some((start, count)) if now.duration_since(*start) < std::time::Duration::from_secs(60) => {
+            *count += 1;
+            *count <= REFUSAL_LINES_PER_MINUTE
+        }
+        _ => {
+            *window = Some((now, 1));
+            true
+        }
+    }
 }
 
 /// Session tag of Fred's own session.
