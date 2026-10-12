@@ -5,6 +5,10 @@ private let appLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "App
 
 class AppDelegate: NSObject, NSApplicationDelegate {
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        AppAppearance.apply(to: NSApplication.shared)
+    }
+
     private(set) var windows: [NostromoWindow] = []
 
     /// Every window is bound to ONE display, keyed by its stable display UUID
