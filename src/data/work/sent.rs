@@ -7,6 +7,26 @@
 //! or its Mother job has not been archived; the ledger itself does not know
 //! either, so every reader passes the liveness test in (`is_live`).
 //!
+//! ## After a daemon restart
+//!
+//! A restarted daemon has no sessions and an empty focus registry until the Mac
+//! reconnects and pushes its own. [`SessionManager::registry_known`] needs TWO
+//! agreeing non-empty pushes before the daemon will call a focus closed (one
+//! push could be a client that has not loaded yet; an empty push resets it).
+//! Until then a marker with no session entry counts as live everywhere
+//! ([`focus_marker_may_be_live`]: the "sent" chip, the send sheet's notice and
+//! the `existing` answer), so after a restart with only one non-empty push a
+//! resend is conservative: it returns `existing` for a focus the user already
+//! closed until a second agreeing push arrives, or `allow_duplicate` is set. A
+//! Mother job marker is judged by Mother's job list instead (unknown, e.g.
+//! Mother unreachable, counts as live).
+//!
+//! The app and the daemon ship together: the Mac's `work_send` /
+//! `work_send_preview` frames are not understood by a daemon that predates
+//! them, which drops the frame (a "bad ClientMsg" warning in its log) without
+//! an answer, so an older daemon shows up in the app as "The daemon did not
+//! answer in time". Run `make install-daemon` with `make mac-install`.
+//!
 //! The file is written atomically (temp file + rename) and is not a secret
 //! (ids, labels, timestamps), but is still 0600 like the rest of `~/.nostromo/teri`.
 

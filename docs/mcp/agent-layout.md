@@ -145,6 +145,23 @@ against the repo's default branch with `max_cost` (default 10). Returns
 the main checkout (for a linked worktree: the checkout that owns it, not the
 worktree's directory) and `--repo-path` is that checkout.
 
+**After a daemon restart** the daemon has no sessions and an empty focus
+registry until the Mac reconnects and pushes its own, and it will not call a
+focus closed until two agreeing non-empty pushes have arrived (one could be a
+client that has not loaded yet). Until then a sent marker with no session entry
+counts as live for the "sent" chip, the send sheet's notice and the duplicate
+rule alike, so a resend of an item whose focus was closed returns
+`kind: "existing"` (conservative: better than a second unattended agent) until
+a second agreeing push or `allow_duplicate: true`. Mother job markers are
+checked against `mother list` instead; if Mother cannot be reached the job
+counts as live.
+
+**The app and the daemon ship together.** The Mac app's `work_send` and
+`work_send_preview` frames are unknown to a daemon built before them; such a
+daemon logs "bad ClientMsg" and sends no reply, so the app reports that the
+daemon did not answer in time. Install both (`make install-daemon`,
+`make mac-install`).
+
 Creation is serialized per source item (or per derived tag), not globally, and
 runs to completion even if the caller goes away: a retry finds the job the
 first call queued. A focus marker is live while its session is, or (after a
