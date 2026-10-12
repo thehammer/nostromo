@@ -284,6 +284,89 @@ final class TeriPicksTabTests: XCTestCase {
                       String(describing: rig.view.visibleRows[2].sentText))
     }
 
+    // MARK: Going to where a pick was sent
+
+    private func returnKey(_ flags: NSEvent.ModifierFlags = [], code: UInt16 = 36, chars: String = "\r") -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
+                         context: nil, characters: chars, charactersIgnoringModifiers: chars,
+                         isARepeat: false, keyCode: code)!
+    }
+
+    /// Picks with a sent marker on RM-12 only ("Fix webhook"); the rig records what was opened.
+    private func sentRig() -> (rig: ViewRig, opened: () -> [(pick: String, target: String)]) {
+        let rig = ViewRig(picks: snapshot(generatedAt: "2026-10-11T06:00:00-05:00", items: fiveItems)) { store in
+            seedItem(store, liveItem("jira:RM-12", source: "jira", title: "RM-12 Refund flow", sent: ["Fix webhook"]))
+        }
+        var opened: [(pick: String, target: String)] = []
+        rig.view.onOpenSent = { pick, marker in opened.append((pick.itemId, marker.targetId)) }
+        XCTAssertTrue(waitUntil { rig.view.visibleRows.count == 5 && rig.view.visibleRows[2].sentText != nil })
+        return (rig, { opened })
+    }
+
+    private func customActions(in view: NSView) -> [NSAccessibilityCustomAction] {
+        rigAllSubviews(of: view).flatMap { $0.accessibilityCustomActions() ?? [] }
+    }
+
+    func testARowWithASentLineOffersAGoToCustomActionThatOpensTheMarker() throws {
+        let (rig, opened) = sentRig()
+
+        let actions = customActions(in: rig.view)
+
+        XCTAssertEqual(actions.count, 1, "only the pick that was sent somewhere has one: \(actions.map(\.name))")
+        let action = try XCTUnwrap(actions.first)
+        XCTAssertTrue(action.name.hasPrefix("Go to"), action.name)
+        XCTAssertTrue(action.name.contains("Sent to Fix webhook"), action.name)
+        XCTAssertEqual(action.handler?(), true)
+        XCTAssertEqual(opened().map(\.pick), ["jira:RM-12"])
+        XCTAssertEqual(opened().map(\.target), ["focus-Fix webhook"])
+    }
+
+    func testCommandReturnOnTheSelectedPickGoesToWhereItWasSent() {
+        let (rig, opened) = sentRig()
+        rig.view.select(itemId: "jira:RM-12")
+
+        rig.view.keyDown(with: returnKey(.command))
+
+        XCTAssertEqual(opened().map(\.target), ["focus-Fix webhook"])
+    }
+
+    func testCommandKeypadEnterGoesThereToo() {
+        let (rig, opened) = sentRig()
+        rig.view.select(itemId: "jira:RM-12")
+
+        rig.view.keyDown(with: returnKey([.command, .numericPad], code: 76, chars: "\u{3}"))
+
+        XCTAssertEqual(opened().count, 1)
+    }
+
+    func testPlainReturnOnTheSelectedPickDoesNotGoAnywhere() {
+        let (rig, opened) = sentRig()
+        rig.view.select(itemId: "jira:RM-12")
+
+        rig.view.keyDown(with: returnKey())
+
+        XCTAssertTrue(opened().isEmpty)
+    }
+
+    func testCommandReturnOnAPickThatWasNeverSentDoesNothing() {
+        let (rig, opened) = sentRig()
+        rig.view.select(itemId: "sentry:4411")
+
+        rig.view.keyDown(with: returnKey(.command))
+
+        XCTAssertTrue(opened().isEmpty)
+        XCTAssertFalse(rig.view.openSentOfSelection())
+    }
+
+    func testCommandReturnWithNoPickSelectedDoesNothing() {
+        let (rig, opened) = sentRig()
+
+        rig.view.keyDown(with: returnKey(.command))
+
+        XCTAssertTrue(opened().isEmpty)
+        XCTAssertFalse(rig.view.openSentOfSelection())
+    }
+
     // MARK: Header, empty state
 
     func testBeforeAnySnapshotArrivesTheHeaderSaysThereAreNoPicksYet() {

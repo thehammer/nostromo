@@ -1269,4 +1269,26 @@ extension TeriSurfaceViewTests {
 
         XCTAssertTrue(waitUntil { rig.surface.rowTexts.first?.sentText == "queued as Mother job" })
     }
+
+    func testSetSendPreparingReachesTheDetailPanesButton() {
+        let rig = makeRig(seed: { seedTodos($0) })
+        rig.surface.select(.todos)
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
+        rig.surface.selectItem(id: "todo:2")
+        let buttons = { rigAllSubviews(of: rig.surface).compactMap { $0 as? NSButton }.map(\.title) }
+        XCTAssertTrue(buttons().contains("Send to agent…"), "\(buttons())")
+        XCTAssertFalse(buttons().contains("Preparing…"))
+
+        rig.surface.setSendPreparing(true)
+
+        XCTAssertTrue(buttons().contains("Preparing…"), "\(buttons())")
+        XCTAssertFalse(buttons().contains("Send to agent…"))
+        let busy = rigAllSubviews(of: rig.surface).compactMap { $0 as? NSButton }.first { $0.title == "Preparing…" }
+        XCTAssertEqual(busy?.isEnabled, false)
+
+        rig.surface.setSendPreparing(false)
+
+        XCTAssertTrue(buttons().contains("Send to agent…"), "\(buttons())")
+        XCTAssertFalse(buttons().contains("Preparing…"))
+    }
 }

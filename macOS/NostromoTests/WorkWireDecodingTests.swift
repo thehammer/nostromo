@@ -165,6 +165,26 @@ final class WorkWireDecodingTests: XCTestCase {
         XCTAssertTrue(p.existing.isEmpty)
     }
 
+    func testWorkSendPreviewCarriesTheInstructionAndTheReadOnlyContext() throws {
+        let msg = try decode("""
+        {"type":"work_send_preview","request_id":"r2","result":{"status":"ok","value":{
+          "item_id":"jira:CORE-1","agent":"claude","label":"CORE-1","instruction":"Look into this","context":"item text"}}}
+        """)
+        guard case .workSendPreview(_, let result) = msg, case .ok(let p) = result else { return XCTFail("got \(msg)") }
+        XCTAssertEqual(p.instruction, "Look into this")
+        XCTAssertEqual(p.context, "item text")
+    }
+
+    func testWorkSendPreviewFromADaemonWithoutAnInstructionStillDecodesWithAnEmptyOne() throws {
+        let msg = try decode("""
+        {"type":"work_send_preview","request_id":"r2","result":{"status":"ok","value":{
+          "item_id":"jira:CORE-1","agent":"claude","label":"CORE-1","context":"item text"}}}
+        """)
+        guard case .workSendPreview(_, let result) = msg, case .ok(let p) = result else { return XCTFail("got \(msg)") }
+        XCTAssertEqual(p.instruction, "")
+        XCTAssertEqual(p.context, "item text")
+    }
+
     func testWorkSendResultOkAndRefusalDecode() throws {
         let ok = try decode("""
         {"type":"work_send_result","request_id":"r3","result":{"status":"ok","value":{"kind":"seeded","focus_tag":"fred"}}}
@@ -256,11 +276,17 @@ final class WorkWireDecodingTests: XCTestCase {
 
         let send = try encode(.send(WorkSendRequest(
             requestId: "r3", itemId: "todo:1", destination: "focus", agent: "claude",
-            workingDirectory: nil, label: "a", context: "b", allowDuplicate: true)))
+            workingDirectory: nil, label: "a", instruction: "b", allowDuplicate: true)))
         XCTAssertEqual(send["type"] as? String, "work_send")
         XCTAssertEqual(send["destination"] as? String, "focus")
         XCTAssertEqual(send["allow_duplicate"] as? Bool, true)
         XCTAssertNil(send["working_directory"])
+        XCTAssertEqual(send["instruction"] as? String, "b", "the user's words are the only text sent")
+        XCTAssertNil(send["context"], "the item's text is never sent")
+        XCTAssertEqual(send["request_id"] as? String, "r3")
+        XCTAssertEqual(send["item_id"] as? String, "todo:1")
+        XCTAssertEqual(send["label"] as? String, "a")
+        XCTAssertEqual(send["agent"] as? String, "claude")
 
         let seed = try encode(.fredSeed(requestId: "r4", text: "hi"))
         XCTAssertEqual(seed["type"] as? String, "fred_seed")
