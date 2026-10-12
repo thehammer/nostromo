@@ -11,6 +11,7 @@
 //! Everything that touches process-global state (CLAUDE_BIN, MOTHER_BIN,
 //! NOSTROMO_TERI_DIR, the process-wide sent ledger) runs under one lock.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -591,6 +592,15 @@ impl Rig {
         std::fs::write(self.mother_dir().join("fail"), "").unwrap();
     }
 
+    fn mother_recover(&self) {
+        let _ = std::fs::remove_file(self.mother_dir().join("fail"));
+    }
+
+    /// The `--branch` of each `mother add` so far, oldest first.
+    fn mother_branches(&self) -> Vec<String> {
+        self.mother_adds().iter().map(|l| add_flags(l)["--branch"].clone()).collect()
+    }
+
     fn mother_adds(&self) -> Vec<String> {
         std::fs::read_to_string(self.mother_dir().join("argv.log"))
             .unwrap_or_default()
@@ -611,6 +621,14 @@ impl Rig {
 
     fn items(&self) -> Vec<WorkItem> {
         self.hub.items(&WorkFilter::default())
+    }
+
+    /// The repo-doc item whose path contains `needle`.
+    fn doc_with_path(&self, needle: &str) -> WorkItem {
+        self.items()
+            .into_iter()
+            .find(|i| i.path.as_deref().is_some_and(|p| p.contains(needle)))
+            .unwrap_or_else(|| panic!("no repo doc whose path contains {needle}"))
     }
 
     fn item(&self, id: &str) -> WorkItem {
@@ -685,6 +703,61 @@ fn tag_of(o: &SendOutcome) -> String {
 fn first_line_starting<'a>(text: &'a str, prefix: &str) -> &'a str {
     text.lines().find(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("no `{prefix}` line in:\n{text}"))
 }
+
+/// The flags of one `mother add` call, e.g. `--repo` -> `alpha`.
+fn add_flags(line: &str) -> HashMap<String, String> {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(toks[0], "add", "{line}");
+    let mut flags = HashMap::new();
+    let mut i = 1;
+    while i < toks.len() {
+        if toks[i].starts_with("--") && i + 1 < toks.len() {
+            flags.insert(toks[i].to_owned(), toks[i + 1].to_owned());
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    flags
+}
+
+/// `teri/<slug>-<six lowercase hex>`: the readable part and the suffix.
+fn split_job_branch(branch: &str) -> (&str, &str) {
+    let rest = branch.strip_prefix("teri/").unwrap_or_else(|| panic!("a job branch starts with teri/: {branch}"));
+    let (stem, suffix) = rest.rsplit_once('-').unwrap_or_else(|| panic!("no suffix on {branch}"));
+    assert!(
+        suffix.len() == 6 && suffix.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        "the branch ends in six lowercase hex characters: {branch}"
+    );
+    (stem, suffix)
+}
+
+/// Characters that must never reach an agent: control, bidi, zero-width and tag characters.
+/// (Line breaks and tabs are fine.)
+fn hidden_chars(text: &str) -> Vec<char> {
+    text.chars()
+        .filter(|c| {
+            (c.is_control() && !matches!(c, '\n' | '\t'))
+                || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2028}' | '\u{2029}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{E0000}'..='\u{E01EF}')
+        })
+        .collect()
+}
+
+/// The headings (`## ...` lines) outside the fence, in order.
+fn headings(outside: &str) -> Vec<String> {
+    message_fence::lines(outside).into_iter().filter(|l| l.starts_with('#')).map(str::to_owned).collect()
+}
+
+/// The brief's fixed headings, in order: ours, never an item's.
+const BRIEF_HEADINGS: [&str; 7] = [
+    "# Work item brief",
+    "## Task",
+    "## Context",
+    "## Target",
+    "## Approach",
+    "## Acceptance criteria",
+    "## Out of scope",
+];
 
 fn cwd_str(p: &Path) -> String {
     p.to_str().unwrap().to_owned()
@@ -948,12 +1021,13 @@ async fn previewing_an_unknown_item_is_unknown_item() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sending_to_a_focus_creates_one_live_focus_seeded_with_the_edited_context() {
+async fn sending_to_a_focus_creates_one_live_focus_seeded_with_the_instruction_then_the_fenced_item() {
     let mut rig = Rig::local().await;
     let alpha = rig.alpha();
     let _ = rig.frames();
+    let shown = rig.preview(DOC_BUG).await;
 
-    let req = send_req(DOC_BUG, "focus", "t5-seed", Some(&alpha), "My label", "EDITED-CONTEXT-LINE\nsecond line");
+    let req = send_req(DOC_BUG, "focus", "t5-seed", Some(&alpha), "My label", "EDITED-INSTRUCTION-LINE\nsecond line");
     let outcome = rig.send(req).await.expect("send");
 
     assert_eq!(outcome.kind, "created", "{outcome:?}");
@@ -961,8 +1035,15 @@ async fn sending_to_a_focus_creates_one_live_focus_seeded_with_the_edited_contex
     let tag = tag_of(&outcome);
     assert!(rig.is_alive(&tag), "the focus has a live session");
     assert!(rig.is_sensitive(&tag), "a focus seeded with work-item text is never visible to a network peer");
+
     let seed = first_agent_message("t5-seed").await;
-    assert!(seed.contains("EDITED-CONTEXT-LINE") && seed.contains("second line"), "the agent's first turn carries the context:\n{seed}");
+    let s = message_fence::split("seed", &seed);
+    assert!(s.before.contains("EDITED-INSTRUCTION-LINE\nsecond line"), "the instruction, verbatim, in front of the fence:\n{seed}");
+    message_fence::assert_not_outside("seed", &s, &[BUG_TITLE, "BUG-BODY-MARKER", "My label"]);
+    message_fence::assert_only_inside("seed", &s, &[BUG_TITLE, "BUG-BODY-MARKER"]);
+    assert!(!s.inside.contains("EDITED-INSTRUCTION-LINE"), "the user's words are not data:\n{seed}");
+    assert_eq!(s.inside, shown.context.trim(), "the fence holds exactly the material the sheet showed");
+    assert!(s.after.trim().is_empty(), "nothing follows the fence:\n{seed}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1102,12 +1183,13 @@ async fn a_mother_job_without_a_project_is_project_required_and_creates_nothing(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_mother_job_queues_through_mother_and_the_item_shows_the_job() {
+async fn a_mother_job_queues_through_mother_with_the_instruction_in_the_task_and_the_item_fenced() {
     let rig = Rig::local().await;
     let alpha = rig.alpha();
+    let shown = rig.preview(DOC_BUG).await;
 
     let outcome = rig
-        .send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "MOTHER-CONTEXT-LINE"))
+        .send(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Fix coupons", "MOTHER-INSTRUCTION-LINE"))
         .await
         .expect("send");
 
@@ -1116,11 +1198,21 @@ async fn a_mother_job_queues_through_mother_and_the_item_shows_the_job() {
     assert_eq!(outcome.focus_tag, None);
     let adds = rig.mother_adds();
     assert_eq!(adds.len(), 1, "{adds:?}");
-    assert!(adds[0].contains("--repo alpha"), "{}", adds[0]);
-    assert!(adds[0].contains("--label teri-send"), "{}", adds[0]);
+    let flags = add_flags(&adds[0]);
+    assert_eq!(flags["--repo"], "alpha", "{}", adds[0]);
+    assert_eq!(flags["--label"], "teri-send", "{}", adds[0]);
     let plans = rig.mother_plans();
     assert_eq!(plans.len(), 1);
-    assert!(plans[0].contains("MOTHER-CONTEXT-LINE"), "the brief carries the context:\n{}", plans[0]);
+
+    let s = message_fence::split("brief", &plans[0]);
+    let task = message_fence::lines(&s.before).iter().position(|l| *l == "## Task").expect("a Task heading in front of the fence");
+    let task_section = message_fence::lines(&s.before)[task + 1..].join("\n");
+    let task_section = task_section.split("\n## ").next().unwrap();
+    assert!(task_section.contains("MOTHER-INSTRUCTION-LINE"), "the instruction is in the Task section:\n{}", plans[0]);
+    message_fence::assert_not_outside("brief", &s, &[BUG_TITLE, "BUG-BODY-MARKER", "Fix coupons", DOC_BUG]);
+    message_fence::assert_only_inside("brief", &s, &[BUG_TITLE, "BUG-BODY-MARKER", "Fix coupons", DOC_BUG]);
+    assert!(!s.inside.contains("MOTHER-INSTRUCTION-LINE"), "the user's words are not data");
+    assert!(s.inside.contains(shown.context.trim()), "the fence holds the material the sheet showed, whole");
 
     let existing = rig.preview(DOC_BUG).await.existing;
     assert_eq!(existing.len(), 1, "{existing:?}");
@@ -1210,3 +1302,597 @@ async fn an_empty_agent_is_invalid_args() {
     assert_eq!(err.code, "invalid_args", "{err:?}");
 }
 
+
+// ═════════════════════════════════════════════════════════════════════════════
+// What the agent is given: the user's words outside the fence, the item inside it
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The user's instruction as the focus seed carries it, cut out of the text in front of the fence.
+fn seed_instruction(s: &message_fence::Split) -> String {
+    s.before
+        .strip_prefix("The user's instruction:\n\n")
+        .and_then(|rest| rest.split("\n\nReference material").next())
+        .unwrap_or_else(|| panic!("the instruction leads the seed:\n{}", s.before))
+        .to_owned()
+}
+
+/// The user's instruction as a brief's Task section carries it.
+fn brief_instruction(s: &message_fence::Split) -> String {
+    s.before
+        .split("The user's instruction for this job (the user directs this work):\n\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n## Context").next())
+        .unwrap_or_else(|| panic!("a Task section in front of the fence:\n{}", s.before))
+        .to_owned()
+}
+
+/// Send `item_id` to a focus under `agent` (a duplicate is allowed) and return the seed, split at its fence.
+async fn seeded(rig: &Rig, item_id: &str, agent: &str, instruction: &str) -> message_fence::Split {
+    let alpha = rig.alpha();
+    let req = SendRequest { allow_duplicate: true, ..send_req(item_id, "focus", agent, Some(&alpha), "Label", instruction) };
+    let outcome = rig.send(req).await.unwrap_or_else(|e| panic!("send of {item_id} to a focus failed: {e:?}"));
+    assert_eq!(outcome.kind, "created", "{outcome:?}");
+    message_fence::split("seed", &first_agent_message(agent).await)
+}
+
+/// Send `item_id` as a Mother job (a duplicate is allowed) and return the brief it queued, split at its fence.
+async fn briefed(rig: &Rig, item_id: &str, instruction: &str) -> message_fence::Split {
+    let before = rig.mother_plans().len();
+    let alpha = rig.alpha();
+    let req = SendRequest {
+        allow_duplicate: true,
+        ..send_req(item_id, "mother_job", "claudia", Some(&alpha), "Label", instruction)
+    };
+    let outcome = rig.send(req).await.unwrap_or_else(|e| panic!("send of {item_id} to Mother failed: {e:?}"));
+    assert_eq!(outcome.kind, "mother_job", "{outcome:?}");
+    let plans = rig.mother_plans();
+    assert_eq!(plans.len(), before + 1, "exactly one more plan reached Mother");
+    message_fence::split("brief", plans.last().unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn editing_the_instruction_never_changes_the_fenced_material() {
+    let rig = Rig::local().await;
+    let first = seeded(&rig, DOC_BUG, "t5-edit-a", "first instruction").await;
+    let second = seeded(&rig, DOC_BUG, "t5-edit-b", "a completely different instruction\nwith two lines").await;
+
+    assert_eq!(first.inside, second.inside, "the fenced material is identical whatever the instruction says");
+    assert_ne!(first.nonce, second.nonce, "only the nonce differs");
+    assert_eq!(seed_instruction(&first), "first instruction");
+    assert_eq!(seed_instruction(&second), "a completely different instruction\nwith two lines");
+
+    let one = briefed(&rig, DOC_BUG, "first instruction").await;
+    let two = briefed(&rig, DOC_BUG, "something else entirely").await;
+    assert_eq!(one.inside, two.inside, "and so is a brief's");
+    assert_eq!(brief_instruction(&one), "first instruction");
+    assert_eq!(brief_instruction(&two), "something else entirely");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_or_blank_instruction_becomes_the_default_instruction() {
+    let rig = Rig::local().await;
+    for (n, blank) in ["", "   \n\t "].into_iter().enumerate() {
+        let s = seeded(&rig, DOC_BUG, &format!("t5-blank-{n}"), blank).await;
+        assert_eq!(seed_instruction(&s), DEFAULT_INSTRUCTION, "blank instruction {blank:?}");
+        let b = briefed(&rig, DOC_BUG, blank).await;
+        assert_eq!(brief_instruction(&b), DEFAULT_INSTRUCTION, "blank instruction {blank:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instruction_that_carries_pasted_third_party_text_is_cleaned_and_capped_and_is_still_not_fenced() {
+    let rig = Rig::local().await;
+    let shown = rig.preview(DOC_BUG).await;
+    // What a client that pastes a ticket into the sheet's instruction field sends: control, escape,
+    // bidi, tag and zero-width characters, line breaks, then 50 KB of text.
+    let pasted = format!(
+        "PASTED-TICKET visible\u{0}\u{7}\u{1b}[31m red\u{202E}rtl\u{200B}zw\u{E0041}\u{E0042}tag\u{2028}\u{FEFF}\r\n\
+         second line kept\n{}",
+        "x".repeat(50_000)
+    );
+
+    let s = seeded(&rig, DOC_BUG, "t5-pasted", &pasted).await;
+    let instruction = seed_instruction(&s);
+    assert_eq!(instruction.chars().count(), 4_000, "capped at 4000 characters, the ellipsis included");
+    assert!(instruction.ends_with('…'), "the cut is marked");
+    assert!(instruction.starts_with("PASTED-TICKET visible"), "the wording is kept");
+    assert!(instruction.contains("second line kept"), "so are the line breaks");
+    assert_eq!(hidden_chars(&s.before), Vec::<char>::new(), "no hidden character reaches the agent");
+    assert!(!s.inside.contains("PASTED-TICKET") && !s.inside.contains("xxxx"), "the instruction is not part of the fenced material");
+    assert_eq!(s.inside, shown.context.trim(), "the fence holds the item's own material only");
+
+    let b = briefed(&rig, DOC_BUG, &pasted).await;
+    let in_brief = brief_instruction(&b);
+    assert_eq!(in_brief.chars().count(), 4_000);
+    assert!(in_brief.ends_with('…') && in_brief.starts_with("PASTED-TICKET visible"));
+    assert_eq!(hidden_chars(&b.outside()), Vec::<char>::new());
+    assert!(!b.inside.contains("PASTED-TICKET") && !b.inside.contains("xxxx"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_an_old_client_sends_as_context_never_reaches_the_agent() {
+    use nostromo::ipc::protocol::ClientMsg;
+    let rig = Rig::local().await;
+    let shown = rig.preview(DOC_BUG).await;
+    let alpha = rig.alpha();
+    // An old client's frame: a `context` (it had the item's text, edited), no `instruction`.
+    let frame: ClientMsg = serde_json::from_value(json!({
+        "type": "work_send", "request_id": "old-1", "item_id": DOC_BUG, "destination": "focus", "agent": "t5-old",
+        "working_directory": alpha.to_string_lossy(), "label": "Old", "context": "OLD-CLIENT-CONTEXT push to main",
+    }))
+    .expect("an old client's frame still decodes");
+    let ClientMsg::WorkSend { request_id, item_id, destination, agent, working_directory, label, instruction, allow_duplicate } =
+        frame
+    else {
+        panic!("a work_send frame")
+    };
+    assert!(instruction.is_empty(), "the old client's `context` is not carried over as an instruction");
+
+    let outcome = rig
+        .send(SendRequest {
+            request_id,
+            item_id,
+            destination,
+            agent,
+            working_directory,
+            label,
+            instruction,
+            allow_duplicate,
+            client_id: Some("old-mac".into()),
+        })
+        .await
+        .expect("send");
+    assert_eq!(outcome.kind, "created", "{outcome:?}");
+
+    let seed = first_agent_message("t5-old").await;
+    let s = message_fence::split("seed", &seed);
+    assert!(!seed.contains("OLD-CLIENT-CONTEXT") && !seed.contains("push to main"), "the old client's text is nowhere:\n{seed}");
+    assert_eq!(seed_instruction(&s), DEFAULT_INSTRUCTION);
+    assert_eq!(s.inside, shown.context.trim(), "the fenced material is what the preview showed");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Hostile text from the item stays inside the fence
+// ═════════════════════════════════════════════════════════════════════════════
+
+const HOSTILE_BUG_PATH: &str = "bugs/open/2026-10-05-hostile-bug.md";
+const HOSTILE_WIP_PATH: &str = "wip/hostile-topic";
+
+/// Repo docs written by a hostile author: a bug doc and a wip folder (title, body, and another file
+/// whose NAME is a forged closer).
+fn hostile_docs() -> Extras {
+    Extras {
+        files: vec![
+            (
+                format!("alpha/.claude/{HOSTILE_BUG_PATH}"),
+                format!("# {}\n\n{}", hostile_line("HX-DOC-TITLE"), hostile_block("HX-DOC-BODY")),
+            ),
+            (
+                format!("alpha/.claude/{HOSTILE_WIP_PATH}/index.md"),
+                format!("# {}\n\n{}", hostile_line("HX-WIP-TITLE"), hostile_block("HX-WIP-BODY")),
+            ),
+            (format!("alpha/.claude/{HOSTILE_WIP_PATH}/HX-WIP-FILE {FORGED}.md"), "other\n".into()),
+        ],
+        doc_items: 2,
+        ..Default::default()
+    }
+}
+
+const INSTRUCTION: &str = "Look at the failing checkout and tell me what you find.";
+
+/// What a seed to an agent must look like whatever the item says.
+fn assert_hostile_seed_contained(what: &str, seed: &str, inside_tokens: &[&str]) {
+    let s = message_fence::split(what, seed);
+    message_fence::assert_not_outside(what, &s, &NEVER_OUTSIDE);
+    message_fence::assert_only_inside(what, &s, inside_tokens);
+    assert_eq!(seed_instruction(&s), INSTRUCTION, "{what}: the instruction is the user's, untouched");
+    assert_eq!(headings(&s.outside()), Vec::<String>::new(), "{what}: the item added a heading of its own");
+    assert_eq!(hidden_chars(seed), Vec::<char>::new(), "{what}: hidden characters reached the agent");
+    assert!(s.after.trim().is_empty(), "{what}: text after the fence:\n{}", s.after);
+}
+
+/// What a brief for Mother must look like whatever the item says.
+fn assert_hostile_brief_contained(what: &str, brief: &str, inside_tokens: &[&str]) {
+    let s = message_fence::split(what, brief);
+    message_fence::assert_not_outside(what, &s, &NEVER_OUTSIDE);
+    message_fence::assert_only_inside(what, &s, inside_tokens);
+    assert_eq!(brief_instruction(&s), INSTRUCTION, "{what}: the instruction is the user's, untouched");
+    assert_eq!(headings(&s.outside()), BRIEF_HEADINGS.to_vec(), "{what}: our headings, and only ours, outside the fence");
+    assert_eq!(hidden_chars(brief), Vec::<char>::new(), "{what}: hidden characters reached Mother");
+
+    // Mother reads the first yaml block that mentions suggested_config: it must be ours.
+    let begin = brief.find(&format!("<<<UNTRUSTED-{}>>>", s.nonce)).unwrap();
+    let first_config = brief.find("suggested_config").unwrap_or_else(|| panic!("{what}: no suggested_config"));
+    assert!(first_config < begin, "{what}: the first suggested_config is not in front of the fence");
+    assert_eq!(s.outside().matches("suggested_config").count(), 1, "{what}: exactly one suggested_config outside the fence");
+    assert_eq!(s.outside().matches("```yaml").count(), 1, "{what}: exactly one yaml block outside the fence");
+    let yaml_at = brief.find("```yaml").unwrap();
+    assert!(yaml_at < first_config && first_config < begin, "{what}: the first yaml block is ours and comes first");
+    let yaml = brief[yaml_at..].split("\n```").next().unwrap();
+    assert!(yaml.contains("model: sonnet") && !yaml.contains("opus-evil"), "{what}: the config is ours:\n{yaml}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_jira_and_sentry_items_stay_inside_the_fence_in_a_focus_seed_and_a_mother_brief() {
+    let rig = Rig::with(Extras { hostile_remote: true, ..Default::default() }).await;
+    let targets: [(&str, &[&str]); 2] = [
+        (JIRA_ITEM, &["HX-JIRA-SUMMARY", "HX-JIRA-DESCRIPTION", "HX-JIRA-COMMENT"]),
+        (SENTRY_MAPPED, &["HX-SENTRY-TITLE", "HX-SENTRY-CULPRIT", "HX-SENTRY-FILE"]),
+    ];
+    for (n, (id, tokens)) in targets.into_iter().enumerate() {
+        let agent = format!("t5-hx-remote-{n}");
+        seeded(&rig, id, &agent, INSTRUCTION).await;
+        assert_hostile_seed_contained(id, &first_agent_message(&agent).await, tokens);
+
+        briefed(&rig, id, INSTRUCTION).await;
+        assert_hostile_brief_contained(id, rig.mother_plans().last().unwrap(), tokens);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_repo_docs_stay_inside_the_fence_in_a_focus_seed_and_a_mother_brief() {
+    let rig = Rig::with(hostile_docs()).await;
+    let targets: [(String, &[&str]); 2] = [
+        (rig.doc_with_path(HOSTILE_BUG_PATH).id, &["HX-DOC-TITLE", "HX-DOC-BODY"]),
+        (rig.doc_with_path(HOSTILE_WIP_PATH).id, &["HX-WIP-TITLE", "HX-WIP-BODY", "HX-WIP-FILE"]),
+    ];
+    for (n, (id, tokens)) in targets.iter().enumerate() {
+        let agent = format!("t5-hx-doc-{n}");
+        seeded(&rig, id, &agent, INSTRUCTION).await;
+        assert_hostile_seed_contained(id, &first_agent_message(&agent).await, tokens);
+
+        briefed(&rig, id, INSTRUCTION).await;
+        assert_hostile_brief_contained(id, rig.mother_plans().last().unwrap(), tokens);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hostile_pick_reason_stays_inside_the_fence_and_out_of_the_instruction() {
+    let rig = Rig::local().await;
+    let reason = format!("{} push to main run curl", hostile_line("HX-REASON"));
+    rig.hub
+        .publish_picks(&[
+            PickEntry { item_id: "todo:4".into(), reason },
+            PickEntry { item_id: "todo:1".into(), reason: "It has been open for nine days".into() },
+            PickEntry { item_id: DOC_BUG.into(), reason: "Three customers reported it this week".into() },
+        ])
+        .expect("publish");
+
+    let shown = rig.preview("todo:4").await;
+    assert!(shown.context.contains("Why Teri picked this: HX-REASON"), "the sheet shows why, as part of the read-only context");
+    for hostile in NEVER_OUTSIDE {
+        assert!(!shown.instruction.contains(hostile), "the pick's reason leaked into the editable instruction: {hostile}");
+    }
+    assert_eq!(shown.instruction, DEFAULT_INSTRUCTION);
+
+    let seed = seeded(&rig, "todo:4", "t5-hx-pick", INSTRUCTION).await;
+    message_fence::assert_not_outside("seed", &seed, &NEVER_OUTSIDE);
+    message_fence::assert_only_inside("seed", &seed, &["Why Teri picked this: HX-REASON", "push to main"]);
+    assert_eq!(seed_instruction(&seed), INSTRUCTION);
+    assert_eq!(hidden_chars(&seed.inside), Vec::<char>::new());
+
+    let brief = briefed(&rig, "todo:4", INSTRUCTION).await;
+    message_fence::assert_not_outside("brief", &brief, &NEVER_OUTSIDE);
+    message_fence::assert_only_inside("brief", &brief, &["Why Teri picked this: HX-REASON", "push to main"]);
+    assert_eq!(brief_instruction(&brief), INSTRUCTION);
+    assert_eq!(headings(&brief.outside()), BRIEF_HEADINGS.to_vec());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_credential_reaches_a_seeded_message_or_a_brief() {
+    let rig = Rig::full().await;
+    for (n, id) in [JIRA_ITEM, SENTRY_MAPPED, SENTRY_UNMAPPED, DOC_BUG, "todo:4"].into_iter().enumerate() {
+        let agent = format!("t5-secret-{n}");
+        let seed = seeded(&rig, id, &agent, INSTRUCTION).await;
+        let brief = briefed(&rig, id, INSTRUCTION).await;
+        for (what, s) in [("seed", seed), ("brief", brief)] {
+            let all = format!("{}\n{}\n{}", s.before, s.inside, s.after);
+            assert!(!all.contains(SENTINEL_SECRET), "{id}: a credential reached the {what}");
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Mother branches and spend cap
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mother_job_is_capped_at_ten_dollars_and_gets_a_slug_and_random_suffix_branch() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+
+    rig.send(send_req("todo:4", "mother_job", "claudia", Some(&alpha), "Plumber", "")).await.unwrap();
+
+    let adds = rig.mother_adds();
+    assert_eq!(adds.len(), 1, "{adds:?}");
+    let flags = add_flags(&adds[0]);
+    assert_eq!(flags["--max-cost"], "10", "an unattended job always carries a spend cap: {}", adds[0]);
+    let (stem, _suffix) = split_job_branch(&flags["--branch"]);
+    assert_eq!(stem, "todo-4", "the readable part names the item: {}", flags["--branch"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_items_whose_ids_share_a_48_character_prefix_get_different_branches() {
+    let long = "2026-10-01-a-very-long-shared-name";
+    let rig = Rig::with(Extras {
+        files: vec![
+            (format!("alpha/.claude/features/backlog/{long}-one.md"), "# One\n\nfirst\n".into()),
+            (format!("alpha/.claude/features/backlog/{long}-two.md"), "# Two\n\nsecond\n".into()),
+        ],
+        doc_items: 2,
+        ..Default::default()
+    })
+    .await;
+    let alpha = rig.alpha();
+    let ids = [rig.doc_with_path(&format!("{long}-one.md")).id, rig.doc_with_path(&format!("{long}-two.md")).id];
+    for id in &ids {
+        rig.send(send_req(id, "mother_job", "claudia", Some(&alpha), "Long ids", "")).await.unwrap();
+    }
+
+    let branches = rig.mother_branches();
+    assert_eq!(branches.len(), 2, "{:?}", rig.mother_adds());
+    assert_ne!(branches[0], branches[1], "two jobs must never share a branch");
+    let (stem_one, _) = split_job_branch(&branches[0]);
+    let (stem_two, _) = split_job_branch(&branches[1]);
+    assert_eq!(stem_one, stem_two, "precondition: the readable part is the same 48-character slug");
+    assert_eq!(stem_one.trim_start_matches("teri/").len(), 48, "{stem_one}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sending_the_same_item_to_mother_again_with_allow_duplicate_gets_a_new_branch() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    let req = send_req("todo:4", "mother_job", "claudia", Some(&alpha), "Plumber", "");
+    rig.send(req.clone()).await.unwrap();
+    rig.send(SendRequest { allow_duplicate: true, ..req }).await.unwrap();
+
+    let branches = rig.mother_branches();
+    assert_eq!(branches.len(), 2, "{:?}", rig.mother_adds());
+    assert_ne!(branches[0], branches[1], "a second job on the first job's branch would fight it");
+    for b in &branches {
+        assert_eq!(split_job_branch(b).0, "todo-4");
+    }
+    let plans = rig.mother_plans();
+    for (plan, branch) in plans.iter().zip(&branches) {
+        let s = message_fence::split("brief", plan);
+        assert!(s.outside().contains(&format!("- Branch: `{branch}`")), "the brief names the branch Mother was given:\n{plan}");
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A retry of the same request
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn with_request_id(req: SendRequest, request_id: &str) -> SendRequest {
+    SendRequest { request_id: request_id.into(), ..req }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_with_the_same_request_id_gets_the_first_answer_and_starts_one_focus() {
+    let mut rig = Rig::local().await;
+    let alpha = rig.alpha();
+    let _ = rig.frames();
+    // `allow_duplicate` is on, so only the request id can explain the second answer.
+    let first_req = with_request_id(
+        SendRequest { allow_duplicate: true, ..focus_req(DOC_BUG, "t5-rid-a", Some(&alpha), "Rid") },
+        "req-1",
+    );
+    let retry = SendRequest { agent: "t5-rid-b".into(), ..first_req.clone() };
+
+    let first = rig.send(first_req).await.unwrap();
+    let second = rig.send(retry).await.unwrap();
+
+    assert_eq!(second, first, "the retry is answered with the first outcome, verbatim");
+    assert_eq!(first.kind, "created");
+    assert_eq!(rig.created_metas().len(), 1, "one FocusCreated");
+    assert!(rig.is_alive(&tag_of(&first)));
+    assert!(agent_messages("t5-rid-b").is_empty(), "the retry started no second agent");
+    assert_eq!(rig.preview(DOC_BUG).await.existing.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_with_the_same_request_id_queues_one_mother_job() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    let req = with_request_id(
+        SendRequest { allow_duplicate: true, ..send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Rid", "go") },
+        "req-2",
+    );
+
+    let first = rig.send(req.clone()).await.unwrap();
+    let second = rig.send(req).await.unwrap();
+
+    assert_eq!(second, first);
+    assert_eq!(rig.mother_adds().len(), 1, "{:?}", rig.mother_adds());
+    assert_eq!(rig.mother_plans().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_sends_with_the_same_request_id_at_once_start_one_focus() {
+    let mut rig = Rig::local().await;
+    let alpha = rig.alpha();
+    let _ = rig.frames();
+    let req = with_request_id(
+        SendRequest { allow_duplicate: true, ..focus_req(DOC_BUG, "t5-rid-race", Some(&alpha), "Race") },
+        "req-race",
+    );
+
+    let (a, b) = tokio::join!(rig.send(req.clone()), rig.send(req));
+
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a, b, "both callers get the one answer");
+    assert_eq!(rig.created_metas().len(), 1, "one FocusCreated");
+    first_agent_message("t5-rid-race").await;
+    assert_eq!(agent_messages("t5-rid-race").len(), 1, "one agent, seeded once");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_id_belongs_to_its_item() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+
+    let one = rig.send(with_request_id(focus_req("todo:1", "t5-rid-item-a", Some(&alpha), "A"), "same-id")).await.unwrap();
+    let two = rig.send(with_request_id(focus_req("todo:4", "t5-rid-item-b", Some(&alpha), "B"), "same-id")).await.unwrap();
+
+    assert_eq!((one.kind.as_str(), two.kind.as_str()), ("created", "created"), "{one:?} {two:?}");
+    assert_ne!(one.focus_tag, two.focus_tag);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_different_request_id_without_allow_duplicate_is_answered_existing() {
+    let mut rig = Rig::local().await;
+    let alpha = rig.alpha();
+    let first = rig.send(with_request_id(focus_req(DOC_BUG, "t5-rid-new-a", Some(&alpha), "A"), "req-a")).await.unwrap();
+    let _ = rig.frames();
+
+    let second = rig.send(with_request_id(focus_req(DOC_BUG, "t5-rid-new-b", Some(&alpha), "B"), "req-b")).await.unwrap();
+
+    assert_eq!(second.kind, "existing", "{second:?}");
+    assert_eq!(second.focus_tag, first.focus_tag);
+    assert!(rig.created_metas().is_empty());
+    assert!(agent_messages("t5-rid-new-b").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_that_failed_is_not_remembered_so_a_retry_with_the_same_request_id_runs_again() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    let req = with_request_id(send_req(DOC_BUG, "mother_job", "claudia", Some(&alpha), "Retry", "go"), "req-fail");
+    rig.mother_fail();
+
+    let err = rig.send(req.clone()).await.unwrap_err();
+    assert_eq!(err.code, "mother_failed", "{err:?}");
+    assert!(rig.ledger.markers(DOC_BUG).is_empty());
+
+    rig.mother_recover();
+    let retried = rig.send(req).await.expect("the retry runs again and succeeds");
+
+    assert_eq!(retried.kind, "mother_job", "{retried:?}");
+    assert_eq!(retried.job_id.as_deref(), Some("abc123"));
+    assert_eq!(rig.mother_adds().len(), 2, "the failed attempt and the retry both reached Mother");
+    assert_eq!(rig.ledger.markers(DOC_BUG).len(), 1);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The sheet and the send agree about what is already out there
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn ghost_marker(tag: &str) -> SentMarker {
+    SentMarker {
+        kind: "focus".into(),
+        target_id: tag.into(),
+        label: format!("sent before the restart ({tag})"),
+        created_at: Utc::now(),
+        nonce: None,
+    }
+}
+
+fn registry_meta(tag: &str) -> FocusMeta {
+    FocusMeta {
+        tag: tag.into(),
+        display_name: tag.into(),
+        agent_name: "cody".into(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
+    }
+}
+
+fn push_registry(rig: &Rig, tags: &[&str]) {
+    rig.sessions.lock().unwrap().set_focus_registry(tags.iter().map(|t| registry_meta(t)).collect());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_restart_the_sheet_and_the_send_both_treat_a_focus_the_daemon_has_not_heard_of_yet_as_existing() {
+    let mut rig = Rig::local().await;
+    let alpha = rig.alpha();
+    rig.ledger.record(DOC_BUG, ghost_marker("cody-ghost-focus")).unwrap();
+    assert!(!rig.is_alive("cody-ghost-focus"), "precondition: this daemon has no session for it");
+    let _ = rig.frames();
+
+    let existing = rig.preview(DOC_BUG).await.existing;
+    assert_eq!(existing.len(), 1, "the sheet warns that the item was already sent: {existing:?}");
+    assert_eq!((existing[0].kind.as_str(), existing[0].target_id.as_str()), ("focus", "cody-ghost-focus"));
+
+    let outcome = rig.send(focus_req(DOC_BUG, "t5-ghost", Some(&alpha), "Again")).await.unwrap();
+    assert_eq!(outcome.kind, "existing", "the send agrees with the sheet: {outcome:?}");
+    assert_eq!(outcome.focus_tag.as_deref(), Some("cody-ghost-focus"));
+    assert!(rig.created_metas().is_empty(), "nothing was started");
+    assert!(agent_messages("t5-ghost").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn once_two_registry_pushes_agree_the_focus_is_gone_the_sheet_and_the_send_both_say_so() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    rig.ledger.record(DOC_BUG, ghost_marker("cody-gone-focus")).unwrap();
+
+    // One push could be a client that is still loading: not evidence.
+    push_registry(&rig, &["cody-unrelated"]);
+    assert_eq!(rig.preview(DOC_BUG).await.existing.len(), 1, "one push is not enough to call it gone");
+
+    push_registry(&rig, &["cody-unrelated"]);
+    assert!(rig.sessions.lock().unwrap().registry_known(), "precondition: the registry is now known");
+    assert!(rig.preview(DOC_BUG).await.existing.is_empty(), "the sheet no longer warns");
+    let outcome = rig.send(focus_req(DOC_BUG, "t5-gone", Some(&alpha), "Fresh")).await.unwrap();
+    assert_eq!(outcome.kind, "created", "and the send creates a new focus: {outcome:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_focus_the_registry_still_lists_is_existing_for_both_the_sheet_and_the_send() {
+    let rig = Rig::local().await;
+    let alpha = rig.alpha();
+    rig.ledger.record(DOC_BUG, ghost_marker("cody-listed-focus")).unwrap();
+
+    push_registry(&rig, &["cody-listed-focus", "cody-unrelated"]);
+    push_registry(&rig, &["cody-listed-focus", "cody-unrelated"]);
+    assert!(rig.sessions.lock().unwrap().registry_known(), "precondition");
+
+    assert_eq!(rig.preview(DOC_BUG).await.existing.len(), 1);
+    let outcome = rig.send(focus_req(DOC_BUG, "t5-listed", Some(&alpha), "Again")).await.unwrap();
+    assert_eq!(outcome.kind, "existing", "{outcome:?}");
+    assert_eq!(outcome.focus_tag.as_deref(), Some("cody-listed-focus"));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A focus whose first message cannot be delivered
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_whose_agent_never_reads_its_first_message_is_seed_failed_and_leaves_no_trace() {
+    // `seed-die` exits at once without reading. The item's material is far larger than a pipe
+    // holds, so writing it to a child that never reads can only fail: no wait or race decides it.
+    let mut rig = Rig::with(Extras {
+        files: vec![("alpha/.claude/ideas/2026-10-06-big.md".into(), format!("# Big\n\n{}\n", "z".repeat(300_000)))],
+        doc_items: 1,
+        ..Default::default()
+    })
+    .await;
+    let alpha = rig.alpha();
+    let big = rig.doc_with_path("2026-10-06-big.md").id;
+    let _ = rig.frames();
+
+    let err = rig.send(focus_req(&big, "seed-die", Some(&alpha), "Doomed")).await.unwrap_err();
+
+    assert_eq!(err.code, "seed_failed", "{err:?}");
+    assert!(!err.message.is_empty());
+    let frames = rig.frames();
+    assert!(
+        !frames.iter().any(|f| matches!(f, ServerMsg::FocusCreated { .. } | ServerMsg::FocusLayout { .. })),
+        "nothing is announced for a focus that never got its message: {frames:?}"
+    );
+    assert!(rig.ledger.markers(&big).is_empty(), "the item is not recorded as sent");
+    assert!(rig.preview(&big).await.existing.is_empty(), "so the sheet does not warn about it either");
+    assert!(!rig.sessions.lock().unwrap().has_live_session("seed-die-doomed"), "the useless session is stopped");
+
+    // The item is free to be sent again, to an agent that does read.
+    let later = rig.send(focus_req(&big, "t5-seed-ok", Some(&alpha), "Doomed")).await.expect("a later send works");
+    assert_eq!(later.kind, "created", "{later:?}");
+    assert_eq!(rig.created_metas().len(), 1, "only the good focus is announced");
+    assert_eq!(rig.ledger.markers(&big).len(), 1);
+    assert!(rig.is_alive(&tag_of(&later)));
+}
