@@ -181,7 +181,21 @@ final class WindowPlacementController {
     private func attemptExit(pollsLeft: Int) {
         guard let window, machine.phase == .exitingForRetry else { return }
         guard window.isFullScreen else {
-            // Nothing to exit; no didExit will come, so advance the machine ourselves.
+            // A real exit may be mid-transition (the style mask can lose `.fullScreen`
+            // before `didExitFullScreen` arrives): then AppKit's own callback will drive
+            // the machine, and a synthetic one now would run the post-exit work early.
+            // Wait (bounded) for the transition to drain; only a window with nothing in
+            // flight has nothing to exit, no didExit coming, and needs the machine advanced.
+            if window.isAnyTransitionInFlight {
+                guard pollsLeft > 0 else {
+                    send(.exitAbandoned)
+                    return
+                }
+                scheduler.schedule(after: Self.gatePollInterval) { [weak self] in
+                    self?.attemptExit(pollsLeft: pollsLeft - 1)
+                }
+                return
+            }
             send(.didExitFullScreen)
             return
         }
@@ -247,6 +261,13 @@ final class WindowPlacementController {
     private func verifyBeforeReentry() {
         guard let window, !window.isFullScreen, targetPresent,
               window.currentDisplayUUID != targetUUID else { return }
+        // The same fire-time guards as every other frame change here: a `setFrame` during
+        // a transition or a display reconfiguration is what this app's crash paths are made of.
+        // Skipping is safe: the window's own re-entry follows either way.
+        if window.isAnyTransitionInFlight || window.isDisplayChangePending || settling {
+            emit("before re-entry: window not on target but a transition / display change is in progress — not re-placing", true)
+            return
+        }
         emit("before re-entry: window not on target — re-placing", true)
         perform(.place)
     }

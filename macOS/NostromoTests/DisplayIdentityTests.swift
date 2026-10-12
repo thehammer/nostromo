@@ -734,6 +734,35 @@ final class StableDisplayCountRecorderTests: XCTestCase {
         XCTAssertEqual(recorded, 3)
     }
 
+    func test_a_launch_whose_display_wait_timed_out_does_not_start_the_recorder() {
+        count = 1                       // the externals never showed up within the wait
+        recorder.launchWindowsOpened(topologyKnown: false)
+
+        XCTAssertEqual(scheduler.scheduled.count, 0, "no check is armed from a topology that is only a guess")
+        scheduler.fireAll()
+        XCTAssertEqual(recorded, 0)
+    }
+
+    func test_a_launch_with_a_known_topology_starts_the_recorder() {
+        recorder.launchWindowsOpened(topologyKnown: true)
+        XCTAssertEqual(scheduler.scheduled.count, 1)
+
+        scheduler.fireAll()
+
+        XCTAssertEqual(recorded, 3)
+    }
+
+    func test_after_a_timed_out_launch_the_first_real_screen_change_starts_recording() {
+        count = 1
+        recorder.launchWindowsOpened(topologyKnown: false)
+        count = 3                       // a slow external finally arrives
+        recorder.topologyChanged()
+
+        scheduler.fireAll()
+
+        XCTAssertEqual(recorded, 3)
+    }
+
     func test_a_count_of_zero_is_never_recorded() {
         LastKnownDisplayCount.record(3, defaults: defaults)
         count = 0

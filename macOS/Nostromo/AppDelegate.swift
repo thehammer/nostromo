@@ -103,7 +103,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 ) { [weak self] reached in
                     self?.displayWaiter = nil
                     self?.placementLog.log("launch", reached ? "expected displays attached" : "display wait timed out", warning: !reached)
-                    self?.openLaunchWindows()
+                    self?.openLaunchWindows(topologyKnown: reached)
                 }
             } else {
                 openLaunchWindows()
@@ -253,12 +253,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Open one window per attached display, then activate ONCE at the end
     /// (windows are only ordered front while being placed, so activation can't
     /// drag them toward the key screen mid-placement).
-    private func openLaunchWindows() {
+    private func openLaunchWindows(topologyKnown: Bool = true) {
         launchWindowsOpened = true
         let displays = screens.displays
         placementLog.log("launch", "opening windows for \(displays.count) display(s)")
         migrateLegacyFocusKeys(onto: displays)
-        stableCountRecorder.topologyChanged()
+        stableCountRecorder.launchWindowsOpened(topologyKnown: topologyKnown)
         for (slot, display) in displays.enumerated() {
             openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot))
         }

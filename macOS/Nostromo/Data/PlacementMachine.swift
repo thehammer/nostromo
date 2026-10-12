@@ -206,7 +206,9 @@ struct PlacementMachine {
         case .exitDropped:
             guard phase == .exitingForRetry else { return [] }
             phase = .fullScreen
-            retryBudget += 1
+            // Refund, clamped: `.displaysReconfigured` may already have reset the budget to its
+            // maximum since the exit was armed.
+            retryBudget = min(retryBudget + 1, Self.maxFullScreenRetries)
             retriesUsed = max(0, retriesUsed - 1)
             return [.log("exit for re-home dropped at fire time — staying full-screen")]
 

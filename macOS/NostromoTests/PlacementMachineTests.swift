@@ -596,6 +596,22 @@ final class PlacementMachineTests: XCTestCase {
         XCTAssertEqual(machine.retriesUsed, 0)
     }
 
+    func test_a_dropped_exit_never_refunds_past_the_retry_maximum_after_a_reconfiguration_reset_the_budget() {
+        driveToFullScreen()
+        send(.displaysReconfigured(currentUUID: other, targetPresent: true))
+        XCTAssertEqual(machine.phase, .exitingForRetry)
+        XCTAssertEqual(machine.retryBudget, 0)
+
+        // A second reconfiguration while the exit is still armed resets the budget to its maximum.
+        send(.displaysReconfigured(currentUUID: other, targetPresent: true))
+        XCTAssertEqual(machine.retryBudget, PlacementMachine.maxFullScreenRetries)
+
+        send(.exitDropped)
+
+        XCTAssertEqual(machine.phase, .fullScreen)
+        XCTAssertEqual(machine.retryBudget, PlacementMachine.maxFullScreenRetries, "clamped, not maximum + 1")
+    }
+
     func test_a_dropped_wrong_landing_exit_gets_its_retry_back_too() {
         driveToEnteringFullScreen()
         send(.didEnterFullScreen(currentUUID: other))
