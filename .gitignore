@@ -1,5 +1,7 @@
 /target
 *.log
+# canned logs the load-harness report tests read (tests/transcript_load): keep them tracked
+!macOS/scripts/testdata/*.log
 .DS_Store
 .env
 __pycache__/

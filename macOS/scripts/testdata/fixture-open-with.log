@@ -1,0 +1,4 @@
+2026-10-13 10:00:00 load harness: opening benchmark fixture, 212 turns
+fixture-open ms=412 rows=24 turns=212
+sha=abc1234 fixture-open ms=380 rows=24 turns=212
+fixture-open ms=455 rows=24 turns=212
