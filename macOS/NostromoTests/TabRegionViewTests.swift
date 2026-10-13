@@ -242,3 +242,63 @@ final class TabRegionViewCaptionGeometryTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(contrastRatio(Theme.fgMuted, Theme.bgBar), 4.5)
     }
 }
+
+// MARK: - Long titles must truncate, never widen the strip (or the window)
+
+/// Mother opens one closable tab per job and job titles are long sentences. Two things made the strip
+/// wider than its window: the label's own intrinsic width outranked the compact tab's preferred width
+/// (each tab grew to 765-794 pt), and the preferred width itself (priority 740) was above
+/// NSLayoutPriorityWindowSizeStayPut (500), so Auto Layout RESIZED THE WINDOW to fit the tabs: on a
+/// 1920-pt display the window became 3697 pt wide and the input bar, model chip and Send button ended
+/// up off the right edge. These tests embed the region the way the app does: pinned inside a real
+/// window's content view.
+final class TabRegionViewLongTitleTests: XCTestCase {
+
+    private func windowWithCompactRegion(tabCount: Int, width: CGFloat) -> (window: NSWindow, region: TabRegionView) {
+        let title = "Let coordinators close a `new` referral in one action from the referrals list (RM-976) and then some more words to make it long"
+        let tabs = (0..<tabCount).map {
+            TabRegionView.Tab(paneId: "job-\($0)", label: "\(title) \($0)", view: NSView())
+        }
+        let region = TabRegionView(tabs: tabs, activePaneId: "job-0", compactTabs: true)
+        region.translatesAutoresizingMaskIntoConstraints = false
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 480),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 480))
+        window.contentView = content
+        content.addSubview(region)
+        NSLayoutConstraint.activate([
+            region.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            region.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            region.topAnchor.constraint(equalTo: content.topAnchor),
+            region.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        content.layoutSubtreeIfNeeded()
+        window.layoutIfNeeded()
+        return (window, region)
+    }
+
+    func testLongTitledCompactTabsDoNotResizeTheWindow() {
+        for count in [6, 14] {
+            let (window, _) = windowWithCompactRegion(tabCount: count, width: 1200)
+            XCTAssertEqual(window.contentLayoutRect.width, 1200, accuracy: 1,
+                           "\(count) long-titled compact tabs resized the window to \(window.contentLayoutRect.width) pt")
+        }
+    }
+
+    func testLongTitledCompactTabsAreNoWiderThanTheCompactWidth() throws {
+        let (_, region) = windowWithCompactRegion(tabCount: 4, width: 1200)
+        let stack = try stripStack(in: region)
+        for (index, tab) in stack.arrangedSubviews.enumerated() {
+            XCTAssertLessThanOrEqual(tab.frame.width, TabRegionView.compactTabWidth + 1,
+                                     "tab \(index) is \(tab.frame.width) pt wide: its title widened it")
+        }
+    }
+
+    func testManyLongTitledCompactTabsShrinkToFitTheStrip() throws {
+        let (_, region) = windowWithCompactRegion(tabCount: 14, width: 1200)
+        let stack = try stripStack(in: region)
+        let total = stack.arrangedSubviews.reduce(0) { $0 + $1.frame.width }
+        XCTAssertLessThanOrEqual(total, 1201, "14 tabs must shrink to fit 1200 pt (total \(total))")
+        XCTAssertGreaterThanOrEqual(stack.arrangedSubviews.map(\.frame.width).min() ?? 0, 69, "tabs keep their 70 pt minimum")
+    }
+}
