@@ -897,3 +897,72 @@ private struct SeededRNG: RandomNumberGenerator {
         return state
     }
 }
+
+// MARK: - Tool-fold wire enrichment (TF1): compaction keeps the new facts
+
+extension TurnPayloadStoreTests {
+
+    private static let foldStart  = Date(timeIntervalSince1970: 1_770_000_000)
+    private static let foldFinish = Date(timeIntervalSince1970: 1_770_000_042)
+
+    private func foldTurn() -> ChatTurn {
+        let bigInput = String(repeating: "i", count: 20_000)
+        let bigOutput = String(repeating: "o", count: 50_000)
+        return ChatTurn(
+            userInput: "go", timestamp: Self.foldStart, timestampRaw: "2026-08-11T12:00:00.0000Z",
+            blocks: [
+                .text("main"),
+                .toolCall(ToolCallData(toolName: "Read", inputSummary: "a.swift", inputFull: bigInput,
+                                       toolUseId: "toolu_A", parentToolUseId: "toolu_agent1",
+                                       target: "/repo/a.swift", startedAt: Self.foldStart,
+                                       finishedAt: Self.foldFinish, finishedQuietly: true)),
+                .toolResult(ToolResultData(content: bigOutput, isError: false, toolUseId: "toolu_A",
+                                           parentToolUseId: "toolu_agent1", at: Self.foldFinish)),
+                .text("sub says"),
+            ],
+            isComplete: true, daemonId: "t0", epoch: 0,
+            subagentTextParents: [3: "toolu_agent1"])
+    }
+
+    private func assertNewFields(_ turn: ChatTurn, file: StaticString = #filePath, line: UInt = #line) {
+        guard turn.blocks.count == 4,
+              case .toolCall(let call) = turn.blocks[1],
+              case .toolResult(let result) = turn.blocks[2] else { return XCTFail("block shape", file: file, line: line) }
+        XCTAssertEqual(call.toolUseId, "toolu_A", file: file, line: line)
+        XCTAssertEqual(call.parentToolUseId, "toolu_agent1", file: file, line: line)
+        XCTAssertEqual(call.target, "/repo/a.swift", file: file, line: line)
+        XCTAssertEqual(call.startedAt, Self.foldStart, file: file, line: line)
+        XCTAssertEqual(call.finishedAt, Self.foldFinish, file: file, line: line)
+        XCTAssertTrue(call.finishedQuietly, file: file, line: line)
+        XCTAssertEqual(call.toolName, "Read", file: file, line: line)
+        XCTAssertEqual(result.toolUseId, "toolu_A", file: file, line: line)
+        XCTAssertEqual(result.parentToolUseId, "toolu_agent1", file: file, line: line)
+        XCTAssertEqual(result.at, Self.foldFinish, file: file, line: line)
+        XCTAssertEqual(turn.subagentTextParents, [3: "toolu_agent1"], file: file, line: line)
+    }
+
+    func testSkeletonKeepsTheToolFoldFactsAndStillDropsInputFull() {
+        let turn = foldTurn()
+        let skeleton = TurnPayloadStore.skeleton(of: turn)
+
+        assertNewFields(skeleton)
+        guard case .toolCall(let call) = skeleton.blocks[1] else { return XCTFail("block 1") }
+        XCTAssertEqual(call.inputFull, "", "the bulky pretty-printed input is still the thing that goes")
+        guard case .toolResult(let result) = skeleton.blocks[2] else { return XCTFail("block 2") }
+        XCTAssertEqual(result.content.count, TurnPayloadStore.prefixLength, "the result prefix is still bounded")
+    }
+
+    func testACompactedTurnHydratesBackWithInputFullAndEveryToolFoldFact() {
+        let store = TurnPayloadStore()
+        let turn = foldTurn()
+        guard let skeleton = compactAndWait(store, turn) else { return }
+        assertNewFields(skeleton)
+
+        guard let restored = assertFull(store.hydrate(skeleton)) else { return }
+        assertNewFields(restored)
+        guard case .toolCall(let call) = restored.blocks[1],
+              case .toolResult(let result) = restored.blocks[2] else { return XCTFail("block shape") }
+        XCTAssertEqual(call.inputFull, String(repeating: "i", count: 20_000))
+        XCTAssertEqual(result.content, String(repeating: "o", count: 50_000))
+    }
+}

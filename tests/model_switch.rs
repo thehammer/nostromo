@@ -554,7 +554,7 @@ impl Observer {
     fn saw_text(&mut self, text: &str) -> bool {
         self.drain();
         self.seen.iter().any(|m| {
-            matches!(m, ServerMsg::SessionTurnDelta { delta: TurnDelta::BlockAppended { block: TurnBlock::Text { text: t }, .. }, .. } if t == text)
+            matches!(m, ServerMsg::SessionTurnDelta { delta: TurnDelta::BlockAppended { block: TurnBlock::Text { text: t, .. }, .. }, .. } if t == text)
         })
     }
 
@@ -627,7 +627,7 @@ fn flat(turns: &[Turn]) -> Vec<String> {
         out.push(format!("user:{}", t.user_input));
         for b in &t.blocks {
             match b {
-                TurnBlock::Text { text } => out.push(format!("text:{text}")),
+                TurnBlock::Text { text, .. } => out.push(format!("text:{text}")),
                 TurnBlock::Note { note_kind, text, .. } => out.push(format!("note:{note_kind:?}:{text}")),
                 _ => {}
             }

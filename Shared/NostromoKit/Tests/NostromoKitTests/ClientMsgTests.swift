@@ -56,6 +56,117 @@ final class ClientMsgTests: XCTestCase {
         XCTAssertFalse(interrupted)
     }
 
+    // MARK: - tool_call / tool_result / text: the optional identity, time and subagent keys (TF1)
+
+    /// 2026-05-30T22:38:55Z, built from calendar components so the expectation does not
+    /// lean on the parser under test.
+    private func utc(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: Int, fraction: Double = 0) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let base = cal.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi, second: s))!
+        return base.addingTimeInterval(fraction)
+    }
+
+    private func callMeta(_ block: DaemonTurnBlock, file: StaticString = #filePath, line: UInt = #line) -> (name: String, summary: String, full: String, meta: DaemonToolMeta)? {
+        guard case let .toolCall(name, summary, full, meta) = block else { XCTFail("\(block)", file: file, line: line); return nil }
+        return (name, summary, full, meta)
+    }
+
+    private func resultMeta(_ block: DaemonTurnBlock, file: StaticString = #filePath, line: UInt = #line) -> (content: String, isError: Bool, meta: DaemonToolMeta)? {
+        guard case let .toolResult(content, isError, meta) = block else { XCTFail("\(block)", file: file, line: line); return nil }
+        return (content, isError, meta)
+    }
+
+    func testAToolCallCarriesItsIdTargetParentAndTimestamp() throws {
+        let block = try decodeBlock(#"{"kind":"tool_call","tool_name":"Read","input_summary":"a.swift","input_full":"{}","tool_use_id":"toolu_01","parent_tool_use_id":"toolu_agent1","target":"/repo/a.swift","ts":"2026-05-30T22:38:55.755Z"}"#)
+        guard let c = callMeta(block) else { return }
+        XCTAssertEqual(c.name, "Read")
+        XCTAssertEqual(c.summary, "a.swift")
+        XCTAssertEqual(c.full, "{}")
+        XCTAssertEqual(c.meta.toolUseId, "toolu_01")
+        XCTAssertEqual(c.meta.parentToolUseId, "toolu_agent1")
+        XCTAssertEqual(c.meta.target, "/repo/a.swift")
+        let ts = try XCTUnwrap(c.meta.ts)
+        XCTAssertEqual(ts.timeIntervalSince1970, utc(2026, 5, 30, 22, 38, 55, fraction: 0.755).timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testAToolResultCarriesItsIdParentAndTimestamp() throws {
+        let block = try decodeBlock(#"{"kind":"tool_result","content":"","is_error":false,"tool_use_id":"toolu_01","parent_tool_use_id":"toolu_agent1","ts":"2026-05-30T22:38:55.755Z"}"#)
+        guard let r = resultMeta(block) else { return }
+        XCTAssertEqual(r.content, "", "an empty successful result is kept on the wire")
+        XCTAssertFalse(r.isError)
+        XCTAssertEqual(r.meta.toolUseId, "toolu_01")
+        XCTAssertEqual(r.meta.parentToolUseId, "toolu_agent1")
+        XCTAssertNil(r.meta.target, "a result has no target")
+        let ts = try XCTUnwrap(r.meta.ts)
+        XCTAssertEqual(ts.timeIntervalSince1970, utc(2026, 5, 30, 22, 38, 55, fraction: 0.755).timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testAToolCallFromAnOlderDaemonDecodesWithNoMeta() throws {
+        let block = try decodeBlock(#"{"kind":"tool_call","tool_name":"Bash","input_summary":"ls","input_full":"{\"command\":\"ls\"}"}"#)
+        guard let c = callMeta(block) else { return }
+        XCTAssertEqual(c.name, "Bash")
+        XCTAssertEqual(c.meta, DaemonToolMeta.none)
+        XCTAssertNil(c.meta.toolUseId)
+        XCTAssertNil(c.meta.parentToolUseId)
+        XCTAssertNil(c.meta.target)
+        XCTAssertNil(c.meta.ts)
+    }
+
+    func testAToolResultFromAnOlderDaemonDecodesWithNoMeta() throws {
+        let block = try decodeBlock(#"{"kind":"tool_result","content":"boom","is_error":true}"#)
+        guard let r = resultMeta(block) else { return }
+        XCTAssertEqual(r.content, "boom")
+        XCTAssertTrue(r.isError)
+        XCTAssertEqual(r.meta, DaemonToolMeta.none)
+    }
+
+    func testTimestampsDecodeWithWholeMillisecondAndNanosecondPrecision() throws {
+        func ts(_ raw: String) throws -> Date? {
+            let block = try decodeBlock(#"{"kind":"tool_result","content":"x","is_error":false,"ts":"\#(raw)"}"#)
+            return resultMeta(block)?.meta.ts
+        }
+        let whole = try XCTUnwrap(try ts("2026-05-30T22:38:55Z"), "no fractional part is valid RFC 3339")
+        XCTAssertEqual(whole.timeIntervalSince1970, utc(2026, 5, 30, 22, 38, 55).timeIntervalSince1970, accuracy: 0.001)
+
+        let millis = try XCTUnwrap(try ts("2026-05-30T22:38:55.755Z"))
+        XCTAssertEqual(millis.timeIntervalSince1970, utc(2026, 5, 30, 22, 38, 55, fraction: 0.755).timeIntervalSince1970, accuracy: 0.001)
+
+        // chrono writes as many digits as the clock had; a stored line can carry nanoseconds.
+        let nanos = try XCTUnwrap(try ts("2026-05-30T22:38:55.755123456Z"), "a nanosecond timestamp must not be lost")
+        XCTAssertEqual(nanos.timeIntervalSince1970, utc(2026, 5, 30, 22, 38, 55, fraction: 0.755123456).timeIntervalSince1970, accuracy: 0.001)
+
+        let offset = try XCTUnwrap(try ts("2026-05-30T17:38:55.755-05:00"), "a numeric offset is the same instant")
+        XCTAssertEqual(offset.timeIntervalSince1970, millis.timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testAnUnparseableTimestampLeavesTheTimeNilAndTheBlockDecoded() throws {
+        let call = try decodeBlock(#"{"kind":"tool_call","tool_name":"Bash","input_summary":"ls","input_full":"{}","tool_use_id":"toolu_9","ts":"yesterday-ish"}"#)
+        guard let c = callMeta(call) else { return }
+        XCTAssertNil(c.meta.ts, "a time is decoration: garbage must not cost the client the whole turn")
+        XCTAssertEqual(c.meta.toolUseId, "toolu_9", "the rest of the block survives a bad time")
+
+        let result = try decodeBlock(#"{"kind":"tool_result","content":"ok","is_error":false,"ts":""}"#)
+        XCTAssertNil(resultMeta(result)?.meta.ts)
+        XCTAssertEqual(resultMeta(result)?.content, "ok")
+    }
+
+    func testTextDecodesWithAndWithoutItsSubagentParent() throws {
+        let subagent = try decodeBlock(#"{"kind":"text","text":"found it","parent_tool_use_id":"toolu_agent1"}"#)
+        guard case let .text(s, parent) = subagent else { return XCTFail("\(subagent)") }
+        XCTAssertEqual(s, "found it")
+        XCTAssertEqual(parent, "toolu_agent1")
+
+        let unknownWhose = try decodeBlock(#"{"kind":"text","text":"x","parent_tool_use_id":"?"}"#)
+        guard case let .text(_, sentinel) = unknownWhose else { return XCTFail("\(unknownWhose)") }
+        XCTAssertEqual(sentinel, "?", "the daemon's 'a subagent, but whose is unknown' sentinel passes through")
+
+        let main = try decodeBlock(#"{"kind":"text","text":"hello"}"#)
+        guard case let .text(m, none) = main else { return XCTFail("\(main)") }
+        XCTAssertEqual(m, "hello")
+        XCTAssertNil(none, "the main agent's prose has no parent")
+    }
+
     // MARK: - session_control: stop
 
     func testSessionControlStop() throws {

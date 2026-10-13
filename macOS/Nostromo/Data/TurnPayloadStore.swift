@@ -361,16 +361,18 @@ final class TurnPayloadStore {
             case .toolCall(let d):
                 // `inputSummary` is the collapsed row's whole content and is
                 // already one line; only `inputFull` is bulky.
-                return .toolCall(ToolCallData(toolName: d.toolName,
-                                              inputSummary: String(d.inputSummary.prefix(120)),
-                                              inputFull: ""))
+                var call = d   // keeps the ids, times and target: all small
+                call.inputSummary = String(d.inputSummary.prefix(120))
+                call.inputFull = ""
+                return .toolCall(call)
             case .toolResult(let d):
                 // The collapsed row shows a line count, which survives the
                 // truncation because `ToolResultView` recomputes it from the
                 // retained prefix — so keep enough to be honest and let
                 // `hydrate` supply the rest on expand.
-                return .toolResult(ToolResultData(content: String(d.content.prefix(prefixLength)),
-                                                  isError: d.isError))
+                var result = d
+                result.content = String(d.content.prefix(prefixLength))
+                return .toolResult(result)
             case .resultSummary, .errorMessage, .askQuestion, .note:
                 return block
             }
@@ -414,12 +416,14 @@ final class TurnPayloadStore {
                 blocks.append(.text(s))
             case .toolCall(let d):
                 guard let full = next(data, &cursor) else { return nil }
-                blocks.append(.toolCall(ToolCallData(toolName: d.toolName,
-                                                     inputSummary: d.inputSummary,
-                                                     inputFull: full)))
+                var call = d
+                call.inputFull = full
+                blocks.append(.toolCall(call))
             case .toolResult(let d):
                 guard let content = next(data, &cursor) else { return nil }
-                blocks.append(.toolResult(ToolResultData(content: content, isError: d.isError)))
+                var result = d
+                result.content = content
+                blocks.append(.toolResult(result))
             default:
                 blocks.append(block)
             }
