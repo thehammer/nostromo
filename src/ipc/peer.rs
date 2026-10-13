@@ -937,7 +937,7 @@ fn redact_meta(meta: &mut FocusMeta, tags: &SensitiveTags) {
 /// Trim an otherwise-deliverable frame for a network peer; see
 /// [`redact_meta`], plus: session and Mother-job lists drop their sensitive
 /// entries, and model frames lose the budget posture, the last request and
-/// the agents' declared models.
+/// the agents' declared models and configured defaults.
 pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
     fn redact_all(mut metas: Vec<FocusMeta>, tags: &SensitiveTags) -> Vec<FocusMeta> {
         for m in &mut metas {
@@ -967,10 +967,13 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             state.last_request = None;
             ServerMsg::SessionModelState(state)
         }
-        // Every agent's name and declared model, read from `~/.claude/agents`.
-        ServerMsg::ModelDefaults { defaults, .. } => {
-            ServerMsg::ModelDefaults { defaults, declared: Default::default() }
-        }
+        // Every agent's name and declared model, read from `~/.claude/agents`,
+        // and the agents the user configured a default for (the map's keys
+        // are agent names too).
+        ServerMsg::ModelDefaults { .. } => ServerMsg::ModelDefaults {
+            defaults: Default::default(),
+            declared: Default::default(),
+        },
         ServerMsg::MotherJobs { mut jobs } => {
             // By label as well as by id: `mother add` returns before the daemon
             // has registered the new job's id, and the job feed must not
@@ -2079,14 +2082,27 @@ mod tests {
 
     #[test]
     fn a_network_peer_is_not_told_which_model_each_agent_declares() {
-        let ServerMsg::ModelDefaults { defaults, declared } =
+        let ServerMsg::ModelDefaults { declared, .. } =
             redact_for_network(model_defaults_msg(), &SensitiveTags::in_memory())
         else {
             panic!("still a ModelDefaults");
         };
 
         assert!(declared.is_empty(), "the agents installed on this machine are not a network peer's to list: {declared:?}");
-        assert_eq!(defaults.get("cody").map(|d| d.model.as_str()), Some("haiku"), "the defaults a user set are intact");
+    }
+
+    #[test]
+    fn a_network_peer_is_not_told_which_agents_the_user_configured_a_default_model_for() {
+        let ServerMsg::ModelDefaults { defaults, declared } =
+            redact_for_network(model_defaults_msg(), &SensitiveTags::in_memory())
+        else {
+            panic!("still a ModelDefaults");
+        };
+
+        assert!(defaults.is_empty(), "the keys of the defaults are agent names the user set up: {defaults:?}");
+        assert!(declared.is_empty(), "{declared:?}");
+        let wire = serde_json::to_string(&ServerMsg::ModelDefaults { defaults, declared }).unwrap();
+        assert!(!wire.contains("cody") && !wire.contains("haiku"), "{wire}");
     }
 
     #[test]
@@ -2112,6 +2128,8 @@ mod tests {
         let defaults = outbound(PeerTrust::Tcp, model_defaults_msg(), &tags);
 
         assert!(matches!(state, Some(ServerMsg::SessionModelState(ref s)) if s.posture.is_none() && s.last_request.is_none()));
-        assert!(matches!(defaults, Some(ServerMsg::ModelDefaults { ref declared, .. }) if declared.is_empty()));
+        assert!(
+            matches!(defaults, Some(ServerMsg::ModelDefaults { ref declared, ref defaults }) if declared.is_empty() && defaults.is_empty())
+        );
     }
 }

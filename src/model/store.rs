@@ -160,6 +160,44 @@ pub(crate) fn write_atomic_with(
     Ok(())
 }
 
+/// The files [`write_atomic_with`] is used for, by stem: a leftover is named
+/// `<stem>.tmp-<uuid>`.
+const STORE_STEMS: [&str; 3] = ["focus-models", "model-defaults", "model-catalog"];
+
+/// How old a temp file must be to count as a leftover: a write in flight (in
+/// this process, or another sharing the directory) has a temp file for a few
+/// milliseconds, never for this long.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Remove the leftovers of an interrupted [`write_atomic_with`] (the model
+/// store files' `<name>.tmp-…` siblings, at least [`STALE_TEMP_AGE`] old) from
+/// `dir`; returns how many were removed. For the start of the daemon.
+pub fn sweep_temp_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let ours = STORE_STEMS.iter().any(|stem| {
+            name.strip_prefix(stem)
+                .is_some_and(|rest| rest.starts_with(".tmp-"))
+        });
+        let stale = entry
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age >= STALE_TEMP_AGE);
+        if ours && stale && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Every focus's record.
 pub fn load_focus_models(path: &Path) -> BTreeMap<String, FocusModelRecord> {
     load_json(path)
@@ -367,6 +405,75 @@ mod tests {
         assert_eq!(temp_files(dir.path()), Vec::<String>::new());
         let back: BTreeMap<String, i32> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back["a"], 2);
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> =
+            std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    /// Make `path` look like it was last written five minutes ago.
+    fn age(path: &Path) {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(300);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(then).unwrap();
+    }
+
+    // [seam: store::sweep_temp_files]
+    #[test]
+    fn sweeping_removes_the_leftovers_of_interrupted_writes_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        for leftover in ["focus-models.tmp-0b5e1c1e-9d1a-4c1e-8f3a-000000000001", "model-defaults.tmp-abc", "model-catalog.tmp-"] {
+            std::fs::write(dir.path().join(leftover), b"{\"half").unwrap();
+            age(&dir.path().join(leftover));
+        }
+        let keep = [
+            "focus-models.json",
+            "model-defaults.json",
+            "focus-models.corrupt-20260101T000000Z",
+            "notes.txt",
+            "tmp-but-not-a-leftover",
+            // Somebody else's temp files: not ours to delete, old or not.
+            "unrelated.tmp-1",
+        ];
+        for name in keep {
+            std::fs::write(dir.path().join(name), b"precious").unwrap();
+            age(&dir.path().join(name));
+        }
+
+        let removed = sweep_temp_files(dir.path());
+
+        assert_eq!(removed, 3);
+        let mut expected: Vec<String> = keep.iter().map(|n| (*n).to_owned()).collect();
+        expected.sort();
+        assert_eq!(names_in(dir.path()), expected, "only the `.tmp-` leftovers went");
+        for name in keep {
+            assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), b"precious", "{name} is untouched");
+        }
+    }
+
+    // [seam: store::sweep_temp_files]
+    #[test]
+    fn a_temp_file_of_a_write_that_is_in_flight_is_not_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let in_flight = dir.path().join("focus-models.tmp-0b5e1c1e-9d1a-4c1e-8f3a-000000000002");
+        std::fs::write(&in_flight, b"{\"being writ").unwrap();
+
+        assert_eq!(sweep_temp_files(dir.path()), 0);
+
+        assert!(in_flight.exists(), "a writer in this process or another sharing the directory is still using it");
+    }
+
+    // [seam: store::sweep_temp_files]
+    #[test]
+    fn sweeping_a_clean_or_missing_directory_removes_nothing_and_does_not_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("focus-models.json"), b"{}").unwrap();
+
+        assert_eq!(sweep_temp_files(dir.path()), 0);
+        assert_eq!(sweep_temp_files(&dir.path().join("not-yet-created")), 0);
+        assert_eq!(names_in(dir.path()), ["focus-models.json"]);
     }
 
     // [seam: FocusModelRecord::updated_at]

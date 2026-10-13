@@ -197,7 +197,7 @@ impl Shared {
     }
 
     fn set_state(&self, s: SessionState) {
-        *self.state.lock().unwrap() = s;
+        *lock_recover(&self.state) = s;
         self.broadcast(SessionEvent::State(s));
     }
 }
@@ -304,7 +304,7 @@ impl ManagedSession {
     }
 
     fn state(&self) -> SessionState {
-        *self.shared.state.lock().unwrap()
+        *lock_recover(&self.shared.state)
     }
 
     fn info(&self) -> SessionInfo {
@@ -971,15 +971,15 @@ impl SessionManager {
             images: images.to_vec(),
         };
         let should_write = {
-            let mut state = session.shared.state.lock().unwrap();
-            let applying = session.shared.model.lock().unwrap().applying.is_some();
+            let mut state = lock_recover(&session.shared.state);
+            let applying = lock_recover(&session.shared.model).applying.is_some();
             if *state == SessionState::Idle && !applying {
                 // Optimistically mark mid-turn so a follow-up send queues rather
                 // than racing a second message onto stdin before the echo lands.
                 *state = SessionState::MidTurn;
                 true
             } else {
-                session.shared.pending.lock().unwrap().push_back(message.clone());
+                lock_recover(&session.shared.pending).push_back(message.clone());
                 false
             }
         };
@@ -987,7 +987,7 @@ impl SessionManager {
         if should_write {
             if let Err(e) = write_user_message(&session.shared, &message) {
                 // The optimistic MidTurn would otherwise wedge the session.
-                *session.shared.state.lock().unwrap() = SessionState::Idle;
+                *lock_recover(&session.shared.state) = SessionState::Idle;
                 return Err(e);
             }
             session
@@ -1020,15 +1020,21 @@ impl SessionManager {
         if !session.alive() {
             anyhow::bail!("session {tag} is not alive");
         }
+        // A message `step` took off the queue may still be on its way to
+        // stdin. The interrupt goes behind it (it ends that message's turn:
+        // Stop applies to the newest turn) rather than ahead, where the
+        // message would then start a turn nobody can stop; `take_carry`
+        // waits the same way.
+        wait_for_write(&session.shared);
         let running = matches!(
-            *session.shared.state.lock().unwrap(),
+            *lock_recover(&session.shared.state),
             SessionState::MidTurn | SessionState::AwaitingPermission
         );
         if !running {
             return Ok(InterruptOutcome::NotRunning);
         }
 
-        session.shared.pending.lock().unwrap().clear();
+        lock_recover(&session.shared.pending).clear();
         session.shared.transcript.lock().unwrap().mark_interrupt_requested();
         let request_id = format!("interrupt-{}", chrono::Utc::now().timestamp_millis());
         write_control_request(
@@ -1163,13 +1169,13 @@ impl SessionManager {
         let waiting = self
             .sessions
             .get(tag)
-            .and_then(|s| s.shared.model.lock().unwrap().waiting.take());
+            .and_then(|s| lock_recover(&s.shared.model).waiting.take());
         if let Some((target, actor)) = waiting {
             let agent = self.agent_of(tag);
             let session_id = self.sessions.get(tag).and_then(|s| s.session_id.clone());
             let current = model_store::focus_record(&self.model_hub.paths.focus_models, tag).map(|r| r.target());
             let ctx = SessionCtx::stopped(tag, agent.as_deref(), session_id.as_deref(), &self.model_hub);
-            let _ = self.switch_not_running(&ctx, current, target, actor);
+            self.switch_not_running_now(&ctx, current, target, actor);
         }
         if let Some(session) = self.sessions.get_mut(tag) {
             session.intentional_stop.store(true, Ordering::SeqCst);
@@ -1300,7 +1306,7 @@ impl SessionManager {
                     // requests fail as soon as the process is gone): let it
                     // record its failure first, so the queue it leaves behind
                     // is what the respawn inherits.
-                    && s.shared.model.lock().unwrap().applying.is_none()
+                    && lock_recover(&s.shared.model).applying.is_none()
             })
             .map(|(tag, _)| tag.clone())
             .collect();
@@ -1378,10 +1384,10 @@ impl SessionManager {
             let crash_times_snapshot;
             {
                 let s = self.sessions.get_mut(&tag).unwrap();
-                let has_pending = !s.shared.pending.lock().unwrap().is_empty();
+                let has_pending = !lock_recover(&s.shared.pending).is_empty();
                 // A switch still waiting (its apply never started, or the
                 // session died first) is work the respawn must pick up.
-                let has_waiting_switch = s.shared.model.lock().unwrap().waiting.is_some();
+                let has_waiting_switch = lock_recover(&s.shared.model).waiting.is_some();
                 wants_recovery = !s.attached_clients.is_empty() || has_pending || has_waiting_switch;
                 let crash_count = s.crash_times.len() as u32;
                 guard_tripped = crash_count >= MAX_RESTARTS;
@@ -1909,7 +1915,7 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
                 model: Some(model), ..
             } => on_model_report(&shared, model),
             ParsedLine::ModelFallback { content, .. } => {
-                shared.model.lock().unwrap().fallback = content.clone();
+                lock_recover(&shared.model).fallback = content.clone();
             }
             _ => {}
         }
@@ -1920,6 +1926,10 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
                 TurnDelta::TurnStarted { .. } => {
                     shared.set_state(SessionState::MidTurn);
                 }
+                // A phantom dropped as the real prompt arrives is no turn
+                // end: that prompt's turn is live, and advancing would write
+                // the next queued message into it or start a switch mid-turn.
+                TurnDelta::TurnErrored { discarded: true, .. } => {}
                 TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. } => {
                     shared.broadcast(SessionEvent::Delta(delta.clone()));
                     advance(&shared);
@@ -2009,25 +2019,76 @@ fn step(shared: &Shared, finished_apply: bool) {
             spawn_apply(shared, target, actor, None);
         }
         Next::Write(msg) => {
-            let wrote = write_user_message(shared, &msg).is_ok();
-            {
-                let mut state = lock_recover(&shared.state);
-                if !wrote {
-                    lock_recover(&shared.pending).push_front(msg);
-                    *state = SessionState::Idle;
-                }
-                shared.writing.store(false, Ordering::SeqCst);
-            }
-            shared.broadcast(SessionEvent::State(if wrote {
-                SessionState::MidTurn
-            } else {
-                SessionState::Idle
-            }));
+            let in_flight = WriteInFlight { shared, msg: Some(msg) };
+            let wrote = in_flight.write().is_ok();
+            in_flight.finish(wrote);
         }
         Next::Idle => shared.broadcast(SessionEvent::State(SessionState::Idle)),
     }
     if finished_apply {
         publish_model_state(shared);
+    }
+}
+
+/// How long to wait for an in-flight write of a queued message before
+/// moving on without it (see [`wait_for_write`]).
+const WRITE_WAIT_LIMIT: Duration = Duration::from_secs(5);
+
+/// Wait (bounded) for the write of a message `step` took off the queue to
+/// finish, whether it was delivered or put back. The caller holds neither
+/// `state` nor `pending`. The write has no reason to outlast the limit: it is
+/// only a pipe write, and a CLI too stalled to read it has bigger problems;
+/// the limit only keeps that from wedging the caller.
+fn wait_for_write(shared: &Shared) {
+    let deadline = std::time::Instant::now() + WRITE_WAIT_LIMIT;
+    while shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A queued message `step` took off `pending` and is writing to stdin, with
+/// `shared.writing` set. However the write ends, even by a panic, `writing`
+/// is cleared and an undelivered message goes back to the front of the queue
+/// (the session idle), so `take_carry` never waits on a write that is over.
+struct WriteInFlight<'a> {
+    shared: &'a Shared,
+    msg: Option<PendingMessage>,
+}
+
+impl WriteInFlight<'_> {
+    fn write(&self) -> Result<()> {
+        match &self.msg {
+            Some(msg) => write_user_message(self.shared, msg),
+            None => Ok(()),
+        }
+    }
+
+    fn finish(mut self, wrote: bool) {
+        self.settle(wrote);
+    }
+
+    fn settle(&mut self, wrote: bool) {
+        let Some(msg) = self.msg.take() else { return };
+        {
+            let mut state = lock_recover(&self.shared.state);
+            if !wrote {
+                lock_recover(&self.shared.pending).push_front(msg);
+                *state = SessionState::Idle;
+            }
+            self.shared.writing.store(false, Ordering::SeqCst);
+        }
+        self.shared.broadcast(SessionEvent::State(if wrote {
+            SessionState::MidTurn
+        } else {
+            SessionState::Idle
+        }));
+    }
+}
+
+impl Drop for WriteInFlight<'_> {
+    /// Reached with the message still held only when the write panicked.
+    fn drop(&mut self) {
+        self.settle(false);
     }
 }
 
@@ -2728,8 +2789,14 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The tests that point `CLAUDE_BIN_ENV` somewhere take this: the
+    /// variable is process-wide, and one test removing it while another is
+    /// about to spawn made that spawn start the real `claude`.
+    static CLAUDE_BIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn resolve_claude_honours_env_override() {
+        let _env = CLAUDE_BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(CLAUDE_BIN_ENV, "/custom/path/to/claude");
         let p = resolve_claude().unwrap();
         assert_eq!(p, PathBuf::from("/custom/path/to/claude"));
@@ -2747,6 +2814,7 @@ mod tests {
 
     #[tokio::test]
     async fn after_spawn_session_tag_for_session_id_resolves() {
+        let _env = CLAUDE_BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
@@ -2762,6 +2830,7 @@ mod tests {
 
     #[tokio::test]
     async fn after_restart_tag_for_session_id_still_resolves() {
+        let _env = CLAUDE_BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
@@ -4021,6 +4090,187 @@ mod tests {
             .expect("not dropped");
         assert_eq!(outcome.status, crate::ipc::protocol::ModelRequestStatus::Failed);
         assert_session_released(&shared, &out).await;
+    }
+
+    // ── a panic elsewhere must not take a session's reader or queue down with it ──
+
+    /// Poison `lock`: a thread panics while holding it.
+    fn poison<T: Send + 'static>(lock: &Arc<Mutex<T>>) {
+        let lock = Arc::clone(lock);
+        let _ = std::thread::spawn(move || {
+            let _held = lock.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+    }
+
+    /// A stub session whose stdin is recorded in `out` (when given), reaped when the guard drops.
+    fn stub_session(dir: &tempfile::TempDir, tag: &str, script: &str) -> (Reap, Shared) {
+        let mut mgr = SessionManager::with_store_path(dir.path().join("sessions.json"));
+        spawn_stub(&mut mgr, tag, script);
+        let shared = mgr.sessions[tag].shared.clone();
+        (Reap(mgr), shared)
+    }
+
+    // [seam: model_switch::on_model_report]
+    #[tokio::test]
+    async fn a_model_report_is_still_recorded_after_a_panic_poisoned_the_runtime_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_reap, shared) = stub_session(&dir, "t", "cat > /dev/null");
+        poison(&shared.model);
+        assert!(shared.model.is_poisoned(), "precondition: the lock is poisoned");
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model_switch::on_model_report(&shared, "claude-opus-5-5")
+        }));
+
+        assert!(outcome.is_ok(), "the report must not panic on a poisoned lock");
+        assert_eq!(lock_recover(&shared.model).reported.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_runtime_lock_was_poisoned_still_notices_its_child_exiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = dir.path().join("gate");
+        // The child reports a model once the gate opens, then exits.
+        let script = format!(
+            r#"while [ ! -e '{}' ]; do sleep 0.05; done; printf '%s\n' '{{"type":"system","subtype":"init","session_id":"stub-sid","model":"claude-opus-5-5"}}'"#,
+            gate.display()
+        );
+        let (_reap, shared) = stub_session(&dir, "t", &script);
+        poison(&shared.model);
+
+        std::fs::write(&gate, "").unwrap();
+
+        eventually("the reader to see its child exit (it panicked on the model report instead)", || {
+            shared.exited.load(Ordering::SeqCst).then_some(())
+        })
+        .await;
+        assert_eq!(lock_recover(&shared.model).reported.as_deref(), Some("claude-opus-5-5"), "the report was still taken");
+    }
+
+    #[tokio::test]
+    async fn asking_for_the_model_a_focus_already_has_does_not_panic_after_a_runtime_lock_was_poisoned() {
+        for which in ["model", "state", "pending"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut reap, shared) = stub_session(&dir, "t", "cat > /dev/null");
+            let hub = reap.0.model_hub();
+            model_store::update_focus_record(&hub.paths.focus_models, "t", |_| {
+                Some(crate::model::store::FocusModelRecord { model: "opus".into(), ..Default::default() })
+            })
+            .unwrap();
+            match which {
+                "model" => poison(&shared.model),
+                "state" => poison(&shared.state),
+                _ => poison(&shared.pending),
+            }
+            let request = SwitchRequest {
+                model: Some("opus".into()),
+                effort: None,
+                actor: Actor::User,
+                set_as_agent_default: false,
+                request_id: None,
+            };
+
+            let ticket = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reap.0.request_switch("t", request)))
+                .unwrap_or_else(|_| panic!("a poisoned {which} lock made request_switch panic"));
+
+            assert_eq!(
+                ticket.immediate().map(|o| o.status),
+                Some(crate::ipc::protocol::ModelRequestStatus::Unchanged),
+                "{which}"
+            );
+        }
+    }
+
+    // [seam: step]
+    #[tokio::test]
+    async fn a_queued_message_whose_write_panics_is_not_lost_and_the_session_is_not_left_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_reap, shared) = stub_session(&dir, "t", "cat > /dev/null");
+        // `write_user_message` takes this lock first, so it panics deterministically.
+        poison(&shared.note_prefix);
+        lock_recover(&shared.pending).push_back(PendingMessage { text: "M1".into(), images: vec![] });
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(&shared, false)));
+
+        assert!(
+            !shared.writing.load(Ordering::SeqCst),
+            "`writing` stays set after a panic: a restart then waits five seconds under the manager lock for a write that is long over"
+        );
+        if outcome.is_err() {
+            let pending = lock_recover(&shared.pending);
+            assert_eq!(pending.front().map(|m| m.text.as_str()), Some("M1"), "the message was not delivered, so it is still queued");
+            drop(pending);
+            assert_eq!(*lock_recover(&shared.state), SessionState::Idle, "and nothing is running that would ever end");
+        }
+    }
+
+    // [seam: SessionManager::interrupt]
+    #[tokio::test]
+    async fn a_stop_pressed_while_a_queued_message_is_being_written_comes_after_that_message_on_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("stdin.log");
+        let mut mgr = SessionManager::with_store_path(dir.path().join("sessions.json"));
+        spawn_stub(&mut mgr, "perri", &recording_stub(&out));
+        let shared = mgr.sessions["perri"].shared.clone();
+        mgr.send_user_message("perri", "first", &[]).unwrap(); // written at once: a turn is running
+        mgr.send_user_message("perri", "M1", &[]).unwrap(); // queued behind it
+        assert_eq!(lock_recover(&shared.pending).len(), 1);
+        let reap = Reap(mgr);
+
+        // Park the writer: `write_user_message` takes this lock before it touches stdin.
+        let parked = shared.note_prefix.lock().unwrap();
+        // The turn ends: the reader's next step takes M1 off the queue and starts writing it.
+        let advancing = {
+            let shared = shared.clone();
+            std::thread::spawn(move || advance(&shared))
+        };
+        let started = Instant::now();
+        while !shared.writing.load(Ordering::SeqCst) {
+            assert!(started.elapsed() < Duration::from_secs(30), "the writer never took M1");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(lock_recover(&shared.pending).is_empty(), "M1 is off the queue and not yet on stdin");
+        // Stop is pressed now.
+        let stopping = std::thread::spawn(move || {
+            let mut reap = reap;
+            let outcome = reap.0.interrupt("perri");
+            (reap, outcome)
+        });
+        // Give an interrupt that does not wait for the writer the chance to get its frame out first.
+        // Nothing depends on how long this takes: a correct one is simply still waiting.
+        let patience = Instant::now() + Duration::from_millis(500);
+        while !stopping.is_finished() && Instant::now() < patience {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(parked);
+
+        advancing.join().unwrap();
+        let (_reap, outcome) = stopping.join().unwrap();
+
+        assert_eq!(outcome.unwrap(), InterruptOutcome::Requested);
+        let frames = eventually("the child to have read every frame", || {
+            let text = std::fs::read_to_string(&out).unwrap_or_default();
+            (text.lines().count() >= 3).then_some(text)
+        })
+        .await;
+        let labels: Vec<String> = frames
+            .lines()
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                match v["type"].as_str().unwrap() {
+                    "user" => v["message"]["content"].as_str().unwrap().to_owned(),
+                    other => format!("{other}:{}", v["request"]["subtype"].as_str().unwrap_or("")),
+                }
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["first", "M1", "control_request:interrupt"],
+            "the interrupt reaches the child after M1, so it applies to M1's turn; M1 never starts a turn the user tried to stop"
+        );
+        assert!(lock_recover(&shared.pending).is_empty(), "Stop leaves nothing queued");
     }
 }
 
