@@ -389,7 +389,7 @@ async fn an_unusable_initial_choice_is_ignored_and_the_defaults_apply() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_tool_created_focus_records_its_explicit_choice_before_the_spawn_and_it_beats_the_default() {
+async fn an_explicit_choice_recorded_by_the_manager_beats_the_default() {
     let mut rig = Rig::new().await;
     rig.declare_agent("claudia", "sonnet");
     rig.set_default("claudia", "haiku", None);

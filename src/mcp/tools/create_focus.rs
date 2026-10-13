@@ -79,8 +79,9 @@ pub struct CreateFocusRequest {
     /// MCP pty id of the calling session (its focus tag), so a focus spawned
     /// by a sensitive (Teri/Fred) or network-driven session inherits that.
     pub caller: Option<String>,
-    /// The model for the new focus (family alias or full name); beats the
-    /// per-agent default and the agent's declared model. `None`: resolve.
+    /// The model for the new focus. Parsed and validated only: not applied until
+    /// M5 adds upgrade approval for tool-created focuses, so a tool-created
+    /// focus resolves per-agent default > declared > CLI default.
     pub model: Option<String>,
     /// The effort for the new focus; `None`: the model's default.
     pub effort: Option<String>,
@@ -370,8 +371,6 @@ async fn create_focus_session(
         source_item,
         select_for_client,
         caller,
-        model,
-        effort,
         ..
     } = req;
 
@@ -401,13 +400,6 @@ async fn create_focus_session(
             first_free_tag(&base, |t| mgr.has_live_session(t))
         };
         register_sensitivity(&mgr, &tag, caller.as_deref(), initial_context.is_some() || instruction.is_some());
-
-        // The caller's choice is recorded before the child exists, so the spawn
-        // reads it; without one, the spawn resolves the defaults itself.
-        let explicit = choice_of(&CreateFocusRequest { model, effort, ..CreateFocusRequest::default() });
-        if explicit.is_some() {
-            mgr.record_new_focus_model(&tag, &agent, explicit.as_ref());
-        }
 
         // Spawn the session (no remote control; daemon-hosted stream-json child).
         // `spawn_session` already initialises the focus's pane tree.
