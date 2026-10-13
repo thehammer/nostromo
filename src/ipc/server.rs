@@ -950,10 +950,14 @@ fn handle_client_msg(
         ClientMsg::FocusRegistryPush { focuses } => {
             let (updated, departed, reconcilable, pane_registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
+                // Defence in depth: `refuse_for_network` already turns a network
+                // peer's push away before it gets here. Both of these act on what a
+                // push says, so neither may ever run for a network peer: a model a
+                // peer names would be an upgrade nobody approved.
                 if !trust.is_network() {
                     mgr.mark_teri_fred_focuses(&focuses);
+                    mgr.apply_initial_models(&focuses);
                 }
-                mgr.apply_initial_models(&focuses);
                 let (updated, departed) = mgr.set_focus_registry(focuses);
                 (
                     updated,

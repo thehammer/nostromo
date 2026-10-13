@@ -21,6 +21,13 @@ final class ModelDefaultsView: NSView {
     private var cancellables = Set<AnyCancellable>()
     private(set) var rows: [ModelDefaultRow] = []
     private(set) var clearButtons: [NSButton] = []
+    /// The one line shown in place of rows: "Loading…" until the first `ModelDefaults` frame has
+    /// arrived (the store has nothing yet), "No agent defaults yet" once it says there are none.
+    private(set) var emptyStateText: String?
+
+    static let loadingText = "Loading agent defaults\u{2026}"
+    static let noDefaultsText = "No agent defaults yet"
+    static let accessibilityTitle = "Agent defaults"
 
     private static let primary = NSColor.white.withAlphaComponent(ModelChip.normalAlpha)
     private static let secondary = NSColor.white.withAlphaComponent(ModelChip.pendingAlpha)
@@ -32,6 +39,9 @@ final class ModelDefaultsView: NSView {
         appearance = NSAppearance(named: .darkAqua)
         wantsLayer = true
         layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1).cgColor
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel(Self.accessibilityTitle)
 
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -96,8 +106,9 @@ final class ModelDefaultsView: NSView {
         title.textColor = Self.secondary
         stack.addArrangedSubview(title)
 
-        if rows.isEmpty {
-            let empty = NSTextField(labelWithString: "No agent defaults yet")
+        emptyStateText = rows.isEmpty ? (store.defaults == nil ? Self.loadingText : Self.noDefaultsText) : nil
+        if let emptyStateText {
+            let empty = NSTextField(labelWithString: emptyStateText)
             empty.font = .systemFont(ofSize: 11)
             empty.textColor = Self.secondary
             stack.addArrangedSubview(empty)
@@ -139,11 +150,14 @@ final class ModelDefaultsView: NSView {
 }
 
 /// The `NSPopover` around `ModelDefaultsView`, anchored to the chip.
-final class ModelDefaultsPopover: NSObject {
+final class ModelDefaultsPopover: NSObject, NSPopoverDelegate {
     let view: ModelDefaultsView
     private let popover = NSPopover()
 
     var isShown: Bool { popover.isShown }
+
+    /// Called when the popover has closed, however it closed (Escape, a click outside).
+    var onDidClose: (() -> Void)?
 
     init(store: ModelStore) {
         view = ModelDefaultsView(store: store)
@@ -154,6 +168,11 @@ final class ModelDefaultsPopover: NSObject {
         popover.behavior = .transient
         popover.animates = false
         popover.appearance = NSAppearance(named: .darkAqua)
+        popover.delegate = self
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        onDidClose?()
     }
 
     func show(relativeTo anchor: NSView) {

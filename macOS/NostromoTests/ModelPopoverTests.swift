@@ -624,3 +624,164 @@ final class ModelPopoverTests: XCTestCase {
         }
     }
 }
+
+
+// MARK: - "Use for new <Agent> focuses" and "Agent defaults…"
+
+extension ModelPopoverTests {
+
+    private func tickUseForNewFocuses(_ vc: ModelPopoverViewController) {
+        vc.useForNewFocusesCheckbox.state = .on
+    }
+
+    // Ticking the box and clicking the model already in use means "make this the default": the
+    // request must go out (the daemon writes the default even though the switch changes nothing),
+    // and the user is told, because nothing else on screen changes.
+    func testTickedBoxAndTheCurrentModelRowSendsTheDefaultRequestAndConfirms() {
+        let vc = openPopup(state: runningState(model: "sonnet"))
+        tickUseForNewFocuses(vc)
+        returnKey(vc)
+        XCTAssertEqual(sender.sets, [set(model: "sonnet", effort: nil, asDefault: true)])
+        XCTAssertEqual(closes, 1)
+        XCTAssertEqual(store.failure(for: tag)?.message, "Sonnet is now the default for new Claudia focuses")
+    }
+
+    func testUntickedBoxAndTheCurrentModelRowStillSendsNothingAndSaysNothing() {
+        let vc = openPopup(state: runningState(model: "sonnet"))
+        returnKey(vc)
+        XCTAssertEqual(sender.sets, [])
+        XCTAssertEqual(closes, 1)
+        XCTAssertNil(store.failure(for: tag))
+    }
+
+    func testClickingTheCurrentModelRowWithTheBoxTickedSendsTheDefaultRequest() throws {
+        let vc = openPopup(state: runningState(model: "sonnet"))
+        tickUseForNewFocuses(vc)
+        try row(vc.modelRowViews, 1).activate()
+        XCTAssertEqual(sender.sets, [set(model: "sonnet", effort: nil, asDefault: true)])
+    }
+
+    func testTickedBoxAndAnotherModelSendsTheSwitchAsTheDefaultWithoutAnExtraNotice() {
+        let vc = openPopup(state: runningState(model: "sonnet"))
+        tickUseForNewFocuses(vc)
+        down(vc)   // Sonnet -> Opus
+        returnKey(vc)
+        XCTAssertEqual(sender.sets, [set(model: "opus", effort: nil, asDefault: true)])
+        XCTAssertNil(store.failure(for: tag), "the chip changes; there is nothing to confirm")
+    }
+
+    func testTickedBoxAndTheCurrentEffortSendsTheDefaultRequestAndConfirms() {
+        let vc = openPopup(state: runningState(model: "opus", effort: "high"))
+        tickUseForNewFocuses(vc)
+        tab(vc)
+        returnKey(vc)
+        XCTAssertEqual(sender.sets, [set(model: nil, effort: "high", asDefault: true)])
+        XCTAssertEqual(closes, 1)
+        XCTAssertEqual(store.failure(for: tag)?.message, "High effort is now the default for new Claudia focuses")
+    }
+
+    func testUntickedBoxAndTheCurrentEffortStillSendsNothingAndSaysNothing() {
+        let vc = openPopup(state: runningState(model: "opus", effort: "high"))
+        tab(vc)
+        returnKey(vc)
+        XCTAssertEqual(sender.sets, [])
+        XCTAssertEqual(closes, 1)
+        XCTAssertNil(store.failure(for: tag))
+    }
+
+    func testTickedBoxAndADisabledEffortRowStillDoesNothing() throws {
+        let vc = openPopup(state: runningState(model: "sonnet", effort: nil))
+        tickUseForNewFocuses(vc)
+        let xhigh = try row(vc.effortRowViews, 4)   // Default, low, medium, high, xhigh: not offered by Sonnet
+        XCTAssertFalse(xhigh.isRowEnabled, "precondition")
+        xhigh.activate()
+        XCTAssertEqual(sender.sets, [])
+        XCTAssertEqual(closes, 0)
+        XCTAssertNil(store.failure(for: tag))
+    }
+
+    func testTheTickedBoxDoesNothingForAFocusWithNoAgent() {
+        store.connectionChanged(true)
+        store.ingest(.modelCatalog(families: standardFamilies(), stale: false, fetchedAt: nil))
+        store.ingest(.sessionModelState(runningState(model: "sonnet")))
+        let vc = ModelPopoverViewController(tag: tag, agentName: nil, store: store) { [unowned self] in self.closes += 1 }
+        _ = vc.view
+        XCTAssertTrue(vc.useForNewFocusesCheckbox.isHidden)
+        tickUseForNewFocuses(vc)
+        returnKey(vc)   // the current row
+        XCTAssertEqual(sender.sets, [], "a hidden box cannot make a default")
+        down(vc)
+        returnKey(vc)
+        XCTAssertEqual(sender.sets, [set(model: "opus", effort: nil, asDefault: false)])
+    }
+
+    // MARK: Agent defaults…
+
+    func testTheAgentDefaultsButtonClosesThePopupThenAsksForTheDefaultsList() throws {
+        let vc = openPopup()
+        var closesWhenShown: Int?
+        vc.onShowAgentDefaults = { [unowned self] in closesWhenShown = self.closes }
+        let button = vc.agentDefaultsButton
+        XCTAssertEqual(button.attributedTitle.string, "Agent defaults\u{2026}")
+        XCTAssertFalse(button.isHidden)
+
+        let action = try XCTUnwrap(button.action)
+        XCTAssertTrue(NSApp.sendAction(action, to: button.target, from: button))
+
+        XCTAssertEqual(closes, 1)
+        XCTAssertEqual(closesWhenShown, 1, "the popup closes first, then the list opens")
+        XCTAssertEqual(sender.sets, [])
+    }
+
+    // MARK: VoiceOver
+
+    func testTheFooterControlsHaveVoiceOverLabels() {
+        let vc = openPopup()
+        XCTAssertEqual(vc.useForNewFocusesCheckbox.accessibilityLabel(), "Use for new Claudia focuses")
+        XCTAssertEqual(vc.agentDefaultsButton.accessibilityLabel(), "Agent defaults\u{2026}")
+    }
+
+    // MARK: Legibility of the new footer (bitmap)
+
+    private func measureFooter(_ control: (ModelPopoverViewController) -> NSView, key: Bool,
+                               textInset: CGFloat) -> RegionLuminance {
+        let vc = openPopup()
+        let content = vc.view
+        content.layoutSubtreeIfNeeded()
+        let size = content.fittingSize
+        content.frame = NSRect(origin: .zero, size: size)
+        let window = windows.makeStateWindow(key: key, width: size.width, height: size.height)
+        let host = NSView(frame: NSRect(origin: .zero, size: size))
+        host.wantsLayer = true
+        host.layer?.backgroundColor = NSColor(calibratedWhite: 0.15, alpha: 1).cgColor
+        window.contentView = host
+        host.addSubview(content)
+        window.orderFront(nil)
+        host.layoutSubtreeIfNeeded()
+        let target = control(vc)
+        let region = target.convert(target.bounds, to: host)
+        var text = region
+        text.origin.x += textInset
+        text.size.width -= textInset
+        return measureRegion(of: host, region: region, textArea: text.insetBy(dx: 0, dy: 3))
+    }
+
+    func testTheUseForNewFocusesLabelIsLegibleInTheKeyWindowAndAnInactiveOne() {
+        for key in [true, false] {
+            // The box itself is system-drawn; the title starts after it.
+            let m = measureFooter({ $0.useForNewFocusesCheckbox }, key: key, textInset: 22)
+            let ratio = modelContrastRatio(m.brightestText, m.fill)
+            XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(key ? "key" : "inactive") window: \(ratio):1")
+            XCTAssertGreaterThan(m.brightestText, m.fill)
+        }
+    }
+
+    func testTheAgentDefaultsLinkIsLegibleInTheKeyWindowAndAnInactiveOne() {
+        for key in [true, false] {
+            let m = measureFooter({ $0.agentDefaultsButton }, key: key, textInset: 0)
+            let ratio = modelContrastRatio(m.brightestText, m.fill)
+            XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(key ? "key" : "inactive") window: \(ratio):1")
+            XCTAssertGreaterThan(m.brightestText, m.fill)
+        }
+    }
+}

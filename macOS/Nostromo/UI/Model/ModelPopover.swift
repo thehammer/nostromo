@@ -207,6 +207,7 @@ final class ModelPopoverViewController: NSViewController {
         useForNewFocusesCheckbox.attributedTitle = NSAttributedString(
             string: ModelPresentation.footerTitle(agent: agentName ?? "agent"),
             attributes: [.foregroundColor: PopoverPalette.primary, .font: NSFont.systemFont(ofSize: 11)])
+        useForNewFocusesCheckbox.setAccessibilityLabel(ModelPresentation.footerTitle(agent: agentName ?? "agent"))
         useForNewFocusesCheckbox.isHidden = (agentName ?? "").isEmpty
         useForNewFocusesCheckbox.state = .off
 
@@ -303,13 +304,25 @@ final class ModelPopoverViewController: NSViewController {
 
     private func chooseModel(_ row: ModelPresentation.ModelRow) {
         let state = store.state(for: tag)
-        // The model already in use does nothing, unless a switch is pending: choosing the
-        // current model then cancels it (the daemon reads it as "back to what is running").
-        if !(row.isCurrent && state?.pending == nil) {
+        let isNoOp = row.isCurrent && state?.pending == nil
+        // The model already in use does nothing, unless a switch is pending (choosing the
+        // current model then cancels it: the daemon reads it as "back to what is running") or
+        // "Use for new <Agent> focuses" is ticked: that means "make this the default", and the
+        // daemon writes the default even when the switch itself changes nothing.
+        let setsDefault = setsAgentDefault
+        if setsDefault || !isNoOp {
             store.requestSwitch(tag: tag, model: row.alias, effort: effortAfterSwitching(to: row.alias, state: state),
-                                setAsAgentDefault: setsAgentDefault)
+                                setAsAgentDefault: setsDefault)
         }
         onClose()
+        if setsDefault && isNoOp { confirmDefault(row.title) }
+    }
+
+    /// Nothing on screen changes when the default was set to what the focus already runs, so say
+    /// so. After the popup has closed: the notice is not shown while the popup is up.
+    private func confirmDefault(_ choice: String) {
+        guard let agentName else { return }
+        store.postNotice(tag: tag, message: ModelPresentation.defaultSetNotice(agent: agentName, choice: choice))
     }
 
     private var setsAgentDefault: Bool {
@@ -333,11 +346,15 @@ final class ModelPopoverViewController: NSViewController {
     }
 
     private func chooseEffort(_ row: ModelPresentation.EffortRow) {
+        guard row.isEnabled else { return }
         let state = store.state(for: tag)
-        if row.isEnabled, !(row.isCurrent && state?.pending == nil) {
-            store.requestSwitch(tag: tag, model: nil, effort: row.value, setAsAgentDefault: setsAgentDefault)
+        let isNoOp = row.isCurrent && state?.pending == nil
+        let setsDefault = setsAgentDefault
+        if setsDefault || !isNoOp {
+            store.requestSwitch(tag: tag, model: nil, effort: row.value, setAsAgentDefault: setsDefault)
         }
-        if row.isEnabled { onClose() }
+        onClose()
+        if setsDefault && isNoOp { confirmDefault(row.value == "default" ? "Default effort" : "\(row.title.capitalized) effort") }
     }
 
     // MARK: Content

@@ -10,6 +10,9 @@ import NostromoKit
 ///
 /// An untouched pair sends nothing (`choice` is nil): the daemon resolves the defaults itself
 /// when it starts the session, so a declared or CLI-default focus is recorded as such.
+///
+/// An effort needs a model to attach to: with no model chosen and none resolved (no default, no
+/// declared model), the Effort picker is disabled and shows "Default".
 final class CreateFocusModelPickers {
     /// What the sheet hands to the new focus: model alias and effort level, either may be nil.
     struct Choice: Equatable {
@@ -56,14 +59,18 @@ final class CreateFocusModelPickers {
     var choice: Choice? {
         guard userTouchedModel || userTouchedEffort else { return nil }
         // Effort needs a model to attach to; "Default" falls back to the agent's resolved one.
-        let model = selectedModel ?? agent.flatMap { store.resolvedStart(agent: $0).model }
-        return Choice(model: model, effort: selectedEffort)
+        return Choice(model: selectedModel ?? resolvedStartModel, effort: selectedEffort)
     }
 
     /// The alias shown in the Model picker; nil for "Default".
     var selectedModel: String? { modelPopup.selectedItem?.representedObject as? String }
     /// The level shown in the Effort picker; nil for "Default".
     var selectedEffort: String? { effortPopup.selectedItem?.representedObject as? String }
+
+    /// "Choose a model first": the Effort picker's tooltip while no model resolves.
+    static let chooseModelFirstTooltip = "Choose a model first"
+    /// The Model picker's "Default" title when the agent has no model of its own.
+    static let cliDefaultTitle = "CLI default"
 
     var modelTitles: [String] { modelPopup.itemTitles }
     var effortTitles: [String] { effortPopup.itemTitles }
@@ -78,7 +85,7 @@ final class CreateFocusModelPickers {
 
     /// Pick an effort level as a click does (nil: "Default").
     func userPickEffort(_ level: String?) {
-        guard let index = effortPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == level })
+        guard effortPopup.isEnabled, let index = effortPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == level })
         else { return }
         effortPopup.selectItem(at: index)
         effortPicked()
@@ -97,6 +104,12 @@ final class CreateFocusModelPickers {
 
     // MARK: - Content
 
+    /// The model a new focus of the selected agent starts on when the Model picker says "Default":
+    /// its per-agent default, else its declared model. nil: the CLI's own default.
+    private var resolvedStartModel: String? {
+        agent.flatMap { store.resolvedStart(agent: $0).model }
+    }
+
     private func reload() {
         let start = agent.map { store.resolvedStart(agent: $0) } ?? (model: nil, effort: nil)
         let keepModel = userTouchedModel ? selectedModel : start.model
@@ -107,15 +120,25 @@ final class CreateFocusModelPickers {
 
     private func rebuildModelItems(selecting alias: String?) {
         modelPopup.removeAllItems()
-        add("Default", value: nil, to: modelPopup)
+        add(defaultModelTitle(), value: nil, to: modelPopup)
         for family in (store.catalog?.families ?? []).sorted(by: { $0.rank < $1.rank }) {
             add(family.displayName, value: family.alias, to: modelPopup)
         }
         select(alias.flatMap(familyAlias(for:)), in: modelPopup)
     }
 
+    /// "Agent default (Sonnet)" when the agent starts on a model of its own, else "CLI default".
+    private func defaultModelTitle() -> String {
+        guard let model = resolvedStartModel else { return Self.cliDefaultTitle }
+        let alias = familyAlias(for: model)
+        let name = store.catalog?.families.first { $0.alias == alias }?.displayName
+            ?? ModelPresentation.familyName(forModel: model)
+        return "Agent default (\(name))"
+    }
+
     private func rebuildEffortItems(keeping level: String?) {
-        let family = store.catalog?.families.first { $0.alias == selectedModel }
+        let model = selectedModel ?? resolvedStartModel
+        let family = model.flatMap(familyAlias(for:)).flatMap { alias in store.catalog?.families.first { $0.alias == alias } }
         effortPopup.removeAllItems()
         add("Default", value: nil, to: effortPopup)
         for level in ModelPresentation.effortLevels {
@@ -124,8 +147,11 @@ final class CreateFocusModelPickers {
             // in the model popup); "Default", or a model the catalogue lacks, offers every level.
             if let family { item.isEnabled = family.efforts.contains(level) }
         }
+        // No model to attach an effort to: the picker is off, and an effort picked earlier goes.
+        effortPopup.isEnabled = model != nil
+        effortPopup.toolTip = model == nil ? Self.chooseModelFirstTooltip : nil
         let wanted = level.flatMap { l in effortPopup.menu?.items.first { ($0.representedObject as? String) == l }?.isEnabled == true ? l : nil }
-        select(wanted, in: effortPopup)
+        select(model == nil ? nil : wanted, in: effortPopup)
     }
 
     /// The alias of the family `model` (an alias or a full name) belongs to, if the catalogue has it.

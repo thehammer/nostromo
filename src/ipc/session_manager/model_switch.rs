@@ -706,6 +706,15 @@ impl SessionManager {
     /// record is written only when the tag has none, so an existing focus's
     /// record is never touched by a later change of a default.
     ///
+    /// **`explicit` is a user's choice and nothing else.** Only the Mac's create
+    /// sheet may supply one (it arrives as `FocusMeta.initial_*`, through
+    /// [`Self::apply_initial_models`], from a local, non-network client). Nothing
+    /// a tool, an agent, a script or a network peer sends may reach this
+    /// parameter: a model it names could be a costlier upgrade that nobody
+    /// approved. M5 adds that approval; until it lands, any other caller
+    /// must pass `None`. (It is `pub` only because the integration tests drive
+    /// it; production passes `None` at the one spawn site.)
+    ///
     /// Returns the declared model when that is what was resolved: the record
     /// is then an observed one (a restart passes no `--model`), but the first
     /// start passes it. A CLI-default result writes nothing; the first report

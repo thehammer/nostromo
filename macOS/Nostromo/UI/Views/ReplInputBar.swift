@@ -29,7 +29,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     let modelChip            = ModelChip()
     /// The popup the chip (or ⇧⌘M) opens, while it is open.
     private(set) var modelPopover: ModelPopover?
-    private var agentDefaultsPopover: ModelDefaultsPopover?
+    private(set) var agentDefaultsPopover: ModelDefaultsPopover?
     private var textTopConstraint: NSLayoutConstraint!
     /// Extra height the image tray takes above the text while chips are attached.
     private static let trayExtra: CGFloat = 54
@@ -338,8 +338,12 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     }
 
     /// "Agent defaults…": the per-agent defaults list, in a popover on the chip.
-    private func showAgentDefaults(store: ModelStore) {
+    func showAgentDefaults(store: ModelStore) {
+        agentDefaultsPopover?.close()
         let popover = ModelDefaultsPopover(store: store)
+        popover.onDidClose = { [weak self, weak popover] in
+            if self?.agentDefaultsPopover === popover { self?.agentDefaultsPopover = nil }
+        }
         agentDefaultsPopover = popover
         popover.show(relativeTo: modelChip)
     }

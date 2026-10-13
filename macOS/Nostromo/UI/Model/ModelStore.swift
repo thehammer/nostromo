@@ -25,7 +25,8 @@ struct ModelRequestResultWire: Equatable {
     var warning: String?
 }
 
-/// Something to tell the user about one focus's model: a switch that did not take.
+/// Something to tell the user about one focus's model: a switch that did not take, or a
+/// confirmation (`ModelStore.postNotice`).
 struct ModelSwitchFailure: Equatable {
     /// Increases with every failure the store records, so a view can tell a new one from the
     /// one it already showed.
@@ -160,6 +161,12 @@ final class ModelStore: ObservableObject {
     func forget(tag: String) {
         states.removeValue(forKey: tag)
         failures.removeValue(forKey: tag)
+    }
+
+    /// Tell the user something about `tag`'s model that is not a failure (a default was saved),
+    /// through the same short-lived notice a failed switch uses.
+    func postNotice(tag: String, message: String) {
+        fail(tag: tag, message: message)
     }
 
     func failure(for tag: String) -> ModelSwitchFailure? {
