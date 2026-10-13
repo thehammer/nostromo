@@ -192,12 +192,16 @@ async fn main() -> Result<()> {
         mgr.configure_model_broadcast(broadcast_tx.clone());
         mgr.model_hub()
     };
+    let sweep_mgr = Arc::clone(&session_mgr);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(nostromo::model::catalog::PROBE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             let _ = nostromo::model::hub::refresh_catalog(&model_hub).await;
+            // Forget the model state of focuses long gone (a no-op until the
+            // Mac has pushed its focus registry).
+            sweep_mgr.lock().unwrap().sweep_model_state(chrono::Utc::now());
         }
     });
 

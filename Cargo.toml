@@ -105,12 +105,13 @@ serde_yaml = "0.9"
 url = "2"
 unicode-width = "0.1"
 unicode-normalization = "0.1.25"
+# Private scratch dir for the model catalogue probe.
+tempfile = "3"
 
 [dev-dependencies]
 nostromo = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["yaml"] }
 wiremock = "0.6"
-tempfile = "3"
 # Enables tokio::time::{pause, advance} for deterministic staleness-tick tests
 # (pane_source_liveness / pane_sources staleness tests). Unified with the main
 # `tokio` dependency's feature set at build time (single-crate, not a workspace).

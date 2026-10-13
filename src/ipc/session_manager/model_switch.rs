@@ -16,8 +16,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{
-    advance, finish_apply, load_id_store, write_control_request, PendingMessage, SessionEvent,
-    SessionManager, Shared,
+    advance, finish_apply, load_id_store, lock_recover, write_control_request, PendingMessage,
+    SessionEvent, SessionManager, Shared,
 };
 use crate::ipc::protocol::{
     EffortChoice, ModelRequestStatus, PendingModel, RecordedModel, ReportedModel, ServerMsg,
@@ -79,7 +79,28 @@ pub(super) struct ModelRuntime {
     pub(super) noted_mismatch: Option<(String, String)>,
 }
 
+/// What a model state needs of a [`ModelRuntime`], copied out so the rest of
+/// the state can be built (and its files read) without holding the lock.
+pub(super) struct RuntimeView {
+    reported: Option<String>,
+    effective_effort: Option<String>,
+    pending: Option<ModelTarget>,
+    phase: SwitchPhase,
+}
+
 impl ModelRuntime {
+    pub(super) fn view(&self) -> RuntimeView {
+        RuntimeView {
+            reported: self.reported.clone(),
+            effective_effort: self.effective_effort.clone(),
+            pending: self
+                .applying
+                .clone()
+                .or_else(|| self.waiting.as_ref().map(|(t, _)| t.clone())),
+            phase: self.phase(),
+        }
+    }
+
     pub(super) fn phase(&self) -> SwitchPhase {
         if self.applying.is_some() {
             SwitchPhase::Applying
@@ -98,6 +119,17 @@ pub(super) struct ControlReply {
     pub(super) error: Option<String>,
     pub(super) error_code: Option<String>,
     pub(super) body: serde_json::Value,
+}
+
+/// How long model state of a focus that no longer exists is kept.
+pub const MODEL_STATE_RETENTION: chrono::Duration = chrono::Duration::days(30);
+
+/// What [`SessionManager::sweep_model_state`] removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelSweep {
+    pub records_removed: usize,
+    pub ledgers_removed: usize,
+    pub request_state_removed: usize,
 }
 
 /// How long the daemon waits for the answer to one control request.
@@ -217,26 +249,59 @@ impl SessionManager {
 
     /// `tag`'s model state: its record, and what its session reports.
     pub fn session_model_state(&self, tag: &str) -> SessionModelState {
-        match self.sessions.get(tag) {
-            Some(session) => {
-                let rt = session.shared.model.lock().unwrap();
-                model_state(&self.model_hub, tag, Some(&rt), session.alive())
-            }
-            None => model_state(&self.model_hub, tag, None, false),
-        }
+        let record = model_store::focus_record(&self.model_hub.paths.focus_models, tag);
+        self.model_state_of(tag, record, model_activity::current_posture())
+    }
+
+    /// The state of every tag in [`Self::model_state_tags`] (what a client
+    /// subscribing to the model topic is replayed), reading the store and the
+    /// posture once for all of them.
+    pub fn model_state_replay(&self) -> Vec<SessionModelState> {
+        let mut records = model_store::load_focus_models(&self.model_hub.paths.focus_models);
+        let posture = model_activity::current_posture();
+        let tags = self.tags_with_model_state(records.keys().cloned());
+        tags.into_iter()
+            .map(|tag| {
+                let record = records.remove(&tag);
+                self.model_state_of(&tag, record, posture.clone())
+            })
+            .collect()
     }
 
     /// Every tag that has a model state worth replaying to a client: live
     /// sessions, registered focuses and recorded focuses.
     pub fn model_state_tags(&self) -> Vec<String> {
+        let recorded =
+            model_store::load_focus_models(&self.model_hub.paths.focus_models).into_keys();
+        self.tags_with_model_state(recorded)
+    }
+
+    fn tags_with_model_state(&self, recorded: impl Iterator<Item = String>) -> Vec<String> {
         let mut tags = self.known_focus_tags();
-        for tag in model_store::load_focus_models(&self.model_hub.paths.focus_models).into_keys() {
+        for tag in recorded {
             if !tags.contains(&tag) {
                 tags.push(tag);
             }
         }
         tags.retain(|t| !self.restrictions.contains_key(t));
         tags
+    }
+
+    fn model_state_of(
+        &self,
+        tag: &str,
+        record: Option<FocusModelRecord>,
+        posture: Option<String>,
+    ) -> SessionModelState {
+        // The runtime is read under its lock; the rest is built outside it.
+        let (view, running) = match self.sessions.get(tag) {
+            Some(session) => (
+                Some(lock_recover(&session.shared.model).view()),
+                session.alive(),
+            ),
+            None => (None, false),
+        };
+        model_state_from(&self.model_hub, tag, view, running, record, posture)
     }
 
     /// Put a one-line note for the agent in front of the next user message
@@ -274,6 +339,12 @@ impl SessionManager {
             .or_else(|| load_id_store(&self.store_path).get(tag).cloned());
 
         let ctx = SessionCtx::stopped(tag, agent.as_deref(), session_id.as_deref(), &hub);
+        // A focus the daemon has never heard of: refusing keeps a typo'd or
+        // departed tag from leaving a record that nothing will ever clean up.
+        let known = session.is_some()
+            || record.is_some()
+            || session_id.is_some()
+            || self.known_focus_tags().iter().any(|t| t == tag);
         let refuse = |to: &ModelTarget, code: &str, message: String| {
             log_switch(
                 &ctx,
@@ -311,6 +382,13 @@ impl SessionManager {
         };
         let target = ModelTarget { model, effort };
 
+        if !known {
+            return refuse(
+                &target,
+                "unknown_focus",
+                format!("no focus named {tag}"),
+            );
+        }
         if self.restrictions.contains_key(tag) {
             return refuse(
                 &target,
@@ -353,7 +431,7 @@ impl SessionManager {
                 model: target.model.clone(),
                 effort: target.effort.clone(),
                 source: ModelSource::Focus,
-                pending: None,
+                ..FocusModelRecord::default()
             })
         });
         if let Err(e) = written {
@@ -364,6 +442,10 @@ impl SessionManager {
         }
         let catalog = hub.catalog();
         let text = copy::stored(current.as_ref(), &target, &catalog);
+        // A stopped session's note belongs after the prompts its stored JSONL
+        // holds, which means parsing that file: done on a thread of its own
+        // (this runs under the manager lock), the ticket resolving after it.
+        let mut stopped_note = None;
         if let Some(session) = self.sessions.get(tag) {
             {
                 // This choice supersedes a switch the dead process still had
@@ -374,13 +456,7 @@ impl SessionManager {
             }
             emit_note(&session.shared, NoteKind::ModelChanged, text.clone());
         } else if !ctx.session_id.is_empty() {
-            note_while_stopped(
-                &hub,
-                tag,
-                &ctx.session_id,
-                NoteKind::ModelChanged,
-                text.clone(),
-            );
+            stopped_note = Some(ctx.session_id.clone());
         }
         log_switch(
             ctx,
@@ -393,12 +469,28 @@ impl SessionManager {
         );
         hub.record_request(tag, &actor, &target, ModelRequestStatus::Applied);
         hub.broadcast(ServerMsg::SessionModelState(self.session_model_state(tag)));
-        SwitchTicket::ready(ModelRequestOutcome {
+        let outcome = ModelRequestOutcome {
             status: ModelRequestStatus::Applied,
             code: None,
-            message: Some(text),
+            message: Some(text.clone()),
             warning: None,
-        })
+        };
+        let Some(session_id) = stopped_note else {
+            return SwitchTicket::ready(outcome);
+        };
+        let (tx, rx) = oneshot::channel();
+        let tag = tag.to_owned();
+        let spawned = std::thread::Builder::new().name("model-stopped-note".into()).spawn({
+            let hub = Arc::clone(&hub);
+            move || {
+                note_while_stopped(&hub, &tag, &session_id, NoteKind::ModelChanged, text);
+                let _ = tx.send(outcome);
+            }
+        });
+        if let Err(e) = spawned {
+            warn!("could not start the thread that notes a stored model change: {e}");
+        }
+        SwitchTicket(TicketInner::Later(rx))
     }
 
     /// Set (or, with `clear`, remove) `agent`'s default model for new focuses.
@@ -515,6 +607,80 @@ impl SessionManager {
         }
     }
 
+    /// Forget the model state of focuses that are long gone, so the files and
+    /// maps do not grow without bound. Deliberately conservative: it does
+    /// nothing until the focus registry is known (an unregistered tag may just
+    /// be one not pushed yet), and only touches what is older than
+    /// [`MODEL_STATE_RETENTION`] and belongs to no live or registered focus:
+    /// store records (by `updated_at`), notes ledgers (by file age) and the
+    /// last-request memory.
+    pub fn sweep_model_state(&mut self, now: chrono::DateTime<chrono::Utc>) -> ModelSweep {
+        let mut report = ModelSweep::default();
+        if !self.registry_known() {
+            return report;
+        }
+        let hub = Arc::clone(&self.model_hub);
+        let cutoff = now - MODEL_STATE_RETENTION;
+        let is_live = |tag: &str| self.sessions.contains_key(tag) || self.focus_may_exist(tag);
+
+        match model_store::sweep_focus_records(&hub.paths.focus_models, now, cutoff, is_live) {
+            Ok(n) => report.records_removed = n,
+            Err(e) => warn!("could not sweep the focus model store: {e:#}"),
+        }
+
+        report.ledgers_removed = self.sweep_ledgers(&hub, cutoff, is_live);
+
+        report.request_state_removed = hub.forget_requests(is_live, cutoff);
+        if report != ModelSweep::default() {
+            info!(
+                records = report.records_removed,
+                ledgers = report.ledgers_removed,
+                requests = report.request_state_removed,
+                "swept stale model state"
+            );
+        }
+        report
+    }
+
+    /// Delete the notes ledgers older than `cutoff` that no live focus resumes
+    /// (a ledger is kept while any live focus resumes its session). Returns
+    /// how many were deleted.
+    fn sweep_ledgers(
+        &self,
+        hub: &ModelHub,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        is_live: impl Fn(&str) -> bool,
+    ) -> usize {
+        let mut live_sessions: std::collections::HashSet<String> = load_id_store(&self.store_path)
+            .into_iter()
+            .filter(|(tag, _)| is_live(tag))
+            .map(|(_, sid)| sid)
+            .collect();
+        live_sessions.extend(self.sessions.values().filter_map(|s| s.session_id.clone()));
+        let Ok(entries) = std::fs::read_dir(&hub.paths.notes_dir) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(sid) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|at| chrono::DateTime::<chrono::Utc>::from(at) < cutoff)
+                .unwrap_or(false);
+            if old && !live_sessions.contains(sid) && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// The agent a focus runs: its session's, else the pushed registry's.
     pub(super) fn agent_of(&self, tag: &str) -> Option<String> {
         self.sessions
@@ -529,7 +695,11 @@ impl SessionManager {
     }
 
     /// The model a spawn of `tag` runs on, and the note to make about it.
-    /// A recorded model the (fresh) catalogue no longer offers is replaced by
+    ///
+    /// Only a *chosen* record (a switch, a creation choice, a per-agent
+    /// default) is passed on: an observed one just remembers what the session
+    /// ran, so the agent's front matter and the CLI default still apply.
+    /// A chosen model the (fresh) catalogue no longer offers is replaced by
     /// the agent's default: per-agent default, else its declared model, else
     /// the CLI default (no record at all).
     pub(super) fn spawn_model(
@@ -541,16 +711,19 @@ impl SessionManager {
         let Some(record) = model_store::focus_record(&hub.paths.focus_models, tag) else {
             return (None, None);
         };
+        if !record.source.is_chosen() {
+            return (None, None);
+        }
         let catalog = hub.catalog();
-        let offered = catalog.is_empty()
-            || catalog.stale
-            || record.model.starts_with("claude-")
-            || catalog.entry(&record.model).is_some();
+        // A stale catalogue is what an earlier probe saw, so it can't say a
+        // model went away; an empty one can't say anything but the known aliases.
+        let offered = (catalog.stale && !catalog.is_empty()) || is_offered(&record.model, &catalog);
         if offered {
             return (Some(record.target()), None);
         }
         let replacement = model_store::load_defaults(&hub.paths.defaults)
             .remove(agent)
+            .filter(|d| is_offered(&d.model, &catalog))
             .map(|d| {
                 (
                     ModelTarget {
@@ -578,7 +751,7 @@ impl SessionManager {
                     model: target.model.clone(),
                     effort: target.effort.clone(),
                     source: *source,
-                    pending: None,
+                    ..FocusModelRecord::default()
                 })
         });
         if let Err(e) = written {
@@ -592,7 +765,8 @@ impl SessionManager {
             .map(|(t, _)| t.model.clone())
             .unwrap_or_else(|| "default".into());
         let note = copy::unavailable(&record.model, &now, &catalog);
-        (replacement.map(|(t, _)| t), Some(note))
+        let target = replacement.and_then(|(t, source)| source.is_chosen().then_some(t));
+        (target, Some(note))
     }
 
     /// Take what a session's replacement must inherit: messages still queued
@@ -600,12 +774,25 @@ impl SessionManager {
     pub(super) fn take_carry(&self, tag: &str) -> Carry {
         match self.sessions.get(tag) {
             Some(s) => {
-                // Same locks, in the same order, as `step`: a message is
-                // either written by the old process or carried, never neither.
-                let _state = s.shared.state.lock().unwrap();
-                let waiting = s.shared.model.lock().unwrap().waiting.take();
-                let messages = s.shared.pending.lock().unwrap().drain(..).collect();
-                Carry { messages, waiting }
+                // Same locks, in the same order, as `step`. A message `step`
+                // took off the queue and is still writing is neither queued
+                // nor yet written: wait (state released) for its outcome, so
+                // it is either delivered to the old process or back on the
+                // queue for the carry, never neither. The caller has killed
+                // or lost the process, so the write ends at once; the limit
+                // only keeps a freak from wedging the manager.
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let state = lock_recover(&s.shared.state);
+                    if s.shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                        drop(state);
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    let waiting = lock_recover(&s.shared.model).waiting.take();
+                    let messages = lock_recover(&s.shared.pending).drain(..).collect();
+                    break Carry { messages, waiting };
+                }
             }
             None => Carry::default(),
         }
@@ -644,13 +831,24 @@ pub(super) fn on_model_report(shared: &Shared, model: &str) {
         return;
     }
     let catalog = ctx.hub.catalog();
-    let (changed, needs_record, mismatch) = {
+    let alias = catalog
+        .family_for_resolved(model)
+        .map(|e| e.value.clone())
+        .unwrap_or_else(|| model.to_owned());
+    let (changed, needs_record, follow, mismatch) = {
         let mut rt = shared.model.lock().unwrap();
         let changed = rt.reported.as_deref() != Some(model);
         rt.reported = Some(model.to_owned());
         let mut mismatch = None;
+        let mut follow = false;
         if let Some(record) = &rt.recorded {
             match crate::model::runs_as(&record.model, model, &catalog) {
+                // Nobody chose the recorded model: the agent's front matter
+                // or the CLI default moved on, and the record moves with it.
+                Some(false) if !record.source.is_chosen() => {
+                    follow = true;
+                    rt.noted_mismatch = None;
+                }
                 Some(false) => {
                     let key = (record.model.clone(), model.to_owned());
                     if rt.noted_mismatch.as_ref() != Some(&key) {
@@ -667,13 +865,24 @@ pub(super) fn on_model_report(shared: &Shared, model: &str) {
                 None => {}
             }
         }
-        (changed, rt.recorded.is_none(), mismatch)
+        (changed, rt.recorded.is_none(), follow, mismatch)
     };
+    if follow {
+        let written =
+            model_store::update_focus_record(&ctx.hub.paths.focus_models, &ctx.tag, |existing| {
+                existing.map(|mut record| {
+                    if !record.source.is_chosen() {
+                        record.model = alias.clone();
+                    }
+                    record
+                })
+            });
+        match written {
+            Ok(record) => shared.model.lock().unwrap().recorded = record,
+            Err(e) => warn!(tag = %ctx.tag, "could not update the observed model: {e:#}"),
+        }
+    }
     if needs_record {
-        let alias = catalog
-            .family_for_resolved(model)
-            .map(|e| e.value.clone())
-            .unwrap_or_else(|| model.to_owned());
         let source = if policy::declared_model(&ctx.agent_name).is_some() {
             ModelSource::AgentDeclared
         } else {
@@ -683,9 +892,8 @@ pub(super) fn on_model_report(shared: &Shared, model: &str) {
             model_store::update_focus_record(&ctx.hub.paths.focus_models, &ctx.tag, |existing| {
                 existing.or(Some(FocusModelRecord {
                     model: alias,
-                    effort: None,
                     source,
-                    pending: None,
+                    ..FocusModelRecord::default()
                 }))
             });
         match written {
@@ -696,7 +904,7 @@ pub(super) fn on_model_report(shared: &Shared, model: &str) {
     if let Some(text) = mismatch {
         emit_note(shared, NoteKind::ModelMismatch, text);
     }
-    if changed || needs_record {
+    if changed || needs_record || follow {
         publish_model_state(shared);
     }
 }
@@ -749,67 +957,60 @@ fn append_ledger_note(hub: &ModelHub, tag: &str, session_id: &str, note: &Ledger
 
 /// Broadcast the session's current model state.
 pub(super) fn publish_model_state(shared: &Shared) {
-    let state = {
-        let rt = shared.model.lock().unwrap();
-        model_state(
-            &shared.ctx.hub,
-            &shared.ctx.tag,
-            Some(&rt),
-            !shared.exited.load(Ordering::SeqCst),
-        )
-    };
-    shared
-        .ctx
-        .hub
-        .broadcast(ServerMsg::SessionModelState(state));
+    let view = lock_recover(&shared.model).view();
+    let ctx = &shared.ctx;
+    let record = model_store::focus_record(&ctx.hub.paths.focus_models, &ctx.tag);
+    let state = model_state_from(
+        &ctx.hub,
+        &ctx.tag,
+        Some(view),
+        !shared.exited.load(Ordering::SeqCst),
+        record,
+        model_activity::current_posture(),
+    );
+    ctx.hub.broadcast(ServerMsg::SessionModelState(state));
 }
 
 /// Build a focus's model state: the store record, plus what its session (if
 /// any) reports and is doing.
-pub(super) fn model_state(
+fn model_state_from(
     hub: &ModelHub,
     tag: &str,
-    rt: Option<&ModelRuntime>,
+    view: Option<RuntimeView>,
     running: bool,
+    record: Option<FocusModelRecord>,
+    posture: Option<String>,
 ) -> SessionModelState {
-    let record = model_store::focus_record(&hub.paths.focus_models, tag);
     let catalog = hub.catalog();
-    let reported = rt
-        .and_then(|rt| rt.reported.clone())
-        .map(|model| ReportedModel {
-            family: catalog
-                .family_for_resolved(&model)
-                .map(|e| e.value.clone())
-                .or_else(|| crate::model::cost::known_family_of(&model).map(str::to_owned)),
-            model,
-        });
-    let pending = rt
-        .and_then(|rt| {
-            rt.applying
-                .clone()
-                .or_else(|| rt.waiting.as_ref().map(|(t, _)| t.clone()))
-        })
-        .map(|t| PendingModel {
-            model: t.model,
-            effort: t.effort,
-        });
+    let (reported, effective_effort, pending, phase) = match view {
+        Some(v) => (v.reported, v.effective_effort, v.pending, v.phase),
+        None => (None, None, None, SwitchPhase::default()),
+    };
+    let reported = reported.map(|model| ReportedModel {
+        family: catalog
+            .family_for_resolved(&model)
+            .map(|e| e.value.clone())
+            .or_else(|| crate::model::cost::known_family_of(&model).map(str::to_owned)),
+        model,
+    });
     SessionModelState {
         tag: tag.to_owned(),
-        effective_effort: rt
-            .and_then(|rt| rt.effective_effort.clone())
-            .or_else(|| record.as_ref().and_then(|r| r.effort.clone())),
+        effective_effort: effective_effort.or_else(|| record.as_ref().and_then(|r| r.effort.clone())),
         recorded: record.map(|r| RecordedModel {
             model: r.model,
             effort: r.effort,
             source: r.source,
         }),
         reported,
-        pending,
-        phase: rt.map(ModelRuntime::phase).unwrap_or_default(),
+        pending: pending.map(|t| PendingModel {
+            model: t.model,
+            effort: t.effort,
+        }),
+        phase,
         running,
         warnings: vec![],
         last_request: hub.last_request(tag),
-        posture: model_activity::current_posture(),
+        posture,
     }
 }
 
@@ -880,15 +1081,26 @@ pub(super) fn model_args(target: Option<&ModelTarget>) -> Vec<String> {
     args
 }
 
+/// May `model` be started or switched to? A model the catalogue lists, or a
+/// full `claude-…` name (left to the CLI even when the catalogue does not list
+/// it). With nothing in the catalogue (never probed, no cache) only the family
+/// aliases Nostromo knows pass: a typo'd name stored for the next start would
+/// otherwise be passed to `--model` and the CLI would reject it at every
+/// start.
+fn is_offered(model: &str, catalog: &ModelCatalog) -> bool {
+    catalog.entry(model).is_some()
+        || model.starts_with("claude-")
+        || (catalog.is_empty() && crate::model::cost::is_known_alias(model))
+}
+
 /// Check `target` against the catalogue: `Err((code, message))` when the
-/// model is not offered or the effort is not supported by it. A full
-/// `claude-…` name the catalogue does not list is left to the CLI.
+/// model is not offered or the effort is not supported by it.
 fn validate_target(
     target: &ModelTarget,
     catalog: &ModelCatalog,
 ) -> std::result::Result<(), (&'static str, String)> {
     let entry = catalog.entry(&target.model);
-    if entry.is_none() && !catalog.is_empty() && !target.model.starts_with("claude-") {
+    if !is_offered(&target.model, catalog) {
         return Err((
             "unknown_model",
             format!(
@@ -936,11 +1148,19 @@ fn begin_switch(
             oneshot::Receiver<ModelRequestOutcome>,
             oneshot::Sender<ModelRequestOutcome>,
         ),
-        Wait,
+        Wait {
+            /// The target differs from the one already waiting.
+            new: bool,
+            /// A turn is running (as opposed to another switch being applied).
+            turn_running: bool,
+        },
     }
-    // The pending record and note are written inside the critical section: a
-    // turn ending now would otherwise start applying (and clear the persisted
-    // pending, and note the change) before they were written.
+    // The decision is made under `state` + `model`, with no IO under them. The
+    // pending record and note are written after, under `model_io` alone: a
+    // turn ending meanwhile starts an apply whose first step takes `model_io`
+    // too, so it can't clear the pending record or note the change before
+    // they are written.
+    let io = lock_recover(&shared.model_io);
     let plan = {
         let state = shared.state.lock().unwrap();
         let mut rt = shared.model.lock().unwrap();
@@ -948,7 +1168,6 @@ fn begin_switch(
         let idle = *state == SessionState::Idle && rt.applying.is_none();
         if same_as_current && rt.applying.is_none() {
             if rt.waiting.take().is_some() {
-                persist_pending(ctx, None);
                 Plan::Cancelled
             } else {
                 Plan::Unchanged
@@ -960,15 +1179,10 @@ fn begin_switch(
         } else {
             let new = rt.waiting.as_ref().map(|(t, _)| t) != Some(&target);
             rt.waiting = Some((target.clone(), actor.clone()));
-            if new {
-                persist_pending(ctx, Some(target.clone()));
-                emit_note(
-                    shared,
-                    NoteKind::ModelPending,
-                    copy::pending(&from, &target, &catalog),
-                );
+            Plan::Wait {
+                new,
+                turn_running: *state != SessionState::Idle,
             }
-            Plan::Wait
         }
     };
     match plan {
@@ -976,14 +1190,28 @@ fn begin_switch(
             SwitchTicket::ready(ModelRequestOutcome::status(ModelRequestStatus::Unchanged))
         }
         Plan::Cancelled => {
+            persist_pending(ctx, None);
             publish_model_state(shared);
             SwitchTicket::ready(ModelRequestOutcome::status(ModelRequestStatus::Unchanged))
         }
         Plan::Apply(rx, tx) => {
+            drop(io);
             spawn_apply(shared, target, actor, Some(tx));
             SwitchTicket(TicketInner::Later(rx))
         }
-        Plan::Wait => {
+        Plan::Wait { new, turn_running } => {
+            if new {
+                persist_pending(ctx, Some(target.clone()));
+                // "After this turn" is only true while a turn is running; behind
+                // another switch being applied the next note is that switch's.
+                if turn_running {
+                    emit_note(
+                        shared,
+                        NoteKind::ModelPending,
+                        copy::pending(&from, &target, &catalog),
+                    );
+                }
+            }
             ctx.hub.record_request(
                 &ctx.tag,
                 &actor,
@@ -1026,6 +1254,26 @@ fn persist_pending(ctx: &SessionCtx, pending: Option<ModelTarget>) {
     }
 }
 
+/// The switch to `target` starts being applied: its persisted `pending`
+/// record (if any) is done with. Only that one: a different target waiting
+/// since is not ours to clear. Takes `model_io` so a `begin_switch` still
+/// writing that record has finished first.
+fn clear_pending_for(ctx: &SessionCtx, shared: &Shared, target: &ModelTarget) {
+    let _io = lock_recover(&shared.model_io);
+    let result =
+        model_store::update_focus_record(&ctx.hub.paths.focus_models, &ctx.tag, |record| {
+            record.map(|mut r| {
+                if r.pending.as_ref() == Some(target) {
+                    r.pending = None;
+                }
+                r
+            })
+        });
+    if let Err(e) = result {
+        warn!(tag = %ctx.tag, "could not clear the pending model switch: {e:#}");
+    }
+}
+
 /// Run [`apply_switch`] on the session's runtime. `rt.applying` is already set.
 pub(super) fn spawn_apply(
     shared: &Shared,
@@ -1034,8 +1282,30 @@ pub(super) fn spawn_apply(
     reply: Option<oneshot::Sender<ModelRequestOutcome>>,
 ) {
     let task_shared = shared.clone();
+    spawn_apply_task(shared, reply, async move {
+        apply_switch(&task_shared, target, actor).await
+    });
+}
+
+/// Run `task` (the switch) as its own task and, however it ends, answer
+/// `reply` and leave `Applying` ([`finish_apply`]). A panic inside the switch
+/// would otherwise leave `applying` set for good: every message would queue
+/// and crash recovery would never fire.
+pub(super) fn spawn_apply_task(
+    shared: &Shared,
+    reply: Option<oneshot::Sender<ModelRequestOutcome>>,
+    task: impl std::future::Future<Output = ModelRequestOutcome> + Send + 'static,
+) {
+    let task_shared = shared.clone();
+    let switch = shared.runtime.spawn(task);
     shared.runtime.spawn(async move {
-        let outcome = apply_switch(&task_shared, target, actor).await;
+        let outcome = match switch.await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                warn!(tag = %task_shared.ctx.tag, "the model switch task failed: {e}");
+                ModelRequestOutcome::failed("the model switch failed unexpectedly")
+            }
+        };
         if let Some(reply) = reply {
             let _ = reply.send(outcome);
         }
@@ -1056,7 +1326,7 @@ struct Applied {
 async fn apply_switch(shared: &Shared, target: ModelTarget, actor: Actor) -> ModelRequestOutcome {
     let ctx = &shared.ctx;
     let catalog = ctx.hub.catalog();
-    persist_pending(ctx, None);
+    clear_pending_for(ctx, shared, &target);
     let record = model_store::focus_record(&ctx.hub.paths.focus_models, &ctx.tag);
     let reported = shared.model.lock().unwrap().reported.clone();
     let current = current_target(record.as_ref(), reported.as_deref(), &catalog);
@@ -1074,7 +1344,7 @@ async fn apply_switch(shared: &Shared, target: ModelTarget, actor: Actor) -> Mod
                         model: target.model.clone(),
                         effort: target.effort.clone(),
                         source,
-                        pending: None,
+                        ..FocusModelRecord::default()
                     })
                 });
             {

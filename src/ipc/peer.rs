@@ -352,7 +352,7 @@ impl SensitiveTags {
     /// The stand-in shown to network peers for a sensitive `tag`: stable for
     /// the life of the registration (or, for a tag that is sensitive without
     /// being registered, of this process) and unrelated to the tag's text.
-    fn opaque_tag(&self, tag: &str) -> String {
+    pub(crate) fn opaque_tag(&self, tag: &str) -> String {
         let mut registered = self.inner.write().unwrap();
         if let Some(opaque) = registered.tags.get(tag) {
             return opaque.clone();
@@ -936,7 +936,8 @@ fn redact_meta(meta: &mut FocusMeta, tags: &SensitiveTags) {
 
 /// Trim an otherwise-deliverable frame for a network peer; see
 /// [`redact_meta`], plus: session and Mother-job lists drop their sensitive
-/// entries.
+/// entries, and model frames lose the budget posture, the last request and
+/// the agents' declared models.
 pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
     fn redact_all(mut metas: Vec<FocusMeta>, tags: &SensitiveTags) -> Vec<FocusMeta> {
         for m in &mut metas {
@@ -958,6 +959,17 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
         ServerMsg::SessionListResp { mut sessions } => {
             sessions.retain(|s| !tags.focus_is_sensitive(&s.tag, &s.agent_name));
             ServerMsg::SessionListResp { sessions }
+        }
+        // What a model state says beyond the model itself is not for the LAN:
+        // Bishop's budget posture, and who asked for the last change.
+        ServerMsg::SessionModelState(mut state) => {
+            state.posture = None;
+            state.last_request = None;
+            ServerMsg::SessionModelState(state)
+        }
+        // Every agent's name and declared model, read from `~/.claude/agents`.
+        ServerMsg::ModelDefaults { defaults, .. } => {
+            ServerMsg::ModelDefaults { defaults, declared: Default::default() }
         }
         ServerMsg::MotherJobs { mut jobs } => {
             // By label as well as by id: `mother add` returns before the daemon
@@ -2008,5 +2020,98 @@ mod tests {
         tags.note_resumed("cody-x");
         assert!(tags.tag_is_sensitive("cody-x"));
         assert!(!tags.is_degraded(), "an in-memory registry is never degraded");
+    }
+
+    // ── model frames over the network ─────────────────────────────────────────
+
+    use crate::ipc::protocol::{
+        AgentModelDefault, LastModelRequest, ModelRequestStatus, PendingModel, RecordedModel,
+        ReportedModel, SessionModelState, SwitchPhase,
+    };
+    use crate::model::store::ModelSource;
+
+    fn full_model_state(tag: &str) -> SessionModelState {
+        SessionModelState {
+            tag: tag.into(),
+            recorded: Some(RecordedModel { model: "opus".into(), effort: Some("high".into()), source: ModelSource::Focus }),
+            reported: Some(ReportedModel { model: "claude-opus-5-5".into(), family: Some("opus".into()) }),
+            effective_effort: Some("high".into()),
+            pending: Some(PendingModel { model: "haiku".into(), effort: None }),
+            phase: SwitchPhase::Waiting,
+            running: true,
+            warnings: vec![],
+            last_request: Some(LastModelRequest {
+                actor: "agent:cody".into(),
+                to: "haiku".into(),
+                status: ModelRequestStatus::PendingTurnEnd,
+                ts: chrono::Utc::now(),
+                request_id: Some("req-1".into()),
+            }),
+            posture: Some("Pump the Brakes".into()),
+        }
+    }
+
+    fn model_defaults_msg() -> ServerMsg {
+        ServerMsg::ModelDefaults {
+            defaults: BTreeMap::from([("cody".to_owned(), AgentModelDefault { model: "haiku".into(), effort: None })]),
+            declared: BTreeMap::from([("archie".to_owned(), "opus".to_owned()), ("fred".to_owned(), "haiku".to_owned())]),
+        }
+    }
+
+    #[test]
+    fn a_network_peer_is_not_told_the_budget_posture_or_the_last_request_of_a_focus() {
+        let original = full_model_state("cody-x");
+
+        let ServerMsg::SessionModelState(seen) =
+            redact_for_network(ServerMsg::SessionModelState(original.clone()), &SensitiveTags::in_memory())
+        else {
+            panic!("still a SessionModelState");
+        };
+
+        assert_eq!(seen.posture, None, "the posture says how much budget the operator has left");
+        assert_eq!(seen.last_request, None, "who asked for what, and why, is the operator's business");
+        assert_eq!(
+            SessionModelState { posture: None, last_request: None, ..original },
+            seen,
+            "everything else about the focus's model is intact"
+        );
+    }
+
+    #[test]
+    fn a_network_peer_is_not_told_which_model_each_agent_declares() {
+        let ServerMsg::ModelDefaults { defaults, declared } =
+            redact_for_network(model_defaults_msg(), &SensitiveTags::in_memory())
+        else {
+            panic!("still a ModelDefaults");
+        };
+
+        assert!(declared.is_empty(), "the agents installed on this machine are not a network peer's to list: {declared:?}");
+        assert_eq!(defaults.get("cody").map(|d| d.model.as_str()), Some("haiku"), "the defaults a user set are intact");
+    }
+
+    #[test]
+    fn a_local_peer_gets_the_model_frames_exactly_as_they_are() {
+        let tags = SensitiveTags::in_memory();
+        for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
+            for msg in [ServerMsg::SessionModelState(full_model_state("cody-x")), model_defaults_msg()] {
+                let sent = outbound(trust, msg.clone(), &tags).expect("a local peer receives it");
+                assert_eq!(
+                    serde_json::to_string(&sent).unwrap(),
+                    serde_json::to_string(&msg).unwrap(),
+                    "{trust:?} gets {msg:?} byte for byte"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_network_peer_is_still_sent_the_redacted_model_frames_of_an_ordinary_focus() {
+        let tags = SensitiveTags::in_memory();
+
+        let state = outbound(PeerTrust::Tcp, ServerMsg::SessionModelState(full_model_state("cody-x")), &tags);
+        let defaults = outbound(PeerTrust::Tcp, model_defaults_msg(), &tags);
+
+        assert!(matches!(state, Some(ServerMsg::SessionModelState(ref s)) if s.posture.is_none() && s.last_request.is_none()));
+        assert!(matches!(defaults, Some(ServerMsg::ModelDefaults { ref declared, .. }) if declared.is_empty()));
     }
 }

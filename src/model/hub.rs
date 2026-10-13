@@ -4,8 +4,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -13,9 +14,30 @@ use super::catalog::{probe, ModelCatalog};
 use super::{policy, store, Actor, ModelPaths, ModelTarget};
 use crate::ipc::protocol::{LastModelRequest, ModelRequestStatus, ServerMsg};
 
+/// The fewest seconds between two catalogue probes (one starts a CLI process,
+/// and any client may ask for one).
+pub const MIN_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Probe bookkeeping: at most one in flight, and a minimum gap between starts.
+struct ProbeGate {
+    in_flight: bool,
+    last_started: Option<Instant>,
+    min_interval: Duration,
+}
+
+/// Held while a probe runs; frees the slot when dropped, however the probe ends.
+struct ProbeSlot<'a>(&'a ModelHub);
+
+impl Drop for ProbeSlot<'_> {
+    fn drop(&mut self) {
+        self.0.probe_gate.lock().unwrap_or_else(|e| e.into_inner()).in_flight = false;
+    }
+}
+
 pub struct ModelHub {
     pub paths: ModelPaths,
     catalog: RwLock<ModelCatalog>,
+    probe_gate: Mutex<ProbeGate>,
     broadcast: Mutex<Option<broadcast::Sender<ServerMsg>>>,
     last_requests: Mutex<HashMap<String, LastModelRequest>>,
     /// The `request_id` of the latest request per tag, stamped on every
@@ -24,16 +46,46 @@ pub struct ModelHub {
 }
 
 impl ModelHub {
-    /// A hub over `paths`, starting from the cached catalogue.
+    /// A hub over `paths`, starting from the cached catalogue. A cache is what
+    /// an earlier run saw, so it is served `stale` until a probe succeeds.
     pub fn new(paths: ModelPaths) -> Self {
-        let catalog = ModelCatalog::load(&paths.catalog);
+        let mut catalog = ModelCatalog::load(&paths.catalog);
+        catalog.stale = !catalog.is_empty();
         Self {
             paths,
             catalog: RwLock::new(catalog),
+            probe_gate: Mutex::new(ProbeGate {
+                in_flight: false,
+                last_started: None,
+                min_interval: MIN_PROBE_INTERVAL,
+            }),
             broadcast: Mutex::new(None),
             last_requests: Mutex::new(HashMap::new()),
             request_ids: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Change the minimum gap between probes (default [`MIN_PROBE_INTERVAL`]).
+    pub fn set_min_probe_interval(&self, interval: Duration) {
+        self.probe_gate.lock().unwrap_or_else(|e| e.into_inner()).min_interval = interval;
+    }
+
+    /// Claim the right to probe now: refused while another probe runs or the
+    /// previous one started less than the minimum gap ago.
+    fn begin_probe(&self) -> Result<ProbeSlot<'_>> {
+        let mut gate = self.probe_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if gate.in_flight {
+            return Err(anyhow!("a model catalogue probe is already running"));
+        }
+        let now = Instant::now();
+        if let Some(last) = gate.last_started {
+            if now.duration_since(last) < gate.min_interval {
+                return Err(anyhow!("model catalogue probe throttled: probed a moment ago"));
+            }
+        }
+        gate.in_flight = true;
+        gate.last_started = Some(now);
+        Ok(ProbeSlot(self))
     }
 
     /// Where model frames are broadcast (the daemon's client fan-out).
@@ -125,11 +177,42 @@ impl ModelHub {
     pub fn last_request(&self, tag: &str) -> Option<LastModelRequest> {
         self.last_requests.lock().unwrap().get(tag).cloned()
     }
+
+    /// Forget the request state of every tag that `is_live` rejects and whose
+    /// last request is older than `cutoff` (a tag with a `request_id` but no
+    /// recorded request goes with it). Returns how many tags were forgotten.
+    pub fn forget_requests(
+        &self,
+        is_live: impl Fn(&str) -> bool,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> usize {
+        let mut last = self.last_requests.lock().unwrap();
+        let mut ids = self.request_ids.lock().unwrap();
+        let mut forgotten: std::collections::HashSet<String> = std::collections::HashSet::new();
+        last.retain(|tag, request| {
+            let keep = is_live(tag) || request.ts >= cutoff;
+            if !keep {
+                forgotten.insert(tag.clone());
+            }
+            keep
+        });
+        ids.retain(|tag, _| {
+            let keep = is_live(tag) || last.contains_key(tag);
+            if !keep {
+                forgotten.insert(tag.clone());
+            }
+            keep
+        });
+        forgotten.len()
+    }
 }
 
 /// Probe the installed CLI for its catalogue and install the result. On
-/// failure the cached catalogue is kept and flagged stale.
+/// failure (including an answer with no models) the cached catalogue is kept
+/// and flagged stale. One probe at a time, and not within the hub's minimum
+/// gap of the previous one: such a call does nothing and returns an error.
 pub async fn refresh_catalog(hub: &ModelHub) -> Result<()> {
+    let _slot = hub.begin_probe()?;
     let result = match crate::ipc::session_manager::resolve_claude() {
         Ok(claude) => probe(&claude).await,
         Err(e) => Err(e),

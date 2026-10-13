@@ -97,11 +97,14 @@ impl ModelCatalog {
     }
 
     /// Parse the `control_response` (or any JSON holding it) the CLI returns
-    /// for `initialize`. `None` when it carries no `models` list.
+    /// for `initialize`. `None` when it carries no `models` list, or one with
+    /// no usable row: an empty answer is no information, and must never
+    /// replace a catalogue that has rows.
     pub fn from_initialize_response(response: &Value, fetched_at: DateTime<Utc>) -> Option<Self> {
         let models = find_key(response, "models")?.as_array()?;
         let rows = models.iter().filter_map(parse_row).collect();
-        Some(Self::from_rows(rows, fetched_at))
+        let catalog = Self::from_rows(rows, fetched_at);
+        (!catalog.is_empty()).then_some(catalog)
     }
 
     /// Nothing known: never probed and no cache.
@@ -227,6 +230,21 @@ pub async fn probe(claude: &Path) -> Result<ModelCatalog> {
 }
 
 async fn probe_inner(claude: &Path) -> Result<ModelCatalog> {
+    // A private, empty working directory: `--setting-sources project` still
+    // reads `<cwd>/.claude/settings.json`, `.mcp.json` and `CLAUDE.md`, and a
+    // shared directory such as `/tmp` could hold someone else's. Removed when
+    // the probe is over (the CLI is killed first).
+    let cwd = tempfile::Builder::new()
+        .prefix("nostromo-model-probe-")
+        .tempdir()
+        .context("creating the probe's working directory")?;
+    // Private to this user: the directory is created with the process umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(cwd.path(), std::fs::Permissions::from_mode(0o700))
+            .context("restricting the probe's working directory")?;
+    }
     let mut child = tokio::process::Command::new(claude)
         .args([
             "-p",
@@ -241,7 +259,7 @@ async fn probe_inner(claude: &Path) -> Result<ModelCatalog> {
             "--tools",
             "",
         ])
-        .current_dir(std::env::temp_dir())
+        .current_dir(cwd.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -293,5 +311,6 @@ async fn probe_inner(claude: &Path) -> Result<ModelCatalog> {
     };
     drop(stdin);
     let _ = child.kill().await;
+    drop(cwd);
     result
 }

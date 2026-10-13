@@ -478,14 +478,18 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
 /// own, replayed live and stored in the session JSONL (contract F1): the
 /// `<local-command-caveat>` meta entry, the `<command-name>/model</command-name>`
 /// entry and the `<local-command-stdout>Set model to …` entry. The daemon
-/// records the switch as a note instead, so these are dropped too.
+/// records the switch as a note instead, so these are dropped too. Matched by
+/// their tags alone, not their wording: a CLI release that rewords the message
+/// must not turn it into a prompt. (Should the tags change too,
+/// `SessionTranscript::discard_orphan_prompt` is the net.)
 fn is_harness_notification(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with("<task-notification>")
         || trimmed.starts_with("<system-reminder>")
-        || trimmed.starts_with("<local-command-caveat>")
-        || trimmed.starts_with("<command-name>/model</command-name>")
-        || trimmed.starts_with("<local-command-stdout>Set model to")
+        || trimmed.starts_with("<local-command-")
+        || trimmed.starts_with("<command-name>")
+        || trimmed.starts_with("<command-message>")
+        || trimmed.starts_with("<command-args>")
 }
 
 /// Opening tag of the one-line note the daemon may put in front of a user
@@ -943,6 +947,7 @@ impl SessionTranscript {
             ParsedLine::UserPrompt {
                 text, timestamp, ..
             } => {
+                let mut deltas: Vec<TurnDelta> = self.discard_orphan_prompt().into_iter().collect();
                 // Flush any still-open turn (defensive; stored JSONL has no
                 // `result` lines and delimits turns by the next user prompt).
                 if let Some(last) = self.turns.last_mut() {
@@ -962,7 +967,7 @@ impl SessionTranscript {
                 };
                 self.retained_bytes += turn_bytes(&turn);
                 self.turns.push(turn.clone());
-                let deltas = vec![TurnDelta::TurnStarted { turn }];
+                deltas.push(TurnDelta::TurnStarted { turn });
                 self.enforce_limits();
                 deltas
             }
@@ -1020,6 +1025,39 @@ impl SessionTranscript {
                 deltas
             }
         }
+    }
+
+    /// The newest turn is a phantom if its "prompt" is a tag-wrapped system
+    /// message (`<…>…</…>`), nothing answered it and it is still open when the
+    /// next prompt arrives: the CLI's replay of a local command whose tags
+    /// `is_harness_notification` does not know (yet). Such a turn never gets a
+    /// result, and counting it would shift every ledger note's position
+    /// (`prompt_count`). Drop it, keep its notes for the next turn, and return
+    /// the delta that closes it for a client that already saw it start.
+    fn discard_orphan_prompt(&mut self) -> Option<TurnDelta> {
+        let last = self.turns.last()?;
+        let wrapped = {
+            let t = last.user_input.trim();
+            t.starts_with('<') && t.ends_with('>')
+        };
+        let answered = last.blocks.iter().any(|b| !matches!(b, TurnBlock::Note { .. }));
+        if last.is_complete || !wrapped || answered {
+            return None;
+        }
+        let turn = self.turns.pop()?;
+        self.prompt_count = self.prompt_count.saturating_sub(1);
+        self.retained_bytes = self.retained_bytes.saturating_sub(turn_bytes(&turn));
+        if self.turns.is_empty() {
+            self.first_user_input = None;
+        }
+        // Notes made while it was the newest turn lead the next one.
+        let mut notes = turn.blocks;
+        notes.append(&mut self.orphan_notes);
+        self.orphan_notes = notes;
+        Some(TurnDelta::TurnErrored {
+            turn_id: turn.id,
+            message: "Not a message: a system entry the CLI replayed.".to_owned(),
+        })
     }
 
     /// Mark the in-flight turn as errored (used on unexpected child exit).
@@ -2253,5 +2291,152 @@ mod tests {
             "asking for more turns than exist must return everything, not panic"
         );
         assert_eq!(all, snap);
+    }
+
+    // ── replay frames the CLI writes for its own commands ─────────────────────
+
+    fn user_event(content: serde_json::Value) -> String {
+        serde_json::json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": content}}).to_string()
+    }
+
+    fn assistant_event(text: &str) -> String {
+        serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}).to_string()
+    }
+
+    const PHANTOM: &str = "<new-wrapper>whatever</new-wrapper>";
+
+    #[test]
+    fn the_clis_own_command_replays_make_no_turn_whatever_wording_they_carry() {
+        for text in [
+            "<local-command-stdout>Switched the model → sonnet</local-command-stdout>",
+            "<local-command-stdout>Set model to `sonnet (claude-sonnet-5-5)`</local-command-stdout>",
+            "<local-command-stdout>Effort set to high</local-command-stdout>",
+            "<local-command-stderr>Error: no such model</local-command-stderr>",
+            "<local-command-caveat>Caveat: the messages below were generated by the user.</local-command-caveat>",
+            "<local-command-some-future-kind>anything at all</local-command-some-future-kind>",
+            "\n\n  <local-command-stdout>after leading blank space</local-command-stdout>",
+            "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>opus</command-args>",
+            "<command-name>/effort</command-name>",
+            "<command-message>effort</command-message>",
+            "<command-args>high</command-args>",
+        ] {
+            assert_eq!(parse_line(&user_event(serde_json::json!(text))), None, "string content: {text:?}");
+            assert_eq!(
+                parse_line(&user_event(serde_json::json!([{"type": "text", "text": text}]))),
+                None,
+                "text-array content: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_prompt_that_only_mentions_such_a_tag_is_still_a_prompt() {
+        for text in [
+            "why does <local-command-stdout> show up in my transcript?",
+            "what does <command-name> mean here",
+            "ok, now run /model and tell me about <command-args>",
+        ] {
+            assert!(
+                matches!(parse_line(&user_event(serde_json::json!(text))), Some(ParsedLine::UserPrompt { .. })),
+                "{text:?} is something the user typed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_prompt_that_was_never_answered_is_dropped_once_the_next_prompt_arrives() {
+        let mut t = SessionTranscript::new();
+        let started = t.ingest_line(&user_event(serde_json::json!(PHANTOM)));
+        let phantom_id = match &started[..] {
+            [TurnDelta::TurnStarted { turn }] => turn.id.clone(),
+            other => panic!("a prompt opens a turn: {other:?}"),
+        };
+
+        let replaced = t.ingest_line(&user_event(serde_json::json!("hi")));
+        t.ingest_line(&assistant_event("hello"));
+        t.ingest_line(result_line());
+
+        let turns = t.snapshot();
+        assert_eq!(turns.len(), 1, "only the real prompt is a turn: {turns:?}");
+        assert_eq!(turns[0].user_input, "hi");
+        assert!(turns[0].is_complete);
+        assert_eq!(t.prompt_count(), 1, "the phantom never counted as a prompt");
+        assert!(
+            replaced.iter().any(|d| matches!(d, TurnDelta::TurnErrored { turn_id, .. } if *turn_id == phantom_id)),
+            "a client that already saw the phantom's TurnStarted is told to close it: {replaced:?}"
+        );
+        assert!(
+            replaced.iter().any(|d| matches!(d, TurnDelta::TurnStarted { turn } if turn.user_input == "hi")),
+            "{replaced:?}"
+        );
+    }
+
+    #[test]
+    fn a_note_made_while_a_phantom_was_the_last_turn_leads_the_real_turn() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_event(serde_json::json!(PHANTOM)));
+        t.add_note(TurnBlock::Note {
+            note_kind: NoteKind::ModelChanged,
+            text: "Model changed to Opus (from Sonnet) by you.".into(),
+            ts: chrono::Utc::now(),
+        });
+
+        t.ingest_line(&user_event(serde_json::json!("hi")));
+
+        let turns = t.snapshot();
+        assert_eq!(turns.len(), 1);
+        assert!(
+            matches!(turns[0].blocks.first(), Some(TurnBlock::Note { text, .. }) if text.starts_with("Model changed")),
+            "the note did not vanish with the phantom: {:?}",
+            turns[0].blocks
+        );
+        assert_eq!(turns[0].user_input, "hi");
+    }
+
+    #[test]
+    fn a_real_unanswered_prompt_is_never_dropped() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_event(serde_json::json!("hello")));
+        t.ingest_line(&user_event(serde_json::json!("hello? anyone?")));
+
+        let turns = t.snapshot();
+        assert_eq!(turns.iter().map(|t| t.user_input.as_str()).collect::<Vec<_>>(), ["hello", "hello? anyone?"]);
+        assert_eq!(t.prompt_count(), 2);
+    }
+
+    #[test]
+    fn a_wrapped_prompt_that_got_an_answer_is_a_real_turn() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_event(serde_json::json!("<tag>pasted xml</tag>")));
+        t.ingest_line(&assistant_event("I see the tag"));
+        t.ingest_line(&user_event(serde_json::json!("next")));
+
+        assert_eq!(t.turn_count(), 2);
+        assert_eq!(t.prompt_count(), 2);
+    }
+
+    #[test]
+    fn a_wrapped_prompt_is_kept_until_something_follows_it() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_event(serde_json::json!(PHANTOM)));
+
+        assert_eq!(t.turn_count(), 1, "it may still be answered");
+        assert_eq!(t.prompt_count(), 1);
+    }
+
+    #[test]
+    fn a_stored_session_drops_the_same_phantom() {
+        let jsonl = [
+            user_event(serde_json::json!(PHANTOM)),
+            user_event(serde_json::json!("hi")),
+            assistant_event("hello"),
+        ]
+        .join("\n");
+
+        let t = transcript_from_jsonl(&jsonl, 100);
+
+        assert_eq!(t.turn_count(), 1);
+        assert_eq!(t.prompt_count(), 1);
+        assert_eq!(t.snapshot()[0].user_input, "hi");
     }
 }

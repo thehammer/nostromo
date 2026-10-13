@@ -62,10 +62,10 @@ use crate::model::store as model_store;
 use crate::model::{Actor, ModelPaths, ModelTarget};
 
 mod model_switch;
-pub use model_switch::{ModelRequestOutcome, SwitchRequest, SwitchTicket, CONTROL_TIMEOUT};
+pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket, CONTROL_TIMEOUT};
 use model_switch::{
-    emit_note, model_args, on_model_report, publish_model_state, spawn_apply,
-    ControlReply, ModelRuntime, SessionCtx,
+    emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ControlReply,
+    ModelRuntime, SessionCtx,
 };
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
@@ -137,11 +137,20 @@ struct PendingMessage {
 /// thread and a running model-switch task. Cloneable `Arc` handles only — no
 /// back-reference to the manager.
 ///
-/// Lock order, wherever more than one is held: `state` → `model` → `pending`.
+/// Lock order, wherever more than one is held:
+/// `model_io` → `state` → `model` → `pending`.
 /// `stdin`, `note_prefix`, `transcript` and `waiters` are leaf locks: they may
-/// be taken while holding the others (a user frame is written under `state`;
-/// `begin_switch` adds its note under `state` + `model`), but nothing else is
-/// ever acquired while one of them is held.
+/// be taken while holding the others, but nothing else is ever acquired while
+/// one of them is held.
+///
+/// Nothing slow runs under `state` or `model`: those are read by `info()` and
+/// `list()` under the manager lock, so a blocking write to a stalled CLI's
+/// stdin (a large image frame into a full pipe) or a disk write under either
+/// would wedge the manager for every session. A user frame is written after
+/// `state` is released, with `writing` set so a restart or crash recovery
+/// (`take_carry`) waits for the write's outcome instead of missing the
+/// message; `begin_switch` does its store and ledger writes under `model_io`
+/// alone, which `apply_switch` also takes before it touches the same records.
 #[derive(Clone)]
 struct Shared {
     transcript: Arc<Mutex<SessionTranscript>>,
@@ -159,6 +168,13 @@ struct Shared {
     /// Control requests awaiting their `control_response`, by request id. The
     /// reader resolves them; it never waits on one itself.
     waiters: Arc<Mutex<HashMap<String, oneshot::Sender<ControlReply>>>>,
+    /// A queued message was taken off `pending` and its stdin write has not
+    /// finished. Set under `state`, cleared by the writer once the message is
+    /// either written or back on `pending`.
+    writing: Arc<AtomicBool>,
+    /// Orders a switch request's store/ledger writes against `apply_switch`'s
+    /// (see the lock-order note above). Holds no data.
+    model_io: Arc<Mutex<()>>,
     /// Who this session is, for notes, the store and activity lines.
     ctx: Arc<SessionCtx>,
     /// One line for the agent's eyes, put in front of the next user message
@@ -167,6 +183,12 @@ struct Shared {
     note_prefix: Arc<Mutex<Option<String>>>,
     /// Runtime the reader thread spawns switch tasks on.
     runtime: tokio::runtime::Handle,
+}
+
+/// Lock `m`, taking the data even if a panicking holder poisoned it. For the
+/// switch machinery's own cleanup, which must still run after such a panic.
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Shared {
@@ -845,6 +867,8 @@ impl SessionManager {
             event_tx,
             model: Arc::new(Mutex::new(runtime)),
             waiters: Arc::new(Mutex::new(HashMap::new())),
+            writing: Arc::new(AtomicBool::new(false)),
+            model_io: Arc::new(Mutex::new(())),
             ctx: Arc::new(SessionCtx {
                 tag: tag.clone(),
                 agent_name: agent_name.clone(),
@@ -938,7 +962,7 @@ impl SessionManager {
         }
 
         // Decide under the state lock, then release it BEFORE touching stdin
-        // (stdin is never taken while another session lock is held). The
+        // (a write to a stalled CLI must not hold `state`, see `Shared`). The
         // message is queued, not written, while a turn runs or a model switch
         // is being applied; queueing happens under the same lock so a turn end
         // draining the queue can't miss it.
@@ -1195,6 +1219,13 @@ impl SessionManager {
                 s.attached_clients.iter().cloned().collect::<Vec<_>>(),
             )
         };
+        // Kill first: a write to a stalled CLI's stdin that is still in
+        // flight then fails at once, so `take_carry` can see its outcome
+        // instead of waiting on a process that will never read.
+        if let Some(session) = self.sessions.get_mut(tag) {
+            session.intentional_stop.store(true, Ordering::SeqCst);
+            session.kill();
+        }
         let carry = self.take_carry(tag);
         self.stop(tag);
         self.sessions.remove(tag);
@@ -1348,7 +1379,10 @@ impl SessionManager {
             {
                 let s = self.sessions.get_mut(&tag).unwrap();
                 let has_pending = !s.shared.pending.lock().unwrap().is_empty();
-                wants_recovery = !s.attached_clients.is_empty() || has_pending;
+                // A switch still waiting (its apply never started, or the
+                // session died first) is work the respawn must pick up.
+                let has_waiting_switch = s.shared.model.lock().unwrap().waiting.is_some();
+                wants_recovery = !s.attached_clients.is_empty() || has_pending || has_waiting_switch;
                 let crash_count = s.crash_times.len() as u32;
                 guard_tripped = crash_count >= MAX_RESTARTS;
                 exit_code = s.last_exit_code;
@@ -1926,42 +1960,41 @@ fn finish_apply(shared: &Shared) {
 fn step(shared: &Shared, finished_apply: bool) {
     enum Next {
         Apply(ModelTarget, Actor),
-        Wrote,
+        Write(PendingMessage),
         Idle,
     }
+    // Tolerant of a poisoned lock: this is the cleanup that ends `Applying`,
+    // and it must still run after a switch task panicked holding one.
     let next = {
-        let mut state = shared.state.lock().unwrap();
-        let mut rt = shared.model.lock().unwrap();
+        let mut state = lock_recover(&shared.state);
+        let mut rt = lock_recover(&shared.model);
         if finished_apply {
             rt.applying = None;
         }
+        let exited = shared.exited.load(Ordering::SeqCst);
         if rt.applying.is_some() {
             *state = SessionState::Idle;
             Next::Idle
-        } else if let Some((target, actor)) = rt.waiting.take() {
+        } else if let Some((target, actor)) = rt.waiting.take_if(|_| !exited) {
             rt.applying = Some(target.clone());
             *state = SessionState::Idle;
             Next::Apply(target, actor)
         } else {
+            // A switch still waiting once the process has exited stays put:
+            // the respawn inherits it (`take_carry`) rather than failing it.
             drop(rt);
-            // The next message is taken and written under the state lock, and
-            // only while the process is up: `take_carry` (restart and crash
-            // recovery) takes the same lock, so a message is either written
-            // here or still queued for the respawned session, never dropped
-            // between the two.
-            let mut pending = shared.pending.lock().unwrap();
-            let msg = if shared.exited.load(Ordering::SeqCst) { None } else { pending.pop_front() };
+            // The next message is only taken while the process is up. It is
+            // written after `state` is released (a stalled CLI must not wedge
+            // every reader of `state`), so `writing` marks it in flight:
+            // `take_carry` (restart and crash recovery) waits for the write's
+            // outcome, which keeps a message either written here or still
+            // queued for the respawned session, never dropped between the two.
+            let msg = if exited { None } else { lock_recover(&shared.pending).pop_front() };
             match msg {
                 Some(msg) => {
-                    drop(pending);
-                    if write_user_message(shared, &msg).is_ok() {
-                        *state = SessionState::MidTurn;
-                        Next::Wrote
-                    } else {
-                        shared.pending.lock().unwrap().push_front(msg);
-                        *state = SessionState::Idle;
-                        Next::Idle
-                    }
+                    shared.writing.store(true, Ordering::SeqCst);
+                    *state = SessionState::MidTurn;
+                    Next::Write(msg)
                 }
                 None => {
                     *state = SessionState::Idle;
@@ -1975,7 +2008,22 @@ fn step(shared: &Shared, finished_apply: bool) {
             shared.broadcast(SessionEvent::State(SessionState::Idle));
             spawn_apply(shared, target, actor, None);
         }
-        Next::Wrote => shared.broadcast(SessionEvent::State(SessionState::MidTurn)),
+        Next::Write(msg) => {
+            let wrote = write_user_message(shared, &msg).is_ok();
+            {
+                let mut state = lock_recover(&shared.state);
+                if !wrote {
+                    lock_recover(&shared.pending).push_front(msg);
+                    *state = SessionState::Idle;
+                }
+                shared.writing.store(false, Ordering::SeqCst);
+            }
+            shared.broadcast(SessionEvent::State(if wrote {
+                SessionState::MidTurn
+            } else {
+                SessionState::Idle
+            }));
+        }
         Next::Idle => shared.broadcast(SessionEvent::State(SessionState::Idle)),
     }
     if finished_apply {
@@ -3829,6 +3877,150 @@ mod tests {
             "restarted session must have an empty crash window"
         );
         assert!(s.alive(), "restarted session must be alive");
+    }
+
+    // ── a switch task that dies must not take the session's queue with it ─────
+
+    /// Kills the stub children on drop, even when an assertion fails first (the test runtime
+    /// waits for the blocking reader threads, which only end when their child does).
+    struct Reap(SessionManager);
+
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            self.0.kill_all_on_shutdown();
+        }
+    }
+
+    /// Poll until `f` yields (30 s at most): events, not sleeps, decide when a test proceeds.
+    async fn eventually<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(v) = f() {
+                return v;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A stub session (its stdin recorded in `out`) with a switch "being applied" and one user
+    /// message queued behind it.
+    fn stub_applying_a_switch(dir: &tempfile::TempDir) -> (Reap, Shared, PathBuf) {
+        let mut mgr = SessionManager::with_store_path(dir.path().join("sessions.json"));
+        let out = dir.path().join("stdin.log");
+        spawn_stub(&mut mgr, "t", &recording_stub(&out));
+        let shared = mgr.sessions["t"].shared.clone();
+        shared.model.lock().unwrap().applying = Some(ModelTarget { model: "opus".into(), effort: None });
+        mgr.send_user_message("t", "queued while applying", &[]).unwrap();
+        assert_eq!(shared.pending.lock().unwrap().len(), 1, "queued, not written: a switch is being applied");
+        assert!(!std::fs::read_to_string(&out).unwrap_or_default().contains("queued while applying"));
+        (Reap(mgr), shared, out)
+    }
+
+    fn applied() -> ModelRequestOutcome {
+        ModelRequestOutcome {
+            status: crate::ipc::protocol::ModelRequestStatus::Applied,
+            code: None,
+            message: None,
+            warning: None,
+        }
+    }
+
+    /// The queued message reaches the stub's stdin, once, and the session is out of `Applying`.
+    async fn assert_session_released(shared: &Shared, out: &std::path::Path) {
+        eventually("the session to leave Applying", || {
+            shared.model.lock().unwrap_or_else(|e| e.into_inner()).applying.is_none().then_some(())
+        })
+        .await;
+        let written = eventually("the queued message to be written", || {
+            let text = std::fs::read_to_string(out).unwrap_or_default();
+            text.contains("queued while applying").then_some(text)
+        })
+        .await;
+        assert_eq!(written.matches("queued while applying").count(), 1, "exactly once: {written:?}");
+        assert!(shared.pending.lock().unwrap().is_empty());
+    }
+
+    // [seam: model_switch::spawn_apply_task]
+    #[tokio::test]
+    async fn a_switch_task_that_finishes_answers_its_requester_and_releases_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_reap, shared, out) = stub_applying_a_switch(&dir);
+        let (tx, rx) = oneshot::channel();
+
+        model_switch::spawn_apply_task(&shared, Some(tx), async { applied() });
+
+        let outcome = tokio::time::timeout(Duration::from_secs(30), rx).await.expect("answered").expect("not dropped");
+        assert_eq!(outcome, applied());
+        assert_session_released(&shared, &out).await;
+    }
+
+    // [seam: model_switch::spawn_apply_task]
+    #[tokio::test]
+    async fn a_switch_task_that_panics_still_leaves_applying_fails_its_requester_and_releases_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_reap, shared, out) = stub_applying_a_switch(&dir);
+        let (tx, rx) = oneshot::channel();
+
+        model_switch::spawn_apply_task(&shared, Some(tx), async {
+            if true {
+                panic!("the switch task blew up");
+            }
+            applied()
+        });
+
+        let outcome = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .expect("the requester is answered, not left waiting")
+            .expect("the answer is a result, not a dropped channel");
+        assert_eq!(outcome.status, crate::ipc::protocol::ModelRequestStatus::Failed);
+        assert_session_released(&shared, &out).await;
+    }
+
+    // [seam: model_switch::spawn_apply_task]
+    #[tokio::test]
+    async fn a_switch_task_that_panics_with_nobody_waiting_still_releases_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_reap, shared, out) = stub_applying_a_switch(&dir);
+
+        model_switch::spawn_apply_task(&shared, None, async {
+            if true {
+                panic!("the switch task blew up");
+            }
+            applied()
+        });
+
+        assert_session_released(&shared, &out).await;
+    }
+
+    // [seam: model_switch::spawn_apply_task]
+    #[tokio::test]
+    async fn a_switch_task_that_panics_on_a_poisoned_runtime_lock_still_leaves_applying() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_reap, shared, out) = stub_applying_a_switch(&dir);
+        // Something else panicked while holding the session's model lock earlier.
+        let model = Arc::clone(&shared.model);
+        let _ = std::thread::spawn(move || {
+            let _held = model.lock().unwrap();
+            panic!("poison the model lock");
+        })
+        .join();
+        assert!(shared.model.is_poisoned(), "precondition: the lock is poisoned");
+        let (tx, rx) = oneshot::channel();
+
+        model_switch::spawn_apply_task(&shared, Some(tx), async {
+            if true {
+                panic!("the switch task blew up");
+            }
+            applied()
+        });
+
+        let outcome = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .expect("the requester is answered")
+            .expect("not dropped");
+        assert_eq!(outcome.status, crate::ipc::protocol::ModelRequestStatus::Failed);
+        assert_session_released(&shared, &out).await;
     }
 }
 

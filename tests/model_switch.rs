@@ -25,24 +25,31 @@
 //! - `$FAKE_INITIAL_MODEL`: the model with no `--model` (default claude-sonnet-4-6).
 //! - `$FAKE_FALLBACK_REASON`: emit a `model_fallback` system event each turn.
 //! - `$FAKE_IGNORE_EFFORT`: `apply_flag_settings` succeeds but changes nothing.
+//! - `hold.initialize` / `release.initialize`: the `initialize` answer (a catalogue probe) waits for the
+//!   release file. `$FAKE_CATALOG` names the file the answer is read from.
+//! - `stall.after.<text>`: after the turn for the user message `<text>` has been handled, the fake stops
+//!   reading stdin: it takes the first 4 KiB of the NEXT frame (so the daemon is provably mid-write),
+//!   logs `STALLED` to `events.log`, and reads on only once `release.stdin` exists.
+//! - every start appends `<pwd -P> <entries in it> <its permissions>` to `cwd.log`.
 //!
 //! No test asserts on wall-clock time. Waits are event-driven with generous
 //! timeouts. Env vars are process-global, so every test holds one lock.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use nostromo::data::work::picks::{picks_restrictions, PICKS_TAG};
 use nostromo::ipc::protocol::{
-    EffortChoice, ModelRequestStatus, ServerMsg, SessionModelState, SwitchPhase,
+    EffortChoice, FocusMeta, ModelRequestStatus, ServerMsg, SessionModelState, SwitchPhase,
 };
 use nostromo::ipc::session_manager::{ModelRequestOutcome, SwitchRequest, SwitchTicket, CLAUDE_BIN_ENV};
 use nostromo::ipc::stream_json::{transcript_from_jsonl, Turn, TurnBlock, TurnDelta};
 use nostromo::ipc::SessionManager;
 use nostromo::model::catalog::ModelCatalog;
+use nostromo::model::hub::{refresh_catalog, ModelHub};
 use nostromo::model::notes::{self, LedgerNote, NoteKind};
 use nostromo::model::store::{self, FocusModelRecord, ModelSource};
 use nostromo::model::{Actor, ModelPaths, ModelTarget};
@@ -56,9 +63,15 @@ const TAG: &str = "focus-a";
 
 const FAKE_CLAUDE: &str = r##"#!/bin/sh
 D="$FAKE_DIR"
+printf '%s\t%s\t%s\n' "$(pwd -P)" "$(ls -A | wc -l | tr -d ' ')" "$(ls -ld . | cut -d' ' -f1)" >> "$D/cwd.log"
 S="$D/state.$$"
 mkdir -p "$S"
-{ for a in "$@"; do printf '%s\n' "$a"; done; printf '%s\n' '--END--'; } >> "$D/argv.log"
+# Appended with one write (a shell's printf writes line by line), so two fakes started together
+# never interleave their arguments.
+A="$D/argv.$$"
+{ for a in "$@"; do printf '%s\n' "$a"; done; printf '%s\n' '--END--'; } > "$A"
+cat "$A" >> "$D/argv.log"
+rm -f "$A"
 printf 'START\n' >> "$D/events.log"
 
 log() { printf '%s\t%s\n' "$1" "$2" >> "$D/events.log"; }
@@ -156,13 +169,29 @@ turn() {
   fi
 }
 
-while IFS= read -r line; do
+STALL_NEXT=""
+next_line() {
+  if [ -n "$STALL_NEXT" ]; then
+    STALL_NEXT=""
+    head=$(dd bs=1 count=4096 2>/dev/null)
+    log STALLED ""
+    wait_for "$D/release.stdin"
+    rest=""
+    IFS= read -r rest
+    line="$head$rest"
+    return 0
+  fi
+  IFS= read -r line
+}
+
+while next_line; do
   log IN "$line"
   case "$line" in
     *'"type":"control_request"'*)
       rid=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
       case "$line" in
         *'"subtype":"initialize"'*)
+          [ -e "$D/hold.initialize" ] && wait_for "$D/release.initialize"
           log ANSWER initialize
           tr -d '\n' < "$FAKE_CATALOG" | sed "s/\"request_id\" *: *\"init-1\"/\"request_id\":\"$rid\"/"
           printf '\n' ;;
@@ -181,7 +210,8 @@ while IFS= read -r line; do
       esac ;;
     *'"type":"user"'*)
       text=$(printf '%s' "$line" | sed -n 's/.*"content":"\([^"]*\)".*/\1/p')
-      turn "$text" ;;
+      turn "$text"
+      [ -e "$D/stall.after.$text" ] && STALL_NEXT=1 ;;
   esac
 done
 "##;
@@ -317,6 +347,7 @@ impl Rig {
             effort: effort.map(str::to_owned),
             source: ModelSource::Focus,
             pending: None,
+            ..FocusModelRecord::default()
         };
         store::update_focus_record(&self.paths.focus_models, tag, |_| Some(record)).unwrap();
     }
@@ -1200,7 +1231,9 @@ async fn a_recorded_family_the_cli_no_longer_offers_starts_on_the_agents_model_w
     let sid = rig.spawn(TAG, "declarer");
 
     let runs = rig.wait_for_runs(1).await;
-    assert_eq!(arg_of(&runs[0], "--model"), Some("sonnet"), "falls back to the agent's model, not a failing start: {:?}", runs[0]);
+    // The fallback is the agent's own model: an observed record, not a choice, so no `--model` is passed
+    // and the agent's front matter decides (chosen-vs-observed, review item 9).
+    assert_eq!(arg_of(&runs[0], "--model"), None, "falls back to the agent's model, not a failing start: {:?}", runs[0]);
     let record = rig.record(TAG).unwrap();
     assert_eq!((record.model.as_str(), record.source), ("sonnet", ModelSource::AgentDeclared));
     let unavailable = rig.ledger_of_kind(&sid, NoteKind::ModelUnavailable);
@@ -1494,4 +1527,1079 @@ fn a_leading_nostromo_note_is_not_part_of_the_prompt_the_user_sees() {
 
     let turns = transcript.snapshot();
     assert_eq!(turns.last().unwrap().user_input, "third question");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Review fix-ups (PR #236): validation, probe hygiene, lock hygiene, robustness,
+// housekeeping, and chosen-vs-observed records.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── helpers for the review fix-up tests ───────────────────────────────────────
+
+fn focus_meta(tag: &str) -> FocusMeta {
+    FocusMeta {
+        initial_model: None,
+        initial_effort: None,
+        tag: tag.into(),
+        display_name: tag.into(),
+        agent_name: "cody".into(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
+    }
+}
+
+/// The fixture catalogue, flagged as what an earlier probe saw.
+fn stale_catalog() -> ModelCatalog {
+    ModelCatalog { stale: true, ..fixture_catalog() }
+}
+
+fn family_names(catalog: &ModelCatalog) -> Vec<String> {
+    catalog.families.iter().map(|f| f.value.clone()).collect()
+}
+
+impl Rig {
+    /// A record with an explicit source, written straight to the store.
+    fn seed_sourced(&self, tag: &str, model: &str, effort: Option<&str>, source: ModelSource) {
+        let record =
+            FocusModelRecord { model: model.to_owned(), effort: effort.map(str::to_owned), source, ..FocusModelRecord::default() };
+        store::update_focus_record(&self.paths.focus_models, tag, |_| Some(record)).unwrap();
+    }
+
+    /// Tell the daemon about these focuses, twice, so it can vouch for the registry
+    /// (`registry_known()` needs two non-empty pushes).
+    fn register(&mut self, tags: &[&str]) {
+        let metas: Vec<FocusMeta> = tags.iter().map(|t| focus_meta(t)).collect();
+        self.mgr.set_focus_registry(metas.clone());
+        self.mgr.set_focus_registry(metas);
+    }
+
+    /// Start `tag` and stop it again: a focus the daemon knows, that is not running and has no record.
+    async fn spawn_and_stop(&mut self, tag: &str) -> String {
+        let n = self.runs().len();
+        let sid = self.spawn(tag, "");
+        self.wait_for_runs(n + 1).await;
+        self.mgr.stop(tag);
+        sid
+    }
+
+    /// Start `tag` of `agent` on a stored (chosen) `model`; the argument vector of that start.
+    async fn start_on_stored(&mut self, tag: &str, agent: &str, model: &str) -> (Vec<String>, String) {
+        self.seed(tag, model, None);
+        let n = self.runs().len();
+        let sid = self.spawn(tag, agent);
+        let runs = self.wait_for_runs(n + 1).await;
+        (runs[n].clone(), sid)
+    }
+
+    /// Every `(directory, entries in it, permissions)` the fake was started in, oldest first.
+    fn start_dirs(&self) -> Vec<(String, String, String)> {
+        std::fs::read_to_string(self.fake.join("cwd.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                Some((f.next()?.to_owned(), f.next()?.to_owned(), f.next()?.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The fake has stopped reading stdin (see `stall.after.<text>`).
+    fn stalled(&self) -> bool {
+        std::fs::read_to_string(self.fake.join("events.log")).unwrap_or_default().lines().any(|l| l.starts_with("STALLED"))
+    }
+
+    async fn wait_for_stall(&self) {
+        eventually("the fake to stop reading stdin", || self.stalled().then_some(())).await
+    }
+
+    fn stall_after(&self, text: &str) {
+        std::fs::write(self.fake.join(format!("stall.after.{text}")), "").unwrap();
+    }
+
+    /// Wait until the session respawns (the supervisor tick), driving it as the daemon does.
+    async fn recover(&mut self, runs: usize) -> Vec<Vec<String>> {
+        let started = Instant::now();
+        loop {
+            self.mgr.reap_and_recover();
+            let all = self.runs();
+            if all.len() >= runs {
+                return all;
+            }
+            assert!(started.elapsed() < WAIT, "the session was never respawned");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// Points the session at a (private) home directory for the rest of the test.
+fn private_home(rig: &mut Rig) -> PathBuf {
+    let home = rig._root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    rig.env("HOME", Some(home.clone().into()));
+    home
+}
+
+/// A stored session (see [`stored_session`]) under `home` as the CLI keeps it.
+fn store_session(home: &Path, sid: &str, jsonl: &str) {
+    let dir = home.join(".claude").join("projects").join("-some-project");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{sid}.jsonl")), jsonl).unwrap();
+}
+
+// ── (2) validation: a typo never reaches the store, whatever the catalogue holds ─
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_catalogue_a_typo_or_a_foreign_model_is_still_refused_and_nothing_is_stored() {
+    let mut rig = Rig::new().await;
+    rig.mgr.set_model_catalog(ModelCatalog::default());
+    let sid = rig.spawn_and_stop(TAG).await;
+
+    for bad in ["opuss", "gpt-4", "default"] {
+        let outcome = settle(rig.request(TAG, to_model(bad))).await;
+
+        assert_eq!(outcome.status, ModelRequestStatus::Refused, "{bad}: {outcome:?}");
+        assert_eq!(outcome.code.as_deref(), Some("unknown_model"), "{bad}");
+        assert!(rig.record(TAG).is_none(), "{bad}: a refused model must leave no record behind");
+    }
+    assert!(rig.ledger(&sid).is_empty(), "nothing was changed, so nothing is noted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_catalogue_a_known_family_or_a_full_model_name_is_still_accepted() {
+    let mut rig = Rig::new().await;
+    rig.mgr.set_model_catalog(ModelCatalog::default());
+    rig.spawn_and_stop(TAG).await;
+
+    for good in ["opus", "claude-opus-4-6", "fable", "haiku", "sonnet"] {
+        let outcome = settle(rig.request(TAG, to_model(good))).await;
+
+        assert_eq!(outcome.status, ModelRequestStatus::Applied, "{good}: {outcome:?}");
+        assert_eq!(rig.record(TAG).map(|r| r.model), Some(good.to_owned()), "{good}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_a_catalogue_a_typo_is_refused_and_default_is_never_a_model() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    rig.spawn_and_stop(TAG).await;
+
+    for bad in ["opuss", "default"] {
+        let outcome = settle(rig.request(TAG, to_model(bad))).await;
+        assert_eq!((outcome.status, outcome.code.as_deref()), (ModelRequestStatus::Refused, Some("unknown_model")), "{bad}");
+    }
+    assert_eq!(rig.record(TAG).unwrap().model, "sonnet");
+}
+
+#[test]
+fn an_empty_model_list_is_not_a_catalogue() {
+    let answer = json!({"type": "control_response", "response": {"subtype": "success", "request_id": "x", "response": {"models": []}}});
+    assert!(ModelCatalog::from_initialize_response(&answer, Utc::now()).is_none());
+    assert!(ModelCatalog::from_initialize_response(&json!({"response": {"models": []}}), Utc::now()).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probe_that_finds_no_models_keeps_the_previous_catalogue_and_flags_it_stale() {
+    let mut rig = Rig::new().await;
+    let mut empty = fixture_json();
+    empty["response"]["response"]["models"] = json!([]);
+    let empty_path = rig.fake.join("empty-catalog.json");
+    std::fs::write(&empty_path, serde_json::to_vec(&empty).unwrap()).unwrap();
+    rig.env("FAKE_CATALOG", Some(empty_path.into()));
+    let hub = ModelHub::new(ModelPaths::beside(&rig._root.path().join("hub").join("sessions.json")));
+    hub.set_catalog(fixture_catalog());
+    assert!(!hub.catalog().stale);
+
+    let result = refresh_catalog(&hub).await;
+
+    assert!(result.is_err(), "no models is a failed probe, not an empty catalogue");
+    assert_eq!(family_names(&hub.catalog()), ["haiku", "sonnet", "opus", "fable"], "the previous catalogue is kept");
+    assert!(hub.catalog().stale, "and flagged as what an earlier probe saw");
+    assert!(matches!(hub.catalog_msg(), ServerMsg::ModelCatalog { stale: true, ref families, .. } if families.len() == 4));
+}
+
+// ── (2) agents that inherit, and recorded models nobody offers ────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_that_inherits_its_model_declares_none_and_its_focus_is_never_given_a_model_flag() {
+    let mut rig = Rig::new().await;
+    rig.declare_agent("inheritor", "inherit");
+
+    rig.spawn(TAG, "inheritor");
+    rig.send(TAG, "hello");
+    rig.wait_for("result:hello").await;
+    let record = eventually("the migrated record", || rig.record(TAG)).await;
+    rig.mgr.restart(TAG).unwrap();
+    rig.mgr.reap_and_recover();
+    let runs = rig.wait_for_runs(2).await;
+
+    assert_eq!(record.source, ModelSource::CliDefault, "`model: inherit` declares nothing, so the CLI's default is what ran");
+    for run in &runs {
+        assert!(!run.iter().any(|a| a == "--model"), "{run:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_focus_of_an_agent_that_declares_nothing_is_started_with_no_model_flag() {
+    let mut rig = Rig::new().await;
+    std::fs::write(rig.agents.join("silent.md"), "---\nname: silent\ndescription: no model line\n---\nYou are silent.\n").unwrap();
+
+    rig.spawn(TAG, "silent");
+    rig.send(TAG, "hello");
+    rig.wait_for("result:hello").await;
+    eventually("the migrated record", || rig.record(TAG)).await;
+    rig.mgr.restart(TAG).unwrap();
+    let runs = rig.wait_for_runs(2).await;
+
+    assert_eq!(runs.iter().filter(|r| r.iter().any(|a| a == "--model")).count(), 0, "{runs:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_model_that_is_no_model_at_all_is_not_passed_when_there_is_no_catalogue() {
+    let mut rig = Rig::new().await;
+    rig.mgr.set_model_catalog(ModelCatalog::default());
+    rig.declare_agent("declarer", "sonnet");
+
+    let (argv, sid) = rig.start_on_stored(TAG, "declarer", "opuss").await;
+
+    assert!(!argv.iter().any(|a| a == "opuss"), "a typo must not become a failing start: {argv:?}");
+    assert_eq!(arg_of(&argv, "--model"), None, "the agent's own model applies through its front matter: {argv:?}");
+    let unavailable = rig.ledger_of_kind(&sid, NoteKind::ModelUnavailable);
+    assert_eq!(unavailable.len(), 1, "{unavailable:?}");
+    assert!(unavailable[0].text.contains("is no longer available"), "{}", unavailable[0].text);
+    assert!(unavailable[0].text.ends_with("this focus now uses Sonnet."), "{}", unavailable[0].text);
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.source), ("sonnet", ModelSource::AgentDeclared));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_model_the_catalogue_does_not_list_is_not_passed_and_the_focus_falls_back_to_the_agents_model() {
+    let mut rig = Rig::new().await;
+    rig.declare_agent("declarer", "sonnet");
+
+    let (argv, sid) = rig.start_on_stored(TAG, "declarer", "opuss").await;
+
+    assert!(!argv.iter().any(|a| a == "opuss"), "{argv:?}");
+    assert_eq!(arg_of(&argv, "--model"), None, "{argv:?}");
+    assert_eq!(rig.ledger_of_kind(&sid, NoteKind::ModelUnavailable).len(), 1);
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.source), ("sonnet", ModelSource::AgentDeclared));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unlisted_stored_model_is_replaced_by_the_agents_default_which_is_a_choice_and_so_is_passed() {
+    let mut rig = Rig::new().await;
+    rig.declare_agent("declarer", "sonnet");
+    assert_eq!(rig.mgr.set_agent_default("declarer", Some("haiku".into()), None, false).status, ModelRequestStatus::Applied);
+
+    let (argv, sid) = rig.start_on_stored(TAG, "declarer", "opuss").await;
+
+    assert_eq!(arg_of(&argv, "--model"), Some("haiku"), "the user's per-agent default beats the front matter: {argv:?}");
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.source), ("haiku", ModelSource::AgentDefault));
+    let unavailable = rig.ledger_of_kind(&sid, NoteKind::ModelUnavailable);
+    assert_eq!(unavailable.len(), 1, "{unavailable:?}");
+    assert!(unavailable[0].text.ends_with("this focus now uses Haiku."), "{}", unavailable[0].text);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_default_the_catalogue_does_not_offer_either_is_skipped_for_the_agents_declared_model() {
+    let mut rig = Rig::new().await;
+    rig.declare_agent("declarer", "sonnet");
+    store::set_default(&rig.paths.defaults, "declarer", Some(store::AgentDefault { model: "gemini".into(), effort: None })).unwrap();
+
+    let (argv, _sid) = rig.start_on_stored(TAG, "declarer", "opuss").await;
+
+    assert!(!argv.iter().any(|a| a == "gemini" || a == "opuss"), "neither unoffered name is passed: {argv:?}");
+    assert_eq!(arg_of(&argv, "--model"), None, "the declared model is observed, not chosen: {argv:?}");
+    let record = rig.record(TAG).unwrap();
+    assert_eq!((record.model.as_str(), record.source), ("sonnet", ModelSource::AgentDeclared));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_default_and_no_declared_model_an_unlisted_stored_model_leaves_the_cli_default_and_a_note() {
+    for catalog in [ModelCatalog::default(), fixture_catalog()] {
+        let mut rig = Rig::new().await;
+        rig.mgr.set_model_catalog(catalog);
+
+        let (argv, sid) = rig.start_on_stored(TAG, "plain-agent", "opuss").await;
+
+        assert!(!argv.iter().any(|a| a == "--model" || a == "opuss"), "{argv:?}");
+        assert!(rig.record(TAG).is_none(), "nothing is recorded until the session reports what it runs");
+        assert_eq!(rig.ledger_of_kind(&sid, NoteKind::ModelUnavailable).len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_model_is_passed_through_unchanged_when_the_catalogue_is_only_stale() {
+    let mut rig = Rig::new().await;
+    rig.mgr.set_model_catalog(stale_catalog());
+
+    let (argv, sid) = rig.start_on_stored(TAG, "", "opuss").await;
+
+    assert_eq!(arg_of(&argv, "--model"), Some("opuss"), "a stale catalogue is no proof a model is gone: {argv:?}");
+    assert!(rig.ledger_of_kind(&sid, NoteKind::ModelUnavailable).is_empty());
+    assert_eq!(rig.record(TAG).unwrap().model, "opuss");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_full_model_name_and_a_known_family_are_always_passed_through() {
+    for catalog in [ModelCatalog::default(), fixture_catalog()] {
+        let mut rig = Rig::new().await;
+        rig.mgr.set_model_catalog(catalog);
+
+        let (pinned, _) = rig.start_on_stored("pinned", "", "claude-haiku-3-0").await;
+        let (family, _) = rig.start_on_stored("family", "", "opus").await;
+
+        assert_eq!(arg_of(&pinned, "--model"), Some("claude-haiku-3-0"), "{pinned:?}");
+        assert_eq!(arg_of(&family, "--model"), Some("opus"), "{family:?}");
+    }
+}
+
+// ── (3) the catalogue probe runs somewhere harmless ───────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probe_runs_in_its_own_private_empty_directory_which_is_gone_when_it_returns() {
+    let rig = Rig::new().await;
+
+    nostromo::model::catalog::probe(&fake_claude_script()).await.expect("the first probe");
+    nostromo::model::catalog::probe(&fake_claude_script()).await.expect("the second probe");
+
+    let dirs = rig.start_dirs();
+    assert_eq!(dirs.len(), 2, "{dirs:?}");
+    let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    for (dir, entries, permissions) in &dirs {
+        assert_ne!(Path::new(dir), temp, "the CLI scans its cwd; the shared temp dir is not a place to run it");
+        assert_eq!(entries, "0", "the directory it starts in is empty: {dir}");
+        // `ls -ld` style `drwx------`, maybe with a trailing `@`/`+` marker.
+        let mode: String = permissions.chars().take(10).collect();
+        assert!(mode.ends_with("------"), "private to the daemon's user: {permissions} {dir}");
+        assert!(!Path::new(dir).exists(), "removed when the probe returns: {dir}");
+    }
+    assert_ne!(dirs[0].0, dirs[1].0, "every probe gets a fresh one");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probe_that_fails_still_cleans_up_its_directory() {
+    let mut rig = Rig::new().await;
+    let refusal = rig.fake.join("error-catalog.json"); // the CLI answers `initialize` with an error
+    std::fs::write(&refusal, r#"{"type":"control_response","response":{"subtype":"error","request_id":"init-1","error":"boom"}}"#).unwrap();
+    rig.env("FAKE_CATALOG", Some(refusal.into()));
+
+    let result = nostromo::model::catalog::probe(&fake_claude_script()).await;
+
+    assert!(result.is_err());
+    let dirs = rig.start_dirs();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    assert!(!Path::new(&dirs[0].0).exists(), "removed even though the probe failed: {}", dirs[0].0);
+}
+
+// ── (4) lock hygiene: a CLI that stops reading must not wedge the daemon ──────
+//
+// A user message bigger than the pipe buffer, written to a CLI that has stopped reading its stdin,
+// blocks the writer. Whatever blocks must not be something the rest of the daemon needs: listing
+// sessions, reading a model state, sending another message and restarting the session all go
+// through the same `Arc<Mutex<SessionManager>>` the daemon shares.
+
+/// Far larger than any pipe buffer.
+const BIG_BYTES: usize = 1 << 20;
+
+fn big_text() -> String {
+    format!("BIG{}", "x".repeat(BIG_BYTES))
+}
+
+/// The wire labels with the big message abbreviated to `…BIG`.
+fn terse(labels: Vec<String>) -> Vec<String> {
+    labels.into_iter().map(|l| if l.len() > 200 { format!("{}BIG", l.split("BIG").next().unwrap_or("")) } else { l }).collect()
+}
+
+/// The session manager behind the mutex a daemon shares it through. Every call runs on a
+/// blocking thread under a deadline, so a wedged manager fails the test instead of hanging it.
+struct Daemon {
+    mgr: Arc<std::sync::Mutex<SessionManager>>,
+    fake: PathBuf,
+}
+
+impl Daemon {
+    /// Move the rig's manager behind a mutex.
+    fn take(rig: &mut Rig) -> Daemon {
+        let placeholder = SessionManager::with_store_path(rig._root.path().join("placeholder").join("sessions.json"));
+        let mgr = std::mem::replace(&mut rig.mgr, placeholder);
+        Daemon { mgr: Arc::new(std::sync::Mutex::new(mgr)), fake: rig.fake.clone() }
+    }
+
+    async fn call<T: Send + 'static>(&self, what: &str, f: impl FnOnce(&mut SessionManager) -> T + Send + 'static) -> T {
+        let mgr = Arc::clone(&self.mgr);
+        let task = tokio::task::spawn_blocking(move || {
+            let mut guard = mgr.lock().unwrap_or_else(|e| e.into_inner());
+            f(&mut guard)
+        });
+        tokio::time::timeout(WAIT, task)
+            .await
+            .unwrap_or_else(|_| panic!("{what} never returned: the session manager is wedged behind a write to a CLI that stopped reading"))
+            .expect("the call did not panic")
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.fake.join("release.stdin"), ""); // un-wedge anything still blocked
+        self.mgr.lock().unwrap_or_else(|e| e.into_inner()).kill_all_on_shutdown();
+    }
+}
+
+/// Lets a stalled fake read again when the test ends (or fails), before the daemon is torn down.
+struct Unstick(PathBuf);
+
+impl Drop for Unstick {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.0.join("release.stdin"), "");
+    }
+}
+
+/// A turn is running, a huge message (and, with `queue_later`, a small one after it) is queued behind
+/// it, the turn ends and the daemon starts writing the huge frame to a CLI that has stopped reading.
+async fn stall_on_a_big_write(rig: &mut Rig, queue_later: bool) -> (Daemon, Unstick) {
+    rig.seed(TAG, "sonnet", None);
+    rig.spawn(TAG, "");
+    rig.hold("turn1");
+    rig.stall_after("turn1");
+    rig.send(TAG, "turn1");
+    rig.wait_for("user:turn1").await;
+    let big = big_text();
+    rig.send(TAG, &big);
+    if queue_later {
+        rig.send(TAG, "later");
+    }
+    let daemon = Daemon::take(rig);
+    let unstick = Unstick(rig.fake.clone());
+
+    rig.release("turn1");
+    rig.wait_for_stall().await; // the CLI took the first bytes of the frame: the daemon is inside the write
+
+    (daemon, unstick)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_stuck_in_a_full_pipe_does_not_wedge_the_session_manager_and_is_delivered_once_in_order() {
+    let mut rig = Rig::new().await;
+    let (daemon, _unstick) = stall_on_a_big_write(&mut rig, false).await;
+
+    let listed = daemon.call("list()", |m| m.list().len()).await;
+    let state = daemon.call("session_model_state()", |m| m.session_model_state(TAG)).await;
+    let accepted = daemon.call("send_user_message()", |m| m.send_user_message(TAG, "later", &[])).await;
+
+    assert_eq!(listed, 1);
+    assert!(state.running);
+    accepted.expect("a message sent while the CLI is slow to read is accepted, and queued");
+    std::fs::write(rig.fake.join("release.stdin"), "").unwrap();
+    rig.wait_for("result:later").await;
+    assert_eq!(
+        terse(rig.wire()),
+        ["user:turn1", "result:turn1", "user:BIG", "result:BIG", "user:later", "result:later"],
+        "the big message exactly once, then the one sent meanwhile exactly once, in order"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_while_a_write_is_stuck_hands_the_queued_messages_to_the_new_process_once_in_order() {
+    let mut rig = Rig::new().await;
+    let (daemon, _unstick) = stall_on_a_big_write(&mut rig, true).await;
+
+    daemon.call("restart()", |m| m.restart(TAG)).await.expect("the session restarts");
+    rig.wait_for("result:later").await;
+
+    assert_eq!(
+        terse(rig.wire()),
+        ["user:turn1", "result:turn1", "user:BIG", "result:BIG", "user:later", "result:later"],
+        "neither lost nor duplicated by the restart"
+    );
+    let events = rig.labels();
+    let second_start = events.iter().enumerate().filter(|(_, l)| *l == "start").nth(1).map(|(i, _)| i).expect("a second process started");
+    let first_big = events.iter().position(|l| l.starts_with("user:BIG")).unwrap();
+    assert!(first_big > second_start, "the big message went to the new process, the old one never took it whole");
+}
+
+// ── (4) a client attaching is replayed every tag's model state, read once ─────
+
+// [seam: SessionManager::model_state_replay]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_replay_a_subscriber_gets_is_exactly_the_state_of_every_tag_the_daemon_knows() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    rig.seed("recorded-only", "opus", Some("high"));
+    rig.seed("locked", "haiku", None);
+    rig.mgr.restrict_tag("locked", picks_restrictions());
+    rig.register(&["registered-only", TAG]);
+    rig.spawn(TAG, "");
+    rig.send(TAG, "hello");
+    rig.wait_for("result:hello").await;
+
+    let tags = rig.mgr.model_state_tags();
+    let replay = rig.mgr.model_state_replay();
+
+    let expected: Vec<SessionModelState> = tags.iter().map(|t| rig.mgr.session_model_state(t)).collect();
+    assert_eq!(replay, expected, "same frames, same order");
+    for tag in [TAG, "recorded-only", "registered-only"] {
+        assert!(replay.iter().any(|s| s.tag == tag), "{tag} is replayed: {:?}", replay.iter().map(|s| &s.tag).collect::<Vec<_>>());
+    }
+    assert!(!replay.iter().any(|s| s.tag == "locked"), "a restricted focus has no model state to show");
+    assert!(replay.iter().find(|s| s.tag == TAG).unwrap().running);
+}
+
+// ── (4) a switch on a focus that is not running is noted where its stored conversation stands ─
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_on_a_stopped_session_is_noted_after_the_prompts_of_its_stored_conversation_before_the_ticket_resolves() {
+    let mut rig = Rig::new().await;
+    let home = private_home(&mut rig);
+    store_session(&home, "sid-two-prompts", &stored_session());
+    rig.seed(TAG, "sonnet", None);
+    rig.mgr
+        .spawn_session(TAG.into(), "".into(), format!("view-{TAG}"), Some(rig.cwd.clone()), Some("sid-two-prompts".into()), false)
+        .expect("resumes");
+    rig.wait_for_runs(1).await;
+    rig.mgr.stop(TAG);
+
+    let outcome = settle(rig.request(TAG, to_model("opus"))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Applied);
+    let ledger = rig.ledger("sid-two-prompts");
+    assert_eq!(ledger.len(), 1, "the note is in the ledger by the time the caller is told: {ledger:?}");
+    assert_eq!(ledger[0].kind, NoteKind::ModelChanged);
+    assert_eq!(ledger[0].text, "Model set to Opus; takes effect when the session starts.");
+    assert_eq!(ledger[0].after_prompt, 2, "after the two prompts the stored conversation holds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_that_just_restarted_notes_a_switch_on_a_focus_it_has_no_session_for_after_its_stored_prompts() {
+    let mut rig = Rig::new().await;
+    let home = private_home(&mut rig);
+    store_session(&home, "sid-two-prompts", &stored_session());
+    rig.seed(TAG, "sonnet", None);
+    std::fs::write(&rig.store_path, serde_json::to_vec(&json!({ TAG: "sid-two-prompts" })).unwrap()).unwrap();
+    let mut restarted = SessionManager::with_store_path(rig.store_path.clone());
+    restarted.set_model_catalog(fixture_catalog());
+
+    let outcome = settle(restarted.request_switch(TAG, to_model("opus"))).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Applied);
+    let ledger = rig.ledger("sid-two-prompts");
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    assert_eq!(ledger[0].after_prompt, 2);
+    assert_eq!(rig.record(TAG).unwrap().model, "opus");
+}
+
+// ── (5) robustness: the queue and the switches behind a failed apply ──────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_asked_for_while_another_is_applied_survives_the_session_dying_and_lands_on_its_replacement() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_SET_MODEL", Some("exit".into()));
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    let _window = rig.observe(TAG, "window-1");
+    rig.hold("set_model");
+
+    let first = rig.request(TAG, to_model("opus"));
+    rig.wait_for("set_model:opus").await;
+    // The running process keeps the environment it started with (it will die on set_model); the one
+    // that replaces it starts with this one.
+    rig.env("FAKE_SET_MODEL", None);
+    let second = rig.request(TAG, to_model("fable"));
+    assert_eq!(second.immediate().expect("answered at once").status, ModelRequestStatus::PendingTurnEnd);
+    rig.release("set_model"); // the first process dies now
+    let first = settle(first).await;
+    assert_eq!(first.status, ModelRequestStatus::Failed, "the switch that was in flight died with its process");
+
+    rig.recover(2).await;
+    eventually("the second switch to be applied on the new process", || {
+        (rig.record(TAG).map(|r| r.model) == Some("fable".to_owned())).then_some(())
+    })
+    .await;
+
+    let failed: Vec<String> = rig.ledger_of_kind(&sid, NoteKind::ModelFailed).into_iter().map(|n| n.text).collect();
+    assert_eq!(failed.len(), 1, "only the switch that really failed is reported as failed: {failed:?}");
+    assert!(failed[0].starts_with("Couldn't switch to Opus"), "{failed:?}");
+    assert!(!failed.iter().any(|t| t.contains("Fable")), "the second switch did not fail: {failed:?}");
+    let changed: Vec<String> = rig.ledger_of_kind(&sid, NoteKind::ModelChanged).into_iter().map(|n| n.text).collect();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(changed[0].starts_with("Model changed to Fable"), "{changed:?}");
+    let runs = rig.runs();
+    assert!(runs[1].iter().any(|a| a == "--resume"), "{:?}", runs[1]);
+    eventually("the new process to be asked", || rig.wire().iter().any(|l| l == "set_model:fable").then_some(())).await;
+    eventually("the switch to settle", || (rig.state(TAG).phase == SwitchPhase::Steady).then_some(())).await;
+    assert_eq!(rig.state(TAG).recorded.unwrap().model, "fable");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_asked_for_while_another_is_applied_and_no_turn_is_running_does_not_claim_to_wait_for_a_turn() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    let sid = rig.spawn(TAG, "");
+    let mut window = rig.observe(TAG, "window-1");
+    rig.hold("set_model");
+
+    let first = rig.request(TAG, to_model("opus"));
+    rig.wait_for("set_model:opus").await;
+    let second = rig.request(TAG, to_model("fable"));
+
+    assert_eq!(second.immediate().expect("answered at once").status, ModelRequestStatus::PendingTurnEnd);
+    assert!(rig.ledger_of_kind(&sid, NoteKind::ModelPending).is_empty(), "\"after this turn\" is not true: no turn is running");
+    assert!(window.notes().iter().all(|(k, _)| *k != NoteKind::ModelPending), "{:?}", window.notes());
+    rig.release("set_model");
+    assert_eq!(settle(first).await.status, ModelRequestStatus::Applied);
+    eventually("the waiting switch to be applied", || (rig.record(TAG).map(|r| r.model) == Some("fable".to_owned())).then_some(())).await;
+
+    assert_eq!(rig.wire(), ["set_model:opus", "get_settings", "set_model:fable", "get_settings"]);
+    assert!(rig.ledger_of_kind(&sid, NoteKind::ModelPending).is_empty());
+    assert!(notes_of(&rig.snapshot(TAG), NoteKind::ModelPending).is_empty());
+    assert_eq!(rig.ledger_of_kind(&sid, NoteKind::ModelChanged).len(), 2);
+}
+
+// ── (8) a switch needs a focus ────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_for_a_tag_nobody_has_heard_of_is_refused_and_leaves_no_record_behind() {
+    let mut rig = Rig::new().await;
+    rig.spawn("someone-else", "");
+
+    for tag in ["no-such-focus", "no-such-either"] {
+        let outcome = settle(rig.request(tag, to_model("opus"))).await;
+
+        assert_eq!(outcome.status, ModelRequestStatus::Refused, "{tag}: {outcome:?}");
+        assert_eq!(outcome.code.as_deref(), Some("unknown_focus"), "{tag}");
+        assert!(rig.record(tag).is_none(), "{tag}: no phantom record");
+    }
+    assert!(!rig.paths.focus_models.exists(), "nothing was written to the store at all");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_for_a_registered_a_recorded_or_a_remembered_focus_is_still_stored_for_its_next_start() {
+    let mut rig = Rig::new().await;
+    rig.register(&["registered-only"]);
+    rig.seed("recorded-only", "sonnet", None);
+    std::fs::write(&rig.store_path, serde_json::to_vec(&json!({ "remembered-only": "sid-remembered" })).unwrap()).unwrap();
+
+    for tag in ["registered-only", "recorded-only", "remembered-only"] {
+        let outcome = settle(rig.request(tag, to_model("opus"))).await;
+
+        assert_eq!(outcome.status, ModelRequestStatus::Applied, "{tag}: {outcome:?}");
+        assert_eq!(rig.record(tag).map(|r| r.model), Some("opus".to_owned()), "{tag}");
+    }
+}
+
+// ── (8) the catalogue probe is throttled ──────────────────────────────────────
+
+fn fresh_hub(rig: &Rig) -> Arc<ModelHub> {
+    Arc::new(ModelHub::new(ModelPaths::beside(&rig._root.path().join("hub").join("sessions.json"))))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_soon_after_a_probe_does_not_probe_again_nor_touch_the_catalogue() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+
+    let first = refresh_catalog(&hub).await;
+    let installed = hub.catalog();
+    let second = refresh_catalog(&hub).await;
+
+    assert!(first.is_ok(), "{first:?}");
+    assert!(second.is_err(), "a probe so soon after the last is refused");
+    assert_eq!(rig.runs().len(), 1, "one probe process, not two");
+    assert_eq!(hub.catalog(), installed, "the catalogue is exactly what the first probe installed");
+    assert!(!hub.catalog().stale, "declining to probe is not a failed probe");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_refreshes_at_once_start_exactly_one_probe() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+
+    let (a, b) = tokio::join!(
+        tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { refresh_catalog(&hub).await.is_ok() }
+        }),
+        tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { refresh_catalog(&hub).await.is_ok() }
+        })
+    );
+
+    let succeeded = [a.unwrap(), b.unwrap()].into_iter().filter(|ok| *ok).count();
+    assert!(succeeded >= 1, "the probe that ran succeeded");
+    assert_eq!(rig.runs().len(), 1, "one probe process");
+    assert!(!hub.catalog().stale);
+}
+
+// [seam: ModelHub::set_min_probe_interval]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_while_a_probe_is_in_flight_does_not_start_a_second_one() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+    hub.set_min_probe_interval(Duration::ZERO); // only the in-flight probe can stop the second
+    rig.hold("initialize");
+    let probing = tokio::spawn({
+        let hub = Arc::clone(&hub);
+        async move { refresh_catalog(&hub).await }
+    });
+    rig.wait_for_runs(1).await; // the first probe's process is up and holding its answer
+
+    let second = refresh_catalog(&hub);
+    tokio::pin!(second);
+    let started = Instant::now();
+    let second = loop {
+        tokio::select! {
+            r = &mut second => break r,
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {
+                assert!(rig.runs().len() < 2, "a second probe process was started while the first was in flight");
+                assert!(started.elapsed() < WAIT, "the second refresh waited for the first instead of declining");
+            }
+        }
+    };
+    rig.release("initialize");
+    let first = tokio::time::timeout(WAIT, probing).await.expect("the first probe finishes").unwrap();
+
+    assert!(first.is_ok(), "{first:?}");
+    assert_eq!(rig.runs().len(), 1);
+    drop(second); // declined (an error) or not, it did not probe
+    assert!(!hub.catalog().stale);
+}
+
+// [seam: ModelHub::set_min_probe_interval]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_minimum_interval_every_refresh_probes() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+    hub.set_min_probe_interval(Duration::ZERO);
+
+    refresh_catalog(&hub).await.expect("first");
+    refresh_catalog(&hub).await.expect("second");
+
+    assert_eq!(rig.runs().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalogue_loaded_from_disk_is_stale_until_a_probe_succeeds() {
+    let rig = Rig::new().await;
+    let paths = ModelPaths::beside(&rig._root.path().join("hub").join("sessions.json"));
+    fixture_catalog().save(&paths.catalog).unwrap(); // what an earlier daemon cached
+    let hub = ModelHub::new(paths);
+
+    assert_eq!(family_names(&hub.catalog()), ["haiku", "sonnet", "opus", "fable"], "the cache is served at once");
+    assert!(hub.catalog().stale, "but it is only what an earlier daemon saw");
+    assert!(matches!(hub.catalog_msg(), ServerMsg::ModelCatalog { stale: true, .. }), "clients are told so");
+
+    refresh_catalog(&hub).await.expect("the probe succeeds");
+
+    assert!(!hub.catalog().stale);
+    assert!(matches!(hub.catalog_msg(), ServerMsg::ModelCatalog { stale: false, .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalogue_installed_fresh_is_not_stale_and_an_empty_cache_is_not_flagged() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+    assert!(hub.catalog().is_empty());
+
+    hub.set_catalog(fixture_catalog());
+
+    assert!(!hub.catalog().stale);
+    assert!(matches!(hub.catalog_msg(), ServerMsg::ModelCatalog { stale: false, .. }));
+}
+
+// ── (8) housekeeping: what a long-gone focus left behind ──────────────────────
+
+fn days_before(now: chrono::DateTime<Utc>, days: i64) -> chrono::DateTime<Utc> {
+    now - chrono::Duration::days(days)
+}
+
+/// Write the focus-models store directly, each record stamped as given (`None`: no stamp at all).
+fn write_records(rig: &Rig, records: &[(&str, Option<chrono::DateTime<Utc>>)]) {
+    let mut all = serde_json::Map::new();
+    for (tag, updated_at) in records {
+        let mut record = json!({"model": "opus", "source": "focus"});
+        if let Some(at) = updated_at {
+            record["updated_at"] = json!(at.to_rfc3339());
+        }
+        all.insert((*tag).to_owned(), record);
+    }
+    std::fs::write(&rig.paths.focus_models, serde_json::to_vec_pretty(&Value::Object(all)).unwrap()).unwrap();
+}
+
+fn record_tags(rig: &Rig) -> Vec<String> {
+    store::load_focus_models(&rig.paths.focus_models).into_keys().collect()
+}
+
+/// When the record was last stamped, read from the file itself.
+fn stamp_of(rig: &Rig, tag: &str) -> Option<chrono::DateTime<Utc>> {
+    let all: Value = serde_json::from_slice(&std::fs::read(&rig.paths.focus_models).unwrap()).unwrap();
+    all[tag]["updated_at"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|t| t.with_timezone(&Utc))
+}
+
+/// A ledger file for `sid` last touched at `modified`.
+fn write_ledger(rig: &Rig, sid: &str, modified: chrono::DateTime<Utc>) -> PathBuf {
+    notes::append(
+        &rig.paths.notes_dir,
+        sid,
+        &LedgerNote { after_prompt: 0, kind: NoteKind::ModelChanged, text: format!("a note of {sid}"), ts: Utc::now() },
+    )
+    .unwrap();
+    let path = notes::ledger_path(&rig.paths.notes_dir, sid);
+    std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(modified.into()).unwrap();
+    path
+}
+
+/// Remember (in the daemon's id store) that `tag` runs claude session `sid`.
+fn remember_session(rig: &Rig, tag: &str, sid: &str) {
+    let mut ids: std::collections::BTreeMap<String, String> =
+        std::fs::read(&rig.store_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    ids.insert(tag.to_owned(), sid.to_owned());
+    std::fs::write(&rig.store_path, serde_json::to_vec(&ids).unwrap()).unwrap();
+}
+
+fn a_request(rig: &Rig, tag: &str, request_id: &str) {
+    let hub = rig.mgr.model_hub();
+    hub.begin_request(tag, Some(request_id.to_owned()));
+    hub.record_request(tag, &Actor::User, &ModelTarget { model: "opus".into(), effort: None }, ModelRequestStatus::Applied);
+}
+
+// [seam: SessionManager::sweep_model_state]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_does_nothing_at_all_until_the_daemon_can_vouch_for_the_registry() {
+    let mut rig = Rig::new().await;
+    let now = Utc::now();
+    rig.mgr.set_focus_registry(vec![focus_meta("registered")]); // one push is not enough
+    assert!(!rig.mgr.registry_known(), "precondition");
+    write_records(&rig, &[("long-gone", Some(days_before(now, 400))), ("undated", None)]);
+    let ledger = write_ledger(&rig, "sid-long-gone", days_before(now, 400));
+    a_request(&rig, "long-gone", "r1");
+    let records_before = std::fs::read(&rig.paths.focus_models).unwrap();
+
+    let sweep: nostromo::ipc::session_manager::ModelSweep = rig.mgr.sweep_model_state(now + chrono::Duration::days(1000));
+
+    assert_eq!((sweep.records_removed, sweep.ledgers_removed, sweep.request_state_removed), (0, 0, 0));
+    assert_eq!(std::fs::read(&rig.paths.focus_models).unwrap(), records_before, "not even an undated record is stamped");
+    assert!(ledger.exists());
+    assert!(rig.mgr.model_hub().last_request("long-gone").is_some());
+}
+
+// [seam: SessionManager::sweep_model_state]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_removes_only_the_records_of_gone_focuses_that_nobody_touched_for_thirty_days() {
+    let mut rig = Rig::new().await;
+    rig.spawn("live-focus", "");
+    rig.register(&["registered-focus"]);
+    let now = Utc::now();
+    write_records(
+        &rig,
+        &[
+            ("gone-old", Some(days_before(now, 40))),
+            ("gone-young", Some(days_before(now, 5))),
+            ("gone-undated", None),
+            ("registered-focus", Some(days_before(now, 400))),
+            ("live-focus", Some(days_before(now, 400))),
+        ],
+    );
+
+    let first = rig.mgr.sweep_model_state(now);
+
+    assert_eq!(first.records_removed, 1);
+    assert_eq!(record_tags(&rig), ["gone-undated", "gone-young", "live-focus", "registered-focus"]);
+    let stamped = stamp_of(&rig, "gone-undated").expect("a record with no stamp is stamped, and kept, so that it ages");
+    assert!((stamped - now).num_seconds().abs() < 60, "stamped with now: {stamped}");
+
+    // Time passes: the stamped record and the young one are now old; registered and live ones never are.
+    let later = rig.mgr.sweep_model_state(now + chrono::Duration::days(40));
+
+    assert_eq!(later.records_removed, 2);
+    assert_eq!(record_tags(&rig), ["live-focus", "registered-focus"]);
+}
+
+// [seam: SessionManager::sweep_model_state]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_removes_stale_ledgers_nothing_live_or_registered_points_at() {
+    let mut rig = Rig::new().await;
+    let live_sid = rig.spawn("live-focus", "");
+    rig.register(&["registered-focus"]);
+    let now = Utc::now();
+    let old = days_before(now, 40);
+    remember_session(&rig, "registered-focus", "sid-registered");
+    remember_session(&rig, "recorded-focus", "sid-recorded-only");
+    rig.seed("recorded-focus", "opus", None);
+    let removed = [write_ledger(&rig, "sid-orphan", old), write_ledger(&rig, "sid-recorded-only", old)];
+    let kept = [
+        write_ledger(&rig, "sid-registered", old),
+        write_ledger(&rig, &live_sid, old),
+        write_ledger(&rig, "sid-young-orphan", days_before(now, 3)),
+    ];
+    let stray = rig.paths.notes_dir.join("README.txt");
+    std::fs::write(&stray, "not a ledger").unwrap();
+    std::fs::OpenOptions::new().write(true).open(&stray).unwrap().set_modified(old.into()).unwrap();
+
+    let sweep = rig.mgr.sweep_model_state(now);
+
+    assert_eq!(sweep.ledgers_removed, 2);
+    for path in &removed {
+        assert!(!path.exists(), "{} should be gone", path.display());
+    }
+    for path in kept.iter().chain([&stray]) {
+        assert!(path.exists(), "{} should be kept", path.display());
+    }
+}
+
+// [seam: SessionManager::sweep_model_state]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_forgets_the_requests_of_gone_focuses_after_thirty_days_and_never_those_of_live_ones() {
+    let mut rig = Rig::new().await;
+    rig.spawn("live-focus", "");
+    rig.register(&["registered-focus"]);
+    a_request(&rig, "gone-focus", "rid-gone");
+    a_request(&rig, "live-focus", "rid-live");
+    let now = Utc::now();
+    let hub = rig.mgr.model_hub();
+
+    let soon = rig.mgr.sweep_model_state(now);
+    assert_eq!(soon.request_state_removed, 0, "a request made just now is not old");
+    assert!(hub.last_request("gone-focus").is_some());
+
+    let later = rig.mgr.sweep_model_state(now + chrono::Duration::days(40));
+
+    assert!(later.request_state_removed >= 1);
+    assert!(hub.last_request("gone-focus").is_none(), "its last request is forgotten");
+    assert!(hub.last_request("live-focus").is_some(), "a live session's is kept whatever its age");
+    // The request id went with it: a new request for the tag no longer carries the old one.
+    let to = ModelTarget { model: "haiku".into(), effort: None };
+    hub.record_request("gone-focus", &Actor::User, &to, ModelRequestStatus::Applied);
+    hub.record_request("live-focus", &Actor::User, &to, ModelRequestStatus::Applied);
+    assert_eq!(hub.last_request("gone-focus").unwrap().request_id, None);
+    assert_eq!(hub.last_request("live-focus").unwrap().request_id.as_deref(), Some("rid-live"));
+}
+
+// ── (9) chosen vs observed ────────────────────────────────────────────────────
+//
+// A record the user (or an agent default) CHOSE is passed to the CLI at every start. A record the
+// daemon merely OBSERVED (the model a session reported, or the model an agent's own front matter
+// declares) is not: the agent's front matter, or the CLI's default, keeps deciding, and the record
+// follows what actually runs.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_chosen_record_is_passed_to_the_cli_at_a_start() {
+    let mut rig = Rig::new().await;
+    rig.seed_sourced("t-focus", "opus", Some("high"), ModelSource::Focus);
+    rig.seed_sourced("t-default", "haiku", Some("low"), ModelSource::AgentDefault);
+    rig.seed_sourced("t-declared", "fable", Some("max"), ModelSource::AgentDeclared);
+    rig.seed_sourced("t-cli", "sonnet", Some("medium"), ModelSource::CliDefault);
+    for tag in ["t-focus", "t-default", "t-declared", "t-cli"] {
+        rig.spawn(tag, "");
+    }
+
+    let runs = rig.wait_for_runs(4).await;
+
+    let mut passed: Vec<(Option<&str>, Option<&str>)> = runs.iter().map(|r| (arg_of(r, "--model"), arg_of(r, "--effort"))).collect();
+    passed.sort();
+    assert_eq!(
+        passed,
+        [(None, None), (None, None), (Some("haiku"), Some("low")), (Some("opus"), Some("high"))],
+        "--model and --effort for the two chosen records only: {runs:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_focus_that_reported_its_model_is_respawned_without_a_model_flag_so_the_agent_or_the_cli_still_decides() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_INITIAL_MODEL", Some("claude-haiku-5-5".into()));
+    rig.declare_agent("declarer", "haiku");
+    rig.spawn(TAG, "declarer");
+    rig.spawn("plain", "plain-agent");
+    for tag in [TAG, "plain"] {
+        rig.send(tag, &format!("hello-{tag}"));
+        rig.wait_for(&format!("result:hello-{tag}")).await;
+    }
+    let declared = eventually("the declarer's record", || rig.record(TAG)).await;
+    let observed = eventually("the plain agent's record", || rig.record("plain")).await;
+    assert_eq!((declared.model.as_str(), declared.source), ("haiku", ModelSource::AgentDeclared));
+    assert_eq!((observed.model.as_str(), observed.source), ("haiku", ModelSource::CliDefault));
+
+    rig.mgr.restart(TAG).unwrap();
+    rig.wait_for_runs(3).await;
+    rig.mgr.restart("plain").unwrap();
+    let runs = rig.wait_for_runs(4).await;
+
+    for run in &runs[2..] {
+        assert!(!run.iter().any(|a| a == "--model" || a == "--effort"), "an observed record is not an instruction: {run:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_observed_record_follows_what_the_respawned_session_reports_without_a_note() {
+    let mut rig = Rig::new().await;
+    rig.env("FAKE_INITIAL_MODEL", Some("claude-haiku-5-5".into()));
+    rig.declare_agent("declarer", "haiku");
+    let sid = rig.spawn(TAG, "declarer");
+    rig.send(TAG, "hello");
+    rig.wait_for("result:hello").await;
+    eventually("the migrated record", || rig.record(TAG)).await;
+    rig.state_broadcasts(); // what happened so far is not what this test is about
+    // The agent's front matter (or the CLI's default) changed while the session was down.
+    rig.env("FAKE_INITIAL_MODEL", Some("claude-sonnet-5-5".into()));
+
+    rig.mgr.restart(TAG).unwrap();
+    rig.wait_for_runs(2).await;
+    rig.send(TAG, "again");
+    rig.wait_for("result:again").await;
+
+    let record = eventually("the record to follow", || rig.record(TAG).filter(|r| r.model == "sonnet")).await;
+    assert!(
+        matches!(record.source, ModelSource::AgentDeclared | ModelSource::CliDefault),
+        "it is still an observation, not a choice: {:?}",
+        record.source
+    );
+    assert!(rig.ledger(&sid).is_empty(), "no mismatch note, no note at all: {:?}", rig.ledger(&sid));
+    let state = rig.state(TAG);
+    assert_eq!(state.recorded.as_ref().map(|r| r.model.as_str()), Some("sonnet"));
+    assert_eq!(state.reported.as_ref().map(|r| r.model.as_str()), Some("claude-sonnet-5-5"));
+    let mut seen = Vec::new();
+    eventually("a state frame for the followed model", || {
+        seen.extend(rig.state_broadcasts());
+        seen.iter()
+            .any(|s| s.tag == TAG && s.recorded.as_ref().map(|r| r.model.as_str()) == Some("sonnet"))
+            .then_some(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_switch_turns_an_observed_record_into_a_choice_so_later_starts_pass_the_model() {
+    let mut rig = Rig::new().await;
+    rig.spawn(TAG, "plain-agent");
+    rig.send(TAG, "hello");
+    rig.wait_for("result:hello").await;
+    let observed = eventually("the migrated record", || rig.record(TAG)).await;
+    assert_eq!(observed.source, ModelSource::CliDefault);
+    // The fake logs the result before it writes it: wait until the daemon has
+    // seen the turn end, or the switch would (rightly) wait for it.
+    eventually("the session to be idle", || {
+        rig.mgr
+            .list()
+            .iter()
+            .any(|s| s.tag == TAG && s.state == nostromo::ipc::stream_json::SessionState::Idle)
+            .then_some(())
+    })
+    .await;
+
+    let outcome = settle(rig.request(TAG, to_model("opus"))).await;
+    rig.mgr.restart(TAG).unwrap();
+    let runs = rig.wait_for_runs(2).await;
+
+    assert_eq!(outcome.status, ModelRequestStatus::Applied);
+    assert_eq!(rig.record(TAG).unwrap().source, ModelSource::Focus);
+    assert!(!runs[0].iter().any(|a| a == "--model"), "{:?}", runs[0]);
+    assert_eq!(arg_of(&runs[1], "--model"), Some("opus"), "{:?}", runs[1]);
 }

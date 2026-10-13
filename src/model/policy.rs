@@ -92,6 +92,8 @@ pub fn declared_models_in(dir: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// `model: inherit` says "use the session's model": it is no model name, and
+/// passed to `--model` the CLI would reject it.
 fn front_matter_model(text: &str) -> Option<String> {
     let rest = text.strip_prefix("---")?;
     let rest = rest
@@ -100,5 +102,62 @@ fn front_matter_model(text: &str) -> Option<String> {
     let end = rest.find("\n---")?;
     let yaml: serde_yaml::Value = serde_yaml::from_str(&rest[..end]).ok()?;
     let model = yaml.get("model")?.as_str()?.trim();
-    (!model.is_empty()).then(|| model.to_owned())
+    (!model.is_empty() && !model.eq_ignore_ascii_case("inherit")).then(|| model.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_file(dir: &Path, agent: &str, front_matter_model: Option<&str>) {
+        let model = front_matter_model.map(|m| format!("model: {m}\n")).unwrap_or_default();
+        std::fs::write(
+            dir.join(format!("{agent}.md")),
+            format!("---\nname: {agent}\ndescription: test agent\n{model}---\nYou are {agent}.\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_agent_declares_the_model_its_front_matter_names() {
+        let dir = tempfile::tempdir().unwrap();
+        agent_file(dir.path(), "tester", Some("haiku"));
+        agent_file(dir.path(), "silent", None);
+
+        assert_eq!(declared_model_in(dir.path(), "tester").as_deref(), Some("haiku"));
+        assert_eq!(declared_model_in(dir.path(), "plugin:tester").as_deref(), Some("haiku"), "looked up by its bare name");
+        assert_eq!(declared_model_in(dir.path(), "silent"), None);
+        assert_eq!(declared_model_in(dir.path(), "missing"), None);
+    }
+
+    #[test]
+    fn model_inherit_declares_nothing_whatever_its_case() {
+        let dir = tempfile::tempdir().unwrap();
+        for (agent, value) in [
+            ("lower", "inherit"),
+            ("title", "Inherit"),
+            ("upper", "INHERIT"),
+            ("quoted", "\"inherit\""),
+            ("padded", "'  inherit '"),
+        ] {
+            agent_file(dir.path(), agent, Some(value));
+            assert_eq!(
+                declared_model_in(dir.path(), agent),
+                None,
+                "`model: {value}` means \"use the parent's model\", which is no model of its own"
+            );
+        }
+    }
+
+    #[test]
+    fn the_list_of_declared_models_leaves_out_agents_that_inherit() {
+        let dir = tempfile::tempdir().unwrap();
+        agent_file(dir.path(), "opinionated", Some("opus"));
+        agent_file(dir.path(), "inheriting", Some("inherit"));
+        agent_file(dir.path(), "silent", None);
+
+        let declared = declared_models_in(dir.path());
+
+        assert_eq!(declared, [("opinionated".to_owned(), "opus".to_owned())]);
+    }
 }

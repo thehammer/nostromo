@@ -713,7 +713,7 @@ fn handle_client_msg(
     // Default-deny for network peers (see `peer::refuse_for_network`): anything
     // but an explicitly allowed read-only request changes nothing.
     if trust.is_network() && refuse_for_network(&msg, sensitive) {
-        log_network_model_refusal(&msg, session_mgr);
+        log_network_model_refusal(&msg, session_mgr, sensitive);
         refuse_over_network(&msg, targeted_tx);
         return;
     }
@@ -1359,11 +1359,7 @@ fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<Server
 fn model_replay(session_mgr: &Arc<Mutex<SessionManager>>) -> Vec<ServerMsg> {
     let mgr = session_mgr.lock().unwrap();
     let mut frames = vec![mgr.model_hub().catalog_msg(), mgr.model_defaults_msg()];
-    frames.extend(
-        mgr.model_state_tags()
-            .into_iter()
-            .map(|tag| ServerMsg::SessionModelState(mgr.session_model_state(&tag))),
-    );
+    frames.extend(mgr.model_state_replay().into_iter().map(ServerMsg::SessionModelState));
     frames
 }
 
@@ -1382,10 +1378,15 @@ fn model_request_result(request_id: String, outcome: ModelRequestOutcome) -> Ser
 /// `refused` activity line (the audit trail of who tried).
 ///
 /// The peer is unauthenticated, so nothing it sent is written verbatim: the
-/// focus tag only if it names a focus the daemon knows, the agent only as that
-/// focus's own agent, the model only if the catalogue offers it. Lines are
-/// rate-limited so a peer cannot flood the log.
-fn log_network_model_refusal(msg: &ClientMsg, session_mgr: &Arc<Mutex<SessionManager>>) {
+/// focus tag only if it names a focus the daemon knows (a sensitive focus's
+/// tag can embed a work item's title, so it is logged as its opaque id), the
+/// agent only as that focus's own agent, the model only if the catalogue
+/// offers it. Lines are rate-limited so a peer cannot flood the log.
+fn log_network_model_refusal(
+    msg: &ClientMsg,
+    session_mgr: &Arc<Mutex<SessionManager>>,
+    sensitive: &SensitiveTags,
+) {
     use crate::model::activity::{activity_path, append, current_posture, ModelActivity, ModelActivityKind, Outcome};
     use crate::model::ModelTarget;
     let kind = match msg {
@@ -1415,6 +1416,7 @@ fn log_network_model_refusal(msg: &ClientMsg, session_mgr: &Arc<Mutex<SessionMan
             _ => return,
         }
     };
+    let tag = tag.map(|t| if sensitive.tag_is_sensitive(&t) { sensitive.opaque_tag(&t) } else { t });
     let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
     append(
         &activity_path(),

@@ -168,7 +168,7 @@ async fn a_real_session_switches_model_live_keeps_its_context_survives_a_bad_mod
 
     // The focus starts on Haiku.
     store::update_focus_record(&paths.focus_models, TAG, |_| {
-        Some(FocusModelRecord { model: "haiku".into(), effort: None, source: ModelSource::Focus, pending: None })
+        Some(FocusModelRecord { model: "haiku".into(), effort: None, source: ModelSource::Focus, pending: None, ..FocusModelRecord::default() })
     })
     .unwrap();
     mgr.spawn_session(TAG.into(), String::new(), "real-model-switch".into(), Some(cwd), None, false).expect("the session starts");

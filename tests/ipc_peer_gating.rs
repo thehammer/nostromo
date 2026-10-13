@@ -4590,7 +4590,7 @@ mod model_switching {
     fn seed_model_state(h: &Harness) {
         let paths = paths_of(h);
         store::update_focus_record(&paths.focus_models, FOCUS, |_| {
-            Some(FocusModelRecord { model: "sonnet".into(), effort: None, source: ModelSource::Focus, pending: None })
+            Some(FocusModelRecord { model: "sonnet".into(), effort: None, source: ModelSource::Focus, pending: None, ..FocusModelRecord::default() })
         })
         .unwrap();
         store::set_default(&paths.defaults, "cody", Some(AgentModelDefault { model: "haiku".into(), effort: None })).unwrap();
@@ -4677,7 +4677,16 @@ mod model_switching {
         spawn_fake_session_with_id(&mut unix, FOCUS, "cody", "v-model-gate-write", Some(FOCUS_SID)).await;
         let paths = paths_of(&h);
         let files_before = model_files(&paths);
-        let transcript_before = transcript_of(&h, FOCUS).await;
+        // The fake logs START before it prints its canned turn: take the baseline
+        // once that turn has been ingested, or "unchanged" compares against a race.
+        let mut transcript_before = transcript_of(&h, FOCUS).await;
+        for _ in 0..400 {
+            if transcript_before.contains("SECRET-ASSISTANT-REPLY") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            transcript_before = transcript_of(&h, FOCUS).await;
+        }
         let activity_before = std::fs::read_to_string(&activity).unwrap_or_default().lines().count();
         let (mut tcp, _) = h.tcp(vec![]).await;
 
@@ -4726,6 +4735,9 @@ mod model_switching {
             .lines()
             .skip(activity_before)
             .filter_map(|l| serde_json::from_str(l).ok())
+            // The log is one file for the whole test process: tests running beside this one
+            // append their own lines (a Unix peer's applied switch of another focus).
+            .filter(|l: &Value| l["focus_tag"] == FOCUS || l["actor"] == "network")
             .collect();
         for line in &audited {
             assert_eq!(line["outcome"], "refused", "only refusals may be audited: {line}");
@@ -4793,5 +4805,148 @@ mod model_switching {
         send(&mut unix, &ClientMsg::SessionModelGet { tag: "fred".into() }).await;
         let frames = recv_until(&mut unix, |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == "fred")).await;
         assert!(state_for(&frames, "fred").is_some(), "{frames:?}");
+    }
+
+    // ── what a network peer may read of a focus's model ───────────────────────
+
+    const POSTURE_LABEL: &str = "Put the hammer down";
+
+    /// A private home holding a Bishop posture file, once per test process. The daemon reads the
+    /// posture from `$HOME/.claude/budget-posture.json` (there is no other override), so this is how
+    /// a test gives it one without reading the operator's own.
+    fn isolated_home_with_posture() {
+        static HOME: OnceLock<PathBuf> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let home = std::env::temp_dir().join(format!("nostromo-peer-gating-home-{}", std::process::id()));
+            std::fs::create_dir_all(home.join(".claude")).expect("temp home");
+            std::fs::write(home.join(".claude").join("budget-posture.json"), format!(r#"{{"posture": "{POSTURE_LABEL}"}}"#))
+                .expect("posture file");
+            std::env::set_var("HOME", &home);
+            home
+        });
+    }
+
+    const PROBE_AGENTS: [&str; 2] = ["zzprobe-agent-alpha", "zzprobe-agent-beta"];
+
+    /// An agents directory declaring a model for each of [`PROBE_AGENTS`], once per test process.
+    fn isolated_agents_dir() {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("nostromo-peer-gating-agents-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("temp agents dir");
+            for agent in PROBE_AGENTS {
+                std::fs::write(dir.join(format!("{agent}.md")), format!("---\nname: {agent}\nmodel: haiku\n---\nYou are {agent}.\n"))
+                    .expect("agent file");
+            }
+            std::env::set_var(nostromo::model::policy::AGENTS_DIR_ENV, &dir);
+            dir
+        });
+    }
+
+    fn raw_of_type<'a>(frames: &'a [Value], kind: &str) -> Vec<&'a Value> {
+        frames.iter().filter(|f| f["type"] == kind).collect()
+    }
+
+    #[tokio::test]
+    async fn a_tcp_client_is_never_told_the_posture_the_last_request_or_the_declared_agents_while_a_unix_client_is() {
+        isolated_activity_log();
+        isolated_home_with_posture();
+        isolated_agents_dir();
+        let h = spawn_server().await;
+        let paths = paths_of(&h);
+        const READ_TAG: &str = "cody-read-gate";
+        store::update_focus_record(&paths.focus_models, READ_TAG, |_| {
+            Some(FocusModelRecord { model: "sonnet".into(), ..FocusModelRecord::default() })
+        })
+        .unwrap();
+        store::set_default(&paths.defaults, "cody", Some(AgentModelDefault { model: "haiku".into(), effort: None })).unwrap();
+        // A local user switches the focus (it is not running, so the choice is stored): the focus now
+        // has a last request.
+        let (mut unix, _) = h.unix(vec![Topic::Model]).await;
+        let (status, code) = model_result(&mut unix, set_msg(READ_TAG, Some("opus"), None, false, "req-read-gate-unique", None), "req-read-gate-unique").await;
+        assert_eq!(status, ModelRequestStatus::Applied, "{code:?}");
+
+        // Control: a local peer is told all of it, so the test below cannot pass by the daemon having nothing to say.
+        send(&mut unix, &ClientMsg::SessionModelGet { tag: READ_TAG.into() }).await;
+        let local = recv_until(&mut unix, |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == READ_TAG)).await;
+        let local_state = state_for(&local, READ_TAG).expect("a local peer reads the focus's model");
+        assert_eq!(local_state.posture.as_deref(), Some(POSTURE_LABEL), "the daemon does have a posture to tell");
+        assert_eq!(local_state.last_request.as_ref().map(|l| l.actor.as_str()), Some("user"));
+        send(&mut unix, &ClientMsg::ModelDefaultsRequest {}).await;
+        let local = recv_until(&mut unix, |m| matches!(m, ServerMsg::ModelDefaults { .. })).await;
+        match local.last() {
+            Some(ServerMsg::ModelDefaults { declared, .. }) => {
+                for agent in PROBE_AGENTS {
+                    assert_eq!(declared.get(agent).map(String::as_str), Some("haiku"), "a local peer is told what {agent} declares");
+                }
+            }
+            other => panic!("no defaults for the local peer: {other:?}"),
+        }
+
+        // The network peer: a Topic::Model subscribe (its replay), then asks for the state and the defaults.
+        let mut tcp = raw_tcp(&h).await;
+        let (_welcome, replay) = raw_handshake(&mut tcp, json!({"type": "subscribe", "topics": ["model"], "renders_decisions": false}))
+            .await
+            .expect("a network peer may subscribe to the model topic");
+        send_json(&mut tcp, &serde_json::to_value(ClientMsg::SessionModelGet { tag: READ_TAG.into() }).unwrap()).await;
+        send_json(&mut tcp, &serde_json::to_value(ClientMsg::ModelDefaultsRequest {}).unwrap()).await;
+        let answers = raw_sync(&mut tcp).await.expect("the connection stays up");
+        let frames: Vec<Value> = replay.into_iter().chain(answers).collect();
+
+        let wire = serde_json::to_string(&frames).unwrap();
+        for secret in [POSTURE_LABEL, "req-read-gate-unique", PROBE_AGENTS[0], PROBE_AGENTS[1]] {
+            assert!(!wire.contains(secret), "{secret:?} reached a network peer: {wire}");
+        }
+        let states: Vec<&Value> = raw_of_type(&frames, "session_model_state").into_iter().filter(|f| f["tag"] == READ_TAG).collect();
+        assert!(states.len() >= 2, "the replay and the answer each carry the focus's state: {wire}");
+        for state in states {
+            assert_eq!(state["recorded"]["model"], "opus", "the model itself is readable: {state}");
+            assert!(state["posture"].is_null(), "{state}");
+            assert!(state["last_request"].is_null(), "{state}");
+        }
+        let defaults = raw_of_type(&frames, "model_defaults");
+        assert!(defaults.len() >= 2, "the replay and the answer each carry the defaults: {wire}");
+        for d in defaults {
+            assert_eq!(d["defaults"]["cody"]["model"], "haiku", "the defaults a user set are readable: {d}");
+            assert!(d["declared"].is_null() || d["declared"].as_object().is_some_and(|o| o.is_empty()), "{d}");
+        }
+    }
+
+    /// Every activity line the refused network requests of this test process left, as JSON.
+    fn network_refusal_lines(activity: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(activity)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|l| l["actor"] == "network" && l["outcome"] == "refused")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_refused_network_switch_of_a_sensitive_focus_is_audited_without_its_tag_while_an_ordinary_focus_keeps_its_tag() {
+        let activity = isolated_activity_log();
+        let h = spawn_server().await;
+        const SECRET_TAG: &str = "cody-audit-secret-jira-title";
+        const OPEN_TAG: &str = "cody-audit-open";
+        let (mut unix, _) = h.unix(vec![]).await;
+        spawn_fake_session(&mut unix, SECRET_TAG, "cody", "v-audit-secret").await;
+        spawn_fake_session(&mut unix, OPEN_TAG, "cody", "v-audit-open").await;
+        h.session_mgr.lock().unwrap().sensitive_tags().mark_tag(SECRET_TAG);
+        let (mut tcp, _) = h.tcp(vec![]).await;
+
+        for (tag, id) in [(SECRET_TAG, "r-audit-secret"), (OPEN_TAG, "r-audit-open")] {
+            let (status, code) = model_result(&mut tcp, set_msg(tag, Some("opus"), None, false, id, None), id).await;
+            assert_eq!((status, code.as_deref()), (ModelRequestStatus::Refused, Some("requires_secure_connection")), "{tag}");
+        }
+
+        // Both refusals were audited before their answers were sent.
+        let lines = network_refusal_lines(&activity);
+        let log = std::fs::read_to_string(&activity).unwrap_or_default();
+        assert!(!log.contains(SECRET_TAG), "a sensitive focus's tag (a Jira title, here) is in the activity log: {log}");
+        assert!(
+            lines.iter().any(|l| l["focus_tag"].as_str().is_some_and(|t| !t.is_empty() && t != OPEN_TAG && t != FOCUS && t != SECRET_TAG)),
+            "the refusal is still audited, under an opaque id: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l["focus_tag"] == OPEN_TAG), "an ordinary focus's refusal still records its tag: {lines:?}");
     }
 }

@@ -31,6 +31,11 @@ pub fn known_family_of(model: &str) -> Option<&'static str> {
         .find(|f| lower == *f || lower.split(['-', '_', '.']).any(|part| part == *f))
 }
 
+/// Is `model` exactly one of the family aliases Nostromo knows (`"opus"`)?
+pub fn is_known_alias(model: &str) -> bool {
+    KNOWN_FAMILIES.iter().any(|(f, _)| *f == model)
+}
+
 /// Effort levels, cheapest first.
 pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
