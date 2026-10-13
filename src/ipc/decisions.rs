@@ -385,11 +385,13 @@ mod tests {
                 id: "approve".into(),
                 label: "Approve".into(),
                 detail: None,
+                is_default: false,
             },
             DecisionChoice {
                 id: "reject".into(),
                 label: "Reject".into(),
                 detail: None,
+                is_default: false,
             },
         ]
     }

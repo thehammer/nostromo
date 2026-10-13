@@ -140,6 +140,8 @@ async fn push_and_settle(s: &mut UnixStream, focuses: Vec<FocusMeta>) -> Vec<Ser
 
 fn meta(tag: &str, agent: &str) -> FocusMeta {
     FocusMeta {
+        initial_model: None,
+        initial_effort: None,
         tag: tag.into(),
         display_name: tag.into(),
         agent_name: agent.into(),

@@ -352,7 +352,7 @@ impl SensitiveTags {
     /// The stand-in shown to network peers for a sensitive `tag`: stable for
     /// the life of the registration (or, for a tag that is sensitive without
     /// being registered, of this process) and unrelated to the tag's text.
-    fn opaque_tag(&self, tag: &str) -> String {
+    pub(crate) fn opaque_tag(&self, tag: &str) -> String {
         let mut registered = self.inner.write().unwrap();
         if let Some(opaque) = registered.tags.get(tag) {
             return opaque.clone();
@@ -650,6 +650,8 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::Notification { tag, .. }
         | ServerMsg::ActivitySnapshot { tag, .. }
         | ServerMsg::PerriState { tag, .. } => ServerClass::Focus(tag),
+        // A focus's model is withheld exactly like its transcript.
+        ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
         ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
 
@@ -686,6 +688,13 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::ActivityHealth { .. }
         | ServerMsg::Withheld { .. }
         | ServerMsg::DaemonReconnected => ServerClass::Open,
+
+        // The CLI's model list and the per-agent defaults name agents and
+        // models, never focus content. A request result goes only to the
+        // connection that asked.
+        ServerMsg::ModelCatalog { .. }
+        | ServerMsg::ModelDefaults { .. }
+        | ServerMsg::ModelRequestResult { .. } => ServerClass::Open,
     }
 }
 
@@ -710,6 +719,7 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
             is_secure_refusal(&e.code)
         }
         ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),
+        ServerMsg::ModelRequestResult { code: Some(code), .. } => is_secure_refusal(code),
         _ => false,
     }
 }
@@ -772,6 +782,10 @@ pub enum NetworkPolicy {
 ///   activity; refused for a sensitive tag by [`targets_sensitive_session`].
 /// * `SessionDetach`/`PtyDetach`: release the peer's own attachment only (a no-op
 ///   for a peer that is not the attached client).
+/// * `ModelCatalogRequest`/`ModelDefaultsRequest`: read the CLI's model list and
+///   the per-agent defaults (agent and model names only).
+/// * `SessionModelGet`: read one focus's model; refused for a sensitive tag by
+///   [`targets_sensitive_session`].
 ///
 /// Everything else is refused, notably: `MotherResume` and every
 /// `MotherAction` (feeds attacker text to a job's agent, or cancels/retries it),
@@ -781,7 +795,9 @@ pub enum NetworkPolicy {
 /// `SessionControl`, `SessionInterrupt`, `SessionAnswerPermission`,
 /// `SessionSend`, `SessionSpawn`, `PtySpawn`, `PtyAttach` (it takes the PTY's
 /// single attachment slot from the Mac client and kills its live stream, so it
-/// is not read-only), `PtyInput`, `PtyResize`,
+/// is not read-only), `PtyInput`, `PtyResize`, every model mutation
+/// (`SessionModelSet`, `ModelDefaultSet` and `ModelCatalogRefresh`, which
+/// starts a process),
 /// `RenderedShape` (it overwrites what `get_view_state` reports to agents) and
 /// the work/picks/seed verbs. An iOS client over the LAN is therefore read-only
 /// until authentication exists.
@@ -796,7 +812,10 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::PtyList
         | ClientMsg::PtyDetach { .. }
         | ClientMsg::FocusList
-        | ClientMsg::ActivitySnapshotRequest { .. } => NetworkPolicy::Allowed,
+        | ClientMsg::ActivitySnapshotRequest { .. }
+        | ClientMsg::ModelCatalogRequest {}
+        | ClientMsg::SessionModelGet { .. }
+        | ClientMsg::ModelDefaultsRequest {} => NetworkPolicy::Allowed,
 
         ClientMsg::PtySpawn { .. }
         | ClientMsg::PtyAttach { .. }
@@ -820,7 +839,10 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::PicksRefresh { .. }
         | ClientMsg::WorkSendPreviewRequest { .. }
         | ClientMsg::WorkSend { .. }
-        | ClientMsg::FredSeed { .. } => NetworkPolicy::Refused,
+        | ClientMsg::FredSeed { .. }
+        | ClientMsg::ModelCatalogRefresh {}
+        | ClientMsg::SessionModelSet { .. }
+        | ClientMsg::ModelDefaultSet { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -851,7 +873,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SessionAnswerPermission { tag, .. }
         | ClientMsg::ClosePane { tag, .. }
         | ClientMsg::ActivitySnapshotRequest { tag }
-        | ClientMsg::RenderedShape { tag, .. } => tags.tag_is_sensitive(tag),
+        | ClientMsg::RenderedShape { tag, .. }
+        | ClientMsg::SessionModelGet { tag }
+        | ClientMsg::SessionModelSet { tag, .. } => tags.tag_is_sensitive(tag),
 
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -874,7 +898,11 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::PicksRefresh { .. }
         | ClientMsg::WorkSendPreviewRequest { .. }
         | ClientMsg::WorkSend { .. }
-        | ClientMsg::FredSeed { .. } => false,
+        | ClientMsg::FredSeed { .. }
+        | ClientMsg::ModelCatalogRequest {}
+        | ClientMsg::ModelCatalogRefresh {}
+        | ClientMsg::ModelDefaultsRequest {}
+        | ClientMsg::ModelDefaultSet { .. } => false,
     }
 }
 
@@ -908,7 +936,8 @@ fn redact_meta(meta: &mut FocusMeta, tags: &SensitiveTags) {
 
 /// Trim an otherwise-deliverable frame for a network peer; see
 /// [`redact_meta`], plus: session and Mother-job lists drop their sensitive
-/// entries.
+/// entries, and model frames lose the budget posture, the last request and
+/// the agents' declared models.
 pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
     fn redact_all(mut metas: Vec<FocusMeta>, tags: &SensitiveTags) -> Vec<FocusMeta> {
         for m in &mut metas {
@@ -930,6 +959,17 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
         ServerMsg::SessionListResp { mut sessions } => {
             sessions.retain(|s| !tags.focus_is_sensitive(&s.tag, &s.agent_name));
             ServerMsg::SessionListResp { sessions }
+        }
+        // What a model state says beyond the model itself is not for the LAN:
+        // Bishop's budget posture, and who asked for the last change.
+        ServerMsg::SessionModelState(mut state) => {
+            state.posture = None;
+            state.last_request = None;
+            ServerMsg::SessionModelState(state)
+        }
+        // Every agent's name and declared model, read from `~/.claude/agents`.
+        ServerMsg::ModelDefaults { defaults, .. } => {
+            ServerMsg::ModelDefaults { defaults, declared: Default::default() }
         }
         ServerMsg::MotherJobs { mut jobs } => {
             // By label as well as by id: `mother add` returns before the daemon
@@ -1049,6 +1089,8 @@ mod tests {
     #[test]
     fn network_peers_never_see_a_focus_project_path() {
         let meta = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: "t".into(),
             display_name: "T".into(),
             agent_name: "cody".into(),
@@ -1183,6 +1225,8 @@ mod tests {
     fn a_sensitive_focus_shows_a_network_peer_only_its_agent_and_an_opaque_tag() {
         let tags = tags_with("cody-secret-jira-title");
         let meta = |tag: &str, agent: &str| FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag: tag.into(),
             display_name: "Cody on SECRET".into(),
             agent_name: agent.into(),
@@ -1267,6 +1311,8 @@ mod tests {
         for tags in [SensitiveTags::persisted(path), SensitiveTags::in_memory()] {
             for (tag, agent) in [("cody-secret-title", "cody"), ("x:fred", "cody"), ("anything", "teri:teri")] {
                 let meta = FocusMeta {
+                    initial_model: None,
+                    initial_effort: None,
                     tag: tag.into(),
                     display_name: "SECRET".into(),
                     agent_name: agent.into(),
@@ -1386,6 +1432,25 @@ mod tests {
                 allow_duplicate: false,
             },
             ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },
+            ClientMsg::ModelCatalogRequest {},
+            ClientMsg::ModelCatalogRefresh {},
+            ClientMsg::SessionModelGet { tag: "x1".into() },
+            ClientMsg::SessionModelSet {
+                tag: "x1".into(),
+                model: Some("opus".into()),
+                effort: None,
+                set_as_agent_default: false,
+                request_id: "r".into(),
+                actor: None,
+            },
+            ClientMsg::ModelDefaultsRequest {},
+            ClientMsg::ModelDefaultSet {
+                agent: "claudia".into(),
+                model: Some("opus".into()),
+                effort: None,
+                clear: false,
+                request_id: "r".into(),
+            },
         ]
     }
 
@@ -1398,12 +1463,15 @@ mod tests {
         "ActivitySnapshotRequest",
         "FocusList",
         "Hello",
+        "ModelCatalogRequest",
+        "ModelDefaultsRequest",
         "Ping",
         "PtyDetach",
         "PtyList",
         "SessionAttach",
         "SessionDetach",
         "SessionList",
+        "SessionModelGet",
         "Subscribe",
     ];
 
@@ -1419,7 +1487,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 33;
+    const CLIENT_MSG_VARIANTS: usize = 39;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -1457,6 +1525,12 @@ mod tests {
             ClientMsg::WorkSendPreviewRequest { .. } => 30,
             ClientMsg::WorkSend { .. } => 31,
             ClientMsg::FredSeed { .. } => 32,
+            ClientMsg::ModelCatalogRequest {} => 33,
+            ClientMsg::ModelCatalogRefresh {} => 34,
+            ClientMsg::SessionModelGet { .. } => 35,
+            ClientMsg::SessionModelSet { .. } => 36,
+            ClientMsg::ModelDefaultsRequest {} => 37,
+            ClientMsg::ModelDefaultSet { .. } => 38,
         }
     }
 
@@ -1946,5 +2020,98 @@ mod tests {
         tags.note_resumed("cody-x");
         assert!(tags.tag_is_sensitive("cody-x"));
         assert!(!tags.is_degraded(), "an in-memory registry is never degraded");
+    }
+
+    // ── model frames over the network ─────────────────────────────────────────
+
+    use crate::ipc::protocol::{
+        AgentModelDefault, LastModelRequest, ModelRequestStatus, PendingModel, RecordedModel,
+        ReportedModel, SessionModelState, SwitchPhase,
+    };
+    use crate::model::store::ModelSource;
+
+    fn full_model_state(tag: &str) -> SessionModelState {
+        SessionModelState {
+            tag: tag.into(),
+            recorded: Some(RecordedModel { model: "opus".into(), effort: Some("high".into()), source: ModelSource::Focus }),
+            reported: Some(ReportedModel { model: "claude-opus-5-5".into(), family: Some("opus".into()) }),
+            effective_effort: Some("high".into()),
+            pending: Some(PendingModel { model: "haiku".into(), effort: None }),
+            phase: SwitchPhase::Waiting,
+            running: true,
+            warnings: vec![],
+            last_request: Some(LastModelRequest {
+                actor: "agent:cody".into(),
+                to: "haiku".into(),
+                status: ModelRequestStatus::PendingTurnEnd,
+                ts: chrono::Utc::now(),
+                request_id: Some("req-1".into()),
+            }),
+            posture: Some("Pump the Brakes".into()),
+        }
+    }
+
+    fn model_defaults_msg() -> ServerMsg {
+        ServerMsg::ModelDefaults {
+            defaults: BTreeMap::from([("cody".to_owned(), AgentModelDefault { model: "haiku".into(), effort: None })]),
+            declared: BTreeMap::from([("archie".to_owned(), "opus".to_owned()), ("fred".to_owned(), "haiku".to_owned())]),
+        }
+    }
+
+    #[test]
+    fn a_network_peer_is_not_told_the_budget_posture_or_the_last_request_of_a_focus() {
+        let original = full_model_state("cody-x");
+
+        let ServerMsg::SessionModelState(seen) =
+            redact_for_network(ServerMsg::SessionModelState(original.clone()), &SensitiveTags::in_memory())
+        else {
+            panic!("still a SessionModelState");
+        };
+
+        assert_eq!(seen.posture, None, "the posture says how much budget the operator has left");
+        assert_eq!(seen.last_request, None, "who asked for what, and why, is the operator's business");
+        assert_eq!(
+            SessionModelState { posture: None, last_request: None, ..original },
+            seen,
+            "everything else about the focus's model is intact"
+        );
+    }
+
+    #[test]
+    fn a_network_peer_is_not_told_which_model_each_agent_declares() {
+        let ServerMsg::ModelDefaults { defaults, declared } =
+            redact_for_network(model_defaults_msg(), &SensitiveTags::in_memory())
+        else {
+            panic!("still a ModelDefaults");
+        };
+
+        assert!(declared.is_empty(), "the agents installed on this machine are not a network peer's to list: {declared:?}");
+        assert_eq!(defaults.get("cody").map(|d| d.model.as_str()), Some("haiku"), "the defaults a user set are intact");
+    }
+
+    #[test]
+    fn a_local_peer_gets_the_model_frames_exactly_as_they_are() {
+        let tags = SensitiveTags::in_memory();
+        for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
+            for msg in [ServerMsg::SessionModelState(full_model_state("cody-x")), model_defaults_msg()] {
+                let sent = outbound(trust, msg.clone(), &tags).expect("a local peer receives it");
+                assert_eq!(
+                    serde_json::to_string(&sent).unwrap(),
+                    serde_json::to_string(&msg).unwrap(),
+                    "{trust:?} gets {msg:?} byte for byte"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_network_peer_is_still_sent_the_redacted_model_frames_of_an_ordinary_focus() {
+        let tags = SensitiveTags::in_memory();
+
+        let state = outbound(PeerTrust::Tcp, ServerMsg::SessionModelState(full_model_state("cody-x")), &tags);
+        let defaults = outbound(PeerTrust::Tcp, model_defaults_msg(), &tags);
+
+        assert!(matches!(state, Some(ServerMsg::SessionModelState(ref s)) if s.posture.is_none() && s.last_request.is_none()));
+        assert!(matches!(defaults, Some(ServerMsg::ModelDefaults { ref declared, .. }) if declared.is_empty()));
     }
 }

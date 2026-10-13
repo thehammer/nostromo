@@ -204,6 +204,8 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
 
 fn focus_meta(tag: &str) -> nostromo::ipc::protocol::FocusMeta {
     nostromo::ipc::protocol::FocusMeta {
+        initial_model: None,
+        initial_effort: None,
         tag: tag.into(),
         display_name: tag.into(),
         agent_name: tag.into(),

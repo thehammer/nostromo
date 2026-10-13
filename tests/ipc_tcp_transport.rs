@@ -26,7 +26,11 @@ async fn spawn_server() -> (Server, u16, TempDir) {
     let socket_path = tmp.path().join("test.sock");
 
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
-    let session_mgr = Arc::new(Mutex::new(SessionManager::new()));
+    // Private store (and so private model files): `SessionManager::new()`
+    // would point at the real `~/.nostromo`.
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        tmp.path().join("session-ids.json"),
+    )));
 
     let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
 

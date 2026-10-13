@@ -222,6 +222,20 @@ struct DecisionChoiceWire: Decodable, Equatable {
     let id: String
     let label: String
     let detail: String?
+    /// The choice Return and Escape pick (`is_default`; absent means false).
+    var isDefault: Bool = false
+}
+
+extension DecisionChoiceWire {
+    private enum Keys: String, CodingKey { case id, label, detail, isDefault = "is_default" }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        isDefault = try c.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+    }
 }
 
 /// Mirrors `ipc::protocol::ActivityStreamWire` — one focus's main stream

@@ -118,6 +118,20 @@ public struct DecisionChoice: Decodable, Equatable {
     public let id: String
     public let label: String
     public let detail: String?
+    /// The choice Return and Escape pick (`is_default`; absent means false).
+    public var isDefault: Bool = false
+}
+
+extension DecisionChoice {
+    private enum Keys: String, CodingKey { case id, label, detail, isDefault = "is_default" }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        isDefault = try c.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+    }
 }
 
 // MARK: - ActivityEvent / ActivityStreamWire

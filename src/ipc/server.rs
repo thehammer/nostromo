@@ -39,7 +39,7 @@ use super::{
         MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     pty_manager::PtyManager,
-    session_manager::SessionManager,
+    session_manager::{ModelRequestOutcome, SessionManager, SwitchRequest},
 };
 use crate::data::work::{
     fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
@@ -48,6 +48,10 @@ use crate::data::work::{
 /// The optional capability advertised in `Welcome.features`: this daemon serves
 /// the `work` topic and its frames.
 const FEATURE_WORK: &str = "work";
+
+/// The optional capability advertised in `Welcome.features`: this daemon serves
+/// the `model` topic (model switching frames).
+const FEATURE_MODEL: &str = "model";
 
 /// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
 /// local client that subscribes after the frame was sent.
@@ -306,7 +310,7 @@ where
     let welcome = ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
-        features: vec![FEATURE_WORK.to_string()],
+        features: vec![FEATURE_WORK.to_string(), FEATURE_MODEL.to_string()],
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     debug!(claimed_id, conn_key, "client welcomed");
@@ -487,6 +491,15 @@ where
         replay_messages(&mut writer, retained_matching(&retained, &topics, None)).await;
     }
 
+    // ── Model replay — catalogue, defaults and every focus's model state ──────
+    // Every peer: a network peer is withheld the state of a sensitive focus by
+    // the same filter as that focus's transcript.
+    if wants_model(&topics) {
+        let frames = model_replay(&session_mgr);
+        replay_messages(&mut writer, frames.into_iter().filter_map(|m| outbound(trust, m, &sensitive)))
+            .await;
+    }
+
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
 
     // `read_frame` is not cancel-safe (a frame is a header read then a body
@@ -543,6 +556,9 @@ where
                 let Some(msg) = outbound(trust, msg, &sensitive) else {
                     continue;
                 };
+                let Some(msg) = without_notes_unless_model(msg, &topics) else {
+                    continue;
+                };
                 let bytes = match serde_json::to_vec(&msg) {
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
@@ -573,11 +589,18 @@ where
                             }
                             // Replay retained frames only for the topics this
                             // subscribe adds; a network peer gets none.
-                            let frames = if trust.is_network() {
+                            let mut frames = if trust.is_network() {
                                 vec![]
                             } else {
                                 retained_matching(&retained, &new_topics, Some(&topics))
                             };
+                            if wants_model(&new_topics) && !wants_model(&topics) {
+                                frames.extend(
+                                    model_replay(&session_mgr)
+                                        .into_iter()
+                                        .filter_map(|m| outbound(trust, m, &sensitive)),
+                                );
+                            }
                             topics = new_topics;
                             replay_messages(&mut writer, frames).await;
                             continue;
@@ -690,6 +713,7 @@ fn handle_client_msg(
     // Default-deny for network peers (see `peer::refuse_for_network`): anything
     // but an explicitly allowed read-only request changes nothing.
     if trust.is_network() && refuse_for_network(&msg, sensitive) {
+        log_network_model_refusal(&msg, session_mgr, sensitive);
         refuse_over_network(&msg, targeted_tx);
         return;
     }
@@ -1239,8 +1263,196 @@ fn handle_client_msg(
             let _ = targeted_tx.send(ServerMsg::WorkSendResult { request_id, result });
         }
 
+        // ── model switching (mutations: local peers only; refused above) ───
+        ClientMsg::ModelCatalogRequest {} => {
+            let msg = session_mgr.lock().unwrap().model_hub().catalog_msg();
+            let _ = targeted_tx.send(msg);
+        }
+
+        ClientMsg::ModelCatalogRefresh {} => {
+            let hub = session_mgr.lock().unwrap().model_hub();
+            tokio::spawn(async move {
+                // The result (or the stale flag) is broadcast by the hub.
+                let _ = crate::model::hub::refresh_catalog(&hub).await;
+            });
+        }
+
+        ClientMsg::SessionModelGet { tag } => {
+            let state = session_mgr.lock().unwrap().session_model_state(&tag);
+            let _ = targeted_tx.send(ServerMsg::SessionModelState(state));
+        }
+
+        ClientMsg::SessionModelSet {
+            tag,
+            model,
+            effort,
+            set_as_agent_default,
+            request_id,
+            actor,
+        } => {
+            // Only a local peer gets here; it is the user unless it says it is
+            // the app-control script.
+            let request = SwitchRequest {
+                model,
+                effort,
+                actor: crate::model::Actor::from_wire(actor.as_deref()),
+                set_as_agent_default,
+                request_id: Some(request_id.clone()),
+            };
+            let ticket = session_mgr.lock().unwrap().request_switch(&tag, request);
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let outcome = ticket.outcome().await;
+                let _ = tx.send(model_request_result(request_id, outcome));
+            });
+        }
+
+        ClientMsg::ModelDefaultsRequest {} => {
+            let msg = session_mgr.lock().unwrap().model_defaults_msg();
+            let _ = targeted_tx.send(msg);
+        }
+
+        ClientMsg::ModelDefaultSet { agent, model, effort, clear, request_id } => {
+            let outcome = session_mgr.lock().unwrap().set_agent_default(&agent, model, effort, clear);
+            let _ = targeted_tx.send(model_request_result(request_id, outcome));
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
+    }
+}
+
+/// Does this client take model frames? Only by naming `Topic::Model`: unlike
+/// other topics, the empty "everything" list does not include it, because a
+/// client that predates model switching can't decode a transcript carrying a
+/// `TurnBlock::Note` (it drops the whole `SessionTurns` frame).
+fn wants_model(topics: &[Topic]) -> bool {
+    topics.contains(&Topic::Model)
+}
+
+/// A session frame as a client that has not asked for model frames gets it:
+/// without transcript notes (see [`wants_model`]).
+fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<ServerMsg> {
+    use crate::ipc::stream_json::{Turn, TurnBlock, TurnDelta};
+    fn strip(turn: &mut Turn) {
+        turn.blocks.retain(|b| !matches!(b, TurnBlock::Note { .. }));
+    }
+    if wants_model(topics) {
+        return Some(msg);
+    }
+    match msg {
+        ServerMsg::SessionTurns { tag, mut turns } => {
+            turns.iter_mut().for_each(strip);
+            Some(ServerMsg::SessionTurns { tag, turns })
+        }
+        ServerMsg::SessionTurnDelta { delta: TurnDelta::Note { .. }, .. } => None,
+        ServerMsg::SessionTurnDelta { tag, delta: TurnDelta::TurnStarted { mut turn } } => {
+            strip(&mut turn);
+            Some(ServerMsg::SessionTurnDelta { tag, delta: TurnDelta::TurnStarted { turn } })
+        }
+        other => Some(other),
+    }
+}
+
+/// What a client subscribing to `Topic::Model` is replayed: the catalogue,
+/// the defaults and the model state of every focus the daemon knows.
+fn model_replay(session_mgr: &Arc<Mutex<SessionManager>>) -> Vec<ServerMsg> {
+    let mgr = session_mgr.lock().unwrap();
+    let mut frames = vec![mgr.model_hub().catalog_msg(), mgr.model_defaults_msg()];
+    frames.extend(mgr.model_state_replay().into_iter().map(ServerMsg::SessionModelState));
+    frames
+}
+
+/// `ServerMsg::ModelRequestResult` for `outcome`.
+fn model_request_result(request_id: String, outcome: ModelRequestOutcome) -> ServerMsg {
+    ServerMsg::ModelRequestResult {
+        request_id,
+        status: outcome.status,
+        code: outcome.code,
+        message: outcome.message,
+        warning: outcome.warning,
+    }
+}
+
+/// A network peer's model mutation is refused with no side effect but one
+/// `refused` activity line (the audit trail of who tried).
+///
+/// The peer is unauthenticated, so nothing it sent is written verbatim: the
+/// focus tag only if it names a focus the daemon knows (a sensitive focus's
+/// tag can embed a work item's title, so it is logged as its opaque id), the
+/// agent only as that focus's own agent, the model only if the catalogue
+/// offers it. Lines are rate-limited so a peer cannot flood the log.
+fn log_network_model_refusal(
+    msg: &ClientMsg,
+    session_mgr: &Arc<Mutex<SessionManager>>,
+    sensitive: &SensitiveTags,
+) {
+    use crate::model::activity::{activity_path, append, current_posture, ModelActivity, ModelActivityKind, Outcome};
+    use crate::model::ModelTarget;
+    let kind = match msg {
+        ClientMsg::SessionModelSet { .. } => ModelActivityKind::ModelSwitch,
+        ClientMsg::ModelDefaultSet { .. } => ModelActivityKind::ModelDefault,
+        _ => return,
+    };
+    if !refusal_line_allowed() {
+        return;
+    }
+    let (tag, agent, to) = {
+        let mgr = session_mgr.lock().unwrap();
+        let catalog = mgr.model_catalog();
+        let offered = |model: &Option<String>, effort: &Option<crate::ipc::protocol::EffortChoice>| {
+            model.as_ref().filter(|m| catalog.entry(m).is_some()).map(|m| ModelTarget {
+                model: m.clone(),
+                effort: effort.and_then(|e| e.level()).map(str::to_owned),
+            })
+        };
+        match msg {
+            ClientMsg::SessionModelSet { tag, model, effort, .. } => {
+                let session = mgr.list().into_iter().find(|s| &s.tag == tag);
+                let known = session.is_some() || mgr.known_focus_tags().contains(tag);
+                (known.then(|| tag.clone()), session.map(|s| s.agent_name), offered(model, effort))
+            }
+            ClientMsg::ModelDefaultSet { model, effort, .. } => (None, None, offered(model, effort)),
+            _ => return,
+        }
+    };
+    let tag = tag.map(|t| if sensitive.tag_is_sensitive(&t) { sensitive.opaque_tag(&t) } else { t });
+    let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
+    append(
+        &activity_path(),
+        &ModelActivity {
+            agent: agent.clone(),
+            kind,
+            summary: "Model change from a network client refused: requires a secure connection.".to_owned(),
+            session_id: None,
+            agent_type: Some(agent),
+            focus_tag: tag,
+            from: None,
+            to,
+            actor: "network".to_owned(),
+            outcome: Outcome::Refused,
+            reason: Some("requires_secure_connection".to_owned()),
+            posture: current_posture(),
+        },
+    );
+}
+
+/// At most [`REFUSAL_LINES_PER_MINUTE`] network-refusal activity lines per
+/// minute, daemon-wide.
+fn refusal_line_allowed() -> bool {
+    const REFUSAL_LINES_PER_MINUTE: u32 = 20;
+    static WINDOW: Mutex<Option<(std::time::Instant, u32)>> = Mutex::new(None);
+    let mut window = WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    match window.as_mut() {
+        Some((start, count)) if now.duration_since(*start) < std::time::Duration::from_secs(60) => {
+            *count += 1;
+            *count <= REFUSAL_LINES_PER_MINUTE
+        }
+        _ => {
+            *window = Some((now, 1));
+            true
+        }
     }
 }
 
@@ -1287,6 +1499,15 @@ fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<Serv
             ServerMsg::WorkSendResult {
                 request_id: request_id.clone(),
                 result: WorkResult::Err(refusal),
+            }
+        }
+        ClientMsg::SessionModelSet { request_id, .. } | ClientMsg::ModelDefaultSet { request_id, .. } => {
+            ServerMsg::ModelRequestResult {
+                request_id: request_id.clone(),
+                status: crate::ipc::protocol::ModelRequestStatus::Refused,
+                code: Some(refusal.code.clone()),
+                message: Some(refusal.message.clone()),
+                warning: None,
             }
         }
         _ => ServerMsg::Error {
@@ -1486,6 +1707,9 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::DecisionRequest { .. } | ServerMsg::DecisionResolved { .. } => {
             subscribed(topics, Topic::Decision)
         }
+        ServerMsg::ModelCatalog { .. }
+        | ServerMsg::ModelDefaults { .. }
+        | ServerMsg::SessionModelState(_) => wants_model(topics),
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,
@@ -1535,11 +1759,13 @@ mod tests {
                     id: "approve".into(),
                     label: "Approve".into(),
                     detail: None,
+                    is_default: false,
                 },
                 DecisionChoice {
                     id: "reject".into(),
                     label: "Reject".into(),
                     detail: None,
+                    is_default: false,
                 },
             ],
             context_pane_id: None,
@@ -1718,6 +1944,56 @@ mod tests {
                 assert!(last_event_at.is_some());
             }
             other => panic!("expected ActivityHealth, got {other:?}"),
+        }
+    }
+
+    // ── model topic: only clients that name it get model frames and notes ──
+
+    fn note_block() -> crate::ipc::stream_json::TurnBlock {
+        crate::ipc::stream_json::TurnBlock::Note {
+            note_kind: crate::model::notes::NoteKind::ModelChanged,
+            text: "Model changed to Opus (from Sonnet) by you.".into(),
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    fn turn_with_note() -> crate::ipc::stream_json::Turn {
+        crate::ipc::stream_json::Turn {
+            id: "t0".into(),
+            user_input: "hi".into(),
+            timestamp: None,
+            blocks: vec![note_block(), crate::ipc::stream_json::TurnBlock::Text { text: "hello".into() }],
+            is_complete: true,
+        }
+    }
+
+    #[test]
+    fn model_frames_go_only_to_clients_that_name_the_model_topic() {
+        let catalog = ServerMsg::ModelCatalog { families: vec![], stale: false, fetched_at: None };
+        assert!(message_matches_topics(&catalog, &[Topic::Model]));
+        assert!(!message_matches_topics(&catalog, &[]), "the everything-list predates model frames");
+        assert!(!message_matches_topics(&catalog, &[Topic::Activity]));
+    }
+
+    #[test]
+    fn a_client_that_has_not_asked_for_model_frames_gets_transcripts_without_notes() {
+        let turns = ServerMsg::SessionTurns { tag: "cody-1".into(), turns: vec![turn_with_note()] };
+        match without_notes_unless_model(turns.clone(), &[Topic::Activity]) {
+            Some(ServerMsg::SessionTurns { turns, .. }) => {
+                assert_eq!(turns[0].blocks, vec![crate::ipc::stream_json::TurnBlock::Text { text: "hello".into() }]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let note = ServerMsg::SessionTurnDelta {
+            tag: "cody-1".into(),
+            delta: crate::ipc::stream_json::TurnDelta::Note { turn_id: Some("t0".into()), block: note_block() },
+        };
+        assert!(without_notes_unless_model(note.clone(), &[]).is_none());
+        // A client that names the topic gets both untouched.
+        assert!(without_notes_unless_model(note, &[Topic::Model]).is_some());
+        match without_notes_unless_model(turns, &[Topic::Model]) {
+            Some(ServerMsg::SessionTurns { turns, .. }) => assert_eq!(turns[0].blocks.len(), 2),
+            other => panic!("{other:?}"),
         }
     }
 }

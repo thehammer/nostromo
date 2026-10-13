@@ -2282,6 +2282,8 @@ async fn a_hostile_repo_directory_name_is_one_lined_and_capped_in_the_target_sec
 
 fn registry_meta(tag: &str) -> FocusMeta {
     FocusMeta {
+        initial_model: None,
+        initial_effort: None,
         tag: tag.into(),
         display_name: tag.into(),
         agent_name: "cody".into(),

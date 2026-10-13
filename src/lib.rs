@@ -13,6 +13,7 @@ pub mod ipc;
 pub mod layout;
 pub mod markdown_blocks;
 pub mod mcp;
+pub mod model;
 pub mod mother;
 pub mod perri_cli;
 pub mod pty;

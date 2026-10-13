@@ -90,6 +90,13 @@ pub enum Topic {
     /// though it still receives `DecisionRequest` broadcasts like any other
     /// message.
     Decision,
+    /// Model switching: `ModelCatalog`, `ModelDefaults` and every focus's
+    /// `SessionModelState`, broadcast on change and replayed on subscribe, and
+    /// the `TurnBlock::Note` markers in transcripts. Advertised as the `model`
+    /// feature in `Welcome.features`. Delivered only to a client that names
+    /// it: the empty "everything" list does not include it (an older client
+    /// fails to decode a transcript carrying a note).
+    Model,
     /// A topic this build does not know (a newer client's). Decoded rather
     /// than rejected so a future topic never makes an older daemon drop the
     /// whole `Subscribe`; it matches no message, and, because it keeps the
@@ -185,6 +192,11 @@ pub struct DecisionChoice {
     /// Optional short supporting text for this option.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub detail: Option<String>,
+    /// This is the choice Return (and Escape) picks: a sheet presents it as
+    /// the default button. Absent from the wire when false, so every
+    /// payload that predates it is byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_default: bool,
 }
 
 /// How a `ServerMsg::DecisionRequest` was ultimately resolved, carried on
@@ -203,6 +215,167 @@ pub enum DecisionResolution {
     Timeout,
     /// The owning session went away while the request was outstanding.
     Cancelled,
+}
+
+// ── model switching ───────────────────────────────────────────────────────────
+
+/// An effort choice: the model's default, or an explicit level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffortChoice {
+    Default,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl EffortChoice {
+    /// The explicit level, or `None` for the model's default.
+    pub fn level(self) -> Option<&'static str> {
+        match self {
+            EffortChoice::Default => None,
+            EffortChoice::Low => Some("low"),
+            EffortChoice::Medium => Some("medium"),
+            EffortChoice::High => Some("high"),
+            EffortChoice::Xhigh => Some("xhigh"),
+            EffortChoice::Max => Some("max"),
+        }
+    }
+}
+
+/// One model family in `ServerMsg::ModelCatalog`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelFamilyWire {
+    /// What to ask for (`"opus"`).
+    pub alias: String,
+    pub display_name: String,
+    /// The full model name the alias currently resolves to.
+    #[serde(default)]
+    pub resolved: Option<String>,
+    /// Effort levels the model accepts (empty: no effort support).
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    /// Cost rank, cheapest lowest.
+    pub rank: u32,
+}
+
+/// What a focus is recorded to run on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedModel {
+    pub model: String,
+    #[serde(default)]
+    pub effort: Option<String>,
+    pub source: crate::model::store::ModelSource,
+}
+
+/// What a running session says it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedModel {
+    /// Full model name, e.g. `claude-sonnet-5-5`.
+    pub model: String,
+    /// The family alias it belongs to, when known.
+    #[serde(default)]
+    pub family: Option<String>,
+}
+
+/// A switch not yet applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingModel {
+    pub model: String,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// Where a focus's switch stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchPhase {
+    /// No switch in progress.
+    #[default]
+    Steady,
+    /// A switch waits for the running turn to end.
+    Waiting,
+    /// A switch is being applied.
+    Applying,
+}
+
+/// A warning attached to a candidate model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelWarning {
+    /// The candidate it concerns: a family alias (`"opus"`) for a model row,
+    /// or `"effort:<level>"` (`"effort:max"`) for an effort row.
+    pub target: String,
+    pub text: String,
+}
+
+/// How a model request ended (or stands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRequestStatus {
+    Applied,
+    PendingTurnEnd,
+    Unchanged,
+    Refused,
+    Failed,
+    AwaitingUser,
+    /// An agent's upgrade request the user denied (or dismissed).
+    Denied,
+    /// An agent's upgrade request nobody answered in time.
+    Expired,
+}
+
+/// The most recent request to change a focus's model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastModelRequest {
+    /// `user`, `script` or `agent:<name>`.
+    pub actor: String,
+    /// What was asked for, e.g. `opus` or `opus · effort high`.
+    pub to: String,
+    pub status: ModelRequestStatus,
+    pub ts: chrono::DateTime<chrono::Utc>,
+    /// The `request_id` of the `SessionModelSet` that made it, so a client
+    /// waiting on a switch that applies later can recognise its outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+/// One focus's model state (`ServerMsg::SessionModelState`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionModelState {
+    pub tag: String,
+    /// What the focus is recorded to run on; `None` when nothing was ever
+    /// chosen and the session has not reported yet.
+    #[serde(default)]
+    pub recorded: Option<RecordedModel>,
+    /// What the running session last reported (assistant message model, else
+    /// the turn's init model).
+    #[serde(default)]
+    pub reported: Option<ReportedModel>,
+    /// The effort the session last confirmed, else the recorded one.
+    #[serde(default)]
+    pub effective_effort: Option<String>,
+    #[serde(default)]
+    pub pending: Option<PendingModel>,
+    #[serde(default)]
+    pub phase: SwitchPhase,
+    pub running: bool,
+    #[serde(default)]
+    pub warnings: Vec<ModelWarning>,
+    #[serde(default)]
+    pub last_request: Option<LastModelRequest>,
+    /// Bishop's budget posture when this state was built (`None`: unknown).
+    #[serde(default)]
+    pub posture: Option<String>,
+}
+
+/// A per-agent default model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentModelDefault {
+    pub model: String,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Metadata about a daemon-hosted persistent session.
@@ -261,6 +434,14 @@ pub struct FocusMeta {
     /// `client_id` whose windows should select this focus when it appears.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub select_for_client: Option<String>,
+    /// The model chosen when the focus was created (family alias or full
+    /// name). Read by the daemon only when it creates the focus's model
+    /// record; absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub initial_model: Option<String>,
+    /// The effort chosen when the focus was created (`None`: the default).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub initial_effort: Option<String>,
 }
 
 // ── agent-authored pane layout (Phase 1: agent-driven-pane-layout) ───────────
@@ -1203,6 +1384,48 @@ pub enum ClientMsg {
         request_id: String,
         text: String,
     },
+
+    // ── model switching ───────────────────────────────────────────────────────
+    /// Ask for the model catalogue. Answered with `ServerMsg::ModelCatalog`.
+    ModelCatalogRequest {},
+    /// Re-probe the installed CLI for its models (refused over TCP). The
+    /// result is broadcast as `ServerMsg::ModelCatalog`.
+    ModelCatalogRefresh {},
+    /// Read one focus's model. Answered with `ServerMsg::SessionModelState`.
+    SessionModelGet {
+        tag: String,
+    },
+    /// Switch a focus's model and/or effort (refused over TCP). `None` keeps
+    /// the current value. Answered with `ServerMsg::ModelRequestResult`.
+    SessionModelSet {
+        tag: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<EffortChoice>,
+        /// Also make this the default for new focuses of the focus's agent.
+        #[serde(default)]
+        set_as_agent_default: bool,
+        request_id: String,
+        /// Who is asking: `"script"` for the app-control client, otherwise
+        /// the user. Honoured from Unix peers only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<String>,
+    },
+    /// Read the per-agent defaults. Answered with `ServerMsg::ModelDefaults`.
+    ModelDefaultsRequest {},
+    /// Set (or, with `clear`, remove) an agent's default model (refused over
+    /// TCP). Answered with `ServerMsg::ModelRequestResult`.
+    ModelDefaultSet {
+        agent: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<EffortChoice>,
+        #[serde(default)]
+        clear: bool,
+        request_id: String,
+    },
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -1580,6 +1803,37 @@ pub enum ServerMsg {
         reason: String,
     },
 
+    // ── model switching ───────────────────────────────────────────────────────
+    /// The model families the installed CLI offers, cheapest first. Sent on
+    /// attach, on request and after every probe.
+    ModelCatalog {
+        families: Vec<ModelFamilyWire>,
+        /// The last probe failed; these are the families an earlier one saw.
+        stale: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fetched_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// One focus's model: recorded, reported, any switch in progress.
+    /// Replayed per tag on attach and broadcast on every change.
+    SessionModelState(SessionModelState),
+    /// Per-agent defaults, and the model each agent declares.
+    ModelDefaults {
+        defaults: std::collections::BTreeMap<String, AgentModelDefault>,
+        declared: std::collections::BTreeMap<String, String>,
+    },
+    /// Answer to `SessionModelSet` / `ModelDefaultSet`, sent to the requesting
+    /// connection only.
+    ModelRequestResult {
+        request_id: String,
+        status: ModelRequestStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
@@ -1900,6 +2154,8 @@ mod tests {
     fn focus_meta_round_trips() {
         // All optionals Some
         let full = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag:             "cody-abc12345".into(),
             display_name:    "Cody in Admin Portal".into(),
             agent_name:      "cody".into(),
@@ -1917,6 +2173,8 @@ mod tests {
 
         // All optionals None
         let minimal = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag:             "fred".into(),
             display_name:    "Fred".into(),
             agent_name:      "fred".into(),
@@ -2021,6 +2279,8 @@ mod tests {
     #[test]
     fn focus_registry_messages_round_trip() {
         let meta = FocusMeta {
+            initial_model: None,
+            initial_effort: None,
             tag:             "fred".into(),
             display_name:    "Fred".into(),
             agent_name:      "fred".into(),
@@ -2095,6 +2355,8 @@ mod tests {
         });
         round_trip_server(ServerMsg::FocusCreated {
             meta: FocusMeta {
+                initial_model: None,
+                initial_effort: None,
                 tag: "cody-core-1234".into(),
                 display_name: "CORE-1234".into(),
                 agent_name: "cody".into(),
@@ -2849,11 +3111,13 @@ mod tests {
                 id: "approve".into(),
                 label: "Approve".into(),
                 detail: Some("Merge and deploy".into()),
+                is_default: false,
             },
             DecisionChoice {
                 id: "reject".into(),
                 label: "Reject".into(),
                 detail: Some("Block the merge".into()),
+                is_default: false,
             },
         ]
     }
@@ -3007,6 +3271,7 @@ mod tests {
             id: "approve".into(),
             label: "Approve".into(),
             detail: Some("Merge and deploy".into()),
+            is_default: false,
         };
         let json = serde_json::to_string(&with_detail).unwrap();
         let back: DecisionChoice = serde_json::from_str(&json).unwrap();
@@ -3020,6 +3285,7 @@ mod tests {
             id: "reject".into(),
             label: "Reject".into(),
             detail: None,
+            is_default: false,
         };
         let json = serde_json::to_string(&without_detail).unwrap();
         let back: DecisionChoice = serde_json::from_str(&json).unwrap();

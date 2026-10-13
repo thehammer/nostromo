@@ -1829,6 +1829,8 @@ fn ghost_marker(tag: &str) -> SentMarker {
 
 fn registry_meta(tag: &str) -> FocusMeta {
     FocusMeta {
+        initial_model: None,
+        initial_effort: None,
         tag: tag.into(),
         display_name: tag.into(),
         agent_name: "cody".into(),
