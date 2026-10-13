@@ -77,11 +77,22 @@ purpose.
 Usage:
     transcript-load-report.py [path/to/diagnostics.jsonl] [--turns N]
                               [--sample /tmp/sample.txt] [--cpu-percent X]
+                              [--fixture-log LOG ...] [--fixture-only]
+
+`--fixture-log` adds an ungraded `fixture-open` line (the median of every
+`fixture-open ms=<n> rows=<n> turns=<n>` line found, with the git SHA of the
+build) for runs under `NOSTROMO_LOAD_FIXTURE=benchmark`. It is a number to
+record, not a criterion: it is not in `CRITERIA`, so it can neither pass nor
+fail. `--fixture-only` prints just that line and skips the diagnostics table (a
+fixture run delivers no live turns, so the table would be all INCONCLUSIVE).
 """
 import argparse
 import datetime
 import json
 import os
+import re
+import statistics
+import subprocess
 import sys
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
@@ -1152,18 +1163,84 @@ def print_report(ev, results, stream=sys.stdout):
           file=stream)
 
 
+# ---------------------------------------------------------------------------
+# Fixture-open baseline (ungraded)
+# ---------------------------------------------------------------------------
+
+FIXTURE_OPEN = re.compile(r"fixture-open ms=(\d+) rows=(\d+) turns=(\d+)")
+FIXTURE_SHA = re.compile(r"\bsha=(\S+)")
+
+
+def git_sha():
+    """The checkout's short SHA (with `-dirty` if modified), or `unknown`."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        out = subprocess.run(["git", "describe", "--always", "--dirty"], cwd=here,
+                             capture_output=True, text=True, check=True)
+        return out.stdout.strip() or "unknown"
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def read_fixture_opens(paths, sha=None):
+    """Every `(ms, rows, turns)` found in the given logs.
+
+    A line may carry a `sha=<sha>` token (the shell driver's history file does).
+    When `sha` is given, tagged lines for another build are skipped, so a baseline
+    is never the median of two different builds. Untagged lines always count.
+    """
+    found = []
+    for path in paths:
+        try:
+            with open(path, errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = FIXTURE_OPEN.search(line)
+            if not m:
+                continue
+            tag = FIXTURE_SHA.search(line)
+            if sha is not None and tag and tag.group(1) != sha:
+                continue
+            found.append(tuple(int(g) for g in m.groups()))
+    return found
+
+
+def print_fixture_open(paths, sha, stream=sys.stdout):
+    """Print the ungraded baseline line. Returns False when there was nothing to print."""
+    runs = read_fixture_opens(paths, sha)
+    if not runs:
+        print(f"fixture-open: no fixture-open lines in {', '.join(paths)} "
+              f"(not a fixture run?)  sha={sha}", file=stream)
+        return False
+    ms = [r[0] for r in runs]
+    median = statistics.median(ms)
+    print(f"fixture-open: median {median:g} ms over {len(runs)} run(s) "
+          f"{sorted(ms)}  rows={runs[-1][1]} turns={runs[-1][2]}  sha={sha}  (not graded)",
+          file=stream)
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("diag", nargs="?", default=DEFAULT_DIAG)
     ap.add_argument("--turns", type=int, default=5000)
     ap.add_argument("--sample", default=None)
     ap.add_argument("--cpu-percent", type=float, default=None)
+    ap.add_argument("--fixture-log", action="append", default=[])
+    ap.add_argument("--fixture-only", action="store_true")
     args = ap.parse_args()
+
+    if args.fixture_only:
+        return 0 if print_fixture_open(args.fixture_log, git_sha()) else 1
 
     ev = load(args.diag)._replace(turns=args.turns, cpu_percent=args.cpu_percent,
                                   sample_path=args.sample)
     results = evaluate_evidence(ev)
     print_report(ev, results)
+    if args.fixture_log:
+        print_fixture_open(args.fixture_log, git_sha())
     # INCONCLUSIVE is non-passing. A criterion nobody measured has not passed,
     # and the shell driver's exit status must not say otherwise.
     return 1 if any(not v.ok for v in results) else 0

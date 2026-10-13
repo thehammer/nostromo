@@ -1,8 +1,10 @@
 import Combine
 import Foundation
+import NostromoKit
 import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "loadharness")
+private let signposter = OSSignposter(subsystem: "com.hammer.nostromo", category: "loadharness")
 
 /// Drives the real transcript code path with synthetic traffic, so the numeric
 /// acceptance criteria can be measured on a real app with a real window and a
@@ -33,6 +35,22 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "loadharnes
 ///   NOSTROMO_LOAD_DURATION=24h     keep driving for a soak run
 ///   NOSTROMO_LOAD_BIG_TURN_BLOCKS=160   one turn of N blocks, before the rest
 ///   NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS=60  rows in that turn's markdown table
+///   NOSTROMO_LOAD_FIXTURE=benchmark  open the benchmark transcript instead (below)
+///
+/// ## Open-fixture mode
+///
+/// `NOSTROMO_LOAD_FIXTURE=benchmark` skips the live-delta drive entirely
+/// (`NOSTROMO_LOAD_TURNS` is ignored). It decodes `BenchmarkTranscript`'s session
+/// (200+ turns, 5,000+ tool calls) and sends it as **one** `.sessionTurns`
+/// snapshot, the way an attach does, then logs how long the pane takes to settle
+/// at the tail: `fixture-open ms=<n> rows=<materialized views> turns=<n>`. That
+/// number is the "today" baseline the tool-fold work is graded against.
+///
+/// "Settled" is read from the pane's own diagnostics (materialized view count and
+/// document height unchanged for `fixtureSettlePolls` polls) rather than from a
+/// hook in `ReplView`, so this mode adds nothing to the rendering code it
+/// measures. `ms` is the time of the last observed change, not of the poll that
+/// confirmed it, so the confirmation window is not in the number.
 ///
 /// ## Why the big turn exists
 ///
@@ -66,6 +84,16 @@ final class TranscriptLoadHarness {
     /// the single densest shape measured, so a big-turn scenario without one
     /// misses most of what made the incident.
     let bigTurnTableRows: Int
+    /// `NOSTROMO_LOAD_FIXTURE`, or nil for the normal live-delta drive.
+    let fixture: String?
+
+    /// Called with the pane's tag once its fixture-open measurement is logged.
+    /// Later slices hang their own checks here.
+    static var afterFixtureOpen: ((String) -> Void)?
+
+    private static let fixturePollInterval: DispatchTimeInterval = .milliseconds(10)
+    private static let fixtureSettlePolls = 5
+    private static let fixtureTimeoutSeconds = 120.0
 
     private(set) var turnsDelivered = 0
 
@@ -107,6 +135,7 @@ final class TranscriptLoadHarness {
         self.durationSeconds = Self.parseDuration(env["NOSTROMO_LOAD_DURATION"])
         self.bigTurnBlocks    = max(0, Int(env["NOSTROMO_LOAD_BIG_TURN_BLOCKS"] ?? "") ?? 0)
         self.bigTurnTableRows = max(0, Int(env["NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS"] ?? "") ?? 60)
+        self.fixture         = env["NOSTROMO_LOAD_FIXTURE"].flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Wait until the window has laid out and its transcript panes have
@@ -190,6 +219,10 @@ final class TranscriptLoadHarness {
             nextSeq[tag]    = 0
             sessionIds[tag] = "harness-session-\(tag)"
         }
+        if let fixture {
+            openFixture(named: fixture)
+            return
+        }
         log.info("""
             load harness: turns=\(self.totalTurns) reconnects=\(self.reconnects) \
             focuses=\(self.focusCount) scroll=\(self.scrollAfterLoad) \
@@ -222,6 +255,81 @@ final class TranscriptLoadHarness {
         timer.resume()
         self.timer = timer
     }
+
+    // MARK: - Open fixture
+
+    /// Attach to a pre-built transcript in one `.sessionTurns` snapshot and time
+    /// how long the pane takes to settle at the tail.
+    private func openFixture(named name: String) {
+        guard name == "benchmark" else {
+            let message = "load harness: unknown NOSTROMO_LOAD_FIXTURE=\(name) (known: benchmark)\n"
+            log.error("\(message, privacy: .public)")
+            FileHandle.standardError.write(Data(message.utf8))
+            exit(2)
+        }
+        // Decode before anything is timed: only the pane's work is under test.
+        let json = BenchmarkTranscript.sessionTurnsJSON(emptyResults: false)
+        guard let turns = try? JSONDecoder().decode([DaemonTurn].self, from: json) else {
+            let message = "load harness: benchmark fixture failed to decode\n"
+            log.error("\(message, privacy: .public)")
+            FileHandle.standardError.write(Data(message.utf8))
+            exit(2)
+        }
+        log.info("load harness: opening benchmark fixture, \(turns.count, privacy: .public) turns")
+
+        client.connected.send(true)
+        for tag in tags {
+            client.messages.send(.sessionSpawned(tag: tag, sessionId: sessionIds[tag]))
+            let started = DispatchTime.now().uptimeNanoseconds
+            let interval = signposter.beginInterval("fixtureOpen", id: signposter.makeSignpostID())
+            client.messages.send(.sessionTurns(tag: tag, turns: turns))
+            awaitSettled(tag: tag, expectedTurns: turns.count, startedAt: started, interval: interval)
+        }
+    }
+
+    /// Poll the pane until its materialized view count and document height have
+    /// stopped changing, then log the time of the last change.
+    private func awaitSettled(tag: String, expectedTurns: Int, startedAt started: UInt64,
+                              interval: OSSignpostIntervalState) {
+        var last: (views: Int, height: Double)?
+        var lastChange = started
+        var stablePolls = 0
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + Self.fixturePollInterval, repeating: Self.fixturePollInterval)
+        timer.setEventHandler {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if Double(now - started) / 1e9 > Self.fixtureTimeoutSeconds {
+                timer.cancel()
+                let message = "load harness: fixture-open did not settle within \(Int(Self.fixtureTimeoutSeconds))s\n"
+                log.error("\(message, privacy: .public)")
+                FileHandle.standardError.write(Data(message.utf8))
+                exit(3)
+            }
+            guard let pane = TranscriptDiagnostics.pane(tag: tag),
+                  pane.retainedTurnCount == expectedTurns, pane.materializedViewCount > 0 else { return }
+            let state = (views: pane.materializedViewCount, height: pane.estimatedDocumentHeight)
+            if let last, last == state {
+                stablePolls += 1
+            } else {
+                last = state
+                lastChange = now
+                stablePolls = 0
+            }
+            guard stablePolls >= Self.fixtureSettlePolls else { return }
+            timer.cancel()
+            signposter.endInterval("fixtureOpen", interval)
+            let ms = Int((Double(lastChange - started) / 1e6).rounded())
+            let line = "fixture-open ms=\(ms) rows=\(state.views) turns=\(expectedTurns)"
+            log.info("\(line, privacy: .public)")
+            // stderr too: the load-test script's log is what the report reads.
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+            Self.afterFixtureOpen?(tag)
+        }
+        timer.resume()
+        fixtureTimers.append(timer)
+    }
+
+    private var fixtureTimers: [DispatchSourceTimer] = []
 
     private func tick() {
         guard cursor < totalTurns else {
