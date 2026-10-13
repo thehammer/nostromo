@@ -25,6 +25,14 @@ struct ModelRequestResultWire: Equatable {
     var warning: String?
 }
 
+/// Something to tell the user about one focus's model: a switch that did not take.
+struct ModelSwitchFailure: Equatable {
+    /// Increases with every failure the store records, so a view can tell a new one from the
+    /// one it already showed.
+    let id: Int
+    let message: String
+}
+
 /// What the store asks of the daemon connection. `NostromodClient` is the real one;
 /// tests pass a recorder.
 protocol ModelRequestSending: AnyObject {
@@ -53,9 +61,18 @@ final class ModelStore: ObservableObject {
     @Published private(set) var isConnected = false
     /// The most recent answer to a request of this connection.
     @Published private(set) var lastResult: ModelRequestResultWire?
+    /// The latest failed switch per focus, until a view dismisses it.
+    @Published private(set) var failures: [String: ModelSwitchFailure] = [:]
 
     var sender: ModelRequestSending?
     private let makeRequestId: () -> String
+    private var nextFailureId = 0
+    /// Requests of this connection not yet answered, oldest first, and the focus each was for.
+    private var outstanding: [(requestId: String, tag: String)] = []
+    /// Request ids whose outcome was already reported, oldest first: the focus's next
+    /// `last_request` repeats them and must not be reported twice.
+    private var reportedRequestIds: [String] = []
+    private static let rememberedRequests = 64
 
     init(sender: ModelRequestSending? = nil, makeRequestId: @escaping () -> String = { UUID().uuidString }) {
         self.sender = sender
@@ -66,7 +83,9 @@ final class ModelStore: ObservableObject {
     func ingest(_ msg: ServerMsg) {
         switch msg {
         case .sessionModelState(let state):
+            let previous = states[state.tag]
             states[state.tag] = state
+            noteLastRequest(of: state, previous: previous)
 
         case .modelCatalog(let families, let stale, let fetchedAt):
             catalog = ModelCatalogState(families: families.sorted { $0.rank < $1.rank },
@@ -78,6 +97,7 @@ final class ModelStore: ObservableObject {
         case .modelRequestResult(let requestId, let status, let code, let message, let warning):
             lastResult = ModelRequestResultWire(requestId: requestId, status: status, code: code,
                                                 message: message, warning: warning)
+            reportResult(requestId: requestId, status: status, code: code, message: message)
 
         default:
             break
@@ -104,6 +124,8 @@ final class ModelStore: ObservableObject {
     @discardableResult
     func requestSwitch(tag: String, model: String?, effort: String?, setAsAgentDefault: Bool = false) -> String {
         let requestId = makeRequestId()
+        outstanding.append((requestId, tag))
+        if outstanding.count > Self.rememberedRequests { outstanding.removeFirst() }
         sender?.sessionModelSet(tag: tag, model: model, effort: effort,
                                 setAsAgentDefault: setAsAgentDefault, requestId: requestId)
         return requestId
@@ -112,5 +134,53 @@ final class ModelStore: ObservableObject {
     /// Drop everything held for a focus that was closed.
     func forget(tag: String) {
         states.removeValue(forKey: tag)
+        failures.removeValue(forKey: tag)
+    }
+
+    func failure(for tag: String) -> ModelSwitchFailure? {
+        failures[tag]
+    }
+
+    /// A view is done with a failure. Only the one it showed goes: a newer failure stays.
+    func dismissFailure(tag: String, id: Int) {
+        guard failures[tag]?.id == id else { return }
+        failures.removeValue(forKey: tag)
+    }
+
+    // MARK: - Failures
+
+    /// The answer to one of this store's own requests. A failure is reported for the focus the
+    /// request was made for; a request still waiting for its turn to end stays outstanding.
+    private func reportResult(requestId: String, status: ModelRequestStatusWire, code: String?, message: String?) {
+        guard let index = outstanding.firstIndex(where: { $0.requestId == requestId }) else { return }
+        let tag = outstanding[index].tag
+        if status == .pendingTurnEnd || status == .awaitingUser { return }
+        outstanding.remove(at: index)
+        let text = status == .unchanged
+            ? ModelPresentation.requestedButNotRunning(state: states[tag])
+            : ModelPresentation.failureMessage(status: status, code: code, message: message)
+        guard let text else { return }
+        reportedRequestIds.append(requestId)
+        if reportedRequestIds.count > Self.rememberedRequests { reportedRequestIds.removeFirst() }
+        fail(tag: tag, message: text)
+    }
+
+    /// A focus's `last_request` that changed to a failure: a script's or an agent's request, or
+    /// one of ours the result frame has not reported. The first state of a focus (the replay on
+    /// subscribe) is history, not news.
+    private func noteLastRequest(of state: SessionModelStateWire, previous: SessionModelStateWire?) {
+        guard previous != nil, let last = state.lastRequest, last != previous?.lastRequest,
+              let text = ModelPresentation.failureMessage(status: last.status, code: nil, message: nil)
+        else { return }
+        if let id = last.requestId,
+           outstanding.contains(where: { $0.requestId == id }) || reportedRequestIds.contains(id) {
+            return
+        }
+        fail(tag: state.tag, message: text)
+    }
+
+    private func fail(tag: String, message: String) {
+        nextFailureId += 1
+        failures[tag] = ModelSwitchFailure(id: nextFailureId, message: message)
     }
 }

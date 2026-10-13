@@ -1184,6 +1184,9 @@ class NoteBlockView: NSView {
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
             label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
         ])
+        // One element carrying the text; its label field would be read a second time.
+        setAccessibilityElement(true)
+        setAccessibilityChildren([])
         setAccessibilityRole(.staticText)
         setAccessibilityLabel(text)
     }

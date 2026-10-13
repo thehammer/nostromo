@@ -41,6 +41,9 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private var modelTag: String?
     private var modelAgentName: String?
     private var modelBinding: AnyCancellable?
+    private var modelNoticeBinding: AnyCancellable?
+    private var modelNoticePopover: ModelNoticePopover?
+    private var modelNoticeId: Int?
     private let spinner      = NSProgressIndicator()
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
@@ -216,6 +219,40 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
 
     // MARK: Model chip
 
+    /// How long a "Couldn't switch" message stays up.
+    static let modelNoticeDuration: TimeInterval = 6
+
+    /// The message about a failed switch of this bar's focus that is up now, if any.
+    private(set) var modelNoticeText: String?
+
+    /// Runs `work` after the notice's duration. A seam: tests capture the closure instead of
+    /// waiting for it.
+    var scheduleModelNoticeDismissal: (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Tells VoiceOver about a new notice. A seam, like the one above.
+    lazy var announceModelNotice: (String) -> Void = { [weak self] text in
+        guard let self else { return }
+        NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+            .announcement: text,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
+    }
+
+    /// Take the notice down now (it also goes by itself after `modelNoticeDuration`).
+    func dismissModelNotice() {
+        closeModelNoticePopover()
+        modelNoticeText = nil
+        if let tag = modelTag, let id = modelNoticeId { modelStore?.dismissFailure(tag: tag, id: id) }
+        modelNoticeId = nil
+    }
+
+    private func closeModelNoticePopover() {
+        modelNoticePopover?.close()
+        modelNoticePopover = nil
+    }
+
     /// Show `tag`'s model in the chip, live from `store`. Every bar bound to the same store
     /// updates from the same frame, which is what keeps two windows in step.
     func bindModel(tag: String, agentName: String?, store: ModelStore) {
@@ -227,6 +264,29 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
             .sink { [weak self] state, connected in
                 self?.showModel(ModelPresentation.chip(state: state, isConnected: connected))
             }
+        // A failure already held when the bar binds is old news; only a new one is shown.
+        modelNoticeBinding = store.$failures.map { $0[tag] }.removeDuplicates().dropFirst().compactMap { $0 }
+            .sink { [weak self] in self?.showModelNotice($0) }
+    }
+
+    /// Say that a switch of this focus failed: next to the chip, and to VoiceOver. Never takes
+    /// the keyboard, never blocks the chip; it goes by itself.
+    private func showModelNotice(_ failure: ModelSwitchFailure) {
+        closeModelNoticePopover()
+        modelNoticeId = failure.id
+        modelNoticeText = failure.message
+        announceModelNotice(failure.message)
+        // The popup is the user's focus when it is open, and it shows the real state.
+        if !modelChip.isHidden, modelPopover?.isShown != true {
+            let notice = ModelNoticePopover(text: failure.message)
+            modelNoticePopover = notice
+            notice.show(relativeTo: modelChip)
+        }
+        scheduleModelNoticeDismissal(Self.modelNoticeDuration) { [weak self] in
+            // A newer failure has its own timer.
+            guard let self, self.modelNoticeId == failure.id else { return }
+            self.dismissModelNotice()
+        }
     }
 
     /// `nil` hides the chip: this session has no model state (restricted, hidden, or the

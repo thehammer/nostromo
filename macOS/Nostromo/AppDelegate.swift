@@ -267,7 +267,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// ⇧⌘M with focus outside every input bar (a list, the transcript): open the key
     /// window's bar. A bar that holds focus handles the action itself, before this.
     @objc func showModelPopover(_ sender: Any?) {
-        ModelShortcut.bars(in: NSApp.keyWindow).first?.showModelPopover(sender)
+        ModelShortcut.bar(in: NSApp.keyWindow)?.showModelPopover(sender)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

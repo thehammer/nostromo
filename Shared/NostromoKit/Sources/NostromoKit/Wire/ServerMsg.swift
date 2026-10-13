@@ -501,15 +501,6 @@ extension ServerMsg {
         let hook_installed: Bool
     }
 
-    private struct ModelCatalogWrapper: Decodable {
-        let families: [ModelFamilyWire]
-        let stale: Bool
-        let fetched_at: String?
-    }
-    private struct ModelDefaultsWrapper: Decodable {
-        let defaults: [String: AgentModelDefaultWire]
-        let declared: [String: String]?
-    }
     private struct ModelRequestResultWrapper: Decodable {
         let request_id: String
         let status: ModelRequestStatusWire
@@ -675,8 +666,8 @@ extension ServerMsg {
             }
 
         case "model_catalog":
-            if let m = try? dec.decode(ModelCatalogWrapper.self, from: data) {
-                return .modelCatalog(families: m.families, stale: m.stale, fetchedAt: m.fetched_at)
+            if let m = try? dec.decode(ModelCatalogFrame.self, from: data) {
+                return .modelCatalog(families: m.families, stale: m.stale, fetchedAt: m.fetchedAt)
             }
 
         case "session_model_state":
@@ -685,8 +676,8 @@ extension ServerMsg {
             }
 
         case "model_defaults":
-            if let m = try? dec.decode(ModelDefaultsWrapper.self, from: data) {
-                return .modelDefaults(defaults: m.defaults, declared: m.declared ?? [:])
+            if let m = try? dec.decode(ModelDefaultsFrame.self, from: data) {
+                return .modelDefaults(defaults: m.defaults, declared: m.declared)
             }
 
         case "model_request_result":

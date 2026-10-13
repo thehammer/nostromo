@@ -156,8 +156,7 @@ final class ModelPopoverTests: XCTestCase {
         XCTAssertTrue(vc.modelRowViews.isEmpty, "precondition: no catalogue yet, so no model rows")
 
         store.ingest(.modelCatalog(families: standardFamilies(), stale: false, fetchedAt: nil))
-        let deadline = Date().addingTimeInterval(2)
-        while vc.modelRowViews.isEmpty && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        modelWaitUntil(failing: false) { !vc.modelRowViews.isEmpty }
 
         XCTAssertEqual(vc.modelRowViews.count, 4)
         XCTAssertGreaterThan(vc.preferredContentSize.height, before, "the popover must grow to show the rows that arrived")
@@ -351,6 +350,96 @@ final class ModelPopoverTests: XCTestCase {
         XCTAssertEqual(closes, 1)
     }
 
+    // MARK: What is running, not what was asked for
+
+    /// Recorded on Opus, but the CLI substituted Sonnet: the session is running Sonnet.
+    private func substitutedState() -> SessionModelStateWire {
+        SessionModelStateWire(tag: tag, recorded: RecordedModelWire(model: "opus", source: .focus),
+                              reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"), running: true)
+    }
+
+    func testTheCheckMarkSitsOnTheModelThatIsRunningNotTheOneThatWasAskedFor() {
+        let vc = openPopup(state: substitutedState())
+        XCTAssertEqual(vc.modelRowViews.map(\.showsCheckmark), [false, true, false, false], "Sonnet is running")
+        XCTAssertEqual(vc.focusedRowIndex, 1, "and the highlight starts there")
+    }
+
+    func testChoosingTheModelThatWasAskedForButIsNotRunningRetriesIt() {
+        let vc = openPopup(state: substitutedState())
+        down(vc)        // Sonnet -> Opus
+        returnKey(vc)
+        XCTAssertEqual(sender.sets, [set(model: "opus", effort: nil)], "exactly one request: the retry")
+        XCTAssertEqual(closes, 1)
+    }
+
+    func testClickingTheRequestedButNotRunningModelRowRetriesItToo() throws {
+        let vc = openPopup(state: substitutedState())
+        try row(vc.modelRowViews, 2).activate()
+        XCTAssertEqual(sender.sets, [set(model: "opus", effort: nil)])
+    }
+
+    func testChoosingTheModelThatIsRunningWithNothingPendingSendsNothing() {
+        let vc = openPopup(state: substitutedState())
+        returnKey(vc)   // Sonnet, checked
+        XCTAssertEqual(sender.sets, [])
+        XCTAssertEqual(closes, 1)
+    }
+
+    func testTheEffortCheckMarkFollowsTheEffectiveEffort() {
+        let state = SessionModelStateWire(tag: tag, recorded: RecordedModelWire(model: "opus", effort: "high", source: .focus),
+                                          reported: ReportedModelWire(model: "claude-opus-5-5", family: "opus"),
+                                          effectiveEffort: "medium", running: true)
+        let vc = openPopup(state: state)
+        XCTAssertEqual(vc.effortRowViews.map(\.showsCheckmark), [false, false, true, false, false, false])
+        tab(vc)
+        XCTAssertEqual(vc.focusedRowIndex, 2, "Tab lands on the effort in force")
+    }
+
+    // MARK: Effort levels from the catalogue
+
+    func testALevelTheCLIOffersThatIsNotOneOfTheStandardFiveGetsARowAndCanBeChosen() throws {
+        var families = standardFamilies().filter { $0.alias != "opus" }
+        families.append(family("opus", rank: 3, efforts: Self.allLevels + ["ultra"], resolved: "claude-opus-5-5"))
+        let vc = openPopup(state: runningState(model: "opus", effort: nil), families: families)
+        XCTAssertEqual(vc.effortRowViews.map(\.titleText), ["Default", "low", "medium", "high", "xhigh", "max", "ultra"])
+        try row(vc.effortRowViews, 6).activate()
+        XCTAssertEqual(sender.sets, [set(model: nil, effort: "ultra")])
+    }
+
+    func testANewLevelTheCurrentModelLacksIsDisabledWithAReason() throws {
+        var families = standardFamilies().filter { $0.alias != "opus" }
+        families.append(family("opus", rank: 3, efforts: Self.allLevels + ["ultra"], resolved: "claude-opus-5-5"))
+        let vc = openPopup(state: runningState(model: "sonnet", effort: nil), families: families)
+        let ultra = try row(vc.effortRowViews, 6)
+        XCTAssertFalse(ultra.isRowEnabled)
+        XCTAssertEqual(ultra.toolTip, "Sonnet doesn't support ultra effort")
+        try ultra.activate()
+        XCTAssertEqual(sender.sets, [])
+    }
+
+    // MARK: Accessibility: one element per row
+
+    func testARowIsOneAccessibilityElementWhoseChildTextIsHiddenFromVoiceOver() {
+        let rowView = ModelPopoverRowView(title: "Opus", secondary: "claude-opus-5-5", showsCheckmark: true, isEnabled: true,
+                                          tooltip: nil, accessibilityLabel: "Opus, claude-opus-5-5, selected", onActivate: {})
+        XCTAssertTrue(rowView.isAccessibilityElement())
+        XCTAssertEqual(rowView.accessibilityRole(), .button)
+        XCTAssertEqual(rowView.accessibilityLabel(), "Opus, claude-opus-5-5, selected")
+        XCTAssertTrue((rowView.accessibilityChildren() ?? []).isEmpty,
+                      "the title, check mark and secondary text are already in the label; VoiceOver must not read them again")
+    }
+
+    func testEveryRowInThePopupHidesItsChildrenFromVoiceOver() {
+        let vc = openPopup(state: runningState(model: "sonnet", effort: "high"))
+        let rows = vc.modelRowViews + vc.effortRowViews
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            XCTAssertTrue((row.accessibilityChildren() ?? []).isEmpty, "row \(row.titleText)")
+            XCTAssertEqual(row.accessibilityRole(), .button, "row \(row.titleText)")
+            XCTAssertFalse((row.accessibilityLabel() ?? "").isEmpty, "row \(row.titleText)")
+        }
+    }
+
     // MARK: Disabled effort rows
 
     func testUnsupportedEffortRowsAreDisabledWithTheReasonInTheTooltip() throws {
@@ -416,12 +505,10 @@ final class ModelPopoverTests: XCTestCase {
         return anchor
     }
 
-    private func waitUntilClosed(_ popover: ModelPopover, timeout: TimeInterval = 2) {
-        // NSPopover closes with an animation: isShown drops when it finishes.
-        let deadline = Date().addingTimeInterval(timeout)
-        while popover.isShown && Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
+    private func waitUntilClosed(_ popover: ModelPopover) {
+        // NSPopover finishes closing on a later run-loop turn: isShown drops then. A bounded
+        // number of turns, never a number of seconds.
+        modelWaitUntil(failing: false) { !popover.isShown }
     }
 
     func testShowingAndClosingThePopover() {

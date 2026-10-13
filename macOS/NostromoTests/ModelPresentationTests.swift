@@ -153,14 +153,44 @@ final class ModelPresentationTests: XCTestCase {
         }
     }
 
-    func testTheEffectiveEffortDoesNotDriveTheTitle() throws {
-        // `effective_effort` reports the model's own default when nothing was chosen.
-        let c = try XCTUnwrap(chip(state(recorded: recorded("opus", effort: nil),
-                                         reported: ReportedModelWire(model: "claude-opus-5-5", family: "opus"),
+    // The daemon's `effective_effort` is the effort the session last confirmed, else the recorded
+    // one: it is what is actually in force, so it drives the chip (and the popup's check mark).
+    func testTheEffectiveEffortIsWhatTheChipShowsWhenItDiffersFromTheRecordedOne() throws {
+        let c = try XCTUnwrap(chip(state(recorded: recorded("sonnet", effort: "high"),
+                                         reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"),
+                                         effectiveEffort: "medium", running: true)))
+        XCTAssertEqual(c.title, "Sonnet \u{00B7} medium")
+        XCTAssertEqual(c.tooltip, "Claude Sonnet (claude-sonnet-5-5), effort: medium")
+        XCTAssertEqual(c.accessibilityLabel, "Model: Sonnet, effort medium. Change model")
+    }
+
+    func testWithNoEffectiveEffortTheChipFallsBackToTheRecordedOne() throws {
+        let c = try XCTUnwrap(chip(state(recorded: recorded("sonnet", effort: "high"),
+                                         reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"),
+                                         effectiveEffort: nil, running: true)))
+        XCTAssertEqual(c.title, "Sonnet \u{00B7} high")
+        XCTAssertEqual(c.tooltip, "Claude Sonnet (claude-sonnet-5-5), effort: high")
+        XCTAssertEqual(c.accessibilityLabel, "Model: Sonnet, effort high. Change model")
+    }
+
+    func testAnEffectiveEffortOfDefaultShowsNoSuffixEvenWhenTheRecordedOneIsExplicit() throws {
+        let c = try XCTUnwrap(chip(state(recorded: recorded("sonnet", effort: "high"),
+                                         reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"),
+                                         effectiveEffort: "default", running: true)))
+        XCTAssertEqual(c.title, "Sonnet")
+        XCTAssertEqual(c.tooltip, "Claude Sonnet (claude-sonnet-5-5), effort: default")
+        XCTAssertEqual(c.accessibilityLabel, "Model: Sonnet, effort default. Change model")
+    }
+
+    func testAnEffectiveEffortWithNothingRecordedStillShows() throws {
+        let c = try XCTUnwrap(chip(state(reported: ReportedModelWire(model: "claude-opus-5-5", family: "opus"),
                                          effectiveEffort: "high", running: true)))
-        XCTAssertEqual(c.title, "Opus")
-        XCTAssertEqual(c.tooltip, "Claude Opus (claude-opus-5-5), effort: default")
-        XCTAssertEqual(c.accessibilityLabel, "Model: Opus, effort default. Change model")
+        XCTAssertEqual(c.title, "Opus \u{00B7} high")
+    }
+
+    func testAStoppedSessionsChipAlsoFollowsTheEffectiveEffort() throws {
+        let c = try XCTUnwrap(chip(state(recorded: recorded("opus", effort: "low"), effectiveEffort: "max", running: false)))
+        XCTAssertEqual(c.title, "Opus \u{00B7} max")
     }
 
     func testARunningSessionWithAReportButNothingRecordedStillShowsTheReport() throws {
@@ -389,19 +419,27 @@ final class ModelPresentationTests: XCTestCase {
         XCTAssertEqual(rows.filter(\.isCurrent).map(\.alias), ["sonnet"])
     }
 
-    func testARecordedAliasWinsOverTheReportedFamily() {
+    func testARunningSessionsReportedFamilyWinsOverTheRecordedAlias() {
+        // Asked for Opus, the CLI runs Sonnet: the check mark follows what is running (like the chip).
         let s = state(recorded: recorded("opus"),
                       reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"), running: true)
         let rows = ModelPresentation.modelRows(state: s, catalog: catalog())
-        XCTAssertEqual(rows.filter(\.isCurrent).map(\.alias), ["opus"])
+        XCTAssertEqual(rows.filter(\.isCurrent).map(\.alias), ["sonnet"])
+        XCTAssertEqual(chip(s)?.title, "Sonnet", "the chip and the check mark agree")
     }
 
-    func testAPinnedRecordedModelChecksNoRow() {
+    func testAStoppedSessionsStaleReportIsIgnoredSoTheRecordedAliasIsChecked() {
+        let s = state(recorded: recorded("opus"),
+                      reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"), running: false)
+        XCTAssertEqual(ModelPresentation.modelRows(state: s, catalog: catalog()).filter(\.isCurrent).map(\.alias), ["opus"])
+    }
+
+    func testAPinnedRecordedModelChecksItsFamilysRow() {
         let s = state(recorded: recorded("claude-sonnet-4-6"),
                       reported: ReportedModelWire(model: "claude-sonnet-4-6", family: "sonnet"), running: true)
         let rows = ModelPresentation.modelRows(state: s, catalog: catalog())
         XCTAssertEqual(rows.count, 4)
-        XCTAssertTrue(rows.allSatisfy { !$0.isCurrent }, "a pinned version is not any alias row")
+        XCTAssertEqual(rows.filter(\.isCurrent).map(\.alias), ["sonnet"], "a pinned version is a member of its family's row")
     }
 
     func testNothingRecordedOrReportedChecksNoRow() {
@@ -475,7 +513,10 @@ final class ModelPresentationTests: XCTestCase {
     }
 
     func testTheReasonNamesTheFamilyAndTheLevel() throws {
-        let c = ModelCatalogState(families: [family("haiku", rank: 1, efforts: ["low", "medium"])], stale: false, fetchedAt: nil)
+        // Another family offers `high`, so the level is a row; haiku's own list lacks it.
+        let c = ModelCatalogState(families: [family("haiku", rank: 1, efforts: ["low", "medium"]),
+                                             family("opus", rank: 3, efforts: ["low", "medium", "high"])],
+                                  stale: false, fetchedAt: nil)
         let rows = effortRows(state(recorded: recorded("haiku")), c)
         let high = try XCTUnwrap(rows.first { $0.value == "high" })
         XCTAssertFalse(high.isEnabled)
@@ -521,5 +562,246 @@ final class ModelPresentationTests: XCTestCase {
         let s = state(reported: ReportedModelWire(model: "claude-haiku-4-5-20251001", family: "haiku"), running: true)
         let rows = effortRows(s)
         XCTAssertFalse(try XCTUnwrap(rows.first { $0.value == "high" }).isEnabled)
+    }
+
+    // MARK: - currentEffort(state:)
+
+    func testTheCurrentEffortIsTheEffectiveOneThenTheRecordedOneThenDefault() {
+        XCTAssertEqual(ModelPresentation.currentEffort(state: state(recorded: recorded("opus", effort: "high"), effectiveEffort: "medium")), "medium")
+        XCTAssertEqual(ModelPresentation.currentEffort(state: state(recorded: recorded("opus", effort: "high"), effectiveEffort: nil)), "high")
+        XCTAssertEqual(ModelPresentation.currentEffort(state: state(recorded: recorded("opus", effort: "high"), effectiveEffort: "default")), "default")
+        XCTAssertEqual(ModelPresentation.currentEffort(state: state(recorded: recorded("opus"), effectiveEffort: nil)), "default")
+        XCTAssertEqual(ModelPresentation.currentEffort(state: state()), "default")
+        XCTAssertEqual(ModelPresentation.currentEffort(state: nil), "default")
+    }
+
+    func testTheEffortRowCheckFollowsTheEffectiveEffort() {
+        let rows = effortRows(state(recorded: recorded("opus", effort: "high"), effectiveEffort: "medium"))
+        XCTAssertEqual(rows.filter(\.isCurrent).map(\.value), ["medium"])
+        XCTAssertEqual(rows.first { $0.value == "medium" }?.accessibilityLabel, "medium, selected")
+    }
+
+    // MARK: - currentAlias(state:catalog:)
+
+    private func alias(_ s: SessionModelStateWire?) -> String? {
+        ModelPresentation.currentAlias(state: s, catalog: catalog())
+    }
+
+    func testARunningSessionThatReportedIsCurrentOnTheFamilyItReports() {
+        let s = state(recorded: recorded("opus"),
+                      reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"), running: true)
+        XCTAssertEqual(alias(s), "sonnet")
+    }
+
+    func testAReportWithNoFamilyIsResolvedAgainstTheCatalogue() {
+        // By the resolved name...
+        XCTAssertEqual(alias(state(recorded: recorded("opus"),
+                                   reported: ReportedModelWire(model: "claude-sonnet-5-5", family: nil), running: true)), "sonnet")
+        // ...or by the family word of a version the catalogue does not list.
+        XCTAssertEqual(alias(state(recorded: recorded("opus"),
+                                   reported: ReportedModelWire(model: "claude-haiku-3-5", family: nil), running: true)), "haiku")
+    }
+
+    func testAReportedFamilyThatIsNotACatalogueAliasIsResolvedFromTheFullName() {
+        let s = state(recorded: recorded("opus"),
+                      reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet-latest"), running: true)
+        XCTAssertEqual(alias(s), "sonnet")
+    }
+
+    func testARecordedAliasIsItself() {
+        XCTAssertEqual(alias(state(recorded: recorded("opus"), running: false)), "opus")
+        XCTAssertEqual(alias(state(recorded: recorded("haiku"), running: false)), "haiku")
+    }
+
+    func testAPinnedRecordedNameResolvesToItsFamilyByTheFamilyWord() {
+        XCTAssertEqual(alias(state(recorded: recorded("claude-opus-5-5"), running: false)), "opus")
+        XCTAssertEqual(alias(state(recorded: recorded("claude-sonnet-4-6"), running: false)), "sonnet")
+    }
+
+    func testAPinnedNameWhoseFamilyTheCatalogueLacksChecksNothing() {
+        XCTAssertNil(alias(state(recorded: recorded("claude-weird-9"), running: false)))
+    }
+
+    func testARunningSessionThatHasNotReportedYetIsCurrentOnTheRecordedModel() {
+        XCTAssertEqual(alias(state(recorded: recorded("opus"), running: true)), "opus")
+        XCTAssertEqual(alias(state(recorded: recorded("claude-sonnet-4-6"), running: true)), "sonnet")
+    }
+
+    func testAStoppedSessionIsCurrentOnTheRecordedModelNotItsOldReport() {
+        let s = state(recorded: recorded("opus"),
+                      reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"), running: false)
+        XCTAssertEqual(alias(s), "opus")
+    }
+
+    func testWithNothingRecordedOrReportedThereIsNoCurrentAlias() {
+        XCTAssertNil(alias(state()))
+        XCTAssertNil(alias(nil))
+    }
+
+    func testARunningSessionWithAReportButNothingRecordedIsCurrentOnTheReport() {
+        XCTAssertEqual(alias(state(reported: ReportedModelWire(model: "claude-opus-5-5", family: "opus"), running: true)), "opus")
+    }
+
+    // MARK: - Chip: a pending effort-only switch
+
+    // The daemon's `pending` is the FULL target. For an effort-only switch its model is the
+    // focus's own, so the chip must not read "Sonnet → Sonnet".
+
+    private func sonnetRunning(effort: String?, pending: PendingModelWire?, phase: SwitchPhaseWire = .waiting,
+                               effective: String? = nil) -> SessionModelStateWire {
+        state(recorded: recorded("sonnet", effort: effort),
+              reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"),
+              effectiveEffort: effective ?? effort, pending: pending, phase: phase, running: true)
+    }
+
+    func testAPendingEffortOnlySwitchShowsTheEffortChange() throws {
+        let c = try XCTUnwrap(chip(sonnetRunning(effort: "high", pending: PendingModelWire(model: "sonnet", effort: "medium"))))
+        XCTAssertEqual(c.title, "Sonnet \u{00B7} high \u{2192} medium")
+        XCTAssertEqual(c.tooltip, "Switching after this turn")
+        XCTAssertEqual(c.accessibilityLabel, "Model: switching effort from high to medium after this turn")
+        XCTAssertEqual(c.style, .pending)
+        XCTAssertTrue(c.isEnabled)
+        XCTAssertEqual(c.accessibilityHint, "\u{21E7}\u{2318}M")
+    }
+
+    func testAPendingEffortChangeFromTheDefaultReadsFamilyArrowEffort() throws {
+        for current in [nil, "default"] as [String?] {
+            let c = try XCTUnwrap(chip(sonnetRunning(effort: current, pending: PendingModelWire(model: "sonnet", effort: "medium"))))
+            XCTAssertEqual(c.title, "Sonnet \u{2192} medium", "current \(String(describing: current))")
+            XCTAssertEqual(c.accessibilityLabel, "Model: switching effort from default to medium after this turn")
+        }
+    }
+
+    func testAPendingResetToTheDefaultEffortSaysDefault() throws {
+        for target in [nil, "default"] as [String?] {
+            let c = try XCTUnwrap(chip(sonnetRunning(effort: "high", pending: PendingModelWire(model: "sonnet", effort: target))))
+            XCTAssertEqual(c.title, "Sonnet \u{00B7} high \u{2192} default", "pending effort \(String(describing: target))")
+            XCTAssertEqual(c.tooltip, "Switching after this turn")
+            XCTAssertEqual(c.accessibilityLabel, "Model: switching effort from high to default after this turn")
+        }
+    }
+
+    func testAPendingEffortSwitchOnAPinnedModelOfTheSameFamilyIsStillEffortOnly() throws {
+        let c = try XCTUnwrap(chip(sonnetRunning(effort: "high", pending: PendingModelWire(model: "claude-sonnet-4-6", effort: "medium"))))
+        XCTAssertEqual(c.title, "Sonnet \u{00B7} high \u{2192} medium")
+        XCTAssertEqual(c.accessibilityLabel, "Model: switching effort from high to medium after this turn")
+    }
+
+    func testTheCurrentEffortOfAnEffortOnlySwitchIsTheEffectiveOne() throws {
+        let c = try XCTUnwrap(chip(sonnetRunning(effort: "high", pending: PendingModelWire(model: "sonnet", effort: "low"),
+                                                 effective: "medium")))
+        XCTAssertEqual(c.title, "Sonnet \u{00B7} medium \u{2192} low")
+    }
+
+    func testAnEffortOnlySwitchBeingAppliedStillReadsSwitching() throws {
+        let c = try XCTUnwrap(chip(sonnetRunning(effort: "high", pending: PendingModelWire(model: "sonnet", effort: "medium"),
+                                                 phase: .applying)))
+        XCTAssertEqual(c.title, "Switching\u{2026}")
+        XCTAssertEqual(c.tooltip, "Switching model")
+        XCTAssertEqual(c.style, .pending)
+    }
+
+    func testAPendingModelChangeStillReadsFromArrowToWithTheTargetsEffort() throws {
+        let c = try XCTUnwrap(chip(sonnetRunning(effort: "high", pending: PendingModelWire(model: "opus", effort: "high"))))
+        XCTAssertEqual(c.title, "Sonnet \u{2192} Opus \u{00B7} high")
+        XCTAssertEqual(c.accessibilityLabel, "Model: switching from Sonnet to Opus after this turn")
+    }
+
+    // MARK: - Effort rows from the catalogue
+
+    private func levelCatalog(_ levels: [[String]]) -> ModelCatalogState {
+        ModelCatalogState(families: levels.enumerated().map { i, efforts in
+            family(["haiku", "sonnet", "opus", "fable"][i], rank: i + 1, efforts: efforts)
+        }, stale: false, fetchedAt: nil)
+    }
+
+    func testTheEffortLevelsAreTheUnionOfEveryFamilysLevelsInCanonicalOrder() {
+        // No family lists them in canonical order, and none lists them all.
+        let c = levelCatalog([["high", "low"], ["max", "medium"], ["xhigh"]])
+        let rows = effortRows(state(recorded: recorded("opus")), c)
+        XCTAssertEqual(rows.map(\.value), ["default", "low", "medium", "high", "xhigh", "max"])
+    }
+
+    func testALevelNewlyOfferedByTheCLIAppearsAfterTheStandardOnes() {
+        let c = levelCatalog([[], ["low", "medium", "high"], ["low", "medium", "high", "xhigh", "max", "ultra"]])
+        let rows = effortRows(state(recorded: recorded("opus")), c)
+        XCTAssertEqual(rows.map(\.value), ["default", "low", "medium", "high", "xhigh", "max", "ultra"])
+        XCTAssertEqual(rows.last?.title, "ultra")
+        XCTAssertEqual(rows.last?.isEnabled, true, "the current model (opus) offers it")
+    }
+
+    func testUnknownLevelsAreAppendedInTheOrderTheCatalogueFirstShowsThem() {
+        let c = levelCatalog([["zeta", "low"], ["alpha", "zeta"], ["omega", "alpha", "max"]])
+        let rows = effortRows(state(recorded: recorded("opus")), c)
+        XCTAssertEqual(rows.map(\.value), ["default", "low", "max", "zeta", "alpha", "omega"])
+    }
+
+    func testLevelsTheCurrentFamilyDoesNotOfferStayVisibleButDisabled() throws {
+        let c = levelCatalog([[], ["low", "medium", "high"], ["low", "medium", "high", "xhigh", "max", "ultra"]])
+        let rows = effortRows(state(recorded: recorded("sonnet")), c)
+        XCTAssertEqual(rows.map(\.value), ["default", "low", "medium", "high", "xhigh", "max", "ultra"])
+        XCTAssertEqual(rows.map(\.isEnabled), [true, true, true, true, false, false, false])
+        let ultra = try XCTUnwrap(rows.last)
+        XCTAssertEqual(ultra.tooltip, "Sonnet doesn't support ultra effort")
+        XCTAssertEqual(ultra.accessibilityLabel, "ultra, unavailable. Sonnet doesn't support ultra effort")
+    }
+
+    func testALevelNoFamilyOffersIsNotShown() {
+        let c = levelCatalog([[], ["high"], ["high", "max"]])
+        let rows = effortRows(state(recorded: recorded("opus")), c)
+        XCTAssertEqual(rows.map(\.value), ["default", "high", "max"], "the rows are what the catalogue offers, not a fixed five")
+    }
+
+    func testWithoutACatalogueOrWithNoLevelsAnywhereTheStandardFiveAreShown() {
+        let standard = ["default"] + ModelPresentation.effortLevels
+        XCTAssertEqual(ModelPresentation.effortRows(state: state(recorded: recorded("opus")), catalog: nil).map(\.value), standard)
+        let none = levelCatalog([[], [], []])
+        XCTAssertEqual(ModelPresentation.effortRows(state: state(recorded: recorded("opus")), catalog: none).map(\.value), standard)
+        let empty = ModelCatalogState(families: [], stale: false, fetchedAt: nil)
+        XCTAssertEqual(ModelPresentation.effortRows(state: state(recorded: recorded("opus")), catalog: empty).map(\.value), standard)
+        XCTAssertEqual(ModelPresentation.effortLevels, ["low", "medium", "high", "xhigh", "max"])
+    }
+
+    // MARK: - failureMessage(status:code:message:)
+
+    private func failure(_ status: ModelRequestStatusWire, _ code: String? = nil, _ message: String? = nil) -> String? {
+        ModelPresentation.failureMessage(status: status, code: code, message: message)
+    }
+
+    func testOutcomesThatAreNotFailuresHaveNoMessage() {
+        for status in [ModelRequestStatusWire.applied, .pendingTurnEnd, .unchanged, .awaitingUser, .unknown("teleported")] {
+            XCTAssertNil(failure(status), "\(status)")
+            XCTAssertNil(failure(status, "unknown_model", "whatever"), "\(status) even with a code and a message")
+        }
+    }
+
+    func testARefusalWithAKnownCodeHasItsOwnReason() {
+        XCTAssertEqual(failure(.refused, "unknown_model"), "Couldn't switch: that model isn't available")
+        XCTAssertEqual(failure(.refused, "not_permitted"), "Couldn't switch: this session's model can't be changed")
+        XCTAssertEqual(failure(.refused, "unknown_focus"), "Couldn't switch: this focus no longer exists")
+    }
+
+    func testAKnownCodeWinsOverTheDaemonsMessage() {
+        XCTAssertEqual(failure(.refused, "unknown_model", "No such model: banana"), "Couldn't switch: that model isn't available")
+    }
+
+    func testOtherRefusalsAndFailuresUseTheDaemonsMessageWithItsFirstLetterLowered() {
+        XCTAssertEqual(failure(.refused, "effort_unsupported", "Sonnet doesn't support xhigh effort."),
+                       "Couldn't switch: sonnet doesn't support xhigh effort.")
+        XCTAssertEqual(failure(.failed, nil, "The session would not restart."), "Couldn't switch: the session would not restart.")
+        XCTAssertEqual(failure(.refused, nil, "Opus is out."), "Couldn't switch: opus is out.")
+        XCTAssertEqual(failure(.failed, "some_new_code", "already lower"), "Couldn't switch: already lower")
+    }
+
+    func testAFailureWithNothingElseSaysSomethingWentWrong() {
+        XCTAssertEqual(failure(.failed), "Couldn't switch: something went wrong")
+        XCTAssertEqual(failure(.refused), "Couldn't switch: something went wrong")
+        XCTAssertEqual(failure(.failed, nil, ""), "Couldn't switch: something went wrong", "an empty message is no message")
+        XCTAssertEqual(failure(.refused, "some_new_code", nil), "Couldn't switch: something went wrong")
+    }
+
+    func testDeniedAndExpiredAreDeclinedStates() {
+        XCTAssertEqual(failure(.denied), "Couldn't switch: the request was declined")
+        XCTAssertEqual(failure(.expired), "Couldn't switch: the request expired")
     }
 }

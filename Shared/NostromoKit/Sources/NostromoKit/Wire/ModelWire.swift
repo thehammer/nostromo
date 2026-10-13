@@ -106,7 +106,8 @@ public struct RecordedModelWire: Decodable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         model = try c.decode(String.self, forKey: .model)
         effort = try c.decodeIfPresent(String.self, forKey: .effort)
-        source = try c.decodeIfPresent(ModelSourceWire.self, forKey: .source) ?? .cliDefault
+        // Rust's serde default for a record with no `source` is `Focus`: somebody chose it.
+        source = try c.decodeIfPresent(ModelSourceWire.self, forKey: .source) ?? .focus
     }
 }
 
@@ -212,16 +213,20 @@ public struct LastModelRequestWire: Decodable, Equatable {
     public let to: String
     public let status: ModelRequestStatusWire
     public let requestId: String?
+    /// When the daemon recorded it (RFC 3339); tells two requests with no id apart.
+    public let ts: String?
 
-    public init(actor: String, to: String, status: ModelRequestStatusWire, requestId: String? = nil) {
+    public init(actor: String, to: String, status: ModelRequestStatusWire, requestId: String? = nil,
+                ts: String? = nil) {
         self.actor = actor
         self.to = to
         self.status = status
         self.requestId = requestId
+        self.ts = ts
     }
 
     enum CodingKeys: String, CodingKey {
-        case actor, to, status
+        case actor, to, status, ts
         case requestId = "request_id"
     }
 
@@ -231,6 +236,7 @@ public struct LastModelRequestWire: Decodable, Equatable {
         to = try c.decodeIfPresent(String.self, forKey: .to) ?? ""
         status = try c.decode(ModelRequestStatusWire.self, forKey: .status)
         requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+        ts = try? c.decodeIfPresent(String.self, forKey: .ts)
     }
 }
 
@@ -307,6 +313,53 @@ public struct AgentModelDefaultWire: Decodable, Equatable {
     public init(model: String, effort: String? = nil) {
         self.model = model
         self.effort = effort
+    }
+}
+
+// MARK: - Frame bodies
+
+/// An element that decodes to `nil` instead of failing the collection around it.
+private struct Lossy<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws {
+        value = try? T(from: decoder)
+    }
+}
+
+/// The body of `model_catalog`. A missing `stale` is false, and a family entry this build
+/// cannot read is skipped: one bad entry must not cost the whole catalogue.
+public struct ModelCatalogFrame: Decodable, Equatable {
+    public let families: [ModelFamilyWire]
+    public let stale: Bool
+    public let fetchedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case families, stale
+        case fetchedAt = "fetched_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        families = (try c.decodeIfPresent([Lossy<ModelFamilyWire>].self, forKey: .families) ?? []).compactMap(\.value)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
+        fetchedAt = try? c.decodeIfPresent(String.self, forKey: .fetchedAt)
+    }
+}
+
+/// The body of `model_defaults`. Entries this build cannot read are skipped; `declared` is
+/// absent for network peers.
+public struct ModelDefaultsFrame: Decodable, Equatable {
+    public let defaults: [String: AgentModelDefaultWire]
+    public let declared: [String: String]
+
+    enum CodingKeys: String, CodingKey { case defaults, declared }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let rawDefaults = try c.decodeIfPresent([String: Lossy<AgentModelDefaultWire>].self, forKey: .defaults) ?? [:]
+        defaults = rawDefaults.compactMapValues(\.value)
+        let rawDeclared = try? c.decodeIfPresent([String: Lossy<String>].self, forKey: .declared)
+        declared = (rawDeclared ?? [:]).compactMapValues(\.value)
     }
 }
 

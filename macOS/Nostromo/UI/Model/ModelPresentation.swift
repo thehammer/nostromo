@@ -49,7 +49,8 @@ enum ModelPresentation {
     /// The chip's accessibility hint: the shortcut that opens the popup.
     static let shortcutHint = "\u{21E7}\u{2318}M"
 
-    /// Effort levels, cheapest first, as the daemon names them.
+    /// The effort levels the CLI is known to offer, cheapest first: the popup's rows when the
+    /// catalogue says nothing, and the order the catalogue's own levels are shown in.
     static let effortLevels = ["low", "medium", "high", "xhigh", "max"]
 
     private static let separator = " \u{00B7} "
@@ -88,6 +89,9 @@ enum ModelPresentation {
         let current = currentDisplay(of: state)
 
         if let pending = state.pending, state.phase != .steady {
+            if let current, familyName(forModel: pending.model) == current.family {
+                return effortOnlyPendingChip(current: current, state: state, pending: pending)
+            }
             let from = current?.family ?? "Default"
             let to = familyName(forModel: pending.model)
             switch state.phase {
@@ -104,7 +108,7 @@ enum ModelPresentation {
             return chip("Default", "Uses the Claude CLI default model", style: .normal,
                         label: steadyLabel(family: "default", effort: nil))
         }
-        let effort = explicitEffort(state.recorded?.effort)
+        let effort = shownEffort(of: state)
         let title = current.family + effortSuffix(effort)
         let label = steadyLabel(family: current.family, effort: effort)
         switch current.origin {
@@ -113,6 +117,23 @@ enum ModelPresentation {
                         style: .normal, label: label)
         case .recorded(let chosen):
             return chip(title, "Starts on \(current.family)", style: chosen ? .normal : .pending, label: label)
+        }
+    }
+
+    /// A pending change of effort alone. The daemon's `pending` is the whole target, so its model
+    /// is the focus's own: showing "Sonnet → Sonnet" would say nothing.
+    private static func effortOnlyPendingChip(current: Display, state: SessionModelStateWire,
+                                              pending: PendingModelWire) -> Chip {
+        let from = explicitEffort(shownEffort(of: state))
+        let to = explicitEffort(pending.effort) ?? defaultEffort
+        let fromText = current.family + effortSuffix(from)
+        let change = "effort from \(from ?? defaultEffort) to \(to)"
+        switch state.phase {
+        case .applying:
+            return chip("Switching\u{2026}", "Switching model", style: .pending, label: "Model: switching \(change)")
+        case .waiting, .steady:
+            return chip("\(fromText) \u{2192} \(to)", "Switching after this turn", style: .pending,
+                        label: "Model: switching \(change) after this turn")
         }
     }
 
@@ -152,6 +173,11 @@ enum ModelPresentation {
         "Model: \(family), effort \(effort ?? defaultEffort). Change model"
     }
 
+    /// The effort the session confirmed (else the recorded one), as the chip and popup show it.
+    private static func shownEffort(of state: SessionModelStateWire?) -> String? {
+        state?.effectiveEffort ?? state?.recorded?.effort
+    }
+
     /// The explicit effort level, or `nil` for the model's default.
     private static func explicitEffort(_ effort: String?) -> String? {
         guard let effort, effort != defaultEffort else { return nil }
@@ -164,22 +190,34 @@ enum ModelPresentation {
 
     // MARK: - Popup rows
 
-    /// The alias whose row carries the check mark: the recorded model when it is an alias
-    /// (a pinned full name matches no row), else what the session reports.
-    static func currentAlias(state: SessionModelStateWire?) -> String? {
-        guard let state else { return nil }
-        if let recorded = state.recorded { return recorded.model }
-        return state.reported?.family
+    /// The alias whose row carries the check mark: the model a running session REPORTS (the chip
+    /// shows it too), else the recorded model. A pinned full name (`claude-opus-5-5`) resolves to
+    /// its catalogue family; a name no family claims checks nothing.
+    static func currentAlias(state: SessionModelStateWire?, catalog: ModelCatalogState?) -> String? {
+        guard let state, let catalog else { return nil }
+        if state.running, let reported = state.reported {
+            if let family = reported.family, catalog.families.contains(where: { $0.alias == family }) { return family }
+            return resolveAlias(reported.model, in: catalog)
+        }
+        return state.recorded.flatMap { resolveAlias($0.model, in: catalog) }
+    }
+
+    /// The catalogue alias a model name stands for: an alias itself, the name an alias resolves
+    /// to, or a name of the family's line (`claude-sonnet-4-6`).
+    private static func resolveAlias(_ model: String, in catalog: ModelCatalogState) -> String? {
+        if let exact = catalog.families.first(where: { $0.alias == model || $0.resolved == model }) { return exact.alias }
+        let family = familyName(forModel: model).lowercased()
+        return catalog.families.first { $0.alias == family }?.alias
     }
 
     /// The current effort as sent on the wire: an explicit level, or `"default"`.
     static func currentEffort(state: SessionModelStateWire?) -> String {
-        explicitEffort(state?.recorded?.effort) ?? defaultEffort
+        explicitEffort(shownEffort(of: state)) ?? defaultEffort
     }
 
     static func modelRows(state: SessionModelStateWire?, catalog: ModelCatalogState?) -> [ModelRow] {
         guard let catalog else { return [] }
-        let current = currentAlias(state: state)
+        let current = currentAlias(state: state, catalog: catalog)
         return catalog.families.sorted { $0.rank < $1.rank }.map { family in
             let title = familyName(forModel: family.alias)
             let isCurrent = family.alias == current
@@ -198,7 +236,7 @@ enum ModelPresentation {
         var rows = [EffortRow(value: defaultEffort, title: "Default", isCurrent: current == defaultEffort,
                               isEnabled: true, tooltip: nil,
                               accessibilityLabel: label("Default", selected: current == defaultEffort))]
-        for level in effortLevels {
+        for level in levels(in: catalog) {
             var tooltip: String?
             if let family, let name, !family.efforts.contains(level) {
                 tooltip = family.efforts.isEmpty
@@ -211,6 +249,15 @@ enum ModelPresentation {
                                   tooltip: tooltip, accessibilityLabel: accessibility))
         }
         return rows
+    }
+
+    /// Every level any family offers: the known ones in their order, then newer ones as the
+    /// catalogue lists them. The standard five when the catalogue offers none.
+    private static func levels(in catalog: ModelCatalogState?) -> [String] {
+        let offered = (catalog?.families ?? []).flatMap(\.efforts)
+        guard !offered.isEmpty else { return effortLevels }
+        let unseen = offered.reduce(into: [String]()) { if !effortLevels.contains($1), !$0.contains($1) { $0.append($1) } }
+        return effortLevels.filter(offered.contains) + unseen
     }
 
     /// The catalogue entry whose efforts apply to the current model: the recorded alias, or the
@@ -228,6 +275,45 @@ enum ModelPresentation {
 
     private static func label(_ name: String, selected: Bool) -> String {
         selected ? "\(name), selected" : name
+    }
+
+    // MARK: - Failures
+
+    /// What to tell the user about a request that did not take: "Couldn't switch: <reason>".
+    /// `nil` for a request that applied, is waiting, changed nothing or is not one this build knows.
+    static func failureMessage(status: ModelRequestStatusWire, code: String?, message: String?) -> String? {
+        let reason: String
+        switch status {
+        case .refused, .failed:
+            if status == .refused, let code, let known = refusalReasons[code] {
+                reason = known
+            } else if let message, let first = message.first {
+                reason = first.lowercased() + message.dropFirst()
+            } else {
+                reason = "something went wrong"
+            }
+        case .denied:  reason = "the request was declined"
+        case .expired: reason = "the request expired"
+        case .applied, .pendingTurnEnd, .unchanged, .awaitingUser, .unknown: return nil
+        }
+        return "Couldn't switch: \(reason)"
+    }
+
+    private static let refusalReasons = [
+        "unknown_model": "that model isn't available",
+        "not_permitted": "this session's model can't be changed",
+        "unknown_focus": "this focus no longer exists",
+    ]
+
+    /// "Opus was requested, but this session is running Sonnet": for a request the daemon calls
+    /// `unchanged` because the model is already the recorded one, while the session runs another.
+    /// `nil` when the focus runs what it is recorded to run.
+    static func requestedButNotRunning(state: SessionModelStateWire?) -> String? {
+        guard let state, state.running, let reported = state.reported, let recorded = state.recorded else { return nil }
+        let requested = familyName(forModel: recorded.model)
+        let running = reported.family.map { familyName(forModel: $0) } ?? familyName(forModel: reported.model)
+        guard requested != running else { return nil }
+        return "\(requested) was requested, but this session is running \(running)"
     }
 
     /// "Use for new Claudia focuses".

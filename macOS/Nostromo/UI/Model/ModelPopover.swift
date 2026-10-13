@@ -79,6 +79,8 @@ final class ModelPopoverRowView: NSView {
 
         toolTip = tooltip
         setAccessibilityElement(true)
+        // The row is one element with its own label; its text fields would be read again.
+        setAccessibilityChildren([])
         setAccessibilityRole(.button)
         setAccessibilityLabel(accessibilityLabel)
         setAccessibilityEnabled(isEnabled)
@@ -422,5 +424,56 @@ final class ModelPopover: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         onDidClose?()
+    }
+}
+
+// MARK: - Notice
+
+/// A short message anchored to the chip: "Couldn't switch: …". Shown for a few seconds, then
+/// dismissed by whoever opened it; it takes no keyboard focus and has no controls.
+final class ModelNoticePopover: NSObject {
+    private let popover = NSPopover()
+    private let label = NSTextField(wrappingLabelWithString: "")
+
+    var isShown: Bool { popover.isShown }
+    var text: String { label.stringValue }
+
+    init(text: String) {
+        super.init()
+        label.stringValue = text
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = PopoverPalette.primary
+        label.preferredMaxLayoutWidth = 260
+        label.setAccessibilityRole(.staticText)
+
+        let content = NSView()
+        content.appearance = NSAppearance(named: .darkAqua)
+        content.wantsLayer = true
+        content.layer?.backgroundColor = PopoverPalette.background.cgColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
+            label.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
+            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            content.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+        ])
+        let controller = NSViewController()
+        controller.view = content
+        popover.contentViewController = controller
+        popover.behavior = .semitransient
+        popover.animates = false
+        popover.appearance = NSAppearance(named: .darkAqua)
+    }
+
+    /// Open above `view`, like the model popup. Needs `view` to be in a window.
+    func show(relativeTo view: NSView) {
+        guard !popover.isShown, view.window != nil else { return }
+        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .maxY)
+    }
+
+    func close() {
+        popover.close()
     }
 }

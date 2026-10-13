@@ -200,6 +200,90 @@ final class ModelWireTests: XCTestCase {
         XCTAssertNil(warning)
     }
 
+    // MARK: - Wire leniency (serde defaults and one bad entry among good ones)
+    //
+    // The Rust side defaults `recorded.source` to `focus` (`ModelSource::default`) and a daemon
+    // may send a catalogue or defaults list with an entry this build cannot read. One bad entry
+    // must cost that entry, never the frame, and never turn a model frame into `.unknown`.
+
+    func testARecordedModelWithoutASourceIsAFocusChoiceLikeTheDaemonsSerdeDefault() throws {
+        let json = #"{"type":"session_model_state","tag":"claudia","recorded":{"model":"opus","effort":"high"},"running":false}"#
+        let s = try state(json)
+        XCTAssertEqual(s.recorded?.model, "opus")
+        XCTAssertEqual(s.recorded?.effort, "high")
+        XCTAssertEqual(s.recorded?.source, .focus, "a missing `source` is the serde default, `focus`")
+        XCTAssertEqual(s.recorded?.source.isChosen, true, "so it counts as chosen")
+    }
+
+    func testTheLastRequestKeepsItsTimestamp() throws {
+        let s = try state(fullStateJSON)
+        XCTAssertEqual(s.lastRequest?.ts, "2026-10-12T19:47:03.123456Z")
+        let noTs = try state(#"{"type":"session_model_state","tag":"claudia","last_request":{"actor":"user","to":"opus","status":"applied"}}"#)
+        XCTAssertEqual(noTs.lastRequest?.status, .applied)
+        XCTAssertNil(noTs.lastRequest?.ts, "the timestamp is optional")
+    }
+
+    func testACatalogueWithoutAStaleKeyDecodesAsNotStale() {
+        let json = #"{"type":"model_catalog","families":[{"alias":"opus","display_name":"Opus","efforts":["low"],"rank":3}]}"#
+        guard case let .modelCatalog(families, stale, _) = decode(json) else { return XCTFail("expected .modelCatalog") }
+        XCTAssertEqual(families.map(\.alias), ["opus"])
+        XCTAssertFalse(stale)
+    }
+
+    func testAMalformedCatalogueFamilyIsSkippedAndTheGoodOnesSurvive() {
+        let json = """
+        {"type":"model_catalog","stale":false,"families":[
+          {"alias":"haiku","display_name":"Haiku","efforts":[],"rank":1},
+          {"display_name":"No alias","efforts":["low"],"rank":2},
+          "not an object",
+          5,
+          null,
+          {"alias":"opus","display_name":"Opus","resolved":"claude-opus-5-5","efforts":["low","high"],"rank":3}]}
+        """
+        guard case let .modelCatalog(families, _, _) = decode(json) else {
+            return XCTFail("a bad family must not turn the whole frame into .unknown")
+        }
+        XCTAssertEqual(families.map(\.alias), ["haiku", "opus"])
+        XCTAssertEqual(families.last?.resolved, "claude-opus-5-5")
+    }
+
+    func testACatalogueWhoseEveryFamilyIsMalformedIsAnEmptyCatalogueNotUnknown() {
+        let json = #"{"type":"model_catalog","stale":true,"families":[{"display_name":"x"},"y",7]}"#
+        guard case let .modelCatalog(families, stale, _) = decode(json) else {
+            return XCTFail("expected .modelCatalog with no families, not .unknown")
+        }
+        XCTAssertEqual(families.map(\.alias), [])
+        XCTAssertTrue(stale)
+    }
+
+    func testAMalformedDefaultsEntryIsSkippedAndTheRestKept() {
+        let json = """
+        {"type":"model_defaults","defaults":{
+           "claudia":{"model":"opus","effort":"high"},
+           "no_model":{"effort":"high"},
+           "not_an_object":"opus",
+           "wrong_type":{"model":5},
+           "cody":{"model":"sonnet"}},
+         "declared":{"claudia":"sonnet","bad_number":5,"bad_null":null,"bad_object":{"a":1},"cody":"sonnet"}}
+        """
+        guard case let .modelDefaults(defaults, declared) = decode(json) else {
+            return XCTFail("a bad entry must not turn the whole frame into .unknown")
+        }
+        XCTAssertEqual(Set(defaults.keys), ["claudia", "cody"])
+        XCTAssertEqual(defaults["claudia"], AgentModelDefaultWire(model: "opus", effort: "high"))
+        XCTAssertEqual(defaults["cody"], AgentModelDefaultWire(model: "sonnet", effort: nil))
+        XCTAssertEqual(declared, ["claudia": "sonnet", "cody": "sonnet"], "bad `declared` entries are skipped")
+    }
+
+    func testDefaultsWhoseEveryEntryIsMalformedAreEmptyNotUnknown() {
+        let json = #"{"type":"model_defaults","defaults":{"a":{"effort":"x"},"b":3},"declared":{"a":1,"b":null}}"#
+        guard case let .modelDefaults(defaults, declared) = decode(json) else {
+            return XCTFail("expected .modelDefaults with empty maps, not .unknown")
+        }
+        XCTAssertEqual(defaults, [:])
+        XCTAssertEqual(declared, [:])
+    }
+
     // MARK: - note blocks and deltas
 
     func testNoteBlockDecodesItsKindTextAndTimestamp() throws {

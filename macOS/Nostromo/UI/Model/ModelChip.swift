@@ -36,6 +36,22 @@ enum ModelShortcut {
         if let content = window?.contentView { walk(content) }
         return found
     }
+
+    /// The bar ⇧⌘M opens in `window`: the one the keyboard focus belongs to, else the first.
+    /// Walking up from the first responder, the first container that holds a bar decides: a bar
+    /// itself (focus in its text view), or the pane whose transcript has focus. In a window of
+    /// several panes that is the pane in use, not whichever sits first in the view tree.
+    static func bar(in window: NSWindow?) -> (ModelShortcutTarget & NSView)? {
+        let eligible = bars(in: window)
+        guard eligible.count > 1, let responder = window?.firstResponder as? NSView else { return eligible.first }
+        var container: NSView? = responder
+        while let view = container {
+            let inside = eligible.filter { $0 === view || $0.isDescendant(of: view) }
+            if let bar = inside.first { return bar }
+            container = view.superview
+        }
+        return eligible.first
+    }
 }
 
 /// The model chip in the input bar. An `NSButton` that draws its own title with explicit
@@ -58,6 +74,9 @@ final class ModelChip: NSButton {
     private static let font = NSFont.systemFont(ofSize: 11, weight: .medium)
 
     private(set) var chipStyle: ModelPresentation.ChipStyle = .normal
+    /// The chip holds the keyboard focus (Tab with Full Keyboard Access). Drawn as a ring in
+    /// `draw`, because the system's own ring is off: this control draws itself.
+    private(set) var hasKeyboardFocus = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -88,6 +107,18 @@ final class ModelChip: NSButton {
         return NSSize(width: min(Self.maxWidth, text + 2 * Self.horizontalPadding), height: Self.height)
     }
 
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { hasKeyboardFocus = true; needsDisplay = true }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { hasKeyboardFocus = false; needsDisplay = true }
+        return resigned
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         // Deliberately no `super.draw`: the cell would draw the title in a system colour.
         let pill = NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5)
@@ -104,6 +135,12 @@ final class ModelChip: NSButton {
             .foregroundColor: NSColor.white.withAlphaComponent(alpha),
             .paragraphStyle: paragraph,
         ])
+        if hasKeyboardFocus {
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 4, yRadius: 4)
+            ring.lineWidth = 2
+            NSColor.white.withAlphaComponent(Self.normalAlpha).setStroke()
+            ring.stroke()
+        }
         let inner = bounds.insetBy(dx: Self.horizontalPadding, dy: 0)
         let lineHeight = ceil(text.size().height)
         text.draw(in: NSRect(x: inner.minX, y: inner.midY - lineHeight / 2, width: inner.width, height: lineHeight))

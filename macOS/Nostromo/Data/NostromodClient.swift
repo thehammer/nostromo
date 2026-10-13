@@ -516,7 +516,9 @@ class NostromodClient {
     /// Publishes decoded server messages on the main queue.
     let messages = PassthroughSubject<ServerMsg, Never>()
 
-    /// Current connection state. CurrentValueSubject replays the latest value to
+    /// Current connection state: true once the daemon's `welcome` for this connection has been
+    /// handled and the topic subscribes it calls for are sent (so spawn/attach, which follow
+    /// this flag, come after them). CurrentValueSubject replays the latest value to
     /// new subscribers, so a ChatSession created while already connected spawns
     /// exactly once, and a reconnect (false→true) re-triggers spawn/attach —
     /// without the init+welcome double that caused duplicate-rendered turns.
@@ -608,7 +610,9 @@ class NostromodClient {
         fd = sock
         reconnectDelay = 1.0
         sendHello()
-        connected.send(true)
+        // `connected` flips true once this connection's `welcome` has been handled (see
+        // `dispatch`): spawn/attach must follow the `model` subscribe, because the daemon
+        // strips transcript notes from a snapshot sent to a connection that has not named it.
         latency.noteConnect()
         // Blocking frame reader on a dedicated background queue.
         DispatchQueue.global(qos: .utility).async { [weak self] in self?.readLoop(sock) }
@@ -935,8 +939,14 @@ class NostromodClient {
 
         // The daemon says which optional capabilities it serves; ask for their
         // topics now, but only on the connection that said so.
+        // Then the connection is declared up: everything keyed on `connected` (ChatSession's
+        // spawn + attach, the model catalogue request) is sent after those subscribes, on the
+        // same ordered socket, so the first attach snapshot already carries transcript notes.
+        // Re-sending an attach later is not an option: the daemon would start a second
+        // forwarder and every delta would render twice.
         if type_ == "welcome", fd == sock {
             subscribeToAdvertisedFeatures(json["features"] as? [String] ?? [])
+            connected.send(true)
         }
 
         let t0 = Date()
@@ -1159,8 +1169,8 @@ class NostromodClient {
 
         // ── model switching ──────────────────────────────────────────────────
         case "model_catalog":
-            if let m = try? decoder.decode(ModelCatalogResp.self, from: raw) {
-                return .modelCatalog(families: m.families, stale: m.stale, fetchedAt: m.fetched_at)
+            if let m = try? decoder.decode(ModelCatalogFrame.self, from: raw) {
+                return .modelCatalog(families: m.families, stale: m.stale, fetchedAt: m.fetchedAt)
             }
 
         case "session_model_state":
@@ -1171,8 +1181,8 @@ class NostromodClient {
             }
 
         case "model_defaults":
-            if let m = try? decoder.decode(ModelDefaultsResp.self, from: raw) {
-                return .modelDefaults(defaults: m.defaults, declared: m.declared ?? [:])
+            if let m = try? decoder.decode(ModelDefaultsFrame.self, from: raw) {
+                return .modelDefaults(defaults: m.defaults, declared: m.declared)
             }
 
         case "model_request_result":
@@ -1191,16 +1201,6 @@ class NostromodClient {
 
 // MARK: - Model switching response wrappers
 
-private struct ModelCatalogResp: Decodable {
-    let families: [ModelFamilyWire]
-    let stale: Bool
-    let fetched_at: String?
-}
-private struct ModelDefaultsResp: Decodable {
-    let defaults: [String: AgentModelDefaultWire]
-    /// Absent for network peers.
-    let declared: [String: String]?
-}
 private struct ModelRequestResultResp: Decodable {
     let request_id: String
     let status: ModelRequestStatusWire

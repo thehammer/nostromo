@@ -189,6 +189,81 @@ final class ModelFrameDecodeTests: XCTestCase {
         XCTAssertNil(nilId)
     }
 
+    // MARK: Leniency (the Mac client's own decode path must match NostromoKit's)
+
+    func testARecordedModelWithoutASourceIsAFocusChoice() throws {
+        let json = #"{"type":"session_model_state","tag":"claudia","recorded":{"model":"opus","effort":"high"},"running":false}"#
+        guard case let .sessionModelState(s) = try decode(json) else { return XCTFail("expected .sessionModelState") }
+        XCTAssertEqual(s.recorded?.source, .focus, "a missing `source` is the daemon's serde default, `focus`")
+        XCTAssertEqual(s.recorded?.source.isChosen, true)
+    }
+
+    func testTheLastRequestKeepsItsTimestamp() throws {
+        let json = #"{"type":"session_model_state","tag":"claudia","last_request":{"actor":"user","to":"opus","status":"failed","ts":"2026-10-12T19:47:03.123456Z","request_id":"r1"}}"#
+        guard case let .sessionModelState(s) = try decode(json) else { return XCTFail("expected .sessionModelState") }
+        XCTAssertEqual(s.lastRequest?.ts, "2026-10-12T19:47:03.123456Z")
+        XCTAssertEqual(s.lastRequest?.requestId, "r1")
+    }
+
+    func testACatalogueWithoutAStaleKeyDecodesAsNotStale() throws {
+        let json = #"{"type":"model_catalog","families":[{"alias":"opus","display_name":"Opus","efforts":["low"],"rank":3}]}"#
+        guard case let .modelCatalog(families, stale, _) = try decode(json) else { return XCTFail("expected .modelCatalog") }
+        XCTAssertEqual(families.map(\.alias), ["opus"])
+        XCTAssertFalse(stale)
+    }
+
+    func testAMalformedCatalogueFamilyIsSkippedAndTheGoodOnesSurvive() throws {
+        let json = """
+        {"type":"model_catalog","stale":false,"families":[
+          {"alias":"haiku","display_name":"Haiku","efforts":[],"rank":1},
+          {"display_name":"No alias","efforts":["low"],"rank":2},
+          "not an object",
+          5,
+          null,
+          {"alias":"opus","display_name":"Opus","resolved":"claude-opus-5-5","efforts":["low","high"],"rank":3}]}
+        """
+        guard case let .modelCatalog(families, _, _) = try decode(json) else {
+            return XCTFail("a bad family must not turn the whole frame into .unknown")
+        }
+        XCTAssertEqual(families.map(\.alias), ["haiku", "opus"])
+    }
+
+    func testACatalogueWhoseEveryFamilyIsMalformedIsAnEmptyCatalogueNotUnknown() throws {
+        let json = #"{"type":"model_catalog","stale":true,"families":[{"display_name":"x"},"y",7]}"#
+        guard case let .modelCatalog(families, stale, _) = try decode(json) else {
+            return XCTFail("expected .modelCatalog with no families, not .unknown")
+        }
+        XCTAssertEqual(families.map(\.alias), [])
+        XCTAssertTrue(stale)
+    }
+
+    func testAMalformedDefaultsEntryIsSkippedAndTheRestKept() throws {
+        let json = """
+        {"type":"model_defaults","defaults":{
+           "claudia":{"model":"opus","effort":"high"},
+           "no_model":{"effort":"high"},
+           "not_an_object":"opus",
+           "wrong_type":{"model":5},
+           "cody":{"model":"sonnet"}},
+         "declared":{"claudia":"sonnet","bad_number":5,"bad_null":null,"bad_object":{"a":1},"cody":"sonnet"}}
+        """
+        guard case let .modelDefaults(defaults, declared) = try decode(json) else {
+            return XCTFail("a bad entry must not turn the whole frame into .unknown")
+        }
+        XCTAssertEqual(Set(defaults.keys), ["claudia", "cody"])
+        XCTAssertEqual(defaults["claudia"], AgentModelDefaultWire(model: "opus", effort: "high"))
+        XCTAssertEqual(declared, ["claudia": "sonnet", "cody": "sonnet"])
+    }
+
+    func testDefaultsWhoseEveryEntryIsMalformedAreEmptyNotUnknown() throws {
+        let json = #"{"type":"model_defaults","defaults":{"a":{"effort":"x"},"b":3},"declared":{"a":1,"b":null}}"#
+        guard case let .modelDefaults(defaults, declared) = try decode(json) else {
+            return XCTFail("expected .modelDefaults with empty maps, not .unknown")
+        }
+        XCTAssertEqual(defaults, [:])
+        XCTAssertEqual(declared, [:])
+    }
+
     // MARK: Subscriptions
 
     func testTheClientSubscribesToTheModelTopic() {
@@ -371,6 +446,319 @@ final class ModelStoreTests: XCTestCase {
     }
 }
 
+// MARK: - (b2) ModelStore: what went wrong, and who is told
+//
+// A switch that does not happen must not fail silently: a refusal, a failure, a denied or expired
+// agent request becomes a short message per focus (`failure(for:)`) that the input bar shows.
+// A failure comes from the answer to a request of this store (`model_request_result`), or from a
+// focus's `last_request` changing to a failing status (a script's or an agent's request).
+
+final class ModelStoreFailureTests: XCTestCase {
+
+    private var sender: ModelRequestRecorder!
+    private var store: ModelStore!
+    private var nextId = 0
+
+    override func setUp() {
+        super.setUp()
+        sender = ModelRequestRecorder()
+        nextId = 0
+        store = ModelStore(sender: sender, makeRequestId: { [unowned self] in
+            self.nextId += 1
+            return "req-\(self.nextId)"
+        })
+    }
+
+    override func tearDown() {
+        store = nil
+        sender = nil
+        super.tearDown()
+    }
+
+    // MARK: Fixtures
+
+    /// The one place that builds a `LastModelRequestWire` (the daemon's `last_request`).
+    private func lastRequest(_ status: ModelRequestStatusWire, to: String = "opus", requestId: String? = nil,
+                             ts: String? = nil, actor: String = "script") -> LastModelRequestWire {
+        LastModelRequestWire(actor: actor, to: to, status: status, requestId: requestId, ts: ts)
+    }
+
+    private func state(_ tag: String = "claudia", recorded: String = "sonnet", reported: String? = "claude-sonnet-5-5",
+                       running: Bool = true, last: LastModelRequestWire? = nil) -> SessionModelStateWire {
+        SessionModelStateWire(tag: tag, recorded: RecordedModelWire(model: recorded, source: .focus),
+                              reported: reported.map { ReportedModelWire(model: $0) },
+                              running: running, lastRequest: last)
+    }
+
+    private func result(_ id: String, _ status: ModelRequestStatusWire, code: String? = nil, message: String? = nil) -> ServerMsg {
+        .modelRequestResult(requestId: id, status: status, code: code, message: message, warning: nil)
+    }
+
+    /// Ingest a state, ask for a switch and answer it: the failure (if any) the store holds for the tag.
+    private func answer(_ status: ModelRequestStatusWire, code: String? = nil, message: String? = nil,
+                        tag: String = "claudia", state s: SessionModelStateWire? = nil) -> ModelSwitchFailure? {
+        store.ingest(.sessionModelState(s ?? state(tag)))
+        let id = store.requestSwitch(tag: tag, model: "opus", effort: nil)
+        store.ingest(result(id, status, code: code, message: message))
+        return store.failure(for: tag)
+    }
+
+    // MARK: Result frames
+
+    func testNothingFailedUntilSomethingDoes() {
+        XCTAssertNil(store.failure(for: "claudia"))
+        XCTAssertEqual(store.failures, [:])
+    }
+
+    func testEachFailingResultBecomesAMessageForTheFocusTheRequestWasMadeFor() {
+        let cases: [(ModelRequestStatusWire, String?, String?, String)] = [
+            (.refused, "unknown_model", nil, "Couldn't switch: that model isn't available"),
+            (.refused, "not_permitted", nil, "Couldn't switch: this session's model can't be changed"),
+            (.refused, "unknown_focus", nil, "Couldn't switch: this focus no longer exists"),
+            (.refused, nil, "Opus is not available on this plan.", "Couldn't switch: opus is not available on this plan."),
+            (.failed, nil, "The CLI would not start.", "Couldn't switch: the CLI would not start."),
+            (.failed, nil, nil, "Couldn't switch: something went wrong"),
+            (.denied, nil, nil, "Couldn't switch: the request was declined"),
+            (.expired, nil, nil, "Couldn't switch: the request expired"),
+        ]
+        for (status, code, message, expected) in cases {
+            let tag = "focus-\(nextId)"
+            let failure = answer(status, code: code, message: message, tag: tag)
+            XCTAssertEqual(failure?.message, expected, "\(status) code=\(String(describing: code)) message=\(String(describing: message))")
+            XCTAssertEqual(store.failures.keys.contains(tag), true)
+        }
+    }
+
+    func testTheFailureBelongsToTheRequestsFocusOnly() {
+        store.ingest(.sessionModelState(state("claudia")))
+        store.ingest(.sessionModelState(state("cody")))
+        _ = store.requestSwitch(tag: "claudia", model: "opus", effort: nil)       // req-1
+        let codyRequest = store.requestSwitch(tag: "cody", model: "opus", effort: nil)   // req-2
+        store.ingest(result(codyRequest, .refused, code: "unknown_model"))
+        XCTAssertNotNil(store.failure(for: "cody"))
+        XCTAssertNil(store.failure(for: "claudia"), "the result answers cody's request, not claudia's")
+        XCTAssertEqual(Set(store.failures.keys), ["cody"])
+    }
+
+    func testAResultForARequestThisStoreNeverMadeSetsNothing() {
+        store.ingest(.sessionModelState(state("claudia")))
+        store.ingest(result("someone-elses-request", .refused, code: "unknown_model"))
+        store.ingest(result("another", .failed, message: "boom"))
+        XCTAssertNil(store.failure(for: "claudia"))
+        XCTAssertEqual(store.failures, [:])
+    }
+
+    func testResultsThatAreNotFailuresSetNothing() {
+        let nonFailures: [ModelRequestStatusWire] = [.applied, .pendingTurnEnd, .awaitingUser, .unknown("teleported")]
+        for status in nonFailures {
+            XCTAssertNil(answer(status, tag: "t-\(nextId)"), "\(status)")
+        }
+        XCTAssertEqual(store.failures, [:])
+    }
+
+    func testASecondFailureReplacesTheFirstWithANewerId() throws {
+        store.ingest(.sessionModelState(state()))
+        let first = store.requestSwitch(tag: "claudia", model: "opus", effort: nil)
+        store.ingest(result(first, .refused, code: "unknown_model"))
+        let one = try XCTUnwrap(store.failure(for: "claudia"))
+
+        let second = store.requestSwitch(tag: "claudia", model: "haiku", effort: nil)
+        store.ingest(result(second, .failed, message: "Nope."))
+        let two = try XCTUnwrap(store.failure(for: "claudia"))
+
+        XCTAssertEqual(two.message, "Couldn't switch: nope.")
+        XCTAssertGreaterThan(two.id, one.id, "ids grow, so a late dismissal of the first cannot clear the second")
+        XCTAssertEqual(store.failures.count, 1)
+    }
+
+    func testAResultIsAnsweredOnceThenTheRequestIsForgotten() {
+        store.ingest(.sessionModelState(state()))
+        let id = store.requestSwitch(tag: "claudia", model: "opus", effort: nil)
+        store.ingest(result(id, .refused, code: "unknown_model"))
+        guard let failure = store.failure(for: "claudia") else { return XCTFail("the first answer must set a failure") }
+        store.dismissFailure(tag: "claudia", id: failure.id)
+        XCTAssertNil(store.failure(for: "claudia"))
+
+        store.ingest(result(id, .refused, code: "unknown_model"))
+        XCTAssertNil(store.failure(for: "claudia"), "the request id is spent after its answer; the store keeps no memory of it")
+    }
+
+    func testTheCodeMappingWinsOverTheDaemonsMessage() {
+        let failure = answer(.refused, code: "unknown_model", message: "No such model: banana")
+        XCTAssertEqual(failure?.message, "Couldn't switch: that model isn't available")
+    }
+
+    // MARK: Dismissal and forgetting
+
+    func testDismissingRemovesOnlyAFailureWhoseIdStillMatches() throws {
+        let failure = try XCTUnwrap(answer(.refused, code: "unknown_model"))
+
+        store.dismissFailure(tag: "claudia", id: failure.id + 100)
+        XCTAssertEqual(store.failure(for: "claudia"), failure, "a stale id (an older failure's) clears nothing")
+
+        store.dismissFailure(tag: "other", id: failure.id)
+        XCTAssertEqual(store.failure(for: "claudia"), failure, "another tag's dismissal clears nothing")
+
+        store.dismissFailure(tag: "claudia", id: failure.id)
+        XCTAssertNil(store.failure(for: "claudia"))
+        XCTAssertEqual(store.failures, [:])
+    }
+
+    func testForgettingAFocusAlsoClearsItsFailure() {
+        _ = answer(.refused, code: "unknown_model")
+        XCTAssertNotNil(store.failure(for: "claudia"))
+        store.forget(tag: "claudia")
+        XCTAssertNil(store.failure(for: "claudia"))
+        XCTAssertNil(store.state(for: "claudia"))
+    }
+
+    // MARK: "Unchanged" that is not
+
+    // The daemon answers `unchanged` when the recorded model already is the requested one, even
+    // when the running session was substituted by the CLI. That is not "nothing to do".
+
+    func testUnchangedWhileTheSessionRunsAnotherFamilyIsAFailureNamingBoth() {
+        let running = state(recorded: "opus", reported: "claude-sonnet-5-5")
+        let failure = answer(.unchanged, state: running)
+        XCTAssertEqual(failure?.message, "Opus was requested, but this session is running Sonnet")
+    }
+
+    func testUnchangedMismatchComparesFamiliesNotSpellings() {
+        let pinned = state(recorded: "claude-opus-5-5", reported: "claude-sonnet-5-5")
+        XCTAssertEqual(answer(.unchanged, tag: "claudia", state: pinned)?.message,
+                       "Opus was requested, but this session is running Sonnet")
+
+        let sameFamily = state("cody", recorded: "claude-opus-5-5", reported: "claude-opus-5-6")
+        XCTAssertNil(answer(.unchanged, tag: "cody", state: sameFamily), "a different version of the same family is not a mismatch")
+
+        let alias = state("perri", recorded: "opus", reported: "claude-opus-5-5")
+        XCTAssertNil(answer(.unchanged, tag: "perri", state: alias))
+    }
+
+    func testUnchangedWithNoMismatchSetsNothing() {
+        XCTAssertNil(answer(.unchanged, tag: "a", state: state("a", recorded: "sonnet", reported: "claude-sonnet-5-5")))
+        XCTAssertNil(answer(.unchanged, tag: "b", state: state("b", recorded: "sonnet", reported: nil)),
+                     "nothing reported yet: nothing to contradict")
+        XCTAssertNil(answer(.unchanged, tag: "c", state: state("c", recorded: "opus", reported: "claude-sonnet-5-5", running: false)),
+                     "a session that is not running reports nothing current")
+        XCTAssertNil(answer(.unchanged, tag: "d", state: SessionModelStateWire(tag: "d", running: true)),
+                     "nothing recorded: nothing was requested of record")
+    }
+
+    func testUnchangedForAFocusWithNoStateSetsNothing() {
+        let id = store.requestSwitch(tag: "ghost", model: "opus", effort: nil)
+        store.ingest(result(id, .unchanged))
+        XCTAssertNil(store.failure(for: "ghost"))
+    }
+
+    // MARK: A failing `last_request` (a script's or an agent's request)
+
+    func testAFailingLastRequestThatChangesAfterTheFirstStateIsAFailure() {
+        store.ingest(.sessionModelState(state(last: lastRequest(.applied, requestId: "s-1"))))
+        XCTAssertNil(store.failure(for: "claudia"))
+
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, requestId: "s-2"))))
+        XCTAssertEqual(store.failure(for: "claudia")?.message, "Couldn't switch: something went wrong")
+    }
+
+    func testEachFailingLastRequestStatusHasItsOwnCopy() {
+        let cases: [(ModelRequestStatusWire, String)] = [
+            (.refused, "Couldn't switch: something went wrong"),
+            (.failed, "Couldn't switch: something went wrong"),
+            (.denied, "Couldn't switch: the request was declined"),
+            (.expired, "Couldn't switch: the request expired"),
+        ]
+        for (i, (status, expected)) in cases.enumerated() {
+            let tag = "focus-\(i)"
+            store.ingest(.sessionModelState(state(tag)))
+            store.ingest(.sessionModelState(state(tag, last: lastRequest(status, requestId: "r-\(i)"))))
+            XCTAssertEqual(store.failure(for: tag)?.message, expected, "\(status)")
+        }
+    }
+
+    func testTheFirstStateForATagNeverShowsAnOldFailure() {
+        // The `model` subscribe replays every focus's state, with whatever `last_request` it had.
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, requestId: "old"))))
+        XCTAssertNil(store.failure(for: "claudia"))
+        // The same replay on the next connection changes nothing either.
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, requestId: "old"))))
+        XCTAssertNil(store.failure(for: "claudia"))
+    }
+
+    func testAFocusForgottenAndSeenAgainStartsOverSoItsReplayShowsNothing() {
+        store.ingest(.sessionModelState(state(last: lastRequest(.applied, requestId: "a"))))
+        store.forget(tag: "claudia")
+        store.ingest(.sessionModelState(state(last: lastRequest(.denied, requestId: "old-denied"))))
+        XCTAssertNil(store.failure(for: "claudia"), "after forget the next state is a first state again")
+    }
+
+    func testTheSameLastRequestArrivingAgainIsNotANewFailure() {
+        store.ingest(.sessionModelState(state(last: lastRequest(.applied, requestId: "a"))))
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, requestId: "f"))))
+        guard let first = store.failure(for: "claudia") else { return XCTFail("the change must show a failure") }
+        store.dismissFailure(tag: "claudia", id: first.id)
+
+        store.ingest(.sessionModelState(state(recorded: "opus", last: lastRequest(.failed, requestId: "f"))))
+        XCTAssertNil(store.failure(for: "claudia"), "every later state carries the same last_request; only a change is news")
+    }
+
+    func testAChangedLastRequestThatIsNotAFailureShowsNothing() {
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, requestId: "f"))))
+        for status in [ModelRequestStatusWire.applied, .pendingTurnEnd, .unchanged, .awaitingUser, .unknown("x")] {
+            store.ingest(.sessionModelState(state(last: lastRequest(status, requestId: "n-\(status)"))))
+            XCTAssertNil(store.failure(for: "claudia"), "\(status)")
+        }
+    }
+
+    func testWithoutARequestIdTheTimestampStatusAndTargetTellRequestsApart() {
+        store.ingest(.sessionModelState(state(last: lastRequest(.applied, to: "opus", ts: "2026-10-12T10:00:00Z"))))
+
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, to: "opus", ts: "2026-10-12T10:05:00Z"))))
+        guard let failure = store.failure(for: "claudia") else { return XCTFail("a new request with a failing status is a failure") }
+        store.dismissFailure(tag: "claudia", id: failure.id)
+
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, to: "opus", ts: "2026-10-12T10:05:00Z"))))
+        XCTAssertNil(store.failure(for: "claudia"), "the identical request again is not new")
+
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, to: "haiku", ts: "2026-10-12T10:05:00Z"))))
+        XCTAssertNotNil(store.failure(for: "claudia"), "a different target is a different request")
+    }
+
+    // The gap in the contract's "compare requestId, else ts+status+to": a request that is first
+    // pending and later fails keeps its request id. That is news, and must show.
+    func testARequestThatWasPendingAndThenFailsWithTheSameIdIsStillAFailure() {
+        store.ingest(.sessionModelState(state(last: lastRequest(.pendingTurnEnd, requestId: "agent-1", actor: "agent:cody"))))
+        store.ingest(.sessionModelState(state(last: lastRequest(.failed, requestId: "agent-1", actor: "agent:cody"))))
+        XCTAssertEqual(store.failure(for: "claudia")?.message, "Couldn't switch: something went wrong")
+    }
+
+    // MARK: One request, one failure
+
+    func testARequestAnsweredByItsResultFrameDoesNotFailAgainWhenTheStateCarriesItAsLastRequest() {
+        store.ingest(.sessionModelState(state()))
+        let id = store.requestSwitch(tag: "claudia", model: "opus", effort: nil)
+        store.ingest(result(id, .refused, code: "unknown_model"))
+        guard let failure = store.failure(for: "claudia") else { return XCTFail("the result must show a failure") }
+
+        store.ingest(.sessionModelState(state(last: lastRequest(.refused, requestId: id, actor: "user"))))
+        XCTAssertEqual(store.failure(for: "claudia"), failure, "same request, same failure: not replaced, not renumbered")
+
+        store.dismissFailure(tag: "claudia", id: failure.id)
+        store.ingest(.sessionModelState(state(recorded: "haiku", last: lastRequest(.refused, requestId: id, actor: "user"))))
+        XCTAssertNil(store.failure(for: "claudia"))
+    }
+
+    // The daemon may broadcast the refused state before it sends the result frame. The request
+    // is one of this store's own, so the result frame (with the code and message) is its report.
+    func testARequestOfThisStoreThatShowsUpInTheStateBeforeItsResultFailsOnceWithTheDetailedMessage() {
+        store.ingest(.sessionModelState(state()))
+        let id = store.requestSwitch(tag: "claudia", model: "opus", effort: nil)
+        store.ingest(.sessionModelState(state(last: lastRequest(.refused, requestId: id, actor: "user"))))
+        store.ingest(result(id, .refused, code: "unknown_model"))
+        XCTAssertEqual(store.failure(for: "claudia")?.message, "Couldn't switch: that model isn't available")
+    }
+}
+
 // MARK: - (c) ChatSession and `note` blocks
 
 final class ChatSessionNoteTests: XCTestCase {
@@ -398,18 +786,13 @@ final class ChatSessionNoteTests: XCTestCase {
         super.tearDown()
     }
 
-    private func waitUntil(timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line,
-                           _ condition: () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !condition() {
-            if Date() >= deadline { return XCTFail("condition not met within \(timeout)s", file: file, line: line) }
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
+    private func waitUntil(file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) {
+        modelWaitUntil(file: file, line: line, condition)
     }
 
     /// Let anything already queued on the main run loop land (used to prove something did NOT happen).
     private func settle() {
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        modelFlushMain()
     }
 
     private func note(_ text: String = ChatSessionNoteTests.text) -> DaemonTurnBlock {
@@ -423,6 +806,15 @@ final class ChatSessionNoteTests: XCTestCase {
     private func startSession(withTurns turns: [DaemonTurn]) {
         client.messages.send(.sessionTurns(tag: "test", turns: turns))
         waitUntil { self.session.turns.count == turns.count }
+    }
+
+    // VoiceOver reads the view's own label; the text field inside it must not be read a second time.
+    func testANoteBlockViewIsOneStaticTextElementWhoseChildTextIsHiddenFromVoiceOver() {
+        let view = NoteBlockView(text: Self.text)
+        XCTAssertTrue(view.isAccessibilityElement())
+        XCTAssertEqual(view.accessibilityRole(), .staticText)
+        XCTAssertEqual(view.accessibilityLabel(), Self.text)
+        XCTAssertTrue((view.accessibilityChildren() ?? []).isEmpty, "the note is read once, from the element's own label")
     }
 
     func testANoteDeltaAppendsANoteBlockToItsTurnAndAnnouncesItOnce() {
