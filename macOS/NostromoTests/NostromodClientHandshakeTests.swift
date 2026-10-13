@@ -18,6 +18,14 @@ import Darwin
 //   * all of that is decided per connection, from scratch, on every reconnect.
 //
 // The fakes below speak the real framing (4-byte big-endian length + JSON).
+//
+// The daemon also strips transcript `note` blocks from a `session_turns` snapshot for any
+// connection whose CURRENT `subscribe` does not name `model` (src/ipc/server.rs
+// `without_notes_unless_model`; a later subscribe replaces the list). So the client must have
+// subscribed to `model` BEFORE the session attaches, or a restored "Model changed" note is lost,
+// and attaching twice on one connection is not safe. The contract these tests pin: a connection
+// is not "connected" to the rest of the app until its `welcome` was processed (and any feature
+// subscribe sent), so spawn/attach always follow the subscribe, on every reconnect.
 
 // MARK: - Fake daemon
 
@@ -30,6 +38,13 @@ final class FakeDaemon {
         /// like an old daemon facing a topic it cannot deserialize.
         var rejectsTopics: Set<String> = []
         var end: End = .never
+        /// A slow daemon: the `welcome` follows the `hello` this much later. The client's other
+        /// frames queue up meanwhile, which is exactly the window a too-early "connected" shows in.
+        var welcomeDelay: TimeInterval = 0
+        /// On `session_attach`, answer a `session_turns` snapshot of one turn that holds this
+        /// note, as the daemon does: WITHOUT the note when the connection's latest `subscribe`
+        /// does not name `model`.
+        var attachNote: String?
 
         enum End {
             case never
@@ -37,12 +52,16 @@ final class FakeDaemon {
             case afterSubscribeNaming(String)
             /// Close this long after the first `subscribe` arrives.
             case afterFirstSubscribe(delay: TimeInterval)
+            /// Close this long after the first `session_attach` arrives (and was answered).
+            case afterFirstAttach(delay: TimeInterval)
         }
     }
 
     struct Frame {
         let type: String
         let topics: [String]
+        /// The frame's `tag`, for session frames.
+        var tag: String = ""
     }
 
     let path: String
@@ -72,6 +91,10 @@ final class FakeDaemon {
 
     func subscribes(connection i: Int) -> [Frame] {
         frames(connection: i).filter { $0.type == "subscribe" }
+    }
+
+    func frames(connection i: Int, ofType type: String) -> [Frame] {
+        frames(connection: i).filter { $0.type == type }
     }
 
     func start() throws {
@@ -136,6 +159,8 @@ final class FakeDaemon {
         lock.unlock()
         let script = scripts[min(index, scripts.count - 1)]
         var closeAt: Date?
+        // What this connection is subscribed to now: each `subscribe` replaces the list.
+        var subscribedTopics: [String] = []
 
         while !isStopped {
             if let at = closeAt, Date() >= at { return }
@@ -146,14 +171,17 @@ final class FakeDaemon {
             else { return }   // the client closed (or sent garbage)
 
             let topics = (json["topics"] as? [String]) ?? []
-            lock.lock(); perConnection[index].append(Frame(type: type, topics: topics)); lock.unlock()
+            let tag = (json["tag"] as? String) ?? ""
+            lock.lock(); perConnection[index].append(Frame(type: type, topics: topics, tag: tag)); lock.unlock()
 
             switch type {
             case "hello":
                 var welcome: [String: Any] = ["type": "welcome", "protocol_version": 4, "daemon_pid": 4242]
                 if let features = script.features { welcome["features"] = features }
+                if script.welcomeDelay > 0 { Thread.sleep(forTimeInterval: script.welcomeDelay) }
                 writeFrame(conn, welcome)
             case "subscribe":
+                subscribedTopics = topics
                 if !script.rejectsTopics.isDisjoint(with: topics) {
                     lock.lock(); rejected += 1; lock.unlock()
                     return
@@ -164,6 +192,23 @@ final class FakeDaemon {
                     if topics.contains(topic) { closeAt = Date().addingTimeInterval(0.1) }
                 case .afterFirstSubscribe(let delay):
                     if closeAt == nil { closeAt = Date().addingTimeInterval(delay) }
+                case .afterFirstAttach:
+                    break
+                }
+            case "session_attach":
+                if let noteText = script.attachNote {
+                    var blocks: [[String: Any]] = []
+                    if subscribedTopics.contains("model") {
+                        blocks.append(["kind": "note", "note_kind": "model_changed", "text": noteText,
+                                       "ts": "2026-10-12T19:47:03.123456Z"])
+                    }
+                    blocks.append(["kind": "text", "text": "ok"])
+                    let turn: [String: Any] = ["id": "t0", "user_input": "hi", "timestamp": "2026-10-12T19:46:00Z",
+                                               "is_complete": true, "blocks": blocks]
+                    writeFrame(conn, ["type": "session_turns", "tag": tag, "turns": [turn]])
+                }
+                if case .afterFirstAttach(let delay) = script.end, closeAt == nil {
+                    closeAt = Date().addingTimeInterval(delay)
                 }
             case "ping":
                 writeFrame(conn, ["type": "pong"])
@@ -223,8 +268,10 @@ final class NostromodClientHandshakeTests: XCTestCase {
 
     private var daemon: FakeDaemon!
     private var client: NostromodClient?
+    private var session: ChatSession?
 
     override func tearDown() {
+        session = nil
         client = nil      // the client reconnects only while it is alive
         daemon?.stop()
         daemon = nil
@@ -238,6 +285,59 @@ final class NostromodClientHandshakeTests: XCTestCase {
         client = c
         c.start()
         return c
+    }
+
+    /// A real client and a real `ChatSession` for `tag`, the way the app wires them: the session
+    /// spawns and attaches whenever the client reports itself connected.
+    private func connectSession(to scripts: [FakeDaemon.Script], tag: String = "claudia") throws -> (NostromodClient, ChatSession) {
+        let c = try connectClient(to: scripts)
+        let s = ChatSession(tag: tag, agentName: "claudia", displayName: "Claudia", workingDirectory: nil, client: c)
+        session = s
+        return (c, s)
+    }
+
+    /// Poll (bounded) until `condition` holds, servicing the main run loop meanwhile: the
+    /// session's Combine pipeline lives on it. Waiting for a socket thread is the one place a
+    /// wall-clock bound is legitimate.
+    private func pumpUntil(_ seconds: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+        }
+        return condition()
+    }
+
+    private static let noteText = "Model changed to Opus (from Sonnet) by you."
+
+    /// Every model note the session shows, whether inside a turn or standing alone.
+    private func notes(in session: ChatSession) -> [String] {
+        session.turns.flatMap { turn -> [String] in
+            var found = turn.blocks.compactMap { block -> String? in
+                if case .note(let text) = block { return text } else { return nil }
+            }
+            if case .note(let text)? = turn.marker { found.append(text) }
+            return found
+        }
+    }
+
+    /// Frame indices of `connection`: its first subscribe naming `model`, its first spawn, its first attach.
+    private func order(of connection: Int) -> (modelSubscribe: Int?, spawn: Int?, attach: Int?) {
+        let frames = daemon.frames(connection: connection)
+        return (frames.firstIndex { $0.type == "subscribe" && $0.topics.contains("model") },
+                frames.firstIndex { $0.type == "session_spawn" },
+                frames.firstIndex { $0.type == "session_attach" })
+    }
+
+    private func assertModelSubscribedBeforeSpawnAndAttach(connection i: Int, file: StaticString = #filePath, line: UInt = #line) {
+        let o = order(of: i)
+        guard let subscribe = o.modelSubscribe, let spawn = o.spawn, let attach = o.attach else {
+            return XCTFail("connection \(i) frames: \(daemon.frames(connection: i).map { "\($0.type)\($0.topics)" })", file: file, line: line)
+        }
+        XCTAssertLessThan(subscribe, spawn, "connection \(i): session_spawn went out before the `model` subscribe", file: file, line: line)
+        XCTAssertLessThan(subscribe, attach, "connection \(i): session_attach went out before the `model` subscribe, so the daemon strips the restored notes", file: file, line: line)
+        XCTAssertEqual(daemon.frames(connection: i, ofType: "session_attach").count, 1,
+                       "connection \(i): attaching twice on one connection spawns a duplicate forwarder", file: file, line: line)
     }
 
     /// Poll (bounded) until `condition` holds.
@@ -333,5 +433,81 @@ final class NostromodClientHandshakeTests: XCTestCase {
         XCTAssertFalse(c2.first?.topics.contains("work") ?? true, "connection 2 first subscribe: \(c2.map(\.topics))")
         XCTAssertTrue(c2.dropFirst().first?.topics.contains("work") ?? false,
                       "connection 2 advertised work again, so it must have been added: \(c2.map(\.topics))")
+    }
+
+    // MARK: - Spawn and attach follow the `model` subscribe
+
+    // The daemon answers a late `session_attach` without the transcript notes when the
+    // connection has not yet named `model`. The fake daemon is slow to say `welcome`, which is the
+    // window in which a client that calls itself connected too early attaches first.
+
+    func testTheFirstAttachFollowsASubscribeNamingModelAndTheRestoredTranscriptKeepsItsNote() throws {
+        let (_, s) = try connectSession(to: [.init(features: ["model"], welcomeDelay: 0.2, attachNote: Self.noteText)])
+
+        XCTAssertTrue(pumpUntil(10) { !self.daemon.frames(connection: 0, ofType: "session_attach").isEmpty },
+                      "the session never attached")
+        XCTAssertTrue(pumpUntil(10) { !s.turns.isEmpty }, "the attach snapshot never reached the session")
+
+        assertModelSubscribedBeforeSpawnAndAttach(connection: 0)
+        XCTAssertEqual(daemon.connectionCount, 1)
+        XCTAssertEqual(s.turns.count, 1)
+        XCTAssertEqual(notes(in: s), [Self.noteText], "the restored 'Model changed' note must be in the transcript")
+    }
+
+    func testEveryReconnectAttachesOnlyAfterItsOwnModelSubscribeAndNeverDuplicatesTheNoteOrTheTurn() throws {
+        let (_, s) = try connectSession(to: [
+            .init(features: ["model"], end: .afterFirstAttach(delay: 0.2), welcomeDelay: 0.2, attachNote: Self.noteText),
+            .init(features: ["model"], welcomeDelay: 0.2, attachNote: Self.noteText),
+        ])
+
+        XCTAssertTrue(pumpUntil(20) { !self.daemon.frames(connection: 1, ofType: "session_attach").isEmpty },
+                      "the session never re-attached after the reconnect (connections: \(daemon.connectionCount))")
+        XCTAssertTrue(pumpUntil(10) { s.currentEpoch >= 2 }, "the second snapshot never reached the session")
+        XCTAssertTrue(pumpUntil(5) { s.attachCount >= 2 })
+
+        assertModelSubscribedBeforeSpawnAndAttach(connection: 0)
+        assertModelSubscribedBeforeSpawnAndAttach(connection: 1)
+        XCTAssertEqual(daemon.connectionCount, 2)
+        XCTAssertEqual(s.attachCount, 2, "one spawn-and-attach per connection")
+        XCTAssertEqual(s.turns.count, 1, "the same turn again is not a second turn")
+        XCTAssertEqual(notes(in: s), [Self.noteText], "and the note is there exactly once")
+    }
+
+    func testAnOldDaemonIsNeverSentModelAndTheClientStillConnectsAndAttaches() throws {
+        let (c, s) = try connectSession(to: [.init(features: nil, rejectsTopics: ["model"], attachNote: Self.noteText)])
+
+        XCTAssertTrue(pumpUntil(10) { !self.daemon.frames(connection: 0, ofType: "session_attach").isEmpty },
+                      "an old daemon sends no feature list, and the client must still become connected and attach")
+        XCTAssertTrue(pumpUntil(10) { !s.turns.isEmpty })
+
+        XCTAssertFalse(daemon.frames(connection: 0, ofType: "session_spawn").isEmpty, "the session was spawned")
+        XCTAssertEqual(daemon.rejections, 0, "`model` was sent to a daemon that did not advertise it")
+        XCTAssertEqual(daemon.connectionCount, 1)
+        XCTAssertFalse(daemon.subscribes(connection: 0).flatMap(\.topics).contains("model"))
+        XCTAssertTrue(c.connected.value)
+        let frames = daemon.frames(connection: 0)
+        XCTAssertLessThan(frames.firstIndex { $0.type == "subscribe" } ?? Int.max,
+                          frames.firstIndex { $0.type == "session_spawn" } ?? -1,
+                          "the base subscribe still comes first")
+        XCTAssertEqual(notes(in: s), [], "an old daemon's snapshot has no notes, and none are invented")
+    }
+
+    func testADaemonAdvertisingWorkAndModelGetsOneFollowUpSubscribeBeforeTheAttach() throws {
+        _ = try connectSession(to: [.init(features: ["work", "model"], welcomeDelay: 0.2)])
+
+        XCTAssertTrue(pumpUntil(10) { !self.daemon.frames(connection: 0, ofType: "session_attach").isEmpty },
+                      "the session never attached")
+
+        let frames = daemon.frames(connection: 0)
+        guard let attach = frames.firstIndex(where: { $0.type == "session_attach" }) else { return XCTFail("no attach") }
+        let before = frames[..<attach].filter { $0.type == "subscribe" }
+        XCTAssertEqual(before.count, 2, "the base subscribe and ONE follow-up, both before the attach: \(before.map(\.topics))")
+        guard before.count == 2 else { return }
+        XCTAssertFalse(before[0].topics.contains("model") || before[0].topics.contains("work"),
+                       "the first subscribe names only topics every daemon knows: \(before[0].topics)")
+        XCTAssertEqual(Set(before[1].topics), Set(NostromodClient.baseTopics + ["work", "model"]),
+                       "the follow-up replaces the first, so it keeps the base topics and adds both: \(before[1].topics)")
+        XCTAssertEqual(daemon.subscribes(connection: 0).count, 2, "no further subscribe follows")
+        assertModelSubscribedBeforeSpawnAndAttach(connection: 0)
     }
 }

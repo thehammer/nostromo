@@ -3,7 +3,7 @@ import os
 
 private let appLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "AppDelegate")
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         AppAppearance.apply(to: NSApplication.shared)
@@ -252,7 +252,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         paneDiagItem.target = self
         debugMenu.addItem(paneDiagItem)
 
+        // Session menu — ⇧⌘M opens the model popup. The item has no target, so the action
+        // walks the responder chain from the key window's first responder to that window's
+        // input bar; `showModelPopover` below catches it when focus sits outside any bar.
+        let sessionMenuItem = NSMenuItem()
+        mainMenu.addItem(sessionMenuItem)
+        let sessionMenu = NSMenu(title: "Session")
+        sessionMenuItem.submenu = sessionMenu
+        sessionMenu.addItem(ModelShortcut.makeMenuItem())
+
         NSApplication.shared.mainMenu = mainMenu
+    }
+
+    /// ⇧⌘M with focus outside every input bar (a list, the transcript): open the key
+    /// window's bar. A bar that holds focus handles the action itself, before this.
+    @objc func showModelPopover(_ sender: Any?) {
+        ModelShortcut.bar(in: NSApp.keyWindow)?.showModelPopover(sender)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == ModelShortcut.action ? !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty : true
     }
 
     /// Open one window per attached display, then activate ONCE at the end

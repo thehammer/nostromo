@@ -56,6 +56,9 @@ enum TurnHeightEstimator {
     static let resultSummaryHeight: CGFloat = 14
     /// `ErrorBlockView`: 8+8 padding.
     static let errorChrome: CGFloat         = 16
+    /// `NoteBlockView`: 4+4 padding around 11 pt text.
+    static let noteChrome: CGFloat          = 8
+    static let noteLineHeight: CGFloat      = 14
     /// `AskQuestionView`: header chip, question, divider, and 36 pt per option.
     static let questionChrome: CGFloat      = 46
     static let questionOptionHeight: CGFloat = 36
@@ -135,6 +138,11 @@ enum TurnHeightEstimator {
                                                width: width - 20,
                                                glyphWidth: monoGlyphWidth,
                                                lineHeight: monoLineHeight)
+        case .note:
+            return noteChrome + wrappedHeight(characters: characters,
+                                              width: width - 2 * NoteBlockView.horizontalInset,
+                                              glyphWidth: systemGlyphWidth,
+                                              lineHeight: noteLineHeight)
         case .askQuestion(let d):
             return questionChrome
                 + CGFloat(d.options.count) * questionOptionHeight

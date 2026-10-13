@@ -310,6 +310,27 @@
 		ZP0000000000000000000043 /* WindowPlacementControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000033 /* WindowPlacementControllerTests.swift */; };
 		ZP0000000000000000000044 /* WindowPlacementLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000034 /* WindowPlacementLogTests.swift */; };
 		ZP0000000000000000000045 /* NostromoWindowConstrainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000035 /* NostromoWindowConstrainTests.swift */; };
+		ZZ0000000000000000M20101 /* ModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20100 /* ModelStore.swift */; };
+		ZZ0000000000000000M20102 /* ModelStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20100 /* ModelStore.swift */; };
+		ZZ0000000000000000M20111 /* ModelPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20110 /* ModelPresentation.swift */; };
+		ZZ0000000000000000M20112 /* ModelPresentation.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20110 /* ModelPresentation.swift */; };
+		ZZ0000000000000000M20121 /* ModelChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20120 /* ModelChip.swift */; };
+		ZZ0000000000000000M20122 /* ModelChip.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20120 /* ModelChip.swift */; };
+		ZZ0000000000000000M20131 /* ModelPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20130 /* ModelPopover.swift */; };
+		ZZ0000000000000000M20132 /* ModelPopover.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20130 /* ModelPopover.swift */; };
+		ZZ0000000000000000M20141 /* CreateFocusModelPickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20140 /* CreateFocusModelPickers.swift */; };
+		ZZ0000000000000000M20142 /* CreateFocusModelPickers.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20140 /* CreateFocusModelPickers.swift */; };
+		ZZ0000000000000000M20151 /* ModelDefaultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20150 /* ModelDefaultsView.swift */; };
+		ZZ0000000000000000M20152 /* ModelDefaultsView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20150 /* ModelDefaultsView.swift */; };
+		ZZ0000000000000000M20161 /* ReplInputBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20160 /* ReplInputBar.swift */; };
+		ZZ0000000000000000M20162 /* ReplInputBar.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20160 /* ReplInputBar.swift */; };
+		ZZ0000000000000000M20171 /* ModelPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20170 /* ModelPresentationTests.swift */; };
+		ZZ0000000000000000M20181 /* ModelChipAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20180 /* ModelChipAppearanceTests.swift */; };
+		ZZ0000000000000000M20191 /* ModelPopoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20190 /* ModelPopoverTests.swift */; };
+		ZZ0000000000000000M20201 /* ModelStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20200 /* ModelStoreTests.swift */; };
+		ZZ0000000000000000M20211 /* CreateFocusModelPickersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20210 /* CreateFocusModelPickersTests.swift */; };
+		ZZ0000000000000000M20221 /* DecisionSheetDefaultChoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20220 /* DecisionSheetDefaultChoiceTests.swift */; };
+		ZZ0000000000000000M20231 /* AppControlModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20230 /* AppControlModelTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -529,6 +550,20 @@
 		ZP0000000000000000000033 /* WindowPlacementControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementControllerTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000034 /* WindowPlacementLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementLogTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000035 /* NostromoWindowConstrainTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoWindowConstrainTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20100 /* ModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStore.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20110 /* ModelPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPresentation.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20120 /* ModelChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelChip.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20130 /* ModelPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPopover.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20140 /* CreateFocusModelPickers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateFocusModelPickers.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20150 /* ModelDefaultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDefaultsView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20160 /* ReplInputBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplInputBar.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20170 /* ModelPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPresentationTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20180 /* ModelChipAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelChipAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20190 /* ModelPopoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPopoverTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20200 /* ModelStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStoreTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20210 /* CreateFocusModelPickersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateFocusModelPickersTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20220 /* DecisionSheetDefaultChoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheetDefaultChoiceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000M20230 /* AppControlModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlModelTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -682,9 +717,23 @@
 				MD0000000000000000000A0 /* MotherDaemonStatus.swift */,
 				MG0000000000000000000A0 /* MotherJobGrouping.swift */,
 				PP000000000000000000004 /* ActivityTickerView.swift */,
+				ZZ0000000000000000M20090 /* Model */,
 				AA0000020000000000000021 /* Views */,
 			);
 			path = UI;
+			sourceTree = "<group>";
+		};
+		ZZ0000000000000000M20090 /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				ZZ0000000000000000M20100 /* ModelStore.swift */,
+				ZZ0000000000000000M20110 /* ModelPresentation.swift */,
+				ZZ0000000000000000M20120 /* ModelChip.swift */,
+				ZZ0000000000000000M20130 /* ModelPopover.swift */,
+				ZZ0000000000000000M20140 /* CreateFocusModelPickers.swift */,
+				ZZ0000000000000000M20150 /* ModelDefaultsView.swift */,
+			);
+			path = Model;
 			sourceTree = "<group>";
 		};
 		AA0000020000000000000021 /* Views */ = {
@@ -707,6 +756,7 @@
 				AA0000020000000000000022 /* PerriView.swift */,
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
+				ZZ0000000000000000M20160 /* ReplInputBar.swift */,
 				FT0000000000000000000002 /* JumpToLatestOverlay.swift */,
 				FT0000000000000000000006 /* FollowTailController.swift */,
 				II000000000000000000020 /* AskQuestionView.swift */,
@@ -758,6 +808,13 @@
 				HH000000000000000000120 /* TurnListVirtualizerTests.swift */,
 				HH000000000000000000130 /* TurnHeightEstimatorTests.swift */,
 				TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */,
+				ZZ0000000000000000M20170 /* ModelPresentationTests.swift */,
+				ZZ0000000000000000M20180 /* ModelChipAppearanceTests.swift */,
+				ZZ0000000000000000M20190 /* ModelPopoverTests.swift */,
+				ZZ0000000000000000M20200 /* ModelStoreTests.swift */,
+				ZZ0000000000000000M20210 /* CreateFocusModelPickersTests.swift */,
+				ZZ0000000000000000M20220 /* DecisionSheetDefaultChoiceTests.swift */,
+				ZZ0000000000000000M20230 /* AppControlModelTests.swift */,
 				TT000000000000000000050 /* TranscriptCopyTests.swift */,
 				SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */,
 				AM00000000000000000000F0 /* AppControlMouseTests.swift */,
@@ -919,6 +976,13 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ZZ0000000000000000M20101 /* ModelStore.swift in Sources */,
+				ZZ0000000000000000M20111 /* ModelPresentation.swift in Sources */,
+				ZZ0000000000000000M20121 /* ModelChip.swift in Sources */,
+				ZZ0000000000000000M20131 /* ModelPopover.swift in Sources */,
+				ZZ0000000000000000M20141 /* CreateFocusModelPickers.swift in Sources */,
+				ZZ0000000000000000M20151 /* ModelDefaultsView.swift in Sources */,
+				ZZ0000000000000000M20161 /* ReplInputBar.swift in Sources */,
 				WK0000000000000000000002 /* WorkModels.swift in Sources */,
 				WK0000000000000000000005 /* WorkStore.swift in Sources */,
 				WK0000000000000000000096 /* WorkScheduler.swift in Sources */,
@@ -1041,6 +1105,20 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ZZ0000000000000000M20102 /* ModelStore.swift in TestSources */,
+				ZZ0000000000000000M20112 /* ModelPresentation.swift in TestSources */,
+				ZZ0000000000000000M20122 /* ModelChip.swift in TestSources */,
+				ZZ0000000000000000M20132 /* ModelPopover.swift in TestSources */,
+				ZZ0000000000000000M20142 /* CreateFocusModelPickers.swift in TestSources */,
+				ZZ0000000000000000M20152 /* ModelDefaultsView.swift in TestSources */,
+				ZZ0000000000000000M20162 /* ReplInputBar.swift in TestSources */,
+				ZZ0000000000000000M20171 /* ModelPresentationTests.swift in Sources */,
+				ZZ0000000000000000M20181 /* ModelChipAppearanceTests.swift in Sources */,
+				ZZ0000000000000000M20191 /* ModelPopoverTests.swift in Sources */,
+				ZZ0000000000000000M20201 /* ModelStoreTests.swift in Sources */,
+				ZZ0000000000000000M20211 /* CreateFocusModelPickersTests.swift in Sources */,
+				ZZ0000000000000000M20221 /* DecisionSheetDefaultChoiceTests.swift in Sources */,
+				ZZ0000000000000000M20231 /* AppControlModelTests.swift in Sources */,
 				WK0000000000000000000003 /* WorkModels.swift in TestSources */,
 				ZP0000000000000000000021 /* DisplayIdentity.swift in TestSources */,
 				ZZ0000000000000000000B21 /* AppAppearance.swift in TestSources */,

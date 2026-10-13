@@ -67,6 +67,10 @@ struct ChatTurn: Identifiable {
         /// Retention hit `TurnPayloadStore.maxRetainedTurns` and the oldest
         /// turns were dropped. Pinned at the top of the transcript.
         case historyUnavailable
+        /// A model-switching note for a session that has no turn yet, so there is
+        /// no turn to hang it on. `ChatSession` drops it when the first turn
+        /// arrives carrying the same note as a leading block.
+        case note(String)
     }
 
     var isGapMarker: Bool { marker == .gap }
@@ -174,6 +178,9 @@ enum TurnBlock {
     case resultSummary(ResultSummaryData)
     case errorMessage(String)
     case askQuestion(AskQuestionData)
+    /// A daemon-authored marker between turns ("Model changed to Opus (from Sonnet) by
+    /// you."): rendered inline, centred, in secondary text. Not a message.
+    case note(String)
 }
 
 extension TurnBlock {
@@ -188,6 +195,7 @@ extension TurnBlock {
         case .resultSummary: return "s"
         case .errorMessage:  return "e"
         case .askQuestion:   return "q"
+        case .note:          return "n"
         }
     }
 
@@ -225,6 +233,7 @@ extension TurnBlock {
         case .resultSummary:        return 0
         case .errorMessage(let m):  return m.utf8.count
         case .askQuestion(let d):   return d.question.utf8.count
+        case .note(let text):       return text.utf8.count
         }
     }
 
@@ -248,6 +257,7 @@ extension TurnBlock {
         case .toolResult(let d):    return d.content.utf8.count
         case .resultSummary:        return 0
         case .errorMessage(let m):  return m.utf8.count
+        case .note(let text):       return text.utf8.count
         case .askQuestion(let d):
             return d.question.utf8.count + d.header.utf8.count
                 + d.options.reduce(0) { $0 + $1.label.utf8.count + $1.description.utf8.count }

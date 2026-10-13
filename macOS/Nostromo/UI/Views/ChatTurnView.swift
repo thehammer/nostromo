@@ -66,6 +66,8 @@ class MarkerTurnView: NSView, TurnIsland {
             text = "⋯  Earlier turns may be missing here — this pane was disconnected for longer than the daemon keeps in its attach window."
         case .historyUnavailable:
             text = "⋯  Earlier history is no longer available in this pane. The full record remains on disk in the Claude session transcript."
+        case .note(let note):
+            text = note
         }
 
         let label = CopyMenuTextField(labelWithString: text)
@@ -371,6 +373,7 @@ class ChatTurnView: NSView, TurnIsland {
             return v
         case .resultSummary(let d):  return ResultChipView(data: d)
         case .errorMessage(let m):   return ErrorBlockView(message: m)
+        case .note(let text):        return NoteBlockView(text: text)
         case .askQuestion(let d):
             let v = AskQuestionView(data: d,
                                     answeredOptionIndex: interaction.answeredOptions[index])
@@ -1146,6 +1149,46 @@ class ErrorBlockView: NSView {
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
         ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+// MARK: - NoteBlockView
+
+/// A daemon-authored transcript marker, e.g. "Model changed to Opus (from Sonnet) by you.":
+/// one centred line of secondary text, no bubble and no chrome, because it is not a message.
+class NoteBlockView: NSView {
+
+    /// Space either side of the text; the height estimator wraps against it.
+    static let horizontalInset: CGFloat = 8
+
+    private let label: CopyMenuTextField
+
+    init(text: String) {
+        label = CopyMenuTextField(labelWithString: text)
+        super.init(frame: .zero)
+        label.isSelectable = true   // copyable transcript content
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = Theme.fgMuted
+        label.alignment = .center
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalInset),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+        // One element carrying the text; its label field would be read a second time.
+        setAccessibilityElement(true)
+        setAccessibilityChildren([])
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(text)
     }
 
     required init?(coder: NSCoder) { fatalError() }

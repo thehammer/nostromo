@@ -169,6 +169,12 @@ public final class TranscriptStore: ObservableObject {
             if let i = turns.firstIndex(where: { $0.id == turnId }) {
                 turns[i] = turns[i].completed()
             }
+        case .note(let turnId, let block):
+            // A note rides on the latest turn. With no turn yet there is nothing
+            // to hang it on; the next `turn_started` carries it as a leading block.
+            if let turnId, let i = turns.firstIndex(where: { $0.id == turnId }) {
+                turns[i] = turns[i].appending(block)
+            }
         }
     }
 }
