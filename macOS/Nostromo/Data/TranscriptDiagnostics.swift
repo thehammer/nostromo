@@ -60,6 +60,11 @@ enum TranscriptDiagnostics {
         return tags.sorted()
     }
 
+    /// The live pane for `tag`, if one is registered.
+    static func pane(tag: String) -> Reporting? {
+        panes.allObjects.lazy.compactMap { $0 as? Reporting }.first { $0.diagnosticsTag == tag }
+    }
+
     // MARK: - Resident memory
 
     /// The process's `phys_footprint`, in bytes.

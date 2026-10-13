@@ -127,10 +127,12 @@ mac-test:
 ## Takes several minutes; drives synthetic traffic through the real code path.
 ##   make mac-load-test                 # 5000 turns, 1 focus
 ##   make mac-load-test TURNS=40000 FOCUSES=8
+##   make mac-load-test FIXTURE=benchmark   # open the benchmark transcript, print fixture-open ms
 TURNS   ?= 5000
 FOCUSES ?= 1
+FIXTURE ?=
 mac-load-test:
-	macOS/scripts/transcript-load-test.sh $(TURNS) $(FOCUSES)
+	macOS/scripts/transcript-load-test.sh $(TURNS) $(FOCUSES) $(FIXTURE)
 
 ## Kill any running Nostromo instance (handles debugserver wedge)
 mac-kill:

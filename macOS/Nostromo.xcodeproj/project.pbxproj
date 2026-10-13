@@ -247,6 +247,22 @@
 		II000000000000000000032 /* ToolResultView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
 		TT000000000000000000011 /* ChatTurnView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
 		TT000000000000000000012 /* ChatTurnView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
+		ZZ0000000000000000TF0101 /* ToolFoldAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */; };
+		ZZ0000000000000000TF0102 /* ToolFoldAdapter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */; };
+		ZZ0000000000000000TF0201 /* ToolGroupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0200 /* ToolGroupView.swift */; };
+		ZZ0000000000000000TF0202 /* ToolGroupView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0200 /* ToolGroupView.swift */; };
+		ZZ0000000000000000TF0301 /* TranscriptFoldStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */; };
+		ZZ0000000000000000TF0302 /* TranscriptFoldStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */; };
+		ZZ0000000000000000TF0401 /* ToolActivityMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0400 /* ToolActivityMenu.swift */; };
+		ZZ0000000000000000TF0402 /* ToolActivityMenu.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0400 /* ToolActivityMenu.swift */; };
+		ZZ0000000000000000TF0501 /* ToolFoldAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0500 /* ToolFoldAdapterTests.swift */; };
+		ZZ0000000000000000TF0601 /* ToolGroupViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0600 /* ToolGroupViewTests.swift */; };
+		ZZ0000000000000000TF0701 /* ToolGroupAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0700 /* ToolGroupAppearanceTests.swift */; };
+		ZZ0000000000000000TF0801 /* ToolFoldScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0800 /* ToolFoldScrollTests.swift */; };
+		ZZ0000000000000000TF0901 /* ToolGroupLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */; };
+		ZZ0000000000000000TF1001 /* TranscriptFoldStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */; };
+		ZZ0000000000000000TF1101 /* ToolActivityMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF1100 /* ToolActivityMenuTests.swift */; };
+		ZZ0000000000000000TF1201 /* BenchmarkTranscriptMacTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF1200 /* BenchmarkTranscriptMacTests.swift */; };
 		TT000000000000000000021 /* MarkdownTableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000020 /* MarkdownTableView.swift */; };
 		TT000000000000000000022 /* MarkdownTableView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000020 /* MarkdownTableView.swift */; };
 		TT000000000000000000032 /* MarkdownCardView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000C0 /* MarkdownCardView.swift */; };
@@ -506,6 +522,18 @@
 		II000000000000000000020 /* AskQuestionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskQuestionView.swift; sourceTree = "<group>"; };
 		II000000000000000000030 /* ToolResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResultView.swift; sourceTree = "<group>"; };
 		TT000000000000000000010 /* ChatTurnView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTurnView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldAdapter.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0200 /* ToolGroupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptFoldStore.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0400 /* ToolActivityMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolActivityMenu.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0500 /* ToolFoldAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldAdapterTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0600 /* ToolGroupViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupViewTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0700 /* ToolGroupAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0800 /* ToolFoldScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldScrollTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupLiveTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptFoldStoreTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF1100 /* ToolActivityMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolActivityMenuTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TF1200 /* BenchmarkTranscriptMacTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkTranscriptMacTests.swift; sourceTree = "<group>"; };
 		TT000000000000000000020 /* MarkdownTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableView.swift; sourceTree = "<group>"; };
 		II000000000000000000040 /* LoadHarnessTargeting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHarnessTargeting.swift; sourceTree = "<group>"; };
 		II000000000000000000100 /* TurnInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionTests.swift; sourceTree = "<group>"; };
@@ -657,6 +685,7 @@
 				AA0000020000000000000032 /* FocusStore.swift */,
 				JJ0000000000000000000001 /* IPCLatencyStats.swift */,
 				JJ0000000000000000000002 /* DaemonDiagnostics.swift */,
+				ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */,
 			);
 			path = Data;
 			sourceTree = "<group>";
@@ -680,6 +709,8 @@
 				HH000000000000000000070 /* TurnListVirtualizer.swift */,
 				HH000000000000000000080 /* TurnHeightEstimator.swift */,
 				II000000000000000000010 /* TurnInteractionStore.swift */,
+				ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */,
+				ZZ0000000000000000TF0400 /* ToolActivityMenu.swift */,
 				AA0000020000000000000005 /* Theme.swift */,
 				AA0000020000000000000006 /* TabBarView.swift */,
 				NT0000000000000000000001 /* NavTabItem.swift */,
@@ -771,6 +802,7 @@
 				LL0000000000000000000005 /* CodeContentView.swift */,
 				MM0000000000000000000002 /* ConversationContentView.swift */,
 				OO0000000000000000000002 /* TicketContentView.swift */,
+				ZZ0000000000000000TF0200 /* ToolGroupView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -808,6 +840,14 @@
 				HH000000000000000000120 /* TurnListVirtualizerTests.swift */,
 				HH000000000000000000130 /* TurnHeightEstimatorTests.swift */,
 				TT000000000000000000040 /* ChatTurnViewLayoutTests.swift */,
+				ZZ0000000000000000TF0500 /* ToolFoldAdapterTests.swift */,
+				ZZ0000000000000000TF0600 /* ToolGroupViewTests.swift */,
+				ZZ0000000000000000TF0700 /* ToolGroupAppearanceTests.swift */,
+				ZZ0000000000000000TF0800 /* ToolFoldScrollTests.swift */,
+				ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */,
+				ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */,
+				ZZ0000000000000000TF1100 /* ToolActivityMenuTests.swift */,
+				ZZ0000000000000000TF1200 /* BenchmarkTranscriptMacTests.swift */,
 				ZZ0000000000000000M20170 /* ModelPresentationTests.swift */,
 				ZZ0000000000000000M20180 /* ModelChipAppearanceTests.swift */,
 				ZZ0000000000000000M20190 /* ModelPopoverTests.swift */,
@@ -1074,6 +1114,10 @@
 				II000000000000000000021 /* AskQuestionView.swift in Sources */,
 				II000000000000000000031 /* ToolResultView.swift in Sources */,
 				TT000000000000000000011 /* ChatTurnView.swift in Sources */,
+				ZZ0000000000000000TF0101 /* ToolFoldAdapter.swift in Sources */,
+				ZZ0000000000000000TF0201 /* ToolGroupView.swift in Sources */,
+				ZZ0000000000000000TF0301 /* TranscriptFoldStore.swift in Sources */,
+				ZZ0000000000000000TF0401 /* ToolActivityMenu.swift in Sources */,
 				TT000000000000000000021 /* MarkdownTableView.swift in Sources */,
 				II000000000000000000041 /* LoadHarnessTargeting.swift in Sources */,
 				JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */,
@@ -1238,6 +1282,18 @@
 				II000000000000000000022 /* AskQuestionView.swift in TestSources */,
 				II000000000000000000032 /* ToolResultView.swift in TestSources */,
 				TT000000000000000000012 /* ChatTurnView.swift in TestSources */,
+				ZZ0000000000000000TF0102 /* ToolFoldAdapter.swift in TestSources */,
+				ZZ0000000000000000TF0202 /* ToolGroupView.swift in TestSources */,
+				ZZ0000000000000000TF0302 /* TranscriptFoldStore.swift in TestSources */,
+				ZZ0000000000000000TF0402 /* ToolActivityMenu.swift in TestSources */,
+				ZZ0000000000000000TF0501 /* ToolFoldAdapterTests.swift in Sources */,
+				ZZ0000000000000000TF0601 /* ToolGroupViewTests.swift in Sources */,
+				ZZ0000000000000000TF0701 /* ToolGroupAppearanceTests.swift in Sources */,
+				ZZ0000000000000000TF0801 /* ToolFoldScrollTests.swift in Sources */,
+				ZZ0000000000000000TF0901 /* ToolGroupLiveTests.swift in Sources */,
+				ZZ0000000000000000TF1001 /* TranscriptFoldStoreTests.swift in Sources */,
+				ZZ0000000000000000TF1101 /* ToolActivityMenuTests.swift in Sources */,
+				ZZ0000000000000000TF1201 /* BenchmarkTranscriptMacTests.swift in Sources */,
 				RD00000000000000000000A2 /* ToastBannerView.swift in TestSources */,
 				TT000000000000000000022 /* MarkdownTableView.swift in TestSources */,
 				TT000000000000000000032 /* MarkdownCardView.swift in TestSources */,

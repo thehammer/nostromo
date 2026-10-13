@@ -1916,5 +1916,59 @@ cpu_seconds {dead_pid}
         self.assertNotIn("division by zero", result.stderr.lower())
 
 
+class FixtureOpenReportTests(unittest.TestCase):
+    """The ungraded `fixture-open` baseline line, on two canned logs."""
+
+    TESTDATA = os.path.join(REPO_ROOT, "macOS", "scripts", "testdata")
+    WITH = os.path.join(TESTDATA, "fixture-open-with.log")
+    WITHOUT = os.path.join(TESTDATA, "fixture-open-without.log")
+
+    def _print(self, paths, sha):
+        out = io.StringIO()
+        ok = report.print_fixture_open(paths, sha, stream=out)
+        return ok, out.getvalue()
+
+    def test_log_with_fixture_lines_prints_median_and_sha(self):
+        ok, text = self._print([self.WITH], "feedbee")
+        self.assertTrue(ok)
+        # The line tagged for another build (sha=abc1234) is excluded.
+        self.assertIn("median 433.5 ms over 2 run(s)", text)
+        self.assertIn("sha=feedbee", text)
+        self.assertIn("not graded", text)
+
+    def test_matching_sha_tag_is_included(self):
+        ok, text = self._print([self.WITH], "abc1234")
+        self.assertTrue(ok)
+        self.assertIn("over 3 run(s)", text)
+        self.assertIn("median 412 ms", text)
+
+    def test_log_without_fixture_lines_says_so_and_reports_failure(self):
+        ok, text = self._print([self.WITHOUT], "feedbee")
+        self.assertFalse(ok)
+        self.assertIn("no fixture-open lines", text)
+
+    def test_missing_log_is_not_a_crash(self):
+        ok, _ = self._print(["/nonexistent/log"], "feedbee")
+        self.assertFalse(ok)
+
+    def test_fixture_open_is_not_a_graded_criterion(self):
+        self.assertNotIn("fixture-open", [c.key for c in report.CRITERIA])
+
+    def test_cli_fixture_only_exit_codes(self):
+        run = lambda log: subprocess.run(
+            [sys.executable, REPORT_SCRIPT_PATH, "--fixture-only", "--fixture-log", log],
+            capture_output=True, text=True)
+        self.assertEqual(run(self.WITH).returncode, 0)
+        self.assertEqual(run(self.WITHOUT).returncode, 1)
+
+    def test_shell_driver_accepts_fixture_and_passes_it_through(self):
+        path = os.path.join(REPO_ROOT, "macOS", "scripts", "transcript-load-test.sh")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertIn('FIXTURE="${3:-${FIXTURE:-}}"', text)
+        self.assertIn('NOSTROMO_LOAD_FIXTURE="$FIXTURE"', text)
+        self.assertEqual(subprocess.run(["bash", "-n", path]).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,14 @@
 # production code path, no daemon) and asserts each criterion against the
 # diagnostics stream the app writes.
 #
-#   macOS/scripts/transcript-load-test.sh [turns] [focuses]
+#   macOS/scripts/transcript-load-test.sh [turns] [focuses] [fixture]
+#
+# `fixture` (or FIXTURE=benchmark in the environment) switches to open-fixture
+# mode: the app opens the benchmark transcript in one snapshot, the script waits
+# for its `fixture-open ms=...` line, prints the median over every run on this
+# build, and stops. Turns are ignored, nothing is graded. Run it 3 times on a
+# build to get a baseline; `FIXTURE_HISTORY` (default
+# /tmp/nostromo-fixture-open.log) accumulates the runs, tagged with the git SHA.
 #
 # A Debug build's numbers are meaningless for this work, so this always builds
 # Release. Expect roughly one turn per second of wall clock: the harness runs
@@ -21,6 +28,9 @@ set -uo pipefail
 
 TURNS="${1:-5000}"
 FOCUSES="${2:-1}"
+FIXTURE="${3:-${FIXTURE:-}}"
+FIXTURE_HISTORY="${FIXTURE_HISTORY:-/tmp/nostromo-fixture-open.log}"
+APP_LOG=/tmp/nostromo-load.log
 RECONNECTS="${NOSTROMO_LOAD_RECONNECTS:-20}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -52,15 +62,29 @@ make -C "$REPO_ROOT" mac-release >/dev/null || { echo "mac-release failed"; exit
 mkdir -p "$(dirname "$DIAG")" || { echo "cannot create $(dirname "$DIAG")"; exit 1; }
 : > "$DIAG" || { echo "cannot truncate $DIAG"; exit 1; }
 
-echo "==> launching: turns=$TURNS focuses=$FOCUSES reconnects=$RECONNECTS"
+echo "==> launching: turns=$TURNS focuses=$FOCUSES reconnects=$RECONNECTS fixture=${FIXTURE:-none}"
 NOSTROMO_LOAD_HARNESS=1 \
 NOSTROMO_LOAD_TURNS="$TURNS" \
 NOSTROMO_LOAD_RECONNECTS="$RECONNECTS" \
 NOSTROMO_LOAD_FOCUSES="$FOCUSES" \
+NOSTROMO_LOAD_FIXTURE="$FIXTURE" \
 NOSTROMO_DIAG_INTERVAL=5 \
-  "$APP/Contents/MacOS/Nostromo" >/tmp/nostromo-load.log 2>&1 &
+  "$APP/Contents/MacOS/Nostromo" >"$APP_LOG" 2>&1 &
 APP_PID=$!
 trap 'kill $APP_PID 2>/dev/null' EXIT
+
+if [ -n "$FIXTURE" ]; then
+  echo "==> waiting for fixture-open"
+  for _ in $(seq 1 240); do
+    grep -q 'fixture-open ms=' "$APP_LOG" && break
+    kill -0 $APP_PID 2>/dev/null || break
+    sleep 1
+  done
+  SHA=$(git -C "$REPO_ROOT" describe --always --dirty 2>/dev/null || echo unknown)
+  grep 'fixture-open ms=' "$APP_LOG" | sed "s/^/sha=$SHA /" >> "$FIXTURE_HISTORY"
+  python3 "$REPORT" --fixture-only --fixture-log "$FIXTURE_HISTORY"
+  exit $?
+fi
 
 echo "==> waiting for $TURNS turns"
 DEADLINE=$(( $(date +%s) + 7200 ))
