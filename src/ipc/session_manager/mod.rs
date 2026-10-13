@@ -785,13 +785,17 @@ impl SessionManager {
         // Pre-populate the transcript from stored scrollback when resuming,
         // with the session's notes put back where they were made.
         let paths = &self.model_hub.paths;
-        let transcript = if resume {
+        let mut transcript = if resume {
             let mut t = load_scrollback(&session_id, SCROLLBACK_TURNS);
             t.merge_ledger_notes(&notes::load(&paths.notes_dir, &session_id));
             t
         } else {
             SessionTranscript::new()
         };
+        // From here on the lines are the running CLI's own: calls and results
+        // without a timestamp may take the time the daemon received them. The
+        // scrollback above was a replay and never invents times.
+        transcript.set_live(true);
         let restricted = self.restrictions.contains_key(&tag);
         let runtime = ModelRuntime {
             recorded: if restricted { None } else { model_store::focus_record(&paths.focus_models, &tag) },
@@ -3461,6 +3465,44 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].is_complete);
         assert_eq!(turns[0].user_input, "hi");
+    }
+
+    #[tokio::test]
+    async fn a_spawned_session_stamps_calls_with_receive_time_but_keeps_line_times() {
+        // The CLI's live `assistant` lines carry no timestamp; its `user`
+        // lines do. (A resumed session's scrollback is a replay and never
+        // gets invented times; that is covered on `transcript_from_jsonl`,
+        // since the scrollback location is not injectable here.)
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let script = r#"printf '%s\n' '{"type":"user","message":{"role":"user","content":"ls"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_live","name":"Bash","input":{"command":"ls"}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","content":"a","is_error":false,"tool_use_id":"toolu_live"}]},"timestamp":"2026-06-01T10:00:05.000Z"}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'"#;
+        let before = chrono::Utc::now();
+        let mut rx = {
+            spawn_stub(&mut mgr, "fred", script);
+            mgr.sessions.get("fred").unwrap().shared.event_tx.subscribe()
+        };
+        collect_events(&mut rx, 20).await;
+        let after = chrono::Utc::now();
+
+        let transcript = mgr.sessions.get("fred").unwrap().shared.transcript.lock().unwrap();
+        assert!(transcript.is_live(), "a spawned session's transcript is live");
+        let blocks = &transcript.snapshot()[0].blocks;
+        let (call_ts, result_ts) = match (&blocks[0], &blocks[1]) {
+            (
+                crate::ipc::stream_json::TurnBlock::ToolCall { ts: c, tool_use_id: Some(id), .. },
+                crate::ipc::stream_json::TurnBlock::ToolResult { ts: r, .. },
+            ) if id == "toolu_live" => (*c, *r),
+            other => panic!("expected call then result, got {other:?}"),
+        };
+        let call_ts = call_ts.expect("a live call with no line timestamp is stamped");
+        assert!(before <= call_ts && call_ts <= after, "{call_ts} not within {before}..{after}");
+        assert_eq!(
+            result_ts,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-06-01T10:00:05.000Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
     }
 
     // ── interrupt (the Stop button) ───────────────────────────────────────────

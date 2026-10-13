@@ -82,6 +82,11 @@ const TURN_OVERHEAD: usize = 128;
 pub enum TurnBlock {
     Text {
         text: String,
+        /// The Agent/Task call this prose came from, when a subagent said it
+        /// (`"?"` when the event is marked as a subagent's but names no
+        /// parent). `None` for the main agent's own prose.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     ToolCall {
         tool_name: String,
@@ -89,10 +94,36 @@ pub enum TurnBlock {
         input_summary: String,
         /// Pretty JSON for possible expansion.
         input_full: String,
+        /// The CLI's `tool_use.id`: a durable identity for the call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        /// `input.file_path` / `input.notebook_path` of a file tool
+        /// (Read, Write, Edit, MultiEdit, NotebookEdit), kept whole so a
+        /// client can count distinct files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// When the call was made: the source line's timestamp, else (live
+        /// only) the daemon's receive time, else unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ts: Option<chrono::DateTime<chrono::Utc>>,
+        /// See [`TurnBlock::Text::parent_tool_use_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     ToolResult {
+        /// Empty for a quiet success: kept on the wire so a client can tell
+        /// a finished call from a running one.
         content: String,
         is_error: bool,
+        /// The `tool_use_id` of the call this answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        /// When the result arrived (same rule as [`TurnBlock::ToolCall::ts`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ts: Option<chrono::DateTime<chrono::Utc>>,
+        /// See [`TurnBlock::Text::parent_tool_use_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
     ResultSummary {
         duration_ms: u64,
@@ -125,6 +156,16 @@ pub enum TurnBlock {
         text: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
+}
+
+impl TurnBlock {
+    /// A main-agent prose block.
+    pub fn text(text: impl Into<String>) -> Self {
+        TurnBlock::Text {
+            text: text.into(),
+            parent_tool_use_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -230,6 +271,12 @@ pub enum ParsedLine {
         context_tokens: Option<u64>,
         /// `message.model` of an assistant event: the model that answered.
         model: Option<String>,
+        /// The line's own `timestamp`, if it carries one (stored JSONL lines
+        /// and live `user` lines do; live `assistant` lines do not).
+        timestamp: Option<String>,
+        /// The Agent/Task call a subagent's line belongs to (`"?"` for a
+        /// sidechain line that names none); `None` for the main agent.
+        parent_tool_use_id: Option<String>,
     },
     /// Turn boundary.
     Result(ResultSummary),
@@ -264,6 +311,10 @@ pub enum ModelReportSource {
     Assistant,
 }
 
+/// `parent_tool_use_id` for subagent traffic that doesn't say which call it
+/// belongs to (an `isSidechain: true` event with no parent id).
+pub const UNKNOWN_PARENT: &str = "?";
+
 /// Parse one NDJSON line from the stream-json output. Returns `None` for lines
 /// we render nothing from (`rate_limit_event`, hook chatter, blank lines, …).
 pub fn parse_line(line: &str) -> Option<ParsedLine> {
@@ -279,8 +330,8 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
             let msg = obj.get("message")?;
             // A subagent's messages arrive on the parent's stdout too, carrying
             // the subagent's model: that is not what the session runs on.
-            let from_subagent = obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true)
-                || obj.get("parent_tool_use_id").is_some_and(|p| !p.is_null());
+            let parent_tool_use_id = subagent_parent(obj);
+            let from_subagent = parent_tool_use_id.is_some();
             let model = msg
                 .get("model")
                 .and_then(|m| m.as_str())
@@ -291,6 +342,8 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
                     blocks: vec![],
                     context_tokens: None,
                     model: Some(model),
+                    timestamp: None,
+                    parent_tool_use_id: None,
                 });
             };
             let blocks: Vec<TurnBlock> = content
@@ -324,6 +377,8 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
                     blocks,
                     context_tokens,
                     model,
+                    timestamp: line_timestamp(obj),
+                    parent_tool_use_id,
                 })
             }
         }
@@ -349,6 +404,28 @@ pub fn parse_line(line: &str) -> Option<ParsedLine> {
         // rate_limit_event and any other type render nothing.
         _ => None,
     }
+}
+
+/// The line's top-level `timestamp`, if it has one.
+fn line_timestamp(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    obj.get("timestamp")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+}
+
+/// Which subagent call an event belongs to: its top-level
+/// `parent_tool_use_id` when non-null, else [`UNKNOWN_PARENT`] when the event
+/// is marked `isSidechain: true` without one, else `None` (the main agent).
+fn subagent_parent(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    let named = obj
+        .get("parent_tool_use_id")
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty());
+    if let Some(parent) = named {
+        return Some(parent.to_string());
+    }
+    let sidechain = obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true);
+    sidechain.then(|| UNKNOWN_PARENT.to_string())
 }
 
 /// `system` events: the init event (session id, and the model the turn runs
@@ -391,16 +468,21 @@ fn parse_control_response(obj: &serde_json::Map<String, Value>) -> Option<Parsed
 }
 
 fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
+    let parent_tool_use_id = subagent_parent(obj);
+    let content = obj.get("message")?.get("content")?;
+
     // Sub-agent prompts are emitted on the parent process's stdout as `user`
     // events tagged `isSidechain: true`. They are NOT human input — dropping
     // them here prevents a spurious cornflower user bubble / new turn. The
     // sub-agent's prompt is still visible via the parent's `Agent` tool_use
-    // block (rendered expandable in the GUI).
-    if obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+    // block (rendered expandable in the GUI). The one exception: a sidechain
+    // event made only of `tool_result` blocks carries a subagent call's
+    // result, not a prompt, and is kept (tagged with its parent).
+    if obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true)
+        && !is_only_tool_results(content)
+    {
         return None;
     }
-
-    let content = obj.get("message")?.get("content")?;
 
     // Plain-string content → a human prompt (new turn), unless it's a
     // harness-injected notification (see is_harness_notification below).
@@ -424,12 +506,8 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
     // Array content → either tool_result blocks (append to current turn) or a
     // text-array human prompt.
     let arr = content.as_array()?;
-    let all_tool_results = !arr.is_empty()
-        && arr
-            .iter()
-            .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
 
-    if all_tool_results {
+    if is_only_tool_results(content) {
         let blocks: Vec<TurnBlock> = arr.iter().filter_map(parse_content_block).collect();
         return if blocks.is_empty() {
             None
@@ -438,6 +516,8 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
                 blocks,
                 context_tokens: None,
                 model: None,
+                timestamp: line_timestamp(obj),
+                parent_tool_use_id,
             })
         };
     }
@@ -470,6 +550,16 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
             .get("timestamp")
             .and_then(|x| x.as_str())
             .map(str::to_string),
+    })
+}
+
+/// `content` is a non-empty array made only of `tool_result` blocks.
+fn is_only_tool_results(content: &Value) -> bool {
+    content.as_array().is_some_and(|arr| {
+        !arr.is_empty()
+            && arr
+                .iter()
+                .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
     })
 }
 
@@ -523,7 +613,10 @@ fn parse_content_block(b: &Value) -> Option<TurnBlock> {
             if t.is_empty() {
                 None
             } else {
-                Some(TurnBlock::Text { text: t })
+                Some(TurnBlock::Text {
+                    text: t,
+                    parent_tool_use_id: None,
+                })
             }
         }
 
@@ -545,6 +638,10 @@ fn parse_content_block(b: &Value) -> Option<TurnBlock> {
                 tool_name: name.to_string(),
                 input_summary: summarize(name, &input),
                 input_full: pretty_json(&input),
+                tool_use_id: str_field(b, "id"),
+                target: target_of(name, &input),
+                ts: None,
+                parent_tool_use_id: None,
             })
         }
 
@@ -556,19 +653,36 @@ fn parse_content_block(b: &Value) -> Option<TurnBlock> {
             if is_error && text.trim() == "Answer questions?" {
                 return None;
             }
-            // Skip empty successful results — they're just ACKs.
-            if text.is_empty() && !is_error {
-                return None;
-            }
+            // An empty successful result is kept (`content: ""`): it is the
+            // only sign that a quiet call (`mkdir`, `git add`) finished.
+            // Clients fold it into its call rather than render it.
             Some(TurnBlock::ToolResult {
                 content: text,
                 is_error,
+                tool_use_id: str_field(b, "tool_use_id"),
+                ts: None,
+                parent_tool_use_id: None,
             })
         }
 
         // thinking and any other block type are dropped (parity with Swift).
         _ => None,
     }
+}
+
+fn str_field(b: &Value, key: &str) -> Option<String> {
+    b.get(key)
+        .and_then(|x| x.as_str())
+        .filter(|x| !x.is_empty())
+        .map(str::to_string)
+}
+
+/// The file a file tool works on: `input.file_path`, else `input.notebook_path`.
+fn target_of(name: &str, input: &Value) -> Option<String> {
+    if !matches!(name, "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit") {
+        return None;
+    }
+    str_field(input, "file_path").or_else(|| str_field(input, "notebook_path"))
 }
 
 fn extract_tool_result_text(b: &Value) -> String {
@@ -638,7 +752,7 @@ fn parse_ask_question(input: &Value) -> Option<TurnBlock> {
 /// submit-review skill in place of the unsupported `AskUserQuestion` tool),
 /// split it into: leading text • askQuestion card • trailing text.
 fn expand_confirm(block: TurnBlock) -> Vec<TurnBlock> {
-    let TurnBlock::Text { ref text } = block else {
+    let TurnBlock::Text { ref text, .. } = block else {
         return vec![block];
     };
 
@@ -655,7 +769,10 @@ fn expand_confirm(block: TurnBlock) -> Vec<TurnBlock> {
             let json_str = json_str.trim().trim_end_matches('`').trim();
             let pre = pending.join("\n").trim().to_string();
             if !pre.is_empty() {
-                result.push(TurnBlock::Text { text: pre });
+                result.push(TurnBlock::Text {
+                    text: pre,
+                    parent_tool_use_id: None,
+                });
             }
             pending.clear();
 
@@ -673,7 +790,10 @@ fn expand_confirm(block: TurnBlock) -> Vec<TurnBlock> {
 
     let tail = pending.join("\n").trim().to_string();
     if !tail.is_empty() {
-        result.push(TurnBlock::Text { text: tail });
+        result.push(TurnBlock::Text {
+            text: tail,
+            parent_tool_use_id: None,
+        });
     }
 
     if did_split {
@@ -799,11 +919,26 @@ pub struct SessionTranscript {
     /// Notes made before the first turn existed. They lead the blocks of the
     /// next turn to start.
     orphan_notes: Vec<TurnBlock>,
+    /// The lines being ingested are arriving now, from the running CLI, as
+    /// opposed to a replay of a stored session. Only a live transcript may
+    /// stamp a call or result that has no timestamp of its own with the
+    /// daemon's receive time; a replay never invents times.
+    live: bool,
 }
 
 impl SessionTranscript {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mark the transcript live (see the `live` field). Set it once any
+    /// scrollback has been loaded and the CLI's own output is what's ingested.
+    pub fn set_live(&mut self, live: bool) {
+        self.live = live;
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.live
     }
 
     /// Record that the operator pressed Stop, so the `result` that ends the
@@ -983,15 +1118,23 @@ impl SessionTranscript {
             ParsedLine::Blocks {
                 blocks,
                 context_tokens,
+                timestamp,
+                parent_tool_use_id,
                 ..
             } => {
                 if let Some(ct) = context_tokens {
                     self.last_context_tokens = Some(ct);
                 }
+                let ts = timestamp
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .or_else(|| self.live.then(chrono::Utc::now));
                 let mut deltas = Vec::with_capacity(blocks.len());
                 if let Some(turn) = self.turns.last_mut() {
                     let turn_id = turn.id.clone();
-                    for b in blocks {
+                    for mut b in blocks {
+                        stamp_block(&mut b, ts, parent_tool_use_id.as_deref());
                         self.retained_bytes += block_bytes(&b);
                         turn.blocks.push(b.clone());
                         deltas.push(TurnDelta::BlockAppended {
@@ -1166,19 +1309,75 @@ impl SessionTranscript {
     }
 }
 
+/// Fill in what only the line knows: when a call or result happened, and
+/// which subagent call the block came from.
+fn stamp_block(
+    block: &mut TurnBlock,
+    at: Option<chrono::DateTime<chrono::Utc>>,
+    parent: Option<&str>,
+) {
+    let tag_parent = |slot: &mut Option<String>| {
+        if slot.is_none() {
+            *slot = parent.map(str::to_string);
+        }
+    };
+    match block {
+        TurnBlock::Text {
+            parent_tool_use_id, ..
+        } => tag_parent(parent_tool_use_id),
+        TurnBlock::ToolCall {
+            ts,
+            parent_tool_use_id,
+            ..
+        }
+        | TurnBlock::ToolResult {
+            ts,
+            parent_tool_use_id,
+            ..
+        } => {
+            if ts.is_none() {
+                *ts = at;
+            }
+            tag_parent(parent_tool_use_id);
+        }
+        _ => {}
+    }
+}
+
 /// Accounting weight of one block: fixed overhead plus its own String
 /// payloads. Matches on every [`TurnBlock`] variant with no wildcard arm, so
 /// adding a variant to the wire type is a compile error here rather than a
 /// silently unmetered payload.
 fn block_bytes(b: &TurnBlock) -> usize {
     let payload = match b {
-        TurnBlock::Text { text } => text.len(),
+        TurnBlock::Text {
+            text,
+            parent_tool_use_id,
+        } => text.len() + opt_len(parent_tool_use_id),
         TurnBlock::ToolCall {
             tool_name,
             input_summary,
             input_full,
-        } => tool_name.len() + input_summary.len() + input_full.len(),
-        TurnBlock::ToolResult { content, .. } => content.len(),
+            tool_use_id,
+            target,
+            ts,
+            parent_tool_use_id,
+        } => {
+            tool_name.len()
+                + input_summary.len()
+                + input_full.len()
+                + opt_len(tool_use_id)
+                + opt_len(target)
+                + ts_bytes(ts)
+                + opt_len(parent_tool_use_id)
+        }
+        TurnBlock::ToolResult {
+            content,
+            tool_use_id,
+            ts,
+            parent_tool_use_id,
+            ..
+        } => content.len() + opt_len(tool_use_id) + ts_bytes(ts) + opt_len(parent_tool_use_id),
         TurnBlock::ResultSummary { .. } => 0,
         TurnBlock::ErrorMessage { message } => message.len(),
         TurnBlock::Note { text, .. } => text.len(),
@@ -1197,6 +1396,14 @@ fn block_bytes(b: &TurnBlock) -> usize {
         }
     };
     BLOCK_OVERHEAD + payload
+}
+
+fn opt_len(s: &Option<String>) -> usize {
+    s.as_deref().map_or(0, str::len)
+}
+
+fn ts_bytes(ts: &Option<chrono::DateTime<chrono::Utc>>) -> usize {
+    ts.map_or(0, |_| std::mem::size_of::<chrono::DateTime<chrono::Utc>>())
 }
 
 /// Accounting weight of one turn: fixed overhead, its own String fields, and
@@ -1295,9 +1502,7 @@ mod tests {
             Some(ParsedLine::Blocks { blocks, .. }) => {
                 assert_eq!(
                     blocks,
-                    vec![TurnBlock::Text {
-                        text: "hello".into()
-                    }]
+                    vec![TurnBlock::text("hello")]
                 );
             }
             other => panic!("expected Blocks, got {other:?}"),
@@ -1311,9 +1516,7 @@ mod tests {
             Some(ParsedLine::Blocks { blocks, .. }) => {
                 assert_eq!(
                     blocks,
-                    vec![TurnBlock::Text {
-                        text: "answer".into()
-                    }]
+                    vec![TurnBlock::text("answer")]
                 );
             }
             other => panic!("expected Blocks, got {other:?}"),
@@ -1420,7 +1623,10 @@ mod tests {
                 b,
                 vec![TurnBlock::ToolResult {
                     content: "ok".into(),
-                    is_error: false
+                    is_error: false,
+                    tool_use_id: Some("t1".into()),
+                    ts: None,
+                    parent_tool_use_id: None,
                 }]
             ),
             other => panic!("expected Blocks, got {other:?}"),
@@ -1529,16 +1735,12 @@ mod tests {
                 assert_eq!(b.len(), 3);
                 assert_eq!(
                     b[0],
-                    TurnBlock::Text {
-                        text: "before".into()
-                    }
+                    TurnBlock::text("before")
                 );
                 assert!(matches!(b[1], TurnBlock::AskQuestion { .. }));
                 assert_eq!(
                     b[2],
-                    TurnBlock::Text {
-                        text: "after".into()
-                    }
+                    TurnBlock::text("after")
                 );
             }
             other => panic!("expected Blocks, got {other:?}"),
@@ -1571,16 +1773,12 @@ mod tests {
                 assert_eq!(b.len(), 3);
                 assert_eq!(
                     b[0],
-                    TurnBlock::Text {
-                        text: "before".into()
-                    }
+                    TurnBlock::text("before")
                 );
                 assert!(matches!(b[1], TurnBlock::AskQuestion { .. }));
                 assert_eq!(
                     b[2],
-                    TurnBlock::Text {
-                        text: "after".into()
-                    }
+                    TurnBlock::text("after")
                 );
             }
             other => panic!("expected Blocks, got {other:?}"),
@@ -1757,15 +1955,22 @@ mod tests {
     #[test]
     fn turn_block_variants_round_trip() {
         let blocks = vec![
-            TurnBlock::Text { text: "hi".into() },
+            TurnBlock::text("hi"),
             TurnBlock::ToolCall {
                 tool_name: "Bash".into(),
                 input_summary: "ls".into(),
                 input_full: "{}".into(),
+                tool_use_id: None,
+                target: None,
+                ts: None,
+                parent_tool_use_id: None,
             },
             TurnBlock::ToolResult {
                 content: "out".into(),
                 is_error: false,
+                tool_use_id: None,
+                ts: None,
+                parent_tool_use_id: None,
             },
             TurnBlock::ResultSummary {
                 duration_ms: 10,
@@ -1796,7 +2001,7 @@ mod tests {
 
     #[test]
     fn turn_block_uses_kind_tag() {
-        let json = serde_json::to_value(TurnBlock::Text { text: "x".into() }).unwrap();
+        let json = serde_json::to_value(TurnBlock::text("x")).unwrap();
         assert_eq!(json.get("kind").unwrap(), "text");
         assert_eq!(json.get("text").unwrap(), "x");
     }
@@ -1815,7 +2020,7 @@ mod tests {
             },
             TurnDelta::BlockAppended {
                 turn_id: "t0".into(),
-                block: TurnBlock::Text { text: "a".into() },
+                block: TurnBlock::text("a"),
             },
             TurnDelta::TurnCompleted {
                 turn_id: "t0".into(),
@@ -1926,13 +2131,39 @@ mod tests {
                 for b in &turn.blocks {
                     n += BLOCK_OVERHEAD;
                     n += match b {
-                        TurnBlock::Text { text } => text.len(),
+                        TurnBlock::Text {
+                            text,
+                            parent_tool_use_id,
+                        } => text.len() + parent_tool_use_id.as_deref().map_or(0, str::len),
                         TurnBlock::ToolCall {
                             tool_name,
                             input_summary,
                             input_full,
-                        } => tool_name.len() + input_summary.len() + input_full.len(),
-                        TurnBlock::ToolResult { content, .. } => content.len(),
+                            tool_use_id,
+                            target,
+                            ts,
+                            parent_tool_use_id,
+                        } => {
+                            tool_name.len()
+                                + input_summary.len()
+                                + input_full.len()
+                                + tool_use_id.as_deref().map_or(0, str::len)
+                                + target.as_deref().map_or(0, str::len)
+                                + ts.map_or(0, |_| 12)
+                                + parent_tool_use_id.as_deref().map_or(0, str::len)
+                        }
+                        TurnBlock::ToolResult {
+                            content,
+                            tool_use_id,
+                            ts,
+                            parent_tool_use_id,
+                            ..
+                        } => {
+                            content.len()
+                                + tool_use_id.as_deref().map_or(0, str::len)
+                                + ts.map_or(0, |_| 12)
+                                + parent_tool_use_id.as_deref().map_or(0, str::len)
+                        }
                         TurnBlock::ResultSummary { .. } => 0,
                         TurnBlock::ErrorMessage { message } => message.len(),
                         TurnBlock::Note { text, .. } => text.len(),
@@ -2507,5 +2738,636 @@ mod tests {
         assert_eq!(t.turn_count(), 1);
         assert_eq!(t.prompt_count(), 1);
         assert_eq!(t.snapshot()[0].user_input, "hi");
+    }
+
+    // ── TF1: wire enrichment (ids, times, targets, subagent tags) ───────────────
+
+    const SUBAGENT: &str = include_str!("testdata/stream_subagent.jsonl");
+    const THINKING_BETWEEN_CALLS: &str =
+        include_str!("testdata/stream_thinking_between_calls.jsonl");
+
+    fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("test timestamp")
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// The blocks of the transcript's only turn, minus the end-of-turn summary.
+    fn only_turn_blocks(t: &SessionTranscript) -> Vec<TurnBlock> {
+        let turns = t.snapshot();
+        assert_eq!(turns.len(), 1, "expected exactly one turn");
+        turns[0]
+            .blocks
+            .iter()
+            .filter(|b| !matches!(b, TurnBlock::ResultSummary { .. }))
+            .cloned()
+            .collect()
+    }
+
+    fn call_parts(b: &TurnBlock) -> (&str, Option<&str>, Option<&str>, Option<&str>) {
+        match b {
+            TurnBlock::ToolCall {
+                tool_name,
+                tool_use_id,
+                target,
+                parent_tool_use_id,
+                ..
+            } => (
+                tool_name,
+                tool_use_id.as_deref(),
+                target.as_deref(),
+                parent_tool_use_id.as_deref(),
+            ),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    fn result_parts(b: &TurnBlock) -> (&str, Option<&str>, Option<&str>) {
+        match b {
+            TurnBlock::ToolResult {
+                content,
+                tool_use_id,
+                parent_tool_use_id,
+                ..
+            } => (content, tool_use_id.as_deref(), parent_tool_use_id.as_deref()),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    fn parent_of(b: &TurnBlock) -> Option<&str> {
+        match b {
+            TurnBlock::Text {
+                parent_tool_use_id, ..
+            }
+            | TurnBlock::ToolCall {
+                parent_tool_use_id, ..
+            }
+            | TurnBlock::ToolResult {
+                parent_tool_use_id, ..
+            } => parent_tool_use_id.as_deref(),
+            other => panic!("block carries no parent: {other:?}"),
+        }
+    }
+
+    fn ts_of(b: &TurnBlock) -> Option<chrono::DateTime<chrono::Utc>> {
+        match b {
+            TurnBlock::ToolCall { ts, .. } | TurnBlock::ToolResult { ts, .. } => *ts,
+            other => panic!("block carries no ts: {other:?}"),
+        }
+    }
+
+    fn first_call(blocks: &[TurnBlock]) -> &TurnBlock {
+        blocks
+            .iter()
+            .find(|b| matches!(b, TurnBlock::ToolCall { .. }))
+            .expect("a tool call")
+    }
+
+    fn first_result(blocks: &[TurnBlock]) -> &TurnBlock {
+        blocks
+            .iter()
+            .find(|b| matches!(b, TurnBlock::ToolResult { .. }))
+            .expect("a tool result")
+    }
+
+    /// A turn opened by a prompt, ready for further lines.
+    fn transcript_with_open_turn() -> SessionTranscript {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_line(0));
+        t
+    }
+
+    #[test]
+    fn a_call_and_its_result_share_the_cli_tool_use_id() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, TOOL_SUCCESS);
+        let blocks = only_turn_blocks(&t);
+
+        let (name, call_id, _, _) = call_parts(first_call(&blocks));
+        let (_, result_id, _) = result_parts(first_result(&blocks));
+
+        assert_eq!(name, "Bash");
+        assert_eq!(call_id, Some("toolu_011LGjEjhLiT5jVof1o2zFHU"));
+        assert_eq!(result_id, Some("toolu_011LGjEjhLiT5jVof1o2zFHU"));
+    }
+
+    #[test]
+    fn a_result_takes_the_timestamp_of_the_line_that_carried_it() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, TOOL_SUCCESS);
+        let blocks = only_turn_blocks(&t);
+
+        assert_eq!(
+            ts_of(first_result(&blocks)),
+            Some(utc("2026-05-30T22:38:55.755Z"))
+        );
+    }
+
+    #[test]
+    fn a_call_from_a_line_without_a_timestamp_has_no_time_unless_the_transcript_is_live() {
+        // Live `assistant` lines carry no timestamp.
+        let mut replay = SessionTranscript::new();
+        assert!(!replay.is_live(), "a new transcript is not live");
+        ingest_all(&mut replay, TOOL_SUCCESS);
+        assert_eq!(ts_of(first_call(&only_turn_blocks(&replay))), None);
+
+        let mut live = SessionTranscript::new();
+        live.set_live(true);
+        assert!(live.is_live());
+        let before = chrono::Utc::now();
+        ingest_all(&mut live, TOOL_SUCCESS);
+        let after = chrono::Utc::now();
+        let blocks = only_turn_blocks(&live);
+
+        let call_ts = ts_of(first_call(&blocks)).expect("a live call is stamped with receive time");
+        assert!(
+            before <= call_ts && call_ts <= after,
+            "{call_ts} not within {before}..{after}"
+        );
+        // A line that has its own timestamp keeps it, live or not.
+        assert_eq!(
+            ts_of(first_result(&blocks)),
+            Some(utc("2026-05-30T22:38:55.755Z"))
+        );
+    }
+
+    #[test]
+    fn a_replayed_session_gets_times_from_its_lines_and_never_invents_one() {
+        let t = transcript_from_jsonl(SCROLLBACK, 30);
+        assert!(!t.is_live(), "a stored session is a replay");
+
+        let turns = t.snapshot();
+        let blocks = &turns[1].blocks;
+        assert_eq!(
+            ts_of(first_call(blocks)),
+            Some(utc("2026-05-30T20:01:01Z"))
+        );
+        assert_eq!(
+            ts_of(first_result(blocks)),
+            Some(utc("2026-05-30T20:01:02Z"))
+        );
+
+        // Every time on the wire is one that is present in the source lines.
+        let source: Vec<chrono::DateTime<chrono::Utc>> = SCROLLBACK
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| v.get("timestamp")?.as_str().map(utc))
+            .collect();
+        let mut stamped = 0;
+        for turn in &turns {
+            for b in &turn.blocks {
+                if let TurnBlock::ToolCall { ts, .. } | TurnBlock::ToolResult { ts, .. } = b {
+                    stamped += 1;
+                    let ts = ts.expect("every line in this session has a timestamp");
+                    assert!(source.contains(&ts), "{ts} is not a source-line time");
+                }
+            }
+        }
+        assert_eq!(stamped, 2, "the call and its result");
+    }
+
+    #[test]
+    fn a_replayed_line_without_a_timestamp_stays_untimed() {
+        let jsonl = [
+            r#"{"type":"user","message":{"role":"user","content":"go"},"timestamp":"2026-05-30T20:00:00.000Z"}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"toolu_x","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"a","is_error":false,"tool_use_id":"toolu_x"}]}}"#,
+        ]
+        .join("\n");
+
+        let t = transcript_from_jsonl(&jsonl, 30);
+        let blocks = only_turn_blocks(&t);
+
+        assert_eq!(ts_of(first_call(&blocks)), None);
+        assert_eq!(ts_of(first_result(&blocks)), None);
+        assert!(!t.is_live());
+    }
+
+    #[test]
+    fn an_empty_successful_result_is_kept_with_its_id() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"","is_error":false,"tool_use_id":"toolu_quiet"}]}}"#;
+        match parse_line(line) {
+            Some(ParsedLine::Blocks { blocks, .. }) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    TurnBlock::ToolResult {
+                        content,
+                        is_error,
+                        tool_use_id,
+                        ..
+                    } => {
+                        assert_eq!(content, "");
+                        assert!(!is_error);
+                        assert_eq!(tool_use_id.as_deref(), Some("toolu_quiet"));
+                    }
+                    other => panic!("expected ToolResult, got {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_successful_result_reaches_the_transcript() {
+        let mut t = transcript_with_open_turn();
+        t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"","is_error":false,"tool_use_id":"toolu_quiet"}]}}"#);
+
+        let blocks = &t.snapshot()[0].blocks;
+        let (content, id, _) = result_parts(first_result(blocks));
+        assert_eq!(content, "");
+        assert_eq!(id, Some("toolu_quiet"));
+    }
+
+    #[test]
+    fn the_answer_questions_error_is_still_suppressed_next_to_a_kept_empty_result() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Answer questions?","is_error":true,"tool_use_id":"toolu_ask"},{"type":"tool_result","content":"","is_error":false,"tool_use_id":"toolu_quiet"}]}}"#;
+        match parse_line(line) {
+            Some(ParsedLine::Blocks { blocks, .. }) => {
+                assert_eq!(blocks.len(), 1, "only the quiet success survives");
+                assert_eq!(result_parts(&blocks[0]).1, Some("toolu_quiet"));
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    // ── subagent traffic ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn subagent_traffic_is_tagged_with_its_agent_call_and_the_main_agents_is_not() {
+        // stream_subagent.jsonl is SYNTHETIC (hand-written to the shape the CLI
+        // is believed to emit; JSONL has no comments, so it is flagged here).
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, SUBAGENT);
+        let blocks = only_turn_blocks(&t);
+        const AGENT: Option<&str> = Some("toolu_agent1");
+
+        assert_eq!(blocks.len(), 10, "{blocks:#?}");
+
+        // Main agent: prose, the Agent call.
+        assert!(matches!(&blocks[0], TurnBlock::Text { text, .. } if text == "Delegating the survey."));
+        assert_eq!(parent_of(&blocks[0]), None);
+        assert_eq!(call_parts(&blocks[1]), ("Agent", AGENT, None, None));
+
+        // Subagent: text, Read call, its result.
+        assert!(matches!(&blocks[2], TurnBlock::Text { text, .. } if text == "Reading the config."));
+        assert_eq!(parent_of(&blocks[2]), AGENT);
+        assert_eq!(
+            call_parts(&blocks[3]),
+            ("Read", Some("toolu_sub_read"), Some("/repo/src/config.rs"), AGENT)
+        );
+        assert_eq!(
+            result_parts(&blocks[4]),
+            ("fn config() {}", Some("toolu_sub_read"), AGENT)
+        );
+
+        // Subagent: text, Bash call, its quiet (empty) result.
+        assert!(matches!(&blocks[5], TurnBlock::Text { text, .. } if text == "Staging the notes."));
+        assert_eq!(parent_of(&blocks[5]), AGENT);
+        assert_eq!(
+            call_parts(&blocks[6]),
+            ("Bash", Some("toolu_sub_bash"), None, AGENT)
+        );
+        assert_eq!(result_parts(&blocks[7]), ("", Some("toolu_sub_bash"), AGENT));
+
+        // The Agent call's own result and the main agent's closing prose.
+        assert_eq!(
+            result_parts(&blocks[8]),
+            ("The config is one small function.", Some("toolu_agent1"), None)
+        );
+        assert!(matches!(&blocks[9], TurnBlock::Text { text, .. } if text.starts_with("The subagent found")));
+        assert_eq!(parent_of(&blocks[9]), None);
+    }
+
+    #[test]
+    fn subagent_results_carry_the_times_of_their_lines() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, SUBAGENT);
+        let blocks = only_turn_blocks(&t);
+
+        assert_eq!(ts_of(&blocks[4]), Some(utc("2026-06-01T10:00:05Z")));
+        assert_eq!(ts_of(&blocks[7]), Some(utc("2026-06-01T10:00:08Z")));
+        assert_eq!(ts_of(&blocks[8]), Some(utc("2026-06-01T10:00:09Z")));
+    }
+
+    #[test]
+    fn a_subagent_prompt_opens_no_turn_and_the_fixture_makes_one_turn() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, SUBAGENT);
+
+        assert_eq!(t.turn_count(), 1);
+        assert_eq!(t.prompt_count(), 1);
+        assert_eq!(
+            t.snapshot()[0].user_input,
+            "Survey the config and tell me what you find."
+        );
+        assert!(t.snapshot()[0].is_complete);
+    }
+
+    #[test]
+    fn a_sidechain_prompt_alone_opens_no_turn() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(r#"{"type":"user","message":{"role":"user","content":"Do X."},"isSidechain":true,"parent_tool_use_id":"toolu_agent1"}"#);
+
+        assert_eq!(t.turn_count(), 0);
+        assert_eq!(t.prompt_count(), 0);
+    }
+
+    #[test]
+    fn a_sidechain_text_array_prompt_is_dropped() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Do X."}]},"isSidechain":true,"parent_tool_use_id":"toolu_agent1"}"#;
+        assert_eq!(parse_line(line), None);
+    }
+
+    #[test]
+    fn a_sidechain_user_event_mixing_text_and_tool_results_is_dropped() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"out","is_error":false,"tool_use_id":"toolu_s"},{"type":"text","text":"and a prompt"}]},"isSidechain":true,"parent_tool_use_id":"toolu_agent1"}"#;
+        assert_eq!(parse_line(line), None);
+    }
+
+    #[test]
+    fn a_sidechain_event_with_no_parent_id_is_tagged_with_the_unknown_marker() {
+        let mut t = transcript_with_open_turn();
+        t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"sub says"},{"type":"tool_use","id":"toolu_s1","name":"Bash","input":{"command":"ls"}}]},"isSidechain":true}"#);
+        t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"out","is_error":false,"tool_use_id":"toolu_s1"}]},"isSidechain":true}"#);
+
+        let blocks = &t.snapshot()[0].blocks;
+        assert_eq!(blocks.len(), 3);
+        for b in blocks {
+            assert_eq!(parent_of(b), Some("?"), "{b:?}");
+        }
+        assert_eq!(UNKNOWN_PARENT, "?");
+    }
+
+    #[test]
+    fn a_non_sidechain_result_that_names_a_parent_is_tagged() {
+        let mut t = transcript_with_open_turn();
+        t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"out","is_error":false,"tool_use_id":"toolu_s1"}]},"parent_tool_use_id":"toolu_agent1"}"#);
+
+        let blocks = &t.snapshot()[0].blocks;
+        assert_eq!(result_parts(&blocks[0]), ("out", Some("toolu_s1"), Some("toolu_agent1")));
+    }
+
+    #[test]
+    fn a_null_parent_and_no_sidechain_flag_is_the_main_agent() {
+        let mut t = transcript_with_open_turn();
+        t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"mine"}]},"parent_tool_use_id":null,"isSidechain":false}"#);
+
+        assert_eq!(parent_of(&t.snapshot()[0].blocks[0]), None);
+    }
+
+    // ── thinking between calls ───────────────────────────────────────────────────
+
+    #[test]
+    fn two_calls_separated_only_by_thinking_end_up_adjacent() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, THINKING_BETWEEN_CALLS);
+        let blocks = only_turn_blocks(&t);
+
+        let call_positions: Vec<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| matches!(b, TurnBlock::ToolCall { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(call_positions.len(), 2);
+        assert_eq!(
+            call_positions[1],
+            call_positions[0] + 1,
+            "no block (thinking is dropped) sits between the calls: {blocks:#?}"
+        );
+        assert_eq!(call_parts(&blocks[call_positions[0]]).1, Some("toolu_first"));
+        assert_eq!(call_parts(&blocks[call_positions[1]]).1, Some("toolu_second"));
+        assert!(
+            blocks.iter().all(|b| !matches!(b, TurnBlock::Note { .. })),
+            "thinking must not surface as another kind of block"
+        );
+    }
+
+    // ── target ───────────────────────────────────────────────────────────────────
+
+    fn call_target(tool: &str, input: &str) -> Option<String> {
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_t","name":"{tool}","input":{input}}}]}}}}"#
+        );
+        match parse_line(&line) {
+            Some(ParsedLine::Blocks { blocks, .. }) => match &blocks[0] {
+                TurnBlock::ToolCall { target, .. } => target.clone(),
+                other => panic!("expected ToolCall, got {other:?}"),
+            },
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_tools_report_the_full_path_they_work_on() {
+        for tool in ["Read", "Write", "Edit", "MultiEdit"] {
+            assert_eq!(
+                call_target(tool, r#"{"file_path":"/repo/deep/dir/file.rs"}"#).as_deref(),
+                Some("/repo/deep/dir/file.rs"),
+                "{tool}"
+            );
+        }
+        assert_eq!(
+            call_target("NotebookEdit", r#"{"notebook_path":"/repo/nb/run.ipynb"}"#).as_deref(),
+            Some("/repo/nb/run.ipynb")
+        );
+    }
+
+    #[test]
+    fn tools_that_are_not_file_tools_report_no_target() {
+        assert_eq!(call_target("Bash", r#"{"command":"ls"}"#), None);
+        assert_eq!(call_target("Bash", r#"{"command":"ls","file_path":"/x"}"#), None);
+        assert_eq!(call_target("Grep", r#"{"pattern":"x","path":"/repo"}"#), None);
+        assert_eq!(call_target("Read", r#"{}"#), None);
+    }
+
+    // ── serde: additive, optional fields ─────────────────────────────────────────
+
+    fn fully_tagged_blocks() -> Vec<TurnBlock> {
+        let ts = Some(utc("2026-06-01T10:00:05.250Z"));
+        vec![
+            TurnBlock::Text {
+                text: "hi".into(),
+                parent_tool_use_id: Some("toolu_agent1".into()),
+            },
+            TurnBlock::ToolCall {
+                tool_name: "Read".into(),
+                input_summary: "a.rs".into(),
+                input_full: "{}".into(),
+                tool_use_id: Some("toolu_c".into()),
+                target: Some("/repo/a.rs".into()),
+                ts,
+                parent_tool_use_id: Some("toolu_agent1".into()),
+            },
+            TurnBlock::ToolResult {
+                content: "out".into(),
+                is_error: true,
+                tool_use_id: Some("toolu_c".into()),
+                ts,
+                parent_tool_use_id: Some("?".into()),
+            },
+        ]
+    }
+
+    #[test]
+    fn enriched_blocks_round_trip_through_json() {
+        for block in fully_tagged_blocks() {
+            let json = serde_json::to_string(&block).unwrap();
+            let back: TurnBlock = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, block, "{json}");
+        }
+    }
+
+    #[test]
+    fn enriched_blocks_use_the_documented_key_names() {
+        let blocks = fully_tagged_blocks();
+        let call = serde_json::to_value(&blocks[1]).unwrap();
+        assert_eq!(call["tool_use_id"], "toolu_c");
+        assert_eq!(call["target"], "/repo/a.rs");
+        assert_eq!(call["parent_tool_use_id"], "toolu_agent1");
+        let ts = call["ts"].as_str().expect("ts is an RFC 3339 string");
+        assert_eq!(utc(ts), utc("2026-06-01T10:00:05.250Z"));
+
+        let result = serde_json::to_value(&blocks[2]).unwrap();
+        assert_eq!(result["tool_use_id"], "toolu_c");
+        assert!(result["ts"].is_string());
+        assert_eq!(result["parent_tool_use_id"], "?");
+
+        let text = serde_json::to_value(&blocks[0]).unwrap();
+        assert_eq!(text["parent_tool_use_id"], "toolu_agent1");
+    }
+
+    #[test]
+    fn blocks_from_before_the_enrichment_still_deserialize_with_the_new_fields_unset() {
+        let call: TurnBlock = serde_json::from_str(
+            r#"{"kind":"tool_call","tool_name":"Bash","input_summary":"ls","input_full":"{}"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            call,
+            TurnBlock::ToolCall {
+                tool_name: "Bash".into(),
+                input_summary: "ls".into(),
+                input_full: "{}".into(),
+                tool_use_id: None,
+                target: None,
+                ts: None,
+                parent_tool_use_id: None,
+            }
+        );
+
+        let result: TurnBlock =
+            serde_json::from_str(r#"{"kind":"tool_result","content":"x","is_error":false}"#)
+                .unwrap();
+        assert_eq!(
+            result,
+            TurnBlock::ToolResult {
+                content: "x".into(),
+                is_error: false,
+                tool_use_id: None,
+                ts: None,
+                parent_tool_use_id: None,
+            }
+        );
+
+        let text: TurnBlock = serde_json::from_str(r#"{"kind":"text","text":"x"}"#).unwrap();
+        assert_eq!(text, TurnBlock::text("x"));
+    }
+
+    #[test]
+    fn untagged_blocks_serialize_with_exactly_the_pre_enrichment_keys() {
+        fn keys(b: &TurnBlock) -> Vec<String> {
+            let mut k: Vec<String> = serde_json::to_value(b)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            k.sort();
+            k
+        }
+        let call = TurnBlock::ToolCall {
+            tool_name: "Bash".into(),
+            input_summary: "ls".into(),
+            input_full: "{}".into(),
+            tool_use_id: None,
+            target: None,
+            ts: None,
+            parent_tool_use_id: None,
+        };
+        let result = TurnBlock::ToolResult {
+            content: "x".into(),
+            is_error: false,
+            tool_use_id: None,
+            ts: None,
+            parent_tool_use_id: None,
+        };
+
+        assert_eq!(keys(&call), ["input_full", "input_summary", "kind", "tool_name"]);
+        assert_eq!(keys(&result), ["content", "is_error", "kind"]);
+        assert_eq!(keys(&TurnBlock::text("x")), ["kind", "text"]);
+    }
+
+    // ── byte accounting of the new fields ────────────────────────────────────────
+
+    fn call_line(extra: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use",{extra}"name":"Bash","input":{{"command":"same"}}}}]}}}}"#
+        )
+    }
+
+    fn retained_after(setup: impl FnOnce(&mut SessionTranscript), line: &str) -> usize {
+        let mut t = transcript_with_open_turn();
+        setup(&mut t);
+        let before = t.byte_len();
+        t.ingest_line(line);
+        t.byte_len() - before
+    }
+
+    #[test]
+    fn identity_time_and_parentage_all_count_toward_retained_bytes() {
+        let plain = retained_after(|_| {}, &call_line(""));
+        let with_id = retained_after(|_| {}, &call_line(r#""id":"toolu_0123456789","#));
+        assert!(with_id > plain, "tool_use_id must be counted: {with_id} vs {plain}");
+
+        let live = retained_after(|t| t.set_live(true), &call_line(""));
+        assert!(live > plain, "a stamped ts must be counted: {live} vs {plain}");
+
+        let sidechain = retained_after(
+            |_| {},
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"same"}}]},"parent_tool_use_id":"toolu_agent_long_id"}"#,
+        );
+        assert!(sidechain > plain, "parent id must be counted: {sidechain} vs {plain}");
+    }
+
+    #[test]
+    fn a_target_counts_toward_retained_bytes() {
+        let call = |target: Option<&str>| TurnBlock::ToolCall {
+            tool_name: "Read".into(),
+            input_summary: "a.rs".into(),
+            input_full: "{}".into(),
+            tool_use_id: None,
+            target: target.map(str::to_string),
+            ts: None,
+            parent_tool_use_id: None,
+        };
+        assert!(block_bytes(&call(Some("/a/long/path/to/a.rs"))) > block_bytes(&call(None)));
+    }
+
+    #[test]
+    fn retained_bytes_still_match_a_full_recount_with_the_new_fields_present() {
+        let mut t = SessionTranscript::new();
+        t.set_live(true);
+        ingest_all(&mut t, SUBAGENT);
+        ingest_all(&mut t, THINKING_BETWEEN_CALLS);
+        ingest_all(&mut t, TOOL_SUCCESS);
+        // Make sure the interesting fields really are on the wire here.
+        let tagged = t.snapshot().iter().flat_map(|turn| turn.blocks.clone()).any(|b| {
+            matches!(&b, TurnBlock::ToolCall { target: Some(_), ts: Some(_), parent_tool_use_id: Some(_), tool_use_id: Some(_), .. })
+        });
+        assert!(tagged);
+
+        assert_eq!(t.byte_len(), recount_bytes(&t));
     }
 }

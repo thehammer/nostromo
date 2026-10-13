@@ -1962,7 +1962,7 @@ mod tests {
             id: "t0".into(),
             user_input: "hi".into(),
             timestamp: None,
-            blocks: vec![note_block(), crate::ipc::stream_json::TurnBlock::Text { text: "hello".into() }],
+            blocks: vec![note_block(), crate::ipc::stream_json::TurnBlock::text("hello")],
             is_complete: true,
         }
     }
@@ -1980,7 +1980,7 @@ mod tests {
         let turns = ServerMsg::SessionTurns { tag: "cody-1".into(), turns: vec![turn_with_note()] };
         match without_notes_unless_model(turns.clone(), &[Topic::Activity]) {
             Some(ServerMsg::SessionTurns { turns, .. }) => {
-                assert_eq!(turns[0].blocks, vec![crate::ipc::stream_json::TurnBlock::Text { text: "hello".into() }]);
+                assert_eq!(turns[0].blocks, vec![crate::ipc::stream_json::TurnBlock::text("hello")]);
             }
             other => panic!("{other:?}"),
         }
