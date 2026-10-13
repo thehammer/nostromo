@@ -4750,6 +4750,50 @@ mod model_switching {
         assert_eq!(status, ModelRequestStatus::Unchanged, "{code:?}");
     }
 
+    // FND-1: `FocusMeta.initial_model` / `initial_effort` are a user's choice in the Mac's create
+    // sheet. A network peer's registry push is refused whole, so the choice it carries is never read.
+    #[tokio::test]
+    async fn a_tcp_registry_push_carrying_an_initial_model_changes_no_model_file_but_a_unix_one_records_it() {
+        isolated_activity_log();
+        let h = spawn_server().await;
+        seed_model_state(&h);
+        let paths = paths_of(&h);
+        let files_before = model_files(&paths);
+        let focus_models_before = std::fs::read(&paths.focus_models).expect("seeded focus-models.json");
+        let (mut unix, _) = h.unix(vec![]).await;
+        let (mut tcp, _) = h.tcp(vec![]).await;
+        let mut pushed = meta("tcp-model-grab", "Grab", "cody", false);
+        pushed.initial_model = Some("opus".into());
+        pushed.initial_effort = Some("max".into());
+        let push = json!({"type": "focus_registry_push", "focuses": [serde_json::to_value(&pushed).unwrap()]});
+        assert_eq!(push["focuses"][0]["initial_model"], "opus", "the wire carries the choice");
+
+        send_json(&mut tcp, &push).await;
+        let frames = raw_sync(&mut tcp).await.expect("the connection stays up");
+
+        assert!(
+            frames.iter().any(|f| f["type"] == "error" && f["message"].as_str().is_some_and(|m| m.contains("requires_secure_connection"))),
+            "the push is refused: {frames:?}"
+        );
+        assert_eq!(model_files(&paths), files_before, "no model file changed");
+        assert_eq!(
+            std::fs::read(&paths.focus_models).expect("focus-models.json"),
+            focus_models_before,
+            "focus-models.json is byte-identical"
+        );
+        assert!(
+            store::focus_record(&paths.focus_models, "tcp-model-grab").is_none(),
+            "no record for the pushed focus"
+        );
+
+        // Control: the same push from the Mac's Unix socket records the choice, so the refusal above
+        // is the transport's doing and not a push that never reaches the handler.
+        send(&mut unix, &ClientMsg::FocusRegistryPush { focuses: vec![pushed] }).await;
+        let _ = sync(&mut unix).await;
+        let record = store::focus_record(&paths.focus_models, "tcp-model-grab").expect("a local push records the choice");
+        assert_eq!((record.model.as_str(), record.effort.as_deref(), record.source), ("opus", Some("max"), ModelSource::Focus));
+    }
+
     #[tokio::test]
     async fn a_tcp_client_can_read_the_model_of_a_focus_it_may_see_but_not_of_a_sensitive_one() {
         isolated_activity_log();

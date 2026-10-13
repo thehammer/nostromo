@@ -316,8 +316,21 @@ enum ModelPresentation {
         return "\(requested) was requested, but this session is running \(running)"
     }
 
+    static let agentDefaultsLinkTitle = "Agent defaults\u{2026}"
+
     /// "Use for new Claudia focuses".
     static func footerTitle(agent: String) -> String {
-        "Use for new \(agent.prefix(1).uppercased() + agent.dropFirst()) focuses"
+        "Use for new \(displayName(agent: agent)) focuses"
+    }
+
+    /// The confirmation shown when the popup's "Use for new <Agent> focuses" box was ticked and
+    /// the choice was already what the focus runs, so nothing else on screen changes:
+    /// "Sonnet is now the default for new Claudia focuses".
+    static func defaultSetNotice(agent: String, choice: String) -> String {
+        "\(choice) is now the default for new \(displayName(agent: agent)) focuses"
+    }
+
+    private static func displayName(agent: String) -> String {
+        agent.prefix(1).uppercased() + agent.dropFirst()
     }
 }

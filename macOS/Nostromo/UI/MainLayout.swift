@@ -291,7 +291,8 @@ class MainLayout: NSView {
         guard let window else { return }
         let sheet = CreateFocusSheet { [weak self] focus in
             guard let self else { return }
-            FocusCreation.commit(focus, store: FocusStore.shared) { self.switchFocus($0) }
+            FocusCreation.commit(focus, store: FocusStore.shared,
+                                 flushRegistry: { AppStore.shared.pushFocusRegistry() }) { self.switchFocus($0) }
             self.presentedSheet = nil
         }
         presentedSheet = sheet  // retain for the sheet's lifetime

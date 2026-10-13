@@ -37,6 +37,7 @@ mod message_fence;
 const FAKE_CLAUDE_SCRIPT: &str = r#"#!/bin/sh
 name=""
 agent=""
+argv=$(printf '%s\n' "$@")
 while [ $# -gt 0 ]; do
   if [ "$1" = "-n" ]; then name="$2"; fi
   if [ "$1" = "--agent" ]; then agent="$2"; fi
@@ -48,6 +49,7 @@ if [ "$agent" = "seed-die" ]; then exit 0; fi
 # the log file name keeps only [A-Za-z0-9._-], at most 120 bytes.
 safe=$(printf '%s' "$name" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_' | LC_ALL=C cut -c1-120)
 log="@LOGDIR@/$safe.stdin"
+printf '%s\n' "$argv" > "@LOGDIR@/$safe.argv"
 alog="@LOGDIR@/agent.$agent.stdin"
 echo START >> "$log"
 echo START >> "$alog"
@@ -112,6 +114,21 @@ async fn first_agent_message(agent: &str) -> String {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("fake claude `--agent {agent}` never received a message");
+}
+
+/// The command-line arguments the fake claude named `view` was started with, one per entry.
+fn fake_argv(view: &str) -> Vec<String> {
+    let dir = FAKE_CLAUDE_DIR.get().expect("install_fake_claude ran");
+    let safe: String = view
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') { b as char } else { '_' })
+        .take(120)
+        .collect();
+    std::fs::read_to_string(dir.join(format!("{safe}.argv")))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn fake_starts(view: &str) -> usize {
@@ -917,6 +934,109 @@ async fn the_mcp_handler_keeps_its_error_codes() {
             ["error"],
         "project_required"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A model named by a tool is checked, never applied (until M5 adds approval)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// No agent definitions: the focus's agent declares no model, so nothing but a leak of the
+/// tool's choice could write a model record for it.
+fn without_agent_models(env: &mut Env) {
+    let agents = env.dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    env.set_env("NOSTROMO_AGENTS_DIR", agents.as_os_str());
+}
+
+fn focus_models_file(env: &Env) -> String {
+    let paths = nostromo::model::ModelPaths::beside(&env.dir.path().join("sessions.json"));
+    std::fs::read_to_string(paths.focus_models).unwrap_or_default()
+}
+
+/// The new focus started with neither flag the tool asked for, and recorded nothing for it.
+fn assert_tool_choice_not_applied(env: &Env, title: &str, tag: &str) {
+    let argv = fake_argv(title);
+    assert!(argv.iter().any(|a| a == "--agent"), "the fake logged the start's arguments: {argv:?}");
+    assert!(
+        !argv.windows(2).any(|w| w[0] == "--model" && w[1] == "opus"),
+        "a tool's model must not reach --model: {argv:?}"
+    );
+    assert!(
+        !argv.windows(2).any(|w| w[0] == "--effort" && w[1] == "max"),
+        "a tool's effort must not reach --effort: {argv:?}"
+    );
+    let paths = nostromo::model::ModelPaths::beside(&env.dir.path().join("sessions.json"));
+    assert!(
+        nostromo::model::store::focus_record(&paths.focus_models, tag).is_none(),
+        "no model record (and certainly none with source focus) for {tag}: {}",
+        focus_models_file(env)
+    );
+    let stored = focus_models_file(env);
+    assert!(!stored.contains("opus") && !stored.contains("max"), "the store holds the tool's choice: {stored}");
+}
+
+#[tokio::test]
+async fn a_model_and_effort_in_the_mcp_arguments_are_accepted_but_not_applied() {
+    let mut env = Env::new().await;
+    without_agent_models(&mut env);
+    let title = "cfi-model-dropped-mcp";
+
+    let out = create_focus(
+        &env.state,
+        &json!({"agent": "cody", "title": title, "model": "opus", "effort": "max"}),
+        None,
+    )
+    .await;
+
+    assert_eq!(out["kind"], "created", "valid values parse and validate: {out}");
+    wait_for_log(title, "START", |l| l.contains("START")).await;
+    let tag = out["focus_id"].as_str().expect("a focus id").to_owned();
+    assert_tool_choice_not_applied(&env, title, &tag);
+}
+
+#[tokio::test]
+async fn a_model_and_effort_on_a_core_request_are_accepted_but_not_applied() {
+    let mut env = Env::new().await;
+    without_agent_models(&mut env);
+    let title = "cfi-model-dropped-core";
+
+    let outcome = env
+        .core(CreateFocusRequest {
+            model: Some("opus".into()),
+            effort: Some("max".into()),
+            ..req("cody", title)
+        })
+        .await
+        .expect("valid values validate");
+
+    assert_eq!(outcome.kind, OutcomeKind::Created);
+    wait_for_log(title, "START", |l| l.contains("START")).await;
+    assert_tool_choice_not_applied(&env, title, &tag_of(&outcome));
+}
+
+#[tokio::test]
+async fn an_unusable_model_or_effort_is_still_refused_and_nothing_is_spawned() {
+    let env = Env::new().await;
+    let cases = [
+        ("cfi-bad-model-space", json!({"model": "opus now"})),
+        ("cfi-bad-model-flag", json!({"model": "--model"})),
+        ("cfi-bad-model-long", json!({"model": "m".repeat(65)})),
+        ("cfi-bad-effort", json!({"model": "opus", "effort": "extreme"})),
+    ];
+    for (title, extra) in cases {
+        let mut args = json!({"agent": "cody", "title": title});
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+
+        let out = create_focus(&env.state, &args, None).await;
+
+        assert_eq!(out["error"], "invalid_args", "{args}: {out}");
+        assert!(
+            out["detail"].as_str().is_some_and(|m| m.contains("model must be a model name")),
+            "the existing message: {out}"
+        );
+        assert_eq!(fake_starts(title), 0, "{args} must not start a session");
+    }
+    assert!(env.session_mgr.lock().unwrap().list().is_empty(), "no session was spawned");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

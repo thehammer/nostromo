@@ -697,6 +697,98 @@ impl SessionManager {
             })
     }
 
+    /// Write the model record of a **new** focus under `tag`, resolved by
+    /// precedence (`explicit` > per-agent default > the agent's declared
+    /// `model:` > CLI default; see [`model_store::resolve_for_new_focus`]).
+    ///
+    /// With `explicit` the focus is new by definition (a daemon-created one),
+    /// so any stale record under the reused tag is replaced. Without it the
+    /// record is written only when the tag has none, so an existing focus's
+    /// record is never touched by a later change of a default.
+    ///
+    /// **`explicit` is a user's choice and nothing else.** Only the Mac's create
+    /// sheet may supply one (it arrives as `FocusMeta.initial_*`, through
+    /// [`Self::apply_initial_models`], from a local, non-network client). Nothing
+    /// a tool, an agent, a script or a network peer sends may reach this
+    /// parameter: a model it names could be a costlier upgrade that nobody
+    /// approved. M5 adds that approval; until it lands, any other caller
+    /// must pass `None`. (It is `pub` only because the integration tests drive
+    /// it; production passes `None` at the one spawn site.)
+    ///
+    /// Returns the declared model when that is what was resolved: the record
+    /// is then an observed one (a restart passes no `--model`), but the first
+    /// start passes it. A CLI-default result writes nothing; the first report
+    /// records what ran.
+    pub fn record_new_focus_model(
+        &self,
+        tag: &str,
+        agent: &str,
+        explicit: Option<&ModelTarget>,
+    ) -> Option<ModelTarget> {
+        let hub = &self.model_hub;
+        if explicit.is_none()
+            && (hub.stored_target(tag).is_some()
+                || model_store::focus_record(&hub.paths.focus_models, tag).is_some())
+        {
+            return None;
+        }
+        let (model, effort, source) =
+            model_store::resolve_for_new_focus(&hub.paths.defaults, agent, explicit);
+        let record = model.map(|model| FocusModelRecord {
+            model,
+            effort,
+            source,
+            ..FocusModelRecord::default()
+        });
+        if record.is_none() && explicit.is_none() {
+            return None;
+        }
+        let target = record.as_ref().map(FocusModelRecord::target);
+        if let Err(e) = model_store::update_focus_record(&hub.paths.focus_models, tag, |_| record) {
+            warn!(tag, "could not record the new focus's model: {e:#}");
+            return None;
+        }
+        target.filter(|_| source == ModelSource::AgentDeclared)
+    }
+
+    /// The model record a client chose for a focus it is creating
+    /// (`FocusMeta.initial_*`), written when the tag has no record yet. A
+    /// choice the CLI could never accept is ignored. Later pushes repeat the
+    /// choice and find the record, so they change nothing.
+    pub fn apply_initial_models(&self, focuses: &[crate::ipc::protocol::FocusMeta]) {
+        for focus in focuses {
+            let Some(model) = focus.initial_model.as_deref() else {
+                continue;
+            };
+            let target = ModelTarget {
+                model: model.to_owned(),
+                effort: focus.initial_effort.clone(),
+            };
+            if !model_store::is_plausible_choice(&target) {
+                warn!(tag = %focus.tag, "ignoring an unusable initial model choice");
+                continue;
+            }
+            let hub = &self.model_hub;
+            if hub.stored_target(&focus.tag).is_some()
+                || model_store::focus_record(&hub.paths.focus_models, &focus.tag).is_some()
+            {
+                continue;
+            }
+            let written =
+                model_store::update_focus_record(&hub.paths.focus_models, &focus.tag, |_| {
+                    Some(FocusModelRecord {
+                        model: target.model,
+                        effort: target.effort,
+                        source: ModelSource::Focus,
+                        ..FocusModelRecord::default()
+                    })
+                });
+            if let Err(e) = written {
+                warn!(tag = %focus.tag, "could not record the chosen model: {e:#}");
+            }
+        }
+    }
+
     /// The model a spawn of `tag` runs on, and the note to make about it.
     ///
     /// Only a *chosen* record (a switch, a creation choice, a per-agent

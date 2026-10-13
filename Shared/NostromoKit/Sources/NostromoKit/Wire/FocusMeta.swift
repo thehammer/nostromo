@@ -16,6 +16,10 @@ public struct FocusMeta: Decodable, Identifiable, Equatable {
     public let org:            String?
     public let isBuiltIn:      Bool
     public let sessionSummary: String?
+    /// The model and effort chosen when the focus was created. The daemon reads them only to
+    /// create the focus's model record and omits them everywhere else.
+    public var initialModel:   String? = nil
+    public var initialEffort:  String? = nil
 
     enum CodingKeys: String, CodingKey {
         case tag
@@ -25,6 +29,8 @@ public struct FocusMeta: Decodable, Identifiable, Equatable {
         case org
         case isBuiltIn      = "is_built_in"
         case sessionSummary = "session_summary"
+        case initialModel   = "initial_model"
+        case initialEffort  = "initial_effort"
     }
 
     /// Org bucket for grouping; defaults like the Mac's `effectiveOrg`.

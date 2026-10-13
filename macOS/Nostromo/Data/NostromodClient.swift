@@ -842,6 +842,10 @@ class NostromodClient {
         let org: String?
         let is_built_in: Bool
         let session_summary: String?
+        /// The model chosen when the focus was created; the daemon reads it only to create the
+        /// focus's model record. Omitted from the JSON when nil.
+        var initial_model: String? = nil
+        var initial_effort: String? = nil
     }
 
     private struct FocusRegistryPushMsg: Encodable {

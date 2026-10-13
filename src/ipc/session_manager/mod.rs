@@ -725,10 +725,21 @@ impl SessionManager {
         );
         // The focus's recorded model, read at every spawn (restart and crash
         // recovery come through here too). No record: no flag, as before.
+        // A start that resumes nothing is a new focus (or one that never ran):
+        // resolve its model by precedence and record it. A resumed focus keeps
+        // what it has, whatever the defaults say now.
         let (model, spawn_note) = if self.restrictions.contains_key(&tag) {
             (None, None)
         } else {
-            self.spawn_model(&tag, &agent_name)
+            let declared = if resume {
+                None
+            } else {
+                self.record_new_focus_model(&tag, &agent_name, None)
+            };
+            match declared {
+                Some(target) => (Some(target), None),
+                None => self.spawn_model(&tag, &agent_name),
+            }
         };
         args.extend(model_args(model.as_ref()));
 
