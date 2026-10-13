@@ -102,7 +102,9 @@ final class TabRegionView: NSView {
         stripStack.orientation = .horizontal
         stripStack.spacing = 0
         stripStack.distribution = compactTabs ? .gravityAreas : .fillEqually
-        if compactTabs { stripStack.alignment = .top }
+        if compactTabs {
+            stripStack.alignment = .top
+        }
         stripStack.translatesAutoresizingMaskIntoConstraints = false
 
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -150,7 +152,11 @@ final class TabRegionView: NSView {
         ])
         if compactTabs {
             let preferred = button.widthAnchor.constraint(equalToConstant: Self.compactTabWidth)
-            preferred.priority = .init(740)          // yields when many tabs crowd the strip
+            // Must stay BELOW NSLayoutPriorityWindowSizeStayPut (500), or Auto Layout RESIZES THE
+            // WINDOW to fit the tabs (6 job tabs made a 1920-pt display's window 3697 pt wide), and
+            // below the stack's own clipping resistance (default 750) and the label's compression
+            // resistance (200, below), so many tabs SHRINK toward 70 pt instead of being clipped.
+            preferred.priority = .init(240)
             preferred.isActive = true
             button.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
         }
@@ -292,11 +298,17 @@ private final class TabButtonView: NSView {
         labelField.font = Theme.tabFont
         labelField.textColor = Theme.fg
         labelField.lineBreakMode = .byTruncatingTail
+        // A long title must TRUNCATE, never widen the tab: a text field's intrinsic width
+        // otherwise outranks the compact tab's preferred width (priority 740), so Mother's job
+        // titles (long sentences) made each tab hundreds of points wide and a handful of open
+        // jobs pushed the whole window layout off the right edge of the display.
+        labelField.setContentCompressionResistancePriority(.init(200), for: .horizontal)
         labelField.translatesAutoresizingMaskIntoConstraints = false
 
         captionField.font = NSFont.systemFont(ofSize: 10, weight: .regular)
         captionField.textColor = Theme.fgMuted
         captionField.lineBreakMode = .byTruncatingTail
+        captionField.setContentCompressionResistancePriority(.init(200), for: .horizontal)
         captionField.isHidden = true
         captionField.translatesAutoresizingMaskIntoConstraints = false
 
