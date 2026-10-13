@@ -2924,14 +2924,29 @@ async fn a_start_after_a_restart_judges_a_retired_full_name_against_the_probe_to
     assert!(!start.iter().any(|a| a == "claude-haiku-3-0"), "the retired full name is not passed: {start:?}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn when_the_first_probe_fails_the_start_passes_no_model_flag_and_leaves_the_record_alone() {
-    let mut rig = Rig::new().await;
+/// From now on the installed CLI answers a probe with no models at all: a probe that fails.
+fn cli_offers_no_models(rig: &mut Rig) {
     let mut empty = fixture_json();
     empty["response"]["response"]["models"] = json!([]);
     let path = rig.fake.join("empty-catalog.json");
     std::fs::write(&path, serde_json::to_vec(&empty).unwrap()).unwrap();
     rig.env("FAKE_CATALOG", Some(path.into()));
+}
+
+/// From now on the installed CLI answers a probe with the fixture catalogue again: a probe that succeeds.
+fn cli_offers_the_fixture_catalogue(rig: &mut Rig) {
+    rig.env("FAKE_CATALOG", Some(fixture_path().into()));
+}
+
+/// The argument vectors of the focus sessions the fake was started as, oldest first (probes left out).
+fn session_starts(rig: &Rig) -> Vec<Vec<String>> {
+    rig.runs().into_iter().filter(|r| is_start_of_session(r)).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn when_the_first_probe_fails_the_start_passes_no_model_flag_and_leaves_the_record_alone() {
+    let mut rig = Rig::new().await;
+    cli_offers_no_models(&mut rig);
     rig.declare_agent("declarer", "sonnet");
     rig.seed(TAG, "opus", Some("high"));
     let before = rig.record(TAG).unwrap();
@@ -2945,16 +2960,81 @@ async fn when_the_first_probe_fails_the_start_passes_no_model_flag_and_leaves_th
     let start = runs.iter().find(|r| is_start_of_session(r)).expect("the session started");
     assert_eq!(runs.len(), 2, "a probe was attempted before the start: {runs:?}");
     assert_eq!(arg_of(start, "--model"), None, "nobody vouches for the stored model, so none is passed: {start:?}");
-    assert_eq!(rig.record(TAG), Some(before), "the record is untouched: no replacement is written");
+    assert_eq!(rig.record(TAG), Some(before.clone()), "the record is untouched: no replacement is written");
     assert!(rig.mgr.model_catalog().stale, "the cache is all there is, and it says so");
+    assert!(!rig.mgr.model_hub().verified_this_run(), "a failed probe vouches for nothing");
 
-    // A probe has been attempted this run: later starts take the catalogue as it is (stale = pass-through).
+    // A probe that failed is not a probe that checked: a later start of another focus with the same stored
+    // alias still has nobody vouching for it. (The retry is throttled here, so it does not start a process.)
+    rig.mgr.model_hub().set_min_probe_interval(Duration::from_secs(3600));
     rig.seed("second", "opus", None);
     rig.spawn("second", "");
     eventually("the second start", || (rig_starts(&rig) >= 2).then_some(())).await;
     let runs = rig.wait_for_all_starts_logged().await;
-    assert_eq!(runs.len(), 3, "no second probe: {runs:?}");
-    assert_eq!(arg_of(&runs[2], "--model"), Some("opus"), "{:?}", runs[2]);
+    assert_eq!(runs.len(), 3, "probe, start, start: a throttled retry starts no process: {runs:?}");
+    assert_eq!(arg_of(&runs[2], "--model"), None, "still nobody vouches for the stored model: {:?}", runs[2]);
+    assert_eq!(rig.record(TAG), Some(before), "and the first record is still untouched");
+    assert!(!rig.mgr.model_hub().verified_this_run());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probe_that_fails_once_and_succeeds_later_lets_the_stored_model_through() {
+    let mut rig = Rig::new().await;
+    cli_offers_no_models(&mut rig);
+    rig.seed("first", "opus", None);
+    rig.seed("second", "opus", None);
+    rig.seed("third", "opus", None);
+    rig.restart_daemon();
+    rig.mgr.model_hub().set_min_probe_interval(Duration::ZERO);
+    rig.spawn("first", ""); // probes (and waits for it), and the probe fails
+    eventually("the first start", || (rig_starts(&rig) >= 1).then_some(())).await;
+    assert!(!rig.mgr.model_hub().verified_this_run(), "precondition: the first probe failed");
+
+    // The CLI can be asked now. The next start has nobody vouching for its model yet, but it sets a probe going.
+    cli_offers_the_fixture_catalogue(&mut rig);
+    rig.spawn("second", "");
+
+    eventually("a probe to succeed in the background", || rig.mgr.model_hub().verified_this_run().then_some(())).await;
+    assert!(!rig.mgr.model_catalog().stale, "the probe's answer is the catalogue now");
+    eventually("the second start", || (rig_starts(&rig) >= 2).then_some(())).await;
+    rig.spawn("third", "");
+    eventually("the third start", || (rig_starts(&rig) >= 3).then_some(())).await;
+    let runs = rig.wait_for_all_starts_logged().await;
+    let starts = session_starts(&rig);
+    assert_eq!(starts.len(), 3, "{runs:?}");
+    assert_eq!(arg_of(&starts[0], "--model"), None, "{:?}", starts[0]);
+    assert_eq!(arg_of(&starts[1], "--model"), None, "it was started before anything vouched for the model: {:?}", starts[1]);
+    assert_eq!(arg_of(&starts[2], "--model"), Some("opus"), "now the stored model is vouched for: {:?}", starts[2]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_after_a_failed_probe_does_not_wait_for_the_probe_it_sets_going() {
+    let mut rig = Rig::new().await;
+    cli_offers_no_models(&mut rig);
+    rig.seed("first", "opus", None);
+    rig.seed("second", "opus", None);
+    rig.restart_daemon();
+    rig.mgr.model_hub().set_min_probe_interval(Duration::ZERO);
+    rig.spawn("first", ""); // the one start that waits for a probe, and the probe fails
+    eventually("the first start", || (rig_starts(&rig) >= 1).then_some(())).await;
+    // The CLI is fine again, but its answer is held: the retry the next start sets going cannot finish
+    // until this test lets it. A start that waited for it could not return, short of giving up on it.
+    cli_offers_the_fixture_catalogue(&mut rig);
+    rig.hold("initialize");
+
+    rig.spawn("second", "");
+
+    assert!(!rig.mgr.model_hub().verified_this_run(), "the probe cannot have finished: its answer is held");
+    eventually("the retry to be asked", || {
+        (rig.labels().iter().filter(|l| *l == "initialize").count() >= 2).then_some(())
+    })
+    .await;
+    eventually("the second start", || (rig_starts(&rig) >= 2).then_some(())).await;
+    assert_eq!(arg_of(&session_starts(&rig)[1], "--model"), None, "no model is passed on the strength of a probe still running");
+    rig.release("initialize");
+    // Had the start waited out the held probe, the probe would have been given up on and never answer.
+    eventually("the retry to succeed once it is answered", || rig.mgr.model_hub().verified_this_run().then_some(())).await;
+    assert!(!rig.mgr.model_catalog().stale);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3121,6 +3201,148 @@ async fn switching_a_stopped_focus_away_and_straight_back_ends_on_the_model_it_w
     assert_eq!(away.status, ModelRequestStatus::Applied, "{away:?}");
     assert_ne!(back.status, ModelRequestStatus::Failed, "{back:?}");
     assert_eq!(rig.record(TAG).unwrap().model, "sonnet", "the last thing the user asked for is what is recorded");
+}
+
+/// Hold the hub's IO thread (where a stopped focus's switch is recorded) until the returned sender sends
+/// or is dropped; a test that fails first drops it, so the thread is never left waiting.
+fn hold_the_io_thread(rig: &Rig) -> std::sync::mpsc::Sender<()> {
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    rig.mgr.model_hub().spawn_io(Box::new(move || {
+        let _ = gate.recv();
+    }));
+    release
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_focus_started_before_its_switch_is_written_starts_on_the_model_it_was_switched_to() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    rig.spawn_and_stop(TAG).await;
+    eventually("the session to be down", || (!rig.state(TAG).running).then_some(())).await;
+    let release = hold_the_io_thread(&rig);
+
+    let ticket = rig.request(TAG, to_model("opus"));
+    assert!(ticket.immediate().is_none(), "the write is queued behind the held IO thread");
+    assert_eq!(rig.record(TAG).unwrap().model, "sonnet", "precondition: the switch is not on disk yet");
+    rig.spawn(TAG, "");
+
+    let runs = rig.wait_for_runs(2).await;
+    assert_eq!(arg_of(&runs[1], "--model"), Some("opus"), "the start runs what the user switched to, not the older record: {:?}", runs[1]);
+    release.send(()).unwrap();
+    let outcome = settle(ticket).await;
+    assert_eq!(outcome.status, ModelRequestStatus::Applied, "{outcome:?}");
+    assert_eq!(rig.record(TAG).unwrap().model, "opus", "and the write lands once the thread is free");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_waiting_for_the_turn_when_the_session_is_stopped_is_what_the_next_start_runs() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    rig.spawn(TAG, "");
+    rig.hold("user1");
+    rig.send(TAG, "user1");
+    rig.wait_for("user:user1").await;
+    let ticket = rig.request(TAG, to_model("opus"));
+    assert_eq!(ticket.immediate().expect("answered at once").status, ModelRequestStatus::PendingTurnEnd);
+
+    rig.mgr.stop(TAG); // cuts the turn short; the switch it was waiting for is not lost
+    rig.spawn(TAG, "");
+
+    let runs = rig.wait_for_runs(2).await;
+    assert_eq!(arg_of(&runs[1], "--model"), Some("opus"), "{:?}", runs[1]);
+    eventually("the switch to be recorded", || (rig.record(TAG).map(|r| r.model) == Some("opus".to_owned())).then_some(())).await;
+    assert_eq!(rig.record(TAG).unwrap().pending, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiting_switch_of_a_session_that_is_stopped_is_what_the_next_start_runs_even_before_it_is_written() {
+    let mut rig = Rig::new().await;
+    rig.seed(TAG, "sonnet", None);
+    rig.spawn(TAG, "");
+    rig.hold("user1");
+    rig.send(TAG, "user1");
+    rig.wait_for("user:user1").await;
+    let ticket = rig.request(TAG, to_model("opus"));
+    assert_eq!(ticket.immediate().expect("answered at once").status, ModelRequestStatus::PendingTurnEnd);
+    let release = hold_the_io_thread(&rig);
+
+    rig.mgr.stop(TAG);
+    rig.spawn(TAG, "");
+
+    let runs = rig.wait_for_runs(2).await;
+    assert_eq!(arg_of(&runs[1], "--model"), Some("opus"), "{:?}", runs[1]);
+    release.send(()).unwrap();
+    eventually("the switch to be recorded", || (rig.record(TAG).map(|r| r.model) == Some("opus".to_owned())).then_some(())).await;
+}
+
+// ── a record being written is cleared from the hub's "not yet written" list however the write ends ─
+
+fn target(model: &str) -> ModelTarget {
+    ModelTarget { model: model.to_owned(), effort: None }
+}
+
+/// Wait until the hub's IO thread has run everything given to it so far.
+async fn io_thread_is_caught_up(hub: &ModelHub) {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    hub.spawn_io(Box::new(move || {
+        let _ = tx.send(());
+    }));
+    eventually("the IO thread to run a job given after the others", || rx.try_recv().ok()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_job_that_panics_still_clears_its_entry_and_records_the_failure_and_the_thread_carries_on() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+    let seq = hub.note_stored(TAG, target("opus"));
+    assert_eq!(hub.stored_target(TAG), Some(target("opus")), "precondition");
+
+    let job_hub = Arc::clone(&hub);
+    hub.spawn_io(Box::new(move || {
+        let _held = job_hub.guard_stored(TAG, seq, Actor::User, target("opus"));
+        panic!("the write blew up");
+    }));
+
+    let failed = eventually("the entry to be cleared and the failure recorded", || {
+        if hub.stored_target(TAG).is_none() { hub.last_request(TAG) } else { None }
+    })
+    .await;
+    assert_eq!(failed.status, ModelRequestStatus::Failed);
+    assert_eq!((failed.actor.as_str(), failed.to.as_str()), ("user", "opus"));
+    io_thread_is_caught_up(&hub).await; // the thread survived the panic and runs the next job
+    assert_eq!(hub.stored_target(TAG), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_job_that_ends_normally_clears_its_entry_and_records_nothing_itself() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+    let seq = hub.note_stored(TAG, target("opus"));
+
+    let job_hub = Arc::clone(&hub);
+    hub.spawn_io(Box::new(move || {
+        let guard = job_hub.guard_stored(TAG, seq, Actor::User, target("opus"));
+        drop(guard);
+    }));
+    io_thread_is_caught_up(&hub).await;
+
+    assert_eq!(hub.stored_target(TAG), None);
+    assert_eq!(hub.last_request(TAG), None, "a write that finished says nothing about the request: its outcome is the writer's to record");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_later_switch_noted_for_the_same_focus_outlives_the_guard_of_an_earlier_one() {
+    let rig = Rig::new().await;
+    let hub = fresh_hub(&rig);
+    let earlier = hub.note_stored(TAG, target("opus"));
+    let later = hub.note_stored(TAG, target("haiku"));
+    assert_eq!(hub.stored_target(TAG), Some(target("haiku")), "precondition");
+
+    drop(hub.guard_stored(TAG, earlier, Actor::User, target("opus")));
+    assert_eq!(hub.stored_target(TAG), Some(target("haiku")), "the earlier write ending does not erase the later switch");
+
+    drop(hub.guard_stored(TAG, later, Actor::User, target("haiku")));
+    assert_eq!(hub.stored_target(TAG), None);
 }
 
 // ── a switch right after a restart, before the Mac has said which focuses exist ─

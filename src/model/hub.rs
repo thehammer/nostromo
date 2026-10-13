@@ -28,23 +28,36 @@ struct ProbeGate {
     min_interval: Duration,
 }
 
-/// Held while a probe runs; frees the slot when dropped, however the probe ends.
-struct ProbeSlot<'a>(&'a ModelHub);
+/// Held while a probe runs; frees the slot when dropped, however the probe
+/// ends (an answer, a failure, or its future being cancelled). It owns what it
+/// needs, so it can be handed to the thread the probe runs on.
+struct ProbeSlot(Arc<Mutex<ProbeGate>>);
 
-impl Drop for ProbeSlot<'_> {
+impl Drop for ProbeSlot {
     fn drop(&mut self) {
-        self.0.probe_gate.lock().unwrap_or_else(|e| e.into_inner()).in_flight = false;
+        lock(&self.0).in_flight = false;
     }
+}
+
+/// Lock `m`, taking the data even if a panicking holder poisoned it: the hub
+/// is also touched from drop guards that run while a panic unwinds, where a
+/// second panic would abort the daemon.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub struct ModelHub {
     pub paths: ModelPaths,
     catalog: RwLock<ModelCatalog>,
-    /// A probe has finished since this hub was made (it installed a
-    /// catalogue, or failed and flagged the cached one stale). Until then
-    /// the catalogue is only what an earlier run saw.
-    probed: AtomicBool,
-    probe_gate: Mutex<ProbeGate>,
+    /// A probe has SUCCEEDED since this hub was made (see [`Self::set_catalog`]).
+    /// A failed probe does not count: until one succeeds the catalogue is
+    /// only what an earlier run saw, and nothing in it may be passed to the
+    /// CLI as a stored model.
+    verified: AtomicBool,
+    /// The first [`probe_before_use`] that had a probe to wait for has been
+    /// made; later ones never wait.
+    first_wait_taken: AtomicBool,
+    probe_gate: Arc<Mutex<ProbeGate>>,
     broadcast: Mutex<Option<broadcast::Sender<ServerMsg>>>,
     last_requests: Mutex<HashMap<String, LastModelRequest>>,
     /// The `request_id` of the latest request per tag, stamped on every
@@ -83,12 +96,13 @@ impl ModelHub {
         Self {
             paths,
             catalog: RwLock::new(catalog),
-            probed: AtomicBool::new(false),
-            probe_gate: Mutex::new(ProbeGate {
+            verified: AtomicBool::new(false),
+            first_wait_taken: AtomicBool::new(false),
+            probe_gate: Arc::new(Mutex::new(ProbeGate {
                 in_flight: false,
                 last_started: None,
                 min_interval: MIN_PROBE_INTERVAL,
-            }),
+            })),
             broadcast: Mutex::new(None),
             last_requests: Mutex::new(HashMap::new()),
             request_ids: Mutex::new(HashMap::new()),
@@ -105,22 +119,27 @@ impl ModelHub {
     /// switch's sequence number.
     pub fn note_stored(&self, tag: &str, target: ModelTarget) -> u64 {
         let seq = self.stored_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.stored.lock().unwrap_or_else(|e| e.into_inner()).insert(tag.to_owned(), (seq, target));
+        lock(&self.stored).insert(tag.to_owned(), (seq, target));
         seq
     }
 
     /// The switch `seq` of `tag` has been written (or failed to be). A later
     /// switch of the same tag stays.
     pub fn stored_done(&self, tag: &str, seq: u64) {
-        let mut stored = self.stored.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stored = lock(&self.stored);
         if stored.get(tag).is_some_and(|(latest, _)| *latest == seq) {
             stored.remove(tag);
         }
     }
 
+    /// A guard for the job that writes switch `seq` of `tag` (see [`StoredGuard`]).
+    pub fn guard_stored(self: &Arc<Self>, tag: &str, seq: u64, actor: Actor, target: ModelTarget) -> StoredGuard {
+        StoredGuard { hub: Arc::clone(self), tag: tag.to_owned(), seq, actor, target }
+    }
+
     /// What the latest switch of `tag` not yet written will make it run.
     pub fn stored_target(&self, tag: &str) -> Option<ModelTarget> {
-        self.stored.lock().unwrap_or_else(|e| e.into_inner()).get(tag).map(|(_, t)| t.clone())
+        lock(&self.stored).get(tag).map(|(_, t)| t.clone())
     }
 
     /// Run `job` on the hub's IO thread: one thread, jobs in the order they
@@ -128,7 +147,7 @@ impl ModelHub {
     /// order. For work that must not run under the session manager's lock.
     /// A panicking job is dropped; the thread carries on.
     pub fn spawn_io(&self, job: IoJob) {
-        let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+        let mut io = lock(&self.io);
         let mut job = Some(job);
         // A second try covers an IO thread that is gone (it could not start).
         for _ in 0..2 {
@@ -164,13 +183,13 @@ impl ModelHub {
 
     /// Change the minimum gap between probes (default [`MIN_PROBE_INTERVAL`]).
     pub fn set_min_probe_interval(&self, interval: Duration) {
-        self.probe_gate.lock().unwrap_or_else(|e| e.into_inner()).min_interval = interval;
+        lock(&self.probe_gate).min_interval = interval;
     }
 
     /// Claim the right to probe now: refused while another probe runs or the
     /// previous one started less than the minimum gap ago.
-    fn begin_probe(&self) -> Result<ProbeSlot<'_>> {
-        let mut gate = self.probe_gate.lock().unwrap_or_else(|e| e.into_inner());
+    fn begin_probe(&self) -> Result<ProbeSlot> {
+        let mut gate = lock(&self.probe_gate);
         if gate.in_flight {
             return Err(anyhow!("a model catalogue probe is already running"));
         }
@@ -182,23 +201,27 @@ impl ModelHub {
         }
         gate.in_flight = true;
         gate.last_started = Some(now);
-        Ok(ProbeSlot(self))
+        Ok(ProbeSlot(Arc::clone(&self.probe_gate)))
+    }
+
+    fn probe_in_flight(&self) -> bool {
+        lock(&self.probe_gate).in_flight
     }
 
     /// Where model frames are broadcast (the daemon's client fan-out).
     pub fn set_broadcast(&self, tx: broadcast::Sender<ServerMsg>) {
-        *self.broadcast.lock().unwrap() = Some(tx);
+        *lock(&self.broadcast) = Some(tx);
     }
 
     /// Send `msg` to every client (no-op until a channel is configured).
     pub fn broadcast(&self, msg: ServerMsg) {
-        if let Some(tx) = self.broadcast.lock().unwrap().as_ref() {
+        if let Some(tx) = lock(&self.broadcast).as_ref() {
             let _ = tx.send(msg);
         }
     }
 
     pub fn catalog(&self) -> ModelCatalog {
-        self.catalog.read().unwrap().clone()
+        self.catalog.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Install a freshly probed catalogue: cache it and tell every client.
@@ -206,21 +229,23 @@ impl ModelHub {
         if let Err(e) = catalog.save(&self.paths.catalog) {
             warn!("could not cache the model catalogue: {e:#}");
         }
-        *self.catalog.write().unwrap() = catalog;
-        self.probed.store(true, Ordering::SeqCst);
+        *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = catalog;
+        self.verified.store(true, Ordering::SeqCst);
         self.broadcast(self.catalog_msg());
     }
 
-    /// Has a probe finished (well or badly) since this hub was made?
-    pub fn probed_this_run(&self) -> bool {
-        self.probed.load(Ordering::SeqCst)
+    /// Has a probe succeeded since this hub was made? Only then has the
+    /// catalogue been checked against the installed CLI; a failed probe
+    /// leaves this false, however many times it is tried.
+    pub fn verified_this_run(&self) -> bool {
+        self.verified.load(Ordering::SeqCst)
     }
 
-    /// The last probe failed: keep serving what we have, flagged stale.
+    /// The last probe failed: keep serving what we have, flagged stale. Does
+    /// not make the catalogue [verified](Self::verified_this_run).
     pub fn mark_stale(&self) {
-        self.probed.store(true, Ordering::SeqCst);
         let changed = {
-            let mut catalog = self.catalog.write().unwrap();
+            let mut catalog = self.catalog.write().unwrap_or_else(|e| e.into_inner());
             let changed = !catalog.stale;
             catalog.stale = true;
             changed
@@ -231,7 +256,7 @@ impl ModelHub {
     }
 
     pub fn catalog_msg(&self) -> ServerMsg {
-        let catalog = self.catalog.read().unwrap();
+        let catalog = self.catalog.read().unwrap_or_else(|e| e.into_inner());
         ServerMsg::ModelCatalog {
             families: catalog.families_wire(),
             stale: catalog.stale,
@@ -251,7 +276,7 @@ impl ModelHub {
 
     /// A new request for `tag` arrived, carrying `request_id` (if any).
     pub fn begin_request(&self, tag: &str, request_id: Option<String>) {
-        self.request_ids.lock().unwrap().insert(tag.to_owned(), request_id);
+        lock(&self.request_ids).insert(tag.to_owned(), request_id);
     }
 
     /// Remember the latest request for `tag` (shown as `last_request`).
@@ -266,20 +291,20 @@ impl ModelHub {
             Some(effort) => format!("{} · effort {effort}", to.model),
             None => to.model.clone(),
         };
-        self.last_requests.lock().unwrap().insert(
+        lock(&self.last_requests).insert(
             tag.to_owned(),
             LastModelRequest {
                 actor: actor.wire(),
                 to,
                 status,
                 ts: chrono::Utc::now(),
-                request_id: self.request_ids.lock().unwrap().get(tag).cloned().flatten(),
+                request_id: lock(&self.request_ids).get(tag).cloned().flatten(),
             },
         );
     }
 
     pub fn last_request(&self, tag: &str) -> Option<LastModelRequest> {
-        self.last_requests.lock().unwrap().get(tag).cloned()
+        lock(&self.last_requests).get(tag).cloned()
     }
 
     /// Forget the request state of every tag that `is_live` rejects and whose
@@ -290,8 +315,8 @@ impl ModelHub {
         is_live: impl Fn(&str) -> bool,
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> usize {
-        let mut last = self.last_requests.lock().unwrap();
-        let mut ids = self.request_ids.lock().unwrap();
+        let mut last = lock(&self.last_requests);
+        let mut ids = lock(&self.request_ids);
         let mut forgotten: std::collections::HashSet<String> = std::collections::HashSet::new();
         last.retain(|tag, request| {
             let keep = is_live(tag) || request.ts >= cutoff;
@@ -315,31 +340,52 @@ impl ModelHub {
 pub const FIRST_PROBE_WAIT: Duration =
     Duration::from_secs(super::catalog::PROBE_TIMEOUT.as_secs() + 2);
 
-/// Make sure a probe has finished before something relies on the catalogue
-/// (a catalogue read from the cache at start has not been checked against
-/// the installed CLI). Does nothing once any probe has finished. Otherwise it
-/// runs one on a thread of its own, runtime included (so it works from inside
-/// or outside a runtime), and waits for the outcome for at most `limit`;
-/// a probe already in flight (the daemon's own) is waited for instead.
+/// Get a catalogue the installed CLI has vouched for before something relies
+/// on it (one read from the cache at start has not been checked, and a model
+/// it names may be gone). Does nothing once a probe has succeeded this run.
+/// Otherwise it starts a probe on a thread of its own, runtime included (so it
+/// works from inside or outside a runtime), unless one is already in flight
+/// (the daemon's own) or the last started too recently (see
+/// [`MIN_PROBE_INTERVAL`]).
+///
+/// Only the FIRST call that has a probe to wait for blocks, for at most
+/// `limit`, and only while that probe runs: it returns as soon as the probe
+/// has ended, well or badly, or has been cancelled. A later call, after a
+/// failed first one, only retries in the background and returns at once, so a
+/// CLI that can't be probed costs one wait, not one per start. The caller
+/// asks [`ModelHub::verified_this_run`] for the outcome.
 /// Blocks the caller: for use from synchronous code only.
 pub fn probe_before_use(hub: &Arc<ModelHub>, limit: Duration) {
-    if hub.probed_this_run() {
+    if hub.verified_this_run() {
         return;
     }
-    let probe_hub = Arc::clone(hub);
-    let started = std::thread::Builder::new().name("model-first-probe".into()).spawn(move || {
-        match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(runtime) => {
-                let _ = runtime.block_on(refresh_catalog(&probe_hub));
+    let may_wait = !hub.first_wait_taken.swap(true, Ordering::SeqCst);
+    // The slot is taken here, not on the probe's thread, so that "no probe is
+    // in flight" below can only mean the probe is over.
+    let probing = match hub.begin_probe() {
+        Ok(slot) => {
+            let probe_hub = Arc::clone(hub);
+            let started = std::thread::Builder::new().name("model-first-probe".into()).spawn(move || {
+                match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(runtime) => {
+                        let _ = runtime.block_on(probe_and_install(&probe_hub, slot));
+                    }
+                    Err(e) => warn!("could not start a runtime for the model catalogue probe: {e}"),
+                }
+            });
+            if let Err(e) = started {
+                warn!("could not start the model catalogue probe: {e}");
             }
-            Err(e) => warn!("could not start a runtime for the model catalogue probe: {e}"),
+            true
         }
-    });
-    if let Err(e) = started {
-        warn!("could not start the model catalogue probe: {e}");
+        // Already running (the daemon's own): worth waiting for. Throttled: not.
+        Err(_) => hub.probe_in_flight(),
+    };
+    if !may_wait || !probing {
+        return;
     }
     let deadline = Instant::now() + limit;
-    while !hub.probed_this_run() && Instant::now() < deadline {
+    while !hub.verified_this_run() && hub.probe_in_flight() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -349,7 +395,13 @@ pub fn probe_before_use(hub: &Arc<ModelHub>, limit: Duration) {
 /// and flagged stale. One probe at a time, and not within the hub's minimum
 /// gap of the previous one: such a call does nothing and returns an error.
 pub async fn refresh_catalog(hub: &ModelHub) -> Result<()> {
-    let _slot = hub.begin_probe()?;
+    let slot = hub.begin_probe()?;
+    probe_and_install(hub, slot).await
+}
+
+/// Run the probe `_slot` was taken for (and free the slot after, however it
+/// ends, even if this future is dropped before it finishes).
+async fn probe_and_install(hub: &ModelHub, _slot: ProbeSlot) -> Result<()> {
     let result = match crate::ipc::session_manager::resolve_claude() {
         Ok(claude) => probe(&claude).await,
         Err(e) => Err(e),
@@ -364,6 +416,29 @@ pub async fn refresh_catalog(hub: &ModelHub) -> Result<()> {
             warn!("model catalogue probe failed; serving the cached one as stale: {e:#}");
             hub.mark_stale();
             Err(e)
+        }
+    }
+}
+
+/// Held by the job that writes a stored switch of a stopped focus (see
+/// [`ModelHub::note_stored`]). Dropping it, however the job ends, retires the
+/// switch's "not yet written" entry: left behind by a job that panicked, the
+/// entry would keep answering as the focus's model although it never landed.
+/// A panic also records the request as failed.
+pub struct StoredGuard {
+    hub: Arc<ModelHub>,
+    tag: String,
+    seq: u64,
+    actor: Actor,
+    target: ModelTarget,
+}
+
+impl Drop for StoredGuard {
+    fn drop(&mut self) {
+        self.hub.stored_done(&self.tag, self.seq);
+        if std::thread::panicking() {
+            warn!(tag = %self.tag, "the job recording a model switch panicked: the switch was not recorded");
+            self.hub.record_request(&self.tag, &self.actor, &self.target, ModelRequestStatus::Failed);
         }
     }
 }

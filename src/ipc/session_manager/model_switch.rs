@@ -451,20 +451,6 @@ impl SessionManager {
         SwitchTicket(TicketInner::Later(rx))
     }
 
-    /// Like [`Self::switch_not_running`], done before it returns. For
-    /// [`Self::stop`], whose respawn reads the record right after.
-    pub(super) fn switch_not_running_now(
-        &mut self,
-        ctx: &SessionCtx,
-        current: Option<ModelTarget>,
-        target: ModelTarget,
-        actor: Actor,
-    ) {
-        if let Some(job) = self.stored_switch(ctx, current, target, actor) {
-            job.run();
-        }
-    }
-
     /// What recording a switch of a stopped focus takes, or `None` when the
     /// focus already has that model. Also drops the switch the dead process
     /// still had waiting: this choice supersedes it, and a crash recovery
@@ -524,6 +510,13 @@ impl SessionManager {
     }
 
     /// Write `agent`'s default, log it, and broadcast the defaults.
+    ///
+    /// This is a durable write under the manager lock, on purpose: the caller
+    /// answers the client with the write's outcome (a failed write must not
+    /// read as `Applied`), a client or the next `spawn_model` reads the
+    /// default right after, and it is a rare, user-initiated change of one
+    /// small file. Moving it to the IO thread would trade that for a
+    /// shorter hold of a lock nothing contends for at that rate.
     fn write_agent_default(&self, agent: &str, target: Option<&ModelTarget>, actor: &Actor) {
         let hub = &self.model_hub;
         let previous = model_store::load_defaults(&hub.paths.defaults).remove(agent);
@@ -709,38 +702,55 @@ impl SessionManager {
     /// Only a *chosen* record (a switch, a creation choice, a per-agent
     /// default) is passed on: an observed one just remembers what the session
     /// ran, so the agent's front matter and the CLI default still apply.
-    /// A chosen model the (fresh) catalogue no longer offers is replaced by
-    /// the agent's default: per-agent default, else its declared model, else
-    /// the CLI default (no record at all). A catalogue that is only the cache
-    /// read at start is probed for first.
+    /// A switch of the stopped focus still being written counts as the record
+    /// (the IO thread may not have reached it yet).
+    ///
+    /// Nothing stored is passed to `--model` until the installed CLI has
+    /// vouched for the catalogue (a probe has succeeded in this daemon run):
+    /// a catalogue read from the cache at start, or kept after a failed
+    /// probe, can't say that a stored alias or name has not been retired, and
+    /// the CLI rejects a start on one at every restart. So the first such
+    /// spawn probes first (bounded wait); while no probe has succeeded the
+    /// spawn passes no `--model` (the CLI's default applies, the record is
+    /// left alone) and later spawns retry the probe in the background
+    /// (throttled), passing the stored model as soon as one has succeeded.
+    /// Once verified, a chosen model the catalogue no longer offers is
+    /// replaced by the agent's default: per-agent default, else its declared
+    /// model, else the CLI default (no record at all). An empty catalogue (no
+    /// cache, nothing probed) can only vouch for the known aliases.
     pub(super) fn spawn_model(
         &self,
         tag: &str,
         agent: &str,
     ) -> (Option<ModelTarget>, Option<String>) {
         let hub = &self.model_hub;
-        let Some(record) = model_store::focus_record(&hub.paths.focus_models, tag) else {
-            return (None, None);
+        let record = match hub.stored_target(tag) {
+            Some(target) => FocusModelRecord {
+                model: target.model,
+                effort: target.effort,
+                source: ModelSource::Focus,
+                ..FocusModelRecord::default()
+            },
+            None => match model_store::focus_record(&hub.paths.focus_models, tag) {
+                Some(record) => record,
+                None => return (None, None),
+            },
         };
         if !record.source.is_chosen() {
             return (None, None);
         }
         let mut catalog = hub.catalog();
-        // A catalogue read from the cache at start has not been checked
-        // against the installed CLI, and a retired model passed to `--model`
-        // fails the start. Learn the CLI's list first (bounded wait); if that
-        // fails, start on the CLI's default rather than on a model nobody
-        // vouches for. The record is left as it is: nothing says it is gone.
-        if !catalog.is_empty() && !hub.probed_this_run() {
+        if !catalog.is_empty() && !hub.verified_this_run() {
             probe_before_use(hub, FIRST_PROBE_WAIT);
-            catalog = hub.catalog();
-            if catalog.stale {
-                warn!(tag, model = %record.model, "model catalogue could not be probed: starting without --model");
+            if !hub.verified_this_run() {
+                warn!(tag, model = %record.model, "model catalogue not verified by the installed CLI yet: starting without --model");
                 return (None, None);
             }
+            catalog = hub.catalog();
         }
-        // A stale catalogue is what an earlier probe saw, so it can't say a
-        // model went away; an empty one can't say anything but the known aliases.
+        // A stale catalogue here is one verified earlier in this run, so it
+        // can't say a model went away; an empty one can't say anything but the
+        // known aliases.
         let offered = (catalog.stale && !catalog.is_empty()) || is_offered(&record.model, &catalog);
         if offered {
             return (Some(record.target()), None);
@@ -768,6 +778,11 @@ impl SessionManager {
                     )
                 })
             });
+        // Written here, under the manager lock, rather than on the IO thread: the
+        // session this spawn starts reports its model within moments, and that
+        // report is judged against the record, which must already be the
+        // replacement (not the retired model) by then. A start is a process
+        // spawn already, and this happens once per retired model.
         let written = model_store::update_focus_record(&hub.paths.focus_models, tag, |_| {
             replacement
                 .as_ref()
@@ -1602,10 +1617,9 @@ impl StoredSwitch {
     /// in the ledger after the prompts its stored conversation holds), log it
     /// and tell the clients.
     fn run(self) -> ModelRequestOutcome {
-        let (hub, tag, seq) = (Arc::clone(&self.ctx.hub), self.ctx.tag.clone(), self.seq);
-        let outcome = self.record();
-        hub.stored_done(&tag, seq);
-        outcome
+        // Retires the "not yet written" entry however `record` ends, even by a panic.
+        let _guard = self.ctx.hub.guard_stored(&self.ctx.tag, self.seq, self.actor.clone(), self.target.clone());
+        self.record()
     }
 
     fn record(self) -> ModelRequestOutcome {
