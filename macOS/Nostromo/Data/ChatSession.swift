@@ -446,9 +446,10 @@ class ChatSession: ObservableObject {
                 }
                 if !turn.blocks.isEmpty {
                     var adopted = turns[i]
-                    adopted.blocks = turn.blocks.map(Self.mapBlock)
+                    (adopted.blocks, adopted.subagentTextParents) = Self.mapBlocks(turn.blocks)
                     dropLeadingNotesShownStandalone(from: &adopted)
                     turns[i].blocks = adopted.blocks
+                    turns[i].subagentTextParents = adopted.subagentTextParents
                     changes.send(.updatedBlocks(index: i, addedCount: turns[i].blocks.count))
                 }
             } else {
@@ -464,8 +465,11 @@ class ChatSession: ObservableObject {
 
         case .blockAppended(let turnId, let block):
             if let i = index(ofDaemonId: turnId) {
-                turns[i].blocks.append(Self.mapBlock(block))
-                changes.send(.updatedBlocks(index: i, addedCount: 1))
+                // An empty successful result folds into its call instead of
+                // appending a block, so there may be nothing to announce.
+                if Self.append(block, to: &turns[i]) {
+                    changes.send(.updatedBlocks(index: i, addedCount: 1))
+                }
             }
 
         case .turnCompleted(let turnId, let summary, let contextTokens):
@@ -527,7 +531,7 @@ class ChatSession: ObservableObject {
             shown.remove(at: at)
             leading += 1
         }
-        turn.blocks.removeFirst(leading)
+        turn.removeLeadingBlocks(leading)
     }
 
     // MARK: - Retention
@@ -661,23 +665,58 @@ class ChatSession: ObservableObject {
     }()
 
     private static func mapTurn(_ t: DaemonTurn, epoch: Int) -> ChatTurn {
-        ChatTurn(userInput:    t.userInput,
-                 timestamp:    t.timestamp.flatMap { iso.date(from: $0) } ?? Date(),
-                 timestampRaw: t.timestamp,
-                 blocks:       t.blocks.map(mapBlock),
-                 isComplete:   t.isComplete,
-                 daemonId:     t.id,
-                 epoch:        epoch)
+        let (blocks, textParents) = mapBlocks(t.blocks)
+        return ChatTurn(userInput:    t.userInput,
+                        timestamp:    t.timestamp.flatMap { iso.date(from: $0) } ?? Date(),
+                        timestampRaw: t.timestamp,
+                        blocks:       blocks,
+                        isComplete:   t.isComplete,
+                        daemonId:     t.id,
+                        epoch:        epoch,
+                        subagentTextParents: textParents)
+    }
+
+    /// A turn's wire blocks as GUI blocks, plus which subagent said each `.text`. Every
+    /// block goes through `ToolCompletionFolding`, so an empty successful result finishes
+    /// its call and gets no block of its own.
+    private static func mapBlocks(_ wire: [DaemonTurnBlock]) -> (blocks: [TurnBlock], textParents: [Int: String]) {
+        var blocks: [TurnBlock] = []
+        blocks.reserveCapacity(wire.count)
+        var textParents: [Int: String] = [:]
+        for b in wire {
+            let index = blocks.count
+            if ToolCompletionFolding.apply(mapBlock(b), to: &blocks), let parent = b.textParent {
+                textParents[index] = parent
+            }
+        }
+        return (blocks, textParents)
+    }
+
+    /// Append one wire block to a live turn (folding it into its call if it is an empty
+    /// successful result). Returns whether a block was appended.
+    @discardableResult
+    private static func append(_ b: DaemonTurnBlock, to turn: inout ChatTurn) -> Bool {
+        let index = turn.blocks.count
+        guard ToolCompletionFolding.apply(mapBlock(b), to: &turn.blocks) else { return false }
+        if let parent = b.textParent { turn.subagentTextParents[index] = parent }
+        return true
     }
 
     private static func mapBlock(_ b: DaemonTurnBlock) -> TurnBlock {
         switch b {
-        case .text(let s):
+        case .text(let s, _):
             return .text(s)
-        case .toolCall(let name, let summary, let full):
-            return .toolCall(ToolCallData(toolName: name, inputSummary: summary, inputFull: full))
-        case .toolResult(let content, let isError):
-            return .toolResult(ToolResultData(content: content, isError: isError))
+        case .toolCall(let name, let summary, let full, let meta):
+            return .toolCall(ToolCallData(toolName: name, inputSummary: summary, inputFull: full,
+                                          toolUseId: meta.toolUseId,
+                                          parentToolUseId: meta.parentToolUseId,
+                                          target: meta.target,
+                                          startedAt: meta.ts))
+        case .toolResult(let content, let isError, let meta):
+            return .toolResult(ToolResultData(content: content, isError: isError,
+                                              toolUseId: meta.toolUseId,
+                                              parentToolUseId: meta.parentToolUseId,
+                                              at: meta.ts))
         case .resultSummary(let d, let c, let e, let i):
             return .resultSummary(ResultSummaryData(durationMs: d, costUSD: c, isError: e, interrupted: i))
         case .errorMessage(let m):

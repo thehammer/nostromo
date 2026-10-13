@@ -816,3 +816,287 @@ final class TurnReconcilerTests: XCTestCase {
         XCTAssertTrue(replaced.didReplaceAll)
     }
 }
+
+// MARK: - Tool-fold wire enrichment (TF1): the Mac's own wire decode
+
+/// The Mac decodes the daemon's blocks with its own `DaemonTurnBlock` (NostromoKit has a
+/// twin; its tests are in `ClientMsgTests`). The optional keys are `tool_use_id`,
+/// `parent_tool_use_id`, `target` and `ts`; an older daemon sends none of them.
+final class DaemonTurnBlockToolMetaDecodeTests: XCTestCase {
+
+    private func decode(_ json: String) throws -> DaemonTurnBlock {
+        try JSONDecoder().decode(DaemonTurnBlock.self, from: Data(json.utf8))
+    }
+
+    /// 2026-05-30T22:38:55Z built from calendar components, so the expectation does not
+    /// lean on the parser under test.
+    private func utc(fraction: Double = 0) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let base = cal.date(from: DateComponents(year: 2026, month: 5, day: 30, hour: 22, minute: 38, second: 55))!
+        return base.addingTimeInterval(fraction)
+    }
+
+    private func call(_ block: DaemonTurnBlock, file: StaticString = #filePath, line: UInt = #line) -> (String, DaemonToolMeta)? {
+        guard case let .toolCall(name, _, _, meta) = block else { XCTFail("\(block)", file: file, line: line); return nil }
+        return (name, meta)
+    }
+
+    private func result(_ block: DaemonTurnBlock, file: StaticString = #filePath, line: UInt = #line) -> (String, Bool, DaemonToolMeta)? {
+        guard case let .toolResult(content, isError, meta) = block else { XCTFail("\(block)", file: file, line: line); return nil }
+        return (content, isError, meta)
+    }
+
+    func testAToolCallCarriesItsIdTargetParentAndTimestamp() throws {
+        let block = try decode(#"{"kind":"tool_call","tool_name":"Read","input_summary":"a.swift","input_full":"{}","tool_use_id":"toolu_01","parent_tool_use_id":"toolu_agent1","target":"/repo/a.swift","ts":"2026-05-30T22:38:55.755Z"}"#)
+        guard let (name, meta) = call(block) else { return }
+        XCTAssertEqual(name, "Read")
+        XCTAssertEqual(meta.toolUseId, "toolu_01")
+        XCTAssertEqual(meta.parentToolUseId, "toolu_agent1")
+        XCTAssertEqual(meta.target, "/repo/a.swift")
+        let ts = try XCTUnwrap(meta.ts)
+        XCTAssertEqual(ts.timeIntervalSince1970, utc(fraction: 0.755).timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testAToolResultCarriesItsIdParentAndTimestamp() throws {
+        let block = try decode(#"{"kind":"tool_result","content":"","is_error":false,"tool_use_id":"toolu_01","parent_tool_use_id":"toolu_agent1","ts":"2026-05-30T22:38:55.755Z"}"#)
+        guard let (content, isError, meta) = result(block) else { return }
+        XCTAssertEqual(content, "")
+        XCTAssertFalse(isError)
+        XCTAssertEqual(meta.toolUseId, "toolu_01")
+        XCTAssertEqual(meta.parentToolUseId, "toolu_agent1")
+        let ts = try XCTUnwrap(meta.ts)
+        XCTAssertEqual(ts.timeIntervalSince1970, utc(fraction: 0.755).timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testBlocksFromAnOlderDaemonDecodeWithNoMeta() throws {
+        let c = try decode(#"{"kind":"tool_call","tool_name":"Bash","input_summary":"ls","input_full":"{}"}"#)
+        XCTAssertEqual(call(c)?.1, DaemonToolMeta.none)
+        let r = try decode(#"{"kind":"tool_result","content":"boom","is_error":true}"#)
+        XCTAssertEqual(result(r)?.2, DaemonToolMeta.none)
+        XCTAssertEqual(result(r)?.0, "boom")
+    }
+
+    func testTimestampsDecodeWithWholeMillisecondAndNanosecondPrecision() throws {
+        func ts(_ raw: String) throws -> Date? {
+            result(try decode(#"{"kind":"tool_result","content":"x","is_error":false,"ts":"\#(raw)"}"#))?.2.ts
+        }
+        let whole = try XCTUnwrap(try ts("2026-05-30T22:38:55Z"))
+        XCTAssertEqual(whole.timeIntervalSince1970, utc().timeIntervalSince1970, accuracy: 0.001)
+        let millis = try XCTUnwrap(try ts("2026-05-30T22:38:55.755Z"))
+        XCTAssertEqual(millis.timeIntervalSince1970, utc(fraction: 0.755).timeIntervalSince1970, accuracy: 0.001)
+        let nanos = try XCTUnwrap(try ts("2026-05-30T22:38:55.755123456Z"), "a nanosecond timestamp must not be lost")
+        XCTAssertEqual(nanos.timeIntervalSince1970, utc(fraction: 0.755123456).timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testAnUnparseableTimestampLeavesTheTimeNilAndTheBlockDecoded() throws {
+        let block = try decode(#"{"kind":"tool_call","tool_name":"Bash","input_summary":"ls","input_full":"{}","tool_use_id":"toolu_9","ts":"yesterday-ish"}"#)
+        guard let (_, meta) = call(block) else { return }
+        XCTAssertNil(meta.ts, "a time is decoration: garbage must not cost the client the whole turn")
+        XCTAssertEqual(meta.toolUseId, "toolu_9")
+    }
+
+    func testTextDecodesWithAndWithoutItsSubagentParent() throws {
+        guard case let .text(s, parent) = try decode(#"{"kind":"text","text":"found it","parent_tool_use_id":"toolu_agent1"}"#) else { return XCTFail("subagent text") }
+        XCTAssertEqual(s, "found it")
+        XCTAssertEqual(parent, "toolu_agent1")
+        guard case let .text(_, main) = try decode(#"{"kind":"text","text":"hello"}"#) else { return XCTFail("main text") }
+        XCTAssertNil(main)
+    }
+
+    func testTheWholeTurnFromAnOlderDaemonStillDecodes() throws {
+        let json = #"{"id":"t0","user_input":"hi","timestamp":null,"is_complete":true,"blocks":[{"kind":"text","text":"a"},{"kind":"tool_call","tool_name":"Bash","input_summary":"ls","input_full":"{}"},{"kind":"tool_result","content":"out","is_error":false}]}"#
+        let turn = try JSONDecoder().decode(DaemonTurn.self, from: Data(json.utf8))
+        XCTAssertEqual(turn.blocks.count, 3)
+    }
+}
+
+// MARK: - Tool-fold wire enrichment (TF1): folding an empty successful result into its call
+
+final class ToolCompletionFoldingTests: XCTestCase {
+
+    private static let t0 = Date(timeIntervalSince1970: 1_770_000_000)
+    private static let t1 = Date(timeIntervalSince1970: 1_770_000_007)
+    private static let t2 = Date(timeIntervalSince1970: 1_770_000_011)
+
+    private func call(_ id: String?, name: String = "Bash") -> TurnBlock {
+        .toolCall(ToolCallData(toolName: name, inputSummary: "cmd \(id ?? "?")", inputFull: "{}",
+                               toolUseId: id, startedAt: Self.t0))
+    }
+
+    private func result(_ id: String?, content: String = "", isError: Bool = false, at: Date? = ToolCompletionFoldingTests.t1) -> TurnBlock {
+        .toolResult(ToolResultData(content: content, isError: isError, toolUseId: id, at: at))
+    }
+
+    private func callData(_ blocks: [TurnBlock], _ index: Int, file: StaticString = #filePath, line: UInt = #line) -> ToolCallData? {
+        guard blocks.indices.contains(index), case .toolCall(let d) = blocks[index] else {
+            XCTFail("block \(index) is not a tool call", file: file, line: line); return nil
+        }
+        return d
+    }
+
+    func testAnEmptySuccessfulResultFinishesItsCallAndIsNotAppended() {
+        var blocks: [TurnBlock] = [.text("running"), call("toolu_A")]
+        let appended = ToolCompletionFolding.apply(result("toolu_A", at: Self.t1), to: &blocks)
+
+        XCTAssertFalse(appended, "an empty success gets no block of its own")
+        XCTAssertEqual(blocks.count, 2, "the block array is exactly what it was before the daemon sent empty results")
+        XCTAssertEqual(blocks.map(\.kindCode).joined(), "tc")
+        let c = callData(blocks, 1)
+        XCTAssertEqual(c?.finishedQuietly, true)
+        XCTAssertEqual(c?.finishedAt, Self.t1, "the call finished when its result arrived")
+        XCTAssertEqual(c?.startedAt, Self.t0, "folding does not disturb the call's start")
+        XCTAssertEqual(c?.toolName, "Bash")
+        XCTAssertEqual(c?.inputSummary, "cmd toolu_A")
+    }
+
+    func testAResultWithContentIsAppendedAndItsCallIsUntouched() {
+        var blocks: [TurnBlock] = [call("toolu_A")]
+        let appended = ToolCompletionFolding.apply(result("toolu_A", content: "out"), to: &blocks)
+
+        XCTAssertTrue(appended)
+        XCTAssertEqual(blocks.map(\.kindCode).joined(), "cr")
+        XCTAssertEqual(callData(blocks, 0)?.finishedQuietly, false)
+        XCTAssertNil(callData(blocks, 0)?.finishedAt)
+        guard case .toolResult(let r) = blocks[1] else { return XCTFail("block 1") }
+        XCTAssertEqual(r.content, "out")
+        XCTAssertEqual(r.toolUseId, "toolu_A")
+        XCTAssertEqual(r.at, Self.t1)
+    }
+
+    func testAnErrorWithEmptyContentIsStillAppendedAndItsCallIsUntouched() {
+        var blocks: [TurnBlock] = [call("toolu_A")]
+        let appended = ToolCompletionFolding.apply(result("toolu_A", content: "", isError: true), to: &blocks)
+
+        XCTAssertTrue(appended, "an error is never quiet: it must show")
+        XCTAssertEqual(blocks.map(\.kindCode).joined(), "cr")
+        XCTAssertEqual(callData(blocks, 0)?.finishedQuietly, false)
+        XCTAssertNil(callData(blocks, 0)?.finishedAt)
+        guard case .toolResult(let r) = blocks[1] else { return XCTFail("block 1") }
+        XCTAssertTrue(r.isError)
+    }
+
+    func testOtherBlocksAreAppendedAsAlways() {
+        var blocks: [TurnBlock] = []
+        XCTAssertTrue(ToolCompletionFolding.apply(.text("hi"), to: &blocks))
+        XCTAssertTrue(ToolCompletionFolding.apply(call("toolu_A"), to: &blocks))
+        XCTAssertTrue(ToolCompletionFolding.apply(.note("n"), to: &blocks))
+        XCTAssertTrue(ToolCompletionFolding.apply(.errorMessage("e"), to: &blocks))
+        XCTAssertEqual(blocks.map(\.kindCode).joined(), "tcne")
+    }
+
+    func testTwoParallelCallsWithResultsArrivingOutOfOrderEachFinishTheRightCall() {
+        var blocks: [TurnBlock] = [call("toolu_A"), call("toolu_B")]
+
+        XCTAssertFalse(ToolCompletionFolding.apply(result("toolu_B", at: Self.t1), to: &blocks))
+        XCTAssertEqual(callData(blocks, 0)?.finishedQuietly, false, "A is still running")
+        XCTAssertEqual(callData(blocks, 1)?.finishedQuietly, true)
+        XCTAssertEqual(callData(blocks, 1)?.finishedAt, Self.t1)
+
+        XCTAssertFalse(ToolCompletionFolding.apply(result("toolu_A", at: Self.t2), to: &blocks))
+        XCTAssertEqual(callData(blocks, 0)?.finishedQuietly, true)
+        XCTAssertEqual(callData(blocks, 0)?.finishedAt, Self.t2)
+        XCTAssertEqual(callData(blocks, 1)?.finishedAt, Self.t1, "B keeps its own finish time")
+        XCTAssertEqual(blocks.count, 2)
+    }
+
+    func testAnEmptyResultMatchingNoCallIsDroppedAndNothingIsTouched() {
+        var blocks: [TurnBlock] = [call("toolu_A")]
+        let appended = ToolCompletionFolding.apply(result("toolu_ZZZ"), to: &blocks)
+
+        XCTAssertFalse(appended, "dropped, exactly as the daemon used to drop it")
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(callData(blocks, 0)?.finishedQuietly, false)
+        XCTAssertNil(callData(blocks, 0)?.finishedAt)
+    }
+
+    func testAnEmptyResultWithNoIdIsDroppedAndNoCallIsTouched() {
+        // An id-less call must not be matched by an id-less result either.
+        var blocks: [TurnBlock] = [call(nil), call("toolu_A")]
+        let appended = ToolCompletionFolding.apply(result(nil), to: &blocks)
+
+        XCTAssertFalse(appended)
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertEqual(callData(blocks, 0)?.finishedQuietly, false)
+        XCTAssertEqual(callData(blocks, 1)?.finishedQuietly, false)
+    }
+
+    func testAnEmptyResultOnAnEmptyArrayIsDropped() {
+        var blocks: [TurnBlock] = []
+        XCTAssertFalse(ToolCompletionFolding.apply(result("toolu_A"), to: &blocks))
+        XCTAssertTrue(blocks.isEmpty)
+    }
+
+    func testAnEmptyResultDoesNotFinishACallThatIsNotInTheArray() {
+        // The call sits in another turn's array: this array has only a different call.
+        var blocks: [TurnBlock] = [.text("x"), call("toolu_B")]
+        XCTAssertFalse(ToolCompletionFolding.apply(result("toolu_A"), to: &blocks))
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertEqual(callData(blocks, 1)?.finishedQuietly, false)
+    }
+}
+
+// MARK: - Tool-fold wire enrichment (TF1): subagent text parents ride beside the blocks
+
+final class ChatTurnSubagentTextParentsTests: XCTestCase {
+
+    func testDroppingLeadingBlocksShiftsEachParentWithItsBlock() {
+        var turn = ChatTurn(userInput: "go", timestamp: Date(timeIntervalSince1970: 1_770_000_000),
+                            blocks: [.note("model changed"), .text("main"), .text("sub A"), .toolCall(ToolCallData(toolName: "Bash", inputSummary: "ls", inputFull: "{}")), .text("sub B")],
+                            subagentTextParents: [2: "toolu_agent1", 4: "toolu_agent2"])
+
+        turn.removeLeadingBlocks(1)
+
+        XCTAssertEqual(turn.blocks.count, 4)
+        XCTAssertEqual(turn.subagentTextParents, [1: "toolu_agent1", 3: "toolu_agent2"],
+                       "after dropping the leading note, each subagent line must still point at its own text")
+        guard case .text(let s) = turn.blocks[1] else { return XCTFail("block 1") }
+        XCTAssertEqual(s, "sub A")
+    }
+
+    func testDroppingBlocksThatHeldParentsForgetsThoseParents() {
+        var turn = ChatTurn(userInput: "go", timestamp: Date(timeIntervalSince1970: 1_770_000_000),
+                            blocks: [.text("sub"), .text("main"), .text("sub 2")],
+                            subagentTextParents: [0: "toolu_agent1", 2: "toolu_agent2"])
+        turn.removeLeadingBlocks(2)
+        XCTAssertEqual(turn.subagentTextParents, [0: "toolu_agent2"])
+        XCTAssertEqual(turn.blocks.count, 1)
+    }
+
+    func testDroppingNoBlocksChangesNothing() {
+        var turn = ChatTurn(userInput: "go", timestamp: Date(timeIntervalSince1970: 1_770_000_000),
+                            blocks: [.text("a"), .text("b")], subagentTextParents: [1: "toolu_agent1"])
+        turn.removeLeadingBlocks(0)
+        XCTAssertEqual(turn.blocks.count, 2)
+        XCTAssertEqual(turn.subagentTextParents, [1: "toolu_agent1"])
+    }
+}
+
+// MARK: - Tool-fold wire enrichment (TF1): today's rendering is unchanged
+
+final class ToolFoldRenderingGuardTests: XCTestCase {
+
+    /// `contentKey` keys the virtualizer's height cache; it counts durable block kinds. The
+    /// enrichment adds ids, times and parents to blocks and must not change that key.
+    func testEnrichedBlocksHaveTheSameContentKeyAsPlainOnes() {
+        let when = Date(timeIntervalSince1970: 1_770_000_000)
+        func turn(_ blocks: [TurnBlock], parents: [Int: String] = [:]) -> ChatTurn {
+            ChatTurn(userInput: "run it", timestamp: when, timestampRaw: "2026-08-11T12:00:00.0000Z",
+                     blocks: blocks, isComplete: true, subagentTextParents: parents)
+        }
+        let plain = turn([.text("hi"),
+                          .toolCall(ToolCallData(toolName: "Bash", inputSummary: "ls", inputFull: "{}")),
+                          .toolResult(ToolResultData(content: "out", isError: false)),
+                          .text("done")])
+        let enriched = turn([.text("hi"),
+                             .toolCall(ToolCallData(toolName: "Bash", inputSummary: "ls", inputFull: "{}",
+                                                    toolUseId: "toolu_1", parentToolUseId: "toolu_agent1",
+                                                    target: "/x", startedAt: when, finishedAt: when, finishedQuietly: true)),
+                             .toolResult(ToolResultData(content: "out", isError: false, toolUseId: "toolu_1",
+                                                        parentToolUseId: "toolu_agent1", at: when)),
+                             .text("done")],
+                            parents: [3: "toolu_agent1"])
+        XCTAssertEqual(enriched.contentKey, plain.contentKey)
+        XCTAssertEqual(plain.contentKey.split(separator: "|").last.map(String.init), "tcrt")
+    }
+}

@@ -310,11 +310,50 @@ struct DaemonAskOption: Decodable {
     }
 }
 
+/// The optional identity, time and subagent facts the daemon attaches to a tool call or
+/// tool result (`stream_json::TurnBlock::ToolCall` / `ToolResult`). Every field is absent
+/// from an older daemon's wire, so every field is optional.
+struct DaemonToolMeta: Equatable {
+    /// The CLI's `tool_use.id` (a call), or the id of the call a result answers.
+    var toolUseId: String?
+    /// The Agent/Task call a subagent's block came from; `"?"` when the daemon knew it was
+    /// a subagent's but not whose.
+    var parentToolUseId: String?
+    /// The file a file tool works on (calls only).
+    var target: String?
+    /// When the call was made, or the result arrived. Nil when unknown.
+    var ts: Date?
+
+    static let none = DaemonToolMeta()
+
+    /// Parses the daemon's RFC 3339 timestamps, with or without a fractional part. An
+    /// unparseable value is nil, never a decode failure: a time is decoration and must not
+    /// cost the client the whole turn.
+    static func parseTimestamp(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        return fractionalFormatter.date(from: raw) ?? wholeFormatter.date(from: raw)
+    }
+
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let wholeFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+}
+
 /// Mirrors `stream_json::TurnBlock` — tagged by `kind`.
 enum DaemonTurnBlock: Decodable {
-    case text(String)
-    case toolCall(toolName: String, inputSummary: String, inputFull: String)
-    case toolResult(content: String, isError: Bool)
+    /// `parentToolUseId`: the Agent/Task call a subagent said this under.
+    case text(String, parentToolUseId: String? = nil)
+    case toolCall(toolName: String, inputSummary: String, inputFull: String, meta: DaemonToolMeta = .none)
+    /// `content` is empty for a quiet success: the daemon keeps those so the client can tell a
+    /// finished call from a running one (`ToolCompletionFolding` folds them into the call).
+    case toolResult(content: String, isError: Bool, meta: DaemonToolMeta = .none)
     case resultSummary(durationMs: Int, costUsd: Double, isError: Bool, interrupted: Bool = false)
     case errorMessage(String)
     case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool)
@@ -327,6 +366,7 @@ enum DaemonTurnBlock: Decodable {
     private enum K: String, CodingKey {
         case kind, text, noteKind = "note_kind", ts
         case toolName = "tool_name", inputSummary = "input_summary", inputFull = "input_full"
+        case toolUseId = "tool_use_id", parentToolUseId = "parent_tool_use_id", target
         case content, isError = "is_error", interrupted
         case durationMs = "duration_ms", costUsd = "cost_usd"
         case message, question, header, options, multiSelect = "multi_select"
@@ -336,14 +376,17 @@ enum DaemonTurnBlock: Decodable {
         let c = try d.container(keyedBy: K.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "text":
-            self = .text(try c.decode(String.self, forKey: .text))
+            self = .text(try c.decode(String.self, forKey: .text),
+                         parentToolUseId: try c.decodeIfPresent(String.self, forKey: .parentToolUseId))
         case "tool_call":
             self = .toolCall(toolName: try c.decode(String.self, forKey: .toolName),
                              inputSummary: try c.decode(String.self, forKey: .inputSummary),
-                             inputFull: try c.decode(String.self, forKey: .inputFull))
+                             inputFull: try c.decode(String.self, forKey: .inputFull),
+                             meta: try Self.decodeMeta(c))
         case "tool_result":
             self = .toolResult(content: try c.decode(String.self, forKey: .content),
-                               isError: try c.decode(Bool.self, forKey: .isError))
+                               isError: try c.decode(Bool.self, forKey: .isError),
+                               meta: try Self.decodeMeta(c))
         case "result_summary":
             self = .resultSummary(durationMs: try c.decode(Int.self, forKey: .durationMs),
                                   costUsd: try c.decode(Double.self, forKey: .costUsd),
@@ -365,6 +408,22 @@ enum DaemonTurnBlock: Decodable {
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown TurnBlock kind: \(other)")
         }
+    }
+}
+
+extension DaemonTurnBlock {
+    /// The subagent call this block is prose from, if it is.
+    var textParent: String? {
+        if case .text(_, let parent) = self { return parent }
+        return nil
+    }
+
+    private static func decodeMeta(_ c: KeyedDecodingContainer<K>) throws -> DaemonToolMeta {
+        DaemonToolMeta(
+            toolUseId: try c.decodeIfPresent(String.self, forKey: .toolUseId),
+            parentToolUseId: try c.decodeIfPresent(String.self, forKey: .parentToolUseId),
+            target: try c.decodeIfPresent(String.self, forKey: .target),
+            ts: DaemonToolMeta.parseTimestamp(try c.decodeIfPresent(String.self, forKey: .ts)))
     }
 }
 
