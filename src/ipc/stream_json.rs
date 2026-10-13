@@ -188,7 +188,15 @@ pub enum TurnDelta {
         context_tokens: Option<u64>,
     },
     /// The in-flight turn was aborted (e.g. the child crashed).
-    TurnErrored { turn_id: String, message: String },
+    TurnErrored {
+        turn_id: String,
+        message: String,
+        /// The turn was never a real one (a phantom prompt dropped when the
+        /// next prompt arrived), not a turn that ended: its owner must not
+        /// treat it as a turn end. Local only; never on the wire.
+        #[serde(skip)]
+        discarded: bool,
+    },
     /// A [`TurnBlock::Note`] was added after the turn `turn_id` (the latest
     /// turn when the note was made). `turn_id: None` means the session has no
     /// turn yet: the note is shown on its own, and it also leads the blocks of
@@ -1057,6 +1065,7 @@ impl SessionTranscript {
         Some(TurnDelta::TurnErrored {
             turn_id: turn.id,
             message: "Not a message: a system entry the CLI replayed.".to_owned(),
+            discarded: true,
         })
     }
 
@@ -1076,6 +1085,7 @@ impl SessionTranscript {
         let delta = Some(TurnDelta::TurnErrored {
             turn_id: turn.id.clone(),
             message: message.to_string(),
+            discarded: false,
         });
         self.enforce_limits();
         delta
@@ -1820,6 +1830,7 @@ mod tests {
             TurnDelta::TurnErrored {
                 turn_id: "t0".into(),
                 message: "x".into(),
+                discarded: false,
             },
         ];
         for d in deltas {
@@ -2369,6 +2380,64 @@ mod tests {
             replaced.iter().any(|d| matches!(d, TurnDelta::TurnStarted { turn } if turn.user_input == "hi")),
             "{replaced:?}"
         );
+    }
+
+    /// The `TurnErrored` deltas among `deltas`, as `(turn_id, discarded)`.
+    fn errored(deltas: &[TurnDelta]) -> Vec<(String, bool)> {
+        deltas
+            .iter()
+            .filter_map(|d| match d {
+                TurnDelta::TurnErrored { turn_id, discarded, .. } => Some((turn_id.clone(), *discarded)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_delta_that_drops_a_phantom_says_it_was_discarded_so_it_is_not_mistaken_for_a_turn_end() {
+        let mut t = SessionTranscript::new();
+        let started = t.ingest_line(&user_event(serde_json::json!(PHANTOM)));
+        let phantom_id = match &started[..] {
+            [TurnDelta::TurnStarted { turn }] => turn.id.clone(),
+            other => panic!("a prompt opens a turn: {other:?}"),
+        };
+
+        let replaced = t.ingest_line(&user_event(serde_json::json!("hi")));
+
+        assert_eq!(
+            errored(&replaced),
+            [(phantom_id, true)],
+            "the phantom is closed for the clients that saw it start, and marked as never having been a turn"
+        );
+    }
+
+    #[test]
+    fn a_turn_aborted_by_a_crash_is_an_ended_turn_not_a_discard() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_event(serde_json::json!("do a thing")));
+
+        let delta = t.mark_current_errored("child crashed").expect("there was an open turn");
+
+        assert_eq!(errored(&[delta]).iter().map(|(_, discarded)| *discarded).collect::<Vec<_>>(), [false]);
+    }
+
+    #[test]
+    fn whether_an_errored_turn_was_discarded_is_not_on_the_wire() {
+        let ended = TurnDelta::TurnErrored { turn_id: "t0".into(), message: "x".into(), discarded: false };
+        let dropped = TurnDelta::TurnErrored { turn_id: "t1".into(), message: "y".into(), discarded: true };
+
+        for delta in [&ended, &dropped] {
+            let json = serde_json::to_value(delta).unwrap();
+            assert_eq!(json["delta"], "turn_errored");
+            assert!(json.get("discarded").is_none(), "no new key for the clients to trip over: {json}");
+            assert_eq!(
+                json.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+                ["delta", "message", "turn_id"].map(String::from).into_iter().collect(),
+                "the same keys as before the flag existed"
+            );
+        }
+        let back: TurnDelta = serde_json::from_value(serde_json::to_value(&ended).unwrap()).unwrap();
+        assert_eq!(back, ended, "an ordinary errored turn still round-trips");
     }
 
     #[test]

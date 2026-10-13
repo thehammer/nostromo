@@ -4907,8 +4907,49 @@ mod model_switching {
         let defaults = raw_of_type(&frames, "model_defaults");
         assert!(defaults.len() >= 2, "the replay and the answer each carry the defaults: {wire}");
         for d in defaults {
-            assert_eq!(d["defaults"]["cody"]["model"], "haiku", "the defaults a user set are readable: {d}");
+            assert!(d["defaults"].is_null() || d["defaults"].as_object().is_some_and(|o| o.is_empty()), "the agents the user set a default for are not a network peer's to list: {d}");
             assert!(d["declared"].is_null() || d["declared"].as_object().is_some_and(|o| o.is_empty()), "{d}");
+        }
+    }
+
+    const DEFAULT_AGENT: &str = "zzdefault-agent-gamma";
+
+    #[tokio::test]
+    async fn a_tcp_client_is_never_told_which_agents_have_a_default_model_while_a_unix_client_is() {
+        isolated_activity_log();
+        isolated_agents_dir();
+        let h = spawn_server().await;
+        // Something to leak: a per-agent default, set the way the app sets one.
+        let set = h.session_mgr.lock().unwrap().set_agent_default(DEFAULT_AGENT, Some("haiku".into()), None, false);
+        assert_eq!(set.status, ModelRequestStatus::Applied, "{set:?}");
+
+        // Control: a local peer is told the default, so the test below cannot pass by there being none.
+        let (mut unix, _) = h.unix(vec![]).await;
+        send(&mut unix, &ClientMsg::ModelDefaultsRequest {}).await;
+        let local = recv_until(&mut unix, |m| matches!(m, ServerMsg::ModelDefaults { .. })).await;
+        match local.last() {
+            Some(ServerMsg::ModelDefaults { defaults, .. }) => {
+                assert_eq!(defaults.get(DEFAULT_AGENT).map(|d| d.model.as_str()), Some("haiku"), "a local peer is told it: {defaults:?}")
+            }
+            other => panic!("no defaults for the local peer: {other:?}"),
+        }
+
+        // The network peer: the replay of a Topic::Model subscribe, then an explicit ask.
+        let mut tcp = raw_tcp(&h).await;
+        let (_welcome, replay) = raw_handshake(&mut tcp, json!({"type": "subscribe", "topics": ["model"], "renders_decisions": false}))
+            .await
+            .expect("a network peer may subscribe to the model topic");
+        send_json(&mut tcp, &serde_json::to_value(ClientMsg::ModelDefaultsRequest {}).unwrap()).await;
+        let answers = raw_sync(&mut tcp).await.expect("the connection stays up");
+        let frames: Vec<Value> = replay.into_iter().chain(answers).collect();
+
+        let wire = serde_json::to_string(&frames).unwrap();
+        assert!(!wire.contains(DEFAULT_AGENT), "the name of an agent the user configured reached a network peer: {wire}");
+        let defaults = raw_of_type(&frames, "model_defaults");
+        assert!(defaults.len() >= 2, "the replay and the answer each carry the defaults frame: {wire}");
+        for d in defaults {
+            assert!(d["defaults"].is_null() || d["defaults"].as_object().is_some_and(|o| o.is_empty()), "defaults: {d}");
+            assert!(d["declared"].is_null() || d["declared"].as_object().is_some_and(|o| o.is_empty()), "declared: {d}");
         }
     }
 

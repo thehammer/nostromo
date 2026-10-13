@@ -39,7 +39,8 @@ pub fn ledger_path(dir: &Path, session_id: &str) -> PathBuf {
     dir.join(format!("{session_id}.jsonl"))
 }
 
-/// Append one note. The line is flushed to disk before returning, and a
+/// Append one note. The line is flushed to disk before returning (the
+/// directory entry too, for a ledger this call creates), and a
 /// ledger whose last line was torn by a crash (no trailing newline) gets a
 /// newline first, so the fragment stays one unreadable line instead of
 /// swallowing this note.
@@ -47,11 +48,13 @@ pub fn append(dir: &Path, session_id: &str, note: &LedgerNote) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut line = serde_json::to_string(note)?;
     line.push('\n');
+    let path = ledger_path(dir, session_id);
+    let is_new = !path.exists();
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
         .append(true)
-        .open(ledger_path(dir, session_id))?;
+        .open(&path)?;
     if file.metadata()?.len() > 0 {
         let mut last = [0u8; 1];
         file.seek(SeekFrom::End(-1))?;
@@ -62,6 +65,14 @@ pub fn append(dir: &Path, session_id: &str, note: &LedgerNote) -> Result<()> {
     }
     file.write_all(line.as_bytes())?;
     file.sync_data()?;
+    if is_new {
+        // `sync_data` makes the contents durable, not the file's entry in its
+        // directory: without this a power loss can lose the whole new ledger.
+        // A directory that can't be fsynced only weakens durability.
+        if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+            tracing::warn!(dir = %dir.display(), "could not fsync the notes directory: {e}");
+        }
+    }
     Ok(())
 }
 
