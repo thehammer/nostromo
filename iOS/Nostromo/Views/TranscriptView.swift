@@ -298,6 +298,14 @@ private struct BlockView: View {
                 options:  options,
                 onAnswer: onAnswer
             )
+
+        case .note(_, let text, _):
+            // iOS does not subscribe to the model topic yet (M7), so a note never
+            // arrives; the case keeps the switch exhaustive and degrades to a quiet line.
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 }

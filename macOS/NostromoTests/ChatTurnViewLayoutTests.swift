@@ -421,6 +421,7 @@ final class ChatTurnViewLayoutTests: XCTestCase {
         case .resultSummary(let d): return ResultChipView(data: d)
         case .errorMessage(let m):  return ErrorBlockView(message: m)
         case .askQuestion(let d):   return AskQuestionView(data: d, answeredOptionIndex: nil)
+        case .note(let text):       return NoteBlockView(text: text)
         }
     }
 

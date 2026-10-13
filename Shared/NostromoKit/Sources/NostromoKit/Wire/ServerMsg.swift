@@ -107,6 +107,21 @@ public enum ServerMsg {
     /// The daemon withheld these topics from this (network) connection.
     case withheld(topics: [String], reason: String)
 
+    // ── model switching ───────────────────────────────────────────────────────
+    // Delivered only to a client that subscribes to the `model` topic.
+
+    /// The model families the installed CLI offers, cheapest first.
+    case modelCatalog(families: [ModelFamilyWire], stale: Bool, fetchedAt: String?)
+    /// One focus's model: recorded, reported, any switch in progress.
+    case sessionModelState(SessionModelStateWire)
+    /// Per-agent defaults, and the model each agent declares. `declared` is
+    /// empty for network peers.
+    case modelDefaults(defaults: [String: AgentModelDefaultWire], declared: [String: String])
+    /// Answer to a `session_model_set` / `model_default_set`, sent to the
+    /// requesting connection only.
+    case modelRequestResult(requestId: String, status: ModelRequestStatusWire,
+                            code: String?, message: String?, warning: String?)
+
     case unknown
 }
 
@@ -284,9 +299,15 @@ public enum DaemonTurnBlock: Decodable {
     case resultSummary(durationMs: Int, costUsd: Double, isError: Bool, interrupted: Bool = false)
     case errorMessage(String)
     case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool)
+    /// A daemon-authored transcript marker ("Model changed to Opus (from
+    /// Sonnet) by you."): not a message, never sent to the agent. `kind` is the
+    /// raw `note_kind` (`model_changed`, `model_pending`, `model_failed`, ...).
+    case note(kind: String, text: String, ts: String?)
 
     private enum K: String, CodingKey {
         case kind
+        case noteKind     = "note_kind"
+        case ts
         case text
         case toolName     = "tool_name"
         case inputSummary = "input_summary"
@@ -333,6 +354,13 @@ public enum DaemonTurnBlock: Decodable {
                 options:     try c.decode([DaemonAskOption].self, forKey: .options),
                 multiSelect: try c.decode(Bool.self,             forKey: .multiSelect)
             )
+        case "note":
+            // `note_kind`, not `kind`: `kind` is this enum's own tag.
+            self = .note(
+                kind: try c.decodeIfPresent(String.self, forKey: .noteKind) ?? "",
+                text: try c.decode(String.self, forKey: .text),
+                ts:   try c.decodeIfPresent(String.self, forKey: .ts)
+            )
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown TurnBlock kind: \(other)")
@@ -361,6 +389,9 @@ public enum DaemonTurnDelta: Decodable {
     case blockAppended(turnId: String, block: DaemonTurnBlock)
     case turnCompleted(turnId: String, summary: DaemonResultSummary)
     case turnErrored(turnId: String, message: String)
+    /// A `note` block was added after turn `turnId`; `nil` means the session
+    /// has no turn yet.
+    case note(turnId: String?, block: DaemonTurnBlock)
 
     private enum K: String, CodingKey {
         case delta
@@ -390,6 +421,11 @@ public enum DaemonTurnDelta: Decodable {
             self = .turnErrored(
                 turnId:  try c.decode(String.self, forKey: .turnId),
                 message: try c.decode(String.self, forKey: .message)
+            )
+        case "note":
+            self = .note(
+                turnId: try c.decodeIfPresent(String.self, forKey: .turnId),
+                block:  try c.decode(DaemonTurnBlock.self, forKey: .block)
             )
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .delta, in: c,
@@ -463,6 +499,23 @@ extension ServerMsg {
         let reason: String?
         let last_event_at: Date?
         let hook_installed: Bool
+    }
+
+    private struct ModelCatalogWrapper: Decodable {
+        let families: [ModelFamilyWire]
+        let stale: Bool
+        let fetched_at: String?
+    }
+    private struct ModelDefaultsWrapper: Decodable {
+        let defaults: [String: AgentModelDefaultWire]
+        let declared: [String: String]?
+    }
+    private struct ModelRequestResultWrapper: Decodable {
+        let request_id: String
+        let status: ModelRequestStatusWire
+        let code: String?
+        let message: String?
+        let warning: String?
     }
 
     /// Decode a raw JSON frame from the daemon.
@@ -619,6 +672,27 @@ extension ServerMsg {
                     lastEventAt: m.last_event_at,
                     hookInstalled: m.hook_installed
                 )
+            }
+
+        case "model_catalog":
+            if let m = try? dec.decode(ModelCatalogWrapper.self, from: data) {
+                return .modelCatalog(families: m.families, stale: m.stale, fetchedAt: m.fetched_at)
+            }
+
+        case "session_model_state":
+            if let m = try? dec.decode(SessionModelStateWire.self, from: data) {
+                return .sessionModelState(m)
+            }
+
+        case "model_defaults":
+            if let m = try? dec.decode(ModelDefaultsWrapper.self, from: data) {
+                return .modelDefaults(defaults: m.defaults, declared: m.declared ?? [:])
+            }
+
+        case "model_request_result":
+            if let m = try? dec.decode(ModelRequestResultWrapper.self, from: data) {
+                return .modelRequestResult(requestId: m.request_id, status: m.status,
+                                           code: m.code, message: m.message, warning: m.warning)
             }
 
         default:

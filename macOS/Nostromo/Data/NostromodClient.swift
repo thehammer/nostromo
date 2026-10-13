@@ -213,6 +213,19 @@ enum ServerMsg {
     /// The daemon withheld these topics from this (network) connection. Informational.
     case withheld(topics: [String], reason: String)
 
+    // ── model switching (delivered only to a client subscribed to the `model` topic,
+    // except for the targeted replies to its own requests) ─────────────────────
+    /// The model families the installed CLI offers, cheapest first.
+    case modelCatalog(families: [ModelFamilyWire], stale: Bool, fetchedAt: String?)
+    /// One focus's model: recorded, reported, any switch in progress. Retained per
+    /// tag by the daemon and replayed on subscribe.
+    case sessionModelState(SessionModelStateWire)
+    /// Per-agent defaults and the model each agent declares.
+    case modelDefaults(defaults: [String: AgentModelDefaultWire], declared: [String: String])
+    /// Answer to a `session_model_set` / `model_default_set` of this connection.
+    case modelRequestResult(requestId: String, status: ModelRequestStatusWire,
+                            code: String?, message: String?, warning: String?)
+
     case unknown
 }
 
@@ -305,9 +318,14 @@ enum DaemonTurnBlock: Decodable {
     case resultSummary(durationMs: Int, costUsd: Double, isError: Bool, interrupted: Bool = false)
     case errorMessage(String)
     case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool)
+    /// A daemon-authored marker ("Model changed to Opus (from Sonnet) by you."): not a
+    /// message, never sent to the agent. `kind` is the raw `note_kind` (`model_changed`,
+    /// `model_pending`, `model_failed`, ...), kept as a string so a kind a newer daemon
+    /// adds still renders.
+    case note(kind: String, text: String, ts: String?)
 
     private enum K: String, CodingKey {
-        case kind, text
+        case kind, text, noteKind = "note_kind", ts
         case toolName = "tool_name", inputSummary = "input_summary", inputFull = "input_full"
         case content, isError = "is_error", interrupted
         case durationMs = "duration_ms", costUsd = "cost_usd"
@@ -338,6 +356,11 @@ enum DaemonTurnBlock: Decodable {
                                 header: try c.decode(String.self, forKey: .header),
                                 options: try c.decode([DaemonAskOption].self, forKey: .options),
                                 multiSelect: try c.decode(Bool.self, forKey: .multiSelect))
+        case "note":
+            // `note_kind`, not `kind`: `kind` is this enum's own tag.
+            self = .note(kind: try c.decodeIfPresent(String.self, forKey: .noteKind) ?? "",
+                         text: try c.decode(String.self, forKey: .text),
+                         ts: try c.decodeIfPresent(String.self, forKey: .ts))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown TurnBlock kind: \(other)")
@@ -373,6 +396,10 @@ enum DaemonTurnDelta: Decodable {
     case blockAppended(turnId: String, block: DaemonTurnBlock)
     case turnCompleted(turnId: String, summary: DaemonResultSummary, contextTokens: Int?)
     case turnErrored(turnId: String, message: String)
+    /// A `note` block was added after turn `turnId` (the latest one when the note was
+    /// made). `nil` means the session had no turn yet; the daemon then also leads the
+    /// next `turnStarted` turn's blocks with the same note.
+    case note(turnId: String?, block: DaemonTurnBlock)
 
     private enum K: String, CodingKey {
         case delta, turn, turnId = "turn_id", block, summary, message
@@ -396,6 +423,9 @@ enum DaemonTurnDelta: Decodable {
         case "turn_errored":
             self = .turnErrored(turnId: try c.decode(String.self, forKey: .turnId),
                                 message: try c.decode(String.self, forKey: .message))
+        case "note":
+            self = .note(turnId: try c.decodeIfPresent(String.self, forKey: .turnId),
+                         block: try c.decode(DaemonTurnBlock.self, forKey: .block))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .delta, in: c,
                 debugDescription: "unknown TurnDelta: \(other)")
@@ -621,7 +651,11 @@ class NostromodClient {
     /// `welcome.features` that add a topic, in the order they are subscribed.
     /// "work" carries the Teri work-item frames (`work_source_status`,
     /// `work_snapshot`, `teri_picks`).
-    static let featureTopics: [String: String] = ["work": "work"]
+    /// "model" carries the model-switching frames (`model_catalog`,
+    /// `session_model_state`, `model_defaults`) and the transcript `note` blocks. The
+    /// daemon delivers them only to a client that names the topic, so a reconnect to
+    /// a daemon that advertises the feature subscribes again (this runs per `welcome`).
+    static let featureTopics: [String: String] = ["work": "work", "model": "model"]
 
     /// Re-subscribe with the base topics plus the topic of every feature this
     /// connection's daemon advertised. Evaluated per connection (a daemon that is
@@ -682,6 +716,45 @@ class NostromodClient {
     /// Lifecycle control: "stop" | "restart" | "new_session".
     func sessionControl(tag: String, action: String) {
         send(SessionControlMsg(tag: tag, action: action), type: "session_control", tag: tag)
+    }
+
+    // MARK: - Model switching commands
+
+    /// Ask for the model catalogue; answered with `ServerMsg.modelCatalog`.
+    func modelCatalogRequest() {
+        send(ClientModelCatalogRequest(), type: "model_catalog_request")
+    }
+
+    /// Re-probe the installed CLI for its models; the daemon broadcasts the result.
+    func modelCatalogRefresh() {
+        send(ClientModelCatalogRefresh(), type: "model_catalog_refresh")
+    }
+
+    /// Read the per-agent defaults; answered with `ServerMsg.modelDefaults`.
+    func modelDefaultsRequest() {
+        send(ClientModelDefaultsRequest(), type: "model_defaults_request")
+    }
+
+    /// Read one focus's model; answered with `ServerMsg.sessionModelState`.
+    func sessionModelGet(tag: String) {
+        send(ClientSessionModelGet(tag: tag), type: "session_model_get", tag: tag)
+    }
+
+    /// Switch a focus's model and/or effort. `nil` keeps the current value, an effort
+    /// of `"default"` resets it. Answered with `ServerMsg.modelRequestResult`.
+    func sessionModelSet(tag: String, model: String?, effort: String?,
+                         setAsAgentDefault: Bool = false, requestId: String) {
+        send(ClientSessionModelSet(tag: tag, model: model, effort: effort,
+                                   setAsAgentDefault: setAsAgentDefault, requestId: requestId),
+             type: "session_model_set", tag: tag)
+    }
+
+    /// Set (or, with `clear`, remove) an agent's default model.
+    func modelDefaultSet(agent: String, model: String?, effort: String?,
+                         clear: Bool = false, requestId: String) {
+        send(ClientModelDefaultSet(agent: agent, model: model, effort: effort,
+                                   clear: clear, requestId: requestId),
+             type: "model_default_set")
     }
 
     // MARK: - Decision modal commands
@@ -1084,12 +1157,56 @@ class NostromodClient {
                 return .withheld(topics: m.topics, reason: m.reason)
             }
 
+        // ── model switching ──────────────────────────────────────────────────
+        case "model_catalog":
+            if let m = try? decoder.decode(ModelCatalogResp.self, from: raw) {
+                return .modelCatalog(families: m.families, stale: m.stale, fetchedAt: m.fetched_at)
+            }
+
+        case "session_model_state":
+            if let m = try? decoder.decode(SessionModelStateWire.self, from: raw) {
+                return .sessionModelState(m)
+            } else {
+                log.error("failed to decode session_model_state")
+            }
+
+        case "model_defaults":
+            if let m = try? decoder.decode(ModelDefaultsResp.self, from: raw) {
+                return .modelDefaults(defaults: m.defaults, declared: m.declared ?? [:])
+            }
+
+        case "model_request_result":
+            if let m = try? decoder.decode(ModelRequestResultResp.self, from: raw) {
+                return .modelRequestResult(requestId: m.request_id, status: m.status,
+                                           code: m.code, message: m.message, warning: m.warning)
+            }
+
         default:
             break
         }
 
         return .unknown
     }
+}
+
+// MARK: - Model switching response wrappers
+
+private struct ModelCatalogResp: Decodable {
+    let families: [ModelFamilyWire]
+    let stale: Bool
+    let fetched_at: String?
+}
+private struct ModelDefaultsResp: Decodable {
+    let defaults: [String: AgentModelDefaultWire]
+    /// Absent for network peers.
+    let declared: [String: String]?
+}
+private struct ModelRequestResultResp: Decodable {
+    let request_id: String
+    let status: ModelRequestStatusWire
+    let code: String?
+    let message: String?
+    let warning: String?
 }
 
 // MARK: - Teri/Fred work view response wrappers

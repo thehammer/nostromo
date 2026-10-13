@@ -371,7 +371,7 @@ final class TurnPayloadStore {
                 // `hydrate` supply the rest on expand.
                 return .toolResult(ToolResultData(content: String(d.content.prefix(prefixLength)),
                                                   isError: d.isError))
-            case .resultSummary, .errorMessage, .askQuestion:
+            case .resultSummary, .errorMessage, .askQuestion, .note:
                 return block
             }
         }
