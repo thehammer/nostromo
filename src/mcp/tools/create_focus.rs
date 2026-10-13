@@ -79,6 +79,11 @@ pub struct CreateFocusRequest {
     /// MCP pty id of the calling session (its focus tag), so a focus spawned
     /// by a sensitive (Teri/Fred) or network-driven session inherits that.
     pub caller: Option<String>,
+    /// The model for the new focus (family alias or full name); beats the
+    /// per-agent default and the agent's declared model. `None`: resolve.
+    pub model: Option<String>,
+    /// The effort for the new focus; `None`: the model's default.
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,12 +301,26 @@ fn validate(req: &CreateFocusRequest) -> Result<(), CreateFocusError> {
             return Err(CreateFocusError::InvalidWorkingDirectory(cwd.to_string_lossy().into_owned()));
         }
     }
+    if let Some(target) = choice_of(req) {
+        if !crate::model::store::is_plausible_choice(&target) {
+            return Err(CreateFocusError::InvalidArgs(
+                "model must be a model name (letters, digits, '-', '_', '.') and effort one of low, medium, high, xhigh, max"
+                    .into(),
+            ));
+        }
+    }
     if let Destination::MotherJob { max_cost: Some(cost) } = &req.destination {
         if !cost.is_finite() || *cost <= 0.0 {
             return Err(CreateFocusError::InvalidArgs("max_cost must be a positive number".into()));
         }
     }
     Ok(())
+}
+
+/// The model choice of a request: its model (with the effort), if it named one.
+fn choice_of(req: &CreateFocusRequest) -> Option<crate::model::ModelTarget> {
+    let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty())?;
+    Some(crate::model::ModelTarget { model: model.to_owned(), effort: req.effort.clone() })
 }
 
 /// The newest live marker for `item_id`, as an `Existing` outcome.
@@ -351,6 +370,8 @@ async fn create_focus_session(
         source_item,
         select_for_client,
         caller,
+        model,
+        effort,
         ..
     } = req;
 
@@ -380,6 +401,13 @@ async fn create_focus_session(
             first_free_tag(&base, |t| mgr.has_live_session(t))
         };
         register_sensitivity(&mgr, &tag, caller.as_deref(), initial_context.is_some() || instruction.is_some());
+
+        // The caller's choice is recorded before the child exists, so the spawn
+        // reads it; without one, the spawn resolves the defaults itself.
+        let explicit = choice_of(&CreateFocusRequest { model, effort, ..CreateFocusRequest::default() });
+        if explicit.is_some() {
+            mgr.record_new_focus_model(&tag, &agent, explicit.as_ref());
+        }
 
         // Spawn the session (no remote control; daemon-hosted stream-json child).
         // `spawn_session` already initialises the focus's pane tree.
@@ -889,6 +917,8 @@ fn parse_request(args: &Value, pty_id: Option<&str>) -> Result<CreateFocusReques
         destination,
         select_for_client: None,
         caller: pty_id.map(str::to_owned),
+        model: string("model")?.filter(|s| !s.is_empty()),
+        effort: string("effort")?.filter(|s| !s.is_empty()),
     })
 }
 

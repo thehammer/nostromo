@@ -47,6 +47,11 @@ struct Focus: Codable, Hashable, Identifiable {
     var daemonTag: String? = nil
     /// Optional user-chosen name (create sheet / sidebar "Rename…"). Nil = default naming.
     var label: String? = nil
+    /// The model chosen in the create sheet (family alias), sent to the daemon with the focus
+    /// registry until it has recorded it. Nil when the user left the pickers alone.
+    var initialModel: String? = nil
+    /// The effort chosen in the create sheet. Nil: the model's default.
+    var initialEffort: String? = nil
 
     /// Longest label the UI accepts.
     static let maxLabelLength = 60
@@ -158,6 +163,8 @@ extension Focus {
         // Additive and optional: a `focuses.json` written before labels existed
         // decodes as nil (default naming).
         label          = try c.decodeIfPresent(String.self, forKey: .label)
+        initialModel   = try c.decodeIfPresent(String.self, forKey: .initialModel)
+        initialEffort  = try c.decodeIfPresent(String.self, forKey: .initialEffort)
 
         // Self-heal a daemon-created focus persisted before `daemonTag` existed.
         //

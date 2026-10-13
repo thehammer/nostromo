@@ -17,6 +17,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
     private let labelField   = NSTextField()
     private let namePreview  = NSTextField(labelWithString: "")
     private let createBtn    = NSButton()
+    private let modelPickers: CreateFocusModelPickers
 
     // Data
     private var agents:   [String] = []
@@ -25,12 +26,14 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
     /// `agents` / `projects` override filesystem discovery (used by tests).
     init(orgResolver: RepoOrgResolver = RepoOrgResolver(),
          agents: [String]? = nil, projects: [String]? = nil,
+         modelStore: ModelStore = .shared,
          onCreate: @escaping (Focus) -> Void) {
         self.onCreate = onCreate
         self.orgResolver = orgResolver
+        self.modelPickers = CreateFocusModelPickers(store: modelStore)
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 256),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 322),
             styleMask:   [.titled],
             backing:     .buffered,
             defer:       false
@@ -50,6 +53,11 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
         }
         createBtn.isEnabled = !self.agents.isEmpty
         updatePreview()
+        modelPickers.agentChanged(to: selectedAgent)
+    }
+
+    private var selectedAgent: String? {
+        agents.indices.contains(agentPopup.indexOfSelectedItem) ? agents[agentPopup.indexOfSelectedItem] : nil
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -80,6 +88,23 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
         agentPopup.target = self
         agentPopup.action = #selector(pickerChanged)
         contentView.addSubview(agentPopup)
+
+        // Model and effort rows (explicit colours: system-drawn labels go dark-on-dark here)
+        func rowLabel(_ text: String) -> NSTextField {
+            let label = NSTextField(labelWithString: text)
+            label.font      = .systemFont(ofSize: 12)
+            label.textColor = .white
+            label.isEditable = false
+            label.isBordered = false
+            label.drawsBackground = false
+            label.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(label)
+            return label
+        }
+        let modelLabel  = rowLabel("Model:")
+        let effortLabel = rowLabel("Effort:")
+        contentView.addSubview(modelPickers.modelPopup)
+        contentView.addSubview(modelPickers.effortPopup)
 
         // Project row
         let projectLabel = NSTextField(labelWithString: "Project:")
@@ -149,7 +174,23 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
             agentPopup.leadingAnchor.constraint(equalTo: agentLabel.trailingAnchor, constant: 8),
             agentPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            projectLabel.topAnchor.constraint(equalTo: agentLabel.bottomAnchor, constant: 14),
+            modelLabel.topAnchor.constraint(equalTo: agentLabel.bottomAnchor, constant: 14),
+            modelLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            modelLabel.widthAnchor.constraint(equalToConstant: 60),
+
+            modelPickers.modelPopup.centerYAnchor.constraint(equalTo: modelLabel.centerYAnchor),
+            modelPickers.modelPopup.leadingAnchor.constraint(equalTo: modelLabel.trailingAnchor, constant: 8),
+            modelPickers.modelPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+
+            effortLabel.topAnchor.constraint(equalTo: modelLabel.bottomAnchor, constant: 14),
+            effortLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            effortLabel.widthAnchor.constraint(equalToConstant: 60),
+
+            modelPickers.effortPopup.centerYAnchor.constraint(equalTo: effortLabel.centerYAnchor),
+            modelPickers.effortPopup.leadingAnchor.constraint(equalTo: effortLabel.trailingAnchor, constant: 8),
+            modelPickers.effortPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+
+            projectLabel.topAnchor.constraint(equalTo: effortLabel.bottomAnchor, constant: 14),
             projectLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             projectLabel.widthAnchor.constraint(equalToConstant: 60),
 
@@ -233,7 +274,10 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
 
     // MARK: - Preview
 
-    @objc private func pickerChanged() { updatePreview() }
+    @objc private func pickerChanged() {
+        modelPickers.agentChanged(to: selectedAgent)
+        updatePreview()
+    }
 
     func controlTextDidChange(_ obj: Notification) { refreshPreviewText() }
 
@@ -284,6 +328,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
         let agentTag    = agents[agentPopup.indexOfSelectedItem]
         let projectPath = projects[projectPopup.indexOfSelectedItem]
         let label       = Focus.normalizedLabel(labelField.stringValue)
+        let choice      = modelPickers.choice
         orgResolver.resolve(projectPath) { [weak self] org in   // org is nil if the lookup failed
             guard let self else { return }
             self.isCreating = false
@@ -294,7 +339,9 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
                               isBuiltIn: false,
                               org: org,
                               sessionSummary: nil,
-                              label: label)
+                              label: label,
+                              initialModel: choice?.model,
+                              initialEffort: choice?.effort)
             if let window = self.window { window.sheetParent?.endSheet(window) }
             self.onCreate(focus)
         }
@@ -314,5 +361,8 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
         labelField.stringValue = text
         refreshPreviewText()
     }
+    /// The Model / Effort pickers' controller.
+    var pickers: CreateFocusModelPickers { modelPickers }
+    func selectAgent(at index: Int) { agentPopup.selectItem(at: index); pickerChanged() }
     func selectProject(at index: Int) { projectPopup.selectItem(at: index); updatePreview() }
 }

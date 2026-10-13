@@ -496,7 +496,7 @@ class AppStore: ObservableObject {
         // for an agent-driven refresh.
     }
 
-    private func pushFocusRegistry() {
+    func pushFocusRegistry() {
         client.focusRegistryPush(FocusStore.shared.wireProjection())
     }
 

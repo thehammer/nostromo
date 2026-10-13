@@ -141,9 +141,10 @@ final class ModelPopoverTests: XCTestCase {
                        ModelPresentation.effortRows(state: store.state(for: tag), catalog: store.catalog).map(\.accessibilityLabel))
     }
 
-    func testTheFooterCheckboxAndPostureHintArePresentButHiddenUntilLaterSlices() {
+    func testTheFooterCheckboxIsShownUncheckedAndThePostureHintStaysHiddenUntilM4() {
         let vc = openPopup()
-        XCTAssertTrue(vc.useForNewFocusesCheckbox.isHidden)
+        XCTAssertFalse(vc.useForNewFocusesCheckbox.isHidden)
+        XCTAssertEqual(vc.useForNewFocusesCheckbox.state, .off)
         XCTAssertTrue(vc.postureHintLabel.isHidden)
     }
 

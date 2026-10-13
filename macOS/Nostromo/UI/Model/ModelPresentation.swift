@@ -316,6 +316,8 @@ enum ModelPresentation {
         return "\(requested) was requested, but this session is running \(running)"
     }
 
+    static let agentDefaultsLinkTitle = "Agent defaults\u{2026}"
+
     /// "Use for new Claudia focuses".
     static func footerTitle(agent: String) -> String {
         "Use for new \(agent.prefix(1).uppercased() + agent.dropFirst()) focuses"

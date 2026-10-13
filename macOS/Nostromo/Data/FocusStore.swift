@@ -113,7 +113,9 @@ final class FocusStore {
                 project_name:    f.repoName,
                 org:             f.effectiveOrg,
                 is_built_in:     f.isBuiltIn,
-                session_summary: f.sessionSummary
+                session_summary: f.sessionSummary,
+                initial_model:   f.initialModel,
+                initial_effort:  f.initialEffort
             )
         }
     }
@@ -130,8 +132,14 @@ final class FocusStore {
 enum FocusCreation {
     /// Always a new session: several per agent+repo are allowed, told apart by
     /// label / branch (see `buildNavRows`). Never switches to an existing match.
-    static func commit(_ focus: Focus, store: FocusStore, switch switchTo: (Focus) -> Void) {
+    ///
+    /// `flushRegistry` sends the focus registry to the daemon *now*, before the focus is switched
+    /// to (which starts its session): the registry carries the model chosen in the create sheet,
+    /// and the daemon must have it before the spawn reads it. The usual push is debounced.
+    static func commit(_ focus: Focus, store: FocusStore, flushRegistry: () -> Void = {},
+                       switch switchTo: (Focus) -> Void) {
         store.add(focus)
+        if focus.initialModel != nil { flushRegistry() }
         switchTo(focus)
     }
 }

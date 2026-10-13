@@ -298,6 +298,64 @@ pub fn set_default(path: &Path, agent: &str, default: Option<AgentDefault>) -> R
     write_json_atomic(path, &all)
 }
 
+/// The model a **new** focus of `agent` starts on, and where that choice came
+/// from: `explicit` (the sheet's or the tool's choice) beats the per-agent
+/// default in `defaults`, which beats the agent's declared `model:`, which
+/// beats the CLI default.
+///
+/// The CLI default is `(None, None, CliDefault)`: spawn passes no `--model`
+/// and the first report records what ran. An explicit effort with no model
+/// anywhere to attach it to is dropped (the CLI's own default model has no
+/// name to pair it with). Pure: nothing is written.
+pub fn resolve_for_new_focus(
+    defaults: &Path,
+    agent: &str,
+    explicit: Option<&ModelTarget>,
+) -> (Option<String>, Option<String>, ModelSource) {
+    let explicit_model = explicit.map(|t| t.model.trim()).filter(|m| !m.is_empty());
+    let explicit_effort = explicit.and_then(|t| t.effort.clone());
+
+    let (model, effort, source) = if let Some(model) = explicit_model {
+        (Some(model.to_owned()), explicit_effort, ModelSource::Focus)
+    } else if let Some(default) = load_defaults(defaults).remove(agent) {
+        (
+            Some(default.model),
+            explicit_effort.or(default.effort),
+            if explicit.is_some() { ModelSource::Focus } else { ModelSource::AgentDefault },
+        )
+    } else if let Some(declared) = super::policy::declared_model(agent) {
+        (
+            Some(declared),
+            explicit_effort,
+            if explicit.is_some() { ModelSource::Focus } else { ModelSource::AgentDeclared },
+        )
+    } else {
+        (None, None, ModelSource::CliDefault)
+    };
+    match model {
+        Some(_) => (model, effort, source),
+        None => (None, None, ModelSource::CliDefault),
+    }
+}
+
+/// Is `target` shaped like something the CLI could accept: a model name of
+/// plain characters (never a flag) and a known effort level? The catalogue
+/// check happens at spawn; this only keeps nonsense out of the store and argv.
+pub fn is_plausible_choice(target: &ModelTarget) -> bool {
+    let model = target.model.as_str();
+    let model_ok = !model.is_empty()
+        && model.len() <= 64
+        && !model.starts_with('-')
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']' | ':'));
+    let effort_ok = target
+        .effort
+        .as_deref()
+        .is_none_or(|e| crate::model::cost::EFFORT_LEVELS.contains(&e));
+    model_ok && effort_ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

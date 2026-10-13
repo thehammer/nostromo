@@ -151,8 +151,13 @@ final class ModelPopoverViewController: NSViewController {
     private(set) var focusedSection: Section = .model
     private(set) var focusedRowIndex = 0
 
-    /// "Use for new <Agent> focuses". Present but hidden until M3 wires it.
+    /// "Use for new <Agent> focuses": unchecked by default. When checked, the choice made in the
+    /// popup also becomes the agent's default for new focuses. Hidden for a focus with no agent.
     let useForNewFocusesCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    /// "Agent defaults…": opens the per-agent defaults list.
+    let agentDefaultsButton = NSButton(title: "", target: nil, action: nil)
+    /// Opens the defaults list (the popup closes first). Set by whoever shows the popup.
+    var onShowAgentDefaults: (() -> Void)?
     /// The posture hint line. Present but hidden until M4 has a warning to show.
     let postureHintLabel = NSTextField(labelWithString: "")
     /// "Model list may be out of date", shown only for a stale catalogue.
@@ -202,7 +207,17 @@ final class ModelPopoverViewController: NSViewController {
         useForNewFocusesCheckbox.attributedTitle = NSAttributedString(
             string: ModelPresentation.footerTitle(agent: agentName ?? "agent"),
             attributes: [.foregroundColor: PopoverPalette.primary, .font: NSFont.systemFont(ofSize: 11)])
-        useForNewFocusesCheckbox.isHidden = true   // M3 wires the per-agent default.
+        useForNewFocusesCheckbox.isHidden = (agentName ?? "").isEmpty
+        useForNewFocusesCheckbox.state = .off
+
+        agentDefaultsButton.attributedTitle = NSAttributedString(
+            string: ModelPresentation.agentDefaultsLinkTitle,
+            attributes: [.foregroundColor: PopoverPalette.secondary, .font: NSFont.systemFont(ofSize: 11),
+                         .underlineStyle: NSUnderlineStyle.single.rawValue])
+        agentDefaultsButton.isBordered = false
+        agentDefaultsButton.target = self
+        agentDefaultsButton.action = #selector(showAgentDefaults)
+        agentDefaultsButton.setAccessibilityLabel(ModelPresentation.agentDefaultsLinkTitle)
 
         outer.addArrangedSubview(header("Model"))
         outer.addArrangedSubview(modelStack)
@@ -211,6 +226,7 @@ final class ModelPopoverViewController: NSViewController {
         outer.addArrangedSubview(staleNoticeLabel)
         outer.addArrangedSubview(postureHintLabel)
         outer.addArrangedSubview(useForNewFocusesCheckbox)
+        outer.addArrangedSubview(agentDefaultsButton)
 
         NSLayoutConstraint.activate([
             outer.topAnchor.constraint(equalTo: content.topAnchor),
@@ -290,9 +306,20 @@ final class ModelPopoverViewController: NSViewController {
         // The model already in use does nothing, unless a switch is pending: choosing the
         // current model then cancels it (the daemon reads it as "back to what is running").
         if !(row.isCurrent && state?.pending == nil) {
-            store.requestSwitch(tag: tag, model: row.alias, effort: effortAfterSwitching(to: row.alias, state: state))
+            store.requestSwitch(tag: tag, model: row.alias, effort: effortAfterSwitching(to: row.alias, state: state),
+                                setAsAgentDefault: setsAgentDefault)
         }
         onClose()
+    }
+
+    private var setsAgentDefault: Bool {
+        !useForNewFocusesCheckbox.isHidden && useForNewFocusesCheckbox.state == .on
+    }
+
+    @objc private func showAgentDefaults() {
+        let show = onShowAgentDefaults
+        onClose()
+        show?()
     }
 
     /// An explicit effort the new model does not offer would make the daemon refuse the
@@ -308,7 +335,7 @@ final class ModelPopoverViewController: NSViewController {
     private func chooseEffort(_ row: ModelPresentation.EffortRow) {
         let state = store.state(for: tag)
         if row.isEnabled, !(row.isCurrent && state?.pending == nil) {
-            store.requestSwitch(tag: tag, model: nil, effort: row.value)
+            store.requestSwitch(tag: tag, model: nil, effort: row.value, setAsAgentDefault: setsAgentDefault)
         }
         if row.isEnabled { onClose() }
     }
@@ -398,6 +425,12 @@ final class ModelPopover: NSObject, NSPopoverDelegate {
     var onDidClose: (() -> Void)?
 
     var isShown: Bool { popover.isShown }
+
+    /// Opens the per-agent defaults list; set by whoever shows the popup.
+    var onShowAgentDefaults: (() -> Void)? {
+        get { viewController.onShowAgentDefaults }
+        set { viewController.onShowAgentDefaults = newValue }
+    }
 
     init(tag: String, agentName: String?, store: ModelStore) {
         let popover = self.popover

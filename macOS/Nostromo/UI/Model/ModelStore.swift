@@ -131,6 +131,31 @@ final class ModelStore: ObservableObject {
         return requestId
     }
 
+    /// Set `agent`'s default model (and effort) for new focuses. The daemon answers with a
+    /// `ModelDefaults` frame, which updates `defaults`. Existing focuses are not touched.
+    @discardableResult
+    func setDefault(agent: String, model: String, effort: String?) -> String {
+        let requestId = makeRequestId()
+        sender?.modelDefaultSet(agent: agent, model: model, effort: effort, clear: false, requestId: requestId)
+        return requestId
+    }
+
+    /// Remove `agent`'s default: its new focuses fall back to the agent's own `model:`, then
+    /// the CLI default.
+    @discardableResult
+    func clearDefault(agent: String) -> String {
+        let requestId = makeRequestId()
+        sender?.modelDefaultSet(agent: agent, model: nil, effort: nil, clear: true, requestId: requestId)
+        return requestId
+    }
+
+    /// What a new focus of `agent` starts on, ignoring any choice made in the create sheet:
+    /// the per-agent default, else the agent's declared model. `nil` model: the CLI default.
+    func resolvedStart(agent: String) -> (model: String?, effort: String?) {
+        if let d = defaults?.defaults[agent] { return (d.model, d.effort) }
+        return (defaults?.declared[agent], nil)
+    }
+
     /// Drop everything held for a focus that was closed.
     func forget(tag: String) {
         states.removeValue(forKey: tag)

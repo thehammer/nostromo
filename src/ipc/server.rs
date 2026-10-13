@@ -953,6 +953,7 @@ fn handle_client_msg(
                 if !trust.is_network() {
                     mgr.mark_teri_fred_focuses(&focuses);
                 }
+                mgr.apply_initial_models(&focuses);
                 let (updated, departed) = mgr.set_focus_registry(focuses);
                 (
                     updated,
