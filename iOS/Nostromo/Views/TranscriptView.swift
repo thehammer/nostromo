@@ -244,12 +244,12 @@ private struct BlockView: View {
 
     var body: some View {
         switch block {
-        case .text(let s):
+        case .text(let s, _):
             Text(s)
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
 
-        case .toolCall(let toolName, let inputSummary, _):
+        case .toolCall(let toolName, let inputSummary, _, _):
             HStack(spacing: 6) {
                 Image(systemName: "wrench")
                     .imageScale(.small)
@@ -262,7 +262,7 @@ private struct BlockView: View {
             .background(Color.secondary.opacity(0.1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
-        case .toolResult(_, let isError):
+        case .toolResult(_, let isError, _):
             HStack(spacing: 6) {
                 Image(systemName: isError ? "xmark.circle.fill" : "checkmark.circle.fill")
                     .imageScale(.small)

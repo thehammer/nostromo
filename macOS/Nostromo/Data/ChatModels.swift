@@ -51,6 +51,12 @@ struct ChatTurn: Identifiable {
     /// prefix that survived truncation, and a 40 KB turn would claim to be three
     /// lines tall — collapsing the document and destroying the scroll position.
     var truncatedLengths: TruncatedLengths? = nil
+    /// Block index → the Agent/Task call whose subagent said that `.text` block (`"?"` when
+    /// unknown). Absent for the main agent's own prose, so a turn without subagents has an
+    /// empty map. It rides beside `blocks` rather than inside `.text` so the ~40 sites that
+    /// match `.text(let s)` stay as they are; use `removeLeadingBlocks` to drop blocks from
+    /// the front, which keeps the indices honest.
+    var subagentTextParents: [Int: String] = [:]
 
     /// Character counts for a turn whose text has been compressed away.
     struct TruncatedLengths {
@@ -83,7 +89,9 @@ struct ChatTurn: Identifiable {
          isComplete: Bool = false,
          daemonId: String? = nil,
          epoch: Int = 0,
-         marker: Marker? = nil) {
+         marker: Marker? = nil,
+         subagentTextParents: [Int: String] = [:]) {
+        self.subagentTextParents = subagentTextParents
         self.id           = id
         self.userInput    = userInput
         self.timestamp    = timestamp
@@ -105,6 +113,15 @@ struct ChatTurn: Identifiable {
         ChatTurn(userInput: "", timestamp: timestamp,
                  timestampRaw: "marker-\(kind)-\(timestamp.timeIntervalSince1970)",
                  isComplete: true, marker: kind)
+    }
+
+    /// Drop the first `count` blocks, moving `subagentTextParents` with the blocks that stay.
+    mutating func removeLeadingBlocks(_ count: Int) {
+        guard count > 0 else { return }
+        blocks.removeFirst(count)
+        subagentTextParents = Dictionary(uniqueKeysWithValues: subagentTextParents.compactMap { index, parent in
+            index >= count ? (index - count, parent) : nil
+        })
     }
 
     /// This turn, wearing `other`'s view identity.
@@ -267,8 +284,28 @@ extension TurnBlock {
 
 struct ToolCallData {
     let toolName:     String
-    let inputSummary: String   // one-liner for the collapsed row
-    let inputFull:    String   // pretty JSON for possible expansion
+    var inputSummary: String   // one-liner for the collapsed row
+    var inputFull:    String   // pretty JSON for possible expansion
+
+    // Facts the daemon sends alongside the call (all absent from an older daemon).
+    // `TurnPayloadStore.skeleton` keeps every one of them: only `inputFull` is bulky.
+
+    /// The CLI's `tool_use.id`: a call's durable identity, the same live and after a
+    /// daemon restart.
+    var toolUseId: String? = nil
+    /// The Agent/Task call this call was made under, when a subagent made it (`"?"` when
+    /// the daemon knew it was a subagent's but not whose).
+    var parentToolUseId: String? = nil
+    /// The file a Read/Write/Edit/MultiEdit/NotebookEdit call works on, in full.
+    var target: String? = nil
+    /// When the call was made. Nil when the daemon could not say.
+    var startedAt: Date? = nil
+    /// When the call's result arrived. Set only by `ToolCompletionFolding`, from the empty
+    /// successful result the daemon sends for a quiet call (`mkdir`, `git add`): that
+    /// result is folded into the call rather than appended as a block.
+    var finishedAt: Date? = nil
+    /// The call finished with an empty successful result (see `finishedAt`).
+    var finishedQuietly: Bool = false
 
     /// The complete command for a Bash call, decoded from `inputFull` (the daemon
     /// truncates `inputSummary` to 80 chars). Anything that is not a Bash call, or
@@ -284,8 +321,59 @@ struct ToolCallData {
 }
 
 struct ToolResultData {
-    let content: String
+    var content: String
     let isError: Bool
+    /// The `tool_use_id` of the call this result answers.
+    var toolUseId: String? = nil
+    /// The Agent/Task call this result belongs to, when it came from a subagent.
+    var parentToolUseId: String? = nil
+    /// When the result arrived. Nil when the daemon could not say.
+    var at: Date? = nil
+}
+
+/// Where a call's result went, as the transcript sees it: the one place the daemon's
+/// empty successful results are dealt with.
+///
+/// The daemon now sends an empty successful result (`content: ""`) so a client can tell a
+/// quiet call that finished from one that is still running. Rendering one would add a
+/// blank row to every transcript, so it is **folded into its call** (`finishedAt`,
+/// `finishedQuietly`) and never appended: a turn's block array is exactly what it was
+/// before the daemon sent them. Errors, even with empty content, and any result with
+/// content are appended as always.
+enum ToolCompletionFolding {
+
+    /// Add `block` to `blocks`, or fold it into the call it finishes.
+    ///
+    /// - Returns: whether a block was appended. False only for an empty successful
+    ///   result, which is dropped whether or not a call matches it (an unmatched one is
+    ///   dropped exactly as the daemon used to drop it).
+    @discardableResult
+    static func apply(_ block: TurnBlock, to blocks: inout [TurnBlock]) -> Bool {
+        guard case .toolResult(let result) = block, result.isQuietSuccess else {
+            blocks.append(block)
+            return true
+        }
+        guard let id = result.toolUseId,
+              let index = blocks.lastIndex(where: { $0.toolCall?.toolUseId == id })
+        else { return false }
+        guard case .toolCall(var call) = blocks[index] else { return false }
+        call.finishedAt = result.at
+        call.finishedQuietly = true
+        blocks[index] = .toolCall(call)
+        return false
+    }
+}
+
+extension ToolResultData {
+    /// An empty result that is not an error: the daemon's "this call finished, quietly".
+    var isQuietSuccess: Bool { content.isEmpty && !isError }
+}
+
+extension TurnBlock {
+    var toolCall: ToolCallData? {
+        if case .toolCall(let d) = self { return d }
+        return nil
+    }
 }
 
 struct ResultSummaryData {

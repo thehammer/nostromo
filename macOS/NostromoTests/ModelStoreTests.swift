@@ -888,3 +888,266 @@ final class ChatSessionNoteTests: XCTestCase {
         XCTAssertEqual(session.turns.first.map(noteTexts(in:)), [Self.text], "the note reads once, inside its turn")
     }
 }
+
+// MARK: - ChatSession and tool-fold wire enrichment (TF1)
+
+/// What `ChatSession` makes of the daemon's enriched blocks: an empty successful tool result
+/// finishes its call instead of becoming a block, and a subagent's prose is tagged with the
+/// call it came from. The transcript's block array is otherwise exactly what it was before
+/// the daemon sent them.
+final class ChatSessionToolFoldTests: XCTestCase {
+
+    private static let stamp = Date(timeIntervalSince1970: 1_770_000_000)
+    private static let finish = Date(timeIntervalSince1970: 1_770_000_009)
+
+    private var client: NostromodClient!
+    private var session: ChatSession!
+    private var changes: [String] = []
+    private var cancellables = Set<AnyCancellable>()
+
+    override func setUp() {
+        super.setUp()
+        client = NostromodClient(socketPath: "/dev/null")
+        session = ChatSession(tag: "test", agentName: "claudia", displayName: "Claudia",
+                              workingDirectory: nil, client: client)
+        changes = []
+        session.changes.sink { [weak self] in
+            switch $0 {
+            case .appended(let i):                      self?.changes.append("appended \(i)")
+            case .updatedBlocks(let i, let n):          self?.changes.append("updatedBlocks \(i) +\(n)")
+            case .spliced(let from):                    self?.changes.append("spliced \(from)")
+            case .cleared:                              self?.changes.append("cleared")
+            }
+        }.store(in: &cancellables)
+    }
+
+    override func tearDown() {
+        cancellables.removeAll()
+        session = nil
+        client = nil
+        super.tearDown()
+    }
+
+    // MARK: Fixtures
+
+    private func call(_ id: String, parent: String? = nil, name: String = "Bash") -> DaemonTurnBlock {
+        .toolCall(toolName: name, inputSummary: "do \(id)", inputFull: "{}",
+                  meta: DaemonToolMeta(toolUseId: id, parentToolUseId: parent, target: nil, ts: Self.stamp))
+    }
+
+    private func result(_ id: String, content: String = "", isError: Bool = false, parent: String? = nil) -> DaemonTurnBlock {
+        .toolResult(content: content, isError: isError,
+                    meta: DaemonToolMeta(toolUseId: id, parentToolUseId: parent, target: nil, ts: Self.finish))
+    }
+
+    private func turn(_ id: String = "t0", input: String = "go", complete: Bool = true, _ blocks: [DaemonTurnBlock]) -> DaemonTurn {
+        DaemonTurn(id: id, userInput: input, timestamp: nil, blocks: blocks, isComplete: complete)
+    }
+
+    private func kinds(_ turn: ChatTurn) -> String { turn.blocks.map(\.kindCode).joined() }
+
+    private func callData(_ turn: ChatTurn, _ index: Int, file: StaticString = #filePath, line: UInt = #line) -> ToolCallData? {
+        guard turn.blocks.indices.contains(index), case .toolCall(let d) = turn.blocks[index] else {
+            XCTFail("block \(index) is not a tool call (\(kinds(turn)))", file: file, line: line); return nil
+        }
+        return d
+    }
+
+    private func snapshot(_ turns: [DaemonTurn]) {
+        client.messages.send(.sessionTurns(tag: "test", turns: turns))
+        modelWaitUntil { self.session.turns.count == turns.count }
+        modelFlushMain()
+    }
+
+    private func delta(_ d: DaemonTurnDelta) {
+        client.messages.send(.sessionTurnDelta(tag: "test", delta: d))
+        modelFlushMain()
+    }
+
+    // MARK: (a) snapshot
+
+    func testASnapshotCallWithAnEmptySuccessfulResultRendersAsJustTheCallAndIsMarkedFinished() {
+        snapshot([
+            turn("t0", input: "without", [.text("go"), call("toolu_A")]),
+            turn("t1", input: "with",    [.text("go"), call("toolu_A"), result("toolu_A")]),
+        ])
+        guard session.turns.count == 2 else { return XCTFail("\(session.turns.count) turns") }
+
+        XCTAssertEqual(kinds(session.turns[1]), kinds(session.turns[0]), "the empty result adds no block")
+        XCTAssertEqual(kinds(session.turns[1]), "tc")
+        XCTAssertEqual(callData(session.turns[0], 1)?.finishedQuietly, false, "a call with no result yet is still running")
+        XCTAssertNil(callData(session.turns[0], 1)?.finishedAt)
+        let finished = callData(session.turns[1], 1)
+        XCTAssertEqual(finished?.finishedQuietly, true)
+        XCTAssertEqual(finished?.finishedAt, Self.finish)
+        XCTAssertEqual(finished?.startedAt, Self.stamp)
+        XCTAssertEqual(finished?.toolUseId, "toolu_A")
+    }
+
+    func testASnapshotKeepsAResultWithContentAndAnErrorEvenWhenItsContentIsEmpty() {
+        snapshot([turn("t0", [call("toolu_A"), call("toolu_B"), call("toolu_C"),
+                              result("toolu_A", content: "out"),
+                              result("toolu_B", content: "", isError: true),
+                              result("toolu_C")])])
+        let t = session.turns[0]
+        XCTAssertEqual(kinds(t), "cccrr", "output and errors are blocks; only the quiet success is folded")
+        XCTAssertEqual(callData(t, 0)?.finishedQuietly, false)
+        XCTAssertEqual(callData(t, 1)?.finishedQuietly, false, "an error is not a quiet finish")
+        XCTAssertEqual(callData(t, 2)?.finishedQuietly, true)
+        guard case .toolResult(let r) = t.blocks[3], case .toolResult(let e) = t.blocks[4] else { return XCTFail(kinds(t)) }
+        XCTAssertEqual(r.content, "out")
+        XCTAssertEqual(r.toolUseId, "toolu_A")
+        XCTAssertEqual(r.at, Self.finish)
+        XCTAssertTrue(e.isError)
+    }
+
+    func testAnOrdinarySnapshotTurnKeepsItsBlocksAndContentKey() {
+        // Call + non-empty result + prose: the shape every transcript had before this feature.
+        snapshot([turn("t0", [.text("start"), call("toolu_A"), result("toolu_A", content: "out"), .text("done")])])
+        let t = session.turns[0]
+        XCTAssertEqual(kinds(t), "tcrt")
+        XCTAssertTrue(t.contentKey.hasSuffix("|4|tcrt"), t.contentKey)
+        XCTAssertTrue(t.subagentTextParents.isEmpty, "a turn with no subagents has an empty map")
+    }
+
+    // MARK: (b) deltas
+
+    func testADeltaEmptySuccessfulResultFinishesItsCallAndAnnouncesNoBlock() {
+        snapshot([turn("t0", complete: false, [.text("go")])])
+        changes = []
+
+        delta(.blockAppended(turnId: "t0", block: call("toolu_A")))
+        delta(.blockAppended(turnId: "t0", block: result("toolu_A")))
+        delta(.blockAppended(turnId: "t0", block: .text("next")))
+
+        let t = session.turns[0]
+        XCTAssertEqual(kinds(t), "tct", "the empty result is not a block")
+        XCTAssertEqual(callData(t, 1)?.finishedQuietly, true)
+        XCTAssertEqual(callData(t, 1)?.finishedAt, Self.finish)
+        XCTAssertEqual(changes, ["updatedBlocks 0 +1", "updatedBlocks 0 +1"],
+                       "one announcement for the call and one for the text; none for the folded result")
+    }
+
+    func testADeltaResultWithContentIsAppendedAndAnnounced() {
+        snapshot([turn("t0", complete: false, [.text("go")])])
+        changes = []
+        delta(.blockAppended(turnId: "t0", block: call("toolu_A")))
+        delta(.blockAppended(turnId: "t0", block: result("toolu_A", content: "out")))
+        delta(.blockAppended(turnId: "t0", block: call("toolu_B")))
+        delta(.blockAppended(turnId: "t0", block: result("toolu_B", content: "", isError: true)))
+
+        XCTAssertEqual(kinds(session.turns[0]), "tcrcr")
+        XCTAssertEqual(changes.count, 4, "every appended block is announced")
+        XCTAssertEqual(callData(session.turns[0], 1)?.finishedQuietly, false)
+        XCTAssertEqual(callData(session.turns[0], 3)?.finishedQuietly, false)
+    }
+
+    func testParallelCallsFinishedOutOfOrderThroughDeltasEachFinishTheirOwnCall() {
+        snapshot([turn("t0", complete: false, [.text("go")])])
+        delta(.blockAppended(turnId: "t0", block: call("toolu_A")))
+        delta(.blockAppended(turnId: "t0", block: call("toolu_B")))
+        delta(.blockAppended(turnId: "t0", block: result("toolu_B")))
+
+        XCTAssertEqual(callData(session.turns[0], 1)?.finishedQuietly, false, "A is still running")
+        XCTAssertEqual(callData(session.turns[0], 2)?.finishedQuietly, true)
+
+        delta(.blockAppended(turnId: "t0", block: result("toolu_A")))
+        XCTAssertEqual(callData(session.turns[0], 1)?.finishedQuietly, true)
+        XCTAssertEqual(kinds(session.turns[0]), "tcc")
+    }
+
+    func testAnEmptyResultWhoseCallIsInAnEarlierTurnIsDroppedWithoutTouchingTheLaterTurn() {
+        snapshot([turn("t0", [call("toolu_A")]), turn("t1", input: "two", complete: false, [.text("go")])])
+        changes = []
+        delta(.blockAppended(turnId: "t1", block: result("toolu_A")))
+
+        XCTAssertEqual(kinds(session.turns[1]), "t")
+        XCTAssertEqual(callData(session.turns[0], 0)?.finishedQuietly, false, "folding is scoped to the turn the result arrived in")
+        XCTAssertEqual(changes, [])
+    }
+
+    // MARK: (c) subagent text
+
+    func testSubagentProseIsTaggedWithItsParentAndTheMainAgentsProseIsNot_Snapshot() {
+        snapshot([turn("t0", [.text("main says"),
+                              call("toolu_agent1", name: "Agent"),
+                              .text("sub says", parentToolUseId: "toolu_agent1"),
+                              call("toolu_in", parent: "toolu_agent1"),
+                              result("toolu_in", parent: "toolu_agent1"),
+                              .text("sub says more", parentToolUseId: "toolu_agent1"),
+                              result("toolu_agent1", content: "report"),
+                              .text("main again")])])
+        let t = session.turns[0]
+        XCTAssertEqual(kinds(t), "tctctrt", "the folded inner result leaves no block")
+        guard case .text(let s) = t.blocks[2] else { return XCTFail("block 2 is not text") }
+        XCTAssertEqual(s, "sub says", "the text itself is unchanged")
+        XCTAssertEqual(t.subagentTextParents, [2: "toolu_agent1", 4: "toolu_agent1"],
+                       "indices are block positions after folding; main prose has no entry")
+        XCTAssertNil(t.subagentTextParents[0])
+        XCTAssertNil(t.subagentTextParents[6])
+        XCTAssertEqual(callData(t, 3)?.parentToolUseId, "toolu_agent1")
+        XCTAssertEqual(callData(t, 3)?.finishedQuietly, true)
+    }
+
+    func testSubagentProseIsTaggedWithItsParentAndTheMainAgentsProseIsNot_Deltas() {
+        snapshot([turn("t0", complete: false, [.text("main says")])])
+        delta(.blockAppended(turnId: "t0", block: call("toolu_agent1", name: "Agent")))
+        delta(.blockAppended(turnId: "t0", block: .text("sub says", parentToolUseId: "toolu_agent1")))
+        delta(.blockAppended(turnId: "t0", block: .text("lost", parentToolUseId: "?")))
+        delta(.blockAppended(turnId: "t0", block: call("toolu_in", parent: "toolu_agent1")))
+        delta(.blockAppended(turnId: "t0", block: result("toolu_in", parent: "toolu_agent1")))
+        delta(.blockAppended(turnId: "t0", block: .text("main again")))
+
+        let t = session.turns[0]
+        XCTAssertEqual(kinds(t), "tcttct")
+        XCTAssertEqual(t.subagentTextParents, [2: "toolu_agent1", 3: "?"])
+        guard case .text(let s) = t.blocks[2] else { return XCTFail("block 2") }
+        XCTAssertEqual(s, "sub says")
+        XCTAssertNil(t.subagentTextParents[5], "main prose after the subagent has no parent")
+    }
+
+    // MARK: (d) echo adoption
+
+    func testTheDaemonsTurnAdoptedOntoTheOptimisticEchoCarriesFoldedResultsAndSubagentParents() {
+        session.send("run it")
+        XCTAssertEqual(session.turns.count, 1)
+        XCTAssertNil(session.turns[0].daemonId, "the echo is not bound to a daemon turn yet")
+
+        delta(.turnStarted(turn("t0", input: "run it", complete: false,
+                                [call("toolu_A"), result("toolu_A"), .text("sub", parentToolUseId: "toolu_agent1")])))
+
+        guard session.turns.count == 1 else { return XCTFail("the echo should be adopted, got \(session.turns.count) turns") }
+        let t = session.turns[0]
+        XCTAssertEqual(t.daemonId, "t0")
+        XCTAssertEqual(kinds(t), "ct")
+        XCTAssertEqual(callData(t, 0)?.finishedQuietly, true)
+        XCTAssertEqual(t.subagentTextParents, [1: "toolu_agent1"])
+    }
+
+    func testANewTurnStartedByTheDaemonCarriesFoldedResultsAndSubagentParents() {
+        delta(.turnStarted(turn("t0", complete: false,
+                                [call("toolu_A"), result("toolu_A"), .text("sub", parentToolUseId: "toolu_agent1")])))
+        guard let t = session.turns.first else { return XCTFail("no turn") }
+        XCTAssertEqual(kinds(t), "ct")
+        XCTAssertEqual(callData(t, 0)?.finishedQuietly, true)
+        XCTAssertEqual(t.subagentTextParents, [1: "toolu_agent1"])
+    }
+
+    // MARK: (e) leading notes
+
+    func testDroppingTheLeadingNoteShownStandaloneKeepsSubagentParentsOnTheirText() {
+        let note = DaemonTurnBlock.note(kind: "model_changed", text: "Model changed to Opus (from Sonnet) by you.", ts: nil)
+        delta(.note(turnId: nil, block: note))
+        modelWaitUntil { self.session.turns.count == 1 }
+
+        delta(.turnStarted(turn("t0", complete: false,
+                                [note, .text("main"), .text("sub", parentToolUseId: "toolu_agent1")])))
+        modelWaitUntil { self.session.turns.count == 2 }
+
+        let t = session.turns[1]
+        XCTAssertEqual(kinds(t), "tt", "the turn's own copy of the note is dropped")
+        guard case .text(let s) = t.blocks[1] else { return XCTFail("block 1") }
+        XCTAssertEqual(s, "sub")
+        XCTAssertEqual(t.subagentTextParents, [1: "toolu_agent1"], "the parent moved with its text")
+    }
+}

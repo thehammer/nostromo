@@ -118,7 +118,7 @@ fn last_reply(mgr: &mut SessionManager, probe: &str) -> String {
     mgr.detach(TAG, probe);
     turns
         .last()
-        .map(|t| t.blocks.iter().filter_map(|b| if let TurnBlock::Text { text } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" "))
+        .map(|t| t.blocks.iter().filter_map(|b| if let TurnBlock::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" "))
         .unwrap_or_default()
 }
 
