@@ -71,6 +71,12 @@ final class StateWindow: NSWindow {
 }
 
 /// Windows made by a test; ordered out in tearDown.
+///
+/// Every window gets `animationBehavior = .none`. Ordering a window in or out otherwise runs a
+/// blocking `NSAnimation` on a GCD worker thread, and in a test process (no display, no running
+/// app) that run loop never finishes: each window leaked one worker for good, 64 of them
+/// exhausted the pool, and every later test that needs a background queue (the fake brokers, the
+/// process runner) timed out.
 final class WindowBag {
     private(set) var windows: [NSWindow] = []
 
@@ -79,6 +85,7 @@ final class WindowBag {
         let w = StateWindow(contentRect: NSRect(x: x, y: y, width: width, height: height),
                             styleMask: [.titled], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
+        w.animationBehavior = .none
         w.reportsKey = key
         windows.append(w)
         return w
@@ -88,6 +95,7 @@ final class WindowBag {
         let w = NSWindow(contentRect: NSRect(x: x, y: y, width: width, height: height),
                          styleMask: [.titled], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
+        w.animationBehavior = .none
         windows.append(w)
         return w
     }

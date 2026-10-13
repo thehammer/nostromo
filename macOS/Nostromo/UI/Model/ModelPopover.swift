@@ -219,10 +219,10 @@ final class ModelPopoverViewController: NSViewController {
         ])
 
         reload()
+        if let current = currentRowIndex(in: focusedSection) { focus(focusedSection, current) }
         // Follow the daemon while the popup is open (a catalogue refresh, a switch landing).
         store.$states.dropFirst().sink { [weak self] _ in self?.reloadSoon() }.store(in: &cancellables)
         store.$catalog.dropFirst().sink { [weak self] _ in self?.reloadSoon() }.store(in: &cancellables)
-        preferredContentSize = content.fittingSize
     }
 
     override func viewDidAppear() {
@@ -263,12 +263,9 @@ final class ModelPopoverViewController: NSViewController {
         let target: Section = focusedSection == .model ? .effort : .model
         let rows = rows(in: target)
         guard !rows.isEmpty else { return }
-        let current = target == .model
-            ? ModelPresentation.modelRows(state: store.state(for: tag), catalog: store.catalog).firstIndex { $0.isCurrent }
-            : ModelPresentation.effortRows(state: store.state(for: tag), catalog: store.catalog).firstIndex { $0.isCurrent }
         // Land on the current row even when the model no longer offers it (disabled): the
         // highlight shows what is set, and Return on it changes nothing.
-        focus(target, current ?? rows.firstIndex { $0.isRowEnabled } ?? 0)
+        focus(target, currentRowIndex(in: target) ?? rows.firstIndex { $0.isRowEnabled } ?? 0)
     }
 
     private func focus(_ section: Section, _ index: Int) {
@@ -324,15 +321,13 @@ final class ModelPopoverViewController: NSViewController {
     private func reload() {
         let state = store.state(for: tag)
         let catalog = store.catalog
-        let modelRows = ModelPresentation.modelRows(state: state, catalog: catalog)
-        let effortRows = ModelPresentation.effortRows(state: state, catalog: catalog)
 
-        modelRowViews = modelRows.map { row in
+        modelRowViews = ModelPresentation.modelRows(state: state, catalog: catalog).map { row in
             ModelPopoverRowView(title: row.title, secondary: row.secondary, showsCheckmark: row.isCurrent,
                                 isEnabled: true, tooltip: row.tooltip, accessibilityLabel: row.accessibilityLabel,
                                 onActivate: { [weak self] in self?.chooseModel(row) })
         }
-        effortRowViews = effortRows.map { row in
+        effortRowViews = ModelPresentation.effortRows(state: state, catalog: catalog).map { row in
             ModelPopoverRowView(title: row.title, secondary: "", showsCheckmark: row.isCurrent,
                                 isEnabled: row.isEnabled, tooltip: row.tooltip, accessibilityLabel: row.accessibilityLabel,
                                 onActivate: { [weak self] in self?.chooseEffort(row) })
@@ -342,15 +337,29 @@ final class ModelPopoverViewController: NSViewController {
         if modelRowViews.isEmpty { modelStack.addArrangedSubview(emptyModelsLabel) }
         staleNoticeLabel.isHidden = !(catalog?.stale ?? false)
 
-        // Start on the current row of the section already focused (the model section first).
-        let current = (focusedSection == .model ? modelRows.map(\.isCurrent) : effortRows.map(\.isCurrent)).firstIndex(of: true)
         let rows = rows(in: focusedSection)
-        let keep = rows.indices.contains(focusedRowIndex) && !isFirstLoad ? focusedRowIndex : (current ?? 0)
-        isFirstLoad = false
-        focus(rows.isEmpty ? .effort : focusedSection, rows.isEmpty ? 0 : keep)
+        if rows.isEmpty {
+            focus(.effort, 0)
+        } else if rows.indices.contains(focusedRowIndex) {
+            focus(focusedSection, focusedRowIndex)
+        } else {
+            focus(focusedSection, currentRowIndex(in: focusedSection) ?? 0)
+        }
+
+        // The popover is as tall as its content: a catalogue that arrives after it opened, or a
+        // stale notice that appears, changes the number of rows.
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
     }
 
-    private var isFirstLoad = true
+    /// Index of the row carrying the check mark in `section`, if any.
+    private func currentRowIndex(in section: Section) -> Int? {
+        let state = store.state(for: tag)
+        switch section {
+        case .model: return ModelPresentation.modelRows(state: state, catalog: store.catalog).firstIndex { $0.isCurrent }
+        case .effort: return ModelPresentation.effortRows(state: state, catalog: store.catalog).firstIndex { $0.isCurrent }
+        }
+    }
 
     private func fill(_ stack: NSStackView, with rows: [ModelPopoverRowView]) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }

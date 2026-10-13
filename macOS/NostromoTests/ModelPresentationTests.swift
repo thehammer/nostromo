@@ -48,6 +48,16 @@ final class ModelPresentationTests: XCTestCase {
         ], stale: stale, fetchedAt: nil)
     }
 
+    func testEffortRowsFollowTheFamilyOfAPinnedRecordedModel() {
+        // Recorded on a pinned full name (the policy default), no alias row is checked, but the
+        // efforts still come from the Sonnet family of the catalogue.
+        let pinned = state(recorded: recorded("claude-sonnet-4-6", source: .cliDefault),
+                           reported: ReportedModelWire(model: "claude-sonnet-4-6", family: nil), running: true)
+        let rows = ModelPresentation.effortRows(state: pinned, catalog: catalog())
+        XCTAssertEqual(rows.map(\.isEnabled), [true, true, true, true, false, false])
+        XCTAssertEqual(rows[4].tooltip, "Sonnet doesn't support xhigh effort")
+    }
+
     // MARK: - familyName(forModel:)
 
     func testFamilyNameIsDerivedFromTheFullModelName() {

@@ -350,9 +350,19 @@ class ChatSession: ObservableObject {
             && lastReconciledSessionId != currentSessionId
         lastReconciledSessionId = currentSessionId
 
-        var snapshot = daemonTurns.map { Self.mapTurn($0, epoch: currentEpoch) }
-        for i in snapshot.indices { dropLeadingNotesShownStandalone(from: &snapshot[i]) }
-        let outcome  = TurnReconciler.reconcile(retained: turns,
+        let snapshot = daemonTurns.map { Self.mapTurn($0, epoch: currentEpoch) }
+
+        // A note shown on its own (the session had no turn yet) is replaced by the snapshot's
+        // copy, which the daemon carries as the first turn's leading block. Leaving the marker
+        // among the retained turns would also hand the reconciler a turn that can never match,
+        // and a snapshot with no overlap then reads as "turns may be missing".
+        var retained = turns
+        var firstStrippedNote: Int?
+        if !snapshot.isEmpty {
+            firstStrippedNote = retained.firstIndex(where: Self.isNoteMarker)
+            retained.removeAll(where: Self.isNoteMarker)
+        }
+        let outcome  = TurnReconciler.reconcile(retained: retained,
                                                 snapshot: snapshot,
                                                 sessionIdChanged: sessionIdChanged)
 
@@ -385,7 +395,9 @@ class ChatSession: ObservableObject {
         compactColdTurns()
         // `.cleared` means "release every turn view and re-sync from `turns`",
         // so it covers the replacement snapshot too.
-        changes.send(outcome.didReplaceAll ? .cleared : .spliced(replacedFrom: outcome.replacedFrom))
+        changes.send(outcome.didReplaceAll
+            ? .cleared
+            : .spliced(replacedFrom: min(outcome.replacedFrom, firstStrippedNote ?? .max)))
         log.info("""
             ChatSession[\(self.tag, privacy: .public)] attach reconcile: \
             epoch=\(self.currentEpoch) snapshot=\(snapshot.count) overlap=\(outcome.overlap) \
@@ -480,6 +492,8 @@ class ChatSession: ObservableObject {
         case .note(let turnId, let block):
             guard case .note(_, let text, _) = block else { return }
             if let turnId {
+                // A turn this client does not hold (the attach snapshot has not landed yet):
+                // dropped, because that snapshot carries the note from the daemon's ledger.
                 guard let i = index(ofDaemonId: turnId) else { return }
                 turns[i].blocks.append(.note(text))
                 changes.send(.updatedBlocks(index: i, addedCount: 1))
@@ -491,6 +505,11 @@ class ChatSession: ObservableObject {
             }
             noteArrived.send(text)
         }
+    }
+
+    private static func isNoteMarker(_ turn: ChatTurn) -> Bool {
+        if case .note? = turn.marker { return true }
+        return false
     }
 
     /// A note that arrived before any turn exists is shown as its own marker, and the

@@ -147,6 +147,22 @@ final class ModelPopoverTests: XCTestCase {
         XCTAssertTrue(vc.postureHintLabel.isHidden)
     }
 
+    func testThePopupGrowsWhenTheCatalogueArrivesAfterItOpened() {
+        store.connectionChanged(true)
+        store.ingest(.sessionModelState(runningState()))
+        let vc = ModelPopoverViewController(tag: tag, agentName: "claudia", store: store) { [unowned self] in self.closes += 1 }
+        _ = vc.view
+        let before = vc.preferredContentSize.height
+        XCTAssertTrue(vc.modelRowViews.isEmpty, "precondition: no catalogue yet, so no model rows")
+
+        store.ingest(.modelCatalog(families: standardFamilies(), stale: false, fetchedAt: nil))
+        let deadline = Date().addingTimeInterval(2)
+        while vc.modelRowViews.isEmpty && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertEqual(vc.modelRowViews.count, 4)
+        XCTAssertGreaterThan(vc.preferredContentSize.height, before, "the popover must grow to show the rows that arrived")
+    }
+
     func testTheStaleNoticeShowsOnlyWhenTheCatalogueIsStale() {
         let fresh = openPopup(stale: false)
         XCTAssertTrue(fresh.staleNoticeLabel.isHidden)

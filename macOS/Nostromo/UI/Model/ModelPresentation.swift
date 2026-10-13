@@ -3,8 +3,6 @@ import NostromoKit
 
 /// Pure text, label and state functions for the model chip and popup: everything the
 /// views show, with no AppKit in it, so the exact PRD copy can be unit-tested.
-///
-/// (Skeleton: filled in by the implementation step of M2.)
 enum ModelPresentation {
 
     enum ChipStyle: Equatable {
@@ -194,7 +192,7 @@ enum ModelPresentation {
 
     static func effortRows(state: SessionModelStateWire?, catalog: ModelCatalogState?) -> [EffortRow] {
         let current = currentEffort(state: state)
-        let family = currentAlias(state: state).flatMap { alias in catalog?.families.first { $0.alias == alias } }
+        let family = catalogFamily(of: state, in: catalog)
         let name = family.map { familyName(forModel: $0.alias) }
 
         var rows = [EffortRow(value: defaultEffort, title: "Default", isCurrent: current == defaultEffort,
@@ -213,6 +211,19 @@ enum ModelPresentation {
                                   tooltip: tooltip, accessibilityLabel: accessibility))
         }
         return rows
+    }
+
+    /// The catalogue entry whose efforts apply to the current model: the recorded alias, or the
+    /// family of a pinned full name (`claude-sonnet-4-6` → `sonnet`), or of what is running.
+    private static func catalogFamily(of state: SessionModelStateWire?, in catalog: ModelCatalogState?) -> ModelFamilyWire? {
+        guard let catalog, let state else { return nil }
+        let candidates = [state.recorded?.model, state.reported?.family, state.reported?.model].compactMap { $0 }
+        for model in candidates {
+            if let exact = catalog.families.first(where: { $0.alias == model }) { return exact }
+            let family = familyName(forModel: model).lowercased()
+            if let byFamily = catalog.families.first(where: { $0.alias == family }) { return byFamily }
+        }
+        return nil
     }
 
     private static func label(_ name: String, selected: Bool) -> String {

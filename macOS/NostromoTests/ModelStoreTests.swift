@@ -479,4 +479,20 @@ final class ChatSessionNoteTests: XCTestCase {
         guard let shown = session.turns.first else { return XCTFail("the snapshot turn is missing") }
         XCTAssertEqual(noteTexts(in: shown), [Self.text], "but they are shown")
     }
+
+    func testASnapshotCarryingTheNoteReplacesTheStandaloneMarkerWithoutAGapMarker() {
+        client.messages.send(.sessionTurnDelta(tag: "test", delta: .note(turnId: nil, block: note())))
+        waitUntil { self.session.turns.count == 1 }
+
+        // Reconnect: the daemon's snapshot holds the first turn, led by the same note.
+        let turn = DaemonTurn(id: "t0", userInput: "hello", timestamp: "2026-10-12T19:47:03.000Z",
+                              blocks: [note(), .text("hi there")], isComplete: true)
+        client.messages.send(.sessionTurns(tag: "test", turns: [turn]))
+        waitUntil { self.session.turns.first?.marker == nil }
+        settle()
+
+        XCTAssertEqual(session.turns.count, 1, "the marker is replaced by the snapshot's copy, with no gap marker beside it")
+        XCTAssertNil(session.turns.first?.marker)
+        XCTAssertEqual(session.turns.first.map(noteTexts(in:)), [Self.text], "the note reads once, inside its turn")
+    }
 }
