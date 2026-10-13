@@ -202,6 +202,9 @@ class ReplView: NSView {
             self.session.send(text, images: images)
         }
         inputBar.onInterrupt = { [weak self] in self?.session.interrupt() }
+        // Every window showing this focus binds to the one shared store, so a switch made in
+        // any of them (or by an agent, or a script) reaches all their chips.
+        inputBar.bindModel(tag: session.tag, agentName: session.agentName, store: ModelStore.shared)
         addSubview(inputBar)
 
         // "Jump to latest" — covers exactly the transcript area (so it sits above
@@ -295,6 +298,13 @@ class ReplView: NSView {
             .sink { [weak self] r in self?.inputBar.setRunning(r) }
             .store(in: &cancellables)
 
+        // A "Model changed" note that arrives in the transcript being looked at is read out by
+        // VoiceOver. The two windows of one focus each get the note; only the key one speaks.
+        session.noteArrived
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] text in self?.announceNote(text) }
+            .store(in: &cancellables)
+
         session.$pendingCount
             .receive(on: DispatchQueue.main)
             .sink { [weak self] count in self?.inputBar.setPendingCount(count) }
@@ -369,6 +379,15 @@ class ReplView: NSView {
         // itself must be.
         contentDirty = true
         schedulePass()
+    }
+
+    /// Tell VoiceOver about a transcript note, when this pane is the one being looked at.
+    private func announceNote(_ text: String) {
+        guard window?.isKeyWindow == true, !isHiddenOrHasHiddenAncestor else { return }
+        NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+            .announcement: text,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
     }
 
     /// Queue a materialization pass. Never runs one synchronously: materializing

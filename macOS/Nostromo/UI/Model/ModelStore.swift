@@ -39,16 +39,19 @@ protocol ModelRequestSending: AnyObject {
 extension NostromodClient: ModelRequestSending {}
 
 /// Every focus's model state, the catalogue and the per-agent defaults, fed by `AppStore`.
-/// One instance per app (`shared`), so every window's chip binds to the same values.
-///
-/// (Skeleton: filled in by the implementation step of M2.)
+/// One instance per app (`shared`), so every window's chip binds to the same values: a
+/// switch made in one window, by an agent or by a script reaches them all from the one
+/// frame the daemon broadcasts.
 final class ModelStore: ObservableObject {
     static let shared = ModelStore()
 
+    /// The latest `SessionModelState` per focus tag. A tag the daemon never sent a state for
+    /// (a restricted or hidden session) is absent, and its chip stays hidden.
     @Published private(set) var states: [String: SessionModelStateWire] = [:]
     @Published private(set) var catalog: ModelCatalogState?
     @Published private(set) var defaults: ModelDefaultsState?
     @Published private(set) var isConnected = false
+    /// The most recent answer to a request of this connection.
     @Published private(set) var lastResult: ModelRequestResultWire?
 
     var sender: ModelRequestSending?
@@ -60,18 +63,54 @@ final class ModelStore: ObservableObject {
     }
 
     /// Take one decoded daemon frame; frames that are not model frames are ignored.
-    func ingest(_ msg: ServerMsg) {}
+    func ingest(_ msg: ServerMsg) {
+        switch msg {
+        case .sessionModelState(let state):
+            states[state.tag] = state
 
-    /// The daemon connection came up (or went away). On a new connection, ask for the
-    /// catalogue and the defaults.
-    func connectionChanged(_ connected: Bool) {}
+        case .modelCatalog(let families, let stale, let fetchedAt):
+            catalog = ModelCatalogState(families: families.sorted { $0.rank < $1.rank },
+                                        stale: stale, fetchedAt: fetchedAt)
 
-    func state(for tag: String) -> SessionModelStateWire? { nil }
+        case .modelDefaults(let defaults, let declared):
+            self.defaults = ModelDefaultsState(defaults: defaults, declared: declared)
 
-    /// Ask the daemon to switch `tag`'s model and/or effort; returns the request id.
+        case .modelRequestResult(let requestId, let status, let code, let message, let warning):
+            lastResult = ModelRequestResultWire(requestId: requestId, status: status, code: code,
+                                                message: message, warning: warning)
+
+        default:
+            break
+        }
+    }
+
+    /// The daemon connection came up (or went away). A new connection starts by asking for
+    /// the catalogue and the defaults; the per-focus states are replayed by the daemon
+    /// when the connection subscribes to the `model` topic.
+    func connectionChanged(_ connected: Bool) {
+        isConnected = connected
+        guard connected else { return }
+        sender?.modelCatalogRequest()
+        sender?.modelDefaultsRequest()
+    }
+
+    func state(for tag: String) -> SessionModelStateWire? {
+        states[tag]
+    }
+
+    /// Ask the daemon to switch `tag`'s model and/or effort; returns the request id. `nil`
+    /// keeps the current value and `"default"` resets the effort. The outcome arrives as the
+    /// focus's next `SessionModelState`, and as a `ModelRequestResult` in `lastResult`.
     @discardableResult
-    func requestSwitch(tag: String, model: String?, effort: String?, setAsAgentDefault: Bool = false) -> String { "" }
+    func requestSwitch(tag: String, model: String?, effort: String?, setAsAgentDefault: Bool = false) -> String {
+        let requestId = makeRequestId()
+        sender?.sessionModelSet(tag: tag, model: model, effort: effort,
+                                setAsAgentDefault: setAsAgentDefault, requestId: requestId)
+        return requestId
+    }
 
     /// Drop everything held for a focus that was closed.
-    func forget(tag: String) {}
+    func forget(tag: String) {
+        states.removeValue(forKey: tag)
+    }
 }

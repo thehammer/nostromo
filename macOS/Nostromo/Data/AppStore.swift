@@ -366,6 +366,7 @@ class AppStore: ObservableObject {
 
     func start() {
         log.info("AppStore starting")
+        ModelStore.shared.sender = client
 
         // IPC messages (session, activity)
         client.messages
@@ -457,6 +458,9 @@ class AppStore: ObservableObject {
                 // The Perri queue held from a dropped connection is stale until a fresh
                 // perri_state frame arrives; a new connection has not delivered one yet.
                 self?.perriHealth.connectionChanged(connected)
+                // Tells every chip whether the daemon is reachable, and on a new connection
+                // asks for the model catalogue and the per-agent defaults.
+                ModelStore.shared.connectionChanged(connected)
                 if connected {
                     WorkStore.shared.reset()
                 } else {
@@ -527,6 +531,7 @@ class AppStore: ObservableObject {
         sessionRegistry.removeValue(forKey: tag)?.detach()
         sessionHealth.removeValue(forKey: tag)
         perriDetailByTag.removeValue(forKey: tag)
+        ModelStore.shared.forget(tag: tag)
         TranscriptDiagnostics.forgetTag(tag)
     }
 
@@ -1286,6 +1291,10 @@ class AppStore: ObservableObject {
 
         case .withheld:
             break   // Only sent to network peers; the Mac's local connection never gets one.
+
+        // Model switching: the store every window's chip and popup binds to.
+        case .modelCatalog, .sessionModelState, .modelDefaults, .modelRequestResult:
+            ModelStore.shared.ingest(msg)
 
         case .pong, .unknown:
             break

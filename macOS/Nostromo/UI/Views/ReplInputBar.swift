@@ -8,7 +8,7 @@ import Combine
 
 // MARK: - ReplInputBar
 
-class ReplInputBar: NSView, NSTextViewDelegate, ModelShortcutTarget {
+class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShortcutTarget {
 
     var onSend:        ((String, [URL]) -> Void)?
     /// The Stop button / ⌘. — interrupt the running turn. Only reachable while one is running.
@@ -32,8 +32,15 @@ class ReplInputBar: NSView, NSTextViewDelegate, ModelShortcutTarget {
     private var textTopConstraint: NSLayoutConstraint!
     /// Extra height the image tray takes above the text while chips are attached.
     private static let trayExtra: CGFloat = 54
-    private var textTrailingToSend: NSLayoutConstraint!
-    private var textTrailingToStop: NSLayoutConstraint!
+    /// The chip sits left of Send, or of Stop too while it shows. Exactly one of these two
+    /// is active at a time; the text view stops short of the chip, whatever the chip's width.
+    private var chipTrailingToSend: NSLayoutConstraint!
+    private var chipTrailingToStop: NSLayoutConstraint!
+    private var chipWidth: NSLayoutConstraint!
+    private var modelStore: ModelStore?
+    private var modelTag: String?
+    private var modelAgentName: String?
+    private var modelBinding: AnyCancellable?
     private let spinner      = NSProgressIndicator()
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
@@ -149,10 +156,15 @@ class ReplInputBar: NSView, NSTextViewDelegate, ModelShortcutTarget {
         imageTray.translatesAutoresizingMaskIntoConstraints = false
         addSubview(imageTray)
 
-        // The text view stops short of the Send button, or of the Stop button
-        // too while it is showing. Exactly one of these is active at a time.
-        textTrailingToSend = textScroll.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -8)
-        textTrailingToStop = textScroll.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor, constant: -8)
+        // Model chip — hidden (and zero-width, so the text view keeps its old extent) until the
+        // daemon has a model state for this focus.
+        modelChip.isHidden = true
+        modelChip.target = self
+        modelChip.action = #selector(showModelPopover(_:))
+        addSubview(modelChip)
+        chipWidth = modelChip.widthAnchor.constraint(equalToConstant: 0)
+        chipTrailingToSend = modelChip.trailingAnchor.constraint(equalTo: button.leadingAnchor)
+        chipTrailingToStop = modelChip.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor)
 
         textTopConstraint = textScroll.topAnchor.constraint(equalTo: border.bottomAnchor, constant: 9)
 
@@ -171,7 +183,11 @@ class ReplInputBar: NSView, NSTextViewDelegate, ModelShortcutTarget {
             placeholder.leadingAnchor.constraint(equalTo: textScroll.leadingAnchor, constant: 4),
             placeholder.topAnchor.constraint(equalTo: textScroll.topAnchor, constant: 6),
 
-            textTrailingToSend,
+            textScroll.trailingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: -8),
+            chipTrailingToSend,
+            chipWidth,
+            modelChip.heightAnchor.constraint(equalToConstant: ModelChip.height),
+            modelChip.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
 
             stopButton.trailingAnchor.constraint(equalTo: button.leadingAnchor, constant: -6),
             stopButton.bottomAnchor.constraint(equalTo: button.bottomAnchor),
@@ -202,7 +218,38 @@ class ReplInputBar: NSView, NSTextViewDelegate, ModelShortcutTarget {
 
     /// Show `tag`'s model in the chip, live from `store`. Every bar bound to the same store
     /// updates from the same frame, which is what keeps two windows in step.
-    func bindModel(tag: String, agentName: String?, store: ModelStore) {}
+    func bindModel(tag: String, agentName: String?, store: ModelStore) {
+        modelTag = tag
+        modelAgentName = agentName
+        modelStore = store
+        modelBinding = Publishers.CombineLatest(store.$states.map { $0[tag] }.removeDuplicates(),
+                                                store.$isConnected.removeDuplicates())
+            .sink { [weak self] state, connected in
+                self?.showModel(ModelPresentation.chip(state: state, isConnected: connected))
+            }
+    }
+
+    /// `nil` hides the chip: this session has no model state (restricted, hidden, or the
+    /// daemon has said nothing). Hidden, it takes no width and cannot open a popup.
+    private func showModel(_ chip: ModelPresentation.Chip?) {
+        guard let chip else {
+            modelChip.isHidden = true
+            chipWidth.constant = 0
+            setChipGap(0)
+            modelPopover?.close()
+            return
+        }
+        modelChip.apply(chip)
+        modelChip.isHidden = false
+        chipWidth.constant = modelChip.intrinsicContentSize.width
+        setChipGap(-6)
+        if !chip.isEnabled { modelPopover?.close() }
+    }
+
+    private func setChipGap(_ gap: CGFloat) {
+        chipTrailingToSend.constant = gap
+        chipTrailingToStop.constant = gap
+    }
 
     // MARK: Actions
 
@@ -211,7 +258,25 @@ class ReplInputBar: NSView, NSTextViewDelegate, ModelShortcutTarget {
     @objc private func stopButtonAction() { onInterrupt?() }
 
     /// ⇧⌘M, or a click on the chip: open (or close) the model popup.
-    @objc func showModelPopover(_ sender: Any?) {}
+    @objc func showModelPopover(_ sender: Any?) {
+        if let open = modelPopover, open.isShown {
+            open.close()
+            return
+        }
+        guard let store = modelStore, let tag = modelTag, canShowModelPopover else { return }
+        let popover = ModelPopover(tag: tag, agentName: modelAgentName, store: store)
+        popover.onDidClose = { [weak self, weak popover] in
+            if self?.modelPopover === popover { self?.modelPopover = nil }
+        }
+        modelPopover = popover
+        popover.show(relativeTo: modelChip)
+    }
+
+    var canShowModelPopover: Bool { !modelChip.isHidden && modelChip.isEnabled }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == ModelShortcut.action ? canShowModelPopover : true
+    }
 
     private func submitAction() {
         var text         = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -237,8 +302,8 @@ class ReplInputBar: NSView, NSTextViewDelegate, ModelShortcutTarget {
 
     func setRunning(_ running: Bool) {
         stopButton.isHidden = !running
-        textTrailingToSend.isActive = !running
-        textTrailingToStop.isActive = running
+        chipTrailingToSend.isActive = !running
+        chipTrailingToStop.isActive = running
         button.alphaValue = running ? 0.5 : 1.0
         running ? spinner.startAnimation(nil) : spinner.stopAnimation(nil)
     }
