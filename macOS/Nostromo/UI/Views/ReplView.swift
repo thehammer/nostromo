@@ -1054,6 +1054,23 @@ extension ReplView: TranscriptDiagnostics.Reporting {
     }
 }
 
+// MARK: - Scroll-safety probe
+
+extension ReplView {
+    /// Read-only: the transcript's first visible block and where the viewport sits
+    /// (`nostromo-app transcript-anchor`). Lays out nothing, scrolls nothing, changes no state.
+    func anchorSnapshot(windowIndex: Int) -> TranscriptAnchorSnapshot {
+        let clip = scrollView.contentView
+        let anchor = virtualizer.captureAnchor(viewportTop: clip.bounds.minY) { [weak self] index, y in
+            self?.island(at: index)?.anchorItem(atY: y)
+        }
+        return TranscriptAnchorProbe.snapshot(
+            tag: session.tag, window: windowIndex, clipBounds: clip.bounds,
+            documentHeight: max(scrollView.documentView?.frame.height ?? 0, virtualizer.documentHeight),
+            anchor: anchor, following: followTail.isPinned)
+    }
+}
+
 // MARK: - Load harness
 
 extension ReplView: ToolGroupHarnessDriving {
