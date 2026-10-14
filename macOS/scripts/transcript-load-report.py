@@ -85,6 +85,12 @@ build) for runs under `NOSTROMO_LOAD_FIXTURE=benchmark`. It is a number to
 record, not a criterion: it is not in `CRITERIA`, so it can neither pass nor
 fail. `--fixture-only` prints just that line and skips the diagnostics table (a
 fixture run delivers no live turns, so the table would be all INCONCLUSIVE).
+
+The same logs' `group-expand ms=<n>` lines (the harness opening the fixture's first
+60-call tool group) print as an ungraded `group-expand` line (target <= 100 ms).
+With `BASELINE_MS=<n>` in the environment (the TF0 `fixture-open` median), a
+`fixture-open vs baseline` line gives this build's median over that baseline
+(target <= 0.50). Both are numbers for the user to record, never criteria.
 """
 import argparse
 import datetime
@@ -1168,7 +1174,25 @@ def print_report(ev, results, stream=sys.stdout):
 # ---------------------------------------------------------------------------
 
 FIXTURE_OPEN = re.compile(r"fixture-open ms=(\d+) rows=(\d+) turns=(\d+)")
+GROUP_EXPAND = re.compile(r"group-expand ms=(\d+)")
+GROUP_EXPAND_TARGET_MS = 100
+FIXTURE_OPEN_TARGET_RATIO = 0.50
 FIXTURE_SHA = re.compile(r"\bsha=(\S+)")
+FIXTURE_FOLD = re.compile(r"\bfold=(\w+)")
+
+
+def fold_mode(env=None):
+    """The tool-group default the run used (`NOSTROMO_LOAD_FOLD_DEFAULT`, collapsed if unset)."""
+    return ((os.environ if env is None else env).get("NOSTROMO_LOAD_FOLD_DEFAULT") or "collapsed").strip()
+
+
+def _other_run(line, sha, fold):
+    """Whether a tagged line belongs to another build or fold mode. Untagged lines count."""
+    tag = FIXTURE_SHA.search(line)
+    if sha is not None and tag and tag.group(1) != sha:
+        return True
+    mode = FIXTURE_FOLD.search(line)
+    return fold is not None and mode is not None and mode.group(1) != fold
 
 
 def git_sha():
@@ -1182,7 +1206,7 @@ def git_sha():
         return "unknown"
 
 
-def read_fixture_opens(paths, sha=None):
+def read_fixture_opens(paths, sha=None, fold=None):
     """Every `(ms, rows, turns)` found in the given logs.
 
     A line may carry a `sha=<sha>` token (the shell driver's history file does).
@@ -1200,16 +1224,66 @@ def read_fixture_opens(paths, sha=None):
             m = FIXTURE_OPEN.search(line)
             if not m:
                 continue
-            tag = FIXTURE_SHA.search(line)
-            if sha is not None and tag and tag.group(1) != sha:
+            if _other_run(line, sha, fold):
                 continue
             found.append(tuple(int(g) for g in m.groups()))
     return found
 
 
+def read_group_expands(paths, sha=None, fold=None):
+    """Every `group-expand ms=<n>` value in the given logs (same SHA rule as fixture-open)."""
+    found = []
+    for path in paths:
+        try:
+            with open(path, errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = GROUP_EXPAND.search(line)
+            if not m:
+                continue
+            if _other_run(line, sha, fold):
+                continue
+            found.append(int(m.group(1)))
+    return found
+
+
+def baseline_ms(env=None):
+    """`BASELINE_MS` from the environment as a positive number, or None."""
+    raw = (os.environ if env is None else env).get("BASELINE_MS", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def fixture_ratio(median, baseline):
+    """This build's fixture-open median over the baseline."""
+    return median / baseline
+
+
+def print_fixture_extras(paths, sha, stream=sys.stdout, env=None):
+    """The ungraded group-expand and baseline-ratio lines, when there is data for them."""
+    fold = fold_mode(env)
+    expands = read_group_expands(paths, sha, fold)
+    if expands:
+        print(f"group-expand: median {statistics.median(expands):g} ms over {len(expands)} run(s) "
+              f"{sorted(expands)}  (target ≤ {GROUP_EXPAND_TARGET_MS} ms, not graded)", file=stream)
+    base = baseline_ms(env)
+    runs = read_fixture_opens(paths, sha, fold)
+    if base is not None and runs:
+        median = statistics.median(r[0] for r in runs)
+        print(f"fixture-open vs baseline: {median:g} ms / {base:g} ms = "
+              f"{fixture_ratio(median, base):.2f}  (target ≤ {FIXTURE_OPEN_TARGET_RATIO:.2f}, not graded)",
+              file=stream)
+
+
 def print_fixture_open(paths, sha, stream=sys.stdout):
     """Print the ungraded baseline line. Returns False when there was nothing to print."""
-    runs = read_fixture_opens(paths, sha)
+    fold = fold_mode()
+    runs = read_fixture_opens(paths, sha, fold)
     if not runs:
         print(f"fixture-open: no fixture-open lines in {', '.join(paths)} "
               f"(not a fixture run?)  sha={sha}", file=stream)
@@ -1217,8 +1291,9 @@ def print_fixture_open(paths, sha, stream=sys.stdout):
     ms = [r[0] for r in runs]
     median = statistics.median(ms)
     print(f"fixture-open: median {median:g} ms over {len(runs)} run(s) "
-          f"{sorted(ms)}  rows={runs[-1][1]} turns={runs[-1][2]}  sha={sha}  (not graded)",
+          f"{sorted(ms)}  rows={runs[-1][1]} turns={runs[-1][2]}  sha={sha}  fold={fold}  (not graded)",
           file=stream)
+    print_fixture_extras(paths, sha, stream)
     return True
 
 

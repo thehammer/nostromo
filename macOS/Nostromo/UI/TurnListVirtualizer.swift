@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// Owns transcript geometry: how tall every turn is, where each one sits, which
 /// ones intersect the viewport, and the anchor that keeps the operator's scroll
@@ -58,7 +59,15 @@ final class TurnListVirtualizer {
     private var isExact: [Bool]    = []
     /// Fenwick tree over `heights`, 1-based.
     private var tree: [CGFloat] = []
-    /// Measured heights, keyed by `"\(contentKey)|\(width)"`.
+    /// Fold digest (`ToolFoldAdapter.foldDigest`) each turn's height was last estimated or
+    /// measured with. Parallel to `keys`.
+    private var digests: [String] = []
+    /// Measured heights, keyed by `"\(contentKey)|\(foldDigest)|\(width)"`.
+    ///
+    /// The fold digest is in the key because fold state changes a turn's height without
+    /// changing its content: keyed by content alone, a turn measured with a group open
+    /// would be handed that height back after the group closed (on a splice, a width
+    /// round trip or a refresh), and the geometry would disagree with the view.
     ///
     /// Bounded, because a streaming turn's `contentKey` changes on every durable
     /// block append and each key is a ~250-character string: left to grow, a long
@@ -70,6 +79,18 @@ final class TurnListVirtualizer {
     private static let measuredCapacity = 4_000
     /// Index lookup for anchor re-resolution after a splice.
     private var indexByKey: [String: Int] = [:]
+
+    /// The fold state each turn renders with: its explicit group choices and expanded
+    /// results. Feeds both the estimate and the height-cache key.
+    var foldState: (ChatTurn) -> TurnInteractionState = { _ in TurnInteractionState() }
+    /// Groups without an explicit choice open (harness `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`).
+    var foldsExpandedByDefault = false
+
+    /// Completed turns' fold shapes, by turn id, with the signature they were planned from.
+    /// Grouping does not depend on width, so a resize, reset or splice re-estimates from
+    /// these instead of re-planning every turn. Bounded like `measured`.
+    private var shapes: [UUID: (signature: String, shape: FoldShape)] = [:]
+    private static let shapesCapacity = 20_000
 
     /// Counts every Fenwick node touched, so tests can assert the complexity
     /// claim above rather than trusting a wall-clock measurement.
@@ -92,7 +113,8 @@ final class TurnListVirtualizer {
         measured.removeAll(keepingCapacity: true)
         self.width = max(width, 1)
         keys    = turns.map { $0.contentKey }
-        heights = turns.map { TurnHeightEstimator.estimate($0, width: self.width) }
+        digests = turns.map { foldDigest(for: $0) }
+        heights = turns.map { estimate($0) }
         isExact = Array(repeating: false, count: turns.count)
         count   = turns.count
         rebuildTree()
@@ -107,11 +129,13 @@ final class TurnListVirtualizer {
         // one lets `turns[floor...]` index past the end of a shorter list.
         let floor = max(0, min(index, count, turns.count))
         keys.removeSubrange(floor...)
+        digests.removeSubrange(floor...)
         heights.removeSubrange(floor...)
         isExact.removeSubrange(floor...)
         for turn in turns[floor...] {
             keys.append(turn.contentKey)
-            heights.append(TurnHeightEstimator.estimate(turn, width: width))
+            digests.append(foldDigest(for: turn))
+            heights.append(estimate(turn))
             isExact.append(false)
         }
         count = turns.count
@@ -128,9 +152,11 @@ final class TurnListVirtualizer {
     /// shape being removed elsewhere.
     func append(_ turn: ChatTurn) {
         let key = turn.contentKey
+        let digest = foldDigest(for: turn)
         keys.append(key)
-        let cached = measured["\(key)|\(width)"]
-        let height = cached ?? TurnHeightEstimator.estimate(turn, width: width)
+        digests.append(digest)
+        let cached = measured[cacheKey(key, digest)]
+        let height = cached ?? estimate(turn)
         heights.append(height)
         isExact.append(cached != nil)
         indexByKey[key] = count
@@ -166,13 +192,15 @@ final class TurnListVirtualizer {
         if oldKey != key, indexByKey[oldKey] == index { indexByKey.removeValue(forKey: oldKey) }
         keys[index] = key
         indexByKey[key] = index
+        let digest = foldDigest(for: turn)
+        digests[index] = digest
 
         // A measured height is only reusable for a *completed* turn. `contentKey`
         // is invariant while a text block grows in place, so a turn measured
         // while materialized and then scrolled away would keep being handed its
         // stale height and the document would stop growing.
-        let cached = turn.isComplete ? measured["\(key)|\(width)"] : nil
-        let height = cached ?? TurnHeightEstimator.estimate(turn, width: width)
+        let cached = turn.isComplete ? measured[cacheKey(key, digest)] : nil
+        let height = cached ?? estimate(turn)
         isExact[index] = cached != nil
         return setHeight(height, at: index)
     }
@@ -189,12 +217,14 @@ final class TurnListVirtualizer {
         width = max(newWidth, 1)
         for i in 0 ..< min(count, turns.count) {
             let key = turns[i].contentKey
+            let digest = foldDigest(for: turns[i])
             keys[i] = key
-            if let m = measured["\(key)|\(width)"] {
+            digests[i] = digest
+            if let m = measured[cacheKey(key, digest)] {
                 heights[i] = m
                 isExact[i] = true
             } else {
-                heights[i] = TurnHeightEstimator.estimate(turns[i], width: width)
+                heights[i] = estimate(turns[i])
                 isExact[i] = false
             }
         }
@@ -212,14 +242,19 @@ final class TurnListVirtualizer {
     /// cached under that key would be handed back once the turn completed — and
     /// `refresh`'s `isComplete` guard would wave it through, marking an
     /// off-screen turn exact at a height hundreds of points short of the truth.
+    ///
+    /// `foldDigest` is the fold state the view was measured with; it becomes the turn's
+    /// current digest.
     @discardableResult
-    func recordMeasured(_ height: CGFloat, at index: Int, isComplete: Bool = true) -> CGFloat {
+    func recordMeasured(_ height: CGFloat, at index: Int, isComplete: Bool = true,
+                        foldDigest: String = "") -> CGFloat {
         guard index >= 0, index < count else { return 0 }
+        digests[index] = foldDigest
         if isComplete {
             if measured.count >= Self.measuredCapacity {
                 measured.removeAll(keepingCapacity: true)
             }
-            measured["\(keys[index])|\(width)"] = height
+            measured[cacheKey(keys[index], foldDigest)] = height
         }
         isExact[index] = isComplete
         return setHeight(height, at: index)
@@ -394,11 +429,40 @@ final class TurnListVirtualizer {
     private func adoptMeasuredHeights(from floor: Int = 0) {
         guard !measured.isEmpty else { return }
         for i in floor ..< count {
-            if let m = measured["\(keys[i])|\(width)"] {
+            if let m = measured[cacheKey(keys[i], digests[i])] {
                 heights[i] = m
                 isExact[i] = true
             }
         }
+    }
+
+    // MARK: - Folds
+
+    private func foldDigest(for turn: ChatTurn) -> String {
+        ToolFoldAdapter.foldDigest(turn: turn, state: foldState(turn), expandedByDefault: foldsExpandedByDefault)
+    }
+
+    private func estimate(_ turn: ChatTurn) -> CGFloat {
+        TurnHeightEstimator.estimate(turn, width: width,
+                                     folds: FoldResolver(state: foldState(turn), expandedByDefault: foldsExpandedByDefault),
+                                     shape: foldShape(for: turn))
+    }
+
+    /// The turn's fold shape: cached for a completed turn, planned afresh for a streaming
+    /// one, nil for a turn with no tool calls (nothing folds).
+    func foldShape(for turn: ChatTurn) -> FoldShape? {
+        guard ToolFoldAdapter.hasToolBlocks(turn) else { return nil }
+        guard turn.isComplete else { return FoldShape(turn) }
+        let signature = FoldShape.signature(of: turn)
+        if let cached = shapes[turn.id], cached.signature == signature { return cached.shape }
+        let shape = FoldShape(turn)
+        if shapes.count >= Self.shapesCapacity { shapes.removeAll(keepingCapacity: true) }
+        shapes[turn.id] = (signature, shape)
+        return shape
+    }
+
+    private func cacheKey(_ contentKey: String, _ digest: String) -> String {
+        "\(contentKey)|\(digest)|\(width)"
     }
 
     private func highestPowerOfTwo(atMost n: Int) -> Int {

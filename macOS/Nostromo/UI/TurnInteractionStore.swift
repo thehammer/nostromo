@@ -23,7 +23,11 @@ struct TurnInteractionState: Equatable {
     /// Block indices whose tool result the operator expanded.
     var expandedBlocks: Set<Int> = []
 
-    var isEmpty: Bool { answeredOptions.isEmpty && expandedBlocks.isEmpty }
+    /// Tool group key (`ToolGroup.key`) → the operator's explicit open (`true`) or closed
+    /// (`false`) choice. Absent means the group follows the default.
+    var groupStates: [String: Bool] = [:]
+
+    var isEmpty: Bool { answeredOptions.isEmpty && expandedBlocks.isEmpty && groupStates.isEmpty }
 }
 
 /// Per-turn interaction state for one transcript pane, keyed by `ChatTurn.ID`.
@@ -59,6 +63,12 @@ final class TurnInteractionStore {
             states[turn]?.expandedBlocks.remove(block)
             if states[turn]?.isEmpty == true { states.removeValue(forKey: turn) }
         }
+    }
+
+    /// Record the operator opening or closing a tool group. Kept either way: closing a group
+    /// is a choice too, and must survive the view.
+    func setGroup(turn: UUID, key: String, _ isExpanded: Bool) {
+        states[turn, default: TurnInteractionState()].groupStates[key] = isExpanded
     }
 
     func removeAll() { states.removeAll() }

@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import NostromoKit
 // ChatTurn, TurnBlock, TurnHeightEstimator and TurnPayloadStore are compiled
 // into this target directly (logic test — no host app). No module imports needed.
 
@@ -134,8 +135,15 @@ final class TurnHeightEstimatorTests: XCTestCase {
         for kind in Kind.allCases {
             blocks.append(block(kind, characters: 300))
             let height = estimate(turn(user: text(120), blocks: blocks))
-            XCTAssertGreaterThan(height, previous,
-                                 "appending a \(kind.rawValue) block must not shrink the turn")
+            if kind == .toolResult || kind == .toolResultError {
+                // A result joins the collapsed tool group of the call before it, whose
+                // row is the same 22 pt whatever it holds.
+                XCTAssertGreaterThanOrEqual(height, previous,
+                                            "appending a \(kind.rawValue) block must not shrink the turn")
+            } else {
+                XCTAssertGreaterThan(height, previous,
+                                     "appending a \(kind.rawValue) block must not shrink the turn")
+            }
             previous = height
         }
     }
@@ -356,5 +364,148 @@ final class TurnHeightEstimatorTests: XCTestCase {
         XCTAssertEqual(actual, expected, accuracy: expected * 0.25,
                        "\(label): estimated \(actual) pt against a hand-computed \(expected) pt",
                        file: file, line: line)
+    }
+}
+
+// MARK: - Tool groups (TF2)
+
+/// A collapsed tool group is one 22 pt row however many calls it holds; an expanded one is that
+/// row plus today's per-member estimates. Still arithmetic only: no view is built.
+final class TurnHeightEstimatorFoldTests: XCTestCase {
+
+    private typealias F = FoldFixtures
+
+    /// No user message, so a turn is its chrome plus its blocks and the arithmetic below is exact.
+    private func turn(_ blocks: [TurnBlock], raw: String? = "2026-10-13T00:00:00.000Z") -> ChatTurn {
+        F.turn(blocks, user: "", raw: raw)
+    }
+
+    private static let paneWidth: CGFloat = 800
+    private var blockWidth: CGFloat { Self.paneWidth * TurnHeightEstimator.blocksWidthFraction - 14 }
+    private let open = FoldResolver(expandedByDefault: true)
+
+    private func estimate(_ turn: ChatTurn, folds: FoldResolver? = nil) -> CGFloat {
+        if let folds { return TurnHeightEstimator.estimate(turn, width: Self.paneWidth, folds: folds) }
+        return TurnHeightEstimator.estimate(turn, width: Self.paneWidth)
+    }
+
+    /// What the estimator says one block costs on its own (the pre-folding number).
+    private func blockCost(_ turn: ChatTurn, _ index: Int) -> CGFloat {
+        let block = turn.blocks[index]
+        return TurnHeightEstimator.estimate(block: block,
+                                            characters: block.heightDependsOnContentLength ? turn.contentLength(ofBlockAt: index) : 0,
+                                            width: blockWidth)
+    }
+
+    private let spacing = TurnHeightEstimator.blockSpacing
+    private let chrome = TurnHeightEstimator.turnChrome
+    private let row = TurnHeightEstimator.groupRowHeight
+
+    func testTheRowIsTwentyTwoPoints() { XCTAssertEqual(TurnHeightEstimator.groupRowHeight, 22) }
+
+    func testACollapsedGroupOfOneAndOneOfSixtyEstimateTheSameTurnHeight() {
+        let one = turn(F.run(1)), sixty = turn(F.run(60))
+        XCTAssertEqual(estimate(one), estimate(sixty))
+        XCTAssertEqual(estimate(one, folds: FoldResolver()), estimate(sixty, folds: FoldResolver()))
+        let withProse1 = turn([.text(F.prose)] + F.run(1) + [.text(F.prose)])
+        let withProse60 = turn([.text(F.prose)] + F.run(60) + [.text(F.prose)])
+        XCTAssertEqual(estimate(withProse1), estimate(withProse60))
+    }
+
+    func testACollapsedGroupContributesExactlyOneRow() {
+        XCTAssertEqual(estimate(turn(F.run(7))), chrome + row)
+        let turn = turn([.text(F.prose)] + F.run(7) + [.text(F.prose)])
+        XCTAssertEqual(estimate(turn), chrome + blockCost(turn, 0) + spacing + row + spacing + blockCost(turn, 15),
+                       accuracy: 0.001)
+    }
+
+    func testAResultSizeCostsNothingWhileItsGroupIsCollapsed() {
+        let small = turn(F.run(3))
+        let huge = turn(F.run(3, output: { _ in F.megabyte }))
+        XCTAssertEqual(estimate(huge), estimate(small))
+        let failing = turn([F.call(id: "u1", summary: "x"), F.result(F.megabyte, id: "u1", isError: true)])
+        XCTAssertEqual(estimate(failing), chrome + row, "a failing result inside a collapsed group is not on screen")
+    }
+
+    func testAnExpandedGroupIsTheRowPlusEachMembersSpacingAndEstimate() {
+        let turn = turn(F.run(3))
+        let members = (0 ..< turn.blocks.count).reduce(CGFloat(0)) { $0 + spacing + blockCost(turn, $1) }
+        XCTAssertEqual(estimate(turn, folds: open), chrome + row + members, accuracy: 0.001)
+        let key = F.groups(of: turn)[0].key
+        XCTAssertEqual(estimate(turn, folds: FoldResolver(groupStates: [key: true])), chrome + row + members, accuracy: 0.001)
+    }
+
+    func testAnExpandedGroupCountsAnOpenFailingResultAtItsFullSize() {
+        let turn = turn([F.call(id: "u1", summary: "x"), F.result(String(repeating: "e", count: 4_000), id: "u1", isError: true)])
+        let expected = chrome + row + (spacing + blockCost(turn, 0)) + (spacing + blockCost(turn, 1))
+        XCTAssertEqual(estimate(turn, folds: open), expected, accuracy: 0.001)
+        XCTAssertGreaterThan(blockCost(turn, 1), TurnHeightEstimator.toolResultCollapsed)
+    }
+
+    func testOnlyTheGroupTheOperatorOpenedIsExpanded() {
+        let turn = turn(F.run(2, prefix: "a") + [.text(F.prose)] + F.run(2, prefix: "b"))
+        let collapsed = estimate(turn)
+        let openFirst = estimate(turn, folds: FoldResolver(groupStates: ["g:a0": true]))
+        let openSecond = estimate(turn, folds: FoldResolver(groupStates: ["g:b0": true]))
+        let openBoth = estimate(turn, folds: open)
+        XCTAssertEqual(openFirst, openSecond, accuracy: 0.001, "two identical runs grow by the same amount")
+        XCTAssertGreaterThan(openFirst, collapsed)
+        XCTAssertEqual(openBoth - collapsed, 2 * (openFirst - collapsed), accuracy: 0.001)
+    }
+
+    func testAnExplicitCloseBeatsAnExpandedDefault() {
+        let turn = turn(F.run(3))
+        let key = F.groups(of: turn)[0].key
+        XCTAssertEqual(estimate(turn, folds: FoldResolver(groupStates: [key: false], expandedByDefault: true)),
+                       estimate(turn))
+    }
+
+    func testEverySeparatorStaysAtItsOwnEstimateBetweenTwoRows() {
+        let separators: [TurnBlock] = [.text(F.prose), F.question(), .errorMessage("the child exited"),
+                                       .note("Model changed to Opus (from Sonnet) by you."), F.chip()]
+        for separator in separators {
+            let turn = turn(F.run(2, prefix: "a") + [separator] + F.run(2, prefix: "b"))
+            XCTAssertEqual(estimate(turn), chrome + row + spacing + blockCost(turn, 4) + spacing + row, accuracy: 0.001,
+                           "\(separator.kindCode)")
+        }
+    }
+
+    func testACompactedTurnKeepsItsExpandedEstimate() {
+        let full = turn([.text(String(repeating: "p", count: 3_000))] + F.run(2)
+                          + [F.call(id: "e1", summary: "x"), F.result(String(repeating: "e", count: 40_000), id: "e1", isError: true)])
+        let skeleton = TurnPayloadStore.skeleton(of: full)
+        XCTAssertEqual(estimate(skeleton), estimate(full), accuracy: 0.001)
+        XCTAssertEqual(estimate(skeleton, folds: open), estimate(full, folds: open), accuracy: 0.001,
+                       "a cold turn must hold its place whether its groups are open or shut")
+    }
+
+    func testTheBenchmarkTailEstimatesLowerCollapsedThanExpanded() throws {
+        let tail = Array(try F.benchmarkTurns().suffix(15))
+        var collapsedTotal: CGFloat = 0, openTotal: CGFloat = 0
+        for turn in tail {
+            let collapsed = estimate(turn), expanded = estimate(turn, folds: open)
+            XCTAssertLessThanOrEqual(collapsed, expanded, "opening a group never makes a turn shorter")
+            collapsedTotal += collapsed
+            openTotal += expanded
+        }
+        XCTAssertLessThan(collapsedTotal, openTotal)
+    }
+
+    func testFiveThousandSingleCallGroupTurnsEstimateInOnePassToTheArithmeticExpectation() {
+        let blocks: [TurnBlock] = [.text(String(repeating: "a", count: 40)), F.call(id: "u", summary: "ls"),
+                                   F.result("ok", id: "u"), .text(String(repeating: "b", count: 40))]
+        let template = turn(blocks)
+        let expected = chrome + blockCost(template, 0) + spacing + row + spacing + blockCost(template, 3)
+        var total: CGFloat = 0
+        for i in 0 ..< 5_000 {
+            let turn = turn(blocks, raw: "2026-10-13T00:00:00.\(i)Z")
+            total += estimate(turn)
+        }
+        XCTAssertEqual(total, expected * 5_000, accuracy: 0.5)
+    }
+
+    func testTheFoldStateIsIgnoredForATurnWithNoToolCalls() {
+        let turn = turn([.text(F.prose), .errorMessage("boom")])
+        XCTAssertEqual(estimate(turn), estimate(turn, folds: open))
     }
 }

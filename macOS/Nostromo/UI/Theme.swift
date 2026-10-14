@@ -33,6 +33,12 @@ enum Theme {
     static let borderActive     = cornflower
     static let borderInactive   = NSColor(red: 70/255, green: 70/255, blue: 80/255, alpha: 1)
 
+    /// The `N failed` badge on a collapsed tool group. Not `redSweater`: on the row's hover
+    /// fill that measures about 4.2:1, under the 4.5:1 floor (see `ToolGroupAppearanceTests`).
+    static let foldFailure = NSColor(srgbRed: 248/255, green: 113/255, blue: 113/255, alpha: 1)
+    /// A tool group row under the pointer.
+    static let foldHover   = NSColor(white: 0.13, alpha: 1)
+
     static let bg           = NSColor(calibratedWhite: 0.05, alpha: 1)
     static let bgBar        = NSColor(calibratedWhite: 0.07, alpha: 1)
     /// The selected tab's fill. Deliberately a deeper blue than `cornflower`:

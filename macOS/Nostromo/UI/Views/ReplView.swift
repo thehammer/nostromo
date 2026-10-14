@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import NostromoKit
 import os
 
 /// Transcript layout and measurement — see `docs/diagnostics.md`, "The
@@ -74,6 +75,12 @@ class ReplView: NSView {
     /// Pane width the geometry was last computed for.
     private var laidOutWidth: CGFloat = 0
     private var cancellables = Set<AnyCancellable>()
+    /// Run once at the end of the next materialization pass (the load harness's
+    /// `group-expand` timing).
+    private var afterNextPass: (() -> Void)?
+    /// Tool groups the operator has not opened or closed start open. Only the load harness
+    /// sets it (`NOSTROMO_LOAD_FOLD_DEFAULT=expanded`); the app default is collapsed.
+    private let foldsExpandedByDefault = TranscriptLoadHarness.foldsExpandedByDefault
 
     /// "Jump to latest" pill, shown while the pane is not following the tail.
     private let jumpOverlay = JumpToLatestOverlay()
@@ -181,6 +188,14 @@ class ReplView: NSView {
         followTail.isMaterializing = { [weak self] in self?.isMaterializing ?? false }
         followTail.requestPass     = { [weak self] in self?.schedulePass() }
         followTail.onFlip          = { [weak self] flip in self?.logFollowTailFlip(flip) }
+
+        // Fold state is part of a turn's height: the estimate folds through it, and the
+        // height cache is keyed by it, so a re-collapsed group never gets its expanded
+        // height back.
+        virtualizer.foldState = { [weak self] turn in
+            self?.interactions.state(for: turn.id) ?? TurnInteractionState()
+        }
+        virtualizer.foldsExpandedByDefault = foldsExpandedByDefault
 
         // Scripted scroll for the acceptance run — see TranscriptLoadHarness.
         NotificationCenter.default.addObserver(
@@ -517,6 +532,10 @@ class ReplView: NSView {
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             }
         }
+        if let done = afterNextPass {
+            afterNextPass = nil
+            done()
+        }
     }
 
     /// Build a turn view, hydrating its payload first if it has gone cold.
@@ -537,8 +556,9 @@ class ReplView: NSView {
         }
         session.payloadStore.pin(turn.id)
 
-        let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable,
-                                interaction: interactions.state(for: turn.id))
+        let state = interactions.state(for: turn.id)
+        let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable, interaction: state,
+                                folds: FoldResolver(state: state, expandedByDefault: foldsExpandedByDefault))
         view.onSend = { [weak self] text in
             guard let self else { return }
             self.followTail.setPinned(true, cause: .send)
@@ -556,6 +576,15 @@ class ReplView: NSView {
         // holding the expanded height.
         view.onBlockExpansion = { [weak self] blockIndex, isExpanded in
             self?.interactions.setExpanded(turn: turn.id, block: blockIndex, isExpanded)
+        }
+        // A tool group opened or closed: the choice outlives the view (eviction, width
+        // changes), and the turn is re-measured through the same path as a result fold.
+        // No scroll-policy change here; anchoring on the toggled row is TF3.
+        view.onGroupToggle = { [weak self] key, isExpanded in
+            guard let self else { return }
+            self.interactions.setGroup(turn: turn.id, key: key, isExpanded)
+            self.pendingRemeasure.insert(turn.id)
+            self.schedulePass()
         }
         // Expanding a tool result changes the turn's height, so the geometry has
         // to be told rather than left to discover it.
@@ -604,7 +633,9 @@ class ReplView: NSView {
         view.setIslandWidth(contentWidth)
         let height = max(view.islandHeight(), TurnHeightEstimator.minimumTurnHeight)
         view.setFrameSize(NSSize(width: contentWidth, height: height))
-        virtualizer.recordMeasured(height, at: index, isComplete: turn.isComplete)
+        let digest = ToolFoldAdapter.foldDigest(turn: turn, state: interactions.state(for: turn.id),
+                                                expandedByDefault: foldsExpandedByDefault)
+        virtualizer.recordMeasured(height, at: index, isComplete: turn.isComplete, foldDigest: digest)
 
         superview?.addSubview(view)
         selection?.restore()
@@ -742,7 +773,9 @@ class ReplView: NSView {
         super.layout()
         // A width change invalidates every estimate and every measurement, since
         // both were taken at the old width. Re-estimating five thousand turns is
-        // a few million float ops — which is what keeps a resize interactive.
+        // a few million float ops — which is what keeps a resize interactive. (Tool
+        // groups don't depend on width: the virtualizer re-estimates them from cached
+        // fold shapes rather than re-planning every turn.)
         let width = contentWidth
         followTail.paneMayHaveBecomeUsable()
         guard width > 1, abs(width - laidOutWidth) > 0.5 else { return }
@@ -884,6 +917,54 @@ extension ReplView: TranscriptDiagnostics.Reporting {
     var estimatedDocumentHeight: Double { Double(virtualizer.documentHeight) }
     var transcriptClearCount: Int       { session.transcriptClears }
     var worstMeasureMs: Double          { worstMeasureSeconds * 1000 }
+    /// Rows the pane shows with folding, and its tool groups (the PRD's rows-per-turn
+    /// metric). One walk over the turns, through the virtualizer's cached fold shapes.
+    var foldRowCounts: (rows: Int, groups: Int) {
+        ToolFoldAdapter.rowCounts(turns: session.turns, resolver: { [interactions, foldsExpandedByDefault] turn in
+            FoldResolver(state: interactions.state(for: turn.id), expandedByDefault: foldsExpandedByDefault)
+        }, shape: { [virtualizer] turn in virtualizer.foldShape(for: turn) })
+    }
+}
+
+// MARK: - Load harness
+
+extension ReplView: ToolGroupHarnessDriving {
+
+    /// Open the first group of `callCount` calls and report how long until the pass that
+    /// renders it has finished.
+    func harnessExpandFirstToolGroup(callCount: Int, completion: @escaping (_ ms: Double?) -> Void) {
+        let turns = session.turns
+        var found: (index: Int, turn: ChatTurn, key: String)?
+        search: for (i, turn) in turns.enumerated() where ToolFoldAdapter.hasToolBlocks(turn) {
+            for case .group(let group) in ToolFoldAdapter.plan(turn) where group.callCount == callCount {
+                found = (i, turn, group.key)
+                break search
+            }
+        }
+        guard let found else { completion(nil); return }
+
+        // First bring the turn on screen (not timed), then click its row the way the
+        // operator would and time from the toggle to the end of the pass it schedules.
+        followTail.setPinned(false, cause: .harness)
+        scrollView.contentView.scroll(NSPoint(x: 0, y: virtualizer.offset(of: found.index)))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        afterNextPass = { [weak self] in
+            guard let self,
+                  let turnView = self.turnViews[found.turn.id] as? ChatTurnView,
+                  let group = turnView.groupView(forKey: found.key)
+            else { completion(nil); return }
+            let started = ContinuousClock.now
+            self.afterNextPass = {
+                let elapsed = started.duration(to: .now)
+                completion(Double(elapsed.components.seconds) * 1000
+                           + Double(elapsed.components.attoseconds) / 1e15)
+            }
+            if group.isExpanded { group.row.toggle() }   // an expanded default: close it first
+            group.row.toggle()
+        }
+        contentDirty = true
+        schedulePass()
+    }
 }
 
 // MARK: - ReplClipView

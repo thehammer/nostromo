@@ -121,8 +121,10 @@ struct TranscriptRig {
     }
 }
 
+/// `folds`: how tool groups resolve (nil: the explicit choices in `interaction`, else collapsed).
 func makeTranscriptRig(_ testCase: XCTestCase, blocks: [TurnBlock],
                        interaction: TurnInteractionState = TurnInteractionState(),
+                       folds: FoldResolver? = nil,
                        paneWidth: CGFloat = 900, withOverlay: Bool = false) -> TranscriptRig {
     let window = makeRigWindow(testCase)
     let scroll = NSScrollView(frame: window.contentView!.bounds)
@@ -138,7 +140,7 @@ func makeTranscriptRig(_ testCase: XCTestCase, blocks: [TurnBlock],
         overlay = o
     }
     let turn = ChatTurn(userInput: "hi", timestamp: Date(), blocks: blocks, isComplete: true)
-    let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: interaction)
+    let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: interaction, folds: folds)
     let rig = TranscriptRig(window: window, scroll: scroll, doc: doc, turn: view, overlay: overlay)
     rig.relayout(width: paneWidth)
     rigSettle()
@@ -345,7 +347,9 @@ final class ProseSelectionTests: XCTestCase {
 
     private func rig(for element: ProseElement, width: CGFloat = 900, overlay: Bool = false)
         -> (TranscriptRig, Target)? {
+        // A call row lives inside its tool group: open the group to reach it.
         let rig = makeTranscriptRig(self, blocks: element.blocks, interaction: element.interaction,
+                                    folds: FoldResolver(state: element.interaction, expandedByDefault: true),
                                     paneWidth: width, withOverlay: overlay)
         guard let target = Target.locate(element, in: rig) else {
             XCTFail("\(element.name): not found in the turn (subviews: \(rigAllSubviews(of: rig.turn).map { String(describing: type(of: $0)) }))")

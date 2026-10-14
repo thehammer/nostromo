@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import NostromoKit
 // ChatTurn, TurnBlock, TurnHeightEstimator and TurnListVirtualizer are compiled
 // into this target directly (logic test — no host app). No module imports needed.
 
@@ -1117,5 +1118,195 @@ final class TurnListVirtualizerTests: XCTestCase {
                           + "that no longer exists are dead weight, and keeping them here would "
                           + "make the two population paths indistinguishable")
         XCTAssertFalse(v.isHeightExact(at: 12))
+    }
+}
+
+// MARK: - Fold state in the height cache (TF2)
+
+/// A turn's rendered height depends on which of its groups are open, but its `contentKey` does
+/// not. A height measured with a group open and cached by `contentKey` alone would be handed
+/// back for the collapsed turn after the view is evicted and rebuilt, leaving geometry and view
+/// disagreeing. The cache is therefore keyed by the fold state too; the scroll anchor is not.
+final class TurnListVirtualizerFoldTests: XCTestCase {
+
+    private typealias F = FoldFixtures
+
+    private static let width: CGFloat = 800
+
+    private func groupTurn(_ index: Int, calls: Int = 3) -> ChatTurn {
+        F.turn([.text("intro \(index)")] + F.run(calls, prefix: "k\(index)_"), user: "",
+               raw: String(format: "2026-10-13T00:00:%02d.000Z", index))
+    }
+
+    private func opened(_ turn: ChatTurn) -> TurnInteractionState {
+        var state = TurnInteractionState()
+        state.groupStates[F.groups(of: turn)[0].key] = true
+        return state
+    }
+
+    private let closed = TurnInteractionState()
+
+    private func makeVirtualizer(_ turns: [ChatTurn]) -> TurnListVirtualizer {
+        let v = TurnListVirtualizer()
+        v.reset(turns: turns, width: Self.width)
+        return v
+    }
+
+    private func estimate(_ turn: ChatTurn, _ state: TurnInteractionState) -> CGFloat {
+        TurnHeightEstimator.estimate(turn, width: Self.width, folds: FoldResolver(state: state))
+    }
+
+    /// A virtualizer holding `turn` at index 0 that has measured it open (400) then shut (60).
+    private func measuredBothWays(_ turn: ChatTurn) -> (v: TurnListVirtualizer, d0: String, d1: String) {
+        let d0 = ToolFoldAdapter.foldDigest(turn: turn, state: closed)
+        let d1 = ToolFoldAdapter.foldDigest(turn: turn, state: opened(turn))
+        let v = makeVirtualizer([turn])
+        v.recordMeasured(400, at: 0, isComplete: true, foldDigest: d1)
+        v.recordMeasured(60, at: 0, isComplete: true, foldDigest: d0)
+        return (v, d0, d1)
+    }
+
+    func testTheOpenAndShutStatesOfATurnHaveDifferentDigests() {
+        let turn = groupTurn(0)
+        XCTAssertNotEqual(ToolFoldAdapter.foldDigest(turn: turn, state: closed),
+                          ToolFoldAdapter.foldDigest(turn: turn, state: opened(turn)))
+        XCTAssertEqual(ToolFoldAdapter.foldDigest(turn: turn, state: closed), "")
+    }
+
+    func testAWidthChangeToTheSameWidthKeepsTheHeightMeasuredForTheCurrentFoldState() {
+        let turn = groupTurn(0)
+        let (v, _, _) = measuredBothWays(turn)
+        v.foldState = { _ in self.closed }
+        v.invalidateWidth(Self.width, turns: [turn])
+        XCTAssertEqual(v.height(at: 0), 60, "the collapsed height, not the expanded one measured before it")
+        XCTAssertTrue(v.isHeightExact(at: 0))
+
+        v.foldState = { _ in self.opened(turn) }
+        v.invalidateWidth(Self.width, turns: [turn])
+        XCTAssertEqual(v.height(at: 0), 400, "with the group open the expanded measurement applies")
+        XCTAssertTrue(v.isHeightExact(at: 0))
+    }
+
+    func testASpliceFromTheTopKeepsTheHeightMeasuredForTheCurrentFoldState() {
+        let turn = groupTurn(0)
+        let (v, _, _) = measuredBothWays(turn)
+        v.foldState = { _ in self.closed }
+        v.splice(turns: [turn], from: 0)
+        XCTAssertEqual(v.height(at: 0), 60)
+        v.foldState = { _ in self.opened(turn) }
+        v.splice(turns: [turn], from: 0)
+        XCTAssertEqual(v.height(at: 0), 400)
+    }
+
+    func testRebuildingATurnAfterEvictionUsesTheHeightForItsFoldState() {
+        let first = groupTurn(0), second = groupTurn(1)
+        let d0 = ToolFoldAdapter.foldDigest(turn: second, state: closed)
+        let d1 = ToolFoldAdapter.foldDigest(turn: second, state: opened(second))
+        let v = makeVirtualizer([first, second])
+        v.recordMeasured(400, at: 1, isComplete: true, foldDigest: d1)
+        v.recordMeasured(60, at: 1, isComplete: true, foldDigest: d0)
+
+        // Drop it and bring it back (the transcript retention / re-attach path).
+        v.foldState = { _ in self.closed }
+        v.splice(turns: [first], from: 1)
+        v.append(second)
+        XCTAssertEqual(v.height(at: 1), 60, "re-materialized shut: the shut height")
+
+        v.foldState = { _ in self.opened(second) }
+        v.splice(turns: [first], from: 1)
+        v.append(second)
+        XCTAssertEqual(v.height(at: 1), 400, "re-materialized open: the open height")
+    }
+
+    func testRefreshingACompletedTurnUsesTheHeightForItsFoldState() {
+        let turn = groupTurn(0)
+        let (v, _, _) = measuredBothWays(turn)
+        v.foldState = { _ in self.closed }
+        v.refresh(turn, at: 0)
+        XCTAssertEqual(v.height(at: 0), 60)
+        v.foldState = { _ in self.opened(turn) }
+        v.refresh(turn, at: 0)
+        XCTAssertEqual(v.height(at: 0), 400)
+    }
+
+    func testAHeightMeasuredOnlyForOneFoldStateIsNotReusedForAnother() {
+        let turn = groupTurn(0)
+        let d1 = ToolFoldAdapter.foldDigest(turn: turn, state: opened(turn))
+        let v = makeVirtualizer([turn])
+        v.recordMeasured(400, at: 0, isComplete: true, foldDigest: d1)
+
+        v.foldState = { _ in self.closed }
+        v.invalidateWidth(Self.width, turns: [turn])
+        XCTAssertEqual(v.height(at: 0), estimate(turn, closed), accuracy: 0.001, "no measurement for the shut state: its estimate")
+        XCTAssertFalse(v.isHeightExact(at: 0))
+    }
+
+    func testAMeasurementRecordedWithoutADigestIsTheShutStatesMeasurement() {
+        let turn = groupTurn(0)
+        let v = makeVirtualizer([turn])
+        v.recordMeasured(75, at: 0)
+        v.foldState = { _ in self.closed }
+        v.invalidateWidth(Self.width, turns: [turn])
+        XCTAssertEqual(v.height(at: 0), 75)
+    }
+
+    func testEstimatesFollowTheFoldState() {
+        let turn = groupTurn(0)
+        let v = TurnListVirtualizer()
+        v.foldState = { _ in self.opened(turn) }
+        v.reset(turns: [turn], width: Self.width)
+        XCTAssertEqual(v.height(at: 0), estimate(turn, opened(turn)), accuracy: 0.001)
+
+        v.foldState = { _ in self.closed }
+        v.reset(turns: [turn], width: Self.width)
+        XCTAssertEqual(v.height(at: 0), estimate(turn, closed), accuracy: 0.001)
+        XCTAssertLessThan(estimate(turn, closed), estimate(turn, opened(turn)))
+    }
+
+    func testGroupsOpenByDefaultEstimateAsExpandedUnlessTheOperatorShutThem() {
+        let turn = groupTurn(0)
+        let v = TurnListVirtualizer()
+        v.foldsExpandedByDefault = true
+        v.reset(turns: [turn], width: Self.width)
+        XCTAssertEqual(v.height(at: 0),
+                       TurnHeightEstimator.estimate(turn, width: Self.width, folds: FoldResolver(expandedByDefault: true)),
+                       accuracy: 0.001)
+        var shut = TurnInteractionState()
+        shut.groupStates[F.groups(of: turn)[0].key] = false
+        v.foldState = { _ in shut }
+        v.reset(turns: [turn], width: Self.width)
+        XCTAssertEqual(v.height(at: 0), estimate(turn, shut), accuracy: 0.001)
+    }
+
+    // MARK: anchors
+
+    func testAnAnchorStillResolvesByContentKeyWhateverTheFoldState() throws {
+        let turns = (0 ..< 6).map { groupTurn($0) }
+        let v = makeVirtualizer(turns)
+        let before = v.offset(of: 3)
+        let anchor = try XCTUnwrap(v.captureAnchor(viewportTop: before + 10))
+        XCTAssertEqual(anchor.key, turns[3].contentKey, "the anchor key is the turn's content key, with no fold state in it")
+        XCTAssertEqual(anchor.index, 3)
+        XCTAssertEqual(anchor.offsetWithinTurn, 10, accuracy: 0.001)
+
+        // An earlier turn is opened: everything below it moves down.
+        v.foldState = { turn in turn.contentKey == turns[1].contentKey ? self.opened(turns[1]) : self.closed }
+        v.invalidateWidth(Self.width, turns: turns)
+        XCTAssertGreaterThan(v.offset(of: 3), before)
+        XCTAssertEqual(v.restoredTop(for: anchor), v.offset(of: 3) + 10, accuracy: 0.001)
+    }
+
+    func testAnAnchorCapturedWhileATurnIsOpenSurvivesAnInsertionAbove() throws {
+        let turns = (0 ..< 5).map { groupTurn($0) }
+        let v = TurnListVirtualizer()
+        v.foldState = { turn in turn.contentKey == turns[2].contentKey ? self.opened(turns[2]) : self.closed }
+        v.reset(turns: turns, width: Self.width)
+        let anchor = try XCTUnwrap(v.captureAnchor(viewportTop: v.offset(of: 2) + 5))
+        XCTAssertEqual(anchor.key, turns[2].contentKey)
+
+        let inserted = [groupTurn(9)] + turns
+        v.splice(turns: inserted, from: 0)
+        XCTAssertEqual(v.restoredTop(for: anchor), v.offset(of: 3) + 5, accuracy: 0.001,
+                       "the anchored turn is now index 3, found by its key")
     }
 }

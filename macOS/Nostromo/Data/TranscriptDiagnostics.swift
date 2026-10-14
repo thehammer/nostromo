@@ -36,6 +36,9 @@ enum TranscriptDiagnostics {
         /// when nothing was slow, so a healthy run says how much headroom it
         /// actually had rather than merely reporting a zero.
         var worstMeasureMs: Double { get }
+        /// Rows the pane shows with tool folding (an item each; an open group adds its
+        /// calls and results) and how many tool groups it has.
+        var foldRowCounts: (rows: Int, groups: Int) { get }
     }
 
     // MARK: - Registry
@@ -101,6 +104,10 @@ enum TranscriptDiagnostics {
         /// pair of fields rather than being inferred from the others.
         let slowMeasures: Int
         let worstMeasureMs: Double
+        /// Rows the pane shows with tool folding: the PRD's rows-per-turn metric is this
+        /// over `retainedTurns`.
+        let visibleRowCount: Int
+        let toolGroupCount: Int
     }
 
     /// Identity for every line this process writes, generated once per launch.
@@ -266,6 +273,7 @@ enum TranscriptDiagnostics {
         let footprint = physicalFootprint()
         let reports: [PaneReport] = panes.allObjects.compactMap { object in
             guard let pane = object as? Reporting else { return nil }
+            let folds = pane.foldRowCounts
             return PaneReport(tag: pane.diagnosticsTag,
                               retainedTurns: pane.retainedTurnCount,
                               materializedViews: pane.materializedViewCount,
@@ -274,7 +282,9 @@ enum TranscriptDiagnostics {
                               estimatedDocHeight: pane.estimatedDocumentHeight,
                               transcriptClears: pane.transcriptClearCount,
                               slowMeasures: pane.slowMeasureCount,
-                              worstMeasureMs: pane.worstMeasureMs)
+                              worstMeasureMs: pane.worstMeasureMs,
+                              visibleRowCount: folds.rows,
+                              toolGroupCount: folds.groups)
         }
         let splitReports = splits.allObjects.compactMap { $0 as? SplitReporting }
         let splitsLaidOutCount = splitReports.filter {

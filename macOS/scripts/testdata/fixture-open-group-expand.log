@@ -1,0 +1,10 @@
+2026-10-13 10:00:00 load harness: opening benchmark fixture, 212 turns
+fixture-open ms=200 rows=1062 turns=212
+2026-10-13 10:00:02 load harness: expanding the first 60-call group
+group-expand ms=80
+fixture-open ms=210 rows=1062 turns=212
+2026-10-13 10:00:12 load harness: expanding the first 60-call group
+group-expand ms=120
+fixture-open ms=220 rows=1062 turns=212
+2026-10-13 10:00:22 load harness: expanding the first 60-call group
+group-expand ms=95
