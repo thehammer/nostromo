@@ -592,12 +592,13 @@ impl TaskRegistry {
             // A detail is published when it has text, or when it lost the
             // text a client holds (a new run); a task with nothing to say
             // announces no detail at all.
-            let after = self.entries.get(&id).map(|e| e.detail.clone());
-            if let Some(after) = after {
+            let publish_detail = self.entries.get(&id).is_some_and(|e| {
                 let had_text = before_detail.as_ref().is_some_and(|d| !detail_is_empty(d));
-                if after_differs(&before_detail, &after) && (had_text || !detail_is_empty(&after)) {
-                    self.dirty_details.insert(id);
-                }
+                before_detail.as_ref() != Some(&e.detail)
+                    && (had_text || !detail_is_empty(&e.detail))
+            });
+            if publish_detail {
+                self.dirty_details.insert(id);
             }
         }
         if self.snapshot(tool_name) != before_snapshot {
@@ -663,11 +664,15 @@ impl TaskRegistry {
         true
     }
 
-    /// Every task, in arrival order, as the wire shows it.
-    pub fn snapshot(&self, tool_name: ToolNameLookup<'_>) -> Vec<TaskMeta> {
+    fn entries_in_order(&self) -> Vec<&TaskEntry> {
         let mut entries: Vec<&TaskEntry> = self.entries.values().collect();
         entries.sort_by_key(|e| e.seq);
         entries
+    }
+
+    /// Every task, in arrival order, as the wire shows it.
+    pub fn snapshot(&self, tool_name: ToolNameLookup<'_>) -> Vec<TaskMeta> {
+        self.entries_in_order()
             .into_iter()
             .map(|e| e.meta(tool_name))
             .collect()
@@ -675,9 +680,7 @@ impl TaskRegistry {
 
     /// The details of every retained task that has any text.
     pub fn details(&self) -> Vec<TaskDetailMsg> {
-        let mut entries: Vec<&TaskEntry> = self.entries.values().collect();
-        entries.sort_by_key(|e| e.seq);
-        entries
+        self.entries_in_order()
             .into_iter()
             .map(|e| e.detail.clone())
             .filter(|d| !detail_is_empty(d))
@@ -717,9 +720,7 @@ impl TaskRegistry {
 
     /// The shell and monitor tasks, running or ended, for the preview poller.
     pub fn preview_targets(&self, tool_name: ToolNameLookup<'_>) -> Vec<PreviewTarget> {
-        let mut entries: Vec<&TaskEntry> = self.entries.values().collect();
-        entries.sort_by_key(|e| e.seq);
-        entries
+        self.entries_in_order()
             .into_iter()
             .filter(|e| e.kind(tool_name).has_output())
             .map(|e| PreviewTarget {
@@ -908,10 +909,6 @@ impl TaskRegistry {
             self.dirty_details.remove(&id);
         }
     }
-}
-
-fn after_differs(before: &Option<TaskDetailMsg>, after: &TaskDetailMsg) -> bool {
-    before.as_ref() != Some(after)
 }
 
 fn event_task_id(kind: &TaskEventKind) -> Option<&str> {

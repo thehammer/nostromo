@@ -274,16 +274,15 @@ impl OutputFileValidator {
     /// Check `path` against the rules above and open it for reading.
     pub fn open(&self, path: &Path, task_id: &str) -> Result<File, OutputFileError> {
         let (dir, name) = self.check_shape(path, task_id)?;
-        open_nofollow(&dir.join(name)).map_err(OutputFileError::Unreadable).and_then(|file| {
-            let meta = file.metadata().map_err(OutputFileError::Unreadable)?;
-            if !meta.file_type().is_file() {
-                return Err(OutputFileError::Rejected("not a regular file"));
-            }
-            if !self.owned_by_us(&meta) {
-                return Err(OutputFileError::Rejected("not owned by the daemon's user"));
-            }
-            Ok(file)
-        })
+        let file = open_nofollow(&dir.join(name)).map_err(OutputFileError::Unreadable)?;
+        let meta = file.metadata().map_err(OutputFileError::Unreadable)?;
+        if !meta.file_type().is_file() {
+            return Err(OutputFileError::Rejected("not a regular file"));
+        }
+        if !self.owned_by_us(&meta) {
+            return Err(OutputFileError::Rejected("not owned by the daemon's user"));
+        }
+        Ok(file)
     }
 
     /// Read the last `max_bytes` of the file at `path`.

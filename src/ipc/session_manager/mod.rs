@@ -66,7 +66,9 @@ mod model_switch;
 mod task_runtime;
 pub use control::CONTROL_TIMEOUT;
 use control::ControlReply;
-use task_runtime::{drive_timer, ensure_poller, forward_session_events, tasks_msg, detail_msg, TaskRuntime};
+use task_runtime::{
+    detail_msg, drive_timer, ensure_poller, forward_session_events, tasks_msg, TaskRuntime,
+};
 pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket};
 use model_switch::{
     emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,
@@ -149,8 +151,8 @@ struct PendingMessage {
 ///
 /// Lock order, wherever more than one is held:
 /// `model_io` → `state` → `model` → `pending`.
-/// The task registry's lock (`tasks`) may be held while the `transcript` lock
-/// is taken, never the reverse.
+/// The task runtime's `hub` lock (in `tasks`) may be held while the
+/// `transcript` lock is taken, never the reverse.
 /// `stdin`, `note_prefix`, `transcript` and `waiters` are leaf locks: they may
 /// be taken while holding the others, but nothing else is ever acquired while
 /// one of them is held.
@@ -1994,7 +1996,7 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
     // child's exit code (it owns only stdout); reap_and_recover captures the
     // real code via child.try_wait() and re-broadcasts Exited with it.
     // `exited` is set before the waiters are dropped, so a control request
-    // registered after this point sees it (see `model_switch::control`).
+    // registered after this point sees it (see `control::control`).
     shared.exited.store(true, Ordering::SeqCst);
     // The tasks end with the process, and clients hear it before anything is
     // torn down.

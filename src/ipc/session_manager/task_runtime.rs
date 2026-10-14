@@ -22,7 +22,7 @@ use tokio::sync::{broadcast, Notify};
 
 use super::control::control;
 use super::{lock_recover, SessionEvent, Shared};
-use crate::ipc::protocol::{TaskDetailMsg, TasksSnapshot};
+use crate::ipc::protocol::{ServerMsg, TaskDetailMsg, TaskMeta, TasksSnapshot};
 use crate::ipc::stream_json::SessionTranscript;
 use crate::ipc::task_output::{
     is_valid_task_id, last_nonempty_line, root_of_output_path, sanitize, OutputFileValidator,
@@ -195,7 +195,7 @@ impl TaskRuntime {
         move |id| lock_recover(&self.transcript).tool_name_of(id).map(str::to_owned)
     }
 
-    fn snapshot_of(&self, tasks: Vec<crate::ipc::protocol::TaskMeta>) -> TasksSnapshot {
+    fn snapshot_of(&self, tasks: Vec<TaskMeta>) -> TasksSnapshot {
         TasksSnapshot {
             session_id: self.session_id.clone(),
             daemon_epoch: daemon_epoch().to_owned(),
@@ -234,6 +234,13 @@ impl TaskRuntime {
     /// A poller is needed: a client is attached and there is a task to read.
     fn poll_wanted(&self) -> bool {
         self.clients.load(Ordering::SeqCst) > 0 && !self.poll_plan().is_empty()
+    }
+
+    /// Mark the poller as running; `false` when one already is.
+    fn claim_poller(&self) -> bool {
+        self.poller_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     /// What the poller reads next: every running shell/monitor task, and the
@@ -342,11 +349,7 @@ pub(super) fn ensure_poller(shared: &Shared) {
     if shared.exited.load(Ordering::SeqCst) || !runtime.poll_wanted() {
         return;
     }
-    if runtime
-        .poller_running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
+    if runtime.claim_poller() {
         let shared = shared.clone();
         let handle = shared.runtime.clone();
         handle.spawn(poll_loop(shared));
@@ -369,10 +372,7 @@ async fn poll_loop(shared: Shared) {
             // A change may have landed between the check and the store.
             if !shared.exited.load(Ordering::SeqCst)
                 && runtime.poll_wanted()
-                && runtime
-                    .poller_running
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
+                && runtime.claim_poller()
             {
                 continue;
             }
@@ -442,11 +442,10 @@ async fn read_preview(shared: &Shared, target: &PreviewTarget) -> Option<String>
 /// ones are sent before carrying on.
 pub(super) async fn forward_session_events(
     mut rx: broadcast::Receiver<SessionEvent>,
-    send: impl Fn(crate::ipc::protocol::ServerMsg) -> bool,
+    send: impl Fn(ServerMsg) -> bool,
     tag: String,
     runtime: Arc<TaskRuntime>,
 ) {
-    use crate::ipc::protocol::ServerMsg;
     loop {
         match rx.recv().await {
             Ok(ev) => {
@@ -492,8 +491,8 @@ pub(super) async fn forward_session_events(
 }
 
 /// The `SessionTasks` frame for a snapshot.
-pub(super) fn tasks_msg(tag: &str, snapshot: &TasksSnapshot) -> crate::ipc::protocol::ServerMsg {
-    crate::ipc::protocol::ServerMsg::SessionTasks {
+pub(super) fn tasks_msg(tag: &str, snapshot: &TasksSnapshot) -> ServerMsg {
+    ServerMsg::SessionTasks {
         tag: tag.to_owned(),
         session_id: snapshot.session_id.clone(),
         daemon_epoch: snapshot.daemon_epoch.clone(),
@@ -503,8 +502,8 @@ pub(super) fn tasks_msg(tag: &str, snapshot: &TasksSnapshot) -> crate::ipc::prot
 }
 
 /// The `SessionTaskDetail` frame for a detail.
-pub(super) fn detail_msg(tag: &str, detail: &TaskDetailMsg) -> crate::ipc::protocol::ServerMsg {
-    crate::ipc::protocol::ServerMsg::SessionTaskDetail {
+pub(super) fn detail_msg(tag: &str, detail: &TaskDetailMsg) -> ServerMsg {
+    ServerMsg::SessionTaskDetail {
         tag: tag.to_owned(),
         task_id: detail.task_id.clone(),
         preview: detail.preview.clone(),
