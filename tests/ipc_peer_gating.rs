@@ -5290,6 +5290,19 @@ mod background_tasks {
                 .join(format!("{id}.output"))
         }
 
+        /// The last lines of the shell task's and the monitor task's output files, once the fake
+        /// has written both (it writes them after it logs `GO-TASKS`).
+        async fn wait_output_lines(&self) -> (String, String) {
+            for _ in 0..400 {
+                let lines = (self.last_output_line("bgsh1"), self.last_output_line("mon1"));
+                if !lines.0.is_empty() && !lines.1.is_empty() {
+                    return lines;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the fake never wrote its task output files");
+        }
+
         /// The last non-empty line of task `id`'s output file ("" while there is no file).
         fn last_output_line(&self, id: &str) -> String {
             std::fs::read_to_string(self.output_file(id))
@@ -5419,7 +5432,7 @@ mod background_tasks {
 
         // The local peer sees both sessions' tasks, the previews and the texts: the leak window is real.
         let (open_tag, sens_tag) = (open.tag.clone(), sens.tag.clone());
-        let previews = (open.last_output_line("bgsh1"), open.last_output_line("mon1"));
+        let previews = open.wait_output_lines().await;
         unix.wait_until("the local peer to see every task and a polled preview", move |f| {
             let d = merged_details(f, &open_tag);
             tasks_complete(f, &open_tag)
@@ -5487,7 +5500,7 @@ mod background_tasks {
         start_tasks(&mut driver, &s).await;
 
         let tag = s.tag.clone();
-        let expect = (s.last_output_line("bgsh1"), s.last_output_line("mon1"));
+        let expect = s.wait_output_lines().await;
         assert_eq!(expect, ("SECRET-OUTPUT-3".to_owned(), "SECRET-OUTPUT-5".to_owned()), "the fake's output files");
         unix.wait_until("the details and a preview of each output file's last line", move |f| {
             let d = merged_details(f, &tag);
