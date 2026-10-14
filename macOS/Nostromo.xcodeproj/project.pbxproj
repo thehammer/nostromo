@@ -264,6 +264,7 @@
 		ZZ0000000000000000TF0501 /* ToolFoldAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0500 /* ToolFoldAdapterTests.swift */; };
 		ZZ0000000000000000TF0601 /* ToolGroupViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0600 /* ToolGroupViewTests.swift */; };
 		ZZ0000000000000000TF0701 /* ToolGroupAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0700 /* ToolGroupAppearanceTests.swift */; };
+		ZZ0000000000000000FC0101 /* MarkdownCodeBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000FC0100 /* MarkdownCodeBlockTests.swift */; };
 		ZZ0000000000000000TF0801 /* ToolFoldScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0800 /* ToolFoldScrollTests.swift */; };
 		ZZ0000000000000000TF0901 /* ToolGroupLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */; };
 		ZZ0000000000000000TF1001 /* TranscriptFoldStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */; };
@@ -543,6 +544,7 @@
 		ZZ0000000000000000TF0500 /* ToolFoldAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldAdapterTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0600 /* ToolGroupViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupViewTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0700 /* ToolGroupAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000FC0100 /* MarkdownCodeBlockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownCodeBlockTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0800 /* ToolFoldScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldScrollTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupLiveTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptFoldStoreTests.swift; sourceTree = "<group>"; };
@@ -871,6 +873,7 @@
 				ZZ0000000000000000TF0500 /* ToolFoldAdapterTests.swift */,
 				ZZ0000000000000000TF0600 /* ToolGroupViewTests.swift */,
 				ZZ0000000000000000TF0700 /* ToolGroupAppearanceTests.swift */,
+				ZZ0000000000000000FC0100 /* MarkdownCodeBlockTests.swift */,
 				ZZ0000000000000000TF0800 /* ToolFoldScrollTests.swift */,
 				ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */,
 				ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */,
@@ -1331,6 +1334,7 @@
 				ZZ0000000000000000TF0501 /* ToolFoldAdapterTests.swift in Sources */,
 				ZZ0000000000000000TF0601 /* ToolGroupViewTests.swift in Sources */,
 				ZZ0000000000000000TF0701 /* ToolGroupAppearanceTests.swift in Sources */,
+				ZZ0000000000000000FC0101 /* MarkdownCodeBlockTests.swift in Sources */,
 				ZZ0000000000000000TF0801 /* ToolFoldScrollTests.swift in Sources */,
 				ZZ0000000000000000TF0901 /* ToolGroupLiveTests.swift in Sources */,
 				ZZ0000000000000000TF1001 /* TranscriptFoldStoreTests.swift in Sources */,

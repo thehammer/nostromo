@@ -1,13 +1,86 @@
 import AppKit
+import NostromoKit
 
 // MARK: - MarkdownRenderer
 
 /// Stateless line-based markdown-to-AttributedString renderer.
-/// Handles headers (H1–H3), bullet lists, numbered lists, blank-line spacing,
-/// and inline spans (inline-code, bold, italic). Not a CommonMark implementation.
+/// Handles fenced code blocks (``` and ~~~), headers (H1–H3), bullet lists,
+/// numbered lists, blank-line spacing, and inline spans (inline-code, bold,
+/// italic). Not a CommonMark implementation.
+///
+/// The text is split into prose and fenced-code segments first
+/// (`MarkdownFences`). Prose keeps the line logic below, with inline spans applied
+/// to that segment only. A code block is rendered verbatim: no headings, lists or
+/// inline spans, and the fence lines themselves never reach the attributed string.
 enum MarkdownRenderer {
 
     static func render(_ markdown: String, baseFont: NSFont) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        // Attributes of the code block just appended: the "\n" that ends its last
+        // line carries them, so the block's box includes that line break.
+        var previousCode: [NSAttributedString.Key: Any]?
+        var appended = false
+        var endsWithEmptyCode = false
+
+        for segment in MarkdownFences.segments(of: markdown) {
+            let part: NSAttributedString
+            let code: [NSAttributedString.Key: Any]?
+            switch segment {
+            case .prose(let text):
+                part = renderProse(text, baseFont: baseFont)
+                code = nil
+                // Blank-only prose (e.g. between two blocks) adds nothing.
+                if part.length == 0 { continue }
+            case .code(let block):
+                let attrs = codeAttributes()
+                part = NSAttributedString(string: block.code, attributes: attrs)
+                code = attrs
+            }
+            // Newline between segments (not after the last)
+            if appended {
+                result.append(NSAttributedString(string: "\n", attributes: previousCode))
+            }
+            result.append(part)
+            previousCode = code
+            appended = true
+            endsWithEmptyCode = code != nil && part.length == 0
+        }
+
+        // An empty code block at the very end still shows as one empty line. A
+        // newline would do it but also adds a trailing extra line fragment outside
+        // the block, so a single space stands in for the line.
+        if endsWithEmptyCode {
+            result.append(NSAttributedString(string: " ", attributes: previousCode))
+        }
+        return result
+    }
+
+    // MARK: - Private helpers
+
+    /// One code block: every line shares one `NSTextBlock`, which is what draws the
+    /// lines as a single box. Each block gets its own instance, or adjacent blocks
+    /// would merge.
+    private static func codeAttributes() -> [NSAttributedString.Key: Any] {
+        let block = NSTextBlock()
+        block.backgroundColor = Theme.codeBlockBackground
+        block.setContentWidth(100, type: .percentageValueType)
+        block.setWidth(8, type: .absoluteValueType, for: .padding)
+        block.setWidth(4, type: .absoluteValueType, for: .margin, edge: .minY)
+        block.setWidth(4, type: .absoluteValueType, for: .margin, edge: .maxY)
+
+        let style = NSMutableParagraphStyle()
+        style.textBlocks       = [block]
+        style.paragraphSpacing = 0
+        return [
+            .font: Theme.firaCode(size: 12),
+            .foregroundColor: Theme.fg,
+            // `!=`, `->`, `=>` render verbatim (as in `ToolCallView`).
+            .ligature: 0,
+            .paragraphStyle: style,
+        ]
+    }
+
+    private static func renderProse(_ markdown: String, baseFont: NSFont) -> NSMutableAttributedString {
         let result = NSMutableAttributedString()
         let lines  = markdown.components(separatedBy: "\n")
 
@@ -81,13 +154,11 @@ enum MarkdownRenderer {
             i += 1
         }
 
-        // Apply inline span pass after all lines are assembled
+        // Apply inline span pass after all of this segment's lines are assembled
         applyInlineSpans(to: result, baseFont: baseFont)
 
         return result
     }
-
-    // MARK: - Private helpers
 
     private static func attributedLine(
         _ text: String,
@@ -244,7 +315,10 @@ enum MarkdownRenderer {
 /// container; it touches no constraint.
 final class MarkdownCardView: NSView {
 
-    private let textView = NSTextView()
+    // TextKit 1 on purpose: the card is measured by an `NSLayoutManager` stack and
+    // `NSTextBlock` (code block background) is TextKit 1 only; render and measure
+    // must use the same engine.
+    private let textView = NSTextView(usingTextLayoutManager: false)
     private let markdown: String
     private let padding: CGFloat = 12
     /// Width the current `intrinsicContentSize` was computed for.
