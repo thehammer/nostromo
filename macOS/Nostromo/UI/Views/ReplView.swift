@@ -961,6 +961,11 @@ extension ReplView: ToolGroupHarnessDriving {
             }
             if group.isExpanded { group.row.toggle() }   // an expanded default: close it first
             group.row.toggle()
+            // This closure runs at the END of a pass, while `isMaterializing` is still true:
+            // `schedulePass()` is suppressed there, and the toggle does not mark the content
+            // dirty, so without this no second pass would ever run and the timing would never
+            // be reported (the harness' 30 s wait would time out).
+            self.contentDirty = true
         }
         contentDirty = true
         schedulePass()
