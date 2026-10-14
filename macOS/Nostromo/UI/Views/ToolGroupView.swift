@@ -313,8 +313,8 @@ final class ToolGroupView: NSView, WidthPresettable {
 /// or a drag (forwarded here to select), and the row's pointing hand stays the cursor.
 final class FoldSummaryField: CopyMenuTextField {
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
+    // No `hitTest` override: the owning row's `hitTest` answers for its whole frame, so this
+    // field is never reached by a click; the row forwards a drag to `beginSelectionDrag`.
     override func resetCursorRects() {}
 
     /// Start a text selection from the row's mouse-down. AppKit's own tracking loop then
@@ -529,7 +529,10 @@ final class ToolGroupRowView: NSView {
 
     /// The whole row is the control: its labels never take the press.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        frame.contains(point) ? self : nil
+        // AppKit hands `point` over in the SUPERVIEW's coordinates (the #185 bug class).
+        guard let superview else { return nil }
+        let local = convert(point, from: superview)
+        return bounds.contains(local) ? self : nil
     }
 
     override func mouseDown(with event: NSEvent) {
