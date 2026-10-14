@@ -49,6 +49,54 @@ public enum BenchmarkTranscript {
     public static func sessionTurnsJSON(seed: UInt64 = 1, emptyResults: Bool) -> Data {
         Generator.generate(seed: seed, emptyResults: emptyResults).json
     }
+
+    /// The Focus view's scenario turns (PRD "Acceptance criteria" preamble) as a JSON array of
+    /// daemon turns, in the same wire shape as `sessionTurnsJSON`: every `FocusScenario`,
+    /// repeated until there are at least `focusScenarioMinTurns` turns. Turn ids are
+    /// `f<n>-<scenario raw value>`. A separate generator (contract X2): `sessionTurnsJSON`
+    /// stays byte-identical.
+    public static func focusScenariosJSON(seed: UInt64 = 1) -> Data {
+        Generator.generateFocus(seed: seed)
+    }
+
+    /// The fewest turns `focusScenariosJSON` emits.
+    public static let focusScenarioMinTurns = 200
+}
+
+/// The turn shapes of the Focus fixture.
+public enum FocusScenario: String, CaseIterable, Sendable {
+    /// Tool groups only; the agent never speaks.
+    case noMessages
+    case oneMessage
+    case twoMessages
+    /// Ten messages interleaved with groups.
+    case tenMessages
+    /// A message, then tools, and no further message.
+    case messageThenTools
+    /// The turn ends on an unanswered ask card.
+    case finalAskCard
+    /// An ask card in the middle of the turn, with activity on both sides.
+    case answeredAskMidTurn
+    /// A model-change note in the middle of the turn.
+    case midTurnNote
+    case stopped
+    case errored
+    /// Every text block is whitespace-only.
+    case whitespaceOnlyMessages
+    /// Two text blocks with nothing between them (the wire never carries thinking).
+    case thinkingBetweenMessages
+    /// A 30 KB final message.
+    case largeFinalMessage
+    /// A markdown table in a message that folds.
+    case markdownTable
+    /// An image result inside activity.
+    case imageResult
+
+    /// The scenario a fixture turn id (`f<n>-<raw value>`) belongs to.
+    public init?(turnId: String) {
+        guard let dash = turnId.firstIndex(of: "-"), turnId.hasPrefix("f") else { return nil }
+        self.init(rawValue: String(turnId[turnId.index(after: dash)...]))
+    }
 }
 
 // MARK: - Random source
@@ -461,5 +509,148 @@ private struct Generator {
         default: return CallSpec(name: "FrobnicateWidget", summary: "widget \(rng.below(100))",
                                  input: ["widget": rng.below(100)], target: nil)
         }
+    }
+}
+
+// MARK: - Focus scenarios
+
+/// The Focus fixture (contract X2). It only adds to `Generator`; nothing the benchmark session
+/// uses is changed, so `sessionTurnsJSON` stays byte-identical. Turn numbers start at 1,000 so
+/// none of the benchmark's turn-keyed shapes (turns 40, 50, 90, 100) apply.
+extension Generator {
+
+    static func generateFocus(seed: UInt64) -> Data {
+        var generator = Generator(seed: seed, emptyResults: false)
+        return generator.runFocus()
+    }
+
+    mutating func runFocus() -> Data {
+        var turns: [Block] = []
+        while turns.count < BenchmarkTranscript.focusScenarioMinTurns {
+            for scenario in FocusScenario.allCases {
+                turns.append(focusTurn(scenario, number: turns.count))
+            }
+        }
+        return try! JSONSerialization.data(withJSONObject: turns, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    mutating func focusTurn(_ scenario: FocusScenario, number n: Int) -> Block {
+        beginTurn(1_000 + n)
+        let startMs = clockMs
+        let id = "f\(n)-\(scenario.rawValue)"
+        var summary: (isError: Bool, interrupted: Bool)? = (false, false)
+
+        switch scenario {
+        case .noMessages:
+            emitGroup(size: 4, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+        case .oneMessage:
+            prose("Nothing to change here: \(sentence())")
+        case .twoMessages:
+            prose("Looking at the layout first. \(sentence())")
+            emitGroup(size: 4, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+            prose("All checked. \(sentence())")
+        case .tenMessages:
+            for i in 0 ..< 10 {
+                prose("Step \(i): \(sentence())")
+                if i < 9 { emitGroup(size: 2 + i % 4, group: i, whitespaceAfterFirst: false, outcome: .normal) }
+            }
+        case .messageThenTools:
+            prose("Running the checks now. \(sentence())")
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+        case .finalAskCard:
+            prose("Let me look at the options. \(sentence())")
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+            prose("I found two ways to do this and need a decision. \(sentence())")
+            askCard()
+            summary = nil
+        case .answeredAskMidTurn:
+            prose("Before I go on I need a decision. \(sentence())")
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+            askCard()
+            emitGroup(size: 2, group: 1, whitespaceAfterFirst: false, outcome: .normal)
+            prose("Done with the chosen approach. \(sentence())")
+        case .midTurnNote:
+            prose("Starting on the first part. \(sentence())")
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+            closeRun()
+            blocks.append(["kind": "note", "note_kind": "model_changed",
+                           "text": "Model changed to Opus (from Sonnet) by you.", "ts": stamp(clockMs)])
+            emitGroup(size: 2, group: 1, whitespaceAfterFirst: false, outcome: .normal)
+            prose("Finished the second part. \(sentence())")
+        case .stopped:
+            prose("Running the long job. \(sentence())")
+            emitGroup(size: 4, group: 0, whitespaceAfterFirst: false, outcome: .interrupted)
+            summary = (true, true)
+        case .errored:
+            prose("Trying the build again. \(sentence())")
+            emitGroup(size: 5, group: 0, whitespaceAfterFirst: false, outcome: .stuck)
+            blocks.append(["kind": "error_message", "message": "Error: connection reset by peer", "ts": stamp(clockMs)])
+            summary = (true, false)
+        case .whitespaceOnlyMessages:
+            whitespace()
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: true, outcome: .normal)
+            whitespace()
+        case .thinkingBetweenMessages:
+            prose("First thought. \(sentence())")
+            prose("Second thought, nothing between. \(sentence())")
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+            prose("Conclusion, part one. \(sentence())")
+            prose("Conclusion, part two. \(sentence())")
+        case .largeFinalMessage:
+            prose("Collecting the results. \(sentence())")
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+            prose(String(String(repeating: "A long closing paragraph about the layout. ", count: 800).prefix(30_000)))
+        case .markdownTable:
+            prose("Here is the comparison:\n\n| Option | Cost |\n|---|---|\n| A | 1 |\n| B | 2 |\n")
+            emitGroup(size: 3, group: 0, whitespaceAfterFirst: false, outcome: .normal)
+            prose("Option A is cheaper. \(sentence())")
+        case .imageResult:
+            prose("Taking a screenshot of the result. \(sentence())")
+            imageGroup()
+            prose("The screenshot looks right. \(sentence())")
+        }
+
+        closeRun()
+        if let summary {
+            blocks.append([
+                "kind": "result_summary", "duration_ms": clockMs - startMs,
+                "cost_usd": Double(rng.range(1 ... 400)) / 1000, "is_error": summary.isError,
+                "interrupted": summary.interrupted, "ts": stamp(clockMs),
+            ])
+        }
+        return [
+            "id": id, "user_input": "Focus scenario \(n): \(sentence())",
+            "timestamp": stamp(startMs), "blocks": blocks, "is_complete": summary != nil,
+        ]
+    }
+
+    mutating func askCard() {
+        closeRun()
+        blocks.append([
+            "kind": "ask_question", "question": "Which approach should I take?",
+            "header": "Approach", "multi_select": false, "ts": stamp(clockMs),
+            "options": [
+                ["label": "Keep going", "description": "Continue with the current plan.", "recommended": true],
+                ["label": "Stop here", "description": "Hold until you have looked.", "recommended": false],
+            ],
+        ])
+    }
+
+    mutating func whitespace() {
+        closeRun()
+        blocks.append(["kind": "text", "text": "  \n", "ts": stamp(clockMs)])
+    }
+
+    /// A group of two calls whose second is a `Read` of an image.
+    mutating func imageGroup() {
+        let build = bash("swift build")
+        let buildId = call(build, durationMs: 800)
+        result(id: buildId, content: resultText(build), isError: false, target: build.target, durationMs: 800)
+        let read = CallSpec(name: "Read", summary: "screenshot.png", input: ["file_path": "/tmp/screenshot.png"],
+                            target: "/tmp/screenshot.png")
+        let readId = call(read, durationMs: 400)
+        result(id: readId, content: "[Image: screenshot.png, 1280x800 PNG]", isError: false,
+               target: read.target, durationMs: 400)
+        closeRun()
     }
 }

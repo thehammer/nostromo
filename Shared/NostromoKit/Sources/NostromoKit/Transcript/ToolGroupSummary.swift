@@ -199,7 +199,7 @@ public enum ToolGroupSummary {
         var fileCountUnknown = false
     }
 
-    private static func phrases(for calls: [FoldCall]) -> [(text: String, calls: Int)] {
+    static func phrases(for calls: [FoldCall]) -> [(text: String, calls: Int)] {
         var tallies: [Kind: Tally] = [:]
         var servers: [String] = []
         for call in calls {
