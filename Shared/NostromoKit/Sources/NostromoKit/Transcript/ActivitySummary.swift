@@ -54,12 +54,15 @@ public enum ActivitySummary {
 
     /// Copy Messages: the folded messages' full text in order, a blank line between messages.
     /// A message's own text blocks are joined the same way. `blockText` maps a block index to
-    /// its text (nil for blocks that are not text). Verbatim.
+    /// its text (nil for blocks that are not text). Only the assistant's own non-empty text is
+    /// copied: a message's `blockIndices` also hold whitespace-only prose, which is skipped
+    /// here, so there are no blank gaps. A subagent's prose is never in `blockIndices` (the
+    /// planner keeps it inside its call, or as a boundary). Text is otherwise verbatim.
     public static func messagesText(for segment: ActivitySegment, blockText: (Int) -> String?) -> String {
         segment.members
             .compactMap { member -> String? in
                 guard case .message(let message) = member else { return nil }
-                let texts = message.blockIndices.compactMap(blockText)
+                let texts = message.blockIndices.compactMap(blockText).filter { $0.contains { !$0.isWhitespace } }
                 return texts.isEmpty ? nil : texts.joined(separator: "\n\n")
             }
             .joined(separator: "\n\n")

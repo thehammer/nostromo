@@ -140,13 +140,19 @@ final class FocusPlannerTests: XCTestCase {
         XCTAssertEqual(shape(plan([blank] + tools("a"))), ["grp0"])
     }
 
-    func testSubagentProseNeverSplitsAMessageAndIsNeverAMessage() {
-        let split = plan([prose, .prose(nonEmpty: true, parentId: "x"), prose])
+    func testSubagentProseIsNeverAMessageAndOneWithNowhereToGoIsABoundaryThatSplitsLikeAnUnattachedResult() {
+        // Subagent prose TF2 cannot attach to an Agent call is an orphan: like an orphaned
+        // result it is rendered as itself (a boundary), never a message and never dropped.
+        // The full table is in "Orphan subagent prose" below.
+        let split = plan([prose, subProse("x"), prose])
 
-        XCTAssertEqual(shape(split), ["msg0"])
-        XCTAssertEqual(latest(split)?.blockIndices, [0, 1, 2])
-        XCTAssertEqual(plan([.prose(nonEmpty: true, parentId: "x")]), [])
-        XCTAssertEqual(plan([.prose(nonEmpty: true, parentId: "?")]), [])
+        XCTAssertEqual(shape(split), ["act[m0]", "b1", "msg1"])
+        XCTAssertEqual(latest(split)?.blockIndices, [2])
+        for message in messageRefs(split) {
+            XCTAssertFalse(message.blockIndices.contains(1), "the orphan is never part of a message")
+        }
+        XCTAssertEqual(shape(plan([subProse("x")])), ["b0"])
+        XCTAssertEqual(shape(plan([subProse("?")])), ["b0"])
     }
 
     func testSubagentProseAttachedToAnEarlierAgentCallDoesNotSplitTheMessageEither() throws {
@@ -329,6 +335,25 @@ final class FocusPlannerTests: XCTestCase {
             }
             XCTAssertEqual(allGroups(plan(blocks, outcome)), tf2, "\(outcome)")
         }
+    }
+
+    /// Every message the items show, folded or latest, in order.
+    private func messageRefs(_ items: [FocusItem]) -> [MessageRef] {
+        var out: [MessageRef] = []
+        for item in items {
+            switch item {
+            case .activity(let s):
+                for case .message(let m) in s.members { out.append(m) }
+            case .message(let m): out.append(m)
+            default: break
+            }
+        }
+        return out
+    }
+
+    /// Subagent prose. Whether it attaches depends on the Agent calls before it.
+    private func subProse(_ parent: String, nonEmpty: Bool = true) -> FoldBlock {
+        .prose(nonEmpty: nonEmpty, parentId: parent)
     }
 
     private func allGroups(_ items: [FocusItem]) -> [ToolGroup] {
@@ -515,7 +540,8 @@ final class FocusPlannerTests: XCTestCase {
         var rig = Rig()
         rig.feed(prose)
 
-        for block in [FoldBlock.hidden, blank, .prose(nonEmpty: true, parentId: "x"), .prose(nonEmpty: true, parentId: "?")] {
+        // (Non-empty subagent prose with nowhere to go is a boundary now: see "Orphan subagent prose".)
+        for block in [FoldBlock.hidden, blank, .prose(nonEmpty: false, parentId: "x"), .prose(nonEmpty: false, parentId: "?")] {
             XCTAssertEqual(nonGroupOps(rig.feed(block)), [], "\(block)")
         }
         XCTAssertEqual(shape(rig.items), ["msg0"])
@@ -907,9 +933,291 @@ final class FocusPlannerTests: XCTestCase {
         XCTAssertEqual(p.items(holding: [1]), rig.planner.items(holding: [1]))
     }
 
+    // MARK: - Planner cost is linear in segment size
+
+    /// One turn of `n` rolled-in messages and no boundary: (prose, call, result) `n` times, then
+    /// a last message. One activity segment of `2n` members (message, group, ...) plus the
+    /// latest message (ordinal `n`).
+    private func oneLongTurn(_ n: Int) -> [FoldBlock] {
+        (0 ..< n).flatMap { [prose, call(id: "c\($0)"), result("c\($0)")] } + [prose]
+    }
+
+    /// The base address and member count of the first activity segment a `.rollIn` carries, as
+    /// plain numbers. Takes the ops and lets go of them before it returns, so the planner is the
+    /// only holder of the segment's storage when the next block is fed (a retained op
+    /// legitimately shares the buffer).
+    private func feedAndProbeRollIn(_ planner: inout FocusPlanner, _ block: FoldBlock) -> (address: Int, count: Int)? {
+        let ops = planner.feed(block)
+        for case .rollIn(_, let rolled) in ops {
+            for case .activity(let segment) in rolled {
+                let address = segment.members.withUnsafeBufferPointer { Int(bitPattern: $0.baseAddress) }
+                return (address, segment.members.count)
+            }
+        }
+        return nil
+    }
+
+    /// Feeds the turn one block at a time, discarding the ops, and reports the work: elements
+    /// the planner visited, and members it copied (a roll-in whose segment storage moved counts
+    /// the segment's size: amortized in-place growth sums to about twice the final size, a copy
+    /// per roll-in sums to about n squared over two).
+    private func feedingCost(_ blocks: [FoldBlock]) -> (visits: Int, copied: Int, rollIns: Int) {
+        var planner = FocusPlanner(turnKey: "T")
+        var lastAddress: Int?
+        var copied = 0
+        var rollIns = 0
+        for block in blocks {
+            if let probe = feedAndProbeRollIn(&planner, block) {
+                rollIns += 1
+                if probe.address != lastAddress { copied += probe.count }
+                lastAddress = probe.address
+            }
+        }
+        return (planner.meter.visits, copied, rollIns)
+    }
+
+    private func finishedPlanner(_ blocks: [FoldBlock]) -> FocusPlanner {
+        var planner = FocusPlanner(turnKey: "T")
+        for block in blocks { _ = planner.feed(block) }
+        return planner
+    }
+
+    func testFeedingOneLongTurnDoesWorkLinearInItsLength() {
+        let small = feedingCost(oneLongTurn(500))
+        let large = feedingCost(oneLongTurn(2_000))
+
+        XCTAssertEqual(small.rollIns, 500)
+        XCTAssertEqual(large.rollIns, 2_000)
+        XCTAssertLessThanOrEqual(large.visits, 5 * small.visits,
+                                 "4x the messages must be about 4x the work, not 16x: \(small.visits) -> \(large.visits)")
+    }
+
+    func testRollingInOntoABigRowDoesNotCopyTheRowEveryTime() {
+        let small = feedingCost(oneLongTurn(500))
+        let large = feedingCost(oneLongTurn(2_000))
+
+        XCTAssertGreaterThan(small.copied, 0)
+        XCTAssertLessThanOrEqual(large.copied, 5 * small.copied,
+                                 "members copied while growing the row: \(small.copied) -> \(large.copied)")
+    }
+
+    func testReadingThePlanOfOneLongTurnDoesWorkLinearInItsLengthAndIsRight() {
+        func read(_ n: Int) -> Int {
+            let planner = finishedPlanner(oneLongTurn(n))
+            let before = planner.meter.visits
+            let items = planner.items()
+            let work = planner.meter.visits - before
+
+            XCTAssertEqual(items.count, 2, "n = \(n)")
+            guard case .activity(let row)? = items.first else { XCTFail("expected a row first, got \(items)"); return work }
+            XCTAssertEqual(row.members.count, 2 * n, "n = \(n)")
+            XCTAssertEqual(row.messageCount, n, "n = \(n)")
+            XCTAssertEqual(row.key, "a:m:T#0", "n = \(n)")
+            XCTAssertEqual(latest(items)?.ordinal, n, "n = \(n)")
+            return work
+        }
+
+        let small = read(500)
+        let large = read(2_000)
+
+        XCTAssertLessThanOrEqual(large, 5 * small, "items(): \(small) -> \(large)")
+    }
+
+    func testReadingThePlanWithAMessageHeldDoesWorkLinearInTheTurnAndIsRight() {
+        func read(_ n: Int) -> Int {
+            let planner = finishedPlanner(oneLongTurn(n))
+            let before = planner.meter.visits
+            let held = planner.items(holding: [3])
+            let work = planner.meter.visits - before
+
+            // Row of m0 g0 m1 g1 m2 g2, the held m3, the rest as a row keyed by its first member (g3), the latest.
+            XCTAssertEqual(held.count, 4, "n = \(n)")
+            let rows = segments(held)
+            XCTAssertEqual(rows.map(\.members.count), [6, 2 * n - 7], "n = \(n)")
+            XCTAssertEqual(rows.map(\.key), ["a:m:T#0", "a:g:c3"], "n = \(n)")
+            guard held.count == 4, case .message(let heldMessage) = held[1] else { XCTFail("expected the held message second, got \(held.count) items"); return work }
+            XCTAssertEqual(heldMessage.ordinal, 3, "n = \(n)")
+            XCTAssertEqual(latest(Array(held.suffix(1)))?.ordinal, n, "n = \(n)")
+            return work
+        }
+
+        let small = read(500)
+        let large = read(2_000)
+
+        XCTAssertLessThanOrEqual(large, 5 * small, "items(holding:): \(small) -> \(large)")
+    }
+
+    func testARollInOntoABigRowIsOneRollInThatExtendsTheSameRowByTheNewMessageAndTheTrailingGroup() throws {
+        var rig = Rig()
+        rig.feed(oneLongTurn(50))
+        rig.feed([call(id: "x"), result("x")])
+        let before = try XCTUnwrap(segments(rig.items).first)
+        XCTAssertEqual(before.members.count, 100)
+        XCTAssertEqual(shape(rig.items).count, 3, "row, latest message m50, trailing group: \(shape(rig.items))")
+
+        let ops = rig.feed(prose)
+
+        XCTAssertEqual(kinds(nonGroupOps(ops)), ["rollIn", "latest"])
+        guard case .rollIn(let from, let rolled) = nonGroupOps(ops)[0] else { return XCTFail("\(ops)") }
+        XCTAssertEqual(from, 0)
+        XCTAssertEqual(rolled.count, 1)
+        guard case .activity(let row)? = rolled.first else { return XCTFail("expected the row, got \(rolled)") }
+        XCTAssertEqual(row.key, before.key)
+        XCTAssertEqual(row.members.count, 102)
+        XCTAssertEqual(Array(row.members.prefix(100)), before.members)
+        guard case .message(let absorbed) = row.members[100], case .group(let trailing) = row.members[101] else {
+            return XCTFail("expected the old latest message and the trailing group last: \(row.members.suffix(2))")
+        }
+        XCTAssertEqual(absorbed.ordinal, 50)
+        XCTAssertEqual(trailing.key, "g:x")
+        XCTAssertTrue(row.isLive)
+        XCTAssertEqual(shape(rig.items), ["act[" + (0 ... 50).map { "m\($0),g\($0)" }.joined(separator: ",") + "]", "msg51"])
+    }
+
+    // MARK: - Orphan subagent prose
+
+    /// Non-empty subagent prose that TF2 cannot attach to an Agent/Task call (no Agent call, an
+    /// unknown parent, or the Agent already finished) is rendered by TF2 as itself. Like an
+    /// orphaned result it is a boundary item: it splits the open message, is never a message
+    /// and never part of an activity row, and is never dropped. Whitespace-only subagent prose
+    /// has nothing to lose and stays invisible.
+    func testSubagentProseThatTF2CannotAttachIsABoundaryThatSplitsTheMessageAndIsNeverDropped() {
+        let table: [(String, [FoldBlock], [String])] = [
+            ("alone", [subProse("x")], ["b0"]),
+            ("alone, parent unknown", [subProse("?")], ["b0"]),
+            ("after a group of plain calls", [call(id: "a"), result("a"), subProse("?")], ["grp0", "b2"]),
+            ("after a group, parent named but not an Agent call", [call(id: "a"), result("a"), subProse("a")], ["grp0", "b2"]),
+            ("while a plain call is open", [call(id: "a"), subProse("a")], ["grp0", "b1"]),
+            ("after a finished Agent call", [call("Agent", id: "a"), result("a"), subProse("?")], ["grp0", "b2"]),
+            ("after a finished Agent call, parent unknown by id", [call("Agent", id: "a"), result("a"), subProse("nope")], ["grp0", "b2"]),
+            ("after the group was closed by text", [call("Agent", id: "a"), result("a"), prose, subProse("?")], ["act[g0]", "msg0", "b3"]),
+            ("trailing text, then orphan", [prose, subProse("?")], ["msg0", "b1"]),
+            ("between two groups", [call(id: "a"), result("a"), subProse("?"), call(id: "b"), result("b")], ["grp0", "b2", "grp1"]),
+            ("between two messages", [prose, subProse("?"), prose], ["act[m0]", "b1", "msg1"]),
+            ("a hidden block before it", [prose, .hidden, subProse("?"), prose], ["act[m0]", "b2", "msg1"]),
+            ("whitespace before it", [prose, blank, subProse("?"), prose], ["act[m0]", "b2", "msg1"]),
+            ("around a group", [prose, call(id: "a"), result("a"), subProse("?"), prose], ["act[m0,g0]", "b3", "msg1"]),
+            ("two in a row", [prose, subProse("?"), subProse("x"), prose], ["act[m0]", "b1", "b2", "msg1"]),
+            ("with a card between messages", [prose, subProse("?"), card, prose], ["act[m0]", "b1", "b2", "msg1"]),
+        ]
+        for (name, blocks, expected) in table {
+            for outcome: FoldOutcome in [.open, .completedOk, .interrupted] {
+                XCTAssertEqual(shape(plan(blocks, outcome)), expected, "\(name), \(outcome)")
+            }
+        }
+    }
+
+    func testAnOrphanSubagentProseIsNeverInAMessageOrARowAsAMember() {
+        let blocks: [FoldBlock] = [prose, subProse("?"), prose, call(id: "a"), result("a"), subProse("?"), prose, subProse("x")]
+
+        let items = plan(blocks)
+
+        for message in messageRefs(items) {
+            XCTAssertTrue(Set(message.blockIndices).isDisjoint(with: [1, 5, 7]), "message \(message.ordinal): \(message.blockIndices)")
+        }
+        let boundaries = items.compactMap { item -> Int? in if case .boundary(let i) = item { return i } else { return nil } }
+        XCTAssertEqual(boundaries, [1, 5, 7])
+    }
+
+    func testWhitespaceOnlySubagentProseStaysInvisibleAndDoesNotSplitAMessage() {
+        XCTAssertEqual(plan([subProse("x", nonEmpty: false)]), [])
+        XCTAssertEqual(plan([subProse("?", nonEmpty: false), subProse("x", nonEmpty: false)]), [])
+        XCTAssertEqual(shape(plan([prose, subProse("?", nonEmpty: false)])), ["msg0"])
+        XCTAssertEqual(shape(plan([subProse("?", nonEmpty: false), prose])), ["msg0"])
+        XCTAssertEqual(shape(plan([call(id: "a"), result("a"), subProse("?", nonEmpty: false), prose])), ["act[g0]", "msg0"])
+        XCTAssertEqual(shape(plan([call(id: "a"), result("a"), prose, subProse("?", nonEmpty: false)])), ["act[g0]", "msg0"])
+
+        let joined = plan([prose, subProse("?", nonEmpty: false), prose])
+        XCTAssertEqual(shape(joined), ["msg0"], "it does not split the message")
+        XCTAssertEqual(latest(joined)?.blockIndices.first, 0)
+        XCTAssertEqual(latest(joined)?.blockIndices.last, 2)
+    }
+
+    func testSubagentProseTF2AttachesToAnAgentCallStillRendersInsideTheCallAndLeavesNoItem() {
+        // Attached by the call's id, even though the Agent call has finished.
+        var blocks: [FoldBlock] = [call("Agent", id: "a"), result("a"), prose, subProse("a"), prose]
+        XCTAssertEqual(shape(plan(blocks)), ["act[g0]", "msg0"])
+        // Attached to the open group's unfinished Agent call, whatever its parent says.
+        blocks = [call("Agent", id: "a"), subProse("?"), subProse("zzz"), result("a"), prose]
+        XCTAssertEqual(shape(plan(blocks)), ["act[g0]", "msg0"])
+        blocks = [prose, call("Task", id: "t"), subProse("?"), result("t"), prose]
+        XCTAssertEqual(shape(plan(blocks)), ["act[m0,g0]", "msg1"])
+    }
+
+    func testAnOrphanSubagentProseIsAppendedAsExactlyOneBoundaryItemAndSplitsTheOpenMessage() {
+        var rig = Rig()
+        rig.feed([prose] + tools("a") + [prose])
+        XCTAssertEqual(shape(rig.items), ["act[m0,g0]", "msg1"])
+
+        let orphanOps = rig.feed(subProse("?"))
+
+        XCTAssertEqual(nonGroupOps(orphanOps), [.item(.boundary(4))])
+        XCTAssertEqual(shape(rig.items), ["act[m0,g0]", "msg1", "b4"])
+
+        let next = rig.feed(prose)
+
+        XCTAssertEqual(kinds(nonGroupOps(next)), ["rollIn", "latest"], "text after the orphan is a new message")
+        XCTAssertEqual(shape(rig.items), ["act[m0,g0,m1]", "b4", "msg2"])
+    }
+
+    func testAnOrphanSubagentProseBeforeAnyMessageIsJustABoundaryItem() {
+        var rig = Rig()
+
+        XCTAssertEqual(nonGroupOps(rig.feed(subProse("x"))), [.item(.boundary(0))])
+        XCTAssertEqual(kinds(nonGroupOps(rig.feed(prose))), ["latest"])
+        XCTAssertEqual(shape(rig.items), ["b0", "msg0"])
+    }
+
+    func testAnAttachedAndAWhitespaceOnlySubagentProseEmitNothingBesidesGroupUpdates() {
+        var rig = Rig()
+        rig.feed([prose, call("Agent", id: "a")])
+
+        XCTAssertEqual(nonGroupOps(rig.feed(subProse("a"))), [])
+        XCTAssertEqual(nonGroupOps(rig.feed(subProse("?"))), [])
+        XCTAssertEqual(nonGroupOps(rig.feed(subProse("?", nonEmpty: false))), [])
+        XCTAssertEqual(shape(rig.items), ["msg0", "grp0"])
+    }
+
+    func testAnOrphanSubagentProseSitsAtItsChronologicalPlaceWhileAMessageIsHeld() {
+        // m0 g0 m1 [orphan] m2 g1 m3: rows [m0,g0,m1] and [m2,g1], the latest m3.
+        let blocks: [FoldBlock] = [prose] + tools("a") + [prose, subProse("?"), prose] + tools("b") + [prose]
+        let p = planner(blocks)
+        XCTAssertEqual(shape(p.items()), ["act[m0,g0,m1]", "b4", "act[m2,g1]", "msg3"])
+
+        XCTAssertEqual(shape(p.items(holding: [1])), ["act[m0,g0]", "msg1", "b4", "act[m2,g1]", "msg3"])
+        XCTAssertEqual(shape(p.items(holding: [2])), ["act[m0,g0,m1]", "b4", "msg2", "grp1", "msg3"])
+        XCTAssertEqual(shape(p.items(holding: [0, 1, 2])), ["msg0", "grp0", "msg1", "b4", "msg2", "grp1", "msg3"])
+        for held: Set<Int> in [[], [0], [1], [2], [0, 2], [1, 2]] {
+            XCTAssertEqual(atoms(p.items(holding: held)), atoms(p.items()), "holding \(held.sorted())")
+        }
+    }
+
+    func testTheGeneratorKeepsProducingBothAttachedAndOrphanSubagentProse() {
+        // Guards the property test: it must keep exercising both outcomes of TF2's attachment.
+        var attached = 0
+        var orphans = 0
+        for n in 0 ..< 400 {
+            var rng = FocusSplitMix64(seed: UInt64(n) &* 104_729 &+ 7)
+            var tf2 = ToolFoldPlanner(turnKey: "turn-\(n)")
+            for case .block(let block, _) in randomSteps(&rng) {
+                let index = tf2.blockCount
+                let ops = tf2.feed(block)
+                guard case .prose(true, _?) = block else { continue }
+                if ops.contains(.block(index)) { orphans += 1 } else { attached += 1 }
+            }
+        }
+        XCTAssertGreaterThan(orphans, 100)
+        XCTAssertGreaterThan(attached, 100)
+    }
+
     // MARK: - Property: replaying the ops is the batch plan
 
-    private enum Category { case message, transparent, toolOrResult, subagentToolOrResult, boundary }
+    private enum Category {
+        case message, transparent, toolOrResult, subagentToolOrResult, boundary
+        /// Non-empty subagent prose: attached to an Agent call it is transparent, otherwise
+        /// (TF2 renders it as itself) it is a boundary. Decided at run time, from TF2.
+        case subagentProse
+    }
 
     private enum Step {
         case block(FoldBlock, Category)
@@ -919,7 +1227,8 @@ final class FocusPlannerTests: XCTestCase {
     private func pr() -> Step { .block(prose, .message) }
     private func ws() -> Step { .block(blank, .transparent) }
     private func hid() -> Step { .block(.hidden, .transparent) }
-    private func sub(_ parent: String) -> Step { .block(.prose(nonEmpty: true, parentId: parent), .transparent) }
+    private func sub(_ parent: String) -> Step { .block(.prose(nonEmpty: true, parentId: parent), .subagentProse) }
+    private func subBlank(_ parent: String) -> Step { .block(.prose(nonEmpty: false, parentId: parent), .transparent) }
     private func cl(_ id: String?, _ name: String = "Bash", started: Double? = nil) -> Step {
         .block(call(name, id: id, started: started), .toolOrResult)
     }
@@ -966,8 +1275,20 @@ final class FocusPlannerTests: XCTestCase {
             let before = planner.items()
             let ops: [FocusOp]
             switch step {
-            case .block(let block, let category):
+            case .block(let block, let declared):
                 ops = planner.feed(block)
+                let index = planner.blockCount - 1
+                var category = declared
+                if declared == .subagentProse {
+                    // Attached to an Agent call it renders inside the call; with nowhere to attach
+                    // TF2 renders it as itself and it is a boundary item.
+                    let attached = allGroups(planner.items()).contains { $0.subagentBlocks.values.joined().contains(index) }
+                    category = attached ? .transparent : .boundary
+                    if !attached {
+                        XCTAssertEqual(nonGroupOps(ops), [.item(.boundary(index))],
+                                       "an orphan subagent prose is exactly one boundary item: \(context)", file: file, line: line)
+                    }
+                }
                 assertEmission(ops, category: category, before: before, messageOpen: messageOpen, context, file: file, line: line)
                 switch category {
                 case .message: messageOpen = true
@@ -979,6 +1300,7 @@ final class FocusPlannerTests: XCTestCase {
                     let attached = allGroups(planner.items()).contains { $0.subagentBlocks.values.joined().contains(index) }
                     if !attached { messageOpen = false }
                 case .transparent: break
+                case .subagentProse: XCTFail("resolved above: \(context)", file: file, line: line)
                 }
             case .quiet(let id, let seconds):
                 ops = planner.callFinished(toolUseId: id, at: seconds.map(at))
@@ -1025,6 +1347,8 @@ final class FocusPlannerTests: XCTestCase {
         switch category {
         case .transparent:
             XCTAssertEqual(main, [], "a transparent block emits only group updates: \(context)", file: file, line: line)
+        case .subagentProse:
+            XCTFail("a subagent prose is resolved to transparent or boundary before it is checked: \(context)", file: file, line: line)
         case .toolOrResult, .subagentToolOrResult, .boundary:
             XCTAssertTrue(main.allSatisfy { if case .item = $0 { return true } else { return false } },
                           "a call, result or boundary never touches the latest message or a row: \(context): \(main)", file: file, line: line)
@@ -1116,7 +1440,11 @@ final class FocusPlannerTests: XCTestCase {
         XCTAssertEqual(groups, tf2Groups, "groups are TF2's, each exactly once, in order: \(context)", file: file, line: line)
         let tf2Boundaries = tf2.compactMap { item -> Int? in
             guard case .block(let i) = item else { return nil }
-            if case .prose = blocks[i] { return nil }
+            if case .prose(let nonEmpty, let parent) = blocks[i] {
+                // Top-level text is a message, whitespace-only prose is invisible; only
+                // non-empty subagent prose TF2 could not attach is a boundary.
+                return nonEmpty && parent != nil ? i : nil
+            }
             return i
         }
         XCTAssertEqual(boundaries, tf2Boundaries, "boundaries are every boundary and orphan, in order: \(context)", file: file, line: line)
@@ -1142,7 +1470,9 @@ final class FocusPlannerTests: XCTestCase {
                     covered.append(i)
                 } else {
                     switch blocks[i] {
-                    case .hidden, .prose: break
+                    case .hidden: break
+                    case .prose(let nonEmpty, let parent):
+                        XCTAssertFalse(nonEmpty && parent != nil, "subagent prose is never inside a message: \(context)", file: file, line: line)
                     case .toolCall, .toolResult:
                         XCTAssertTrue(attached.contains(i), "a top-level call or result inside a message: \(context)", file: file, line: line)
                     case .boundary: XCTFail("a boundary inside a message: \(context)", file: file, line: line)
@@ -1184,6 +1514,14 @@ final class FocusPlannerTests: XCTestCase {
             ("agent with subagent traffic", [cl("a", "Agent"), sub("a"), subCall("s1", parent: "a"), subResult("s1", parent: "a", error: true), rs("a"), pr()]),
             ("A, subagent prose, B", [pr(), sub("?"), pr()]),
             ("A, call, subagent prose with nowhere to go, B", [pr(), cl("a"), rs("a"), sub("?"), pr()]),
+            ("A, whitespace-only subagent prose, B", [pr(), subBlank("?"), pr()]),
+            ("orphan subagent prose alone", [sub("x")]),
+            ("A, orphan subagent prose", [pr(), sub("?")]),
+            ("call, orphan subagent prose", [cl("a"), rs("a"), sub("?")]),
+            ("A, call, orphan subagent prose, B", [pr(), cl("a"), rs("a"), sub("?"), pr()]),
+            ("finished Agent, orphan subagent prose, A", [cl("a", "Agent"), rs("a"), sub("?"), pr()]),
+            ("Agent, attached subagent prose, A", [cl("a", "Agent"), sub("a"), sub("?"), rs("a"), pr()]),
+            ("A, orphan, orphan, B, card, orphan, C", [pr(), sub("?"), sub("x"), pr(), bnd(.note), sub("?"), pr()]),
             ("call without id, positional result, A", [cl(nil), rs(nil), pr()]),
             ("ten messages", (0 ..< 10).flatMap { [pr(), cl("t\($0)"), rs("t\($0)")] } + [pr()]),
         ]
@@ -1323,7 +1661,7 @@ final class FocusPlannerTests: XCTestCase {
                     steps.append(rs("ghost\(serial)", error: chance(25), at: time()))
                 }
             case 10:
-                steps.append(sub(parent()))
+                steps.append(chance(20) ? subBlank(parent()) : sub(parent()))
             case 11:
                 steps.append(subCall("s\(serial)", parent: parent()))
             case 12:

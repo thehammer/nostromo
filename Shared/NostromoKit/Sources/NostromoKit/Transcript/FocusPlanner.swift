@@ -9,7 +9,8 @@ public struct MessageRef: Equatable, Sendable {
     /// a reload and in every window.
     public let ordinal: Int
     /// Block indices of the message's text blocks, plus the transparent blocks (hidden,
-    /// whitespace-only prose, a subagent's prose TF2 could not attach) that sit between them.
+    /// whitespace-only prose) that sit between them. Never a subagent's prose: attached, it
+    /// renders inside its call; unattached, it is a boundary.
     public internal(set) var blockIndices: [Int]
 
     public init(ordinal: Int, blockIndices: [Int]) {
@@ -108,8 +109,11 @@ public enum FocusOp: Equatable, Sendable {
 ///
 /// The rule (contract §2.1):
 /// - a message is a maximal run of non-empty top-level prose with no top-level call, result
-///   or boundary between; hidden blocks, whitespace-only prose and subagent prose do not
-///   split it;
+///   or boundary between; hidden blocks, whitespace-only prose and subagent prose attached to
+///   a call do not split it;
+/// - a subagent's non-empty prose that TF2 cannot attach to a call is a boundary, like an
+///   unattachable subagent result: it splits a message and is never folded, so it is never
+///   lost;
 /// - the latest message, every boundary and the trailing groups after the latest message are
 ///   conversation-level items; every other message and every group before the latest message
 ///   is activity, folded into one segment per run between two boundaries.
@@ -119,8 +123,16 @@ public enum FocusOp: Equatable, Sendable {
 /// derives the same items from scratch, which is what the property test holds the ops to.
 ///
 /// Cost: a block is O(1) amortized, excluding the forwarded group work. A roll-in rebuilds the
-/// range it absorbs (the latest message, the trailing groups and the boundaries between them).
+/// range it absorbs (the latest message, the trailing groups and the boundaries between them)
+/// and extends the adjacent segment in place: it takes the segment out of `shown` first, so
+/// the append does not copy the segment's members, and it rehomes only the new members.
 public struct FocusPlanner {
+
+    /// Counts the elements the planner visits while folding, rehoming and holding, so a test can
+    /// bound the work without a clock. A class so the non-mutating readers can count too.
+    final class WorkMeter {
+        var visits = 0
+    }
 
     /// What the turn is made of, in order, before it is laid out.
     private enum Atom: Equatable {
@@ -157,6 +169,9 @@ public struct FocusPlanner {
     private var lastActivityItem: Int?
     private var groupHome: [Int: GroupHome] = [:]
 
+    /// Test instrumentation (see `WorkMeter`). Copies of a planner share it.
+    let meter = WorkMeter()
+
     /// - Parameter turnKey: the turn's durable identity, for the keys of segments that start
     ///   with a message and of groups without ids.
     public init(turnKey: String) {
@@ -179,12 +194,19 @@ public struct FocusPlanner {
         case .hidden:
             noteTransparent(index)
         case .prose(let nonEmpty, let parentId):
-            if nonEmpty && parentId == nil {
-                ops += addText(index)
-            } else if parentId == nil || foldOps.contains(.block(index)) {
-                // Whitespace, or a subagent's prose TF2 could not attach: not a message, and
-                // it does not split one. Attached subagent blocks render inside their call.
-                noteTransparent(index)
+            if parentId == nil {
+                // Whitespace is not a message and does not split one.
+                if nonEmpty { ops += addText(index) } else { noteTransparent(index) }
+            } else if foldOps.contains(.block(index)) {
+                // A subagent's prose TF2 could not attach. Whitespace has nothing to lose;
+                // text is a boundary (as an unattachable subagent result is), so it stays
+                // visible. Attached subagent blocks render inside their call.
+                if nonEmpty {
+                    closeMessage()
+                    ops.append(addBoundary(index))
+                } else {
+                    noteTransparent(index)
+                }
             }
         case .boundary:
             closeMessage()
@@ -209,11 +231,7 @@ public struct FocusPlanner {
         guard turnOpen, outcome != .open else { return ops }
         turnOpen = false
         closeMessage()
-        if let last = lastActivityItem, case .activity(var segment) = shown[last], segment.isLive {
-            segment.isLive = false
-            shown[last] = .activity(segment)
-            ops.append(.segmentChanged(segment))
-        }
+        if let last = lastActivityItem, let op = endLive(at: last) { ops.append(op) }
         return ops
     }
 
@@ -230,7 +248,8 @@ public struct FocusPlanner {
         var trailing = atoms[...]
         if let latest = atoms.lastIndex(where: { if case .message = $0 { return true } else { return false } }),
            case .message(let ordinal) = atoms[latest] {
-            items = fold(atoms[..<latest], seed: nil)
+            var noSeed: ActivitySegment?
+            items = fold(atoms[..<latest], seed: &noSeed)
             items.append(.message(messages[ordinal]))
             trailing = atoms[(latest + 1)...]
         }
@@ -262,6 +281,7 @@ public struct FocusPlanner {
                 out.append(item)
                 continue
             }
+            meter.visits += 2 * segment.members.count
             var stretch: [ActivityMember] = []
             var isPrefix = true
             func flush() {
@@ -360,7 +380,7 @@ public struct FocusPlanner {
         if let atom = latestAtom, let item = latestItem {
             firstAtom = atom
             from = item
-            if item > 0, case .activity(let adjacent) = shown[item - 1] {
+            if item > 0, let adjacent = takeSegment(at: item - 1) {
                 // The segment just before the latest message takes it as its next member.
                 seed = adjacent
                 from = item - 1
@@ -373,15 +393,15 @@ public struct FocusPlanner {
 
         if let firstAtom {
             // An earlier segment stops being the last one.
-            if let last = lastActivityItem, last < from, case .activity(var segment) = shown[last], segment.isLive {
-                segment.isLive = false
-                shown[last] = .activity(segment)
-                ops.append(.segmentChanged(segment))
-            }
-            var rolled = fold(atoms[firstAtom...], seed: seed)
+            if let last = lastActivityItem, last < from, let op = endLive(at: last) { ops.append(op) }
+            let seededMembers = seed?.members.count ?? 0
+            var rolled = fold(atoms[firstAtom...], seed: &seed)
             Self.markLive(&rolled, turnOpen: turnOpen)
             shown.replaceSubrange(from..., with: rolled)
-            for (offset, item) in rolled.enumerated() { rehome(item, at: from + offset) }
+            for (offset, item) in rolled.enumerated() {
+                // The seed's members are already homed in the same slots.
+                rehome(item, at: from + offset, fromSlot: offset == 0 ? seededMembers : 0)
+            }
             lastActivityItem = shown.lastIndex { $0.activityKey != nil }
             ops.append(.rollIn(from: from, items: rolled))
         }
@@ -420,9 +440,8 @@ public struct FocusPlanner {
             case .item(let item)?:
                 shown[item] = .group(group)
             case .member(let item, let slot)?:
-                if case .activity(var segment) = shown[item] {
-                    segment.members[slot] = .group(group)
-                    shown[item] = .activity(segment)
+                if case .activity = shown[item] {
+                    _ = updateSegment(at: item) { $0.members[slot] = .group(group) }
                 }
             case nil:
                 break
@@ -437,26 +456,54 @@ public struct FocusPlanner {
         return nil
     }
 
-    private mutating func rehome(_ item: FocusItem, at position: Int) {
+    /// `fromSlot`: the segment's members before it are already homed.
+    private mutating func rehome(_ item: FocusItem, at position: Int, fromSlot: Int = 0) {
         switch item {
         case .group(let group):
             groupHome[group.id] = .item(position)
         case .activity(let segment):
-            for (slot, member) in segment.members.enumerated() {
-                if case .group(let group) = member { groupHome[group.id] = .member(item: position, slot: slot) }
+            meter.visits += segment.members.count - fromSlot
+            for slot in fromSlot ..< segment.members.count {
+                if case .group(let group) = segment.members[slot] { groupHome[group.id] = .member(item: position, slot: slot) }
             }
         case .message, .boundary:
             break
         }
     }
 
+    // MARK: - Segments in `shown`
+
+    /// Moves the segment out of `shown[index]`, leaving a placeholder, so the caller holds the
+    /// only reference to its members and can append in place. The caller puts it back.
+    private mutating func takeSegment(at index: Int) -> ActivitySegment? {
+        guard case .activity(let segment) = shown[index] else { return nil }
+        shown[index] = .boundary(-1)
+        return segment
+    }
+
+    /// Clears `isLive` on the segment at `index`; nil if it was not live.
+    private mutating func endLive(at index: Int) -> FocusOp? {
+        guard case .activity(let segment) = shown[index], segment.isLive else { return nil }
+        return .segmentChanged(updateSegment(at: index) { $0.isLive = false })
+    }
+
+    /// Changes the segment in `shown[index]` without copying its members.
+    private mutating func updateSegment(at index: Int, _ change: (inout ActivitySegment) -> Void) -> ActivitySegment {
+        guard var segment = takeSegment(at: index) else { preconditionFailure("not a segment") }
+        change(&segment)
+        shown[index] = .activity(segment)
+        return segment
+    }
+
     // MARK: - Folding atoms into items
 
     /// `atoms` as items: messages and groups fold into segments, split at boundaries. `seed`
-    /// is a segment the first run continues.
-    private func fold(_ atoms: ArraySlice<Atom>, seed: ActivitySegment?) -> [FocusItem] {
+    /// is a segment the first run continues; it is moved into the result, not copied, so the
+    /// caller must not hold another reference to its members.
+    private func fold(_ atoms: ArraySlice<Atom>, seed: inout ActivitySegment?) -> [FocusItem] {
         var items: [FocusItem] = []
-        var current = seed
+        var current: ActivitySegment?
+        swap(&current, &seed)
         func add(_ member: ActivityMember) {
             if current == nil {
                 current = ActivitySegment(key: key(of: member), members: [member])
@@ -465,6 +512,7 @@ public struct FocusPlanner {
             }
         }
         for atom in atoms {
+            meter.visits += 1
             switch atom {
             case .message(let ordinal):
                 add(.message(messages[ordinal]))
