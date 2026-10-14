@@ -532,6 +532,7 @@ class AppStore: ObservableObject {
         sessionHealth.removeValue(forKey: tag)
         perriDetailByTag.removeValue(forKey: tag)
         ModelStore.shared.forget(tag: tag)
+        TranscriptFoldStore.shared.removeFocus(tag: tag)
         TranscriptDiagnostics.forgetTag(tag)
     }
 

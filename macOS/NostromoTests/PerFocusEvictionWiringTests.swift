@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 
 /// Fitness functions, not behavioural tests — same spirit as
@@ -257,7 +258,85 @@ final class PerFocusEvictionWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: - FV1: evictPerFocusState forgets the focus's transcript fold state
+
+    /// A removed focus's fold/result/mode entries are otherwise unreachable
+    /// forever (the store is bounded, but a closed focus should not squat on
+    /// the caps). Scoped to the isolated body for the same reason as
+    /// `testEvictPerFocusStateEvictsSessionHealth`.
+    func testEvictPerFocusStateForgetsTranscriptFoldState() throws {
+        let source = try Self.appStoreSource()
+        let body = try Self.isolatedFunctionBody(named: "func evictPerFocusState", in: source, sourceFile: "AppStore.swift")
+        XCTAssertTrue(body.contains("TranscriptFoldStore.shared.removeFocus(tag: tag)"), """
+            evictPerFocusState must call TranscriptFoldStore.shared.removeFocus(tag: tag) — without \
+            it a closed focus's fold states, result states and explicit Focus/All activity mode \
+            stay in transcript-folds.v1.json (and count against its caps) forever.
+            """)
+    }
+
+    /// `removeFocus` is "focus removal only" (design contract §2.4). The one
+    /// legitimate call site is the eviction path, which only runs from
+    /// `FocusStore.focusRemovals` — and that never fires for a built-in. Any
+    /// second call site (a tab close, a window close, a session detach) would
+    /// wipe fold state for a focus the operator can still return to.
+    func testAppStoreCallsFoldStoreRemoveFocusOnlyFromEvictionPath() throws {
+        let source = try Self.appStoreSource()
+        let occurrences = source.components(separatedBy: "TranscriptFoldStore.shared.removeFocus").count - 1
+        XCTAssertEqual(occurrences, 1, """
+            AppStore.swift must call TranscriptFoldStore.shared.removeFocus exactly once, from \
+            evictPerFocusState. Found \(occurrences) call sites; any other would drop fold state \
+            for a focus that still exists.
+            """)
+    }
+
+    // MARK: - FV1: built-in focuses never lose their fold state
+
+    /// Built-ins (fred/mother/perri/teri) can never be removed, so
+    /// `focusRemovals` never fires for them, so `evictPerFocusState` — and with
+    /// it `TranscriptFoldStore.removeFocus` — never runs for them. That
+    /// chain is what keeps a built-in's explicit mode and folds for the life
+    /// of the install. `FocusStore` IS compiled into the test target, so the
+    /// first link is checked behaviourally; the AppStore link is the
+    /// textual checks above.
+    func testRemovingABuiltInFocusNeverSendsFocusRemovals() throws {
+        let store = FocusStore(storageURL: try makeFocusStoreURL())
+        var removed: [Focus] = []
+        let sub = store.focusRemovals.sink { removed.append($0) }
+        defer { sub.cancel() }
+
+        let builtIns = store.focuses.filter { $0.isBuiltIn }
+        XCTAssertFalse(builtIns.isEmpty, "test premise: FocusStore ships built-in focuses")
+        for focus in builtIns { store.remove(focus) }
+
+        XCTAssertTrue(removed.isEmpty, "removing a built-in must never fire focusRemovals (it would evict its fold state)")
+        XCTAssertEqual(store.focuses.filter { $0.isBuiltIn }.map(\.id), builtIns.map(\.id),
+                       "built-ins must survive a remove attempt")
+    }
+
+    func testRemovingADynamicFocusSendsFocusRemovalsExactlyOnce() throws {
+        let store = FocusStore(storageURL: try makeFocusStoreURL())
+        let dynamic = Focus(id: UUID().uuidString, agentTag: "cody", projectPath: "/tmp/fv1-store-test",
+                            isBuiltIn: false, org: "Carefeed")
+        store.add(dynamic)
+        var removed: [Focus] = []
+        let sub = store.focusRemovals.sink { removed.append($0) }
+        defer { sub.cancel() }
+
+        store.remove(dynamic)
+        store.remove(dynamic)   // double-remove must not evict twice
+
+        XCTAssertEqual(removed.map(\.sessionTag), [dynamic.sessionTag])
+    }
+
     // MARK: - Source helpers
+
+    private func makeFocusStoreURL() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("per-focus-eviction-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir.appendingPathComponent("focuses.json")
+    }
 
     private static func appStoreSource() throws -> String { try sourceFile("Nostromo/Data/AppStore.swift") }
     private static func focusStoreSource() throws -> String { try sourceFile("Nostromo/Data/FocusStore.swift") }
