@@ -704,14 +704,13 @@ impl TaskRegistry {
         entries.sort_by_key(|e| e.seq);
         entries
             .into_iter()
-            .filter_map(|e| {
-                e.kind(tool_name).has_output().then(|| PreviewTarget {
-                    task_id: e.id.clone(),
-                    terminal: e.status.is_terminal(),
-                    output_file: e.output_file.clone(),
-                    tool_use_id: e.tool_use_id.clone(),
-                    preview: e.detail.preview.clone(),
-                })
+            .filter(|e| e.kind(tool_name).has_output())
+            .map(|e| PreviewTarget {
+                task_id: e.id.clone(),
+                terminal: e.status.is_terminal(),
+                output_file: e.output_file.clone(),
+                tool_use_id: e.tool_use_id.clone(),
+                preview: e.detail.preview.clone(),
             })
             .collect()
     }

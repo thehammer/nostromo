@@ -122,6 +122,15 @@ public enum ServerMsg {
     case modelRequestResult(requestId: String, status: ModelRequestStatusWire,
                             code: String?, message: String?, warning: String?)
 
+    // ── background tasks ──────────────────────────────────────────────────────
+
+    /// Every background task of a session (full snapshot; replaces the last).
+    /// Metadata only; also sent to network peers for non-sensitive focuses.
+    case sessionTasks(SessionTasksWire)
+    /// The text derived from one task's output or the conversation. Local
+    /// clients only: the daemon never sends it to a network peer.
+    case sessionTaskDetail(SessionTaskDetailWire)
+
     case unknown
 }
 
@@ -748,6 +757,16 @@ extension ServerMsg {
             if let m = try? dec.decode(ModelRequestResultWrapper.self, from: data) {
                 return .modelRequestResult(requestId: m.request_id, status: m.status,
                                            code: m.code, message: m.message, warning: m.warning)
+            }
+
+        case "session_tasks":
+            if let m = try? dec.decode(SessionTasksWire.self, from: data) {
+                return .sessionTasks(m)
+            }
+
+        case "session_task_detail":
+            if let m = try? dec.decode(SessionTaskDetailWire.self, from: data) {
+                return .sessionTaskDetail(m)
             }
 
         default:

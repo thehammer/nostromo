@@ -1,0 +1,15 @@
+{"type":"system","subtype":"task_started","description":"no task id at all","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_progress","task_id":"","description":"empty task id","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_updated","task_id":42,"patch":{"status":"completed"},"session_id":"tsk-0002"}
+{"type":"system","subtype":"task_updated","task_id":"b7k2m9x1a","patch":"completed","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_updated","task_id":"b7k2m9x1a","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_notification","task_id":"b7k2m9x1a","status":"exploded","summary":"unknown status","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_notification","task_id":"b7k2m9x1a","summary":"no status","session_id":"tsk-0002"}
+{"type":"system","subtype":"background_tasks_changed","tasks":"b7k2m9x1a","session_id":"tsk-0002"}
+{"type":"system","subtype":"background_tasks_changed","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_frobnicated","task_id":"b7k2m9x1a","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_started","description":"malformed and without a session id"}
+{"type":"system","subtype":"background_tasks_changed","tasks":null,"session_id":"tsk-0002"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[42,null,{"description":"an entry with no id"},{"task_id":"ok1","task_type":"local_bash","description":"the survivor"}],"session_id":"tsk-0002"}
+{"type":"system","subtype":"task_progress","task_id":"b7k2m9x1a","usage":"lots","session_id":"tsk-0002"}
+{"type":"system","subtype":"task_updated","task_id":"b7k2m9x1a","patch":{"status":"weird","end_time":"yesterday"},"session_id":"tsk-0002"}

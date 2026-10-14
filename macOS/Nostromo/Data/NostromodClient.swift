@@ -226,6 +226,12 @@ enum ServerMsg {
     case modelRequestResult(requestId: String, status: ModelRequestStatusWire,
                             code: String?, message: String?, warning: String?)
 
+    // ── background tasks ──────────────────────────────────────────────────────
+    /// Every background task of a session (full snapshot; replaces the last).
+    case sessionTasks(SessionTasksWire)
+    /// Output- or conversation-derived text of one task. Local clients only.
+    case sessionTaskDetail(SessionTaskDetailWire)
+
     case unknown
 }
 
@@ -1252,6 +1258,18 @@ class NostromodClient {
             if let m = try? decoder.decode(ModelRequestResultResp.self, from: raw) {
                 return .modelRequestResult(requestId: m.request_id, status: m.status,
                                            code: m.code, message: m.message, warning: m.warning)
+            }
+
+        case "session_tasks":
+            if let m = try? decoder.decode(SessionTasksWire.self, from: raw) {
+                return .sessionTasks(m)
+            } else {
+                log.error("failed to decode session_tasks")
+            }
+
+        case "session_task_detail":
+            if let m = try? decoder.decode(SessionTaskDetailWire.self, from: raw) {
+                return .sessionTaskDetail(m)
             }
 
         default:

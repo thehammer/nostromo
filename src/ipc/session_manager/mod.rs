@@ -1112,6 +1112,7 @@ impl SessionManager {
                 .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
             session.attached_clients.insert(client_id.to_string());
             session.shared.tasks.set_clients(session.attached_clients.len());
+            ensure_poller(&session.shared);
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
             // loading scrollback at spawn time (`load_scrollback`). Without

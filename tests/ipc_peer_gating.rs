@@ -965,18 +965,74 @@ async fn work_source_statuses_for_different_sources_are_retained_separately() {
 /// `<view>.stdin` on every (re)spawn, then logs every stdin line it receives
 /// and completes a turn for it. The log is keyed by the `-n <view name>`
 /// argument, so every test picks a unique view name.
+///
+/// **Task mode** (opt-in: a view name starting with `tasks-`; every other view
+/// behaves exactly as described above). A stdin line containing `GO-TASKS`
+/// still gets its normal turn and is then followed by a scripted sequence of
+/// background-task events (see `emit_tasks`), and a `control_request` line is
+/// answered (`get_task_output` with `SECRET-OUTPUT-9`, anything else with an
+/// "Unsupported control request subtype" error) instead of getting a turn. The
+/// task output files live under `<LOGDIR>/<view>.root/<cwd, "/" -> "-">/
+/// <session id>/tasks/<task id>.output`, the layout of the real CLI's temp root.
 const FAKE_CLAUDE_SCRIPT: &str = r#"#!/bin/sh
 name=""
+sid=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "-n" ]; then name="$2"; fi
+  if [ "$1" = "--session-id" ] || [ "$1" = "--resume" ]; then sid="$2"; fi
   shift
 done
 log="@LOGDIR@/$name.stdin"
 echo START >> "$log"
+tasks=""
+case "$name" in tasks-*) tasks=1 ;; esac
+
+answer_control() {
+  rid=$(printf '%s' "$1" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  case "$1" in
+    *get_task_output*)
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"output":"SECRET-OUTPUT-9\\n","total_bytes":16,"truncated":false}}}\n' "$rid"
+      ;;
+    *)
+      printf '{"type":"control_response","response":{"subtype":"error","request_id":"%s","error":"Unsupported control request subtype"}}\n' "$rid"
+      ;;
+  esac
+}
+
+emit_tasks() {
+  root="@LOGDIR@/$name.root"
+  tdir="$root/$(pwd -P | tr / -)/$sid/tasks"
+  mkdir -p "$tdir"
+  printf 'SECRET-OUTPUT-1\nSECRET-OUTPUT-2\nSECRET-OUTPUT-3\n\n\n' > "$tdir/bgsh1.output"
+  printf 'SECRET-OUTPUT-4\nSECRET-OUTPUT-5\n\n' > "$tdir/mon1.output"
+  printf 'SECRET-OUTPUT-AGENT-TRANSCRIPT\n' > "$tdir/agent1.output"
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bash1","name":"Bash","input":{"command":"npm run build:watch","run_in_background":true}}]}}'
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bash1","content":"Command running in background with ID: bgsh1"}]}}'
+  printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"bgsh1","tool_use_id":"toolu_bash1","description":"build watcher","task_type":"local_bash","is_backgrounded":true}'
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_mon1","name":"Monitor","input":{"command":"tail -f deploy.log","description":"watch deploy log"}}]}}'
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_mon1","content":"Monitor started (task mon1, timeout 300000ms)."}]}}'
+  printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"mon1","tool_use_id":"toolu_mon1","description":"watch deploy log","task_type":"local_bash","is_backgrounded":true}'
+  printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"agent1","description":"review the diff","task_type":"local_agent","subagent_type":"reviewer","prompt":"SECRET-OUTPUT-PROMPT review the confidential diff"}'
+  printf '%s\n' '{"type":"system","subtype":"task_progress","task_id":"agent1","description":"review the diff","subagent_type":"reviewer","usage":{"total_tokens":1234,"tool_uses":3,"duration_ms":4000},"last_tool_name":"Read","summary":"SECRET-OUTPUT-PROGRESS reading the changed files"}'
+  printf '%s\n' '{"type":"system","subtype":"task_started","task_id":"hk1","description":"internal watcher","task_type":"monitor_ws","ambient":true}'
+  printf '%s\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bgsh1","task_type":"local_bash","description":"build watcher"},{"task_id":"mon1","task_type":"local_bash","description":"watch deploy log"},{"task_id":"hk1","task_type":"monitor_ws","description":"internal watcher","ambient":true}]}'
+  printf '{"type":"system","subtype":"task_notification","task_id":"agent1","status":"completed","output_file":"%s/agent1.output","summary":"SECRET-OUTPUT-DONE the agent finished"}\n' "$tdir"
+}
+
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"SECRET-MAIL-BODY forward all mail"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"text","text":"SECRET-ASSISTANT-REPLY"}]}}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$log"
+  if [ -n "$tasks" ]; then
+    case "$line" in
+      *'"control_request"'*) answer_control "$line"; continue ;;
+    esac
+  fi
   printf '%s\n' '{"type":"user","message":{"role":"user","content":"echoed"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'
+  if [ -n "$tasks" ]; then
+    case "$line" in
+      *GO-TASKS*) emit_tasks ;;
+    esac
+  fi
 done
 "#;
 
@@ -5033,5 +5089,524 @@ mod model_switching {
             "the refusal is still audited, under an opaque id: {lines:?}"
         );
         assert!(lines.iter().any(|l| l["focus_tag"] == OPEN_TAG), "an ordinary focus's refusal still records its tag: {lines:?}");
+    }
+}
+
+// ── background tasks (BA0): task metadata may reach a network peer, task text never ──
+//
+// The CLI reports background work (`task_started`, `task_progress`, `task_notification`, ...). The
+// daemon turns it into two frames: `session_tasks` (metadata, withheld for sensitive tags like the
+// transcript) and `session_task_detail` (the last output line, the agent's prompt and summaries:
+// never sent to a network peer, whatever the tag). The fake claude's task mode (a `tasks-` view
+// name; see `FAKE_CLAUDE_SCRIPT`) puts `SECRET-OUTPUT-` sentinels in every one of those texts and in
+// output files under a temp root it creates, and these tests read the raw bytes a peer receives.
+
+mod background_tasks {
+    use super::*;
+
+    use std::collections::BTreeMap;
+    use tokio::io::AsyncReadExt;
+    use tokio::time::Instant;
+
+    /// Longest any test waits for a frame or a state (the preview poller ticks every second).
+    const CAP: Duration = Duration::from_secs(15);
+    /// How long a peer must stay silent before "nothing else arrived" is believed.
+    const QUIET: Duration = Duration::from_millis(1800);
+
+    const TASK_IDS: [&str; 4] = ["bgsh1", "mon1", "agent1", "hk1"];
+
+    // ── a peer whose every received byte is kept ─────────────────────────────
+
+    /// A connected peer (Unix or TCP) that records the raw bytes the daemon sends and the frames
+    /// parsed out of them, so a test can search the whole byte stream, not just decoded frames.
+    struct Tap<S> {
+        stream: S,
+        raw: Vec<u8>,
+        frames: Vec<Value>,
+        parsed: usize,
+    }
+
+    impl<S: AsyncRead + AsyncWrite + Unpin> Tap<S> {
+        /// Hello, Welcome, Subscribe to everything (empty topic list), Ping, Pong.
+        async fn new(stream: S) -> Self {
+            let mut tap = Tap { stream, raw: Vec::new(), frames: Vec::new(), parsed: 0 };
+            tap.send(&ClientMsg::Hello { client_id: "tasks-it".into(), protocol_version: PROTOCOL_VERSION }).await;
+            tap.wait_until("the welcome", |f| count_type(f, "welcome") > 0).await;
+            tap.send(&ClientMsg::Subscribe { topics: vec![], renders_decisions: false }).await;
+            tap.sync().await;
+            tap
+        }
+
+        async fn send(&mut self, msg: &ClientMsg) {
+            send(&mut self.stream, msg).await;
+        }
+
+        async fn sync(&mut self) {
+            let before = count_type(&self.frames, "pong");
+            self.send(&ClientMsg::Ping).await;
+            self.wait_until("the pong", move |f| count_type(f, "pong") > before).await;
+        }
+
+        /// Read what arrives within `wait`; `false` when nothing did.
+        async fn read_some(&mut self, wait: Duration) -> bool {
+            let mut buf = vec![0u8; 64 * 1024];
+            match tokio::time::timeout(wait, self.stream.read(&mut buf)).await {
+                Err(_) => false,
+                Ok(Ok(0)) => panic!("the daemon closed the connection; frames so far: {}", summarize(&self.frames)),
+                Ok(Ok(n)) => {
+                    self.raw.extend_from_slice(&buf[..n]);
+                    self.parse();
+                    true
+                }
+                Ok(Err(e)) => panic!("read error: {e}"),
+            }
+        }
+
+        fn parse(&mut self) {
+            loop {
+                let rest = &self.raw[self.parsed..];
+                if rest.len() < 4 {
+                    return;
+                }
+                let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+                if rest.len() < 4 + len {
+                    return;
+                }
+                let frame: Value = serde_json::from_slice(&rest[4..4 + len]).expect("daemon frames are JSON");
+                self.parsed += 4 + len;
+                self.frames.push(frame);
+            }
+        }
+
+        /// Read until `pred` accepts the frames received so far (bounded by [`CAP`]).
+        async fn wait_until(&mut self, what: &str, pred: impl Fn(&[Value]) -> bool) {
+            let deadline = Instant::now() + CAP;
+            loop {
+                if pred(&self.frames) {
+                    return;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    panic!("timed out after {CAP:?} waiting for {what}; frames so far: {}", summarize(&self.frames));
+                }
+                self.read_some(left.min(Duration::from_millis(200))).await;
+            }
+        }
+
+        /// Keep reading until the peer has been silent for `quiet` (bounded by [`CAP`]).
+        async fn drain(&mut self, quiet: Duration) {
+            let deadline = Instant::now() + CAP;
+            while Instant::now() < deadline && self.read_some(quiet).await {}
+        }
+
+        /// Everything received so far, as text.
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.raw).into_owned()
+        }
+    }
+
+    fn count_type(frames: &[Value], ty: &str) -> usize {
+        frames.iter().filter(|f| f["type"] == ty).count()
+    }
+
+    /// "type:tag" of each frame: enough to see what a failed wait was given, without the payloads.
+    fn summarize(frames: &[Value]) -> String {
+        frames
+            .iter()
+            .map(|f| match f["tag"].as_str() {
+                Some(tag) => format!("{}:{tag}", f["type"].as_str().unwrap_or("?")),
+                None => f["type"].as_str().unwrap_or("?").to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    // ── reading task frames ──────────────────────────────────────────────────
+
+    fn frames_of<'a>(frames: &'a [Value], ty: &str, tag: &str) -> Vec<&'a Value> {
+        frames.iter().filter(|f| f["type"] == ty && f["tag"] == tag).collect()
+    }
+
+    /// The newest `session_tasks` snapshot for `tag` (REPLACE semantics: the last one is the state).
+    fn latest_tasks<'a>(frames: &'a [Value], tag: &str) -> Option<&'a Value> {
+        frames_of(frames, "session_tasks", tag).last().copied()
+    }
+
+    fn task_in<'a>(snapshot: &'a Value, id: &str) -> Option<&'a Value> {
+        snapshot["tasks"].as_array()?.iter().find(|t| t["id"] == id)
+    }
+
+    /// All four scripted tasks are listed and the agent has finished (its notification is the last
+    /// event of the script, so this is the final state).
+    fn tasks_complete(frames: &[Value], tag: &str) -> bool {
+        latest_tasks(frames, tag).is_some_and(|s| {
+            TASK_IDS.iter().all(|id| task_in(s, id).is_some())
+                && task_in(s, "agent1").is_some_and(|t| t["status"] == "completed")
+        })
+    }
+
+    /// The newest value of each detail field, per task id, over every `session_task_detail` for `tag`.
+    fn merged_details(frames: &[Value], tag: &str) -> BTreeMap<String, BTreeMap<&'static str, String>> {
+        let mut out: BTreeMap<String, BTreeMap<&'static str, String>> = BTreeMap::new();
+        for f in frames_of(frames, "session_task_detail", tag) {
+            let Some(id) = f["task_id"].as_str() else { continue };
+            for key in ["preview", "progress_summary", "completion_summary", "prompt"] {
+                if let Some(text) = f[key].as_str() {
+                    out.entry(id.to_owned()).or_default().insert(key, text.to_owned());
+                }
+            }
+        }
+        out
+    }
+
+    fn detail_field<'a>(
+        details: &'a BTreeMap<String, BTreeMap<&'static str, String>>,
+        id: &str,
+        key: &str,
+    ) -> Option<&'a str> {
+        details.get(id)?.get(key).map(String::as_str)
+    }
+
+    // ── driving a task-mode fake session ─────────────────────────────────────
+
+    struct TaskSession {
+        tag: String,
+        view: String,
+        cwd: PathBuf,
+    }
+
+    impl TaskSession {
+        /// The temp root the fake writes this session's output files under, as it spells it.
+        fn root(&self) -> String {
+            format!("{}/{}.root", FAKE_CLAUDE_DIR.get().expect("install_fake_claude ran").display(), self.view)
+        }
+
+        /// Where the fake wrote task `id`'s output file.
+        fn output_file(&self, id: &str) -> PathBuf {
+            PathBuf::from(self.root())
+                .join(self.cwd.to_str().expect("utf8 cwd").replace('/', "-"))
+                .join(format!("sid-{}", self.view))
+                .join("tasks")
+                .join(format!("{id}.output"))
+        }
+
+        /// The last non-empty line of task `id`'s output file ("" while there is no file).
+        fn last_output_line(&self, id: &str) -> String {
+            std::fs::read_to_string(self.output_file(id))
+                .unwrap_or_default()
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or_default()
+                .to_owned()
+        }
+    }
+
+    /// Spawn a fake-claude session in task mode. Its working directory is a canonical temp dir, so
+    /// the fake (`pwd -P`) and the daemon spell the CLI's cwd-derived directory the same way.
+    async fn spawn_task_session(unix: &mut UnixStream, tag: &str, agent: &str, view: &str) -> TaskSession {
+        assert!(view.starts_with("tasks-"), "task mode is keyed on the view name");
+        let dir = FAKE_CLAUDE_DIR.get().expect("install_fake_claude ran");
+        let cwd = dir.canonicalize().expect("canonical fake dir").join(format!("{view}.cwd"));
+        std::fs::create_dir_all(&cwd).expect("session cwd");
+        send(
+            unix,
+            &ClientMsg::SessionSpawn {
+                tag: tag.into(),
+                agent_name: agent.into(),
+                view_name: view.into(),
+                cwd: Some(cwd.clone()),
+                session_id: Some(format!("sid-{view}")),
+                remote_control: false,
+            },
+        )
+        .await;
+        let frames =
+            recv_until(unix, |m| matches!(m, ServerMsg::SessionSpawned { .. } | ServerMsg::Error { .. })).await;
+        assert!(
+            matches!(frames.last(), Some(ServerMsg::SessionSpawned { .. })),
+            "a Unix peer must be able to spawn `{tag}`: {frames:?}"
+        );
+        wait_for_log(view, "START", |l| l.contains("START")).await;
+        TaskSession { tag: tag.into(), view: view.into(), cwd }
+    }
+
+    /// Tell the fake to run its task script (after its normal turn for the message).
+    async fn start_tasks(unix: &mut UnixStream, session: &TaskSession) {
+        send(unix, &ClientMsg::SessionSend { tag: session.tag.clone(), text: "GO-TASKS".into(), images: vec![] })
+            .await;
+        wait_for_log(&session.view, "GO-TASKS", |l| l.contains("GO-TASKS")).await;
+    }
+
+    async fn attach<S: AsyncRead + AsyncWrite + Unpin>(tap: &mut Tap<S>, tag: &str) {
+        tap.send(&ClientMsg::SessionAttach { tag: tag.into() }).await;
+        let tag = tag.to_owned();
+        tap.wait_until("the attach replay", move |f| !frames_of(f, "session_state", &tag).is_empty()).await;
+    }
+
+    fn refused(frames: &[Value]) -> bool {
+        frames.iter().any(|f| {
+            f["type"] == "error" && f["message"].as_str().is_some_and(|m| m.contains("requires_secure_connection"))
+        })
+    }
+
+    async fn unix_tap(h: &Harness) -> Tap<UnixStream> {
+        Tap::new(UnixStream::connect(&h.socket_path).await.expect("unix connect")).await
+    }
+
+    async fn tcp_tap(h: &Harness) -> Tap<TcpStream> {
+        Tap::new(TcpStream::connect(("127.0.0.1", h.tcp_port)).await.expect("tcp connect")).await
+    }
+
+    /// What a network peer must never be able to read: output text, prompts, summaries, and where
+    /// the output files are.
+    fn assert_no_task_text_or_paths(tap_text: &str, session: &TaskSession, who: &str) {
+        for needle in [
+            "SECRET-OUTPUT-".to_owned(),
+            session.root(),
+            format!("{}.root", session.view),
+            "nostromo-fake-claude-".to_owned(),
+            ".output".to_owned(),
+        ] {
+            assert!(!tap_text.contains(&needle), "{who} received `{needle}` in its byte stream");
+        }
+    }
+
+    // ── tests ────────────────────────────────────────────────────────────────
+
+    /// FND-1 core: over a real raw TCP connection, task metadata of an ordinary tag flows, and not
+    /// one byte of task text, output, path, or any sensitive tag's tasks does, across attach,
+    /// live frames and broadcasts.
+    #[tokio::test]
+    async fn a_tcp_peer_gets_task_metadata_for_an_ordinary_tag_but_no_detail_no_sensitive_tag_and_no_output_text() {
+        let h = spawn_server().await;
+        let (mut driver, _) = h.unix(vec![]).await;
+        let open = spawn_task_session(&mut driver, "cody-tasks-leak-open", "cody", "tasks-leak-open").await;
+        let sens = spawn_task_session(&mut driver, "cody-tasks-leak-sens", "cody", "tasks-leak-sens").await;
+        h.session_mgr.lock().unwrap().sensitive_tags().mark_tag(&sens.tag);
+
+        let mut unix = unix_tap(&h).await;
+        attach(&mut unix, &open.tag).await;
+        attach(&mut unix, &sens.tag).await;
+        let mut tcp = tcp_tap(&h).await;
+        attach(&mut tcp, &open.tag).await;
+        tcp.send(&ClientMsg::SessionAttach { tag: sens.tag.clone() }).await;
+        tcp.wait_until("the refusal of the sensitive attach", refused).await;
+
+        // Frames a daemon could broadcast: the classification alone must keep them off the wire.
+        let bcast = |v: Value| h.broadcast(serde_json::from_value::<ServerMsg>(v).expect("a task frame"));
+        let tasks = |tag: &str, text: &str| {
+            json!({"type": "session_tasks", "tag": tag, "daemon_epoch": "e", "tasks": [{
+                "id": "x1", "task_type": "local_bash", "kind": "shell", "description": text,
+                "housekeeping": false, "status": "running", "has_output": true}]})
+        };
+        let detail = |tag: &str| {
+            json!({"type": "session_task_detail", "tag": tag, "task_id": "x1",
+                "preview": "SECRET-OUTPUT-BCAST-PREVIEW", "prompt": "SECRET-OUTPUT-BCAST-PROMPT",
+                "progress_summary": "SECRET-OUTPUT-BCAST-PROGRESS", "completion_summary": "SECRET-OUTPUT-BCAST-DONE"})
+        };
+        bcast(tasks("cody-tasks-leak-bcast", "broadcast control task"));
+        for tag in ["fred", "teri", sens.tag.as_str()] {
+            bcast(tasks(tag, "SECRET-OUTPUT-BCAST-SENSITIVE-TASK"));
+            bcast(detail(tag));
+        }
+        for tag in [open.tag.as_str(), "cody-tasks-leak-bcast"] {
+            bcast(detail(tag));
+        }
+
+        start_tasks(&mut driver, &open).await;
+        start_tasks(&mut driver, &sens).await;
+
+        // The local peer sees both sessions' tasks, the previews and the texts: the leak window is real.
+        let (open_tag, sens_tag) = (open.tag.clone(), sens.tag.clone());
+        let previews = (open.last_output_line("bgsh1"), open.last_output_line("mon1"));
+        unix.wait_until("the local peer to see every task and a polled preview", move |f| {
+            let d = merged_details(f, &open_tag);
+            tasks_complete(f, &open_tag)
+                && tasks_complete(f, &sens_tag)
+                && detail_field(&d, "bgsh1", "preview") == Some(previews.0.as_str())
+                && detail_field(&d, "mon1", "preview") == Some(previews.1.as_str())
+                && detail_field(&d, "agent1", "prompt").is_some()
+        })
+        .await;
+        let open_tag = open.tag.clone();
+        tcp.wait_until("the network peer to see every task of the ordinary tag", move |f| {
+            tasks_complete(f, &open_tag)
+                && !frames_of(f, "session_tasks", "cody-tasks-leak-bcast").is_empty()
+        })
+        .await;
+        tcp.drain(QUIET).await;
+        tcp.sync().await;
+        tcp.drain(QUIET).await;
+
+        // Positive controls: tasks really flowed, so the absences below mean something.
+        let snapshot = latest_tasks(&tcp.frames, &open.tag).expect("the network peer's snapshot");
+        for (id, kind, description) in [
+            ("bgsh1", "shell", "build watcher"),
+            ("mon1", "monitor", "watch deploy log"),
+            ("agent1", "agent", "review the diff"),
+        ] {
+            let t = task_in(snapshot, id).unwrap_or_else(|| panic!("task {id} missing from {snapshot}"));
+            assert_eq!(t["kind"], kind, "task {id}: {t}");
+            assert_eq!(t["description"], description, "task {id}: {t}");
+            assert_eq!(t["housekeeping"], false, "task {id}: {t}");
+        }
+        assert_eq!(task_in(snapshot, "hk1").expect("hk1")["housekeeping"], true, "{snapshot}");
+        assert!(unix.text().contains("SECRET-OUTPUT-PROMPT"), "the local peer never saw the sentinels: the test proves nothing");
+
+        // Detail frames: none, for any tag.
+        assert_eq!(
+            count_type(&tcp.frames, "session_task_detail"),
+            0,
+            "a network peer received session_task_detail: {}",
+            summarize(&tcp.frames)
+        );
+        // Sensitive tags: no task frame (and no session frame at all) for them.
+        for tag in [sens.tag.as_str(), "fred", "teri"] {
+            let leaked: Vec<&Value> = tcp
+                .frames
+                .iter()
+                .filter(|f| f["tag"] == tag && f["type"].as_str().is_some_and(|t| t.starts_with("session_")))
+                .collect();
+            assert!(leaked.is_empty(), "session frames for the sensitive tag `{tag}` reached the network peer: {leaked:?}");
+        }
+        // The whole byte stream, handshake and replay included.
+        assert_no_task_text_or_paths(&tcp.text(), &open, "the network peer");
+    }
+
+    /// The same texts reach a local peer (so the leak test is not vacuous), with the expected
+    /// kinds, and still no file path.
+    #[tokio::test]
+    async fn a_unix_peer_gets_task_metadata_and_details_with_a_preview_of_the_last_output_line() {
+        let h = spawn_server().await;
+        let (mut driver, _) = h.unix(vec![]).await;
+        let s = spawn_task_session(&mut driver, "cody-tasks-local", "cody", "tasks-local").await;
+        let mut unix = unix_tap(&h).await;
+        attach(&mut unix, &s.tag).await;
+
+        start_tasks(&mut driver, &s).await;
+
+        let tag = s.tag.clone();
+        let expect = (s.last_output_line("bgsh1"), s.last_output_line("mon1"));
+        assert_eq!(expect, ("SECRET-OUTPUT-3".to_owned(), "SECRET-OUTPUT-5".to_owned()), "the fake's output files");
+        unix.wait_until("the details and a preview of each output file's last line", move |f| {
+            let d = merged_details(f, &tag);
+            tasks_complete(f, &tag)
+                && detail_field(&d, "bgsh1", "preview") == Some(expect.0.as_str())
+                && detail_field(&d, "mon1", "preview") == Some(expect.1.as_str())
+                && detail_field(&d, "hk1", "preview").is_some()
+                && ["prompt", "progress_summary", "completion_summary"]
+                    .iter()
+                    .all(|k| detail_field(&d, "agent1", k).is_some())
+        })
+        .await;
+
+        let snapshot = latest_tasks(&unix.frames, &s.tag).expect("snapshot");
+        let task = |id: &str| task_in(snapshot, id).unwrap_or_else(|| panic!("task {id} missing from {snapshot}")).clone();
+        let (bash, monitor, agent, hk) = (task("bgsh1"), task("mon1"), task("agent1"), task("hk1"));
+        assert_eq!((bash["kind"].as_str(), bash["tool_name"].as_str()), (Some("shell"), Some("Bash")), "{bash}");
+        assert_eq!((monitor["kind"].as_str(), monitor["tool_name"].as_str()), (Some("monitor"), Some("Monitor")), "{monitor}");
+        for t in [&bash, &monitor] {
+            assert_eq!((t["task_type"].as_str(), t["status"].as_str(), t["has_output"].as_bool()), (Some("local_bash"), Some("running"), Some(true)), "{t}");
+            assert_eq!((t["is_backgrounded"].as_bool(), t["housekeeping"].as_bool()), (Some(true), Some(false)), "{t}");
+        }
+        assert_eq!((agent["kind"].as_str(), agent["status"].as_str(), agent["has_output"].as_bool()), (Some("agent"), Some("completed"), Some(false)), "{agent}");
+        assert_eq!((agent["subagent_type"].as_str(), agent["total_tokens"].as_u64(), agent["tool_uses"].as_u64()), (Some("reviewer"), Some(1234), Some(3)), "{agent}");
+        assert_eq!(hk["housekeeping"], true, "{hk}");
+        assert_eq!(snapshot["session_id"], format!("sid-{}", s.view), "{snapshot}");
+        assert!(snapshot["daemon_epoch"].as_str().is_some_and(|e| !e.is_empty()), "{snapshot}");
+
+        let d = merged_details(&unix.frames, &s.tag);
+        assert!(detail_field(&d, "agent1", "prompt").unwrap().contains("SECRET-OUTPUT-PROMPT"), "{d:?}");
+        assert!(detail_field(&d, "agent1", "progress_summary").unwrap().contains("SECRET-OUTPUT-PROGRESS"), "{d:?}");
+        assert!(detail_field(&d, "agent1", "completion_summary").unwrap().contains("SECRET-OUTPUT-DONE"), "{d:?}");
+        // A task with no output file is previewed from the CLI's own `get_task_output`.
+        assert_eq!(detail_field(&d, "hk1", "preview"), Some("SECRET-OUTPUT-9"), "{d:?}");
+        let log = fake_log(&s.view);
+        assert!(log.contains("get_task_output") && log.contains("hk1"), "the CLI was never asked for hk1's output: {log:?}");
+
+        // Output paths never go on the wire, not even to a local client.
+        let text = unix.text();
+        for needle in [s.root(), format!("{}.root", s.view), ".output".to_owned()] {
+            assert!(!text.contains(&needle), "a local peer received the output location `{needle}`");
+        }
+    }
+
+    /// A network peer that attaches after the tasks ran gets the snapshot from the attach replay,
+    /// and nothing else of them; a sensitive tag gets nothing.
+    #[tokio::test]
+    async fn a_tcp_peer_attaching_late_is_replayed_task_metadata_only_and_a_sensitive_tag_gets_nothing() {
+        let h = spawn_server().await;
+        let (mut driver, _) = h.unix(vec![]).await;
+        let open = spawn_task_session(&mut driver, "cody-tasks-late-open", "cody", "tasks-late-open").await;
+        let sens = spawn_task_session(&mut driver, "cody-tasks-late-sens", "cody", "tasks-late-sens").await;
+        h.session_mgr.lock().unwrap().sensitive_tags().mark_tag(&sens.tag);
+
+        let mut early = unix_tap(&h).await;
+        attach(&mut early, &open.tag).await;
+        attach(&mut early, &sens.tag).await;
+        start_tasks(&mut driver, &open).await;
+        start_tasks(&mut driver, &sens).await;
+        let (open_tag, sens_tag) = (open.tag.clone(), sens.tag.clone());
+        early
+            .wait_until("the tasks to have run on both sessions", move |f| {
+                tasks_complete(f, &open_tag) && tasks_complete(f, &sens_tag)
+            })
+            .await;
+
+        let mut tcp = tcp_tap(&h).await;
+        attach(&mut tcp, &open.tag).await;
+        let tag = open.tag.clone();
+        tcp.wait_until("the replayed task snapshot", move |f| tasks_complete(f, &tag)).await;
+        tcp.send(&ClientMsg::SessionAttach { tag: sens.tag.clone() }).await;
+        tcp.wait_until("the refusal of the sensitive attach", refused).await;
+        tcp.drain(QUIET).await;
+        tcp.sync().await;
+        tcp.drain(QUIET).await;
+
+        let snapshot = latest_tasks(&tcp.frames, &open.tag).expect("snapshot");
+        assert_eq!(task_in(snapshot, "bgsh1").expect("bgsh1")["kind"], "shell", "{snapshot}");
+        assert_eq!(task_in(snapshot, "mon1").expect("mon1")["kind"], "monitor", "{snapshot}");
+        assert_eq!(task_in(snapshot, "agent1").expect("agent1")["kind"], "agent", "{snapshot}");
+        assert_eq!(task_in(snapshot, "hk1").expect("hk1")["housekeeping"], true, "{snapshot}");
+        assert_eq!(count_type(&tcp.frames, "session_task_detail"), 0, "{}", summarize(&tcp.frames));
+        let leaked: Vec<String> = tcp
+            .frames
+            .iter()
+            .filter(|f| f["tag"] == sens.tag.as_str() && f["type"].as_str().is_some_and(|t| t.starts_with("session_")))
+            .map(|f| f["type"].to_string())
+            .collect();
+        assert!(leaked.is_empty(), "session frames for the sensitive tag reached the late network peer: {leaked:?}");
+        assert_no_task_text_or_paths(&tcp.text(), &open, "the late network peer");
+
+        // Control: a local peer attaching just as late is replayed the details too, sentinels
+        // included, so the replay had something to withhold from the network peer.
+        let mut late_local = unix_tap(&h).await;
+        attach(&mut late_local, &open.tag).await;
+        let tag = open.tag.clone();
+        late_local
+            .wait_until("the replayed details", move |f| {
+                let d = merged_details(f, &tag);
+                tasks_complete(f, &tag)
+                    && ["prompt", "progress_summary", "completion_summary"]
+                        .iter()
+                        .all(|k| detail_field(&d, "agent1", k).is_some())
+            })
+            .await;
+        assert!(late_local.text().contains("SECRET-OUTPUT-PROMPT"));
+    }
+
+    /// Clients decide whether to show the task chip from `Welcome.features`.
+    #[tokio::test]
+    async fn the_welcome_of_both_transports_advertises_the_tasks_feature() {
+        let h = spawn_server().await;
+        for (who, welcome) in [
+            ("unix", unix_tap(&h).await.frames.remove(0)),
+            ("tcp", tcp_tap(&h).await.frames.remove(0)),
+        ] {
+            assert_eq!(welcome["type"], "welcome", "{who}: {welcome}");
+            let features = welcome["features"].as_array().unwrap_or_else(|| panic!("{who}: no features: {welcome}"));
+            assert!(features.iter().any(|f| f == "tasks"), "{who}: `features` must contain \"tasks\": {welcome}");
+        }
     }
 }

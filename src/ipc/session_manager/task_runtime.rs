@@ -357,9 +357,9 @@ pub(super) fn ensure_poller(shared: &Shared) {
 async fn poll_loop(shared: Shared) {
     let runtime = Arc::clone(&shared.tasks);
     loop {
-        let plan = if shared.exited.load(Ordering::SeqCst) {
-            Vec::new()
-        } else if runtime.clients.load(Ordering::SeqCst) == 0 {
+        let plan = if shared.exited.load(Ordering::SeqCst)
+            || runtime.clients.load(Ordering::SeqCst) == 0
+        {
             Vec::new()
         } else {
             runtime.poll_plan()
