@@ -1044,6 +1044,11 @@ class TextBlockView: NSView, WidthPresettable {
                 view = label
             case .table(let headers, let rows):
                 view = MarkdownTableView(headers: headers, rows: rows)
+            case .code(let source):
+                // Appended to `cards` so `presetLayoutWidth` reaches it.
+                let card = MarkdownCardView(markdown: source)
+                cards.append(card)
+                view = card
             }
 
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -1069,6 +1074,8 @@ class TextBlockView: NSView, WidthPresettable {
 
     /// Returns true when the text contains enough markdown markers to warrant card rendering.
     private static func hasMarkdown(_ s: String) -> Bool {
+        // `~~~` fences contain no backtick, so they need their own check.
+        if MarkdownFences.containsFence(s) { return true }
         let lines = s.components(separatedBy: "\n")
         let lineMarker = lines.contains { line in
             line.hasPrefix("# ") || line.hasPrefix("## ") || line.hasPrefix("### ")
@@ -1079,16 +1086,25 @@ class TextBlockView: NSView, WidthPresettable {
     }
 
     /// Splits text on bare `---` separator lines into one or more markdown segments.
+    /// Only prose lines separate: a `---` inside a fenced block is code, and the block's
+    /// source (fences included) goes to the card intact so the renderer can see it.
     private static func markdownSegments(from text: String) -> [String] {
         var segments: [String] = []
         var current: [String]  = []
-        for line in text.components(separatedBy: "\n") {
-            if line.trimmingCharacters(in: .whitespaces) == "---" {
-                let seg = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !seg.isEmpty { segments.append(seg) }
-                current = []
-            } else {
-                current.append(line)
+        for segment in MarkdownFences.segments(of: text) {
+            switch segment {
+            case .code(let block):
+                current.append(block.source)
+            case .prose(let prose):
+                for line in prose.components(separatedBy: "\n") {
+                    if line.trimmingCharacters(in: .whitespaces) == "---" {
+                        let seg = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !seg.isEmpty { segments.append(seg) }
+                        current = []
+                    } else {
+                        current.append(line)
+                    }
+                }
             }
         }
         let tail = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1097,12 +1113,16 @@ class TextBlockView: NSView, WidthPresettable {
     }
 
     /// Returns true when the text contains a markdown pipe table (takes the existing path).
+    /// Lines inside fenced code never count.
     private static func hasPipeTable(_ s: String) -> Bool {
-        let lines = s.components(separatedBy: "\n")
-        guard let headerIdx = lines.firstIndex(where: { $0.hasPrefix("|") }) else { return false }
-        let nextIdx = lines.index(after: headerIdx)
-        guard nextIdx < lines.endIndex else { return false }
-        return lines[nextIdx].contains("|") && lines[nextIdx].contains("-")
+        MarkdownFences.segments(of: s).contains { segment in
+            guard case .prose(let prose) = segment else { return false }
+            let lines = prose.components(separatedBy: "\n")
+            guard let headerIdx = lines.firstIndex(where: { $0.hasPrefix("|") }) else { return false }
+            let nextIdx = lines.index(after: headerIdx)
+            guard nextIdx < lines.endIndex else { return false }
+            return lines[nextIdx].contains("|") && lines[nextIdx].contains("-")
+        }
     }
 
     // MARK: Segment model & parser
@@ -1110,9 +1130,22 @@ class TextBlockView: NSView, WidthPresettable {
     private enum Segment {
         case paragraph(String)
         case table(headers: [String], rows: [[String]])
+        case code(source: String)
     }
 
     private static func parseSegments(_ text: String) -> [Segment] {
+        var segments: [Segment] = []
+        for fenced in MarkdownFences.segments(of: text) {
+            switch fenced {
+            case .prose(let prose): segments += parseProse(prose)
+            case .code(let block):  segments.append(.code(source: block.source))
+            }
+        }
+        return segments
+    }
+
+    /// Paragraphs and tables from a run of prose lines (never code).
+    private static func parseProse(_ text: String) -> [Segment] {
         let lines = text.components(separatedBy: "\n")
         var segments: [Segment] = []
         var pending: [String]   = []

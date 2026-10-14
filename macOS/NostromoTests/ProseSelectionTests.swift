@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import NostromoKit
 
 // Contract: assistant prose in the transcript can be selected and copied.
 //
@@ -1284,11 +1285,13 @@ final class MarkdownCardLayoutTests: XCTestCase {
     /// Lays `card` out at `layoutWidth`, with the height `measuredHeight` gave for `presetWidth`
     /// (which is what the real pane does), and returns how much taller the laid-out text is
     /// than its view (positive = clipped).
-    private func shortfall(presetWidth: CGFloat, layoutWidth: CGFloat, in window: NSWindow) -> CGFloat? {
-        let card = MarkdownCardView(markdown: md)
+    private func shortfall(presetWidth: CGFloat, layoutWidth: CGFloat, in window: NSWindow,
+                           markdown: String? = nil) -> CGFloat? {
+        let markdown = markdown ?? md
+        let card = MarkdownCardView(markdown: markdown)
         card.presetWidth = presetWidth
         card.frame = NSRect(x: 0, y: 0, width: layoutWidth,
-                            height: MarkdownCardView.measuredHeight(markdown: md, width: presetWidth))
+                            height: MarkdownCardView.measuredHeight(markdown: markdown, width: presetWidth))
         window.contentView!.addSubview(card)
         card.layoutSubtreeIfNeeded()
         defer { card.removeFromSuperview() }
@@ -1314,6 +1317,28 @@ final class MarkdownCardLayoutTests: XCTestCase {
             }
         }
         print("CARDCLIP widths checked \(widths.count * 3), max shortfall \(worst.shortfall) pt at \(worst.desc)")
+        XCTAssertTrue(failures.isEmpty, "\(failures.count) layouts clip the last line (max shortfall \(worst.shortfall) pt at \(worst.desc)); first: \(failures.prefix(3))")
+    }
+
+    /// The same contract over the reported message, whose fenced code blocks add text-block padding
+    /// and margins to the height `measuredHeight` has to predict.
+    func testTheCardsTextViewIsNeverShorterThanItsLaidOutFencedCodeAcrossWidthsAndHalfPointOffsets() throws {
+        let fenced = MarkdownFenceFixtures.reportedMessage
+        let window = makeRigWindow(self, size: NSSize(width: 1500, height: 900))
+        var worst: (shortfall: CGFloat, desc: String) = (-.infinity, "")
+        var failures: [String] = []
+        let widths = [300, 380, 460, 540, 620, 700, 820, 940, 1100, 1400].map { CGFloat($0) }
+            + stride(from: 300 as CGFloat, through: 1400, by: 3.7).map { $0 }
+        for w in widths {
+            for offset in [-0.5, 0, 0.5 as CGFloat] {
+                guard let miss = shortfall(presetWidth: w, layoutWidth: w + offset, in: window, markdown: fenced) else {
+                    return XCTFail("no text view in the card")
+                }
+                if miss > worst.shortfall { worst = (miss, "preset \(w), laid out at \(w + offset)") }
+                if miss > 0.5 { failures.append("preset \(w), laid out at \(w + offset): text is \(miss) pt taller than its view") }
+            }
+        }
+        print("CARDCLIP fenced: widths checked \(widths.count * 3), max shortfall \(worst.shortfall) pt at \(worst.desc)")
         XCTAssertTrue(failures.isEmpty, "\(failures.count) layouts clip the last line (max shortfall \(worst.shortfall) pt at \(worst.desc)); first: \(failures.prefix(3))")
     }
 }

@@ -65,6 +65,13 @@ enum Theme {
         .foregroundColor: selectionForeground,
     ]
 
+    /// Fenced code blocks in a `MarkdownCardView`. Explicit (component-based) and
+    /// appearance-independent, like the rest of the always-dark transcript. Against
+    /// `bgBar` (the card fill) it is ~1.3:1, so the block reads as a surface; `fg` on
+    /// it is ~10:1 and `selectionBackground` on it is ~3.6:1 (all pinned in
+    /// `MarkdownCodeBlockTests`).
+    static let codeBlockBackground = NSColor(white: 0.16, alpha: 1)
+
     // MARK: - Fonts
 
     static let tabFont       = NSFont.systemFont(ofSize: 12, weight: .regular)
