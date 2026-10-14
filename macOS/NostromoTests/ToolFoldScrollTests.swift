@@ -1807,6 +1807,31 @@ final class FocusScrollTests: XCTestCase {
         }
     }
 
+    // MARK: layout cost, across the pane
+
+    func testARollInMeasuresOnlyItsOwnTurnsIslandsAcrossThePane() throws {
+        let live = F.turn([focusMessage("First")] + F.run(2, prefix: "a") + [focusMessage("Second")] + F.run(1, prefix: "b"),
+                          complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 6).map(historyTurn) + [live])
+        rig.start()
+        let others = rig.materialized.filter { $0.key != live.id }
+        XCTAssertGreaterThan(others.count, 0, "precondition: other turns are materialized in the pane")
+        let otherViews = others.mapValues { ObjectIdentifier($0) }
+
+        ChatTurnView.measureIslandCount = 0
+        rig.append([focusMessage("Third")])   // rolls Second and group b into the row
+
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertEqual(view.activityRowViews.first?.row.summaryField.stringValue.hasPrefix("2 messages"), true,
+                       "precondition: the roll-in happened")
+        XCTAssertGreaterThan(ChatTurnView.measureIslandCount, 0)
+        XCTAssertLessThanOrEqual(ChatTurnView.measureIslandCount, view.subviews.count,
+                                 "no more measurements than the rolled-in turn has islands")
+        for (id, identity) in otherViews {
+            XCTAssertEqual(rig.materialized[id].map { ObjectIdentifier($0) }, identity, "another turn's view was rebuilt")
+        }
+    }
+
     // MARK: the composer
 
     func testTheComposerKeepsFirstResponderThroughRollIns() throws {

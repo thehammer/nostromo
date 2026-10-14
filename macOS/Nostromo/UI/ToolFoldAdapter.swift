@@ -97,8 +97,7 @@ struct FoldShape: Equatable {
                 case .message(let m):
                     // The lane shows a folded message's visible text only (`ActivityRowView`).
                     return .message(m.blockIndices.filter { i in
-                        guard turn.blocks.indices.contains(i), case .text(let text) = turn.blocks[i] else { return false }
-                        return text.contains { !$0.isWhitespace }
+                        turn.blocks.indices.contains(i) && ActivityRowView.showsInLane(turn.blocks[i])
                     })
                 }
             })

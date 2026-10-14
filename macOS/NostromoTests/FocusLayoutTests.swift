@@ -1041,3 +1041,83 @@ final class FocusPerformanceProxyTests: XCTestCase {
         assertShowAllHoldsEveryBlockOnceInOrder(scenarios)
     }
 }
+
+// MARK: - State carried into items a roll-in rebuilds (review follow-ups)
+
+/// A roll-in rebuilds items while the turn view lives. What the operator did to them since the
+/// view was built (a group opened, a result expanded, a card answered) must come back.
+final class FocusRollInStateTests: XCTestCase {
+
+    private func button(in view: NSView, titled title: String? = nil) -> NSButton? {
+        rigAllSubviews(of: view).compactMap { $0 as? NSButton }
+            .first { title == nil || $0.title.contains(title!) || $0.attributedTitle.string.contains(title!) }
+    }
+
+    func testATrailingGroupTheOperatorOpenedComesBackOpenInTheLaneAfterItRollsIn() throws {
+        let stream = FocusStream([X.message("FIRST-MSG")] + F.run(2, prefix: "a") + [X.message("SECOND-MSG")]
+                                 + F.run(1, prefix: "b"))
+        let trailing = try XCTUnwrap(stream.view.groupView(forKey: "g:b0"))
+        trailing.row.toggle()   // the operator opens it
+        XCTAssertTrue(trailing.isExpanded)
+
+        stream.append([X.message("THIRD-MSG")])   // the group rolls into the existing row
+        let row = try XCTUnwrap(stream.view.activityRowViews.first)
+        row.row.toggle()
+
+        let inLane = try XCTUnwrap(row.groupView(forKey: "g:b0"), "the group is in the lane")
+        XCTAssertTrue(inLane.isExpanded, "the operator's choice survives the roll-in")
+    }
+
+    func testAResultTheOperatorExpandedComesBackExpandedInTheLaneAfterItRollsIn() throws {
+        let stream = FocusStream([X.message("FIRST-MSG")] + F.run(1, prefix: "a") + [X.message("SECOND-MSG")]
+                                 + F.run(1, prefix: "b", output: { _ in "B-OUTPUT-SENTINEL" }))
+        let trailing = try XCTUnwrap(stream.view.groupView(forKey: "g:b0"))
+        trailing.row.toggle()
+        let result = try XCTUnwrap(trailing.memberViews.first { $0 is ToolResultView })
+        try XCTUnwrap(button(in: result)).performClick(nil)   // the operator expands the output
+        XCTAssertTrue(X.contains("B-OUTPUT-SENTINEL", in: result), "precondition: the output shows")
+
+        stream.append([X.message("THIRD-MSG")])
+        let row = try XCTUnwrap(stream.view.activityRowViews.first)
+        row.row.toggle()
+
+        let inLane = try XCTUnwrap(row.groupView(forKey: "g:b0"))
+        XCTAssertTrue(X.contains("B-OUTPUT-SENTINEL", in: inLane), "the expanded output comes back expanded")
+    }
+
+    func testACardAnsweredAfterTheViewWasBuiltComesBackAnsweredWhenARollInRebuildsIt() throws {
+        let stream = FocusStream([X.message("FIRST-MSG")] + F.run(1, prefix: "a") + [X.message("SECOND-MSG"), F.question()]
+                                 + F.run(1, prefix: "b"))
+        var sent: [String] = []
+        stream.view.onSend = { sent.append($0) }
+        let card = try XCTUnwrap(X.columns(stream.view).first { $0 is AskQuestionView })
+        try XCTUnwrap(button(in: card)).performClick(nil)   // the operator answers (the first option)
+        XCTAssertEqual(sent.count, 1)
+
+        stream.append([X.message("THIRD-MSG")])   // rebuilds from SECOND-MSG on, the card included
+
+        let rebuilt = try XCTUnwrap(X.columns(stream.view).first { $0 is AskQuestionView })
+        XCTAssertFalse(rebuilt === card, "precondition: the roll-in rebuilt the card")
+        let options = rigAllSubviews(of: rebuilt).compactMap { $0 as? NSButton }
+        XCTAssertFalse(options.isEmpty)
+        XCTAssertTrue(options.allSatisfy { !$0.isEnabled }, "the rebuilt card is inert: answered, not armed again")
+        options.forEach { $0.performClick(nil) }
+        XCTAssertEqual(sent.count, 1, "no second answer can be sent")
+    }
+
+    func testAnAnchorOnAMessageThatRolledIntoACollapsedRowResolvesToTheRow() throws {
+        let stream = FocusStream([X.message("FIRST-MSG")] + F.run(1, prefix: "a") + [X.message("SECOND-MSG")]
+                                 + F.run(1, prefix: "b"))
+        let secondKey = "b3"   // FIRST-MSG, call a0, result a0, SECOND-MSG
+        XCTAssertNotNil(stream.view.offset(ofItemKey: secondKey), "precondition: the message is an item")
+
+        stream.append([X.message("THIRD-MSG")])
+
+        let row = try XCTUnwrap(stream.view.activityRowViews.first)
+        XCTAssertFalse(row.isExpanded)
+        XCTAssertEqual(stream.view.offset(ofItemKey: secondKey), stream.view.offset(ofItemKey: row.segment.key),
+                       "the collapsed row stands in for the message it folded")
+        XCTAssertEqual(stream.view.offset(ofItemKey: "g:b0"), stream.view.offset(ofItemKey: row.segment.key),
+                       "and for the group it folded")
+    }
+}

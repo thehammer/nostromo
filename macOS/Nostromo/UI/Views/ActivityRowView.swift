@@ -53,7 +53,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     /// The blocks the segment's members use, by block index (see `ToolGroupView.blocks`).
     private var blocks: [Int: TurnBlock]
     private let contentAvailable: Bool
-    private let interaction: TurnInteractionState
+    private var interaction: TurnInteractionState
     private var folds: FoldResolver
     private let reduceMotion: () -> Bool
     private let now: () -> Date
@@ -138,6 +138,13 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         guard expanded != isExpanded else { return }
         row.setExpanded(expanded, animated: false)
         applyExpanded(expanded)
+    }
+
+    /// The turn's interaction and fold state as they are now, for lane members built from here
+    /// on (members already built keep theirs).
+    func updateState(interaction: TurnInteractionState, folds: FoldResolver) {
+        self.interaction = interaction
+        self.folds = folds
     }
 
     /// Re-resolve the lane's groups (a change made elsewhere). Returns whether any changed.
@@ -233,11 +240,18 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         needsLayout = true
     }
 
+    /// Whether a folded message's block gets a view in the lane: visible text only (the
+    /// estimator's `FoldShape` asks the same).
+    static func showsInLane(_ block: TurnBlock) -> Bool {
+        guard case .text(let text) = block else { return false }
+        return text.contains { !$0.isWhitespace }
+    }
+
     /// A folded message: one `TextBlockView` per non-empty text block, in the folded tone.
     private func appendMessage(_ message: MessageRef) {
         var first = true
         for index in message.blockIndices {
-            guard case .text(let text)? = blocks[index], text.contains(where: { !$0.isWhitespace }) else { continue }
+            guard let block = blocks[index], Self.showsInLane(block), case .text(let text) = block else { continue }
             let key = first ? "\(segment.key)/m\(message.ordinal)" : "b\(index)"
             first = false
             appendMember(key: key, view: TextBlockView(text: text, tone: .folded), blockIndex: index)
@@ -357,11 +371,29 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     func offset(ofItemKey key: String) -> CGFloat? {
         if key == segment.key { return 0 }
         let block = key.hasPrefix("b") ? Int(key.dropFirst()) : nil
-        return firstMember { member, top in
+        if let shown = firstMember(where: { member, top -> CGFloat? in
             if member.key == key || (block != nil && member.blockIndex == block) { return top }
-            guard let block, let group = member.view as? ToolGroupView,
-                  let inside = group.offset(ofMemberBlock: block) else { return nil }
-            return top + inside
+            guard let block, let group = member.view as? ToolGroupView else { return nil }
+            if let inside = group.offset(ofMemberBlock: block) { return top + inside }
+            // In a collapsed lane group: its row stands in for it.
+            return group.group.memberIndices.contains(block) ? top : nil
+        }) { return shown }
+        // Folded away (the row is collapsed, or its lane not built): the row stands in for what
+        // it holds, so an anchor on a message or group that just rolled in stays put.
+        return holds(itemKey: key, block: block) ? 0 : nil
+    }
+
+    /// Whether `key` (a message key, a group key or `b<i>`) names something in this segment.
+    private func holds(itemKey key: String, block: Int?) -> Bool {
+        segment.members.contains { member in
+            switch member {
+            case .message(let message):
+                return key == "\(segment.key)/m\(message.ordinal)"
+                    || block.map(message.blockIndices.contains) == true
+            case .group(let group):
+                return key == group.key
+                    || block.map { b in group.memberIndices.contains(b) || group.subagentBlocks.values.contains { $0.contains(b) } } == true
+            }
         }
     }
 

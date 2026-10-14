@@ -346,8 +346,10 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     var onWillChangeHeight: (() -> Void)?
 
     /// Everything the operator has already done to this turn, restored into the
-    /// block views as they are built.
-    private let interaction: TurnInteractionState
+    /// block views as they are built. Kept current with what is done here (answers, result
+    /// folds), because a roll-in rebuilds items while the view lives: a card answered after the
+    /// view was built must come back answered.
+    private var interaction: TurnInteractionState
 
     /// Reply text injected by the confirm card — suppress its bubble so the card
     /// itself serves as the only visible acknowledgement of the user's choice.
@@ -492,8 +494,10 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             } else if let row = view as? ActivityRowView {
                 let expanded = folds.isActivityExpanded(key: row.segment.key)
                 let opened = expanded != row.isExpanded
+                // The lane's groups first, so a lane built by the open is built from `folds`.
+                let regrouped = row.applyFolds(folds)
                 row.setExpanded(expanded)
-                guard row.applyFolds(folds) || opened else { continue }
+                guard regrouped || opened else { continue }
             } else {
                 continue
             }
@@ -648,6 +652,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         switch item {
         case .activity(let segment):
             guard let row = columnViews[column] as? ActivityRowView else { return false }
+            // Members that joined (a trailing group the operator opened, results they expanded)
+            // build from the state as it is now, not as it was when the row was made.
+            row.updateState(interaction: interaction, folds: folds)
             if row.segment != segment, row.update(segment: segment, blockAt: blockAt) {
                 remeasureColumnIfMeasured(column)
             }
@@ -750,7 +757,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             self.columnChangedHeight(view)
         }
         view.onBlockExpansion = { [weak self] index, isExpanded in
-            self?.onBlockExpansion?(index, isExpanded)
+            self?.noteBlockExpansion(index, isExpanded)
         }
         view.onHeightChange = { [weak self, weak view] in
             guard let self, let view else { return }
@@ -779,7 +786,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             self.columnChangedHeight(view)
         }
         view.onBlockExpansion = { [weak self] index, isExpanded in
-            self?.onBlockExpansion?(index, isExpanded)
+            self?.noteBlockExpansion(index, isExpanded)
         }
         view.onHeightChange = { [weak self, weak view] in
             guard let self, let view else { return }
@@ -787,6 +794,17 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         }
         view.onBatchWillBuild = { [weak self] in self?.onWillChangeHeight?() }
         return view
+    }
+
+    /// A result (or agent activity) fold was toggled somewhere in this turn: remember it here too,
+    /// for items a roll-in rebuilds, and tell the owner.
+    private func noteBlockExpansion(_ index: Int, _ isExpanded: Bool) {
+        if isExpanded {
+            interaction.expandedBlocks.insert(index)
+        } else {
+            interaction.expandedBlocks.remove(index)
+        }
+        onBlockExpansion?(index, isExpanded)
     }
 
     /// A column's height changed by itself (a toggle, a member fold, a batch of rows): only that
@@ -807,7 +825,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
                                    startExpanded: interaction.expandedBlocks.contains(index))
             v.onExpansionChange = { [weak self, weak v] isExpanded in
                 guard let self, let v else { return }
-                self.onBlockExpansion?(index, isExpanded)
+                self.noteBlockExpansion(index, isExpanded)
                 // Only this block's height changed. Re-measuring the one island
                 // and re-summing is what keeps an expand O(1) in turn size — and
                 // what stops the cached total drifting from what is on screen.
@@ -824,6 +842,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
                 guard let self else { return }
                 // Record before sending. If the send path ever tears this view
                 // down, the answer is already outside it.
+                self.interaction.answeredOptions[index] = optionIndex
                 self.onAnsweredOption?(index, optionIndex)
                 self.onSend?(answer)
             }
@@ -1871,7 +1890,7 @@ struct TranscriptSelection {
     /// The selection currently held inside `view`, or nil when the first
     /// responder is not a non-empty selection within it.
     static func capture(in view: NSView) -> TranscriptSelection? {
-        if let control = view.window?.firstResponder as? ToolGroupRowView, control.isDescendant(of: view) {
+        if let control = view.window?.firstResponder as? FoldRowView, control.isDescendant(of: view) {
             return TranscriptSelection(holder: .focus(control), range: NSRange(location: 0, length: 0))
         }
         guard let text = view.window?.firstResponder as? NSTextView,
