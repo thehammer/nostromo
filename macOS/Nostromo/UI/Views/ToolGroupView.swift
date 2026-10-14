@@ -83,7 +83,17 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     private var unbuiltEstimate: CGFloat = 0
     private let rule = NSView()
 
-    init(group: ToolGroup, blocks: [TurnBlock],
+    convenience init(group: ToolGroup, blocks: [TurnBlock],
+                     contentAvailable: Bool, interaction: TurnInteractionState, isExpanded: Bool,
+                     reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+                     now: @escaping () -> Date = Date.init) {
+        self.init(group: group, blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil },
+                  contentAvailable: contentAvailable, interaction: interaction, isExpanded: isExpanded,
+                  reduceMotion: reduceMotion, now: now)
+    }
+
+    /// `blockAt`: the turn's block at an index (read during the call only).
+    init(group: ToolGroup, blockAt: (Int) -> TurnBlock?,
          contentAvailable: Bool, interaction: TurnInteractionState, isExpanded: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
          now: @escaping () -> Date = Date.init) {
@@ -94,7 +104,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
         self.row = ToolGroupRowView(group: group, isExpanded: isExpanded, payloadAvailable: contentAvailable,
                                     reduceMotion: reduceMotion, now: now)
         super.init(frame: .zero)
-        takeBlocks(of: group, from: blocks)
+        takeBlocks(of: group, from: blockAt)
         translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
         // The rule lives in the turn's gutter, outside these bounds.
@@ -135,8 +145,14 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     /// The group grew (or its counts changed). Returns whether this view's height changed.
     @discardableResult
     func update(group: ToolGroup, blocks: [TurnBlock]) -> Bool {
+        update(group: group, blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil })
+    }
+
+    /// `update(group:blocks:)`, with the turn's blocks by lookup.
+    @discardableResult
+    func update(group: ToolGroup, blockAt: (Int) -> TurnBlock?) -> Bool {
         self.group = group
-        takeBlocks(of: group, from: blocks)
+        takeBlocks(of: group, from: blockAt)
         row.update(group: group)
         guard isExpanded else { return false }
         let before = contentHeight
@@ -147,13 +163,13 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
 
     // MARK: - Members
 
-    private func takeBlocks(of group: ToolGroup, from all: [TurnBlock]) {
+    private func takeBlocks(of group: ToolGroup, from blockAt: (Int) -> TurnBlock?) {
         for index in group.memberIndices.reversed() {
             guard blocks[index] == nil else { break }   // members only ever grow at the end
-            blocks[index] = all[index]
+            blocks[index] = blockAt(index)
         }
         for indices in group.subagentBlocks.values {
-            for index in indices where blocks[index] == nil { blocks[index] = all[index] }
+            for index in indices where blocks[index] == nil { blocks[index] = blockAt(index) }
         }
     }
 
@@ -421,15 +437,17 @@ final class FoldSummaryField: CopyMenuTextField {
     }
 }
 
-// MARK: - ToolGroupRowView
+// MARK: - FoldRowView
 
-/// The group's 22 pt row: disclosure triangle, summary (or, for a group of one, the call's
-/// own header), failure badge, time. A control: click, Space/Return/→/← toggle it.
+/// A fold's 22 pt row: disclosure triangle, summary, failure badge, time, and (for a tool group)
+/// an activity dot, a call icon and `· stopped`. A control: click, Space/Return/→/← toggle it.
+/// The shared base of `ToolGroupRowView` and the Focus view's `ActivityRowHeaderView`, which
+/// differ only in what they say and what they copy.
 ///
 /// Every colour is explicit (`palette`), never a semantic or system colour, so the row reads
 /// the same in key and non-key windows whatever the system appearance (the Teri tab lesson).
 /// Everything drawn is sanitized (`FoldTextSanitizer`); the copy actions are not.
-final class ToolGroupRowView: NSView {
+class FoldRowView: NSView {
 
     static let height: CGFloat = 22
     /// A mouse-up within this distance of its mouse-down is a click; further is a drag that
@@ -447,21 +465,17 @@ final class ToolGroupRowView: NSView {
 
     /// The operator toggled the row (new state).
     var onToggle: ((Bool) -> Void)?
-    /// Where Copy Commands / Copy Summary / ⌘C put text. Injectable for tests.
+    /// Where the copy actions and ⌘C put text. Injectable for tests.
     var pasteboard: NSPasteboard = .general
 
-    private(set) var group: ToolGroup
-    private let payloadAvailable: Bool
-    private let reduceMotion: () -> Bool
-    /// The clock the running call's elapsed time is read from. Injected by tests.
-    private let now: () -> Date
+    let reduceMotion: () -> Bool
     private(set) var isExpanded = false
 
     private let triangleView = NSView()
     private let triangle = CAShapeLayer()
     /// The calm activity dot a running row shows before `Running`.
     private let activityView = NSView()
-    private let iconField = NSTextField(labelWithString: "")
+    let iconField = NSTextField(labelWithString: "")
     private let summary = FoldSummaryField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
     private let time = NSTextField(labelWithString: "")
@@ -470,13 +484,8 @@ final class ToolGroupRowView: NSView {
     private var mouseDownEvent: NSEvent?
     private var forwardedDrag = false
 
-    init(group: ToolGroup, isExpanded: Bool, payloadAvailable: Bool,
-         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         now: @escaping () -> Date = Date.init) {
-        self.group = group
-        self.payloadAvailable = payloadAvailable
+    init(reduceMotion: @escaping () -> Bool) {
         self.reduceMotion = reduceMotion
-        self.now = now
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: Self.height))
         wantsLayer = true
         layer?.cornerRadius = 4
@@ -485,8 +494,10 @@ final class ToolGroupRowView: NSView {
         setUpTriangle()
         setUpActivityDot()
         setUpLabels()
-        update(group: group)
-        setExpanded(isExpanded, animated: false)
+        iconField.isHidden = true
+        badge.isHidden = true
+        time.isHidden = true
+        stopped.isHidden = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -515,54 +526,30 @@ final class ToolGroupRowView: NSView {
     /// The rotating triangle (for the Reduce Motion check).
     var triangleLayer: CALayer { triangle }
 
-    // MARK: Content
+    // MARK: Content (for subclasses)
 
-    #if DEBUG
-    /// Every `update(group:)`, so tests can hold a turn build to one summary per group.
-    static var updateCount = 0
-    #endif
+    func setSummary(_ text: String) { setText(text, on: summary, color: Theme.fgMuted) }
 
-    /// Show `group` as it stands. In place: the row's height never changes, so an update never
-    /// needs a re-measure, and it posts nothing to VoiceOver (no announcement per call).
-    func update(group: ToolGroup) {
-        #if DEBUG
-        Self.updateCount += 1
-        #endif
-        self.group = group
-        let running = ToolGroupSummary.runningTitle(for: group)
-        if let running {
-            iconField.isHidden = true
-            setText(running, on: summary, color: Theme.fgMuted)
-        } else if let text = ToolGroupSummary.summary(for: group) {
-            iconField.isHidden = true
-            setText(text, on: summary, color: Theme.fgMuted)
-        } else if let call = group.calls.first {
-            // A group of one reads as its call's own header.
-            iconField.isHidden = false
-            iconField.stringValue = ToolCallView.icon(for: call.name)
-            setText(ToolGroupSummary.header(for: call), on: summary, color: Theme.fgMuted)
-        }
-        setActivity(running != nil)
-        let failure = ToolGroupSummary.failureText(for: group)
-        badge.isHidden = failure == nil
-        setText(failure.map { "· \($0)" } ?? "", on: badge, color: Theme.foldFailure)
-        let stoppedText = ToolGroupSummary.stoppedSuffix(for: group)
-        stopped.isHidden = stoppedText == nil
-        setText(stoppedText.map { "· \($0)" } ?? "", on: stopped, color: Theme.fgMuted)
-        refreshElapsed()
+    /// `· N failed`, or hidden for nil.
+    func setFailure(_ text: String?) {
+        badge.isHidden = text == nil
+        setText(text.map { "· \($0)" } ?? "", on: badge, color: Theme.foldFailure)
     }
 
-    /// Re-read the clock: the running call's elapsed time, or the settled group's duration.
-    func refreshElapsed() {
-        let text = group.state == .running
-            ? ToolGroupSummary.runningElapsedText(for: group, now: now())
-            : ToolGroupSummary.durationText(for: group)
+    /// `· 41 s`, or hidden for nil.
+    func setTime(_ text: String?) {
         time.isHidden = text == nil
         setText(text.map { "· \($0)" } ?? "", on: time, color: Theme.fgMuted)
     }
 
+    /// `· stopped`, or hidden for nil.
+    func setStopped(_ text: String?) {
+        stopped.isHidden = text == nil
+        setText(text.map { "· \($0)" } ?? "", on: stopped, color: Theme.fgMuted)
+    }
+
     /// Show or hide the activity dot. It pulses unless Reduce Motion is on.
-    private func setActivity(_ active: Bool) {
+    func setActivity(_ active: Bool) {
         guard let dot = activityView.layer else { return }
         activityView.isHidden = !active
         guard active, !reduceMotion() else {
@@ -652,7 +639,7 @@ final class ToolGroupRowView: NSView {
         ])
     }
 
-    private func setText(_ text: String, on field: NSTextField, color: NSColor) {
+    func setText(_ text: String, on field: NSTextField, color: NSColor) {
         guard field.stringValue != text else { return }
         // Font and colour go in the string *and* on the cell: the field editor that takes
         // over on selection reads the cell (see `ToolCallView`).
@@ -746,7 +733,7 @@ final class ToolGroupRowView: NSView {
 
     /// Focusable from the keyboard, but a click never takes focus from the composer: the
     /// window asks this during the mouse-down it is about to deliver. Nothing else here ever
-    /// makes a row first responder, so a group updating cannot either.
+    /// makes a row first responder, so a row updating cannot either.
     override var acceptsFirstResponder: Bool {
         guard let type = NSApp?.currentEvent?.type else { return true }
         return ![.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(type)
@@ -768,7 +755,7 @@ final class ToolGroupRowView: NSView {
     override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill() }
 
     override func keyDown(with event: NSEvent) {
-        // ⌘→, ⌥←, ⌃↑… belong to someone else (TF4's Expand/Collapse All among them).
+        // ⌘→, ⌥←, ⌃↑… belong to someone else (FV4's Focus / Show All among them).
         guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else {
             return super.keyDown(with: event)
         }
@@ -782,7 +769,8 @@ final class ToolGroupRowView: NSView {
         }
     }
 
-    /// Focus the previous/next group row that exists (is materialized) in this pane.
+    /// Focus the previous/next fold row (tool group or activity row) that exists (is
+    /// materialized) and shows in this pane.
     private func moveFocus(by step: Int) {
         guard let window else { return }
         let root = enclosingScrollView?.documentView ?? window.contentView ?? self
@@ -795,9 +783,9 @@ final class ToolGroupRowView: NSView {
         target.scrollToVisible(target.bounds)
     }
 
-    private static func rows(in view: NSView) -> [ToolGroupRowView] {
-        view.subviews.flatMap { sub -> [ToolGroupRowView] in
-            if let row = sub as? ToolGroupRowView { return sub.isHiddenOrHasHiddenAncestor ? [] : [row] }
+    private static func rows(in view: NSView) -> [FoldRowView] {
+        view.subviews.flatMap { sub -> [FoldRowView] in
+            if let row = sub as? FoldRowView { return sub.isHiddenOrHasHiddenAncestor ? [] : [row] }
             return rows(in: sub)
         }
     }
@@ -805,9 +793,96 @@ final class ToolGroupRowView: NSView {
     /// ⌘C with the row focused (and so no text selected): the summary.
     @objc func copy(_ sender: Any?) { copySummary() }
 
+    // MARK: Copy (for subclasses)
+
+    func contextMenu() -> NSMenu { NSMenu() }
+
+    func copySummary() {}
+
+    func put(_ string: String) {
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
+    }
+
+    // MARK: Accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .disclosureTriangle }
+    override func accessibilityValue() -> Any? { isExpanded ? "expanded" : "collapsed" }
+    override func accessibilityChildren() -> [Any]? { [] }
+    override func accessibilityPerformPress() -> Bool {
+        toggle()
+        return true
+    }
+}
+
+// MARK: - ToolGroupRowView
+
+/// The group's row: summary (or, for a group of one, the call's own header), failure badge,
+/// time; while running, the live text and the activity dot.
+final class ToolGroupRowView: FoldRowView {
+
+    private(set) var group: ToolGroup
+    private let payloadAvailable: Bool
+    /// The clock the running call's elapsed time is read from. Injected by tests.
+    private let now: () -> Date
+
+    init(group: ToolGroup, isExpanded: Bool, payloadAvailable: Bool,
+         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+         now: @escaping () -> Date = Date.init) {
+        self.group = group
+        self.payloadAvailable = payloadAvailable
+        self.now = now
+        super.init(reduceMotion: reduceMotion)
+        update(group: group)
+        setExpanded(isExpanded, animated: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: Content
+
+    #if DEBUG
+    /// Every `update(group:)`, so tests can hold a turn build to one summary per group.
+    static var updateCount = 0
+    #endif
+
+    /// Show `group` as it stands. In place: the row's height never changes, so an update never
+    /// needs a re-measure, and it posts nothing to VoiceOver (no announcement per call).
+    func update(group: ToolGroup) {
+        #if DEBUG
+        Self.updateCount += 1
+        #endif
+        self.group = group
+        let running = ToolGroupSummary.runningTitle(for: group)
+        if let running {
+            iconField.isHidden = true
+            setSummary(running)
+        } else if let text = ToolGroupSummary.summary(for: group) {
+            iconField.isHidden = true
+            setSummary(text)
+        } else if let call = group.calls.first {
+            // A group of one reads as its call's own header.
+            iconField.isHidden = false
+            iconField.stringValue = ToolCallView.icon(for: call.name)
+            setSummary(ToolGroupSummary.header(for: call))
+        }
+        setActivity(running != nil)
+        setFailure(ToolGroupSummary.failureText(for: group))
+        setStopped(ToolGroupSummary.stoppedSuffix(for: group))
+        refreshElapsed()
+    }
+
+    /// Re-read the clock: the running call's elapsed time, or the settled group's duration.
+    func refreshElapsed() {
+        setTime(group.state == .running
+            ? ToolGroupSummary.runningElapsedText(for: group, now: now())
+            : ToolGroupSummary.durationText(for: group))
+    }
+
     // MARK: Copy
 
-    func contextMenu() -> NSMenu {
+    override func contextMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(withTitle: "Copy Commands", action: #selector(copyCommandsAction), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy Summary", action: #selector(copySummaryAction), keyEquivalent: "").target = self
@@ -822,28 +897,15 @@ final class ToolGroupRowView: NSView {
         put(ToolGroupSummary.commandsText(for: group, payloadAvailable: payloadAvailable))
     }
 
-    func copySummary() {
+    override func copySummary() {
         put(ToolGroupSummary.plainText(for: group))
-    }
-
-    private func put(_ string: String) {
-        pasteboard.clearContents()
-        pasteboard.setString(string, forType: .string)
     }
 
     // MARK: Accessibility
 
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .disclosureTriangle }
     /// While running, the live text (VoiceOver reads it when the row is focused; nothing is
     /// announced per call).
     override func accessibilityLabel() -> String? { ToolGroupSummary.accessibilityLabel(for: group, now: now()) }
-    override func accessibilityValue() -> Any? { isExpanded ? "expanded" : "collapsed" }
-    override func accessibilityChildren() -> [Any]? { [] }
-    override func accessibilityPerformPress() -> Bool {
-        toggle()
-        return true
-    }
 }
 
 // MARK: - AgentActivityView

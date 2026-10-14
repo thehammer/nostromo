@@ -83,14 +83,16 @@ final class ToolGroupViewTests: XCTestCase {
 
     // MARK: collapsed
 
-    func testACollapsedRunOfCallsIsOneRowBetweenTheProse() {
-        let turn = F.turn([.text("before")] + F.run(4) + [.text("after")])
+    // Under the Focus layout a run of calls with a message after it folds into the activity row
+    // (FocusLayoutTests); the run after the latest message is the TF2 group row, as it always was.
+    func testACollapsedRunOfCallsAfterTheLatestMessageIsOneRow() {
+        let turn = F.turn([.text("before")] + F.run(4))
         let view = makeTurnView(turn)
-        XCTAssertEqual(view.subviews.map(typeName), ["UserBubbleView", "TextBlockView", "ToolGroupView", "TextBlockView"])
+        XCTAssertEqual(view.subviews.map(typeName), ["UserBubbleView", "TextBlockView", "ToolGroupView"])
     }
 
     func testACollapsedGroupBuildsNoCallOrResultViewAnywhere() {
-        let turn = F.turn([.text("before")] + F.run(4) + [.text("after")])
+        let turn = F.turn([.text("before")] + F.run(4))
         let view = makeTurnView(turn)
         let all = rigAllSubviews(of: view)
         XCTAssertFalse(all.contains { $0 is ToolCallView }, "no call header while collapsed")
@@ -99,7 +101,7 @@ final class ToolGroupViewTests: XCTestCase {
     }
 
     func testACollapsedGroupsRowShowsTheSummary() throws {
-        let turn = F.turn([.text("before")] + F.run(4) + [.text("after")])
+        let turn = F.turn([.text("before")] + F.run(4))
         let group = F.groups(of: turn)[0]
         let view = makeTurnView(turn)
         let row = try XCTUnwrap(groupViews(in: view).first?.row)
@@ -119,7 +121,8 @@ final class ToolGroupViewTests: XCTestCase {
     func testAnIdlessGroupIsKeyedByTheTurnsIdentityAndTheCallsOrdinal() {
         let blocks: [TurnBlock] = [F.call(summary: "a"), F.result(), F.call(summary: "b"), .text("break"), F.call(summary: "c")]
         let turn = F.turn(blocks)
-        let keys = groupViews(in: makeTurnView(turn)).map(\.group.key)
+        // The first group has the message after it, so it is in the activity row: open the row.
+        let keys = groupViews(in: makeTurnView(turn, interaction: F.rowsOpen(turn))).map(\.group.key)
         XCTAssertEqual(keys, ["g:\(turn.identityKey)#c0", "g:\(turn.identityKey)#c2"])
     }
 
@@ -143,7 +146,7 @@ final class ToolGroupViewTests: XCTestCase {
     // MARK: expanded
 
     func testAnExpandedGroupShowsTheCallsAndResultsInBlockOrder() throws {
-        let turn = F.turn([.text("before")] + F.run(4) + [.text("after")])
+        let turn = F.turn([.text("before")] + F.run(4))
         let key = F.groups(of: turn)[0].key
         for view in [makeTurnView(turn, interaction: expanded(key)),
                      makeTurnView(turn, folds: FoldResolver(expandedByDefault: true))] {
@@ -167,7 +170,8 @@ final class ToolGroupViewTests: XCTestCase {
         let turn = F.turn(F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"))
         var state = TurnInteractionState()
         state.groupStates["g:b0"] = true
-        let collapsedDefault = groupViews(in: makeTurnView(turn, interaction: state)).map(\.isExpanded)
+        // Group a has the message after it: open its activity row to see it.
+        let collapsedDefault = groupViews(in: makeTurnView(turn, interaction: F.rowsOpen(turn, in: state))).map(\.isExpanded)
         XCTAssertEqual(collapsedDefault, [false, true])
         var close = TurnInteractionState()
         close.groupStates["g:a0"] = false
@@ -228,7 +232,7 @@ final class ToolGroupViewTests: XCTestCase {
     // MARK: toggling
 
     func testClickingTheRowOpensTheGroupAndTellsTheOwnerAndTheHeightGrows() throws {
-        let turn = F.turn([.text("before")] + F.run(4) + [.text("after")])
+        let turn = F.turn([.text("before")] + F.run(4))
         let key = F.groups(of: turn)[0].key
         let view = makeTurnView(turn)
         var toggles: [String] = []
@@ -252,7 +256,7 @@ final class ToolGroupViewTests: XCTestCase {
     }
 
     func testAnExpandedTurnsHeightIsWhatAFreshlyBuiltExpandedTurnMeasures() throws {
-        let turn = F.turn([.text("before")] + F.run(4) + [.text("after")])
+        let turn = F.turn([.text("before")] + F.run(4))
         let key = F.groups(of: turn)[0].key
         let clicked = makeTurnView(turn)
         try XCTUnwrap(groupViews(in: clicked).first).row.toggle()
@@ -273,16 +277,26 @@ final class ToolGroupViewTests: XCTestCase {
     func testEachSeparatorSplitsTwoRunsAndStaysOutsideEveryGroup() {
         for separator in separators() {
             let turn = F.turn(F.run(2, prefix: "a") + [separator.block] + F.run(2, prefix: "b"))
-            for folds in [FoldResolver(), FoldResolver(expandedByDefault: true)] {
-                let view = makeTurnView(turn, folds: folds)
+            // Prose is a message under Focus: the run before it folds into an activity row (open here
+            // so its group can be looked at), and the prose, being the latest message, is not in it.
+            let isProse = separator.name == "prose"
+            let open = F.rowsOpen(turn)
+            for folds in [FoldResolver(state: open), FoldResolver(state: open, expandedByDefault: true)] {
+                let view = makeTurnView(turn, interaction: open, folds: folds)
                 let direct = view.subviews.filter { !($0 is UserBubbleView) }
-                XCTAssertEqual(direct.count, 3, "\(separator.name): group, separator, group")
+                XCTAssertEqual(direct.count, 3, "\(separator.name): \(isProse ? "row" : "group"), separator, group")
                 guard direct.count == 3 else { continue }
-                XCTAssertTrue(direct[0] is ToolGroupView && direct[2] is ToolGroupView, "\(separator.name)")
+                XCTAssertTrue(isProse ? direct[0] is ActivityRowView : direct[0] is ToolGroupView, "\(separator.name)")
+                XCTAssertTrue(direct[2] is ToolGroupView, "\(separator.name)")
                 XCTAssertTrue(separator.isThatView(direct[1]), "\(separator.name): the middle column is \(typeName(direct[1]))")
+                XCTAssertEqual(groupViews(in: view).count, 2, "\(separator.name): two runs, two groups")
                 for group in groupViews(in: view) {
                     XCTAssertFalse(rigAllSubviews(of: group).contains(where: separator.isThatView),
                                    "\(separator.name) must never be inside a group")
+                }
+                if let row = direct[0] as? ActivityRowView {
+                    XCTAssertFalse(row.laneMemberViews.contains { rigAllSubviews(of: $0).contains(where: separator.isThatView) || separator.isThatView($0) },
+                                   "\(separator.name) must never be inside the activity row")
                 }
             }
         }
@@ -519,7 +533,8 @@ final class ToolGroupRowTests: XCTestCase {
     }
 
     func testUpAndDownArrowsMoveFocusBetweenGroupRowsInTheSameWindow() throws {
-        let turn = F.turn(F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"))
+        // A note between the runs (prose would fold the first run into an activity row).
+        let turn = F.turn(F.run(2, prefix: "a") + [.note("between")] + F.run(2, prefix: "b"))
         let rig = makeTranscriptRig(self, blocks: turn.blocks)
         let rows = rigAllSubviews(of: rig.turn).compactMap { $0 as? ToolGroupRowView }
         XCTAssertEqual(rows.count, 2)
@@ -829,9 +844,9 @@ final class ToolGroupSelectionTests: XCTestCase {
     private static let sentinel = "HIDDEN-OUTPUT-SENTINEL"
 
     private func turnWithHiddenOutput() -> ChatTurn {
+        // Ends on the group, so it is the trailing group row (a message after it would fold it into a row).
         F.turn([.text("Intro prose that is long enough to be a real paragraph of assistant text. " + F.prose)]
-               + F.run(3, output: { "result \($0) \(Self.sentinel) more output" })
-               + [.text("Outro prose, also a paragraph of assistant text. " + F.prose)])
+               + F.run(3, output: { "result \($0) \(Self.sentinel) more output" }))
     }
 
     private func everyString(in view: NSView) -> [String] {
@@ -877,8 +892,7 @@ final class ToolGroupSelectionTests: XCTestCase {
 
     func testADragFromTheProseIntoTheRowSelectsOnlyProseText() throws {
         let prose = "Intro prose that is long enough to be a real paragraph of assistant text. " + F.prose
-        let rig = makeTranscriptRig(self, blocks: [.text(prose)] + F.run(3, output: { "result \($0) \(Self.sentinel)" })
-                                    + [.text("Outro. " + F.prose)])
+        let rig = makeTranscriptRig(self, blocks: [.text(prose)] + F.run(3, output: { "result \($0) \(Self.sentinel)" }))
         let proseLabel = try XCTUnwrap(textFields(in: rig.turn).first { $0.stringValue == prose },
                                        "the first paragraph is a label: \(textFields(in: rig.turn).map(\.stringValue))")
         let row = try XCTUnwrap(rigAllSubviews(of: rig.turn).compactMap { $0 as? ToolGroupRowView }.first)
@@ -915,8 +929,7 @@ final class ToolGroupColdTurnTests: XCTestCase {
             F.call("Bash", id: "c1", summary: "make build", start: 0), F.result("built", id: "c1", time: 1.0),
             F.call("Bash", id: "c2", summary: "make test", start: 1), F.result("1 failure", id: "c2", isError: true, time: 4.1),
             F.call("Read", id: "c3", summary: "Package.swift", target: "/repo/Package.swift", start: 2),
-            F.result("// swift-tools", id: "c3", time: 3),
-            .text("done")]
+            F.result("// swift-tools", id: "c3", time: 3)]
         return F.turn(blocks)
     }
 
@@ -990,7 +1003,7 @@ final class ToolGroupColdTurnTests: XCTestCase {
 final class ToolGroupCostTests: XCTestCase {
 
     private func turnWithGroup(of n: Int) -> ChatTurn {
-        F.turn([.text("before")] + F.run(n) + [.text("after")])
+        F.turn([.text("before")] + F.run(n))
     }
 
     #if DEBUG
@@ -1074,7 +1087,8 @@ final class ToolGroupReviewFollowUpTests: XCTestCase {
     func testBuildingATurnUpdatesEachGroupRowAtMostTwice() {
         let turn = F.turn([.text(F.prose)] + F.run(1_000, name: "Read") + [.text(F.prose)] + F.run(3, prefix: "b"))
         ToolGroupRowView.updateCount = 0
-        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState())
+        // The 1,000-call group is in an activity row (a message follows it): open the row so it is built.
+        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: F.rowsOpen(turn))
         XCTAssertEqual(rigAllSubviews(of: view).compactMap { $0 as? ToolGroupView }.count, 2)
         XCTAssertLessThanOrEqual(ToolGroupRowView.updateCount, 4, "one at creation and one with the final state, per group")
     }
@@ -1093,7 +1107,8 @@ final class ToolGroupReviewFollowUpTests: XCTestCase {
     /// Toggling a focused row re-measures its turn, which detaches it; focus must come back
     /// so a second Space (or ↓) still reaches the row.
     func testAKeyboardFocusedRowKeepsFocusAcrossItsOwnToggleAndRemeasure() throws {
-        let turn = F.turn([.text(F.prose)] + F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"))
+        // A note between the runs (prose would fold the first run into an activity row).
+        let turn = F.turn([.text(F.prose)] + F.run(2, prefix: "a") + [.note("between")] + F.run(2, prefix: "b"))
         let rig = makeTranscriptRig(self, blocks: turn.blocks)
         let rows = rigAllSubviews(of: rig.turn).compactMap { $0 as? ToolGroupRowView }
         guard rows.count == 2 else { return XCTFail("expected two rows, got \(rows.count)") }
@@ -1148,7 +1163,15 @@ final class ToolGroupReviewFollowUpTests: XCTestCase {
         let first = virtualizer.foldShape(for: turn)
         XCTAssertEqual(first, virtualizer.foldShape(for: turn))
         turn.blocks += [.text("more"), F.call(id: "z")]
-        XCTAssertEqual(virtualizer.foldShape(for: turn)?.items.count, 3 + 1, "prose, group, prose, new group")
-        XCTAssertNil(virtualizer.foldShape(for: F.turn([.text(F.prose)])), "nothing folds without tool calls")
+        let grown = virtualizer.foldShape(for: turn)
+        XCTAssertNotEqual(grown, first, "the changed blocks were planned again")
+        XCTAssertEqual(grown?.items.count, 3, "Focus: an activity row (prose, group), the latest message, the new group")
+        if case .activity(_, let members)? = grown?.items.first {
+            XCTAssertEqual(members.count, 2, "the row folds the first prose and the first group")
+        } else {
+            XCTFail("the first item is the activity row: \(String(describing: grown?.items))")
+        }
+        XCTAssertEqual(virtualizer.foldShape(for: F.turn([.text(F.prose)]))?.items, [.message([0])],
+                       "a turn with one message and nothing to fold is that message")
     }
 }

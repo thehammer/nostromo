@@ -35,8 +35,10 @@ private let signposter = OSSignposter(subsystem: "com.hammer.nostromo", category
 ///   NOSTROMO_LOAD_DURATION=24h     keep driving for a soak run
 ///   NOSTROMO_LOAD_BIG_TURN_BLOCKS=160   one turn of N blocks, before the rest
 ///   NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS=60  rows in that turn's markdown table
-///   NOSTROMO_LOAD_FIXTURE=benchmark  open the benchmark transcript instead (below)
-///   NOSTROMO_LOAD_FOLD_DEFAULT=collapsed|expanded  tool groups' default (harness only)
+///   NOSTROMO_LOAD_FIXTURE=benchmark  open the benchmark transcript instead (below);
+///                                    `benchmark-focus` opens the Focus view's scenario turns
+///   NOSTROMO_LOAD_FOLD_DEFAULT=collapsed|expanded  Focus (collapsed) or Show All (every tool
+///                                    group and activity row open; harness only)
 ///
 /// ## Open-fixture mode
 ///
@@ -46,6 +48,8 @@ private let signposter = OSSignposter(subsystem: "com.hammer.nostromo", category
 /// snapshot, the way an attach does, then logs how long the pane takes to settle
 /// at the tail: `fixture-open ms=<n> rows=<materialized views> turns=<n>`. That
 /// number is the "today" baseline the tool-fold work is graded against.
+/// `NOSTROMO_LOAD_FIXTURE=benchmark-focus` does the same with
+/// `BenchmarkTranscript.focusScenariosJSON()` (the Focus view's scenario turns).
 ///
 /// "Settled" is read from the pane's own diagnostics (materialized view count and
 /// document height unchanged for `fixtureSettlePolls` polls) rather than from a
@@ -79,8 +83,8 @@ final class TranscriptLoadHarness {
         ProcessInfo.processInfo.environment["NOSTROMO_LOAD_HARNESS"] == "1"
     }
 
-    /// `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`: tool groups start open, to time the fixture
-    /// the way it rendered before folding. Ignored outside the harness.
+    /// `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`: tool groups and activity rows start open (Show
+    /// All), to time the fixture with every block it renders. Ignored outside the harness.
     static var foldsExpandedByDefault: Bool {
         isActive && ProcessInfo.processInfo.environment["NOSTROMO_LOAD_FOLD_DEFAULT"] == "expanded"
     }
@@ -279,21 +283,28 @@ final class TranscriptLoadHarness {
     /// Attach to a pre-built transcript in one `.sessionTurns` snapshot and time
     /// how long the pane takes to settle at the tail.
     private func openFixture(named name: String) {
-        guard name == "benchmark" else {
-            let message = "load harness: unknown NOSTROMO_LOAD_FIXTURE=\(name) (known: benchmark)\n"
-            log.error("\(message, privacy: .public)")
-            FileHandle.standardError.write(Data(message.utf8))
-            exit(2)
-        }
         // Decode before anything is timed: only the pane's work is under test.
-        let json = BenchmarkTranscript.sessionTurnsJSON(emptyResults: false)
-        guard let turns = try? JSONDecoder().decode([DaemonTurn].self, from: json) else {
-            let message = "load harness: benchmark fixture failed to decode\n"
+        let json: Data
+        switch name {
+        case "benchmark":
+            json = BenchmarkTranscript.sessionTurnsJSON(emptyResults: false)
+        case "benchmark-focus":
+            // The Focus view's scenario turns (contract X2): a separate fixture, so `benchmark`
+            // stays byte-identical and its baselines comparable.
+            json = BenchmarkTranscript.focusScenariosJSON()
+        default:
+            let message = "load harness: unknown NOSTROMO_LOAD_FIXTURE=\(name) (known: benchmark, benchmark-focus)\n"
             log.error("\(message, privacy: .public)")
             FileHandle.standardError.write(Data(message.utf8))
             exit(2)
         }
-        log.info("load harness: opening benchmark fixture, \(turns.count, privacy: .public) turns")
+        guard let turns = try? JSONDecoder().decode([DaemonTurn].self, from: json) else {
+            let message = "load harness: \(name) fixture failed to decode\n"
+            log.error("\(message, privacy: .public)")
+            FileHandle.standardError.write(Data(message.utf8))
+            exit(2)
+        }
+        log.info("load harness: opening \(name, privacy: .public) fixture, \(turns.count, privacy: .public) turns")
 
         client.connected.send(true)
         for tag in tags {

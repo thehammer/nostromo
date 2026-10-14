@@ -1,25 +1,39 @@
 import Foundation
 import NostromoKit
 
-/// How a turn's tool groups resolve open or closed (contract §2.4), first match wins:
+/// How a turn's foldables resolve open or closed (FV contract §2.2, `FocusFoldResolver`), first
+/// match wins:
 /// 1. the operator's explicit choice;
-/// 2. the stuck-turn auto-open: a recorded auto entry, or the derived `ToolGroup.isStuck`;
-/// 3. the default (collapsed, or expanded under `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`).
+/// 2. (tool groups only) the stuck-turn auto-open: a recorded auto entry, or the derived
+///    `ToolGroup.isStuck`. Activity rows never auto-open;
+/// 3. the mode: Focus closes, All activity opens (`NOSTROMO_LOAD_FOLD_DEFAULT=expanded` in the
+///    load harness). Every pane is in Focus until FV4 adds the toggle.
 struct FoldResolver: Equatable {
     /// `ToolGroup.key` → explicit choice.
     var groupStates: [String: Bool] = [:]
     /// Keys the stuck-turn rule opened.
     var groupAuto: Set<String> = []
-    var expandedByDefault = false
+    /// `ActivitySegment.key` → explicit choice.
+    var activityStates: [String: Bool] = [:]
+    var mode: TranscriptViewMode = .focus
 
-    init(groupStates: [String: Bool] = [:], groupAuto: Set<String> = [], expandedByDefault: Bool = false) {
+    /// Everything starts open: All activity (the harness's "Show All").
+    var expandedByDefault: Bool {
+        get { mode == .allActivity }
+        set { mode = newValue ? .allActivity : .focus }
+    }
+
+    init(groupStates: [String: Bool] = [:], groupAuto: Set<String> = [],
+         activityStates: [String: Bool] = [:], expandedByDefault: Bool = false) {
         self.groupStates = groupStates
         self.groupAuto = groupAuto
-        self.expandedByDefault = expandedByDefault
+        self.activityStates = activityStates
+        self.mode = expandedByDefault ? .allActivity : .focus
     }
 
     init(state: TurnInteractionState, expandedByDefault: Bool = false) {
-        self.init(groupStates: state.groupStates, groupAuto: state.groupAuto, expandedByDefault: expandedByDefault)
+        self.init(groupStates: state.groupStates, groupAuto: state.groupAuto,
+                  activityStates: state.activityStates, expandedByDefault: expandedByDefault)
     }
 
     func isExpanded(_ group: ToolGroup) -> Bool {
@@ -27,32 +41,72 @@ struct FoldResolver: Equatable {
     }
 
     func isExpanded(key: String, isStuck: Bool = false) -> Bool {
-        if let explicit = groupStates[key] { return explicit }
-        if isStuck || groupAuto.contains(key) { return true }
-        return expandedByDefault
+        FocusFoldResolver.isOpen(.toolGroup, mode: mode, explicit: groupStates[key],
+                                 auto: groupAuto.contains(key), derivedStuck: isStuck)
+    }
+
+    /// Whether the activity row `key` (`ActivitySegment.key`) is open.
+    func isActivityExpanded(key: String) -> Bool {
+        FocusFoldResolver.isOpen(.activityRow, mode: mode, explicit: activityStates[key],
+                                 auto: nil, derivedStuck: false)
     }
 }
 
-/// What folding makes of a turn, without its text: the items, and for each group its key,
-/// members and agent rows. Enough to estimate the turn at any width, and small enough to
-/// cache, so a resize or a reset does not re-run the planner over every turn.
+/// What the Focus view makes of a turn, without its text: the items, and for each group and
+/// activity row its key and members. Enough to estimate the turn at any width, and small
+/// enough to cache, so a resize or a reset does not re-run the planner over every turn.
 struct FoldShape: Equatable {
+    struct Group: Equatable {
+        let key: String
+        let members: [Int]
+        let agentRows: Int
+        let isStuck: Bool
+    }
+
     enum Item: Equatable {
+        /// A block rendered as itself: a boundary (chip, card, error, note, orphan).
         case block(Int)
-        case group(key: String, members: [Int], agentRows: Int, isStuck: Bool)
+        /// The latest message: one text block view per block index.
+        case message([Int])
+        case group(Group)
+        /// An activity row; when expanded its lane shows `memberShapes` (`.message` with the
+        /// message's non-empty text blocks, `.group`).
+        case activity(key: String, memberShapes: [Item])
     }
 
     let items: [Item]
 
-    init(_ turn: ChatTurn) {
-        items = ToolFoldAdapter.plan(turn).map { item in
-            switch item {
-            case .block(let i): return .block(i)
-            case .group(let g):
-                return .group(key: g.key, members: g.memberIndices, agentRows: g.subagentBlocks.count,
-                              isStuck: g.isStuck)
-            }
+    /// `held`: messages whose roll-in the pane holds back (`FocusPlanner.items(holding:)`).
+    init(_ turn: ChatTurn, held: Set<Int> = []) {
+        var planner = FocusPlanner(turnKey: turn.identityKey)
+        for block in ToolFoldAdapter.foldBlocks(of: turn) { _ = planner.feed(block) }
+        _ = planner.turnEnded(outcome: ToolFoldAdapter.outcome(of: turn))
+        items = planner.items(holding: held).map { Self.item($0, turn: turn) }
+    }
+
+    private static func item(_ item: FocusItem, turn: ChatTurn) -> Item {
+        switch item {
+        case .boundary(let i):  return .block(i)
+        case .message(let m):   return .message(m.blockIndices)
+        case .group(let g):     return .group(group(g))
+        case .activity(let segment):
+            return .activity(key: segment.key, memberShapes: segment.members.map { member in
+                switch member {
+                case .group(let g):
+                    return .group(group(g))
+                case .message(let m):
+                    // The lane shows a folded message's visible text only (`ActivityRowView`).
+                    return .message(m.blockIndices.filter { i in
+                        guard turn.blocks.indices.contains(i), case .text(let text) = turn.blocks[i] else { return false }
+                        return text.contains { !$0.isWhitespace }
+                    })
+                }
+            })
         }
+    }
+
+    private static func group(_ g: ToolGroup) -> Group {
+        Group(key: g.key, members: g.memberIndices, agentRows: g.subagentBlocks.count, isStuck: g.isStuck)
     }
 
     /// Whether a cached shape still describes `turn`: same block kinds, same subagent prose.
@@ -130,13 +184,14 @@ enum ToolFoldAdapter {
     }
 
     /// Stable digest of the fold state a turn renders with, for the height-cache key.
-    /// Empty when the turn carries no explicit group choice and no expanded result.
+    /// Empty when the turn carries no explicit choice, no expanded result and no hold.
     ///
     /// Built from the state alone (sorted, so dictionary order cannot change it): the
-    /// resolver is "explicit choice, else the default", so the explicit choices and the
-    /// default are everything that decides which groups and results are open.
+    /// resolver is "explicit choice, else the default", so the explicit choices, the holds and
+    /// the default are everything that decides what is open.
     static func foldDigest(turn: ChatTurn, state: TurnInteractionState, expandedByDefault: Bool = false) -> String {
         guard !state.groupStates.isEmpty || !state.expandedBlocks.isEmpty || !state.groupAuto.isEmpty
+                || !state.activityStates.isEmpty || !state.heldOrdinals.isEmpty
                 || expandedByDefault else { return "" }
         var text = expandedByDefault ? "E" : "C"
         for key in state.groupStates.keys.sorted() {
@@ -144,11 +199,18 @@ enum ToolFoldAdapter {
         }
         if !state.groupAuto.isEmpty { text += "|a" + state.groupAuto.sorted().joined(separator: ",") }
         text += "|b" + state.expandedBlocks.sorted().map(String.init).joined(separator: ",")
+        if !state.activityStates.isEmpty {
+            text += "|A" + state.activityStates.keys.sorted()
+                .map { "\($0)=\(state.activityStates[$0]! ? 1 : 0)" }.joined(separator: ",")
+        }
+        if !state.heldOrdinals.isEmpty {
+            text += "|h" + state.heldOrdinals.sorted().map(String.init).joined(separator: ",")
+        }
         return fnv1a(text)
     }
 
-    /// Rows a pane shows with folding (an item each; an expanded group adds its members) and
-    /// the number of tool groups, for `TranscriptDiagnostics`.
+    /// Rows a pane shows in the Focus view, and its tool groups (every group, also those
+    /// folded into activity rows), for `TranscriptDiagnostics`. See `focusRowCount`.
     ///
     /// `shape` supplies a turn's (cached) fold shape; nil plans the turn afresh.
     static func rowCounts(turns: [ChatTurn], resolver: (ChatTurn) -> FoldResolver,
@@ -156,21 +218,54 @@ enum ToolFoldAdapter {
         var rows = 0
         var groups = 0
         for turn in turns {
-            guard hasToolBlocks(turn) else {
-                rows += turn.blocks.count
-                continue
+            let counts = focusRows(shape?(turn) ?? FoldShape(turn), resolver: resolver(turn))
+            rows += counts.rows
+            groups += counts.groups
+        }
+        return (rows, groups)
+    }
+
+    /// Rows `turn` shows in the Focus view: a boundary 1; the latest message 1 per text block; a
+    /// group 1, plus its members when open; an activity row 1, plus, when open, its lane (1 per
+    /// folded text block, and each group as above).
+    static func focusRowCount(of turn: ChatTurn, resolver: FoldResolver) -> Int {
+        focusRows(FoldShape(turn), resolver: resolver).rows
+    }
+
+    /// Rows `turn` showed under TF2's tool folds alone (every planner item one row, an open
+    /// group adds its members): the baseline the Focus view is measured against.
+    static func toolFoldRowCount(of turn: ChatTurn, resolver: FoldResolver) -> Int {
+        guard hasToolBlocks(turn) else { return turn.blocks.count }
+        return plan(turn).reduce(0) { rows, item in
+            switch item {
+            case .block: return rows + 1
+            case .group(let g): return rows + 1 + (resolver.isExpanded(g) ? g.memberIndices.count : 0)
             }
-            let folds = resolver(turn)
-            for item in (shape?(turn) ?? FoldShape(turn)).items {
-                switch item {
-                case .block:
-                    rows += 1
-                case .group(let key, let members, _, let isStuck):
-                    groups += 1
-                    rows += 1 + (folds.isExpanded(key: key, isStuck: isStuck) ? members.count : 0)
+        }
+    }
+
+    private static func focusRows(_ shape: FoldShape, resolver: FoldResolver) -> (rows: Int, groups: Int) {
+        var rows = 0
+        var groups = 0
+        func count(_ item: FoldShape.Item) {
+            switch item {
+            case .block:
+                rows += 1
+            case .message(let indices):
+                rows += indices.count
+            case .group(let g):
+                groups += 1
+                rows += 1 + (resolver.isExpanded(key: g.key, isStuck: g.isStuck) ? g.members.count : 0)
+            case .activity(let key, let members):
+                rows += 1
+                if resolver.isActivityExpanded(key: key) {
+                    members.forEach(count)
+                } else {
+                    groups += members.reduce(0) { if case .group = $1 { return $0 + 1 } else { return $0 } }
                 }
             }
         }
+        shape.items.forEach(count)
         return (rows, groups)
     }
 

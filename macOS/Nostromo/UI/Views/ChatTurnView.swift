@@ -241,8 +241,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private var bubbleHeight: CGFloat = 0
 
     /// The frame-positioned column under the bubble: the truncation banner when
-    /// there is one, then one view per rendered item — a block, or a whole tool
-    /// group (`ToolGroupView`). Parallel to `columnHeights`.
+    /// there is one, then the views of each Focus item (`slots`) — a text block of the latest
+    /// message, a boundary, a whole tool group (`ToolGroupView`) or a whole activity row
+    /// (`ActivityRowView`). Parallel to `columnHeights`.
     private var columnViews: [NSView] = []
     private var columnHeights: [CGFloat] = []
     /// Item key of each column (see `TurnIsland`). Parallel to `columnViews`.
@@ -254,17 +255,42 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// Blocks fed to `planner` so far: the index of the next block.
     private var renderedCount = 0
 
-    /// Folds the turn's tool calls into groups as blocks arrive (see `ToolFoldPlanner`).
-    /// Each block is fed once, so streaming costs the new blocks only.
-    private var planner: ToolFoldPlanner
+    /// Lays the turn out in the Focus view (`FocusPlanner`, which owns TF2's `ToolFoldPlanner`)
+    /// as blocks arrive. Each block is fed once, so streaming costs the new blocks only. The only
+    /// classifier: this view renders the items it is given.
+    private var planner: FocusPlanner
     private var plannerEnded = false
-    /// Block index → its column, for blocks rendered as themselves.
-    private var columnForBlock: [Int: Int] = [:]
-    /// Group id → its view and its column.
+    /// The planner's items as the ops so far leave them (`FocusPlanner.replay`).
+    private var plan: [FocusItem] = []
+    /// Messages whose roll-in this pane holds back (FV2's interim hold): presented through
+    /// `FocusPlanner.items(holding:)`, at their place, as conversation.
+    private var held: Set<Int>
+    /// The latest message's ordinal, from the planner's `.latestChanged`.
+    private var latestOrdinal: Int?
+
+    /// What one rendered item is, for matching it against the next presentation.
+    private enum Identity: Equatable {
+        case activity(String)
+        case message(Int)
+        case boundary(Int)
+        case group(Int)
+    }
+
+    /// One rendered item: its identity and its run of columns.
+    private struct Slot {
+        let identity: Identity
+        let firstColumn: Int
+        var columnCount: Int
+        /// A message's block indices rendered so far.
+        var blockCount: Int
+    }
+
+    /// The rendered items, in order, each over `columnCount` columns from `firstColumn`.
+    private var slots: [Slot] = []
+    /// Group id → its view, for the groups rendered as items (not inside a lane).
     private var groupViews: [Int: ToolGroupView] = [:]
-    private var columnForGroup: [Int: Int] = [:]
-    /// How groups resolve. Kept current: the operator's toggles here and `applyFolds` update it,
-    /// so the stuck-turn rule at turn end sees choices made since the view was built.
+    /// How foldables resolve. Kept current: the operator's toggles here and `applyFolds` update
+    /// it, so the stuck-turn rule at turn end sees choices made since the view was built.
     private var folds: FoldResolver
     /// The clock the running rows read their elapsed time from.
     private let now: () -> Date
@@ -292,8 +318,20 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// persistence, so the state survives the view.
     var onBlockExpansion: ((_ blockIndex: Int, _ isExpanded: Bool) -> Void)?
 
-    /// Fired when the operator opens or closes a tool group, so the choice outlives this view.
+    /// Fired when the operator opens or closes a tool group (here or inside an activity lane),
+    /// so the choice outlives this view.
     var onGroupToggle: ((_ groupKey: String, _ isExpanded: Bool) -> Void)?
+
+    /// Fired when the operator opens or closes an activity row.
+    var onActivityToggle: ((_ key: String, _ isExpanded: Bool) -> Void)?
+
+    /// Asked, during a live update, when a newer message rolls the latest one into activity:
+    /// whether to hold that roll-in back (the pane is not following the tail). Held, the
+    /// outgoing message stays where it is as conversation (`onHold`) until `releaseHolds()`.
+    var holdsRollIns: () -> Bool = { false }
+
+    /// A roll-in was held back: the outgoing message's ordinal, so the pane can remember it.
+    var onHold: ((_ ordinal: Int) -> Void)?
 
     /// Fired when the turn ended in error while streaming and its last group (which has a
     /// failed call) was opened by the stuck-turn rule, so the auto entry can be recorded.
@@ -319,15 +357,18 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// Wired by `ReplView` to `session.send(_:)`.
     var onSend: ((String) -> Void)?
 
-    /// - Parameter folds: how tool groups resolve; nil means the operator's explicit choices
-    ///   in `interaction`, else collapsed.
+    /// - Parameters:
+    ///   - folds: how tool groups and activity rows resolve; nil means the operator's explicit
+    ///     choices in `interaction`, else the Focus default (collapsed).
+    ///   - heldOrdinals: messages whose roll-in the pane is holding back (`holdsRollIns`).
     init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState,
-         folds: FoldResolver? = nil, now: @escaping () -> Date = Date.init) {
+         folds: FoldResolver? = nil, heldOrdinals: Set<Int> = [], now: @escaping () -> Date = Date.init) {
         self.contentAvailable = contentAvailable
         self.interaction      = interaction
         self.folds            = folds ?? FoldResolver(state: interaction)
+        self.held             = heldOrdinals
         self.now              = now
-        self.planner          = ToolFoldPlanner(turnKey: turn.identityKey)
+        self.planner          = FocusPlanner(turnKey: turn.identityKey)
         super.init(frame: .zero)
         // Positioned by frame inside the document view, with exactly one
         // constraint of its own — its width. Nothing ties it to its container or
@@ -398,16 +439,17 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     /// Called as the turn's blocks array grows during live streaming.
     ///
-    /// Renders — and measures — only the blocks that are new. Everything already
+    /// Renders — and measures — only the items that changed. Everything already
     /// rendered keeps its cached height, which is sound precisely because each
     /// block is an island at a fixed width: appending one cannot move an
     /// earlier one.
     ///
-    /// New blocks go through the fold planner, whose ops say what to render: a
-    /// block as itself, a new group, or an existing group that grew. A group that
-    /// grew is updated in place and, only if it is expanded, re-measured; a
-    /// collapsed one keeps its fixed-height row, whose live text (`Running · N
-    /// done · …`) changes synchronously here.
+    /// New blocks go through the Focus planner, whose ops say what changed: an item appended,
+    /// the latest message grown, a group or activity segment changed, or a roll-in (a newer
+    /// message moved the latest one and the trailing groups into the activity row above). A
+    /// changed item is updated in place; a collapsed row or group keeps its fixed-height row,
+    /// whose counts change synchronously here. A roll-in rebuilds only this turn's items from
+    /// the first one it changed.
     ///
     /// The same block count can still be news: a quiet call that finished has its
     /// empty result folded into the call in place (`ToolCompletionFolding`). When
@@ -417,109 +459,254 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         render(turn, live: true)
     }
 
-    /// The tool group view with this key, if this turn has one (the load harness's
-    /// `group-expand`).
+    /// The tool group view with this key: an item of this turn, or inside a built activity lane
+    /// (the load harness's `group-expand`, and tests).
     func groupView(forKey key: String) -> ToolGroupView? {
-        groupViews.values.first { $0.group.key == key }
+        if let view = groupViews.values.first(where: { $0.group.key == key }) { return view }
+        for row in activityRowViews {
+            if let view = row.groupView(forKey: key) { return view }
+        }
+        return nil
     }
 
-    /// Re-resolve every group from `folds`: a change made elsewhere (another window, Expand
-    /// All, the default). Not an operator toggle here, so `onGroupToggle` stays quiet. Groups
-    /// that open or close are re-measured at once. Returns whether any did.
+    /// The activity rows of this turn, in order.
+    var activityRowViews: [ActivityRowView] { columnViews.compactMap { $0 as? ActivityRowView } }
+
+    /// The activity row with this segment key.
+    func activityRowView(forKey key: String) -> ActivityRowView? {
+        activityRowViews.first { $0.segment.key == key }
+    }
+
+    /// Re-resolve every group and activity row from `folds`: a change made elsewhere (another
+    /// window, the mode, the default). Not an operator toggle here, so the toggle callbacks
+    /// stay quiet. Those that open or close are re-measured at once. Returns whether any did.
     @discardableResult
     func applyFolds(_ folds: FoldResolver) -> Bool {
         self.folds = folds
         var changed = false
-        for (id, view) in groupViews {
-            let expanded = folds.isExpanded(view.group)
-            guard expanded != view.isExpanded else { continue }
-            view.setExpanded(expanded)
+        for (column, view) in columnViews.enumerated() {
+            if let group = view as? ToolGroupView {
+                let expanded = folds.isExpanded(group.group)
+                guard expanded != group.isExpanded else { continue }
+                group.setExpanded(expanded)
+            } else if let row = view as? ActivityRowView {
+                let expanded = folds.isActivityExpanded(key: row.segment.key)
+                let opened = expanded != row.isExpanded
+                row.setExpanded(expanded)
+                guard row.applyFolds(folds) || opened else { continue }
+            } else {
+                continue
+            }
             changed = true
-            remeasureGroupColumn(id)
+            remeasureColumnIfMeasured(column)
         }
         return changed
     }
 
-    /// Feed the new blocks to the planner and render what it says.
+    /// Release every held roll-in: the held messages fold into their rows. `turn` is this turn
+    /// as it stands (its blocks are read during the call only). The caller keeps the reading
+    /// position (`ReplView.applyFoldChange`).
+    func releaseHolds(turn: ChatTurn) {
+        guard !held.isEmpty else { return }
+        held = []
+        let blocks = turn.blocks
+        reconcile(with: plan, blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil })
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    /// Messages whose roll-in this view is holding back.
+    var heldOrdinals: Set<Int> { held }
+
+    /// Feed the new blocks to the planner and render what changed.
     ///
-    /// A group's ops are coalesced: however many times the blocks of this call touched a
-    /// group (a whole turn being built touches a 500-call group a thousand times), its view
-    /// is updated once, with the group's final state. The turn's block array is only
-    /// borrowed for the call; holding it would make every block the session appends to
-    /// this turn copy the array.
+    /// The ops of the whole call are applied to `plan` first and the views reconciled once,
+    /// so however many times the blocks of this call touched an item (a whole turn being built
+    /// touches a 500-call group a thousand times), its view is built or updated once, with its
+    /// final state. The turn's block array is only borrowed for the call; holding it would
+    /// make every block the session appends to this turn copy the array.
     ///
     /// `live`: a streaming update, as opposed to the build. Only live updates report groups
-    /// settling and open a stuck group with `onAutoOpen`: what was history when the view was
-    /// built already resolves through `folds`.
+    /// settling, hold roll-ins and open a stuck group with `onAutoOpen`: what was history when
+    /// the view was built already resolves through `folds`.
     private func render(_ turn: ChatTurn, live: Bool) {
         let ending = turn.isComplete && !plannerEnded
         guard turn.blocks.count > renderedCount || ending || !unfinishedCalls.isEmpty else { return }
         let blocks = turn.blocks
-        var touched: [Int] = []
-        var touchedSet = Set<Int>()
-        var settled: [Int] = []
-        func touch(_ id: Int) {
-            if touchedSet.insert(id).inserted { touched.append(id) }
-        }
-        func closeOpenGroup() {
-            if let id = openGroupId { settled.append(id) }
-            openGroupId = nil
-        }
-        func apply(_ ops: [ToolFoldPlanner.Op]) {
-            for op in ops {
-                switch op {
-                case .block(let index):
-                    closeOpenGroup()
-                    columnForBlock[index] = columnViews.count
-                    appendColumnView(makeBlockView(blocks[index], at: index), key: "b\(index)")
-                case .group(let group):
-                    closeOpenGroup()
-                    let view = makeGroupView(group, blocks: blocks)
-                    groupViews[group.id] = view
-                    columnForGroup[group.id] = columnViews.count
-                    appendColumnView(view, key: group.key)
-                    openGroupId = group.id
-                    touch(group.id)
-                case .extend(let group):
-                    touch(group.id)
-                }
-            }
-        }
+        var ops: [FocusOp] = []
 
         // A quiet call finishing changes a block already fed, in place.
         for (id, index) in unfinishedCalls where index < renderedCount {
             guard case .toolCall(let call) = blocks[index], call.finishedQuietly else { continue }
             unfinishedCalls.removeValue(forKey: id)
-            apply(planner.callFinished(toolUseId: id, at: call.finishedAt))
+            ops += planner.callFinished(toolUseId: id, at: call.finishedAt)
         }
         while renderedCount < blocks.count {
             let index = renderedCount
             renderedCount += 1
             noteCompletion(of: blocks[index], at: index)
-            apply(planner.feed(ToolFoldAdapter.foldBlock(blocks[index],
-                                                         parentId: turn.subagentTextParents[index])))
+            ops += planner.feed(ToolFoldAdapter.foldBlock(blocks[index],
+                                                          parentId: turn.subagentTextParents[index]))
         }
         if ending {
             plannerEnded = true
             unfinishedCalls.removeAll()
-            apply(planner.turnEnded(outcome: ToolFoldAdapter.outcome(of: turn)))
-            closeOpenGroup()
+            ops += planner.turnEnded(outcome: ToolFoldAdapter.outcome(of: turn))
         }
-        // A group created by this call was built from its first snapshot; bring it, and
-        // every group extended, to the planner's final state.
-        for id in touched {
-            guard let view = groupViews[id], let group = planner.group(id: id) else { continue }
-            let grew = view.update(group: group, blocks: blocks)
-            if grew { remeasureGroupColumn(id) }
-        }
+
+        let settled = trackOpenGroup(through: ops, ending: ending)
+        if live { holdRollIns(in: ops) }
+        plan = FocusPlanner.replay(ops, onto: plan)
+        reconcile(with: held.isEmpty ? plan : planner.items(holding: held),
+                  blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil })
+
         if ending { openStuckGroup(live: live) }
         if live {
-            for id in settled {
-                if let group = planner.group(id: id) { onGroupSettled?(group) }
-            }
+            for group in settled { onGroupSettled?(group) }
         }
         invalidateIntrinsicContentSize()
         needsLayout = true
+    }
+
+    /// Keep `openGroupId` (the running row's group) current through `ops`; returns the groups
+    /// that closed, with their final state.
+    private func trackOpenGroup(through ops: [FocusOp], ending: Bool) -> [ToolGroup] {
+        var latest: [Int: ToolGroup] = [:]
+        var settled: [Int] = []
+        func closeOpenGroup() {
+            if let id = openGroupId { settled.append(id) }
+            openGroupId = nil
+        }
+        for op in ops {
+            switch op {
+            case .item(.group(let group)):
+                closeOpenGroup()
+                latest[group.id] = group
+                openGroupId = group.id
+            case .item, .rollIn, .latestChanged:
+                closeOpenGroup()
+            case .groupChanged(let group):
+                latest[group.id] = group
+            case .segmentChanged:
+                break
+            }
+        }
+        if ending { closeOpenGroup() }
+        return settled.compactMap { latest[$0] ?? groupViews[$0]?.group }
+    }
+
+    /// A roll-in arrived (a newer message moved the latest one into activity). In a pane that
+    /// does not follow the tail it is held back: the outgoing message stays as it is.
+    private func holdRollIns(in ops: [FocusOp]) {
+        var latest = latestOrdinal
+        for op in ops {
+            switch op {
+            case .rollIn:
+                if let outgoing = latest, !held.contains(outgoing), holdsRollIns() {
+                    held.insert(outgoing)
+                    onHold?(outgoing)
+                }
+            case .latestChanged(let message):
+                latest = message.ordinal
+            default:
+                break
+            }
+        }
+        latestOrdinal = latest
+    }
+
+    /// Bring the views to `items`: items that match what is rendered (same identity, in the
+    /// same place) are updated in place; from the first that does not, the old items' views
+    /// go and the new ones are built. Changes only ever happen at a turn's end (a roll-in, a
+    /// new item) or in place, so the matching prefix is almost the whole turn.
+    private func reconcile(with items: [FocusItem], blockAt: (Int) -> TurnBlock?) {
+        latestOrdinal = items.reduce(latestOrdinal) { latest, item in
+            if case .message(let m) = item { return max(latest ?? m.ordinal, m.ordinal) } else { return latest }
+        }
+        var i = 0
+        while i < items.count, i < slots.count, slots[i].identity == Self.identity(of: items[i]) {
+            guard updateInPlace(slot: i, with: items[i], isLast: i == slots.count - 1, blockAt: blockAt) else { break }
+            i += 1
+        }
+        if i < slots.count { removeSlots(from: i) }
+        for item in items[i...] { appendSlot(item, blockAt: blockAt) }
+    }
+
+    private static func identity(of item: FocusItem) -> Identity {
+        switch item {
+        case .activity(let segment): return .activity(segment.key)
+        case .message(let message):  return .message(message.ordinal)
+        case .boundary(let index):   return .boundary(index)
+        case .group(let group):      return .group(group.id)
+        }
+    }
+
+    /// Update one rendered item to `item` (same identity). False when it cannot be done in place.
+    private func updateInPlace(slot i: Int, with item: FocusItem, isLast: Bool,
+                               blockAt: (Int) -> TurnBlock?) -> Bool {
+        let column = slots[i].firstColumn
+        switch item {
+        case .activity(let segment):
+            guard let row = columnViews[column] as? ActivityRowView else { return false }
+            if row.segment != segment, row.update(segment: segment, blockAt: blockAt) {
+                remeasureColumnIfMeasured(column)
+            }
+        case .message(let message):
+            let rendered = slots[i].blockCount
+            guard message.blockIndices.count != rendered else { return true }
+            // A message only grows while it is the last item.
+            guard isLast, message.blockIndices.count > rendered else { return false }
+            for index in message.blockIndices[rendered...] {
+                appendColumnView(makeBlockView(blockAt(index), at: index), key: "b\(index)")
+            }
+            slots[i].columnCount += message.blockIndices.count - rendered
+            slots[i].blockCount = message.blockIndices.count
+        case .boundary:
+            break
+        case .group(let group):
+            guard let view = groupViews[group.id] else { return false }
+            if view.group != group, view.update(group: group, blockAt: blockAt) {
+                remeasureColumnIfMeasured(column)
+            }
+        }
+        return true
+    }
+
+    /// Render `item` after the last one.
+    private func appendSlot(_ item: FocusItem, blockAt: (Int) -> TurnBlock?) {
+        let first = columnViews.count
+        var blockCount = 0
+        switch item {
+        case .activity(let segment):
+            appendColumnView(makeActivityRow(segment, blockAt: blockAt), key: segment.key)
+        case .message(let message):
+            for index in message.blockIndices {
+                appendColumnView(makeBlockView(blockAt(index), at: index), key: "b\(index)")
+            }
+            blockCount = message.blockIndices.count
+        case .boundary(let index):
+            appendColumnView(makeBlockView(blockAt(index), at: index), key: "b\(index)")
+        case .group(let group):
+            let view = makeGroupView(group, blockAt: blockAt)
+            groupViews[group.id] = view
+            appendColumnView(view, key: group.key)
+        }
+        slots.append(Slot(identity: Self.identity(of: item), firstColumn: first,
+                          columnCount: columnViews.count - first, blockCount: blockCount))
+    }
+
+    /// Drop the views of `slots[from...]`.
+    private func removeSlots(from index: Int) {
+        let firstColumn = slots[index].firstColumn
+        for slot in slots[index...] {
+            if case .group(let id) = slot.identity { groupViews.removeValue(forKey: id) }
+        }
+        slots.removeSubrange(index...)
+        for view in columnViews[firstColumn...] { view.removeFromSuperview() }
+        columnViews.removeSubrange(firstColumn...)
+        columnHeights.removeSubrange(firstColumn...)
+        columnKeys.removeSubrange(firstColumn...)
+        columnWidthConstraints.removeSubrange(firstColumn...)
     }
 
     /// Keep `unfinishedCalls` current as blocks are fed.
@@ -537,9 +724,10 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         }
     }
 
-    /// The turn just ended. If it ended in error with a failed call in its last group, that
-    /// group opens, once (contract §2.4): unless the operator chose a state for it, which wins.
-    /// Nothing ever closes here.
+    /// The turn just ended. If it ended in error with a failed call in its last group, and that
+    /// group sits after the latest message (the trailing group), it opens, once (contract §2.4):
+    /// unless the operator chose a state for it, which wins. A stuck group inside an activity
+    /// row opens when the row is opened. Nothing ever closes here.
     private func openStuckGroup(live: Bool) {
         guard let id = groupViews.keys.max(), let view = groupViews[id], view.group.isStuck,
               !view.isExpanded, folds.groupStates[view.group.key] == nil
@@ -547,57 +735,83 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         let key = view.group.key
         folds.groupAuto.insert(key)
         view.setExpanded(true)
-        remeasureGroupColumn(id)
+        if let column = columnViews.firstIndex(of: view) { remeasureColumnIfMeasured(column) }
         if live { onAutoOpen?(key) }
     }
 
-    private func makeGroupView(_ group: ToolGroup, blocks: [TurnBlock]) -> ToolGroupView {
-        let view = ToolGroupView(group: group, blocks: blocks,
+    private func makeGroupView(_ group: ToolGroup, blockAt: (Int) -> TurnBlock?) -> ToolGroupView {
+        let view = ToolGroupView(group: group, blockAt: blockAt,
                                  contentAvailable: contentAvailable, interaction: interaction,
                                  isExpanded: folds.isExpanded(group), now: now)
-        let id = group.id
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.folds.groupStates[view.group.key] = isExpanded
             self.onGroupToggle?(view.group.key, isExpanded)
-            self.groupChangedHeight(id)
+            self.columnChangedHeight(view)
         }
         view.onBlockExpansion = { [weak self] index, isExpanded in
             self?.onBlockExpansion?(index, isExpanded)
         }
-        view.onHeightChange = { [weak self] in self?.groupChangedHeight(id) }
+        view.onHeightChange = { [weak self, weak view] in
+            guard let self, let view else { return }
+            self.columnChangedHeight(view)
+        }
         view.onBatchWillBuild = { [weak self] in self?.onWillChangeHeight?() }
         return view
     }
 
-    /// One group's height changed (toggled, or a member fold inside it). Only that
-    /// island is re-measured, as for a result fold.
-    /// Re-measure a group's column now, unless a full re-measure is already pending.
-    private func remeasureGroupColumn(_ id: Int) {
-        if !needsFullRemeasure, let column = columnForGroup[id] { remeasureColumnView(at: column) }
+    private func makeActivityRow(_ segment: ActivitySegment, blockAt: (Int) -> TurnBlock?) -> ActivityRowView {
+        var blocks: [Int: TurnBlock] = [:]
+        ActivityRowView.collectBlocks(of: segment, from: blockAt, into: &blocks)
+        let view = ActivityRowView(segment: segment, blocks: blocks, contentAvailable: contentAvailable,
+                                   interaction: interaction, folds: folds,
+                                   isExpanded: folds.isActivityExpanded(key: segment.key), now: now)
+        view.onToggle = { [weak self, weak view] isExpanded in
+            guard let self, let view else { return }
+            self.folds.activityStates[view.segment.key] = isExpanded
+            self.onActivityToggle?(view.segment.key, isExpanded)
+            self.columnChangedHeight(view)
+        }
+        view.onGroupToggle = { [weak self, weak view] key, isExpanded in
+            guard let self, let view else { return }
+            self.folds.groupStates[key] = isExpanded
+            self.onGroupToggle?(key, isExpanded)
+            self.columnChangedHeight(view)
+        }
+        view.onBlockExpansion = { [weak self] index, isExpanded in
+            self?.onBlockExpansion?(index, isExpanded)
+        }
+        view.onHeightChange = { [weak self, weak view] in
+            guard let self, let view else { return }
+            self.columnChangedHeight(view)
+        }
+        view.onBatchWillBuild = { [weak self] in self?.onWillChangeHeight?() }
+        return view
     }
 
-    private func groupChangedHeight(_ id: Int) {
-        guard let column = columnForGroup[id] else { return }
+    /// A column's height changed by itself (a toggle, a member fold, a batch of rows): only that
+    /// island is re-measured, and the owner is told.
+    private func columnChangedHeight(_ view: NSView) {
+        guard let column = columnViews.firstIndex(of: view) else { return }
         remeasureColumnView(at: column)
         onIntrinsicHeightChange?()
     }
 
-    private func makeBlockView(_ block: TurnBlock, at index: Int) -> NSView {
+    private func makeBlockView(_ block: TurnBlock?, at index: Int) -> NSView {
+        guard let block else { return NSView() }
         switch block {
         case .text(let t):           return TextBlockView(text: t)
         case .toolCall(let d):       return ToolCallView(data: d)
         case .toolResult(let d):
             let v = ToolResultView(data: d, contentAvailable: contentAvailable,
                                    startExpanded: interaction.expandedBlocks.contains(index))
-            v.onExpansionChange = { [weak self] isExpanded in
-                guard let self else { return }
+            v.onExpansionChange = { [weak self, weak v] isExpanded in
+                guard let self, let v else { return }
                 self.onBlockExpansion?(index, isExpanded)
                 // Only this block's height changed. Re-measuring the one island
                 // and re-summing is what keeps an expand O(1) in turn size — and
                 // what stops the cached total drifting from what is on screen.
-                if let column = self.columnForBlock[index] { self.remeasureColumnView(at: column) }
-                self.onIntrinsicHeightChange?()
+                self.columnChangedHeight(v)
             }
             return v
         case .resultSummary(let d):  return ResultChipView(data: d)
@@ -715,6 +929,11 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         return height
     }
 
+    /// Re-measure a column now, unless a full re-measure is already pending.
+    private func remeasureColumnIfMeasured(_ index: Int) {
+        if !needsFullRemeasure { remeasureColumnView(at: index) }
+    }
+
     /// Re-measure one column view in place — a tool result that just expanded.
     private func remeasureColumnView(at index: Int) {
         guard columnViews.indices.contains(index) else { return }
@@ -785,15 +1004,24 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     func anchorItem(atY y: CGFloat) -> (key: String, offset: CGFloat)? {
         firstColumn { i, top in
-            top + columnHeights[i] > y ? (columnKeys[i], y - top) : nil
+            guard top + columnHeights[i] > y else { return nil }
+            // Inside an activity row: its row, or the lane member under `y`.
+            if let row = columnViews[i] as? ActivityRowView, let inside = row.anchorItem(atY: y - top) {
+                return inside
+            }
+            return (columnKeys[i], y - top)
         }
     }
 
     func offset(ofItemKey key: String) -> CGFloat? {
-        // `b<i>` can also name a member of an expanded group.
+        // `b<i>` can also name a member of an expanded group; any key can name something in an
+        // expanded activity lane.
         let member = key.hasPrefix("b") ? Int(key.dropFirst()) : nil
         return firstColumn { i, top in
             if columnKeys[i] == key { return top }
+            if let row = columnViews[i] as? ActivityRowView {
+                return row.offset(ofItemKey: key).map { top + $0 }
+            }
             guard let member, let group = columnViews[i] as? ToolGroupView,
                   let inside = group.offset(ofMemberBlock: member) else { return nil }
             return top + inside
@@ -801,11 +1029,14 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     }
 
     func rowRect(forGroupKey key: String) -> NSRect? {
-        guard let top = firstColumn(where: { i, top in
-            columnKeys[i] == key && columnViews[i] is ToolGroupView ? top : nil
-        }) else { return nil }
-        return NSRect(x: Self.blocksLeadingInset, y: top,
-                      width: Self.blockWidth(paneWidth: islandWidth), height: ToolGroupRowView.height)
+        firstColumn { i, top -> NSRect? in
+            if columnKeys[i] == key, columnViews[i] is ToolGroupView {
+                return NSRect(x: Self.blocksLeadingInset, y: top,
+                              width: Self.blockWidth(paneWidth: islandWidth), height: FoldRowView.height)
+            }
+            guard let row = columnViews[i] as? ActivityRowView, let rect = row.rowRect(forGroupKey: key) else { return nil }
+            return rect.offsetBy(dx: Self.blocksLeadingInset, dy: top)
+        }
     }
 
     // MARK: - Elapsed time (ElapsedTicking)
@@ -1001,8 +1232,27 @@ class TextBlockView: NSView, WidthPresettable {
         for card in cards { card.presetWidth = width }
     }
 
-    init(text: String) {
+    /// Whose words these are: the conversation (`Theme.fg`), or an agent message folded into an
+    /// activity row's lane (`Theme.foldedProse`, PRD "Visual distinction"). Only the text colour
+    /// differs; fonts, sizes and so heights are the same.
+    enum Tone {
+        case conversation
+        case folded
+
+        var textColor: NSColor {
+            switch self {
+            case .conversation: return Theme.fg
+            case .folded:       return Theme.foldedProse
+            }
+        }
+    }
+
+    let tone: Tone
+
+    init(text: String, tone: Tone = .conversation) {
+        self.tone = tone
         super.init(frame: .zero)
+        let textColor = tone.textColor
 
         // Route to markdown cards if text has markdown content and no pipe table.
         // (Pipe tables use the existing MarkdownTableView path.)
@@ -1010,7 +1260,7 @@ class TextBlockView: NSView, WidthPresettable {
             let segments = Self.markdownSegments(from: text)
             var prevAnchor: NSLayoutYAxisAnchor = topAnchor
             for (i, segment) in segments.enumerated() {
-                let card = MarkdownCardView(markdown: segment)
+                let card = MarkdownCardView(markdown: segment, textColor: textColor)
                 card.translatesAutoresizingMaskIntoConstraints = false
                 addSubview(card)
                 cards.append(card)
@@ -1037,16 +1287,16 @@ class TextBlockView: NSView, WidthPresettable {
                 let label = CopyMenuTextField(labelWithString: Self.stripMarkdown(txt))
                 label.isSelectable = true   // copyable: text in the transcript must be selectable
                 label.font                 = .systemFont(ofSize: 13)
-                label.textColor            = Theme.fg
+                label.textColor            = textColor
                 label.lineBreakMode        = .byWordWrapping
                 label.maximumNumberOfLines = 0
                 label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
                 view = label
             case .table(let headers, let rows):
-                view = MarkdownTableView(headers: headers, rows: rows)
+                view = MarkdownTableView(headers: headers, rows: rows, textColor: textColor)
             case .code(let source):
                 // Appended to `cards` so `presetLayoutWidth` reaches it.
-                let card = MarkdownCardView(markdown: source)
+                let card = MarkdownCardView(markdown: source, textColor: textColor)
                 cards.append(card)
                 view = card
             }

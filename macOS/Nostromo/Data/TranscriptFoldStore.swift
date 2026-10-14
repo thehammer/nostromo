@@ -1,12 +1,9 @@
 import Combine
 import Foundation
+import NostromoKit
 import os
 
-// FV2: replace with NostromoKit.TranscriptViewMode (same raw values, so the file format is identical).
-enum TranscriptViewMode: String, Codable {
-    case focus
-    case allActivity
-}
+// The mode is `NostromoKit.TranscriptViewMode` (raw values `focus` / `allActivity`, the file's).
 
 enum FoldOrigin: String, Codable {
     case user
@@ -314,7 +311,15 @@ final class TranscriptFoldStore {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }   // no file: first launch
+        let data: Data
+        do {
+            data = try Data(contentsOf: fileURL)
+        } catch {
+            // No file: first launch. A file that is there but cannot be read is set aside like
+            // a corrupt one, so the next write does not silently replace it.
+            if FileManager.default.fileExists(atPath: fileURL.path) { quarantineCorruptFile() }
+            return
+        }
         guard let file = try? JSONDecoder().decode(FileFormat.self, from: data), file.version == 1 else {
             quarantineCorruptFile()
             return

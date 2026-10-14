@@ -78,8 +78,9 @@ class ReplView: NSView {
     /// Run once at the end of the next materialization pass (the load harness's
     /// `group-expand` timing).
     private var afterNextPass: (() -> Void)?
-    /// Tool groups the operator has not opened or closed start open. Only the load harness
-    /// sets it (`NOSTROMO_LOAD_FOLD_DEFAULT=expanded`); the app default is collapsed.
+    /// Tool groups and activity rows the operator has not opened or closed start open (Show
+    /// All). Only the load harness sets it (`NOSTROMO_LOAD_FOLD_DEFAULT=expanded`); the app is
+    /// in Focus (collapsed) until FV4 adds the toggle.
     private let foldsExpandedByDefault = TranscriptLoadHarness.foldsExpandedByDefault
 
     /// "Jump to latest" pill, shown while the pane is not following the tail.
@@ -193,7 +194,12 @@ class ReplView: NSView {
         followTail.contentWidth    = { [weak self] in self?.contentWidth ?? 1 }
         followTail.isMaterializing = { [weak self] in self?.isMaterializing ?? false }
         followTail.requestPass     = { [weak self] in self?.schedulePass() }
-        followTail.onFlip          = { [weak self] flip in self?.logFollowTailFlip(flip) }
+        followTail.onFlip          = { [weak self] flip in
+            self?.logFollowTailFlip(flip)
+            // Following the tail again (scrolled back down, Jump to latest, a send): every
+            // held roll-in completes.
+            if flip.pinned { self?.releaseHeldRollIns() }
+        }
 
         viewport = TranscriptViewportCoordinator(
             virtualizer: virtualizer, scrollView: scrollView, followTail: followTail,
@@ -466,6 +472,22 @@ class ReplView: NSView {
         schedulePass()
     }
 
+    /// FV2's interim hold, released: the pane follows the tail again, so every roll-in it held
+    /// back completes, keeping the reading position (a pinned pane stays at the bottom).
+    private func releaseHeldRollIns() {
+        let ids = interactions.releaseAllHolds()
+        guard !ids.isEmpty else { return }
+        let turns = session.turns.filter { ids.contains($0.id) }
+        applyFoldChange(turnIds: ids) {
+            for turn in turns {
+                guard let view = turnViews[turn.id] as? ChatTurnView else { continue }
+                switch session.hydrated(turn) {
+                case .full(let t), .unavailable(let t): view.releaseHolds(turn: t)
+                }
+            }
+        }
+    }
+
     /// Record the stuck-turn auto-open for a turn that completed while not materialized (the
     /// view does it for one that is). Only a turn that ended in error can be stuck, so the plan
     /// is computed once, at completion, never per streamed block.
@@ -648,7 +670,8 @@ class ReplView: NSView {
 
         let state = interactions.state(for: turn.id)
         let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable, interaction: state,
-                                folds: FoldResolver(state: state, expandedByDefault: foldsExpandedByDefault))
+                                folds: FoldResolver(state: state, expandedByDefault: foldsExpandedByDefault),
+                                heldOrdinals: state.heldOrdinals)
         view.onSend = { [weak self] text in
             guard let self else { return }
             self.followTail.setPinned(true, cause: .send)
@@ -683,6 +706,23 @@ class ReplView: NSView {
             }
             self.pendingRemeasure.insert(turn.id)
             self.schedulePass()
+        }
+        // An activity row opened or closed: as for a group (in memory per pane until FV4).
+        view.onActivityToggle = { [weak self] key, isExpanded in
+            guard let self else { return }
+            self.interactions.setActivity(turn: turn.id, key: key, isExpanded)
+            if let index = self.index(ofTurn: turn.id) {
+                self.viewport.noteUserToggle(turnIndex: index, itemKey: key)
+            }
+            self.pendingRemeasure.insert(turn.id)
+            self.schedulePass()
+        }
+        // FV2's interim hold (FV3 refines it): a newer message would roll the latest one into
+        // the activity row; in a pane that is not following the tail it waits, so text never
+        // folds away under a reader. Released when the pane follows the tail again.
+        view.holdsRollIns = { [weak self] in !(self?.isPinnedToBottom ?? true) }
+        view.onHold = { [weak self] ordinal in
+            self?.interactions.hold(turn: turn.id, ordinal: ordinal)
         }
         // An open group is about to build its next batch of rows: note the reading position
         // before its height changes.
@@ -1075,6 +1115,24 @@ extension ReplView: ToolGroupHarnessDriving {
             completion(nil)
             fullyBuilt(nil)
             return
+        }
+
+        // In the Focus view the group may sit in a collapsed activity row: open that row first
+        // (not timed), so the group's own row is there to click.
+        let segmentKey = FoldShape(found.turn).items.lazy.compactMap { item -> String? in
+            guard case .activity(let key, let members) = item,
+                  members.contains(where: { if case .group(let g) = $0 { return g.key == found.key } else { return false } })
+            else { return nil }
+            return key
+        }.first
+        if let segmentKey {
+            interactions.setActivity(turn: found.turn.id, key: segmentKey, true)
+            if let view = turnViews[found.turn.id] as? ChatTurnView {
+                view.applyFolds(FoldResolver(state: interactions.state(for: found.turn.id),
+                                             expandedByDefault: foldsExpandedByDefault))
+            }
+            virtualizer.refresh(found.turn, at: found.index)
+            pendingRemeasure.insert(found.turn.id)
         }
 
         // First bring the turn on screen (not timed), then click its row the way the

@@ -14,8 +14,17 @@ import NostromoKit
 /// inline spans, and the fence lines themselves never reach the attributed string.
 enum MarkdownRenderer {
 
-    static func render(_ markdown: String, baseFont: NSFont) -> NSAttributedString {
+    /// `textColor`: every run's text colour, code included (code keeps its block background).
+    /// `Theme.fg` is the conversation; a folded message in an activity lane passes
+    /// `Theme.foldedProse`. Colour never changes the height, so measuring ignores it.
+    static func render(_ markdown: String, baseFont: NSFont, textColor: NSColor = Theme.fg) -> NSAttributedString {
         let result = NSMutableAttributedString()
+        defer {
+            if textColor != Theme.fg {
+                result.addAttribute(.foregroundColor, value: textColor,
+                                    range: NSRange(location: 0, length: result.length))
+            }
+        }
         // Attributes of the code block just appended: the "\n" that ends its last
         // line carries them, so the block's box includes that line break.
         var previousCode: [NSAttributedString.Key: Any]?
@@ -324,14 +333,15 @@ final class MarkdownCardView: NSView {
     /// Width the current `intrinsicContentSize` was computed for.
     private var measuredWidth: CGFloat = -1
 
-    init(markdown: String) {
+    /// `textColor`: see `MarkdownRenderer.render`.
+    init(markdown: String, textColor: NSColor = Theme.fg) {
         self.markdown = markdown
         super.init(frame: .zero)
         setupLayer()
         setupTextView()
         let baseFont = NSFont.systemFont(ofSize: 13)
         textView.textStorage?.setAttributedString(
-            MarkdownRenderer.render(markdown, baseFont: baseFont)
+            MarkdownRenderer.render(markdown, baseFont: baseFont, textColor: textColor)
         )
     }
 

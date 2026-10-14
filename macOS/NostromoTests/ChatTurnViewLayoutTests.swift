@@ -483,21 +483,27 @@ final class ChatTurnViewLayoutTests: XCTestCase {
 
     /// An open tool group renders its members exactly as the turn rendered them before
     /// folding — same views, same heights — under its 22 pt row, `blockSpacing` apart.
+    ///
+    /// Under the Focus layout this fixture's group has the message after it, so it sits in an
+    /// activity row, whose lane is `ActivityRowView.laneInset` narrower: the row is open in both
+    /// builds and only the group differs.
     func testAnExpandedGroupIsItsRowPlusTodaysMembers() throws {
         let paneWidth: CGFloat = 900
         let f = try XCTUnwrap(Self.fixtures.first { $0.name == "mixed-agentic" })
         let turn = buildTurn(f)
+        let rowOpen = FoldFixtures.rowsOpen(turn)
+        var groupOpen = rowOpen
+        groupOpen.groupStates[FoldFixtures.groups(of: turn)[0].key] = true
         let collapsed = measuredHeight(ChatTurnView(turn: turn, contentAvailable: true,
-                                                    interaction: TurnInteractionState()), paneWidth: paneWidth)
+                                                    interaction: rowOpen), paneWidth: paneWidth)
         let expanded = measuredHeight(ChatTurnView(turn: turn, contentAvailable: true,
-                                                   interaction: TurnInteractionState(),
-                                                   folds: FoldResolver(expandedByDefault: true)),
-                                      paneWidth: paneWidth)
+                                                   interaction: groupOpen), paneWidth: paneWidth)
+        let laneWidth = ChatTurnView.blockWidth(paneWidth: paneWidth) - ActivityRowView.laneInset
         let members = [0, 1].map { i in
-            ChatTurnView.measureIsland(freshBlockView(f.blocks[i], expanded: false),
-                                       width: ChatTurnView.blockWidth(paneWidth: paneWidth))
+            ChatTurnView.measureIsland(freshBlockView(f.blocks[i], expanded: false), width: laneWidth)
         }
         let membersHeight = members.reduce(0) { $0 + TurnHeightEstimator.blockSpacing + $1 }
+        XCTAssertGreaterThan(collapsed, 0)
         XCTAssertEqual(expanded - collapsed, membersHeight, accuracy: 0.5,
                        "opening the group adds exactly today's call and result rows")
     }
