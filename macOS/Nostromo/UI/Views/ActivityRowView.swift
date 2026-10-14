@@ -201,7 +201,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
 
     private func applyExpanded(_ expanded: Bool) {
         isExpanded = expanded
-        if !expanded { releaseFocusFromMembers() }
+        if !expanded { releaseFocus(from: members.map(\.view), to: row) }
         // Hidden at once, not at the next layout pass: a collapsed row must hold no visible (or
         // selectable) member text in between.
         for member in members { member.view.isHidden = !expanded }
@@ -274,16 +274,6 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         addSubview(view)
         members.append(Member(key: key, view: view, widthConstraint: constraint, height: height,
                               blockIndex: blockIndex))
-    }
-
-    /// A selection (or focus) inside the lane must not outlive the collapse: ⌘C would copy
-    /// hidden text. The operator just toggled this row, so focus moves to it.
-    private func releaseFocusFromMembers() {
-        guard let window, let responder = window.firstResponder as? NSView else { return }
-        let editorOwner = (responder as? NSTextView).flatMap { $0.isFieldEditor ? $0.delegate as? NSView : nil }
-        let owner = editorOwner ?? responder
-        guard members.contains(where: { owner.isDescendant(of: $0.view) }) else { return }
-        if !window.makeFirstResponder(row) { window.makeFirstResponder(nil) }
     }
 
     private func memberChangedHeight(_ view: NSView) {
@@ -385,25 +375,20 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     override func layout() {
         super.layout()
         let width = bounds.width
-        place(row, NSRect(x: 0, y: 0, width: width, height: FoldRowView.height))
+        row.setFrameIfChanged(NSRect(x: 0, y: 0, width: width, height: FoldRowView.height))
         var y = FoldRowView.height
         for member in members {
             member.view.isHidden = !isExpanded
             guard isExpanded else { continue }
             y += Self.memberSpacing
-            place(member.view, NSRect(x: Self.laneInset, y: y, width: laneWidth, height: member.height))
+            member.view.setFrameIfChanged(NSRect(x: Self.laneInset, y: y, width: laneWidth, height: member.height))
             y += member.height
         }
         laneRule.isHidden = !isExpanded || members.isEmpty
         if !laneRule.isHidden {
             let top = FoldRowView.height + Self.memberSpacing
-            place(laneRule, NSRect(x: 0, y: top, width: Self.laneRuleWidth, height: max(0, y - top)))
+            laneRule.setFrameIfChanged(NSRect(x: 0, y: top, width: Self.laneRuleWidth, height: max(0, y - top)))
         }
-    }
-
-    private func place(_ view: NSView, _ rect: NSRect) {
-        guard view.frame != rect else { return }
-        view.frame = rect
     }
 
     // MARK: - Copy

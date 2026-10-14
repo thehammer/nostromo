@@ -175,7 +175,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
 
     private func applyExpanded(_ expanded: Bool) {
         isExpanded = expanded
-        if !expanded { releaseFocusFromMembers() }
+        if !expanded { releaseFocus(from: members.map(\.view), to: row) }
         // Hidden at once, not at the next layout pass: a collapsed group must hold no
         // visible (or selectable) member text in between.
         for member in members { member.view.isHidden = !expanded }
@@ -248,16 +248,6 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
             }
         }
         unbuiltEstimate = height
-    }
-
-    /// A selection (or focus) inside a member must not outlive the collapse: ⌘C would copy
-    /// hidden output. The operator just toggled this row, so focus moves to it.
-    private func releaseFocusFromMembers() {
-        guard let window, let responder = window.firstResponder as? NSView else { return }
-        let editorOwner = (responder as? NSTextView).flatMap { $0.isFieldEditor ? $0.delegate as? NSView : nil }
-        let owner = editorOwner ?? responder
-        guard members.contains(where: { owner.isDescendant(of: $0.view) }) else { return }
-        if !window.makeFirstResponder(row) { window.makeFirstResponder(nil) }
     }
 
     /// The same views `ChatTurnView` built for these blocks before folding.
@@ -397,25 +387,20 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     override func layout() {
         super.layout()
         let width = bounds.width
-        place(row, NSRect(x: 0, y: 0, width: width, height: ToolGroupRowView.height))
+        row.setFrameIfChanged(NSRect(x: 0, y: 0, width: width, height: ToolGroupRowView.height))
         var y = ToolGroupRowView.height
         for member in members {
             member.view.isHidden = !isExpanded
             guard isExpanded else { continue }
             y += Self.memberSpacing
-            place(member.view, NSRect(x: 0, y: y, width: width, height: member.height))
+            member.view.setFrameIfChanged(NSRect(x: 0, y: y, width: width, height: member.height))
             y += member.height
         }
         rule.isHidden = !isExpanded || members.isEmpty
         if !rule.isHidden {
             let top = ToolGroupRowView.height + Self.memberSpacing
-            place(rule, NSRect(x: Self.ruleX, y: top, width: Self.ruleWidth, height: max(0, y - top)))
+            rule.setFrameIfChanged(NSRect(x: Self.ruleX, y: top, width: Self.ruleWidth, height: max(0, y - top)))
         }
-    }
-
-    private func place(_ view: NSView, _ rect: NSRect) {
-        guard view.frame != rect else { return }
-        view.frame = rect
     }
 }
 
@@ -434,6 +419,28 @@ final class FoldSummaryField: CopyMenuTextField {
     /// follows the drag to its mouse-up.
     func beginSelectionDrag(with mouseDown: NSEvent) {
         super.mouseDown(with: mouseDown)
+    }
+}
+
+// MARK: - Fold container helpers
+
+/// What `ToolGroupView` and `ActivityRowView` (frame-positioned containers of a fold row and
+/// its members) both do.
+extension NSView {
+    /// Set the frame only when it differs, so an unchanged layout pass does no work.
+    func setFrameIfChanged(_ rect: NSRect) {
+        guard frame != rect else { return }
+        frame = rect
+    }
+
+    /// A selection (or focus) inside a member must not outlive the collapse: ⌘C would copy
+    /// hidden text. The operator just toggled `row`, so focus moves to it.
+    func releaseFocus(from members: [NSView], to row: NSView) {
+        guard let window, let responder = window.firstResponder as? NSView else { return }
+        let editorOwner = (responder as? NSTextView).flatMap { $0.isFieldEditor ? $0.delegate as? NSView : nil }
+        let owner = editorOwner ?? responder
+        guard members.contains(where: { owner.isDescendant(of: $0) }) else { return }
+        if !window.makeFirstResponder(row) { window.makeFirstResponder(nil) }
     }
 }
 
