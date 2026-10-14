@@ -3479,4 +3479,607 @@ mod tests {
 
         assert_eq!(t.byte_len(), recount_bytes(&t));
     }
+    // ── background-task events ──────────────────────────────────────────────
+
+    use crate::ipc::protocol::{TaskKind, TaskMeta, TaskStatus};
+    use crate::ipc::tasks::{
+        LevelTask, RawTaskStatus, TaskEvent, TaskEventKind, TaskRegistry, TaskStarted, TaskUsage,
+    };
+
+    const TASK_EVENTS: &str = include_str!("testdata/tasks-events.jsonl");
+    const TASK_MALFORMED: &str = include_str!("testdata/tasks-malformed.jsonl");
+    const TASK_SESSION: &str = include_str!("testdata/tasks-session.jsonl");
+
+    fn fixture_line(content: &str, n: usize) -> &str {
+        content.lines().nth(n).unwrap_or_else(|| panic!("fixture has no line {n}"))
+    }
+
+    fn task_event_at(n: usize) -> TaskEvent {
+        match parse_line(fixture_line(TASK_EVENTS, n)) {
+            Some(ParsedLine::Task(event)) => event,
+            other => panic!("tasks-events.jsonl line {n} should be a task event, got {other:?}"),
+        }
+    }
+
+    /// A line the CLI emits about its background tasks, found without the parser.
+    fn is_task_line(line: &str) -> bool {
+        line.contains(r#""subtype":"task_"#) || line.contains(r#""subtype":"background_tasks_changed""#)
+    }
+
+    #[test]
+    fn every_line_of_the_task_event_fixture_parses_to_a_task_event() {
+        let lines = TASK_EVENTS.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(lines, 17);
+        for n in 0..lines {
+            task_event_at(n);
+        }
+    }
+
+    #[test]
+    fn the_fixture_covers_all_five_subtypes() {
+        let mut seen = std::collections::HashSet::new();
+        for n in 0..17 {
+            seen.insert(match task_event_at(n).kind {
+                TaskEventKind::Started(_) => "started",
+                TaskEventKind::Progress(_) => "progress",
+                TaskEventKind::Updated(_) => "updated",
+                TaskEventKind::Notification(_) => "notification",
+                TaskEventKind::LevelChanged(_) => "level",
+            });
+        }
+        assert_eq!(seen.len(), 5, "{seen:?}");
+    }
+
+    #[test]
+    fn task_started_parses_with_its_fields() {
+        let e = task_event_at(0);
+        assert_eq!(e.session_id.as_deref(), Some("tsk-0001"));
+        assert_eq!(
+            e.kind,
+            TaskEventKind::Started(TaskStarted {
+                task_id: "b7k2m9x1a".into(),
+                run_id: Some("run-001".into()),
+                tool_use_id: Some("toolu_bash_bg".into()),
+                description: "Run the nightly build".into(),
+                task_type: Some("local_bash".into()),
+                is_backgrounded: Some(true),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn an_agent_start_carries_its_prompt_and_subagent_type() {
+        let TaskEventKind::Started(s) = task_event_at(2).kind else { panic!() };
+        assert_eq!(s.task_id, "agt5r1w3d");
+        assert_eq!(s.task_type.as_deref(), Some("local_agent"));
+        assert_eq!(s.subagent_type.as_deref(), Some("Explore"));
+        assert_eq!(s.prompt.as_deref(), Some("Read the config and report what you find."));
+        assert_eq!(s.is_backgrounded, Some(false));
+        assert_eq!(s.run_id, None);
+    }
+
+    #[test]
+    fn a_workflow_start_carries_its_name_and_parent() {
+        let TaskEventKind::Started(s) = task_event_at(3).kind else { panic!() };
+        assert_eq!(s.task_type.as_deref(), Some("local_workflow"));
+        assert_eq!(s.workflow_name.as_deref(), Some("release-checks"));
+        assert_eq!(s.parent_task_id.as_deref(), Some("agt5r1w3d"));
+    }
+
+    #[test]
+    fn a_future_task_type_is_carried_through_untouched() {
+        let TaskEventKind::Started(s) = task_event_at(4).kind else { panic!() };
+        assert_eq!(s.task_type.as_deref(), Some("quantum_task"));
+    }
+
+    #[test]
+    fn ambient_and_skip_transcript_are_read_from_a_start() {
+        let TaskEventKind::Started(ambient) = task_event_at(5).kind else { panic!() };
+        assert!(ambient.ambient && !ambient.skip_transcript);
+        let TaskEventKind::Started(skip) = task_event_at(6).kind else { panic!() };
+        assert!(skip.skip_transcript && !skip.ambient);
+        let TaskEventKind::Started(plain) = task_event_at(0).kind else { panic!() };
+        assert!(!plain.ambient && !plain.skip_transcript);
+    }
+
+    #[test]
+    fn task_progress_parses_usage_last_tool_and_summary() {
+        let TaskEventKind::Progress(p) = task_event_at(7).kind else { panic!() };
+        assert_eq!(p.task_id, "agt5r1w3d");
+        assert_eq!(p.tool_use_id.as_deref(), Some("toolu_agent1"));
+        assert_eq!(p.description.as_deref(), Some("Reading the config files"));
+        assert_eq!(p.subagent_type.as_deref(), Some("Explore"));
+        assert_eq!(
+            p.usage,
+            Some(TaskUsage { total_tokens: Some(1234), tool_uses: Some(3), duration_ms: Some(4200) })
+        );
+        assert_eq!(p.last_tool_name.as_deref(), Some("Read"));
+        assert_eq!(p.summary.as_deref(), Some("Reading the config files"));
+    }
+
+    #[test]
+    fn partial_and_absent_usage_stay_partial_and_absent() {
+        let TaskEventKind::Progress(partial) = task_event_at(8).kind else { panic!() };
+        assert_eq!(
+            partial.usage,
+            Some(TaskUsage { total_tokens: Some(50), tool_uses: None, duration_ms: None })
+        );
+        let TaskEventKind::Progress(none) = task_event_at(9).kind else { panic!() };
+        assert_eq!(none.usage, None);
+    }
+
+    #[test]
+    fn task_updated_parses_its_patch() {
+        let TaskEventKind::Updated(u) = task_event_at(10).kind else { panic!() };
+        assert_eq!(u.task_id, "b7k2m9x1a");
+        assert_eq!(u.run_id.as_deref(), Some("run-001"));
+        assert_eq!(u.patch.status, Some(RawTaskStatus::Completed));
+        assert_eq!(u.patch.end_time, Some(1_760_000_012_345));
+
+        let TaskEventKind::Updated(misc) = task_event_at(11).kind else { panic!() };
+        assert_eq!(misc.patch.status, None);
+        assert_eq!(misc.patch.description.as_deref(), Some("Watch the deploy log (prod)"));
+        assert_eq!(misc.patch.is_backgrounded, Some(true));
+        assert_eq!(misc.patch.end_time, None);
+    }
+
+    #[test]
+    fn task_notification_parses_status_reason_output_file_and_usage() {
+        let TaskEventKind::Notification(n) = task_event_at(12).kind else { panic!() };
+        assert_eq!(n.task_id, "agt5r1w3d");
+        assert_eq!(n.tool_use_id.as_deref(), Some("toolu_agent1"));
+        assert_eq!(n.status, TaskStatus::Completed);
+        assert_eq!(n.reason, None);
+        assert_eq!(
+            n.output_file.as_deref(),
+            Some("/private/tmp/claude-501/-repo/tsk-0001/tasks/agt5r1w3d.output")
+        );
+        assert_eq!(n.summary.as_deref(), Some("Agent \"Survey the config\" finished"));
+        assert_eq!(
+            n.usage,
+            Some(TaskUsage { total_tokens: Some(2000), tool_uses: Some(5), duration_ms: Some(9000) })
+        );
+
+        let TaskEventKind::Notification(restart) = task_event_at(13).kind else { panic!() };
+        assert_eq!(restart.status, TaskStatus::Stopped);
+        assert_eq!(restart.reason.as_deref(), Some("worker_restart"));
+    }
+
+    #[test]
+    fn background_tasks_changed_parses_the_whole_level() {
+        let TaskEventKind::LevelChanged(level) = task_event_at(14).kind else { panic!() };
+        assert_eq!(
+            level,
+            vec![
+                LevelTask {
+                    task_id: "mon4q8z2c".into(),
+                    task_type: Some("local_bash".into()),
+                    description: "Watch the deploy log".into(),
+                    ..Default::default()
+                },
+                LevelTask {
+                    task_id: "amb8u4t6g".into(),
+                    task_type: Some("monitor_ws".into()),
+                    description: "Watch the socket".into(),
+                    ambient: true,
+                    ..Default::default()
+                },
+                LevelTask {
+                    task_id: "agt5r1w3d".into(),
+                    run_id: Some("run-007".into()),
+                    task_type: Some("local_agent".into()),
+                    subagent_type: Some("Explore".into()),
+                    description: "Survey the config".into(),
+                    parent_task_id: Some("top1".into()),
+                    ambient: false,
+                },
+            ]
+        );
+        let TaskEventKind::LevelChanged(empty) = task_event_at(15).kind else { panic!() };
+        assert!(empty.is_empty(), "an empty level is a real, empty level");
+    }
+
+    #[test]
+    fn a_frame_naming_an_earlier_run_still_parses_and_is_left_to_the_registry() {
+        let TaskEventKind::Progress(p) = task_event_at(16).kind else { panic!() };
+        assert_eq!(p.run_id.as_deref(), Some("run-000"));
+    }
+
+    #[test]
+    fn a_malformed_or_unknown_task_event_falls_back_to_the_old_behaviour() {
+        let sid = |n: usize| parse_line(fixture_line(TASK_MALFORMED, n));
+        for n in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
+            assert_eq!(
+                sid(n),
+                Some(ParsedLine::SessionId("tsk-0002".into())),
+                "tasks-malformed.jsonl line {n}: {}",
+                fixture_line(TASK_MALFORMED, n)
+            );
+        }
+        assert_eq!(sid(10), None, "malformed and no session id: nothing at all");
+    }
+
+    #[test]
+    fn a_level_without_tasks_is_not_mistaken_for_an_empty_level() {
+        // An empty level would end every background task after the grace.
+        assert!(!matches!(
+            parse_line(r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s"}"#),
+            Some(ParsedLine::Task(_))
+        ));
+        assert!(!matches!(
+            parse_line(r#"{"type":"system","subtype":"background_tasks_changed","tasks":null,"session_id":"s"}"#),
+            Some(ParsedLine::Task(_))
+        ));
+    }
+
+    #[test]
+    fn odd_but_usable_task_events_are_tolerated() {
+        // Garbage entries in a level are skipped, the good one is kept.
+        let Some(ParsedLine::Task(TaskEvent { kind: TaskEventKind::LevelChanged(level), .. })) =
+            parse_line(fixture_line(TASK_MALFORMED, 12))
+        else {
+            panic!("line 12 should still be a level")
+        };
+        assert_eq!(level.len(), 1);
+        assert_eq!(level[0].task_id, "ok1");
+        // A usage that is not an object is no usage.
+        let Some(ParsedLine::Task(TaskEvent { kind: TaskEventKind::Progress(p), .. })) =
+            parse_line(fixture_line(TASK_MALFORMED, 13))
+        else {
+            panic!("line 13 should still be progress")
+        };
+        assert_eq!(p.usage, None);
+        // An unknown patch status and an end_time that is not a number are ignored.
+        let Some(ParsedLine::Task(TaskEvent { kind: TaskEventKind::Updated(u), .. })) =
+            parse_line(fixture_line(TASK_MALFORMED, 14))
+        else {
+            panic!("line 14 should still be an update")
+        };
+        assert_eq!((u.patch.status, u.patch.end_time), (None, None));
+    }
+
+    #[test]
+    fn a_task_event_never_makes_a_delta_or_a_turn() {
+        let mut t = SessionTranscript::new();
+        for n in 0..17 {
+            let deltas = t.ingest_line(fixture_line(TASK_EVENTS, n));
+            assert!(deltas.is_empty(), "line {n} produced {deltas:?}");
+        }
+        assert_eq!(t.turn_count(), 0);
+        assert!(!t.is_mid_turn());
+        assert_eq!(t.prompt_count(), 0);
+        assert_eq!(t.first_user_input(), None);
+    }
+
+    #[test]
+    fn a_task_event_still_teaches_the_transcript_its_session_id_like_any_system_line() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(fixture_line(TASK_EVENTS, 0));
+        assert_eq!(t.session_id(), Some("tsk-0001"));
+        t.ingest_line(r#"{"type":"system","subtype":"task_progress","task_id":"x","session_id":"another"}"#);
+        assert_eq!(t.session_id(), Some("tsk-0001"), "the first id sticks");
+    }
+
+    #[test]
+    fn a_recorded_session_with_task_events_builds_the_same_transcript_as_without_them() {
+        let all: Vec<&str> = TASK_SESSION.lines().filter(|l| !l.trim().is_empty()).collect();
+        let task_lines = all.iter().filter(|l| is_task_line(l)).count();
+        assert!(task_lines >= 7, "the fixture must really interleave task events ({task_lines})");
+        for line in all.iter().filter(|l| is_task_line(l)) {
+            assert!(matches!(parse_line(line), Some(ParsedLine::Task(_))), "{line}");
+        }
+
+        let mut with = SessionTranscript::new();
+        let mut without = SessionTranscript::new();
+        let (mut deltas_with, mut deltas_without) = (vec![], vec![]);
+        for line in &all {
+            let before = serde_json::to_string(&with.snapshot()).unwrap();
+            let d = with.ingest_line(line);
+            if is_task_line(line) {
+                assert!(d.is_empty(), "a task event produced deltas: {d:?}");
+                assert_eq!(serde_json::to_string(&with.snapshot()).unwrap(), before, "a task event changed a turn");
+            } else {
+                deltas_without.extend(without.ingest_line(line));
+            }
+            deltas_with.extend(d);
+        }
+
+        assert_eq!(
+            serde_json::to_string(&deltas_with).unwrap(),
+            serde_json::to_string(&deltas_without).unwrap(),
+            "the broadcast deltas are byte-identical"
+        );
+        assert_eq!(
+            serde_json::to_string(&with.snapshot()).unwrap(),
+            serde_json::to_string(&without.snapshot()).unwrap(),
+            "the turns are byte-identical"
+        );
+        assert_eq!(with.turn_count(), 2);
+        assert_eq!(with.byte_len(), without.byte_len());
+        assert_eq!(with.prompt_count(), without.prompt_count());
+        assert_eq!(with.is_mid_turn(), without.is_mid_turn());
+        assert_eq!(with.session_id(), without.session_id());
+        assert_eq!(with.first_user_input(), without.first_user_input());
+    }
+
+    #[test]
+    fn a_stored_session_with_task_events_reads_back_the_same_turns_as_without_them() {
+        let without: String = TASK_SESSION
+            .lines()
+            .filter(|l| !is_task_line(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let a = transcript_from_jsonl(TASK_SESSION, 100);
+        let b = transcript_from_jsonl(&without, 100);
+        assert_eq!(
+            serde_json::to_string(&a.snapshot()).unwrap(),
+            serde_json::to_string(&b.snapshot()).unwrap()
+        );
+    }
+
+    // ── the tool index ──────────────────────────────────────────────────────
+
+    /// Every tool call in the transcript, as `(tool_use_id, tool_name, tagged as a subagent's)`.
+    fn calls_in(t: &SessionTranscript) -> Vec<(String, String, bool)> {
+        t.snapshot()
+            .iter()
+            .flat_map(|turn| turn.blocks.iter())
+            .filter_map(|b| match b {
+                TurnBlock::ToolCall { tool_name, tool_use_id: Some(id), parent_tool_use_id, .. } => {
+                    Some((id.clone(), tool_name.clone(), parent_tool_use_id.is_some()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_tool_call_is_findable_by_its_id_including_a_subagents() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, SUBAGENT);
+        let calls = calls_in(&t);
+        assert!(calls.len() >= 3, "{calls:?}");
+        assert!(calls.iter().any(|(_, _, sub)| *sub), "the fixture has a subagent's calls");
+        assert!(calls.iter().any(|(_, _, sub)| !sub), "and a top-level one");
+
+        for (id, name, _) in &calls {
+            assert_eq!(t.tool_name_of(id), Some(name.as_str()), "{id}");
+        }
+        assert_eq!(t.tool_name_of("toolu_agent1"), Some("Agent"));
+        assert_eq!(t.tool_name_of("toolu_sub_read"), Some("Read"));
+        assert_eq!(t.tool_name_of("toolu_sub_bash"), Some("Bash"));
+    }
+
+    #[test]
+    fn an_id_that_never_named_a_call_has_no_tool_name() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, TOOL_SUCCESS);
+        assert_eq!(t.tool_name_of("toolu_never_seen"), None);
+        assert_eq!(t.tool_name_of(""), None);
+    }
+
+    #[test]
+    fn the_tool_names_of_a_recorded_session_are_indexed() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, TASK_SESSION);
+        assert_eq!(t.tool_name_of("toolu_bash_bg"), Some("Bash"));
+        assert_eq!(t.tool_name_of("toolu_monitor1"), Some("Monitor"));
+    }
+
+    fn bash_background_exchange(i: usize, path: &str) -> String {
+        format!(
+            concat!(
+                r#"{{"type":"user","message":{{"role":"user","content":"prompt {i}"}},"isReplay":true}}"#, "\n",
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_{i}","name":"Bash","input":{{"command":"make {i}","run_in_background":true}}}}]}}}}"#, "\n",
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"Command running in background with ID: b{i}. Output is being written to: {path}","is_error":false,"tool_use_id":"toolu_{i}"}}]}}}}"#, "\n",
+                r#"{{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}}"#, "\n",
+            ),
+            i = i,
+            path = path,
+        )
+    }
+
+    #[test]
+    fn a_background_bash_results_output_path_is_captured_without_the_full_stop() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, &bash_background_exchange(0, "/private/tmp/claude-501/-repo/s1/tasks/b0.output."));
+        assert_eq!(
+            t.background_output_path("toolu_0"),
+            Some("/private/tmp/claude-501/-repo/s1/tasks/b0.output")
+        );
+    }
+
+    #[test]
+    fn the_path_is_taken_whether_or_not_a_full_stop_follows_it() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, &bash_background_exchange(1, "/private/tmp/claude-501/-repo/s1/tasks/b1.output"));
+        assert_eq!(
+            t.background_output_path("toolu_1"),
+            Some("/private/tmp/claude-501/-repo/s1/tasks/b1.output")
+        );
+    }
+
+    #[test]
+    fn text_after_the_path_line_is_not_part_of_the_path() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_line(0));
+        t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_x","name":"Bash","input":{"command":"x"}}]}}"#);
+        t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Started. Output is being written to: /p/q/tasks/bx.output.\nYou will be notified when it completes.","is_error":false,"tool_use_id":"toolu_x"}]}}"#);
+        assert_eq!(t.background_output_path("toolu_x"), Some("/p/q/tasks/bx.output"));
+    }
+
+    #[test]
+    fn only_a_bash_call_gets_an_output_path_from_its_result() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_line(0));
+        for tool in ["Monitor", "Read", "Agent"] {
+            t.ingest_line(&format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_{tool}","name":"{tool}","input":{{}}}}]}}}}"#
+            ));
+            t.ingest_line(&format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"Output is being written to: /p/q/tasks/b.output.","is_error":false,"tool_use_id":"toolu_{tool}"}}]}}}}"#
+            ));
+            assert_eq!(t.background_output_path(&format!("toolu_{tool}")), None, "{tool}");
+        }
+    }
+
+    #[test]
+    fn a_result_for_a_call_never_seen_gets_no_output_path() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_line(0));
+        t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output is being written to: /p/q/tasks/b.output.","is_error":false,"tool_use_id":"toolu_orphan"}]}}"#);
+        assert_eq!(t.background_output_path("toolu_orphan"), None);
+    }
+
+    #[test]
+    fn a_bash_result_without_the_sentence_has_no_output_path() {
+        let mut t = SessionTranscript::new();
+        ingest_all(&mut t, TOOL_SUCCESS);
+        for (id, name, _) in calls_in(&t) {
+            if name == "Bash" {
+                assert_eq!(t.background_output_path(&id), None, "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_subagents_background_bash_is_indexed_too() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_line(0));
+        t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_sb","name":"Bash","input":{"command":"x"}}]},"parent_tool_use_id":"toolu_agent9"}"#);
+        t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output is being written to: /p/q/tasks/sb.output.","is_error":false,"tool_use_id":"toolu_sb"}]},"isSidechain":true,"parent_tool_use_id":"toolu_agent9"}"#);
+        assert_eq!(t.tool_name_of("toolu_sb"), Some("Bash"));
+        assert_eq!(t.background_output_path("toolu_sb"), Some("/p/q/tasks/sb.output"));
+    }
+
+    #[test]
+    fn the_index_forgets_the_calls_of_turns_the_transcript_drops() {
+        let mut t = SessionTranscript::new();
+        let total = 5 * RETAINED_TURNS;
+        for i in 0..total {
+            ingest_all(&mut t, &bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output.")));
+        }
+        assert_eq!(t.turn_count(), RETAINED_TURNS);
+
+        let kept: std::collections::HashSet<String> = calls_in(&t).into_iter().map(|(id, _, _)| id).collect();
+        assert_eq!(kept.len(), RETAINED_TURNS);
+        for i in 0..total {
+            let id = format!("toolu_{i}");
+            if kept.contains(&id) {
+                assert_eq!(t.tool_name_of(&id), Some("Bash"), "{id} is retained");
+                assert!(t.background_output_path(&id).is_some(), "{id} is retained");
+            } else {
+                assert_eq!(t.tool_name_of(&id), None, "{id} was dropped with its turn");
+                assert_eq!(t.background_output_path(&id), None, "{id} was dropped with its turn");
+            }
+        }
+    }
+
+    #[test]
+    fn the_index_forgets_the_calls_of_turns_cut_by_truncate_to_last() {
+        let mut t = SessionTranscript::new();
+        for i in 0..6 {
+            ingest_all(&mut t, &bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output.")));
+        }
+
+        t.truncate_to_last(2);
+
+        for i in 0..4 {
+            assert_eq!(t.tool_name_of(&format!("toolu_{i}")), None, "toolu_{i}");
+            assert_eq!(t.background_output_path(&format!("toolu_{i}")), None, "toolu_{i}");
+        }
+        for i in 4..6 {
+            assert_eq!(t.tool_name_of(&format!("toolu_{i}")), Some("Bash"), "toolu_{i}");
+            assert!(t.background_output_path(&format!("toolu_{i}")).is_some(), "toolu_{i}");
+        }
+    }
+
+    #[test]
+    fn a_stored_session_trimmed_to_its_last_turns_indexes_only_those() {
+        let content: String = (0..6).map(|i| bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output."))).collect();
+        let t = transcript_from_jsonl(&content, 2);
+        assert_eq!(t.tool_name_of("toolu_3"), None);
+        assert_eq!(t.tool_name_of("toolu_4"), Some("Bash"));
+        assert_eq!(t.tool_name_of("toolu_5"), Some("Bash"));
+    }
+
+    #[test]
+    fn the_index_forgets_calls_shed_from_a_single_oversized_turn() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(&user_line(0));
+        t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_early","name":"Bash","input":{"command":"x"}}]}}"#);
+        t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output is being written to: /p/q/tasks/early.output.","is_error":false,"tool_use_id":"toolu_early"}]}}"#);
+        assert_eq!(t.tool_name_of("toolu_early"), Some("Bash"));
+        assert!(t.background_output_path("toolu_early").is_some());
+
+        let one_mib = 1024 * 1024;
+        for i in 0..(RETAINED_BYTES / one_mib) + 10 {
+            t.ingest_line(&tool_result_line_marked(&format!("block{i}"), one_mib));
+        }
+        t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_late","name":"Monitor","input":{}}]}}"#);
+
+        assert_eq!(t.turn_count(), 1);
+        assert_eq!(t.tool_name_of("toolu_early"), None, "its block was shed");
+        assert_eq!(t.background_output_path("toolu_early"), None);
+        assert_eq!(t.tool_name_of("toolu_late"), Some("Monitor"));
+    }
+
+    // ── kind resolution: live equals reloaded ───────────────────────────────
+
+    /// The registry a daemon would hold after `content`, with tool names looked
+    /// up as the reader does: against the transcript as it is when each event
+    /// arrives (`live`), or against a transcript rebuilt from the stored lines.
+    fn registry_for(content: &str, live: bool) -> (TaskRegistry, SessionTranscript) {
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        let mut registry = TaskRegistry::new();
+        let mut t = SessionTranscript::new();
+        let replayed = transcript_from_jsonl(content, 1000);
+        for (i, line) in lines.iter().enumerate() {
+            if let Some(ParsedLine::Task(event)) = parse_line(line) {
+                let now = 1_000 + 10 * i as u64;
+                if live {
+                    registry.apply(&event, now, &|id| t.tool_name_of(id).map(str::to_owned));
+                } else {
+                    registry.apply(&event, now, &|id| replayed.tool_name_of(id).map(str::to_owned));
+                }
+            }
+            t.ingest_line(line);
+        }
+        let t = if live { t } else { replayed };
+        (registry, t)
+    }
+
+    fn resolved(registry: &TaskRegistry, t: &SessionTranscript) -> Vec<TaskMeta> {
+        registry.snapshot(&|id| t.tool_name_of(id).map(str::to_owned))
+    }
+
+    #[test]
+    fn kind_resolution_after_a_scrollback_reload_equals_live_resolution() {
+        let (live_registry, live) = registry_for(TASK_SESSION, true);
+        let (replay_registry, replayed) = registry_for(TASK_SESSION, false);
+
+        for id in ["toolu_bash_bg", "toolu_monitor1", "toolu_missing"] {
+            assert_eq!(live.tool_name_of(id), replayed.tool_name_of(id), "{id}");
+            assert_eq!(live.background_output_path(id), replayed.background_output_path(id), "{id}");
+        }
+        assert_eq!(
+            live.background_output_path("toolu_bash_bg"),
+            Some("/private/tmp/claude-501/-repo/tsk-0003/tasks/b7k2m9x1a.output")
+        );
+        let from_live = resolved(&live_registry, &live);
+        let from_replay = resolved(&replay_registry, &replayed);
+        assert_eq!(from_live, from_replay);
+        let kinds: Vec<(&str, TaskKind)> = from_live.iter().map(|t| (t.id.as_str(), t.kind)).collect();
+        assert_eq!(kinds, [("b7k2m9x1a", TaskKind::Shell), ("mon4q8z2c", TaskKind::Monitor)]);
+    }
+
+    #[test]
+    fn the_recorded_sessions_tasks_end_as_the_events_say() {
+        let (registry, t) = registry_for(TASK_SESSION, true);
+        let tasks = resolved(&registry, &t);
+        assert_eq!(tasks[0].status, TaskStatus::Completed);
+        assert_eq!(tasks[1].status, TaskStatus::Stopped, "killed");
+        assert!(tasks.iter().all(|t| t.has_output));
+    }
 }

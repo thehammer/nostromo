@@ -2010,4 +2010,49 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+
+    // ── background tasks ────────────────────────────────────────────────────
+
+    fn tasks_frame() -> ServerMsg {
+        ServerMsg::SessionTasks {
+            tag: "cody-1".into(),
+            session_id: Some("sess".into()),
+            daemon_epoch: "epoch".into(),
+            stop_supported: None,
+            tasks: vec![],
+        }
+    }
+
+    fn task_detail_frame() -> ServerMsg {
+        ServerMsg::SessionTaskDetail {
+            tag: "cody-1".into(),
+            task_id: "t1".into(),
+            preview: Some("line".into()),
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        }
+    }
+
+    #[test]
+    fn the_task_frames_reach_a_client_whatever_topics_it_named() {
+        // Like the other session frames, they are not behind a topic: a client
+        // attached to the session gets them, and an old client ignores the type.
+        for topics in [
+            vec![],
+            vec![Topic::Activity],
+            vec![Topic::Model],
+            vec![Topic::Work, Topic::Fred],
+            vec![Topic::Layout, Topic::Focuses],
+        ] {
+            assert!(message_matches_topics(&tasks_frame(), &topics), "{topics:?}");
+            assert!(message_matches_topics(&task_detail_frame(), &topics), "{topics:?}");
+        }
+    }
+
+    #[test]
+    fn the_tasks_capability_is_advertised_under_its_documented_name() {
+        // `Welcome.features` carries this string; the Swift clients look for it.
+        assert_eq!(FEATURE_TASKS, "tasks");
+    }
 }

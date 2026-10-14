@@ -2149,4 +2149,194 @@ mod tests {
             matches!(defaults, Some(ServerMsg::ModelDefaults { ref declared, ref defaults }) if declared.is_empty() && defaults.is_empty())
         );
     }
+
+    // ── background-task frames (FND-1) ──────────────────────────────────────
+
+    use crate::ipc::protocol::{TaskEndReason, TaskKind, TaskMeta, TaskStatus};
+
+    /// A `TaskMeta` with EVERY optional field set, so its serialisation shows
+    /// every key the type can ever put on the wire.
+    fn full_task_meta() -> TaskMeta {
+        TaskMeta {
+            id: "b7k2m9x1a".into(),
+            run_id: Some("run-001".into()),
+            task_type: "local_bash".into(),
+            kind: TaskKind::Monitor,
+            tool_name: Some("Monitor".into()),
+            description: "Watch the deploy log".into(),
+            subagent_type: Some("Explore".into()),
+            workflow_name: Some("release-checks".into()),
+            tool_use_id: Some("toolu_1".into()),
+            parent_task_id: Some("p1".into()),
+            is_backgrounded: Some(true),
+            housekeeping: false,
+            status: TaskStatus::Stopped,
+            end_reason: Some(TaskEndReason::SessionEnded),
+            started_at_ms: Some(1_000),
+            ended_at_ms: Some(2_000),
+            duration_ms: Some(1_000),
+            total_tokens: Some(10),
+            tool_uses: Some(2),
+            last_tool_name: Some("Read".into()),
+            has_output: true,
+        }
+    }
+
+    fn session_tasks_msg(tag: &str) -> ServerMsg {
+        ServerMsg::SessionTasks {
+            tag: tag.into(),
+            session_id: Some("sess-1".into()),
+            daemon_epoch: "epoch-1".into(),
+            stop_supported: Some(true),
+            tasks: vec![full_task_meta()],
+        }
+    }
+
+    fn session_task_detail_msg(tag: &str) -> ServerMsg {
+        ServerMsg::SessionTaskDetail {
+            tag: tag.into(),
+            task_id: "b7k2m9x1a".into(),
+            preview: Some("SECRET-OUTPUT-1 last line".into()),
+            progress_summary: Some("SECRET-OUTPUT-2 progress".into()),
+            completion_summary: Some("SECRET-OUTPUT-3 completion".into()),
+            prompt: Some("SECRET-OUTPUT-4 prompt".into()),
+        }
+    }
+
+    fn wire(msg: &ServerMsg) -> String {
+        serde_json::to_string(msg).unwrap()
+    }
+
+    #[test]
+    fn the_task_list_is_classified_with_its_focus_and_the_task_detail_is_local_only() {
+        assert_eq!(classify_server_msg(&session_tasks_msg("cody-x")), ServerClass::Focus("cody-x"));
+        assert_eq!(classify_server_msg(&session_task_detail_msg("cody-x")), ServerClass::LocalOnly);
+        // The class does not depend on the tag.
+        assert_eq!(classify_server_msg(&session_task_detail_msg("fred")), ServerClass::LocalOnly);
+    }
+
+    #[test]
+    fn a_network_peer_never_receives_a_task_detail_whatever_the_focus() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive", "fred", "teri"] {
+            let msg = session_task_detail_msg(tag);
+            assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{tag}");
+            assert!(outbound(PeerTrust::Tcp, msg, &tags).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_local_peer_receives_a_task_detail_exactly_as_it_is() {
+        let tags = tags_with("cody-sensitive");
+        for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
+            for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+                let msg = session_task_detail_msg(tag);
+                assert!(may_receive(trust, &msg, &tags), "{trust:?} {tag}");
+                let sent = outbound(trust, msg.clone(), &tags).expect("delivered");
+                assert_eq!(wire(&sent), wire(&msg), "{trust:?} {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_task_list_of_an_ordinary_focus_reaches_a_network_peer_unchanged() {
+        let tags = tags_with("cody-sensitive");
+        let msg = session_tasks_msg("cody-ordinary");
+
+        assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
+        let sent = outbound(PeerTrust::Tcp, msg.clone(), &tags).expect("delivered");
+
+        assert_eq!(wire(&sent), wire(&msg));
+        assert_eq!(wire(&redact_for_network(msg.clone(), &tags)), wire(&msg), "redaction leaves it as it is");
+    }
+
+    #[test]
+    fn the_task_list_of_a_sensitive_focus_is_withheld_from_a_network_peer() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-sensitive", "fred", "teri", "FRED"] {
+            let msg = session_tasks_msg(tag);
+            assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{tag}");
+            assert!(outbound(PeerTrust::Tcp, msg, &tags).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_local_peer_receives_the_task_list_of_every_focus() {
+        let tags = tags_with("cody-sensitive");
+        for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
+            for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+                assert!(may_receive(trust, &session_tasks_msg(tag), &tags), "{trust:?} {tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_a_network_peer_can_receive_carries_task_text_or_a_path() {
+        let tags = SensitiveTags::in_memory();
+        let sent = outbound(PeerTrust::Tcp, session_tasks_msg("cody-ordinary"), &tags).expect("delivered");
+        let json = wire(&sent);
+        for forbidden in ["SECRET-OUTPUT", "preview", "summary", "prompt", "output_file", "/private/tmp"] {
+            assert!(!json.contains(forbidden), "{forbidden} in {json}");
+        }
+    }
+
+    /// The keys a `TaskMeta` may carry on the wire. This list is deliberately
+    /// written out here and not derived from the struct: adding a field to
+    /// `TaskMeta` must fail this test until someone has decided, here, that the
+    /// new field is safe for a network peer (no output, preview, summary,
+    /// prompt or path).
+    const TASK_META_ALLOWED_KEYS: &[&str] = &[
+        "id",
+        "run_id",
+        "task_type",
+        "kind",
+        "tool_name",
+        "description",
+        "subagent_type",
+        "workflow_name",
+        "tool_use_id",
+        "parent_task_id",
+        "is_backgrounded",
+        "housekeeping",
+        "status",
+        "end_reason",
+        "started_at_ms",
+        "ended_at_ms",
+        "duration_ms",
+        "total_tokens",
+        "tool_uses",
+        "last_tool_name",
+        "has_output",
+    ];
+
+    #[test]
+    fn a_task_meta_with_every_optional_field_set_has_exactly_the_approved_keys() {
+        let value = serde_json::to_value(full_task_meta()).unwrap();
+        let keys: std::collections::BTreeSet<&str> =
+            value.as_object().unwrap().keys().map(String::as_str).collect();
+        let allowed: std::collections::BTreeSet<&str> = TASK_META_ALLOWED_KEYS.iter().copied().collect();
+
+        assert_eq!(
+            keys, allowed,
+            "TaskMeta changed on the wire. A new field must be classified for network peers: \
+             it may carry no output, preview, summary, prompt or path (those go in SessionTaskDetail, \
+             which is LocalOnly). Update TASK_META_ALLOWED_KEYS only once that is true."
+        );
+    }
+
+    #[test]
+    fn the_task_list_frame_has_exactly_the_approved_top_level_keys() {
+        let value = serde_json::to_value(session_tasks_msg("cody-x")).unwrap();
+        let keys: std::collections::BTreeSet<&str> =
+            value.as_object().unwrap().keys().map(String::as_str).collect();
+        let allowed: std::collections::BTreeSet<&str> =
+            ["type", "tag", "session_id", "daemon_epoch", "stop_supported", "tasks"].into_iter().collect();
+        assert_eq!(keys, allowed);
+    }
+
+    #[test]
+    fn the_task_list_frame_never_contains_the_text_of_a_detail() {
+        let json = wire(&session_tasks_msg("cody-x"));
+        assert!(!json.contains("SECRET-OUTPUT"), "{json}");
+    }
 }

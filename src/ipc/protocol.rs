@@ -4531,4 +4531,200 @@ mod work_wire_tests {
         assert_eq!(back, full);
     }
 
+    // ── background tasks ────────────────────────────────────────────────────
+
+    fn bare_task_meta() -> TaskMeta {
+        TaskMeta {
+            id: "t1".into(),
+            run_id: None,
+            task_type: "local_bash".into(),
+            kind: TaskKind::Shell,
+            tool_name: None,
+            description: "Run it".into(),
+            subagent_type: None,
+            workflow_name: None,
+            tool_use_id: None,
+            parent_task_id: None,
+            is_backgrounded: None,
+            housekeeping: false,
+            status: TaskStatus::Running,
+            end_reason: None,
+            started_at_ms: None,
+            ended_at_ms: None,
+            duration_ms: None,
+            total_tokens: None,
+            tool_uses: None,
+            last_tool_name: None,
+            has_output: true,
+        }
+    }
+
+    #[test]
+    fn a_bare_task_meta_serialises_only_its_required_keys() {
+        let value = serde_json::to_value(bare_task_meta()).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["description", "has_output", "housekeeping", "id", "kind", "status", "task_type"]
+        );
+    }
+
+    #[test]
+    fn session_tasks_round_trips_with_and_without_its_optional_fields() {
+        let bare = ServerMsg::SessionTasks {
+            tag: "cody-x".into(),
+            session_id: None,
+            daemon_epoch: "epoch-1".into(),
+            stop_supported: None,
+            tasks: vec![bare_task_meta()],
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("session_id") && !json.contains("stop_supported"), "{json}");
+        round_trip_server(bare);
+
+        let mut full = bare_task_meta();
+        full.run_id = Some("run-1".into());
+        full.tool_name = Some("Bash".into());
+        full.end_reason = Some(TaskEndReason::Vanished);
+        full.status = TaskStatus::Stopped;
+        full.total_tokens = Some(0);
+        round_trip_server(ServerMsg::SessionTasks {
+            tag: "cody-x".into(),
+            session_id: Some("sess".into()),
+            daemon_epoch: "epoch-1".into(),
+            stop_supported: Some(false),
+            tasks: vec![full, bare_task_meta()],
+        });
+    }
+
+    #[test]
+    fn an_empty_task_list_is_a_real_frame() {
+        let msg = ServerMsg::SessionTasks {
+            tag: "t".into(),
+            session_id: None,
+            daemon_epoch: "e".into(),
+            stop_supported: None,
+            tasks: vec![],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""tasks":[]"#), "{json}");
+        round_trip_server(msg);
+    }
+
+    #[test]
+    fn session_task_detail_round_trips_and_omits_what_is_unset() {
+        let only_preview = ServerMsg::SessionTaskDetail {
+            tag: "cody-x".into(),
+            task_id: "t1".into(),
+            preview: Some("building 3/9".into()),
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        };
+        let json = serde_json::to_string(&only_preview).unwrap();
+        assert!(
+            !json.contains("progress_summary") && !json.contains("completion_summary") && !json.contains("prompt"),
+            "{json}"
+        );
+        assert!(json.contains(r#""preview":"building 3/9""#));
+        round_trip_server(only_preview);
+
+        round_trip_server(ServerMsg::SessionTaskDetail {
+            tag: "cody-x".into(),
+            task_id: "t1".into(),
+            preview: Some("p".into()),
+            progress_summary: Some("a".into()),
+            completion_summary: Some("b".into()),
+            prompt: Some("c".into()),
+        });
+        let nothing = ServerMsg::SessionTaskDetail {
+            tag: "t".into(),
+            task_id: "t1".into(),
+            preview: None,
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        };
+        assert_eq!(serde_json::to_string(&nothing).unwrap(), r#"{"type":"session_task_detail","tag":"t","task_id":"t1"}"#);
+    }
+
+    #[test]
+    fn the_task_frames_use_the_type_names_the_clients_decode() {
+        let tasks = ServerMsg::SessionTasks {
+            tag: "t".into(),
+            session_id: None,
+            daemon_epoch: "e".into(),
+            stop_supported: None,
+            tasks: vec![],
+        };
+        assert_eq!(serde_json::to_value(&tasks).unwrap()["type"], "session_tasks");
+        let detail = ServerMsg::SessionTaskDetail {
+            tag: "t".into(),
+            task_id: "x".into(),
+            preview: None,
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        };
+        assert_eq!(serde_json::to_value(&detail).unwrap()["type"], "session_task_detail");
+    }
+
+    #[test]
+    fn the_task_enums_use_their_documented_wire_names() {
+        fn name<T: serde::Serialize>(v: &T) -> String {
+            match serde_json::to_value(v).unwrap() {
+                serde_json::Value::String(s) => s,
+                other => panic!("not a string: {other}"),
+            }
+        }
+        for (kind, expected) in [
+            (TaskKind::Shell, "shell"),
+            (TaskKind::Monitor, "monitor"),
+            (TaskKind::Agent, "agent"),
+            (TaskKind::Workflow, "workflow"),
+            (TaskKind::Other, "other"),
+        ] {
+            assert_eq!(name(&kind), expected);
+        }
+        for (status, expected) in [
+            (TaskStatus::Pending, "pending"),
+            (TaskStatus::Running, "running"),
+            (TaskStatus::Paused, "paused"),
+            (TaskStatus::Completed, "completed"),
+            (TaskStatus::Failed, "failed"),
+            (TaskStatus::Stopped, "stopped"),
+        ] {
+            assert_eq!(name(&status), expected);
+        }
+        for (reason, expected) in [
+            (TaskEndReason::UserStop, "user_stop"),
+            (TaskEndReason::Restart, "restart"),
+            (TaskEndReason::SessionEnded, "session_ended"),
+            (TaskEndReason::Vanished, "vanished"),
+        ] {
+            assert_eq!(name(&reason), expected);
+        }
+    }
+
+    #[test]
+    fn a_task_list_that_names_only_the_required_fields_decodes() {
+        let json = r#"{"type":"session_tasks","tag":"t","daemon_epoch":"e","tasks":[
+            {"id":"t1","task_type":"","kind":"other","description":"","housekeeping":false,"status":"running","has_output":false}]}"#;
+        let msg: ServerMsg = serde_json::from_str(json).unwrap();
+        let ServerMsg::SessionTasks { session_id, stop_supported, tasks, .. } = msg else { panic!() };
+        assert_eq!((session_id, stop_supported), (None, None));
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].run_id, None);
+        assert_eq!(tasks[0].total_tokens, None, "an absent count stays absent, not zero");
+    }
+
+    #[test]
+    fn a_task_detail_that_names_only_its_task_decodes() {
+        let msg: ServerMsg = serde_json::from_str(r#"{"type":"session_task_detail","tag":"t","task_id":"x"}"#).unwrap();
+        assert!(matches!(
+            msg,
+            ServerMsg::SessionTaskDetail { preview: None, progress_summary: None, completion_summary: None, prompt: None, .. }
+        ));
+    }
 }
