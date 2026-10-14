@@ -5622,4 +5622,141 @@ mod background_tasks {
             assert!(features.iter().any(|f| f == "tasks"), "{who}: `features` must contain \"tasks\": {welcome}");
         }
     }
+
+    // ── BA0 review fixes: who keeps the poller running, and what a network peer hears at the end ──
+
+    /// Ends the session the way an operator's stop does, and waits for nothing: the daemon sends
+    /// every attached client its final task list itself.
+    fn stop_session(h: &Harness, tag: &str) {
+        h.session_mgr.lock().unwrap().stop(tag);
+    }
+
+    /// `true` once the newest task list for `tag` shows task `id` with `status`.
+    fn task_has_status(frames: &[Value], tag: &str, id: &str, status: &str) -> bool {
+        latest_tasks(frames, tag).and_then(|s| task_in(s, id)).is_some_and(|t| t["status"] == status)
+    }
+
+    /// A network peer alone keeps nothing polling: previews never reach it, so the daemon must not
+    /// read output files or ask the CLI for output on its account.
+    #[tokio::test]
+    async fn a_tcp_peer_alone_never_causes_task_output_reads_and_the_first_local_peer_starts_them() {
+        let h = spawn_server().await;
+        let (mut driver, _) = h.unix(vec![]).await; // spawns and drives; never attaches
+        let s = spawn_task_session(&mut driver, "cody-tasks-netonly", "cody", "tasks-netonly").await;
+        let mut tcp = tcp_tap(&h).await;
+        attach(&mut tcp, &s.tag).await;
+
+        start_tasks(&mut driver, &s).await;
+        let tag = s.tag.clone();
+        tcp.wait_until("the network peer to see every task", move |f| tasks_complete(f, &tag)).await;
+        // The files the daemon could read a preview from are gone, so any poll would have to ask the CLI.
+        std::fs::remove_dir_all(s.root()).expect("the fake wrote its output files under this root");
+        tcp.drain(QUIET).await;
+        tcp.sync().await;
+        tcp.drain(QUIET).await; // two poll intervals and more
+
+        let log = fake_log(&s.view);
+        assert!(!log.contains("get_task_output"), "the CLI was asked for output with only a network peer attached: {log:?}");
+        assert_eq!(count_type(&tcp.frames, "session_task_detail"), 0, "{}", summarize(&tcp.frames));
+        assert_no_task_text_or_paths(&tcp.text(), &s, "the network peer");
+
+        // The first local peer attaches: polling starts. What it is replayed is what the registry
+        // held at that moment, which has no preview for the shell and monitor tasks (no read ever
+        // happened), so the agent's detail comes first.
+        let mut unix = unix_tap(&h).await;
+        attach(&mut unix, &s.tag).await;
+        let tag = s.tag.clone();
+        unix.wait_until("the replayed details", move |f| detail_field(&merged_details(f, &tag), "agent1", "prompt").is_some()).await;
+        let order: Vec<&str> = frames_of(&unix.frames, "session_task_detail", &s.tag)
+            .iter()
+            .filter_map(|f| f["task_id"].as_str())
+            .collect();
+        assert_eq!(order.first(), Some(&"agent1"), "a preview was already held before any local peer attached: {order:?}");
+        let tag = s.tag.clone();
+        unix.wait_until("a preview, from the CLI now that the files are gone", move |f| {
+            detail_field(&merged_details(f, &tag), "bgsh1", "preview") == Some("SECRET-OUTPUT-9")
+        })
+        .await;
+        assert!(fake_log(&s.view).contains("get_task_output"), "the poller never asked the CLI once a local peer was attached");
+    }
+
+    /// The one case in which a network peer already has a live forwarder on a sensitive tag: the tag
+    /// is marked after the peer attached.
+    #[tokio::test]
+    async fn a_tag_marked_sensitive_after_a_tcp_peer_attached_sends_that_peer_no_more_task_frames() {
+        let h = spawn_server().await;
+        let (mut driver, _) = h.unix(vec![]).await;
+        let s = spawn_task_session(&mut driver, "cody-tasks-latemark", "cody", "tasks-latemark").await;
+        let mut tcp = tcp_tap(&h).await;
+        attach(&mut tcp, &s.tag).await;
+        let mut unix = unix_tap(&h).await;
+        attach(&mut unix, &s.tag).await;
+        assert!(!frames_of(&tcp.frames, "session_tasks", &s.tag).is_empty(), "the network peer was attached and told the (empty) task list");
+
+        h.session_mgr.lock().unwrap().sensitive_tags().mark_tag(&s.tag);
+        tcp.sync().await;
+        let (frames_before, bytes_before) = (tcp.frames.len(), tcp.raw.len());
+        start_tasks(&mut driver, &s).await;
+        let (tag, expect) = (s.tag.clone(), s.wait_output_lines().await);
+        unix.wait_until("the local peer to see the tasks and a preview", move |f| {
+            tasks_complete(f, &tag) && detail_field(&merged_details(f, &tag), "bgsh1", "preview") == Some(expect.0.as_str())
+        })
+        .await;
+        stop_session(&h, &s.tag);
+        let tag = s.tag.clone();
+        unix.wait_until("the local peer to see the session's tasks end", move |f| task_has_status(f, &tag, "bgsh1", "stopped")).await;
+        tcp.drain(QUIET).await;
+        tcp.sync().await;
+        tcp.drain(QUIET).await;
+
+        // The control: the tasks changed, ended with the session, and the local peer heard all of it.
+        assert!(unix.text().contains("SECRET-OUTPUT-PROMPT"));
+        let after = &tcp.frames[frames_before..];
+        let leaked: Vec<String> = after
+            .iter()
+            .filter(|f| f["tag"] == s.tag.as_str() && matches!(f["type"].as_str(), Some("session_tasks" | "session_task_detail")))
+            .map(|f| f.to_string())
+            .collect();
+        assert!(leaked.is_empty(), "task frames for the newly sensitive tag reached the network peer: {leaked:?}");
+        let after_text = String::from_utf8_lossy(&tcp.raw[bytes_before..]).into_owned();
+        assert_no_task_text_or_paths(&after_text, &s, "the network peer, after the mark,");
+    }
+
+    /// Over a real TCP connection, the last thing an ordinary tag's tasks do: end with the session.
+    #[tokio::test]
+    async fn a_tcp_peer_is_told_the_running_tasks_ended_with_the_session_and_still_gets_no_detail() {
+        let h = spawn_server().await;
+        let (mut driver, _) = h.unix(vec![]).await;
+        let s = spawn_task_session(&mut driver, "cody-tasks-endsnap", "cody", "tasks-endsnap").await;
+        let mut tcp = tcp_tap(&h).await;
+        attach(&mut tcp, &s.tag).await;
+        let mut unix = unix_tap(&h).await;
+        attach(&mut unix, &s.tag).await;
+        start_tasks(&mut driver, &s).await;
+        let tag = s.tag.clone();
+        tcp.wait_until("the network peer to see every task running", move |f| tasks_complete(f, &tag)).await;
+        let tag = s.tag.clone();
+        unix.wait_until("the local peer to see the details", move |f| {
+            detail_field(&merged_details(f, &tag), "agent1", "prompt").is_some()
+        })
+        .await;
+
+        stop_session(&h, &s.tag);
+
+        let tag = s.tag.clone();
+        tcp.wait_until("the final task list", move |f| task_has_status(f, &tag, "bgsh1", "stopped")).await;
+        tcp.drain(QUIET).await;
+        tcp.sync().await;
+        tcp.drain(QUIET).await;
+        let last = latest_tasks(&tcp.frames, &s.tag).expect("a task list");
+        for id in ["bgsh1", "mon1", "hk1"] {
+            let t = task_in(last, id).unwrap_or_else(|| panic!("{id} missing from {last}"));
+            assert_eq!((t["status"].as_str(), t["end_reason"].as_str()), (Some("stopped"), Some("session_ended")), "{t}");
+        }
+        let agent = task_in(last, "agent1").expect("agent1");
+        assert_eq!((agent["status"].as_str(), agent["end_reason"].as_str()), (Some("completed"), None), "{agent}");
+        assert_eq!(count_type(&tcp.frames, "session_task_detail"), 0, "{}", summarize(&tcp.frames));
+        assert!(unix.text().contains("SECRET-OUTPUT-PROMPT"), "the control: the local peer saw the texts");
+        assert_no_task_text_or_paths(&tcp.text(), &s, "the network peer");
+    }
 }

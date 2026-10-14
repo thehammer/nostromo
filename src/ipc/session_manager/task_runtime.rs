@@ -994,4 +994,262 @@ mod tests {
         let details: Vec<_> = events.iter().filter(|e| matches!(e, SessionEvent::TaskDetail(_))).collect();
         assert!(details.is_empty(), "a detail frame with no text says nothing: {details:?}");
     }
+
+    // ── which output paths teach the output root ─────────────────────────────
+
+    fn roots_of(rt: &TaskRuntime) -> Vec<PathBuf> {
+        lock_recover(&rt.files).validator.roots().to_vec()
+    }
+
+    fn report_output_file(rt: &TaskRuntime, task_id: &str, path: &str) {
+        let (tx, _rx) = broadcast::channel(16);
+        rt.on_event(&tx, &notified(task_id, "completed", json!({"output_file": path})));
+    }
+
+    #[test]
+    fn a_reported_output_path_that_is_not_this_sessions_own_task_file_never_widens_the_readable_roots() {
+        // (task id, reported path): each merely resembles `<root>/<cwd>/<session>/tasks/<task>.output`.
+        let cases = [
+            ("t1", "/elsewhere/-work-repo/sess-1/tasks/other.output"),   // not this task's file name
+            ("t1", "/elsewhere/-work-repo/sess-1/tasks/t1.output.bak"),  // not exactly `<task>.output`
+            ("t1", "/elsewhere/-work-repo/other-session/tasks/t1.output"), // another session's folder
+            ("t1", "/home/alice/work/tasks/t1.output"),                  // ends in tasks/<id>.output under a parent of home
+            ("t1", "/Users/alice/tasks/t1.output"),
+            ("t1", "/tasks/t1.output"),
+            ("t1", "tasks/t1.output"),                                   // relative
+            ("t1", "/elsewhere/-work-repo/sess-1/notasks/t1.output"),    // not a `tasks` folder
+            ("t1", "/elsewhere/sess-1/other/tasks/t1.output"),           // the session id is at the wrong level
+        ];
+        for (task_id, path) in cases {
+            let (rt, _t, dir) = runtime();
+
+            report_output_file(&rt, task_id, path);
+
+            assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()], "{path} must not teach a root");
+        }
+    }
+
+    #[test]
+    fn without_a_session_id_no_reported_path_teaches_a_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = TaskRuntime::with_validator(
+            Arc::new(Mutex::new(SessionTranscript::new())),
+            None,
+            PathBuf::from("/work/repo"),
+            OutputFileValidator::new(dir.path()),
+        );
+
+        report_output_file(&rt, "t1", "/elsewhere/-work-repo/sess-1/tasks/t1.output");
+
+        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn the_first_path_of_the_exact_shape_teaches_its_root_and_later_ones_do_not() {
+        let (rt, _t, dir) = runtime();
+        // Paths of the wrong shape first: they must not use up the one lesson.
+        report_output_file(&rt, "t1", "/decoy/-work-repo/other-session/tasks/t1.output");
+        report_output_file(&rt, "t1", "/decoy/-work-repo/sess-1/tasks/other.output");
+        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()]);
+
+        report_output_file(&rt, "t1", "/cli-tmp/claude-501/-work-repo/sess-1/tasks/t1.output");
+        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf(), PathBuf::from("/cli-tmp/claude-501")]);
+
+        report_output_file(&rt, "t2", "/another-tmp/-work-repo/sess-1/tasks/t2.output");
+        assert_eq!(
+            roots_of(&rt),
+            vec![dir.path().to_path_buf(), PathBuf::from("/cli-tmp/claude-501")],
+            "only the first root is learned"
+        );
+    }
+
+    // ── what the poller is asked to read ─────────────────────────────────────
+
+    #[test]
+    fn housekeeping_tasks_are_left_out_of_the_poll_plan_running_or_ended() {
+        let (rt, _t, _dir) = runtime();
+        let (tx, _rx) = broadcast::channel(64);
+        rt.on_event(&tx, &started("live", json!({"task_type": "local_bash"})));
+        rt.on_event(&tx, &started("ambient", json!({"task_type": "local_bash", "ambient": true})));
+        rt.on_event(&tx, &started("skipped", json!({"task_type": "monitor_mcp", "skip_transcript": true})));
+        rt.on_event(&tx, &started("ambient-ended", json!({"task_type": "local_bash", "ambient": true})));
+        rt.on_event(&tx, &notified("ambient-ended", "completed", json!({})));
+        rt.on_event(&tx, &started("live-ended", json!({"task_type": "local_bash"})));
+        rt.on_event(&tx, &notified("live-ended", "completed", json!({})));
+        rt.on_event(&tx, &started("flagged-late", json!({"task_type": "local_bash"})));
+        rt.on_event(&tx, &notified("flagged-late", "completed", json!({"skip_transcript": true})));
+
+        let plan: Vec<String> = rt.poll_plan().into_iter().map(|t| t.task_id).collect();
+
+        assert_eq!(plan, ["live", "live-ended"]);
+    }
+
+    #[test]
+    fn a_session_with_only_housekeeping_tasks_needs_no_poller_however_many_clients_are_attached() {
+        let (rt, _t, _dir) = runtime();
+        let (tx, _rx) = broadcast::channel(16);
+        rt.set_clients(2);
+        rt.on_event(&tx, &started("ambient", json!({"task_type": "monitor_ws", "ambient": true})));
+        assert!(!rt.poll_wanted());
+
+        rt.on_event(&tx, &started("live", json!({"task_type": "local_bash"})));
+        assert!(rt.poll_wanted());
+    }
+
+    // ── asking the CLI for a task's output backs off ─────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn after_a_failed_answer_the_cli_is_not_asked_again_for_thirty_seconds() {
+        let (rt, _t, _dir) = runtime();
+        assert!(rt.cli_tail_allowed(), "a CLI nobody has asked yet may be asked");
+
+        rt.note_cli_tail_answer(&Err("No task found with ID".into()));
+
+        assert!(!rt.cli_tail_allowed());
+        tokio::time::advance(Duration::from_millis(29_999)).await;
+        assert!(!rt.cli_tail_allowed(), "still inside the backoff");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(rt.cli_tail_allowed(), "thirty seconds on, the CLI may be asked again");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_after_the_backoff_starts_a_new_backoff() {
+        let (rt, _t, _dir) = runtime();
+        rt.note_cli_tail_answer(&Err("the session did not answer within 10 s".into()));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(rt.cli_tail_allowed());
+
+        rt.note_cli_tail_answer(&Err("the session did not answer within 10 s".into()));
+
+        assert!(!rt.cli_tail_allowed());
+        tokio::time::advance(Duration::from_millis(29_999)).await;
+        assert!(!rt.cli_tail_allowed());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(rt.cli_tail_allowed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_from_the_cli_ends_the_backoff() {
+        let (rt, _t, _dir) = runtime();
+        rt.note_cli_tail_answer(&Err("No task found with ID".into()));
+        assert!(!rt.cli_tail_allowed());
+
+        rt.note_cli_tail_answer(&Ok(()));
+
+        assert!(rt.cli_tail_allowed(), "no need to wait out the rest of the backoff");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cli_that_does_not_support_get_task_output_is_never_asked_again() {
+        for text in [
+            "Unsupported control request subtype",
+            "UNSUPPORTED",
+            "get_task_output is not supported by this CLI",
+            "Unknown control request subtype: get_task_output",
+            "unknown subtype",
+        ] {
+            let (rt, _t, _dir) = runtime();
+
+            rt.note_cli_tail_answer(&Err(text.into()));
+
+            assert!(!rt.cli_tail_allowed(), "{text}");
+            tokio::time::advance(Duration::from_secs(24 * 3600)).await;
+            assert!(!rt.cli_tail_allowed(), "{text}: a day later the CLI is still not asked");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn other_failures_only_back_off_and_are_not_taken_for_lack_of_support() {
+        for text in [
+            "No task found with ID",
+            "unknown task",
+            "the session did not answer within 10 s",
+            "the session exited",
+            "the session refused the change",
+        ] {
+            let (rt, _t, _dir) = runtime();
+
+            rt.note_cli_tail_answer(&Err(text.into()));
+            assert!(!rt.cli_tail_allowed(), "{text}");
+            tokio::time::advance(Duration::from_secs(30)).await;
+
+            assert!(rt.cli_tail_allowed(), "{text}: the CLI may be asked again after the backoff");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_success_does_not_undo_an_unsupported_verdict() {
+        let (rt, _t, _dir) = runtime();
+        rt.note_cli_tail_answer(&Err("Unsupported control request subtype".into()));
+
+        rt.note_cli_tail_answer(&Ok(()));
+
+        assert!(!rt.cli_tail_allowed());
+    }
+
+    // ── the lag resend, as a network peer receives it ────────────────────────
+
+    /// What a peer of `trust` is sent when its forwarder lagged over a task's whole story (whose
+    /// texts are `SECRET-OUTPUT-` sentinels). The frames go through the same `outbound` filter the
+    /// server applies to every targeted frame.
+    async fn frames_after_a_lag(trust: crate::ipc::peer::PeerTrust, tag: &str, sensitive: bool) -> Vec<ServerMsg> {
+        use crate::ipc::peer::{outbound, SensitiveTags};
+        let (rt, _t, _dir) = runtime();
+        let (tx, rx) = broadcast::channel::<SessionEvent>(2);
+        rt.on_event(&tx, &started("agt", json!({"task_type": "local_agent", "prompt": "SECRET-OUTPUT-PROMPT"})));
+        rt.on_event(&tx, &notified("agt", "completed", json!({"summary": "SECRET-OUTPUT-DONE"})));
+        for code in 10..13 {
+            tx.send(SessionEvent::Exited { exit_code: Some(code) }).unwrap();
+        }
+        let tags = SensitiveTags::in_memory();
+        if sensitive {
+            tags.mark_tag(tag);
+        }
+        let (out_tx, mut out) = mpsc::unbounded_channel();
+        let peer = move |msg: ServerMsg| {
+            match outbound(trust, msg, &tags) {
+                Some(msg) => out_tx.send(msg).is_ok(),
+                None => true,
+            }
+        };
+        let handle = tokio::spawn(forward_session_events(rx, peer, tag.into(), rt));
+        drop(tx);
+        handle.await.unwrap();
+        let mut frames = vec![];
+        while let Ok(frame) = out.try_recv() {
+            frames.push(frame);
+        }
+        frames
+    }
+
+    #[tokio::test]
+    async fn after_a_lag_a_local_peer_is_resent_the_task_list_and_its_texts() {
+        use crate::ipc::peer::PeerTrust;
+        for sensitive in [false, true] {
+            let frames = frames_after_a_lag(PeerTrust::LocalOther, "cody-1", sensitive).await;
+            let wire = serde_json::to_string(&frames).unwrap();
+            assert!(frames.iter().any(|f| matches!(f, ServerMsg::SessionTasks { .. })), "{wire}");
+            assert!(wire.contains("SECRET-OUTPUT-PROMPT") && wire.contains("SECRET-OUTPUT-DONE"), "the control: {wire}");
+        }
+    }
+
+    #[tokio::test]
+    async fn after_a_lag_a_network_peer_is_resent_the_task_list_of_an_ordinary_tag_but_never_a_detail() {
+        use crate::ipc::peer::PeerTrust;
+        let frames = frames_after_a_lag(PeerTrust::Tcp, "cody-1", false).await;
+        let wire = serde_json::to_string(&frames).unwrap();
+
+        let lists: Vec<_> = frames.iter().filter(|f| matches!(f, ServerMsg::SessionTasks { .. })).collect();
+        assert_eq!(lists.len(), 1, "{wire}");
+        assert!(!frames.iter().any(|f| matches!(f, ServerMsg::SessionTaskDetail { .. })), "{wire}");
+        assert!(!wire.contains("SECRET-OUTPUT"), "{wire}");
+    }
+
+    #[tokio::test]
+    async fn after_a_lag_a_network_peer_is_resent_nothing_of_a_sensitive_tag() {
+        use crate::ipc::peer::PeerTrust;
+        let frames = frames_after_a_lag(PeerTrust::Tcp, "cody-1", true).await;
+
+        assert!(frames.is_empty(), "{}", serde_json::to_string(&frames).unwrap());
+    }
 }

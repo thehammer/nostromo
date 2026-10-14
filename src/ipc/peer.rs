@@ -2270,13 +2270,110 @@ mod tests {
         }
     }
 
+    // ── a task list built from a registry that was told secrets ──────────────
+
+    use crate::ipc::tasks::{parse_task_event, TaskHub};
+
+    /// A registry fed what the CLI reports, with a `SECRET-OUTPUT-` sentinel in every text a task
+    /// can have: its prompt, its progress and completion summaries, its last output line, and the
+    /// path of its output file. The frames below are built from it, so a field that leaks into the
+    /// task list is a field this test sees.
+    fn hub_told_secrets() -> TaskHub {
+        let mut hub = TaskHub::new();
+        let lookup = |_: &str| None::<String>;
+        let mut now = 1_000;
+        let mut feed = |subtype: &str, body: serde_json::Value| {
+            let event = parse_task_event(subtype, body.as_object().unwrap()).expect("a task event");
+            now += 1;
+            hub.on_event(&event, now, &lookup);
+        };
+        feed("task_started", serde_json::json!({"task_id": "agent1", "description": "review the diff", "task_type": "local_agent", "prompt": "SECRET-OUTPUT-PROMPT review the confidential diff"}));
+        feed("task_progress", serde_json::json!({"task_id": "agent1", "summary": "SECRET-OUTPUT-PROGRESS reading the changed files", "usage": {"total_tokens": 7}}));
+        feed("task_started", serde_json::json!({"task_id": "shell1", "description": "build watcher", "task_type": "local_bash", "is_backgrounded": true}));
+        feed("task_started", serde_json::json!({"task_id": "done1", "description": "quick job", "task_type": "local_bash"}));
+        feed("task_notification", serde_json::json!({
+            "task_id": "done1", "status": "completed",
+            "summary": "SECRET-OUTPUT-DONE the job finished",
+            "output_file": "/private/tmp/claude-501/SECRET-OUTPUT-PATH/-work-repo/sess-1/tasks/done1.output",
+        }));
+        hub.set_preview("shell1", Some("SECRET-OUTPUT-PREVIEW last output line".into()), now + 1, &lookup);
+        hub
+    }
+
+    /// The `SessionTasks` frame and the `SessionTaskDetail` frames of `tag`, as the daemon builds
+    /// them from the registry's current state.
+    fn frames_from_a_registry_told_secrets(tag: &str) -> (ServerMsg, Vec<ServerMsg>) {
+        let (tasks, details) = hub_told_secrets().current(&|_: &str| None::<String>);
+        let list = ServerMsg::SessionTasks {
+            tag: tag.into(),
+            session_id: Some("sess-1".into()),
+            daemon_epoch: "epoch-1".into(),
+            stop_supported: None,
+            tasks,
+        };
+        let details = details
+            .into_iter()
+            .map(|d| ServerMsg::SessionTaskDetail {
+                tag: tag.into(),
+                task_id: d.task_id,
+                preview: d.preview,
+                progress_summary: d.progress_summary,
+                completion_summary: d.completion_summary,
+                prompt: d.prompt,
+            })
+            .collect();
+        (list, details)
+    }
+
+    const SECRET_TEXTS: [&str; 4] = ["SECRET-OUTPUT-PROMPT", "SECRET-OUTPUT-PROGRESS", "SECRET-OUTPUT-DONE", "SECRET-OUTPUT-PREVIEW"];
+
     #[test]
     fn nothing_a_network_peer_can_receive_carries_task_text_or_a_path() {
-        let tags = SensitiveTags::in_memory();
-        let sent = outbound(PeerTrust::Tcp, session_tasks_msg("cody-ordinary"), &tags).expect("delivered");
-        let json = wire(&sent);
-        for forbidden in ["SECRET-OUTPUT", "preview", "summary", "prompt", "output_file", "/private/tmp"] {
-            assert!(!json.contains(forbidden), "{forbidden} in {json}");
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+            let (list, details) = frames_from_a_registry_told_secrets(tag);
+            // Positive control: the registry really holds the secrets and the detail frames carry them.
+            let detail_wire = details.iter().map(wire).collect::<Vec<_>>().join("\n");
+            for secret in SECRET_TEXTS {
+                assert!(detail_wire.contains(secret), "the control: {secret} is not in the details of {tag}: {detail_wire}");
+            }
+
+            let mut received = vec![];
+            for frame in std::iter::once(list.clone()).chain(details.clone()) {
+                if let Some(sent) = outbound(PeerTrust::Tcp, frame, &tags) {
+                    received.push(sent);
+                }
+            }
+
+            // The task list of an ordinary tag is delivered, and it is the whole of what is.
+            let expected_frames = usize::from(tag == "cody-ordinary");
+            assert_eq!(received.len(), expected_frames, "{tag}: {received:?}");
+            let json = received.iter().map(wire).collect::<Vec<_>>().join("\n");
+            for forbidden in ["SECRET-OUTPUT", "preview", "summary", "prompt", "output_file", "/private/tmp"] {
+                assert!(!json.contains(forbidden), "{forbidden} in {json}");
+            }
+            if tag == "cody-ordinary" {
+                for id in ["agent1", "shell1", "done1"] {
+                    assert!(json.contains(id), "the delivered list is a real one: {json}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_local_peer_is_sent_the_secret_texts_of_the_same_registry() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive"] {
+            let (_, details) = frames_from_a_registry_told_secrets(tag);
+            let sent: Vec<String> = details
+                .into_iter()
+                .map(|d| wire(&outbound(PeerTrust::LocalOther, d, &tags).expect("a local peer receives details")))
+                .collect();
+            let wire = sent.join("\n");
+            for secret in SECRET_TEXTS {
+                assert!(wire.contains(secret), "{tag}: {secret}");
+            }
+            assert!(!wire.contains("/private/tmp"), "no output path, not even for a local peer: {wire}");
         }
     }
 
@@ -2309,8 +2406,62 @@ mod tests {
         "has_output",
     ];
 
+    /// Fails unless `meta` has every `Option` field set. The destructuring is exhaustive on
+    /// purpose: a field added to `TaskMeta` does not compile here until it is listed, and a field
+    /// left `None` in the fixture would be skipped when serialised (the key-set test below would
+    /// then pass without ever seeing it).
+    fn assert_every_optional_field_is_set(meta: TaskMeta) {
+        let TaskMeta {
+            id: _,
+            run_id,
+            task_type: _,
+            kind: _,
+            tool_name,
+            description: _,
+            subagent_type,
+            workflow_name,
+            tool_use_id,
+            parent_task_id,
+            is_backgrounded,
+            housekeeping: _,
+            status: _,
+            end_reason,
+            started_at_ms,
+            ended_at_ms,
+            duration_ms,
+            total_tokens,
+            tool_uses,
+            last_tool_name,
+            has_output: _,
+        } = meta;
+        let unset: Vec<&str> = [
+            ("run_id", run_id.is_none()),
+            ("tool_name", tool_name.is_none()),
+            ("subagent_type", subagent_type.is_none()),
+            ("workflow_name", workflow_name.is_none()),
+            ("tool_use_id", tool_use_id.is_none()),
+            ("parent_task_id", parent_task_id.is_none()),
+            ("is_backgrounded", is_backgrounded.is_none()),
+            ("end_reason", end_reason.is_none()),
+            ("started_at_ms", started_at_ms.is_none()),
+            ("ended_at_ms", ended_at_ms.is_none()),
+            ("duration_ms", duration_ms.is_none()),
+            ("total_tokens", total_tokens.is_none()),
+            ("tool_uses", tool_uses.is_none()),
+            ("last_tool_name", last_tool_name.is_none()),
+        ]
+        .into_iter()
+        .filter_map(|(name, is_none)| is_none.then_some(name))
+        .collect();
+        assert!(
+            unset.is_empty(),
+            "full_task_meta() must set every optional field, or its key set proves nothing; unset: {unset:?}"
+        );
+    }
+
     #[test]
     fn a_task_meta_with_every_optional_field_set_has_exactly_the_approved_keys() {
+        assert_every_optional_field_is_set(full_task_meta());
         let value = serde_json::to_value(full_task_meta()).unwrap();
         let keys: std::collections::BTreeSet<&str> =
             value.as_object().unwrap().keys().map(String::as_str).collect();
@@ -2336,7 +2487,20 @@ mod tests {
 
     #[test]
     fn the_task_list_frame_never_contains_the_text_of_a_detail() {
-        let json = wire(&session_tasks_msg("cody-x"));
+        let (list, details) = frames_from_a_registry_told_secrets("cody-x");
+
+        // Positive control: the same registry's detail frames carry every secret.
+        let detail_wire = details.iter().map(wire).collect::<Vec<_>>().join("\n");
+        for secret in SECRET_TEXTS {
+            assert!(detail_wire.contains(secret), "the control: {secret} is not in {detail_wire}");
+        }
+        // The list is a real one: it names the tasks the registry was told about...
+        let json = wire(&list);
+        for id in ["agent1", "shell1", "done1"] {
+            assert!(json.contains(id), "{json}");
+        }
+        // ...and carries none of what they said.
         assert!(!json.contains("SECRET-OUTPUT"), "{json}");
+        assert!(!json.contains("/private/tmp"), "{json}");
     }
 }
