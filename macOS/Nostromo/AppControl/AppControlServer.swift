@@ -135,6 +135,7 @@ final class AppControlServer {
         case "click":       return try click(req)
         case "drag":        return try drag(req)
         case "hittest":     return try hitTest(req)
+        case "transcript-anchor": return try transcriptAnchor(req)
         case "key":         return try key(req)
         case "type":        return try typeText(req)
         case "paste":       return try paste(req)
@@ -428,6 +429,38 @@ final class AppControlServer {
             throw AppControlError.badRequest("hittest needs x and y")
         }
         return AppControlHitTest.report(in: w, at: try point(req, w))
+    }
+
+    /// READ-ONLY scroll-safety probe: the transcript's first visible block and viewport offsets
+    /// (`TranscriptAnchorProbe`). Sends no event, changes no focus, forces no layout.
+    /// The pane: the `ReplView` whose tag is `focus`, else the one holding the first responder,
+    /// else the window's only visible one.
+    private func transcriptAnchor(_ req: AppControlRequest) throws -> Any {
+        let w = try window(req)
+        var panes: [ReplView] = []
+        func walk(_ v: NSView) {
+            if let pane = v as? ReplView, !pane.isHiddenOrHasHiddenAncestor { panes.append(pane) }
+            v.subviews.forEach(walk)
+        }
+        if let content = w.contentView { walk(content) }
+        let tags = panes.map { $0.diagnosticsTag }
+        let pane: ReplView
+        if let tag = req.string("focus") {
+            guard let found = panes.first(where: { $0.diagnosticsTag == tag }) else {
+                throw AppControlError.notFound("no visible pane tagged \"\(tag)\" in window; visible tags: \(tags)")
+            }
+            pane = found
+        } else if let responder = w.firstResponder as? NSView,
+                  let found = panes.first(where: { responder === $0 || responder.isDescendant(of: $0) }) {
+            pane = found
+        } else if panes.count == 1 {
+            pane = panes[0]
+        } else {
+            throw AppControlError.notFound("no pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(tags)")
+        }
+        let index = appDelegate?.windows.firstIndex(where: { $0 === w }) ?? req.int("window") ?? 0
+        let data = try JSONEncoder().encode(pane.anchorSnapshot(windowIndex: index))
+        return try JSONSerialization.jsonObject(with: data)
     }
 
     /// Press at one point, drag to another, release — for selecting text.
