@@ -1,4 +1,5 @@
 import AppKit
+import NostromoKit
 
 // Turn and block views for the transcript, moved out of `ReplView.swift` so
 // they can be compiled into the logic test bundle — the same move
@@ -214,18 +215,27 @@ class ChatTurnView: NSView, TurnIsland {
     private var bubbleHeight: CGFloat = 0
 
     /// The frame-positioned column under the bubble: the truncation banner when
-    /// there is one, then one view per rendered block. Parallel to
-    /// `columnHeights`.
+    /// there is one, then one view per rendered item — a block, or a whole tool
+    /// group (`ToolGroupView`). Parallel to `columnHeights`.
     private var columnViews: [NSView] = []
     private var columnHeights: [CGFloat] = []
     /// Width constraint of each column view, so a pane resize can re-widen them
     /// without rebuilding. Parallel to `columnViews`.
     private var columnWidthConstraints: [NSLayoutConstraint] = []
     private var bubbleWidthConstraint: NSLayoutConstraint?
-    /// Index into `columnViews` of the first *block* — 1 when a truncation
-    /// banner is present, 0 otherwise. Block index `i` is `columnViews[blockOffset + i]`.
-    private var blockOffset = 0
+    /// Blocks fed to `planner` so far: the index of the next block.
     private var renderedCount = 0
+
+    /// Folds the turn's tool calls into groups as blocks arrive (see `ToolFoldPlanner`).
+    /// Each block is fed once, so streaming costs the new blocks only.
+    private var planner: ToolFoldPlanner
+    private var plannerEnded = false
+    /// Block index → its column, for blocks rendered as themselves.
+    private var columnForBlock: [Int: Int] = [:]
+    /// Group id → its view and its column.
+    private var groupViews: [Int: ToolGroupView] = [:]
+    private var columnForGroup: [Int: Int] = [:]
+    private let folds: FoldResolver
 
     /// False when this turn's payload was dropped past the retention cap. Its
     /// blocks say so rather than rendering as empty.
@@ -245,6 +255,9 @@ class ChatTurnView: NSView, TurnIsland {
     /// persistence, so the state survives the view.
     var onBlockExpansion: ((_ blockIndex: Int, _ isExpanded: Bool) -> Void)?
 
+    /// Fired when the operator opens or closes a tool group, so the choice outlives this view.
+    var onGroupToggle: ((_ groupKey: String, _ isExpanded: Bool) -> Void)?
+
     /// Everything the operator has already done to this turn, restored into the
     /// block views as they are built.
     private let interaction: TurnInteractionState
@@ -257,9 +270,14 @@ class ChatTurnView: NSView, TurnIsland {
     /// Wired by `ReplView` to `session.send(_:)`.
     var onSend: ((String) -> Void)?
 
-    init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState) {
+    /// - Parameter folds: how tool groups resolve; nil means the operator's explicit choices
+    ///   in `interaction`, else collapsed.
+    init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState,
+         folds: FoldResolver? = nil) {
         self.contentAvailable = contentAvailable
         self.interaction      = interaction
+        self.folds            = folds ?? FoldResolver(state: interaction)
+        self.planner          = ToolFoldPlanner(turnKey: turn.identityKey)
         super.init(frame: .zero)
         // Positioned by frame inside the document view, with exactly one
         // constraint of its own — its width. Nothing ties it to its container or
@@ -289,9 +307,8 @@ class ChatTurnView: NSView, TurnIsland {
         // expandable.
         if !contentAvailable {
             appendColumnView(Self.makeTruncationBanner())
-            blockOffset = 1
         }
-        renderNewBlocks(turn.blocks)
+        render(turn)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -335,23 +352,96 @@ class ChatTurnView: NSView, TurnIsland {
     /// rendered keeps its cached height, which is sound precisely because each
     /// block is an island at a fixed width: appending one cannot move an
     /// earlier one.
+    ///
+    /// New blocks go through the fold planner, whose ops say what to render: a
+    /// block as itself, a new group, or an existing group that grew. A group that
+    /// grew is updated in place and, only if it is expanded, re-measured; a
+    /// collapsed one keeps its fixed-height row.
     func update(turn: ChatTurn) {
-        let newBlocks = Array(turn.blocks.dropFirst(renderedCount))
-        guard !newBlocks.isEmpty else { return }
-        renderNewBlocks(newBlocks)
+        render(turn)
     }
 
-    private func renderNewBlocks(_ blocks: [TurnBlock]) {
-        for block in blocks {
-            // `renderedCount` is already the index of the block being added, and
-            // it keeps counting across streaming `update(turn:)` calls — so it is
-            // the block index, and a second counter would only be a second thing
-            // to get out of step with it.
-            appendColumnView(makeBlockView(block, at: renderedCount))
+    /// The tool group view with this key, if this turn has one (the load harness's
+    /// `group-expand`).
+    func groupView(forKey key: String) -> ToolGroupView? {
+        groupViews.values.first { $0.group.key == key }
+    }
+
+    /// Feed the new blocks to the planner and render what it says.
+    ///
+    /// A group's ops are coalesced: however many times the blocks of this call touched a
+    /// group (a whole turn being built touches a 500-call group a thousand times), its view
+    /// is updated once, with the group's final state. The turn's block array is only
+    /// borrowed for the call; holding it would make every block the session appends to
+    /// this turn copy the array.
+    private func render(_ turn: ChatTurn) {
+        guard turn.blocks.count > renderedCount || (turn.isComplete && !plannerEnded) else { return }
+        let blocks = turn.blocks
+        var touched: [Int] = []
+        var touchedSet = Set<Int>()
+        func apply(_ ops: [ToolFoldPlanner.Op]) {
+            for op in ops {
+                switch op {
+                case .block(let index):
+                    columnForBlock[index] = columnViews.count
+                    appendColumnView(makeBlockView(blocks[index], at: index))
+                case .group(let group):
+                    let view = makeGroupView(group, blocks: blocks)
+                    groupViews[group.id] = view
+                    columnForGroup[group.id] = columnViews.count
+                    appendColumnView(view)
+                    if touchedSet.insert(group.id).inserted { touched.append(group.id) }
+                case .extend(let group):
+                    if touchedSet.insert(group.id).inserted { touched.append(group.id) }
+                }
+            }
+        }
+        while renderedCount < blocks.count {
+            let index = renderedCount
             renderedCount += 1
+            apply(planner.feed(ToolFoldAdapter.foldBlock(blocks[index],
+                                                         parentId: turn.subagentTextParents[index])))
+        }
+        if turn.isComplete && !plannerEnded {
+            plannerEnded = true
+            apply(planner.turnEnded(outcome: ToolFoldAdapter.outcome(of: turn)))
+        }
+        // A group created by this call was built from its first snapshot; bring it, and
+        // every group extended, to the planner's final state.
+        for id in touched {
+            guard let view = groupViews[id], let group = planner.group(id: id) else { continue }
+            let grew = view.update(group: group, blocks: blocks)
+            if grew, !needsFullRemeasure, let column = columnForGroup[id] {
+                remeasureColumnView(at: column)
+            }
         }
         invalidateIntrinsicContentSize()
         needsLayout = true
+    }
+
+    private func makeGroupView(_ group: ToolGroup, blocks: [TurnBlock]) -> ToolGroupView {
+        let view = ToolGroupView(group: group, blocks: blocks,
+                                 contentAvailable: contentAvailable, interaction: interaction,
+                                 isExpanded: folds.isExpanded(group))
+        let id = group.id
+        view.onToggle = { [weak self, weak view] isExpanded in
+            guard let self, let view else { return }
+            self.onGroupToggle?(view.group.key, isExpanded)
+            self.groupChangedHeight(id)
+        }
+        view.onBlockExpansion = { [weak self] index, isExpanded in
+            self?.onBlockExpansion?(index, isExpanded)
+        }
+        view.onHeightChange = { [weak self] in self?.groupChangedHeight(id) }
+        return view
+    }
+
+    /// One group's height changed (toggled, or a member fold inside it). Only that
+    /// island is re-measured, as for a result fold.
+    private func groupChangedHeight(_ id: Int) {
+        guard let column = columnForGroup[id] else { return }
+        remeasureColumnView(at: column)
+        onIntrinsicHeightChange?()
     }
 
     private func makeBlockView(_ block: TurnBlock, at index: Int) -> NSView {
@@ -367,7 +457,7 @@ class ChatTurnView: NSView, TurnIsland {
                 // Only this block's height changed. Re-measuring the one island
                 // and re-summing is what keeps an expand O(1) in turn size — and
                 // what stops the cached total drifting from what is on screen.
-                self.remeasureColumnView(at: self.blockOffset + index)
+                if let column = self.columnForBlock[index] { self.remeasureColumnView(at: column) }
                 self.onIntrinsicHeightChange?()
             }
             return v
@@ -419,6 +509,11 @@ class ChatTurnView: NSView, TurnIsland {
         return constraint
     }
 
+    #if DEBUG
+    /// Every `measureIsland` call, for the layout-cost tests (no wall clock).
+    static var measureIslandCount = 0
+    #endif
+
     /// Measure one island at `width`, detached.
     ///
     /// Detached is not optional, and the reason is `ReplView.measure()`'s:
@@ -438,6 +533,9 @@ class ChatTurnView: NSView, TurnIsland {
     /// once the solve has given it a real width, and `fittingSize` alone
     /// reports it as a single line.
     static func measureIsland(_ view: NSView, width: CGFloat) -> CGFloat {
+        #if DEBUG
+        measureIslandCount += 1
+        #endif
         let superview = view.superview
         let selection = TranscriptSelection.capture(in: view)
         superview.map { _ in view.removeFromSuperview() }
@@ -866,7 +964,7 @@ class TextBlockView: NSView, WidthPresettable {
 /// Every selectable label in the transcript uses this class, menu or not, because
 /// the same editor swap is what blackens selected text: see
 /// `CopyMenuTextFieldCell.setUpFieldEditorAttributes`.
-final class CopyMenuTextField: NSTextField {
+class CopyMenuTextField: NSTextField {
 
     override class var cellClass: AnyClass? {
         get { CopyMenuTextFieldCell.self }
@@ -971,7 +1069,7 @@ class ToolCallView: NSView {
         layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
         layer?.cornerRadius    = 6
 
-        let iconLabel = NSTextField(labelWithString: icon(for: data.toolName))
+        let iconLabel = NSTextField(labelWithString: Self.icon(for: data.toolName))
         iconLabel.font      = .systemFont(ofSize: 12)
         iconLabel.textColor = Theme.fgMuted
         iconLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -1062,7 +1160,8 @@ class ToolCallView: NSView {
         pasteboard.setString(string, forType: .string)
     }
 
-    private func icon(for name: String) -> String {
+    /// The glyph a call row leads with. A collapsed group of one shows the same one.
+    static func icon(for name: String) -> String {
         switch name {
         case "Read":                         return "📄"
         case "Write":                        return "📝"
@@ -1241,12 +1340,15 @@ enum TranscriptFocusPolicy {
 ///
 /// Two kinds of holder: a selectable label's shared *field editor* (the editor is
 /// transient — the label is what lives in the transcript), and a plain
-/// `NSTextView`, which is how `MarkdownCardView` shows prose.
+/// `NSTextView`, which is how `MarkdownCardView` shows prose. A third, with no
+/// text: keyboard focus on a control in the transcript (a tool group row), which a
+/// re-measure would otherwise drop the moment the operator toggles it.
 struct TranscriptSelection {
 
     private enum Holder {
         case label(NSTextField)
         case textView(NSTextView)
+        case focus(NSView)
     }
 
     private let holder: Holder
@@ -1255,6 +1357,9 @@ struct TranscriptSelection {
     /// The selection currently held inside `view`, or nil when the first
     /// responder is not a non-empty selection within it.
     static func capture(in view: NSView) -> TranscriptSelection? {
+        if let control = view.window?.firstResponder as? ToolGroupRowView, control.isDescendant(of: view) {
+            return TranscriptSelection(holder: .focus(control), range: NSRange(location: 0, length: 0))
+        }
         guard let text = view.window?.firstResponder as? NSTextView,
               text.selectedRange.length > 0
         else { return nil }
@@ -1285,6 +1390,9 @@ struct TranscriptSelection {
                 clip.scroll(to: origin)
                 clip.enclosingScrollView?.reflectScrolledClipView(clip)
             }
+        case .focus(let control):
+            guard let window = control.window, window.firstResponder !== control else { return }
+            window.makeFirstResponder(control)
         }
     }
 

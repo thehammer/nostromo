@@ -16,6 +16,9 @@
 # build, and stops. Turns are ignored, nothing is graded. Run it 3 times on a
 # build to get a baseline; `FIXTURE_HISTORY` (default
 # /tmp/nostromo-fixture-open.log) accumulates the runs, tagged with the git SHA.
+# The run also records `group-expand` (opening the first 60-call tool group).
+# `BASELINE_MS=<n>` prints this build's fixture-open over that baseline;
+# `NOSTROMO_LOAD_FOLD_DEFAULT=expanded` opens every tool group (today's look).
 #
 # A Debug build's numbers are meaningless for this work, so this always builds
 # Release. Expect roughly one turn per second of wall clock: the harness runs
@@ -68,6 +71,7 @@ NOSTROMO_LOAD_TURNS="$TURNS" \
 NOSTROMO_LOAD_RECONNECTS="$RECONNECTS" \
 NOSTROMO_LOAD_FOCUSES="$FOCUSES" \
 NOSTROMO_LOAD_FIXTURE="$FIXTURE" \
+NOSTROMO_LOAD_FOLD_DEFAULT="${NOSTROMO_LOAD_FOLD_DEFAULT:-collapsed}" \
 NOSTROMO_DIAG_INTERVAL=5 \
   "$APP/Contents/MacOS/Nostromo" >"$APP_LOG" 2>&1 &
 APP_PID=$!
@@ -80,8 +84,14 @@ if [ -n "$FIXTURE" ]; then
     kill -0 $APP_PID 2>/dev/null || break
     sleep 1
   done
+  # The group-expand line follows within a pass or two of fixture-open.
+  for _ in $(seq 1 30); do
+    grep -q 'group-expand' "$APP_LOG" && break
+    kill -0 $APP_PID 2>/dev/null || break
+    sleep 1
+  done
   SHA=$(git -C "$REPO_ROOT" describe --always --dirty 2>/dev/null || echo unknown)
-  grep 'fixture-open ms=' "$APP_LOG" | sed "s/^/sha=$SHA /" >> "$FIXTURE_HISTORY"
+  grep -E 'fixture-open ms=|group-expand ms=' "$APP_LOG" | sed "s/^/sha=$SHA /" >> "$FIXTURE_HISTORY"
   python3 "$REPORT" --fixture-only --fixture-log "$FIXTURE_HISTORY"
   exit $?
 fi

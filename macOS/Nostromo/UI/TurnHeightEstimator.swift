@@ -1,4 +1,5 @@
 import CoreGraphics
+import NostromoKit
 
 /// Estimates how tall a turn will render, from arithmetic alone.
 ///
@@ -50,6 +51,8 @@ enum TurnHeightEstimator {
     static let cardChrome: CGFloat          = 24
     /// `ToolCallView`: one 7+7-padded row of 11 pt text.
     static let toolCallHeight: CGFloat      = 30
+    /// `ToolGroupRowView`: a fixed 22 pt row, whatever the group holds.
+    static let groupRowHeight: CGFloat      = 22
     /// `ToolResultView` collapsed: the disclosure row plus 8+8 padding.
     static let toolResultCollapsed: CGFloat = 32
     /// `ResultChipView`: a single 10 pt line.
@@ -75,7 +78,11 @@ enum TurnHeightEstimator {
     // MARK: - Estimation
 
     /// Estimated rendered height of `turn` at `width` points of pane width.
-    static func estimate(_ turn: ChatTurn, width: CGFloat) -> CGFloat {
+    ///
+    /// `shape`: the turn's fold shape when the caller has it cached (it does not depend on
+    /// width); nil plans the turn here.
+    static func estimate(_ turn: ChatTurn, width: CGFloat, folds: FoldResolver = FoldResolver(),
+                         shape: FoldShape? = nil) -> CGFloat {
         guard turn.marker == nil else { return markerHeight }
         let paneWidth = max(width, 1)
 
@@ -97,16 +104,43 @@ enum TurnHeightEstimator {
         }
 
         let blockWidth = paneWidth * blocksWidthFraction - 14
-        for (i, block) in turn.blocks.enumerated() {
-            // Ask for the length only when the answer can change the height —
-            // see `TurnBlock.heightDependsOnContentLength`.
-            let characters = block.heightDependsOnContentLength
-                ? turn.contentLength(ofBlockAt: i) : 0
-            height += estimate(block: block, characters: characters, width: blockWidth)
-            if i > 0 { height += blockSpacing }
+        // Tool calls fold into groups, so a turn that has any is estimated item by
+        // item through the same rule the view renders with. One that has none is
+        // the plain block walk it always was.
+        guard ToolFoldAdapter.hasToolBlocks(turn) else {
+            for i in turn.blocks.indices {
+                height += estimate(blockAt: i, of: turn, width: blockWidth)
+                if i > 0 { height += blockSpacing }
+            }
+            return max(height, minimumTurnHeight)
         }
 
+        for (n, item) in (shape ?? FoldShape(turn)).items.enumerated() {
+            if n > 0 { height += blockSpacing }
+            switch item {
+            case .block(let i):
+                height += estimate(blockAt: i, of: turn, width: blockWidth)
+            case .group(let key, let members, let agentRows):
+                height += groupRowHeight
+                // A collapsed group is its row, whatever it holds. Expanded, the row plus
+                // every member as it rendered before folding, plus a collapsed agent-activity
+                // row under each Agent call with subagent blocks.
+                guard folds.isExpanded(key: key) else { continue }
+                for i in members {
+                    height += blockSpacing + estimate(blockAt: i, of: turn, width: blockWidth)
+                }
+                height += CGFloat(agentRows) * (blockSpacing + toolResultCollapsed)
+            }
+        }
         return max(height, minimumTurnHeight)
+    }
+
+    private static func estimate(blockAt i: Int, of turn: ChatTurn, width: CGFloat) -> CGFloat {
+        let block = turn.blocks[i]
+        // Ask for the length only when the answer can change the height —
+        // see `TurnBlock.heightDependsOnContentLength`.
+        let characters = block.heightDependsOnContentLength ? turn.contentLength(ofBlockAt: i) : 0
+        return estimate(block: block, characters: characters, width: width)
     }
 
     static func estimate(block: TurnBlock, characters: Int, width: CGFloat) -> CGFloat {

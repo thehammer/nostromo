@@ -1,0 +1,4 @@
+fixture-open ms=200 rows=24 turns=212 fold=collapsed
+fixture-open ms=900 rows=60 turns=212 fold=expanded
+group-expand ms=50 calls=60 fold=collapsed
+group-expand ms=400 calls=60 fold=expanded

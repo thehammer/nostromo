@@ -36,6 +36,7 @@ private let signposter = OSSignposter(subsystem: "com.hammer.nostromo", category
 ///   NOSTROMO_LOAD_BIG_TURN_BLOCKS=160   one turn of N blocks, before the rest
 ///   NOSTROMO_LOAD_BIG_TURN_TABLE_ROWS=60  rows in that turn's markdown table
 ///   NOSTROMO_LOAD_FIXTURE=benchmark  open the benchmark transcript instead (below)
+///   NOSTROMO_LOAD_FOLD_DEFAULT=collapsed|expanded  tool groups' default (harness only)
 ///
 /// ## Open-fixture mode
 ///
@@ -51,6 +52,10 @@ private let signposter = OSSignposter(subsystem: "com.hammer.nostromo", category
 /// hook in `ReplView`, so this mode adds nothing to the rendering code it
 /// measures. `ms` is the time of the last observed change, not of the poll that
 /// confirmed it, so the confirmation window is not in the number.
+///
+/// It then opens the fixture's first 60-call tool group and logs
+/// `group-expand ms=<n>`: from the toggle to the end of the materialization pass
+/// that renders it.
 ///
 /// ## Why the big turn exists
 ///
@@ -72,6 +77,18 @@ final class TranscriptLoadHarness {
     static var isActive: Bool {
         ProcessInfo.processInfo.environment["NOSTROMO_LOAD_HARNESS"] == "1"
     }
+
+    /// `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`: tool groups start open, to time the fixture
+    /// the way it rendered before folding. Ignored outside the harness.
+    static var foldsExpandedByDefault: Bool {
+        isActive && ProcessInfo.processInfo.environment["NOSTROMO_LOAD_FOLD_DEFAULT"] == "expanded"
+    }
+
+    /// Logged on the timing lines, so the report never pools collapsed and expanded runs.
+    static var foldModeName: String { foldsExpandedByDefault ? "expanded" : "collapsed" }
+
+    /// Size of the group `group-expand` opens: the fixture's largest.
+    static let groupExpandCallCount = 60
 
     let totalTurns: Int
     let reconnects: Int
@@ -319,17 +336,29 @@ final class TranscriptLoadHarness {
             timer.cancel()
             signposter.endInterval("fixtureOpen", interval)
             let ms = Int((Double(lastChange - started) / 1e6).rounded())
-            let line = "fixture-open ms=\(ms) rows=\(state.views) turns=\(expectedTurns)"
+            let line = "fixture-open ms=\(ms) rows=\(state.views) turns=\(expectedTurns) fold=\(Self.foldModeName)"
             log.info("\(line, privacy: .public)")
             // stderr too: the load-test script's log is what the report reads.
             FileHandle.standardError.write(Data((line + "\n").utf8))
             Self.afterFixtureOpen?(tag)
+            self.measureGroupExpand(tag: tag)
         }
         timer.resume()
         fixtureTimers.append(timer)
     }
 
     private var fixtureTimers: [DispatchSourceTimer] = []
+
+    /// Open the fixture's first 60-call group and log how long it took to render.
+    private func measureGroupExpand(tag: String) {
+        guard let pane = TranscriptDiagnostics.pane(tag: tag) as? ToolGroupHarnessDriving else { return }
+        pane.harnessExpandFirstToolGroup(callCount: Self.groupExpandCallCount) { ms in
+            let line = ms.map { "group-expand ms=\(Int($0.rounded())) calls=\(Self.groupExpandCallCount) fold=\(Self.foldModeName)" }
+                ?? "group-expand: no \(Self.groupExpandCallCount)-call group in the fixture"
+            log.info("\(line, privacy: .public)")
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
+    }
 
     private func tick() {
         guard cursor < totalTurns else {
@@ -571,4 +600,9 @@ struct SeededRNG {
         state ^= state << 17
         return state
     }
+}
+
+/// A pane the harness can ask to open a tool group (`group-expand`).
+protocol ToolGroupHarnessDriving: AnyObject {
+    func harnessExpandFirstToolGroup(callCount: Int, completion: @escaping (_ ms: Double?) -> Void)
 }

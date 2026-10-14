@@ -1970,5 +1970,126 @@ class FixtureOpenReportTests(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", path]).returncode, 0)
 
 
+class GroupExpandReportTests(unittest.TestCase):
+    """TF2's two ungraded report lines: `group-expand` and `fixture-open vs baseline`.
+
+    Both are wall-clock bets the operator measures (`make mac-load-test FIXTURE=benchmark`), so
+    the report states the number and the target and never fails the run over them. Driven
+    through the CLI, the way the shell driver calls it.
+    """
+
+    TESTDATA = os.path.join(REPO_ROOT, "macOS", "scripts", "testdata")
+    LOG = os.path.join(TESTDATA, "fixture-open-group-expand.log")      # fixture-open 200/210/220, group-expand 80/120/95
+    OPEN_ONLY = os.path.join(TESTDATA, "fixture-open-with.log")
+
+    def _run(self, log, baseline=None):
+        env = {k: v for k, v in os.environ.items() if k != "BASELINE_MS"}
+        if baseline is not None:
+            env["BASELINE_MS"] = str(baseline)
+        return subprocess.run(
+            [sys.executable, REPORT_SCRIPT_PATH, "--fixture-only", "--fixture-log", log],
+            capture_output=True, text=True, env=env)
+
+    def _line(self, proc, prefix):
+        found = [l for l in proc.stdout.splitlines() if l.startswith(prefix)]
+        self.assertTrue(found, f"no line starting {prefix!r} in:\n{proc.stdout}\n{proc.stderr}")
+        return found[0]
+
+    def test_the_canned_log_has_the_lines_these_tests_rely_on(self):
+        with open(self.LOG) as fh:
+            text = fh.read()
+        self.assertEqual(re.findall(r"fixture-open ms=(\d+)", text), ["200", "210", "220"])
+        self.assertEqual(re.findall(r"group-expand ms=(\d+)", text), ["80", "120", "95"])
+
+    def test_group_expand_prints_the_median_and_its_target(self):
+        proc = self._run(self.LOG)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        line = self._line(proc, "group-expand: median")
+        self.assertTrue(line.startswith("group-expand: median 95 ms"), line)
+        self.assertIn("≤ 100 ms", line)
+
+    def test_group_expand_is_not_graded_even_when_over_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "slow.log")
+            with open(log, "w") as fh:
+                fh.write("fixture-open ms=300 rows=10 turns=2\n"
+                         "group-expand ms=400\ngroup-expand ms=500\ngroup-expand ms=450\n")
+            proc = self._run(log)
+        self.assertEqual(proc.returncode, 0, "a slow expand is reported, not failed")
+        self.assertTrue(self._line(proc, "group-expand: median").startswith("group-expand: median 450 ms"))
+
+    def test_group_expand_median_of_an_even_number_of_runs_is_the_midpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "even.log")
+            with open(log, "w") as fh:
+                fh.write("fixture-open ms=300 rows=10 turns=2\ngroup-expand ms=60\ngroup-expand ms=100\n")
+            proc = self._run(log)
+        self.assertTrue(self._line(proc, "group-expand: median").startswith("group-expand: median 80 ms"))
+
+    def test_no_group_expand_line_when_the_log_has_none(self):
+        proc = self._run(self.OPEN_ONLY)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse([l for l in proc.stdout.splitlines() if l.startswith("group-expand:")],
+                         proc.stdout)
+
+    def test_the_existing_fixture_open_line_is_still_printed(self):
+        proc = self._run(self.LOG)
+        self.assertTrue(self._line(proc, "fixture-open: median").startswith("fixture-open: median 210 ms"))
+
+    def test_baseline_prints_the_ratio_to_two_decimals_with_the_target(self):
+        proc = self._run(self.LOG, baseline=500)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        line = self._line(proc, "fixture-open vs baseline:")
+        self.assertIn("0.42", line)
+        self.assertIn("target ≤ 0.50", line)
+
+    def test_baseline_ratio_changes_with_the_baseline(self):
+        self.assertIn("0.21", self._line(self._run(self.LOG, baseline=1000), "fixture-open vs baseline:"))
+        self.assertIn("0.50", self._line(self._run(self.LOG, baseline=420), "fixture-open vs baseline:"))
+
+    def test_a_ratio_over_target_is_reported_not_failed(self):
+        proc = self._run(self.LOG, baseline=300)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        line = self._line(proc, "fixture-open vs baseline:")
+        self.assertIn("0.70", line)
+        self.assertIn("target ≤ 0.50", line)
+
+    def test_without_a_baseline_there_is_no_ratio_line(self):
+        proc = self._run(self.LOG)
+        self.assertNotIn("vs baseline", proc.stdout)
+
+    def test_the_ratio_is_over_the_same_median_the_report_prints(self):
+        proc = self._run(self.OPEN_ONLY, baseline=867)
+        median = re.search(r"fixture-open: median ([\d.]+) ms", proc.stdout)
+        self.assertIsNotNone(median, proc.stdout)
+        line = self._line(proc, "fixture-open vs baseline:")
+        self.assertIn(f"{float(median.group(1)) / 867:.2f}", line)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class FoldModeReportTests(unittest.TestCase):
+    """Collapsed and expanded runs on one build are never pooled into one median (review)."""
+
+    LOG = os.path.join(REPO_ROOT, "macOS", "scripts", "testdata", "fixture-open-fold-modes.log")
+
+    def _run(self, fold=None):
+        env = {k: v for k, v in os.environ.items() if k not in ("BASELINE_MS", "NOSTROMO_LOAD_FOLD_DEFAULT")}
+        if fold is not None:
+            env["NOSTROMO_LOAD_FOLD_DEFAULT"] = fold
+        return subprocess.run(
+            [sys.executable, REPORT_SCRIPT_PATH, "--fixture-only", "--fixture-log", self.LOG],
+            capture_output=True, text=True, env=env).stdout
+
+    def test_the_default_reads_only_collapsed_runs(self):
+        out = self._run()
+        self.assertIn("fixture-open: median 200 ms over 1 run(s)", out)
+        self.assertIn("fold=collapsed", out)
+        self.assertIn("group-expand: median 50 ms over 1 run(s)", out)
+
+    def test_an_expanded_run_reads_only_expanded_lines(self):
+        out = self._run("expanded")
+        self.assertIn("fixture-open: median 900 ms over 1 run(s)", out)
+        self.assertIn("group-expand: median 400 ms over 1 run(s)", out)

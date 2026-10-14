@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import NostromoKit
 
 // ChatModels.swift and ChatTurnView.swift are compiled directly into this
 // logic-test target (no host app). `ReplView` is not (its `init` reaches
@@ -710,4 +711,142 @@ final class TranscriptSelectionSurvivalTests: XCTestCase {
 /// A flipped container so test geometry matches the transcript's document view.
 private final class FlippedTestView: NSView {
     override var isFlipped: Bool { true }
+}
+
+// MARK: - Tool group row: Copy Commands, Copy Summary, ⌘C (TF2)
+
+/// The group row's copy surface. A collapsed group hides every command it ran, so Copy
+/// Commands has to hand the operator all of them, complete, without expanding. Nothing here
+/// touches the general pasteboard: the row's pasteboard is injected.
+final class ToolGroupCopyTests: XCTestCase {
+
+    private typealias F = FoldFixtures
+
+    /// A group of: a long multi-line Bash command, a Read, a failing Bash, with a total time.
+    private func commandGroup() -> ToolGroup {
+        F.group([
+            F.foldCall("Bash", id: "b1", summary: "git log --format=… (truncated)",
+                       full: F.bashInput(trickyCommand), start: 0),
+            F.foldResult(id: "b1", time: 1),
+            F.foldCall("Read", id: "r1", summary: "a.txt", full: F.jsonInput(["file_path": "/tmp/a.txt"]),
+                       target: "/tmp/a.txt", start: 1),
+            F.foldResult(id: "r1", time: 2),
+            F.foldCall("Bash", id: "b2", summary: "make", full: F.bashInput("make"), start: 2),
+            F.foldResult(id: "b2", isError: true, time: 4.1),
+        ])
+    }
+
+    private func makeRow(_ group: ToolGroup, payloadAvailable: Bool = true) -> (ToolGroupRowView, NSPasteboard, NSWindow) {
+        let window = makeWindow()
+        let row = ToolGroupRowView(group: group, isExpanded: false, payloadAvailable: payloadAvailable)
+        let pasteboard = privatePasteboard()
+        row.pasteboard = pasteboard
+        addTeardownBlock { pasteboard.releaseGlobally() }
+        row.frame = NSRect(x: 0, y: 100, width: 600, height: ToolGroupRowView.height)
+        window.contentView!.addSubview(row)
+        window.contentView!.layoutSubtreeIfNeeded()
+        return (row, pasteboard, window)
+    }
+
+    func testTheContextMenuOffersCopyCommandsAndCopySummary() {
+        let (row, _, _) = makeRow(commandGroup())
+        XCTAssertEqual(row.contextMenu().items.map(\.title), ["Copy Commands", "Copy Summary"])
+    }
+
+    func testCopySummaryPutsWhatTheRowReadsOnThePasteboard() {
+        let group = commandGroup()
+        let (row, pasteboard, _) = makeRow(group)
+        XCTAssertTrue(invokeItem("Copy Summary", in: row.contextMenu()))
+        XCTAssertEqual(pasteboard.string(forType: .string), ToolGroupSummary.plainText(for: group))
+        XCTAssertEqual(pasteboard.string(forType: .string), "Ran 2 commands, read 1 file · 1 failed · 4.1 s")
+    }
+
+    func testCopyCommandsPutsEveryCallsCompleteInputOnThePasteboardInOrder() throws {
+        XCTAssertGreaterThan(trickyCommand.count, 80)
+        XCTAssertTrue(trickyCommand.contains("\n"))
+        let group = commandGroup()
+        let (row, pasteboard, _) = makeRow(group)
+        XCTAssertTrue(invokeItem("Copy Commands", in: row.contextMenu()))
+
+        let text = try XCTUnwrap(pasteboard.string(forType: .string))
+        XCTAssertEqual(text, ToolGroupSummary.commandsText(for: group, payloadAvailable: true))
+        XCTAssertTrue(text.hasPrefix(trickyCommand + "\n"), "the long multi-line command is verbatim and first")
+        XCTAssertTrue(text.hasSuffix("\nmake"), "the last call is last")
+        XCTAssertFalse(text.contains("…"), "nothing is abbreviated")
+        XCTAssertTrue(text.contains("Read "), "a non-Bash call is named")
+        XCTAssertTrue(text.contains("/tmp/a.txt"))
+    }
+
+    func testCopyCommandsOfATenThousandCharacterCommandIsCompleteAndVerbatim() {
+        let group = F.group([F.foldCall("Bash", id: "h1", summary: String(F.longCommand.prefix(80)),
+                                        full: F.bashInput(F.longCommand)), F.foldResult(id: "h1")])
+        let (row, pasteboard, _) = makeRow(group)
+        row.copyCommands()
+        XCTAssertEqual(pasteboard.string(forType: .string), F.longCommand)
+        XCTAssertEqual(pasteboard.string(forType: .string)?.count, 10_000)
+    }
+
+    func testCopyCommandsDoesNotSanitizeWhatTheAgentRan() {
+        let command = "printf '\u{1B}[31mred\u{1B}[0m'\necho \u{202E}done"
+        let group = F.group([F.foldCall("Bash", id: "h1", summary: "printf …", full: F.bashInput(command)),
+                             F.foldResult(id: "h1")])
+        let (row, pasteboard, _) = makeRow(group)
+        row.copyCommands()
+        XCTAssertEqual(pasteboard.string(forType: .string), command, "complete means exactly what was run, escapes and all")
+    }
+
+    func testCopyCommandsLeavesOutTheSubagentsOwnCalls() throws {
+        let group = F.group([
+            F.foldCall("Agent", id: "toolu_agent", summary: "explore", full: F.jsonInput(["description": "explore"])),
+            .toolCall(FoldCall(name: "Bash", toolUseId: "sub1", parentId: "toolu_agent", inputSummary: "grep",
+                               inputFull: F.bashInput("grep -r secret"))),
+            .toolResult(FoldResult(toolUseId: "sub1", parentId: "toolu_agent")),
+            F.foldResult(id: "toolu_agent"),
+        ])
+        let (row, pasteboard, _) = makeRow(group)
+        row.copyCommands()
+        let text = try XCTUnwrap(pasteboard.string(forType: .string))
+        XCTAssertTrue(text.hasPrefix("Agent "), text)
+        XCTAssertFalse(text.contains("grep -r secret"), text)
+        XCTAssertEqual(text.split(separator: "\n").count, 1)
+    }
+
+    func testCopyCommandsForADroppedPayloadFallsBackToSummariesAndSaysSo() throws {
+        let group = F.group([F.foldCall("Bash", id: "b1", summary: "make build"), F.foldResult(id: "b1"),
+                             F.foldCall("Grep", id: "g1", summary: "pattern: foo"), F.foldResult(id: "g1")])
+        let (row, pasteboard, _) = makeRow(group, payloadAvailable: false)
+        row.copyCommands()
+        let text = try XCTUnwrap(pasteboard.string(forType: .string))
+        XCTAssertEqual(text, ["make build …", "Grep pattern: foo …", ToolGroupSummary.truncatedCommandsNote]
+                        .joined(separator: "\n"))
+    }
+
+    func testCommandCForTheFocusedRowCopiesTheSummary() throws {
+        let group = commandGroup()
+        let (row, pasteboard, window) = makeRow(group)
+        XCTAssertTrue(window.makeFirstResponder(row))
+        XCTAssertTrue(NSApp.sendAction(#selector(NSText.copy(_:)), to: row, from: nil), "the row answers ⌘C")
+        XCTAssertEqual(pasteboard.string(forType: .string), ToolGroupSummary.plainText(for: group))
+    }
+
+    func testCopySummaryOfAHostileHeaderIsTheSanitizedOneLineRowText() throws {
+        let group = F.group([F.foldCall("Bash", id: "h1", summary: F.hostileSummary), F.foldResult(id: "h1")])
+        let (row, pasteboard, _) = makeRow(group)
+        row.copySummary()
+        let text = try XCTUnwrap(pasteboard.string(forType: .string))
+        XCTAssertEqual(text, ToolGroupSummary.plainText(for: group))
+        XCTAssertFalse(text.unicodeScalars.contains(where: F.isForbiddenOnARow))
+    }
+
+    func testEachCopyReplacesThePasteboardContentsRatherThanAppendingToIt() throws {
+        let (row, pasteboard, _) = makeRow(commandGroup())
+        pasteboard.clearContents()
+        pasteboard.setString("old", forType: .string)
+        row.copySummary()
+        XCTAssertFalse(try XCTUnwrap(pasteboard.string(forType: .string)).contains("old"))
+        row.copyCommands()
+        let text = try XCTUnwrap(pasteboard.string(forType: .string))
+        XCTAssertTrue(text.hasPrefix(trickyCommand), "the last copy wins")
+        XCTAssertFalse(text.contains("Ran 2 commands"))
+    }
 }

@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import NostromoKit
 
 // ChatTurnView, MarkerTurnView, MarkdownTableView, TextBlockView,
 // ToolCallView, ResultChipView, ErrorBlockView, UserBubbleView, TurnIsland,
@@ -323,11 +324,15 @@ final class ChatTurnViewLayoutTests: XCTestCase {
                blocks: [.text("Intro paragraph.\n\n" + table(rows: 5, cols: 3)
                               + "\n\nTrailing paragraph.")],
                expanded: [], trueGolden: 274, falseGolden: 293),
+        // Tool calls fold into a collapsed tool group (TF2): a 22 pt row in place of the
+        // call (33 pt) and its result. Before folding these two goldens were 99/118 and
+        // 554/573; `testAnExpandedGroupIsItsRowPlusTodaysMembers` holds the open group to
+        // today's member rendering.
         Fixture(name: "tool-call", userInput: "run it",
                blocks: [.toolCall(ToolCallData(toolName: "Bash",
                                                inputSummary: "git diff --stat -- macOS/",
                                                inputFull: "{}"))],
-               expanded: [], trueGolden: 99, falseGolden: 118),
+               expanded: [], trueGolden: 88, falseGolden: 107),
         Fixture(name: "tool-result-collapsed", userInput: "run it",
                blocks: [.toolResult(ToolResultData(content: text(4_000), isError: false))],
                expanded: [], trueGolden: 95, falseGolden: 114),
@@ -362,7 +367,7 @@ final class ChatTurnViewLayoutTests: XCTestCase {
                    .text(table(rows: 8, cols: 5)),
                    .errorMessage("warning: one file could not be read"),
                    .resultSummary(ResultSummaryData(durationMs: 9_876, costUSD: 0.1, isError: false)),
-               ], expanded: [], trueGolden: 554, falseGolden: 573),
+               ], expanded: [], trueGolden: 508, falseGolden: 527),
         Fixture(name: "long-user-input", userInput: text(600),
                blocks: [.text(text(200))], expanded: [],
                trueGolden: 178, falseGolden: 197),
@@ -454,10 +459,17 @@ final class ChatTurnViewLayoutTests: XCTestCase {
                     width: ChatTurnView.bubbleWidth(paneWidth: paneWidth))
                 expected += bubbleHeight + 8
             }
-            let blockHeights = f.blocks.enumerated().map { i, block in
-                ChatTurnView.measureIsland(
-                    freshBlockView(block, expanded: f.expanded.contains(i)),
-                    width: ChatTurnView.blockWidth(paneWidth: paneWidth))
+            // One column item per planner item: a block as itself, a (collapsed) tool group
+            // as its fixed row.
+            let blockHeights = ToolFoldAdapter.plan(turn).map { item -> CGFloat in
+                switch item {
+                case .block(let i):
+                    return ChatTurnView.measureIsland(
+                        freshBlockView(f.blocks[i], expanded: f.expanded.contains(i)),
+                        width: ChatTurnView.blockWidth(paneWidth: paneWidth))
+                case .group:
+                    return ToolGroupRowView.height
+                }
             }
             expected += blockHeights.reduce(0, +)
             expected += TurnHeightEstimator.blockSpacing * CGFloat(max(0, blockHeights.count - 1))
@@ -467,6 +479,27 @@ final class ChatTurnViewLayoutTests: XCTestCase {
                            "\(f.name): islandHeight() (\(actual)) must equal chrome + bubble + " +
                            "Σblocks + spacing (\(expected))")
         }
+    }
+
+    /// An open tool group renders its members exactly as the turn rendered them before
+    /// folding — same views, same heights — under its 22 pt row, `blockSpacing` apart.
+    func testAnExpandedGroupIsItsRowPlusTodaysMembers() throws {
+        let paneWidth: CGFloat = 900
+        let f = try XCTUnwrap(Self.fixtures.first { $0.name == "mixed-agentic" })
+        let turn = buildTurn(f)
+        let collapsed = measuredHeight(ChatTurnView(turn: turn, contentAvailable: true,
+                                                    interaction: TurnInteractionState()), paneWidth: paneWidth)
+        let expanded = measuredHeight(ChatTurnView(turn: turn, contentAvailable: true,
+                                                   interaction: TurnInteractionState(),
+                                                   folds: FoldResolver(expandedByDefault: true)),
+                                      paneWidth: paneWidth)
+        let members = [0, 1].map { i in
+            ChatTurnView.measureIsland(freshBlockView(f.blocks[i], expanded: false),
+                                       width: ChatTurnView.blockWidth(paneWidth: paneWidth))
+        }
+        let membersHeight = members.reduce(0) { $0 + TurnHeightEstimator.blockSpacing + $1 }
+        XCTAssertEqual(expanded - collapsed, membersHeight, accuracy: 0.5,
+                       "opening the group adds exactly today's call and result rows")
     }
 
     // MARK: - 5. Incremental streaming yields the same height as building at once

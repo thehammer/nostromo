@@ -368,3 +368,97 @@ final class TurnInteractionWiringTests: XCTestCase {
         return calls
     }
 }
+
+// MARK: - Tool group choices (TF2)
+
+/// The operator's open/closed choice for a tool group lives here, outside the turn's views, so
+/// it survives eviction and width changes like an expanded result or an answered question.
+final class TurnInteractionStoreGroupStateTests: XCTestCase {
+
+    func testAnOpenedGroupIsRemembered() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.setGroup(turn: turn, key: "g:toolu_1", true)
+        XCTAssertEqual(store.state(for: turn).groupStates, ["g:toolu_1": true])
+    }
+
+    func testAClosedGroupIsRememberedToo() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.setGroup(turn: turn, key: "g:toolu_1", true)
+        store.setGroup(turn: turn, key: "g:toolu_1", false)
+        XCTAssertEqual(store.state(for: turn).groupStates, ["g:toolu_1": false],
+                       "closing is a choice: it must survive the view like opening does")
+    }
+
+    func testGroupsOfOneTurnAreIndependentAndTurnsDoNotShareThem() {
+        let store = TurnInteractionStore()
+        let a = UUID(), b = UUID()
+        store.setGroup(turn: a, key: "g:one", true)
+        store.setGroup(turn: a, key: "g:two", false)
+        store.setGroup(turn: b, key: "g:one", false)
+        XCTAssertEqual(store.state(for: a).groupStates, ["g:one": true, "g:two": false])
+        XCTAssertEqual(store.state(for: b).groupStates, ["g:one": false])
+        XCTAssertEqual(store.state(for: UUID()).groupStates, [:])
+    }
+
+    func testAStateWithOnlyAGroupChoiceIsNotEmpty() {
+        XCTAssertTrue(TurnInteractionState().isEmpty)
+        var state = TurnInteractionState()
+        state.groupStates["g:x"] = false
+        XCTAssertFalse(state.isEmpty)
+    }
+
+    func testCollapsingTheLastExpandedResultDoesNotForgetGroupChoices() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.setGroup(turn: turn, key: "g:toolu_1", true)
+        store.setExpanded(turn: turn, block: 2, true)
+        store.setExpanded(turn: turn, block: 2, false)
+        XCTAssertEqual(store.state(for: turn).groupStates, ["g:toolu_1": true])
+        XCTAssertEqual(store.trackedTurnCount, 1)
+    }
+
+    func testGroupChoicesAndResultExpansionsAreKeptSideBySide() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.recordAnswer(turn: turn, block: 5, option: 1)
+        store.setExpanded(turn: turn, block: 2, true)
+        store.setGroup(turn: turn, key: "g:toolu_1", true)
+        let state = store.state(for: turn)
+        XCTAssertEqual(state.answeredOptions, [5: 1])
+        XCTAssertEqual(state.expandedBlocks, [2])
+        XCTAssertEqual(state.groupStates, ["g:toolu_1": true])
+    }
+
+    func testPruningForgetsGroupChoicesOfTurnsThatLeftTheTranscript() {
+        let store = TurnInteractionStore()
+        let kept = UUID(), gone = UUID()
+        store.setGroup(turn: kept, key: "g:a", true)
+        store.setGroup(turn: gone, key: "g:b", true)
+        store.prune(keeping: [kept])
+        XCTAssertEqual(store.state(for: kept).groupStates, ["g:a": true])
+        XCTAssertEqual(store.state(for: gone).groupStates, [:])
+        XCTAssertEqual(store.trackedTurnCount, 1)
+    }
+
+    func testClearingTheTranscriptForgetsEveryGroupChoice() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.setGroup(turn: turn, key: "g:a", true)
+        store.removeAll()
+        XCTAssertEqual(store.state(for: turn).groupStates, [:])
+        XCTAssertEqual(store.trackedTurnCount, 0)
+    }
+
+    func testStatesThatDifferOnlyByAGroupChoiceAreNotEqual() {
+        var a = TurnInteractionState(), b = TurnInteractionState()
+        XCTAssertEqual(a, b)
+        a.groupStates["g:x"] = true
+        XCTAssertNotEqual(a, b)
+        b.groupStates["g:x"] = false
+        XCTAssertNotEqual(a, b)
+        b.groupStates["g:x"] = true
+        XCTAssertEqual(a, b)
+    }
+}
