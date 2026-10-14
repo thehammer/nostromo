@@ -1,28 +1,35 @@
 import Foundation
 import NostromoKit
 
-/// How a turn's tool groups resolve open or closed. In TF2: the operator's explicit choice,
-/// else the default (collapsed, or expanded under `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`).
+/// How a turn's tool groups resolve open or closed (contract §2.4), first match wins:
+/// 1. the operator's explicit choice;
+/// 2. the stuck-turn auto-open: a recorded auto entry, or the derived `ToolGroup.isStuck`;
+/// 3. the default (collapsed, or expanded under `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`).
 struct FoldResolver: Equatable {
     /// `ToolGroup.key` → explicit choice.
     var groupStates: [String: Bool] = [:]
+    /// Keys the stuck-turn rule opened.
+    var groupAuto: Set<String> = []
     var expandedByDefault = false
 
-    init(groupStates: [String: Bool] = [:], expandedByDefault: Bool = false) {
+    init(groupStates: [String: Bool] = [:], groupAuto: Set<String> = [], expandedByDefault: Bool = false) {
         self.groupStates = groupStates
+        self.groupAuto = groupAuto
         self.expandedByDefault = expandedByDefault
     }
 
     init(state: TurnInteractionState, expandedByDefault: Bool = false) {
-        self.init(groupStates: state.groupStates, expandedByDefault: expandedByDefault)
+        self.init(groupStates: state.groupStates, groupAuto: state.groupAuto, expandedByDefault: expandedByDefault)
     }
 
     func isExpanded(_ group: ToolGroup) -> Bool {
-        isExpanded(key: group.key)
+        isExpanded(key: group.key, isStuck: group.isStuck)
     }
 
-    func isExpanded(key: String) -> Bool {
-        groupStates[key] ?? expandedByDefault
+    func isExpanded(key: String, isStuck: Bool = false) -> Bool {
+        if let explicit = groupStates[key] { return explicit }
+        if isStuck || groupAuto.contains(key) { return true }
+        return expandedByDefault
     }
 }
 
@@ -32,7 +39,7 @@ struct FoldResolver: Equatable {
 struct FoldShape: Equatable {
     enum Item: Equatable {
         case block(Int)
-        case group(key: String, members: [Int], agentRows: Int)
+        case group(key: String, members: [Int], agentRows: Int, isStuck: Bool)
     }
 
     let items: [Item]
@@ -41,7 +48,9 @@ struct FoldShape: Equatable {
         items = ToolFoldAdapter.plan(turn).map { item in
             switch item {
             case .block(let i): return .block(i)
-            case .group(let g): return .group(key: g.key, members: g.memberIndices, agentRows: g.subagentBlocks.count)
+            case .group(let g):
+                return .group(key: g.key, members: g.memberIndices, agentRows: g.subagentBlocks.count,
+                              isStuck: g.isStuck)
             }
         }
     }
@@ -127,11 +136,13 @@ enum ToolFoldAdapter {
     /// resolver is "explicit choice, else the default", so the explicit choices and the
     /// default are everything that decides which groups and results are open.
     static func foldDigest(turn: ChatTurn, state: TurnInteractionState, expandedByDefault: Bool = false) -> String {
-        guard !state.groupStates.isEmpty || !state.expandedBlocks.isEmpty || expandedByDefault else { return "" }
+        guard !state.groupStates.isEmpty || !state.expandedBlocks.isEmpty || !state.groupAuto.isEmpty
+                || expandedByDefault else { return "" }
         var text = expandedByDefault ? "E" : "C"
         for key in state.groupStates.keys.sorted() {
             text += "|\(key)=\(state.groupStates[key]! ? 1 : 0)"
         }
+        if !state.groupAuto.isEmpty { text += "|a" + state.groupAuto.sorted().joined(separator: ",") }
         text += "|b" + state.expandedBlocks.sorted().map(String.init).joined(separator: ",")
         return fnv1a(text)
     }
@@ -154,9 +165,9 @@ enum ToolFoldAdapter {
                 switch item {
                 case .block:
                     rows += 1
-                case .group(let key, let members, _):
+                case .group(let key, let members, _, let isStuck):
                     groups += 1
-                    rows += 1 + (folds.isExpanded(key: key) ? members.count : 0)
+                    rows += 1 + (folds.isExpanded(key: key, isStuck: isStuck) ? members.count : 0)
                 }
             }
         }

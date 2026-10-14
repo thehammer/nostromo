@@ -11,18 +11,30 @@ import NostromoKit
 /// a 60-call group costs what a 1-call group costs. Members are built on first expand and
 /// kept (hidden) when collapsed again, until the turn view itself goes.
 ///
+/// Opening a large group builds the first `memberBatchSize` members at once (more than a
+/// pane shows) and the rest in batches on the next main-queue turns, with estimated heights
+/// standing in for them meanwhile so the group is about its final height from the first
+/// pass. Building and measuring every member of a 60-call group in the click's own pass was
+/// most of what that click cost.
+///
 /// Laid out like `ChatTurnView`: members are frame-positioned and each measured detached with
 /// `ChatTurnView.measureIsland`, so no constraint links one member to another, and this
 /// view's own height is arithmetic over cached member heights. It occupies the block column
 /// (members keep today's x and width); the 2 pt leading rule sits in the turn's gutter, to
 /// the left of the column.
-final class ToolGroupView: NSView, WidthPresettable {
+final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
 
     /// Space between the row and the first member, and between members.
     static let memberSpacing: CGFloat = TurnHeightEstimator.blockSpacing
     /// The leading rule's x, inside the turn's 14 pt gutter.
     static let ruleX: CGFloat = -8
     static let ruleWidth: CGFloat = 2
+    /// Members built in the pass that opens the group, and in each later batch: about twelve
+    /// calls with their results.
+    static let memberBatchSize = 24
+
+    /// Runs the next batch of member building: the main queue's next turn. Tests inject theirs.
+    var scheduleBatch: (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }
 
     let row: ToolGroupRowView
     private(set) var group: ToolGroup
@@ -33,6 +45,9 @@ final class ToolGroupView: NSView, WidthPresettable {
     var onBlockExpansion: ((_ blockIndex: Int, _ isExpanded: Bool) -> Void)?
     /// A member changed height; the group re-measured it already.
     var onHeightChange: (() -> Void)?
+    /// A batch of member building is about to change this view's height on its own (no click
+    /// caused it), so the owner can note the reading position first.
+    var onBatchWillBuild: (() -> Void)?
 
     /// The blocks this group shows (members and subagent blocks), by block index. Copied
     /// out of the turn's array rather than holding the array: a view that kept it would
@@ -62,17 +77,22 @@ final class ToolGroupView: NSView, WidthPresettable {
     private var memberWidth: CGFloat = 0
     /// Set when members exist but were measured at another width (resized while collapsed).
     private var membersStale = false
+    /// A batch of member building is scheduled.
+    private var batchPending = false
+    /// Estimated height of the members not built yet (with their spacing).
+    private var unbuiltEstimate: CGFloat = 0
     private let rule = NSView()
 
     init(group: ToolGroup, blocks: [TurnBlock],
          contentAvailable: Bool, interaction: TurnInteractionState, isExpanded: Bool,
-         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
+         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+         now: @escaping () -> Date = Date.init) {
         self.group = group
         self.contentAvailable = contentAvailable
         self.interaction = interaction
         self.isExpanded = isExpanded
         self.row = ToolGroupRowView(group: group, isExpanded: isExpanded, payloadAvailable: contentAvailable,
-                                    reduceMotion: reduceMotion)
+                                    reduceMotion: reduceMotion, now: now)
         super.init(frame: .zero)
         takeBlocks(of: group, from: blocks)
         translatesAutoresizingMaskIntoConstraints = true
@@ -102,6 +122,9 @@ final class ToolGroupView: NSView, WidthPresettable {
     /// Member views built so far, in display order. Empty until the first expand.
     var memberViews: [NSView] { members.map(\.view) }
 
+    /// Every member has a view (none is waiting for a batch).
+    var isFullyBuilt: Bool { builtMemberCount == group.memberIndices.count }
+
     /// Open or close without it counting as the operator's click (no `onToggle`).
     func setExpanded(_ expanded: Bool) {
         guard expanded != isExpanded else { return }
@@ -117,7 +140,8 @@ final class ToolGroupView: NSView, WidthPresettable {
         row.update(group: group)
         guard isExpanded else { return false }
         let before = contentHeight
-        syncMembers()
+        // While batches are still building the members, the next batch picks these up too.
+        if batchPending { estimateUnbuilt() } else { syncMembers() }
         return contentHeight != before
     }
 
@@ -142,19 +166,21 @@ final class ToolGroupView: NSView, WidthPresettable {
         if expanded {
             // Existing members first, so the ones `syncMembers` adds are measured once.
             if membersStale { remeasureMembers() }
-            syncMembers()
+            syncMembers(limit: Self.memberBatchSize)
         }
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
 
-    /// Build member views for members the group gained since, and keep agent activity in
-    /// step with the subagent blocks.
-    private func syncMembers() {
+    /// Build member views for members the group gained since (at most `limit` of them, the
+    /// rest in later batches), and keep agent activity in step with the subagent blocks.
+    private func syncMembers(limit: Int = .max) {
         let indices = group.memberIndices
-        while builtMemberCount < indices.count {
+        var built = 0
+        while builtMemberCount < indices.count, built < limit {
             let index = indices[builtMemberCount]
             builtMemberCount += 1
+            built += 1
             appendMember(.block(index), view: makeMemberView(at: index))
         }
         for (agentIndex, subagent) in group.subagentBlocks {
@@ -168,8 +194,44 @@ final class ToolGroupView: NSView, WidthPresettable {
                              at: callPosition + 1)
             }
         }
+        estimateUnbuilt()
+        if !isFullyBuilt && !batchPending {
+            batchPending = true
+            scheduleBatch { [weak self] in self?.buildNextBatch() }
+        }
         invalidateIntrinsicContentSize()
         needsLayout = true
+    }
+
+    /// The next batch: build, then tell the turn the group's height changed (estimates became
+    /// measurements). Stops while the group is closed; opening it again carries on.
+    private func buildNextBatch() {
+        batchPending = false
+        guard isExpanded, !isFullyBuilt else { return }
+        onBatchWillBuild?()
+        syncMembers(limit: Self.memberBatchSize)
+        onHeightChange?()
+    }
+
+    /// What the members still to be built will roughly take (`TurnHeightEstimator`'s rules).
+    private func estimateUnbuilt() {
+        let indices = group.memberIndices
+        guard builtMemberCount < indices.count else {
+            unbuiltEstimate = 0
+            return
+        }
+        let width = max(memberWidth, 1)
+        var height: CGFloat = 0
+        for index in indices[builtMemberCount...] {
+            guard let block = blocks[index] else { continue }
+            var characters = 0
+            if case .toolResult(let result) = block, result.isError { characters = result.content.utf8.count }
+            height += Self.memberSpacing + TurnHeightEstimator.estimate(block: block, characters: characters, width: width)
+            if group.subagentBlocks[index] != nil {
+                height += Self.memberSpacing + TurnHeightEstimator.toolResultCollapsed
+            }
+        }
+        unbuiltEstimate = height
     }
 
     /// A selection (or focus) inside a member must not outlive the collapse: ⌘C would copy
@@ -229,8 +291,12 @@ final class ToolGroupView: NSView, WidthPresettable {
         view.translatesAutoresizingMaskIntoConstraints = true
         let constraint = view.widthAnchor.constraint(equalToConstant: max(memberWidth, 1))
         constraint.isActive = true
-        addSubview(view)
+        // Measured before it is attached: `measureIsland` would otherwise detach it from a group
+        // that is in the window and attach it again, and that round trip through the window's
+        // constraint engine, once per member, was most of what opening a 60-call group cost.
         let height = memberWidth > 0 ? ChatTurnView.measureIsland(view, width: memberWidth) : 0
+        view.isHidden = !isExpanded
+        addSubview(view)
         members.insert(Member(key: key, view: view, widthConstraint: constraint, height: height), at: position)
     }
 
@@ -263,6 +329,7 @@ final class ToolGroupView: NSView, WidthPresettable {
         memberWidth = width
         // Measured only while visible: a collapsed group's cost stays one row.
         if isExpanded { remeasureMembers() } else { membersStale = !members.isEmpty }
+        estimateUnbuilt()
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -273,12 +340,42 @@ final class ToolGroupView: NSView, WidthPresettable {
         var height = ToolGroupRowView.height
         if isExpanded {
             for member in members { height += Self.memberSpacing + member.height }
+            height += unbuiltEstimate
         }
         return height
     }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: contentHeight)
+    }
+
+    /// The row plus the members, summed: no solve, and no detaching this view (and every member
+    /// in it) from the window to ask.
+    func arithmeticHeight(atWidth width: CGFloat) -> CGFloat {
+        presetLayoutWidth(width)
+        return contentHeight
+    }
+
+    /// Top of the member showing block `index` (a call or result), in this view's coordinates;
+    /// for a subagent's block, the top of the agent-activity row that holds it. Nil when the
+    /// group is collapsed or shows no such block.
+    func offset(ofMemberBlock index: Int) -> CGFloat? {
+        guard isExpanded else { return nil }
+        let key: MemberKey
+        if group.memberIndices.contains(index) {
+            key = .block(index)
+        } else if let agent = group.subagentBlocks.first(where: { $0.value.contains(index) })?.key {
+            key = .activity(agent)
+        } else {
+            return nil
+        }
+        var y = ToolGroupRowView.height
+        for member in members {
+            y += Self.memberSpacing
+            if member.key == key { return y }
+            y += member.height
+        }
+        return nil
     }
 
     override func layout() {
@@ -344,6 +441,9 @@ final class ToolGroupRowView: NSView {
     static let leadingInset: CGFloat = 10
     static let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
     static let rotationDuration: CFTimeInterval = 0.15
+    /// The activity dot's opacity pulse (one way; it autoreverses).
+    static let pulseDuration: CFTimeInterval = 1.2
+    static let activityDotSize: CGFloat = 6
 
     /// The operator toggled the row (new state).
     var onToggle: ((Bool) -> Void)?
@@ -353,29 +453,37 @@ final class ToolGroupRowView: NSView {
     private(set) var group: ToolGroup
     private let payloadAvailable: Bool
     private let reduceMotion: () -> Bool
+    /// The clock the running call's elapsed time is read from. Injected by tests.
+    private let now: () -> Date
     private(set) var isExpanded = false
 
     private let triangleView = NSView()
     private let triangle = CAShapeLayer()
+    /// The calm activity dot a running row shows before `Running`.
+    private let activityView = NSView()
     private let iconField = NSTextField(labelWithString: "")
     private let summary = FoldSummaryField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
     private let time = NSTextField(labelWithString: "")
+    private let stopped = NSTextField(labelWithString: "")
     private var trackingArea: NSTrackingArea?
     private var mouseDownEvent: NSEvent?
     private var forwardedDrag = false
 
     init(group: ToolGroup, isExpanded: Bool, payloadAvailable: Bool,
-         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
+         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+         now: @escaping () -> Date = Date.init) {
         self.group = group
         self.payloadAvailable = payloadAvailable
         self.reduceMotion = reduceMotion
+        self.now = now
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: Self.height))
         wantsLayer = true
         layer?.cornerRadius = 4
         focusRingType = .default
 
         setUpTriangle()
+        setUpActivityDot()
         setUpLabels()
         update(group: group)
         setExpanded(isExpanded, animated: false)
@@ -395,8 +503,15 @@ final class ToolGroupRowView: NSView {
     var summaryField: NSTextField { summary }
     /// `· N failed`, hidden when nothing failed.
     var badgeField: NSTextField { badge }
-    /// `· 4.1 s`, hidden when the time is unknown.
+    /// `· 4.1 s`, hidden when the time is unknown. While running: the running call's elapsed
+    /// time (`· 42 s`) once it has run 10 s.
     var timeField: NSTextField { time }
+    /// `· stopped`, shown only for a group the operator stopped mid-call.
+    var stoppedField: NSTextField { stopped }
+    /// The running row's activity dot.
+    var activityLayer: CALayer { activityView.layer! }
+    /// Whether the activity dot is showing (the group is running).
+    var isShowingActivity: Bool { !activityView.isHidden }
     /// The rotating triangle (for the Reduce Motion check).
     var triangleLayer: CALayer { triangle }
 
@@ -407,12 +522,18 @@ final class ToolGroupRowView: NSView {
     static var updateCount = 0
     #endif
 
+    /// Show `group` as it stands. In place: the row's height never changes, so an update never
+    /// needs a re-measure, and it posts nothing to VoiceOver (no announcement per call).
     func update(group: ToolGroup) {
         #if DEBUG
         Self.updateCount += 1
         #endif
         self.group = group
-        if let text = ToolGroupSummary.summary(for: group) {
+        let running = ToolGroupSummary.runningTitle(for: group)
+        if let running {
+            iconField.isHidden = true
+            setText(running, on: summary, color: Theme.fgMuted)
+        } else if let text = ToolGroupSummary.summary(for: group) {
             iconField.isHidden = true
             setText(text, on: summary, color: Theme.fgMuted)
         } else if let call = group.calls.first {
@@ -421,12 +542,54 @@ final class ToolGroupRowView: NSView {
             iconField.stringValue = ToolCallView.icon(for: call.name)
             setText(ToolGroupSummary.header(for: call), on: summary, color: Theme.fgMuted)
         }
+        setActivity(running != nil)
         let failure = ToolGroupSummary.failureText(for: group)
         badge.isHidden = failure == nil
         setText(failure.map { "· \($0)" } ?? "", on: badge, color: Theme.foldFailure)
-        let duration = ToolGroupSummary.durationText(for: group)
-        time.isHidden = duration == nil
-        setText(duration.map { "· \($0)" } ?? "", on: time, color: Theme.fgMuted)
+        let stoppedText = ToolGroupSummary.stoppedSuffix(for: group)
+        stopped.isHidden = stoppedText == nil
+        setText(stoppedText.map { "· \($0)" } ?? "", on: stopped, color: Theme.fgMuted)
+        refreshElapsed()
+    }
+
+    /// Re-read the clock: the running call's elapsed time, or the settled group's duration.
+    func refreshElapsed() {
+        let text = group.state == .running
+            ? ToolGroupSummary.runningElapsedText(for: group, now: now())
+            : ToolGroupSummary.durationText(for: group)
+        time.isHidden = text == nil
+        setText(text.map { "· \($0)" } ?? "", on: time, color: Theme.fgMuted)
+    }
+
+    /// Show or hide the activity dot. It pulses unless Reduce Motion is on.
+    private func setActivity(_ active: Bool) {
+        guard let dot = activityView.layer else { return }
+        activityView.isHidden = !active
+        guard active, !reduceMotion() else {
+            dot.removeAnimation(forKey: "pulse")
+            return
+        }
+        guard dot.animation(forKey: "pulse") == nil else { return }
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue = 0.3
+        pulse.duration = Self.pulseDuration
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        dot.add(pulse, forKey: "pulse")
+    }
+
+    private func setUpActivityDot() {
+        activityView.wantsLayer = true
+        activityView.translatesAutoresizingMaskIntoConstraints = false
+        activityView.layer?.backgroundColor = Theme.fgMuted.cgColor
+        activityView.layer?.cornerRadius = Self.activityDotSize / 2
+        activityView.isHidden = true
+        NSLayoutConstraint.activate([
+            activityView.widthAnchor.constraint(equalToConstant: Self.activityDotSize),
+            activityView.heightAnchor.constraint(equalToConstant: Self.activityDotSize),
+        ])
     }
 
     private func setUpTriangle() {
@@ -469,14 +632,14 @@ final class ToolGroupRowView: NSView {
         summary.setContentHuggingPriority(.defaultLow, for: .horizontal)
         summary.menuProvider = { [weak self] in self?.contextMenu() ?? NSMenu() }
 
-        for (field, color) in [(badge, Theme.foldFailure), (time, Theme.fgMuted)] {
+        for (field, color) in [(badge, Theme.foldFailure), (time, Theme.fgMuted), (stopped, Theme.fgMuted)] {
             field.font = Self.font
             field.textColor = color
             field.setContentHuggingPriority(.required, for: .horizontal)
             field.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
 
-        let stack = NSStackView(views: [triangleView, iconField, summary, badge, time])
+        let stack = NSStackView(views: [triangleView, activityView, iconField, summary, badge, time, stopped])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 5
@@ -672,7 +835,9 @@ final class ToolGroupRowView: NSView {
 
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .disclosureTriangle }
-    override func accessibilityLabel() -> String? { ToolGroupSummary.accessibilityLabel(for: group) }
+    /// While running, the live text (VoiceOver reads it when the row is focused; nothing is
+    /// announced per call).
+    override func accessibilityLabel() -> String? { ToolGroupSummary.accessibilityLabel(for: group, now: now()) }
     override func accessibilityValue() -> Any? { isExpanded ? "expanded" : "collapsed" }
     override func accessibilityChildren() -> [Any]? { [] }
     override func accessibilityPerformPress() -> Bool {
@@ -804,5 +969,161 @@ final class AgentActivityView: NSView {
             return
         }
         content.addArrangedSubview(view)
+    }
+}
+
+// MARK: - ElapsedTicker
+
+/// Something holding running group rows whose elapsed time needs a periodic refresh.
+protocol ElapsedTicking: AnyObject {
+    /// When its running rows next need a refresh after `now`; nil when nothing is running.
+    func nextElapsedTick(after now: Date) -> Date?
+    func refreshElapsed()
+}
+
+/// One pane's elapsed-time tick for running tool-group rows: at most once a second, and only
+/// while a running call has been running for 10 s (`ChatTurnView.nextElapsedTick`).
+///
+/// Not a repeating timer: one one-shot at a time, aimed at the earliest moment any
+/// materialized row's text changes, re-aimed after every tick and every pass. So nothing is
+/// scheduled while no call is running, and the tick stops by itself when the group settles,
+/// the turn completes or the view is evicted (it is no longer among `islands`). A hidden pane
+/// calls `stop()`.
+final class ElapsedTicker {
+
+    /// Run `fire` after `delay` seconds; returns a cancel closure.
+    typealias Schedule = (_ delay: TimeInterval, _ fire: @escaping () -> Void) -> () -> Void
+
+    /// The pane's materialized turn views.
+    var islands: () -> [ElapsedTicking] = { [] }
+    /// Whether the pane can be seen (in a window, not hidden, not occluded). Nothing ticks
+    /// while it cannot.
+    var isActive: () -> Bool = { true }
+    /// Ticks delivered so far.
+    private(set) var fireCount = 0
+    var isScheduled: Bool { cancel != nil }
+
+    private let now: () -> Date
+    private let schedule: Schedule
+    private var cancel: (() -> Void)?
+    private var due: Date?
+    private var lastFire: Date?
+
+    init(now: @escaping () -> Date = Date.init, schedule: @escaping Schedule = ElapsedTicker.onMainQueue) {
+        self.now = now
+        self.schedule = schedule
+    }
+
+    /// Aim the next tick at the earliest row that needs one, or stop when none does.
+    func reevaluate() {
+        guard isActive() else {
+            stop()
+            return
+        }
+        let current = now()
+        guard var next = islands().compactMap({ $0.nextElapsedTick(after: current) }).min() else {
+            stop()
+            return
+        }
+        // At most once a second, whatever the clocks say.
+        if let lastFire { next = max(next, lastFire.addingTimeInterval(1)) }
+        if isScheduled, due == next { return }
+        stop()
+        due = next
+        cancel = schedule(max(0, next.timeIntervalSince(current))) { [weak self] in self?.fire() }
+    }
+
+    func stop() {
+        cancel?()
+        cancel = nil
+        due = nil
+    }
+
+    private func fire() {
+        cancel = nil
+        due = nil
+        fireCount += 1
+        lastFire = now()
+        for island in islands() { island.refreshElapsed() }
+        reevaluate()
+    }
+
+    static func onMainQueue(_ delay: TimeInterval, _ fire: @escaping () -> Void) -> () -> Void {
+        let work = DispatchWorkItem(block: fire)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        return { work.cancel() }
+    }
+}
+
+// MARK: - ToolActivityAnnouncer
+
+/// Tells VoiceOver, once, that a tool group finished with failures, in the pane the operator
+/// is working in. Nothing per call, nothing for a clean or stopped group, nothing for a pane
+/// that is not focused.
+final class ToolActivityAnnouncer {
+
+    private let post: (String) -> Void
+    /// Groups already settled with failures, so each is spoken at most once, whichever path
+    /// reported it (a turn view, or the pane for a live turn with no view). Bounded crudely.
+    private var announced: Set<String> = []
+    private static let announcedLimit = 1_000
+
+    /// `post` speaks the text; `voiceOver(from:)` is the app's.
+    init(post: @escaping (String) -> Void) {
+        self.post = post
+    }
+
+    func groupSettled(_ group: ToolGroup, in pane: NSView) {
+        guard group.state == .settled, group.failedCount > 0 else { return }
+        if announced.count >= Self.announcedLimit { announced.removeAll() }
+        guard announced.insert(group.key).inserted, Self.paneHasFocus(pane) else { return }
+        post(ToolGroupSummary.settledAnnouncement(failedCount: group.failedCount))
+    }
+
+    /// Forget what was spoken (the transcript was cleared).
+    func reset() {
+        announced.removeAll()
+    }
+
+    /// The group that `turn`'s newest block just closed: that block ends a group (non-empty
+    /// prose, or anything that is not a tool call or result) and the item before it is a group.
+    /// For a live turn with no view to report its groups settling. Plans the turn, so it is
+    /// called only when the newest block can end a group.
+    static func groupClosed(byLastBlockOf turn: ChatTurn) -> ToolGroup? {
+        guard let last = turn.blocks.last else { return nil }
+        switch last {
+        case .toolCall, .toolResult:
+            return nil
+        case .text(let text):
+            guard text.contains(where: { !$0.isWhitespace }) else { return nil }
+        case .resultSummary, .errorMessage, .askQuestion, .note:
+            break
+        }
+        let items = ToolFoldAdapter.plan(turn)
+        guard items.count >= 2, items.last == .block(turn.blocks.count - 1),
+              case .group(let group) = items[items.count - 2]
+        else { return nil }
+        return group
+    }
+
+    /// The pane's window is key and the first responder (a field editor counts as the label it
+    /// edits) is inside the pane.
+    static func paneHasFocus(_ pane: NSView) -> Bool {
+        guard let window = pane.window, window.isKeyWindow, !pane.isHiddenOrHasHiddenAncestor,
+              let responder = window.firstResponder as? NSView
+        else { return false }
+        let editorOwner = (responder as? NSTextView).flatMap { $0.isFieldEditor ? $0.delegate as? NSView : nil }
+        return (editorOwner ?? responder).isDescendant(of: pane)
+    }
+
+    /// An `.announcementRequested` from `element`, at medium priority.
+    static func voiceOver(from element: NSView) -> (String) -> Void {
+        { [weak element] text in
+            guard let element else { return }
+            NSAccessibility.post(element: element, notification: .announcementRequested, userInfo: [
+                .announcement: text,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+            ])
+        }
     }
 }

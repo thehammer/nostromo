@@ -503,3 +503,41 @@ final class FollowTailControllerTests: XCTestCase {
                              "the right edge is mostly bare backdrop: no always-visible scroller track is drawn")
     }
 }
+
+// MARK: - A fold toggle's flips (TF3)
+
+extension FollowTailControllerTests {
+
+    func testAFoldToggleFlipReachesOnFlipWithItsCauseAndDrivesThePill() {
+        let rig = Rig()
+        XCTAssertTrue(rig.controller.isPinned)
+        XCTAssertTrue(rig.overlay.button.isHidden)
+
+        rig.controller.setPinned(false, cause: .foldToggle)
+
+        XCTAssertFalse(rig.controller.isPinned)
+        XCTAssertFalse(rig.overlay.button.isHidden, "the pill is offered once the pane stops following")
+        XCTAssertEqual(rig.flips.count, 1)
+        XCTAssertEqual(rig.flips.last?.pinned, false)
+        XCTAssertEqual(rig.flips.last?.cause, .foldToggle)
+        XCTAssertNil(rig.flips.last?.originDeltaY, "not a bounds-driven flip")
+        XCTAssertNil(rig.flips.last?.sizeChanged)
+
+        rig.controller.setPinned(true, cause: .foldToggle)
+
+        XCTAssertTrue(rig.controller.isPinned)
+        XCTAssertTrue(rig.overlay.button.isHidden)
+        XCTAssertEqual(rig.flips.count, 2)
+        XCTAssertEqual(rig.flips.last?.pinned, true)
+        XCTAssertEqual(rig.flips.last?.cause, .foldToggle)
+    }
+
+    func testAFoldToggleThatKeepsThePaneFollowingIsNotAFlip() {
+        let rig = Rig()
+
+        rig.controller.setPinned(true, cause: .foldToggle)
+
+        XCTAssertTrue(rig.controller.isPinned)
+        XCTAssertTrue(rig.flips.isEmpty)
+    }
+}

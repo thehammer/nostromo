@@ -18,7 +18,8 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "chat")
 enum TurnChange {
     /// One turn was appended at `index`.
     case appended(index: Int)
-    /// `addedCount` blocks were appended to the turn at `index`.
+    /// `addedCount` blocks were appended to the turn at `index`. Zero when a block already
+    /// there changed in place (a quiet tool call finished).
     case updatedBlocks(index: Int, addedCount: Int)
     /// Turns from `replacedFrom` onward were replaced (attach reconcile).
     /// Everything before that index kept its identity and its rendered view.
@@ -465,10 +466,13 @@ class ChatSession: ObservableObject {
 
         case .blockAppended(let turnId, let block):
             if let i = index(ofDaemonId: turnId) {
-                // An empty successful result folds into its call instead of
-                // appending a block, so there may be nothing to announce.
-                if Self.append(block, to: &turns[i]) {
-                    changes.send(.updatedBlocks(index: i, addedCount: 1))
+                // An empty successful result folds into its call instead of appending a
+                // block. That still changes the turn (the call is finished: a live tool
+                // group's "N done" and time), so it is announced with nothing added.
+                switch Self.append(block, to: &turns[i]) {
+                case .appended:     changes.send(.updatedBlocks(index: i, addedCount: 1))
+                case .finishedCall: changes.send(.updatedBlocks(index: i, addedCount: 0))
+                case .dropped:      break
                 }
             }
 
@@ -693,13 +697,13 @@ class ChatSession: ObservableObject {
     }
 
     /// Append one wire block to a live turn (folding it into its call if it is an empty
-    /// successful result). Returns whether a block was appended.
+    /// successful result).
     @discardableResult
-    private static func append(_ b: DaemonTurnBlock, to turn: inout ChatTurn) -> Bool {
+    private static func append(_ b: DaemonTurnBlock, to turn: inout ChatTurn) -> ToolCompletionFolding.Outcome {
         let index = turn.blocks.count
-        guard ToolCompletionFolding.apply(mapBlock(b), to: &turn.blocks) else { return false }
-        if let parent = b.textParent { turn.subagentTextParents[index] = parent }
-        return true
+        let outcome = ToolCompletionFolding.fold(mapBlock(b), into: &turn.blocks)
+        if outcome == .appended, let parent = b.textParent { turn.subagentTextParents[index] = parent }
+        return outcome
     }
 
     private static func mapBlock(_ b: DaemonTurnBlock) -> TurnBlock {

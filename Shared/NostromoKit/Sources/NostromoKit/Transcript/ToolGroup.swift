@@ -44,4 +44,10 @@ public struct ToolGroup: Equatable, Sendable {
     }
 
     public var callCount: Int { calls.count }
+
+    /// The call at `runningCall`: the one running now. Nil unless the group is running.
+    public var currentCall: FoldCall? {
+        guard let index = runningCall, let slot = callIndices.lastIndex(of: index) else { return nil }
+        return calls[slot]
+    }
 }

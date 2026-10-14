@@ -27,7 +27,15 @@ struct TurnInteractionState: Equatable {
     /// (`false`) choice. Absent means the group follows the default.
     var groupStates: [String: Bool] = [:]
 
-    var isEmpty: Bool { answeredOptions.isEmpty && expandedBlocks.isEmpty && groupStates.isEmpty }
+    /// Tool group keys the stuck-turn rule opened when the turn ended in error (contract §2.4).
+    /// Recorded rather than only derived because the error that made the turn stuck
+    /// (`resultSummary`, `errorMessage`) is not durable across a daemon restart. An explicit
+    /// choice in `groupStates` still wins.
+    var groupAuto: Set<String> = []
+
+    var isEmpty: Bool {
+        answeredOptions.isEmpty && expandedBlocks.isEmpty && groupStates.isEmpty && groupAuto.isEmpty
+    }
 }
 
 /// Per-turn interaction state for one transcript pane, keyed by `ChatTurn.ID`.
@@ -69,6 +77,11 @@ final class TurnInteractionStore {
     /// is a choice too, and must survive the view.
     func setGroup(turn: UUID, key: String, _ isExpanded: Bool) {
         states[turn, default: TurnInteractionState()].groupStates[key] = isExpanded
+    }
+
+    /// Record that the stuck-turn rule opened a tool group.
+    func recordAuto(turn: UUID, key: String) {
+        states[turn, default: TurnInteractionState()].groupAuto.insert(key)
     }
 
     func removeAll() { states.removeAll() }

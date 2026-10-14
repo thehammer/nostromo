@@ -43,10 +43,17 @@ final class TurnListVirtualizer {
     /// viewport changes. This names the turn at the top of the viewport and how
     /// far into it we are, so the position can be restored after a height
     /// correction, a live append above the viewport, or a resize.
+    ///
+    /// When the turn is materialized it also names the **item** inside it (a block or a
+    /// tool group, `TurnIsland.anchorItem`) and how far into that item. A height change
+    /// inside the turn but above the viewport top (a group opening off screen) moves
+    /// everything below it, including the turn offset that a turn-only anchor would keep.
     struct Anchor: Equatable {
         let key: String
         let index: Int
         let offsetWithinTurn: CGFloat
+        var itemKey: String? = nil
+        var offsetInItem: CGFloat = 0
     }
 
     // MARK: - State
@@ -55,6 +62,10 @@ final class TurnListVirtualizer {
     private(set) var count = 0
 
     private var keys:    [String]  = []
+    /// Each turn's `ChatTurn.id`, so an index this geometry hands out names the turn it meant
+    /// even while the pane's turn array is momentarily ahead of it (an index into that array
+    /// can name a different turn until the change event arrives).
+    private var ids:     [UUID]    = []
     private var heights: [CGFloat] = []
     private var isExact: [Bool]    = []
     /// Fenwick tree over `heights`, 1-based.
@@ -113,6 +124,7 @@ final class TurnListVirtualizer {
         measured.removeAll(keepingCapacity: true)
         self.width = max(width, 1)
         keys    = turns.map { $0.contentKey }
+        ids     = turns.map(\.id)
         digests = turns.map { foldDigest(for: $0) }
         heights = turns.map { estimate($0) }
         isExact = Array(repeating: false, count: turns.count)
@@ -129,11 +141,13 @@ final class TurnListVirtualizer {
         // one lets `turns[floor...]` index past the end of a shorter list.
         let floor = max(0, min(index, count, turns.count))
         keys.removeSubrange(floor...)
+        ids.removeSubrange(floor...)
         digests.removeSubrange(floor...)
         heights.removeSubrange(floor...)
         isExact.removeSubrange(floor...)
         for turn in turns[floor...] {
             keys.append(turn.contentKey)
+            ids.append(turn.id)
             digests.append(foldDigest(for: turn))
             heights.append(estimate(turn))
             isExact.append(false)
@@ -154,6 +168,7 @@ final class TurnListVirtualizer {
         let key = turn.contentKey
         let digest = foldDigest(for: turn)
         keys.append(key)
+        ids.append(turn.id)
         digests.append(digest)
         let cached = measured[cacheKey(key, digest)]
         let height = cached ?? estimate(turn)
@@ -191,6 +206,7 @@ final class TurnListVirtualizer {
         let oldKey = keys[index]
         if oldKey != key, indexByKey[oldKey] == index { indexByKey.removeValue(forKey: oldKey) }
         keys[index] = key
+        ids[index] = turn.id
         indexByKey[key] = index
         let digest = foldDigest(for: turn)
         digests[index] = digest
@@ -219,6 +235,7 @@ final class TurnListVirtualizer {
             let key = turns[i].contentKey
             let digest = foldDigest(for: turns[i])
             keys[i] = key
+            ids[i] = turns[i].id
             digests[i] = digest
             if let m = measured[cacheKey(key, digest)] {
                 heights[i] = m
@@ -263,6 +280,23 @@ final class TurnListVirtualizer {
     func height(at index: Int) -> CGFloat {
         guard index >= 0, index < count else { return 0 }
         return heights[index]
+    }
+
+    /// The content key of the turn at `index` (what an `Anchor` names it by).
+    func contentKey(at index: Int) -> String? {
+        guard index >= 0, index < count else { return nil }
+        return keys[index]
+    }
+
+    /// The `ChatTurn.id` of the turn at `index`.
+    func turnID(at index: Int) -> UUID? {
+        guard index >= 0, index < count else { return nil }
+        return ids[index]
+    }
+
+    /// Where the turn `id` is in this geometry. O(turns): for clicks, not for passes.
+    func index(ofTurnID id: UUID) -> Int? {
+        ids.lastIndex(of: id)
     }
 
     func isHeightExact(at index: Int) -> Bool {
@@ -336,12 +370,21 @@ final class TurnListVirtualizer {
 
     /// Name the position currently at the top of the viewport, so it can be put
     /// back after the geometry underneath it changes.
-    func captureAnchor(viewportTop: CGFloat) -> Anchor? {
+    ///
+    /// `item` names the item at `offsetWithinTurn` inside the turn at `index` and the offset
+    /// into it, when the turn is materialized (nil: anchor on the turn alone).
+    func captureAnchor(viewportTop: CGFloat,
+                       item: ((_ index: Int, _ offsetWithinTurn: CGFloat) -> (key: String, offset: CGFloat)?)? = nil)
+        -> Anchor? {
         guard count > 0 else { return nil }
         let index = self.index(atY: viewportTop)
-        return Anchor(key: keys[index],
-                      index: index,
-                      offsetWithinTurn: viewportTop - offset(of: index))
+        let offsetWithinTurn = viewportTop - offset(of: index)
+        var anchor = Anchor(key: keys[index], index: index, offsetWithinTurn: offsetWithinTurn)
+        if let found = item?(index, offsetWithinTurn) {
+            anchor.itemKey = found.key
+            anchor.offsetInItem = found.offset
+        }
+        return anchor
     }
 
     /// Where the viewport top has to move so `anchor` stays where it was.
@@ -349,8 +392,15 @@ final class TurnListVirtualizer {
     /// Re-resolves the anchor by content key first: a splice reindexes turns,
     /// and following the stale index would move the operator's reading position
     /// by however many turns the splice inserted.
-    func restoredTop(for anchor: Anchor) -> CGFloat {
+    ///
+    /// `itemOffset` finds the anchor's item inside the (materialized) turn at an index; when
+    /// it does, the item is what stays put. Otherwise the turn-level offset is used.
+    func restoredTop(for anchor: Anchor,
+                     itemOffset: ((_ index: Int, _ itemKey: String) -> CGFloat?)? = nil) -> CGFloat {
         let index = indexByKey[anchor.key] ?? min(anchor.index, max(0, count - 1))
+        if let itemKey = anchor.itemKey, let top = itemOffset?(index, itemKey) {
+            return offset(of: index) + top + anchor.offsetInItem
+        }
         return offset(of: index) + anchor.offsetWithinTurn
     }
 

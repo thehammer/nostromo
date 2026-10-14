@@ -151,14 +151,36 @@ public struct ToolFoldPlanner {
         return drainOps(appended: nil)
     }
 
+    /// A call fed earlier finished quietly afterwards: its empty successful result was folded
+    /// into it in place (`finishedAt`/`finishedQuietly`), so no block arrived to say so. The
+    /// result is what feeding the call already finished would have given. Unknown or already
+    /// finished calls change nothing.
+    public mutating func callFinished(toolUseId: String, at: Date?) -> [Op] {
+        guard let ref = callsById[toolUseId] else { return [] }
+        let (g, s) = (ref.group, ref.slot)
+        guard !tracks[g].finished[s] else { return [] }
+        tracks[g].finished[s] = true
+        groups[g].finishedCount += 1
+        groups[g].calls[s].finishedQuietly = true
+        groups[g].calls[s].finishedAt = at
+        if let at {
+            tracks[g].endKnown[s] = true
+            tracks[g].unknownEnds -= 1
+            tracks[g].latestEnd = max(tracks[g].latestEnd ?? at, at)
+        }
+        markDirty(g)
+        refresh(g)
+        return drainOps(appended: nil)
+    }
+
     // MARK: - Reading
 
-    /// The items as they stand.
     /// The group with this id as it stands, or nil.
     public func group(id: Int) -> ToolGroup? {
         groups.indices.contains(id) ? groups[id] : nil
     }
 
+    /// The items as they stand.
     public func items() -> [Item] {
         layout.map { ref in
             switch ref {

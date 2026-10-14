@@ -184,4 +184,37 @@ final class FollowTailPolicyTests: XCTestCase {
         XCTAssertFalse(FollowTailPolicy.showsJumpToLatest(isPinned: true))
         XCTAssertTrue(FollowTailPolicy.showsJumpToLatest(isPinned: false))
     }
+
+    // MARK: - A fold toggle (TF3)
+
+    func testAFoldToggleIsARecordedCauseOfAFlip() {
+        XCTAssertEqual(FollowTailPolicy.Cause.foldToggle.rawValue, "foldToggle")
+    }
+
+    func testAPaneStaysPinnedAfterAFoldToggleExactlyWhenTheViewportReachesTheEnd() {
+        // Exactly at the end.
+        XCTAssertTrue(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 5000, documentHeight: 5000))
+        // Within half a point: rounding, still at the end.
+        XCTAssertTrue(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 4999.6, documentHeight: 5000))
+        XCTAssertTrue(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 4999.5, documentHeight: 5000),
+                      "exactly half a point from the end still counts as the end")
+        // More than half a point short: the bottom is no longer in view.
+        XCTAssertFalse(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 4999.4, documentHeight: 5000))
+        XCTAssertFalse(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 4990, documentHeight: 5000))
+    }
+
+    func testAFoldToggleThatLeavesTheViewportFarFromTheEndUnpins() {
+        XCTAssertFalse(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 1000, documentHeight: 5000))
+        // Unlike a scroll, the pin threshold does not apply: 30 pt short is not the end.
+        XCTAssertFalse(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 4970, documentHeight: 5000))
+    }
+
+    func testAViewportPastTheEndOfTheDocumentIsPinned() {
+        XCTAssertTrue(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 5200, documentHeight: 5000))
+    }
+
+    func testADocumentShorterThanTheViewportIsPinned() {
+        XCTAssertTrue(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 600, documentHeight: 300))
+        XCTAssertTrue(FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: 600, documentHeight: 600))
+    }
 }

@@ -342,25 +342,39 @@ struct ToolResultData {
 /// content are appended as always.
 enum ToolCompletionFolding {
 
+    /// What `fold` did with a block.
+    enum Outcome: Equatable {
+        /// Appended as a block of its own.
+        case appended
+        /// An empty successful result, folded into the call at this index (changed in place).
+        case finishedCall(at: Int)
+        /// An empty successful result with no call to finish: dropped, exactly as the daemon
+        /// used to drop it.
+        case dropped
+    }
+
     /// Add `block` to `blocks`, or fold it into the call it finishes.
-    ///
-    /// - Returns: whether a block was appended. False only for an empty successful
-    ///   result, which is dropped whether or not a call matches it (an unmatched one is
-    ///   dropped exactly as the daemon used to drop it).
     @discardableResult
-    static func apply(_ block: TurnBlock, to blocks: inout [TurnBlock]) -> Bool {
+    static func fold(_ block: TurnBlock, into blocks: inout [TurnBlock]) -> Outcome {
         guard case .toolResult(let result) = block, result.isQuietSuccess else {
             blocks.append(block)
-            return true
+            return .appended
         }
         guard let id = result.toolUseId,
-              let index = blocks.lastIndex(where: { $0.toolCall?.toolUseId == id })
-        else { return false }
-        guard case .toolCall(var call) = blocks[index] else { return false }
+              let index = blocks.lastIndex(where: { $0.toolCall?.toolUseId == id }),
+              case .toolCall(var call) = blocks[index]
+        else { return .dropped }
         call.finishedAt = result.at
         call.finishedQuietly = true
         blocks[index] = .toolCall(call)
-        return false
+        return .finishedCall(at: index)
+    }
+
+    /// `fold`, answering only whether a block was appended. False only for an empty
+    /// successful result, which never gets a block of its own.
+    @discardableResult
+    static func apply(_ block: TurnBlock, to blocks: inout [TurnBlock]) -> Bool {
+        fold(block, into: &blocks) == .appended
     }
 }
 

@@ -87,7 +87,9 @@ fail. `--fixture-only` prints just that line and skips the diagnostics table (a
 fixture run delivers no live turns, so the table would be all INCONCLUSIVE).
 
 The same logs' `group-expand ms=<n>` lines (the harness opening the fixture's first
-60-call tool group) print as an ungraded `group-expand` line (target <= 100 ms).
+60-call tool group) print as an ungraded `group-expand` line (target <= 100 ms), and
+its `group-expand-full ms=<n>` lines (until every row of that group is built) as an
+ungraded `group-expand-full` line.
 With `BASELINE_MS=<n>` in the environment (the TF0 `fixture-open` median), a
 `fixture-open vs baseline` line gives this build's median over that baseline
 (target <= 0.50). Both are numbers for the user to record, never criteria.
@@ -1175,6 +1177,7 @@ def print_report(ev, results, stream=sys.stdout):
 
 FIXTURE_OPEN = re.compile(r"fixture-open ms=(\d+) rows=(\d+) turns=(\d+)")
 GROUP_EXPAND = re.compile(r"group-expand ms=(\d+)")
+GROUP_EXPAND_FULL = re.compile(r"group-expand-full ms=(\d+)")
 GROUP_EXPAND_TARGET_MS = 100
 FIXTURE_OPEN_TARGET_RATIO = 0.50
 FIXTURE_SHA = re.compile(r"\bsha=(\S+)")
@@ -1230,8 +1233,11 @@ def read_fixture_opens(paths, sha=None, fold=None):
     return found
 
 
-def read_group_expands(paths, sha=None, fold=None):
-    """Every `group-expand ms=<n>` value in the given logs (same SHA rule as fixture-open)."""
+def read_group_expands(paths, sha=None, fold=None, pattern=GROUP_EXPAND):
+    """Every `group-expand ms=<n>` value in the given logs (same SHA rule as fixture-open).
+
+    `pattern=GROUP_EXPAND_FULL` reads the `group-expand-full ms=<n>` lines instead.
+    """
     found = []
     for path in paths:
         try:
@@ -1240,7 +1246,7 @@ def read_group_expands(paths, sha=None, fold=None):
         except OSError:
             continue
         for line in lines:
-            m = GROUP_EXPAND.search(line)
+            m = pattern.search(line)
             if not m:
                 continue
             if _other_run(line, sha, fold):
@@ -1271,6 +1277,11 @@ def print_fixture_extras(paths, sha, stream=sys.stdout, env=None):
     if expands:
         print(f"group-expand: median {statistics.median(expands):g} ms over {len(expands)} run(s) "
               f"{sorted(expands)}  (target ≤ {GROUP_EXPAND_TARGET_MS} ms, not graded)", file=stream)
+    full = read_group_expands(paths, sha, fold, GROUP_EXPAND_FULL)
+    if full:
+        print(f"group-expand-full: median {statistics.median(full):g} ms over {len(full)} run(s) "
+              f"{sorted(full)}  (every row of the group built; target ≤ {GROUP_EXPAND_TARGET_MS} ms, "
+              f"not graded)", file=stream)
     base = baseline_ms(env)
     runs = read_fixture_opens(paths, sha, fold)
     if base is not None and runs:

@@ -208,3 +208,180 @@ final class FollowTailController {
         requestPass()
     }
 }
+
+// MARK: - TranscriptViewportCoordinator
+
+/// Keeps the operator's place in a transcript pane across a materialization pass: the
+/// scroll-restoring half of `ReplView.materialize()` (its first and last steps), extracted so
+/// tests can drive it with real AppKit objects (`ReplView` itself cannot be built in the logic
+/// test bundle).
+///
+/// Three rules, in priority order, applied at the end of the pass:
+/// 1. **The operator toggled a row** (a tool group, or a result fold): that row goes back to
+///    the same place on screen. If the pane was following the tail, it keeps following only if
+///    the bottom is still in view afterwards (`FollowTailPolicy.pinnedAfterFoldToggle`).
+/// 2. **Following the tail**: scroll to the bottom.
+/// 3. **Scrolled up**: the item at the top of the viewport stays where it was. The anchor names
+///    the item inside its turn (`TurnIsland.anchorItem`), not just the turn, and it is captured
+///    *before* a programmatic change is applied (`noteProgrammaticChange`), so a height change
+///    inside the anchor turn but above the viewport (a group opening off screen) cannot move the
+///    text being read.
+final class TranscriptViewportCoordinator {
+
+    private enum Pending {
+        /// Rule 1: put the row named by `anchor` (offset 0 into its item) back at `screenY`
+        /// below the viewport top.
+        case row(TurnListVirtualizer.Anchor, screenY: CGFloat, wasPinned: Bool)
+        /// Rule 3: keep the content at the viewport top in place.
+        case top(TurnListVirtualizer.Anchor)
+    }
+
+    let virtualizer: TurnListVirtualizer
+    let scrollView: NSScrollView
+    let followTail: FollowTailController
+    /// The materialized island of the turn at an index, or nil.
+    let islandFor: (_ turnIndex: Int) -> TurnIsland?
+
+    /// The pane's half of `applyFoldChange`: mark the turns for re-measure, re-estimate the
+    /// rest, schedule a pass.
+    var foldChangeApplied: (Set<UUID>) -> Void = { _ in }
+
+    private var pending: Pending?
+    /// The viewport top when `pending` was captured. A pass that finds the viewport has moved
+    /// since (the operator scrolled) drops it rather than pulling them back.
+    private var pendingViewportTop: CGFloat = 0
+
+    init(virtualizer: TurnListVirtualizer, scrollView: NSScrollView, followTail: FollowTailController,
+         islandFor: @escaping (_ turnIndex: Int) -> TurnIsland?) {
+        self.virtualizer = virtualizer
+        self.scrollView = scrollView
+        self.followTail = followTail
+        self.islandFor = islandFor
+    }
+
+    private var clip: NSClipView { scrollView.contentView }
+
+    // MARK: Before a change
+
+    /// Rule 1: the operator toggled the row `itemKey` (a group key, or `b<i>` for a result) in
+    /// the turn at `turnIndex`. Call as the toggle is reported, before the pass that measures
+    /// it: the island may already hold the new state, but nothing above the toggled row has
+    /// moved, so its screen position is still the one the operator clicked.
+    func noteUserToggle(turnIndex: Int, itemKey: String) {
+        guard let island = islandFor(turnIndex), let itemTop = island.offset(ofItemKey: itemKey),
+              let key = virtualizer.contentKey(at: turnIndex)
+        else {
+            noteProgrammaticChange()
+            return
+        }
+        let viewportTop = clip.bounds.minY
+        let anchor = TurnListVirtualizer.Anchor(key: key, index: turnIndex, offsetWithinTurn: itemTop,
+                                                itemKey: itemKey, offsetInItem: 0)
+        // From where the island is drawn (the last pass put it there), not from the geometry,
+        // which may already have moved on: the row stays where the operator saw it.
+        pending = .row(anchor, screenY: island.frame.minY + itemTop - viewportTop,
+                       wasPinned: followTail.isPinned)
+        pendingViewportTop = viewportTop
+    }
+
+    /// Rule 3: a programmatic change (streaming, the stuck-turn auto-open, a fold change made
+    /// elsewhere) is about to be applied. Captures the reading position first, unless the pane
+    /// follows the tail or a position is already pending.
+    func noteProgrammaticChange() {
+        guard pending == nil, !followTail.isPinned, let anchor = captureAnchor() else { return }
+        pending = .top(anchor)
+        pendingViewportTop = clip.bounds.minY
+    }
+
+    /// Forget a pending position: the transcript it named is gone (cleared).
+    func discardPending() {
+        pending = nil
+    }
+
+    /// The one entry point for a programmatic fold change: capture → `mutation` →
+    /// `foldChangeApplied(turnIds)` (re-measure, re-estimate, pass).
+    func applyFoldChange(turnIds: Set<UUID>, mutation: () -> Void) {
+        noteProgrammaticChange()
+        mutation()
+        foldChangeApplied(turnIds)
+    }
+
+    // MARK: The pass
+
+    /// Step 1 of a materialization pass: name where the operator is reading, before any
+    /// height changes, unless that was done before the change that asked for this pass.
+    func beginPass() {
+        if pending != nil, abs(clip.bounds.minY - pendingViewportTop) > 0.5 { pending = nil }
+        noteProgrammaticChange()
+    }
+
+    /// Where the viewport will be once `endPass` has put things back, as far as the geometry
+    /// knows after `beginPass`. The pass materializes the turns around this rather than around
+    /// where the viewport was before the change: an Expand All that grows the turns above the
+    /// reading position by more than the overscan would otherwise evict the very turn being read.
+    func anticipatedViewport() -> NSRect {
+        var viewport = clip.bounds
+        let lowest = max(0, virtualizer.documentHeight - viewport.height)
+        switch pending {
+        case .row(let anchor, let screenY, _)?:
+            viewport.origin.y = virtualizer.restoredTop(for: anchor, itemOffset: itemOffset) - screenY
+        case _ where followTail.isPinned:
+            viewport.origin.y = lowest
+        case .top(let anchor)?:
+            viewport.origin.y = virtualizer.restoredTop(for: anchor, itemOffset: itemOffset)
+        case nil:
+            break
+        }
+        viewport.origin.y = min(max(0, viewport.origin.y), lowest)
+        return viewport
+    }
+
+    /// Step 5 of a materialization pass, after views are built, measured and positioned and
+    /// the document view sized: put the reading position back, or follow the newest content.
+    func endPass() {
+        defer { pending = nil }
+        switch pending {
+        case .row(let anchor, let screenY, let wasPinned)?:
+            let rowTop = virtualizer.restoredTop(for: anchor, itemOffset: itemOffset)
+            scroll(toTop: clamped(rowTop - screenY))
+            if wasPinned {
+                let pinned = FollowTailPolicy.pinnedAfterFoldToggle(viewportMaxY: clip.bounds.maxY,
+                                                                    documentHeight: documentHeight)
+                followTail.setPinned(pinned, cause: .foldToggle)
+            }
+        case _ where followTail.isPinned:
+            followTail.scrollToBottom()
+        case .top(let anchor)?:
+            scroll(toTop: virtualizer.restoredTop(for: anchor, itemOffset: itemOffset))
+        case nil:
+            break
+        }
+    }
+
+    // MARK: Helpers
+
+    private func captureAnchor() -> TurnListVirtualizer.Anchor? {
+        virtualizer.captureAnchor(viewportTop: clip.bounds.minY) { [islandFor] index, y in
+            islandFor(index)?.anchorItem(atY: y)
+        }
+    }
+
+    private func itemOffset(_ index: Int, _ itemKey: String) -> CGFloat? {
+        islandFor(index)?.offset(ofItemKey: itemKey)
+    }
+
+    private var documentHeight: CGFloat {
+        max(scrollView.documentView?.frame.height ?? 0, virtualizer.documentHeight)
+    }
+
+    /// The highest top the clip view can actually scroll to.
+    private func clamped(_ top: CGFloat) -> CGFloat {
+        min(max(0, top), max(0, documentHeight - clip.bounds.height))
+    }
+
+    private func scroll(toTop top: CGFloat) {
+        guard abs(top - clip.bounds.minY) > 0.5 else { return }
+        clip.scroll(NSPoint(x: 0, y: top))
+        scrollView.reflectScrolledClipView(clip)
+    }
+}
