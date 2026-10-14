@@ -303,6 +303,10 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// the turn ended), with its final state. Never for groups already settled when built.
     var onGroupSettled: ((ToolGroup) -> Void)?
 
+    /// Fired just before this view changes its own height with nobody having asked (an open
+    /// group building its next batch of rows), so the owner can note the reading position.
+    var onWillChangeHeight: (() -> Void)?
+
     /// Everything the operator has already done to this turn, restored into the
     /// block views as they are built.
     private let interaction: TurnInteractionState
@@ -562,6 +566,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             self?.onBlockExpansion?(index, isExpanded)
         }
         view.onHeightChange = { [weak self] in self?.groupChangedHeight(id) }
+        view.onBatchWillBuild = { [weak self] in self?.onWillChangeHeight?() }
         return view
     }
 

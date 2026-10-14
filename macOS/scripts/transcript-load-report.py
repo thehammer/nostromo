@@ -1280,7 +1280,8 @@ def print_fixture_extras(paths, sha, stream=sys.stdout, env=None):
     full = read_group_expands(paths, sha, fold, GROUP_EXPAND_FULL)
     if full:
         print(f"group-expand-full: median {statistics.median(full):g} ms over {len(full)} run(s) "
-              f"{sorted(full)}  (every row of the group built, not graded)", file=stream)
+              f"{sorted(full)}  (every row of the group built; target ≤ {GROUP_EXPAND_TARGET_MS} ms, "
+              f"not graded)", file=stream)
     base = baseline_ms(env)
     runs = read_fixture_opens(paths, sha, fold)
     if base is not None and runs:

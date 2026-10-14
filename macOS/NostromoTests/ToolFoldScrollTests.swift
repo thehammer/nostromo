@@ -170,6 +170,8 @@ private final class ScrollRig {
             }
         }
         view.onIntrinsicHeightChange = { [unowned self] in self.pending.insert(id) }
+        // A later member batch is about to change the island's heights: name the reading position first.
+        view.onWillChangeHeight = { [unowned self] in self.coordinator.noteProgrammaticChange() }
         view.onAutoOpen = { [unowned self] key in
             self.autoOpened.append(key)
             self.store.recordAuto(turn: id, key: key)
@@ -835,13 +837,14 @@ final class TurnIslandItemGeometryTests: XCTestCase {
         view.subviews.filter { !($0 is UserBubbleView) }
     }
 
-    private func makeOpenRig(_ blocks: [TurnBlock], folds: FoldResolver? = nil) -> (TranscriptRig, ChatTurnView) {
+    private func makeOpenRig(_ blocks: [TurnBlock], folds: FoldResolver? = nil,
+                             textParents: [Int: String] = [:]) -> (TranscriptRig, ChatTurnView) {
         let window = makeRigWindow(self)
         let scroll = NSScrollView(frame: window.contentView!.bounds)
         let doc = RigFlippedDoc(frame: NSRect(x: 0, y: 0, width: 900, height: 1))
         scroll.documentView = doc
         window.contentView!.addSubview(scroll)
-        let turn = F.turn(blocks, complete: false)
+        let turn = F.turn(blocks, complete: false, textParents: textParents)
         let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(), folds: folds)
         view.setIslandWidth(900)
         return (TranscriptRig(window: window, scroll: scroll, doc: doc, turn: view, overlay: nil), view)
@@ -975,6 +978,42 @@ final class TurnIslandItemGeometryTests: XCTestCase {
         XCTAssertNotNil(rig.turn.offset(ofItemKey: "b2"), "its members resolve now")
         rig.relayout(width: 900)
         XCTAssertEqual(closingAfter, columns(rig.turn)[2].frame.minY, accuracy: 0.5)
+    }
+
+    // MARK: subagent blocks
+
+    /// 0 prose, 1 Agent call, 2 subagent call, 3 subagent result, 4 subagent prose, 5 the Agent's result.
+    private var agentBlocks: [TurnBlock] {
+        [.text("intro"),
+         F.call("Agent", id: "toolu_agent", summary: "explore the repo"),
+         F.call("Bash", id: "sub1", summary: "grep -r foo", parent: "toolu_agent"),
+         F.result("foo.txt", id: "sub1", parent: "toolu_agent"),
+         .text("the subagent thinks"),
+         F.result("report from the agent", id: "toolu_agent")]
+    }
+
+    func testASubagentBlockResolvesToTheTopOfItsAgentActivityRowWhenTheGroupIsOpen() throws {
+        let (rig, view) = makeOpenRig(agentBlocks, folds: FoldResolver(expandedByDefault: true), textParents: [4: "toolu_agent"])
+        rig.relayout(width: 900)
+        let group = try XCTUnwrap(columns(view).compactMap { $0 as? ToolGroupView }.first)
+        let activity = try XCTUnwrap(group.memberViews.first { $0 is AgentActivityView })
+        let expected = view.convert(activity.bounds, from: activity).minY
+
+        for index in [2, 3, 4] {
+            XCTAssertEqual(try XCTUnwrap(view.offset(ofItemKey: "b\(index)"), "b\(index)"), expected, accuracy: 0.5,
+                           "subagent block \(index) sits in the activity row")
+        }
+        let call = try XCTUnwrap(group.memberViews.first { $0 is ToolCallView })
+        XCTAssertEqual(try XCTUnwrap(view.offset(ofItemKey: "b1")), view.convert(call.bounds, from: call).minY, accuracy: 0.5,
+                       "the Agent call itself still resolves to its own row")
+        XCTAssertGreaterThan(expected, try XCTUnwrap(view.offset(ofItemKey: "b1")))
+    }
+
+    func testASubagentBlockOfACollapsedGroupDoesNotResolve() {
+        let (rig, view) = makeOpenRig(agentBlocks, textParents: [4: "toolu_agent"])
+        rig.relayout(width: 900)
+
+        XCTAssertNil(view.offset(ofItemKey: "b3"))
     }
 
     // MARK: markers
@@ -1177,5 +1216,311 @@ final class TranscriptViewportAnticipationTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(viewport.origin.y, 0)
         XCTAssertLessThanOrEqual(viewport.origin.y, max(0, rig.virtualizer.documentHeight - rig.viewportHeight) + 0.5)
+    }
+}
+
+// MARK: - A later batch must not move what is read below the group
+
+/// A turn that ends in error with a long failing group (`g:e0`, 36 calls, 72 members) whose
+/// results carry long multi-line errors, then paragraphs after it. The stuck-turn rule opens
+/// the group; 24 members are built at once and the rest in batches, each of which changes the
+/// island's height (estimates become measurements).
+final class ToolGroupBatchAnchorScrollTests: XCTestCase {
+
+    private func failingTail() -> ChatTurn {
+        var blocks = fillerBlocks(3, tag: "intro")
+        for i in 0 ..< 36 {
+            blocks.append(F.call(id: "e\(i)", summary: "make step\(i)", start: Double(i)))
+            let error = (0 ..< 6).map { "error line \($0) of step \(i): the linker could not resolve a symbol" }.joined(separator: "\n")
+            blocks.append(F.result(error, id: "e\(i)", isError: true, time: Double(i) + 0.5))
+        }
+        blocks += fillerBlocks(30, tag: "closing")
+        return F.turn(blocks, complete: false, user: "tail")
+    }
+
+    private func makeRig() -> (ScrollRig, ChatTurn, ScrollBatchCollector) {
+        let tail = failingTail()
+        let rig = ScrollRig(self, turns: (0 ..< 5).map(historyTurn) + [tail])
+        rig.start()
+        return (rig, tail, ScrollBatchCollector())
+    }
+
+    func testReadingTheClosingProseBelowAStuckGroupDoesNotMoveThroughItsBatches() throws {
+        let (rig, tail, collector) = makeRig()
+        let placed = try XCTUnwrap(rig.placeRow(turn: tail.id, key: "g:e0", atScreenY: -300))
+        XCTAssertEqual(placed, -300, accuracy: 2, "precondition: the group row is above the top of the viewport")
+        XCTAssertFalse(rig.followTail.isPinned)
+        let group = try XCTUnwrap(rig.groupView(turn: tail.id, key: "g:e0"))
+        group.scheduleBatch = { collector.schedule($0) }
+        let probe = try XCTUnwrap(rig.probe())
+        XCTAssertEqual(probe.landmark.turnID, tail.id)
+        let groupColumn = try XCTUnwrap(rig.columnIndex(ofGroup: "g:e0", inTurn: tail.id))
+        XCTAssertGreaterThan(probe.landmark.subviewIndex, groupColumn, "precondition: the reader is below the group")
+
+        rig.append([errorChip()], complete: true)
+
+        XCTAssertTrue(group.isExpanded, "the stuck group opened")
+        XCTAssertFalse(group.isFullyBuilt, "precondition: members are still queued")
+        assertStill(rig, probe, "after the stuck group opened")
+
+        var batches = 0
+        while collector.runNext() {
+            batches += 1
+            XCTAssertLessThan(batches, 20, "the batches never end")
+            rig.runPass()
+            assertStill(rig, probe, "after batch \(batches)")
+        }
+
+        XCTAssertGreaterThan(batches, 0)
+        XCTAssertTrue(group.isFullyBuilt)
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testReadingInsideTheBuiltPartOfAStuckGroupDoesNotMoveThroughItsBatches() throws {
+        let (rig, tail, collector) = makeRig()
+        let group = try XCTUnwrap(rig.groupView(turn: tail.id, key: "g:e0"))
+        group.scheduleBatch = { collector.schedule($0) }
+        rig.append([errorChip()], complete: true)
+        XCTAssertTrue(group.isExpanded, "the stuck group opened")
+        XCTAssertFalse(group.isFullyBuilt, "precondition: members are still queued")
+
+        // The operator scrolls so the group's row is above the top and a built member straddles it.
+        rig.userScroll(to: rig.virtualizer.offset(of: rig.turns.count - 1))
+        rig.settle()
+        let placed = try XCTUnwrap(rig.placeRow(turn: tail.id, key: "g:e0", atScreenY: -100))
+        XCTAssertEqual(placed, -100, accuracy: 2)
+        XCTAssertFalse(rig.followTail.isPinned)
+        let top = rig.clip.bounds.minY
+        let member = try XCTUnwrap(group.memberViews.first { rig.doc.convert($0.bounds, from: $0).maxY > top + 1 },
+                                   "precondition: a built member is at the top of the viewport")
+        let before = rig.screenY(of: member)
+        let probe = try XCTUnwrap(rig.probe())
+
+        var batches = 0
+        while collector.runNext() {
+            batches += 1
+            XCTAssertLessThan(batches, 20)
+            rig.runPass()
+            XCTAssertEqual(rig.screenY(of: member), before, accuracy: 1, "batch \(batches) moved the member being read")
+            assertStill(rig, probe, "after batch \(batches)")
+        }
+
+        XCTAssertGreaterThan(batches, 0)
+        XCTAssertTrue(group.isFullyBuilt)
+    }
+}
+
+// MARK: - Turn ids in the virtualizer's geometry
+
+final class TurnListVirtualizerTurnIDTests: XCTestCase {
+
+    private func turns(_ names: String...) -> [ChatTurn] { names.map { F.turn([.text($0)], user: $0) } }
+
+    private func ids(_ v: TurnListVirtualizer) -> [UUID?] { (0 ..< v.count).map { v.turnID(at: $0) } }
+
+    private func make(_ list: [ChatTurn]) -> TurnListVirtualizer {
+        let v = TurnListVirtualizer()
+        v.reset(turns: list, width: 900)
+        return v
+    }
+
+    func testIdsFollowReset() {
+        let list = turns("A", "B", "C")
+        let v = make(list)
+
+        XCTAssertEqual(ids(v), list.map { Optional($0.id) })
+        for (i, turn) in list.enumerated() { XCTAssertEqual(v.index(ofTurnID: turn.id), i) }
+    }
+
+    func testAnUnknownIdOrIndexHasNoAnswer() {
+        let v = make(turns("A", "B"))
+
+        XCTAssertNil(v.index(ofTurnID: UUID()))
+        XCTAssertNil(v.turnID(at: 2))
+        XCTAssertNil(v.turnID(at: -1))
+        XCTAssertNil(TurnListVirtualizer().turnID(at: 0))
+    }
+
+    func testIdsFollowAnAppend() {
+        let list = turns("A", "B")
+        let v = make(list)
+        let more = F.turn([.text("C")], user: "C")
+
+        v.append(more)
+
+        XCTAssertEqual(v.turnID(at: 2), more.id)
+        XCTAssertEqual(v.index(ofTurnID: more.id), 2)
+        XCTAssertEqual(v.index(ofTurnID: list[0].id), 0)
+    }
+
+    func testIdsFollowASpliceThatReplacesTheTail() {
+        let list = turns("A", "B", "C")
+        let v = make(list)
+        let replacement = turns("X", "Y")
+
+        v.splice(turns: [list[0]] + replacement, from: 1)
+
+        XCTAssertEqual(ids(v), ([list[0]] + replacement).map { Optional($0.id) })
+        XCTAssertNil(v.index(ofTurnID: list[1].id), "a replaced turn is gone")
+        XCTAssertEqual(v.index(ofTurnID: replacement[1].id), 2)
+    }
+
+    func testIdsFollowASpliceToAShorterList() {
+        let list = turns("A", "B", "C", "D")
+        let v = make(list)
+
+        v.splice(turns: Array(list.prefix(2)), from: 0)
+
+        XCTAssertEqual(v.count, 2)
+        XCTAssertEqual(ids(v), list.prefix(2).map { Optional($0.id) })
+        XCTAssertNil(v.turnID(at: 3))
+        XCTAssertNil(v.index(ofTurnID: list[3].id))
+    }
+
+    func testIdsFollowTheRemovalOfTheFrontTurns() {
+        let list = turns("A", "B", "C")
+        let v = make(list)
+
+        v.splice(turns: Array(list.dropFirst()), from: 0)
+
+        XCTAssertEqual(ids(v), list.dropFirst().map { Optional($0.id) })
+        XCTAssertNil(v.index(ofTurnID: list[0].id))
+        XCTAssertEqual(v.index(ofTurnID: list[1].id), 0)
+        XCTAssertEqual(v.index(ofTurnID: list[2].id), 1)
+    }
+
+    func testIdsFollowAnInsertionAtTheFront() {
+        let list = turns("A", "B")
+        let v = make(list)
+        let front = F.turn([.text("X")], user: "X")
+
+        v.splice(turns: [front] + list, from: 0)
+
+        XCTAssertEqual(v.index(ofTurnID: front.id), 0)
+        XCTAssertEqual(v.index(ofTurnID: list[0].id), 1)
+        XCTAssertEqual(v.index(ofTurnID: list[1].id), 2)
+    }
+
+    func testARefreshedTurnKeepsItsIdWhileItsContentChanges() {
+        let list = turns("A", "B", "C")
+        let v = make(list)
+        var grown = list[1]
+        grown.blocks.append(.text("more"))
+
+        v.refresh(grown, at: 1)
+
+        XCTAssertEqual(v.turnID(at: 1), list[1].id)
+        XCTAssertEqual(v.index(ofTurnID: list[1].id), 1)
+        XCTAssertEqual(ids(v), list.map { Optional($0.id) })
+    }
+
+    func testARefreshWithADifferentTurnTakesOverTheSlot() {
+        let list = turns("A", "B", "C")
+        let v = make(list)
+        let other = F.turn([.text("Z")], user: "Z")
+
+        v.refresh(other, at: 1)
+
+        XCTAssertEqual(v.turnID(at: 1), other.id)
+        XCTAssertNil(v.index(ofTurnID: list[1].id))
+    }
+
+    func testIdsFollowAWidthInvalidation() {
+        let list = turns("A", "B")
+        let v = make(list)
+        let swapped = turns("X", "Y")
+
+        v.invalidateWidth(700, turns: swapped)
+
+        XCTAssertEqual(ids(v), swapped.map { Optional($0.id) })
+        XCTAssertNil(v.index(ofTurnID: list[0].id))
+    }
+
+    func testIdsFollowAWidthInvalidationThatChangesTheTurnCount() {
+        let list = turns("A", "B")
+        let v = make(list)
+        let more = turns("A", "B", "C", "D")
+
+        v.invalidateWidth(700, turns: more)
+
+        XCTAssertEqual(v.count, 4)
+        XCTAssertEqual(ids(v), more.map { Optional($0.id) })
+    }
+}
+
+// MARK: - A cleared transcript
+
+extension TranscriptViewportAnticipationTests {
+
+    func testADiscardedPendingPositionIsNotRestoredAndTheViewportIsAnticipatedWhereItIs() throws {
+        let rig = ScrollRig(self, turns: longTranscript())
+        rig.start()
+        XCTAssertNotNil(rig.placeRow(turn: rig.turns[4].id, key: "g:L4_0", atScreenY: -60))
+        XCTAssertFalse(rig.followTail.isPinned)
+        let top = rig.clip.bounds.minY
+        let turnTopBefore = rig.virtualizer.offset(of: 4)
+        rig.coordinator.noteProgrammaticChange()
+        rig.store.setGroup(turn: rig.turns[2].id, key: "g:L2_0", true)
+        rig.virtualizer.splice(turns: rig.turns, from: 0)
+        XCTAssertGreaterThan(rig.virtualizer.offset(of: 4) - turnTopBefore, 50, "precondition: restoring would move the viewport")
+
+        rig.coordinator.discardPending()
+
+        XCTAssertEqual(rig.coordinator.anticipatedViewport().origin.y, top, accuracy: 0.01)
+        rig.coordinator.endPass()
+        XCTAssertEqual(rig.clip.bounds.minY, top, accuracy: 0.5, "the old anchor was restored after the transcript was cleared")
+    }
+
+    func testDiscardingWithNothingPendingChangesNothing() throws {
+        let rig = ScrollRig(self, turns: longTranscript())
+        rig.start()
+        XCTAssertNotNil(rig.placeRow(turn: rig.turns[3].id, key: "g:L3_0", atScreenY: 100))
+        let top = rig.clip.bounds.minY
+
+        rig.coordinator.discardPending()
+        rig.coordinator.endPass()
+
+        XCTAssertEqual(rig.clip.bounds.minY, top, accuracy: 0.01)
+    }
+}
+
+// MARK: - Subagent blocks and the row anchor
+
+final class ToolFoldSubagentScrollTests: XCTestCase {
+
+    func testExpandingAnAgentActivityAndASubagentResultInAPinnedPaneKeepsTheActivityRowStill() throws {
+        let blocks: [TurnBlock] = [
+            .text("Delegating. \(F.prose)"),
+            F.call("Agent", id: "toolu_agent", summary: "explore the repo"),
+            F.call("Bash", id: "sub1", summary: "grep -r foo", parent: "toolu_agent"),
+            F.result("hit one\nhit two\nhit three", id: "sub1", parent: "toolu_agent"),
+            .text("the subagent thinks"),
+            F.result("report from the agent", id: "toolu_agent"),
+        ]
+        let tail = F.turn(blocks, complete: false, user: "tail", textParents: [4: "toolu_agent"])
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [tail])
+        rig.store.setGroup(turn: tail.id, key: "g:toolu_agent", true)
+        rig.start()
+        XCTAssertTrue(rig.followTail.isPinned)
+        let group = try XCTUnwrap(rig.groupView(turn: tail.id, key: "g:toolu_agent"))
+        let activity = try XCTUnwrap(group.memberViews.first { $0 is AgentActivityView }, "the Agent call has subagent activity")
+        let before = rig.screenY(of: activity)
+        XCTAssertGreaterThan(before, 0, "precondition: the activity row is on screen")
+        XCTAssertLessThan(before, rig.viewportHeight)
+
+        // Open the activity.
+        try XCTUnwrap(disclosureButton(in: activity)).performClick(nil)
+        rig.runPass()
+        XCTAssertEqual(rig.screenY(of: activity), before, accuracy: 1, "opening the activity moved its row")
+
+        // Then a subagent result inside it: its block index is a subagent block, not a member.
+        let result = try XCTUnwrap(rigAllSubviews(of: activity).compactMap { $0 as? ToolResultView }.first,
+                                   "the activity lists the subagent's result")
+        let button = try XCTUnwrap(disclosureButton(in: result))
+        button.performClick(nil)
+        rig.runPass()
+
+        XCTAssertTrue(button.title.hasPrefix("▼"), "precondition: the subagent result opened")
+        XCTAssertEqual(rig.screenY(of: activity), before, accuracy: 1, "the activity row moved when a result inside it opened")
     }
 }

@@ -62,6 +62,10 @@ final class TurnListVirtualizer {
     private(set) var count = 0
 
     private var keys:    [String]  = []
+    /// Each turn's `ChatTurn.id`, so an index this geometry hands out names the turn it meant
+    /// even while the pane's turn array is momentarily ahead of it (an index into that array
+    /// can name a different turn until the change event arrives).
+    private var ids:     [UUID]    = []
     private var heights: [CGFloat] = []
     private var isExact: [Bool]    = []
     /// Fenwick tree over `heights`, 1-based.
@@ -120,6 +124,7 @@ final class TurnListVirtualizer {
         measured.removeAll(keepingCapacity: true)
         self.width = max(width, 1)
         keys    = turns.map { $0.contentKey }
+        ids     = turns.map(\.id)
         digests = turns.map { foldDigest(for: $0) }
         heights = turns.map { estimate($0) }
         isExact = Array(repeating: false, count: turns.count)
@@ -136,11 +141,13 @@ final class TurnListVirtualizer {
         // one lets `turns[floor...]` index past the end of a shorter list.
         let floor = max(0, min(index, count, turns.count))
         keys.removeSubrange(floor...)
+        ids.removeSubrange(floor...)
         digests.removeSubrange(floor...)
         heights.removeSubrange(floor...)
         isExact.removeSubrange(floor...)
         for turn in turns[floor...] {
             keys.append(turn.contentKey)
+            ids.append(turn.id)
             digests.append(foldDigest(for: turn))
             heights.append(estimate(turn))
             isExact.append(false)
@@ -161,6 +168,7 @@ final class TurnListVirtualizer {
         let key = turn.contentKey
         let digest = foldDigest(for: turn)
         keys.append(key)
+        ids.append(turn.id)
         digests.append(digest)
         let cached = measured[cacheKey(key, digest)]
         let height = cached ?? estimate(turn)
@@ -198,6 +206,7 @@ final class TurnListVirtualizer {
         let oldKey = keys[index]
         if oldKey != key, indexByKey[oldKey] == index { indexByKey.removeValue(forKey: oldKey) }
         keys[index] = key
+        ids[index] = turn.id
         indexByKey[key] = index
         let digest = foldDigest(for: turn)
         digests[index] = digest
@@ -226,6 +235,7 @@ final class TurnListVirtualizer {
             let key = turns[i].contentKey
             let digest = foldDigest(for: turns[i])
             keys[i] = key
+            ids[i] = turns[i].id
             digests[i] = digest
             if let m = measured[cacheKey(key, digest)] {
                 heights[i] = m
@@ -276,6 +286,17 @@ final class TurnListVirtualizer {
     func contentKey(at index: Int) -> String? {
         guard index >= 0, index < count else { return nil }
         return keys[index]
+    }
+
+    /// The `ChatTurn.id` of the turn at `index`.
+    func turnID(at index: Int) -> UUID? {
+        guard index >= 0, index < count else { return nil }
+        return ids[index]
+    }
+
+    /// Where the turn `id` is in this geometry. O(turns): for clicks, not for passes.
+    func index(ofTurnID id: UUID) -> Int? {
+        ids.lastIndex(of: id)
     }
 
     func isHeightExact(at index: Int) -> Bool {

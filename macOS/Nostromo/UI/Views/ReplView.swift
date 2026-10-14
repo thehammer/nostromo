@@ -202,6 +202,7 @@ class ReplView: NSView {
         elapsedTicker.islands = { [weak self] in
             self?.turnViews.values.compactMap { $0 as? ElapsedTicking } ?? []
         }
+        elapsedTicker.isActive = { [weak self] in self?.isVisibleOnScreen ?? false }
 
         // Fold state is part of a turn's height: the estimate folds through it, and the
         // height cache is keyed by it, so a re-collapsed group never gets its expanded
@@ -360,6 +361,8 @@ class ReplView: NSView {
         if case .cleared = change {} else { viewport.noteProgrammaticChange() }
         switch change {
         case .cleared:
+            viewport.discardPending()
+            announcer.reset()
             releaseAllTurnViews()
             // Nothing in `turns` survives, so nothing recorded against them
             // should either. This is half the bound that stops the interaction
@@ -395,7 +398,7 @@ class ReplView: NSView {
             guard index < turns.count else { return }
             virtualizer.append(turns[index])
 
-        case .updatedBlocks(let index, _):
+        case .updatedBlocks(let index, let addedCount):
             guard index < turns.count else { return }
             let turn = turns[index]
             // A streaming turn is normally materialized, so append only the blocks that are
@@ -406,6 +409,10 @@ class ReplView: NSView {
                 pendingRemeasure.insert(turn.id)
             } else {
                 recordStuckGroup(of: turn)
+                // No view to report a group settling, so the pane does, for VoiceOver.
+                if addedCount == 1, let group = ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn) {
+                    announcer.groupSettled(group, in: self)
+                }
             }
             // After the update, so the estimate folds through any auto entry it recorded.
             virtualizer.refresh(turn, at: index)
@@ -417,16 +424,22 @@ class ReplView: NSView {
         schedulePass()
     }
 
-    /// The materialized island of the turn at `index`, if any.
+    /// The materialized island of the turn at geometry index `index`, if any. Resolved through
+    /// the virtualizer's own ids: `session.turns` can be a change event ahead of the geometry,
+    /// and the same index there may name another turn.
     private func island(at index: Int) -> TurnIsland? {
-        let turns = session.turns
-        guard turns.indices.contains(index) else { return nil }
-        return turnViews[turns[index].id]
+        virtualizer.turnID(at: index).flatMap { turnViews[$0] }
     }
 
-    /// The turn's current index (turns move on a splice; views keep the id).
+    /// The turn's index in the geometry (turns move on a splice; views keep the id).
     private func index(ofTurn id: UUID) -> Int? {
-        session.turns.lastIndex { $0.id == id }
+        virtualizer.index(ofTurnID: id)
+    }
+
+    /// In a window, not hidden, and the window not occluded.
+    private var isVisibleOnScreen: Bool {
+        guard let window, !isHiddenOrHasHiddenAncestor else { return false }
+        return window.occlusionState.contains(.visible)
     }
 
     /// A fold change made outside this pane's own clicks: the stuck-turn auto-open here, and
@@ -436,18 +449,18 @@ class ReplView: NSView {
         viewport.applyFoldChange(turnIds: turnIds, mutation: mutation)
     }
 
-    /// The pane's half of `applyFoldChange`: the changed turns that are on screen are measured
-    /// again, every other turn is re-estimated with its new fold state, and a pass runs.
+    /// The pane's half of `applyFoldChange`: each changed turn is re-estimated with its new fold
+    /// state (or handed back a height measured with it), those on screen are measured again, and
+    /// a pass runs. One walk over the geometry, refreshing only the changed turns in place: a
+    /// splice here would re-key every turn against `session.turns`, which can be an append ahead.
     private func foldChangeApplied(_ turnIds: Set<UUID>) {
-        for id in turnIds where turnViews[id] != nil { pendingRemeasure.insert(id) }
-        // Re-estimates every turn through the fold state and adopts each measured height that is
-        // still valid (by content key and fold digest).
-        virtualizer.splice(turns: session.turns, from: 0)
-        // A splice leaves a materialized turn with no reusable measurement (a streaming one) at
-        // its estimate, so it is measured again too.
-        for (i, turn) in session.turns.enumerated()
-        where turnViews[turn.id] != nil && !virtualizer.isHeightExact(at: i) {
-            pendingRemeasure.insert(turn.id)
+        guard !turnIds.isEmpty else { return }
+        var changed: [UUID: ChatTurn] = [:]
+        for turn in session.turns where turnIds.contains(turn.id) { changed[turn.id] = turn }
+        for i in 0 ..< virtualizer.count {
+            guard let id = virtualizer.turnID(at: i), let turn = changed[id] else { continue }
+            virtualizer.refresh(turn, at: i)
+            if turnViews[id] != nil { pendingRemeasure.insert(id) }
         }
         contentDirty = true
         schedulePass()
@@ -557,7 +570,8 @@ class ReplView: NSView {
             virtualizer.splice(turns: turns, from: 0)
         }
         // Around where step 5 will put the viewport, not where it was before the change.
-        let window = virtualizer.visibleWindow(viewport: viewport.anticipatedViewport())
+        let anticipated = viewport.anticipatedViewport()
+        let window = virtualizer.visibleWindow(viewport: anticipated)
         assert(window.upperBound <= turns.count,
                "visibleWindow \(window) exceeds \(turns.count) turns — geometry is out of sync")
 
@@ -598,6 +612,15 @@ class ReplView: NSView {
 
         // 5. Put the toggled row or the reading position back, or follow the newest content.
         viewport.endPass()
+        // Measuring can land the viewport away from where step 2 expected it, past the turns it
+        // materialized: a blank band must not wait for the next unrelated event. (Only when it
+        // landed elsewhere, so a viewport the window cannot cover never loops.)
+        let landed = scrollView.contentView.bounds
+        if abs(landed.minY - anticipated.minY) > 0.5,
+           virtualizer.index(atY: landed.minY) < window.lowerBound
+            || virtualizer.index(atY: landed.maxY) >= window.upperBound {
+            contentDirty = true
+        }
         elapsedTicker.reevaluate()
         if let done = afterNextPass {
             afterNextPass = nil
@@ -661,6 +684,9 @@ class ReplView: NSView {
             self.pendingRemeasure.insert(turn.id)
             self.schedulePass()
         }
+        // An open group is about to build its next batch of rows: note the reading position
+        // before its height changes.
+        view.onWillChangeHeight = { [weak self] in self?.viewport.noteProgrammaticChange() }
         // The turn ended in error and the view opened its last, failed group: record it (TF4
         // keeps it across restarts) through the fold-change entry point, which also keeps the
         // reading position.
@@ -903,10 +929,8 @@ class ReplView: NSView {
     }
 
     @objc private func windowOcclusionChanged() {
-        guard window?.occlusionState.contains(.visible) == true else {
-            elapsedTicker.stop()   // the pass that re-shows the pane re-aims it
-            return
-        }
+        elapsedTicker.reevaluate()   // stops while occluded, re-aims when visible again
+        guard window?.occlusionState.contains(.visible) == true else { return }
         followTail.paneWasShown()
     }
 
@@ -917,12 +941,13 @@ class ReplView: NSView {
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
+        elapsedTicker.reevaluate()
         followTail.paneWasShown()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { elapsedTicker.stop() }
+        elapsedTicker.reevaluate()   // stops out of a window
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             TranscriptFocusPolicy.focusInputIfAppropriate(

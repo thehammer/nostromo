@@ -1757,3 +1757,243 @@ final class ChatTurnViewReadingOrderTests: XCTestCase {
         XCTAssertTrue(view.subviews.last is TextBlockView)
     }
 }
+
+// MARK: - A batch announces itself before it changes the island
+
+extension ToolGroupExpandCostTests {
+
+    func testTheTurnIsToldBeforeEachBatchChangesItsHeightOnceEach() throws {
+        // Commands long enough to wrap: a call row then measures taller than its one-line
+        // estimate, so a batch replacing estimates really changes the height.
+        let long = String(repeating: "--a-long-argument ", count: 30)
+        let blocks = (0 ..< 60).flatMap { i in
+            [F.call("Bash", id: "t\(i)", summary: "cmd \(i) \(long)"), F.result("output \(i)", id: "t\(i)")]
+        }
+        let (stream, group, collector) = try makeFixture(blocks)
+        group.row.toggle()
+        var heightsSeenInTheCallback: [CGFloat] = []
+        stream.view.onWillChangeHeight = { heightsSeenInTheCallback.append(stream.view.islandHeight()) }
+        var heightsBefore: [CGFloat] = []
+        var heightsAfter: [CGFloat] = []
+
+        while collector.pendingCount > 0, heightsBefore.count < 20 {
+            heightsBefore.append(stream.view.islandHeight())
+            collector.runNext()
+            heightsAfter.append(stream.view.islandHeight())
+        }
+
+        XCTAssertGreaterThan(heightsBefore.count, 0)
+        XCTAssertEqual(heightsSeenInTheCallback.count, heightsBefore.count, "once per batch")
+        for (i, seen) in heightsSeenInTheCallback.enumerated() {
+            XCTAssertEqual(seen, heightsBefore[i], accuracy: 0.001, "batch \(i + 1): the turn was told after its height had already changed")
+        }
+        XCTAssertTrue(zip(heightsBefore, heightsAfter).contains { abs($0 - $1) > 0.001 },
+                      "precondition: at least one batch changed the height, or the test proves nothing")
+        XCTAssertTrue(group.isFullyBuilt)
+    }
+
+    func testTheTurnIsNotToldWhenABatchFindsTheGroupClosed() throws {
+        let (stream, group, collector) = try makeFixture()
+        group.row.toggle()
+        var told = 0
+        stream.view.onWillChangeHeight = { told += 1 }
+        group.row.toggle()
+
+        collector.drain()
+
+        XCTAssertEqual(told, 0, "nothing was built, so nothing changed")
+    }
+}
+
+// MARK: - The ticker only ticks while the pane can be seen
+
+extension ElapsedTickerTests {
+
+    func testAnInactivePaneSchedulesNothing() {
+        let (stream, clock) = runningStream()
+        let setup = makeTicker(clock: clock) { () -> [ElapsedTicking] in [stream.view] }
+        setup.ticker.isActive = { false }
+
+        setup.ticker.reevaluate()
+
+        XCTAssertFalse(setup.ticker.isScheduled)
+        XCTAssertEqual(setup.scheduler.pendingCount, 0)
+        XCTAssertTrue(setup.scheduler.scheduledDelays.isEmpty)
+    }
+
+    func testAPaneThatBecomesInactiveCancelsItsPendingTick() {
+        let (stream, clock) = runningStream()
+        var active = true
+        let setup = makeTicker(clock: clock) { () -> [ElapsedTicking] in [stream.view] }
+        setup.ticker.isActive = { active }
+        setup.ticker.reevaluate()
+        XCTAssertEqual(setup.scheduler.pendingCount, 1)
+
+        active = false
+        setup.ticker.reevaluate()
+
+        XCTAssertFalse(setup.ticker.isScheduled)
+        XCTAssertEqual(setup.scheduler.pendingCount, 0)
+        XCTAssertEqual(setup.scheduler.advance(to: F.at(60)), [], "nothing fires while the pane is hidden")
+    }
+
+    func testAPaneThatBecomesActiveAgainSchedulesAgain() {
+        let (stream, clock) = runningStream()
+        var active = false
+        let setup = makeTicker(clock: clock) { () -> [ElapsedTicking] in [stream.view] }
+        setup.ticker.isActive = { active }
+        setup.ticker.reevaluate()
+        XCTAssertFalse(setup.ticker.isScheduled)
+
+        active = true
+        setup.ticker.reevaluate()
+
+        XCTAssertTrue(setup.ticker.isScheduled)
+        XCTAssertEqual(setup.scheduler.pendingCount, 1)
+    }
+
+    func testATickThatFiresJustAfterThePaneWentInactiveSchedulesNothingFurther() {
+        let (stream, clock) = runningStream()
+        var active = true
+        let setup = makeTicker(clock: clock) { () -> [ElapsedTicking] in [stream.view] }
+        setup.ticker.isActive = { active }
+        setup.ticker.reevaluate()
+
+        active = false
+        setup.scheduler.advance(to: F.at(11))
+
+        XCTAssertEqual(setup.scheduler.pendingCount, 0)
+        XCTAssertFalse(setup.ticker.isScheduled)
+    }
+}
+
+// MARK: - The announcer says each group once
+
+final class ToolActivityAnnouncerDedupeTests: XCTestCase {
+
+    private func failedGroup(id: String = "x") -> ToolGroup {
+        F.group([F.foldCall("Bash", id: id, summary: "make"), F.foldResult(id: id, isError: true)], outcome: .completedOk)
+    }
+
+    /// A focused pane: the composer inside it is first responder in a key window.
+    private func focusedPane() -> NSView {
+        let window = makeRigWindow(self, size: NSSize(width: 400, height: 300))
+        let pane = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 30))
+        pane.addSubview(composer)
+        window.contentView!.addSubview(pane)
+        XCTAssertTrue(window.makeFirstResponder(composer))
+        return pane
+    }
+
+    func testTheSameFailedGroupReportedTwiceIsAnnouncedOnce() {
+        let pane = focusedPane()
+        var posted: [String] = []
+        let announcer = ToolActivityAnnouncer(post: { posted.append($0) })
+        let group = failedGroup()
+
+        announcer.groupSettled(group, in: pane)
+        announcer.groupSettled(group, in: pane)
+
+        XCTAssertEqual(posted, ["Tool activity finished, 1 failed call"])
+    }
+
+    func testDifferentFailedGroupsAreEachAnnounced() {
+        let pane = focusedPane()
+        var posted: [String] = []
+        let announcer = ToolActivityAnnouncer(post: { posted.append($0) })
+
+        announcer.groupSettled(failedGroup(id: "a"), in: pane)
+        announcer.groupSettled(failedGroup(id: "b"), in: pane)
+
+        XCTAssertEqual(posted.count, 2)
+    }
+
+    func testResetForgetsWhatWasAnnounced() {
+        let pane = focusedPane()
+        var posted: [String] = []
+        let announcer = ToolActivityAnnouncer(post: { posted.append($0) })
+        let group = failedGroup()
+        announcer.groupSettled(group, in: pane)
+
+        announcer.reset()
+        announcer.groupSettled(group, in: pane)
+
+        XCTAssertEqual(posted.count, 2)
+    }
+
+    // MARK: the group a turn's newest block just closed
+
+    private func turn(_ blocks: [TurnBlock], complete: Bool = false, parents: [Int: String] = [:]) -> ChatTurn {
+        F.turn(blocks, complete: complete, textParents: parents)
+    }
+
+    func testProseAfterAFailedGroupClosesThatGroup() throws {
+        let t = turn([.text("start")] + failingRun() + [.text("That failed; trying another way.")])
+
+        let group = try XCTUnwrap(ToolActivityAnnouncer.groupClosed(byLastBlockOf: t))
+
+        XCTAssertEqual(group.key, "g:s0")
+        XCTAssertEqual(group.state, .settled)
+        XCTAssertEqual(group.failedCount, 1)
+    }
+
+    func testAnErrorChipThatCompletesTheTurnClosesTheLastGroup() throws {
+        let t = turn(failingRun("a") + [.text("between")] + failingRun("b") + [errorChip()], complete: true)
+
+        let group = try XCTUnwrap(ToolActivityAnnouncer.groupClosed(byLastBlockOf: t))
+
+        XCTAssertEqual(group.key, "g:b0")
+        XCTAssertEqual(group.state, .settled)
+        XCTAssertEqual(group.failedCount, 1)
+    }
+
+    func testOtherBoundariesCloseTheGroupBeforeThem() throws {
+        for boundary in [TurnBlock.errorMessage("boom"), .note("a note"), F.question(), F.chip()] {
+            let t = turn(failingRun() + [boundary])
+
+            XCTAssertEqual(ToolActivityAnnouncer.groupClosed(byLastBlockOf: t)?.key, "g:s0")
+        }
+    }
+
+    func testAnInterruptedChipClosesTheGroupAsStoppedSoItIsNeverSpoken() throws {
+        let t = turn(failingRun() + [F.call(id: "s2", summary: "make c", start: 2), stopChip()], complete: true)
+        let pane = focusedPane()
+        var posted: [String] = []
+        let announcer = ToolActivityAnnouncer(post: { posted.append($0) })
+
+        let group = try XCTUnwrap(ToolActivityAnnouncer.groupClosed(byLastBlockOf: t))
+        announcer.groupSettled(group, in: pane)
+
+        XCTAssertEqual(group.state, .stopped)
+        XCTAssertEqual(group.failedCount, 1)
+        XCTAssertEqual(posted, [])
+    }
+
+    func testACallOrAResultAsTheNewestBlockClosesNothing() {
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn([.text("go")] + failingRun() + [F.call(id: "n", summary: "more")])))
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn([.text("go")] + failingRun())))
+    }
+
+    func testWhitespaceProseClosesNothing() {
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn(failingRun() + [.text("  \n\t ")])))
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn(failingRun() + [.text("")])))
+    }
+
+    func testSubagentProseAttachedToAnAgentCallClosesNothing() {
+        // 0 Agent call, 1 subagent call, 2 subagent result, 3 subagent prose (attached to the Agent call).
+        let blocks: [TurnBlock] = [F.call("Agent", id: "toolu_agent", summary: "explore"),
+                                   F.call("Bash", id: "sub1", summary: "grep", parent: "toolu_agent"),
+                                   F.result("hit", id: "sub1", isError: true, parent: "toolu_agent"),
+                                   .text("the subagent thinks")]
+
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn(blocks, parents: [3: "toolu_agent"])))
+    }
+
+    func testAnItemBeforeTheNewestBlockThatIsNotAGroupClosesNothing() {
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn([.text("one"), .text("two")])))
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn([.text("only")])))
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn([F.chip()], complete: true)))
+        XCTAssertNil(ToolActivityAnnouncer.groupClosed(byLastBlockOf: turn([])))
+    }
+}

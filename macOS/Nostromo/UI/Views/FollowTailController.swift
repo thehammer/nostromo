@@ -277,7 +277,9 @@ final class TranscriptViewportCoordinator {
         let viewportTop = clip.bounds.minY
         let anchor = TurnListVirtualizer.Anchor(key: key, index: turnIndex, offsetWithinTurn: itemTop,
                                                 itemKey: itemKey, offsetInItem: 0)
-        pending = .row(anchor, screenY: virtualizer.offset(of: turnIndex) + itemTop - viewportTop,
+        // From where the island is drawn (the last pass put it there), not from the geometry,
+        // which may already have moved on: the row stays where the operator saw it.
+        pending = .row(anchor, screenY: island.frame.minY + itemTop - viewportTop,
                        wasPinned: followTail.isPinned)
         pendingViewportTop = viewportTop
     }
@@ -289,6 +291,11 @@ final class TranscriptViewportCoordinator {
         guard pending == nil, !followTail.isPinned, let anchor = captureAnchor() else { return }
         pending = .top(anchor)
         pendingViewportTop = clip.bounds.minY
+    }
+
+    /// Forget a pending position: the transcript it named is gone (cleared).
+    func discardPending() {
+        pending = nil
     }
 
     /// The one entry point for a programmatic fold change: capture → `mutation` →

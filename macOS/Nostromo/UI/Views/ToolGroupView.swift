@@ -45,6 +45,9 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     var onBlockExpansion: ((_ blockIndex: Int, _ isExpanded: Bool) -> Void)?
     /// A member changed height; the group re-measured it already.
     var onHeightChange: (() -> Void)?
+    /// A batch of member building is about to change this view's height on its own (no click
+    /// caused it), so the owner can note the reading position first.
+    var onBatchWillBuild: (() -> Void)?
 
     /// The blocks this group shows (members and subagent blocks), by block index. Copied
     /// out of the turn's array rather than holding the array: a view that kept it would
@@ -205,6 +208,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     private func buildNextBatch() {
         batchPending = false
         guard isExpanded, !isFullyBuilt else { return }
+        onBatchWillBuild?()
         syncMembers(limit: Self.memberBatchSize)
         onHeightChange?()
     }
@@ -352,14 +356,23 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
         return contentHeight
     }
 
-    /// Top of the member showing block `index` (a call or result), in this view's coordinates.
-    /// Nil when the group is collapsed or has no such member.
+    /// Top of the member showing block `index` (a call or result), in this view's coordinates;
+    /// for a subagent's block, the top of the agent-activity row that holds it. Nil when the
+    /// group is collapsed or shows no such block.
     func offset(ofMemberBlock index: Int) -> CGFloat? {
         guard isExpanded else { return nil }
+        let key: MemberKey
+        if group.memberIndices.contains(index) {
+            key = .block(index)
+        } else if let agent = group.subagentBlocks.first(where: { $0.value.contains(index) })?.key {
+            key = .activity(agent)
+        } else {
+            return nil
+        }
         var y = ToolGroupRowView.height
         for member in members {
             y += Self.memberSpacing
-            if member.key == .block(index) { return y }
+            if member.key == key { return y }
             y += member.height
         }
         return nil
@@ -983,6 +996,9 @@ final class ElapsedTicker {
 
     /// The pane's materialized turn views.
     var islands: () -> [ElapsedTicking] = { [] }
+    /// Whether the pane can be seen (in a window, not hidden, not occluded). Nothing ticks
+    /// while it cannot.
+    var isActive: () -> Bool = { true }
     /// Ticks delivered so far.
     private(set) var fireCount = 0
     var isScheduled: Bool { cancel != nil }
@@ -1000,6 +1016,10 @@ final class ElapsedTicker {
 
     /// Aim the next tick at the earliest row that needs one, or stop when none does.
     func reevaluate() {
+        guard isActive() else {
+            stop()
+            return
+        }
         let current = now()
         guard var next = islands().compactMap({ $0.nextElapsedTick(after: current) }).min() else {
             stop()
@@ -1043,6 +1063,10 @@ final class ElapsedTicker {
 final class ToolActivityAnnouncer {
 
     private let post: (String) -> Void
+    /// Groups already settled with failures, so each is spoken at most once, whichever path
+    /// reported it (a turn view, or the pane for a live turn with no view). Bounded crudely.
+    private var announced: Set<String> = []
+    private static let announcedLimit = 1_000
 
     /// `post` speaks the text; `voiceOver(from:)` is the app's.
     init(post: @escaping (String) -> Void) {
@@ -1050,8 +1074,36 @@ final class ToolActivityAnnouncer {
     }
 
     func groupSettled(_ group: ToolGroup, in pane: NSView) {
-        guard group.state == .settled, group.failedCount > 0, Self.paneHasFocus(pane) else { return }
+        guard group.state == .settled, group.failedCount > 0 else { return }
+        if announced.count >= Self.announcedLimit { announced.removeAll() }
+        guard announced.insert(group.key).inserted, Self.paneHasFocus(pane) else { return }
         post(ToolGroupSummary.settledAnnouncement(failedCount: group.failedCount))
+    }
+
+    /// Forget what was spoken (the transcript was cleared).
+    func reset() {
+        announced.removeAll()
+    }
+
+    /// The group that `turn`'s newest block just closed: that block ends a group (non-empty
+    /// prose, or anything that is not a tool call or result) and the item before it is a group.
+    /// For a live turn with no view to report its groups settling. Plans the turn, so it is
+    /// called only when the newest block can end a group.
+    static func groupClosed(byLastBlockOf turn: ChatTurn) -> ToolGroup? {
+        guard let last = turn.blocks.last else { return nil }
+        switch last {
+        case .toolCall, .toolResult:
+            return nil
+        case .text(let text):
+            guard text.contains(where: { !$0.isWhitespace }) else { return nil }
+        case .resultSummary, .errorMessage, .askQuestion, .note:
+            break
+        }
+        let items = ToolFoldAdapter.plan(turn)
+        guard items.count >= 2, items.last == .block(turn.blocks.count - 1),
+              case .group(let group) = items[items.count - 2]
+        else { return nil }
+        return group
     }
 
     /// The pane's window is key and the first responder (a field editor counts as the label it
