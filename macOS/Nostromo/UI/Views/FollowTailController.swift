@@ -305,9 +305,7 @@ final class TranscriptViewportCoordinator {
     /// height changes, unless that was done before the change that asked for this pass.
     func beginPass() {
         if pending != nil, abs(clip.bounds.minY - pendingViewportTop) > 0.5 { pending = nil }
-        guard pending == nil, !followTail.isPinned, let anchor = captureAnchor() else { return }
-        pending = .top(anchor)
-        pendingViewportTop = clip.bounds.minY
+        noteProgrammaticChange()
     }
 
     /// Where the viewport will be once `endPass` has put things back, as far as the geometry

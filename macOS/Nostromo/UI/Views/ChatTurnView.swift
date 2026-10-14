@@ -431,7 +431,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             guard expanded != view.isExpanded else { continue }
             view.setExpanded(expanded)
             changed = true
-            if !needsFullRemeasure, let column = columnForGroup[id] { remeasureColumnView(at: column) }
+            remeasureGroupColumn(id)
         }
         return changed
     }
@@ -506,9 +506,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         for id in touched {
             guard let view = groupViews[id], let group = planner.group(id: id) else { continue }
             let grew = view.update(group: group, blocks: blocks)
-            if grew, !needsFullRemeasure, let column = columnForGroup[id] {
-                remeasureColumnView(at: column)
-            }
+            if grew { remeasureGroupColumn(id) }
         }
         if ending { openStuckGroup(live: live) }
         if live {
@@ -545,7 +543,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         let key = view.group.key
         folds.groupAuto.insert(key)
         view.setExpanded(true)
-        if !needsFullRemeasure, let column = columnForGroup[id] { remeasureColumnView(at: column) }
+        remeasureGroupColumn(id)
         if live { onAutoOpen?(key) }
     }
 
@@ -569,6 +567,11 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     /// One group's height changed (toggled, or a member fold inside it). Only that
     /// island is re-measured, as for a result fold.
+    /// Re-measure a group's column now, unless a full re-measure is already pending.
+    private func remeasureGroupColumn(_ id: Int) {
+        if !needsFullRemeasure, let column = columnForGroup[id] { remeasureColumnView(at: column) }
+    }
+
     private func groupChangedHeight(_ id: Int) {
         guard let column = columnForGroup[id] else { return }
         remeasureColumnView(at: column)
@@ -802,12 +805,16 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     // MARK: - Elapsed time (ElapsedTicking)
 
+    /// The last group's view, while it is running.
+    private var runningOpenGroup: ToolGroupView? {
+        guard let id = openGroupId, let view = groupViews[id], view.group.state == .running else { return nil }
+        return view
+    }
+
     /// When the running row next needs its elapsed time refreshed: 10 s after its call
     /// started, then on each whole second after that. Nil when nothing is running.
     func nextElapsedTick(after now: Date) -> Date? {
-        guard let id = openGroupId, let view = groupViews[id], view.group.state == .running,
-              let start = view.group.currentCall?.startedAt
-        else { return nil }
+        guard let view = runningOpenGroup, let start = view.group.currentCall?.startedAt else { return nil }
         let age = now.timeIntervalSince(start)
         guard age.isFinite else { return nil }
         if age < ToolGroupSummary.elapsedThreshold {
@@ -818,8 +825,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     /// Re-read the clock into the running row. In place: no re-measure.
     func refreshElapsed() {
-        guard let id = openGroupId, let view = groupViews[id], view.group.state == .running else { return }
-        view.row.refreshElapsed()
+        runningOpenGroup?.row.refreshElapsed()
     }
 
     /// Arithmetic over cached block heights — no solve, no matter how many
