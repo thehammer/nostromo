@@ -858,7 +858,11 @@ fn handle_client_msg(
         ClientMsg::SessionAttach { tag } => {
             let result = {
                 let mut mgr = session_mgr.lock().unwrap();
-                mgr.attach(&tag, conn_key)
+                if trust.is_network() {
+                    mgr.attach_network(&tag, conn_key)
+                } else {
+                    mgr.attach(&tag, conn_key)
+                }
             };
             if let Err(e) = result {
                 let _ = targeted_tx.send(ServerMsg::Error {

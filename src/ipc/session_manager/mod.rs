@@ -207,6 +207,11 @@ fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The attached clients that are local peers: the ones task previews are for.
+fn local_client_count(attached: &HashSet<String>, network: &HashSet<String>) -> usize {
+    attached.iter().filter(|c| !network.contains(*c)).count()
+}
+
 impl Shared {
     fn broadcast(&self, ev: SessionEvent) {
         let _ = self.event_tx.send(ev);
@@ -433,6 +438,10 @@ pub struct SessionManager {
     /// network (TCP) peer must neither read nor drive. See
     /// [`SensitiveTags`]; persisted beside the session id store.
     sensitive: SensitiveTags,
+    /// Clients that are network (TCP) peers. They are attached like any
+    /// other, but they do not count as a reason to poll task previews: the
+    /// previews never reach them.
+    network_clients: HashSet<String>,
     /// Per focus tag: the nonce of the focus `create_focus_core` last created
     /// under it. In memory only (a restart forgets it).
     focus_nonces: HashMap<String, String>,
@@ -470,6 +479,7 @@ impl SessionManager {
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             store_path,
             focus_registry: Vec::new(),
+            network_clients: HashSet::new(),
             daemon_created_tags: HashSet::new(),
             pending_departures: HashSet::new(),
             non_empty_pushes_seen: 0,
@@ -1113,7 +1123,10 @@ impl SessionManager {
                 .get_mut(tag)
                 .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
             session.attached_clients.insert(client_id.to_string());
-            session.shared.tasks.set_clients(session.attached_clients.len());
+            session
+                .shared
+                .tasks
+                .set_clients(local_client_count(&session.attached_clients, &self.network_clients));
             ensure_poller(&session.shared);
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
@@ -1186,11 +1199,21 @@ impl SessionManager {
         Ok(())
     }
 
+    /// [`Self::attach`] for a network (TCP) peer: the same frames, but the
+    /// client does not keep the task preview poller running.
+    pub fn attach_network(&mut self, tag: &str, client_id: &str) -> Result<()> {
+        self.network_clients.insert(client_id.to_string());
+        self.attach(tag, client_id)
+    }
+
     /// Detach `client_id` from `tag` (the child keeps running).
     pub fn detach(&mut self, tag: &str, client_id: &str) {
         if let Some(session) = self.sessions.get_mut(tag) {
             session.attached_clients.remove(client_id);
-            session.shared.tasks.set_clients(session.attached_clients.len());
+            session
+                .shared
+                .tasks
+                .set_clients(local_client_count(&session.attached_clients, &self.network_clients));
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
@@ -1223,11 +1246,20 @@ impl SessionManager {
             let ctx = SessionCtx::stopped(tag, agent.as_deref(), session_id.as_deref(), &self.model_hub);
             let _ = self.switch_not_running(&ctx, current, target, actor);
         }
+        let mut ended_tasks = None;
         if let Some(session) = self.sessions.get_mut(tag) {
             session.intentional_stop.store(true, Ordering::SeqCst);
             session.stop_reason = Some(StopReason::User);
             session.kill();
             session.shared.exited.store(true, Ordering::SeqCst);
+            // The forwarders are aborted below, before the reader reaches
+            // EOF: the tasks end with the process, and the clients hear it
+            // here, straight on their own channels.
+            session.shared.tasks.end_session(&session.shared.event_tx);
+            ended_tasks = Some((
+                session.shared.tasks.current().0,
+                session.attached_clients.iter().cloned().collect::<Vec<_>>(),
+            ));
             session.shared.broadcast(SessionEvent::PermanentlyDown {
                 reason: StopReason::User,
             });
@@ -1235,6 +1267,11 @@ impl SessionManager {
                 h.abort();
             }
             debug!(tag, "session stopped");
+        }
+        if let Some((snapshot, clients)) = ended_tasks {
+            for client in clients {
+                self.send_to_client(&client, tasks_msg(tag, &snapshot));
+            }
         }
         // The session is going down (permanently, or about to be respawned by
         // `restart`/`new_session`, both of which call this first) — either
@@ -1840,11 +1877,15 @@ impl SessionManager {
     pub fn on_client_disconnect(&mut self, client_id: &str) {
         for session in self.sessions.values_mut() {
             session.attached_clients.remove(client_id);
-            session.shared.tasks.set_clients(session.attached_clients.len());
+            session
+                .shared
+                .tasks
+                .set_clients(local_client_count(&session.attached_clients, &self.network_clients));
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
         }
+        self.network_clients.remove(client_id);
         self.client_senders.lock().unwrap().remove(client_id);
 
         // Drop any rendered-shape reports this connection contributed (W1 —
@@ -5013,7 +5054,7 @@ done
         // The CLI starts refusing: the preview stays as it was and nothing is published.
         let before = control_log(&log).len();
         std::fs::write(&fail, "").unwrap();
-        eventually("a read to be attempted and refused", || (control_log(&log).len() >= before + 2).then_some(())).await;
+        eventually("a read to be attempted and refused", || (control_log(&log).len() > before).then_some(())).await;
         assert_eq!(rig.next_preview(PREVIEW_INTERVAL + Duration::from_millis(500)).await, None);
         assert_eq!(rig.published_preview("b7k2m9x1a").as_deref(), Some("gamma"), "the last preview is kept on an error");
         assert!(control_log(&log).iter().all(|r| r["request"]["task_id"] != "agt1"));

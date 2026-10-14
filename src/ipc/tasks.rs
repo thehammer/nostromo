@@ -542,6 +542,8 @@ impl Dirty {
 pub struct PreviewTarget {
     pub task_id: String,
     pub terminal: bool,
+    /// Not activity (an ambient watcher): its output is not worth reading.
+    pub housekeeping: bool,
     /// The output path the CLI reported for the task, if it did.
     pub output_file: Option<String>,
     /// The tool call that started the task.
@@ -726,6 +728,7 @@ impl TaskRegistry {
             .map(|e| PreviewTarget {
                 task_id: e.id.clone(),
                 terminal: e.status.is_terminal(),
+                housekeeping: e.housekeeping,
                 output_file: e.output_file.clone(),
                 tool_use_id: e.tool_use_id.clone(),
                 preview: e.detail.preview.clone(),

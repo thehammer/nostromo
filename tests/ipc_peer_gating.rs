@@ -5507,7 +5507,6 @@ mod background_tasks {
             tasks_complete(f, &tag)
                 && detail_field(&d, "bgsh1", "preview") == Some(expect.0.as_str())
                 && detail_field(&d, "mon1", "preview") == Some(expect.1.as_str())
-                && detail_field(&d, "hk1", "preview").is_some()
                 && ["prompt", "progress_summary", "completion_summary"]
                     .iter()
                     .all(|k| detail_field(&d, "agent1", k).is_some())
@@ -5533,10 +5532,11 @@ mod background_tasks {
         assert!(detail_field(&d, "agent1", "prompt").unwrap().contains("SECRET-OUTPUT-PROMPT"), "{d:?}");
         assert!(detail_field(&d, "agent1", "progress_summary").unwrap().contains("SECRET-OUTPUT-PROGRESS"), "{d:?}");
         assert!(detail_field(&d, "agent1", "completion_summary").unwrap().contains("SECRET-OUTPUT-DONE"), "{d:?}");
-        // A task with no output file is previewed from the CLI's own `get_task_output`.
-        assert_eq!(detail_field(&d, "hk1", "preview"), Some("SECRET-OUTPUT-9"), "{d:?}");
+        // A housekeeping task (an ambient watcher) is never polled: not from a file, and the CLI
+        // is never asked for its output.
+        assert_eq!(detail_field(&d, "hk1", "preview"), None, "{d:?}");
         let log = fake_log(&s.view);
-        assert!(log.contains("get_task_output") && log.contains("hk1"), "the CLI was never asked for hk1's output: {log:?}");
+        assert!(!log.contains(r#""task_id":"hk1""#), "the CLI was asked for a housekeeping task's output: {log:?}");
 
         // Output paths never go on the wire, not even to a local client.
         let text = unix.text();

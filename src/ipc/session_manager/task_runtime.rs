@@ -62,6 +62,18 @@ impl TaskClock {
     }
 }
 
+/// After the CLI failed to answer `get_task_output`, how long before asking again.
+const CLI_TAIL_BACKOFF_MS: u64 = 30_000;
+
+/// Whether the CLI's own `get_task_output` is worth asking.
+#[derive(Default)]
+struct CliTail {
+    /// The CLI answered "unsupported": never ask again this session.
+    unsupported: bool,
+    /// Do not ask before this time (a failed or timed-out request).
+    retry_at_ms: u64,
+}
+
 /// What the poller and the path ladder remember between reads.
 struct FileState {
     validator: OutputFileValidator,
@@ -91,6 +103,7 @@ pub(super) struct TaskRuntime {
     /// Wakes the timer: something changed, or the session ended.
     wake: Notify,
     files: Mutex<FileState>,
+    cli_tail: Mutex<CliTail>,
 }
 
 impl TaskRuntime {
@@ -125,6 +138,7 @@ impl TaskRuntime {
                 polled: HashSet::new(),
                 finalized: HashSet::new(),
             }),
+            cli_tail: Mutex::new(CliTail::default()),
         })
     }
 
@@ -132,7 +146,7 @@ impl TaskRuntime {
     pub(super) fn on_event(&self, tx: &broadcast::Sender<SessionEvent>, event: &TaskEvent) {
         if let TaskEventKind::Notification(n) = &event.kind {
             if let Some(path) = &n.output_file {
-                self.learn_root(path);
+                self.learn_root(&n.task_id, path);
             }
         }
         {
@@ -217,19 +231,58 @@ impl TaskRuntime {
         }
     }
 
-    /// The first path the CLI reports teaches the root its files live under.
-    fn learn_root(&self, reported: &str) {
+    /// The first output path the CLI reports for this session teaches the
+    /// root its files live under. Only a path of the exact shape
+    /// `<root>/<cwd>/<this session's id>/tasks/<task id>.output` counts, so a
+    /// path that merely ends in `tasks/` cannot widen what the daemon reads.
+    fn learn_root(&self, task_id: &str, reported: &str) {
+        let Some(session_id) = &self.session_id else { return };
+        let path = std::path::Path::new(reported);
+        let shaped = path.file_name().and_then(|n| n.to_str()) == Some(&format!("{task_id}.output"))
+            && path
+                .ancestors()
+                .nth(2)
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                == Some(session_id.as_str());
+        if !shaped {
+            return;
+        }
         let mut files = lock_recover(&self.files);
         if files.root_learned {
             return;
         }
-        if let Some(root) = root_of_output_path(std::path::Path::new(reported)) {
+        if let Some(root) = root_of_output_path(path) {
             files.validator.add_root(root);
             files.root_learned = true;
         }
     }
 
     // ── preview ─────────────────────────────────────────────────────────────
+
+    /// May the poller ask the CLI for a task's output now?
+    fn cli_tail_allowed(&self) -> bool {
+        let tail = lock_recover(&self.cli_tail);
+        !tail.unsupported && self.clock.now_ms() >= tail.retry_at_ms
+    }
+
+    fn note_cli_tail_answer(&self, answer: &Result<(), String>) {
+        let mut tail = lock_recover(&self.cli_tail);
+        match answer {
+            Ok(()) => tail.retry_at_ms = 0,
+            Err(reason) => {
+                let reason = reason.to_lowercase();
+                if reason.contains("unsupported")
+                    || reason.contains("not supported")
+                    || (reason.contains("unknown") && reason.contains("subtype"))
+                {
+                    tail.unsupported = true;
+                } else {
+                    tail.retry_at_ms = self.clock.now_ms() + CLI_TAIL_BACKOFF_MS;
+                }
+            }
+        }
+    }
 
     /// A poller is needed: a client is attached and there is a task to read.
     fn poll_wanted(&self) -> bool {
@@ -248,9 +301,18 @@ impl TaskRuntime {
     fn poll_plan(&self) -> Vec<PreviewTarget> {
         let lookup = self.tool_lookup();
         let targets = lock_recover(&self.hub).registry().preview_targets(&lookup);
-        let files = lock_recover(&self.files);
+        let mut files = lock_recover(&self.files);
+        // The bookkeeping follows the registry: an evicted task is forgotten,
+        // and a task that runs (again) is not finalized.
+        let known: HashSet<&str> = targets.iter().map(|t| t.task_id.as_str()).collect();
+        files.polled.retain(|id| known.contains(id.as_str()));
+        files.finalized.retain(|id| known.contains(id.as_str()));
+        for t in targets.iter().filter(|t| !t.terminal) {
+            files.finalized.remove(&t.task_id);
+        }
         targets
             .into_iter()
+            .filter(|t| !t.housekeeping)
             .filter(|t| {
                 !t.terminal
                     || (!files.finalized.contains(&t.task_id)
@@ -427,13 +489,19 @@ async fn read_preview(shared: &Shared, target: &PreviewTarget) -> Option<String>
     if let Some(bytes) = shared.tasks.read_file_tail(target).await {
         return last_nonempty_line(&sanitize(&bytes));
     }
+    if !shared.tasks.cli_tail_allowed() {
+        return None;
+    }
     let reply = control(
         shared,
         serde_json::json!({ "subtype": "get_task_output", "task_id": target.task_id }),
     )
-    .await
-    .ok()?;
-    let output = reply.body.get("output")?.as_str()?;
+    .await;
+    shared
+        .tasks
+        .note_cli_tail_answer(&reply.as_ref().map(|_| ()).map_err(|f| f.reason.clone()));
+    let output = reply.ok()?.body.get("output")?.as_str()?.to_owned();
+    let output = output.as_str();
     last_nonempty_line(&sanitize(output.as_bytes()))
 }
 
