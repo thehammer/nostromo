@@ -34,6 +34,10 @@ private func waitUntil(maxTurns: Int = 500, _ condition: () -> Bool) -> Bool {
     for _ in 0..<maxTurns {
         if condition() { return true }
         flushMain(generations: 1)
+        // An idle main queue makes a "turn" take microseconds, so 500 of them can pass before a
+        // lookup running on another thread has delivered (a loaded CI runner did exactly that).
+        // Give that thread a moment per turn; the bound is still only a failure timeout.
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.002))
     }
     return condition()
 }
