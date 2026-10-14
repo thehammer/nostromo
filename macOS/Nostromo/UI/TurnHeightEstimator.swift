@@ -120,12 +120,12 @@ enum TurnHeightEstimator {
             switch item {
             case .block(let i):
                 height += estimate(blockAt: i, of: turn, width: blockWidth)
-            case .group(let key, let members, let agentRows):
+            case .group(let key, let members, let agentRows, let isStuck):
                 height += groupRowHeight
                 // A collapsed group is its row, whatever it holds. Expanded, the row plus
                 // every member as it rendered before folding, plus a collapsed agent-activity
                 // row under each Agent call with subagent blocks.
-                guard folds.isExpanded(key: key) else { continue }
+                guard folds.isExpanded(key: key, isStuck: isStuck) else { continue }
                 for i in members {
                     height += blockSpacing + estimate(blockAt: i, of: turn, width: blockWidth)
                 }

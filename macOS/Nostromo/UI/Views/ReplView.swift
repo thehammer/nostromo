@@ -92,6 +92,12 @@ class ReplView: NSView {
     /// lives in `FollowTailPolicy`; the wiring in `FollowTailController`.
     private var followTail: FollowTailController!
     private var isPinnedToBottom: Bool { followTail.isPinned }
+    /// Keeps the reading position across a pass, and the toggled row in place (see there).
+    private var viewport: TranscriptViewportCoordinator!
+    /// The elapsed time on running tool-group rows: one tick for the pane, only while needed.
+    private let elapsedTicker = ElapsedTicker()
+    /// "Tool activity finished, N failed calls", for VoiceOver, when this pane is focused.
+    private lazy var announcer = ToolActivityAnnouncer(post: ToolActivityAnnouncer.voiceOver(from: self))
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
          workingDirectory: String? = nil, quickActions: [QuickAction] = []) {
@@ -188,6 +194,14 @@ class ReplView: NSView {
         followTail.isMaterializing = { [weak self] in self?.isMaterializing ?? false }
         followTail.requestPass     = { [weak self] in self?.schedulePass() }
         followTail.onFlip          = { [weak self] flip in self?.logFollowTailFlip(flip) }
+
+        viewport = TranscriptViewportCoordinator(
+            virtualizer: virtualizer, scrollView: scrollView, followTail: followTail,
+            islandFor: { [weak self] index in self?.island(at: index) })
+        viewport.foldChangeApplied = { [weak self] turnIds in self?.foldChangeApplied(turnIds) }
+        elapsedTicker.islands = { [weak self] in
+            self?.turnViews.values.compactMap { $0 as? ElapsedTicking } ?? []
+        }
 
         // Fold state is part of a turn's height: the estimate folds through it, and the
         // height cache is keyed by it, so a re-collapsed group never gets its expanded
@@ -341,6 +355,9 @@ class ReplView: NSView {
 
     private func apply(_ change: TurnChange) {
         let turns = session.turns
+        // Name the reading position before anything changes under it (a no-op while following
+        // the tail, or when a position is already waiting for the next pass).
+        if case .cleared = change {} else { viewport.noteProgrammaticChange() }
         switch change {
         case .cleared:
             releaseAllTurnViews()
@@ -381,19 +398,74 @@ class ReplView: NSView {
         case .updatedBlocks(let index, _):
             guard index < turns.count else { return }
             let turn = turns[index]
-            virtualizer.refresh(turn, at: index)
-            // A streaming turn is materialized by definition, so append only the
-            // blocks that are new rather than rebuilding its subtree.
+            // A streaming turn is normally materialized, so append only the blocks that are
+            // new rather than rebuilding its subtree. The view opens a stuck turn's last group
+            // itself (`onAutoOpen`); for one that is not materialized the entry is recorded here.
             if let view = turnViews[turn.id] as? ChatTurnView {
                 view.update(turn: turn)
                 pendingRemeasure.insert(turn.id)
+            } else {
+                recordStuckGroup(of: turn)
             }
+            // After the update, so the estimate folds through any auto entry it recorded.
+            virtualizer.refresh(turn, at: index)
         }
         // Distinguished from a scroll- or frame-driven request: a content change
         // must never be dropped, whereas a bounds notification the pass caused
         // itself must be.
         contentDirty = true
         schedulePass()
+    }
+
+    /// The materialized island of the turn at `index`, if any.
+    private func island(at index: Int) -> TurnIsland? {
+        let turns = session.turns
+        guard turns.indices.contains(index) else { return nil }
+        return turnViews[turns[index].id]
+    }
+
+    /// The turn's current index (turns move on a splice; views keep the id).
+    private func index(ofTurn id: UUID) -> Int? {
+        session.turns.lastIndex { $0.id == id }
+    }
+
+    /// A fold change made outside this pane's own clicks: the stuck-turn auto-open here, and
+    /// TF4's store events (another window, Expand/Collapse All, the default). Keeps the reading
+    /// position (`TranscriptViewportCoordinator`): capture → `mutation` → re-measure → pass.
+    func applyFoldChange(turnIds: Set<UUID>, mutation: () -> Void) {
+        viewport.applyFoldChange(turnIds: turnIds, mutation: mutation)
+    }
+
+    /// The pane's half of `applyFoldChange`: the changed turns that are on screen are measured
+    /// again, every other turn is re-estimated with its new fold state, and a pass runs.
+    private func foldChangeApplied(_ turnIds: Set<UUID>) {
+        for id in turnIds where turnViews[id] != nil { pendingRemeasure.insert(id) }
+        // Re-estimates every turn through the fold state and adopts each measured height that is
+        // still valid (by content key and fold digest).
+        virtualizer.splice(turns: session.turns, from: 0)
+        // A splice leaves a materialized turn with no reusable measurement (a streaming one) at
+        // its estimate, so it is measured again too.
+        for (i, turn) in session.turns.enumerated()
+        where turnViews[turn.id] != nil && !virtualizer.isHeightExact(at: i) {
+            pendingRemeasure.insert(turn.id)
+        }
+        contentDirty = true
+        schedulePass()
+    }
+
+    /// Record the stuck-turn auto-open for a turn that completed while not materialized (the
+    /// view does it for one that is). Only a turn that ended in error can be stuck, so the plan
+    /// is computed once, at completion, never per streamed block.
+    private func recordStuckGroup(of turn: ChatTurn) {
+        guard turn.isComplete else { return }
+        let outcome = ToolFoldAdapter.outcome(of: turn)
+        guard outcome == .completedError || outcome == .errored else { return }
+        guard case .group(let group)? = ToolFoldAdapter.plan(turn).last(where: {
+            if case .group = $0 { return true } else { return false }
+        }), group.isStuck else { return }
+        let state = interactions.state(for: turn.id)
+        guard state.groupStates[group.key] == nil, !state.groupAuto.contains(group.key) else { return }
+        interactions.recordAuto(turn: turn.id, key: group.key)
     }
 
     /// Tell VoiceOver about a transcript note, when this pane is the one being looked at.
@@ -450,9 +522,10 @@ class ReplView: NSView {
             return
         }
 
-        let viewport = scrollView.contentView.bounds
-        // 1. Name where the operator is reading, BEFORE any height changes.
-        let anchor = isPinnedToBottom ? nil : virtualizer.captureAnchor(viewportTop: viewport.minY)
+        let viewportBounds = scrollView.contentView.bounds
+        // 1. Name where the operator is reading, BEFORE any height changes (unless a change
+        //    already did, before it was applied).
+        viewport.beginPass()
 
         // 1b. Re-sync geometry to the turn array this pass is actually going to
         //     index, before asking it for a window.
@@ -483,7 +556,8 @@ class ReplView: NSView {
         if virtualizer.count != turns.count {
             virtualizer.splice(turns: turns, from: 0)
         }
-        let window = virtualizer.visibleWindow(viewport: viewport)
+        // Around where step 5 will put the viewport, not where it was before the change.
+        let window = virtualizer.visibleWindow(viewport: viewport.anticipatedViewport())
         assert(window.upperBound <= turns.count,
                "visibleWindow \(window) exceeds \(turns.count) turns — geometry is out of sync")
 
@@ -520,18 +594,11 @@ class ReplView: NSView {
             turnViews[turns[i].id]?.setFrameOrigin(NSPoint(x: 0, y: virtualizer.offset(of: i)))
         }
         documentView.setFrameSize(NSSize(width: contentWidth,
-                                         height: max(virtualizer.documentHeight, viewport.height)))
+                                         height: max(virtualizer.documentHeight, viewportBounds.height)))
 
-        // 5. Put the reading position back, or follow the newest content.
-        if isPinnedToBottom {
-            followTail.scrollToBottom()
-        } else if let anchor {
-            let top = virtualizer.restoredTop(for: anchor)
-            if abs(top - viewport.minY) > 0.5 {
-                scrollView.contentView.scroll(NSPoint(x: 0, y: top))
-                scrollView.reflectScrolledClipView(scrollView.contentView)
-            }
-        }
+        // 5. Put the toggled row or the reading position back, or follow the newest content.
+        viewport.endPass()
+        elapsedTicker.reevaluate()
         if let done = afterNextPass {
             afterNextPass = nil
             done()
@@ -574,17 +641,38 @@ class ReplView: NSView {
         // cache keys measured heights by content, which is invariant across
         // expansion, so a re-collapsed tool result would leave the virtualizer
         // holding the expanded height.
+        // The toggled row stays where it is on screen (`noteUserToggle`).
         view.onBlockExpansion = { [weak self] blockIndex, isExpanded in
-            self?.interactions.setExpanded(turn: turn.id, block: blockIndex, isExpanded)
+            guard let self else { return }
+            self.interactions.setExpanded(turn: turn.id, block: blockIndex, isExpanded)
+            if let index = self.index(ofTurn: turn.id) {
+                self.viewport.noteUserToggle(turnIndex: index, itemKey: "b\(blockIndex)")
+            }
         }
         // A tool group opened or closed: the choice outlives the view (eviction, width
-        // changes), and the turn is re-measured through the same path as a result fold.
-        // No scroll-policy change here; anchoring on the toggled row is TF3.
+        // changes), the turn is re-measured through the same path as a result fold, and the
+        // clicked row stays where it is on screen.
         view.onGroupToggle = { [weak self] key, isExpanded in
             guard let self else { return }
             self.interactions.setGroup(turn: turn.id, key: key, isExpanded)
+            if let index = self.index(ofTurn: turn.id) {
+                self.viewport.noteUserToggle(turnIndex: index, itemKey: key)
+            }
             self.pendingRemeasure.insert(turn.id)
             self.schedulePass()
+        }
+        // The turn ended in error and the view opened its last, failed group: record it (TF4
+        // keeps it across restarts) through the fold-change entry point, which also keeps the
+        // reading position.
+        view.onAutoOpen = { [weak self] key in
+            guard let self else { return }
+            self.applyFoldChange(turnIds: [turn.id]) {
+                self.interactions.recordAuto(turn: turn.id, key: key)
+            }
+        }
+        view.onGroupSettled = { [weak self] group in
+            guard let self else { return }
+            self.announcer.groupSettled(group, in: self)
         }
         // Expanding a tool result changes the turn's height, so the geometry has
         // to be told rather than left to discover it.
@@ -625,9 +713,15 @@ class ReplView: NSView {
         //
         // Detached, the only constraints in play are the island's own internal
         // layout — which is exactly the question being asked.
-        let superview = view.superview
+        //
+        // Except a `ChatTurnView`: its height is a sum of block heights it measured itself (each
+        // block detached on its own), so asking it never reads its frame, and detaching it would
+        // only push every view and constraint it holds out of the window's engine and back in.
+        // For an expanded 60-call group that round trip was a large part of the expand time.
+        let detach = !(view is ChatTurnView)
+        let superview = detach ? view.superview : nil
         // Detaching drops a live transcript selection; put it back after.
-        let selection = TranscriptSelection.capture(in: view)
+        let selection = detach ? TranscriptSelection.capture(in: view) : nil
         superview.map { _ in view.removeFromSuperview() }
 
         view.setIslandWidth(contentWidth)
@@ -809,8 +903,16 @@ class ReplView: NSView {
     }
 
     @objc private func windowOcclusionChanged() {
-        guard window?.occlusionState.contains(.visible) == true else { return }
+        guard window?.occlusionState.contains(.visible) == true else {
+            elapsedTicker.stop()   // the pass that re-shows the pane re-aims it
+            return
+        }
         followTail.paneWasShown()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        elapsedTicker.stop()
     }
 
     override func viewDidUnhide() {
@@ -820,6 +922,7 @@ class ReplView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { elapsedTicker.stop() }
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             TranscriptFocusPolicy.focusInputIfAppropriate(
@@ -931,8 +1034,10 @@ extension ReplView: TranscriptDiagnostics.Reporting {
 extension ReplView: ToolGroupHarnessDriving {
 
     /// Open the first group of `callCount` calls and report how long until the pass that
-    /// renders it has finished.
-    func harnessExpandFirstToolGroup(callCount: Int, completion: @escaping (_ ms: Double?) -> Void) {
+    /// renders it has finished (`completion`), and until every member is built and a pass has
+    /// rendered them (`fullyBuilt`: the batches after the first, `ToolGroupView.memberBatchSize`).
+    func harnessExpandFirstToolGroup(callCount: Int, completion: @escaping (_ ms: Double?) -> Void,
+                                     fullyBuilt: @escaping (_ ms: Double?) -> Void) {
         let turns = session.turns
         var found: (index: Int, turn: ChatTurn, key: String)?
         search: for (i, turn) in turns.enumerated() where ToolFoldAdapter.hasToolBlocks(turn) {
@@ -941,7 +1046,11 @@ extension ReplView: ToolGroupHarnessDriving {
                 break search
             }
         }
-        guard let found else { completion(nil); return }
+        guard let found else {
+            completion(nil)
+            fullyBuilt(nil)
+            return
+        }
 
         // First bring the turn on screen (not timed), then click its row the way the
         // operator would and time from the toggle to the end of the pass it schedules.
@@ -952,12 +1061,28 @@ extension ReplView: ToolGroupHarnessDriving {
             guard let self,
                   let turnView = self.turnViews[found.turn.id] as? ChatTurnView,
                   let group = turnView.groupView(forKey: found.key)
-            else { completion(nil); return }
+            else {
+                completion(nil)
+                fullyBuilt(nil)
+                return
+            }
             let started = ContinuousClock.now
-            self.afterNextPass = {
+            func elapsedMs() -> Double {
                 let elapsed = started.duration(to: .now)
-                completion(Double(elapsed.components.seconds) * 1000
-                           + Double(elapsed.components.attoseconds) / 1e15)
+                return Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
+            }
+            // Every batch re-measures the group and schedules a pass; report after the pass
+            // that follows the last one.
+            func reportWhenFullyBuilt() {
+                guard group.isFullyBuilt else {
+                    self.afterNextPass = reportWhenFullyBuilt
+                    return
+                }
+                fullyBuilt(elapsedMs())
+            }
+            self.afterNextPass = {
+                completion(elapsedMs())
+                reportWhenFullyBuilt()
             }
             if group.isExpanded { group.row.toggle() }   // an expanded default: close it first
             group.row.toggle()

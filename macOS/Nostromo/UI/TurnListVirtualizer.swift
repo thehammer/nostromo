@@ -43,10 +43,17 @@ final class TurnListVirtualizer {
     /// viewport changes. This names the turn at the top of the viewport and how
     /// far into it we are, so the position can be restored after a height
     /// correction, a live append above the viewport, or a resize.
+    ///
+    /// When the turn is materialized it also names the **item** inside it (a block or a
+    /// tool group, `TurnIsland.anchorItem`) and how far into that item. A height change
+    /// inside the turn but above the viewport top (a group opening off screen) moves
+    /// everything below it, including the turn offset that a turn-only anchor would keep.
     struct Anchor: Equatable {
         let key: String
         let index: Int
         let offsetWithinTurn: CGFloat
+        var itemKey: String? = nil
+        var offsetInItem: CGFloat = 0
     }
 
     // MARK: - State
@@ -265,6 +272,12 @@ final class TurnListVirtualizer {
         return heights[index]
     }
 
+    /// The content key of the turn at `index` (what an `Anchor` names it by).
+    func contentKey(at index: Int) -> String? {
+        guard index >= 0, index < count else { return nil }
+        return keys[index]
+    }
+
     func isHeightExact(at index: Int) -> Bool {
         guard index >= 0, index < count else { return false }
         return isExact[index]
@@ -336,12 +349,21 @@ final class TurnListVirtualizer {
 
     /// Name the position currently at the top of the viewport, so it can be put
     /// back after the geometry underneath it changes.
-    func captureAnchor(viewportTop: CGFloat) -> Anchor? {
+    ///
+    /// `item` names the item at `offsetWithinTurn` inside the turn at `index` and the offset
+    /// into it, when the turn is materialized (nil: anchor on the turn alone).
+    func captureAnchor(viewportTop: CGFloat,
+                       item: ((_ index: Int, _ offsetWithinTurn: CGFloat) -> (key: String, offset: CGFloat)?)? = nil)
+        -> Anchor? {
         guard count > 0 else { return nil }
         let index = self.index(atY: viewportTop)
-        return Anchor(key: keys[index],
-                      index: index,
-                      offsetWithinTurn: viewportTop - offset(of: index))
+        let offsetWithinTurn = viewportTop - offset(of: index)
+        var anchor = Anchor(key: keys[index], index: index, offsetWithinTurn: offsetWithinTurn)
+        if let found = item?(index, offsetWithinTurn) {
+            anchor.itemKey = found.key
+            anchor.offsetInItem = found.offset
+        }
+        return anchor
     }
 
     /// Where the viewport top has to move so `anchor` stays where it was.
@@ -349,8 +371,15 @@ final class TurnListVirtualizer {
     /// Re-resolves the anchor by content key first: a splice reindexes turns,
     /// and following the stale index would move the operator's reading position
     /// by however many turns the splice inserted.
-    func restoredTop(for anchor: Anchor) -> CGFloat {
+    ///
+    /// `itemOffset` finds the anchor's item inside the (materialized) turn at an index; when
+    /// it does, the item is what stays put. Otherwise the turn-level offset is used.
+    func restoredTop(for anchor: Anchor,
+                     itemOffset: ((_ index: Int, _ itemKey: String) -> CGFloat?)? = nil) -> CGFloat {
         let index = indexByKey[anchor.key] ?? min(anchor.index, max(0, count - 1))
+        if let itemKey = anchor.itemKey, let top = itemOffset?(index, itemKey) {
+            return offset(of: index) + top + anchor.offsetInItem
+        }
         return offset(of: index) + anchor.offsetWithinTurn
     }
 

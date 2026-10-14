@@ -61,22 +61,78 @@ public enum ToolGroupSummary {
         return "\(minutes / 60) h \(twoDigits(minutes % 60)) m"
     }
 
-    /// What the row reads, as plain text: summary (or header), then failure, then time,
-    /// joined by ` · `. This is what Copy Summary copies.
+    /// What the row reads, as plain text: summary (or header), then failure, then time, then
+    /// `stopped`, joined by ` · `. This is what Copy Summary copies.
     public static func plainText(for group: ToolGroup) -> String {
-        [title(for: group), failureText(for: group), durationText(for: group)]
+        [title(for: group), failureText(for: group), durationText(for: group), stoppedSuffix(for: group)]
             .compactMap { $0 }
             .joined(separator: separator)
     }
 
-    /// The row's VoiceOver label: like `plainText`, with the failure as `1 failed call`.
-    public static func accessibilityLabel(for group: ToolGroup) -> String {
+    /// The row's VoiceOver label: like `plainText`, with the failure as `1 failed call`. While the
+    /// group runs it is the live text instead (with the elapsed time when `now` is given).
+    public static func accessibilityLabel(for group: ToolGroup, now: Date? = nil) -> String {
         let failure = group.failedCount > 0
             ? "\(group.failedCount) failed call\(group.failedCount == 1 ? "" : "s")" : nil
-        return [title(for: group), failure, durationText(for: group)]
+        if let running = runningTitle(for: group) {
+            return [running, failure, now.flatMap { runningElapsedText(for: group, now: $0) }]
+                .compactMap { $0 }
+                .joined(separator: ", ")
+        }
+        return [title(for: group), failure, durationText(for: group), stoppedSuffix(for: group)]
             .compactMap { $0 }
             .joined(separator: ", ")
     }
+
+    // MARK: - While running
+
+    /// A running call shows its elapsed time once it has run this long.
+    public static let elapsedThreshold: TimeInterval = 10
+
+    /// `Running · N done · <current call header>`, or `Running · <header>` before any call has
+    /// finished. Nil unless the group is running.
+    public static func runningTitle(for group: ToolGroup) -> String? {
+        guard group.state == .running else { return nil }
+        var parts = ["Running"]
+        if group.finishedCount > 0 { parts.append("\(group.finishedCount) done") }
+        if let call = group.currentCall { parts.append(header(for: call)) }
+        return FoldTextSanitizer.sanitize(parts.joined(separator: separator))
+    }
+
+    /// The running call's elapsed time in whole seconds (`42 s`, `1 m 05 s`), once it has run
+    /// `elapsedThreshold`. Nil while younger, when its start is unknown, or when not running.
+    public static func runningElapsedText(for group: ToolGroup, now: Date) -> String? {
+        guard group.state == .running, let start = group.currentCall?.startedAt else { return nil }
+        let age = now.timeIntervalSince(start)
+        guard age.isFinite, age >= elapsedThreshold else { return nil }
+        let seconds = Int(age.rounded(.down))
+        if seconds < 60 { return "\(seconds) s" }
+        if seconds < 3600 { return "\(seconds / 60) m \(twoDigits(seconds % 60)) s" }
+        let minutes = seconds / 60
+        return "\(minutes / 60) h \(twoDigits(minutes % 60)) m"
+    }
+
+    /// The whole live line: the running title, the failures so far, the elapsed time.
+    /// Nil unless the group is running.
+    public static func runningText(for group: ToolGroup, now: Date) -> String? {
+        guard let title = runningTitle(for: group) else { return nil }
+        return [title, failureText(for: group), runningElapsedText(for: group, now: now)]
+            .compactMap { $0 }
+            .joined(separator: separator)
+    }
+
+    /// `stopped` for a group the operator stopped while a call had no result; nil otherwise.
+    /// Calls without a result are unfinished, never failed.
+    public static func stoppedSuffix(for group: ToolGroup) -> String? {
+        group.state == .stopped ? "stopped" : nil
+    }
+
+    /// What VoiceOver announces when a group in the focused pane settles with failures.
+    public static func settledAnnouncement(failedCount: Int) -> String {
+        "Tool activity finished, \(failedCount) failed call\(failedCount == 1 ? "" : "s")"
+    }
+
+    // MARK: - Copy
 
     /// Copy Commands: every top-level call's complete input, one per line, in order.
     ///

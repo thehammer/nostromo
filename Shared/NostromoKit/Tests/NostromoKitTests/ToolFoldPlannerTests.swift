@@ -724,3 +724,170 @@ private struct SplitMix64 {
         return z ^ (z >> 31)
     }
 }
+
+// MARK: - TF3: a call finishing quietly after it was fed
+
+/// On the Mac an empty successful result is folded into its call in place, so the call a
+/// planner has already been fed finishes without a new block (PRD "While running").
+extension ToolFoldPlannerTests {
+
+    private func feeding(_ blocks: [FoldBlock]) -> ToolFoldPlanner {
+        var planner = ToolFoldPlanner(turnKey: "T")
+        for block in blocks { _ = planner.feed(block) }
+        return planner
+    }
+
+    func testACallThatFinishesQuietlyUpdatesItsGroupWithOneExtend() {
+        var planner = feeding([call(id: "a", started: 0), call(id: "b", started: 1)])
+
+        let ops = planner.callFinished(toolUseId: "b", at: at(5))
+
+        guard case .extend(let g)? = ops.first, ops.count == 1 else { return XCTFail("one extend expected, got \(ops)") }
+        XCTAssertEqual(g.id, 0)
+        XCTAssertEqual(g.finishedCount, 1)
+        XCTAssertEqual(g.runningCall, 0, "a is the call still running")
+        XCTAssertEqual(g.state, .running)
+        XCTAssertNil(g.endedAt, "a has not ended")
+        XCTAssertEqual(planner.blockCount, 2, "no block was added")
+    }
+
+    func testTheLastCallFinishingQuietlySettlesTheGroupAndGivesItsEnd() {
+        var planner = feeding([call(id: "a", started: 0), call(id: "b", started: 1)])
+        _ = planner.callFinished(toolUseId: "b", at: at(5))
+
+        let ops = planner.callFinished(toolUseId: "a", at: at(6))
+
+        guard case .extend(let g)? = ops.first, ops.count == 1 else { return XCTFail("one extend expected, got \(ops)") }
+        XCTAssertEqual(g.finishedCount, 2)
+        XCTAssertNil(g.runningCall)
+        XCTAssertEqual(g.state, .settled)
+        XCTAssertEqual(g.endedAt, at(6))
+    }
+
+    func testAQuietCallFinishingWithoutATimeSettlesTheGroupWithNoEnd() {
+        var planner = feeding([call(id: "a", started: 0)])
+
+        let ops = planner.callFinished(toolUseId: "a", at: nil)
+
+        guard case .extend(let g)? = ops.first, ops.count == 1 else { return XCTFail("one extend expected, got \(ops)") }
+        XCTAssertEqual(g.finishedCount, 1)
+        XCTAssertEqual(g.state, .settled)
+        XCTAssertNil(g.endedAt)
+    }
+
+    func testOnlyTheGroupThatHoldsTheCallIsExtended() throws {
+        var planner = feeding([call(id: "a", started: 0), prose, call(id: "b", started: 1)])
+
+        let ops = planner.callFinished(toolUseId: "a", at: at(2))
+
+        guard case .extend(let g)? = ops.first, ops.count == 1 else { return XCTFail("one extend expected, got \(ops)") }
+        XCTAssertEqual(g.id, 0)
+        XCTAssertEqual(g.finishedCount, 1)
+        XCTAssertEqual(g.state, .settled, "an earlier group stays settled")
+        XCTAssertEqual(try XCTUnwrap(planner.group(id: 1)).state, .running)
+        XCTAssertEqual(try XCTUnwrap(planner.group(id: 1)).finishedCount, 0)
+    }
+
+    func testAnUnknownCallIdChangesNothing() {
+        var planner = feeding([call(id: "a", started: 0)])
+        let before = planner.items()
+
+        XCTAssertEqual(planner.callFinished(toolUseId: "nope", at: at(1)), [])
+        XCTAssertEqual(planner.items(), before)
+    }
+
+    func testACallThatAlreadyFinishedChangesNothingWhetherItFinishedByResultOrQuietly() {
+        var planner = feeding([call(id: "a", started: 0), result("a", at: 1), call(id: "b", started: 2)])
+        _ = planner.callFinished(toolUseId: "b", at: at(3))
+        let before = planner.items()
+
+        XCTAssertEqual(planner.callFinished(toolUseId: "a", at: at(9)), [], "a finished by its result")
+        XCTAssertEqual(planner.callFinished(toolUseId: "b", at: at(9)), [], "b already finished quietly")
+        XCTAssertEqual(planner.items(), before)
+    }
+
+    func testACallThatFinishedBecauseTheTurnEndedChangesNothing() {
+        var planner = feeding([call(id: "a", started: 0)])
+        _ = planner.turnEnded(outcome: .completedOk)
+        let before = planner.items()
+
+        XCTAssertEqual(planner.callFinished(toolUseId: "a", at: at(9)), [])
+        XCTAssertEqual(planner.items(), before)
+    }
+
+    // MARK: Property: finishing late == having been finished from the start
+
+    /// Feeding `blocks` with the quiet call unfinished and calling `callFinished` after any
+    /// number of them gives the batch plan of the same blocks with the call finished.
+    private func assertQuietFinishMatchesBatch(_ blocks: [FoldBlock], quiet id: String, at when: Double?,
+                                               outcomes: [FoldOutcome], _ shape: String,
+                                               file: StaticString = #filePath, line: UInt = #line) {
+        guard let index = blocks.firstIndex(where: { if case .toolCall(let c) = $0 { return c.toolUseId == id } else { return false } })
+        else { return XCTFail("\(shape): no call \(id)", file: file, line: line) }
+        let batchBlocks = blocks.map { block -> FoldBlock in
+            guard case .toolCall(var c) = block, c.toolUseId == id else { return block }
+            c.finishedAt = when.map(at)
+            c.finishedQuietly = true
+            return .toolCall(c)
+        }
+
+        for fed in (index + 1) ... blocks.count {
+            for outcome in outcomes {
+                let context = "\(shape): call \(id) finished after \(fed) of \(blocks.count) blocks, outcome \(outcome)"
+                var planner = ToolFoldPlanner(turnKey: "T")
+                var ops: [ToolFoldPlanner.Op] = []
+                for block in blocks.prefix(fed) { ops += planner.feed(block) }
+                ops += planner.callFinished(toolUseId: id, at: when.map(at))
+                for block in blocks.dropFirst(fed) { ops += planner.feed(block) }
+                if outcome != .open { ops += planner.turnEnded(outcome: outcome) }
+
+                let expected = ToolFoldPlanner.plan(blocks: batchBlocks, outcome: outcome, turnKey: "T")
+                XCTAssertEqual(planner.items(), expected, context, file: file, line: line)
+                XCTAssertEqual(ToolFoldPlanner.replay(ops), expected, "replayed ops: \(context)", file: file, line: line)
+            }
+        }
+    }
+
+    func testAQuietCallInTheMiddleOfARunMatchesTheBatchPlan() {
+        let blocks: [FoldBlock] = [call(id: "a", started: 0), call(id: "b", started: 1), call(id: "c", started: 2)]
+
+        assertQuietFinishMatchesBatch(blocks, quiet: "b", at: 5, outcomes: [.open, .completedOk, .interrupted], "mid-run")
+    }
+
+    func testAQuietCallThatIsTheLastCallMatchesTheBatchPlan() {
+        let blocks: [FoldBlock] = [call(id: "a", started: 0), result("a", at: 1), call(id: "b", started: 2)]
+
+        assertQuietFinishMatchesBatch(blocks, quiet: "b", at: 3, outcomes: [.open, .completedOk, .completedError], "last call")
+    }
+
+    func testAQuietCallInAGroupThatProseClosedMatchesTheBatchPlan() {
+        let blocks: [FoldBlock] = [call(id: "a", started: 0), call(id: "b", started: 1), prose, call(id: "c", started: 2)]
+
+        assertQuietFinishMatchesBatch(blocks, quiet: "a", at: 4, outcomes: [.open, .completedError, .errored], "closed group")
+    }
+
+    func testAQuietCallWithNoTimeMatchesTheBatchPlan() {
+        let blocks: [FoldBlock] = [call(id: "a", started: 0), call(id: "b", started: 1), result("a", error: true, at: 2)]
+
+        assertQuietFinishMatchesBatch(blocks, quiet: "b", at: nil, outcomes: [.open, .completedOk], "no time")
+    }
+
+    func testSeveralQuietCallsFinishingOneAfterAnotherMatchTheBatchPlan() {
+        let blocks: [FoldBlock] = [call(id: "a", started: 0), call(id: "b", started: 1), call(id: "c", started: 2), result("b", at: 3)]
+        var planner = ToolFoldPlanner(turnKey: "T")
+        var ops: [ToolFoldPlanner.Op] = []
+        for block in blocks { ops += planner.feed(block) }
+        ops += planner.callFinished(toolUseId: "a", at: at(4))
+        ops += planner.callFinished(toolUseId: "c", at: at(5))
+
+        let batch = blocks.map { block -> FoldBlock in
+            guard case .toolCall(var c) = block, c.toolUseId == "a" || c.toolUseId == "c" else { return block }
+            c.finishedAt = at(c.toolUseId == "a" ? 4 : 5)
+            c.finishedQuietly = true
+            return .toolCall(c)
+        }
+
+        XCTAssertEqual(planner.items(), ToolFoldPlanner.plan(blocks: batch, outcome: .open, turnKey: "T"))
+        XCTAssertEqual(ToolFoldPlanner.replay(ops), planner.items())
+    }
+}

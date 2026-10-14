@@ -518,3 +518,272 @@ final class ToolFoldPlannerQuietCallTests: XCTestCase {
         XCTAssertEqual(blocks[1], .hidden)
     }
 }
+
+// MARK: - TF3: the live line
+
+/// What a group says while it is running (PRD "While running"), and how a stopped group
+/// ends. Groups come from `ToolFoldPlanner.plan` with `.open` for a running one.
+final class ToolGroupLiveSummaryTests: XCTestCase {
+
+    // MARK: Builders
+
+    private let t0 = Date(timeIntervalSince1970: 1_000_000)
+    private func at(_ seconds: Double) -> Date { t0.addingTimeInterval(seconds) }
+
+    private func call(_ name: String = "Bash", id: String, summary: String = "", start: Double? = nil) -> FoldBlock {
+        .toolCall(FoldCall(name: name, toolUseId: id, startedAt: start.map(at), inputSummary: summary))
+    }
+
+    private func result(_ id: String, error: Bool = false, at seconds: Double? = nil) -> FoldBlock {
+        .toolResult(FoldResult(toolUseId: id, isError: error, at: seconds.map(at)))
+    }
+
+    private func group(_ blocks: [FoldBlock], _ outcome: FoldOutcome = .open,
+                       file: StaticString = #filePath, line: UInt = #line) -> ToolGroup {
+        let items = ToolFoldPlanner.plan(blocks: blocks, outcome: outcome, turnKey: "T")
+        guard items.count == 1, case .group(let g) = items[0] else {
+            XCTFail("expected exactly one group, got \(items)", file: file, line: line)
+            return ToolGroup(id: 0, key: "")
+        }
+        return g
+    }
+
+    /// A running group: `done` finished Read calls (the first `failed` of them failed), then
+    /// one Bash call still waiting for its result, started at `started`.
+    private func running(done: Int = 0, failed: Int = 0, call running: String = "cargo test",
+                         started: Double? = 0) -> ToolGroup {
+        var blocks: [FoldBlock] = []
+        for i in 0 ..< done {
+            blocks.append(call("Read", id: "d\(i)", summary: "file\(i).swift", start: Double(i)))
+            blocks.append(result("d\(i)", error: i < failed, at: Double(i) + 0.5))
+        }
+        blocks.append(call("Bash", id: "run", summary: running, start: started))
+        return group(blocks, .open)
+    }
+
+    /// Three Bash calls, the last of which never got a result, in a turn the operator stopped.
+    /// The first `failed` calls failed.
+    private func stopped(failed: Int = 0) -> ToolGroup {
+        var blocks: [FoldBlock] = []
+        for i in 0 ..< 3 {
+            blocks.append(call(id: "s\(i)", summary: "cmd \(i)", start: Double(i)))
+            if i < 2 { blocks.append(result("s\(i)", error: i < failed, at: Double(i) + 0.5)) }
+        }
+        return group(blocks, .interrupted)
+    }
+
+    private func settled() -> ToolGroup {
+        group([call(id: "a", summary: "ls", start: 0), result("a", at: 1),
+               call(id: "b", summary: "pwd", start: 1), result("b", at: 2)], .completedOk)
+    }
+
+    // MARK: runningTitle
+
+    func testTheRunningTitleOmitsTheDoneCountWhenNothingHasFinished() {
+        XCTAssertEqual(ToolGroupSummary.runningTitle(for: running(done: 0)), "Running · Bash · cargo test")
+    }
+
+    func testTheRunningTitleCountsTheCallsThatAreDone() {
+        XCTAssertEqual(ToolGroupSummary.runningTitle(for: running(done: 1)), "Running · 1 done · Bash · cargo test")
+        XCTAssertEqual(ToolGroupSummary.runningTitle(for: running(done: 3)), "Running · 3 done · Bash · cargo test")
+    }
+
+    func testFailedCallsCountAsDoneInTheRunningTitle() {
+        XCTAssertEqual(ToolGroupSummary.runningTitle(for: running(done: 3, failed: 2)), "Running · 3 done · Bash · cargo test")
+    }
+
+    func testTheRunningTitleNamesTheRunningCallNotTheFirstOne() {
+        // Two calls in flight: the last unfinished one is the running one.
+        let g = group([call(id: "a", summary: "first thing", start: 0), call(id: "b", summary: "second thing", start: 1)], .open)
+
+        let title = ToolGroupSummary.runningTitle(for: g)
+
+        XCTAssertEqual(title, "Running · Bash · second thing")
+    }
+
+    func testTheRunningTitleFollowsTheRunningCallWhenAnEarlierOneIsStillOutstanding() {
+        let g = group([call(id: "a", summary: "slow one", start: 0), call(id: "b", summary: "quick one", start: 1),
+                       call(id: "c", summary: "last one", start: 2), result("b", at: 3)], .open)
+
+        XCTAssertEqual(ToolGroupSummary.runningTitle(for: g), "Running · 1 done · Bash · last one")
+    }
+
+    func testARunningGroupOfOneIsTitledTheSameWay() {
+        let g = group([call("Read", id: "a", summary: "Package.swift", start: 0)], .open)
+
+        XCTAssertEqual(ToolGroupSummary.runningTitle(for: g), "Running · Read · Package.swift")
+    }
+
+    func testTheRunningTitleOfHostileTextIsSafeToDrawOnOneLine() {
+        for hostile in HostileContent.all {
+            let title = ToolGroupSummary.runningTitle(for: running(done: 2, call: hostile)) ?? ""
+            let text = ToolGroupSummary.runningText(for: running(done: 2, call: hostile), now: at(30)) ?? ""
+
+            for line in [title, text] {
+                XCTAssertTrue(line.hasPrefix("Running"), line)
+                XCTAssertFalse(line.unicodeScalars.contains(where: HostileContent.isForbiddenOnARow))
+                XCTAssertLessThanOrEqual(line.utf16.count, FoldTextSanitizer.maxUTF16 + 64)
+            }
+        }
+    }
+
+    // MARK: runningText
+
+    func testTheLiveLineJoinsTitleFailureAndElapsedTimeWithMiddleDots() {
+        let g = running(done: 3, failed: 1, started: 10)
+
+        XCTAssertEqual(ToolGroupSummary.runningText(for: g, now: at(52)),
+                       "Running · 3 done · Bash · cargo test · 1 failed · 42 s")
+    }
+
+    func testTheLiveLineSkipsTheFailureAndTheTimeWhenThereAreNone() {
+        XCTAssertEqual(ToolGroupSummary.runningText(for: running(done: 2), now: at(4)), "Running · 2 done · Bash · cargo test")
+    }
+
+    func testAFailureShowsInTheLiveLineAsSoonAsOneCallFailed() {
+        let g = group([call("Read", id: "a", summary: "a.swift", start: 0), result("a", error: true, at: 1),
+                       call("Bash", id: "b", summary: "cargo build", start: 1)], .open)
+
+        XCTAssertEqual(ToolGroupSummary.runningText(for: g, now: at(2)), "Running · 1 done · Bash · cargo build · 1 failed")
+    }
+
+    func testTheLiveLineShowsTheElapsedTimeWithoutAFailure() {
+        XCTAssertEqual(ToolGroupSummary.runningText(for: running(done: 0), now: at(75)), "Running · Bash · cargo test · 1 m 15 s")
+    }
+
+    // MARK: Elapsed time
+
+    func testElapsedTimeIsHiddenUnderTenSecondsAndFloorsFromTen() {
+        let g = running()
+
+        XCTAssertNil(ToolGroupSummary.runningElapsedText(for: g, now: at(0)))
+        XCTAssertNil(ToolGroupSummary.runningElapsedText(for: g, now: at(9)))
+        XCTAssertNil(ToolGroupSummary.runningElapsedText(for: g, now: at(9.9)), "9.9 s floors to 9")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(10)), "10 s")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(10.9)), "10 s", "floored, never rounded up")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(42.5)), "42 s")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(59)), "59 s")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(59.9)), "59 s")
+    }
+
+    func testElapsedTimeUsesMinutesAndHoursLikeTheSettledTime() {
+        let g = running()
+
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(60)), "1 m 00 s")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(65)), "1 m 05 s")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(75)), "1 m 15 s")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(125)), "2 m 05 s")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(3600)), "1 h 00 m")
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(3720)), "1 h 02 m")
+    }
+
+    func testElapsedTimeIsMeasuredFromTheRunningCallNotFromTheGroupsFirstCall() {
+        let g = running(done: 1, started: 100)
+
+        XCTAssertNil(ToolGroupSummary.runningElapsedText(for: g, now: at(105)))
+        XCTAssertEqual(ToolGroupSummary.runningElapsedText(for: g, now: at(115)), "15 s")
+    }
+
+    func testElapsedTimeIsNilWhenTheRunningCallsStartIsUnknown() {
+        let g = running(done: 1, started: nil)
+
+        XCTAssertNil(ToolGroupSummary.runningElapsedText(for: g, now: at(500)))
+        XCTAssertEqual(ToolGroupSummary.runningText(for: g, now: at(500)), "Running · 1 done · Bash · cargo test")
+    }
+
+    func testAClockBehindTheStartIsNotAnElapsedTime() {
+        XCTAssertNil(ToolGroupSummary.runningElapsedText(for: running(started: 100), now: at(50)))
+    }
+
+    // MARK: Not running
+
+    func testNothingIsRunningTextForAGroupThatIsNotRunning() {
+        let groups: [(String, ToolGroup)] = [
+            ("settled", settled()),
+            ("stopped", stopped()),
+            ("every call finished while the turn is open", group([call(id: "a", start: 0), result("a", at: 1)], .open)),
+            ("a turn that ended with the call unanswered", group([call(id: "a", start: 0)], .completedOk)),
+        ]
+        for (name, g) in groups {
+            XCTAssertNil(ToolGroupSummary.runningTitle(for: g), name)
+            XCTAssertNil(ToolGroupSummary.runningElapsedText(for: g, now: at(500)), name)
+            XCTAssertNil(ToolGroupSummary.runningText(for: g, now: at(500)), name)
+        }
+    }
+
+    func testAnEarlierGroupOfAnOpenTurnIsNotRunningEvenWithACallOutstanding() {
+        let items = ToolFoldPlanner.plan(blocks: [call(id: "a", start: 0), .prose(nonEmpty: true), call(id: "b", start: 1)],
+                                         outcome: .open, turnKey: "T")
+        let groups = items.compactMap { item -> ToolGroup? in if case .group(let g) = item { return g } else { return nil } }
+
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertNil(ToolGroupSummary.runningTitle(for: groups[0]))
+        XCTAssertNotNil(ToolGroupSummary.runningTitle(for: groups[1]))
+    }
+
+    // MARK: Stopped
+
+    func testAStoppedGroupHasAStoppedSuffixAndASettledOneDoesNot() {
+        XCTAssertEqual(ToolGroupSummary.stoppedSuffix(for: stopped()), "stopped")
+        XCTAssertNil(ToolGroupSummary.stoppedSuffix(for: settled()))
+        XCTAssertNil(ToolGroupSummary.stoppedSuffix(for: running()))
+    }
+
+    func testPlainTextOfAStoppedGroupEndsWithStopped() {
+        XCTAssertEqual(ToolGroupSummary.plainText(for: stopped()), "Ran 3 commands · stopped")
+    }
+
+    func testPlainTextOfAStoppedGroupPutsStoppedAfterTheFailure() {
+        XCTAssertEqual(ToolGroupSummary.plainText(for: stopped(failed: 1)), "Ran 3 commands · 1 failed · stopped")
+    }
+
+    func testCallsWithNoResultInAStoppedGroupAreNotFailures() {
+        let g = stopped()
+
+        XCTAssertEqual(g.failedCount, 0)
+        XCTAssertNil(ToolGroupSummary.failureText(for: g))
+        XCTAssertFalse(ToolGroupSummary.plainText(for: g).contains("failed"))
+        XCTAssertFalse(ToolGroupSummary.accessibilityLabel(for: g).contains("failed"))
+    }
+
+    func testTheLabelOfAStoppedGroupEndsWithStopped() {
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: stopped()), "Ran 3 commands, stopped")
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: stopped(failed: 1)), "Ran 3 commands, 1 failed call, stopped")
+    }
+
+    // MARK: VoiceOver label
+
+    func testTheLabelOfARunningGroupIsTheLiveTextSpokenWithCommas() {
+        let g = running(done: 3, failed: 1, started: 10)
+
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: g, now: at(52)),
+                       "Running · 3 done · Bash · cargo test, 1 failed call, 42 s")
+    }
+
+    func testTheLabelOfARunningGroupLeavesOutTheTimeWithoutAClockAndUnderTenSeconds() {
+        let g = running(done: 3, failed: 1, started: 10)
+
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: g), "Running · 3 done · Bash · cargo test, 1 failed call")
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: g, now: at(15)), "Running · 3 done · Bash · cargo test, 1 failed call")
+    }
+
+    func testTheLabelOfARunningGroupPluralisesFailedCalls() {
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: running(done: 3, failed: 2), now: at(1)),
+                       "Running · 3 done · Bash · cargo test, 2 failed calls")
+    }
+
+    func testTheLabelOfASettledGroupIgnoresTheClock() {
+        let g = settled()
+
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: g, now: at(9_999)), ToolGroupSummary.accessibilityLabel(for: g))
+        XCTAssertEqual(ToolGroupSummary.accessibilityLabel(for: g), "Ran 2 commands, 2.0 s")
+    }
+
+    // MARK: Announcement
+
+    func testTheSettledAnnouncementSaysHowManyCallsFailed() {
+        XCTAssertEqual(ToolGroupSummary.settledAnnouncement(failedCount: 1), "Tool activity finished, 1 failed call")
+        XCTAssertEqual(ToolGroupSummary.settledAnnouncement(failedCount: 2), "Tool activity finished, 2 failed calls")
+        XCTAssertEqual(ToolGroupSummary.settledAnnouncement(failedCount: 12), "Tool activity finished, 12 failed calls")
+    }
+}

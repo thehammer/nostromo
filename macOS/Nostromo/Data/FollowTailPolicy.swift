@@ -48,6 +48,9 @@ enum FollowTailPolicy {
         case jumpToLatest
         /// The load harness's scripted scroll round trip.
         case harness
+        /// The operator opened or closed a tool group or result fold while following: the
+        /// toggled row stays put on screen, so the bottom may have moved out of view.
+        case foldToggle
     }
 
     /// Distance from the bottom of the document to the bottom of the viewport.
@@ -110,6 +113,13 @@ enum FollowTailPolicy {
             isMaterializing: isMaterializing,
             documentHeight: documentHeight,
             visibleMaxY: bounds.maxY)
+    }
+
+    /// The pinned state after a fold toggle in a pane that was following, once the toggled row
+    /// has been put back where it was: following iff the bottom of the document is still in
+    /// view (to within `unpinEpsilon`). A viewport at or past the end counts as at the bottom.
+    static func pinnedAfterFoldToggle(viewportMaxY: CGFloat, documentHeight: CGFloat) -> Bool {
+        documentHeight - viewportMaxY <= unpinEpsilon
     }
 
     /// Whether a pane should schedule a catch-up pass because it just became

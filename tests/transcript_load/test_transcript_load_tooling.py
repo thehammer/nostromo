@@ -2032,6 +2032,28 @@ class GroupExpandReportTests(unittest.TestCase):
         self.assertFalse([l for l in proc.stdout.splitlines() if l.startswith("group-expand:")],
                          proc.stdout)
 
+    def test_group_expand_full_prints_its_own_median_and_is_not_graded(self):
+        # TF3: the rows below the first batch build on later main-queue turns, so "every row
+        # built" is its own number. Its lines must not be read as `group-expand` ones.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "full.log")
+            with open(log, "w") as fh:
+                fh.write("fixture-open ms=300 rows=10 turns=2\n"
+                         "group-expand ms=20\ngroup-expand-full ms=140\n"
+                         "group-expand ms=30\ngroup-expand-full ms=160\n"
+                         "group-expand ms=25\ngroup-expand-full ms=150\n")
+            proc = self._run(log)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(self._line(proc, "group-expand: median").startswith("group-expand: median 25 ms over 3 run(s)"))
+        full = self._line(proc, "group-expand-full: median")
+        self.assertTrue(full.startswith("group-expand-full: median 150 ms over 3 run(s)"), full)
+        self.assertIn("not graded", full)
+
+    def test_no_group_expand_full_line_when_the_log_has_none(self):
+        proc = self._run(self.LOG)
+        self.assertFalse([l for l in proc.stdout.splitlines() if l.startswith("group-expand-full:")],
+                         proc.stdout)
+
     def test_the_existing_fixture_open_line_is_still_printed(self):
         proc = self._run(self.LOG)
         self.assertTrue(self._line(proc, "fixture-open: median").startswith("fixture-open: median 210 ms"))

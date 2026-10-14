@@ -1012,7 +1012,7 @@ final class ChatSessionToolFoldTests: XCTestCase {
 
     // MARK: (b) deltas
 
-    func testADeltaEmptySuccessfulResultFinishesItsCallAndAnnouncesNoBlock() {
+    func testADeltaEmptySuccessfulResultFinishesItsCallAndAnnouncesAnInPlaceChange() {
         snapshot([turn("t0", complete: false, [.text("go")])])
         changes = []
 
@@ -1024,8 +1024,10 @@ final class ChatSessionToolFoldTests: XCTestCase {
         XCTAssertEqual(kinds(t), "tct", "the empty result is not a block")
         XCTAssertEqual(callData(t, 1)?.finishedQuietly, true)
         XCTAssertEqual(callData(t, 1)?.finishedAt, Self.finish)
-        XCTAssertEqual(changes, ["updatedBlocks 0 +1", "updatedBlocks 0 +1"],
-                       "one announcement for the call and one for the text; none for the folded result")
+        // TF3: the folded result adds no block but still changes the turn (its call is finished,
+        // which a live tool group's "N done" and time show), so it is announced with +0.
+        XCTAssertEqual(changes, ["updatedBlocks 0 +1", "updatedBlocks 0 +0", "updatedBlocks 0 +1"],
+                       "the call, the in-place finish (no block added), then the text")
     }
 
     func testADeltaResultWithContentIsAppendedAndAnnounced() {

@@ -55,7 +55,8 @@ private let signposter = OSSignposter(subsystem: "com.hammer.nostromo", category
 ///
 /// It then opens the fixture's first 60-call tool group and logs
 /// `group-expand ms=<n>`: from the toggle to the end of the materialization pass
-/// that renders it.
+/// that renders it; then `group-expand-full ms=<n>`: until every call row of the
+/// group is built and rendered (rows below the first batch build on later turns).
 ///
 /// ## Why the big turn exists
 ///
@@ -352,12 +353,15 @@ final class TranscriptLoadHarness {
     /// Open the fixture's first 60-call group and log how long it took to render.
     private func measureGroupExpand(tag: String) {
         guard let pane = TranscriptDiagnostics.pane(tag: tag) as? ToolGroupHarnessDriving else { return }
-        pane.harnessExpandFirstToolGroup(callCount: Self.groupExpandCallCount) { ms in
-            let line = ms.map { "group-expand ms=\(Int($0.rounded())) calls=\(Self.groupExpandCallCount) fold=\(Self.foldModeName)" }
-                ?? "group-expand: no \(Self.groupExpandCallCount)-call group in the fixture"
+        func report(_ name: String, _ ms: Double?) {
+            let line = ms.map { "\(name) ms=\(Int($0.rounded())) calls=\(Self.groupExpandCallCount) fold=\(Self.foldModeName)" }
+                ?? "\(name): no \(Self.groupExpandCallCount)-call group in the fixture"
             log.info("\(line, privacy: .public)")
             FileHandle.standardError.write(Data((line + "\n").utf8))
         }
+        pane.harnessExpandFirstToolGroup(callCount: Self.groupExpandCallCount,
+                                         completion: { report("group-expand", $0) },
+                                         fullyBuilt: { report("group-expand-full", $0) })
     }
 
     private func tick() {
@@ -602,7 +606,10 @@ struct SeededRNG {
     }
 }
 
-/// A pane the harness can ask to open a tool group (`group-expand`).
+/// A pane the harness can ask to open a tool group (`group-expand`, `group-expand-full`).
 protocol ToolGroupHarnessDriving: AnyObject {
-    func harnessExpandFirstToolGroup(callCount: Int, completion: @escaping (_ ms: Double?) -> Void)
+    /// `completion`: ms from the click to the end of the pass that renders it. `fullyBuilt`: ms
+    /// until every member is built and rendered. Nil when there is no such group.
+    func harnessExpandFirstToolGroup(callCount: Int, completion: @escaping (_ ms: Double?) -> Void,
+                                     fullyBuilt: @escaping (_ ms: Double?) -> Void)
 }

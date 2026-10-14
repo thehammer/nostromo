@@ -16,7 +16,8 @@
 # build, and stops. Turns are ignored, nothing is graded. Run it 3 times on a
 # build to get a baseline; `FIXTURE_HISTORY` (default
 # /tmp/nostromo-fixture-open.log) accumulates the runs, tagged with the git SHA.
-# The run also records `group-expand` (opening the first 60-call tool group).
+# The run also records `group-expand` (opening the first 60-call tool group: to the
+# end of the pass that renders it) and `group-expand-full` (until all its rows are built).
 # `BASELINE_MS=<n>` prints this build's fixture-open over that baseline;
 # `NOSTROMO_LOAD_FOLD_DEFAULT=expanded` opens every tool group (today's look).
 #
@@ -84,14 +85,15 @@ if [ -n "$FIXTURE" ]; then
     kill -0 $APP_PID 2>/dev/null || break
     sleep 1
   done
-  # The group-expand line follows within a pass or two of fixture-open.
+  # The group-expand line follows within a pass or two of fixture-open, and
+  # group-expand-full (every call row of the group built) a few main-queue turns later.
   for _ in $(seq 1 30); do
-    grep -q 'group-expand' "$APP_LOG" && break
+    grep -q 'group-expand-full' "$APP_LOG" && break
     kill -0 $APP_PID 2>/dev/null || break
     sleep 1
   done
   SHA=$(git -C "$REPO_ROOT" describe --always --dirty 2>/dev/null || echo unknown)
-  grep -E 'fixture-open ms=|group-expand ms=' "$APP_LOG" | sed "s/^/sha=$SHA /" >> "$FIXTURE_HISTORY"
+  grep -E 'fixture-open ms=|group-expand(-full)? ms=' "$APP_LOG" | sed "s/^/sha=$SHA /" >> "$FIXTURE_HISTORY"
   python3 "$REPORT" --fixture-only --fixture-log "$FIXTURE_HISTORY"
   exit $?
 fi
