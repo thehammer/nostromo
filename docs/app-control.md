@@ -36,6 +36,7 @@ screenshot or the `tree` dump can be passed straight to `click`.
 | `click` | by `X Y` or `--text`; the reply says which view class was hit |
 | `drag` | press at `X Y` (or `--text`), drag in steps to `--to X Y`, release — for selecting text |
 | `hittest X Y` | **read-only, sends no event** (may complete a layout pass AppKit already had pending): which view a click at X Y would hit, plus the chain of views from it up to the content view and the focus state (see below) |
+| `transcript-anchor [--focus TAG]` | **read-only, sends no event, no focus change**: the transcript's first visible block (`turnKey`, `itemKey`, `offsetPt` from the viewport top), `bottomOffsetPt` (0 at the bottom) and `following`; the scroll-safety gate compares two snapshots (≤ 1 pt) |
 | `key` / `type` | key event through `NSApp.sendEvent` (menu shortcuts fire) / insert text at the first responder |
 | `paste` | put an image or text on the clipboard and send `paste:` |
 | `drop` | deliver a file drop to the registered drag destination under a point |
