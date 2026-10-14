@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use super::decisions::DecisionRegistry;
 use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
 use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
-use super::protocol::{FocusMeta, ServerMsg, SessionInfo};
+use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
 use super::stream_json::{
     load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript, TurnDelta,
     NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN, SCROLLBACK_TURNS,
@@ -61,11 +61,16 @@ use crate::model::notes::{self, NoteKind};
 use crate::model::store as model_store;
 use crate::model::{Actor, ModelPaths, ModelTarget};
 
+mod control;
 mod model_switch;
-pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket, CONTROL_TIMEOUT};
+mod task_runtime;
+pub use control::CONTROL_TIMEOUT;
+use control::ControlReply;
+use task_runtime::{drive_timer, ensure_poller, forward_session_events, tasks_msg, detail_msg, TaskRuntime};
+pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket};
 use model_switch::{
-    emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ControlReply,
-    ModelRuntime, SessionCtx,
+    emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,
+    SessionCtx,
 };
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
@@ -118,6 +123,11 @@ pub enum SessionEvent {
     PermanentlyDown {
         reason: StopReason,
     },
+    /// The session's background tasks changed: the full list (REPLACE).
+    Tasks(Arc<TasksSnapshot>),
+    /// The text of one background task changed (preview, summaries, prompt).
+    /// Carried only by a `LocalOnly` frame.
+    TaskDetail(Arc<TaskDetailMsg>),
 }
 
 // ── pending-message queue ─────────────────────────────────────────────────────
@@ -139,6 +149,8 @@ struct PendingMessage {
 ///
 /// Lock order, wherever more than one is held:
 /// `model_io` → `state` → `model` → `pending`.
+/// The task registry's lock (`tasks`) may be held while the `transcript` lock
+/// is taken, never the reverse.
 /// `stdin`, `note_prefix`, `transcript` and `waiters` are leaf locks: they may
 /// be taken while holding the others, but nothing else is ever acquired while
 /// one of them is held.
@@ -183,6 +195,8 @@ struct Shared {
     note_prefix: Arc<Mutex<Option<String>>>,
     /// Runtime the reader thread spawns switch tasks on.
     runtime: tokio::runtime::Handle,
+    /// The session's background tasks: registry, publication, previews.
+    tasks: Arc<TaskRuntime>,
 }
 
 /// Lock `m`, taking the data even if a panicking holder poisoned it. For the
@@ -856,6 +870,7 @@ impl SessionManager {
             .clone()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .or_else(|| std::env::current_dir().ok());
+        let task_dir = dir.clone().unwrap_or_default();
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
@@ -873,8 +888,14 @@ impl SessionManager {
         let stderr = child.stderr.take();
 
         let (event_tx, _) = broadcast::channel::<SessionEvent>(512);
+        let transcript = Arc::new(Mutex::new(transcript));
+        let tasks = TaskRuntime::new(
+            Arc::clone(&transcript),
+            Some(session_id.clone()),
+            task_dir.clone(),
+        );
         let shared = Shared {
-            transcript: Arc::new(Mutex::new(transcript)),
+            transcript,
             stdin: Arc::new(Mutex::new(stdin)),
             pending: Arc::new(Mutex::new(VecDeque::new())),
             state: Arc::new(Mutex::new(SessionState::Idle)),
@@ -893,7 +914,15 @@ impl SessionManager {
             }),
             note_prefix: Arc::new(Mutex::new(None)),
             runtime: tokio::runtime::Handle::current(),
+            tasks,
         };
+        // Ends vanished tasks and flushes coalesced task snapshots; stops
+        // when the CLI has exited.
+        tokio::spawn(drive_timer(
+            Arc::clone(&shared.tasks),
+            shared.event_tx.clone(),
+            Arc::clone(&shared.exited),
+        ));
 
         // Stderr drain thread: read and log stderr lines so crash output is
         // visible in the nostromd log rather than silently discarded.
@@ -1076,12 +1105,13 @@ impl SessionManager {
     /// Attach `client_id` to `tag`: send a `SessionTurns` snapshot + current
     /// `SessionState`, then forward live events. Multiple clients may attach.
     pub fn attach(&mut self, tag: &str, client_id: &str) -> Result<()> {
-        let (turns, state, event_rx) = {
+        let (turns, state, event_rx, tasks) = {
             let session = self
                 .sessions
                 .get_mut(tag)
                 .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
             session.attached_clients.insert(client_id.to_string());
+            session.shared.tasks.set_clients(session.attached_clients.len());
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
             // loading scrollback at spawn time (`load_scrollback`). Without
@@ -1102,7 +1132,7 @@ impl SessionManager {
                 .recent_turns(SCROLLBACK_TURNS);
             let state = session.state();
             let rx = session.shared.event_tx.subscribe();
-            (turns, state, rx)
+            (turns, state, rx, Arc::clone(&session.shared.tasks))
         };
 
         self.send_to_client(
@@ -1120,49 +1150,30 @@ impl SessionManager {
             },
         );
 
+        // The tasks as they are now, then the live events (subscribed above,
+        // so nothing between is lost; a snapshot replaces the previous one).
+        let (snapshot, details) = tasks.current();
+        self.send_to_client(client_id, tasks_msg(tag, &snapshot));
+        for detail in details {
+            self.send_to_client(client_id, detail_msg(tag, &detail));
+        }
+
         // Forwarder task: SessionEvent → targeted ServerMsg.
         let senders = Arc::clone(&self.client_senders);
         let tag_s = tag.to_string();
         let client_s = client_id.to_string();
-        let mut rx = event_rx;
-        let task = tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) => {
-                        let msg = match ev {
-                            SessionEvent::Delta(delta) => ServerMsg::SessionTurnDelta {
-                                tag: tag_s.clone(),
-                                delta,
-                            },
-                            SessionEvent::State(state) => ServerMsg::SessionState {
-                                tag: tag_s.clone(),
-                                state,
-                            },
-                            SessionEvent::Exited { exit_code } => ServerMsg::SessionExited {
-                                tag: tag_s.clone(),
-                                exit_code,
-                            },
-                            SessionEvent::PermanentlyDown { reason } => ServerMsg::SessionDown {
-                                tag: tag_s.clone(),
-                                reason,
-                            },
-                        };
-                        let guard = senders.lock().unwrap();
-                        match guard.get(&client_s) {
-                            Some(tx) => {
-                                let _ = tx.send(msg);
-                            }
-                            None => break, // client disconnected
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(tag = %tag_s, client = %client_s, "session forwarder lagged {n}");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
+        let task = tokio::spawn(forward_session_events(
+            event_rx,
+            move |msg| match senders.lock().unwrap().get(&client_s) {
+                Some(tx) => {
+                    let _ = tx.send(msg);
+                    true
                 }
-            }
-        });
-
+                None => false,
+            },
+            tag_s,
+            tasks,
+        ));
         if let Some(session) = self.sessions.get_mut(tag) {
             session
                 .forwarders
@@ -1176,6 +1187,7 @@ impl SessionManager {
     pub fn detach(&mut self, tag: &str, client_id: &str) {
         if let Some(session) = self.sessions.get_mut(tag) {
             session.attached_clients.remove(client_id);
+            session.shared.tasks.set_clients(session.attached_clients.len());
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
@@ -1825,6 +1837,7 @@ impl SessionManager {
     pub fn on_client_disconnect(&mut self, client_id: &str) {
         for session in self.sessions.values_mut() {
             session.attached_clients.remove(client_id);
+            session.shared.tasks.set_clients(session.attached_clients.len());
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
@@ -1948,6 +1961,10 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
             ParsedLine::ModelFallback { content, .. } => {
                 lock_recover(&shared.model).fallback = content.clone();
             }
+            ParsedLine::Task(event) => {
+                shared.tasks.on_event(&shared.event_tx, event);
+                ensure_poller(&shared);
+            }
             _ => {}
         }
 
@@ -1978,6 +1995,9 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
     // `exited` is set before the waiters are dropped, so a control request
     // registered after this point sees it (see `model_switch::control`).
     shared.exited.store(true, Ordering::SeqCst);
+    // The tasks end with the process, and clients hear it before anything is
+    // torn down.
+    shared.tasks.end_session(&shared.event_tx);
     lock_recover(&shared.waiters).clear();
     shared.broadcast(SessionEvent::Exited { exit_code: None });
     publish_model_state(&shared);

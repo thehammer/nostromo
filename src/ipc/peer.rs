@@ -578,6 +578,11 @@ pub enum ServerClass<'a> {
     /// Unattributed events are withheld: they may belong to a Teri/Fred
     /// session whose session id the daemon could not resolve.
     Activity(Option<&'a str>),
+    /// Text derived from a task's output or from the conversation (a preview
+    /// line, an agent's summary or prompt): delivered to local peers only,
+    /// whatever the focus, so no sensitive-tag bookkeeping can leak it. A
+    /// network peer never receives it, even for a tag that is not sensitive.
+    LocalOnly,
 }
 
 // ── What is NOT gated (read this before trusting the exhaustive matches) ─────
@@ -653,6 +658,13 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
+        // A session's background tasks: metadata only (`TaskMeta` is a closed
+        // struct with no output, preview, summary, prompt or path), so the
+        // list follows the transcript rule. The text derived from a task's
+        // output or the conversation is a separate frame, local only.
+        ServerMsg::SessionTasks { tag, .. } => ServerClass::Focus(tag),
+        ServerMsg::SessionTaskDetail { .. } => ServerClass::LocalOnly,
+
         ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
 
         // Scoped to one Mother job. A job started from a work item carries
@@ -705,7 +717,8 @@ pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
         ServerClass::Open
         | ServerClass::Focus(_)
         | ServerClass::Job(_)
-        | ServerClass::Activity(_) => SensitiveClass::NotSensitive,
+        | ServerClass::Activity(_)
+        | ServerClass::LocalOnly => SensitiveClass::NotSensitive,
     }
 }
 
@@ -740,6 +753,7 @@ pub fn may_receive(trust: PeerTrust, msg: &ServerMsg, tags: &SensitiveTags) -> b
         ServerClass::Job(job_id) => !tags.job_is_sensitive(job_id),
         ServerClass::Activity(Some(tag)) => !tags.tag_is_sensitive(tag),
         ServerClass::Activity(None) => false,
+        ServerClass::LocalOnly => false,
     }
 }
 
@@ -960,6 +974,9 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             sessions.retain(|s| !tags.focus_is_sensitive(&s.tag, &s.agent_name));
             ServerMsg::SessionListResp { sessions }
         }
+        // A task list passes unchanged: it has no sensitive field by
+        // construction (see `TaskMeta`, and the key-set test below).
+        ServerMsg::SessionTasks { .. } => msg,
         // What a model state says beyond the model itself is not for the LAN:
         // Bishop's budget posture, and who asked for the last change.
         ServerMsg::SessionModelState(mut state) => {

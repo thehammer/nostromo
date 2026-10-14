@@ -48,6 +48,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::tasks::{parse_task_event, TaskEvent};
 use crate::model::notes::{LedgerNote, NoteKind};
 
 /// How many turns a fresh attach or resume is served. Do not change this
@@ -293,6 +294,10 @@ pub enum ParsedLine {
         fallback: Option<String>,
         content: Option<String>,
     },
+    /// A background-task event (`task_started`, `task_progress`,
+    /// `task_updated`, `task_notification`, `background_tasks_changed`). It
+    /// renders nothing: the session's task registry consumes it.
+    Task(TaskEvent),
     /// The answer to a control request the daemon sent.
     ControlResponse {
         request_id: String,
@@ -449,6 +454,12 @@ fn parse_system_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine
                 content: str_field("content"),
             })
         }
+        Some(subtype @ ("task_started" | "task_progress" | "task_updated" | "task_notification"
+        | "background_tasks_changed")) => match parse_task_event(subtype, obj) {
+            Some(event) => Some(ParsedLine::Task(event)),
+            // Malformed: treated like any other `system` line.
+            None => session_id.map(ParsedLine::SessionId),
+        },
         _ => session_id.map(ParsedLine::SessionId),
     }
 }
@@ -924,6 +935,10 @@ pub struct SessionTranscript {
     /// stamp a call or result that has no timestamp of its own with the
     /// daemon's receive time; a replay never invents times.
     live: bool,
+    /// Which tool each retained call belongs to, and where a background
+    /// `Bash` writes its output: what the task registry needs to tell a
+    /// `Monitor` from a `Bash` and to find an output file.
+    tool_index: ToolIndex,
 }
 
 impl SessionTranscript {
@@ -994,6 +1009,18 @@ impl SessionTranscript {
         let id = format!("t{}", self.next_seq);
         self.next_seq += 1;
         id
+    }
+
+    /// The name of the tool call `tool_use_id` belongs to, while that call is
+    /// retained (top-level and subagent calls alike).
+    pub fn tool_name_of(&self, tool_use_id: &str) -> Option<&str> {
+        self.tool_index.names.get(tool_use_id).map(String::as_str)
+    }
+
+    /// Where the background `Bash` call `tool_use_id` writes its output,
+    /// as its tool result said. A path the CLI reported, not yet validated.
+    pub fn background_output_path(&self, tool_use_id: &str) -> Option<&str> {
+        self.tool_index.output_paths.get(tool_use_id).map(String::as_str)
     }
 
     /// Total user prompts ingested (see the `prompt_count` field).
@@ -1087,6 +1114,16 @@ impl SessionTranscript {
             | ParsedLine::ModelFallback { .. }
             | ParsedLine::ControlResponse { .. } => vec![],
 
+            // Background tasks are the registry's business: a task event
+            // never opens a turn or adds a block, so a transcript recorded
+            // with or without them is the same.
+            ParsedLine::Task(TaskEvent { session_id, .. }) => {
+                if let (None, Some(sid)) = (&self.session_id, session_id) {
+                    self.session_id = Some(sid);
+                }
+                vec![]
+            }
+
             ParsedLine::UserPrompt {
                 text, timestamp, ..
             } => {
@@ -1135,6 +1172,7 @@ impl SessionTranscript {
                     let turn_id = turn.id.clone();
                     for mut b in blocks {
                         stamp_block(&mut b, ts, parent_tool_use_id.as_deref());
+                        self.tool_index.note_block(&b);
                         self.retained_bytes += block_bytes(&b);
                         turn.blocks.push(b.clone());
                         deltas.push(TurnDelta::BlockAppended {
@@ -1276,6 +1314,7 @@ impl SessionTranscript {
     fn drop_oldest_turn(&mut self) {
         if let Some(t) = self.turns.first() {
             self.retained_bytes = self.retained_bytes.saturating_sub(turn_bytes(t));
+            self.tool_index.forget_blocks(&t.blocks);
         }
         if !self.turns.is_empty() {
             self.turns.remove(0);
@@ -1303,10 +1342,80 @@ impl SessionTranscript {
             count += 1;
         }
         if count > 0 {
-            let freed: usize = turn.blocks.drain(0..count).map(|b| block_bytes(&b)).sum();
+            let shed_blocks: Vec<TurnBlock> = turn.blocks.drain(0..count).collect();
+            let freed: usize = shed_blocks.iter().map(block_bytes).sum();
             self.retained_bytes = self.retained_bytes.saturating_sub(freed);
+            self.tool_index.forget_blocks(&shed_blocks);
         }
     }
+}
+
+/// The side index of a transcript: tool names by call id, and the output
+/// path of each background `Bash`. Bounded by what the transcript retains:
+/// entries go when their turn (or block) does.
+#[derive(Debug, Default)]
+struct ToolIndex {
+    names: std::collections::HashMap<String, String>,
+    output_paths: std::collections::HashMap<String, String>,
+}
+
+/// The text a background `Bash` result carries before the output path.
+const OUTPUT_PATH_MARKER: &str = "Output is being written to: ";
+
+impl ToolIndex {
+    /// Record what `block` tells: a call's tool name, a background `Bash`
+    /// result's output path.
+    fn note_block(&mut self, block: &TurnBlock) {
+        match block {
+            TurnBlock::ToolCall {
+                tool_name,
+                tool_use_id: Some(id),
+                ..
+            } => {
+                self.names.insert(id.clone(), tool_name.clone());
+            }
+            TurnBlock::ToolResult {
+                content,
+                tool_use_id: Some(id),
+                ..
+            } if self.names.get(id).map(String::as_str) == Some("Bash") => {
+                if let Some(path) = output_path_in(content) {
+                    self.output_paths.insert(id.clone(), path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn forget_blocks(&mut self, blocks: &[TurnBlock]) {
+        for block in blocks {
+            match block {
+                TurnBlock::ToolCall {
+                    tool_use_id: Some(id),
+                    ..
+                } => {
+                    self.names.remove(id);
+                    self.output_paths.remove(id);
+                }
+                TurnBlock::ToolResult {
+                    tool_use_id: Some(id),
+                    ..
+                } => {
+                    self.output_paths.remove(id);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The path in `… Output is being written to: <path>.` (the sentence's full
+/// stop is not part of the path).
+fn output_path_in(result_text: &str) -> Option<String> {
+    let rest = &result_text[result_text.find(OUTPUT_PATH_MARKER)? + OUTPUT_PATH_MARKER.len()..];
+    let line = rest.lines().next()?.trim();
+    let path = line.strip_suffix('.').unwrap_or(line).trim();
+    (!path.is_empty()).then(|| path.to_owned())
 }
 
 /// Fill in what only the line knows: when a call or result happened, and

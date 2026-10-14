@@ -1428,6 +1428,136 @@ pub enum ClientMsg {
     },
 }
 
+// ── background tasks ──────────────────────────────────────────────────────────
+
+/// What a background task is, for the activity panel. Resolved by the daemon
+/// from the CLI's `task_type` and the tool that started the task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    /// A background `Bash` command.
+    Shell,
+    /// The Monitor tool, or an MCP/web-socket monitor.
+    Monitor,
+    Agent,
+    Workflow,
+    /// Anything else; `TaskMeta::task_type` keeps the CLI's raw label.
+    Other,
+}
+
+impl TaskKind {
+    /// Shell and Monitor tasks write an output stream the daemon can preview.
+    pub fn has_output(self) -> bool {
+        matches!(self, TaskKind::Shell | TaskKind::Monitor)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl TaskStatus {
+    /// `true` once the task can no longer change state.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Stopped)
+    }
+}
+
+/// Why a task ended as `stopped`, when the CLI did not say so itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskEndReason {
+    /// A Nostromo stop for this task was accepted, then the task ended stopped.
+    UserStop,
+    /// The CLI's notification said `worker_restart`.
+    Restart,
+    /// The CLI process ended while the task ran.
+    SessionEnded,
+    /// The task left the CLI's live background set and never reported an end.
+    Vanished,
+}
+
+/// Metadata of one background task (`ServerMsg::SessionTasks`).
+///
+/// **A closed struct on purpose.** It travels in a frame a network peer may
+/// receive for a non-sensitive focus, so it carries no output, preview,
+/// summary, prompt or file path: that text lives in `SessionTaskDetail`, which
+/// is `LocalOnly`. A new field must be classified in `peer.rs` (its key-set
+/// test fails until the allow-list there is updated on purpose).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskMeta {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The CLI's raw `task_type` (`local_bash`, `local_agent`, …), `""` if none.
+    pub task_type: String,
+    pub kind: TaskKind,
+    /// The tool that started the task (`Bash`, `Monitor`, `Agent`, …), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_backgrounded: Option<bool>,
+    /// Not activity: an ambient watcher or a `skip_transcript` task.
+    pub housekeeping: bool,
+    pub status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<TaskEndReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool_name: Option<String>,
+    /// The daemon can show this task's output (shell and monitor tasks).
+    pub has_output: bool,
+}
+
+/// One full snapshot of a session's background tasks (REPLACE semantics): the
+/// payload of `ServerMsg::SessionTasks`, minus the tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TasksSnapshot {
+    /// The Claude session id the tasks belong to.
+    pub session_id: Option<String>,
+    /// Random id of this daemon process: tasks never survive a daemon restart.
+    pub daemon_epoch: String,
+    /// `None` until known.
+    pub stop_supported: Option<bool>,
+    pub tasks: Vec<TaskMeta>,
+}
+
+/// Output- or conversation-derived text of one task: the payload of
+/// `ServerMsg::SessionTaskDetail`, minus the tag. `LocalOnly`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskDetailMsg {
+    pub task_id: String,
+    pub preview: Option<String>,
+    pub progress_summary: Option<String>,
+    pub completion_summary: Option<String>,
+    pub prompt: Option<String>,
+}
+
 // ── daemon → client messages ──────────────────────────────────────────────────
 
 /// Messages sent from the daemon to a TUI client.
@@ -1832,6 +1962,34 @@ pub enum ServerMsg {
         message: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         warning: Option<String>,
+    },
+    // ── background tasks ──────────────────────────────────────────────────────
+    /// Every background task of a session, retained ended ones included. A
+    /// full snapshot (REPLACE semantics), sent on attach and on every change
+    /// (coalesced). Metadata only: no output, preview, summary, prompt or path.
+    SessionTasks {
+        tag: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        daemon_epoch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_supported: Option<bool>,
+        tasks: Vec<TaskMeta>,
+    },
+    /// The text derived from one task's output or from the conversation: the
+    /// last output line, the agent's progress and completion summaries, its
+    /// prompt. `LocalOnly`: never sent to a network peer, whatever the tag.
+    SessionTaskDetail {
+        tag: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.

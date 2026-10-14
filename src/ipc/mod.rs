@@ -8,6 +8,8 @@
 //! - [`scrollback`]      — PTY scrollback ring buffer
 //! - [`pty_manager`]     — daemon-side PTY lifecycle management
 //! - [`stream_json`]     — stream-json turn model + parser
+//! - [`tasks`]           — background-task registry (activity panel)
+//! - [`task_output`]     — task output sanitiser, file validator, tail read
 //! - [`session_manager`] — daemon-side persistent stream-json session lifecycle
 //! - [`server`]          — daemon-side accept loop and fan-out broadcaster
 //! - [`client`]          — TUI-side connection and subscription
@@ -25,6 +27,8 @@ pub mod scrollback;
 pub mod server;
 pub mod session_manager;
 pub mod stream_json;
+pub mod task_output;
+pub mod tasks;
 
 pub use client::{ConnectionState, DaemonClient};
 pub use protocol::{default_socket_path, ClientMsg, ServerMsg, Topic};

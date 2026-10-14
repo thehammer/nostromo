@@ -53,6 +53,11 @@ const FEATURE_WORK: &str = "work";
 /// the `model` topic (model switching frames).
 const FEATURE_MODEL: &str = "model";
 
+/// The optional capability advertised in `Welcome.features`: this daemon sends
+/// `session_tasks` and `session_task_detail` (the background activity panel).
+/// Clients use it to decide whether to show the panel's chip.
+const FEATURE_TASKS: &str = "tasks";
+
 /// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
 /// local client that subscribes after the frame was sent.
 type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
@@ -310,7 +315,11 @@ where
     let welcome = ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
-        features: vec![FEATURE_WORK.to_string(), FEATURE_MODEL.to_string()],
+        features: vec![
+            FEATURE_WORK.to_string(),
+            FEATURE_MODEL.to_string(),
+            FEATURE_TASKS.to_string(),
+        ],
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     debug!(claimed_id, conn_key, "client welcomed");
