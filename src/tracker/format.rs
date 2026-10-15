@@ -755,6 +755,8 @@ struct Splicer<'a> {
     eol: &'static str,
     /// Original item index by id.
     original: HashMap<&'a str, usize>,
+    /// Target items by id.
+    targets: HashMap<&'a str, &'a Item>,
     /// Ids that keep their place (per-section LCS of original and target order).
     anchored: HashSet<&'a str>,
     /// Target items to write just before an anchored item.
@@ -785,6 +787,7 @@ impl<'a> Splicer<'a> {
             assign_markers,
             eol,
             original,
+            targets: target.items.iter().map(|i| (i.id.as_str(), i)).collect(),
             anchored: HashSet::new(),
             before: HashMap::new(),
             after_segment: HashMap::new(),
@@ -816,7 +819,7 @@ impl<'a> Splicer<'a> {
             let keep = lcs(&original_ids, &target_ids);
             let mut pending: Vec<&'a Item> = Vec::new();
             for id in target_ids {
-                let item = self.target.item(id).expect("id from target");
+                let item = self.targets[id];
                 if keep.contains(id) {
                     self.anchored.insert(id);
                     self.before.insert(id, std::mem::take(&mut pending));
@@ -909,7 +912,7 @@ impl<'a> Splicer<'a> {
                         for item in self.before.get(id).into_iter().flatten() {
                             self.write_item(&mut out, item);
                         }
-                        self.write_item(&mut out, self.target.item(id).expect("anchored"));
+                        self.write_item(&mut out, self.targets[id]);
                     }
                 }
                 _ => out.push(self.parsed.text(&segment.span)),
@@ -973,31 +976,34 @@ impl<'a> Splicer<'a> {
     }
 }
 
-/// Members of a longest common subsequence of `a` and `b`.
+/// Members of a longest common subsequence of `a` and `b`, whose elements
+/// are each unique (item ids). With unique elements the LCS is the longest
+/// increasing run of `b`-positions taken in `a` order: O(n log n) time and
+/// O(n) space, so a huge hand-made file can't blow up memory.
 pub(crate) fn lcs<'a>(a: &[&'a str], b: &[&'a str]) -> HashSet<&'a str> {
-    let (n, m) = (a.len(), b.len());
-    let mut table = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            table[i][j] = if a[i] == b[j] {
-                table[i + 1][j + 1] + 1
-            } else {
-                table[i + 1][j].max(table[i][j + 1])
-            };
+    let pos_in_b: HashMap<&str, usize> = b.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let seq: Vec<(&'a str, usize)> = a
+        .iter()
+        .filter_map(|id| pos_in_b.get(id).map(|p| (*id, *p)))
+        .collect();
+    // tails[k]: index into `seq` of the smallest tail of an increasing run of
+    // length k + 1; prev[i]: the element before seq[i] in its best run.
+    let mut tails: Vec<usize> = Vec::new();
+    let mut prev: Vec<Option<usize>> = vec![None; seq.len()];
+    for (i, &(_, p)) in seq.iter().enumerate() {
+        let k = tails.partition_point(|&t| seq[t].1 < p);
+        prev[i] = k.checked_sub(1).map(|k| tails[k]);
+        if k == tails.len() {
+            tails.push(i);
+        } else {
+            tails[k] = i;
         }
     }
     let mut keep = HashSet::new();
-    let (mut i, mut j) = (0, 0);
-    while i < n && j < m {
-        if a[i] == b[j] {
-            keep.insert(a[i]);
-            i += 1;
-            j += 1;
-        } else if table[i + 1][j] >= table[i][j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
+    let mut cursor = tails.last().copied();
+    while let Some(i) = cursor {
+        keep.insert(seq[i].0);
+        cursor = prev[i];
     }
     keep
 }
@@ -1029,5 +1035,13 @@ mod tests {
         let text = format!("## Now\n{}", serialise_item(&item, stamp(), "\n"));
         let parsed = parse(text.as_bytes()).unwrap();
         assert_eq!(parsed.board.items, vec![item]);
+    }
+
+    #[test]
+    fn lcs_keeps_the_longest_common_order() {
+        let keep = lcs(&["a", "b", "c", "d", "e"], &["b", "a", "c", "e", "x", "d"]);
+        assert_eq!(keep.len(), 3);
+        assert!(keep.contains("c"));
+        assert!(lcs(&[], &["a"]).is_empty());
     }
 }
