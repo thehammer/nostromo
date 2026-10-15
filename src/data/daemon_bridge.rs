@@ -103,6 +103,9 @@ fn dispatch(msg: ServerMsg, app_tx: &mpsc::UnboundedSender<AppEvent>, bus: &Agen
         | ServerMsg::SessionModelState(_)
         | ServerMsg::ModelDefaults { .. }
         | ServerMsg::ModelRequestResult { .. }
+        // Background-task frames are consumed by the Swift thin-clients.
+        | ServerMsg::SessionTasks { .. }
+        | ServerMsg::SessionTaskDetail { .. }
         // Agent-authored pane layout messages are consumed by the Swift thin-client.
         | ServerMsg::FocusLayout { .. }
         | ServerMsg::PaneContent { .. }

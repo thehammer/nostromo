@@ -53,6 +53,11 @@ const FEATURE_WORK: &str = "work";
 /// the `model` topic (model switching frames).
 const FEATURE_MODEL: &str = "model";
 
+/// The optional capability advertised in `Welcome.features`: this daemon sends
+/// `session_tasks` and `session_task_detail` (the background activity panel).
+/// Clients use it to decide whether to show the panel's chip.
+const FEATURE_TASKS: &str = "tasks";
+
 /// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
 /// local client that subscribes after the frame was sent.
 type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
@@ -310,7 +315,11 @@ where
     let welcome = ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
-        features: vec![FEATURE_WORK.to_string(), FEATURE_MODEL.to_string()],
+        features: vec![
+            FEATURE_WORK.to_string(),
+            FEATURE_MODEL.to_string(),
+            FEATURE_TASKS.to_string(),
+        ],
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     debug!(claimed_id, conn_key, "client welcomed");
@@ -849,7 +858,11 @@ fn handle_client_msg(
         ClientMsg::SessionAttach { tag } => {
             let result = {
                 let mut mgr = session_mgr.lock().unwrap();
-                mgr.attach(&tag, conn_key)
+                if trust.is_network() {
+                    mgr.attach_network(&tag, conn_key)
+                } else {
+                    mgr.attach(&tag, conn_key)
+                }
             };
             if let Err(e) = result {
                 let _ = targeted_tx.send(ServerMsg::Error {
@@ -2000,5 +2013,50 @@ mod tests {
             Some(ServerMsg::SessionTurns { turns, .. }) => assert_eq!(turns[0].blocks.len(), 2),
             other => panic!("{other:?}"),
         }
+    }
+
+    // ── background tasks ────────────────────────────────────────────────────
+
+    fn tasks_frame() -> ServerMsg {
+        ServerMsg::SessionTasks {
+            tag: "cody-1".into(),
+            session_id: Some("sess".into()),
+            daemon_epoch: "epoch".into(),
+            stop_supported: None,
+            tasks: vec![],
+        }
+    }
+
+    fn task_detail_frame() -> ServerMsg {
+        ServerMsg::SessionTaskDetail {
+            tag: "cody-1".into(),
+            task_id: "t1".into(),
+            preview: Some("line".into()),
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        }
+    }
+
+    #[test]
+    fn the_task_frames_reach_a_client_whatever_topics_it_named() {
+        // Like the other session frames, they are not behind a topic: a client
+        // attached to the session gets them, and an old client ignores the type.
+        for topics in [
+            vec![],
+            vec![Topic::Activity],
+            vec![Topic::Model],
+            vec![Topic::Work, Topic::Fred],
+            vec![Topic::Layout, Topic::Focuses],
+        ] {
+            assert!(message_matches_topics(&tasks_frame(), &topics), "{topics:?}");
+            assert!(message_matches_topics(&task_detail_frame(), &topics), "{topics:?}");
+        }
+    }
+
+    #[test]
+    fn the_tasks_capability_is_advertised_under_its_documented_name() {
+        // `Welcome.features` carries this string; the Swift clients look for it.
+        assert_eq!(FEATURE_TASKS, "tasks");
     }
 }

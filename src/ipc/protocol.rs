@@ -1428,6 +1428,136 @@ pub enum ClientMsg {
     },
 }
 
+// ── background tasks ──────────────────────────────────────────────────────────
+
+/// What a background task is, for the activity panel. Resolved by the daemon
+/// from the CLI's `task_type` and the tool that started the task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    /// A background `Bash` command.
+    Shell,
+    /// The Monitor tool, or an MCP/web-socket monitor.
+    Monitor,
+    Agent,
+    Workflow,
+    /// Anything else; `TaskMeta::task_type` keeps the CLI's raw label.
+    Other,
+}
+
+impl TaskKind {
+    /// Shell and Monitor tasks write an output stream the daemon can preview.
+    pub fn has_output(self) -> bool {
+        matches!(self, TaskKind::Shell | TaskKind::Monitor)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl TaskStatus {
+    /// `true` once the task can no longer change state.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Stopped)
+    }
+}
+
+/// Why a task ended as `stopped`, when the CLI did not say so itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskEndReason {
+    /// A Nostromo stop for this task was accepted, then the task ended stopped.
+    UserStop,
+    /// The CLI's notification said `worker_restart`.
+    Restart,
+    /// The CLI process ended while the task ran.
+    SessionEnded,
+    /// The task left the CLI's live background set and never reported an end.
+    Vanished,
+}
+
+/// Metadata of one background task (`ServerMsg::SessionTasks`).
+///
+/// **A closed struct on purpose.** It travels in a frame a network peer may
+/// receive for a non-sensitive focus, so it carries no output, preview,
+/// summary, prompt or file path: that text lives in `SessionTaskDetail`, which
+/// is `LocalOnly`. A new field must be classified in `peer.rs` (its key-set
+/// test fails until the allow-list there is updated on purpose).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskMeta {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The CLI's raw `task_type` (`local_bash`, `local_agent`, …), `""` if none.
+    pub task_type: String,
+    pub kind: TaskKind,
+    /// The tool that started the task (`Bash`, `Monitor`, `Agent`, …), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_backgrounded: Option<bool>,
+    /// Not activity: an ambient watcher or a `skip_transcript` task.
+    pub housekeeping: bool,
+    pub status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<TaskEndReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool_name: Option<String>,
+    /// The daemon can show this task's output (shell and monitor tasks).
+    pub has_output: bool,
+}
+
+/// One full snapshot of a session's background tasks (REPLACE semantics): the
+/// payload of `ServerMsg::SessionTasks`, minus the tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TasksSnapshot {
+    /// The Claude session id the tasks belong to.
+    pub session_id: Option<String>,
+    /// Random id of this daemon process: tasks never survive a daemon restart.
+    pub daemon_epoch: String,
+    /// `None` until known.
+    pub stop_supported: Option<bool>,
+    pub tasks: Vec<TaskMeta>,
+}
+
+/// Output- or conversation-derived text of one task: the payload of
+/// `ServerMsg::SessionTaskDetail`, minus the tag. `LocalOnly`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskDetailMsg {
+    pub task_id: String,
+    pub preview: Option<String>,
+    pub progress_summary: Option<String>,
+    pub completion_summary: Option<String>,
+    pub prompt: Option<String>,
+}
+
 // ── daemon → client messages ──────────────────────────────────────────────────
 
 /// Messages sent from the daemon to a TUI client.
@@ -1832,6 +1962,34 @@ pub enum ServerMsg {
         message: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         warning: Option<String>,
+    },
+    // ── background tasks ──────────────────────────────────────────────────────
+    /// Every background task of a session, retained ended ones included. A
+    /// full snapshot (REPLACE semantics), sent on attach and on every change
+    /// (coalesced). Metadata only: no output, preview, summary, prompt or path.
+    SessionTasks {
+        tag: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        daemon_epoch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_supported: Option<bool>,
+        tasks: Vec<TaskMeta>,
+    },
+    /// The text derived from one task's output or from the conversation: the
+    /// last output line, the agent's progress and completion summaries, its
+    /// prompt. `LocalOnly`: never sent to a network peer, whatever the tag.
+    SessionTaskDetail {
+        tag: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.
@@ -4373,4 +4531,200 @@ mod work_wire_tests {
         assert_eq!(back, full);
     }
 
+    // ── background tasks ────────────────────────────────────────────────────
+
+    fn bare_task_meta() -> TaskMeta {
+        TaskMeta {
+            id: "t1".into(),
+            run_id: None,
+            task_type: "local_bash".into(),
+            kind: TaskKind::Shell,
+            tool_name: None,
+            description: "Run it".into(),
+            subagent_type: None,
+            workflow_name: None,
+            tool_use_id: None,
+            parent_task_id: None,
+            is_backgrounded: None,
+            housekeeping: false,
+            status: TaskStatus::Running,
+            end_reason: None,
+            started_at_ms: None,
+            ended_at_ms: None,
+            duration_ms: None,
+            total_tokens: None,
+            tool_uses: None,
+            last_tool_name: None,
+            has_output: true,
+        }
+    }
+
+    #[test]
+    fn a_bare_task_meta_serialises_only_its_required_keys() {
+        let value = serde_json::to_value(bare_task_meta()).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["description", "has_output", "housekeeping", "id", "kind", "status", "task_type"]
+        );
+    }
+
+    #[test]
+    fn session_tasks_round_trips_with_and_without_its_optional_fields() {
+        let bare = ServerMsg::SessionTasks {
+            tag: "cody-x".into(),
+            session_id: None,
+            daemon_epoch: "epoch-1".into(),
+            stop_supported: None,
+            tasks: vec![bare_task_meta()],
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("session_id") && !json.contains("stop_supported"), "{json}");
+        round_trip_server(bare);
+
+        let mut full = bare_task_meta();
+        full.run_id = Some("run-1".into());
+        full.tool_name = Some("Bash".into());
+        full.end_reason = Some(TaskEndReason::Vanished);
+        full.status = TaskStatus::Stopped;
+        full.total_tokens = Some(0);
+        round_trip_server(ServerMsg::SessionTasks {
+            tag: "cody-x".into(),
+            session_id: Some("sess".into()),
+            daemon_epoch: "epoch-1".into(),
+            stop_supported: Some(false),
+            tasks: vec![full, bare_task_meta()],
+        });
+    }
+
+    #[test]
+    fn an_empty_task_list_is_a_real_frame() {
+        let msg = ServerMsg::SessionTasks {
+            tag: "t".into(),
+            session_id: None,
+            daemon_epoch: "e".into(),
+            stop_supported: None,
+            tasks: vec![],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""tasks":[]"#), "{json}");
+        round_trip_server(msg);
+    }
+
+    #[test]
+    fn session_task_detail_round_trips_and_omits_what_is_unset() {
+        let only_preview = ServerMsg::SessionTaskDetail {
+            tag: "cody-x".into(),
+            task_id: "t1".into(),
+            preview: Some("building 3/9".into()),
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        };
+        let json = serde_json::to_string(&only_preview).unwrap();
+        assert!(
+            !json.contains("progress_summary") && !json.contains("completion_summary") && !json.contains("prompt"),
+            "{json}"
+        );
+        assert!(json.contains(r#""preview":"building 3/9""#));
+        round_trip_server(only_preview);
+
+        round_trip_server(ServerMsg::SessionTaskDetail {
+            tag: "cody-x".into(),
+            task_id: "t1".into(),
+            preview: Some("p".into()),
+            progress_summary: Some("a".into()),
+            completion_summary: Some("b".into()),
+            prompt: Some("c".into()),
+        });
+        let nothing = ServerMsg::SessionTaskDetail {
+            tag: "t".into(),
+            task_id: "t1".into(),
+            preview: None,
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        };
+        assert_eq!(serde_json::to_string(&nothing).unwrap(), r#"{"type":"session_task_detail","tag":"t","task_id":"t1"}"#);
+    }
+
+    #[test]
+    fn the_task_frames_use_the_type_names_the_clients_decode() {
+        let tasks = ServerMsg::SessionTasks {
+            tag: "t".into(),
+            session_id: None,
+            daemon_epoch: "e".into(),
+            stop_supported: None,
+            tasks: vec![],
+        };
+        assert_eq!(serde_json::to_value(&tasks).unwrap()["type"], "session_tasks");
+        let detail = ServerMsg::SessionTaskDetail {
+            tag: "t".into(),
+            task_id: "x".into(),
+            preview: None,
+            progress_summary: None,
+            completion_summary: None,
+            prompt: None,
+        };
+        assert_eq!(serde_json::to_value(&detail).unwrap()["type"], "session_task_detail");
+    }
+
+    #[test]
+    fn the_task_enums_use_their_documented_wire_names() {
+        fn name<T: serde::Serialize>(v: &T) -> String {
+            match serde_json::to_value(v).unwrap() {
+                serde_json::Value::String(s) => s,
+                other => panic!("not a string: {other}"),
+            }
+        }
+        for (kind, expected) in [
+            (TaskKind::Shell, "shell"),
+            (TaskKind::Monitor, "monitor"),
+            (TaskKind::Agent, "agent"),
+            (TaskKind::Workflow, "workflow"),
+            (TaskKind::Other, "other"),
+        ] {
+            assert_eq!(name(&kind), expected);
+        }
+        for (status, expected) in [
+            (TaskStatus::Pending, "pending"),
+            (TaskStatus::Running, "running"),
+            (TaskStatus::Paused, "paused"),
+            (TaskStatus::Completed, "completed"),
+            (TaskStatus::Failed, "failed"),
+            (TaskStatus::Stopped, "stopped"),
+        ] {
+            assert_eq!(name(&status), expected);
+        }
+        for (reason, expected) in [
+            (TaskEndReason::UserStop, "user_stop"),
+            (TaskEndReason::Restart, "restart"),
+            (TaskEndReason::SessionEnded, "session_ended"),
+            (TaskEndReason::Vanished, "vanished"),
+        ] {
+            assert_eq!(name(&reason), expected);
+        }
+    }
+
+    #[test]
+    fn a_task_list_that_names_only_the_required_fields_decodes() {
+        let json = r#"{"type":"session_tasks","tag":"t","daemon_epoch":"e","tasks":[
+            {"id":"t1","task_type":"","kind":"other","description":"","housekeeping":false,"status":"running","has_output":false}]}"#;
+        let msg: ServerMsg = serde_json::from_str(json).unwrap();
+        let ServerMsg::SessionTasks { session_id, stop_supported, tasks, .. } = msg else { panic!() };
+        assert_eq!((session_id, stop_supported), (None, None));
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].run_id, None);
+        assert_eq!(tasks[0].total_tokens, None, "an absent count stays absent, not zero");
+    }
+
+    #[test]
+    fn a_task_detail_that_names_only_its_task_decodes() {
+        let msg: ServerMsg = serde_json::from_str(r#"{"type":"session_task_detail","tag":"t","task_id":"x"}"#).unwrap();
+        assert!(matches!(
+            msg,
+            ServerMsg::SessionTaskDetail { preview: None, progress_summary: None, completion_summary: None, prompt: None, .. }
+        ));
+    }
 }

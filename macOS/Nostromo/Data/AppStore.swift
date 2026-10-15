@@ -1297,6 +1297,9 @@ class AppStore: ObservableObject {
         case .modelCatalog, .sessionModelState, .modelDefaults, .modelRequestResult:
             ModelStore.shared.ingest(msg)
 
+        case .sessionTasks, .sessionTaskDetail:
+            break   // BA3 routes these to BackgroundTaskStore
+
         case .pong, .unknown:
             break
         }
