@@ -972,8 +972,9 @@ async fn work_source_statuses_for_different_sources_are_retained_separately() {
 /// background-task events (see `emit_tasks`), and a `control_request` line is
 /// answered (`get_task_output` with `SECRET-OUTPUT-9`, anything else with an
 /// "Unsupported control request subtype" error) instead of getting a turn. The
-/// task output files live under `<LOGDIR>/<view>.root/<cwd, "/" -> "-">/
-/// <session id>/tasks/<task id>.output`, the layout of the real CLI's temp root.
+/// task output files live under `/tmp/claude-<uid>/<cwd, "/" -> "-">/
+/// <session id>/tasks/<task id>.output`, the layout of the real CLI's temp root
+/// (the daemon only learns a root of that shape; the cwd is unique to the test run).
 const FAKE_CLAUDE_SCRIPT: &str = r#"#!/bin/sh
 name=""
 sid=""
@@ -1000,7 +1001,7 @@ answer_control() {
 }
 
 emit_tasks() {
-  root="@LOGDIR@/$name.root"
+  root="/tmp/claude-$(id -u)"
   tdir="$root/$(pwd -P | tr / -)/$sid/tasks"
   mkdir -p "$tdir"
   printf 'SECRET-OUTPUT-1\nSECRET-OUTPUT-2\nSECRET-OUTPUT-3\n\n\n' > "$tdir/bgsh1.output"
@@ -5275,16 +5276,28 @@ mod background_tasks {
         cwd: PathBuf,
     }
 
+    impl Drop for TaskSession {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.session_dir());
+        }
+    }
+
     impl TaskSession {
-        /// The temp root the fake writes this session's output files under, as it spells it.
+        /// The temp root the fake writes this session's output files under, as it spells it:
+        /// the CLI's `/tmp/claude-<uid>`, shared with the real CLI, so never remove it.
         fn root(&self) -> String {
-            format!("{}/{}.root", FAKE_CLAUDE_DIR.get().expect("install_fake_claude ran").display(), self.view)
+            format!("/tmp/claude-{}", nostromo::ipc::task_output::current_uid())
+        }
+
+        /// The folder under the root that holds only this session's files (the cwd is unique
+        /// to this test run).
+        fn session_dir(&self) -> PathBuf {
+            PathBuf::from(self.root()).join(self.cwd.to_str().expect("utf8 cwd").replace('/', "-"))
         }
 
         /// Where the fake wrote task `id`'s output file.
         fn output_file(&self, id: &str) -> PathBuf {
-            PathBuf::from(self.root())
-                .join(self.cwd.to_str().expect("utf8 cwd").replace('/', "-"))
+            self.session_dir()
                 .join(format!("sid-{}", self.view))
                 .join("tasks")
                 .join(format!("{id}.output"))
@@ -5377,7 +5390,7 @@ mod background_tasks {
         for needle in [
             "SECRET-OUTPUT-".to_owned(),
             session.root(),
-            format!("{}.root", session.view),
+            session.session_dir().display().to_string(),
             "nostromo-fake-claude-".to_owned(),
             ".output".to_owned(),
         ] {
@@ -5540,7 +5553,7 @@ mod background_tasks {
 
         // Output paths never go on the wire, not even to a local client.
         let text = unix.text();
-        for needle in [s.root(), format!("{}.root", s.view), ".output".to_owned()] {
+        for needle in [s.root(), s.session_dir().display().to_string(), ".output".to_owned()] {
             assert!(!text.contains(&needle), "a local peer received the output location `{needle}`");
         }
     }
@@ -5650,7 +5663,7 @@ mod background_tasks {
         let tag = s.tag.clone();
         tcp.wait_until("the network peer to see every task", move |f| tasks_complete(f, &tag)).await;
         // The files the daemon could read a preview from are gone, so any poll would have to ask the CLI.
-        std::fs::remove_dir_all(s.root()).expect("the fake wrote its output files under this root");
+        std::fs::remove_dir_all(s.session_dir()).expect("the fake wrote its output files under this folder");
         tcp.drain(QUIET).await;
         tcp.sync().await;
         tcp.drain(QUIET).await; // two poll intervals and more

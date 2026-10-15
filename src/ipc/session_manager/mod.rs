@@ -5449,8 +5449,18 @@ done
     #[tokio::test]
     async fn an_output_path_in_this_sessions_own_tasks_folder_teaches_where_the_files_are() {
         let mut rig = preview_rig("cody-1", STAY_ALIVE);
-        // The CLI's real root is somewhere the daemon was not told about.
-        let learned = rig._dir.path().join("other-tmp").join("-work-repo").join("stub-sid").join("tasks");
+        // The CLI's real root is somewhere the daemon was not told about: only
+        // `/tmp/claude-<uid>` can be learned, so use a folder of our own in it.
+        let cwd_dir = format!("-work-repo-{}-{}", std::process::id(), rig._dir.path().file_name().unwrap().to_string_lossy());
+        let learned_cwd = PathBuf::from(format!("/tmp/claude-{}", crate::ipc::task_output::current_uid())).join(cwd_dir);
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(learned_cwd.clone());
+        let learned = learned_cwd.join("stub-sid").join("tasks");
         std::fs::create_dir_all(&learned).unwrap();
         std::fs::write(learned.join("shell1.output"), "from the learned root\n").unwrap();
         rig.shared.tasks.set_clients(1);

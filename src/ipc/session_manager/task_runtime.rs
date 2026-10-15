@@ -25,7 +25,7 @@ use super::{lock_recover, SessionEvent, Shared};
 use crate::ipc::protocol::{ServerMsg, TaskDetailMsg, TaskMeta, TasksSnapshot};
 use crate::ipc::stream_json::SessionTranscript;
 use crate::ipc::task_output::{
-    is_valid_task_id, last_nonempty_line, root_of_output_path, sanitize, OutputFileValidator,
+    current_uid, is_valid_task_id, last_nonempty_line, learnable_root, sanitize, OutputFileValidator,
     TAIL_MAX_BYTES,
 };
 use crate::ipc::tasks::{PreviewTarget, TaskEvent, TaskEventKind, TaskHub, TaskOutput};
@@ -235,6 +235,9 @@ impl TaskRuntime {
     /// root its files live under. Only a path of the exact shape
     /// `<root>/<cwd>/<this session's id>/tasks/<task id>.output` counts, so a
     /// path that merely ends in `tasks/` cannot widen what the daemon reads.
+    /// The root must also be this user's `claude-<uid>` folder directly under
+    /// `/tmp` or `/private/tmp` (see [`learnable_root`]); anything else
+    /// teaches nothing and leaves the lesson for a later path.
     fn learn_root(&self, task_id: &str, reported: &str) {
         let Some(session_id) = &self.session_id else { return };
         let path = std::path::Path::new(reported);
@@ -252,7 +255,7 @@ impl TaskRuntime {
         if files.root_learned {
             return;
         }
-        if let Some(root) = root_of_output_path(path) {
+        if let Some(root) = learnable_root(path, current_uid()) {
             files.validator.add_root(root);
             files.root_learned = true;
         }
@@ -1047,19 +1050,43 @@ mod tests {
     #[test]
     fn the_first_path_of_the_exact_shape_teaches_its_root_and_later_ones_do_not() {
         let (rt, _t, dir) = runtime();
+        let uid = crate::ipc::task_output::current_uid();
         // Paths of the wrong shape first: they must not use up the one lesson.
         report_output_file(&rt, "t1", "/decoy/-work-repo/other-session/tasks/t1.output");
         report_output_file(&rt, "t1", "/decoy/-work-repo/sess-1/tasks/other.output");
         assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()]);
 
-        report_output_file(&rt, "t1", "/cli-tmp/claude-501/-work-repo/sess-1/tasks/t1.output");
-        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf(), PathBuf::from("/cli-tmp/claude-501")]);
+        let real_root = PathBuf::from(format!("/tmp/claude-{uid}"));
+        report_output_file(&rt, "t1", &format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output"));
+        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf(), real_root.clone()]);
 
-        report_output_file(&rt, "t2", "/another-tmp/-work-repo/sess-1/tasks/t2.output");
+        report_output_file(&rt, "t2", &format!("/private/tmp/claude-{uid}/-work-repo/sess-1/tasks/t2.output"));
         assert_eq!(
             roots_of(&rt),
-            vec![dir.path().to_path_buf(), PathBuf::from("/cli-tmp/claude-501")],
+            vec![dir.path().to_path_buf(), real_root],
             "only the first root is learned"
+        );
+    }
+
+    #[test]
+    fn a_path_outside_the_cli_tmp_root_teaches_nothing_and_does_not_use_up_the_lesson() {
+        let (rt, _t, dir) = runtime();
+        let uid = crate::ipc::task_output::current_uid();
+
+        // Right shape for this session and task, wrong place: a document
+        // folder, a tmp root of someone else, a path that climbs out.
+        report_output_file(&rt, "t1", "/Users/h/Documents/-work-repo/sess-1/tasks/t1.output");
+        report_output_file(&rt, "t1", &format!("/tmp/claude-{}/-work-repo/sess-1/tasks/t1.output", uid + 1));
+        report_output_file(&rt, "t1", &format!("/var/folders/ab/T/claude-{uid}/-work-repo/sess-1/tasks/t1.output"));
+        report_output_file(&rt, "t1", &format!("/tmp/claude-{uid}/../../Users/h/-work-repo/sess-1/tasks/t1.output"));
+        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()], "nothing taught");
+
+        report_output_file(&rt, "t1", &format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output"));
+
+        assert_eq!(
+            roots_of(&rt),
+            vec![dir.path().to_path_buf(), PathBuf::from(format!("/tmp/claude-{uid}"))],
+            "a later real-shaped path still teaches"
         );
     }
 

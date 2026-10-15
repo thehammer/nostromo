@@ -18,6 +18,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
+use crate::data::work::is_invisible;
+
 /// A preview is at most this many characters.
 pub const PREVIEW_MAX_CHARS: usize = 200;
 
@@ -42,7 +44,10 @@ const BINARY_NUL_SHARE_PERCENT: usize = 10;
 ///   last one is kept (progress bars rewrite their line). `\r\n` is a plain
 ///   line ending. A line whose text after the last `\r` is empty keeps the
 ///   last non-empty segment instead, so a trailing `\r` never blanks a line.
-/// * Every other control character except `\n` and `\t` is dropped.
+/// * Every other control character except `\n` and `\t` is dropped, and so
+///   is every invisible format character (`is_invisible`: bidi overrides and
+///   isolates, zero-width and tag characters, variation selectors, …) that
+///   could spoof or hide text.
 pub fn sanitize(input: &[u8]) -> String {
     let nuls = input.iter().filter(|&&b| b == 0).count();
     if !input.is_empty() && nuls * 100 > input.len() * BINARY_NUL_SHARE_PERCENT {
@@ -53,7 +58,7 @@ pub fn sanitize(input: &[u8]) -> String {
     collapse_carriage_returns(&without_escapes)
 }
 
-/// Remove escape sequences and every control character except `\n`, `\t`
+/// Remove escape sequences and every invisible character except `\n`, `\t`
 /// and `\r` (the last is resolved line by line afterwards).
 fn strip_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -68,7 +73,7 @@ fn strip_escapes(text: &str) -> String {
                 }
             }
             '\n' | '\t' | '\r' => out.push(c),
-            c if c.is_control() => {}
+            c if is_invisible(c) => {}
             c => out.push(c),
         }
     }
@@ -374,19 +379,39 @@ pub fn root_of_output_path(path: &Path) -> Option<PathBuf> {
     (root.parent().is_some()).then(|| root.to_path_buf())
 }
 
+/// The parents under which the CLI keeps its `claude-<uid>` tmp root.
+const TRUSTED_TMP_PARENTS: [&str; 2] = ["/tmp", "/private/tmp"];
+
+/// The root a CLI-reported output path may teach the validator: what
+/// [`root_of_output_path`] finds, provided it is `<tmp>/claude-<uid>` for the
+/// given `uid` with `<tmp>` one of `/tmp` and `/private/tmp`. A path that
+/// puts the CLI's files anywhere else (a project's `Documents` folder, say)
+/// teaches nothing, so a hostile report cannot widen what the daemon reads.
+pub fn learnable_root(path: &Path, uid: u32) -> Option<PathBuf> {
+    if path.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+        return None;
+    }
+    let root = root_of_output_path(path)?;
+    let name_ok = root.file_name().and_then(|n| n.to_str()) == Some(&format!("claude-{uid}"));
+    let parent_ok = root
+        .parent()
+        .is_some_and(|parent| TRUSTED_TMP_PARENTS.iter().any(|t| parent == Path::new(t)));
+    (name_ok && parent_ok).then_some(root)
+}
+
 fn default_tmp_root() -> PathBuf {
     let base = if cfg!(target_os = "macos") { "/private/tmp" } else { "/tmp" };
     PathBuf::from(base).join(format!("claude-{}", current_uid()))
 }
 
 #[cfg(unix)]
-fn current_uid() -> u32 {
+pub fn current_uid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
 }
 
 #[cfg(not(unix))]
-fn current_uid() -> u32 {
+pub fn current_uid() -> u32 {
     0
 }
 
@@ -394,9 +419,10 @@ fn current_uid() -> u32 {
 fn open_nofollow(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     // O_NONBLOCK: opening a FIFO that slipped in must not block the daemon.
+    // O_NOCTTY: opening a terminal device must not make it our controlling tty.
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
 }
 
@@ -1034,6 +1060,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn invisible_and_bidi_characters_are_removed_wherever_they_sit() {
+        let table: &[(char, &str)] = &[
+            ('\u{202E}', "right-to-left override"),
+            ('\u{202A}', "LRE"),
+            ('\u{202B}', "RLE"),
+            ('\u{202C}', "PDF"),
+            ('\u{202D}', "LRO"),
+            ('\u{2066}', "LRI"),
+            ('\u{2067}', "RLI"),
+            ('\u{2068}', "FSI"),
+            ('\u{2069}', "PDI"),
+            ('\u{200B}', "zero width space"),
+            ('\u{200C}', "ZWNJ"),
+            ('\u{200D}', "ZWJ"),
+            ('\u{200E}', "LRM"),
+            ('\u{200F}', "RLM"),
+            ('\u{2060}', "word joiner"),
+            ('\u{FEFF}', "BOM"),
+            ('\u{00AD}', "soft hyphen"),
+            ('\u{061C}', "arabic letter mark"),
+            ('\u{180E}', "mongolian vowel separator"),
+            ('\u{FE0F}', "variation selector 16"),
+            ('\u{E0041}', "tag latin capital a"),
+            ('\u{E0100}', "variation selector supplement"),
+            ('\u{2800}', "braille blank"),
+            ('\u{3164}', "hangul filler"),
+            ('\u{FFA0}', "halfwidth hangul filler"),
+            ('\u{2028}', "line separator"),
+            ('\u{2029}', "paragraph separator"),
+        ];
+        for (c, name) in table {
+            assert_eq!(sanitize(format!("a{c}b").as_bytes()), "ab", "U+{:04X} {name} must be removed", *c as u32);
+            assert_eq!(sanitize(format!("{c}{c}ab{c}").as_bytes()), "ab", "U+{:04X} {name} at the edges", *c as u32);
+        }
+    }
+
+    #[test]
+    fn a_reversed_filename_trick_shows_its_true_text() {
+        assert_eq!(sanitize("report\u{202E}fdp.exe".as_bytes()), "reportfdp.exe");
+    }
+
+    #[test]
+    fn ordinary_text_in_any_script_and_layout_whitespace_is_untouched() {
+        let text = "plain text\n\tindented caf\u{e9} na\u{ef}ve \u{65e5}\u{672c}\u{8a9e} \u{4e2d}\u{6587} \u{1f600} \u{2764} done\n";
+        assert_eq!(sanitize(text.as_bytes()), text);
+    }
+
+    #[test]
+    fn escape_sequences_are_still_removed_next_to_invisible_characters() {
+        assert_eq!(sanitize("a\u{202E}\x1b[31mb\x1b[0m\u{200B}\x1b]0;t\x07c".as_bytes()), "abc");
+    }
+
+    #[test]
+    fn a_preview_line_built_from_hostile_output_is_clean() {
+        let out = sanitize("building\n\u{202E}done \u{200B}ok\u{E0041}\n\n".as_bytes());
+        assert_eq!(last_nonempty_line(&out).as_deref(), Some("done ok"));
+    }
+
     // ── root_of_output_path ─────────────────────────────────────────────────
 
     #[test]
@@ -1062,6 +1147,65 @@ mod tests {
         assert_eq!(root_of_output_path(Path::new("tasks/b1.output")), None);
         assert_eq!(root_of_output_path(Path::new("b1.output")), None);
         assert_eq!(root_of_output_path(Path::new("")), None);
+    }
+
+    // ── learnable_root ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_cli_path_under_its_claude_uid_folder_in_tmp_teaches_that_folder() {
+        assert_eq!(
+            learnable_root(Path::new("/private/tmp/claude-502/-Users-h-repo/sess/tasks/b1.output"), 502),
+            Some(PathBuf::from("/private/tmp/claude-502"))
+        );
+        assert_eq!(
+            learnable_root(Path::new("/tmp/claude-502/-Users-h-repo/sess/tasks/b1.output"), 502),
+            Some(PathBuf::from("/tmp/claude-502"))
+        );
+    }
+
+    #[test]
+    fn a_path_that_is_not_in_the_cli_tmp_root_for_this_user_teaches_nothing() {
+        let cases: &[(&str, u32)] = &[
+            ("/Users/h/Documents/x/sess/tasks/t1.output", 502),
+            ("/Users/h/Documents/-work-repo/sess-1/tasks/t1.output", 502),
+            ("/private/tmp/claude-501/-Users-h-repo/sess/tasks/b1.output", 502), // someone else's
+            ("/tmp/claude-501/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/var/folders/ab/T/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/tmp/sub/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/private/tmp/sub/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/tmp/claude-502x/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/tmp/xclaude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/tmp/claude-/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/tmp/claude/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/tmp/claude-0502/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/elsewhere/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            ("/tmp/claude-502/-Users-h-repo/sess/out/b1.output", 502), // not a tasks folder
+            ("tmp/claude-502/-Users-h-repo/sess/tasks/b1.output", 502), // relative
+        ];
+        for (path, uid) in cases {
+            assert_eq!(learnable_root(Path::new(path), *uid), None, "{path} as uid {uid}");
+        }
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_the_tmp_root_teaches_nothing() {
+        let cases = [
+            "/tmp/claude-502/../../Users/h/x/sess/tasks/b.output",
+            "/tmp/claude-502/-repo/../sess/tasks/b.output",
+            "/tmp/../Users/claude-502/-repo/sess/tasks/b.output",
+            "/tmp/claude-502/-repo/sess/tasks/../tasks/b.output",
+        ];
+        for path in cases {
+            assert_eq!(learnable_root(Path::new(path), 502), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn the_real_default_root_for_this_user_is_learnable() {
+        let uid = current_uid();
+        let path = format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output");
+        assert_eq!(learnable_root(Path::new(&path), uid), Some(PathBuf::from(format!("/tmp/claude-{uid}"))));
     }
 
     #[test]

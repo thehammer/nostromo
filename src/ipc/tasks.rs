@@ -23,6 +23,7 @@
 //! [`TaskDetailMsg`], which is `LocalOnly` (see `peer.rs`).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value};
 
@@ -35,6 +36,11 @@ pub const VANISH_GRACE_MS: u64 = 3_000;
 
 /// Ended tasks kept per session, besides every task still running.
 pub const RETAINED_ENDED_TASKS: usize = 40;
+
+/// Tasks still running (or paused, or pending) kept per session. A task that
+/// would be the next one is refused and counted, never silently swapped for
+/// one the CLI still lists.
+pub const MAX_RUNNING_TASKS: usize = 200;
 
 /// Snapshots and details are published at most once per this many ms.
 pub const COALESCE_MS: u64 = 250;
@@ -559,6 +565,10 @@ pub struct TaskRegistry {
     next_seq: u64,
     dirty_snapshot: bool,
     dirty_details: HashSet<String>,
+    /// New tasks refused because [`MAX_RUNNING_TASKS`] were already running.
+    dropped: u64,
+    /// How many times [`Self::snapshot`] ran (diagnostics and tests).
+    snapshot_builds: AtomicU64,
 }
 
 impl TaskRegistry {
@@ -571,7 +581,8 @@ impl TaskRegistry {
     /// A frame naming an older `run_id` than the one held is late and changes
     /// nothing; a newer run of the same task replaces the earlier one.
     pub fn apply(&mut self, event: &TaskEvent, now: u64, tool_name: ToolNameLookup<'_>) {
-        let before_snapshot = self.snapshot(tool_name);
+        // What the wire shows of the tasks this event names, before it.
+        let before_meta = self.metas_of(&event.kind, tool_name);
         let touched = event_task_id(&event.kind).map(str::to_owned);
         let before_detail = touched
             .as_ref()
@@ -588,7 +599,7 @@ impl TaskRegistry {
         if let Some(entry) = touched.as_ref().and_then(|id| self.entries.get_mut(id)) {
             entry.resolve_tool_name(tool_name);
         }
-        self.retain();
+        let evicted = self.retain();
 
         if let Some(id) = touched {
             // A detail is published when it has text, or when it lost the
@@ -603,7 +614,9 @@ impl TaskRegistry {
                 self.dirty_details.insert(id);
             }
         }
-        if self.snapshot(tool_name) != before_snapshot {
+        // Only the tasks the event names (and the ones retention dropped) can
+        // differ: no need to build, twice per event, a snapshot of them all.
+        if evicted || self.metas_of(&event.kind, tool_name) != before_meta {
             self.dirty_snapshot = true;
         }
     }
@@ -666,6 +679,14 @@ impl TaskRegistry {
         true
     }
 
+    /// The wire form of each task `kind` names that exists, by name.
+    fn metas_of(&self, kind: &TaskEventKind, tool_name: ToolNameLookup<'_>) -> Vec<(String, Option<TaskMeta>)> {
+        event_task_ids(kind)
+            .into_iter()
+            .map(|id| (id.to_owned(), self.entries.get(id).map(|e| e.meta(tool_name))))
+            .collect()
+    }
+
     fn entries_in_order(&self) -> Vec<&TaskEntry> {
         let mut entries: Vec<&TaskEntry> = self.entries.values().collect();
         entries.sort_by_key(|e| e.seq);
@@ -674,6 +695,7 @@ impl TaskRegistry {
 
     /// Every task, in arrival order, as the wire shows it.
     pub fn snapshot(&self, tool_name: ToolNameLookup<'_>) -> Vec<TaskMeta> {
+        self.snapshot_builds.fetch_add(1, Ordering::Relaxed);
         self.entries_in_order()
             .into_iter()
             .map(|e| e.meta(tool_name))
@@ -740,17 +762,40 @@ impl TaskRegistry {
         self.entries.len()
     }
 
+    /// Tasks refused since the registry began because too many were running.
+    pub fn dropped_tasks(&self) -> u64 {
+        self.dropped
+    }
+
+    /// How many snapshots have been built since the registry began.
+    pub fn snapshot_builds(&self) -> u64 {
+        self.snapshot_builds.load(Ordering::Relaxed)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     // ── event handlers ──────────────────────────────────────────────────────
 
-    /// The entry a frame of `run_id` applies to: created if new, `None` when
-    /// the frame is late (older run than the held one). A newer run resets the
-    /// entry first.
-    fn entry_for(&mut self, id: &str, run_id: Option<&str>, now: u64) -> Option<&mut TaskEntry> {
+    /// The entry a frame of `run_id` applies to, `None` when the frame is late
+    /// (older run than the held one) or the task is unknown. A newer run
+    /// resets the entry first.
+    ///
+    /// Only a start (or a live level listing the task) may `create` an entry,
+    /// and only while fewer than [`MAX_RUNNING_TASKS`] tasks are running; a
+    /// refused task is counted in [`Self::dropped_tasks`]. Anything else
+    /// naming an unknown id (a task never started here, or one retention
+    /// already dropped) is ignored: it could never be told to end.
+    fn entry_for(&mut self, id: &str, run_id: Option<&str>, now: u64, create: bool) -> Option<&mut TaskEntry> {
         if !self.entries.contains_key(id) {
+            if !create {
+                return None;
+            }
+            if self.running_count() >= MAX_RUNNING_TASKS {
+                self.dropped += 1;
+                return None;
+            }
             let seq = self.next_seq;
             self.next_seq += 1;
             let mut entry = TaskEntry::new(id, seq, now);
@@ -771,7 +816,7 @@ impl TaskRegistry {
     }
 
     fn on_started(&mut self, e: &TaskStarted, now: u64) {
-        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now) else {
+        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now, true) else {
             return;
         };
         if let Some(t) = &e.task_type {
@@ -794,7 +839,7 @@ impl TaskRegistry {
     }
 
     fn on_progress(&mut self, e: &TaskProgress, now: u64) {
-        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now) else {
+        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now, false) else {
             return;
         };
         if entry.status.is_terminal() {
@@ -819,7 +864,7 @@ impl TaskRegistry {
     }
 
     fn on_updated(&mut self, e: &TaskUpdated, now: u64) {
-        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now) else {
+        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now, false) else {
             return;
         };
         let patch = &e.patch;
@@ -840,7 +885,7 @@ impl TaskRegistry {
     }
 
     fn on_notification(&mut self, e: &TaskNotification, now: u64) {
-        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now) else {
+        let Some(entry) = self.entry_for(&e.task_id, e.run_id.as_deref(), now, false) else {
             return;
         };
         if e.tool_use_id.is_some() && entry.tool_use_id.is_none() {
@@ -866,7 +911,7 @@ impl TaskRegistry {
     fn on_level(&mut self, level: &[LevelTask], now: u64) {
         let in_level: HashSet<&str> = level.iter().map(|t| t.task_id.as_str()).collect();
         for t in level {
-            let Some(entry) = self.entry_for(&t.task_id, t.run_id.as_deref(), now) else {
+            let Some(entry) = self.entry_for(&t.task_id, t.run_id.as_deref(), now, true) else {
                 continue;
             };
             entry.seen_in_level = true;
@@ -894,9 +939,14 @@ impl TaskRegistry {
         }
     }
 
+    /// Tasks not yet ended.
+    fn running_count(&self) -> usize {
+        self.entries.values().filter(|e| !e.status.is_terminal()).count()
+    }
+
     /// Keep every running task and the [`RETAINED_ENDED_TASKS`] most recently
-    /// ended; drop the rest with their details.
-    fn retain(&mut self) {
+    /// ended; drop the rest with their details. `true` when any was dropped.
+    fn retain(&mut self) -> bool {
         let mut ended: Vec<(u64, u64, String)> = self
             .entries
             .values()
@@ -904,13 +954,14 @@ impl TaskRegistry {
             .map(|e| (e.ended_at_ms.unwrap_or(e.started_at_ms), e.seq, e.id.clone()))
             .collect();
         if ended.len() <= RETAINED_ENDED_TASKS {
-            return;
+            return false;
         }
         ended.sort_by_key(|e| std::cmp::Reverse((e.0, e.1)));
         for (_, _, id) in ended.into_iter().skip(RETAINED_ENDED_TASKS) {
             self.entries.remove(&id);
             self.dirty_details.remove(&id);
         }
+        true
     }
 }
 
@@ -921,6 +972,14 @@ fn event_task_id(kind: &TaskEventKind) -> Option<&str> {
         TaskEventKind::Updated(e) => Some(&e.task_id),
         TaskEventKind::Notification(e) => Some(&e.task_id),
         TaskEventKind::LevelChanged(_) => None,
+    }
+}
+
+/// Every task id an event names: the one of a task event, all of a level's.
+fn event_task_ids(kind: &TaskEventKind) -> Vec<&str> {
+    match kind {
+        TaskEventKind::LevelChanged(level) => level.iter().map(|t| t.task_id.as_str()).collect(),
+        other => event_task_id(other).into_iter().collect(),
     }
 }
 
@@ -1504,9 +1563,16 @@ mod tests {
     }
 
     #[test]
-    fn a_late_frame_for_a_task_not_yet_known_is_just_the_first_news_of_it() {
+    fn a_frame_for_a_task_never_started_is_ignored_and_one_for_a_started_task_keeps_its_run() {
         let reg = registry_with(&[(&progress("t1", json!({"run_id": "run-001", "description": "hello"})), 1_000)]);
-        assert_eq!(one(&reg, "t1").run_id.as_deref(), Some("run-001"));
+        assert_eq!(reg.len(), 0, "progress alone does not make a task");
+
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 900),
+            (&progress("t1", json!({"run_id": "run-001", "description": "hello"})), 1_000),
+        ]);
+        let t = one(&reg, "t1");
+        assert_eq!((t.run_id.as_deref(), t.description.as_str()), (Some("run-001"), "hello"));
     }
 
     #[test]
@@ -1894,25 +1960,28 @@ mod tests {
 
     #[test]
     fn an_empty_usage_object_is_still_unknown() {
-        let reg = registry_with(&[(&progress("t1", json!({"usage": {}})), 1_000)]);
+        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": {}})), 1_000)]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses, t.duration_ms), (None, None, None));
     }
 
     #[test]
     fn usage_with_only_some_fields_sets_only_those() {
-        let reg = registry_with(&[(&progress("t1", json!({"usage": {"total_tokens": 50}})), 1_000)]);
+        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": {"total_tokens": 50}})), 1_000)]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (Some(50), None));
 
-        let reg = registry_with(&[(&progress("t1", json!({"usage": {"tool_uses": 4}})), 1_000)]);
+        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": {"tool_uses": 4}})), 1_000)]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (None, Some(4)));
     }
 
     #[test]
     fn a_reported_zero_is_a_zero() {
-        let reg = registry_with(&[(&progress("t1", json!({"usage": {"total_tokens": 0, "tool_uses": 0}})), 1_000)]);
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 900),
+            (&progress("t1", json!({"usage": {"total_tokens": 0, "tool_uses": 0}})), 1_000),
+        ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (Some(0), Some(0)));
     }
@@ -1920,6 +1989,7 @@ mod tests {
     #[test]
     fn later_usage_updates_the_fields_it_names_and_keeps_the_others() {
         let reg = registry_with(&[
+            (&started("t1", json!({})), 900),
             (&progress("t1", json!({"usage": {"total_tokens": 100, "tool_uses": 2}})), 1_000),
             (&progress("t1", json!({"usage": {"total_tokens": 250}})), 2_000),
             (&progress("t1", json!({"description": "no usage this time"})), 3_000),
@@ -1940,7 +2010,7 @@ mod tests {
 
     #[test]
     fn malformed_usage_is_ignored() {
-        let reg = registry_with(&[(&progress("t1", json!({"usage": "lots"})), 1_000)]);
+        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": "lots"})), 1_000)]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (None, None));
     }
@@ -1950,7 +2020,7 @@ mod tests {
     #[test]
     fn the_start_time_is_when_the_daemon_first_heard_of_the_task() {
         let reg = registry_with(&[
-            (&progress("t1", json!({"description": "early news"})), 500),
+            (&in_level(&["t1"]), 500),
             (&started("t1", json!({})), 1_000),
             (&progress("t1", json!({"description": "more"})), 2_000),
         ]);
@@ -2201,6 +2271,7 @@ mod tests {
     fn a_hundred_progress_events_in_a_second_make_at_most_five_snapshots_and_the_last_is_current() {
         let mut hub = TaskHub::new();
         let mut out = Vec::new();
+        out.extend(hub.on_event(&started("agt", json!({})), 0, &no_tools).into_iter().map(|o| (0, o)));
         for i in 0..100u64 {
             let now = i * 10;
             run_timer(&mut hub, now, &mut out);
@@ -2225,6 +2296,7 @@ mod tests {
     #[test]
     fn the_first_change_after_a_quiet_spell_is_published_in_the_same_call() {
         let mut hub = TaskHub::new();
+        hub.on_event(&started("t1", json!({})), 0, &no_tools);
         let first = hub.on_event(&progress("t1", json!({"description": "one"})), 1_000, &no_tools);
         assert_eq!(snapshot_in(&first).len(), 1);
 
@@ -2240,7 +2312,7 @@ mod tests {
     #[test]
     fn a_change_inside_the_window_waits_for_the_window_to_end() {
         let mut hub = TaskHub::new();
-        hub.on_event(&progress("t1", json!({"description": "one"})), 1_000, &no_tools);
+        hub.on_event(&started("t1", json!({"description": "one"})), 1_000, &no_tools);
 
         let early = hub.on_event(&progress("t1", json!({"description": "two"})), 1_249, &no_tools);
 
@@ -2256,10 +2328,11 @@ mod tests {
     fn an_event_that_changes_nothing_publishes_nothing_and_asks_for_no_wakeup() {
         let mut hub = TaskHub::new();
         let event = progress("t1", json!({"description": "same", "usage": {"total_tokens": 5}, "last_tool_name": "Read"}));
-        snapshot_in(&hub.on_event(&event, 1_000, &no_tools));
+        hub.on_event(&started("t1", json!({})), 1_000, &no_tools);
+        snapshot_in(&hub.on_event(&event, 1_250, &no_tools));
 
         // Well past the window, and inside it.
-        assert!(hub.on_event(&event, 1_100, &no_tools).is_empty());
+        assert!(hub.on_event(&event, 1_300, &no_tools).is_empty());
         assert!(hub.on_event(&event, 9_000, &no_tools).is_empty());
         assert_eq!(hub.next_wakeup(), None);
     }
@@ -2424,5 +2497,424 @@ mod tests {
         reg.tick(u64::MAX);
         reg.end_session(u64::MAX);
         let _ = reg.snapshot(&no_tools);
+    }
+
+    // ── text from the CLI arrives free of invisible characters ──────────────
+
+    /// Right-to-left override, zero width space and a tag character around
+    /// `a b c d`: what is left must be `abcd`.
+    fn hostile(text: &str) -> String {
+        let mut chars = text.chars();
+        let mut out = String::new();
+        for (i, c) in chars.by_ref().enumerate() {
+            out.push(c);
+            out.push(['\u{202E}', '\u{200B}', '\u{E0041}', '\u{2066}', '\u{FEFF}'][i % 5]);
+        }
+        out
+    }
+
+    #[test]
+    fn invisible_characters_never_reach_a_task_description_or_a_detail() {
+        let reg = registry_with(&[
+            (
+                &started("t1", json!({"description": hostile("abcd"), "prompt": hostile("pro")})),
+                1_000,
+            ),
+            (&progress("t1", json!({"summary": hostile("sum")})), 2_000),
+            (&notified("t1", "completed", json!({"summary": hostile("done")})), 3_000),
+        ]);
+
+        let meta = one(&reg, "t1");
+        let detail = reg.detail("t1").unwrap();
+
+        assert_eq!(meta.description, "abcd");
+        assert_eq!(detail.prompt.as_deref(), Some("pro"));
+        assert_eq!(detail.progress_summary.as_deref(), Some("sum"));
+        assert_eq!(detail.completion_summary.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn invisible_characters_are_dropped_from_a_description_changed_by_progress_updates_and_levels() {
+        let reg = registry_with(&[
+            (&in_level(&["t1"]), 500),
+            (&progress("t1", json!({"description": hostile("live")})), 1_000),
+            (&started("t2", json!({})), 1_000),
+            (&updated("t2", json!({"description": hostile("patched")})), 2_000),
+            (&level(json!([{"task_id": "t3", "task_type": "local_bash", "description": hostile("listed")}])), 3_000),
+        ]);
+        assert_eq!(one(&reg, "t1").description, "live");
+        assert_eq!(one(&reg, "t2").description, "patched");
+        assert_eq!(one(&reg, "t3").description, "listed");
+    }
+
+    #[test]
+    fn text_that_is_only_invisible_characters_leaves_no_detail() {
+        let reg = registry_with(&[(
+            &started("t1", json!({"prompt": "\u{202E}\u{200B}\u{E0041}", "task_type": "local_agent"})),
+            1_000,
+        )]);
+        assert_eq!(reg.detail("t1").and_then(|d| d.prompt), None);
+        assert!(reg.details().is_empty());
+    }
+
+    // ── only a start or a level makes a task ────────────────────────────────
+
+    /// Every kind of late news about `id`.
+    fn news_about(id: &str) -> Vec<(&'static str, TaskEvent)> {
+        vec![
+            ("progress", progress(id, json!({"description": "late", "usage": {"total_tokens": 9}, "summary": "s"}))),
+            ("progress with run", progress(id, json!({"run_id": "run-009", "description": "late"}))),
+            ("non-terminal patch", updated(id, json!({"status": "running", "description": "late"}))),
+            ("paused patch", updated(id, json!({"status": "paused"}))),
+            ("terminal patch", updated(id, json!({"status": "completed", "end_time": 5_000}))),
+            ("killed patch", updated(id, json!({"status": "killed"}))),
+            ("completed notification", notified(id, "completed", json!({"summary": "done"}))),
+            ("failed notification", notified(id, "failed", json!({}))),
+            ("stopped notification", notified(id, "stopped", json!({"reason": "worker_restart"}))),
+        ]
+    }
+
+    /// 45 tasks started and ended; the oldest five are dropped by retention.
+    fn registry_after_retention() -> TaskRegistry {
+        let mut reg = TaskRegistry::new();
+        for i in 0..45u64 {
+            let id = format!("e{i:02}");
+            reg.apply(&started(&id, json!({"prompt": format!("p{i}")})), 1_000 + i, &no_tools);
+            reg.apply(&notified(&id, "completed", json!({})), 2_000 + i * 10, &no_tools);
+        }
+        reg.take_dirty();
+        reg
+    }
+
+    fn assert_news_about_changes_nothing(reg: &mut TaskRegistry, id: &str) {
+        let before = snap(reg);
+        let details_before = reg.details();
+        for (label, event) in news_about(id) {
+            reg.apply(&event, 90_000, &no_tools);
+
+            assert_eq!(reg.len(), before.len(), "{label} changed the number of tasks");
+            assert_eq!(snap(reg), before, "{label} changed the snapshot");
+            assert_eq!(reg.details(), details_before, "{label} changed the details");
+            assert_eq!(reg.detail(id), None, "{label} made a detail for {id}");
+            assert!(!reg.is_dirty(), "{label} marked the registry dirty");
+            assert!(reg.take_dirty().is_clean(), "{label}");
+            assert!(!reg.tick(1_000_000), "{label} left something to end");
+            assert_eq!(reg.next_deadline(), None, "{label}");
+        }
+        assert!(!snap(reg).iter().any(|t| t.id == id), "{id} must not have appeared");
+    }
+
+    #[test]
+    fn news_about_a_task_never_seen_creates_no_task() {
+        let mut reg = TaskRegistry::new();
+        assert_news_about_changes_nothing(&mut reg, "ghost");
+        assert_eq!(reg.len(), 0);
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn news_about_a_task_never_seen_changes_nothing_next_to_known_tasks() {
+        let mut reg = registry_with(&[(&started("real", json!({"prompt": "p"})), 1_000)]);
+        reg.take_dirty();
+        assert_news_about_changes_nothing(&mut reg, "ghost");
+        assert_eq!(one(&reg, "real").status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn news_about_a_task_retention_already_dropped_does_not_bring_it_back() {
+        let mut reg = registry_after_retention();
+        assert!(!snap(&reg).iter().any(|t| t.id == "e00"), "e00 is among the oldest ended and gone");
+        assert_eq!(reg.len(), 40);
+
+        assert_news_about_changes_nothing(&mut reg, "e00");
+
+        assert_eq!(reg.len(), 40, "nothing was resurrected and nothing else was evicted");
+        assert!(snap(&reg).iter().any(|t| t.id == "e44"), "the newest ended task is still there");
+        assert!(snap(&reg).iter().any(|t| t.id == "e05"), "the oldest kept ended task is still there");
+    }
+
+    #[test]
+    fn late_news_about_an_unknown_task_publishes_nothing_and_asks_for_no_wakeup() {
+        let mut hub = TaskHub::new();
+        for (label, event) in news_about("ghost") {
+            assert!(hub.on_event(&event, 5_000, &no_tools).is_empty(), "{label}");
+            assert_eq!(hub.next_wakeup(), None, "{label}");
+        }
+        assert!(hub.on_tick(1_000_000, &no_tools).is_empty());
+        assert_eq!(hub.registry().len(), 0);
+        assert!(hub.registry().details().is_empty());
+    }
+
+    #[test]
+    fn a_level_that_lists_an_unknown_task_still_creates_it_and_later_news_applies() {
+        let mut reg = TaskRegistry::new();
+        reg.apply(&in_level(&["t1"]), 1_000, &no_tools);
+        assert_eq!(reg.len(), 1);
+
+        reg.apply(&progress("t1", json!({"description": "now known", "usage": {"total_tokens": 4}})), 2_000, &no_tools);
+        reg.apply(&notified("t1", "completed", json!({})), 3_000, &no_tools);
+
+        let t = one(&reg, "t1");
+        assert_eq!((t.description.as_str(), t.total_tokens, t.status), ("now known", Some(4), TaskStatus::Completed));
+    }
+
+    // ── the running cap ─────────────────────────────────────────────────────
+
+    fn running_id(i: u64) -> String {
+        format!("s{i:04}")
+    }
+
+    fn registry_at_the_cap() -> TaskRegistry {
+        let mut reg = TaskRegistry::new();
+        for i in 0..MAX_RUNNING_TASKS as u64 {
+            reg.apply(&started(&running_id(i), json!({})), 1_000 + i, &no_tools);
+        }
+        reg.take_dirty();
+        reg
+    }
+
+    #[test]
+    fn the_running_cap_is_two_hundred() {
+        assert_eq!(MAX_RUNNING_TASKS, 200);
+    }
+
+    #[test]
+    fn a_storm_of_starts_keeps_the_first_two_hundred_and_counts_the_rest_as_dropped() {
+        let mut hub = TaskHub::new();
+        for i in 0..5_000u64 {
+            hub.on_event(&started(&running_id(i), json!({})), 1_000 + i, &no_tools);
+        }
+
+        assert_eq!(hub.registry().len(), MAX_RUNNING_TASKS);
+        assert_eq!(hub.registry().dropped_tasks(), 4_800);
+        let (tasks, _) = hub.current(&no_tools);
+        let ids: Vec<String> = tasks.into_iter().map(|t| t.id).collect();
+        let first_two_hundred: Vec<String> = (0..MAX_RUNNING_TASKS as u64).map(running_id).collect();
+        assert_eq!(ids, first_two_hundred, "the earliest are kept, in order, none swapped for a later one");
+    }
+
+    #[test]
+    fn a_storm_of_starts_builds_no_more_snapshots_than_the_coalescing_allows() {
+        let mut hub = TaskHub::new();
+        for i in 0..5_000u64 {
+            hub.on_event(&started(&running_id(i), json!({})), 1_000 + i, &no_tools);
+        }
+
+        let builds = hub.registry().snapshot_builds();
+
+        let allowed = 5_000 / COALESCE_MS + 2;
+        assert!(builds <= allowed, "{builds} snapshots built for 5 s of events (allowed {allowed})");
+    }
+
+    #[test]
+    fn a_storm_inside_one_short_window_builds_at_most_two_snapshots() {
+        let mut hub = TaskHub::new();
+        // 5,000 events, all within 100 ms of injected time.
+        for i in 0..5_000u64 {
+            hub.on_event(&started(&running_id(i), json!({})), 1_000 + i / 50, &no_tools);
+        }
+
+        let builds = hub.registry().snapshot_builds();
+
+        assert!(builds <= 2, "{builds} snapshots built inside one 100 ms window");
+        assert_eq!(hub.registry().len(), MAX_RUNNING_TASKS);
+    }
+
+    #[test]
+    fn a_refused_task_changes_nothing_and_marks_nothing_dirty() {
+        let mut reg = registry_at_the_cap();
+        let before = snap(&reg);
+        let details_before = reg.details();
+
+        reg.apply(&started("one-too-many", json!({"prompt": "p", "description": "x"})), 9_000, &no_tools);
+
+        assert_eq!(reg.len(), MAX_RUNNING_TASKS);
+        assert_eq!(reg.dropped_tasks(), 1);
+        assert_eq!(snap(&reg), before, "nothing existing was evicted or changed");
+        assert_eq!(reg.details(), details_before);
+        assert_eq!(reg.detail("one-too-many"), None);
+        assert!(!reg.is_dirty());
+        assert!(reg.take_dirty().is_clean());
+    }
+
+    #[test]
+    fn news_about_a_refused_task_creates_nothing_either() {
+        let mut reg = registry_at_the_cap();
+        reg.apply(&started("refused", json!({})), 9_000, &no_tools);
+
+        assert_news_about_changes_nothing(&mut reg, "refused");
+
+        assert_eq!(reg.len(), MAX_RUNNING_TASKS);
+    }
+
+    #[test]
+    fn paused_and_pending_tasks_count_towards_the_cap() {
+        for raw in ["paused", "pending"] {
+            let mut reg = TaskRegistry::new();
+            for i in 0..MAX_RUNNING_TASKS as u64 - 1 {
+                reg.apply(&started(&running_id(i), json!({})), 1_000 + i, &no_tools);
+            }
+            reg.apply(&started("last", json!({})), 2_000, &no_tools);
+            reg.apply(&updated("last", json!({"status": raw})), 2_001, &no_tools);
+
+            reg.apply(&started("refused", json!({})), 3_000, &no_tools);
+
+            assert_eq!(reg.len(), MAX_RUNNING_TASKS, "{raw}");
+            assert_eq!(reg.dropped_tasks(), 1, "{raw}");
+        }
+    }
+
+    #[test]
+    fn ended_tasks_do_not_count_towards_the_running_cap() {
+        let mut reg = TaskRegistry::new();
+        for i in 0..45u64 {
+            let id = format!("e{i:02}");
+            reg.apply(&started(&id, json!({})), 100 + i, &no_tools);
+            reg.apply(&notified(&id, "completed", json!({})), 200 + i, &no_tools);
+        }
+
+        for i in 0..MAX_RUNNING_TASKS as u64 {
+            reg.apply(&started(&running_id(i), json!({})), 1_000 + i, &no_tools);
+        }
+
+        let snapshot = snap(&reg);
+        let running = snapshot.iter().filter(|t| !t.status.is_terminal()).count();
+        let ended = snapshot.iter().filter(|t| t.status.is_terminal()).count();
+        assert_eq!((running, ended), (MAX_RUNNING_TASKS, RETAINED_ENDED_TASKS));
+        assert_eq!(reg.dropped_tasks(), 0);
+    }
+
+    #[test]
+    fn once_a_running_task_ends_a_new_one_is_accepted_again() {
+        let mut reg = registry_at_the_cap();
+        reg.apply(&started("refused", json!({})), 5_000, &no_tools);
+        assert_eq!(reg.dropped_tasks(), 1);
+
+        reg.apply(&notified(&running_id(7), "completed", json!({})), 6_000, &no_tools);
+        reg.apply(&started("welcome", json!({"description": "fits now"})), 7_000, &no_tools);
+
+        assert_eq!(one(&reg, "welcome").description, "fits now");
+        assert_eq!(one(&reg, &running_id(7)).status, TaskStatus::Completed, "the ended task is kept as ever");
+        assert_eq!(reg.dropped_tasks(), 1);
+        assert!(!snap(&reg).iter().any(|t| t.id == "refused"));
+
+        reg.apply(&started("full-again", json!({})), 8_000, &no_tools);
+        assert_eq!(reg.dropped_tasks(), 2, "the cap holds again");
+        assert!(!snap(&reg).iter().any(|t| t.id == "full-again"));
+    }
+
+    #[test]
+    fn a_task_that_vanishes_makes_room_too() {
+        let mut reg = TaskRegistry::new();
+        reg.apply(&started("bg", json!({"task_type": "local_bash", "is_backgrounded": true})), 1_000, &no_tools);
+        reg.apply(&in_level(&["bg"]), 1_100, &no_tools);
+        for i in 0..MAX_RUNNING_TASKS as u64 - 1 {
+            reg.apply(&started(&running_id(i), json!({})), 2_000 + i, &no_tools);
+        }
+        reg.apply(&started("refused", json!({})), 3_000, &no_tools);
+        assert_eq!(reg.dropped_tasks(), 1);
+
+        reg.apply(&level(json!([])), 4_000, &no_tools);
+        assert!(reg.tick(4_000 + VANISH_GRACE_MS));
+        reg.apply(&started("accepted", json!({})), 8_000, &no_tools);
+
+        assert_eq!(one(&reg, "accepted").status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn events_for_a_known_task_are_never_refused_at_the_cap() {
+        let mut reg = registry_at_the_cap();
+        let known = running_id(3);
+
+        reg.apply(&progress(&known, json!({"description": "still going", "usage": {"total_tokens": 8}})), 5_000, &no_tools);
+        reg.apply(&updated(&known, json!({"is_backgrounded": true})), 5_100, &no_tools);
+        reg.apply(&started(&known, json!({"run_id": "run-2", "description": "second run"})), 5_200, &no_tools);
+        reg.apply(&notified(&running_id(4), "failed", json!({"summary": "boom"})), 5_300, &no_tools);
+        let ids: Vec<String> = (0..MAX_RUNNING_TASKS as u64).map(running_id).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        reg.apply(&in_level(&refs), 5_400, &no_tools);
+
+        assert_eq!(reg.dropped_tasks(), 0, "nothing known was turned away");
+        assert_eq!(one(&reg, &known).description, "second run");
+        assert_eq!(one(&reg, &running_id(4)).status, TaskStatus::Failed);
+        assert_eq!(reg.len(), MAX_RUNNING_TASKS);
+    }
+
+    #[test]
+    fn a_level_listing_three_hundred_new_tasks_creates_only_up_to_the_cap() {
+        let ids: Vec<String> = (0..300u64).map(running_id).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut reg = TaskRegistry::new();
+
+        reg.apply(&in_level(&refs), 1_000, &no_tools);
+
+        assert_eq!(reg.len(), MAX_RUNNING_TASKS);
+        assert_eq!(reg.dropped_tasks(), 100);
+        let kept: Vec<String> = snap(&reg).into_iter().map(|t| t.id).collect();
+        assert!(kept.iter().all(|id| ids.contains(id)));
+    }
+
+    #[test]
+    fn a_level_at_the_cap_refuses_its_new_tasks_without_touching_the_known_ones() {
+        let mut reg = registry_at_the_cap();
+        let before = snap(&reg);
+
+        reg.apply(&in_level(&["brand-new", "another-new"]), 9_000, &no_tools);
+
+        assert_eq!(reg.len(), MAX_RUNNING_TASKS);
+        assert_eq!(reg.dropped_tasks(), 2);
+        assert!(!snap(&reg).iter().any(|t| t.id == "brand-new"));
+        // The known tasks are not in that level, so they get their grace;
+        // the visible snapshot itself is unchanged.
+        assert_eq!(snap(&reg), before);
+    }
+
+    // ── work is bounded by the window, not by the event count ───────────────
+
+    #[test]
+    fn a_thousand_progress_events_in_one_window_build_at_most_two_snapshots_and_the_last_is_current() {
+        let mut hub = TaskHub::new();
+        let mut out = Vec::new();
+        out.extend(hub.on_event(&started("agt", json!({})), 1_000, &no_tools));
+        let builds_before = hub.registry().snapshot_builds();
+
+        // 1,000 events inside the 250 ms window that opened at 1,000.
+        for i in 0..1_000u64 {
+            let event = progress("agt", json!({"usage": {"total_tokens": i + 1}}));
+            out.extend(hub.on_event(&event, 1_001 + i / 5, &no_tools));
+        }
+        let mut timed = Vec::new();
+        run_timer(&mut hub, u64::MAX, &mut timed);
+        out.extend(timed.into_iter().map(|(_, o)| o));
+
+        let builds = hub.registry().snapshot_builds() - builds_before;
+
+        assert!(builds <= 2, "{builds} snapshots built for 1,000 events in one window");
+        let last = out
+            .iter()
+            .rev()
+            .find_map(|o| match o {
+                TaskOutput::Snapshot(s) => Some(s.clone()),
+                TaskOutput::Detail(_) => None,
+            })
+            .expect("a snapshot was published");
+        assert_eq!(last[0].total_tokens, Some(1_000), "the final publication is current");
+        assert_eq!(hub.next_wakeup(), None);
+    }
+
+    #[test]
+    fn events_that_change_nothing_build_no_snapshot_for_publication() {
+        let mut hub = TaskHub::new();
+        hub.on_event(&started("t1", json!({})), 1_000, &no_tools);
+        let event = progress("t1", json!({"description": "same"}));
+        hub.on_event(&event, 1_250, &no_tools);
+        let before = hub.registry().snapshot_builds();
+
+        for i in 0..100u64 {
+            assert!(hub.on_event(&event, 2_000 + i * 300, &no_tools).is_empty());
+        }
+
+        assert_eq!(hub.next_wakeup(), None);
+        assert!(hub.registry().snapshot_builds() - before <= 1, "an unchanged task is not re-published");
     }
 }
