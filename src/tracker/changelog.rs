@@ -22,7 +22,7 @@ pub struct ChangeLog {
 /// What a reader with a cursor gets.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Since {
-    /// No cursor: the reader gets the whole board.
+    /// No cursor (or one ahead of the log): the reader gets the whole board.
     Full,
     /// Changes after the cursor, excluding the reader's own.
     Changes(Vec<Change>),
@@ -56,7 +56,11 @@ impl ChangeLog {
         let Some(cursor) = cursor else {
             return Since::Full;
         };
-        if cursor >= self.seq {
+        if cursor > self.seq {
+            // Ahead of the log (it was reset): the reader's copy can't be trusted.
+            return Since::Full;
+        }
+        if cursor == self.seq {
             return Since::Changes(Vec::new());
         }
         let oldest_kept = self.entries.front().map_or(self.seq + 1, |c| c.seq);

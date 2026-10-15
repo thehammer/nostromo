@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use super::diff::diff;
 use super::format::{
-    is_reserved_tail_token, LINKS_PREFIX, MAX_OWNER_CHARS, parse, serialise_item, splice, validate_command_text, Malformed,
+    is_reserved_tail_token, parse, reread, serialise_item, splice, validate_command_text,
+    Malformed, ParsedBoard, LINKS_PREFIX, MAX_OWNER_CHARS, TAIL_CHARS,
 };
 use super::model::{
     generate_id, is_valid_id, Author, Board, Change, Env, Item, Kind, Link, LogLine, Stamp, Status,
@@ -149,7 +150,11 @@ fn check_size(old: &Board, new: &Board, at: Stamp) -> Result<(), OpError> {
             None => size += item_len(item),
         }
     }
-    for item in old.items.iter().filter(|i| !new_ids.contains(i.id.as_str())) {
+    for item in old
+        .items
+        .iter()
+        .filter(|i| !new_ids.contains(i.id.as_str()))
+    {
         size -= item_len(item);
     }
     for line in new.log.iter().skip(old.log.len()) {
@@ -219,8 +224,14 @@ impl Apply<'_> {
     }
 
     /// Edits the item at `pos`; a given `section` moves it to that section's end.
-    fn update(&mut self, pos: usize, fields: &Fields, section: Option<&str>) -> Result<(), OpError> {
+    fn update(
+        &mut self,
+        pos: usize,
+        fields: &Fields,
+        section: Option<&str>,
+    ) -> Result<(), OpError> {
         self.edit(pos, |item| fields.apply(item));
+        self.check_command(fields, &self.board.items[pos])?;
         if let Some(section) = section {
             let section = self.section(section)?;
             if self.board.items[pos].section != section {
@@ -249,15 +260,26 @@ impl Apply<'_> {
         let id = match &u.id {
             Some(id) => id.clone(),
             None => {
-                let taken: HashSet<String> = self.board.items.iter().map(|i| i.id.clone()).collect();
+                let taken: HashSet<String> =
+                    self.board.items.iter().map(|i| i.id.clone()).collect();
                 generate_id(text, &taken)
             }
         };
         let mut item = Item::new(&id, &section, text);
         fields.apply(&mut item);
+        self.check_command(fields, &item)?;
         item.updated_at = Some(self.at.now);
         let at = self.end_of_section(&section);
         self.board.items.insert(at, item);
+        Ok(())
+    }
+
+    /// A command item needs a command (else its note could read back as one).
+    fn check_command(&self, fields: &Fields, item: &Item) -> Result<(), OpError> {
+        let touched = fields.kind.is_some() || fields.command.is_some();
+        if touched && item.kind == Kind::Command && item.command.is_none() {
+            return Err(self.invalid("a command item needs a command".to_string()));
+        }
         Ok(())
     }
 
@@ -289,8 +311,8 @@ impl Apply<'_> {
             None => self.end_of_section(&section),
         };
         self.board.items.insert(insert_at, item);
-        let moved = old_section != section
-            || self.board.items.iter().map(|i| &i.id).ne(old_order.iter());
+        let moved =
+            old_section != section || self.board.items.iter().map(|i| &i.id).ne(old_order.iter());
         if moved {
             self.board.items[insert_at].updated_at = Some(self.at.now);
         }
@@ -379,7 +401,9 @@ impl Apply<'_> {
             return Err(self.invalid(format!("{field} is empty")));
         }
         if value.chars().any(char::is_control) {
-            return Err(self.invalid(format!("{field} must be one line with no control characters")));
+            return Err(self.invalid(format!(
+                "{field} must be one line with no control characters"
+            )));
         }
         if value.contains("<!--") {
             return Err(self.invalid(format!("{field} must not contain <!--")));
@@ -390,7 +414,11 @@ impl Apply<'_> {
     /// Validates every given upsert field up front.
     fn fields(&self, u: &Upsert) -> Result<Fields, OpError> {
         let mut f = Fields {
-            text: u.text.as_deref().map(|t| self.single_line("text", t)).transpose()?,
+            text: u
+                .text
+                .as_deref()
+                .map(|t| self.single_line("text", t))
+                .transpose()?,
             status: u.status.as_deref().map(|s| self.status(s)).transpose()?,
             ..Fields::default()
         };
@@ -401,10 +429,18 @@ impl Apply<'_> {
             f.note = Some(self.note(note)?);
         }
         if let Some(links) = &u.links {
-            f.links = Some(links.iter().map(|l| self.link(l)).collect::<Result<_, _>>()?);
+            f.links = Some(
+                links
+                    .iter()
+                    .map(|l| self.link(l))
+                    .collect::<Result<_, _>>()?,
+            );
         }
         if let Some(kind) = &u.kind {
-            f.kind = Some(Kind::from_wire(kind).ok_or_else(|| self.invalid(format!("invalid kind {kind:?}")))?);
+            f.kind = Some(
+                Kind::from_wire(kind)
+                    .ok_or_else(|| self.invalid(format!("invalid kind {kind:?}")))?,
+            );
         }
         if let Some(command) = &u.command {
             if let Err(e) = validate_command_text(command) {
@@ -416,7 +452,9 @@ impl Apply<'_> {
         if let Some(env) = &u.env {
             f.env = Some(match env.trim() {
                 "" => None,
-                e => Some(Env::from_wire(e).ok_or_else(|| self.invalid(format!("invalid env {e:?}")))?),
+                e => Some(
+                    Env::from_wire(e).ok_or_else(|| self.invalid(format!("invalid env {e:?}")))?,
+                ),
             });
         }
         Ok(f)
@@ -428,21 +466,28 @@ impl Apply<'_> {
         }
         let owner = self.single_line("owner", owner)?;
         if owner.chars().count() > MAX_OWNER_CHARS
-            || owner.contains(" · ")
-            || owner.contains(" — ")
+            || owner.contains(TAIL_CHARS)
             || is_reserved_tail_token(&owner)
         {
-            return Err(self.invalid(format!("owner {owner:?} can't be written in the file's tail")));
+            return Err(self.invalid(format!(
+                "owner {owner:?} can't be written in the file's tail"
+            )));
         }
         Ok(Some(owner))
     }
 
     fn note(&self, note: &str) -> Result<Option<String>, OpError> {
-        if note.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+        if note
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
             return Err(self.invalid("note has control characters".to_string()));
         }
+        // As the file stores it: no trailing whitespace, no blank edges.
+        let lines: Vec<&str> = note.split('\n').map(str::trim_end).collect();
+        let note = lines.join("\n");
         let note = note.trim_matches('\n');
-        if note.trim().is_empty() {
+        if note.is_empty() {
             return Ok(None);
         }
         if note.lines().any(|l| l.starts_with(LINKS_PREFIX)) {
@@ -457,11 +502,14 @@ impl Apply<'_> {
             LinkInput::Full { text, url } => (text.as_str(), url.as_deref()),
         };
         let text = self.single_line("link text", text)?;
-        if text.contains(" · ") || text.contains(['[', ']']) {
-            return Err(self.invalid(format!("link text {text:?} can't contain \" · \", [ or ]")));
+        if text.contains(TAIL_CHARS) || text.contains(['[', ']']) {
+            return Err(self.invalid(format!("link text {text:?} can't contain —, ·, [ or ]")));
         }
         if let Some(url) = url {
-            if url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '(' || c == ')') {
+            if url
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '(' || c == ')')
+            {
                 return Err(self.invalid(format!("link url {url:?} is not a plain url")));
             }
         }
@@ -483,8 +531,9 @@ struct Fields {
 }
 
 impl Fields {
-    /// Sets the given fields; `true` if anything changed. A command implies
-    /// kind `command` unless a kind is given.
+    /// Sets the given fields; `true` if anything changed. Kind and command
+    /// follow each other: setting a command makes the item a command,
+    /// clearing it (or setting kind `item`) makes it a plain item.
     fn apply(&self, item: &mut Item) -> bool {
         let mut changed = false;
         if let Some(text) = &self.text {
@@ -504,12 +553,20 @@ impl Fields {
         }
         if let Some(command) = &self.command {
             changed |= set(&mut item.command, command.clone());
-            if command.is_some() && self.kind.is_none() {
-                changed |= set(&mut item.kind, Kind::Command);
+            if self.kind.is_none() {
+                let kind = if command.is_some() {
+                    Kind::Command
+                } else {
+                    Kind::Item
+                };
+                changed |= set(&mut item.kind, kind);
             }
         }
         if let Some(kind) = self.kind {
             changed |= set(&mut item.kind, kind);
+            if kind == Kind::Item {
+                changed |= set(&mut item.command, None);
+            }
         }
         if let Some(env) = self.env {
             changed |= set(&mut item.env, env);
@@ -541,13 +598,19 @@ pub enum WriteError {
 pub struct Applied {
     /// The new file bytes.
     pub bytes: Vec<u8>,
-    /// The board the ops produced (re-parse `bytes` for spans).
+    /// `bytes` parsed: the board as written (human lines that just got a
+    /// marker carry its time).
+    pub parsed: ParsedBoard,
+    /// `parsed.board`.
     pub board: Board,
     pub changes: Vec<Change>,
 }
 
 /// The whole write path over bytes: parse, apply the batch, splice with
-/// marker assignment. An empty batch only assigns markers to human lines.
+/// marker assignment, and check the new bytes read back as the batch's
+/// board. An empty batch only assigns markers to human lines. A batch whose
+/// result can't be written faithfully (say, an item placed inside a prose
+/// section's unclosed code fence) is refused `invalid_args`.
 pub fn apply_to_file(
     bytes: &[u8],
     ops: &[Op],
@@ -557,9 +620,29 @@ pub fn apply_to_file(
     let parsed = parse(bytes)?;
     let (board, changes) = apply_batch(&parsed.board, ops, author, at)?;
     let bytes = splice(&parsed, &board, at, true);
+    let reparsed = reread(&bytes, &board).map_err(|bad| {
+        let index = ops
+            .iter()
+            .rposition(|op| bad.item_id.is_some() && op_item_id(op) == bad.item_id.as_deref())
+            .unwrap_or(ops.len().saturating_sub(1));
+        OpError::InvalidArgs {
+            index,
+            reason: format!("{bad}"),
+        }
+    })?;
     Ok(Applied {
         bytes,
-        board,
+        board: reparsed.board.clone(),
+        parsed: reparsed,
         changes,
     })
+}
+
+/// The item an op names, if any.
+fn op_item_id(op: &Op) -> Option<&str> {
+    match op {
+        Op::Upsert(u) => u.id.as_deref(),
+        Op::Status { id, .. } | Op::Remove { id } | Op::Move { id, .. } => Some(id),
+        Op::Log { .. } => None,
+    }
 }

@@ -33,19 +33,25 @@ pub fn compact_full(board: &Board) -> String {
             if let Some(env) = item.env {
                 tag.push_str(&format!(" {}", env.token()));
             }
-            out.push_str(&format!("- {} [{tag}] {}\n", item.id, quote_untrusted(&item.text)));
+            out.push_str(&format!(
+                "- {} [{tag}] {}\n",
+                item.id,
+                quote_untrusted(&item.text)
+            ));
             if let Some(command) = &item.command {
                 out.push_str("  ```\n");
-                for line in command.split('\n') {
-                    out.push_str(&format!("  {}\n", quote_untrusted(line)));
-                }
+                push_quoted_lines(&mut out, command);
                 out.push_str("  ```\n");
             }
-            for line in item.note.iter().flat_map(|n| n.split('\n')) {
-                out.push_str(&format!("  {}\n", quote_untrusted(line)));
+            if let Some(note) = &item.note {
+                push_quoted_lines(&mut out, note);
             }
             if !item.links.is_empty() {
-                let links: Vec<String> = item.links.iter().map(|l| quote_untrusted(&l.text)).collect();
+                let links: Vec<String> = item
+                    .links
+                    .iter()
+                    .map(|l| quote_untrusted(&l.text))
+                    .collect();
                 out.push_str(&format!("  Links: {}\n", links.join(" · ")));
             }
         }
@@ -54,7 +60,11 @@ pub fn compact_full(board: &Board) -> String {
         out.push_str("## Log\n");
         let skip = board.log.len().saturating_sub(LOG_LINES);
         for line in &board.log[skip..] {
-            out.push_str(&format!("- {} {}\n", line.time, quote_untrusted(&line.text)));
+            out.push_str(&format!(
+                "- {} {}\n",
+                line.time,
+                quote_untrusted(&line.text)
+            ));
         }
     }
     out
@@ -123,7 +133,11 @@ fn quote_value(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(quote_value).collect()),
         Value::Object(map) => match map.get("text") {
             Some(Value::String(text)) if map.contains_key("kind") => json!(quote_untrusted(text)),
-            _ => Value::Object(map.iter().map(|(k, v)| (k.clone(), quote_value(v))).collect()),
+            _ => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), quote_value(v)))
+                    .collect(),
+            ),
         },
         other => other.clone(),
     }
@@ -136,10 +150,23 @@ fn quote_value(value: &Value) -> Value {
 /// characters with `…[truncated]`.
 pub fn quote_untrusted(text: &str) -> String {
     let visible = make_visible(&strip_escapes(text));
-    let neutral = neutralise_note_tags(&visible);
-    match neutral.char_indices().nth(QUOTE_CAP_CHARS) {
-        Some((cut, _)) => format!("{}{TRUNCATED}", &neutral[..cut]),
-        None => neutral,
+    cap(&neutralise_note_tags(&visible))
+}
+
+/// A multi-line field, indented two spaces, each line quoted, the field as a
+/// whole capped at [`QUOTE_CAP_CHARS`].
+fn push_quoted_lines(out: &mut String, field: &str) {
+    let capped = cap(field);
+    for line in capped.split('\n') {
+        out.push_str(&format!("  {}\n", quote_untrusted(line)));
+    }
+}
+
+/// The first [`QUOTE_CAP_CHARS`] characters, plus [`TRUNCATED`] if cut.
+fn cap(text: &str) -> String {
+    match text.char_indices().nth(QUOTE_CAP_CHARS) {
+        Some((cut, _)) => format!("{}{TRUNCATED}", &text[..cut]),
+        None => text.to_string(),
     }
 }
 

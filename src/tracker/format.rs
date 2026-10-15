@@ -129,7 +129,11 @@ pub fn serialise_item(item: &Item, at: Stamp, eol: &str) -> String {
     tail.extend(item.owner.clone());
     tail.extend(item.env.map(|e| e.token().to_string()));
     tail.push(at.hhmm(updated));
-    let check = if item.status == Status::Done { 'x' } else { ' ' };
+    let check = if item.status == Status::Done {
+        'x'
+    } else {
+        ' '
+    };
     let mut out = format!(
         "- [{check}] {} — {} {}{eol}",
         item.text,
@@ -159,6 +163,51 @@ pub fn serialise_item(item: &Item, at: Stamp, eol: &str) -> String {
     out
 }
 
+/// Written bytes that don't read back as the board they were written from.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{}", match item_id {
+    Some(id) => format!("item {id} can't be written so that it reads back the same"),
+    None => "the board can't be written so that it reads back the same".to_string(),
+})]
+pub struct Unwritable {
+    /// The first item that differs; `None` for the Log, sections or a parse
+    /// failure.
+    pub item_id: Option<String>,
+}
+
+/// Parses bytes just written from `expected` and checks they read back as it:
+/// same sections, same Log, and every item equal apart from `updated_at`
+/// (a marker just appended to a human line sets it).
+pub fn reread(bytes: &[u8], expected: &Board) -> Result<ParsedBoard, Unwritable> {
+    let whole = || Unwritable { item_id: None };
+    let parsed = parse(bytes).map_err(|_| whole())?;
+    let board = &parsed.board;
+    if board.sections != expected.sections || board.log != expected.log {
+        return Err(whole());
+    }
+    let read: HashMap<&str, &Item> = board.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    for item in &expected.items {
+        let same = read.get(item.id.as_str()).is_some_and(|got| {
+            Item {
+                updated_at: None,
+                ..(*got).clone()
+            } == Item {
+                updated_at: None,
+                ..item.clone()
+            }
+        });
+        if !same {
+            return Err(Unwritable {
+                item_id: Some(item.id.clone()),
+            });
+        }
+    }
+    if board.items.len() != expected.items.len() {
+        return Err(whole());
+    }
+    Ok(parsed)
+}
+
 /// The default sections of a new board.
 pub const DEFAULT_SECTIONS: [&str; 7] = [
     "Now",
@@ -172,7 +221,11 @@ pub const DEFAULT_SECTIONS: [&str; 7] = [
 
 /// A new board's text. Empty `sections` means [`DEFAULT_SECTIONS`].
 pub fn template(title: &str, sections: &[&str]) -> String {
-    let sections = if sections.is_empty() { &DEFAULT_SECTIONS[..] } else { sections };
+    let sections = if sections.is_empty() {
+        &DEFAULT_SECTIONS[..]
+    } else {
+        sections
+    };
     let mut out = format!("# {}\n", title.trim());
     for section in sections {
         out.push_str(&format!("\n## {}\n", section.trim()));
@@ -221,6 +274,9 @@ pub fn is_invisible(ch: char) -> bool {
 
 pub(crate) const LINKS_PREFIX: &str = "Links: ";
 const TAIL_SEP: &str = " — ";
+/// Owners and link text can't contain these: they'd split the tail or the
+/// `Links:` line differently on the next read.
+pub(crate) const TAIL_CHARS: [char; 2] = ['—', '·'];
 const TOKEN_SEP: &str = " · ";
 const MARKER_START: &str = "<!-- #";
 pub(crate) const MAX_OWNER_CHARS: usize = 32;
@@ -247,7 +303,11 @@ fn split_lines(source: &str) -> Vec<Line> {
         let (content_end, end) = match bytes[start..].iter().position(|b| *b == b'\n') {
             Some(nl) => {
                 let nl = start + nl;
-                let content_end = if nl > start && bytes[nl - 1] == b'\r' { nl - 1 } else { nl };
+                let content_end = if nl > start && bytes[nl - 1] == b'\r' {
+                    nl - 1
+                } else {
+                    nl
+                };
                 (content_end, nl + 1)
             }
             None => (bytes.len(), bytes.len()),
@@ -321,7 +381,9 @@ fn parse_marker(text: &str) -> Option<Marker> {
     let inner = text.strip_prefix(MARKER_START)?.strip_suffix(" -->")?;
     let mut parts = inner.split(' ');
     let id = parts.next().filter(|id| is_valid_id(id))?;
-    let secs_text = parts.next().filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))?;
+    let secs_text = parts
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))?;
     let secs: i64 = secs_text.parse().ok()?;
     DateTime::from_timestamp(secs, 0)?;
     let mut marker = Marker {
@@ -487,16 +549,23 @@ impl<'a> Parser<'a> {
             if let Some(open) = Fence::open(line) {
                 fence = Some(open);
                 self.loose(i);
-            } else if let Some(title) = line.strip_prefix("# ").filter(|_| self.board.title.is_none()) {
+            } else if let Some(title) = line
+                .strip_prefix("# ")
+                .filter(|_| self.board.title.is_none())
+            {
                 self.board.title = Some(title.trim().to_string());
                 self.node(SegmentKind::Title, i, i);
             } else if let Some(heading) = line.strip_prefix("## ") {
                 context = self.heading(i, heading.trim(), &mut section_ids);
-            } else if let (Some(checked), Context::Section(section)) = (task_prefix(line), context) {
+            } else if let (Some(checked), Context::Section(section)) = (task_prefix(line), context)
+            {
                 let last = self.continuation_end(i);
                 self.item(i, last, checked, section)?;
                 i = last;
-            } else if let Some(caps) = log_line_re().captures(line).filter(|_| context == Context::Log) {
+            } else if let Some(caps) = log_line_re()
+                .captures(line)
+                .filter(|_| context == Context::Log)
+            {
                 let index = self.board.log.len();
                 self.board.log.push(LogLine {
                     time: caps[1].to_string(),
@@ -565,7 +634,10 @@ impl<'a> Parser<'a> {
             self.push_segment(SegmentKind::Blank, from, until - 1);
             return;
         };
-        let last = (from..until).rev().find(|&j| !self.is_blank(j)).unwrap_or(first);
+        let last = (from..until)
+            .rev()
+            .find(|&j| !self.is_blank(j))
+            .unwrap_or(first);
         if first > from {
             self.push_segment(SegmentKind::Blank, from, first - 1);
         }
@@ -589,7 +661,13 @@ impl<'a> Parser<'a> {
         self.segments.push(Segment { kind, span });
     }
 
-    fn item(&mut self, first: usize, last: usize, checked: bool, section: usize) -> Result<(), Malformed> {
+    fn item(
+        &mut self,
+        first: usize,
+        last: usize,
+        checked: bool,
+        section: usize,
+    ) -> Result<(), Malformed> {
         let (text, tail, marker) = split_task_line(&self.content(first)[6..], first + 1)?;
         let status = match (checked, tail.status) {
             (true, _) => Status::Done,
@@ -600,7 +678,9 @@ impl<'a> Parser<'a> {
         item.status = status;
         item.owner = tail.owner;
         item.env = tail.env;
-        let block: Vec<&str> = (first + 1..=last).map(|j| strip_indent(self.content(j))).collect();
+        let block: Vec<&str> = (first + 1..=last)
+            .map(|j| strip_indent(self.content(j)))
+            .collect();
         let is_cmd = marker.as_ref().is_some_and(|m| m.cmd);
         read_block(&mut item, &block, is_cmd);
         if let Some(m) = &marker {
@@ -699,7 +779,10 @@ fn read_block(item: &mut Item, block: &[&str], is_cmd: bool) {
     let mut rest = block;
     if is_cmd {
         if let Some(fence) = block.first().and_then(|l| Fence::open(l)) {
-            let close = block[1..].iter().position(|l| fence.closes(l)).map(|p| p + 1);
+            let close = block[1..]
+                .iter()
+                .position(|l| fence.closes(l))
+                .map(|p| p + 1);
             let end = close.unwrap_or(block.len());
             item.command = Some(block[1..end].join("\n"));
             rest = &block[(end + 1).min(block.len())..];
@@ -728,7 +811,10 @@ fn read_block(item: &mut Item, block: &[&str], is_cmd: bool) {
     while note.last().is_some_and(|l| l.is_empty()) {
         note.pop();
     }
-    let start = note.iter().position(|l| !l.is_empty()).unwrap_or(note.len());
+    let start = note
+        .iter()
+        .position(|l| !l.is_empty())
+        .unwrap_or(note.len());
     if start < note.len() {
         item.note = Some(note[start..].join("\n"));
     }
@@ -776,7 +862,12 @@ struct Splicer<'a> {
 }
 
 impl<'a> Splicer<'a> {
-    fn new(parsed: &'a ParsedBoard, target: &'a Board, at: Stamp, assign_markers: bool) -> Splicer<'a> {
+    fn new(
+        parsed: &'a ParsedBoard,
+        target: &'a Board,
+        at: Stamp,
+        assign_markers: bool,
+    ) -> Splicer<'a> {
         let source = &parsed.source;
         let eol = match source.find('\n') {
             Some(nl) if nl > 0 && source.as_bytes()[nl - 1] == b'\r' => "\r\n",
@@ -877,10 +968,15 @@ impl<'a> Splicer<'a> {
     /// section's last non-blank segment; `None` when there is no Log section.
     fn log_tail_segment(&self) -> Option<usize> {
         let segments = &self.parsed.segments;
-        if let Some(last) = segments.iter().rposition(|s| matches!(s.kind, SegmentKind::LogLine(_))) {
+        if let Some(last) = segments
+            .iter()
+            .rposition(|s| matches!(s.kind, SegmentKind::LogLine(_)))
+        {
             return Some(last);
         }
-        let heading = segments.iter().position(|s| s.kind == SegmentKind::LogHeading)?;
+        let heading = segments
+            .iter()
+            .position(|s| s.kind == SegmentKind::LogHeading)?;
         let mut tail = heading;
         for (index, segment) in segments.iter().enumerate().skip(heading + 1) {
             match segment.kind {
@@ -954,7 +1050,11 @@ impl<'a> Splicer<'a> {
         let spans = &self.parsed.item_spans[index];
         if self.parsed.board.items[index] != *item {
             let task_end = spans.task_line.end;
-            let eol = if source[task_end..].starts_with("\r\n") { "\r\n" } else { self.eol };
+            let eol = if source[task_end..].starts_with("\r\n") {
+                "\r\n"
+            } else {
+                self.eol
+            };
             out.push(&serialise_item(item, self.at, eol));
             return;
         }

@@ -213,12 +213,26 @@ fn board_60_fixture_has_sixty_items_in_six_sections_and_a_log() {
     let titles: Vec<&str> = b.sections.iter().map(|s| s.title.as_str()).collect();
     assert_eq!(
         titles,
-        ["Now", "Next", "Waiting on you", "Done", "Findings", "Loose ends"]
+        [
+            "Now",
+            "Next",
+            "Waiting on you",
+            "Done",
+            "Findings",
+            "Loose ends"
+        ]
     );
     let section_ids: Vec<&str> = b.sections.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(
         section_ids,
-        ["now", "next", "waiting-on-you", "done", "findings", "loose-ends"]
+        [
+            "now",
+            "next",
+            "waiting-on-you",
+            "done",
+            "findings",
+            "loose-ends"
+        ]
     );
     assert_eq!(b.log.len(), 12);
     assert_eq!(ids_of(b).iter().collect::<HashSet<_>>().len(), 60);
@@ -238,12 +252,13 @@ fn board_60_fixture_has_sixty_items_in_six_sections_and_a_log() {
 fn board_60_items_are_in_canonical_form_so_regenerating_them_is_byte_identical() {
     let (src, parsed) = board60();
     for item in &parsed.board.items {
-        let at = item.updated_at.expect("every fixture item has a marker time");
+        let at = item
+            .updated_at
+            .expect("every fixture item has a marker time");
         let regenerated = serialise_item(item, Stamp::utc(at), "\n");
         let span = parsed.item_span(&item.id).unwrap();
         assert_eq!(
-            regenerated,
-            &src[span],
+            regenerated, &src[span],
             "item {} does not regenerate to its own bytes",
             item.id
         );
@@ -268,7 +283,11 @@ fn parse_reads_sections_title_log_and_duplicate_section_ids() {
     assert_eq!(b.title.as_deref(), Some("My title"));
     let ids: Vec<&str> = b.sections.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(ids, ["now", "now-2", "waiting-on-you"]);
-    assert_eq!(b.log.len(), 1, "## LOG (any case) is the Log, not a section");
+    assert_eq!(
+        b.log.len(),
+        1,
+        "## LOG (any case) is the Log, not a section"
+    );
     assert_eq!(b.log[0].time, "10:42");
     assert_eq!(b.log[0].text, "started");
 
@@ -294,7 +313,10 @@ fn checkbox_and_tail_decide_status_owner_env_and_text() {
     let get = |id: &str| b.item(id).unwrap_or_else(|| panic!("item {id}"));
 
     let a1 = get("a-1");
-    assert_eq!((a1.status, a1.owner.as_deref()), (Status::Done, Some("cody")));
+    assert_eq!(
+        (a1.status, a1.owner.as_deref()),
+        (Status::Done, Some("cody"))
+    );
     assert_eq!(a1.text, "Ship one");
     assert_eq!(get("a-2").status, Status::Todo, "unticked 'done' is todo");
     assert_eq!(get("a-3").status, Status::Todo);
@@ -303,12 +325,23 @@ fn checkbox_and_tail_decide_status_owner_env_and_text() {
     assert_eq!(a4.status, Status::InProgress);
     assert_eq!(a4.env, Some(Env::Prod));
     assert_eq!(a4.text, "Ship four");
-    assert_eq!(get("a-5").text, "Fix a — b thing", "only the last ' — ' starts the tail");
+    assert_eq!(
+        get("a-5").text,
+        "Fix a — b thing",
+        "only the last ' — ' starts the tail"
+    );
     assert_eq!(get("a-5").status, Status::Blocked);
     let a6 = get("a-6");
-    assert_eq!((a6.owner.as_deref(), a6.env), (Some("prod"), None), "env tokens are exact case");
+    assert_eq!(
+        (a6.owner.as_deref(), a6.env),
+        (Some("prod"), None),
+        "env tokens are exact case"
+    );
     let a7 = get("a-7");
-    assert_eq!(a7.text, "Ship seven — see notes · and the ticket", "two owner tokens: not a tail");
+    assert_eq!(
+        a7.text, "Ship seven — see notes · and the ticket",
+        "two owner tokens: not a tail"
+    );
     assert_eq!(a7.owner, None);
     assert_eq!(
         get("a-8").text,
@@ -347,7 +380,13 @@ fn item_blocks_hold_command_note_links_and_swallow_indented_task_lines() {
     let kinds: Vec<LinkKind> = cmd.links.iter().map(|l| l.kind).collect();
     assert_eq!(
         kinds,
-        [LinkKind::Pr, LinkKind::Jira, LinkKind::Sentry, LinkKind::Run, LinkKind::File]
+        [
+            LinkKind::Pr,
+            LinkKind::Jira,
+            LinkKind::Sentry,
+            LinkKind::Run,
+            LinkKind::File
+        ]
     );
     assert_eq!(
         b.item("plain-1").unwrap().note.as_deref(),
@@ -375,12 +414,22 @@ fn round_trip_holds_for_a_template_board_and_for_crlf_and_missing_final_newline(
     let variants: Vec<(&str, Vec<u8>)> = vec![
         ("template", tpl.clone().into_bytes()),
         ("template CRLF", tpl.replace('\n', "\r\n").into_bytes()),
-        ("template no final newline", tpl.trim_end_matches('\n').as_bytes().to_vec()),
-        ("board-60 no final newline", fixture_str("board-60.md").trim_end().as_bytes().to_vec()),
+        (
+            "template no final newline",
+            tpl.trim_end_matches('\n').as_bytes().to_vec(),
+        ),
+        (
+            "board-60 no final newline",
+            fixture_str("board-60.md").trim_end().as_bytes().to_vec(),
+        ),
     ];
     for (name, bytes) in variants {
         let parsed = parse_ok(&bytes);
-        assert_bytes_eq(&splice(&parsed, &parsed.board, stamp0(), false), &bytes, name);
+        assert_bytes_eq(
+            &splice(&parsed, &parsed.board, stamp0(), false),
+            &bytes,
+            name,
+        );
     }
 }
 
@@ -388,15 +437,32 @@ fn round_trip_holds_for_a_template_board_and_for_crlf_and_missing_final_newline(
 fn template_has_the_default_sections_and_no_items_and_custom_sections_are_used() {
     let parsed = parse_ok(template("Sentry triage", &[]).as_bytes());
     assert_eq!(parsed.board.title.as_deref(), Some("Sentry triage"));
-    let titles: Vec<&str> = parsed.board.sections.iter().map(|s| s.title.as_str()).collect();
+    let titles: Vec<&str> = parsed
+        .board
+        .sections
+        .iter()
+        .map(|s| s.title.as_str())
+        .collect();
     assert_eq!(
         titles,
-        ["Now", "Next", "Waiting on you", "Done", "Findings", "Loose ends"]
+        [
+            "Now",
+            "Next",
+            "Waiting on you",
+            "Done",
+            "Findings",
+            "Loose ends"
+        ]
     );
     assert!(parsed.board.items.is_empty());
 
     let custom = parse_ok(template("T", &["Alpha", "Beta"]).as_bytes());
-    let ids: Vec<&str> = custom.board.sections.iter().map(|s| s.id.as_str()).collect();
+    let ids: Vec<&str> = custom
+        .board
+        .sections
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect();
     assert!(ids.contains(&"alpha") && ids.contains(&"beta"));
 }
 
@@ -421,7 +487,11 @@ fn marking_an_item_done_changes_only_that_items_bytes() {
     .unwrap();
     let out = String::from_utf8(applied.bytes).unwrap();
 
-    assert_eq!(&out[..span.start], &src[..span.start], "bytes before the item");
+    assert_eq!(
+        &out[..span.start],
+        &src[..span.start],
+        "bytes before the item"
+    );
     assert!(out.ends_with(&src[span.end..]), "bytes after the item");
 
     let new_span = replaced_span(&out, &src, &span);
@@ -470,7 +540,11 @@ fn upserting_only_a_note_changes_only_that_items_bytes() {
     let old_lines: Vec<&str> = src[span.clone()].lines().collect();
     assert_eq!(new_lines.len(), old_lines.len() + 1);
     assert_eq!(new_lines[1], "  A fresh note");
-    assert_eq!(new_lines[2..], old_lines[1..], "links line kept, after the note");
+    assert_eq!(
+        new_lines[2..],
+        old_lines[1..],
+        "links line kept, after the note"
+    );
     assert_eq!(
         new_lines[0].rsplit_once(" · ").unwrap().0,
         old_lines[0].rsplit_once(" · ").unwrap().0,
@@ -494,7 +568,10 @@ fn logging_appends_one_line_at_the_end_and_touches_nothing_else() {
     let reparsed = parse_ok(&out);
     assert_eq!(reparsed.board.log.len(), 13);
     assert_eq!(reparsed.board.log.last().unwrap().time, "08:15");
-    assert_eq!(reparsed.board.log.last().unwrap().text, "Cody: deployed the fix");
+    assert_eq!(
+        reparsed.board.log.last().unwrap().text,
+        "Cody: deployed the fix"
+    );
 }
 
 #[test]
@@ -510,7 +587,10 @@ fn logging_into_a_file_without_a_final_newline_keeps_it_that_way() {
     assert!(out.starts_with(src.as_bytes()));
     assert!(!out.ends_with(b"\n"));
     let reparsed = parse_ok(&out);
-    assert_eq!(reparsed.board.log.last().unwrap().text, "no trailing newline");
+    assert_eq!(
+        reparsed.board.log.last().unwrap().text,
+        "no trailing newline"
+    );
     assert_eq!(reparsed.board.log.len(), 13);
 }
 
@@ -705,14 +785,22 @@ fn two_hundred_random_single_item_edits_never_touch_bytes_outside_the_item() {
             .unwrap_or_else(|e| panic!("{ctx}: refused: {e}"));
         let out = applied.bytes;
 
-        assert_bytes_eq(&out[..span.start], &src.as_bytes()[..span.start], &format!("{ctx}: prefix"));
+        assert_bytes_eq(
+            &out[..span.start],
+            &src.as_bytes()[..span.start],
+            &format!("{ctx}: prefix"),
+        );
         assert!(
             out.len() >= span.start && out.ends_with(&src.as_bytes()[span.end..]),
             "{ctx}: suffix after the item changed"
         );
 
         let reparsed = parse_ok(&out);
-        assert_eq!(ids_of(&reparsed.board), original_ids, "{ctx}: item order/ids");
+        assert_eq!(
+            ids_of(&reparsed.board),
+            original_ids,
+            "{ctx}: item order/ids"
+        );
         assert_eq!(reparsed.board.sections, parsed.board.sections, "{ctx}");
         assert_eq!(reparsed.board.prose, parsed.board.prose, "{ctx}");
         assert_eq!(reparsed.board.log, parsed.board.log, "{ctx}");
@@ -733,12 +821,14 @@ fn two_hundred_random_single_item_edits_never_touch_bytes_outside_the_item() {
             let got = reparsed.board.item(&orig.id).unwrap();
             assert_eq!(got.updated_at, Some(now), "{ctx}: updated-at is the stamp");
             assert!(!applied.changes.is_empty(), "{ctx}: a change was recorded");
-            let new_span = std::str::from_utf8(
-                &out[span.start..out.len() - (src.len() - span.end)],
-            )
-            .unwrap();
+            let new_span =
+                std::str::from_utf8(&out[span.start..out.len() - (src.len() - span.end)]).unwrap();
             let first = new_span.lines().next().unwrap();
-            let box_ = if expected.status == Status::Done { "- [x] " } else { "- [ ] " };
+            let box_ = if expected.status == Status::Done {
+                "- [x] "
+            } else {
+                "- [ ] "
+            };
             assert!(first.starts_with(box_), "{ctx}: {first:?}");
             assert!(
                 first.contains(&format!(
@@ -752,7 +842,10 @@ fn two_hundred_random_single_item_edits_never_touch_bytes_outside_the_item() {
         }
         src = String::from_utf8(out).unwrap();
     }
-    assert!(real_changes > 150, "generator should mostly make real edits: {real_changes}");
+    assert!(
+        real_changes > 150,
+        "generator should mostly make real edits: {real_changes}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -775,8 +868,14 @@ fn handwritten_fixture_is_crlf_without_a_final_newline_and_is_readable() {
     assert_eq!(b.items.len(), 10);
     assert_eq!(b.title.as_deref(), Some("Handwritten notes"));
     let rotate = item_by_text(&b, "Rotate keys");
-    assert_eq!((rotate.status, rotate.owner.as_deref()), (Status::Blocked, Some("pat")));
-    assert_eq!(item_by_text(&b, "Send the weekly update").status, Status::Done);
+    assert_eq!(
+        (rotate.status, rotate.owner.as_deref()),
+        (Status::Blocked, Some("pat"))
+    );
+    assert_eq!(
+        item_by_text(&b, "Send the weekly update").status,
+        Status::Done
+    );
     assert!(b
         .items
         .iter()
@@ -786,15 +885,21 @@ fn handwritten_fixture_is_crlf_without_a_final_newline_and_is_readable() {
         item_by_text(&b, "Fix flaky test — see notes · and the ticket").owner,
         None
     );
-    assert!(b
-        .items
-        .iter()
-        .any(|i| i.text.starts_with("Draft the postmortem — a very long trailing remark")));
+    assert!(b.items.iter().any(|i| i
+        .text
+        .starts_with("Draft the postmortem — a very long trailing remark")));
     // The fenced fake item and the indented child are not items.
     assert!(!b.items.iter().any(|i| i.text.contains("not an item")));
-    assert!(!b.items.iter().any(|i| i.text.contains("indented child task")));
+    assert!(!b
+        .items
+        .iter()
+        .any(|i| i.text.contains("indented child task")));
     let parent = item_by_text(&b, "Parent task with a child");
-    assert!(parent.note.as_deref().unwrap().contains("- [ ] indented child task"));
+    assert!(parent
+        .note
+        .as_deref()
+        .unwrap()
+        .contains("- [ ] indented child task"));
     // Markerless lines still get unique, valid ids.
     let id_re = Regex::new(r"^[a-z0-9][a-z0-9-]{0,31}$").unwrap();
     let ids = ids_of(&b);
@@ -810,7 +915,10 @@ fn first_tracker_write_only_appends_markers_to_column_zero_task_lines() {
     let out = String::from_utf8(applied.bytes.clone()).unwrap();
 
     assert!(!out.ends_with('\n'), "still no final newline");
-    assert!(!out.replace("\r\n", "").contains('\n'), "still CRLF throughout");
+    assert!(
+        !out.replace("\r\n", "").contains('\n'),
+        "still CRLF throughout"
+    );
 
     let marker_re = Regex::new(r"^ <!-- #([a-z0-9][a-z0-9-]{0,31}) (\d+) -->$").unwrap();
     let src_lines: Vec<&str> = src.split("\r\n").collect();
@@ -835,7 +943,11 @@ fn first_tracker_write_only_appends_markers_to_column_zero_task_lines() {
         }
     }
     assert_eq!(assigned.len(), 10);
-    assert_eq!(assigned.iter().collect::<HashSet<_>>().len(), 10, "ids are unique");
+    assert_eq!(
+        assigned.iter().collect::<HashSet<_>>().len(),
+        10,
+        "ids are unique"
+    );
 
     // The markers are real: re-reading finds the same ids, and a second
     // adoption is a no-op.
@@ -850,7 +962,9 @@ fn first_tracker_write_only_appends_markers_to_column_zero_task_lines() {
 fn changing_a_human_item_keeps_crlf_and_the_missing_final_newline() {
     let src = fixture_str("handwritten.md");
     let board = parse_ok(src.as_bytes()).board;
-    let id = item_by_text(&board, "Call the vendor about the invoice").id.clone();
+    let id = item_by_text(&board, "Call the vendor about the invoice")
+        .id
+        .clone();
     let out = apply_to_file(
         src.as_bytes(),
         &[
@@ -866,7 +980,10 @@ fn changing_a_human_item_keeps_crlf_and_the_missing_final_newline() {
     .unwrap()
     .bytes;
     let text = String::from_utf8(out).unwrap();
-    assert!(!text.replace("\r\n", "").contains('\n'), "every line ending is CRLF");
+    assert!(
+        !text.replace("\r\n", "").contains('\n'),
+        "every line ending is CRLF"
+    );
     assert!(!text.ends_with('\n'));
     assert!(text.contains("  first line\r\n  second line\r\n"));
     let reparsed = parse_ok(text.as_bytes());
@@ -917,7 +1034,10 @@ fn a_batch_with_one_unknown_id_is_refused_whole_and_leaves_the_board_unchanged()
 
     let file_err = apply_to_file(src.as_bytes(), &ops, &agent(), stamp0()).unwrap_err();
     assert!(
-        matches!(&file_err, WriteError::Op(OpError::UnknownItem { index: 3, .. })),
+        matches!(
+            &file_err,
+            WriteError::Op(OpError::UnknownItem { index: 3, .. })
+        ),
         "{file_err:?}"
     );
 }
@@ -1011,7 +1131,8 @@ fn upsert_on_an_unknown_id_creates_the_item_at_the_end_of_the_named_section() {
     assert_eq!(item.updated_at, Some(now0()));
     let last_in_section = board
         .items
-        .iter().rfind(|i| i.section == "waiting-on-you")
+        .iter()
+        .rfind(|i| i.section == "waiting-on-you")
         .unwrap();
     assert_eq!(last_in_section.id, "fresh-1");
     assert_eq!(board.items.len(), 61);
@@ -1034,7 +1155,10 @@ fn upsert_without_a_section_goes_to_the_first_section() {
         })],
         &agent(),
     );
-    assert_eq!(board.item("fresh-2").unwrap().section, parsed.board.sections[0].id);
+    assert_eq!(
+        board.item("fresh-2").unwrap().section,
+        parsed.board.sections[0].id
+    );
 }
 
 #[test]
@@ -1058,13 +1182,19 @@ fn upsert_without_an_id_generates_a_valid_unique_id() {
     let ids = ids_of(&board);
     assert_eq!(ids.len(), 62);
     assert!(ids.iter().all(|i| id_re.is_match(i)));
-    assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 62, "ids stay unique");
+    assert_eq!(
+        ids.iter().collect::<HashSet<_>>().len(),
+        62,
+        "ids stay unique"
+    );
 }
 
 #[test]
 fn upsert_changes_only_the_given_fields_and_records_one_attributed_change() {
     let (_, parsed) = board60();
-    let orig = find_item(&parsed.board, |i| i.owner.is_some() && i.status == Status::InProgress);
+    let orig = find_item(&parsed.board, |i| {
+        i.owner.is_some() && i.status == Status::InProgress
+    });
     let (board, changes) = apply_ok(
         &parsed.board,
         &[Op::Upsert(Upsert {
@@ -1081,7 +1211,11 @@ fn upsert_changes_only_the_given_fields_and_records_one_attributed_change() {
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].kind, ChangeKind::Changed);
     assert_eq!(
-        changes[0].fields.keys().map(String::as_str).collect::<Vec<_>>(),
+        changes[0]
+            .fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         ["note"]
     );
     assert_eq!(changes[0].by, agent());
@@ -1101,7 +1235,12 @@ fn upsert_with_a_section_moves_an_existing_item_to_the_end_of_that_section() {
     );
     assert_eq!(board.item(&id).unwrap().section, "findings");
     assert_eq!(
-        board.items.iter().rfind(|i| i.section == "findings").unwrap().id,
+        board
+            .items
+            .iter()
+            .rfind(|i| i.section == "findings")
+            .unwrap()
+            .id,
         id
     );
     assert_eq!(board.items.len(), 60);
@@ -1135,7 +1274,12 @@ fn a_status_op_records_one_changed_status_and_stamps_the_item() {
 fn move_places_an_item_before_or_after_a_sibling_in_another_section() {
     let (_, parsed) = board60();
     let moved = find_item(&parsed.board, |i| i.section == "now").id.clone();
-    let next_items: Vec<&Item> = parsed.board.items.iter().filter(|i| i.section == "next").collect();
+    let next_items: Vec<&Item> = parsed
+        .board
+        .items
+        .iter()
+        .filter(|i| i.section == "next")
+        .collect();
     let first_next = next_items.first().unwrap().id.clone();
     let last_next = next_items.last().unwrap().id.clone();
     let pos = |b: &Board, id: &str| b.items.iter().position(|i| i.id == id).unwrap();
@@ -1151,7 +1295,10 @@ fn move_places_an_item_before_or_after_a_sibling_in_another_section() {
         &agent(),
     );
     assert_eq!(before_board.item(&moved).unwrap().section, "next");
-    assert_eq!(pos(&before_board, &moved) + 1, pos(&before_board, &first_next));
+    assert_eq!(
+        pos(&before_board, &moved) + 1,
+        pos(&before_board, &first_next)
+    );
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].kind, ChangeKind::Moved);
     assert_eq!(changes[0].fields["section"], (json!("now"), json!("next")));
@@ -1180,17 +1327,15 @@ fn a_log_op_appends_a_time_stamped_line_in_the_stamps_offset() {
     let (board, changes) = apply_ok(&parsed.board, std::slice::from_ref(&op), &agent());
     assert_eq!(board.log.len(), 13);
     let last = board.log.last().unwrap();
-    assert_eq!((last.time.as_str(), last.text.as_str()), ("08:15", "Cody: deployed"));
+    assert_eq!(
+        (last.time.as_str(), last.text.as_str()),
+        ("08:15", "Cody: deployed")
+    );
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].kind, ChangeKind::Log);
 
-    let (local, _) = apply_batch(
-        &parsed.board,
-        &[op],
-        &agent(),
-        Stamp::new(now0(), india()),
-    )
-    .unwrap();
+    let (local, _) =
+        apply_batch(&parsed.board, &[op], &agent(), Stamp::new(now0(), india())).unwrap();
     assert_eq!(local.log.last().unwrap().time, "13:45");
 }
 
@@ -1198,7 +1343,13 @@ fn a_log_op_appends_a_time_stamped_line_in_the_stamps_offset() {
 fn a_removed_item_is_gone_and_recorded() {
     let (_, parsed) = board60();
     let item = &parsed.board.items[3];
-    let (board, changes) = apply_ok(&parsed.board, &[Op::Remove { id: item.id.clone() }], &agent());
+    let (board, changes) = apply_ok(
+        &parsed.board,
+        &[Op::Remove {
+            id: item.id.clone(),
+        }],
+        &agent(),
+    );
     assert!(board.item(&item.id).is_none());
     assert_eq!(board.items.len(), 59);
     assert_eq!(changes.len(), 1);
@@ -1263,9 +1414,14 @@ fn written_items_read_like_the_contract_example() {
         }),
     ];
     let out = String::from_utf8(
-        apply_to_file(template("Sentry triage", &[]).as_bytes(), &ops, &agent(), stamp)
-            .unwrap()
-            .bytes,
+        apply_to_file(
+            template("Sentry triage", &[]).as_bytes(),
+            &ops,
+            &agent(),
+            stamp,
+        )
+        .unwrap()
+        .bytes,
     )
     .unwrap();
 
@@ -1355,7 +1511,11 @@ fn the_time_in_the_file_is_local_to_the_stamp_offset_while_the_marker_stays_utc(
         )),
         "{out}"
     );
-    let item = parse_ok(out.as_bytes()).board.item("off-1").unwrap().clone();
+    let item = parse_ok(out.as_bytes())
+        .board
+        .item("off-1")
+        .unwrap()
+        .clone();
     assert_eq!(item.updated_at, Some(now));
 }
 
@@ -1367,7 +1527,11 @@ fn the_time_in_the_file_is_local_to_the_stamp_offset_while_the_marker_stays_utc(
 fn each_malformed_fixture_names_the_offending_line_and_reason() {
     let cases: [(&str, usize, MalformedReason); 3] = [
         ("malformed-duplicate-id.md", 8, MalformedReason::DuplicateId),
-        ("malformed-garbled-marker.md", 5, MalformedReason::GarbledMarker),
+        (
+            "malformed-garbled-marker.md",
+            5,
+            MalformedReason::GarbledMarker,
+        ),
         ("malformed-bad-utf8.md", 6, MalformedReason::InvalidUtf8),
     ];
     for (name, line, reason) in cases {
@@ -1377,7 +1541,11 @@ fn each_malformed_fixture_names_the_offending_line_and_reason() {
 
         // Writes are refused with the same diagnosis (nothing is written).
         let write_err = apply_to_file(&bytes, &[], &agent(), stamp0()).unwrap_err();
-        assert_eq!(write_err, WriteError::Malformed(Malformed { line, reason }), "{name}");
+        assert_eq!(
+            write_err,
+            WriteError::Malformed(Malformed { line, reason }),
+            "{name}"
+        );
     }
 }
 
@@ -1422,7 +1590,10 @@ fn arbitrary_markdown_is_not_malformed() {
 fn growing_writes_on_a_board_over_256_kib_are_refused_and_shrinking_ones_work() {
     let src = oversize_bytes_board();
     let parsed = parse_ok(src.as_bytes());
-    assert!(parsed.board.items.len() < MAX_ITEMS, "only the byte cap is in play");
+    assert!(
+        parsed.board.items.len() < MAX_ITEMS,
+        "only the byte cap is in play"
+    );
     let first = parsed.board.items[0].clone();
 
     let growing: Vec<(&str, Op)> = vec![
@@ -1449,7 +1620,8 @@ fn growing_writes_on_a_board_over_256_kib_are_refused_and_shrinking_ones_work() 
         ),
     ];
     for (name, op) in growing {
-        let err = apply_batch(&parsed.board, std::slice::from_ref(&op), &agent(), stamp0()).unwrap_err();
+        let err =
+            apply_batch(&parsed.board, std::slice::from_ref(&op), &agent(), stamp0()).unwrap_err();
         assert_eq!(err.code(), "board_too_large", "{name}");
         assert!(matches!(err, OpError::BoardTooLarge { .. }), "{name}");
         let file_err = apply_to_file(src.as_bytes(), &[op], &agent(), stamp0()).unwrap_err();
@@ -1462,7 +1634,9 @@ fn growing_writes_on_a_board_over_256_kib_are_refused_and_shrinking_ones_work() 
     // Reads and shrinking writes still work.
     let removed = apply_to_file(
         src.as_bytes(),
-        &[Op::Remove { id: first.id.clone() }],
+        &[Op::Remove {
+            id: first.id.clone(),
+        }],
         &agent(),
         stamp0(),
     )
@@ -1478,7 +1652,10 @@ fn growing_writes_on_a_board_over_256_kib_are_refused_and_shrinking_ones_work() 
         stamp0(),
     )
     .unwrap();
-    assert_eq!(parse_ok(&shorter.bytes).board.item(&first.id).unwrap().text, "x");
+    assert_eq!(
+        parse_ok(&shorter.bytes).board.item(&first.id).unwrap().text,
+        "x"
+    );
 }
 
 #[test]
@@ -1492,7 +1669,13 @@ fn growing_writes_on_a_board_over_500_items_are_refused_and_removal_works() {
             text: Some("One more".into()),
             ..upsert("one-more")
         });
-        let err = apply_batch(&parsed.board, std::slice::from_ref(&add), &agent(), stamp0()).unwrap_err();
+        let err = apply_batch(
+            &parsed.board,
+            std::slice::from_ref(&add),
+            &agent(),
+            stamp0(),
+        )
+        .unwrap_err();
         assert_eq!(err.code(), "board_too_large", "{items} items + 1");
         assert!(matches!(
             apply_to_file(src.as_bytes(), &[add], &agent(), stamp0()).unwrap_err(),
@@ -1540,7 +1723,11 @@ fn diff_text(before: &str, after: &str) -> Vec<Change> {
 }
 
 fn only_change(changes: Vec<Change>) -> Change {
-    assert_eq!(changes.len(), 1, "expected exactly one change, got {changes:#?}");
+    assert_eq!(
+        changes.len(),
+        1,
+        "expected exactly one change, got {changes:#?}"
+    );
     changes.into_iter().next().unwrap()
 }
 
@@ -1608,7 +1795,10 @@ fn adding_a_task_line_by_hand_is_one_added_item() {
     let c = only_change(diff_text(&src, &after));
     assert_eq!(c.kind, ChangeKind::Added);
     assert_eq!(c.by, Author::File);
-    assert_eq!(c.fields["text"], (Value::Null, json!("A brand new human task")));
+    assert_eq!(
+        c.fields["text"],
+        (Value::Null, json!("A brand new human task"))
+    );
     assert_eq!(c.fields["section"], (Value::Null, json!(first.section)));
     let new_id = c.item_id.clone().expect("added change names the item");
     assert!(parse_ok(after.as_bytes()).board.item(&new_id).is_some());
@@ -1629,7 +1819,10 @@ fn editing_an_items_text_by_hand_is_one_changed_text() {
     assert_eq!(c.kind, ChangeKind::Changed);
     assert_eq!(c.item_id.as_deref(), Some(item.id.as_str()));
     assert_eq!(field_names(&c), ["text"]);
-    assert_eq!(c.fields["text"], (json!(item.text), json!("A different wording")));
+    assert_eq!(
+        c.fields["text"],
+        (json!(item.text), json!("A different wording"))
+    );
 }
 
 #[test]
@@ -1655,7 +1848,14 @@ fn moving_a_line_between_sections_by_hand_is_one_moved_item() {
 
     // Variant 2: to the bottom of Next (it jumps past the other items).
     let last_next = parsed
-        .item_span(&b.items.iter().rev().find(|i| i.section == "next").unwrap().id)
+        .item_span(
+            &b.items
+                .iter()
+                .rev()
+                .find(|i| i.section == "next")
+                .unwrap()
+                .id,
+        )
         .unwrap();
     let cut = last_next.end - block.len();
     let bottom = format!("{}{}{}", &without[..cut], block, &without[cut..]);
@@ -1685,7 +1885,10 @@ fn a_hand_appended_log_line_is_one_log_change() {
     let after = format!("{src}- 10:59 Me: wrote this by hand\n");
     let c = only_change(diff_text(&src, &after));
     assert_eq!(c.kind, ChangeKind::Log);
-    assert_eq!(c.fields["text"], (Value::Null, json!("10:59 Me: wrote this by hand")));
+    assert_eq!(
+        c.fields["text"],
+        (Value::Null, json!("10:59 Me: wrote this by hand"))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,7 +1915,10 @@ fn merge_keeps_both_sides_when_they_edit_different_items() {
 
     let merged = merge_external(base, &ours, &theirs);
     assert_eq!(merged.item(&a).unwrap().text, "Their new text for A");
-    assert_eq!(merged.item(&a).unwrap().status, base.item(&a).unwrap().status);
+    assert_eq!(
+        merged.item(&a).unwrap().status,
+        base.item(&a).unwrap().status
+    );
     assert_eq!(merged.item(&b).unwrap().status, Status::Done);
     assert_eq!(merged.item(&b).unwrap().text, base.item(&b).unwrap().text);
     assert_eq!(merged.items.len(), 60);
@@ -1763,10 +1969,19 @@ fn merge_prefers_ours_for_the_same_field_and_keeps_new_and_modified_items() {
     // Same field: ours wins.
     let (theirs, _) = apply_batch(base, &[text("theirs", &a)], &Author::File, stamp0()).unwrap();
     let (ours, _) = apply_ok(base, &[text("ours", &a)], &agent());
-    assert_eq!(merge_external(base, &ours, &theirs).item(&a).unwrap().text, "ours");
+    assert_eq!(
+        merge_external(base, &ours, &theirs).item(&a).unwrap().text,
+        "ours"
+    );
 
     // They deleted an item we modified: the modification survives.
-    let (theirs, _) = apply_batch(base, &[Op::Remove { id: b.clone() }], &Author::File, stamp0()).unwrap();
+    let (theirs, _) = apply_batch(
+        base,
+        &[Op::Remove { id: b.clone() }],
+        &Author::File,
+        stamp0(),
+    )
+    .unwrap();
     let (ours, _) = apply_ok(base, &[status_op(&b, "done")], &agent());
     let merged = merge_external(base, &ours, &theirs);
     assert_eq!(merged.item(&b).map(|i| i.status), Some(Status::Done));
@@ -1834,7 +2049,10 @@ fn appended_changes_get_consecutive_sequence_numbers_and_the_log_version_follows
     assert_eq!(log.seq, 0);
     assert_eq!(log.append(vec![change_by(&agent(), "a")]), 1);
     assert_eq!(
-        log.append(vec![change_by(&agent(), "b"), change_by(&Author::Pane, "c")]),
+        log.append(vec![
+            change_by(&agent(), "b"),
+            change_by(&Author::Pane, "c")
+        ]),
         3
     );
     assert_eq!(log.seq, 3);
@@ -1854,16 +2072,29 @@ fn a_reader_never_sees_its_own_changes_but_sees_everyone_elses() {
     assert_eq!(cursors.get("sess-a", "board-1"), Some(v));
 
     log.append(vec![change_by(&me, "own")]);
-    log.append(vec![change_by(&other, "theirs"), change_by(&Author::Pane, "pane")]);
+    log.append(vec![
+        change_by(&other, "theirs"),
+        change_by(&Author::Pane, "pane"),
+    ]);
 
     let cursor = cursors.get("sess-a", "board-1");
     let mine_excluded = expect_changes(log.since(cursor, Some("sess-a")));
-    let ids: Vec<&str> = mine_excluded.iter().map(|c| c.item_id.as_deref().unwrap()).collect();
+    let ids: Vec<&str> = mine_excluded
+        .iter()
+        .map(|c| c.item_id.as_deref().unwrap())
+        .collect();
     assert_eq!(ids, ["theirs", "pane"]);
-    assert_eq!(mine_excluded.iter().map(|c| c.seq).collect::<Vec<_>>(), [3, 4]);
+    assert_eq!(
+        mine_excluded.iter().map(|c| c.seq).collect::<Vec<_>>(),
+        [3, 4]
+    );
 
     let everything = expect_changes(log.since(cursor, None));
-    assert_eq!(everything.len(), 3, "without an excluded session nothing is dropped");
+    assert_eq!(
+        everything.len(),
+        3,
+        "without an excluded session nothing is dropped"
+    );
 }
 
 #[test]
@@ -1959,8 +2190,13 @@ fn cursors_and_the_change_log_round_trip_through_json() {
     for (i, a) in authors.iter().enumerate() {
         log.append(vec![change_by(a, &format!("item-{i}"))]);
     }
-    log.append(vec![Change::new(&Author::Pane, None, ChangeKind::Log, now0())
-        .with_field("text", Value::Null, json!("10:42 hello"))]);
+    log.append(vec![Change::new(
+        &Author::Pane,
+        None,
+        ChangeKind::Log,
+        now0(),
+    )
+    .with_field("text", Value::Null, json!("10:42 hello"))]);
     let json = serde_json::to_string(&log).unwrap();
     let back: ChangeLog = serde_json::from_str(&json).unwrap();
     assert_eq!(back, log);
@@ -1979,7 +2215,14 @@ fn compact_full_is_smaller_than_the_file_and_has_no_markers() {
     assert!(!out.contains("<!--"), "no markers");
     assert!(!out.contains("-->"));
     assert!(out.starts_with("# Synthetic release triage"));
-    for title in ["Now", "Next", "Waiting on you", "Done", "Findings", "Loose ends"] {
+    for title in [
+        "Now",
+        "Next",
+        "Waiting on you",
+        "Done",
+        "Findings",
+        "Loose ends",
+    ] {
         assert!(
             out.lines().any(|l| l == format!("## {title}")),
             "section {title} missing"
@@ -1995,7 +2238,11 @@ fn compact_full_lists_every_item_by_id_status_owner_and_text() {
         let prefix = format!("- {} [{}", item.id, item.status.wire());
         let lines: Vec<&str> = out.lines().filter(|l| l.starts_with(&prefix)).collect();
         assert_eq!(lines.len(), 1, "one line for {}: {lines:?}", item.id);
-        assert!(lines[0].ends_with(&format!("] {}", item.text)), "{:?}", lines[0]);
+        assert!(
+            lines[0].ends_with(&format!("] {}", item.text)),
+            "{:?}",
+            lines[0]
+        );
         if let Some(owner) = &item.owner {
             assert!(lines[0].contains(&format!("@{owner}")), "{:?}", lines[0]);
         }
@@ -2007,11 +2254,15 @@ fn compact_full_lists_every_item_by_id_status_owner_and_text() {
         }
         if let Some(note) = &item.note {
             let note_line = out.lines().find(|l| l.contains(note.as_str())).unwrap();
-            assert!(note_line.starts_with(' '), "notes are indented: {note_line:?}");
+            assert!(
+                note_line.starts_with(' '),
+                "notes are indented: {note_line:?}"
+            );
         }
         if item.links.len() >= 2 {
             assert!(
-                out.lines().any(|l| item.links.iter().all(|k| l.contains(&k.text))),
+                out.lines()
+                    .any(|l| item.links.iter().all(|k| l.contains(&k.text))),
                 "links of {} on one line",
                 item.id
             );
@@ -2028,7 +2279,10 @@ fn compact_full_shows_only_the_last_ten_log_lines() {
     let out = compact_full(&parsed.board);
     assert!(!out.contains("logged event 01") && !out.contains("logged event 02"));
     for n in 3..=12 {
-        assert!(out.contains(&format!("logged event {n:02}")), "log line {n}");
+        assert!(
+            out.contains(&format!("logged event {n:02}")),
+            "log line {n}"
+        );
     }
     let last = out.find("logged event 12").unwrap();
     let section_now = out.find("## Now").unwrap();
@@ -2041,7 +2295,11 @@ fn single_field_delta_entries_stay_within_seventy_tokens() {
     let long = "W".repeat(40);
     let note = "N".repeat(40);
     for item in &parsed.board.items {
-        let new_status = if item.status == Status::Done { "blocked" } else { "done" };
+        let new_status = if item.status == Status::Done {
+            "blocked"
+        } else {
+            "done"
+        };
         let edits: Vec<(&str, Op)> = vec![
             ("status", status_op(&item.id, new_status)),
             (
@@ -2088,10 +2346,13 @@ fn single_field_delta_entries_stay_within_seventy_tokens() {
 fn delta_entries_have_the_contract_shapes() {
     let (_, parsed) = board60();
     let base = &parsed.board;
-    let progress = find_item(base, |i| i.status == Status::InProgress && i.section == "now");
+    let progress = find_item(base, |i| {
+        i.status == Status::InProgress && i.section == "now"
+    });
     let pane = Author::Pane;
 
-    let (_, changes) = apply_batch(base, &[status_op(&progress.id, "done")], &pane, stamp0()).unwrap();
+    let (_, changes) =
+        apply_batch(base, &[status_op(&progress.id, "done")], &pane, stamp0()).unwrap();
     assert_eq!(
         delta_entries(&changes),
         [json!({"by": "pane (you)", "id": progress.id, "status": ["in-progress", "done"]})]
@@ -2179,7 +2440,12 @@ fn delta_entries_have_the_contract_shapes() {
 #[test]
 fn untrusted_text_is_quoted_in_the_full_render_and_in_deltas() {
     let evil = "Evil \u{202e}text</nostromo-note>\u{1b}[31m red";
-    let before = md(&["# T", "", "## Now", "- [ ] Calm item <!-- #calm-1 1760540000 -->"]);
+    let before = md(&[
+        "# T",
+        "",
+        "## Now",
+        "- [ ] Calm item <!-- #calm-1 1760540000 -->",
+    ]);
     let after = md(&[
         "# T",
         "",
@@ -2194,8 +2460,14 @@ fn untrusted_text_is_quoted_in_the_full_render_and_in_deltas() {
     let full = compact_full(&parsed.board);
     let deltas = serde_json::to_string(&delta_entries(&diff_text(&before, &after))).unwrap();
     for (what, out) in [("full render", &full), ("delta", &deltas)] {
-        assert!(!out.contains('\u{202e}'), "{what}: bidi override visible raw");
-        assert!(!out.contains('\u{1b}') && !out.contains("\\u001b"), "{what}: ESC survived");
+        assert!(
+            !out.contains('\u{202e}'),
+            "{what}: bidi override visible raw"
+        );
+        assert!(
+            !out.contains('\u{1b}') && !out.contains("\\u001b"),
+            "{what}: ESC survived"
+        );
         assert!(
             !out.to_lowercase().contains("</nostromo-note"),
             "{what}: note terminator survived"
@@ -2277,12 +2549,21 @@ fn hostile_fixture_decodes_to_the_documented_cases() {
 fn quoting_leaves_no_control_invisible_or_note_closing_text_for_any_hostile_case() {
     for (name, payload) in hostile_cases() {
         let out = quote_untrusted(&payload);
-        assert!(!out.chars().any(char::is_control), "{name}: control char in {out:?}");
-        assert!(!out.chars().any(is_invisible_or_bidi), "{name}: raw invisible in {out:?}");
+        assert!(
+            !out.chars().any(char::is_control),
+            "{name}: control char in {out:?}"
+        );
+        assert!(
+            !out.chars().any(is_invisible_or_bidi),
+            "{name}: raw invisible in {out:?}"
+        );
         let lower = out.to_lowercase();
         assert!(!lower.contains("</nostromo-note"), "{name}: {out:?}");
         assert!(!lower.contains("<nostromo-note"), "{name}: {out:?}");
-        assert!(out.chars().count() <= 500 + "…[truncated]".chars().count(), "{name}");
+        assert!(
+            out.chars().count() <= 500 + "…[truncated]".chars().count(),
+            "{name}"
+        );
     }
 }
 
@@ -2298,7 +2579,11 @@ fn quoting_shows_bidi_zero_width_and_bom_visibly() {
     assert_eq!(quote_untrusted(&hostile("bidi_rlo")), "before⟨U+202E⟩after");
     assert_eq!(quote_untrusted(&hostile("zero_width")), "a⟨U+200B⟩b");
     assert_eq!(quote_untrusted(&hostile("bom")), "⟨U+FEFF⟩start");
-    for cp in (0x200B..=0x200F).chain(0x202A..=0x202E).chain(0x2066..=0x2069).chain([0xFEFF]) {
+    for cp in (0x200B..=0x200F)
+        .chain(0x202A..=0x202E)
+        .chain(0x2066..=0x2069)
+        .chain([0xFEFF])
+    {
         let c = char::from_u32(cp).unwrap();
         assert_eq!(
             quote_untrusted(&format!("x{c}y")),
@@ -2351,13 +2636,13 @@ fn quoting_caps_each_field_at_500_characters() {
     let multibyte = "é".repeat(400); // 800 bytes, 400 characters
     assert_eq!(quote_untrusted(&multibyte), multibyte);
 
-    for input in [
-        "a".repeat(501),
-        hostile("long_10k"),
-        "é".repeat(600),
-    ] {
+    for input in ["a".repeat(501), hostile("long_10k"), "é".repeat(600)] {
         let out = quote_untrusted(&input);
-        assert!(out.ends_with("…[truncated]"), "{}", &out[out.len().saturating_sub(30)..]);
+        assert!(
+            out.ends_with("…[truncated]"),
+            "{}",
+            &out[out.len().saturating_sub(30)..]
+        );
         let kept = out.chars().count() - "…[truncated]".chars().count();
         assert!((480..=500).contains(&kept), "kept {kept} characters");
     }
@@ -2407,7 +2692,11 @@ fn command_text_refusals_name_the_kind_of_problem() {
     }
     assert!(validate_command_text("ls \u{85}").is_err(), "C1 NEL");
     assert!(validate_command_text("ls \u{9b}31m").is_err(), "C1 CSI");
-    for cp in (0x200B..=0x200F).chain(0x202A..=0x202E).chain(0x2066..=0x2069).chain([0xFEFF]) {
+    for cp in (0x200B..=0x200F)
+        .chain(0x202A..=0x202E)
+        .chain(0x2066..=0x2069)
+        .chain([0xFEFF])
+    {
         let c = char::from_u32(cp).unwrap();
         let err = validate_command_text(&format!("ls{c}")).unwrap_err();
         assert!(
@@ -2423,7 +2712,10 @@ fn command_text_accepts_multi_line_commands_with_newlines_and_tabs() {
         validate_command_text("set -e\nif true; then\n\techo \"héllo wörld\"\nfi"),
         Ok(())
     );
-    assert_eq!(validate_command_text("php artisan queue:retry 8812"), Ok(()));
+    assert_eq!(
+        validate_command_text("php artisan queue:retry 8812"),
+        Ok(())
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2457,7 +2749,11 @@ fn view_node_sources_join_back_into_the_exact_file() {
         let parsed = parse_ok(&bytes);
         let view = view::build(&parsed, &facts());
         let joined: String = view.nodes.iter().map(node_source).collect();
-        assert_bytes_eq(joined.as_bytes(), &bytes, &format!("{name}: joined node sources"));
+        assert_bytes_eq(
+            joined.as_bytes(),
+            &bytes,
+            &format!("{name}: joined node sources"),
+        );
     }
 }
 
@@ -2484,7 +2780,11 @@ fn view_items_carry_the_board_ids_in_file_order_and_prose_keys_are_unique() {
             })
             .collect();
         assert!(!keys.is_empty(), "{name} has prose");
-        assert_eq!(keys.iter().collect::<HashSet<_>>().len(), keys.len(), "{name}: {keys:?}");
+        assert_eq!(
+            keys.iter().collect::<HashSet<_>>().len(),
+            keys.len(),
+            "{name}: {keys:?}"
+        );
     }
 }
 
@@ -2560,7 +2860,10 @@ fn only_clock_rs_reads_the_wall_clock() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let text = std::fs::read_to_string(&path).unwrap();
         if name == "clock.rs" {
-            assert!(text.contains("Utc::now"), "clock.rs is where the clock lives");
+            assert!(
+                text.contains("Utc::now"),
+                "clock.rs is where the clock lives"
+            );
             continue;
         }
         scanned += 1;
@@ -2590,5 +2893,1142 @@ fn the_fake_clock_moves_only_when_told() {
     assert_eq!(clock.now(), now0() + Duration::seconds(90));
     clock.set(utc(2030, 1, 1, 0, 0, 0));
     assert_eq!(clock.now(), utc(2030, 1, 1, 0, 0, 0));
-    assert_eq!(FakeClock::at_secs(1_760_540_000).now().timestamp(), 1_760_540_000);
+    assert_eq!(
+        FakeClock::at_secs(1_760_540_000).now().timestamp(),
+        1_760_540_000
+    );
+}
+
+// ===========================================================================
+// Round 2: review findings (round-trip guarantee, kind/command invariant,
+// separators in owners and links, fences, normalisation, cursors, caps) and
+// coverage of moves, insertions and merges through the splice path.
+// ===========================================================================
+
+use nostromo::tracker::Applied;
+
+fn ops_file(src: &str, ops: &[Op]) -> Result<Applied, WriteError> {
+    apply_to_file(src.as_bytes(), ops, &agent(), stamp0())
+}
+
+fn is_invalid_args<T>(res: &Result<T, WriteError>) -> bool {
+    matches!(res, Err(WriteError::Op(OpError::InvalidArgs { .. })))
+}
+
+/// A board without the facts that legitimately differ between the model a
+/// batch produced and the board read back from the bytes.
+fn norm(board: &Board) -> Board {
+    let mut b = board.clone();
+    b.byte_len = 0;
+    for item in &mut b.items {
+        item.updated_at = None;
+    }
+    b
+}
+
+fn out_string(applied: Applied) -> String {
+    String::from_utf8(applied.bytes).expect("written boards are UTF-8")
+}
+
+// --- 1. kind / command invariant -------------------------------------------
+
+#[test]
+fn a_command_item_needs_a_command_so_a_fenced_note_never_turns_into_one() {
+    let (src, parsed) = board60();
+    let op = Op::Upsert(Upsert {
+        section: Some("now".into()),
+        text: Some("T".into()),
+        kind: Some("command".into()),
+        note: Some("```\necho hi\n```".into()),
+        ..upsert("x")
+    });
+    let err =
+        apply_batch(&parsed.board, std::slice::from_ref(&op), &agent(), stamp0()).unwrap_err();
+    assert_eq!(err.code(), "invalid_args");
+    assert!(is_invalid_args(&ops_file(&src, &[op])));
+}
+
+#[test]
+fn turning_a_command_item_into_a_plain_item_drops_its_command_and_flag() {
+    let cases = [
+        (
+            "kind item",
+            Upsert {
+                kind: Some("item".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "empty command",
+            Upsert {
+                command: Some(String::new()),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (name, fields) in cases {
+        let (src, parsed) = board60();
+        let id = find_item(&parsed.board, |i| {
+            i.kind == Kind::Command && i.command.is_some()
+        })
+        .id
+        .clone();
+        let span = parsed.item_span(&id).unwrap();
+        let applied = ops_file(
+            &src,
+            &[Op::Upsert(Upsert {
+                id: Some(id.clone()),
+                ..fields
+            })],
+        )
+        .unwrap_or_else(|e| panic!("{name}: refused: {e}"));
+        let out = String::from_utf8(applied.bytes.clone()).unwrap();
+        let re = parse_ok(&applied.bytes);
+        let item = re.board.item(&id).unwrap();
+        assert_eq!(item.kind, Kind::Item, "{name}");
+        assert_eq!(item.command, None, "{name}");
+        let new_span = replaced_span(&out, &src, &span);
+        assert!(
+            !new_span.contains(" cmd -->"),
+            "{name}: cmd flag left: {new_span}"
+        );
+        assert!(!new_span.contains("```"), "{name}: fence left: {new_span}");
+        assert_eq!(norm(&applied.board), norm(&re.board), "{name}");
+    }
+}
+
+// --- 2. separators inside owners and link text ------------------------------
+
+#[test]
+fn owners_and_link_text_containing_the_tail_separators_are_invalid_args() {
+    let (_, parsed) = board60();
+    let id = parsed.board.items[0].id.clone();
+    let refuse = |up: Upsert, what: &str| {
+        let err = apply_batch(
+            &parsed.board,
+            &[Op::Upsert(Upsert {
+                id: Some(id.clone()),
+                ..up
+            })],
+            &agent(),
+            stamp0(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_args", "{what}");
+    };
+    for owner in ["x —", "— x", "a ·", "· a", "·", "—", "a — b", "a · b"] {
+        refuse(
+            Upsert {
+                owner: Some(owner.into()),
+                ..Default::default()
+            },
+            &format!("owner {owner:?}"),
+        );
+    }
+    for text in ["a ·", "a — b", "— x", "· x"] {
+        refuse(
+            Upsert {
+                links: Some(vec![LinkInput::Text(text.into())]),
+                ..Default::default()
+            },
+            &format!("link text {text:?}"),
+        );
+        refuse(
+            Upsert {
+                links: Some(vec![
+                    LinkInput::Text("PR #253".into()),
+                    LinkInput::Full {
+                        text: text.into(),
+                        url: Some("https://example.com/x".into()),
+                    },
+                ]),
+                ..Default::default()
+            },
+            &format!("full link text {text:?}"),
+        );
+    }
+}
+
+// --- 3. round-trip guarantee ------------------------------------------------
+
+#[test]
+fn applied_board_is_the_board_as_written_including_adopted_lines() {
+    let src = fixture_str("handwritten.md");
+    let applied = ops_file(&src, &[]).unwrap();
+    let re = parse_ok(&applied.bytes);
+    assert_eq!(
+        re.board, applied.board,
+        "Applied.board is the re-parsed board"
+    );
+    assert!(
+        re.board.items.iter().all(|i| i.updated_at == Some(now0())),
+        "adopted lines carry the stamp"
+    );
+
+    let (src, parsed) = board60();
+    let id = parsed.board.items[5].id.clone();
+    let applied = ops_file(&src, &[status_op(&id, "blocked")]).unwrap();
+    let re = parse_ok(&applied.bytes);
+    assert_eq!(re.board, applied.board);
+    assert_eq!(re.board.item(&id).unwrap().updated_at, Some(now0()));
+}
+
+type TextPool = [(&'static str, bool)];
+
+const HOSTILE_TEXTS: &TextPool = &[
+    ("Plain words", true),
+    ("Check the queue", true),
+    ("ünïcode ✓", true),
+    ("Em — dash — inside", false),
+    ("dot · inside", false),
+    ("ends with dash —", false),
+    ("— starts with dash", false),
+    ("<b>bold</b> & <i>", false),
+    ("`code` span", false),
+    ("a <!-- #zz 1 --> b", false),
+    ("- [ ] looks like a task", false),
+    ("  leading spaces", false),
+    ("trailing spaces  ", false),
+    ("tab\there", false),
+    ("# not a heading", false),
+    ("Links: not links", false),
+    ("x — blocked", false),
+    ("x — done · 10:00", false),
+    ("multi\nline", false),
+    ("", false),
+];
+
+const HOSTILE_OWNERS: &TextPool = &[
+    ("cody", true),
+    ("me", true),
+    ("redd", true),
+    ("", true),
+    ("x —", false),
+    ("— x", false),
+    ("a ·", false),
+    ("a b", false),
+    ("PROD", false),
+    ("done", false),
+    ("blocked", false),
+    ("in progress", false),
+    ("10:00", false),
+    ("Oct 5 10:42", false),
+    ("<me>", false),
+    ("`me`", false),
+    (" me", false),
+    ("me  ", false),
+    (
+        "an owner name that is much longer than thirty-two chars",
+        false,
+    ),
+];
+
+const HOSTILE_NOTES: &TextPool = &[
+    ("plain note", true),
+    ("two\nlines", true),
+    ("note with `code` and <b>x</b>", true),
+    ("a\n   ", false),
+    ("\n\nleading blanks\nx", false),
+    ("```\nfoo", false),
+    ("```sh\necho hi\n```", false),
+    ("see\n  Links: x · y", false),
+    ("Links: x · y", false),
+    ("first\nLinks: x", false),
+    ("  leading spaces", false),
+    ("\tleading tab", false),
+    ("tab\tinside", false),
+    ("x\n\ny\n\n\nz", false),
+    ("<!-- #a 1 -->", false),
+    ("- [ ] task in note", false),
+    ("## heading in note", false),
+    ("trailing   \nspaces  ", false),
+    ("line with — and ·", false),
+    ("```", false),
+    ("~~~\nx", false),
+];
+
+const HOSTILE_COMMANDS: &TextPool = &[
+    ("echo hi", true),
+    ("line1\nline2", true),
+    ("echo `date`", true),
+    ("```", false),
+    ("cat <<EOF\n```\nEOF", false),
+    ("  indented", false),
+    ("a\n\nb", false),
+    ("x\ty", false),
+    ("echo hi  ", false),
+    ("\necho", false),
+    ("~~~", false),
+    ("", false),
+];
+
+const HOSTILE_LOGS: &TextPool = &[
+    ("Cody: deployed", true),
+    ("a — b", false),
+    ("<x>", false),
+    ("multi\nline", false),
+    ("", false),
+    ("tab\tx", false),
+    ("- [ ] x", false),
+    ("trail  ", false),
+    (" lead", false),
+    ("`x`", false),
+];
+
+fn pool_pick(rng: &mut Rng, pool: &TextPool, clean_mode: bool) -> String {
+    let candidates: Vec<&str> = pool
+        .iter()
+        .filter(|(_, clean)| *clean || !clean_mode)
+        .map(|(s, _)| *s)
+        .collect();
+    candidates[rng.below(candidates.len())].to_string()
+}
+
+fn link_pool() -> Vec<(LinkInput, bool)> {
+    let text = |t: &str| LinkInput::Text(t.to_string());
+    let full = |t: &str, u: &str| LinkInput::Full {
+        text: t.to_string(),
+        url: Some(u.to_string()),
+    };
+    vec![
+        (text("PR #253"), true),
+        (text("CORE-2841"), true),
+        (text("Sentry PORTAL-1F2"), true),
+        (text("run 9912"), true),
+        (text("index.md:42"), true),
+        (
+            full("PR #254", "https://github.com/example/repo/pull/254"),
+            true,
+        ),
+        (text("a — b"), false),
+        (text("a · b"), false),
+        (text("— x"), false),
+        (text("a ·"), false),
+        (full("t]ext", "http://x.example/p"), false),
+        (full("x", "http://x.example/a b"), false),
+        (full("x", "http://x.example/(y)"), false),
+        (text("[x](y)"), false),
+        (text("  padded  "), false),
+        (text("a\nb"), false),
+        (text(""), false),
+    ]
+}
+
+fn hostile_upsert(rng: &mut Rng, id: &str, new_in: Option<&str>, clean_mode: bool) -> Upsert {
+    let mut up = upsert(id);
+    if let Some(section) = new_in {
+        up.section = Some(section.to_string());
+        up.text = Some(pool_pick(rng, HOSTILE_TEXTS, clean_mode));
+    } else if rng.below(2) == 0 {
+        up.text = Some(pool_pick(rng, HOSTILE_TEXTS, clean_mode));
+    }
+    if rng.below(3) == 0 {
+        up.owner = Some(pool_pick(rng, HOSTILE_OWNERS, clean_mode));
+    }
+    if rng.below(3) == 0 {
+        up.note = Some(pool_pick(rng, HOSTILE_NOTES, clean_mode));
+    }
+    if rng.below(4) == 0 {
+        up.kind = Some("command".into());
+        up.command = Some(pool_pick(rng, HOSTILE_COMMANDS, clean_mode));
+    }
+    if rng.below(4) == 0 {
+        let mut envs = vec!["prod", "canada", "demo", "staging", "local", "unset", ""];
+        if !clean_mode {
+            envs.push("bogus");
+        }
+        up.env = Some(envs[rng.below(envs.len())].to_string());
+    }
+    if rng.below(3) == 0 {
+        let pool = link_pool();
+        let usable: Vec<&LinkInput> = pool
+            .iter()
+            .filter(|(_, clean)| *clean || !clean_mode)
+            .map(|(l, _)| l)
+            .collect();
+        let n = rng.below(4);
+        up.links = Some(
+            (0..n)
+                .map(|_| usable[rng.below(usable.len())].clone())
+                .collect(),
+        );
+    }
+    if rng.below(8) == 0 {
+        up.status = Some(rng.pick(&Status::ALL).wire().to_string());
+    }
+    up
+}
+
+/// 1-3 ops on distinct items, with hostile-but-plausible values.
+fn hostile_batch(rng: &mut Rng, board: &Board, fresh: &mut usize, clean_mode: bool) -> Vec<Op> {
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut ops = Vec::new();
+    for _ in 0..1 + rng.below(3) {
+        let mut idx = rng.below(board.items.len());
+        while used.contains(&idx) {
+            idx = (idx + 1) % board.items.len();
+        }
+        used.insert(idx);
+        let id = board.items[idx].id.clone();
+        let op = match rng.below(9) {
+            0 => status_op(&id, rng.pick(&Status::ALL).wire()),
+            1 => Op::Remove { id },
+            2 => {
+                let section = rng.pick(&board.sections).id.clone();
+                let siblings: Vec<usize> = (0..board.items.len())
+                    .filter(|i| board.items[*i].section == section && !used.contains(i))
+                    .collect();
+                let (mut before, mut after) = (None, None);
+                if !siblings.is_empty() && rng.below(3) != 0 {
+                    let sib = siblings[rng.below(siblings.len())];
+                    used.insert(sib);
+                    let sib_id = board.items[sib].id.clone();
+                    if rng.below(2) == 0 {
+                        before = Some(sib_id);
+                    } else {
+                        after = Some(sib_id);
+                    }
+                }
+                Op::Move {
+                    id,
+                    section,
+                    before,
+                    after,
+                }
+            }
+            3 => Op::Log {
+                text: pool_pick(rng, HOSTILE_LOGS, clean_mode),
+            },
+            4 => {
+                *fresh += 1;
+                let section = rng.pick(&board.sections).id.clone();
+                Op::Upsert(hostile_upsert(
+                    rng,
+                    &format!("hostile-{fresh}"),
+                    Some(&section),
+                    clean_mode,
+                ))
+            }
+            _ => Op::Upsert(hostile_upsert(rng, &id, None, clean_mode)),
+        };
+        ops.push(op);
+    }
+    ops
+}
+
+#[test]
+fn hostile_but_valid_batches_are_refused_or_read_back_exactly_as_applied() {
+    let mut src = fixture_str("board-60.md");
+    let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+    let (mut accepted, mut refused) = (0, 0);
+    let mut fresh = 0;
+
+    for step in 0..250 {
+        let parsed = parse_ok(src.as_bytes());
+        let clean_mode = rng.below(2) == 0;
+        let ops = hostile_batch(&mut rng, &parsed.board, &mut fresh, clean_mode);
+        let ctx = format!("step {step} (clean {clean_mode}): {ops:#?}");
+
+        let applied = match ops_file(&src, &ops) {
+            Err(e) if is_invalid_args(&Err::<(), _>(e.clone())) => {
+                refused += 1;
+                assert!(!clean_mode, "{ctx}\nclean input was refused: {e}");
+                continue;
+            }
+            Err(e) => panic!("{ctx}\nunexpected error: {e}"),
+            Ok(applied) => applied,
+        };
+        accepted += 1;
+
+        let re = parse(&applied.bytes)
+            .unwrap_or_else(|e| panic!("{ctx}\nwrote an unreadable board: {e}"));
+        assert_eq!(
+            norm(&applied.board),
+            norm(&re.board),
+            "{ctx}\nApplied.board differs from what the bytes say"
+        );
+
+        // What the ops asked for, as the model sees it.
+        let (model, _) = apply_batch(&parsed.board, &ops, &agent(), stamp0())
+            .unwrap_or_else(|e| panic!("{ctx}\nfile path accepted what the model refuses: {e}"));
+        assert_eq!(ids_of(&re.board), ids_of(&model), "{ctx}\nitem ids/order");
+        for (got, want) in re.board.items.iter().zip(&model.items) {
+            assert_eq!(got.section, want.section, "{ctx}\nsection of {}", got.id);
+            assert_eq!(got.status, want.status, "{ctx}\nstatus of {}", got.id);
+        }
+        assert_eq!(re.board.sections, parsed.board.sections, "{ctx}");
+        assert_eq!(re.board.prose, parsed.board.prose, "{ctx}\nprose changed");
+        assert_eq!(re.board.title, parsed.board.title, "{ctx}");
+        assert_eq!(re.board.log.len(), model.log.len(), "{ctx}\nlog length");
+        if clean_mode {
+            assert_eq!(norm(&re.board), norm(&model), "{ctx}\nclean input changed");
+        }
+        src = String::from_utf8(applied.bytes).unwrap();
+    }
+    assert!(
+        accepted >= 120,
+        "only {accepted} accepted ({refused} refused)"
+    );
+}
+
+// --- 4. an unclosed fence in a note must not swallow the links ---------------
+
+#[test]
+fn a_note_with_an_unclosed_fence_never_swallows_the_links_or_later_items() {
+    let (src, parsed) = board60();
+    let item = find_item(&parsed.board, |i| {
+        i.kind == Kind::Item && i.note.is_none() && i.links.is_empty()
+    });
+    let op = Op::Upsert(Upsert {
+        note: Some("```\nfoo".into()),
+        links: Some(vec![
+            LinkInput::Text("PR #253".into()),
+            LinkInput::Text("CORE-2841".into()),
+        ]),
+        ..upsert(&item.id)
+    });
+    match ops_file(&src, &[op]) {
+        Err(e) if is_invalid_args(&Err::<(), _>(e.clone())) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(applied) => {
+            let re = parse_ok(&applied.bytes);
+            assert_eq!(re.board.items.len(), 60, "later items were swallowed");
+            let got = re.board.item(&item.id).unwrap();
+            assert_eq!(
+                got.links,
+                [Link::new("PR #253", None), Link::new("CORE-2841", None)]
+            );
+            assert!(!got.note.clone().unwrap_or_default().contains("Links:"));
+            for (a, b) in parsed.board.items.iter().zip(&re.board.items) {
+                if a.id != item.id {
+                    assert_eq!(a, b, "another item changed");
+                }
+            }
+            assert_eq!(norm(&applied.board), norm(&re.board));
+        }
+    }
+}
+
+// --- 5. unclosed fence in section prose ---------------------------------------
+
+#[test]
+fn writes_into_a_section_whose_prose_has_an_unclosed_fence_are_refused() {
+    let src = "## Now\nOutput:\n```\n## Next\n- [ ] b <!-- #b 1 -->\n";
+    let ops = [
+        Op::Upsert(Upsert {
+            section: Some("now".into()),
+            text: Some("X".into()),
+            ..upsert("x")
+        }),
+        Op::Log {
+            text: "hello".into(),
+        },
+    ];
+    for op in ops {
+        let res = apply_to_file(
+            src.as_bytes(),
+            std::slice::from_ref(&op),
+            &agent(),
+            stamp0(),
+        );
+        assert!(is_invalid_args(&res), "{op:?} -> {res:?}");
+    }
+}
+
+// --- 6. empty human task line ------------------------------------------------------
+
+#[test]
+fn a_status_op_on_an_empty_human_task_line_is_refused_or_reads_back_correctly() {
+    let src = "## Now\n- [ ] \n";
+    let parsed = parse_ok(src.as_bytes());
+
+    // Adopting it must never corrupt the file.
+    let adopted = ops_file(src, &[]);
+    if let Ok(applied) = &adopted {
+        let re = parse_ok(&applied.bytes);
+        assert_eq!(norm(&applied.board), norm(&re.board));
+        assert_eq!(re.board.items.len(), parsed.board.items.len());
+    } else {
+        assert!(is_invalid_args(&adopted), "{adopted:?}");
+    }
+
+    let Some(item) = parsed.board.items.first() else {
+        return; // not an item at all: nothing for a status op to hit
+    };
+    let res = ops_file(src, &[status_op(&item.id, "done")]);
+    match res {
+        Err(e) if is_invalid_args(&Err::<(), _>(e.clone())) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(applied) => {
+            let re = parse_ok(&applied.bytes);
+            assert_eq!(re.board.items.len(), 1);
+            assert_eq!(re.board.items[0].id, item.id);
+            assert_eq!(re.board.items[0].status, Status::Done);
+            assert_eq!(norm(&applied.board), norm(&re.board));
+        }
+    }
+}
+
+// --- 7. note normalisation ---------------------------------------------------------
+
+#[test]
+fn notes_are_normalised_on_write_and_the_applied_board_agrees() {
+    let cases = [
+        ("a\n   ", "a"),
+        ("\n\na\n\n", "a"),
+        ("a  \nb\t\n", "a\nb"),
+        ("a\n\n   \n", "a"),
+    ];
+    for (ask, want) in cases {
+        let (src, parsed) = board60();
+        let id = find_item(&parsed.board, |i| i.kind == Kind::Item && i.note.is_none())
+            .id
+            .clone();
+        let applied = ops_file(
+            &src,
+            &[Op::Upsert(Upsert {
+                note: Some(ask.into()),
+                ..upsert(&id)
+            })],
+        )
+        .unwrap_or_else(|e| panic!("{ask:?}: refused: {e}"));
+        let re = parse_ok(&applied.bytes);
+        assert_eq!(
+            re.board.item(&id).unwrap().note.as_deref(),
+            Some(want),
+            "{ask:?}"
+        );
+        assert_eq!(
+            applied.board.item(&id).unwrap().note.as_deref(),
+            Some(want),
+            "{ask:?}: Applied.board agrees"
+        );
+        assert_eq!(norm(&applied.board), norm(&re.board), "{ask:?}");
+    }
+}
+
+// --- 8. cursor ahead of the log --------------------------------------------------
+
+#[test]
+fn a_cursor_ahead_of_the_log_gets_the_whole_board() {
+    let mut log = ChangeLog::new();
+    log.append(vec![
+        change_by(&agent_session("sess-b"), "a"),
+        change_by(&agent_session("sess-b"), "b"),
+        change_by(&agent_session("sess-b"), "c"),
+    ]);
+    assert_eq!(log.since(Some(10), None), Since::Full);
+    assert_eq!(log.since(Some(4), Some("sess-a")), Since::Full);
+    assert_eq!(log.since(Some(3), None), Since::Changes(Vec::new()));
+    assert_eq!(ChangeLog::new().since(Some(1), None), Since::Full);
+}
+
+// --- 9. compact_full caps a note per field -----------------------------------------
+
+#[test]
+fn compact_full_caps_a_thousand_line_note_as_one_field() {
+    let mut src =
+        String::from("# T\n\n## Now\n- [ ] Noted — todo · 14:53 <!-- #noted-1 1760540000 -->\n");
+    for _ in 0..1000 {
+        src.push_str("  ab\n");
+    }
+    let board = parse_ok(src.as_bytes()).board;
+    assert_eq!(
+        board
+            .item("noted-1")
+            .unwrap()
+            .note
+            .as_deref()
+            .unwrap()
+            .lines()
+            .count(),
+        1000
+    );
+
+    let out = compact_full(&board);
+    let start = out
+        .lines()
+        .position(|l| l.starts_with("- noted-1 ["))
+        .expect("the item is listed");
+    let note: Vec<&str> = out
+        .lines()
+        .skip(start + 1)
+        .take_while(|l| l.starts_with(' '))
+        .map(str::trim_start)
+        .collect();
+    let total = note.join("\n");
+    assert!(
+        total.chars().count() <= 530,
+        "note rendered as {} characters",
+        total.chars().count()
+    );
+    assert!(out.contains("…[truncated]"));
+    assert!(
+        out.chars().count() < 1500,
+        "whole render is {} chars",
+        out.chars().count()
+    );
+}
+
+// --- 10. moves through the splice path ------------------------------------------
+
+fn section_range(out: &str, title: &str) -> std::ops::Range<usize> {
+    let start = out
+        .find(&format!("\n## {title}\n"))
+        .unwrap_or_else(|| panic!("section {title}"))
+        + 1;
+    let end = out[start..]
+        .find("\n## ")
+        .map_or(out.len(), |e| start + e + 1);
+    start..end
+}
+
+fn assert_in_section(out: &str, id: &str, title: &str) {
+    let at = out
+        .find(&format!("<!-- #{id} "))
+        .unwrap_or_else(|| panic!("{id} missing"));
+    assert!(
+        section_range(out, title).contains(&at),
+        "{id} is not under ## {title}"
+    );
+}
+
+fn assert_other_spans_survive(src: &str, parsed: &ParsedBoard, out: &str, except: &[&str]) {
+    for item in &parsed.board.items {
+        if except.contains(&item.id.as_str()) {
+            continue;
+        }
+        let span = &src[parsed.item_span(&item.id).unwrap()];
+        assert_eq!(
+            out.matches(span).count(),
+            1,
+            "original bytes of {} must occur exactly once",
+            item.id
+        );
+    }
+}
+
+/// Runs one op on board-60 through `apply_to_file` and checks the placement
+/// of `moved` and that nothing else changed.
+fn check_placement(op: Op, moved: &str, to: (&str, &str), rel: Option<(&str, bool)>, last: bool) {
+    let (src, parsed) = board60();
+    let applied =
+        ops_file(&src, std::slice::from_ref(&op)).unwrap_or_else(|e| panic!("{op:?}: {e}"));
+    let out = String::from_utf8(applied.bytes.clone()).unwrap();
+    let re = parse_ok(&applied.bytes);
+    let model = apply_ok(&parsed.board, std::slice::from_ref(&op), &agent()).0;
+
+    assert_eq!(ids_of(&re.board), ids_of(&model), "{op:?}: order");
+    assert_eq!(re.board.items.len(), 60, "{op:?}");
+    assert_eq!(
+        out.matches(&format!("<!-- #{moved} ")).count(),
+        1,
+        "{op:?}: exactly once"
+    );
+    let got = re.board.item(moved).unwrap();
+    assert_eq!(got.section, to.0, "{op:?}");
+    assert_in_section(&out, moved, to.1);
+
+    let mut expected = parsed.board.item(moved).unwrap().clone();
+    expected.section = to.0.to_string();
+    assert!(
+        same_fields(got, &expected),
+        "{op:?}: the moved item's fields changed"
+    );
+
+    let pos = |id: &str| re.board.items.iter().position(|i| i.id == id).unwrap();
+    if let Some((sibling, before)) = rel {
+        if before {
+            assert_eq!(
+                pos(moved) + 1,
+                pos(sibling),
+                "{op:?}: right before {sibling}"
+            );
+        } else {
+            assert_eq!(
+                pos(moved),
+                pos(sibling) + 1,
+                "{op:?}: right after {sibling}"
+            );
+        }
+    }
+    if last {
+        let last_in_section = re.board.items.iter().rfind(|i| i.section == to.0).unwrap();
+        assert_eq!(last_in_section.id, moved, "{op:?}: end of section");
+    }
+    assert_other_spans_survive(&src, &parsed, &out, &[moved]);
+    assert_eq!(re.board.prose, parsed.board.prose, "{op:?}: prose");
+    assert_eq!(re.board.sections, parsed.board.sections, "{op:?}");
+    assert_eq!(re.board.log, parsed.board.log, "{op:?}");
+    assert_eq!(norm(&applied.board), norm(&re.board), "{op:?}");
+}
+
+fn ids_in<'a>(board: &'a Board, section: &str) -> Vec<&'a str> {
+    board
+        .items
+        .iter()
+        .filter(|i| i.section == section)
+        .map(|i| i.id.as_str())
+        .collect()
+}
+
+fn mv(id: &str, section: &str, before: Option<&str>, after: Option<&str>) -> Op {
+    Op::Move {
+        id: id.into(),
+        section: section.into(),
+        before: before.map(Into::into),
+        after: after.map(Into::into),
+    }
+}
+
+#[test]
+fn moves_between_sections_land_in_the_right_place_through_the_file() {
+    let (_, parsed) = board60();
+    let b = &parsed.board;
+    let now = ids_in(b, "now");
+    let next = ids_in(b, "next");
+    let findings = ids_in(b, "findings");
+    let done = ids_in(b, "done");
+    let cmd = find_item(b, |i| i.section == "now" && i.kind == Kind::Command)
+        .id
+        .clone();
+
+    check_placement(
+        mv(now[0], "next", None, None),
+        now[0],
+        ("next", "Next"),
+        None,
+        false,
+    );
+    check_placement(
+        mv(&cmd, "findings", Some(findings[0]), None),
+        &cmd,
+        ("findings", "Findings"),
+        Some((findings[0], true)),
+        false,
+    );
+    check_placement(
+        mv(now[3], "done", None, Some(done[4])),
+        now[3],
+        ("done", "Done"),
+        Some((done[4], false)),
+        false,
+    );
+    check_placement(
+        mv(now[4], "next", None, Some(next[next.len() - 1])),
+        now[4],
+        ("next", "Next"),
+        Some((next[next.len() - 1], false)),
+        false,
+    );
+    check_placement(
+        mv(now[5], "next", Some(next[0]), None),
+        now[5],
+        ("next", "Next"),
+        Some((next[0], true)),
+        false,
+    );
+}
+
+#[test]
+fn moves_within_a_section_reorder_through_the_file() {
+    let (_, parsed) = board60();
+    let now = ids_in(&parsed.board, "now");
+    check_placement(
+        mv(now[1], "now", Some(now[6]), None),
+        now[1],
+        ("now", "Now"),
+        Some((now[6], true)),
+        false,
+    );
+    check_placement(
+        mv(now[8], "now", None, Some(now[1])),
+        now[8],
+        ("now", "Now"),
+        Some((now[1], false)),
+        false,
+    );
+    check_placement(
+        mv(now[0], "now", None, Some(now[9])),
+        now[0],
+        ("now", "Now"),
+        Some((now[9], false)),
+        false,
+    );
+}
+
+#[test]
+fn upserting_a_section_on_an_existing_item_moves_it_to_the_end_of_that_section() {
+    let (_, parsed) = board60();
+    let now = ids_in(&parsed.board, "now");
+    for (idx, section, title) in [
+        (0, "done", "Done"),
+        (3, "loose-ends", "Loose ends"),
+        (7, "findings", "Findings"),
+    ] {
+        let op = Op::Upsert(Upsert {
+            section: Some(section.into()),
+            ..upsert(now[idx])
+        });
+        check_placement(op, now[idx], (section, title), None, true);
+    }
+}
+
+#[test]
+fn moving_into_an_empty_section_through_the_file_works() {
+    let out1 = out_string(
+        ops_file(
+            &template("T", &[]),
+            &[
+                Op::Upsert(Upsert {
+                    section: Some("now".into()),
+                    text: Some("One".into()),
+                    ..upsert("one-1")
+                }),
+                Op::Upsert(Upsert {
+                    section: Some("now".into()),
+                    text: Some("Two".into()),
+                    ..upsert("two-2")
+                }),
+                Op::Upsert(Upsert {
+                    section: Some("done".into()),
+                    text: Some("Three".into()),
+                    ..upsert("three-3")
+                }),
+            ],
+        )
+        .unwrap(),
+    );
+    let applied = ops_file(&out1, &[mv("one-1", "next", None, None)]).unwrap();
+    let out2 = String::from_utf8(applied.bytes.clone()).unwrap();
+    let re = parse_ok(&applied.bytes);
+    assert_eq!(re.board.item("one-1").unwrap().section, "next");
+    assert_in_section(&out2, "one-1", "Next");
+    assert_in_section(&out2, "two-2", "Now");
+    assert_in_section(&out2, "three-3", "Done");
+    assert_eq!(re.board.items.len(), 3);
+    assert_eq!(norm(&applied.board), norm(&re.board));
+}
+
+// --- 11. new items into non-empty sections through the splice ----------------------
+
+#[test]
+fn a_new_item_lands_at_the_end_of_any_non_empty_section_without_disturbing_others() {
+    for (section, title) in [
+        ("now", "Now"),
+        ("next", "Next"),
+        ("waiting-on-you", "Waiting on you"),
+        ("done", "Done"),
+        ("findings", "Findings"),
+        ("loose-ends", "Loose ends"),
+    ] {
+        let (src, parsed) = board60();
+        let op = Op::Upsert(Upsert {
+            section: Some(section.into()),
+            text: Some("Spliced in".into()),
+            note: Some("first note line\nsecond note line".into()),
+            links: Some(vec![LinkInput::Text("PR #253".into())]),
+            ..upsert("spliced-1")
+        });
+        let applied = ops_file(&src, std::slice::from_ref(&op)).unwrap();
+        let out = String::from_utf8(applied.bytes.clone()).unwrap();
+        let re = parse_ok(&applied.bytes);
+
+        assert_eq!(re.board.items.len(), 61, "{section}");
+        assert_eq!(out.matches("<!-- #spliced-1 ").count(), 1, "{section}");
+        let got = re.board.item("spliced-1").unwrap();
+        assert_eq!(got.section, section);
+        assert_eq!(got.text, "Spliced in");
+        assert_eq!(
+            got.note.as_deref(),
+            Some("first note line\nsecond note line")
+        );
+        assert_eq!(got.links, [Link::new("PR #253", None)]);
+        assert_eq!(
+            re.board
+                .items
+                .iter()
+                .rfind(|i| i.section == section)
+                .unwrap()
+                .id,
+            "spliced-1",
+            "{section}: end of section"
+        );
+        assert_in_section(&out, "spliced-1", title);
+        assert_other_spans_survive(&src, &parsed, &out, &[]);
+        assert_eq!(re.board.prose, parsed.board.prose, "{section}: prose");
+        assert_eq!(re.board.log, parsed.board.log, "{section}");
+        assert_eq!(norm(&applied.board), norm(&re.board), "{section}");
+        let model = apply_ok(&parsed.board, &[op], &agent()).0;
+        assert_eq!(ids_of(&re.board), ids_of(&model), "{section}: order");
+    }
+}
+
+#[test]
+fn new_items_into_empty_and_non_empty_template_sections_read_back_in_place() {
+    let first = ops_file(
+        &template("T", &[]),
+        &[Op::Upsert(Upsert {
+            section: Some("now".into()),
+            text: Some("A".into()),
+            ..upsert("a-1")
+        })],
+    )
+    .unwrap();
+    let second = ops_file(
+        &String::from_utf8(first.bytes).unwrap(),
+        &[
+            Op::Upsert(Upsert {
+                section: Some("now".into()),
+                text: Some("B".into()),
+                ..upsert("b-2")
+            }),
+            Op::Upsert(Upsert {
+                section: Some("next".into()),
+                text: Some("C".into()),
+                ..upsert("c-3")
+            }),
+        ],
+    )
+    .unwrap();
+    let out = String::from_utf8(second.bytes.clone()).unwrap();
+    let re = parse_ok(&second.bytes);
+    assert_eq!(ids_in(&re.board, "now"), ["a-1", "b-2"]);
+    assert_eq!(ids_in(&re.board, "next"), ["c-3"]);
+    assert_in_section(&out, "c-3", "Next");
+    assert_eq!(norm(&second.board), norm(&re.board));
+}
+
+#[test]
+fn new_items_into_the_crlf_board_use_crlf_and_keep_the_missing_final_newline() {
+    let src = fixture_str("handwritten.md");
+    let adopted_bytes = ops_file(&src, &[]).unwrap().bytes;
+    let adopted = parse_ok(&adopted_bytes);
+    let adopted_text = String::from_utf8(adopted_bytes).unwrap();
+
+    for section in ["today", "later"] {
+        let op = Op::Upsert(Upsert {
+            section: Some(section.into()),
+            text: Some("New in CRLF".into()),
+            note: Some("n1\nn2".into()),
+            links: Some(vec![LinkInput::Text("PR #253".into())]),
+            ..upsert("crlf-new")
+        });
+        let applied = ops_file(&src, std::slice::from_ref(&op)).unwrap();
+        let out = String::from_utf8(applied.bytes.clone()).unwrap();
+
+        let without_crlf = out.replace("\r\n", "");
+        assert!(!without_crlf.contains('\n'), "{section}: bare LF written");
+        assert!(!without_crlf.contains('\r'), "{section}: bare CR written");
+        assert!(!out.ends_with('\n'), "{section}: gained a final newline");
+        assert!(out.matches("\r\n").count() >= adopted_text.matches("\r\n").count());
+
+        let re = parse_ok(&applied.bytes);
+        let got = re.board.item("crlf-new").unwrap();
+        assert_eq!(got.section, section);
+        assert_eq!(got.note.as_deref(), Some("n1\nn2"));
+        assert_eq!(got.links, [Link::new("PR #253", None)]);
+        assert_eq!(
+            re.board
+                .items
+                .iter()
+                .rfind(|i| i.section == section)
+                .unwrap()
+                .id,
+            "crlf-new",
+            "{section}: end of section"
+        );
+        assert_eq!(re.board.items.len(), adopted.board.items.len() + 1);
+        for item in &adopted.board.items {
+            let span = adopted.item_span(&item.id).unwrap();
+            assert_eq!(
+                out.matches(&adopted_text[span]).count(),
+                1,
+                "{section}: {} survives byte for byte",
+                item.id
+            );
+        }
+        assert_eq!(norm(&applied.board), norm(&re.board), "{section}");
+    }
+}
+
+// --- 12. merge with ours adding and moving ---------------------------------------
+
+#[test]
+fn merge_keeps_an_added_and_a_moved_item_of_ours_while_theirs_edits_others() {
+    let (_, parsed) = board60();
+    let base = &parsed.board;
+    let now = ids_in(base, "now");
+    let next = ids_in(base, "next");
+    let pred = (*now.last().unwrap()).to_string();
+    let moved = ids_in(base, "findings")[0].to_string();
+
+    let (ours, _) = apply_ok(
+        base,
+        &[
+            Op::Upsert(Upsert {
+                section: Some("now".into()),
+                text: Some("Ours new".into()),
+                ..upsert("ours-new")
+            }),
+            mv(&moved, "done", None, None),
+        ],
+        &agent(),
+    );
+    let pos = |b: &Board, id: &str| b.items.iter().position(|i| i.id == id).unwrap();
+    assert_eq!(
+        pos(&ours, "ours-new"),
+        pos(&ours, &pred) + 1,
+        "precondition"
+    );
+
+    let text = |id: &str, t: &str| {
+        Op::Upsert(Upsert {
+            text: Some(t.into()),
+            ..upsert(id)
+        })
+    };
+    let (theirs, _) = apply_batch(
+        base,
+        &[
+            text(&pred, "Theirs edited the predecessor"),
+            text(next[2], "Theirs edited next"),
+        ],
+        &Author::File,
+        stamp0(),
+    )
+    .unwrap();
+
+    let merged = merge_external(base, &ours, &theirs);
+    assert_eq!(merged.items.len(), 61);
+    assert_eq!(merged.item("ours-new").unwrap().text, "Ours new");
+    assert_eq!(
+        pos(&merged, "ours-new"),
+        pos(&merged, &pred) + 1,
+        "added item stays right after its predecessor"
+    );
+    assert_eq!(merged.item("ours-new").unwrap().section, "now");
+    assert_eq!(
+        merged.item(&moved).unwrap().section,
+        "done",
+        "moved item is in ours' section"
+    );
+    assert_eq!(
+        merged.item(&pred).unwrap().text,
+        "Theirs edited the predecessor"
+    );
+    assert_eq!(merged.item(next[2]).unwrap().text, "Theirs edited next");
+
+    let without_new =
+        |b: &Board| -> Vec<String> { ids_of(b).into_iter().filter(|i| i != "ours-new").collect() };
+    assert_eq!(
+        without_new(&merged),
+        without_new(&ours),
+        "relative order follows ours"
+    );
+    assert_eq!(
+        ids_of(&merged).iter().collect::<HashSet<_>>().len(),
+        61,
+        "no duplicates"
+    );
 }

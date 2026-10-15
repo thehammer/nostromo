@@ -28,7 +28,7 @@ pub use clock::{Clock, FakeClock, SystemClock};
 pub use diff::{diff, merge_external};
 pub use format::{
     parse, splice, template, validate_command_text, CommandTextError, Malformed, MalformedReason,
-    ParsedBoard,
+    ParsedBoard, Unwritable,
 };
 pub use model::{
     Author, Board, Change, ChangeKind, Counts, Env, Item, Kind, Link, LinkKind, LogLine, Section,

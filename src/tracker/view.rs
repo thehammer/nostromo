@@ -232,7 +232,11 @@ fn view_item(item: &Item, source: String) -> ViewItem {
         status: item.status,
         owner: item.owner.clone(),
         updated_at: item.updated_at,
-        note_blocks: item.note.as_deref().map(markdown_to_blocks).unwrap_or_default(),
+        note_blocks: item
+            .note
+            .as_deref()
+            .map(markdown_to_blocks)
+            .unwrap_or_default(),
         links: item.links.clone(),
         kind: item.kind,
         command: item.command.clone(),

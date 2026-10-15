@@ -232,7 +232,9 @@ fn kind_from_text(text: &str) -> Option<LinkKind> {
             ),
         ]
     });
-    res.iter().find(|(re, _)| re.is_match(text)).map(|(_, k)| *k)
+    res.iter()
+        .find(|(re, _)| re.is_match(text))
+        .map(|(_, k)| *k)
 }
 
 fn kind_from_url(url: &str) -> Option<LinkKind> {
@@ -403,7 +405,13 @@ pub fn slug(text: &str) -> String {
 /// with a salt until the id is not in `taken`. Deterministic.
 pub fn generate_id(text: &str, taken: &HashSet<String>) -> String {
     let first = text.split_whitespace().next().map(slug).unwrap_or_default();
-    let mut word: String = first.split('-').next().unwrap_or("").chars().take(27).collect();
+    let mut word: String = first
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(27)
+        .collect();
     if word.is_empty() {
         word = "item".to_string();
     }

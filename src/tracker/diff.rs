@@ -19,7 +19,11 @@ pub fn diff(old: &Board, new: &Board, author: &Author, now: DateTime<Utc>) -> Ve
     let old_items: HashMap<&str, &Item> = old.items.iter().map(|i| (i.id.as_str(), i)).collect();
     let new_ids: HashSet<&str> = new.items.iter().map(|i| i.id.as_str()).collect();
 
-    for item in old.items.iter().filter(|i| !new_ids.contains(i.id.as_str())) {
+    for item in old
+        .items
+        .iter()
+        .filter(|i| !new_ids.contains(i.id.as_str()))
+    {
         out.push(
             Change::new(author, Some(&item.id), ChangeKind::Removed, now)
                 .with_field("section", json!(item.section), Value::Null)
@@ -33,7 +37,10 @@ pub fn diff(old: &Board, new: &Board, author: &Author, now: DateTime<Utc>) -> Ve
             out.push(added(item, author, now));
             continue;
         };
-        let prev_section = renamed.get(prev.section.as_str()).copied().unwrap_or(&prev.section);
+        let prev_section = renamed
+            .get(prev.section.as_str())
+            .copied()
+            .unwrap_or(&prev.section);
         if prev_section != item.section || reordered.contains(item.id.as_str()) {
             out.push(
                 Change::new(author, Some(&item.id), ChangeKind::Moved, now).with_field(
@@ -54,13 +61,11 @@ pub fn diff(old: &Board, new: &Board, author: &Author, now: DateTime<Utc>) -> Ve
     }
 
     for line in appended_log(old, new) {
-        out.push(
-            Change::new(author, None, ChangeKind::Log, now).with_field(
-                "text",
-                Value::Null,
-                json!(format!("{} {}", line.time, line.text)),
-            ),
-        );
+        out.push(Change::new(author, None, ChangeKind::Log, now).with_field(
+            "text",
+            Value::Null,
+            json!(format!("{} {}", line.time, line.text)),
+        ));
     }
     out
 }
@@ -93,8 +98,11 @@ fn changed_fields(old: &Item, new: &Item) -> Vec<(&'static str, Value, Value)> {
 /// An `Added` change carrying the new item's section, text and every
 /// non-default field.
 fn added(item: &Item, author: &Author, now: DateTime<Utc>) -> Change {
-    let mut change = Change::new(author, Some(&item.id), ChangeKind::Added, now)
-        .with_field("section", Value::Null, json!(item.section));
+    let mut change = Change::new(author, Some(&item.id), ChangeKind::Added, now).with_field(
+        "section",
+        Value::Null,
+        json!(item.section),
+    );
     let blank = Item {
         status: Status::Todo,
         kind: Kind::Item,
@@ -118,8 +126,14 @@ fn section_changes<'a>(
 ) -> HashMap<&'a str, &'a str> {
     let new_ids: HashSet<&str> = new.sections.iter().map(|s| s.id.as_str()).collect();
     let old_ids: HashSet<&str> = old.sections.iter().map(|s| s.id.as_str()).collect();
-    let mut gone = old.sections.iter().filter(|s| !new_ids.contains(s.id.as_str()));
-    let mut fresh = new.sections.iter().filter(|s| !old_ids.contains(s.id.as_str()));
+    let mut gone = old
+        .sections
+        .iter()
+        .filter(|s| !new_ids.contains(s.id.as_str()));
+    let mut fresh = new
+        .sections
+        .iter()
+        .filter(|s| !old_ids.contains(s.id.as_str()));
     let mut renamed = HashMap::new();
     let section = |id_old: Value, id_new: Value, t_old: Value, t_new: Value| {
         Change::new(author, None, ChangeKind::Section, now)
@@ -130,16 +144,40 @@ fn section_changes<'a>(
         match (gone.next(), fresh.next()) {
             (Some(o), Some(n)) => {
                 renamed.insert(o.id.as_str(), n.id.as_str());
-                out.push(section(json!(o.id), json!(n.id), json!(o.title), json!(n.title)));
+                out.push(section(
+                    json!(o.id),
+                    json!(n.id),
+                    json!(o.title),
+                    json!(n.title),
+                ));
             }
-            (Some(o), None) => out.push(section(json!(o.id), Value::Null, json!(o.title), Value::Null)),
-            (None, Some(n)) => out.push(section(Value::Null, json!(n.id), Value::Null, json!(n.title))),
+            (Some(o), None) => out.push(section(
+                json!(o.id),
+                Value::Null,
+                json!(o.title),
+                Value::Null,
+            )),
+            (None, Some(n)) => out.push(section(
+                Value::Null,
+                json!(n.id),
+                Value::Null,
+                json!(n.title),
+            )),
             (None, None) => break,
         }
     }
     for n in &new.sections {
-        if let Some(o) = old.sections.iter().find(|o| o.id == n.id && o.title != n.title) {
-            out.push(section(json!(o.id), json!(n.id), json!(o.title), json!(n.title)));
+        if let Some(o) = old
+            .sections
+            .iter()
+            .find(|o| o.id == n.id && o.title != n.title)
+        {
+            out.push(section(
+                json!(o.id),
+                json!(n.id),
+                json!(o.title),
+                json!(n.title),
+            ));
         }
     }
     renamed
@@ -147,16 +185,32 @@ fn section_changes<'a>(
 
 /// Items that stayed in their (possibly renamed) section but whose order
 /// relative to the section's other surviving items changed.
-fn reordered_items<'a>(old: &'a Board, new: &'a Board, renamed: &HashMap<&str, &str>) -> HashSet<&'a str> {
-    let new_section: HashMap<&str, &str> =
-        new.items.iter().map(|i| (i.id.as_str(), i.section.as_str())).collect();
+fn reordered_items<'a>(
+    old: &'a Board,
+    new: &'a Board,
+    renamed: &HashMap<&str, &str>,
+) -> HashSet<&'a str> {
+    let new_section: HashMap<&str, &str> = new
+        .items
+        .iter()
+        .map(|i| (i.id.as_str(), i.section.as_str()))
+        .collect();
     let mut out = HashSet::new();
     for section in &new.sections {
         let stayed = |item: &&Item| {
-            let old_section = renamed.get(item.section.as_str()).copied().unwrap_or(&item.section);
-            old_section == section.id && new_section.get(item.id.as_str()) == Some(&section.id.as_str())
+            let old_section = renamed
+                .get(item.section.as_str())
+                .copied()
+                .unwrap_or(&item.section);
+            old_section == section.id
+                && new_section.get(item.id.as_str()) == Some(&section.id.as_str())
         };
-        let before: Vec<&str> = old.items.iter().filter(stayed).map(|i| i.id.as_str()).collect();
+        let before: Vec<&str> = old
+            .items
+            .iter()
+            .filter(stayed)
+            .map(|i| i.id.as_str())
+            .collect();
         let before_set: HashSet<&str> = before.iter().copied().collect();
         let after: Vec<&str> = new
             .items
@@ -249,7 +303,11 @@ fn place_our_changes(items: &mut Vec<Item>, base: &Board, ours: &Board, theirs: 
             None => {
                 let mut item = our.clone();
                 if !section_ok(&item.section) {
-                    item.section = theirs.sections.first().map(|s| s.id.clone()).unwrap_or_default();
+                    item.section = theirs
+                        .sections
+                        .first()
+                        .map(|s| s.id.clone())
+                        .unwrap_or_default();
                 }
                 item
             }
