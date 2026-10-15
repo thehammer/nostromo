@@ -18,6 +18,7 @@ pub mod mother;
 pub mod perri_cli;
 pub mod pty;
 pub mod sessions;
+pub mod tracker;
 pub mod transcript;
 pub mod ui;
 pub mod views;
