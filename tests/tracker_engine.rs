@@ -110,7 +110,7 @@ fn ids_of(board: &Board) -> Vec<String> {
     board.items.iter().map(|i| i.id.clone()).collect()
 }
 
-fn find_item<'a>(board: &'a Board, pred: impl Fn(&Item) -> bool) -> &'a Item {
+fn find_item(board: &Board, pred: impl Fn(&Item) -> bool) -> &Item {
     board
         .items
         .iter()
@@ -1011,9 +1011,7 @@ fn upsert_on_an_unknown_id_creates_the_item_at_the_end_of_the_named_section() {
     assert_eq!(item.updated_at, Some(now0()));
     let last_in_section = board
         .items
-        .iter()
-        .filter(|i| i.section == "waiting-on-you")
-        .last()
+        .iter().rfind(|i| i.section == "waiting-on-you")
         .unwrap();
     assert_eq!(last_in_section.id, "fresh-1");
     assert_eq!(board.items.len(), 61);
@@ -1103,7 +1101,7 @@ fn upsert_with_a_section_moves_an_existing_item_to_the_end_of_that_section() {
     );
     assert_eq!(board.item(&id).unwrap().section, "findings");
     assert_eq!(
-        board.items.iter().filter(|i| i.section == "findings").last().unwrap().id,
+        board.items.iter().rfind(|i| i.section == "findings").unwrap().id,
         id
     );
     assert_eq!(board.items.len(), 60);
@@ -1179,7 +1177,7 @@ fn a_log_op_appends_a_time_stamped_line_in_the_stamps_offset() {
     let op = Op::Log {
         text: "Cody: deployed".into(),
     };
-    let (board, changes) = apply_ok(&parsed.board, &[op.clone()], &agent());
+    let (board, changes) = apply_ok(&parsed.board, std::slice::from_ref(&op), &agent());
     assert_eq!(board.log.len(), 13);
     let last = board.log.last().unwrap();
     assert_eq!((last.time.as_str(), last.text.as_str()), ("08:15", "Cody: deployed"));
@@ -1451,7 +1449,7 @@ fn growing_writes_on_a_board_over_256_kib_are_refused_and_shrinking_ones_work() 
         ),
     ];
     for (name, op) in growing {
-        let err = apply_batch(&parsed.board, &[op.clone()], &agent(), stamp0()).unwrap_err();
+        let err = apply_batch(&parsed.board, std::slice::from_ref(&op), &agent(), stamp0()).unwrap_err();
         assert_eq!(err.code(), "board_too_large", "{name}");
         assert!(matches!(err, OpError::BoardTooLarge { .. }), "{name}");
         let file_err = apply_to_file(src.as_bytes(), &[op], &agent(), stamp0()).unwrap_err();
@@ -1494,7 +1492,7 @@ fn growing_writes_on_a_board_over_500_items_are_refused_and_removal_works() {
             text: Some("One more".into()),
             ..upsert("one-more")
         });
-        let err = apply_batch(&parsed.board, &[add.clone()], &agent(), stamp0()).unwrap_err();
+        let err = apply_batch(&parsed.board, std::slice::from_ref(&add), &agent(), stamp0()).unwrap_err();
         assert_eq!(err.code(), "board_too_large", "{items} items + 1");
         assert!(matches!(
             apply_to_file(src.as_bytes(), &[add], &agent(), stamp0()).unwrap_err(),
