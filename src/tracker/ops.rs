@@ -1,6 +1,6 @@
 //! Item operations and atomic batches (contract §4).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -17,6 +17,14 @@ use super::model::{
 /// Size caps: a batch that grows a board past either is refused.
 pub const MAX_BOARD_BYTES: usize = 256 * 1024;
 pub const MAX_ITEMS: usize = 500;
+/// Ops in one batch; a longer batch is refused `invalid_args` before any op runs.
+pub const MAX_BATCH_OPS: usize = 200;
+/// Longest item text, link text and Log line, in characters.
+pub const MAX_LINE_CHARS: usize = 500;
+/// Longest note, in characters.
+pub const MAX_NOTE_CHARS: usize = 8_000;
+/// Longest command, in characters.
+pub const MAX_COMMAND_CHARS: usize = 4_000;
 
 /// A link given to `upsert`: bare text (`"PR #253"`) or `{text, url}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,60 +123,40 @@ impl OpError {
 
 /// Applies `ops` in order to a copy of `board`, all or none. Returns the new
 /// board and its changes (attributed to `author`, at `at.now`, `seq` 0).
+/// More than [`MAX_BATCH_OPS`] ops is refused before any runs; the size and
+/// item caps are checked after every op, so an oversized batch stops at the
+/// op that crosses them.
 pub fn apply_batch(
     board: &Board,
     ops: &[Op],
     author: &Author,
     at: Stamp,
 ) -> Result<(Board, Vec<Change>), OpError> {
-    let mut next = board.clone();
-    for (index, op) in ops.iter().enumerate() {
-        Apply {
-            board: &mut next,
-            index,
-            at,
-        }
-        .op(op)?;
-    }
-    check_size(board, &next, at)?;
-    let changes = diff(board, &next, author, at.now);
-    Ok((next, changes))
-}
-
-/// Refuses a batch that grows the board past a cap. The new size is
-/// estimated from the old file size plus the size difference of every
-/// changed item and Log line as it would be written.
-fn check_size(old: &Board, new: &Board, at: Stamp) -> Result<(), OpError> {
-    let item_len = |item: &Item| serialise_item(item, at, "\n").len() as i64;
-    let mut size = old.byte_len as i64;
-    let old_items: HashMap<&str, &Item> = old.items.iter().map(|i| (i.id.as_str(), i)).collect();
-    let new_ids: HashSet<&str> = new.items.iter().map(|i| i.id.as_str()).collect();
-    for item in &new.items {
-        match old_items.get(item.id.as_str()) {
-            Some(prev) if *prev == item => {}
-            Some(prev) => size += item_len(item) - item_len(prev),
-            None => size += item_len(item),
-        }
-    }
-    for item in old
-        .items
-        .iter()
-        .filter(|i| !new_ids.contains(i.id.as_str()))
-    {
-        size -= item_len(item);
-    }
-    for line in new.log.iter().skip(old.log.len()) {
-        size += (line.time.len() + line.text.len() + 4) as i64;
-    }
-    let size = size.max(0) as usize;
-    let grows = new.items.len() > old.items.len() || size > old.byte_len;
-    if grows && (size > MAX_BOARD_BYTES || new.items.len() > MAX_ITEMS) {
-        return Err(OpError::BoardTooLarge {
-            bytes: size,
-            items: new.items.len(),
+    if ops.len() > MAX_BATCH_OPS {
+        return Err(OpError::InvalidArgs {
+            index: MAX_BATCH_OPS,
+            reason: format!(
+                "a batch holds at most {MAX_BATCH_OPS} ops, got {}",
+                ops.len()
+            ),
         });
     }
-    Ok(())
+    let mut next = board.clone();
+    let mut apply = Apply {
+        board: &mut next,
+        index: 0,
+        at,
+        size: board.byte_len as i64,
+        start_bytes: board.byte_len,
+        start_items: board.items.len(),
+    };
+    for (index, op) in ops.iter().enumerate() {
+        apply.index = index;
+        apply.op(op)?;
+        apply.check_size()?;
+    }
+    let changes = diff(board, &next, author, at.now);
+    Ok((next, changes))
 }
 
 /// One op applied to the working copy.
@@ -176,9 +164,30 @@ struct Apply<'a> {
     board: &'a mut Board,
     index: usize,
     at: Stamp,
+    /// The file size as the board would be written now: the original size
+    /// plus every op's change to an item's or Log line's written size.
+    size: i64,
+    start_bytes: usize,
+    start_items: usize,
 }
 
 impl Apply<'_> {
+    /// Refuses a batch that has grown the board past a cap; a board already
+    /// over a cap can still shrink or change in place.
+    fn check_size(&self) -> Result<(), OpError> {
+        let size = self.size.max(0) as usize;
+        let items = self.board.items.len();
+        let grows = items > self.start_items || size > self.start_bytes;
+        if grows && (size > MAX_BOARD_BYTES || items > MAX_ITEMS) {
+            return Err(OpError::BoardTooLarge { bytes: size, items });
+        }
+        Ok(())
+    }
+
+    fn item_len(&self, item: &Item) -> i64 {
+        serialise_item(item, self.at, "\n").len() as i64
+    }
+
     fn op(&mut self, op: &Op) -> Result<(), OpError> {
         match op {
             Op::Upsert(upsert) => self.upsert(upsert),
@@ -190,7 +199,8 @@ impl Apply<'_> {
             }
             Op::Remove { id } => {
                 let pos = self.find(id)?;
-                self.board.items.remove(pos);
+                let item = self.board.items.remove(pos);
+                self.size -= self.item_len(&item);
                 Ok(())
             }
             Op::Move {
@@ -200,11 +210,10 @@ impl Apply<'_> {
                 after,
             } => self.move_item(id, section, before.as_deref(), after.as_deref()),
             Op::Log { text } => {
-                let text = self.single_line("text", text)?;
-                self.board.log.push(LogLine {
-                    time: self.at.hhmm(self.at.now),
-                    text,
-                });
+                let text = self.single_line("log text", text, MAX_LINE_CHARS)?;
+                let time = self.at.hhmm(self.at.now);
+                self.size += (time.len() + text.len() + 4) as i64;
+                self.board.log.push(LogLine { time, text });
                 Ok(())
             }
         }
@@ -269,6 +278,7 @@ impl Apply<'_> {
         fields.apply(&mut item);
         self.check_command(fields, &item)?;
         item.updated_at = Some(self.at.now);
+        self.size += self.item_len(&item);
         let at = self.end_of_section(&section);
         self.board.items.insert(at, item);
         Ok(())
@@ -341,10 +351,13 @@ impl Apply<'_> {
     /// Applies `change` to the item at `pos`; bumps `updated_at` if it changed
     /// anything.
     fn edit(&mut self, pos: usize, change: impl FnOnce(&mut Item) -> bool) {
+        let before = self.item_len(&self.board.items[pos]);
         let item = &mut self.board.items[pos];
         if change(item) {
             item.updated_at = Some(self.at.now);
         }
+        let after = self.item_len(&self.board.items[pos]);
+        self.size += after - before;
     }
 
     /// Index where a new item of `section` goes: after the section's last
@@ -394,8 +407,9 @@ impl Apply<'_> {
         }
     }
 
-    /// Trimmed, non-empty, one line, no control characters, no `<!--`.
-    fn single_line(&self, field: &str, value: &str) -> Result<String, OpError> {
+    /// Trimmed, non-empty, at most `max` characters, one line, no control
+    /// characters, no `<!--`.
+    fn single_line(&self, field: &str, value: &str, max: usize) -> Result<String, OpError> {
         let value = value.trim();
         if value.is_empty() {
             return Err(self.invalid(format!("{field} is empty")));
@@ -408,7 +422,19 @@ impl Apply<'_> {
         if value.contains("<!--") {
             return Err(self.invalid(format!("{field} must not contain <!--")));
         }
+        self.within(field, value, max)?;
         Ok(value.to_string())
+    }
+
+    /// `value` is at most `max` characters.
+    fn within(&self, field: &str, value: &str, max: usize) -> Result<(), OpError> {
+        let len = value.chars().count();
+        if len > max {
+            return Err(self.invalid(format!(
+                "{field} is {len} characters, over the {max}-character limit"
+            )));
+        }
+        Ok(())
     }
 
     /// Validates every given upsert field up front.
@@ -417,7 +443,7 @@ impl Apply<'_> {
             text: u
                 .text
                 .as_deref()
-                .map(|t| self.single_line("text", t))
+                .map(|t| self.single_line("text", t, MAX_LINE_CHARS))
                 .transpose()?,
             status: u.status.as_deref().map(|s| self.status(s)).transpose()?,
             ..Fields::default()
@@ -447,6 +473,7 @@ impl Apply<'_> {
                 return Err(self.invalid(format!("command: {e}")));
             }
             let command = command.trim_matches('\n');
+            self.within("command", command, MAX_COMMAND_CHARS)?;
             f.command = Some((!command.trim().is_empty()).then(|| command.to_string()));
         }
         if let Some(env) = &u.env {
@@ -464,7 +491,7 @@ impl Apply<'_> {
         if owner.trim().is_empty() {
             return Ok(None);
         }
-        let owner = self.single_line("owner", owner)?;
+        let owner = self.single_line("owner", owner, MAX_OWNER_CHARS)?;
         if owner.chars().count() > MAX_OWNER_CHARS
             || owner.contains(TAIL_CHARS)
             || is_reserved_tail_token(&owner)
@@ -490,6 +517,7 @@ impl Apply<'_> {
         if note.is_empty() {
             return Ok(None);
         }
+        self.within("note", note, MAX_NOTE_CHARS)?;
         if note.lines().any(|l| l.starts_with(LINKS_PREFIX)) {
             return Err(self.invalid("a note line can't start with \"Links: \"".to_string()));
         }
@@ -501,7 +529,7 @@ impl Apply<'_> {
             LinkInput::Text(text) => (text.as_str(), None),
             LinkInput::Full { text, url } => (text.as_str(), url.as_deref()),
         };
-        let text = self.single_line("link text", text)?;
+        let text = self.single_line("link text", text, MAX_LINE_CHARS)?;
         if text.contains(TAIL_CHARS) || text.contains(['[', ']']) {
             return Err(self.invalid(format!("link text {text:?} can't contain —, ·, [ or ]")));
         }

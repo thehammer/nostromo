@@ -3,7 +3,7 @@
 
 use serde_json::{json, Map, Value};
 
-use super::format::is_invisible;
+use super::format::longest_run;
 use super::model::{Board, Change, ChangeKind};
 
 /// Log lines in the compact full render.
@@ -39,9 +39,11 @@ pub fn compact_full(board: &Board) -> String {
                 quote_untrusted(&item.text)
             ));
             if let Some(command) = &item.command {
-                out.push_str("  ```\n");
-                push_quoted_lines(&mut out, command);
-                out.push_str("  ```\n");
+                // Longer than any backtick run inside, so no command line closes it.
+                let mut body = String::new();
+                push_quoted_lines(&mut body, command);
+                let fence = "`".repeat(longest_run(&body, '`').max(2) + 1);
+                out.push_str(&format!("  {fence}\n{body}  {fence}\n"));
             }
             if let Some(note) = &item.note {
                 push_quoted_lines(&mut out, note);
@@ -82,7 +84,7 @@ pub fn delta_entries(changes: &[Change]) -> Vec<Value> {
 
 fn delta_entry(change: &Change) -> Value {
     let mut entry = Map::new();
-    entry.insert("by".to_string(), json!(change.by.label()));
+    entry.insert("by".to_string(), json!(quote_untrusted(&change.by.label())));
     if let Some(id) = &change.item_id {
         entry.insert("id".to_string(), json!(id));
     }
@@ -144,13 +146,15 @@ fn quote_value(value: &Value) -> Value {
 }
 
 /// Makes untrusted text safe to show an agent: ANSI/OSC escape sequences and
-/// control characters removed (`\n`/`\t` become spaces), zero-width and bidi
-/// characters shown as `⟨U+202E⟩`, `<nostromo-note` / `</nostromo-note` (any
-/// case) neutralised to `‹nostromo-note` / `‹/nostromo-note`, capped at 500
+/// control characters removed (`\n`/`\t` become spaces), every invisible
+/// character (`data::work::is_invisible`: zero-width, bidi, tag characters,
+/// soft hyphen, …) shown as `⟨U+202E⟩`, `<nostromo-note` / `</nostromo-note`
+/// and `<tracker-changes` / `</tracker-changes` (any case) neutralised to
+/// `‹nostromo-note` / `‹/nostromo-note` (likewise `tracker-changes`), capped at 500
 /// characters with `…[truncated]`.
 pub fn quote_untrusted(text: &str) -> String {
     let visible = make_visible(&strip_escapes(text));
-    cap(&neutralise_note_tags(&visible))
+    cap(&neutralise_wrapper_tags(&visible))
 }
 
 /// A multi-line field, indented two spaces, each line quoted, the field as a
@@ -220,7 +224,7 @@ fn skip_string(chars: &mut std::iter::Peekable<std::str::Chars>) {
 fn make_visible(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        if is_invisible(ch) {
+        if crate::data::work::is_invisible(ch) {
             out.push_str(&format!("⟨U+{:04X}⟩", ch as u32));
         } else {
             out.push(ch);
@@ -229,16 +233,20 @@ fn make_visible(text: &str) -> String {
     out
 }
 
-/// `<nostromo-note` → `‹nostromo-note`, `</nostromo-note` → `‹/nostromo-note`,
-/// any case.
-fn neutralise_note_tags(text: &str) -> String {
-    const TAG: &str = "nostromo-note";
+/// The wrapper tags data must never open or close: the note prefix and the
+/// injected-changes block (contract §7).
+const WRAPPER_TAGS: [&str; 2] = ["nostromo-note", "tracker-changes"];
+
+/// `<nostromo-note` → `‹nostromo-note`, `</nostromo-note` → `‹/nostromo-note`
+/// (and the same for `tracker-changes`), any case.
+fn neutralise_wrapper_tags(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for (pos, _) in lower.match_indices('<') {
         let rest = &lower[pos + 1..];
-        if rest.starts_with(TAG) || rest.strip_prefix('/').is_some_and(|r| r.starts_with(TAG)) {
+        let opens = |r: &str| WRAPPER_TAGS.iter().any(|tag| r.starts_with(tag));
+        if opens(rest) || rest.strip_prefix('/').is_some_and(opens) {
             out.push_str(&text[last..pos]);
             out.push('‹');
             last = pos + 1;

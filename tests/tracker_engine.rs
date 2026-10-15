@@ -4032,3 +4032,1928 @@ fn merge_keeps_an_added_and_a_moved_item_of_ours_while_theirs_edits_others() {
         "no duplicates"
     );
 }
+
+// ===========================================================================
+// PR #253 fix-ups: wide invisible-character defence, per-field caps and a
+// bounded change log, batch caps, a seeded merge oracle, hardening
+// ===========================================================================
+
+use std::collections::BTreeSet;
+
+use nostromo::data::work::is_invisible;
+use nostromo::tracker::model::{
+    LogLine, Section, LOGGED_TRUNCATED, MAX_LOGGED_CHARS, MAX_LOGGED_ELEMENTS,
+};
+use nostromo::tracker::ops::{MAX_BATCH_OPS, MAX_COMMAND_CHARS, MAX_LINE_CHARS, MAX_NOTE_CHARS};
+use nostromo::tracker::ChangeLogError;
+
+/// A seeded generator (splitmix64 scramble into the xorshift `Rng` above), so
+/// adjacent seeds diverge and seed 0 is not a fixed point.
+fn seeded(seed: u64) -> Rng {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    Rng((z ^ (z >> 31)) | 1)
+}
+
+fn collect_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|v| collect_strings(v, out)),
+        Value::Object(map) => map.values().for_each(|v| collect_strings(v, out)),
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1. Invisible characters: the wide predicate everywhere an agent reads
+// ---------------------------------------------------------------------------
+
+/// Tag characters, soft hyphen, line/paragraph separators, word joiner,
+/// variation selectors, fillers, braille blank and the old narrow list.
+const INVISIBLES: [char; 20] = [
+    '\u{E0041}',
+    '\u{E0020}',
+    '\u{E007F}',
+    '\u{00AD}',
+    '\u{2028}',
+    '\u{2029}',
+    '\u{2060}',
+    '\u{FE0F}',
+    '\u{FE00}',
+    '\u{E0100}',
+    '\u{034F}',
+    '\u{3164}',
+    '\u{180E}',
+    '\u{1D173}',
+    '\u{2800}',
+    '\u{200B}',
+    '\u{200D}',
+    '\u{202E}',
+    '\u{2066}',
+    '\u{FEFF}',
+];
+
+fn shown(c: char) -> String {
+    format!("⟨U+{:04X}⟩", c as u32)
+}
+
+/// A one-item board with `c` in every untrusted field an agent is shown.
+fn board_hiding(c: char) -> Board {
+    let mut item = Item::new("hid-1", "now", &format!("text{c}end"));
+    item.owner = Some(format!("own{c}er"));
+    item.note = Some(format!("note{c}end"));
+    item.kind = Kind::Command;
+    item.command = Some(format!("cmd{c}end"));
+    item.links = vec![Link::new(&format!("link{c}end"), None)];
+    Board {
+        title: Some(format!("Title{c}end")),
+        sections: vec![Section {
+            id: "now".into(),
+            title: format!("Sec{c}end"),
+        }],
+        items: vec![item],
+        prose: vec![],
+        log: vec![LogLine {
+            time: "10:00".into(),
+            text: format!("log{c}end"),
+        }],
+        byte_len: 0,
+    }
+}
+
+#[test]
+fn every_invisible_character_is_shown_as_its_codepoint_by_quote_untrusted() {
+    for c in INVISIBLES {
+        assert!(is_invisible(c), "predicate misses U+{:04X}", c as u32);
+        assert_eq!(
+            quote_untrusted(&format!("a{c}b")),
+            format!("a{}b", shown(c)),
+            "U+{:04X}",
+            c as u32
+        );
+    }
+}
+
+#[test]
+fn ordinary_international_text_is_not_mangled_by_quoting_or_command_validation() {
+    let text = "café 日本語 naïve Zoë";
+    assert_eq!(quote_untrusted(text), text);
+    assert_eq!(validate_command_text("echo café 日本語 👍"), Ok(()));
+    assert!(!is_invisible('é') && !is_invisible('日') && !is_invisible('👍'));
+}
+
+#[test]
+fn the_full_render_shows_no_invisible_character_in_any_field() {
+    for c in INVISIBLES {
+        let out = compact_full(&board_hiding(c));
+        assert!(
+            !out.contains(c),
+            "U+{:04X} survived in the full render:\n{out}",
+            c as u32
+        );
+        assert_eq!(
+            out.matches(&shown(c)).count(),
+            8,
+            "title, section, text, owner, command, note, link text and log line each show it: {out}"
+        );
+    }
+}
+
+/// Changes touching every field: a section rename, a changed item (old and
+/// new values both carry `c`), an added item, a removed item and a Log line.
+fn changes_hiding(c: char) -> Vec<Change> {
+    let mut chg = Item::new("chg", "now", &format!("old{c}text"));
+    chg.note = Some(format!("old{c}note"));
+    let rem = Item::new("rem", "now", &format!("rem{c}text"));
+    let old = Board {
+        title: Some("T".into()),
+        sections: vec![Section {
+            id: "now".into(),
+            title: format!("Old{c}title"),
+        }],
+        items: vec![chg, rem],
+        prose: vec![],
+        log: vec![],
+        byte_len: 0,
+    };
+    let mut new = old.clone();
+    new.sections[0].title = format!("New{c}title");
+    new.items.remove(1);
+    {
+        let it = &mut new.items[0];
+        it.text = format!("new{c}text");
+        it.owner = Some(format!("own{c}er"));
+        it.note = Some(format!("new{c}note"));
+        it.kind = Kind::Command;
+        it.command = Some(format!("cmd{c}end"));
+        it.links = vec![Link::new(&format!("link{c}end"), None)];
+    }
+    let mut added = board_hiding(c).items.remove(0);
+    added.id = "add".into();
+    new.items.push(added);
+    new.log.push(LogLine {
+        time: "10:05".into(),
+        text: format!("log{c}end"),
+    });
+    diff(&old, &new, &agent(), now0())
+}
+
+#[test]
+fn delta_entries_show_no_invisible_character_whatever_field_changed() {
+    for c in INVISIBLES {
+        let changes = changes_hiding(c);
+        let kinds: HashSet<ChangeKind> = changes.iter().map(|ch| ch.kind).collect();
+        for k in [
+            ChangeKind::Added,
+            ChangeKind::Changed,
+            ChangeKind::Removed,
+            ChangeKind::Log,
+            ChangeKind::Section,
+        ] {
+            assert!(kinds.contains(&k), "precondition: a {k:?} change");
+        }
+        let entries = delta_entries(&changes);
+        let json_text = serde_json::to_string(&entries).unwrap();
+        assert!(
+            !json_text.contains(c),
+            "U+{:04X} survived in {json_text}",
+            c as u32
+        );
+        if (c as u32) <= 0xFFFF {
+            let escaped = format!("\\u{:04x}", c as u32);
+            assert!(
+                !json_text.to_lowercase().contains(&escaped),
+                "JSON-escaped U+{:04X} survived in {json_text}",
+                c as u32
+            );
+        }
+        let mut strings = Vec::new();
+        collect_strings(&Value::Array(entries), &mut strings);
+        assert!(
+            strings.iter().all(|s| !s.contains(c)),
+            "U+{:04X} in a parsed string: {strings:?}",
+            c as u32
+        );
+        assert!(
+            json_text.contains(&shown(c)),
+            "U+{:04X} is shown as its codepoint: {json_text}",
+            c as u32
+        );
+    }
+}
+
+#[test]
+fn command_text_with_any_invisible_character_is_refused_with_its_offset_and_codepoint() {
+    for c in INVISIBLES {
+        assert_eq!(
+            validate_command_text(&format!("ab{c}d")),
+            Err(CommandTextError::InvisibleChar {
+                at: 2,
+                codepoint: c as u32
+            }),
+            "U+{:04X}",
+            c as u32
+        );
+        // The offset is in bytes: two 2-byte characters first.
+        assert_eq!(
+            validate_command_text(&format!("éé{c}")),
+            Err(CommandTextError::InvisibleChar {
+                at: 4,
+                codepoint: c as u32
+            })
+        );
+    }
+}
+
+#[test]
+fn an_agent_command_with_an_invisible_character_is_invalid_args() {
+    let (_, parsed) = board60();
+    for c in INVISIBLES {
+        let op = Op::Upsert(Upsert {
+            section: Some("now".into()),
+            text: Some("Run it".into()),
+            command: Some(format!("echo a{c}b")),
+            ..Default::default()
+        });
+        let err = apply_batch(&parsed.board, &[op], &agent(), stamp0())
+            .expect_err("a command hiding text must be refused");
+        assert!(
+            matches!(err, OpError::InvalidArgs { index: 0, .. }),
+            "U+{:04X}: {err:?}",
+            c as u32
+        );
+    }
+}
+
+const ZWJ_FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+
+#[test]
+fn the_users_file_keeps_invisible_characters_byte_for_byte_when_an_agent_writes_elsewhere() {
+    let src = md(&[
+        "# Board",
+        "",
+        &format!("Prose with soft\u{AD}hyphen, tag \u{E0041}\u{E0042} and family {ZWJ_FAMILY}."),
+        "",
+        "## Now",
+        &format!(
+            "- [ ] Shy\u{AD}phen \u{E0041}tag {ZWJ_FAMILY} emoji — todo · 14:53 <!-- #inv-1 1760540000 -->"
+        ),
+        &format!("  Note with soft\u{AD}hyphen, \u{E0041} and {ZWJ_FAMILY}."),
+        "",
+        "## Log",
+        "- 09:00 started",
+    ]);
+    let applied = apply_to_file(
+        src.as_bytes(),
+        &[Op::Log {
+            text: "unrelated".into(),
+        }],
+        &agent(),
+        stamp0(),
+    )
+    .expect("an unrelated write succeeds");
+    let out = String::from_utf8(applied.bytes).unwrap();
+    for line in src.lines().filter(|l| !l.is_empty()) {
+        assert!(out.contains(line), "line changed or lost: {line:?}\n{out}");
+    }
+    assert!(out.contains("unrelated"));
+}
+
+#[test]
+fn an_agent_item_text_with_a_soft_hyphen_is_written_verbatim() {
+    let src = md(&[
+        "# Board",
+        "",
+        "## Now",
+        "- [ ] Existing — todo · 14:53 <!-- #ex-1 1760540000 -->",
+    ]);
+    let text = "Soft\u{AD}hyphen task";
+    let applied = apply_to_file(
+        src.as_bytes(),
+        &[Op::Upsert(Upsert {
+            section: Some("now".into()),
+            text: Some(text.into()),
+            ..Default::default()
+        })],
+        &agent(),
+        stamp0(),
+    )
+    .expect("single_line only refuses control characters");
+    let out = String::from_utf8(applied.bytes).unwrap();
+    assert!(out.contains(&format!("- [ ] {text} — ")), "{out}");
+    assert!(applied.board.items.iter().any(|i| i.text == text));
+}
+
+// ---------------------------------------------------------------------------
+// 2. Per-field caps
+// ---------------------------------------------------------------------------
+
+type OpBuilder = Box<dyn Fn(String) -> Op>;
+
+/// (field name, limit, word the refusal must name, op carrying the value).
+fn capped_fields() -> Vec<(&'static str, usize, &'static str, OpBuilder)> {
+    let create = || Upsert {
+        id: Some("probe-1".into()),
+        section: Some("now".into()),
+        text: Some("Cap probe".into()),
+        ..Default::default()
+    };
+    vec![
+        (
+            "item text",
+            MAX_LINE_CHARS,
+            "text",
+            Box::new(move |v| {
+                Op::Upsert(Upsert {
+                    text: Some(v),
+                    ..create()
+                })
+            }),
+        ),
+        (
+            "link text",
+            MAX_LINE_CHARS,
+            "link text",
+            Box::new(move |v| {
+                Op::Upsert(Upsert {
+                    links: Some(vec![LinkInput::Text(v)]),
+                    ..create()
+                })
+            }),
+        ),
+        (
+            "log text",
+            MAX_LINE_CHARS,
+            "log text",
+            Box::new(|v| Op::Log { text: v }),
+        ),
+        (
+            "note",
+            MAX_NOTE_CHARS,
+            "note",
+            Box::new(move |v| {
+                Op::Upsert(Upsert {
+                    note: Some(v),
+                    ..create()
+                })
+            }),
+        ),
+        (
+            "command",
+            MAX_COMMAND_CHARS,
+            "command",
+            Box::new(move |v| {
+                Op::Upsert(Upsert {
+                    command: Some(v),
+                    ..create()
+                })
+            }),
+        ),
+    ]
+}
+
+fn good_create() -> Op {
+    Op::Upsert(Upsert {
+        id: Some("fine-1".into()),
+        section: Some("now".into()),
+        text: Some("A fine item".into()),
+        ..Default::default()
+    })
+}
+
+#[test]
+fn every_capped_field_accepts_exactly_the_limit_and_refuses_one_more_character() {
+    let (_, parsed) = board60();
+    let base = &parsed.board;
+    for fill in ["a", "😀"] {
+        for (name, limit, word, build) in capped_fields() {
+            let at_limit = fill.repeat(limit);
+            let (board, _) = apply_batch(base, &[build(at_limit)], &agent(), stamp0())
+                .unwrap_or_else(|e| panic!("{name} of exactly {limit} {fill:?} refused: {e}"));
+            assert!(
+                board.items.len() > base.items.len() || board.log.len() > base.log.len(),
+                "{name}: the write must land"
+            );
+
+            let over = fill.repeat(limit + 1);
+            let err =
+                apply_batch(base, &[good_create(), build(over)], &agent(), stamp0()).expect_err(
+                    &format!("{name} of {} characters must be refused", limit + 1),
+                );
+            match err {
+                OpError::InvalidArgs { index, reason } => {
+                    assert_eq!(index, 1, "{name}: the over-limit op is the failing one");
+                    assert!(
+                        reason.contains(word) && reason.contains(&limit.to_string()),
+                        "{name}: reason {reason:?} should name {word:?} and {limit}"
+                    );
+                }
+                other => panic!("{name}: expected InvalidArgs, got {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn caps_count_the_value_as_stored_after_trim_and_normalisation() {
+    let (_, parsed) = board60();
+    let base = &parsed.board;
+    let create = || Upsert {
+        id: Some("probe-1".into()),
+        section: Some("now".into()),
+        text: Some("Cap probe".into()),
+        ..Default::default()
+    };
+    let ops = [
+        Op::Upsert(Upsert {
+            text: Some(format!("  {}  ", "t".repeat(MAX_LINE_CHARS))),
+            ..create()
+        }),
+        Op::Upsert(Upsert {
+            id: Some("probe-2".into()),
+            note: Some(format!("{}   \n\n", "n".repeat(MAX_NOTE_CHARS))),
+            ..create()
+        }),
+        Op::Upsert(Upsert {
+            id: Some("probe-3".into()),
+            command: Some(format!("{}\n", "c".repeat(MAX_COMMAND_CHARS))),
+            ..create()
+        }),
+        Op::Log {
+            text: format!(" {} ", "l".repeat(MAX_LINE_CHARS)),
+        },
+    ];
+    for op in ops {
+        apply_batch(base, std::slice::from_ref(&op), &agent(), stamp0())
+            .unwrap_or_else(|e| panic!("{op:?} is within the limit once normalised: {e}"));
+    }
+}
+
+#[test]
+fn updating_an_existing_item_is_capped_too() {
+    let (_, parsed) = board60();
+    let base = &parsed.board;
+    let id = base.items[0].id.clone();
+    let over = Op::Upsert(Upsert {
+        note: Some("n".repeat(MAX_NOTE_CHARS + 1)),
+        ..upsert(&id)
+    });
+    assert!(matches!(
+        apply_batch(base, &[over], &agent(), stamp0()),
+        Err(OpError::InvalidArgs { index: 0, .. })
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Bounded change values and a bounded change log
+// ---------------------------------------------------------------------------
+
+fn truncated(prefix_char: &str) -> Value {
+    json!(format!(
+        "{}{LOGGED_TRUNCATED}",
+        prefix_char.repeat(MAX_LOGGED_CHARS)
+    ))
+}
+
+fn one_field(old: Value, new: Value) -> (Value, Value) {
+    Change::new(&agent(), Some("a"), ChangeKind::Changed, now0())
+        .with_field("f", old, new)
+        .fields["f"]
+        .clone()
+}
+
+#[test]
+fn change_values_longer_than_the_cap_are_cut_to_the_cap_plus_a_marker() {
+    let (old, new) = one_field(json!("x".repeat(MAX_LOGGED_CHARS + 1)), json!("short"));
+    assert_eq!(old, truncated("x"));
+    assert_eq!(new, json!("short"));
+
+    let exact = "y".repeat(MAX_LOGGED_CHARS);
+    let (old, new) = one_field(json!(exact), Value::Null);
+    assert_eq!(old, json!(exact), "exactly at the cap is untouched");
+    assert_eq!(new, Value::Null);
+
+    // Characters, not bytes.
+    let (old, _) = one_field(json!("😀".repeat(MAX_LOGGED_CHARS + 50)), Value::Null);
+    assert_eq!(old, truncated("😀"));
+}
+
+#[test]
+fn change_arrays_keep_their_first_elements_and_one_marker_element() {
+    let many: Vec<Value> = (0..MAX_LOGGED_ELEMENTS + 2).map(|i| json!(i)).collect();
+    let (old, _) = one_field(json!(many), Value::Null);
+    let mut expected: Vec<Value> = (0..MAX_LOGGED_ELEMENTS).map(|i| json!(i)).collect();
+    expected.push(Value::String(LOGGED_TRUNCATED.to_string()));
+    assert_eq!(old, json!(expected));
+
+    let just_over: Vec<Value> = (0..MAX_LOGGED_ELEMENTS + 1).map(|i| json!(i)).collect();
+    let (old, _) = one_field(json!(just_over), Value::Null);
+    assert_eq!(old.as_array().unwrap().len(), MAX_LOGGED_ELEMENTS + 1);
+    assert_eq!(old[MAX_LOGGED_ELEMENTS], json!(LOGGED_TRUNCATED));
+
+    let exact: Vec<Value> = (0..MAX_LOGGED_ELEMENTS).map(|i| json!(i)).collect();
+    let (old, _) = one_field(json!(exact.clone()), Value::Null);
+    assert_eq!(old, json!(exact), "exactly at the cap is untouched");
+}
+
+#[test]
+fn change_truncation_reaches_strings_and_arrays_nested_in_arrays_and_objects() {
+    let long = "z".repeat(MAX_LOGGED_CHARS + 10);
+    let value = json!({
+        "text": long,
+        "kind": "url",
+        "n": 7,
+        "flag": true,
+        "list": [long, 1, 2, 3, 4],
+        "nested": [[long, 1, 2, 3, 4, 5]],
+    });
+    let (old, _) = one_field(value, Value::Null);
+    let cut = truncated("z");
+    assert_eq!(old["text"], cut);
+    assert_eq!(old["kind"], json!("url"));
+    assert_eq!(old["n"], json!(7));
+    assert_eq!(old["flag"], json!(true));
+    assert_eq!(old["list"], json!([cut, 1, 2, LOGGED_TRUNCATED]));
+    assert_eq!(old["nested"], json!([[cut, 1, 2, LOGGED_TRUNCATED]]));
+
+    // An array of long strings: each cut, then the extras dropped.
+    let (old, _) = one_field(json!([long, long, long, long]), Value::Null);
+    assert_eq!(old, json!([cut, cut, cut, LOGGED_TRUNCATED]));
+}
+
+fn huge_board_pair() -> (Board, Board) {
+    let big = |c: &str| c.repeat(100_000);
+    let mut chg = Item::new("chg", "now", &big("a"));
+    chg.note = Some(big("n"));
+    let mut rem = Item::new("rem", "now", &big("r"));
+    rem.note = Some(big("q"));
+    let old = Board {
+        title: Some("T".into()),
+        sections: vec![Section {
+            id: "now".into(),
+            title: "Now".into(),
+        }],
+        items: vec![chg, rem],
+        prose: vec![],
+        log: vec![],
+        byte_len: 0,
+    };
+    let mut new = old.clone();
+    new.items.remove(1);
+    {
+        let it = &mut new.items[0];
+        it.text = big("b");
+        it.note = Some(big("m"));
+        it.links = (0..6)
+            .map(|i| Link::new(&format!("{i}{}", big("l")), None))
+            .collect();
+        it.command = Some(big("c"));
+        it.kind = Kind::Command;
+    }
+    let mut added = Item::new("add", "now", &big("d"));
+    added.note = Some(big("e"));
+    added.links = (0..6)
+        .map(|i| Link::new(&format!("{i}{}", big("k")), None))
+        .collect();
+    new.items.push(added);
+    new.log.push(LogLine {
+        time: "10:05".into(),
+        text: big("g"),
+    });
+    (old, new)
+}
+
+fn cut_to_cap(v: &Value) -> bool {
+    let mut strings = Vec::new();
+    collect_strings(v, &mut strings);
+    strings
+        .iter()
+        .all(|s| s.chars().count() <= MAX_LOGGED_CHARS + LOGGED_TRUNCATED.chars().count())
+}
+
+#[test]
+fn diffing_boards_with_huge_values_yields_bounded_changes() {
+    let (old, new) = huge_board_pair();
+    let changes = diff(&old, &new, &agent(), now0());
+    let kinds: HashSet<ChangeKind> = changes.iter().map(|c| c.kind).collect();
+    for k in [
+        ChangeKind::Added,
+        ChangeKind::Changed,
+        ChangeKind::Removed,
+        ChangeKind::Log,
+    ] {
+        assert!(kinds.contains(&k), "precondition: a {k:?} change");
+    }
+    for change in &changes {
+        for (name, (o, n)) in &change.fields {
+            assert!(
+                cut_to_cap(o) && cut_to_cap(n),
+                "{:?} field {name} is not bounded",
+                change.kind
+            );
+        }
+        let bytes = serde_json::to_vec(change).unwrap().len();
+        assert!(
+            bytes < 20 * 1024,
+            "{:?} change is {bytes} bytes",
+            change.kind
+        );
+    }
+    let changed = changes
+        .iter()
+        .find(|c| c.kind == ChangeKind::Changed)
+        .unwrap();
+    assert_eq!(
+        changed.fields["note"].0,
+        json!(format!("{}{LOGGED_TRUNCATED}", "n".repeat(200)))
+    );
+    assert_eq!(
+        changed.fields["note"].1,
+        json!(format!("{}{LOGGED_TRUNCATED}", "m".repeat(200)))
+    );
+    let links = changed.fields["links"].1.as_array().unwrap();
+    assert_eq!(
+        links.len(),
+        MAX_LOGGED_ELEMENTS + 1,
+        "6 links keep 3 and a marker"
+    );
+    assert_eq!(links[MAX_LOGGED_ELEMENTS], json!(LOGGED_TRUNCATED));
+    let removed = changes
+        .iter()
+        .find(|c| c.kind == ChangeKind::Removed)
+        .unwrap();
+    assert!(removed.fields["text"]
+        .0
+        .as_str()
+        .unwrap()
+        .ends_with(LOGGED_TRUNCATED));
+    let log = changes.iter().find(|c| c.kind == ChangeKind::Log).unwrap();
+    assert!(log.fields["text"]
+        .1
+        .as_str()
+        .unwrap()
+        .ends_with(LOGGED_TRUNCATED));
+}
+
+#[test]
+fn delta_entries_of_cut_values_still_end_with_the_visible_marker_and_stay_short() {
+    let (old, new) = huge_board_pair();
+    let changes = diff(&old, &new, &agent(), now0());
+    let entries = delta_entries(&changes);
+    let mut strings = Vec::new();
+    collect_strings(&Value::Array(entries), &mut strings);
+    let long: Vec<&String> = strings
+        .iter()
+        .filter(|s| s.chars().count() > MAX_LOGGED_CHARS)
+        .collect();
+    assert!(
+        !long.is_empty(),
+        "precondition: cut values reach the deltas"
+    );
+    for s in long {
+        assert!(s.ends_with(LOGGED_TRUNCATED), "{s:?}");
+        assert!(
+            s.chars().count() <= 500 + LOGGED_TRUNCATED.chars().count(),
+            "{} chars",
+            s.chars().count()
+        );
+    }
+}
+
+/// The largest serialised size one logged change may have: five 200-char
+/// strings (old and new) plus four link objects, with 4-byte characters and
+/// the author, comfortably inside 20 KiB. Stated here so a regression that
+/// stops truncating fails loudly.
+const MAX_CHANGE_BYTES: usize = 20 * 1024;
+
+/// One storm round on an empty board: create the item at maximal sizes, then
+/// update every field to different maximal values. Each op is its own batch.
+fn storm_round(fill: &str, base: &Board) -> Vec<Change> {
+    let value = |tag: &str, limit: usize| format!("{tag}{}", fill.repeat(limit - 1));
+    let item = |tag: &str, status: &str, env: &str| {
+        Op::Upsert(Upsert {
+            id: Some("storm-1".into()),
+            section: Some("now".into()),
+            text: Some(value(tag, MAX_LINE_CHARS)),
+            status: Some(status.into()),
+            owner: Some(format!("owner-{tag}")),
+            note: Some(value(tag, MAX_NOTE_CHARS)),
+            links: Some(
+                (0..6)
+                    .map(|i| LinkInput::Text(format!("{i}{}", value(tag, MAX_LINE_CHARS - 1))))
+                    .collect(),
+            ),
+            command: Some(value(tag, MAX_COMMAND_CHARS)),
+            env: Some(env.into()),
+            ..Default::default()
+        })
+    };
+    let (created, mut first) =
+        apply_batch(base, &[item("A", "blocked", "prod")], &agent(), stamp0())
+            .expect("a maximal create is within every cap");
+    let (_, second) = apply_batch(&created, &[item("B", "done", "demo")], &agent(), stamp0())
+        .expect("a maximal update is within every cap");
+    first.extend(second);
+    first
+}
+
+fn storm_log(fill: &str) -> (ChangeLog, usize) {
+    let base = Board {
+        title: Some("Storm".into()),
+        sections: vec![Section {
+            id: "now".into(),
+            title: "Now".into(),
+        }],
+        ..Board::default()
+    };
+    let mut log = ChangeLog::new();
+    let mut largest = 0;
+    for _ in 0..500 {
+        let changes = storm_round(fill, &base);
+        assert_eq!(changes.len(), 2, "one Added and one Changed per round");
+        for field in ["text", "note", "command", "owner", "links", "status", "env"] {
+            assert!(
+                changes.iter().all(|c| c.fields.contains_key(field)),
+                "every storm change touches {field}"
+            );
+        }
+        for change in &changes {
+            let bytes = serde_json::to_vec(change).unwrap().len();
+            largest = largest.max(bytes);
+            assert!(
+                bytes <= MAX_CHANGE_BYTES,
+                "a {:?} change serialises to {bytes} bytes (limit {MAX_CHANGE_BYTES})",
+                change.kind
+            );
+        }
+        log.append(changes);
+    }
+    (log, largest)
+}
+
+#[test]
+fn a_thousand_maximal_writes_keep_the_serialised_change_log_bounded() {
+    for fill in ["a", "😀"] {
+        let (log, largest) = storm_log(fill);
+        assert_eq!(log.entries.len(), MAX_ENTRIES);
+        let total = serde_json::to_vec(&log).unwrap().len();
+        eprintln!("storm {fill:?}: largest change {largest} bytes, log {total} bytes");
+        assert!(
+            total <= MAX_ENTRIES * MAX_CHANGE_BYTES + 1024,
+            "log is {total} bytes for fill {fill:?}"
+        );
+        if fill == "a" {
+            assert!(total < 8 * 1024 * 1024, "ASCII storm is {total} bytes");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3. Batch caps
+// ---------------------------------------------------------------------------
+
+fn log_ops(n: usize) -> Vec<Op> {
+    (0..n)
+        .map(|i| Op::Log {
+            text: format!("line {i}"),
+        })
+        .collect()
+}
+
+fn flat_board(items: usize, byte_len: usize) -> Board {
+    Board {
+        title: Some("Flat".into()),
+        sections: vec![Section {
+            id: "now".into(),
+            title: "Now".into(),
+        }],
+        items: (0..items)
+            .map(|i| {
+                let mut it = Item::new(&format!("x{i}"), "now", &format!("Task {i:04}"));
+                it.updated_at = Some(now0());
+                it
+            })
+            .collect(),
+        prose: vec![],
+        log: vec![],
+        byte_len,
+    }
+}
+
+fn create_op(id: &str) -> Op {
+    Op::Upsert(Upsert {
+        id: Some(id.to_string()),
+        section: Some("now".into()),
+        text: Some(format!("New {id}")),
+        ..Default::default()
+    })
+}
+
+#[test]
+fn a_batch_of_exactly_the_op_limit_runs_and_one_more_is_refused_before_any_op() {
+    assert_eq!(MAX_BATCH_OPS, 200);
+    let (_, parsed) = board60();
+    let base = &parsed.board;
+    let (board, changes) = apply_batch(base, &log_ops(MAX_BATCH_OPS), &agent(), stamp0())
+        .expect("200 ops are allowed");
+    assert_eq!(board.log.len(), base.log.len() + MAX_BATCH_OPS);
+    assert_eq!(changes.len(), MAX_BATCH_OPS);
+
+    match apply_batch(base, &log_ops(MAX_BATCH_OPS + 1), &agent(), stamp0()) {
+        Err(OpError::InvalidArgs { index, reason }) => {
+            assert_eq!(index, MAX_BATCH_OPS);
+            assert!(reason.contains("200"), "{reason}");
+        }
+        other => panic!("expected InvalidArgs at 200, got {other:?}"),
+    }
+
+    // The size check comes first: a bad first op is never reached.
+    let mut ops = vec![Op::Remove { id: "ghost".into() }];
+    ops.extend(log_ops(MAX_BATCH_OPS));
+    assert!(matches!(
+        apply_batch(base, &ops, &agent(), stamp0()),
+        Err(OpError::InvalidArgs { index: 200, .. })
+    ));
+}
+
+#[test]
+fn an_oversized_batch_is_refused_through_the_file_path_too() {
+    let (src, _) = board60();
+    let err = apply_to_file(
+        src.as_bytes(),
+        &log_ops(MAX_BATCH_OPS + 1),
+        &agent(),
+        stamp0(),
+    )
+    .expect_err("201 ops");
+    assert!(matches!(
+        err,
+        WriteError::Op(OpError::InvalidArgs { index: 200, .. })
+    ));
+}
+
+#[test]
+fn creates_past_the_item_cap_fail_at_the_first_create_that_exceeds_it() {
+    let base = flat_board(MAX_ITEMS - 5, 0);
+    let ops: Vec<Op> = (0..MAX_BATCH_OPS)
+        .map(|i| create_op(&format!("c{i}")))
+        .collect();
+    match apply_batch(&base, &ops, &agent(), stamp0()) {
+        Err(OpError::BoardTooLarge { items, .. }) => {
+            assert_eq!(items, MAX_ITEMS + 1, "refused at the first excess create")
+        }
+        other => panic!("expected BoardTooLarge, got {other:?}"),
+    }
+    // Exactly filling the board is fine.
+    let (full, _) = apply_batch(&base, &ops[..5], &agent(), stamp0()).expect("fills to the cap");
+    assert_eq!(full.items.len(), MAX_ITEMS);
+}
+
+#[test]
+fn creates_past_the_byte_cap_fail_within_two_items_of_it() {
+    let base = flat_board(3, MAX_BOARD_BYTES - 20_000);
+    let ops: Vec<Op> = (0..MAX_BATCH_OPS)
+        .map(|i| {
+            Op::Upsert(Upsert {
+                id: Some(format!("big-{i}")),
+                section: Some("now".into()),
+                text: Some(format!("Big item {i}")),
+                command: Some("c".repeat(MAX_COMMAND_CHARS)),
+                note: Some("n".repeat(MAX_NOTE_CHARS)),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let max_item = 13 * 1024;
+    match apply_batch(&base, &ops, &agent(), stamp0()) {
+        Err(OpError::BoardTooLarge { bytes, .. }) => {
+            assert!(bytes > MAX_BOARD_BYTES, "{bytes} is over the cap");
+            assert!(
+                bytes < MAX_BOARD_BYTES + 2 * max_item,
+                "{bytes} bytes: the batch ran on well past the cap"
+            );
+        }
+        other => panic!("expected BoardTooLarge, got {other:?}"),
+    }
+}
+
+#[test]
+fn edits_that_do_not_grow_a_full_board_still_succeed() {
+    // 500 items in a file already over the byte cap (say, grown by hand).
+    let base = flat_board(MAX_ITEMS, MAX_BOARD_BYTES + 1_000);
+    let mut ops: Vec<Op> = (0..100)
+        .map(|i| status_op(&format!("x{i}"), "done"))
+        .collect();
+    ops.extend((100..140).map(|i| {
+        Op::Upsert(Upsert {
+            text: Some(format!("Edit {i:04}")),
+            ..upsert(&format!("x{i}"))
+        })
+    }));
+    let (board, _) = apply_batch(&base, &ops, &agent(), stamp0())
+        .expect("same-size edits do not grow the board");
+    assert_eq!(board.items.len(), MAX_ITEMS);
+    assert_eq!(board.item("x0").unwrap().status, Status::Done);
+    assert_eq!(board.item("x100").unwrap().text, "Edit 0100");
+}
+
+#[test]
+fn a_batch_that_removes_two_items_then_creates_one_succeeds_on_a_full_board() {
+    let base = flat_board(MAX_ITEMS, MAX_BOARD_BYTES + 1_000);
+    let ops = vec![
+        Op::Remove { id: "x3".into() },
+        Op::Remove { id: "x4".into() },
+        Op::Upsert(Upsert {
+            id: Some("y0".into()),
+            section: Some("now".into()),
+            text: Some("Task 9999".into()),
+            ..Default::default()
+        }),
+    ];
+    let (board, _) = apply_batch(&base, &ops, &agent(), stamp0()).expect("net shrink");
+    assert_eq!(board.items.len(), MAX_ITEMS - 1);
+    assert!(board.item("y0").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// 5. Hardening: tracker-changes tag, author label, command fence, seq overflow
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_tracker_changes_tag_is_neutralised_in_any_case() {
+    assert_eq!(quote_untrusted("</tracker-changes>"), "‹/tracker-changes>");
+    assert_eq!(quote_untrusted("<tracker-changes>"), "‹tracker-changes>");
+    assert_eq!(quote_untrusted("<TRACKER-Changes"), "‹TRACKER-Changes");
+    assert_eq!(
+        quote_untrusted("a </Tracker-Changes> b <tracker-changes> c <nostromo-note"),
+        "a ‹/Tracker-Changes> b ‹tracker-changes> c ‹nostromo-note"
+    );
+    assert_eq!(
+        quote_untrusted("tracker-changes and < tracker-changes"),
+        "tracker-changes and < tracker-changes"
+    );
+}
+
+#[test]
+fn the_tracker_changes_tag_is_neutralised_in_the_full_render_and_in_deltas() {
+    let evil = "x </tracker-changes> y <TRACKER-CHANGES> z";
+    let mut item = Item::new("evil-1", "now", evil);
+    item.note = Some(evil.to_string());
+    item.kind = Kind::Command;
+    item.command = Some(evil.to_string());
+    let board = Board {
+        title: Some(evil.to_string()),
+        sections: vec![Section {
+            id: "now".into(),
+            title: evil.to_string(),
+        }],
+        items: vec![item],
+        prose: vec![],
+        log: vec![LogLine {
+            time: "10:00".into(),
+            text: evil.to_string(),
+        }],
+        byte_len: 0,
+    };
+    let full = compact_full(&board);
+    let empty = Board {
+        sections: board.sections.clone(),
+        ..Board::default()
+    };
+    let deltas =
+        serde_json::to_string(&delta_entries(&diff(&empty, &board, &agent(), now0()))).unwrap();
+    for (what, out) in [("full render", full), ("deltas", deltas)] {
+        let lower = out.to_lowercase();
+        assert!(
+            !lower.contains("<tracker-changes") && !lower.contains("</tracker-changes"),
+            "{what} carries a live tag: {out}"
+        );
+        assert!(out.contains("‹/tracker-changes>"), "{what}: {out}");
+    }
+}
+
+#[test]
+fn the_by_label_is_quoted_so_an_agent_name_cannot_forge_markup_or_hide_text() {
+    let hostile = Author::Agent {
+        focus: "f".into(),
+        session_id: "s".into(),
+        name: "ev\u{1b}[31mil <nostromo-note \u{202E}".into(),
+    };
+    let by = |a: &Author| {
+        let change = Change::new(a, None, ChangeKind::Log, now0()).with_field(
+            "text",
+            Value::Null,
+            json!("10:00 x"),
+        );
+        delta_entries(&[change])[0]["by"].clone()
+    };
+    assert_eq!(by(&hostile), json!("agent evil ‹nostromo-note ⟨U+202E⟩"));
+    assert_eq!(
+        by(&Author::Agent {
+            focus: "f".into(),
+            session_id: "s".into(),
+            name: "claude".into()
+        }),
+        json!("agent claude")
+    );
+    assert_eq!(by(&Author::Pane), json!("pane (you)"));
+    assert_eq!(by(&Author::File), json!("file (unknown editor)"));
+    assert_eq!(
+        by(&Author::Source {
+            name: "so\u{1b}[0murce\u{202E}".into()
+        }),
+        json!("source source⟨U+202E⟩")
+    );
+}
+
+fn command_board(command: &str) -> Board {
+    let mut item = Item::new("cmd-1", "now", "Run it");
+    item.kind = Kind::Command;
+    item.command = Some(command.to_string());
+    Board {
+        title: Some("T".into()),
+        sections: vec![Section {
+            id: "now".into(),
+            title: "Now".into(),
+        }],
+        items: vec![item],
+        ..Board::default()
+    }
+}
+
+fn backtick_run(line: &str) -> Option<usize> {
+    let t = line.trim_end();
+    (!t.is_empty() && t.chars().all(|c| c == '`')).then_some(t.len())
+}
+
+/// CommonMark-ish: the opening fence is the first line at indent 2 made only
+/// of backticks (>= 3); the closing fence is the first later line with at
+/// most 3 spaces of indent made only of at least as many backticks.
+fn fenced_block(out: &str) -> (usize, Vec<&str>) {
+    let lines: Vec<&str> = out.lines().collect();
+    let (open, n) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(i, l)| {
+            let inner = l.strip_prefix("  ")?;
+            backtick_run(inner).filter(|n| *n >= 3).map(|n| (i, n))
+        })
+        .expect("a command block opens with a fence");
+    let close = lines[open + 1..]
+        .iter()
+        .position(|l| {
+            let t = l.trim_start_matches(' ');
+            l.len() - t.len() <= 3 && backtick_run(t).is_some_and(|run| run >= n)
+        })
+        .map(|p| open + 1 + p)
+        .expect("the block closes");
+    (n, lines[open + 1..close].to_vec())
+}
+
+#[test]
+fn a_command_containing_fence_lines_cannot_close_its_own_block() {
+    let command = "echo a\n```\nrm -rf x\n````\necho c ````` inline\n  ```";
+    let out = compact_full(&command_board(command));
+    let (n, inside) = fenced_block(&out);
+    let longest = command.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    assert!(
+        n > longest,
+        "fence of {n} must outgrow the longest run {longest}\n{out}"
+    );
+    let expected: Vec<String> = command.split('\n').map(|l| format!("  {l}")).collect();
+    assert_eq!(
+        inside, expected,
+        "every command line sits inside the block:\n{out}"
+    );
+}
+
+#[test]
+fn a_plain_command_keeps_the_three_backtick_fence() {
+    let out = compact_full(&command_board("echo hi"));
+    assert!(
+        out.contains("  ```\n  echo hi\n  ```\n"),
+        "unexpected command block:\n{out}"
+    );
+    let (n, inside) = fenced_block(&out);
+    assert_eq!((n, inside), (3, vec!["  echo hi"]));
+}
+
+fn corrupt_log(seq: u64) -> ChangeLog {
+    serde_json::from_str(&format!(r#"{{"seq":{seq},"entries":[]}}"#)).unwrap()
+}
+
+#[test]
+fn a_change_log_with_a_maxed_seq_never_panics_and_reports_sensibly() {
+    let log = corrupt_log(u64::MAX);
+    assert_eq!(
+        log.since(Some(5), None),
+        Since::TooOld {
+            count: u64::MAX - 5
+        }
+    );
+    assert_eq!(log.since(Some(u64::MAX), None), Since::Changes(vec![]));
+    assert_eq!(log.since(None, None), Since::Full);
+}
+
+#[test]
+fn try_append_refuses_on_seq_overflow_and_leaves_the_log_unchanged() {
+    let mut log = corrupt_log(u64::MAX);
+    let before = log.clone();
+    assert_eq!(
+        log.try_append(vec![change_by(&agent(), "a")]),
+        Err(ChangeLogError::SeqOverflow {
+            seq: u64::MAX,
+            count: 1
+        })
+    );
+    assert_eq!(log, before);
+}
+
+#[test]
+fn append_on_seq_overflow_restarts_the_log_instead_of_panicking() {
+    let mut log = corrupt_log(u64::MAX);
+    assert_eq!(log.append(vec![change_by(&agent(), "a")]), 1);
+    assert_eq!(log.seq, 1);
+    assert_eq!(log.entries.len(), 1);
+    assert_eq!(log.entries[0].seq, 1);
+}
+
+#[test]
+fn a_log_one_below_the_maximum_takes_one_change_and_then_refuses() {
+    let mut log = corrupt_log(u64::MAX - 1);
+    assert_eq!(log.try_append(vec![change_by(&agent(), "a")]), Ok(u64::MAX));
+    assert_eq!(log.seq, u64::MAX);
+    assert_eq!(
+        log.try_append(vec![change_by(&agent(), "b")]),
+        Err(ChangeLogError::SeqOverflow {
+            seq: u64::MAX,
+            count: 1
+        })
+    );
+    assert_eq!(log.seq, u64::MAX);
+    assert_eq!(log.entries.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Seeded merge oracle (contract §3.2)
+//
+// `merge_external(base, ours, theirs)`: `ours` is base plus our ops (built
+// with `apply_batch`), `theirs` is base plus an independent set of direct
+// edits. The oracle states the rules per item id, over the union of the ids:
+//
+//   in base, ours, theirs   present; each field is ours if ours changed it
+//                           against base, else theirs; the section is ours if
+//                           ours moved it and theirs still has that section,
+//                           else theirs
+//   in base, ours, not theirs  (they deleted it) kept exactly as ours if ours
+//                           modified it in any way (modification beats
+//                           deletion), else gone
+//   in base, theirs, not ours  (we removed it) kept exactly as theirs if
+//                           theirs edited it, else gone. A rename of its
+//                           section alone is not asserted either way.
+//   in base only            gone
+//   in ours and theirs only (both added the same id) ours' fields win
+//   in ours only            present exactly as ours (section: ours' if theirs
+//                           has it, else theirs' first section)
+//   in theirs only          present exactly as theirs
+//
+// Title, sections and prose are theirs'. The Log is theirs' lines followed by
+// the lines we appended.
+// ---------------------------------------------------------------------------
+
+const ORACLE_SECTIONS: [(&str, &str); 3] = [("now", "Now"), ("next", "Next"), ("done", "Done")];
+
+fn oracle_base(rng: &mut Rng) -> Board {
+    let n = 6 + rng.below(7);
+    let mut items: Vec<Item> = (0..n)
+        .map(|k| {
+            let section = ORACLE_SECTIONS[rng.below(3)].0;
+            let words = random_words(rng, 1, 3);
+            let mut it = Item::new(&format!("b{k}"), section, &format!("Base {k} {words}"));
+            it.status = *rng.pick(&Status::ALL);
+            if rng.below(2) == 0 {
+                it.owner = Some((*rng.pick(&OWNERS)).to_string());
+            }
+            if rng.below(2) == 0 {
+                it.note = Some(format!("note {k}\nsecond line"));
+            }
+            for l in 0..rng.below(3) {
+                it.links
+                    .push(Link::new(&format!("PR #{}", 100 + k * 3 + l), None));
+            }
+            if rng.below(4) == 0 {
+                it.kind = Kind::Command;
+                it.command = Some(format!("run-{k} --now"));
+            }
+            if rng.below(3) == 0 {
+                it.env = Some(*rng.pick(&Env::ALL));
+            }
+            it.updated_at = Some(now0() - Duration::minutes(60 + k as i64));
+            it
+        })
+        .collect();
+    items.sort_by_key(|i| ORACLE_SECTIONS.iter().position(|s| s.0 == i.section));
+    let log = (0..rng.below(4))
+        .map(|i| LogLine {
+            time: format!("09:0{i}"),
+            text: format!("base log {i}"),
+        })
+        .collect();
+    Board {
+        title: Some("Oracle board".into()),
+        sections: ORACLE_SECTIONS
+            .iter()
+            .map(|(id, title)| Section {
+                id: (*id).into(),
+                title: (*title).into(),
+            })
+            .collect(),
+        items,
+        prose: vec![],
+        log,
+        byte_len: 0,
+    }
+}
+
+/// Fills `u` with a random non-empty subset of field edits (some clear).
+fn oracle_fields(rng: &mut Rng, u: &mut Upsert, tag: &str, n: usize, with_section: bool) {
+    let clear = |rng: &mut Rng| rng.below(4) == 0;
+    if rng.below(3) == 0 {
+        u.text = Some(format!("Ours {tag}"));
+    }
+    if rng.below(3) == 0 {
+        u.status = Some(rng.pick(&Status::ALL).wire().to_string());
+    }
+    if rng.below(3) == 0 {
+        u.owner = Some(if clear(rng) {
+            String::new()
+        } else {
+            (*rng.pick(&OWNERS)).to_string()
+        });
+    }
+    if rng.below(3) == 0 {
+        u.note = Some(if clear(rng) {
+            String::new()
+        } else {
+            format!("ours note {tag}")
+        });
+    }
+    if rng.below(3) == 0 {
+        u.links = Some(if clear(rng) {
+            vec![]
+        } else {
+            vec![LinkInput::Text(format!("PR #{}", 900 + n))]
+        });
+    }
+    if rng.below(3) == 0 {
+        u.command = Some(if clear(rng) {
+            String::new()
+        } else {
+            format!("ours-cmd {tag}")
+        });
+    }
+    if rng.below(3) == 0 {
+        u.env = Some(if clear(rng) {
+            String::new()
+        } else {
+            rng.pick(&Env::ALL).wire().to_string()
+        });
+    }
+    if with_section && rng.below(5) == 0 {
+        u.section = Some(ORACLE_SECTIONS[rng.below(3)].0.to_string());
+    }
+    let any = u.text.is_some()
+        || u.status.is_some()
+        || u.owner.is_some()
+        || u.note.is_some()
+        || u.links.is_some()
+        || u.command.is_some()
+        || u.env.is_some()
+        || u.section.is_some();
+    if !any {
+        u.note = Some(format!("ours fallback note {tag}"));
+    }
+}
+
+/// A random index below `n`, favouring the first three so both sides often
+/// land on the same items.
+fn hot(rng: &mut Rng, n: usize) -> usize {
+    if rng.below(2) == 0 {
+        rng.below(n.min(3))
+    } else {
+        rng.below(n)
+    }
+}
+
+/// `base` plus a random sequence of agent ops (each its own batch; a refused
+/// op is dropped). Also says whether any op may have reordered items.
+fn oracle_ours(rng: &mut Rng, base: &Board) -> (Board, bool) {
+    let mut board = base.clone();
+    let mut may_reorder = false;
+    for n in 0..(1 + rng.below(6)) {
+        let ids = ids_of(&board);
+        let tag = format!("O{n}");
+        let kind = if ids.is_empty() { 1 } else { rng.below(10) };
+        let mut reorders = false;
+        let op = match kind {
+            0 | 7 | 8 => {
+                let mut u = upsert(&ids[hot(rng, ids.len())]);
+                oracle_fields(rng, &mut u, &tag, n, true);
+                reorders = u.section.is_some();
+                Op::Upsert(u)
+            }
+            1 | 9 => {
+                let id = if rng.below(2) == 0 {
+                    format!("n{}", rng.below(2))
+                } else {
+                    format!("o{n}")
+                };
+                let mut u = Upsert {
+                    id: Some(id),
+                    section: Some(ORACLE_SECTIONS[rng.below(3)].0.to_string()),
+                    ..Default::default()
+                };
+                oracle_fields(rng, &mut u, &tag, n, false);
+                u.text = Some(format!("Ours new {tag}"));
+                Op::Upsert(u)
+            }
+            2 | 3 => status_op(&ids[hot(rng, ids.len())], rng.pick(&Status::ALL).wire()),
+            4 => Op::Remove {
+                id: ids[hot(rng, ids.len())].clone(),
+            },
+            5 => {
+                reorders = true;
+                let id = ids[hot(rng, ids.len())].clone();
+                let section = ORACLE_SECTIONS[rng.below(3)].0;
+                let others: Vec<&String> = board
+                    .items
+                    .iter()
+                    .filter(|i| i.section == section && i.id != id)
+                    .map(|i| &i.id)
+                    .collect();
+                let (before, after) = match rng.below(3) {
+                    0 if !others.is_empty() => {
+                        (Some(others[rng.below(others.len())].clone()), None)
+                    }
+                    1 if !others.is_empty() => {
+                        (None, Some(others[rng.below(others.len())].clone()))
+                    }
+                    _ => (None, None),
+                };
+                Op::Move {
+                    id,
+                    section: section.into(),
+                    before,
+                    after,
+                }
+            }
+            _ => Op::Log {
+                text: format!("ours log {tag}"),
+            },
+        };
+        if let Ok((next, _)) = apply_batch(&board, &[op], &agent(), stamp0()) {
+            board = next;
+            may_reorder |= reorders;
+        }
+    }
+    (board, may_reorder)
+}
+
+fn insert_in_section(board: &mut Board, item: Item) {
+    let rank = |id: &str| board.sections.iter().position(|s| s.id == id);
+    let want = rank(&item.section);
+    let at = match board.items.iter().rposition(|i| i.section == item.section) {
+        Some(last) => last + 1,
+        None => board
+            .items
+            .iter()
+            .position(|i| rank(&i.section) > want)
+            .unwrap_or(board.items.len()),
+    };
+    board.items.insert(at, item);
+}
+
+/// `base` plus random direct edits (what a user or `git pull` could do to the
+/// parsed board). Also the section rename `(old id, new id)` if one happened.
+fn oracle_theirs(rng: &mut Rng, base: &Board) -> (Board, Option<(String, String)>) {
+    let mut b = base.clone();
+    let mut rename: Option<(String, String)> = None;
+    for k in 0..(1 + rng.below(6)) {
+        let n = b.items.len();
+        let tag = format!("T{k}");
+        let section_id =
+            |rng: &mut Rng, b: &Board| b.sections[rng.below(b.sections.len())].id.clone();
+        match rng.below(13) {
+            0..=3 if n > 0 => {
+                let i = hot(rng, n);
+                let gone = rng.below(3) == 0;
+                match rng.below(9) {
+                    0 => b.items[i].text = format!("Theirs {tag}"),
+                    1 => b.items[i].status = *rng.pick(&Status::ALL),
+                    2 => {
+                        b.items[i].owner = (!gone).then(|| (*rng.pick(&OWNERS)).to_string());
+                    }
+                    3 | 7 | 8 => b.items[i].note = (!gone).then(|| format!("theirs note {tag}")),
+                    4 => {
+                        b.items[i].links = if gone {
+                            vec![]
+                        } else {
+                            vec![Link::new(&format!("PR #{}", 700 + k), None)]
+                        }
+                    }
+                    5 => {
+                        b.items[i].command = (!gone).then(|| format!("theirs-cmd {tag}"));
+                        b.items[i].kind = if gone { Kind::Item } else { Kind::Command };
+                    }
+                    _ => b.items[i].env = (!gone).then(|| *rng.pick(&Env::ALL)),
+                }
+                b.items[i].updated_at = Some(now0());
+            }
+            4 | 5 if n > 0 => {
+                b.items.remove(hot(rng, n));
+            }
+            6 => {
+                let id = if rng.below(2) == 0 {
+                    format!("n{}", rng.below(2))
+                } else {
+                    format!("t{k}")
+                };
+                if b.item(&id).is_none() {
+                    let section = section_id(rng, &b);
+                    let mut it = Item::new(&id, &section, &format!("Theirs new {tag}"));
+                    it.note = (rng.below(2) == 0).then(|| format!("theirs new note {tag}"));
+                    it.updated_at = Some(now0());
+                    insert_in_section(&mut b, it);
+                }
+            }
+            7 if n > 0 => {
+                let mut it = b.items.remove(hot(rng, n));
+                it.section = section_id(rng, &b);
+                insert_in_section(&mut b, it);
+            }
+            8 if n > 1 => {
+                let it = b.items.remove(hot(rng, n));
+                let same: Vec<usize> = b
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, i)| i.section == it.section)
+                    .map(|(p, _)| p)
+                    .collect();
+                let r = rng.below(same.len() + 1);
+                let at = match (same.get(r), same.last()) {
+                    (Some(p), _) => *p,
+                    (None, Some(last)) => last + 1,
+                    (None, None) => b.items.len(),
+                };
+                b.items.insert(at, it);
+            }
+            9 if rename.is_none() => {
+                let s = rng.below(b.sections.len());
+                let old = b.sections[s].id.clone();
+                let new = format!("renamed-{k}");
+                b.sections[s] = Section {
+                    id: new.clone(),
+                    title: format!("Renamed {k}"),
+                };
+                for it in b.items.iter_mut().filter(|i| i.section == old) {
+                    it.section = new.clone();
+                }
+                rename = Some((old, new));
+            }
+            10 => b.title = Some(format!("Theirs title {k}")),
+            _ => b.log.push(LogLine {
+                time: format!("10:0{k}"),
+                text: format!("theirs log {k}"),
+            }),
+        }
+    }
+    (b, rename)
+}
+
+fn without_meta(item: &Item) -> Item {
+    let mut c = item.clone();
+    c.section = String::new();
+    c.updated_at = None;
+    c
+}
+
+#[derive(Default, Debug)]
+struct OracleStats {
+    resurrected: usize,
+    deleted_untouched_by_us: usize,
+    removed_by_us_edited_by_them: usize,
+    removed_by_us_untouched: usize,
+    note_ours_only: usize,
+    note_clash: usize,
+    note_theirs_only: usize,
+    ours_log: usize,
+    theirs_log: usize,
+    ours_added: usize,
+    both_added: usize,
+    ours_moved_section: usize,
+}
+
+fn check_merge(seed: u64, stats: &mut OracleStats) {
+    let mut rng = seeded(seed);
+    let base = oracle_base(&mut rng);
+    let (ours, may_reorder) = oracle_ours(&mut rng, &base);
+    let (theirs, rename) = oracle_theirs(&mut rng, &base);
+    let merged = merge_external(&base, &ours, &theirs);
+    let ctx = |what: &str| format!("seed {seed}: {what}");
+
+    // (a) structure
+    let merged_ids = ids_of(&merged);
+    assert_eq!(
+        merged_ids.iter().collect::<HashSet<_>>().len(),
+        merged_ids.len(),
+        "{}",
+        ctx("duplicate item ids")
+    );
+    for item in &merged.items {
+        assert!(
+            merged.section(&item.section).is_some(),
+            "{}",
+            ctx(&format!("{} sits in a missing section", item.id))
+        );
+    }
+    assert_eq!(merged.title, theirs.title, "{}", ctx("title is theirs"));
+    assert_eq!(
+        merged.sections,
+        theirs.sections,
+        "{}",
+        ctx("sections are theirs")
+    );
+    assert_eq!(merged.prose, theirs.prose, "{}", ctx("prose is theirs"));
+
+    // (b) the Log: theirs' lines, then the lines we appended
+    assert!(
+        ours.log.starts_with(&base.log),
+        "generator: ours only appends"
+    );
+    let mut want_log = theirs.log.clone();
+    want_log.extend(ours.log[base.log.len()..].iter().cloned());
+    assert_eq!(merged.log, want_log, "{}", ctx("log lines"));
+    stats.ours_log += usize::from(ours.log.len() > base.log.len());
+    stats.theirs_log += usize::from(theirs.log.len() > base.log.len());
+
+    // (b)/(c) per item
+    let all_ids: BTreeSet<String> = base
+        .items
+        .iter()
+        .chain(&ours.items)
+        .chain(&theirs.items)
+        .map(|i| i.id.clone())
+        .collect();
+    let mut collision = false;
+    for id in &all_ids {
+        let (b, o, t) = (base.item(id), ours.item(id), theirs.item(id));
+        let m = merged.item(id);
+        let ctx = |what: &str| format!("seed {seed}, item {id}: {what}");
+        let fallback = || theirs.sections[0].id.clone();
+        match (b, o, t) {
+            (Some(b), Some(o), Some(t)) => {
+                let m = m.unwrap_or_else(|| panic!("{}", ctx("lost an item both sides kept")));
+                macro_rules! check_fields {
+                    ($($f:ident),*) => {$(
+                        let want = if o.$f != b.$f { &o.$f } else { &t.$f };
+                        assert_eq!(&m.$f, want, "{}", ctx(concat!("field ", stringify!($f))));
+                    )*};
+                }
+                check_fields!(text, status, owner, note, links, kind, command, env, bind);
+                let want_section = if o.section != b.section && theirs.section(&o.section).is_some()
+                {
+                    &o.section
+                } else {
+                    &t.section
+                };
+                assert_eq!(&m.section, want_section, "{}", ctx("section"));
+                if o.note != b.note {
+                    if t.note == b.note {
+                        stats.note_ours_only += 1;
+                    } else {
+                        stats.note_clash += 1;
+                    }
+                } else if t.note != b.note {
+                    stats.note_theirs_only += 1;
+                }
+                stats.ours_moved_section += usize::from(o.section != b.section);
+            }
+            (Some(b), Some(o), None) => {
+                if o != b {
+                    stats.resurrected += 1;
+                    let m = m.unwrap_or_else(|| {
+                        panic!(
+                            "{}",
+                            ctx("an item they deleted and we modified was dropped")
+                        )
+                    });
+                    assert_eq!(
+                        without_meta(m),
+                        without_meta(o),
+                        "{}",
+                        ctx("resurrected as ours")
+                    );
+                    let want = if theirs.section(&o.section).is_some() {
+                        o.section.clone()
+                    } else {
+                        fallback()
+                    };
+                    assert_eq!(m.section, want, "{}", ctx("resurrected section"));
+                } else {
+                    stats.deleted_untouched_by_us += 1;
+                    assert!(
+                        m.is_none(),
+                        "{}",
+                        ctx("they deleted it, we left it alone: gone")
+                    );
+                }
+            }
+            (Some(b), None, Some(t)) => {
+                let mut unrenamed = t.clone();
+                if let Some((old, new)) = &rename {
+                    if &unrenamed.section == new {
+                        unrenamed.section = old.clone();
+                    }
+                }
+                if t == b {
+                    stats.removed_by_us_untouched += 1;
+                    assert!(
+                        m.is_none(),
+                        "{}",
+                        ctx("we removed it, they left it alone: gone")
+                    );
+                } else if unrenamed != *b {
+                    stats.removed_by_us_edited_by_them += 1;
+                    assert_eq!(
+                        m,
+                        Some(t),
+                        "{}",
+                        ctx("we removed it, they edited it: kept as theirs")
+                    );
+                }
+            }
+            (Some(_), None, None) => {
+                assert!(m.is_none(), "{}", ctx("removed by both"));
+            }
+            (None, Some(o), Some(t)) => {
+                collision = true;
+                stats.both_added += 1;
+                let m = m.unwrap_or_else(|| panic!("{}", ctx("lost an item both sides added")));
+                assert_eq!(
+                    without_meta(m),
+                    without_meta(o),
+                    "{}",
+                    ctx("ours wins a double add")
+                );
+                let want = if o.section != t.section && theirs.section(&o.section).is_some() {
+                    &o.section
+                } else {
+                    &t.section
+                };
+                assert_eq!(&m.section, want, "{}", ctx("section of a double add"));
+            }
+            (None, Some(o), None) => {
+                stats.ours_added += 1;
+                let m = m.unwrap_or_else(|| panic!("{}", ctx("lost an item we added")));
+                assert_eq!(
+                    without_meta(m),
+                    without_meta(o),
+                    "{}",
+                    ctx("our added item")
+                );
+                let want = if theirs.section(&o.section).is_some() {
+                    o.section.clone()
+                } else {
+                    fallback()
+                };
+                assert_eq!(m.section, want, "{}", ctx("our added item's section"));
+            }
+            (None, None, Some(t)) => {
+                assert_eq!(m, Some(t), "{}", ctx("their added item"));
+            }
+            (None, None, None) => unreachable!("id came from one of the boards"),
+        }
+    }
+
+    // Their relative order survives unless we moved or double-added things.
+    if !may_reorder && !collision {
+        let in_merged: HashSet<&str> = merged_ids.iter().map(String::as_str).collect();
+        let in_theirs: HashSet<&str> = theirs.items.iter().map(|i| i.id.as_str()).collect();
+        let theirs_order: Vec<&str> = theirs
+            .items
+            .iter()
+            .map(|i| i.id.as_str())
+            .filter(|i| in_merged.contains(i))
+            .collect();
+        let merged_order: Vec<&str> = merged_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|i| in_theirs.contains(i))
+            .collect();
+        assert_eq!(merged_order, theirs_order, "{}", ctx("their order is kept"));
+    }
+
+    // (d) deterministic
+    assert_eq!(
+        merge_external(&base, &ours, &theirs),
+        merged,
+        "{}",
+        ctx("merging twice differs")
+    );
+
+    // (e) one side unchanged: the merge is the other side
+    assert_eq!(
+        merge_external(&base, &base, &theirs),
+        theirs,
+        "{}",
+        ctx("nothing of ours: the result is theirs")
+    );
+    let from_ours = merge_external(&base, &ours, &base);
+    assert_eq!(
+        from_ours.items.len(),
+        ours.items.len(),
+        "{}",
+        ctx("nothing of theirs: our item count")
+    );
+    for item in &ours.items {
+        assert_eq!(
+            from_ours.item(&item.id),
+            Some(item),
+            "{}",
+            ctx(&format!("nothing of theirs: {} is ours", item.id))
+        );
+    }
+    assert_eq!(
+        from_ours.log,
+        ours.log,
+        "{}",
+        ctx("nothing of theirs: our log")
+    );
+}
+
+#[test]
+fn merge_oracle_two_thousand_seeded_boards_follow_the_field_level_rules() {
+    let mut stats = OracleStats::default();
+    for seed in 0..2_000 {
+        check_merge(seed, &mut stats);
+    }
+    // The oracle must not be vacuous: every rule is exercised many times.
+    let s = &stats;
+    for (name, count) in [
+        ("resurrected", s.resurrected),
+        ("deleted_untouched_by_us", s.deleted_untouched_by_us),
+        (
+            "removed_by_us_edited_by_them",
+            s.removed_by_us_edited_by_them,
+        ),
+        ("removed_by_us_untouched", s.removed_by_us_untouched),
+        ("note_ours_only", s.note_ours_only),
+        ("note_clash", s.note_clash),
+        ("note_theirs_only", s.note_theirs_only),
+        ("ours_log", s.ours_log),
+        ("theirs_log", s.theirs_log),
+        ("ours_added", s.ours_added),
+        ("both_added", s.both_added),
+        ("ours_moved_section", s.ours_moved_section),
+    ] {
+        assert!(
+            count >= 20,
+            "{name} only hit {count} times in 2000 seeds: {stats:?}"
+        );
+    }
+}
+
+// --- (f) through the file: untouched lines stay byte-identical -----------------
+
+/// The lines of an item's block in `src`: its task line plus following
+/// indented lines.
+fn block_of<'a>(src: &'a str, id: &str) -> Vec<&'a str> {
+    let lines: Vec<&str> = src.lines().collect();
+    let marker = format!("<!-- #{id} ");
+    let start = lines
+        .iter()
+        .position(|l| l.contains(&marker))
+        .unwrap_or_else(|| panic!("no task line for {id}"));
+    let len = lines[start + 1..]
+        .iter()
+        .take_while(|l| l.starts_with("  "))
+        .count();
+    lines[start..=start + len].to_vec()
+}
+
+#[test]
+fn merge_oracle_untouched_item_blocks_stay_byte_identical_through_the_file() {
+    let (src, base_parsed) = board60();
+    let base = &base_parsed.board;
+    for seed in 0..300u64 {
+        let mut rng = seeded(0xF11E_0000 + seed);
+        let mut pool = ids_of(base);
+        let mut take = |rng: &mut Rng| pool.swap_remove(rng.below(pool.len()));
+
+        // Ours: a few agent ops on distinct items, always including a log line.
+        let mut ours_ids: HashSet<String> = HashSet::new();
+        let mut ops = vec![Op::Log {
+            text: format!("agent note {seed}"),
+        }];
+        for k in 0..(1 + rng.below(4)) {
+            let id = take(&mut rng);
+            ours_ids.insert(id.clone());
+            ops.push(match rng.below(6) {
+                0 => status_op(&id, "done"),
+                1 => Op::Upsert(Upsert {
+                    note: Some(format!("agent note {k}")),
+                    ..upsert(&id)
+                }),
+                2 => Op::Upsert(Upsert {
+                    text: Some(format!("Agent text {k}")),
+                    ..upsert(&id)
+                }),
+                3 => Op::Remove { id },
+                4 => mv(&id, ORACLE_SECTIONS[rng.below(3)].0, None, None),
+                _ => Op::Upsert(Upsert {
+                    owner: Some("claude".into()),
+                    command: Some(format!("run {k}")),
+                    ..upsert(&id)
+                }),
+            });
+        }
+        let ours = apply_ok(base, &ops, &agent()).0;
+
+        // Theirs: hand edits of the file bytes, on items we did not touch.
+        let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
+        for k in 0..(1 + rng.below(2)) {
+            let id = take(&mut rng);
+            let marker = format!("<!-- #{id} ");
+            let at = lines.iter().position(|l| l.contains(&marker)).unwrap();
+            if rng.below(2) == 0 {
+                let line = &lines[at];
+                let text_start = line.find("] ").unwrap() + 2;
+                let tail_start = line.find(" — ").unwrap();
+                lines[at] = format!(
+                    "{}Hand edited {k}{}",
+                    &line[..text_start],
+                    &line[tail_start..]
+                );
+            } else {
+                let len = block_of(&src, &id).len();
+                lines.drain(at..at + len);
+            }
+        }
+        if rng.below(2) == 0 {
+            lines.push("- 10:59 Me: wrote this by hand".to_string());
+        }
+        let theirs_src = format!("{}\n", lines.join("\n"));
+        let theirs_parsed = parse_ok(theirs_src.as_bytes());
+
+        let merged = merge_external(base, &ours, &theirs_parsed.board);
+        let out = String::from_utf8(splice(&theirs_parsed, &merged, stamp0(), true)).unwrap();
+        let written = parse_ok(out.as_bytes()).board;
+
+        // What was merged is what the file now says.
+        assert_eq!(
+            written.items.iter().map(|i| &i.id).collect::<BTreeSet<_>>(),
+            merged.items.iter().map(|i| &i.id).collect::<BTreeSet<_>>(),
+            "seed {seed}: item set written"
+        );
+        for item in &merged.items {
+            let w = written.item(&item.id).unwrap();
+            assert_eq!(
+                w.section, item.section,
+                "seed {seed}: {} section written",
+                item.id
+            );
+            assert_eq!(
+                without_meta(w),
+                without_meta(item),
+                "seed {seed}: {} written",
+                item.id
+            );
+        }
+        // Items neither agent op touched keep every byte, hand edits included.
+        for item in &theirs_parsed.board.items {
+            if ours_ids.contains(&item.id) {
+                continue;
+            }
+            let block = block_of(&theirs_src, &item.id).join("\n");
+            assert!(
+                out.contains(&block),
+                "seed {seed}: block of {} changed\n--- theirs\n{block}\n--- out\n{out}",
+                item.id
+            );
+        }
+        // Their hand-written Log line is still there, ahead of ours.
+        let log_texts: Vec<&str> = merged.log.iter().map(|l| l.text.as_str()).collect();
+        let mine = log_texts
+            .iter()
+            .position(|t| *t == format!("agent note {seed}"));
+        assert!(mine.is_some(), "seed {seed}: our log line");
+        if let Some(theirs_at) = log_texts
+            .iter()
+            .position(|t| *t == "Me: wrote this by hand")
+        {
+            assert!(theirs_at < mine.unwrap(), "seed {seed}: theirs first");
+        }
+    }
+}

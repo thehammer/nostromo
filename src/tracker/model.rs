@@ -532,6 +532,15 @@ pub enum ChangeKind {
     Section,
 }
 
+/// Longest string kept in a [`Change`]'s field values, in characters; a
+/// longer one is cut and ends with [`LOGGED_TRUNCATED`].
+pub const MAX_LOGGED_CHARS: usize = 200;
+/// Most array elements kept in a [`Change`]'s field values; further ones are
+/// replaced by one [`LOGGED_TRUNCATED`] string.
+pub const MAX_LOGGED_ELEMENTS: usize = 3;
+/// Marker ending a cut value in the change log.
+pub const LOGGED_TRUNCATED: &str = "…[truncated]";
+
 /// One attributed, field-level change (contract §3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Change {
@@ -558,8 +567,39 @@ impl Change {
         }
     }
 
+    /// Adds a field; both values are cut to the logged caps ([`MAX_LOGGED_CHARS`],
+    /// [`MAX_LOGGED_ELEMENTS`]) so a change's size doesn't depend on how long
+    /// the item's text was.
     pub fn with_field(mut self, name: &str, old: Value, new: Value) -> Change {
-        self.fields.insert(name.to_string(), (old, new));
+        self.fields
+            .insert(name.to_string(), (bounded(old), bounded(new)));
         self
+    }
+}
+
+/// `value` with every string over [`MAX_LOGGED_CHARS`] and every array over
+/// [`MAX_LOGGED_ELEMENTS`] cut and marked [`LOGGED_TRUNCATED`].
+fn bounded(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(match text.char_indices().nth(MAX_LOGGED_CHARS) {
+            Some((cut, _)) => format!("{}{LOGGED_TRUNCATED}", &text[..cut]),
+            None => text,
+        }),
+        Value::Array(items) => {
+            let cut = items.len() > MAX_LOGGED_ELEMENTS;
+            let mut kept: Vec<Value> = items
+                .into_iter()
+                .take(MAX_LOGGED_ELEMENTS)
+                .map(bounded)
+                .collect();
+            if cut {
+                kept.push(Value::String(LOGGED_TRUNCATED.to_string()));
+            }
+            Value::Array(kept)
+        }
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(k, v)| (k, bounded(v))).collect())
+        }
+        other => other,
     }
 }

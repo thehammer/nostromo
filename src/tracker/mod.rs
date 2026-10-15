@@ -23,7 +23,7 @@ pub mod ops;
 pub mod render;
 pub mod view;
 
-pub use changelog::{ChangeLog, Cursors, Since};
+pub use changelog::{ChangeLog, ChangeLogError, Cursors, Since};
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use diff::{diff, merge_external};
 pub use format::{

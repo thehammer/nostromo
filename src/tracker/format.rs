@@ -248,7 +248,7 @@ pub enum CommandTextError {
 
 /// Accepts printable text with `\n` and `\t`; refuses `\r`, ESC sequences,
 /// other C0/C1 controls (and DEL), zero-width and bidi-override characters
-/// (contract §7 list).
+/// (contract §7: [`crate::data::work::is_invisible`], the one shared predicate).
 pub fn validate_command_text(text: &str) -> Result<(), CommandTextError> {
     for (at, ch) in text.char_indices() {
         let codepoint = ch as u32;
@@ -257,17 +257,13 @@ pub fn validate_command_text(text: &str) -> Result<(), CommandTextError> {
             '\r' => return Err(CommandTextError::CarriageReturn { at }),
             '\u{1b}' | '\u{9b}' | '\u{9d}' => return Err(CommandTextError::Escape { at }),
             c if c.is_control() => return Err(CommandTextError::ControlChar { at, codepoint }),
-            c if is_invisible(c) => return Err(CommandTextError::InvisibleChar { at, codepoint }),
+            c if crate::data::work::is_invisible(c) => {
+                return Err(CommandTextError::InvisibleChar { at, codepoint })
+            }
             _ => {}
         }
     }
     Ok(())
-}
-
-/// Zero-width and bidi-control characters (contract §7): U+200B-U+200F,
-/// U+202A-U+202E, U+2066-U+2069, U+FEFF.
-pub fn is_invisible(ch: char) -> bool {
-    matches!(ch, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -348,7 +344,7 @@ impl Fence {
     }
 }
 
-fn longest_run(text: &str, ch: char) -> usize {
+pub(crate) fn longest_run(text: &str, ch: char) -> usize {
     let mut best = 0;
     let mut run = 0;
     for c in text.chars() {

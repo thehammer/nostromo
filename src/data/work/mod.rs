@@ -28,9 +28,9 @@ pub mod service;
 pub mod todos;
 pub(crate) mod untrusted;
 
-/// The invisible-character predicate, for the integration tests' fence scanner
-/// (`tests/support/fence_scan.rs`), so the scanner cannot share a gap with the sanitiser.
-#[cfg(feature = "test-support")]
+/// The invisible-character predicate: the one defence shared by the tracker
+/// renders, the task-output sanitiser and the integration tests' fence scanner
+/// (`tests/support/fence_scan.rs`), so none of them can share a gap with the sanitiser.
 pub use untrusted::is_invisible;
 
 pub use model::*;
