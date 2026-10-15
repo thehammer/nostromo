@@ -906,7 +906,7 @@ impl TaskRegistry {
         if ended.len() <= RETAINED_ENDED_TASKS {
             return;
         }
-        ended.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+        ended.sort_by_key(|e| std::cmp::Reverse((e.0, e.1)));
         for (_, _, id) in ended.into_iter().skip(RETAINED_ENDED_TASKS) {
             self.entries.remove(&id);
             self.dirty_details.remove(&id);
