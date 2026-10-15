@@ -33,8 +33,18 @@ struct TurnInteractionState: Equatable {
     /// choice in `groupStates` still wins.
     var groupAuto: Set<String> = []
 
+    /// Activity row key (`ActivitySegment.key`) → the operator's explicit open or closed choice
+    /// (Focus view). In memory per pane until FV4 moves it, with `groupStates`, to the store.
+    var activityStates: [String: Bool] = [:]
+
+    /// Ordinals of messages whose roll-in this pane is holding back (FV2's interim hold): they
+    /// stay on screen as conversation, at their place, until the pane follows the tail again.
+    /// Per pane and transient, never persisted (contract §2.5).
+    var heldOrdinals: Set<Int> = []
+
     var isEmpty: Bool {
         answeredOptions.isEmpty && expandedBlocks.isEmpty && groupStates.isEmpty && groupAuto.isEmpty
+            && activityStates.isEmpty && heldOrdinals.isEmpty
     }
 }
 
@@ -82,6 +92,28 @@ final class TurnInteractionStore {
     /// Record that the stuck-turn rule opened a tool group.
     func recordAuto(turn: UUID, key: String) {
         states[turn, default: TurnInteractionState()].groupAuto.insert(key)
+    }
+
+    /// Record the operator opening or closing an activity row.
+    func setActivity(turn: UUID, key: String, _ isExpanded: Bool) {
+        states[turn, default: TurnInteractionState()].activityStates[key] = isExpanded
+    }
+
+    /// Hold back the roll-in of message `ordinal` of `turn`.
+    func hold(turn: UUID, ordinal: Int) {
+        states[turn, default: TurnInteractionState()].heldOrdinals.insert(ordinal)
+    }
+
+    /// Release every hold in the pane. Returns the turns that had any.
+    @discardableResult
+    func releaseAllHolds() -> Set<UUID> {
+        var released: Set<UUID> = []
+        for (id, state) in states where !state.heldOrdinals.isEmpty {
+            released.insert(id)
+            states[id]?.heldOrdinals = []
+            if states[id]?.isEmpty == true { states.removeValue(forKey: id) }
+        }
+        return released
     }
 
     func removeAll() { states.removeAll() }

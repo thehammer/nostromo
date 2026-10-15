@@ -54,7 +54,8 @@ class MarkdownTableView: NSView {
         let height: CGFloat
     }
 
-    init(headers: [String], rows tableRows: [[String]]) {
+    /// `textColor`: the body cells' text (`Theme.fg`; `Theme.foldedProse` in an activity lane).
+    init(headers: [String], rows tableRows: [[String]], textColor: NSColor = Theme.fg) {
         colCount = max(headers.count, tableRows.map { $0.count }.max() ?? 1)
 
         // A table with no columns has nothing to render. Previously this
@@ -90,7 +91,7 @@ class MarkdownTableView: NSView {
                 label.font = isHeader
                     ? .systemFont(ofSize: 11, weight: .semibold)
                     : .systemFont(ofSize: 11)
-                label.textColor            = isHeader ? Theme.cornflower : Theme.fg
+                label.textColor            = isHeader ? Theme.cornflower : textColor
                 label.lineBreakMode        = .byTruncatingTail
                 label.maximumNumberOfLines = 1
                 rowView.addSubview(label)

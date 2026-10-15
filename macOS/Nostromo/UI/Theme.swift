@@ -38,6 +38,11 @@ enum Theme {
     static let foldFailure = NSColor(srgbRed: 248/255, green: 113/255, blue: 113/255, alpha: 1)
     /// A tool group row under the pointer.
     static let foldHover   = NSColor(white: 0.13, alpha: 1)
+    /// An agent message folded into an activity row's lane (Focus view): the agent talking,
+    /// but quieter than the conversation (`fg`). Same font and size as prose.
+    static let foldedProse = NSColor(white: 175/255, alpha: 1)
+    /// The 2 pt rule down the left of an expanded activity row's lane.
+    static let foldLaneRule = NSColor(white: 100/255, alpha: 1)
 
     static let bg           = NSColor(calibratedWhite: 0.05, alpha: 1)
     static let bgBar        = NSColor(calibratedWhite: 0.07, alpha: 1)

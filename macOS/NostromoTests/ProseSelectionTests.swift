@@ -818,8 +818,11 @@ final class ReplRig {
         materializeTurn()
     }
 
+    /// An open turn, because `stream(_:)` feeds it more blocks: under the Focus layout a block that
+    /// arrives after the turn ended is a new message (the turn's last message is closed), which
+    /// rolls the first one into an activity row. A live turn is never complete when blocks arrive.
     private static func makeTurn(_ blocks: [TurnBlock]) -> ChatTurnView {
-        ChatTurnView(turn: ChatTurn(userInput: "hi", timestamp: Date(), blocks: blocks, isComplete: true),
+        ChatTurnView(turn: ChatTurn(userInput: "hi", timestamp: Date(), blocks: blocks, isComplete: false),
                      contentAvailable: true, interaction: TurnInteractionState())
     }
 

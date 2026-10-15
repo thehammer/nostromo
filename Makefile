@@ -128,6 +128,7 @@ mac-test:
 ##   make mac-load-test                 # 5000 turns, 1 focus
 ##   make mac-load-test TURNS=40000 FOCUSES=8
 ##   make mac-load-test FIXTURE=benchmark   # open the benchmark transcript, print fixture-open ms
+##   make mac-load-test FIXTURE=benchmark-focus   # the Focus view scenario turns, same report
 TURNS   ?= 5000
 FOCUSES ?= 1
 FIXTURE ?=

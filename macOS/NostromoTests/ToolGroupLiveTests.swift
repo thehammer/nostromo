@@ -545,7 +545,8 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     // MARK: stuck-turn auto-open
 
     func testAFailedGroupStaysClosedWhileTheTurnIsStillRunning() throws {
-        let stream = LiveStream([.text(F.prose)] + failingRun() + [.text("moving on")])
+        // Ends on the group: with a message after it, the group would be folded into an activity row.
+        let stream = LiveStream([.text(F.prose)] + failingRun())
         let group = try stream.group()
 
         XCTAssertEqual(group.group.failedCount, 1)
@@ -591,7 +592,9 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     }
 
     func testOnlyTheTurnsLastGroupCanOpenAndItOnlyWhenItHasAFailure() throws {
-        let stream = LiveStream(failingRun("a") + [.text("between")] + F.run(2, prefix: "z"))
+        // Group a has the message after it: it is in an activity row, opened here so it can be looked at.
+        let blocks = failingRun("a") + [.text("between")] + F.run(2, prefix: "z")
+        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))
 
         stream.append([errorChip()], complete: true)
 
@@ -601,7 +604,8 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     }
 
     func testAnAutoOpenNeverClosesAnythingTheOperatorOpened() throws {
-        let stream = LiveStream(F.run(2, prefix: "a") + [.text("between")] + failingRun("b"))
+        let blocks = F.run(2, prefix: "a") + [.text("between")] + failingRun("b")
+        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
         try stream.group(0).row.toggle()
         XCTAssertTrue(try stream.group(0).isExpanded)
 
@@ -624,7 +628,8 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     }
 
     func testACompletedOkTurnLeavesFailedAndUntouchedGroupsClosed() throws {
-        let stream = LiveStream(failingRun("a") + [.text("between")] + F.run(3, prefix: "z"))
+        let blocks = failingRun("a") + [.text("between")] + F.run(3, prefix: "z")
+        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
 
         stream.append([F.chip()], complete: true)
 
@@ -634,7 +639,8 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     }
 
     func testAGroupTheOperatorOpenedWhileRunningStaysOpenAfterACleanCompletionAndAnUntouchedOneStaysClosed() throws {
-        let stream = LiveStream(F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"))
+        let blocks = F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b")
+        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
         try stream.group(0).row.toggle()
 
         stream.append([F.chip()], complete: true)
@@ -741,8 +747,9 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     }
 
     func testApplyFoldsOpensAGroupRecordedAsAutomatic() throws {
-        let stream = LiveStream(F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"), complete: true)
-        var state = TurnInteractionState()
+        let blocks = F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b")
+        let stream = LiveStream(blocks, complete: true, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) row
+        var state = F.rowsOpen(F.turn(blocks))
         state.groupAuto = ["g:b0"]
 
         let changed = stream.view.applyFolds(FoldResolver(state: state))
@@ -1496,7 +1503,9 @@ private func callSummaries(of group: ToolGroupView) -> [String] {
 
 final class ToolGroupExpandCostTests: XCTestCase {
 
-    private let sixty: [TurnBlock] = [.text(F.prose)] + F.run(60) + [.text("after")]
+    /// Ends on the group: the trailing group is its own row (with a message after it, Focus folds it
+    /// into an activity row and builds no group view until that row is opened).
+    private let sixty: [TurnBlock] = [.text(F.prose)] + F.run(60)
 
     /// A completed turn holding one 60-call group (`g:t0`, 120 members), the group's view with its
     /// batches collected, and the collector.
@@ -1541,7 +1550,8 @@ final class ToolGroupExpandCostTests: XCTestCase {
         let turn = try F.benchmarkTurns().first { F.groups(of: $0).contains { $0.callCount == 60 } }
         let big = try XCTUnwrap(turn, "the benchmark has no 60-call group")
         let key = try XCTUnwrap(F.groups(of: big).first { $0.callCount == 60 }?.key)
-        let view = makeLive(big, LiveClock(F.at(0)))
+        // The group has a message after it in the benchmark turn: it is in an activity row, open here.
+        let view = makeLive(big, LiveClock(F.at(0)), interaction: F.rowsOpen(big))
         let group = try XCTUnwrap(view.groupView(forKey: key))
         let collector = BatchCollector()
         group.scheduleBatch = { collector.schedule($0) }
@@ -1620,7 +1630,7 @@ final class ToolGroupExpandCostTests: XCTestCase {
     }
 
     func testASmallGroupOpensWhole() throws {
-        let stream = LiveStream([.text(F.prose)] + F.run(5) + [.text("after")], complete: true)
+        let stream = LiveStream([.text(F.prose)] + F.run(5), complete: true)
         let group = try stream.group()
         let collector = BatchCollector()
         group.scheduleBatch = { collector.schedule($0) }
@@ -1714,7 +1724,8 @@ final class ChatTurnViewReadingOrderTests: XCTestCase {
     func testExpandingAGroupInTheMiddleOfATurnKeepsTheColumnsInDisplayOrder() throws {
         let blocks: [TurnBlock] = [.text("Before. \(F.prose)")] + F.run(3, prefix: "a") + [.text("Between. \(F.prose)")]
             + F.run(2, prefix: "b") + [.text("After. \(F.prose)")]
-        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)))
+        // Both groups have a message after them: they are in the activity row, open here.
+        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)), interaction: F.rowsOpen(F.turn(blocks)))
         let before = order(view)
         XCTAssertTrue(view.subviews.first is UserBubbleView)
         let middle = try XCTUnwrap(view.groupView(forKey: "g:a0"))
@@ -1732,7 +1743,8 @@ final class ChatTurnViewReadingOrderTests: XCTestCase {
     func testClosingAndOpeningEveryGroupLeavesTheOrderAlone() throws {
         let blocks: [TurnBlock] = F.run(2, prefix: "a") + [.text("Between. \(F.prose)")] + F.run(2, prefix: "b")
             + [.text("Then. \(F.prose)")] + F.run(2, prefix: "c")
-        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)))
+        // Groups a and b are in the activity row (open here); c is the trailing group.
+        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)), interaction: F.rowsOpen(F.turn(blocks)))
         let before = order(view)
 
         for key in ["g:a0", "g:b0", "g:c0"] { try XCTUnwrap(view.groupView(forKey: key)).row.toggle() }

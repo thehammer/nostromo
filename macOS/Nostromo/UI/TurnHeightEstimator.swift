@@ -53,6 +53,8 @@ enum TurnHeightEstimator {
     static let toolCallHeight: CGFloat      = 30
     /// `ToolGroupRowView`: a fixed 22 pt row, whatever the group holds.
     static let groupRowHeight: CGFloat      = 22
+    /// `ActivityRowView.laneInset`: an expanded activity row's members sit this far in.
+    static let laneInset: CGFloat           = 14
     /// `ToolResultView` collapsed: the disclosure row plus 8+8 padding.
     static let toolResultCollapsed: CGFloat = 32
     /// `ResultChipView`: a single 10 pt line.
@@ -104,35 +106,53 @@ enum TurnHeightEstimator {
         }
 
         let blockWidth = paneWidth * blocksWidthFraction - 14
-        // Tool calls fold into groups, so a turn that has any is estimated item by
-        // item through the same rule the view renders with. One that has none is
-        // the plain block walk it always was.
-        guard ToolFoldAdapter.hasToolBlocks(turn) else {
-            for i in turn.blocks.indices {
-                height += estimate(blockAt: i, of: turn, width: blockWidth)
-                if i > 0 { height += blockSpacing }
-            }
-            return max(height, minimumTurnHeight)
-        }
-
+        // Estimated item by item through the same Focus layout the view renders.
         for (n, item) in (shape ?? FoldShape(turn)).items.enumerated() {
             if n > 0 { height += blockSpacing }
-            switch item {
-            case .block(let i):
-                height += estimate(blockAt: i, of: turn, width: blockWidth)
-            case .group(let key, let members, let agentRows, let isStuck):
-                height += groupRowHeight
-                // A collapsed group is its row, whatever it holds. Expanded, the row plus
-                // every member as it rendered before folding, plus a collapsed agent-activity
-                // row under each Agent call with subagent blocks.
-                guard folds.isExpanded(key: key, isStuck: isStuck) else { continue }
-                for i in members {
-                    height += blockSpacing + estimate(blockAt: i, of: turn, width: blockWidth)
-                }
-                height += CGFloat(agentRows) * (blockSpacing + toolResultCollapsed)
-            }
+            height += estimate(item, of: turn, width: blockWidth, folds: folds)
         }
         return max(height, minimumTurnHeight)
+    }
+
+    /// One Focus item at `width` (the block column, or an activity lane).
+    private static func estimate(_ item: FoldShape.Item, of turn: ChatTurn, width: CGFloat,
+                                 folds: FoldResolver) -> CGFloat {
+        switch item {
+        case .block(let i):
+            return estimate(blockAt: i, of: turn, width: width)
+        case .message(let indices):
+            var height: CGFloat = 0
+            for (n, i) in indices.enumerated() {
+                if n > 0 { height += blockSpacing }
+                height += estimate(blockAt: i, of: turn, width: width)
+            }
+            return height
+        case .group(let group):
+            // A collapsed group is its row, whatever it holds. Expanded, the row plus every
+            // member as it rendered before folding, plus a collapsed agent-activity row under
+            // each Agent call with subagent blocks.
+            var height = groupRowHeight
+            guard folds.isExpanded(key: group.key, isStuck: group.isStuck) else { return height }
+            for i in group.members {
+                height += blockSpacing + estimate(blockAt: i, of: turn, width: width)
+            }
+            return height + CGFloat(group.agentRows) * (blockSpacing + toolResultCollapsed)
+        case .activity(let key, let members):
+            // Collapsed, the row alone: what it folds is never laid out. Expanded, the row plus
+            // its lane, `laneInset` narrower.
+            var height = groupRowHeight
+            guard folds.isActivityExpanded(key: key) else { return height }
+            let laneWidth = width - laneInset
+            for member in members {
+                switch member {
+                case .message(let indices):
+                    for i in indices { height += blockSpacing + estimate(blockAt: i, of: turn, width: laneWidth) }
+                default:
+                    height += blockSpacing + estimate(member, of: turn, width: laneWidth, folds: folds)
+                }
+            }
+            return height
+        }
     }
 
     private static func estimate(blockAt i: Int, of turn: ChatTurn, width: CGFloat) -> CGFloat {

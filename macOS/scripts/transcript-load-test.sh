@@ -11,7 +11,8 @@
 #   macOS/scripts/transcript-load-test.sh [turns] [focuses] [fixture]
 #
 # `fixture` (or FIXTURE=benchmark in the environment) switches to open-fixture
-# mode: the app opens the benchmark transcript in one snapshot, the script waits
+# mode: the app opens the benchmark transcript in one snapshot (FIXTURE=benchmark-focus:
+# the Focus view's scenario turns, history in /tmp/nostromo-fixture-open-benchmark-focus.log), the script waits
 # for its `fixture-open ms=...` line, prints the median over every run on this
 # build, and stops. Turns are ignored, nothing is graded. Run it 3 times on a
 # build to get a baseline; `FIXTURE_HISTORY` (default
@@ -19,7 +20,7 @@
 # The run also records `group-expand` (opening the first 60-call tool group: to the
 # end of the pass that renders it) and `group-expand-full` (until all its rows are built).
 # `BASELINE_MS=<n>` prints this build's fixture-open over that baseline;
-# `NOSTROMO_LOAD_FOLD_DEFAULT=expanded` opens every tool group (today's look).
+# `NOSTROMO_LOAD_FOLD_DEFAULT=expanded` opens every tool group and activity row (Show All).
 #
 # A Debug build's numbers are meaningless for this work, so this always builds
 # Release. Expect roughly one turn per second of wall clock: the harness runs
@@ -33,7 +34,13 @@ set -uo pipefail
 TURNS="${1:-5000}"
 FOCUSES="${2:-1}"
 FIXTURE="${3:-${FIXTURE:-}}"
-FIXTURE_HISTORY="${FIXTURE_HISTORY:-/tmp/nostromo-fixture-open.log}"
+# One history per fixture, so a median never pools two fixtures' runs (`benchmark` keeps the
+# file it always had).
+if [ -z "$FIXTURE" ] || [ "$FIXTURE" = benchmark ]; then
+  FIXTURE_HISTORY="${FIXTURE_HISTORY:-/tmp/nostromo-fixture-open.log}"
+else
+  FIXTURE_HISTORY="${FIXTURE_HISTORY:-/tmp/nostromo-fixture-open-$FIXTURE.log}"
+fi
 APP_LOG=/tmp/nostromo-load.log
 RECONNECTS="${NOSTROMO_LOAD_RECONNECTS:-20}"
 

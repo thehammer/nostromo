@@ -91,10 +91,12 @@ final class TurnListVirtualizer {
     /// Index lookup for anchor re-resolution after a splice.
     private var indexByKey: [String: Int] = [:]
 
-    /// The fold state each turn renders with: its explicit group choices and expanded
-    /// results. Feeds both the estimate and the height-cache key.
+    /// The fold state each turn renders with: its explicit group and activity-row choices,
+    /// expanded results and held roll-ins. Feeds both the estimate and the height-cache key
+    /// (`ToolFoldAdapter.foldDigest`).
     var foldState: (ChatTurn) -> TurnInteractionState = { _ in TurnInteractionState() }
-    /// Groups without an explicit choice open (harness `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`).
+    /// Groups and activity rows without an explicit choice open (harness
+    /// `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`: Show All).
     var foldsExpandedByDefault = false
 
     /// Completed turns' fold shapes, by turn id, with the signature they were planned from.
@@ -498,11 +500,11 @@ final class TurnListVirtualizer {
                                      shape: foldShape(for: turn))
     }
 
-    /// The turn's fold shape: cached for a completed turn, planned afresh for a streaming
-    /// one, nil for a turn with no tool calls (nothing folds).
+    /// The turn's Focus shape: cached for a completed turn, planned afresh for a streaming one
+    /// or one whose roll-ins the pane holds back (a hold is transient).
     func foldShape(for turn: ChatTurn) -> FoldShape? {
-        guard ToolFoldAdapter.hasToolBlocks(turn) else { return nil }
-        guard turn.isComplete else { return FoldShape(turn) }
+        let held = foldState(turn).heldOrdinals
+        guard turn.isComplete, held.isEmpty else { return FoldShape(turn, held: held) }
         let signature = FoldShape.signature(of: turn)
         if let cached = shapes[turn.id], cached.signature == signature { return cached.shape }
         let shape = FoldShape(turn)

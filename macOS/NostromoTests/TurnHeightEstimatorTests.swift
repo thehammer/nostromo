@@ -414,9 +414,13 @@ final class TurnHeightEstimatorFoldTests: XCTestCase {
 
     func testACollapsedGroupContributesExactlyOneRow() {
         XCTAssertEqual(estimate(turn(F.run(7))), chrome + row)
+        // The group after the latest message is its own row, below the message.
+        let trailing = turn([.text(F.prose)] + F.run(7))
+        XCTAssertEqual(estimate(trailing), chrome + blockCost(trailing, 0) + spacing + row, accuracy: 0.001)
+        // Under Focus a group with a message after it is folded into the activity row: one row, and
+        // the folded message costs nothing while the row is collapsed.
         let turn = turn([.text(F.prose)] + F.run(7) + [.text(F.prose)])
-        XCTAssertEqual(estimate(turn), chrome + blockCost(turn, 0) + spacing + row + spacing + blockCost(turn, 15),
-                       accuracy: 0.001)
+        XCTAssertEqual(estimate(turn), chrome + row + spacing + blockCost(turn, 15), accuracy: 0.001)
     }
 
     func testAResultSizeCostsNothingWhileItsGroupIsCollapsed() {
@@ -444,10 +448,12 @@ final class TurnHeightEstimatorFoldTests: XCTestCase {
 
     func testOnlyTheGroupTheOperatorOpenedIsExpanded() {
         let turn = turn(F.run(2, prefix: "a") + [.text(F.prose)] + F.run(2, prefix: "b"))
-        let collapsed = estimate(turn)
-        let openFirst = estimate(turn, folds: FoldResolver(groupStates: ["g:a0": true]))
-        let openSecond = estimate(turn, folds: FoldResolver(groupStates: ["g:b0": true]))
-        let openBoth = estimate(turn, folds: open)
+        // Group a has the message after it, so it is in an activity row: open the row in every case.
+        let rowOpen = [F.activityKeys(of: turn)[0]: true]
+        let collapsed = estimate(turn, folds: FoldResolver(activityStates: rowOpen))
+        let openFirst = estimate(turn, folds: FoldResolver(groupStates: ["g:a0": true], activityStates: rowOpen))
+        let openSecond = estimate(turn, folds: FoldResolver(groupStates: ["g:b0": true], activityStates: rowOpen))
+        let openBoth = estimate(turn, folds: FoldResolver(groupStates: ["g:a0": true, "g:b0": true], activityStates: rowOpen))
         XCTAssertEqual(openFirst, openSecond, accuracy: 0.001, "two identical runs grow by the same amount")
         XCTAssertGreaterThan(openFirst, collapsed)
         XCTAssertEqual(openBoth - collapsed, 2 * (openFirst - collapsed), accuracy: 0.001)
@@ -495,7 +501,8 @@ final class TurnHeightEstimatorFoldTests: XCTestCase {
         let blocks: [TurnBlock] = [.text(String(repeating: "a", count: 40)), F.call(id: "u", summary: "ls"),
                                    F.result("ok", id: "u"), .text(String(repeating: "b", count: 40))]
         let template = turn(blocks)
-        let expected = chrome + blockCost(template, 0) + spacing + row + spacing + blockCost(template, 3)
+        // Focus: the first prose and the group fold into one collapsed row, above the latest message.
+        let expected = chrome + row + spacing + blockCost(template, 3)
         var total: CGFloat = 0
         for i in 0 ..< 5_000 {
             let turn = turn(blocks, raw: "2026-10-13T00:00:00.\(i)Z")

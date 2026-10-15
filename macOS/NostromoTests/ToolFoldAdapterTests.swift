@@ -226,6 +226,28 @@ enum FoldFixtures {
     }
 }
 
+// MARK: - Focus helpers for the TF2/TF3 tests
+
+/// Under the Focus layout a group that has a message after it folds into a collapsed activity row, so
+/// a TF2/TF3 test that needs to see that group opens the row (or ends the turn on the group, so it
+/// is the trailing group and renders at the top level as it always did).
+extension FoldFixtures {
+
+    /// The keys of the turn's activity rows (`ActivitySegment.key`), in order.
+    static func activityKeys(of turn: ChatTurn) -> [String] {
+        let blocks = turn.blocks.enumerated().map { foldBlock($1, at: $0, in: turn) }
+        return FocusPlanner.plan(blocks: blocks, outcome: outcome(of: turn), turnKey: turn.identityKey)
+            .compactMap { if case .activity(let segment) = $0 { return segment.key } else { return nil } }
+    }
+
+    /// `state` with every activity row of `turn` opened by the operator. Tool groups are untouched.
+    static func rowsOpen(_ turn: ChatTurn, in state: TurnInteractionState = TurnInteractionState()) -> TurnInteractionState {
+        var state = state
+        for key in activityKeys(of: turn) { state.activityStates[key] = true }
+        return state
+    }
+}
+
 // MARK: - ToolFoldAdapterTests
 
 final class ToolFoldAdapterTests: XCTestCase {
@@ -481,28 +503,29 @@ final class ToolFoldAdapterTests: XCTestCase {
     // MARK: row counts for diagnostics
 
     func testACollapsedGroupIsOneRowAndAnExpandedGroupAddsItsMembers() {
-        let turn = F.turn([.text("a")] + F.run(4) + [.text("b")])   // 10 blocks: a, 8 members, b
+        // Ends on the group (the trailing group renders at the top level): a, 8 members.
+        let turn = F.turn([.text("a")] + F.run(4))
         let key = F.groups(of: turn)[0].key
         let collapsed = ToolFoldAdapter.rowCounts(turns: [turn]) { _ in FoldResolver() }
-        XCTAssertEqual(collapsed.rows, 3)
+        XCTAssertEqual(collapsed.rows, 2)
         XCTAssertEqual(collapsed.groups, 1)
         let expanded = ToolFoldAdapter.rowCounts(turns: [turn]) { _ in FoldResolver(groupStates: [key: true]) }
-        XCTAssertEqual(expanded.rows, 1 + (1 + 8) + 1)
+        XCTAssertEqual(expanded.rows, 1 + (1 + 8))
         XCTAssertEqual(expanded.groups, 1)
         let byDefault = ToolFoldAdapter.rowCounts(turns: [turn]) { _ in FoldResolver(expandedByDefault: true) }
         XCTAssertEqual(byDefault.rows, expanded.rows)
     }
 
     func testRowCountsSumOverTurnsAndEachTurnUsesItsOwnResolver() {
-        let one = F.turn([.text("a")] + F.run(2, prefix: "x") + [.text("b")], raw: "2026-10-13T00:00:01.000Z")
+        let one = F.turn([.text("a")] + F.run(2, prefix: "x"), raw: "2026-10-13T00:00:01.000Z")
         let two = F.turn(F.run(3, prefix: "y") + [F.chip()], raw: "2026-10-13T00:00:02.000Z")
         let empty = F.turn([], raw: "2026-10-13T00:00:03.000Z")
         let oneKey = F.groups(of: one)[0].key
         let counts = ToolFoldAdapter.rowCounts(turns: [one, two, empty]) { turn in
             turn.identityKey == one.identityKey ? FoldResolver(groupStates: [oneKey: true]) : FoldResolver()
         }
-        // one: prose + (group + 4 members) + prose = 7 ; two: group + chip = 2 ; empty: 0
-        XCTAssertEqual(counts.rows, 7 + 2 + 0)
+        // one: prose + (group + 4 members) = 6 ; two: group + chip = 2 ; empty: 0
+        XCTAssertEqual(counts.rows, 6 + 2 + 0)
         XCTAssertEqual(counts.groups, 2)
     }
 

@@ -25,16 +25,23 @@ private func fillerBlocks(_ count: Int, tag: String) -> [TurnBlock] {
     (0 ..< count).map { TurnBlock.text("\(tag) paragraph \($0). \(F.prose) \(F.prose) \(F.prose)") }
 }
 
-/// A complete turn: prose, one group of four calls (`g:h<n>_0`), prose.
+/// Notes (a boundary: never folded, never a message). Content below a group that leaves the group
+/// where it is: under the Focus layout a group with a message after it folds into an activity row,
+/// while a group followed only by boundaries is the TF2/TF3 group row at the top level.
+private func noteBlocks(_ count: Int, tag: String) -> [TurnBlock] {
+    (0 ..< count).map { TurnBlock.note("\(tag) note \($0). \(F.prose) \(F.prose) \(F.prose) \(F.prose)") }
+}
+
+/// A complete turn: prose, one group of four calls (`g:h<n>_0`), a note.
 private func historyTurn(_ n: Int) -> ChatTurn {
     F.turn([.text("History \(n) opening. \(F.prose)")] + F.run(4, prefix: "h\(n)_")
-           + [.text("History \(n) closing. \(F.prose) \(F.prose) \(F.prose)")], user: "history \(n)")
+           + [.note("History \(n) closing. \(F.prose) \(F.prose) \(F.prose)")], user: "history \(n)")
 }
 
 /// A complete, tall turn: opening prose, one group of four calls (`g:L<n>_0`), then ten
-/// paragraphs, so a viewport can sit inside the turn with the group above it.
+/// notes, so a viewport can sit inside the turn with the group above it.
 private func longTurn(_ n: Int) -> ChatTurn {
-    F.turn([.text("Long \(n) opening. \(F.prose)")] + F.run(4, prefix: "L\(n)_") + fillerBlocks(10, tag: "long \(n)"),
+    F.turn([.text("Long \(n) opening. \(F.prose)")] + F.run(4, prefix: "L\(n)_") + noteBlocks(10, tag: "long \(n)"),
            user: "long \(n)")
 }
 
@@ -91,6 +98,13 @@ private final class ScrollRig {
     /// `key=state` for every toggle the operator made, as the pane's `onGroupToggle` saw it.
     var groupToggles: [String] = []
     var autoOpened: [String] = []
+    /// `key=state` for every activity-row toggle the operator made, as the pane's `onActivityToggle` saw it (FV2).
+    var activityToggles: [String] = []
+    /// Ordinals the pane was told to hold back (FV2's interim hold), in order.
+    var holds: [Int] = []
+    /// Overrides the interim hold policy (`!followTail.isPinned`, what `ReplView` wires) for a test
+    /// that needs a roll-in to go through while the pane is not following.
+    var holdPolicy: (() -> Bool)?
     var coordinator: TranscriptViewportCoordinator!
 
     init(_ testCase: XCTestCase, turns: [ChatTurn], size: NSSize = NSSize(width: 900, height: 600)) {
@@ -117,7 +131,11 @@ private final class ScrollRig {
         followTail.contentWidth = { [unowned self] in self.contentWidth }
         followTail.isMaterializing = { [unowned self] in self.isMaterializing }
         followTail.requestPass = { [unowned self] in self.passRequested = true }
-        followTail.onFlip = { [unowned self] in self.flips.append($0) }
+        followTail.onFlip = { [unowned self] flip in
+            self.flips.append(flip)
+            // ReplView: becoming pinned (following, or Jump to latest) releases every hold.
+            if flip.pinned { self.releaseHolds() }
+        }
         virtualizer.foldState = { [unowned self] turn in self.store.state(for: turn.id) }
 
         coordinator = TranscriptViewportCoordinator(virtualizer: virtualizer, scrollView: scrollView,
@@ -152,8 +170,22 @@ private final class ScrollRig {
     private func makeView(for turn: ChatTurn) -> ChatTurnView {
         let state = store.state(for: turn.id)
         let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: state,
-                                folds: FoldResolver(state: state, expandedByDefault: expandedByDefault))
+                                folds: FoldResolver(state: state, expandedByDefault: expandedByDefault),
+                                heldOrdinals: state.heldOrdinals)
         let id = turn.id
+        view.holdsRollIns = { [unowned self] in self.holdPolicy?() ?? !self.followTail.isPinned }
+        view.onHold = { [unowned self] ordinal in
+            self.holds.append(ordinal)
+            self.store.hold(turn: id, ordinal: ordinal)
+        }
+        view.onActivityToggle = { [unowned self] key, open in
+            self.activityToggles.append("\(key)=\(open)")
+            self.store.setActivity(turn: id, key: key, open)
+            self.pending.insert(id)
+            if let index = self.turns.firstIndex(where: { $0.id == id }) {
+                self.coordinator.noteUserToggle(turnIndex: index, itemKey: key)
+            }
+        }
         view.onGroupToggle = { [unowned self] key, open in
             self.groupToggles.append("\(key)=\(open)")
             self.store.setGroup(turn: id, key: key, open)
@@ -278,6 +310,30 @@ private final class ScrollRig {
         runPass()
     }
 
+    func activityRow(turn id: UUID, key: String) -> ActivityRowView? {
+        materialized[id]?.activityRowView(forKey: key)
+    }
+
+    /// The activity row's own click, then the pass the pane would run.
+    func toggleActivityRow(turn id: UUID, key: String) {
+        guard let view = activityRow(turn: id, key: key) else { return XCTFail("no view for activity row \(key)") }
+        view.row.toggle()
+        runPass()
+    }
+
+    /// What `ReplView` does when the pane becomes pinned: forget every hold and re-present those
+    /// turns, off screen, with the reading position anchored.
+    func releaseHolds() {
+        let ids = store.releaseAllHolds()
+        guard !ids.isEmpty else { return }
+        coordinator.applyFoldChange(turnIds: ids) {
+            for id in ids {
+                guard let index = self.turns.firstIndex(where: { $0.id == id }) else { continue }
+                self.materialized[id]?.releaseHolds(turn: self.turns[index])
+            }
+        }
+    }
+
     /// The index of the group view among its turn view's subviews.
     func columnIndex(ofGroup key: String, inTurn id: UUID) -> Int? {
         guard let turnView = materialized[id], let group = turnView.groupView(forKey: key) else { return nil }
@@ -325,6 +381,20 @@ private final class ScrollRig {
             settle()
         }
         return groupView(turn: id, key: key).map { screenY(of: $0.row) }
+    }
+
+    /// Like `placeRow`, for an activity row.
+    @discardableResult
+    func placeActivityRow(turn id: UUID, key: String, atScreenY target: CGFloat) -> CGFloat? {
+        guard let index = turns.firstIndex(where: { $0.id == id }) else { return nil }
+        userScroll(to: virtualizer.offset(of: index))
+        settle()
+        for _ in 0 ..< 4 {
+            guard let row = activityRow(turn: id, key: key)?.row else { return nil }
+            userScroll(to: screenY(of: row) + clip.bounds.minY - target)
+            settle()
+        }
+        return activityRow(turn: id, key: key).map { screenY(of: $0.row) }
     }
 }
 
@@ -394,7 +464,7 @@ final class ToolFoldScrollTests: XCTestCase {
             blocks.append(F.call(id: "s\(i)", summary: "make step\(i)", start: Double(i)))
             blocks.append(F.result(i == 5 ? "exit 2" : "ok", id: "s\(i)", isError: i == 5, time: Double(i) + 0.5))
         }
-        blocks += fillerBlocks(40, tag: "after")
+        blocks += noteBlocks(40, tag: "after")
         return F.turn(blocks, complete: false, user: "tail")
     }
 
@@ -542,7 +612,7 @@ final class ToolFoldScrollTests: XCTestCase {
     /// A pinned pane whose tail turn ends with a group row and a closing line: the row is on
     /// screen, near the bottom.
     private func pinnedTailRig() -> (ScrollRig, ChatTurn) {
-        let tail = F.turn([.text("Tail opening.")] + F.run(5, prefix: "g") + [.text("Tail closing line.")], user: "tail")
+        let tail = F.turn([.text("Tail opening.")] + F.run(5, prefix: "g"), user: "tail")
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [tail])
         rig.start()
         return (rig, tail)
@@ -618,7 +688,7 @@ final class ToolFoldScrollTests: XCTestCase {
 
     private func resultTurn(filler: Int) -> ChatTurn {
         F.turn([.text("Results.")] + F.run(4, prefix: "m", output: { "line a \($0)\nline b\nline c" })
-               + fillerBlocks(filler, tag: "results"), user: "results")
+               + noteBlocks(filler, tag: "results"), user: "results")
     }
 
     func testExpandingAResultInsideAnOpenGroupKeepsItsHeaderStillWhenScrolledUp() throws {
@@ -831,7 +901,7 @@ final class TurnListVirtualizerItemAnchorTests: XCTestCase {
 final class TurnIslandItemGeometryTests: XCTestCase {
 
     /// Prose (b0), a group of three calls (blocks 1 to 6, `g:t0`), prose (b7).
-    private let blocks: [TurnBlock] = [.text("Opening. \(F.prose)")] + F.run(3) + [.text("Closing. \(F.prose)")]
+    private let blocks: [TurnBlock] = [.text("Opening. \(F.prose)")] + F.run(3) + [.note("Closing. \(F.prose)")]
 
     private func columns(_ view: ChatTurnView) -> [NSView] {
         view.subviews.filter { !($0 is UserBubbleView) }
@@ -1046,9 +1116,9 @@ private final class ScrollBatchCollector {
 
 final class ToolGroupExpandScrollTests: XCTestCase {
 
-    /// Opening prose, one 60-call group (`g:B0`, 120 members), ten paragraphs.
+    /// Opening prose, one 60-call group (`g:B0`, 120 members), ten notes.
     private func bigTurn() -> ChatTurn {
-        F.turn([.text("Big opening. \(F.prose)")] + F.run(60, prefix: "B") + fillerBlocks(10, tag: "big"), user: "big")
+        F.turn([.text("Big opening. \(F.prose)")] + F.run(60, prefix: "B") + noteBlocks(10, tag: "big"), user: "big")
     }
 
     private func bigRig() -> (ScrollRig, ChatTurn) {
@@ -1234,7 +1304,8 @@ final class ToolGroupBatchAnchorScrollTests: XCTestCase {
             let error = (0 ..< 6).map { "error line \($0) of step \(i): the linker could not resolve a symbol" }.joined(separator: "\n")
             blocks.append(F.result(error, id: "e\(i)", isError: true, time: Double(i) + 0.5))
         }
-        blocks += fillerBlocks(30, tag: "closing")
+        // Notes, not paragraphs: a message after the group would fold it into an activity row.
+        blocks += noteBlocks(30, tag: "closing")
         return F.turn(blocks, complete: false, user: "tail")
     }
 
@@ -1522,5 +1593,261 @@ final class ToolFoldSubagentScrollTests: XCTestCase {
 
         XCTAssertTrue(button.title.hasPrefix("▼"), "precondition: the subagent result opened")
         XCTAssertEqual(rig.screenY(of: activity), before, accuracy: 1, "the activity row moved when a result inside it opened")
+    }
+}
+
+
+// MARK: - Focus: roll-ins, holds and activity rows (FV2)
+
+private func focusMessage(_ tag: String) -> TurnBlock { .text("\(tag) \(F.prose) \(F.prose)") }
+
+/// An activity row (`opening` and one group of three calls) above a tall latest message.
+private func activityTurn(_ n: Int) -> ChatTurn {
+    F.turn([focusMessage("Act \(n) opening")] + F.run(3, prefix: "A\(n)_") + fillerBlocks(10, tag: "act \(n)"),
+           user: "activity \(n)")
+}
+
+final class FocusScrollTests: XCTestCase {
+
+    private func textBlock(containing text: String, in view: ChatTurnView?) -> TextBlockView? {
+        view?.subviews.compactMap { $0 as? TextBlockView }.first { FocusFixtures.contains(text, in: $0) }
+    }
+
+    // MARK: following
+
+    func testAFollowingPaneStaysAtTheTrueBottomThroughTenRollIns() throws {
+        let live = F.turn([focusMessage("Starting")], complete: false, user: "go")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
+        rig.start()
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5)
+
+        for n in 0 ..< 10 {
+            rig.append(F.run(2, prefix: "r\(n)_"))
+            XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "after the calls of step \(n)")
+            rig.append([focusMessage("Message \(n)")])
+
+            XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "after roll-in \(n) the viewport ends at the true bottom")
+            XCTAssertTrue(rig.followTail.isPinned, "after roll-in \(n)")
+        }
+
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertEqual(view.activityRowViews.count, 1)
+        XCTAssertTrue(view.activityRowViews[0].row.summaryField.stringValue.hasPrefix("10 messages"),
+                      view.activityRowViews[0].row.summaryField.stringValue)
+        XCTAssertTrue(rig.holds.isEmpty, "a following pane never holds a roll-in")
+        XCTAssertTrue(rig.flips.filter { !$0.pinned }.isEmpty, "following never stopped")
+    }
+
+    // MARK: not following: the interim hold
+
+    private func holdingRig() -> (ScrollRig, ChatTurn) {
+        // The outgoing message is three text blocks tall, so it is on screen however the geometry rounds.
+        let live = F.turn([focusMessage("Earlier note")] + F.run(2, prefix: "a")
+                          + [focusMessage("OLD-HELD-MSG"), focusMessage("OLD-HELD-TWO"), focusMessage("OLD-HELD-THREE")]
+                          + F.run(2, prefix: "b"), complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
+        rig.start()
+        rig.userScroll(to: rig.doc.frame.height - rig.viewportHeight - 60)
+        rig.settle()
+        return (rig, live)
+    }
+
+    func testANonFollowingPaneHoldsTheOutgoingMessageWhereTheReaderSeesItAndNothingMoves() throws {
+        let (rig, live) = holdingRig()
+        XCTAssertFalse(rig.followTail.isPinned, "precondition: the operator is reading")
+        let old = try XCTUnwrap(textBlock(containing: "OLD-HELD-MSG", in: rig.materialized[live.id]))
+        let y = rig.screenY(of: old)
+        XCTAssertGreaterThanOrEqual(y + old.bounds.height, 0, "precondition: the outgoing message is on screen")
+        XCTAssertLessThan(y, rig.viewportHeight, "precondition: the outgoing message is on screen")
+        let probe = try XCTUnwrap(rig.probe())
+
+        rig.append([focusMessage("NEW-LATEST-MSG")])
+
+        XCTAssertEqual(rig.holds, [1], "the second message (ordinal 1) was held")
+        XCTAssertEqual(rig.store.state(for: live.id).heldOrdinals, [1])
+        assertStill(rig, probe, "after a roll-in was held")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertTrue(textBlock(containing: "OLD-HELD-MSG", in: view) === old, "the old message's view is still in the tree, untouched")
+        XCTAssertNotNil(textBlock(containing: "NEW-LATEST-MSG", in: view), "the newer message appears below as the latest")
+        XCTAssertEqual(rig.screenY(of: old), y, accuracy: 1, "the held message did not move")
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testJumpToLatestReleasesTheHoldFoldsTheMessageIntoTheRowAndLandsAtTheTrueBottom() throws {
+        let (rig, live) = holdingRig()
+        rig.append([focusMessage("NEW-LATEST-MSG")])
+        XCTAssertEqual(rig.holds, [1], "precondition: the roll-in was held")
+        rig.flips = []
+
+        rig.followTail.pinToBottomAndScroll(cause: .jumpToLatest)   // what the overlay's button does
+        rig.settle()
+
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertEqual(rig.flips.map(\.cause), [.jumpToLatest])
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "the pane is at the true bottom")
+        XCTAssertTrue(rig.store.state(for: live.id).heldOrdinals.isEmpty, "the hold is released")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertNil(textBlock(containing: "OLD-HELD-MSG", in: view), "no top-level text block still holds the old message")
+        XCTAssertNotNil(textBlock(containing: "NEW-LATEST-MSG", in: view))
+        XCTAssertTrue(try XCTUnwrap(view.activityRowViews.first).row.summaryField.stringValue.hasPrefix("2 messages"),
+                      "the old message is in the row")
+    }
+
+    func testAHoldSurvivesTheViewBeingRebuiltWhileTheOperatorIsStillReading() throws {
+        let (rig, live) = holdingRig()
+        rig.append([focusMessage("NEW-LATEST-MSG")])
+        let probe = try XCTUnwrap(rig.probe())
+
+        for view in rig.materialized.values { view.removeFromSuperview() }
+        rig.materialized.removeAll()
+        rig.runPass()
+
+        XCTAssertNotNil(textBlock(containing: "OLD-HELD-MSG", in: rig.materialized[live.id]), "rebuilt, the held message is still conversation")
+        assertStill(rig, probe, "after the views were rebuilt")
+    }
+
+    // MARK: toggling an activity row
+
+    func testTogglingAnActivityRowNearTheBottomOfAPinnedPaneKeepsItsRowStill() throws {
+        let tail = F.turn([focusMessage("Tail opening")] + F.run(3, prefix: "g") + [.text("Tail closing line.")], user: "tail")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [tail])
+        rig.start()
+        XCTAssertTrue(rig.followTail.isPinned)
+        let activity = try XCTUnwrap(rig.materialized[tail.id]?.activityRowViews.first)
+        let key = activity.segment.key
+        let before = rig.screenY(of: activity.row)
+        XCTAssertGreaterThan(before, 0, "precondition: the row is on screen")
+        XCTAssertLessThan(before, rig.viewportHeight)
+
+        rig.toggleActivityRow(turn: tail.id, key: key)
+
+        XCTAssertEqual(rig.activityToggles, ["\(key)=true"])
+        XCTAssertTrue(activity.isExpanded)
+        XCTAssertEqual(rig.screenY(of: activity.row), before, accuracy: 1, "expanding moved the row")
+
+        rig.toggleActivityRow(turn: tail.id, key: key)
+
+        XCTAssertEqual(rig.activityToggles, ["\(key)=true", "\(key)=false"])
+        XCTAssertEqual(rig.screenY(of: activity.row), before, accuracy: 1, "collapsing moved the row")
+    }
+
+    func testTogglingAnActivityRowWhileScrolledUpKeepsItsRowStill() throws {
+        let rig = ScrollRig(self, turns: (0 ..< 6).map(activityTurn))
+        rig.start()
+        let target = rig.turns[3].id
+        let key = try XCTUnwrap(FocusFixtures.segments(of: rig.turns[3]).first).key
+        let placed = try XCTUnwrap(rig.placeActivityRow(turn: target, key: key, atScreenY: 150))
+        XCTAssertEqual(placed, 150, accuracy: 2)
+        XCTAssertFalse(rig.followTail.isPinned)
+        let row = try XCTUnwrap(rig.activityRow(turn: target, key: key)).row
+        let collapsedHeight = rig.virtualizer.height(at: 3)
+
+        rig.toggleActivityRow(turn: target, key: key)
+
+        XCTAssertGreaterThan(rig.virtualizer.height(at: 3), collapsedHeight + 30, "precondition: the row opened")
+        XCTAssertEqual(rig.screenY(of: row), placed, accuracy: 1, "expanding moved the row")
+
+        rig.toggleActivityRow(turn: target, key: key)
+
+        XCTAssertEqual(rig.virtualizer.height(at: 3), collapsedHeight, accuracy: 1)
+        XCTAssertEqual(rig.screenY(of: row), placed, accuracy: 1, "collapsing moved the row")
+    }
+
+    // MARK: an open row through a roll-in
+
+    private func openLaneTail() -> ChatTurn {
+        var blocks: [TurnBlock] = []
+        for i in 0 ..< 16 { blocks += [focusMessage("LANE-\(i)")] + F.run(1, prefix: "l\(i)_") }
+        blocks.append(focusMessage("OLDEST-LATEST-MSG"))
+        return F.turn(blocks, complete: false, user: "open lane")
+    }
+
+    func testAnExpandedRowThatAbsorbsARollInStaysOpenAndTheFirstVisibleLineDoesNotMove() throws {
+        let tail = openLaneTail()
+        let rig = ScrollRig(self, turns: (0 ..< 3).map(longTurn) + [tail])
+        rig.store.setActivity(turn: tail.id, key: FocusFixtures.segments(of: tail)[0].key, true)
+        rig.start()
+        let tailIndex = rig.turns.count - 1
+        rig.userScroll(to: rig.virtualizer.offset(of: tailIndex) + 300)
+        rig.settle()
+        XCTAssertFalse(rig.followTail.isPinned, "precondition: the operator is reading inside the open lane")
+        let activity = try XCTUnwrap(rig.materialized[tail.id]?.activityRowViews.first)
+        XCTAssertTrue(activity.isExpanded, "precondition")
+        let member = try XCTUnwrap(activity.laneMemberViews.first { (20 ..< 400).contains(rig.screenY(of: $0)) },
+                                   "precondition: a lane member is on screen")
+        let before = rig.screenY(of: member)
+        let probe = try XCTUnwrap(rig.probe())
+        rig.holdPolicy = { false }   // off screen roll-ins go through (FV3's rule); this is the layout half
+
+        // A note between, so it is a newer message (contract §2.1) and nothing trails the old one.
+        rig.append([.note("Model changed to Opus."), focusMessage("NEWER-MSG")])
+
+        XCTAssertTrue(rig.holds.isEmpty)
+        XCTAssertTrue(activity.isExpanded, "an open row stays open")
+        XCTAssertTrue(FocusFixtures.contains("OLDEST-LATEST-MSG", in: try XCTUnwrap(activity.laneMemberViews.last)),
+                      "the rolled-in message is at the end of the lane")
+        XCTAssertEqual(rig.screenY(of: member), before, accuracy: 1, "a lane member moved")
+        assertStill(rig, probe, "after the open row absorbed a roll-in")
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testAnExpandedRowInAFollowingPaneStaysOpenAndThePaneStaysAtTheBottom() throws {
+        let live = F.turn([focusMessage("First")] + F.run(2, prefix: "a") + [focusMessage("Second")], complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
+        rig.store.setActivity(turn: live.id, key: FocusFixtures.segments(of: live)[0].key, true)
+        rig.start()
+        XCTAssertTrue(rig.followTail.isPinned)
+
+        for n in 0 ..< 3 {
+            rig.append(F.run(1, prefix: "roll\(n)_") + [focusMessage("Roll \(n)")])
+
+            XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "after roll-in \(n)")
+            XCTAssertEqual(rig.materialized[live.id]?.activityRowViews.first?.isExpanded, true, "after roll-in \(n)")
+        }
+    }
+
+    // MARK: layout cost, across the pane
+
+    func testARollInMeasuresOnlyItsOwnTurnsIslandsAcrossThePane() throws {
+        let live = F.turn([focusMessage("First")] + F.run(2, prefix: "a") + [focusMessage("Second")] + F.run(1, prefix: "b"),
+                          complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 6).map(historyTurn) + [live])
+        rig.start()
+        let others = rig.materialized.filter { $0.key != live.id }
+        XCTAssertGreaterThan(others.count, 0, "precondition: other turns are materialized in the pane")
+        let otherViews = others.mapValues { ObjectIdentifier($0) }
+
+        ChatTurnView.measureIslandCount = 0
+        rig.append([focusMessage("Third")])   // rolls Second and group b into the row
+
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertEqual(view.activityRowViews.first?.row.summaryField.stringValue.hasPrefix("2 messages"), true,
+                       "precondition: the roll-in happened")
+        XCTAssertGreaterThan(ChatTurnView.measureIslandCount, 0)
+        XCTAssertLessThanOrEqual(ChatTurnView.measureIslandCount, view.subviews.count,
+                                 "no more measurements than the rolled-in turn has islands")
+        for (id, identity) in otherViews {
+            XCTAssertEqual(rig.materialized[id].map { ObjectIdentifier($0) }, identity, "another turn's view was rebuilt")
+        }
+    }
+
+    // MARK: the composer
+
+    func testTheComposerKeepsFirstResponderThroughRollIns() throws {
+        let live = F.turn([focusMessage("First")], complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
+        rig.start()
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 40))
+        rig.window.contentView!.addSubview(composer)
+        XCTAssertTrue(rig.window.makeFirstResponder(composer))
+
+        for n in 0 ..< 5 {
+            rig.append(F.run(2, prefix: "c\(n)_"))
+            rig.append([focusMessage("Message \(n)")])
+            XCTAssertTrue(rig.window.firstResponder === composer,
+                          "roll-in \(n) took focus: \(String(describing: rig.window.firstResponder))")
+        }
+        XCTAssertEqual(rig.materialized[live.id]?.activityRowViews.count, 1)
     }
 }
