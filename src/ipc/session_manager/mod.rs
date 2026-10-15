@@ -35,7 +35,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -451,11 +451,18 @@ pub struct SessionManager {
     restrictions: HashMap<String, SessionRestrictions>,
     /// Model state shared by every session: files, catalogue, broadcasts.
     model_hub: Arc<ModelHub>,
+    /// The `nostromo-guard` binary every spawned session's PreToolUse hook
+    /// runs (see [`build_claude_args_with`]). `nostromd` sets it from
+    /// [`crate::approvals::guard::resolve_guard_path`]; a path that doesn't
+    /// exist fails closed (every tool call is blocked).
+    guard_path: PathBuf,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
-        Self::with_store_path(default_store_path())
+        let mut mgr = Self::with_store_path(default_store_path());
+        mgr.guard_path = crate::approvals::guard::resolve_guard_path();
+        mgr
     }
 
     pub fn with_store_path(store_path: PathBuf) -> Self {
@@ -500,7 +507,32 @@ impl SessionManager {
                 crate::data::work::picks::PICKS_TAG.to_owned(),
                 crate::data::work::picks::picks_restrictions(),
             )]),
+            // Tests: `NOSTROMO_GUARD_BIN`, else a path that fails closed. Never
+            // a binary found beside the test executable.
+            guard_path: std::env::var_os(crate::approvals::guard::GUARD_BIN_ENV)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(crate::approvals::guard::GUARD_SENTINEL_PATH)),
         }
+    }
+
+    /// The guard binary sessions spawned from now on run as their PreToolUse hook.
+    pub fn guard_path(&self) -> &Path {
+        &self.guard_path
+    }
+
+    /// Set the guard binary (`nostromd`, at startup).
+    pub fn set_guard_path(&mut self, path: PathBuf) {
+        self.guard_path = path;
+    }
+
+    /// True iff `args` (a session's `claude` argv) carries this manager's guard
+    /// hook: the element after `--settings` equals
+    /// [`crate::approvals::guard::hook_settings_json`] for [`Self::guard_path`].
+    /// The approval broker only holds requests from such sessions.
+    pub fn session_has_guard(&self, args: &[String]) -> bool {
+        let expected = crate::approvals::guard::hook_settings_json(&self.guard_path);
+        args.windows(2).any(|w| w[0] == "--settings" && w[1] == expected)
     }
 
     /// The registry of sensitive tags/jobs (a shared handle: clones see the
@@ -748,6 +780,7 @@ impl SessionManager {
             &effective_id,
             resume,
             self.restrictions.get(&tag),
+            &crate::approvals::guard::hook_settings_json(&self.guard_path),
         );
         // The focus's recorded model, read at every spawn (restart and crash
         // recovery come through here too). No record: no flag, as before.
@@ -2357,14 +2390,19 @@ fn capture_exit_code(child: &mut Child) -> Option<i32> {
 
 /// Build the `claude` argument vector for a persistent stream-json session. An
 /// empty `agent_name` starts the session with no `--agent`.
+///
+/// `guard_settings` is the production-shell guard's inline `--settings` JSON
+/// ([`crate::approvals::guard::hook_settings_json`]); see
+/// [`build_claude_args_with`].
 pub fn build_claude_args(
     agent_name: &str,
     view_name: &str,
     remote_control: bool,
     session_id: &str,
     resume: bool,
+    guard_settings: &str,
 ) -> Vec<String> {
-    build_claude_args_with(agent_name, view_name, remote_control, session_id, resume, None)
+    build_claude_args_with(agent_name, view_name, remote_control, session_id, resume, None, guard_settings)
 }
 
 /// [`build_claude_args`], optionally under [`SessionRestrictions`].
@@ -2372,6 +2410,13 @@ pub fn build_claude_args(
 /// Unrestricted sessions keep `--dangerously-skip-permissions` (see below).
 /// A restricted one drops it for `--permission-mode dontAsk` plus the
 /// allow-list flags: the allow-list is then the only thing it may use.
+///
+/// **Both** kinds get `["--settings", guard_settings]` right after their
+/// permission flag: the production-shell guard's PreToolUse hook. A hook
+/// passed inline runs under bypass and under `dontAsk` alike, before any
+/// permission decision, and its `"disableAllHooks":false` wins over a user
+/// setting an agent could write mid-session. Neither the bypass nor the
+/// allow-list may be the thing that lets an agent type into a production shell.
 pub fn build_claude_args_with(
     agent_name: &str,
     view_name: &str,
@@ -2379,10 +2424,11 @@ pub fn build_claude_args_with(
     session_id: &str,
     resume: bool,
     restrictions: Option<&SessionRestrictions>,
+    guard_settings: &str,
 ) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     match restrictions {
-        None => args.push(
+        None => {
             // Full permission bypass for daemon-hosted sessions. A headless
             // stream-json session has no way to answer an interactive permission
             // prompt, so the softer `--settings {defaultMode:bypassPermissions}`
@@ -2391,12 +2437,20 @@ pub fn build_claude_args_with(
             // — matching sessions.toml and the in-process TUI views — so agents
             // like Perri can run their gh/compound commands. Scoped to this child
             // process; never touches the operator's global ~/.claude/settings.json.
-            "--dangerously-skip-permissions".into(),
-        ),
+            args.push("--dangerously-skip-permissions".into());
+            // The bypass skips permission checks, not hooks: the guard still
+            // vets every tool call.
+            args.extend(["--settings".into(), guard_settings.into()]);
+        }
         Some(r) => {
             // No bypass: nothing outside the allow-list can run, and nothing
             // prompts (a headless session could not answer anyway).
             args.extend(["--permission-mode".into(), "dontAsk".into()]);
+            // The allow-list decides what may run; the guard still vets each
+            // allowed call (an allowed Bash could otherwise reach a prod shell).
+            // `--setting-sources project` below doesn't drop it: inline
+            // `--settings` always loads.
+            args.extend(["--settings".into(), guard_settings.into()]);
             args.extend(["--tools".into(), r.builtin_tools.join(",")]);
             args.extend(["--allowedTools".into(), r.allowed_tools.join(",")]);
             args.push("--strict-mcp-config".into());
@@ -2704,9 +2758,14 @@ mod tests {
 
     // ── arg construction ──────────────────────────────────────────────────────
 
+    /// The guard `--settings` JSON for an arbitrary guard path.
+    fn guard() -> String {
+        crate::approvals::guard::hook_settings_json(Path::new("/opt/x/nostromo-guard"))
+    }
+
     #[test]
     fn args_fresh_session_uses_session_id_flag() {
-        let args = build_claude_args("fred", "Fred", false, "sid-1", false);
+        let args = build_claude_args("fred", "Fred", false, "sid-1", false, &guard());
         assert!(args.windows(2).any(|w| w == ["--session-id", "sid-1"]));
         assert!(!args.iter().any(|a| a == "--resume"));
         assert!(!args.iter().any(|a| a == "--remote-control"));
@@ -2725,7 +2784,7 @@ mod tests {
 
     #[test]
     fn args_resume_uses_resume_flag() {
-        let args = build_claude_args("teri", "Teri", false, "sid-2", true);
+        let args = build_claude_args("teri", "Teri", false, "sid-2", true, &guard());
         assert!(args.windows(2).any(|w| w == ["--resume", "sid-2"]));
         assert!(!args.iter().any(|a| a == "--session-id"));
     }
@@ -2752,7 +2811,7 @@ mod tests {
 
     #[test]
     fn restricted_args_carry_the_allow_list_and_no_permission_bypass() {
-        let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid", false, Some(&restricted()));
+        let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid", false, Some(&restricted()), &guard());
         assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"), "{args:?}");
         for pair in [
             ["--permission-mode", "dontAsk"],
@@ -2770,20 +2829,20 @@ mod tests {
         assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
         // The unrestricted vector is unchanged.
         assert_eq!(
-            build_claude_args_with("a", "v", false, "sid", false, None),
-            build_claude_args("a", "v", false, "sid", false)
+            build_claude_args_with("a", "v", false, "sid", false, None, &guard()),
+            build_claude_args("a", "v", false, "sid", false, &guard())
         );
     }
 
     #[test]
     fn a_restricted_session_with_no_agent_name_gets_no_agent_flag() {
-        let args = build_claude_args_with("", "Teri picks", false, "sid", false, Some(&restricted()));
+        let args = build_claude_args_with("", "Teri picks", false, "sid", false, Some(&restricted()), &guard());
         assert!(!args.iter().any(|a| a == "--agent"), "{args:?}");
         assert!(!args.iter().any(|a| a.contains("teri:teri")), "{args:?}");
         assert!(args.windows(2).any(|w| w == ["--setting-sources", "project"]), "{args:?}");
         assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
         // An unrestricted session with no agent name has no agent flag either, and gains nothing else.
-        let plain = build_claude_args_with("", "v", false, "sid", false, None);
+        let plain = build_claude_args_with("", "v", false, "sid", false, None, &guard());
         assert!(!plain.iter().any(|a| a == "--agent" || a == "--setting-sources" || a == "--disable-slash-commands"), "{plain:?}");
     }
 
@@ -2815,7 +2874,7 @@ mod tests {
 
     #[test]
     fn args_remote_control_adds_flag() {
-        let args = build_claude_args("perri", "Perri", true, "sid-3", false);
+        let args = build_claude_args("perri", "Perri", true, "sid-3", false, &guard());
         assert!(args.windows(2).any(|w| w == ["--remote-control", "Perri"]));
     }
 

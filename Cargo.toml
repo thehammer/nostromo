@@ -26,6 +26,10 @@ path = "src/bin/nostromo_mcp_bridge.rs"
 name = "nostromo-activity-hook"
 path = "src/bin/nostromo_activity_hook.rs"
 
+[[bin]]
+name = "nostromo-guard"
+path = "src/bin/nostromo_guard.rs"
+
 [features]
 # Test-only seams (e.g. pointing the Jira source at a local mock server). The
 # crate enables it for its own tests through the self dev-dependency below;

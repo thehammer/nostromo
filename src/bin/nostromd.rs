@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use nostromo::mdns;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -82,6 +82,15 @@ async fn main() -> Result<()> {
 
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
+    // The production-shell guard every session runs as its PreToolUse hook.
+    // A missing binary fails closed: the hook wrapper blocks every tool call.
+    let guard_path = nostromo::approvals::guard::resolve_guard_path();
+    if guard_path == std::path::Path::new(nostromo::approvals::guard::GUARD_SENTINEL_PATH) {
+        error!("nostromo-guard not found beside nostromd: every agent tool call will be blocked until it is installed");
+    } else {
+        info!(guard = %guard_path.display(), "production-shell guard");
+    }
+    session_mgr.lock().unwrap().set_guard_path(guard_path);
     // Seed the session-id reverse index from the on-disk store so activity
     // events from sessions spawned by a *previous* daemon process (this one
     // predates a fresh process's in-memory index) still attribute correctly

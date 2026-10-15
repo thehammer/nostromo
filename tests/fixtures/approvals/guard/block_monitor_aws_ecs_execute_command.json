@@ -1,0 +1,11 @@
+{
+  "session_id": "s-1",
+  "tool_use_id": "toolu_1",
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "bypassPermissions",
+  "cwd": "/tmp",
+  "tool_name": "Monitor",
+  "tool_input": {
+    "command": "aws ecs execute-command --cluster c --task t --interactive --command bash"
+  }
+}

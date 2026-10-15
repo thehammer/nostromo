@@ -42,9 +42,9 @@ clean:
 
 # ── daemon targets ────────────────────────────────────────────────────────────
 
-## Build the nostromd daemon binary (release).
+## Build the nostromd daemon binary and its production-shell guard (release).
 daemon:
-	cargo build --release --bin nostromd
+	cargo build --release --bin nostromd --bin nostromo-guard
 
 ## Install the daemon binary and register the launchd agent.
 ##
@@ -61,6 +61,13 @@ install-daemon: daemon
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
 	  rm -f "$$real" && cp target/release/nostromd "$$real" && codesign --force -s - "$$real"
 	@echo "Installed nostromd to $(HOME)/.local/bin/nostromd"
+	@# The production-shell guard every daemon session runs as its PreToolUse hook. nostromd
+	@# looks for it beside its own (symlink-resolved) executable, so it goes next to the real
+	@# nostromd. Same remove/copy/re-sign dance. Missing, every agent tool call is blocked.
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  guard="$$(dirname "$$real")/nostromo-guard"; \
+	  rm -f "$$guard" && cp target/release/nostromo-guard "$$guard" && codesign --force -s - "$$guard" && \
+	  echo "Installed nostromo-guard to $$guard"
 	sed \
 		-e 's|__PREFIX__|$(HOME)/.local|g' \
 		-e 's|__HOME__|$(HOME)|g' \
@@ -82,6 +89,8 @@ install-daemon: daemon
 uninstall-daemon:
 	launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  rm -f "$$(dirname "$$real")/nostromo-guard"
 	rm -f "$(HOME)/.local/bin/nostromd"
 	@echo "nostromd uninstalled"
 
