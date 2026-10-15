@@ -310,6 +310,7 @@ fn is_tmux_input_verb(name: &str) -> bool {
 }
 
 /// The gate for the tmux rule: `tmux` plus an input verb anywhere in the text.
+/// It must accept everything [`is_tmux_input_verb`] does (a cheap superset).
 fn mentions_tmux_input(text: &str) -> bool {
     text.contains("tmux") && ["send", "paste", "pipe", "load", "setb", "set-b"].iter().any(|v| text.contains(v))
 }
@@ -385,6 +386,7 @@ fn tmux_rule(normalized: &str, parsed: &ShellParse, probe: &dyn PaneProbe) -> Re
     for call in &calls {
         let socket = call.socket.clone().unwrap_or(TmuxSocket::Default);
         for target in &call.targets {
+            // Without a literal target and a known socket there is nothing to probe.
             let (Some(target), Some(_)) = (target, &call.socket) else {
                 cant_tell.push(socket.clone());
                 continue;
@@ -401,8 +403,13 @@ fn tmux_rule(normalized: &str, parsed: &ShellParse, probe: &dyn PaneProbe) -> Re
             }
         }
     }
+    any_remote_pane(&cant_tell, probe)
+}
+
+/// Block if any pane on any of `sockets` is remote (the target can't be told).
+fn any_remote_pane(sockets: &[TmuxSocket], probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
     let mut checked: Vec<&TmuxSocket> = Vec::new();
-    for socket in &cant_tell {
+    for socket in sockets {
         if checked.contains(&socket) {
             continue;
         }
@@ -441,8 +448,7 @@ fn tmux_call(cmd: &SimpleCommand) -> Option<TmuxCall> {
         }
         if let Some((flag, value, dynamic)) = option_value(w, "LSfcT", words, &mut i) {
             match flag {
-                'L' if dynamic => socket = None,
-                'S' if dynamic => socket = None,
+                'L' | 'S' if dynamic => socket = None,
                 'L' => socket = Some(TmuxSocket::Name(value)),
                 'S' => socket = Some(TmuxSocket::Path(value)),
                 _ => {}

@@ -105,7 +105,6 @@ pub struct HereDoc {
     pub strip_tabs: bool,
 }
 
-
 /// Tokenize `cmd`.
 pub fn parse(cmd: &str) -> ShellParse {
     parse_at_depth(cmd, 0)
@@ -140,7 +139,8 @@ struct PendingHereDoc {
     strip_tabs: bool,
     /// The command it feeds is a shell reading a script from stdin.
     feeds_shell: bool,
-    /// Span for the commands found in the body, if it feeds a shell.
+    /// Index in `ShellParse::commands` of the command it feeds (meaningful
+    /// only when `feeds_shell`); its span is reported for the body's commands.
     owner: usize,
 }
 
@@ -190,6 +190,30 @@ impl<'a> Parser<'a> {
     /// Length of the UTF-8 char starting at `pos` (1 for a stray byte).
     fn char_len(&self, pos: usize) -> usize {
         self.src[pos..].chars().next().map_or(1, char::len_utf8)
+    }
+
+    /// Copy the char at `pos` into `text` and step over it.
+    fn copy_char(&mut self, text: &mut Vec<u8>) {
+        let len = self.char_len(self.pos);
+        text.extend_from_slice(&self.b[self.pos..self.pos + len]);
+        self.pos += len;
+    }
+
+    /// After an opening `'`: the length of the quoted text, up to the closing quote.
+    fn single_quoted_len(&self) -> Step<usize> {
+        self.b[self.pos..].iter().position(|&c| c == b'\'').ok_or(Unbalanced)
+    }
+
+    /// Skip blanks, then read the word at `pos` if there is one (it is
+    /// recorded in `cmd`'s span).
+    fn optional_word(&mut self, cmd: &mut Builder) -> Step<Option<Word>> {
+        self.skip_blanks();
+        if self.peek().is_none_or(Self::is_meta) {
+            return Ok(None);
+        }
+        let word = self.read_word()?;
+        cmd.touch(&word.span);
+        Ok(Some(word))
     }
 
     fn is_meta(c: u8) -> bool {
@@ -330,10 +354,7 @@ impl<'a> Parser<'a> {
         if self.starts_with("<<<") {
             self.pos += 3;
             cmd.touch(&(start..self.pos));
-            self.skip_blanks();
-            if self.peek().is_some_and(|c| !Self::is_meta(c)) {
-                let word = self.read_word()?;
-                cmd.touch(&word.span);
+            if let Some(word) = self.optional_word(cmd)? {
                 cmd.herestrings.push(word.text);
             }
             return Ok(());
@@ -377,11 +398,7 @@ impl<'a> Parser<'a> {
 
     /// The word after a redirection operator: parsed (it may hold `$( )`) and dropped.
     fn redirect_target(&mut self, cmd: &mut Builder) -> Step<()> {
-        self.skip_blanks();
-        if self.peek().is_some_and(|c| !Self::is_meta(c)) {
-            let word = self.read_word()?;
-            cmd.touch(&word.span);
-        }
+        self.optional_word(cmd)?;
         Ok(())
     }
 
@@ -407,7 +424,7 @@ impl<'a> Parser<'a> {
                 },
                 b'\'' => {
                     self.pos += 1;
-                    let len = self.b[self.pos..].iter().position(|&c| c == b'\'').ok_or(Unbalanced)?;
+                    let len = self.single_quoted_len()?;
                     text.extend_from_slice(&self.b[self.pos..self.pos + len]);
                     self.pos += len + 1;
                 }
@@ -424,11 +441,7 @@ impl<'a> Parser<'a> {
                     dynamic |= self.read_double_quoted(&mut text)?;
                 }
                 b'$' | b'`' => dynamic |= self.read_dollar_or_backtick(&mut text)?,
-                _ => {
-                    let len = self.char_len(self.pos);
-                    text.extend_from_slice(&self.b[self.pos..self.pos + len]);
-                    self.pos += len;
-                }
+                _ => self.copy_char(&mut text),
             }
         }
         Ok(Word { text: String::from_utf8_lossy(&text).into_owned(), span: start..self.pos, dynamic })
@@ -456,11 +469,7 @@ impl<'a> Parser<'a> {
                     }
                 },
                 b'$' | b'`' => dynamic |= self.read_dollar_or_backtick(text)?,
-                _ => {
-                    let len = self.char_len(self.pos);
-                    text.extend_from_slice(&self.b[self.pos..self.pos + len]);
-                    self.pos += len;
-                }
+                _ => self.copy_char(text),
             }
         }
     }
@@ -570,8 +579,7 @@ impl<'a> Parser<'a> {
                 b'\\' => self.pos += 1,
                 b'\'' => {
                     self.pos += 1;
-                    let len = self.b[self.pos..].iter().position(|&c| c == b'\'').ok_or(Unbalanced)?;
-                    self.pos += len;
+                    self.pos += self.single_quoted_len()?;
                 }
                 b'"' => {
                     self.pos += 1;
@@ -645,11 +653,7 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                _ => {
-                    let len = self.char_len(self.pos);
-                    text.extend_from_slice(&self.b[self.pos..self.pos + len]);
-                    self.pos += len;
-                }
+                _ => self.copy_char(text),
             }
         }
     }
