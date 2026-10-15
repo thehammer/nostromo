@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::diff::diff;
 use super::format::{
-    is_reserved_tail_token, parse, serialise_item, splice, validate_command_text, Malformed,
+    is_reserved_tail_token, LINKS_PREFIX, MAX_OWNER_CHARS, parse, serialise_item, splice, validate_command_text, Malformed,
 };
 use super::model::{
     generate_id, is_valid_id, Author, Board, Change, Env, Item, Kind, Link, LogLine, Stamp, Status,
@@ -180,7 +180,8 @@ impl Apply<'_> {
             Op::Status { id, status } => {
                 let status = self.status(status)?;
                 let pos = self.find(id)?;
-                self.edit(pos, |item| set(&mut item.status, status))
+                self.edit(pos, |item| set(&mut item.status, status));
+                Ok(())
             }
             Op::Remove { id } => {
                 let pos = self.find(id)?;
@@ -211,20 +212,30 @@ impl Apply<'_> {
             Some(id) => self.board.items.iter().position(|i| &i.id == id),
             None => None,
         };
-        if let Some(pos) = existing {
-            self.edit(pos, |item| fields.apply(item))?;
-            if let Some(section) = &u.section {
-                let section = self.section(section)?;
-                if self.board.items[pos].section != section {
-                    let mut item = self.board.items.remove(pos);
-                    item.section = section;
-                    item.updated_at = Some(self.at.now);
-                    let at = self.end_of_section(&item.section);
-                    self.board.items.insert(at, item);
-                }
-            }
-            return Ok(());
+        match existing {
+            Some(pos) => self.update(pos, &fields, u.section.as_deref()),
+            None => self.create(u, &fields),
         }
+    }
+
+    /// Edits the item at `pos`; a given `section` moves it to that section's end.
+    fn update(&mut self, pos: usize, fields: &Fields, section: Option<&str>) -> Result<(), OpError> {
+        self.edit(pos, |item| fields.apply(item));
+        if let Some(section) = section {
+            let section = self.section(section)?;
+            if self.board.items[pos].section != section {
+                let mut item = self.board.items.remove(pos);
+                item.section = section;
+                item.updated_at = Some(self.at.now);
+                let at = self.end_of_section(&item.section);
+                self.board.items.insert(at, item);
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a new item (generated id unless `u.id` is given) at the end of its section.
+    fn create(&mut self, u: &Upsert, fields: &Fields) -> Result<(), OpError> {
         let section = match &u.section {
             Some(section) => self.section(section)?,
             None => match self.board.sections.first() {
@@ -268,22 +279,7 @@ impl Apply<'_> {
         item.section = section.clone();
         let insert_at = match before.or(after) {
             Some(neighbour) => {
-                let n = self.board.items.iter().position(|i| i.id == neighbour);
-                let n = match n {
-                    Some(n) => n,
-                    None if neighbour == id => {
-                        return Err(self.invalid("an item can't move relative to itself".to_string()))
-                    }
-                    None => {
-                        return Err(OpError::UnknownItem {
-                            index: self.index,
-                            id: neighbour.to_string(),
-                        })
-                    }
-                };
-                if self.board.items[n].section != section {
-                    return Err(self.invalid(format!("{neighbour} is not in section {section}")));
-                }
+                let n = self.neighbour(neighbour, id, &section)?;
                 if before.is_some() {
                     n
                 } else {
@@ -301,14 +297,32 @@ impl Apply<'_> {
         Ok(())
     }
 
+    /// Position of the `before`/`after` neighbour of a move (the item being
+    /// moved is already removed); it must exist and be in `section`.
+    fn neighbour(&self, neighbour: &str, moving: &str, section: &str) -> Result<usize, OpError> {
+        let Some(n) = self.board.items.iter().position(|i| i.id == neighbour) else {
+            return Err(if neighbour == moving {
+                self.invalid("an item can't move relative to itself".to_string())
+            } else {
+                OpError::UnknownItem {
+                    index: self.index,
+                    id: neighbour.to_string(),
+                }
+            });
+        };
+        if self.board.items[n].section != section {
+            return Err(self.invalid(format!("{neighbour} is not in section {section}")));
+        }
+        Ok(n)
+    }
+
     /// Applies `change` to the item at `pos`; bumps `updated_at` if it changed
     /// anything.
-    fn edit(&mut self, pos: usize, change: impl FnOnce(&mut Item) -> bool) -> Result<(), OpError> {
+    fn edit(&mut self, pos: usize, change: impl FnOnce(&mut Item) -> bool) {
         let item = &mut self.board.items[pos];
         if change(item) {
             item.updated_at = Some(self.at.now);
         }
-        Ok(())
     }
 
     /// Index where a new item of `section` goes: after the section's last
@@ -413,7 +427,7 @@ impl Apply<'_> {
             return Ok(None);
         }
         let owner = self.single_line("owner", owner)?;
-        if owner.chars().count() > 32
+        if owner.chars().count() > MAX_OWNER_CHARS
             || owner.contains(" · ")
             || owner.contains(" — ")
             || is_reserved_tail_token(&owner)
@@ -431,7 +445,7 @@ impl Apply<'_> {
         if note.trim().is_empty() {
             return Ok(None);
         }
-        if note.lines().any(|l| l.starts_with("Links: ")) {
+        if note.lines().any(|l| l.starts_with(LINKS_PREFIX)) {
             return Err(self.invalid("a note line can't start with \"Links: \"".to_string()));
         }
         Ok(Some(note.to_string()))

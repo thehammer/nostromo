@@ -200,7 +200,8 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
 }
 
 impl ViewNode {
-    fn source_mut(&mut self) -> &mut String {
+    /// The node's exact markdown from the file.
+    pub fn source(&self) -> &str {
         match self {
             ViewNode::Title { source, .. }
             | ViewNode::Section { source, .. }
@@ -211,8 +212,7 @@ impl ViewNode {
         }
     }
 
-    /// The node's exact markdown from the file.
-    pub fn source(&self) -> &str {
+    fn source_mut(&mut self) -> &mut String {
         match self {
             ViewNode::Title { source, .. }
             | ViewNode::Section { source, .. }

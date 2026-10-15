@@ -219,11 +219,11 @@ pub fn is_invisible(ch: char) -> bool {
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
 
-const LINKS_PREFIX: &str = "Links: ";
+pub(crate) const LINKS_PREFIX: &str = "Links: ";
 const TAIL_SEP: &str = " — ";
 const TOKEN_SEP: &str = " · ";
 const MARKER_START: &str = "<!-- #";
-const MAX_OWNER_CHARS: usize = 32;
+pub(crate) const MAX_OWNER_CHARS: usize = 32;
 
 /// 1-based line number of the byte just past `prefix`.
 fn line_of(prefix: &[u8]) -> usize {
@@ -491,20 +491,7 @@ impl<'a> Parser<'a> {
                 self.board.title = Some(title.trim().to_string());
                 self.node(SegmentKind::Title, i, i);
             } else if let Some(heading) = line.strip_prefix("## ") {
-                let title = heading.trim();
-                if title.eq_ignore_ascii_case("log") {
-                    context = Context::Log;
-                    self.node(SegmentKind::LogHeading, i, i);
-                } else {
-                    let id = unique_section_id(title, &mut section_ids);
-                    let index = self.board.sections.len();
-                    self.board.sections.push(Section {
-                        id,
-                        title: title.to_string(),
-                    });
-                    context = Context::Section(index);
-                    self.node(SegmentKind::Section(index), i, i);
-                }
+                context = self.heading(i, heading.trim(), &mut section_ids);
             } else if let (Some(checked), Context::Section(section)) = (task_prefix(line), context) {
                 let last = self.continuation_end(i);
                 self.item(i, last, checked, section)?;
@@ -529,6 +516,22 @@ impl<'a> Parser<'a> {
             segments: self.segments,
             item_spans: self.item_spans,
         })
+    }
+
+    /// Emits the `## ` heading on line `i` (the Log heading or a new
+    /// section) and returns the context that follows it.
+    fn heading(&mut self, i: usize, title: &str, section_ids: &mut HashSet<String>) -> Context {
+        if title.eq_ignore_ascii_case("log") {
+            self.node(SegmentKind::LogHeading, i, i);
+            return Context::Log;
+        }
+        let index = self.board.sections.len();
+        self.board.sections.push(Section {
+            id: unique_section_id(title, section_ids),
+            title: title.to_string(),
+        });
+        self.node(SegmentKind::Section(index), i, i);
+        Context::Section(index)
     }
 
     /// The last line of the item starting at `first`: indented lines (and
@@ -587,24 +590,7 @@ impl<'a> Parser<'a> {
     }
 
     fn item(&mut self, first: usize, last: usize, checked: bool, section: usize) -> Result<(), Malformed> {
-        let task = &self.content(first)[6..];
-        let (body, marker) = match task.rfind(MARKER_START) {
-            Some(pos) => {
-                let marker = parse_marker(task[pos..].trim_end()).ok_or(Malformed {
-                    line: first + 1,
-                    reason: MalformedReason::GarbledMarker,
-                })?;
-                (task[..pos].trim(), Some(marker))
-            }
-            None => (task.trim(), None),
-        };
-        let (text, tail) = match body.rfind(TAIL_SEP) {
-            Some(pos) => match parse_tail(&body[pos + TAIL_SEP.len()..]) {
-                Some(tail) => (body[..pos].trim_end(), tail),
-                None => (body, Tail::default()),
-            },
-            None => (body, Tail::default()),
-        };
+        let (text, tail, marker) = split_task_line(&self.content(first)[6..], first + 1)?;
         let status = match (checked, tail.status) {
             (true, _) => Status::Done,
             (false, Some(status)) if status != Status::Done => status,
@@ -657,6 +643,29 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
+}
+
+/// Splits a task line (after its checkbox) into text, recognised visible
+/// tail and trailing marker. `line` is the 1-based line number for errors.
+fn split_task_line(task: &str, line: usize) -> Result<(&str, Tail, Option<Marker>), Malformed> {
+    let (body, marker) = match task.rfind(MARKER_START) {
+        Some(pos) => {
+            let marker = parse_marker(task[pos..].trim_end()).ok_or(Malformed {
+                line,
+                reason: MalformedReason::GarbledMarker,
+            })?;
+            (task[..pos].trim(), Some(marker))
+        }
+        None => (task.trim(), None),
+    };
+    let (text, tail) = match body.rfind(TAIL_SEP) {
+        Some(pos) => match parse_tail(&body[pos + TAIL_SEP.len()..]) {
+            Some(tail) => (body[..pos].trim_end(), tail),
+            None => (body, Tail::default()),
+        },
+        None => (body, Tail::default()),
+    };
+    Ok((text, tail, marker))
 }
 
 fn unique_section_id(title: &str, taken: &mut HashSet<String>) -> String {
@@ -801,21 +810,8 @@ impl<'a> Splicer<'a> {
         let tails = self.section_tail_segments();
         let sections = &self.parsed.board.sections;
         for (section_index, section) in sections.iter().enumerate() {
-            let target_ids: Vec<&'a str> = self
-                .target
-                .items
-                .iter()
-                .filter(|i| i.section == section.id)
-                .map(|i| i.id.as_str())
-                .collect();
-            let original_ids: Vec<&'a str> = self
-                .parsed
-                .board
-                .items
-                .iter()
-                .filter(|i| i.section == section.id)
-                .map(|i| i.id.as_str())
-                .collect();
+            let target_ids = ids_in_section(&self.target.items, &section.id);
+            let original_ids = ids_in_section(&self.parsed.board.items, &section.id);
             let keep = lcs(&original_ids, &target_ids);
             let mut pending: Vec<&'a Item> = Vec::new();
             for id in target_ids {
@@ -974,6 +970,15 @@ impl<'a> Splicer<'a> {
             &source[task_end..spans.span.end]
         ));
     }
+}
+
+/// The ids of `items` in `section`, in order.
+fn ids_in_section<'a>(items: &'a [Item], section: &str) -> Vec<&'a str> {
+    items
+        .iter()
+        .filter(|i| i.section == section)
+        .map(|i| i.id.as_str())
+        .collect()
 }
 
 /// Members of a longest common subsequence of `a` and `b`, whose elements

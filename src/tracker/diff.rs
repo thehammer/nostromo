@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use super::format::lcs;
-use super::model::{Author, Board, Change, ChangeKind, Item, Kind, Status};
+use super::model::{Author, Board, Change, ChangeKind, Item, Kind, LogLine, Status};
 
 /// The changes that turn `old` into `new`: sections added/renamed/removed,
 /// items removed, then per item in `new` order added / moved (section change
@@ -172,11 +172,11 @@ fn reordered_items<'a>(old: &'a Board, new: &'a Board, renamed: &HashMap<&str, &
 
 /// Log lines in `new` that `old` doesn't have: the suffix when `old` is a
 /// prefix, else every line not matched one-for-one in `old`.
-fn appended_log<'a>(old: &Board, new: &'a Board) -> Vec<&'a super::model::LogLine> {
+fn appended_log<'a>(old: &Board, new: &'a Board) -> Vec<&'a LogLine> {
     if new.log.starts_with(&old.log) {
         return new.log[old.log.len()..].iter().collect();
     }
-    let mut remaining: Vec<&super::model::LogLine> = old.log.iter().collect();
+    let mut remaining: Vec<&LogLine> = old.log.iter().collect();
     new.log
         .iter()
         .filter(|line| match remaining.iter().position(|o| o == line) {
@@ -198,7 +198,6 @@ fn appended_log<'a>(old: &Board, new: &'a Board) -> Vec<&'a super::model::LogLin
 pub fn merge_external(base: &Board, ours: &Board, theirs: &Board) -> Board {
     let base_items: HashMap<&str, &Item> = base.items.iter().map(|i| (i.id.as_str(), i)).collect();
     let our_items: HashMap<&str, &Item> = ours.items.iter().map(|i| (i.id.as_str(), i)).collect();
-    let their_ids: HashSet<&str> = theirs.items.iter().map(|i| i.id.as_str()).collect();
     let section_ok = |id: &str| theirs.section(id).is_some();
 
     // Theirs, with our field changes on top.
@@ -214,8 +213,25 @@ pub fn merge_external(base: &Board, ours: &Board, theirs: &Board) -> Board {
         }
     }
 
-    // Our additions, items we moved, and items we edited that theirs deleted:
-    // placed after their predecessor in our order.
+    place_our_changes(&mut items, base, ours, theirs);
+
+    let mut log = theirs.log.clone();
+    if ours.log.starts_with(&base.log) {
+        log.extend(ours.log[base.log.len()..].iter().cloned());
+    }
+    Board {
+        items,
+        log,
+        ..theirs.clone()
+    }
+}
+
+/// Our additions, items we moved, and items we edited that theirs deleted:
+/// placed in `items` after their predecessor in our order.
+fn place_our_changes(items: &mut Vec<Item>, base: &Board, ours: &Board, theirs: &Board) {
+    let base_items: HashMap<&str, &Item> = base.items.iter().map(|i| (i.id.as_str(), i)).collect();
+    let their_ids: HashSet<&str> = theirs.items.iter().map(|i| i.id.as_str()).collect();
+    let section_ok = |id: &str| theirs.section(id).is_some();
     let base_order: Vec<&str> = base.items.iter().map(|i| i.id.as_str()).collect();
     let our_order: Vec<&str> = ours.items.iter().map(|i| i.id.as_str()).collect();
     let kept = lcs(&base_order, &our_order);
@@ -251,16 +267,6 @@ pub fn merge_external(base: &Board, ours: &Board, theirs: &Board) -> Board {
                 .unwrap_or(items.len()),
         };
         items.insert(at, item);
-    }
-
-    let mut log = theirs.log.clone();
-    if ours.log.starts_with(&base.log) {
-        log.extend(ours.log[base.log.len()..].iter().cloned());
-    }
-    Board {
-        items,
-        log,
-        ..theirs.clone()
     }
 }
 
