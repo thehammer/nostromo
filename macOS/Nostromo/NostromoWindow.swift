@@ -107,7 +107,8 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
 
     deinit { Self.transitioning.remove(ObjectIdentifier(self)) }
 
-    private var inTransition: Bool { Self.transitioning.contains(ObjectIdentifier(self)) }
+    /// This window (not a sibling) is mid enter/exit transition.
+    var isInTransition: Bool { Self.transitioning.contains(ObjectIdentifier(self)) }
 
     /// Run `body` once no NostromoWindow is mid-transition, polling every 0.5 s
     /// for up to `budget` seconds; gives up (does nothing) past the budget.
@@ -125,12 +126,13 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     // MARK: - NSWindowDelegate
 
     func windowDidBecomeKey(_ notification: Notification) {
-        guard gaveUpOnFullScreen, !styleMask.contains(.fullScreen), !inTransition else { return }
+        guard gaveUpOnFullScreen, !styleMask.contains(.fullScreen), !isInTransition else { return }
         gaveUpOnFullScreen = false
         startupRetries = 0
         winLog.warning("windowDidBecomeKey — retrying full-screen once after an earlier give-up (\(self.title, privacy: .public))")
         Self.whenIdle(budget: 5) { [weak self] in
-            guard let self, !self.styleMask.contains(.fullScreen), !self.inTransition else { return }
+            guard let self, !self.styleMask.contains(.fullScreen), !self.isInTransition else { return }
+            guard !self.isPendingScreenRemoval else { self.fullScreenDeferredByPendingRemoval = true; return }
             self.toggleFullScreen(nil)
         }
     }
@@ -177,6 +179,12 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
             return
         }
 
+        // A window whose display is gone starts no entry or retry; it resumes if the display returns.
+        guard !isPendingScreenRemoval else {
+            fullScreenDeferredByPendingRemoval = true
+            return
+        }
+
         // Startup failure: a window in the simultaneous multi-window sequence
         // occasionally fails. Retry — but only a couple of times, only once no
         // sibling is mid-transition, and with a growing delay.
@@ -191,7 +199,8 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak window] in
             Self.whenIdle(budget: 5) {
                 guard let self, let window,
-                      !window.styleMask.contains(.fullScreen), !self.inTransition else { return }
+                      !window.styleMask.contains(.fullScreen), !self.isInTransition else { return }
+                guard !self.isPendingScreenRemoval else { self.fullScreenDeferredByPendingRemoval = true; return }
                 winLog.warning("windowDidFailToEnterFullScreen — retrying toggleFullScreen for \(window.title, privacy: .public)")
                 window.toggleFullScreen(nil)
             }
@@ -215,6 +224,13 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
             winLog.warning("windowDidExitFullScreen — re-entry already in progress, skipping")
             return
         }
+        // Its display is gone and the close is waiting out the grace: entering full-screen
+        // now would build a Space on a display that is about to lose this window.
+        guard !isPendingScreenRemoval else {
+            winLog.warning("windowDidExitFullScreen — display removal pending, not re-entering (\(self.title, privacy: .public))")
+            fullScreenDeferredByPendingRemoval = true
+            return
+        }
         isReenteringFullScreen = true
         isPostExitReentry      = true
         displayChangePending   = false
@@ -234,21 +250,33 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         // progress and the ENTER transition's failure handler crashes when it
         // references the stale EXIT controller. 3 s gives macOS enough runway
         // to complete all cleanup before we attempt re-entry.
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.reentryDelay) { [weak self] in
+        scheduler.schedule(after: Self.reentryDelay) { [weak self] in
             NotificationCenter.default.removeObserver(observer)
             guard let self, !self.styleMask.contains(.fullScreen) else {
                 self?.isReenteringFullScreen = false
                 self?.isPostExitReentry      = false
                 return
             }
+            guard !self.isPendingScreenRemoval else {
+                winLog.warning("windowDidExitFullScreen — display removal pending at re-entry time, not re-entering (\(self.title, privacy: .public))")
+                self.fullScreenDeferredByPendingRemoval = true
+                self.isReenteringFullScreen = false
+                self.isPostExitReentry      = false
+                return
+            }
             guard !self.displayChangePending else {
                 winLog.warning("windowDidExitFullScreen — aborting: display change in progress (\(self.title, privacy: .public))")
                 self.isReenteringFullScreen = false
                 // Re-attempt after the display change settles.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self.scheduler.schedule(after: 2.0) { [weak self] in
                     guard let self, !self.styleMask.contains(.fullScreen),
                           !self.isReenteringFullScreen else {
                         self?.isPostExitReentry = false
+                        return
+                    }
+                    guard !self.isPendingScreenRemoval else {
+                        self.fullScreenDeferredByPendingRemoval = true
+                        self.isPostExitReentry = false
                         return
                     }
                     winLog.warning("windowDidExitFullScreen — follow-up re-entry after display settle (\(self.title, privacy: .public))")
@@ -288,6 +316,43 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     /// whose screen has disappeared. Prevents the close from terminating the app —
     /// disconnecting a monitor should remove that window, not quit Nostromo.
     var isOrphanedByScreenRemoval = false
+
+    /// Set while this window's display is gone and its close waits out the grace. Such a
+    /// window starts no full-screen entry, retry or re-entry (it would build a Space on a
+    /// display about to lose its window, and the close would then wait on that transition).
+    /// Clearing it (the display returned) resumes any entry that was held back.
+    var isPendingScreenRemoval = false {
+        didSet {
+            if oldValue, !isPendingScreenRemoval { resumeDeferredFullScreen() }
+        }
+    }
+
+    /// An entry/re-entry/retry was suppressed by `isPendingScreenRemoval` and is owed.
+    private var fullScreenDeferredByPendingRemoval = false
+
+    /// The display came back: do the held-back entry, with the same runway as any
+    /// post-exit re-entry (crash path #3).
+    private func resumeDeferredFullScreen() {
+        guard fullScreenDeferredByPendingRemoval, !isReenteringFullScreen else { return }
+        fullScreenDeferredByPendingRemoval = false
+        isReenteringFullScreen = true
+        isPostExitReentry      = true
+        scheduler.schedule(after: Self.reentryDelay) { [weak self] in
+            guard let self else { return }
+            guard !self.isPendingScreenRemoval, !self.styleMask.contains(.fullScreen), !self.isInTransition else {
+                if self.isPendingScreenRemoval { self.fullScreenDeferredByPendingRemoval = true }
+                self.isReenteringFullScreen = false
+                self.isPostExitReentry      = false
+                return
+            }
+            winLog.warning("resuming full-screen entry after a display removal was called off (\(self.title, privacy: .public))")
+            self.lifecycleHandler?(.willReenterFullScreen)
+            self.toggleFullScreen(nil)
+        }
+    }
+
+    /// Times the post-exit re-entry; injected so tests need no wall clock.
+    var scheduler: PlacementScheduler = MainQueueScheduler.shared
 
     // Swallow Escape so it can't trigger a full-screen exit via cancelOperation.
     override func cancelOperation(_ sender: Any?) {

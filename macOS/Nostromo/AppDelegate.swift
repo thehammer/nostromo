@@ -46,7 +46,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             openWindows: { [weak self] displays in self?.openWindowsForNewDisplays(displays) },
             closeWindow: { [weak self] uuid in self?.closeWindowForVanishedDisplay(uuid) },
             passFinished: { [weak self] in self?.closeUntrackedWindows() },
-            log: { [weak self] message in self?.placementLog.log("screensDidChange", message) }
+            log: { [weak self] message in self?.placementLog.log("screensDidChange", message) },
+            driftedUUIDs: { [weak self] in self?.driftedWindowUUIDs() ?? [] },
+            setPendingRemoval: { [weak self] uuid, pending in
+                self?.windowsByDisplayUUID[uuid]?.isPendingScreenRemoval = pending
+            },
+            isWindowTransitioning: { [weak self] uuid in self?.windowsByDisplayUUID[uuid]?.isInTransition ?? false }
         )
     )
     /// Set when screen loss closed the last window (lid closed, no externals).
@@ -56,9 +61,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private static let displayWaitTimeout: TimeInterval = 5
     private static let staggerInterval: TimeInterval = 0.7
-    /// Bounded wait for an in-flight full-screen transition before closing a vanished display's window.
-    private static let closeDeferralInterval: TimeInterval = 0.5
-    private static let closeDeferralLimit = 6
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         appLog.info("applicationDidFinishLaunching — pid=\(ProcessInfo.processInfo.processIdentifier, privacy: .public) screens=\(NSScreen.screens.count, privacy: .public)")
@@ -494,47 +496,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
-    /// Close the window of a display that stayed gone for the whole grace period.
-    /// Mark as orphaned first so windowShouldClose allows the close without
-    /// terminating the app. Disable animations and exit full-screen state
-    /// before closing to avoid the _NSExitFullScreenTransitionController
-    /// crash path that fires when a full-screen window is closed mid-animation.
-    private func closeWindowForVanishedDisplay(_ uuid: String, deferralsLeft: Int = AppDelegate.closeDeferralLimit) {
+    /// Keys whose window is on a different display than its own (macOS moved it).
+    private func driftedWindowUUIDs() -> Set<String> {
+        Set(windowsByDisplayUUID.compactMap { uuid, win in
+            guard let current = win.currentDisplayUUID, current != uuid else { return nil }
+            return uuid
+        })
+    }
+
+    /// Close the window of a display that stayed gone for the whole grace period (the
+    /// coordinator has already waited out the window's own transition and checked the
+    /// display is still gone). Mark as orphaned first so windowShouldClose allows the
+    /// close without terminating the app. Disable animations and exit full-screen state
+    /// before closing to avoid the _NSExitFullScreenTransitionController crash path
+    /// that fires when a full-screen window is closed mid-animation. The order of the
+    /// steps is `VanishedWindowTeardown`'s contract (unbind before any AppKit call).
+    private func closeWindowForVanishedDisplay(_ uuid: String) {
         guard let win = windowsByDisplayUUID[uuid] else { return }
-        // The grace gives the window's own full-screen recovery time to start, and
-        // closing mid-transition is the crash path described below: wait (bounded)
-        // for it to finish. The display may also have come back meanwhile.
-        if win.isAnyTransitionInFlight, deferralsLeft > 0 {
-            MainQueueScheduler.shared.schedule(after: Self.closeDeferralInterval) { [weak self] in
-                guard let self, !self.screens.displays.contains(where: { $0.uuid == uuid }) else { return }
-                self.closeWindowForVanishedDisplay(uuid, deferralsLeft: deferralsLeft - 1)
-            }
-            return
-        }
-        // Unbind BEFORE any AppKit call below: dropping the full-screen mask and
-        // `close()` can post didChangeScreenParameters, and a handler that still saw
-        // this key bound would log "removed" and close the window again.
-        windowsByDisplayUUID.removeValue(forKey: uuid)
-        placementControllers.removeValue(forKey: uuid)
-        windows.removeAll { $0 === win }
-
-        // A momentarily empty topology (lid closed, no externals) closes every
-        // window but must not quit the app — see applicationShouldTerminateAfterLastWindowClosed.
-        if windowsByDisplayUUID.isEmpty { lastWindowClosedByScreenLoss = true }
-
-        appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
-        placementLog.log("screensDidChange", "display \(uuid) removed — closing its window")
-        win.isOrphanedByScreenRemoval = true
-        win.animationBehavior = .none
-        win.lifecycleHandler = nil
-        if win.styleMask.contains(.fullScreen) {
-            // Exit full-screen synchronously before close so AppKit doesn't
-            // schedule an exit-transition cleanup block that outlives the window.
-            var mask = win.styleMask
-            mask.remove(.fullScreen)
-            win.styleMask = mask
-        }
-        win.close()
+        VanishedWindowTeardown.run(.init(
+            unbindKey: { [self] in windowsByDisplayUUID.removeValue(forKey: uuid) },
+            dropController: { [self] in placementControllers.removeValue(forKey: uuid) },
+            removeFromWindows: { [self] in windows.removeAll { $0 === win } },
+            afterUnbind: { [self] in
+                // A momentarily empty topology (lid closed, no externals) closes every
+                // window but must not quit the app — see applicationShouldTerminateAfterLastWindowClosed.
+                if windowsByDisplayUUID.isEmpty { lastWindowClosedByScreenLoss = true }
+                appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
+                placementLog.log("screensDidChange", "display \(uuid) removed — closing its window")
+            },
+            prepareWindow: {
+                win.isOrphanedByScreenRemoval = true
+                win.animationBehavior = .none
+                win.lifecycleHandler = nil
+            },
+            dropFullScreenMask: {
+                guard win.styleMask.contains(.fullScreen) else { return }
+                // Exit full-screen synchronously before close so AppKit doesn't
+                // schedule an exit-transition cleanup block that outlives the window.
+                var mask = win.styleMask
+                mask.remove(.fullScreen)
+                win.styleMask = mask
+            },
+            close: { win.close() }
+        ))
     }
 
     /// Safety net: any window without a bound controller is invisible and useless.

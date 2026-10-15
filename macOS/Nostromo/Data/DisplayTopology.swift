@@ -40,7 +40,7 @@ struct DisplayTopologyFingerprint: Equatable {
 /// display flapping, wake, Space reconfiguration). Acting on each one re-homes
 /// every full-screen window and recreates windows for displays that come right
 /// back, which blanks the panes. So:
-///   - an unchanged topology does nothing;
+///   - an unchanged topology does nothing, except re-home a window macOS moved off its display;
 ///   - a changed one gives each surviving window ONE re-home grant;
 ///   - a vanished display's window is closed only if the display is still gone
 ///     after a grace period (the caller schedules `PendingClose`s).
@@ -54,8 +54,8 @@ struct DisplayTopologyState {
     }
 
     struct Pass: Equatable {
-        /// Keys of surviving windows that get a re-home grant (sorted). Empty when
-        /// the fingerprint did not change.
+        /// Keys of surviving windows that get a re-home grant (sorted): all of them when
+        /// the fingerprint changed, only the drifted ones when it did not.
         var rehome: [String]
         /// Attached displays with no window: open one (new, or reappeared after a close).
         var open: [DisplayInfo]
@@ -79,7 +79,8 @@ struct DisplayTopologyState {
     private var pending: [String: Int] = [:]
     /// Keys whose close was ordered and whose window is not yet unbound: never
     /// scheduled again, so a host that is slow to unbind cannot be told to close twice.
-    private var closing: Set<String> = []
+    /// uuid -> token of the `PendingClose` that ordered the close.
+    private var closing: [String: Int] = [:]
     private var nextToken = 0
     private var unchangedRun = 0
 
@@ -90,7 +91,10 @@ struct DisplayTopologyState {
         unchangedRun = 0
     }
 
-    mutating func reconcile(attached: [DisplayInfo], bound: Set<String>) -> Decision {
+    /// `drifted`: bound keys whose window is currently on a different display than its
+    /// own (macOS moved it). They get a re-home grant even when the topology is unchanged.
+    mutating func reconcile(attached: [DisplayInfo], bound: Set<String>,
+                            drifted: Set<String> = []) -> Decision {
         let fingerprint = DisplayTopologyFingerprint(displays: attached)
         let changed = fingerprint != lastHandled
         let plan = DisplayReconciler.plan(attached: attached, boundUUIDs: bound)
@@ -100,23 +104,27 @@ struct DisplayTopologyState {
         // would stop a later vanish of the same key from ever being scheduled.
         for uuid in pending.keys where !bound.contains(uuid) { pending.removeValue(forKey: uuid) }
 
-        closing = closing.filter { bound.contains($0) && !attachedUUIDs.contains($0) }
+        closing = closing.filter { bound.contains($0.key) && !attachedUUIDs.contains($0.key) }
 
         let cancelled = pending.keys.filter { attachedUUIDs.contains($0) }.sorted()
         for uuid in cancelled { pending.removeValue(forKey: uuid) }
 
         // A key already waiting out its grace is not scheduled again ("removed" twice).
         var scheduled: [PendingClose] = []
-        for uuid in plan.toClose where pending[uuid] == nil && !closing.contains(uuid) {
+        for uuid in plan.toClose where pending[uuid] == nil && closing[uuid] == nil {
             nextToken += 1
             pending[uuid] = nextToken
             scheduled.append(PendingClose(uuid: uuid, token: nextToken))
         }
 
-        let rehome = changed ? bound.subtracting(plan.toClose).sorted() : []
+        // A changed topology re-homes every survivor. An unchanged one re-homes only the
+        // windows macOS moved off their display (a display that vanished and returned
+        // inside the settle leaves its window on a neighbour with an equal fingerprint).
+        let survivors = bound.subtracting(plan.toClose)
+        let rehome = (changed ? survivors : survivors.intersection(drifted)).sorted()
         lastHandled = fingerprint
 
-        if !changed, plan.toOpen.isEmpty, scheduled.isEmpty, cancelled.isEmpty {
+        if !changed, plan.toOpen.isEmpty, scheduled.isEmpty, cancelled.isEmpty, rehome.isEmpty {
             unchangedRun += 1
             return .unchanged(shouldLog: unchangedRun == 1 || unchangedRun % Self.unchangedLogInterval == 0)
         }
@@ -130,8 +138,26 @@ struct DisplayTopologyState {
         guard pending[close.uuid] == close.token else { return false }
         pending.removeValue(forKey: close.uuid)
         guard !displayStillAttached else { return false }
-        closing.insert(close.uuid)
+        closing[close.uuid] = close.token
         return true
+    }
+
+    /// The host did not close the window after `graceExpired` returned true (the
+    /// display came back, the window is already gone). Forgets the close so the next
+    /// `reconcile` that still finds the display absent schedules a fresh grace.
+    mutating func closeAborted(_ close: PendingClose) {
+        guard closing[close.uuid] == close.token else { return }
+        closing.removeValue(forKey: close.uuid)
+    }
+
+    /// True while `close` is the close that `graceExpired` ordered and nothing superseded it.
+    func isCloseCurrent(_ close: PendingClose) -> Bool {
+        closing[close.uuid] == close.token
+    }
+
+    /// A close for `uuid` is waiting out its grace or has been ordered and not yet unbound.
+    func hasOutstandingClose(for uuid: String) -> Bool {
+        pending[uuid] != nil || closing[uuid] != nil
     }
 }
 
@@ -161,6 +187,14 @@ final class DisplayTopologyCoordinator {
         /// A pass that did something has finished.
         var passFinished: () -> Void
         var log: (_ message: String) -> Void
+        /// Keys whose window is on a different display than its own right now.
+        var driftedUUIDs: () -> Set<String> = { [] }
+        /// The window is (true) or is no longer (false) doomed: a close is waiting out
+        /// its grace or has been ordered. A doomed window must start no full-screen
+        /// entry, retry or re-entry.
+        var setPendingRemoval: (_ uuid: String, _ pending: Bool) -> Void = { _, _ in }
+        /// The window bound to this key (and only that one) is mid enter/exit transition.
+        var isWindowTransitioning: (_ uuid: String) -> Bool = { _ in false }
     }
 
     static let defaultSettleDelay: TimeInterval = 0.5
@@ -168,26 +202,38 @@ final class DisplayTopologyCoordinator {
     /// A burst that never goes quiet is handled anyway after this long, so a steady
     /// stream of notifications cannot starve the handler.
     static let defaultMaxSettleDelay: TimeInterval = 3
+    /// A close that finds its own window mid-transition waits this long, at most
+    /// `defaultCloseDeferralLimit` times, then closes anyway.
+    static let defaultCloseDeferralInterval: TimeInterval = 0.5
+    static let defaultCloseDeferralLimit = 6
 
     private let scheduler: PlacementScheduler
     private let host: Host
     private let settleDelay: TimeInterval
     private let closeGrace: TimeInterval
     private let maxSettleDelay: TimeInterval
+    private let closeDeferralInterval: TimeInterval
+    private let closeDeferralLimit: Int
     private var state = DisplayTopologyState()
     private var generation = 0
     private var burstOpen = false
     private var burstToken = 0
+    /// Keys the host was told are pending removal and not yet told otherwise.
+    private var pendingRemoval: Set<String> = []
 
     init(scheduler: PlacementScheduler, host: Host,
          settleDelay: TimeInterval = DisplayTopologyCoordinator.defaultSettleDelay,
          closeGrace: TimeInterval = DisplayTopologyCoordinator.defaultCloseGrace,
-         maxSettleDelay: TimeInterval = DisplayTopologyCoordinator.defaultMaxSettleDelay) {
+         maxSettleDelay: TimeInterval = DisplayTopologyCoordinator.defaultMaxSettleDelay,
+         closeDeferralInterval: TimeInterval = DisplayTopologyCoordinator.defaultCloseDeferralInterval,
+         closeDeferralLimit: Int = DisplayTopologyCoordinator.defaultCloseDeferralLimit) {
         self.scheduler = scheduler
         self.host = host
         self.settleDelay = settleDelay
         self.closeGrace = closeGrace
         self.maxSettleDelay = maxSettleDelay
+        self.closeDeferralInterval = closeDeferralInterval
+        self.closeDeferralLimit = closeDeferralLimit
     }
 
     /// The launch opened windows for `displays`: that is the handled topology.
@@ -218,7 +264,10 @@ final class DisplayTopologyCoordinator {
         burstOpen = false
         generation += 1  // any settle timer still queued for this burst is now stale
         let attached = host.attachedDisplays()
-        switch state.reconcile(attached: attached, bound: host.boundUUIDs()) {
+        let decision = state.reconcile(attached: attached, bound: host.boundUUIDs(), drifted: host.driftedUUIDs())
+        // Before any grant below: a window whose display returned must be live again.
+        syncPendingRemoval()
+        switch decision {
         case .unchanged(let shouldLog):
             if shouldLog { host.log("display topology unchanged (\(attached.count) display(s)) — nothing to do") }
 
@@ -231,6 +280,8 @@ final class DisplayTopologyCoordinator {
             if !pass.open.isEmpty { host.openWindows(pass.open) }
             for close in pass.scheduleClose {
                 host.log("display \(close.uuid) gone — closing its window in \(Int(closeGrace)) s unless it returns")
+                pendingRemoval.insert(close.uuid)
+                host.setPendingRemoval(close.uuid, true)
                 scheduler.schedule(after: closeGrace) { [weak self] in self?.graceExpired(close) }
             }
             host.passFinished()
@@ -240,7 +291,82 @@ final class DisplayTopologyCoordinator {
     private func graceExpired(_ close: DisplayTopologyState.PendingClose) {
         let stillAttached = host.attachedDisplays().contains { $0.uuid == close.uuid }
         if state.graceExpired(close, displayStillAttached: stillAttached) {
-            host.closeWindow(close.uuid)
+            attemptClose(close, deferralsLeft: closeDeferralLimit)
+        } else {
+            syncPendingRemoval()
         }
+    }
+
+    /// Close the window of a display that stayed gone for the whole grace, unless that
+    /// is no longer right. Every path that does not close tells the state
+    /// (`closeAborted`), or the key would stay "being closed" and never be scheduled again.
+    private func attemptClose(_ close: DisplayTopologyState.PendingClose, deferralsLeft: Int) {
+        guard state.isCloseCurrent(close) else { return }   // superseded by a newer close
+        let uuid = close.uuid
+        guard host.boundUUIDs().contains(uuid) else {
+            abortClose(close, reason: "its window is already gone")
+            return
+        }
+        guard !host.attachedDisplays().contains(where: { $0.uuid == uuid }) else {
+            abortClose(close, reason: "the display returned")
+            return
+        }
+        // Closing mid-transition is the `_NSExitFullScreenTransitionController` crash path:
+        // wait (bounded) for THIS window's transition. A sibling's does not matter here.
+        if host.isWindowTransitioning(uuid), deferralsLeft > 0 {
+            scheduler.schedule(after: closeDeferralInterval) { [weak self] in
+                self?.attemptClose(close, deferralsLeft: deferralsLeft - 1)
+            }
+            return
+        }
+        host.closeWindow(uuid)
+    }
+
+    private func abortClose(_ close: DisplayTopologyState.PendingClose, reason: String) {
+        state.closeAborted(close)
+        host.log("not closing the window of display \(close.uuid): \(reason)")
+        syncPendingRemoval()
+    }
+
+    /// Tells the host a window is no longer doomed once no close is outstanding for it.
+    private func syncPendingRemoval() {
+        for uuid in pendingRemoval.sorted() where !state.hasOutstandingClose(for: uuid) {
+            pendingRemoval.remove(uuid)
+            host.setPendingRemoval(uuid, false)
+        }
+    }
+}
+
+// MARK: - Teardown order
+
+/// What `AppDelegate` does to a window whose display stayed gone, as ordered steps.
+/// The ORDER is the contract: the key is unbound BEFORE any AppKit call, because
+/// dropping the full-screen mask and `close()` can synchronously post
+/// didChangeScreenParameters, and a handler that still saw the key bound would act
+/// on the window a second time. The mask goes before `close()` so AppKit does not
+/// schedule an exit-transition cleanup that outlives the window
+/// (`_NSExitFullScreenTransitionController` crash).
+enum VanishedWindowTeardown {
+    struct Steps {
+        var unbindKey: () -> Void
+        var dropController: () -> Void
+        var removeFromWindows: () -> Void
+        /// App state that depends on the unbind (e.g. "was that the last window") and logging.
+        var afterUnbind: () -> Void
+        /// Orphan flag, no animation, no lifecycle handler.
+        var prepareWindow: () -> Void
+        /// Drops the full-screen mask if the window has it.
+        var dropFullScreenMask: () -> Void
+        var close: () -> Void
+    }
+
+    static func run(_ steps: Steps) {
+        steps.unbindKey()
+        steps.dropController()
+        steps.removeFromWindows()
+        steps.afterUnbind()
+        steps.prepareWindow()
+        steps.dropFullScreenMask()
+        steps.close()
     }
 }

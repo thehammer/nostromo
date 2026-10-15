@@ -104,6 +104,25 @@ private final class FakeHost {
     /// False models a stale binding: the window is never unbound.
     var unbindsOnClose = true
 
+    /// Keys whose window macOS has moved off its own display (what `driftedUUIDs` reports).
+    var drifted: Set<String> = []
+    /// Keys whose window is mid enter/exit transition (what `isWindowTransitioning` reports).
+    var transitioning: Set<String> = []
+
+    struct PendingRemovalCall: Equatable {
+        let uuid: String
+        let pending: Bool
+    }
+    /// Every `setPendingRemoval` call, in order.
+    private(set) var pendingRemovalCalls: [PendingRemovalCall] = []
+    /// The keys currently flagged doomed (the net effect of the calls).
+    private(set) var pendingRemoval: Set<String> = []
+
+    /// The window for `uuid` disappears by some route other than `closeWindow`.
+    func dropWindow(_ uuid: String) { windows.removeValue(forKey: uuid) }
+    /// A window for `uuid` appears by some route other than `openWindows`.
+    func addWindow(_ uuid: String) { bind(uuid) }
+
     init(attached: [DisplayInfo]) {
         self.attached = attached
         for d in attached { bind(d.uuid) }
@@ -135,7 +154,13 @@ private final class FakeHost {
                 if self.unbindsOnClose { self.windows.removeValue(forKey: uuid) }
             },
             passFinished: { [unowned self] in self.passFinishedCount += 1 },
-            log: { [unowned self] message in self.logs.append(message) })
+            log: { [unowned self] message in self.logs.append(message) },
+            driftedUUIDs: { [unowned self] in self.drifted },
+            setPendingRemoval: { [unowned self] uuid, pending in
+                self.pendingRemovalCalls.append(PendingRemovalCall(uuid: uuid, pending: pending))
+                if pending { self.pendingRemoval.insert(uuid) } else { self.pendingRemoval.remove(uuid) }
+            },
+            isWindowTransitioning: { [unowned self] uuid in self.transitioning.contains(uuid) })
     }
 }
 
@@ -793,5 +818,490 @@ final class DisplayTopologyStarvationTests: XCTestCase {
 
         XCTAssertEqual(rig.host.topologyChangedCount, 1)
         XCTAssertEqual(rig.host.passFinishedCount, 1)
+    }
+}
+
+// MARK: - PR #254 review fix-ups
+
+private func seededState(_ displays: [DisplayInfo] = Fake.three) -> DisplayTopologyState {
+    var state = DisplayTopologyState()
+    state.recordHandled(displays)
+    return state
+}
+
+private func keySet(_ displays: [DisplayInfo]) -> Set<String> { Set(displays.map(\.uuid)) }
+
+private func expectPass(_ decision: DisplayTopologyState.Decision,
+                        file: StaticString = #filePath, line: UInt = #line) -> DisplayTopologyState.Pass? {
+    guard case .pass(let p) = decision else {
+        XCTFail("expected a pass, got \(decision)", file: file, line: line)
+        return nil
+    }
+    return p
+}
+
+// MARK: B1: a close the host does not carry out must not orphan the window
+
+/// `graceExpired` returning true records the close as ordered. If the host then
+/// bails (the display came back, the window is already gone) and the state is never
+/// told, every later `reconcile` that finds the display absent and the key bound
+/// returns `.unchanged` forever: the window is orphaned.
+final class DisplayTopologyAbortedCloseStateTests: XCTestCase {
+
+    private let away = [Fake.builtIn, Fake.lg]          // Dell vanished
+    private var bound: Set<String> { keySet(Fake.three) }
+
+    func test_an_aborted_close_lets_the_next_pass_schedule_a_fresh_close_for_the_still_bound_vanished_key() {
+        var state = seededState()
+        guard let p1 = expectPass(state.reconcile(attached: away, bound: bound)),
+              let close = p1.scheduleClose.first else { return }
+        XCTAssertTrue(state.graceExpired(close, displayStillAttached: false))
+
+        state.closeAborted(close)
+
+        XCTAssertFalse(state.isCloseCurrent(close), "an aborted close is no longer the current close")
+        XCTAssertFalse(state.hasOutstandingClose(for: Fake.dell.uuid))
+        guard let p2 = expectPass(state.reconcile(attached: away, bound: bound)) else { return }
+        XCTAssertEqual(p2.scheduleClose.map(\.uuid), [Fake.dell.uuid], "the vanished, still-bound window gets a fresh grace")
+        XCTAssertNotEqual(p2.scheduleClose.first?.token, close.token)
+    }
+
+    /// Documented contrast: this is the bug. Without `closeAborted` the ordered close
+    /// stays on the books and the window is never scheduled again.
+    func test_without_closeAborted_an_ordered_close_blocks_every_later_schedule_for_that_key() {
+        var state = seededState()
+        guard let p1 = expectPass(state.reconcile(attached: away, bound: bound)),
+              let close = p1.scheduleClose.first else { return }
+        XCTAssertTrue(state.graceExpired(close, displayStillAttached: false))
+
+        XCTAssertEqual(state.reconcile(attached: away, bound: bound), .unchanged(shouldLog: true))
+        XCTAssertEqual(state.reconcile(attached: away, bound: bound), .unchanged(shouldLog: false))
+        XCTAssertTrue(state.isCloseCurrent(close))
+        XCTAssertTrue(state.hasOutstandingClose(for: Fake.dell.uuid))
+    }
+
+    func test_aborting_a_superseded_close_does_not_cancel_the_newer_one() {
+        var state = seededState()
+        guard let p1 = expectPass(state.reconcile(attached: away, bound: bound)),
+              let first = p1.scheduleClose.first else { return }
+        XCTAssertTrue(state.graceExpired(first, displayStillAttached: false))
+
+        // The display returns (the ordered close is forgotten), then vanishes again.
+        _ = state.reconcile(attached: Fake.three, bound: bound)
+        guard let p3 = expectPass(state.reconcile(attached: away, bound: bound)),
+              let second = p3.scheduleClose.first else { return }
+        XCTAssertTrue(state.graceExpired(second, displayStillAttached: false))
+        XCTAssertFalse(state.isCloseCurrent(first), "superseded")
+        XCTAssertTrue(state.isCloseCurrent(second))
+
+        state.closeAborted(first)                      // a stale abort
+        XCTAssertTrue(state.isCloseCurrent(second), "a stale abort must not clear the newer close")
+
+        state.closeAborted(second)
+        XCTAssertFalse(state.isCloseCurrent(second))
+        XCTAssertFalse(state.hasOutstandingClose(for: Fake.dell.uuid))
+    }
+
+    func test_a_close_waiting_out_its_grace_counts_as_outstanding_until_it_resolves() {
+        var state = seededState()
+        guard let p1 = expectPass(state.reconcile(attached: away, bound: bound)),
+              let close = p1.scheduleClose.first else { return }
+        XCTAssertTrue(state.hasOutstandingClose(for: Fake.dell.uuid))
+        XCTAssertFalse(state.hasOutstandingClose(for: Fake.lg.uuid))
+
+        XCTAssertFalse(state.graceExpired(close, displayStillAttached: true))
+        XCTAssertFalse(state.hasOutstandingClose(for: Fake.dell.uuid), "grace expired with the display attached: nothing outstanding")
+    }
+}
+
+// MARK: S1: re-home a window macOS moved even when the topology fingerprint did not change
+
+final class DisplayTopologyDriftStateTests: XCTestCase {
+
+    func test_a_drifted_window_gets_exactly_one_rehome_grant_when_the_fingerprint_is_unchanged() {
+        var state = seededState()
+        guard let p = expectPass(state.reconcile(attached: Fake.three, bound: keySet(Fake.three),
+                                                 drifted: [Fake.dell.uuid])) else { return }
+        XCTAssertEqual(p.rehome, [Fake.dell.uuid], "only the drifted window; the healthy ones get no grant")
+        XCTAssertEqual(p.open, [])
+        XCTAssertEqual(p.scheduleClose, [])
+        XCTAssertEqual(p.cancelledClose, [])
+    }
+
+    func test_several_drifted_windows_are_each_granted_once_in_sorted_order() {
+        var state = seededState()
+        guard let p = expectPass(state.reconcile(attached: Fake.three, bound: keySet(Fake.three),
+                                                 drifted: [Fake.lg.uuid, Fake.dell.uuid])) else { return }
+        XCTAssertEqual(p.rehome, [Fake.dell.uuid, Fake.lg.uuid].sorted())
+    }
+
+    func test_once_the_window_is_back_the_next_unchanged_event_does_nothing_again() {
+        var state = seededState()
+        _ = state.reconcile(attached: Fake.three, bound: keySet(Fake.three), drifted: [Fake.dell.uuid])
+
+        XCTAssertEqual(state.reconcile(attached: Fake.three, bound: keySet(Fake.three), drifted: []),
+                       .unchanged(shouldLog: true))
+    }
+
+    func test_an_unchanged_topology_with_nothing_drifted_is_still_unchanged() {
+        var state = seededState()
+        XCTAssertEqual(state.reconcile(attached: Fake.three, bound: keySet(Fake.three), drifted: []),
+                       .unchanged(shouldLog: true))
+    }
+
+    func test_a_drifted_key_that_has_no_window_is_ignored() {
+        var state = seededState()
+        XCTAssertEqual(state.reconcile(attached: Fake.three, bound: keySet(Fake.three), drifted: ["NO-SUCH-WINDOW"]),
+                       .unchanged(shouldLog: true))
+    }
+
+    func test_a_drifted_window_whose_display_vanished_is_not_re_homed_it_is_being_closed() {
+        var state = seededState([Fake.builtIn, Fake.lg])            // handled topology: Dell already gone
+        guard let p = expectPass(state.reconcile(attached: [Fake.builtIn, Fake.lg], bound: keySet(Fake.three),
+                                                 drifted: [Fake.dell.uuid])) else { return }
+        XCTAssertEqual(p.scheduleClose.map(\.uuid), [Fake.dell.uuid])
+        XCTAssertEqual(p.rehome, [], "a window being closed gets no grant")
+    }
+
+    func test_a_drifted_window_is_not_granted_twice_when_the_fingerprint_changed_too() {
+        var state = seededState()
+        let moved = [Fake.builtIn, Fake.lg, Fake.moved(Fake.dell, by: 50)]
+        guard let p = expectPass(state.reconcile(attached: moved, bound: keySet(Fake.three),
+                                                 drifted: [Fake.dell.uuid])) else { return }
+        XCTAssertEqual(p.rehome, Fake.three.map(\.uuid).sorted(), "one grant per surviving window, no duplicates")
+    }
+}
+
+final class DisplayTopologyDriftCoordinatorTests: XCTestCase {
+
+    /// Display Dell vanishes and returns inside the 0.5 s settle: by the time the pass
+    /// runs the fingerprint equals the handled one, but macOS moved Dell's window.
+    private func flapInsideSettle(_ rig: Rig) {
+        rig.host.attached = [Fake.builtIn, Fake.lg]
+        rig.coordinator.displaysChanged()
+        rig.clock.advance(by: 0.25)
+        rig.host.attached = Fake.three
+        rig.coordinator.displaysChanged()
+        rig.clock.advance(by: 0.5)
+    }
+
+    func test_a_flap_inside_the_settle_that_left_a_window_moved_re_homes_exactly_that_window_once() {
+        let rig = Rig(initial: Fake.three)
+        rig.host.drifted = [Fake.dell.uuid]
+
+        flapInsideSettle(rig)
+        rig.clock.advance(by: 30)
+
+        XCTAssertEqual(rig.host.rehomed, [Fake.dell.uuid], "one grant for the moved window, none for the healthy ones")
+        XCTAssertEqual(rig.host.closed, [])
+        XCTAssertEqual(rig.host.opened, [])
+    }
+
+    func test_a_flapping_noise_event_with_nothing_drifted_re_homes_nothing() {
+        let rig = Rig(initial: Fake.three)
+
+        flapInsideSettle(rig)
+        rig.clock.advance(by: 30)
+
+        XCTAssertEqual(rig.host.rehomed, [])
+        XCTAssertEqual(rig.host.closed, [])
+        XCTAssertEqual(rig.host.opened, [])
+    }
+
+    func test_drift_is_read_afresh_on_every_pass() {
+        let rig = Rig(initial: Fake.three)
+        rig.host.drifted = [Fake.lg.uuid]
+        rig.notify()
+        XCTAssertEqual(rig.host.rehomed, [Fake.lg.uuid])
+
+        rig.host.drifted = []
+        rig.notify()
+        XCTAssertEqual(rig.host.rehomed, [Fake.lg.uuid], "no new grant once nothing is drifted")
+
+        rig.host.drifted = [Fake.builtIn.uuid]
+        rig.notify()
+        XCTAssertEqual(rig.host.rehomed, [Fake.lg.uuid, Fake.builtIn.uuid])
+    }
+}
+
+// MARK: S2: a doomed window must not stay alive during the grace
+
+final class DisplayTopologyPendingRemovalTests: XCTestCase {
+
+    private let air = Fake.airPlayUUID
+    private let grace = DisplayTopologyCoordinator.defaultCloseGrace
+    private let deferral = DisplayTopologyCoordinator.defaultCloseDeferralInterval
+    private let limit = DisplayTopologyCoordinator.defaultCloseDeferralLimit
+
+    /// The vanish pass has run (clock at its settle time); the next `grace` seconds are the grace.
+    private func vanish(_ rig: Rig) { rig.setAttached(Fake.three) }
+
+    /// Collapses consecutive duplicate calls so the assertions do not depend on redundant repeats.
+    private func flagTransitions(_ host: FakeHost) -> [FakeHost.PendingRemovalCall] {
+        var out: [FakeHost.PendingRemovalCall] = []
+        for call in host.pendingRemovalCalls where out.last != call { out.append(call) }
+        return out
+    }
+
+    func test_the_doomed_window_is_flagged_as_soon_as_its_close_is_scheduled_and_no_survivor_ever_is() {
+        let rig = Rig(initial: Fake.four)
+
+        vanish(rig)
+
+        XCTAssertEqual(rig.host.pendingRemoval, [air])
+        XCTAssertEqual(flagTransitions(rig.host), [.init(uuid: air, pending: true)])
+        XCTAssertEqual(rig.host.closed, [], "flagged, not yet closed: that waits out the grace")
+
+        rig.clock.advance(by: 60)
+        XCTAssertTrue(rig.host.pendingRemovalCalls.allSatisfy { $0.uuid == air }, "surviving windows are never flagged")
+    }
+
+    func test_the_flag_is_cleared_when_the_display_returns_within_the_grace() {
+        let rig = Rig(initial: Fake.four)
+        vanish(rig)
+        rig.clock.advance(by: 2)
+
+        rig.setAttached(Fake.four)
+
+        XCTAssertEqual(rig.host.pendingRemoval, [], "the window lives on: it may enter full-screen again")
+        XCTAssertEqual(flagTransitions(rig.host), [.init(uuid: air, pending: true), .init(uuid: air, pending: false)])
+        rig.clock.advance(by: 60)
+        XCTAssertEqual(rig.host.closed, [])
+    }
+
+    func test_the_flag_is_cleared_when_the_grace_expires_and_the_display_is_attached_again() {
+        let rig = Rig(initial: Fake.four)
+        vanish(rig)
+        rig.host.attached = Fake.four                   // back, with no notification
+
+        rig.clock.advance(by: grace)
+
+        XCTAssertEqual(rig.host.closed, [])
+        XCTAssertEqual(rig.host.pendingRemoval, [])
+        XCTAssertEqual(flagTransitions(rig.host).last, FakeHost.PendingRemovalCall(uuid: air, pending: false))
+    }
+
+    func test_the_flag_is_cleared_when_the_close_is_aborted_because_the_window_is_already_gone() {
+        let rig = Rig(initial: Fake.four)
+        vanish(rig)
+        rig.host.dropWindow(air)
+
+        rig.clock.advance(by: grace)
+
+        XCTAssertEqual(rig.host.closed, [])
+        XCTAssertEqual(rig.host.pendingRemoval, [])
+        XCTAssertEqual(flagTransitions(rig.host).last, FakeHost.PendingRemovalCall(uuid: air, pending: false))
+    }
+
+    func test_a_flapping_display_is_flagged_again_each_time_it_goes_away() {
+        let rig = Rig(initial: Fake.four)
+        vanish(rig)
+        rig.clock.advance(by: 1)
+        rig.setAttached(Fake.four)
+        rig.clock.advance(by: 1)
+        rig.setAttached(Fake.three)
+
+        XCTAssertEqual(flagTransitions(rig.host), [.init(uuid: air, pending: true),
+                                                   .init(uuid: air, pending: false),
+                                                   .init(uuid: air, pending: true)])
+        XCTAssertEqual(rig.host.pendingRemoval, [air])
+    }
+
+    func test_another_windows_transition_does_not_defer_the_close() {
+        let rig = Rig(initial: Fake.four)
+        rig.host.transitioning = [Fake.builtIn.uuid, Fake.lg.uuid]    // siblings, not the doomed window
+        vanish(rig)
+
+        rig.clock.advance(by: grace - deferral)
+        XCTAssertEqual(rig.host.closed, [], "not before the grace")
+        rig.clock.advance(by: deferral)
+
+        XCTAssertEqual(rig.host.closed, [air], "closed at the grace, siblings' transitions notwithstanding")
+    }
+
+    func test_the_doomed_windows_own_transition_defers_the_close_until_it_ends() {
+        let rig = Rig(initial: Fake.four)
+        rig.host.transitioning = [air]
+        vanish(rig)
+
+        rig.clock.advance(by: grace)                    // the grace has just expired
+        XCTAssertEqual(rig.host.closed, [], "the window is mid-transition: deferred")
+        rig.clock.advance(by: deferral)
+        XCTAssertEqual(rig.host.closed, [])
+        XCTAssertEqual(rig.host.pendingRemoval, [air], "still doomed while the close is deferred")
+
+        rig.host.transitioning = []
+        rig.clock.advance(by: deferral * 2)
+
+        XCTAssertEqual(rig.host.closeCount(of: air), 1)
+        rig.clock.advance(by: 60)
+        XCTAssertEqual(rig.host.closeCount(of: air), 1)
+    }
+
+    func test_a_transition_that_never_ends_defers_the_close_a_bounded_number_of_times_then_closes_anyway() {
+        let rig = Rig(initial: Fake.four)
+        rig.host.transitioning = [air]
+        vanish(rig)
+        rig.clock.advance(by: grace)
+
+        rig.clock.advance(by: deferral * Double(limit - 1))
+        XCTAssertEqual(rig.host.closed, [], "still within the deferral bound")
+
+        rig.clock.advance(by: deferral * 2)
+        XCTAssertEqual(rig.host.closed, [air], "forced close at the bound")
+        rig.clock.advance(by: 60)
+        XCTAssertEqual(rig.host.closeCount(of: air), 1, "the deferral chain ends with the close")
+    }
+
+    func test_the_deferral_interval_and_limit_are_the_coordinators_parameters() {
+        let clock = VirtualClock()
+        let host = FakeHost(attached: Fake.four)
+        let coordinator = DisplayTopologyCoordinator(scheduler: clock, host: host.makeHost(),
+                                                     closeDeferralInterval: 1, closeDeferralLimit: 2)
+        coordinator.recordHandled(Fake.four)
+        host.transitioning = [air]
+        host.attached = Fake.three
+        coordinator.displaysChanged()
+        clock.advance(by: 0.5)                          // the vanish pass
+        clock.advance(by: grace)                        // grace expires: deferral 1
+
+        clock.advance(by: 1.5)
+        XCTAssertEqual(host.closed, [], "deferral 2 at +1 s")
+        clock.advance(by: 1)                            // +2.5 s
+        XCTAssertEqual(host.closed, [air], "limit of 2 deferrals reached: closed at +2 s")
+    }
+}
+
+// MARK: B1: end to end, the window is never orphaned
+
+final class DisplayTopologyOrphanedWindowTests: XCTestCase {
+
+    private let air = Fake.airPlayUUID
+    private let grace = DisplayTopologyCoordinator.defaultCloseGrace
+    private let deferral = DisplayTopologyCoordinator.defaultCloseDeferralInterval
+
+    func test_a_display_returning_exactly_when_the_deferral_fires_does_not_orphan_the_window_if_it_goes_again() {
+        let rig = Rig(initial: Fake.four)
+        rig.host.transitioning = [air]                  // the doomed window is mid-transition at grace expiry
+        rig.setAttached(Fake.three)
+        rig.clock.advance(by: grace)                    // grace expires; the close is deferred
+        XCTAssertEqual(rig.host.closed, [])
+
+        rig.host.attached = Fake.four                   // back exactly when the deferral timer fires; no notification
+        rig.clock.advance(by: deferral)
+        XCTAssertEqual(rig.host.closed, [], "the display is back: the close is abandoned")
+
+        rig.host.attached = Fake.three                  // flaps away and back, no reconcile in between
+        rig.host.attached = Fake.four
+        rig.clock.advance(by: 0.25)
+
+        rig.host.attached = Fake.three                  // gone again
+        rig.host.transitioning = []
+        rig.notify()                                    // ... and a notification arrives
+        XCTAssertEqual(rig.host.closed, [], "a fresh grace starts: not closed at once")
+        rig.clock.advance(by: grace - deferral)
+        XCTAssertEqual(rig.host.closed, [], "not before the fresh grace elapses")
+        rig.clock.advance(by: deferral)
+
+        XCTAssertEqual(rig.host.closeCount(of: air), 1, "the window is closed after a fresh grace, never orphaned")
+        XCTAssertNil(rig.host.windows[air])
+    }
+
+    func test_a_window_that_vanished_by_other_means_is_not_closed_and_a_later_rebound_key_still_is() {
+        let rig = Rig(initial: Fake.four)
+        rig.setAttached(Fake.three)
+        rig.host.dropWindow(air)                        // gone by another route before the grace ends
+
+        rig.clock.advance(by: grace)
+        XCTAssertEqual(rig.host.closed, [], "no window for the key: closeWindow is not called")
+
+        rig.host.addWindow(air)                         // a window for the key exists again, display still gone
+        rig.notify()
+        rig.clock.advance(by: grace - deferral)
+        XCTAssertEqual(rig.host.closed, [])
+        rig.clock.advance(by: deferral)
+
+        XCTAssertEqual(rig.host.closeCount(of: air), 1, "the later vanish of the re-bound key still closes it")
+    }
+
+    func test_a_stale_deferral_chain_does_nothing_after_its_close_was_superseded() {
+        let rig = Rig(initial: Fake.four)
+        rig.host.transitioning = [air]
+        rig.setAttached(Fake.three)                     // t=0.5, grace due 5.5
+        rig.clock.advance(by: 4.75)                     // t=5.25
+        rig.coordinator.displaysChanged()               // a pass is due at 5.75
+        rig.clock.advance(by: 0.25)                     // t=5.5: the grace expires, deferred to 6.0
+        XCTAssertEqual(rig.host.closed, [])
+
+        rig.host.attached = Fake.four                   // returns before the deferral timer
+        rig.host.transitioning = []
+        rig.clock.advance(by: 0.25)                     // t=5.75: the pass sees the display back
+
+        rig.host.attached = Fake.three                  // vanishes again: a NEW close with a fresh grace
+        rig.coordinator.displaysChanged()
+        rig.clock.advance(by: 0.5)                      // t=6.25: the stale timer fired at 6.0, then the pass ran
+        XCTAssertEqual(rig.host.closed, [], "the superseded deferral chain must not close the window")
+
+        rig.clock.advance(by: 4.75)                     // t=11.0, just before the fresh grace (due 11.25)
+        XCTAssertEqual(rig.host.closed, [], "the fresh grace is measured from the new vanish")
+        rig.clock.advance(by: 0.5)
+        XCTAssertEqual(rig.host.closeCount(of: air), 1)
+    }
+}
+
+// MARK: N1: teardown order
+
+final class VanishedWindowTeardownTests: XCTestCase {
+
+    private static let unbindSteps = ["unbindKey", "dropController", "removeFromWindows", "afterUnbind"]
+    private static let appKitSteps = ["prepareWindow", "dropFullScreenMask", "close"]
+
+    private func steps(_ record: @escaping (String) -> Void,
+                       unbindKey: (() -> Void)? = nil,
+                       dropFullScreenMask: (() -> Void)? = nil,
+                       close: (() -> Void)? = nil) -> VanishedWindowTeardown.Steps {
+        VanishedWindowTeardown.Steps(
+            unbindKey: { record("unbindKey"); unbindKey?() },
+            dropController: { record("dropController") },
+            removeFromWindows: { record("removeFromWindows") },
+            afterUnbind: { record("afterUnbind") },
+            prepareWindow: { record("prepareWindow") },
+            dropFullScreenMask: { record("dropFullScreenMask"); dropFullScreenMask?() },
+            close: { record("close"); close?() })
+    }
+
+    func test_teardown_runs_every_step_once_in_the_contracted_order() {
+        var order: [String] = []
+        VanishedWindowTeardown.run(steps { order.append($0) })
+        XCTAssertEqual(order, ["unbindKey", "dropController", "removeFromWindows", "afterUnbind",
+                               "prepareWindow", "dropFullScreenMask", "close"])
+    }
+
+    func test_no_appkit_facing_step_runs_before_the_key_is_unbound() {
+        var order: [String] = []
+        VanishedWindowTeardown.run(steps { order.append($0) })
+
+        for appKit in Self.appKitSteps {
+            guard let a = order.firstIndex(of: appKit) else { return XCTFail("\(appKit) never ran") }
+            for unbind in Self.unbindSteps {
+                guard let u = order.firstIndex(of: unbind) else { return XCTFail("\(unbind) never ran") }
+                XCTAssertLessThan(u, a, "\(unbind) must precede \(appKit)")
+            }
+        }
+    }
+
+    func test_a_reentrant_notification_from_the_mask_drop_or_close_finds_the_key_already_unbound() {
+        var bound = true
+        var boundSeenDuringMaskDrop: Bool?
+        var boundSeenDuringClose: Bool?
+
+        VanishedWindowTeardown.run(steps(
+            { _ in },
+            unbindKey: { bound = false },
+            dropFullScreenMask: { boundSeenDuringMaskDrop = bound },     // AppKit may post didChangeScreenParameters here
+            close: { boundSeenDuringClose = bound }))
+
+        XCTAssertEqual(boundSeenDuringMaskDrop, false, "a handler re-entered by dropping the mask must not see the key bound")
+        XCTAssertEqual(boundSeenDuringClose, false, "a handler re-entered by close() must not see the key bound")
     }
 }
