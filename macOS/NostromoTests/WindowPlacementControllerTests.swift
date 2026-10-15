@@ -28,6 +28,10 @@ private final class FakeWindow: PlacementWindowing {
     var displayChangePending = false
     var isDisplayChangePending: Bool { displayChangePending }
 
+    /// The window's display vanished and its close is waiting out the grace (mirrors `NostromoWindow`'s flag).
+    var pendingScreenRemoval = false
+    var isPendingScreenRemoval: Bool { pendingScreenRemoval }
+
     /// Every phase the controller mirrored onto the window, in order.
     private(set) var phasesSeen: [PlacementPhase] = []
     func placementPhaseChanged(_ phase: PlacementPhase) { phasesSeen.append(phase) }
@@ -1232,5 +1236,57 @@ final class WindowPlacementControllerTests: XCTestCase {
         controller.begin()
 
         XCTAssertEqual(distinctPhasesSeen(), [.idle, .gaveUp])
+    }
+
+    // MARK: S2: a window pending removal starts no full-screen entry
+
+    func test_the_first_enter_toggle_never_fires_while_the_window_is_pending_removal() {
+        makeController(windowOn: target.uuid)
+        window.pendingScreenRemoval = true
+
+        controller.begin()
+        scheduler.runNext()
+        scheduler.runNext()
+        scheduler.runNext()
+
+        XCTAssertEqual(window.toggleCount, 0, "a doomed window must not enter full-screen")
+    }
+
+    func test_the_first_enter_toggle_fires_normally_once_the_pending_removal_clears_in_time() {
+        makeController(windowOn: target.uuid)
+        window.pendingScreenRemoval = true
+
+        controller.begin()
+        for _ in 0..<3 { scheduler.runNext() }
+        XCTAssertEqual(window.toggleCount, 0)
+
+        window.pendingScreenRemoval = false             // the display returned
+        scheduler.runAll()
+
+        XCTAssertEqual(window.toggleCount, 1, "exactly one enter toggle")
+        XCTAssertFalse(emitted.contains { $0.message.hasPrefix("WARNING") }, "a normal wait, not a forced toggle")
+    }
+
+    func test_a_window_still_pending_removal_at_the_poll_bound_drops_the_enter_without_toggling() {
+        makeController(windowOn: target.uuid)
+        window.pendingScreenRemoval = true
+
+        controller.begin()
+        let steps = runCountingSteps()                  // fails the test itself if the polling is unbounded
+
+        XCTAssertEqual(window.toggleCount, 0, "unlike an in-flight transition, the bound never forces the toggle")
+        XCTAssertLessThanOrEqual(steps, WindowPlacementController.gateMaxPolls + 3, "bounded like the in-flight poll")
+        XCTAssertTrue(scheduler.pending.isEmpty)
+    }
+
+    func test_pending_removal_still_blocks_the_enter_when_a_transition_is_also_in_flight() {
+        makeController(windowOn: target.uuid)
+        window.pendingScreenRemoval = true
+        window.transitionInFlight = true
+
+        controller.begin()
+        scheduler.runAll()
+
+        XCTAssertEqual(window.toggleCount, 0, "the in-flight bound would force a toggle; pending removal must still win")
     }
 }

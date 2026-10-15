@@ -20,12 +20,16 @@ protocol PlacementWindowing: AnyObject {
     /// A display configuration change is in progress (the guard `NostromoWindow`'s own
     /// re-entry uses). Nothing frame- or toggle-related runs while it is set.
     var isDisplayChangePending: Bool { get }
+    /// The window's display vanished and its close is waiting out the grace: it must
+    /// start no full-screen entry until that resolves (it closes, or the display returns).
+    var isPendingScreenRemoval: Bool { get }
     /// The controller's phase changed; the window mirrors it (frame-constraint scope).
     func placementPhaseChanged(_ phase: PlacementPhase)
 }
 
 extension PlacementWindowing {
     var isDisplayChangePending: Bool { false }
+    var isPendingScreenRemoval: Bool { false }
     func placementPhaseChanged(_ phase: PlacementPhase) {}
 }
 
@@ -159,10 +163,16 @@ final class WindowPlacementController {
     /// Past the bound it proceeds — launch always toggled unconditionally before.
     private func attemptEnter(pollsLeft: Int) {
         guard let window, machine.phase == .enteringFullScreen, !window.isFullScreen else { return }
-        if window.isAnyTransitionInFlight, pollsLeft > 0 {
+        // A window whose display vanished and whose close waits out the grace waits like an
+        // in-flight transition: if the display returns it proceeds, otherwise it is closed.
+        if window.isAnyTransitionInFlight || window.isPendingScreenRemoval, pollsLeft > 0 {
             scheduler.schedule(after: Self.gatePollInterval) { [weak self] in
                 self?.attemptEnter(pollsLeft: pollsLeft - 1)
             }
+            return
+        }
+        if window.isPendingScreenRemoval {
+            emit("enter dropped: display removal still pending after the bounded wait", true)
             return
         }
         if window.isAnyTransitionInFlight {

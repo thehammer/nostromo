@@ -31,6 +31,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         scheduler: MainQueueScheduler.shared,
         screenCount: { [screens] in screens.displays.count }
     )
+    /// Turns raw `didChangeScreenParameters` into: nothing (unchanged topology), one
+    /// debounced pass, and a close only after a vanished display stays gone for a grace.
+    private lazy var topologyCoordinator = DisplayTopologyCoordinator(
+        scheduler: MainQueueScheduler.shared,
+        host: DisplayTopologyCoordinator.Host(
+            attachedDisplays: { [screens] in screens.displays },
+            boundUUIDs: { [weak self] in Set(self?.windowsByDisplayUUID.keys.map { $0 } ?? []) },
+            topologyChanged: { [weak self] in
+                self?.logTopology(scope: "screensDidChange")
+                self?.stableCountRecorder.topologyChanged()
+            },
+            rehome: { [weak self] uuid in self?.placementControllers[uuid]?.displaysReconfigured() },
+            openWindows: { [weak self] displays in self?.openWindowsForNewDisplays(displays) },
+            closeWindow: { [weak self] uuid in self?.closeWindowForVanishedDisplay(uuid) },
+            passFinished: { [weak self] in self?.closeUntrackedWindows() },
+            log: { [weak self] message in self?.placementLog.log("screensDidChange", message) },
+            driftedUUIDs: { [weak self] in self?.driftedWindowUUIDs() ?? [] },
+            setPendingRemoval: { [weak self] uuid, pending in
+                self?.windowsByDisplayUUID[uuid]?.isPendingScreenRemoval = pending
+            },
+            isWindowTransitioning: { [weak self] uuid in self?.windowsByDisplayUUID[uuid]?.isInTransition ?? false }
+        )
+    )
     /// Set when screen loss closed the last window (lid closed, no externals).
     /// The app must survive that and re-open windows when a display returns.
     private var lastWindowClosedByScreenLoss = false
@@ -282,6 +305,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let displays = screens.displays
         placementLog.log("launch", "opening windows for \(displays.count) display(s)")
         migrateLegacyFocusKeys(onto: displays)
+        // The topology the launch windows are opened for: the first notification
+        // after launch is only a change if it differs from this.
+        topologyCoordinator.recordHandled(displays)
         stableCountRecorder.launchWindowsOpened(topologyKnown: topologyKnown)
         for (slot, display) in displays.enumerated() {
             openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot))
@@ -449,62 +475,74 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // MARK: - Screen change handling
 
     @objc private func screensDidChange(_ notification: Notification) {
-        logTopology(scope: "screensDidChange")
         guard launchWindowsOpened else {
+            logTopology(scope: "screensDidChange")
             displayWaiter?.screensChanged()
             return
         }
+        // Does no work here: the coordinator debounces the burst, then handles the
+        // settled topology once (and not at all if it equals the last handled one).
+        topologyCoordinator.displaysChanged()
+    }
 
-        let attached = screens.displays
-        stableCountRecorder.topologyChanged()
-        let plan = DisplayReconciler.plan(attached: attached, boundUUIDs: Set(windowsByDisplayUUID.keys))
-
-        // A momentarily empty topology (lid closed, no externals) closes every
-        // window but must not quit the app — see applicationShouldTerminateAfterLastWindowClosed.
-        if !plan.toClose.isEmpty, plan.toClose.count == windowsByDisplayUUID.count {
-            lastWindowClosedByScreenLoss = true
+    /// Open windows for newly connected or REconnected displays, bound to the same
+    /// UUID (so they recover their remembered focus), through the same
+    /// verified-placement path as launch. A base delay lets the topology settle.
+    private func openWindowsForNewDisplays(_ displays: [DisplayInfo]) {
+        migrateLegacyFocusKeys(onto: screens.displays)
+        for (slot, display) in displays.enumerated() {
+            placementLog.log("screensDidChange", "display \(display.uuid) attached — opening window")
+            openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot + 1))
         }
+    }
 
-        // Existing windows get one bounded re-home grant (macOS may have moved them).
-        for uuid in windowsByDisplayUUID.keys where !plan.toClose.contains(uuid) {
-            placementControllers[uuid]?.displaysReconfigured()
-        }
+    /// Keys whose window is on a different display than its own (macOS moved it).
+    private func driftedWindowUUIDs() -> Set<String> {
+        Set(windowsByDisplayUUID.compactMap { uuid, win in
+            guard let current = win.currentDisplayUUID, current != uuid else { return nil }
+            return uuid
+        })
+    }
 
-        // Close windows whose display has disappeared.
-        // Mark as orphaned first so windowShouldClose allows the close without
-        // terminating the app. Disable animations and exit full-screen state
-        // before closing to avoid the _NSExitFullScreenTransitionController
-        // crash path that fires when a full-screen window is closed mid-animation.
-        for uuid in plan.toClose {
-            guard let win = windowsByDisplayUUID[uuid] else { continue }
-            appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
-            placementLog.log("screensDidChange", "display \(uuid) removed — closing its window")
-            win.isOrphanedByScreenRemoval = true
-            win.animationBehavior = .none
-            win.lifecycleHandler = nil
-            if win.styleMask.contains(.fullScreen) {
+    /// Close the window of a display that stayed gone for the whole grace period (the
+    /// coordinator has already waited out the window's own transition and checked the
+    /// display is still gone). Mark as orphaned first so windowShouldClose allows the
+    /// close without terminating the app. Disable animations and exit full-screen state
+    /// before closing to avoid the _NSExitFullScreenTransitionController crash path
+    /// that fires when a full-screen window is closed mid-animation. The order of the
+    /// steps is `VanishedWindowTeardown`'s contract (unbind before any AppKit call).
+    private func closeWindowForVanishedDisplay(_ uuid: String) {
+        guard let win = windowsByDisplayUUID[uuid] else { return }
+        VanishedWindowTeardown.run(.init(
+            unbindKey: { [self] in windowsByDisplayUUID.removeValue(forKey: uuid) },
+            dropController: { [self] in placementControllers.removeValue(forKey: uuid) },
+            removeFromWindows: { [self] in windows.removeAll { $0 === win } },
+            afterUnbind: { [self] in
+                // A momentarily empty topology (lid closed, no externals) closes every
+                // window but must not quit the app — see applicationShouldTerminateAfterLastWindowClosed.
+                if windowsByDisplayUUID.isEmpty { lastWindowClosedByScreenLoss = true }
+                appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
+                placementLog.log("screensDidChange", "display \(uuid) removed — closing its window")
+            },
+            prepareWindow: {
+                win.isOrphanedByScreenRemoval = true
+                win.animationBehavior = .none
+                win.lifecycleHandler = nil
+            },
+            dropFullScreenMask: {
+                guard win.styleMask.contains(.fullScreen) else { return }
                 // Exit full-screen synchronously before close so AppKit doesn't
                 // schedule an exit-transition cleanup block that outlives the window.
                 var mask = win.styleMask
                 mask.remove(.fullScreen)
                 win.styleMask = mask
-            }
-            windowsByDisplayUUID.removeValue(forKey: uuid)
-            placementControllers.removeValue(forKey: uuid)
-            windows.removeAll { $0 === win }
-            win.close()
-        }
+            },
+            close: { win.close() }
+        ))
+    }
 
-        // Open windows for newly connected or REconnected displays, bound to the
-        // same UUID (so they recover their remembered focus), through the same
-        // verified-placement path as launch. A base delay lets the topology settle.
-        if !plan.toOpen.isEmpty { migrateLegacyFocusKeys(onto: attached) }
-        for (slot, display) in plan.toOpen.enumerated() {
-            placementLog.log("screensDidChange", "display \(display.uuid) attached — opening window")
-            openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot + 1))
-        }
-
-        // Safety net: any window without a bound controller is invisible and useless.
+    /// Safety net: any window without a bound controller is invisible and useless.
+    private func closeUntrackedWindows() {
         for win in windows where !placementControllers.keys.contains(where: { windowsByDisplayUUID[$0] === win }) {
             if win.allowsUnconstrainedFrame { closeUntrackedWindow(win, reason: "not bound to a controller") }
         }

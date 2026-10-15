@@ -326,8 +326,12 @@
 		PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP0000000000000000000001 /* TicketBlockDocumentTests.swift */; };
 
 		ZP0000000000000000000011 /* DisplayIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000001 /* DisplayIdentity.swift */; };
+		ZP0000000000000000000015 /* DisplayTopology.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000005 /* DisplayTopology.swift */; };
 		ZZ0000000000000000000B11 /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000000B01 /* AppAppearance.swift */; };
 		ZP0000000000000000000021 /* DisplayIdentity.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000001 /* DisplayIdentity.swift */; };
+		ZP0000000000000000000026 /* DisplayTopology.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000005 /* DisplayTopology.swift */; };
+		ZP0000000000000000000046 /* DisplayTopologyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000036 /* DisplayTopologyTests.swift */; };
+		ZP0000000000000000000047 /* NostromoWindowPendingRemovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000037 /* NostromoWindowPendingRemovalTests.swift */; };
 		ZZ0000000000000000000B21 /* AppAppearance.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000000B01 /* AppAppearance.swift */; };
 		ZP0000000000000000000012 /* PlacementMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000002 /* PlacementMachine.swift */; };
 		ZP0000000000000000000022 /* PlacementMachine.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000002 /* PlacementMachine.swift */; };
@@ -639,11 +643,14 @@
 		OO0000000000000000000002 /* TicketContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketContentView.swift; sourceTree = "<group>"; };
 
 		ZP0000000000000000000001 /* DisplayIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayIdentity.swift; sourceTree = "<group>"; };
+		ZP0000000000000000000005 /* DisplayTopology.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayTopology.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000000B01 /* AppAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAppearance.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000002 /* PlacementMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacementMachine.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000003 /* WindowPlacementLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementLog.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000004 /* WindowPlacementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementController.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000031 /* DisplayIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayIdentityTests.swift; sourceTree = "<group>"; };
+		ZP0000000000000000000036 /* DisplayTopologyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayTopologyTests.swift; sourceTree = "<group>"; };
+		ZP0000000000000000000037 /* NostromoWindowPendingRemovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoWindowPendingRemovalTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000032 /* PlacementMachineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacementMachineTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000033 /* WindowPlacementControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementControllerTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000034 /* WindowPlacementLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementLogTests.swift; sourceTree = "<group>"; };
@@ -756,6 +763,7 @@
 				WK0000000000000000000010 /* TeriViewState.swift */,
 				HH000000000000000000010 /* TurnReconciler.swift */,
 				ZP0000000000000000000001 /* DisplayIdentity.swift */,
+				ZP0000000000000000000005 /* DisplayTopology.swift */,
 				ZZ0000000000000000000B01 /* AppAppearance.swift */,
 				ZP0000000000000000000002 /* PlacementMachine.swift */,
 				ZP0000000000000000000003 /* WindowPlacementLog.swift */,
@@ -1032,6 +1040,8 @@
 				XX0000000000000000000001 /* NotificationDecodeTests.swift */,
 				XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */,
 				ZP0000000000000000000031 /* DisplayIdentityTests.swift */,
+				ZP0000000000000000000036 /* DisplayTopologyTests.swift */,
+				ZP0000000000000000000037 /* NostromoWindowPendingRemovalTests.swift */,
 				ZP0000000000000000000032 /* PlacementMachineTests.swift */,
 				ZP0000000000000000000033 /* WindowPlacementControllerTests.swift */,
 				ZP0000000000000000000034 /* WindowPlacementLogTests.swift */,
@@ -1210,6 +1220,7 @@
 				AA0000000000000000000012 /* AppDelegate.swift in Sources */,
 				AA0000000000000000000013 /* NostromoWindow.swift in Sources */,
 				ZP0000000000000000000011 /* DisplayIdentity.swift in Sources */,
+				ZP0000000000000000000015 /* DisplayTopology.swift in Sources */,
 				ZZ0000000000000000000B11 /* AppAppearance.swift in Sources */,
 				ZP0000000000000000000012 /* PlacementMachine.swift in Sources */,
 				ZP0000000000000000000013 /* WindowPlacementLog.swift in Sources */,
@@ -1330,12 +1341,15 @@
 				ZZ0000000000000000M20231 /* AppControlModelTests.swift in Sources */,
 				WK0000000000000000000003 /* WorkModels.swift in TestSources */,
 				ZP0000000000000000000021 /* DisplayIdentity.swift in TestSources */,
+				ZP0000000000000000000026 /* DisplayTopology.swift in TestSources */,
 				ZZ0000000000000000000B21 /* AppAppearance.swift in TestSources */,
 				ZP0000000000000000000022 /* PlacementMachine.swift in TestSources */,
 				ZP0000000000000000000023 /* WindowPlacementLog.swift in TestSources */,
 				ZP0000000000000000000024 /* WindowPlacementController.swift in TestSources */,
 				ZP0000000000000000000025 /* NostromoWindow.swift in TestSources */,
 				ZP0000000000000000000041 /* DisplayIdentityTests.swift in Sources */,
+				ZP0000000000000000000046 /* DisplayTopologyTests.swift in Sources */,
+				ZP0000000000000000000047 /* NostromoWindowPendingRemovalTests.swift in Sources */,
 				ZP0000000000000000000042 /* PlacementMachineTests.swift in Sources */,
 				ZP0000000000000000000043 /* WindowPlacementControllerTests.swift in Sources */,
 				ZP0000000000000000000044 /* WindowPlacementLogTests.swift in Sources */,
