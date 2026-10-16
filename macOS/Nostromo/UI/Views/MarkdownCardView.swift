@@ -19,12 +19,8 @@ enum MarkdownRenderer {
     /// `Theme.foldedProse`. Colour never changes the height, so measuring ignores it.
     static func render(_ markdown: String, baseFont: NSFont, textColor: NSColor = Theme.fg) -> NSAttributedString {
         let result = NSMutableAttributedString()
-        defer {
-            if textColor != Theme.fg {
-                result.addAttribute(.foregroundColor, value: textColor,
-                                    range: NSRange(location: 0, length: result.length))
-            }
-        }
+        // Token colours of the code blocks, applied after the tone in `finish`.
+        var tokenRuns: [(range: NSRange, kind: SyntaxTokenKind)] = []
         // Attributes of the code block just appended: the "\n" that ends its last
         // line carries them, so the block's box includes that line break.
         var previousCode: [NSAttributedString.Key: Any]?
@@ -49,7 +45,14 @@ enum MarkdownRenderer {
             if appended {
                 result.append(NSAttributedString(string: "\n", attributes: previousCode))
             }
+            let start = result.length
             result.append(part)
+            if case .code(let block) = segment {
+                for token in SyntaxHighlighter.tokens(in: block.code, language: block.language) {
+                    tokenRuns.append((NSRange(location: start + token.utf16Range.lowerBound,
+                                              length: token.utf16Range.count), token.kind))
+                }
+            }
             previousCode = code
             appended = true
             endsWithEmptyCode = code != nil && part.length == 0
@@ -61,10 +64,27 @@ enum MarkdownRenderer {
         if endsWithEmptyCode {
             result.append(NSAttributedString(string: " ", attributes: previousCode))
         }
+        finish(result, textColor: textColor, tokenRuns: tokenRuns)
         return result
     }
 
     // MARK: - Private helpers
+
+    /// The one place text colour is decided, for both tones. Tone first (a folded
+    /// message repaints every run, code included), then token colours on top so the
+    /// tone doesn't erase them; in a folded message the tokens are dimmed.
+    private static func finish(_ result: NSMutableAttributedString, textColor: NSColor,
+                               tokenRuns: [(range: NSRange, kind: SyntaxTokenKind)]) {
+        let dimmed = textColor != Theme.fg
+        if dimmed {
+            result.addAttribute(.foregroundColor, value: textColor,
+                                range: NSRange(location: 0, length: result.length))
+        }
+        for run in tokenRuns {
+            result.addAttribute(.foregroundColor, value: Theme.syntaxColor(run.kind, dimmed: dimmed),
+                                range: run.range)
+        }
+    }
 
     /// One code block: every line shares one `NSTextBlock`, which is what draws the
     /// lines as a single box. Each block gets its own instance, or adjacent blocks
@@ -81,9 +101,10 @@ enum MarkdownRenderer {
         style.textBlocks       = [block]
         style.paragraphSpacing = 0
         return [
-            .font: Theme.firaCode(size: 12),
+            .font: Theme.codeFont(size: 12),
             .foregroundColor: Theme.fg,
-            // `!=`, `->`, `=>` render verbatim (as in `ToolCallView`).
+            // `!=`, `->`, `=>` render verbatim (as in `ToolCallView`); `codeFont` also
+            // turns off Fira Code's `calt` arrows, which `.ligature` doesn't control.
             .ligature: 0,
             .paragraphStyle: style,
         ]
@@ -256,10 +277,10 @@ enum MarkdownRenderer {
                     .firstMatch(in: text, range: span.range)?
                     .range(at: 1) else { continue }
                 let inner = nsText.substring(with: contentRange)
-                let codeFont = Theme.firaCode(size: 12)
                 let codeAttrs: [NSAttributedString.Key: Any] = [
-                    .font: codeFont,
+                    .font: Theme.codeFont(size: 12),
                     .foregroundColor: Theme.fg,
+                    .ligature: 0,
                     .backgroundColor: NSColor.white.withAlphaComponent(0.12),
                 ]
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: codeAttrs))

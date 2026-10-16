@@ -734,9 +734,17 @@ final class FocusToneTests: XCTestCase {
         let conversation = TextBlockView(text: markdown)
         let folded = TextBlockView(text: markdown, tone: .folded)
 
-        XCTAssertTrue(X.proseColors(in: conversation).allSatisfy { X.same($0, Theme.fg) })
-        XCTAssertTrue(X.proseColors(in: folded).allSatisfy { X.same($0, Theme.foldedProse) },
+        // The code block is highlighted: its `let` and `42` are token colours, not `fg`. Every visible
+        // run is the tone's text colour or a token colour of that tone (dimmed in the folded view).
+        func isToneOrToken(_ color: NSColor, tone: NSColor, dimmed: Bool) -> Bool {
+            X.same(color, tone) || SyntaxTokenKind.allCases.contains { X.same(color, Theme.syntaxColor($0, dimmed: dimmed)) }
+        }
+        XCTAssertTrue(X.proseColors(in: conversation).allSatisfy { isToneOrToken($0, tone: Theme.fg, dimmed: false) },
+                      "\(X.proseColors(in: conversation))")
+        XCTAssertTrue(X.proseColors(in: folded).allSatisfy { isToneOrToken($0, tone: Theme.foldedProse, dimmed: true) },
                       "\(X.proseColors(in: folded))")
+
+        var letColours: [NSColor] = []
         for view in [conversation, folded] {
             let storage = try XCTUnwrap(X.all(NSTextView.self, in: view).first?.textStorage)
             let range = (storage.string as NSString).range(of: "let answer")
@@ -744,7 +752,11 @@ final class FocusToneTests: XCTestCase {
             let style = storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
             XCTAssertTrue(X.same(style?.textBlocks.first?.backgroundColor, Theme.codeBlockBackground),
                           "the code block keeps its background in either tone")
+            letColours.append(try XCTUnwrap(storage.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor))
         }
+        XCTAssertTrue(X.same(letColours[0], Theme.syntaxColor(.keyword, dimmed: false)), "`let` is a keyword in the conversation")
+        XCTAssertTrue(X.same(letColours[1], Theme.syntaxColor(.keyword, dimmed: true)), "`let` is a dimmed keyword in the folded view")
+        XCTAssertFalse(X.same(letColours[1], letColours[0]), "the `let` run dimmed when the message folded")
     }
 
     func testTheTwoColoursAreExplicitComponentColours() {

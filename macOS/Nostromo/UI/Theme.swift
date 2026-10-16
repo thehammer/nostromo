@@ -1,4 +1,5 @@
 import AppKit
+import NostromoKit
 
 // MARK: - DarkSplitView
 
@@ -77,6 +78,83 @@ enum Theme {
     /// `MarkdownCodeBlockTests`).
     static let codeBlockBackground = NSColor(white: 0.16, alpha: 1)
 
+    // MARK: - Syntax highlighting
+
+    /// Token colours in fenced code blocks: explicit sRGB components, appearance-
+    /// independent (the app pins Dark Aqua). Contrast on `codeBlockBackground`:
+    /// keyword 6.6, type/key 8.4, string 7.6, number/literal 6.5, comment 5.5
+    /// (quieter than `fg`), variable 6.2, meta 6.8, inserted 8.3, deleted 5.5.
+    private static func syntaxPaletteComponents(_ kind: SyntaxTokenKind) -> (CGFloat, CGFloat, CGFloat) {
+        switch kind {
+        case .keyword:          return (204, 153, 255)
+        case .type, .key:       return (229, 192, 123)
+        case .string:           return (152, 200, 121)
+        case .number, .literal: return (222, 160, 104)
+        case .comment:          return (150, 160, 170)
+        case .variable:         return (240, 140, 148)
+        case .meta:             return (102, 190, 204)
+        case .inserted:         return (126, 214, 140)
+        case .deleted:          return (248, 120, 120)
+        }
+    }
+
+    /// Colour of a token. `dimmed == false` is the palette colour. `dimmed == true`
+    /// is for a message folded into an activity lane (`foldedProse`, ~6.6:1 on the
+    /// block): the palette colour blended toward `codeBlockBackground` (neutral
+    /// grey, so the hue is unchanged) by the largest `t <= 0.25` that keeps WCAG
+    /// contrast >= 4.6:1 on `codeBlockBackground`. Dimmed tokens sit at 4.6-6:1. A
+    /// fixed `t = 0.25` would drop comment and deleted to ~3.7:1, hence the clamp.
+    static func syntaxColor(_ kind: SyntaxTokenKind, dimmed: Bool) -> NSColor {
+        let (r, g, b) = syntaxPaletteComponents(kind)
+        let base = NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: 1)
+        guard dimmed else { return base }
+        let t = dimBlend(for: kind)
+        let bg = srgbComponents(codeBlockBackground)
+        return NSColor(srgbRed: r / 255 + (bg.0 - r / 255) * t,
+                       green: g / 255 + (bg.1 - g / 255) * t,
+                       blue: b / 255 + (bg.2 - b / 255) * t, alpha: 1)
+    }
+
+    private static var dimBlendCache: [SyntaxTokenKind: CGFloat] = [:]
+    private static let dimMaxBlend: CGFloat = 0.25
+    private static let dimMinContrast: CGFloat = 4.6
+
+    private static func dimBlend(for kind: SyntaxTokenKind) -> CGFloat {
+        if let cached = dimBlendCache[kind] { return cached }
+        let (r, g, b) = syntaxPaletteComponents(kind)
+        let fg = (r / 255, g / 255, b / 255)
+        let bg = srgbComponents(codeBlockBackground)
+        let bgL = relativeLuminance(bg)
+        func contrast(_ t: CGFloat) -> CGFloat {
+            let c = (fg.0 + (bg.0 - fg.0) * t, fg.1 + (bg.1 - fg.1) * t, fg.2 + (bg.2 - fg.2) * t)
+            let l = relativeLuminance(c)
+            return (max(l, bgL) + 0.05) / (min(l, bgL) + 0.05)
+        }
+        let result: CGFloat
+        if contrast(dimMaxBlend) >= dimMinContrast {
+            result = dimMaxBlend
+        } else {
+            var lo: CGFloat = 0, hi = dimMaxBlend
+            for _ in 0..<20 {
+                let mid = (lo + hi) / 2
+                if contrast(mid) >= dimMinContrast { lo = mid } else { hi = mid }
+            }
+            result = lo
+        }
+        dimBlendCache[kind] = result
+        return result
+    }
+
+    private static func srgbComponents(_ color: NSColor) -> (CGFloat, CGFloat, CGFloat) {
+        let c = color.usingColorSpace(.sRGB) ?? color
+        return (c.redComponent, c.greenComponent, c.blueComponent)
+    }
+
+    private static func relativeLuminance(_ c: (CGFloat, CGFloat, CGFloat)) -> CGFloat {
+        func lin(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * lin(c.0) + 0.7152 * lin(c.1) + 0.0722 * lin(c.2)
+    }
+
     // MARK: - Fonts
 
     static let tabFont       = NSFont.systemFont(ofSize: 12, weight: .regular)
@@ -98,6 +176,35 @@ enum Theme {
         return NSFont(name: name, size: size)
             ?? .monospacedSystemFont(ofSize: size, weight: weight)
     }
+
+    /// The code font: Fira Code with its ligatures off. `.ligature: 0` alone does
+    /// not do it: Fira Code draws `->`, `::`, `---`, `!=`, `=>`, `<=`, `/*`, `//`
+    /// through the OpenType `calt` (contextual alternates) feature. A spike on
+    /// 2026-10-16 laid out `"-> :: --- != => <= /* // www"` (28 characters) in
+    /// FiraCodeNF-Reg 12 pt through TextKit 1: 20 glyphs differed from the font's
+    /// plain glyph for their character with `.ligature: 0` (and with `1`), and 0
+    /// with `liga` and `calt` off in the font descriptor. Advance widths and line
+    /// height were identical, so turning them off changes no metric. SF Mono
+    /// fallback is returned unchanged. Main-thread use only (the cache is unlocked).
+    static func codeFont(size: CGFloat) -> NSFont {
+        if let cached = codeFontCache[size] { return cached }
+        let base = firaCode(size: size)
+        let font: NSFont
+        if base.fontName.hasPrefix("FiraCodeNF") {
+            let settings: [[NSFontDescriptor.FeatureKey: Int]] = [
+                [.typeIdentifier: kLigaturesType, .selectorIdentifier: kCommonLigaturesOffSelector],
+                [.typeIdentifier: kContextualAlternatesType, .selectorIdentifier: kContextualAlternatesOffSelector],
+            ]
+            let descriptor = base.fontDescriptor.addingAttributes([.featureSettings: settings])
+            font = NSFont(descriptor: descriptor, size: size) ?? base
+        } else {
+            font = base
+        }
+        codeFontCache[size] = font
+        return font
+    }
+
+    private static var codeFontCache: [CGFloat: NSFont] = [:]
 
     // MARK: - Metrics
 
