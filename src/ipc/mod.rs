@@ -14,12 +14,15 @@
 //! - [`server`]          — daemon-side accept loop and fan-out broadcaster
 //! - [`client`]          — TUI-side connection and subscription
 //! - [`decisions`]       — daemon-side decision-modal request registry (W6)
+//! - [`peer`]            — peer trust and what each peer may see or do
+//! - [`peer_verify`]     — who is on the other end of a Unix connection (the Mac app?)
 
 pub mod client;
 pub mod codec;
 pub mod decisions;
 pub mod pane_registry;
 pub mod peer;
+pub mod peer_verify;
 pub mod perri_state;
 pub mod protocol;
 pub mod pty_manager;

@@ -67,6 +67,8 @@ async fn make_harness() -> Harness {
         Arc::clone(&session_mgr),
         dir.path().join("perri-state"),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .expect("raw server should bind");
 
@@ -122,7 +124,7 @@ async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
 async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
     raw_send(
         stream,
-        &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4 },
+        &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4, client_kind: None },
     )
     .await;
     assert!(matches!(raw_recv(stream).await, ServerMsg::Welcome { .. }));

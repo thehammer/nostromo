@@ -115,15 +115,12 @@ pub struct DecisionRegistry {
     /// does not grow the way an unbounded log of a high-frequency stream
     /// would.
     resolved: HashSet<String>,
-    /// Connection keys that have declared themselves operators — either by
+    /// Connection keys of the verified Nostromo Mac app (the only peer whose
+    /// answer is accepted) that declared themselves operators — either by
     /// naming `Topic::Decision` explicitly in their `Subscribe` topics, or by
     /// setting `renders_decisions: true` on that frame. See
     /// [`Self::has_operator`].
     operators: HashSet<String>,
-    /// Network (TCP) connections that declared the same. Kept apart: a network
-    /// peer is never sent a decision for a sensitive focus. See
-    /// [`Self::has_operator_for`].
-    network_operators: HashSet<String>,
     /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
     /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
     /// for the multi-window decision-sheet bug: every presenting window (not
@@ -321,33 +318,30 @@ impl DecisionRegistry {
 
     // ── operator subscription ──────────────────────────────────────────────
 
-    /// True iff at least one connected client has declared that it renders
-    /// decisions (see [`Self::operators`]). `nostromo.ask_decision` checks
-    /// this before submitting anything — an agent blocking on a closed GUI is
-    /// a worse failure than an immediate refusal.
+    /// True iff the verified Mac app is connected and renders decisions (see
+    /// [`Self::operators`]). `nostromo.ask_decision` checks this before
+    /// submitting anything — an agent blocking on a closed GUI is a worse
+    /// failure than an immediate refusal.
     pub fn has_operator(&self) -> bool {
-        !self.operators.is_empty() || !self.network_operators.is_empty()
+        !self.operators.is_empty()
     }
 
-    /// Is there a client that can receive a decision request on a focus that is
-    /// `sensitive` (or not)? A network peer renders only ordinary focuses (a
-    /// sensitive request is never sent to it), so it counts only for those.
-    pub fn has_operator_for(&self, sensitive: bool) -> bool {
-        !self.operators.is_empty() || (!sensitive && !self.network_operators.is_empty())
+    /// Is there someone who can answer a decision request on a focus that is
+    /// `sensitive` (or not)? Only the verified Mac app can answer, and it is
+    /// sent every focus's requests, so the answer is the same for both. (A
+    /// network peer used to count for ordinary focuses; it can't answer, so it
+    /// no longer does.)
+    pub fn has_operator_for(&self, _sensitive: bool) -> bool {
+        self.has_operator()
     }
 
-    /// A network (TCP) client that renders decisions; see [`Self::has_operator_for`].
-    pub fn add_network_operator(&mut self, conn_key: &str) {
-        self.network_operators.insert(conn_key.to_string());
-    }
-
+    /// Register a connection of the verified Mac app that renders decisions.
     pub fn add_operator(&mut self, conn_key: &str) {
         self.operators.insert(conn_key.to_string());
     }
 
     pub fn remove_operator(&mut self, conn_key: &str) {
         self.operators.remove(conn_key);
-        self.network_operators.remove(conn_key);
     }
 
     // ── test/diagnostic visibility ────────────────────────────────────────────
@@ -1096,11 +1090,11 @@ mod tests {
         assert_eq!(rx_c.try_recv(), Ok(DecisionOutcome::Cancelled));
     }
 
-    // ── network operators (round 3) ───────────────────────────────────────────
+    // ── operators (AP1) ───────────────────────────────────────────────────────
     //
-    // An unauthenticated network peer may render decisions for ordinary
-    // focuses, but a request on a sensitive (Teri/Fred-derived) focus is never
-    // sent to it, so it must not count as someone who can answer one.
+    // Only a verified operator (the Nostromo Mac app) counts as someone who can
+    // answer a decision, for any focus. A client that merely receives decision
+    // broadcasts (an agent's script, a network peer) never registers as one.
 
     #[test]
     fn with_no_operator_nobody_can_receive_a_request_on_any_kind_of_focus() {
@@ -1111,41 +1105,25 @@ mod tests {
     }
 
     #[test]
-    fn a_local_operator_counts_for_requests_on_sensitive_and_ordinary_focuses_alike() {
+    fn a_verified_operator_counts_for_requests_on_sensitive_and_ordinary_focuses_alike() {
         let mut registry = DecisionRegistry::new();
-        registry.add_operator("local-1");
+        registry.add_operator("app-1");
         assert!(registry.has_operator());
         assert!(registry.has_operator_for(false));
         assert!(registry.has_operator_for(true));
     }
 
     #[test]
-    fn a_network_operator_counts_only_for_requests_on_ordinary_focuses() {
+    fn removing_the_last_operator_withdraws_it_for_every_kind_of_focus() {
         let mut registry = DecisionRegistry::new();
-        registry.add_network_operator("tcp-1");
-        assert!(registry.has_operator(), "has_operator() still means any operator");
-        assert!(registry.has_operator_for(false));
-        assert!(!registry.has_operator_for(true), "a network peer never receives a sensitive request");
-    }
+        registry.add_operator("app-1");
+        registry.add_operator("app-2");
+        registry.remove_operator("app-1");
+        assert!(registry.has_operator_for(false) && registry.has_operator_for(true));
 
-    #[test]
-    fn a_local_operator_alongside_a_network_one_makes_sensitive_requests_deliverable() {
-        let mut registry = DecisionRegistry::new();
-        registry.add_network_operator("tcp-1");
-        registry.add_operator("local-1");
-        assert!(registry.has_operator_for(true));
-
-        registry.remove_operator("local-1");
-        assert!(!registry.has_operator_for(true), "only the network operator is left");
-        assert!(registry.has_operator_for(false));
-    }
-
-    #[test]
-    fn removing_a_network_operator_withdraws_it() {
-        let mut registry = DecisionRegistry::new();
-        registry.add_network_operator("tcp-1");
-        registry.remove_operator("tcp-1");
+        registry.remove_operator("app-2");
         assert!(!registry.has_operator());
         assert!(!registry.has_operator_for(false));
+        assert!(!registry.has_operator_for(true));
     }
 }

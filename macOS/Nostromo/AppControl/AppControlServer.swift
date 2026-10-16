@@ -103,7 +103,13 @@ final class AppControlServer {
                 buffer.removeSubrange(...nl)
                 guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
                 var reply = ""
-                DispatchQueue.main.sync { reply = self.handle(line) }
+                // Everything a request does happens inside the gate, so a control
+                // that answers an agent refuses it (`HumanGesture`).
+                DispatchQueue.main.sync {
+                    SyntheticInputGate.begin()
+                    defer { SyntheticInputGate.end() }
+                    reply = self.handle(line)
+                }
                 let out = Array((reply + "\n").utf8)
                 _ = out.withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count) }
             }
@@ -497,6 +503,7 @@ final class AppControlServer {
                                            windowNumber: w.windowNumber, context: nil,
                                            characters: chars, charactersIgnoringModifiers: chars.lowercased(),
                                            isARepeat: false, keyCode: UInt16(req.int("keyCode") ?? 0))
+                    .map(SyntheticInputGate.stamped)
             else { throw AppControlError.failed("could not synthesise key event") }
             NSApp.sendEvent(e)   // app-level so menu key equivalents (⌘., ⌘V) fire
         }

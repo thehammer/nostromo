@@ -1,4 +1,7 @@
 import AppKit
+import os
+
+private let sheetLog = Logger(subsystem: "com.hammer.nostromo", category: "decisions")
 
 /// A daemon-driven decision modal: an agent poses a question with a fixed set
 /// of choices, and this sheet returns the operator's pick (or an explicit
@@ -39,6 +42,12 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
     private var resolved = false
 
     private var choiceButtons: [(id: String, button: NSButton)] = []
+
+    /// The event behind a button's action. A seam for tests; the app reads
+    /// `NSApp.currentEvent`.
+    var currentEvent: () -> NSEvent? = { NSApp.currentEvent }
+    /// Whether VoiceOver is on. A seam for tests.
+    var voiceOverEnabled: () -> Bool = { NSWorkspace.shared.isVoiceOverEnabled }
 
     /// - Parameters:
     ///   - resolution: the resolution already recorded for `requestId` in
@@ -150,7 +159,7 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
         dismissBtn.bezelStyle = .rounded
         dismissBtn.keyEquivalent = "\u{1b}"
         dismissBtn.target = self
-        dismissBtn.action = #selector(dismissTapped)
+        dismissBtn.action = #selector(dismissTapped(_:))
         dismissBtn.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(dismissBtn)
 
@@ -168,12 +177,35 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
     // MARK: - Resolution
 
     @objc private func choiceTapped(_ sender: NSButton) {
-        guard let id = sender.identifier?.rawValue else { return }
+        guard let id = sender.identifier?.rawValue, isHumanGesture(on: sender) else { return }
         resolve(choiceId: id)
     }
 
-    @objc private func dismissTapped() {
+    /// The Dismiss button, and Esc (its key equivalent).
+    @objc private func dismissTapped(_ sender: NSButton) {
+        guard isHumanGesture(on: sender) else { return }
         resolve(choiceId: nil)
+    }
+
+    /// The close box and ⌘W dismiss too, so they need a human gesture as well.
+    /// A refused close leaves the sheet up.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !resolved, let content = sender.contentView else { return true }
+        return isHumanGesture(on: content)
+    }
+
+    /// Only a person may answer an agent: input synthesised by the app-control
+    /// socket, or an Accessibility press from another process, does nothing
+    /// and the sheet stays.
+    private func isHumanGesture(on control: NSView) -> Bool {
+        switch HumanGesture.permit(currentEvent(), control: control, voiceOverEnabled: voiceOverEnabled) {
+        case .human(let sourcePid, let sourceState):
+            sheetLog.info("decision \(self.requestId, privacy: .public) answered by a user gesture (event source pid \(sourcePid.map(String.init) ?? "none", privacy: .public), state \(sourceState.map(String.init) ?? "none", privacy: .public))")
+            return true
+        case .refused(let reason):
+            sheetLog.notice("synthetic input refused: \(reason.rawValue, privacy: .public) on decision \(self.requestId, privacy: .public)")
+            return false
+        }
     }
 
     /// Closed via the titlebar close box without picking an option, OR

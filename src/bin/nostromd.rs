@@ -109,12 +109,24 @@ async fn main() -> Result<()> {
 
     // ── IPC server (Unix socket) ──────────────────────────────────────────────
     let socket_path = nostromo::ipc::default_socket_path();
+    // Only the verified Mac app may answer decisions. In QA mode the isolated
+    // QA instance's bundle id is accepted too; the user's daemon never sets it.
+    let qa_mode = std::env::var("NOSTROMO_QA_DAEMON").is_ok_and(|v| v == "1");
+    if qa_mode {
+        warn!(
+            "NOSTROMO_QA_DAEMON=1: QA MODE. The QA app bundle ({}) is accepted as the operator app. \
+             Never run the user's daemon like this.",
+            nostromo::ipc::peer_verify::QA_BUNDLE_ID
+        );
+    }
     let server = Server::bind(
         &socket_path,
         Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         config.perri_state_dir(),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        qa_mode,
     )
     .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
 

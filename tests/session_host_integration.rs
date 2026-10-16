@@ -54,7 +54,7 @@ async fn session_round_trip_drives_real_claude() {
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(store_path)));
     let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
-    let _server = Server::bind(&socket_path, pty_mgr, session_mgr, tmp.join("perri-state"), decisions).unwrap();
+    let _server = Server::bind(&socket_path, pty_mgr, session_mgr, tmp.join("perri-state"), decisions, Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier), false).unwrap();
 
     // Give the listener a moment to bind.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -67,6 +67,7 @@ async fn session_round_trip_drives_real_claude() {
         &ClientMsg::Hello {
             client_id: "it-client".into(),
             protocol_version: 3,
+            client_kind: None,
         },
     )
     .await;

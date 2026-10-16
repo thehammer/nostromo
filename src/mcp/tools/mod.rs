@@ -1042,6 +1042,60 @@ mod tests {
         }
     }
 
+    // ── no agent-callable approval surface (AP1) ─────────────────────────────
+
+    /// An agent must never be able to list, read or answer permission/approval
+    /// requests through MCP: answering is the operator's act, and the daemon
+    /// only accepts it from the verified Mac app. Asserted over the whole
+    /// registered surface (names and descriptions), so a new tool that touches
+    /// the approval space fails here and has to be argued for.
+    #[test]
+    fn no_tool_lists_reads_or_answers_permission_requests() {
+        use regex::Regex;
+        let approval = Regex::new(r"(?i)(permission|approv)").unwrap();
+        let verb = Regex::new(r"(?i)(list|read|answer|allow|deny|grant|resolve)").unwrap();
+
+        // Exact tool names that are allowed to trip the heuristic, each with the
+        // reason. Adding a name here is a deliberate review decision; a NEW
+        // tool must not be silently allowed.
+        let allowed: &[(&str, &str)] = &[];
+
+        let mut offenders = Vec::new();
+        for d in tool_descriptors() {
+            let name = d.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+            let desc = d.get("description").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+            let hit = |text: &str| approval.is_match(text) && verb.is_match(text);
+            if (hit(&name) || hit(&desc)) && !allowed.iter().any(|(n, _)| *n == name) {
+                offenders.push(name);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "MCP tools that look like they list/read/answer permission or approval requests: {offenders:?}"
+        );
+    }
+
+    /// `ask_decision` can resolve only the registry entry it creates itself:
+    /// its handler and its input carry no request id to point at somebody
+    /// else's pending decision.
+    #[test]
+    fn ask_decision_cannot_address_a_request_it_did_not_create() {
+        let src = include_str!("ask_decision.rs");
+
+        let sig_start = src.find("pub async fn handle(").expect("ask_decision::handle must exist");
+        let sig_end = src[sig_start..].find('{').expect("handle has a body") + sig_start;
+        let signature = &src[sig_start..sig_end];
+        assert!(!signature.contains("request_id"), "handle must take no request id: {signature}");
+
+        let in_start = src.find("struct AskDecisionInput").expect("AskDecisionInput must exist");
+        let in_end = src[in_start..].find("\n}").expect("struct closes") + in_start;
+        let input_struct = &src[in_start..in_end];
+        assert!(
+            !input_struct.contains("request_id"),
+            "AskDecisionInput must have no request_id field: {input_struct}"
+        );
+    }
+
     // ── which Perri tools are focus-scoped, as a declared contract ──────────
 
     /// The descriptor a caller reads from `tools/list` is the *only* runtime

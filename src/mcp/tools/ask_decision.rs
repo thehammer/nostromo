@@ -79,10 +79,8 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
     let tag = tag.to_string();
 
     // Fail fast rather than blocking: an agent waiting on a closed GUI for
-    // the full timeout is a worse failure than an immediate refusal.
-    // A network client renders only decisions on ordinary focuses (the
-    // request of a Teri/Fred-derived focus is never sent to it), so for those
-    // it does not count as someone who can answer.
+    // the full timeout is a worse failure than an immediate refusal. Only the
+    // verified Mac app counts as someone who can answer.
     let sensitive = daemon.session_mgr.lock().unwrap().sensitive_tags().tag_is_sensitive(&tag);
     if !daemon.decisions.lock().unwrap().has_operator_for(sensitive) {
         return json!({ "error": "no_operator" });

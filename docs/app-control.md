@@ -113,6 +113,24 @@ Read-only smoke scripts for Teri/Fred and window placement, and how to read them
 Pair with `bin/fake-mother-broker` (launch the app with `MOTHER_BROKER_SOCK`)
 to drive Mother-queue UI with canned jobs.
 
+## Controls that answer agents refuse app-control input
+
+An agent can drive this socket, so app-control must not be able to answer an
+agent for the human. Controls that answer an agent (a decision sheet's choices,
+its Dismiss button and Esc today; approval controls next) accept only a real
+user gesture. A `click`, `key` or `type` aimed at one does nothing: the sheet
+stays up and the app logs `synthetic input refused`. That holds whether or not
+app-control is enabled.
+
+How the app tells: every request runs inside `SyntheticInputGate.begin()` /
+`end()`, and every event `click`, `drag` and `key` synthesise carries
+`SyntheticInputGate.marker` in its `CGEvent` source user data
+(`macOS/Nostromo/Security/`). `HumanGesture.permit` refuses either.
+
+**QA-only switch.** An isolated QA build may accept synthetic input on those
+controls when it is launched with `NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT=1` **and**
+its bundle id is not `com.hammer.nostromo`. The user's app never honours it.
+
 ## Limits
 
 Windows must be on-screen and awake: with displays locked or asleep the

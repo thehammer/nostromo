@@ -49,6 +49,8 @@ fn spawn() -> Daemon {
         session_mgr,
         tmp.path().join("perri-state"),
         decisions,
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .unwrap();
     Daemon { socket_path, server, _tmp: tmp }
@@ -83,7 +85,7 @@ async fn sync(s: &mut UnixStream) -> Result<Vec<ServerMsg>, String> {
 /// replayed before the first Pong.
 async fn connect(d: &Daemon, topics: Vec<Topic>) -> (UnixStream, Vec<ServerMsg>) {
     let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
-    send(&mut s, &ClientMsg::Hello { client_id: "oversized-frame-it".into(), protocol_version: PROTOCOL_VERSION })
+    send(&mut s, &ClientMsg::Hello { client_id: "oversized-frame-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None })
         .await;
     match try_recv(&mut s).await {
         Ok(ServerMsg::Welcome { .. }) => {}

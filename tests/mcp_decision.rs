@@ -475,6 +475,10 @@ fn make_raw_daemon_state() -> RawHarness {
         Arc::clone(&session_mgr),
         dir.path().join("perri-state"),
         Arc::clone(&decisions),
+        // Raw connections here play the Mac app (with the `mac_app` claim);
+        // other local processes are covered by `tests/ipc_operator_app.rs`.
+        Arc::new(nostromo::ipc::peer_verify::testing::FakePeerVerifier::always_app()),
+        false,
     )
     .expect("raw server should bind");
     decisions.lock().unwrap().configure_broadcast(server.tx.clone());
@@ -565,7 +569,7 @@ async fn raw_handshake(
 ) {
     raw_send(
         stream,
-        &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4 },
+        &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4, client_kind: Some("mac_app".into()) },
     )
     .await;
     assert!(matches!(raw_recv(stream).await, ServerMsg::Welcome { .. }));
@@ -757,6 +761,10 @@ async fn make_combined_harness() -> CombinedHarness {
         Arc::clone(&session_mgr),
         dir.path().join("perri-state"),
         Arc::clone(&decisions),
+        // Raw connections here play the Mac app (with the `mac_app` claim);
+        // other local processes are covered by `tests/ipc_operator_app.rs`.
+        Arc::new(nostromo::ipc::peer_verify::testing::FakePeerVerifier::always_app()),
+        false,
     )
     .expect("raw server should bind");
     decisions.lock().unwrap().configure_broadcast(raw_server.tx.clone());
@@ -1017,7 +1025,7 @@ async fn a_connection_whose_second_frame_is_ping_instead_of_subscribe_does_not_c
     let mut stream = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
     raw_send(
         &mut stream,
-        &ClientMsg::Hello { client_id: "ping-only".into(), protocol_version: 4 },
+        &ClientMsg::Hello { client_id: "ping-only".into(), protocol_version: 4, client_kind: Some("mac_app".into()) },
     )
     .await;
     assert!(matches!(raw_recv(&mut stream).await, ServerMsg::Welcome { .. }));

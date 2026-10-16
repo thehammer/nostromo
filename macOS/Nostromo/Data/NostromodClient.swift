@@ -11,10 +11,15 @@ private struct ClientHello: Encodable {
     let type_            = "hello"
     let clientId:         String
     let protocolVersion:  Int
+    /// Says this is the Mac app. The daemon also checks the connecting
+    /// process's app bundle; only both together let this connection answer
+    /// an agent's decision. Older daemons ignore the key.
+    let clientKind       = "mac_app"
     enum CodingKeys: String, CodingKey {
         case type_           = "type"
         case clientId        = "client_id"
         case protocolVersion = "protocol_version"
+        case clientKind      = "client_kind"
     }
 }
 
