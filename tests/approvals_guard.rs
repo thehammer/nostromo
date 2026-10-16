@@ -1403,3 +1403,19 @@ fn bypass_unsetting_the_tmux_environment_moves_the_server() {
         assert_allowed(evaluate(&bash(command), &all_local), command);
     }
 }
+
+#[test]
+fn bypass_a_command_alias_change_is_checked_against_the_server() {
+    // Once set, `command-alias[100] ls=send-keys` makes a later `tmux ls -t %7 x` type into %7.
+    let command = "tmux set -s command-alias[100] ls=send-keys";
+    let remote = FakeProbe::default().other_pane_on(DEFAULT, "production:ap:portal", REMOTE_SHELL);
+    assert_blocked(evaluate(&bash(command), &remote), RULE_TMUX_INPUT, command);
+    let local = FakeProbe::default().other_pane_on(DEFAULT, "zsh", LOCAL_SHELL);
+    assert_allowed(evaluate(&bash(command), &local), command);
+}
+
+#[test]
+fn bypass_aws_service_and_operation_on_different_lines_of_opaque_text() {
+    let command = "python3 -c \"import os; os.system('''aws ecs --profile p\nexecute-command --cluster c''')\"";
+    assert_blocked(evaluate(&bash(command), &FakeProbe::default()), RULE_COMMAND, command);
+}

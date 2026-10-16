@@ -84,6 +84,11 @@ directory (tests). Neither changes what is blocked.
 - A tmux server on a socket outside tmux's socket directory, reached through a dynamic
   `-S "$P"`, isn't found by the every-server check. (Finding servers from the process table
   would close this; not done.)
+- A tmux `command-alias` that shadows a command name (`ls=send-keys`), set before the
+  session or kept on the server from an earlier call, isn't resolved. Changing one through
+  tmux while a remote pane is open is blocked, but the guard doesn't read the live alias list.
+- tmux reached as another user (`sudo tmux`, `su`) talks to that user's server, which the
+  every-server check doesn't list.
 - OS-level automation (AppleScript, Accessibility) that types into a terminal isn't seen.
   Neither is a fake app bundle that the user (or an agent) gets to run with those
   permissions.

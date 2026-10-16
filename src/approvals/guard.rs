@@ -315,9 +315,10 @@ fn tool_name_re() -> &'static Regex {
 fn command_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Anything may sit between the service and the operation on the same
-        // line (`aws ecs --profile p execute-command`, option values with spaces).
-        let opts = r"\b[^\n]*\b";
+        // Anything may sit between the service and the operation, line breaks
+        // included (`aws ecs --profile p execute-command`, values with spaces,
+        // continued lines).
+        let opts = r"\b[\s\S]*?\b";
         let run_task = if BLOCK_RUN_TASK { format!(r"|\becs_run_task\b|\becs{opts}run-task\b") } else { String::new() };
         Regex::new(&format!(
             r"(?i)\becs_connect\b|\becs_shell\b|\becs_open_tmux_pane\b|\becs{opts}execute-command\b|\bssm{opts}start-session\b|\bsession-manager-plugin\b{run_task}"
@@ -659,7 +660,9 @@ fn tmux_call(cmd: &SimpleCommand, env_moved: bool) -> Option<TmuxCall> {
     let mut targets = Vec::new();
     for sub in split_tmux_commands(&words[i..]) {
         let Some((name, args)) = sub.split_first() else { continue };
-        let kind = if name.dynamic { TmuxKind::Indirect } else { tmux_kind(&name.text) };
+        // A `command-alias` change can make any name (even `ls`) an input command.
+        let sets_alias = args.iter().any(|a| a.text.to_ascii_lowercase().contains("command-alias"));
+        let kind = if name.dynamic || sets_alias { TmuxKind::Indirect } else { tmux_kind(&name.text) };
         if kind == TmuxKind::Safe {
             continue;
         }
