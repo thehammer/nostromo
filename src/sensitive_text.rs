@@ -21,10 +21,12 @@
 //! invisible characters (`data::work::is_invisible`: zero-width, bidi, tag
 //! characters, soft hyphen) are dropped, and compatibility forms (fullwidth
 //! letters and punctuation, any Unicode decimal digit, en dash and minus) are
-//! folded to ASCII. Finding offsets are mapped back to the original text. A
-//! hidden character can sit INSIDE a value (`219-<ZWSP>09-9999`) or stand in
-//! for a space (`SSN<ZWSP>219-09-9999`), so text that has one is scanned twice:
-//! once with hidden characters dropped, once with each read as a space.
+//! folded to ASCII, and combining marks are removed. Finding offsets are
+//! mapped back to the original text. A hidden character can sit INSIDE a value
+//! (`219-<ZWSP>09-9999`) or stand in for a space (`SSN<ZWSP>219-09-9999`), so
+//! when a hidden run could be either the text is scanned up to three times:
+//! with hidden characters dropped, with those runs read as a space, and with
+//! only those next to a word read as a space.
 //!
 //! Nothing here may panic on any input, and no panic message may carry text:
 //! text is never sliced by assumed byte offsets (only `get`, regex offsets and
@@ -35,6 +37,7 @@ use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
+use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::data::work::is_invisible;
@@ -215,15 +218,6 @@ fn is_plain(text: &str) -> bool {
     text.is_ascii() && !text.chars().any(is_hidden)
 }
 
-/// What a hidden character becomes in a view.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Hidden {
-    /// Removed: it sat inside a value.
-    Drop,
-    /// A space: it stood in for one.
-    Space,
-}
-
 /// The text with compatibility forms folded to ASCII, plus where each of its
 /// characters came from.
 struct View {
@@ -235,15 +229,12 @@ struct View {
 }
 
 impl View {
-    fn push(&mut self, c: char, origin: (usize, usize)) {
+    fn push(&mut self, c: char, origin: (u32, u32)) {
         // `scan` caps the input at MAX_SCAN_BYTES (1 MiB) before getting here, and
         // normalising expands one character into at most 18, so u32 holds it.
         self.starts
             .push(u32::try_from(self.text.len()).unwrap_or(u32::MAX));
-        self.origin.push((
-            u32::try_from(origin.0).unwrap_or(u32::MAX),
-            u32::try_from(origin.1).unwrap_or(u32::MAX),
-        ));
+        self.origin.push(origin);
         self.text.push(c);
     }
 
@@ -263,41 +254,112 @@ impl View {
     }
 }
 
-fn normalise(text: &str, hidden: Hidden) -> View {
-    let mut view = View {
-        text: String::with_capacity(text.len()),
-        starts: Vec::with_capacity(text.len()),
-        origin: Vec::with_capacity(text.len()),
-    };
+/// One character of the folded text. A hidden character is kept (as a space)
+/// so the views can decide what it was.
+struct Piece {
+    c: char,
+    origin: (u32, u32),
+    hidden: bool,
+}
+
+/// NFKC and digit/dash folding per character, combining marks removed (a mark
+/// stacked on a digit or letter must not break a value), hidden characters
+/// flagged.
+fn fold(text: &str) -> Vec<Piece> {
+    let mut pieces = Vec::with_capacity(text.len());
     for (i, c) in text.char_indices() {
-        let origin = (i, i + c.len_utf8());
+        let origin = (
+            u32::try_from(i).unwrap_or(u32::MAX),
+            u32::try_from(i + c.len_utf8()).unwrap_or(u32::MAX),
+        );
+        let mut piece = |c: char, hidden: bool| pieces.push(Piece { c, origin, hidden });
         if c.is_ascii() {
             if is_hidden(c) {
-                if hidden == Hidden::Space {
-                    view.push(' ', origin);
-                }
+                piece(' ', true);
             } else {
-                view.push(c, origin);
+                piece(c, false);
             }
             continue;
         }
         if is_hidden(c) {
-            if hidden == Hidden::Space {
-                view.push(' ', origin);
-            }
+            piece(' ', true);
             continue;
         }
         for n in std::iter::once(c).nfkc() {
             if is_hidden(n) {
-                if hidden == Hidden::Space {
-                    view.push(' ', origin);
-                }
-            } else {
-                view.push(fold_char(n), origin);
+                piece(' ', true);
+            } else if !is_combining_mark(n) {
+                piece(fold_char(n), false);
             }
         }
     }
-    view
+    pieces
+}
+
+/// A hidden run between these two visible characters could be a space or part
+/// of a value: both views are tried. Beside whitespace or a joiner (`-._/`) it
+/// is not a space (`219-<ZWSP>09` is `219-09`), and between two letters it is
+/// part of a word (`pass<ZWSP>word`).
+fn is_ambiguous(before: char, after: char) -> bool {
+    let plain = |c: char| c.is_whitespace() || is_joiner(c);
+    !plain(before)
+        && !plain(after)
+        && !(before.is_ascii_alphabetic() && after.is_ascii_alphabetic())
+}
+
+/// Which ambiguous hidden runs a view turns into a space.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spaced {
+    /// None: every hidden character is removed.
+    No,
+    /// All of them.
+    All,
+    /// Only those next to a word: a letter on one side and a non-letter on the
+    /// other (`SSN<ZWSP>2<ZWSP>19`: the label is cut off, the number is not).
+    AtWords,
+}
+
+/// The view where hidden characters are removed, except the ambiguous runs
+/// `spaced` selects, which become one space. Also says whether any run was
+/// ambiguous, i.e. whether the spaced views differ.
+fn build_view(pieces: &[Piece], spaced: Spaced) -> (View, bool) {
+    let mut view = View {
+        text: String::with_capacity(pieces.len()),
+        starts: Vec::with_capacity(pieces.len()),
+        origin: Vec::with_capacity(pieces.len()),
+    };
+    let mut any_ambiguous = false;
+    let mut i = 0;
+    while i < pieces.len() {
+        let Some(piece) = pieces.get(i) else { break };
+        if !piece.hidden {
+            view.push(piece.c, piece.origin);
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while pieces.get(j).is_some_and(|p| p.hidden) {
+            j += 1;
+        }
+        let before = i.checked_sub(1).and_then(|k| pieces.get(k));
+        let after = pieces.get(j);
+        if let (Some(b), Some(a)) = (before, after) {
+            if is_ambiguous(b.c, a.c) {
+                any_ambiguous = true;
+                let space = match spaced {
+                    Spaced::No => false,
+                    Spaced::All => true,
+                    Spaced::AtWords => b.c.is_ascii_alphabetic() != a.c.is_ascii_alphabetic(),
+                };
+                if space {
+                    let end = pieces.get(j - 1).map_or(piece.origin.1, |p| p.origin.1);
+                    view.push(' ', (piece.origin.0, end));
+                }
+            }
+        }
+        i = j;
+    }
+    (view, any_ambiguous)
 }
 
 /// Folds what NFKC leaves behind: Unicode decimal digits (Arabic-Indic,
@@ -343,11 +405,14 @@ fn decimal_digit_value(c: char) -> Option<u8> {
 }
 
 fn scan_normalised(text: &str, cfg: &GuardConfig) -> Vec<Finding> {
-    let dropped = normalise(text, Hidden::Drop);
+    let pieces = fold(text);
+    let (dropped, any_ambiguous) = build_view(&pieces, Spaced::No);
     let mut out = map_back(&dropped, scan_plain(&dropped.text, cfg));
-    if text.chars().any(is_hidden) {
-        let spaced = normalise(text, Hidden::Space);
-        out.extend(map_back(&spaced, scan_plain(&spaced.text, cfg)));
+    if any_ambiguous {
+        for mode in [Spaced::All, Spaced::AtWords] {
+            let (spaced, _) = build_view(&pieces, mode);
+            out.extend(map_back(&spaced, scan_plain(&spaced.text, cfg)));
+        }
     }
     out
 }
@@ -735,14 +800,34 @@ fn scan_email(text: &str, cfg: &GuardConfig, out: &mut Vec<Finding>) {
         let in_url = userinfo
             .iter()
             .any(|r| r.start <= whole.start() && whole.start() < r.end)
-            || text
-                .get(..whole.start())
-                .is_some_and(|head| head.ends_with("://"));
+            || is_url_user(text, whole.start(), whole.end());
         if in_url || is_work_domain(&domain, cfg) {
             continue;
         }
         push(out, Class::PersonalEmail, whole.range());
     }
+}
+
+/// `scheme://user@host`: a complete URL scheme right before the address and a
+/// URL boundary right after it (so `://jo.hale@gmail.com` alone is still an
+/// address).
+fn is_url_user(text: &str, start: usize, end: usize) -> bool {
+    let Some(scheme) = text
+        .get(..start)
+        .and_then(|head| head.strip_suffix("://"))
+        .map(|before| {
+            before
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+                .collect::<Vec<char>>()
+        })
+    else {
+        return false;
+    };
+    scheme.last().is_some_and(char::is_ascii_alphabetic)
+        && next_char(text, end)
+            .is_none_or(|n| n.is_whitespace() || matches!(n, '/' | ':' | '?' | '#'))
 }
 
 fn is_work_domain(domain: &str, cfg: &GuardConfig) -> bool {

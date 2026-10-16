@@ -1354,3 +1354,60 @@ fn scan_binary_survives_a_fullwidth_ssn_line_and_keeps_reporting_later_lines() {
         out.stderr.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review round 2: mixed hidden characters, combining marks, URL userinfo
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hidden_characters_both_inside_a_value_and_as_its_separator_are_still_detected() {
+    let zw = '\u{200B}';
+    assert_flags(
+        Class::Ssn,
+        &[
+            format!("SSN{zw}219-{zw}09-9999"),
+            format!("SSN{zw}2{zw}19-09-9999"),
+            format!("ssn:{zw}219{zw}-09-9999"),
+        ],
+    );
+    assert_flags(Class::Dob, &[format!("D{zw}OB{zw}03/{zw}14/1941")]);
+    assert_flags(Class::Phone, &[format!("call{zw}312-{zw}555-0142")]);
+    assert_flags(Class::Card, &[format!("card{zw}4111{zw}1111 1111 1111")]);
+}
+
+#[test]
+fn combining_marks_stacked_on_digits_and_letters_do_not_defeat_detection() {
+    let mark = '\u{0301}';
+    assert_flags(
+        Class::Ssn,
+        &[
+            format!("SSN 2{mark}19-09-9999"),
+            format!("SSN 219-0{mark}9-9999{mark}"),
+        ],
+    );
+    assert_flags(Class::Secret, &[format!("A{mark}KIA{}", up_alnum(16))]);
+    assert_flags(Class::Phone, &[format!("call 312-555-014{mark}2")]);
+    let text = format!("SSN 2{mark}19-09-9999");
+    let found = findings(&text);
+    assert_well_formed(&text, &found);
+}
+
+#[test]
+fn a_bare_url_prefix_does_not_exempt_an_address() {
+    assert_flags(
+        Class::PersonalEmail,
+        &[
+            "://dorothy.hale@gmail.com",
+            "see ://dorothy.hale@gmail.com",
+            "1x://dorothy.hale@gmail.com",
+        ],
+    );
+    assert_not_flags(
+        Class::PersonalEmail,
+        &[
+            "ssh://deploy@host.example.com/x",
+            "https://deploy@host.example.com",
+            "ssh://deploy@host.example.com:22",
+        ],
+    );
+}

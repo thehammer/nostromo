@@ -18,7 +18,8 @@ Text longer than `MAX_SCAN_BYTES` (1 MiB) is not scanned: `scan` returns one `Cl
 
 The patterns are ASCII-only and run on a normalised view of the text, with offsets mapped back to the original:
 
-- Invisible characters (`data::work::is_invisible`: zero-width, bidi overrides, Unicode tag characters, soft hyphen, ...) are removed, so `219-<ZWSP>09-9999` is an SSN. Whitespace such as `\n` and `\t` is never removed. A hidden character can also stand in for a space (`SSN<ZWSP>219-09-9999`), so text that contains one is scanned twice, once with them removed and once with each read as a space.
+- Invisible characters (`data::work::is_invisible`: zero-width, bidi overrides, Unicode tag characters, soft hyphen, ...) are removed, so `219-<ZWSP>09-9999` is an SSN. Whitespace such as `\n` and `\t` is never removed. A hidden character can also stand in for a space (`SSN<ZWSP>219-09-9999`); where a hidden run could be either (not beside whitespace or a joiner, not between two letters) the text is also scanned with those runs read as a space, and with only the runs next to a word read as a space.
+- Combining marks (`2<U+0301>19-09-9999`) are removed.
 - Compatibility forms are folded to ASCII: fullwidth letters and punctuation (`ＡＫＩＡ…`, `＠`, `＝`), any Unicode decimal digit (Arabic-Indic, Devanagari, Thai, mathematical digits, ...), and en dash, minus and similar dashes read as `-`. This uses NFKC from the `unicode-normalization` crate already in the tree, plus the digit and dash folding NFKC leaves out.
 - Only ASCII letters and digits count as "glued" to a value, so text in scripts written without spaces (`社会保障号219-09-9999`) is still scanned.
 
@@ -43,6 +44,7 @@ The patterns are ASCII-only and run on a normalised view of the text, with offse
 - **Non-NANP phone numbers** and bare 10-digit phone numbers without `+1`. Phones with spaced separators (`312 - 555 - 0142`).
 - **SSNs with spaces or dots** (`219 09 9999`, `219.09.9999`) or as 9 bare digits (`219099999`). These are indistinguishable from versions, order ids and phone fragments; the unlabelled forms are not worth the false alarms.
 - **Cards** on networks outside first digit 3-6 / 2221-2720, with irregular grouping, dots as separators (`4111.1111.1111.1111`), double spaces, or a line break inside the number.
+- **Several hidden characters in one card number** when some stand in for spaces and others sit inside a group (`4111<ZWSP>1111 1111 11<ZWSP>11`); each placement alone is detected.
 - **Homoglyphs**: look-alike letters from another script (Cyrillic `АКІА`), which NFKC does not fold to Latin. Digits in any script and fullwidth forms ARE detected.
 - **Email addresses** with a Unicode domain (`jo@bücher.example`), a quoted local part (`"jo hale"@gmail.com`), or the local part `git` (`git@gmail.com` is skipped with `git@github.com:org/repo.git`).
 - **`password=` values that start with `$`, `%`, `<`, `{`, `[`, `*`, `/`, `~` or `.`** (`password=$ecret99`): the assignment rule skips them as placeholders and paths. URL passwords are checked by exact placeholder shape instead.
