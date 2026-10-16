@@ -8,7 +8,14 @@
 //! literally (`-l`: always literally; `-H`: hex bytes). A small line editor
 //! applies the keys that edit the shell's input line (backspace, cursor
 //! movement, kill), because text can be typed out of order and fixed up.
-//! Nothing here runs anything.
+//!
+//! Keys that move or rearrange text in ways that depend on the shell and its
+//! key bindings (word motion `M-b` / `C-Left`, yank `C-y`, transpose `C-t`,
+//! undo `C-_`, history recall `Up`, `Escape` sequences, …) are **not**
+//! applied: they are [`Key::Inexact`]. A call that mixes typed text with one
+//! is "can't tell" ([`Typed::inexact`]); the guard blocks it when a remote
+//! pane is open, or when the text typed could still spell a marker
+//! ([`could_spell_marker`]). Nothing here runs anything.
 
 use std::collections::HashMap;
 
@@ -29,9 +36,13 @@ pub enum Key {
     KillToStart,
     KillToEnd,
     KillWord,
-    /// A key that edits nothing the guard models (arrows up and down, `Escape`,
-    /// function keys, `C-c`, `M-x`, …): it ends the text like a space.
-    Other,
+    /// A key that leaves the typed text alone (`C-c`, `C-l`, function keys, page
+    /// keys, …): it ends the text like a space.
+    Inert,
+    /// A key that moves or rearranges text in a way the guard does not apply
+    /// (`M-b`, `C-Left`, `C-y`, `C-t`, `C-_`, `C-x`, `Up`, `Escape`, …): the line
+    /// that results can't be told. It ends the text like a space.
+    Inexact,
 }
 
 /// The arguments of one `send-keys` call, split into flags and keys.
@@ -119,32 +130,59 @@ pub fn send_keys(args: &[Word]) -> Vec<Key> {
 /// The key a name stands for, `None` when the argument is plain text.
 fn key_named(name: &str) -> Option<Key> {
     let lower = name.to_ascii_lowercase();
+    // `^x` is `C-x`.
+    let lower = match lower.strip_prefix('^') {
+        Some(c) if c.chars().count() == 1 => format!("c-{c}"),
+        _ => lower,
+    };
     Some(match lower.as_str() {
         "space" => Key::Char(' '),
-        "enter" | "kpenter" | "c-m" | "c-j" | "^m" | "^j" => Key::Enter,
-        "tab" | "c-i" | "^i" => Key::Tab,
-        "bspace" | "c-h" | "c-?" | "^h" | "^?" => Key::Backspace,
-        "dc" | "delete" | "c-d" | "^d" => Key::Delete,
-        "left" | "c-b" | "^b" => Key::Left,
-        "right" | "c-f" | "^f" => Key::Right,
-        "home" | "c-a" | "^a" => Key::Home,
-        "end" | "c-e" | "^e" => Key::End,
-        "c-u" | "^u" => Key::KillToStart,
-        "c-k" | "^k" => Key::KillToEnd,
-        "c-w" | "^w" => Key::KillWord,
-        "escape" | "up" | "down" | "btab" | "ppage" | "npage" | "pageup" | "pagedown" | "ic" | "insert" => {
-            Key::Other
-        }
-        _ => {
-            let modifier = lower.len() > 2 && matches!(lower.as_bytes(), [b'c' | b'm' | b's', b'-', ..]);
-            let caret = lower.len() == 2 && lower.starts_with('^');
-            let function = lower.len() > 1 && lower.starts_with('f') && lower[1..].bytes().all(|b| b.is_ascii_digit());
-            if modifier || caret || function || (lower.starts_with("kp") && name.len() > 2) {
-                Key::Other
-            } else {
-                return None;
-            }
-        }
+        "enter" | "kpenter" | "c-m" | "c-j" => Key::Enter,
+        "tab" | "c-i" => Key::Tab,
+        "bspace" | "c-h" | "c-?" => Key::Backspace,
+        "dc" | "delete" | "c-d" => Key::Delete,
+        "left" | "c-b" => Key::Left,
+        "right" | "c-f" => Key::Right,
+        "home" | "c-a" => Key::Home,
+        "end" | "c-e" => Key::End,
+        "c-u" => Key::KillToStart,
+        "c-k" => Key::KillToEnd,
+        "c-w" => Key::KillWord,
+        // History recall and escape sequences (`Escape b` is `M-b`).
+        "escape" | "up" | "down" => Key::Inexact,
+        "btab" | "ppage" | "npage" | "pageup" | "pagedown" | "ic" | "insert" => Key::Inert,
+        _ => return modified_key(&lower),
+    })
+}
+
+/// `C-`, `M-` and `S-` keys (any mix, `C-M-b`), function keys and keypad keys.
+/// Only a modifier on a real key counts: `c-note` is text.
+fn modified_key(lower: &str) -> Option<Key> {
+    let mut base = lower;
+    let mut modified = false;
+    while let Some(rest) = base.strip_prefix("c-").or_else(|| base.strip_prefix("m-")).or_else(|| base.strip_prefix("s-")) {
+        base = rest;
+        modified = true;
+    }
+    let single = base.chars().count() == 1;
+    let named = matches!(
+        base,
+        "up" | "down" | "left" | "right" | "home" | "end" | "bspace" | "dc" | "delete" | "ic" | "insert" | "tab"
+            | "btab" | "enter" | "escape" | "space" | "ppage" | "npage" | "pageup" | "pagedown"
+    );
+    let function = base.len() > 1 && base.starts_with('f') && base[1..].bytes().all(|b| b.is_ascii_digit());
+    let keypad = base.starts_with("kp") && base.len() > 2;
+    if !modified {
+        return (function || keypad).then_some(Key::Inert);
+    }
+    if !(single || named || function || keypad) {
+        return None;
+    }
+    // Keys the shell reads as no text change.
+    Some(match lower {
+        "c-c" | "c-g" | "c-l" | "c-z" | "c-\\" | "c-@" => Key::Inert,
+        _ if function || keypad => Key::Inert,
+        _ => Key::Inexact,
     })
 }
 
@@ -164,6 +202,8 @@ pub struct Typed {
     pub joined: String,
     /// The word before the cursor at each Tab (a shell completes it).
     pub tab_words: Vec<String>,
+    /// A [`Key::Inexact`] was typed along with text: `edited` can't be trusted.
+    pub inexact: bool,
 }
 
 impl Typed {
@@ -177,6 +217,17 @@ impl Typed {
         }
         out
     }
+}
+
+/// Could `typed` (text typed along with keys that rearrange it) still be
+/// reordered into one of `markers` (lowercase words)? Cheap and wide on
+/// purpose: a marker's first four characters appear in it, or it holds every
+/// distinct letter of a marker (a yank can repeat text, so counts don't matter).
+pub fn could_spell_marker(typed: &str, markers: &[&str]) -> bool {
+    let typed = typed.to_ascii_lowercase();
+    markers.iter().any(|m| {
+        typed.contains(&m[..m.len().min(4)]) || m.chars().all(|c| typed.contains(c))
+    })
 }
 
 /// Run `keys` through the line editor.
@@ -254,9 +305,15 @@ pub fn type_keys(keys: &[Key]) -> Typed {
                 cursor = start;
                 typed.spaced.push(' ');
             }
-            Key::Other => typed.spaced.push(' '),
+            Key::Inert => typed.spaced.push(' '),
+            Key::Inexact => {
+                typed.inexact = true;
+                typed.spaced.push(' ');
+            }
         }
     }
+    // An editing key alone (`Up Enter`, `M-b`) has no typed text to mix up.
+    typed.inexact &= typed.joined.chars().any(|c| !c.is_whitespace());
     lines.push(line.into_iter().collect());
     typed.edited = lines.join("\n");
     typed
@@ -381,6 +438,39 @@ mod tests {
         assert_eq!(typed(&["nnect", "Home", "ecs_co"]).edited, "ecs_connect");
         assert_eq!(typed(&["abc", "C-u", "x"]).edited, "x");
         assert_eq!(typed(&["a", "Left", "b", "End", "c"]).edited, "bac");
+    }
+
+    #[test]
+    fn keys_that_rearrange_text_are_inexact_only_when_text_is_typed() {
+        for keys in [
+            &["connect", "M-b", "ecs_"][..],
+            &["connect", "M-Left", "ecs_"],
+            &["connect", "C-Left", "ecs_"],
+            &["connect", "C-u", "ecs_", "C-y"],
+            &["ecs_connetc", "C-t"],
+            &["x", "C-_"],
+            &["x", "C-x", "C-u"],
+            &["x", "Escape", "b"],
+            &["x", "Up"],
+            &["x", "^y"],
+        ] {
+            assert!(typed(keys).inexact, "{keys:?}");
+        }
+        for keys in [&["M-b"][..], &["Up", "Enter"], &["C-y"], &["ls", "C-c"], &["ls", "C-l", "Enter"], &["ls", "F5"], &["a c-note"], &["m-ecs_", "connect"]] {
+            assert!(!typed(keys).inexact, "{keys:?}");
+        }
+        // `m-ecs_` is not a key: the text is typed.
+        assert_eq!(typed(&["m-ecs_", "connect"]).edited, "m-ecs_connect");
+    }
+
+    #[test]
+    fn could_spell_marker_is_wide_on_purpose() {
+        let markers = ["ecs_connect", "execute-command"];
+        assert!(could_spell_marker("connectecs_", &markers));
+        assert!(could_spell_marker("cesconnect_", &markers));
+        assert!(could_spell_marker("execu", &markers));
+        assert!(!could_spell_marker("ls", &markers));
+        assert!(!could_spell_marker("git status", &markers));
     }
 
     #[test]

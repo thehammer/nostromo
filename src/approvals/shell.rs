@@ -33,6 +33,10 @@ pub struct ShellParse {
     pub heredocs: Vec<HereDoc>,
     /// True when the input (or a nested payload) could not be tokenized.
     pub unparsed: bool,
+    /// A here-doc anywhere in the input (nested ones and payloads too) has an
+    /// unquoted delimiter and a body with `$(` or a backtick: the shell runs
+    /// that text, and the tokenizer does not parse it.
+    pub expanding_heredoc: bool,
 }
 
 /// One simple command: its words after quote removal, without redirections
@@ -578,6 +582,7 @@ impl<'a> Parser<'a> {
             wild: Vec::new(),
         };
         let ok = sub.parse_list(false).is_ok();
+        self.out.expanding_heredoc |= sub.out.expanding_heredoc;
         // Map spans back onto this input when the text was copied verbatim.
         let close = self.pos;
         let shift = move |r: &Range<usize>| if escaped { open..close } else { r.start + open + 1..r.end + open + 1 };
@@ -730,6 +735,10 @@ impl<'a> Parser<'a> {
                 }
             };
             let body_span = body_start..body_end;
+            let body = &self.src[body_span.clone()];
+            if !hd.quoted && (body.contains('`') || body.contains("$(")) {
+                self.out.expanding_heredoc = true;
+            }
             if hd.feeds_shell {
                 let body = &self.src[body_span.clone()];
                 let body = if hd.strip_tabs {
@@ -788,6 +797,7 @@ impl<'a> Parser<'a> {
         }
         let sub = parse_at_depth(text, self.depth + 1);
         self.out.unparsed |= sub.unparsed;
+        self.out.expanding_heredoc |= sub.expanding_heredoc;
         self.out.commands.extend(sub.commands.into_iter().map(|c| SimpleCommand { span: span.clone(), ..c }));
     }
 }
@@ -890,7 +900,7 @@ fn command_payloads(words: &[Word]) -> Payload {
     }
 }
 
-fn is_assignment(w: &str) -> bool {
+pub(crate) fn is_assignment(w: &str) -> bool {
     match w.split_once('=') {
         Some((name, _)) => {
             !name.is_empty()

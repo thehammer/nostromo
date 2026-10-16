@@ -15,6 +15,7 @@ pub mod guard;
 pub mod shell;
 
 mod expand;
+mod inert;
 mod keys;
 mod tmux_bin;
 

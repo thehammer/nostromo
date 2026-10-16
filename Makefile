@@ -63,7 +63,8 @@ install-daemon: daemon
 	@# runs) beside its own symlink-resolved executable, so it goes next to the real nostromd.
 	@# Both are staged and signed BEFORE either is replaced: a failed copy or codesign must not
 	@# leave a new nostromd beside a missing or stale guard (missing, every agent tool call is
-	@# blocked).
+	@# blocked). The guard is moved into place BEFORE nostromd, so there is never a new daemon
+	@# beside a stale guard.
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
 	  guard="$$(dirname "$$real")/nostromo-guard"; \
 	  stage_daemon="$$real.new.$$$$"; stage_guard="$$guard.new.$$$$"; \
@@ -74,7 +75,7 @@ install-daemon: daemon
 	    rm -f "$$stage_daemon" "$$stage_guard"; \
 	    echo "install-daemon: could not copy and sign nostromd and nostromo-guard; nothing was replaced" >&2; exit 1; \
 	  fi; \
-	  if rm -f "$$real" "$$guard" && mv "$$stage_daemon" "$$real" && mv "$$stage_guard" "$$guard"; then :; \
+	  if rm -f "$$guard" && mv "$$stage_guard" "$$guard" && rm -f "$$real" && mv "$$stage_daemon" "$$real"; then :; \
 	  else \
 	    rm -f "$$stage_daemon" "$$stage_guard"; \
 	    echo "install-daemon: could not move the new binaries into place; reinstall with make install-daemon" >&2; exit 1; \

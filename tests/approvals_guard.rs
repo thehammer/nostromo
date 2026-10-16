@@ -1207,14 +1207,14 @@ fn bypass_tmux_short_buffer_verbs_are_checked_against_the_server() {
 
 #[test]
 fn bypass_tmux_commands_that_run_other_tmux_commands_are_checked() {
-    // if-shell, bind-key, run-shell, source-file, … run tmux commands the guard can't see.
+    // if-shell, bind-key, run-shell, … run tmux commands the guard can't see. (`source-file` was
+    // here too: round 2 makes it allowed while a pane is remote when the call has no input
+    // command, see `benign_tmux_source_file_of_a_plain_path_is_allowed_while_a_pane_is_remote`.)
     for command in [
         "tmux if-shell true 'pi -t %7 cat'",
         "tmux if true 'loa /tmp/x'",
         "tmux bind-key x pi -t %7 cat",
         "tmux run-shell -C 'pi -t %7 cat'",
-        "tmux source-file /tmp/cmds.tmux",
-        "tmux source /tmp/cmds.tmux",
         "tmux set-hook -g pane-focus-in 'pi -t %7 cat'",
         "tmux confirm-before 'pi -t %7 cat'",
         "tmux command-prompt -I x 'pi -t %7 cat'",
@@ -2107,4 +2107,825 @@ fn the_guards_own_tmux_probes_ignore_the_agents_tmux_environment() {
     tmux(&["select-pane", "-t", pane.as_str(), "-T", "zsh"]);
     let local = sb.guard_with(&["pre-tool-use"], payload.to_string().as_bytes(), hostile);
     assert_eq!((local.code, local.stdout.as_str()), (Some(0), ""), "a local pane is still allowed: {local:?}");
+}
+
+// ── round 2 review fixes (B4: tmux state changes, B5: editing keys, false positives) ─────
+//
+// RED tests: every `bypass_*` test below fails on the code that precedes its fix, and so do
+// the `benign_*` tests that name a mention of a marker or `tmux source-file`. Tests for things
+// that must stay blocked or allowed may already pass; they pin the behaviour while the fixes land.
+
+type World = fn() -> FakeProbe;
+
+fn three_worlds() -> [(&'static str, World); 3] {
+    [
+        ("no tmux server", FakeProbe::default as World),
+        ("a local-only tmux server", local_world as World),
+        ("a remote pane is open", remote_pane_world as World),
+    ]
+}
+
+/// Every command in every one of the three worlds: allowed (`expect == None`) or blocked by the
+/// rule named. Reports every (world, command) that is not.
+#[track_caller]
+fn assert_in_every_world(commands: &[&str], what: &str, expect: Option<&str>) {
+    let mut failures = Vec::new();
+    for (world_name, world) in three_worlds() {
+        for command in commands {
+            let verdict = evaluate(&bash(command), &world());
+            let ok = match expect {
+                None => verdict == Ok(GuardVerdict::Allow),
+                Some(rule) => rule_of(&verdict) == Some(rule),
+            };
+            if !ok {
+                failures.push(format!("  [{world_name}] {command:?} -> {verdict:?}"));
+            }
+        }
+    }
+    let wanted = expect.map_or_else(|| "an allow".to_owned(), |r| format!("a block by `{r}`"));
+    assert!(failures.is_empty(), "{what}: expected {wanted} for:\n{}", failures.join("\n"));
+}
+
+/// Every command must be blocked, by whichever rule. Reports all that are not.
+#[track_caller]
+fn assert_all_blocked_by_any_rule(commands: &[&str], what: &str, world: impl Fn() -> FakeProbe) {
+    let failures: Vec<String> = commands
+        .iter()
+        .filter_map(|c| {
+            let verdict = evaluate(&bash(c), &world());
+            (!matches!(verdict, Ok(GuardVerdict::Block { .. }))).then(|| format!("  {c:?} -> {verdict:?}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{what}: expected a block (any rule) for:\n{}", failures.join("\n"));
+}
+
+// ── B4: a state-changing tmux command in the same call moves what a target means ─────────
+//
+// The guard resolves `-t prod` to the pane that is active when the hook runs. An earlier command
+// in the same call can change which pane that is. So with any state-changing (or "can't tell")
+// tmux command in the call, every target that is not a `%N` pane id is "can't tell".
+
+/// `%0` is local, `%1` is an ECS shell, and every other target the tests aim at resolves to a
+/// LOCAL pane: a guard that looks only at what the target resolves to now would allow them.
+fn state_change_world() -> FakeProbe {
+    FakeProbe::default()
+        .pane_on(DEFAULT, "%0", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "%1", REMOTE_TITLE, REMOTE_SHELL)
+        .pane_on(DEFAULT, "prod", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "0", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "work:0.1", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "prod:1.0", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "{last}", "zsh", LOCAL_SHELL)
+}
+
+/// The same targets, no remote pane anywhere.
+fn state_change_all_local_world() -> FakeProbe {
+    FakeProbe::default()
+        .pane_on(DEFAULT, "%0", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "prod", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "0", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "work:0.1", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "prod:1.0", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "{last}", "zsh", LOCAL_SHELL)
+}
+
+/// tmux commands that change what the active pane / window / session is, or may (an unknown name
+/// may be a `command-alias`; `if-shell` and `run-shell` run anything).
+const TMUX_STATE_CHANGES: &[&str] = &[
+    "tmux select-pane -t %0",
+    "tmux select-pane -U",
+    "tmux select-window -t 0",
+    "tmux select-layout even-horizontal",
+    "tmux last-pane",
+    "tmux last-window",
+    "tmux kill-pane -t %0",
+    "tmux kill-window -t 1",
+    "tmux swap-pane -U",
+    "tmux swap-window -t 1",
+    "tmux join-pane -s %0",
+    "tmux break-pane -d",
+    "tmux move-window -t 5",
+    "tmux move-pane -t 1",
+    "tmux next-window",
+    "tmux next-layout",
+    "tmux previous-window",
+    "tmux previous-layout",
+    "tmux new-window -d",
+    "tmux split-window -d",
+    "tmux new-session -d -s x",
+    "tmux rename-window x",
+    "tmux rename-session x",
+    // aliases and prefixes tmux accepts
+    "tmux selectp -t %0",
+    "tmux selectw -t 0",
+    "tmux lastp",
+    "tmux killp -t %0",
+    "tmux select-p -t %0",
+    "tmux swapp -U",
+    "tmux neww -d",
+    "tmux splitw -d",
+    // a name tmux does not define may be a command-alias for any of the above
+    "tmux foo",
+    // commands that run other commands
+    "tmux if-shell true 'select-pane -t %0'",
+    "tmux run-shell 'tmux select-pane -t %0'",
+];
+
+fn then_send_keys(first: &str, target: &str) -> String {
+    format!("{first}; tmux send-keys -t {target} x")
+}
+
+#[test]
+fn bypass_a_tmux_state_change_before_a_send_keys_makes_every_session_or_window_target_unknown() {
+    // The examples from the review, spelled out.
+    let spelled_out = [
+        "tmux select-pane -t %0; tmux send-keys -t prod 'echo PWNED' Enter",
+        "tmux kill-pane -t %1; tmux send-keys -t prod x",
+        "tmux last-pane; tmux send-keys -t prod x",
+        "tmux select-pane -U; tmux send-keys -t prod x",
+        "tmux select-window -t 0 && tmux send-keys -t 0 x",
+        r"tmux select-pane -t %0 \; send-keys -t prod x",
+        r"tmux select-pane -t %0 \; send-keys -t 0 x",
+        "tmux select-pane -t %0 || tmux send-keys -t prod x",
+        "tmux select-pane -t %0\ntmux send-keys -t prod x",
+        "bash -c 'tmux select-pane -t %0; tmux send-keys -t prod x'",
+        "cd /tmp && tmux select-pane -t %0 && tmux send-keys -t work:0.1 x",
+        // the change may come after the send in the text: a call is one unit
+        "tmux send-keys -t prod x; tmux select-pane -t %0",
+        // no target at all
+        "tmux select-pane -t %0; tmux send-keys x",
+    ];
+    assert_all_blocked(&spelled_out, RULE_TMUX_INPUT, "a state change in the same call", state_change_world);
+}
+
+#[test]
+fn bypass_every_kind_of_tmux_state_change_defeats_session_window_and_unqualified_targets() {
+    let mut commands = Vec::new();
+    for change in TMUX_STATE_CHANGES {
+        for target in ["prod", "0", "work:0.1", "prod:1.0", "{last}"] {
+            commands.push(then_send_keys(change, target));
+        }
+        commands.push(format!("{change}; tmux send-keys x"));
+    }
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    assert_all_blocked(&refs, RULE_TMUX_INPUT, "a state change in the same call", state_change_world);
+}
+
+#[test]
+fn bypass_a_pane_id_after_a_state_change_is_still_probed_and_a_remote_one_is_blocked() {
+    assert_all_blocked(
+        &[
+            "tmux select-pane -t %0; tmux send-keys -t %1 x",
+            "tmux last-pane; tmux send-keys -t %1 x Enter",
+            "tmux new-window -d; tmux send-keys -t %1 x",
+        ],
+        RULE_TMUX_INPUT,
+        "%1 is the remote pane, whatever ran first",
+        state_change_world,
+    );
+}
+
+#[test]
+fn tmux_input_without_a_state_change_in_the_call_still_follows_what_the_target_resolves_to() {
+    // The existing behaviour: nothing earlier in the call can move `prod`, so it is the pane it
+    // resolves to (a local one), and a remote pane elsewhere on the server does not matter.
+    assert_all_allowed(
+        &[
+            "tmux send-keys -t prod x",
+            "tmux send-keys -t 0 x",
+            "tmux send-keys -t work:0.1 x",
+            "tmux send-keys -t %0 x; tmux send-keys -t prod y",
+        ],
+        "no state change in the call",
+        state_change_world,
+    );
+}
+
+#[test]
+fn tmux_state_changes_followed_by_input_to_a_pane_id_that_is_local_stay_allowed() {
+    // `%N` ids are stable: nothing in the call moves them, so the probe's answer stands.
+    assert_all_allowed(
+        &[
+            "tmux select-pane -t %0; tmux send-keys -t %0 x",
+            "tmux last-pane; tmux send-keys -t %0 x Enter",
+            "tmux new-window -d; tmux send-keys -t %0 'cargo test' Enter",
+            r"tmux select-pane -t %0 \; send-keys -t %0 x",
+            "tmux kill-window -t 1; tmux send-keys -t %0 x",
+        ],
+        "a stable pane id that is local",
+        state_change_world,
+    );
+}
+
+#[test]
+fn tmux_read_only_commands_before_a_send_keys_do_not_make_its_target_unknown() {
+    assert_all_allowed(
+        &[
+            "tmux list-panes; tmux send-keys -t prod x",
+            "tmux list-panes -a; tmux send-keys -t prod x",
+            "tmux list-windows; tmux send-keys -t 0 x",
+            "tmux list-sessions; tmux send-keys -t prod x",
+            "tmux ls; tmux send-keys -t prod x",
+            "tmux display-message -p x; tmux send-keys -t prod x",
+            "tmux capture-pane -p -t prod; tmux send-keys -t prod x",
+            "tmux send-keys -t prod x; tmux list-panes",
+        ],
+        "read-only tmux commands change nothing",
+        state_change_world,
+    );
+}
+
+#[test]
+fn tmux_state_changes_with_no_remote_pane_anywhere_are_allowed() {
+    let mut commands = vec![
+        "tmux select-pane -t %0; tmux send-keys -t prod x".to_owned(),
+        "tmux last-pane; tmux send-keys -t prod x".to_owned(),
+        "tmux select-window -t 0 && tmux send-keys -t 0 x".to_owned(),
+    ];
+    for change in TMUX_STATE_CHANGES {
+        commands.push(then_send_keys(change, "prod"));
+        commands.push(format!("{change}; tmux send-keys x"));
+    }
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    assert_all_allowed(&refs, "nothing remote to type into", all_local_world);
+    assert_all_allowed(&refs, "nothing remote to type into, targets resolve to local panes", state_change_all_local_world);
+    assert_all_allowed(&refs, "no tmux server", FakeProbe::default);
+}
+
+// ── B5: editing and meta keys assemble a marker in a local pane ──────────────────────────
+//
+// `Key::Other` acts like a space, but `M-b`, `C-y`, `C-t` … edit the line. A call that mixes
+// literal text with a key the line-editor model cannot apply exactly is "can't tell".
+
+/// `%0` and `%2` are local; nothing is remote.
+fn pane_two_world() -> FakeProbe {
+    FakeProbe::default().pane_on(DEFAULT, "%0", "zsh", LOCAL_SHELL).pane_on(DEFAULT, "%2", "zsh", LOCAL_SHELL)
+}
+
+/// `%0` and `%2` are local, and an ECS shell is open (`%1`).
+fn pane_two_with_remote_elsewhere_world() -> FakeProbe {
+    pane_two_world().pane_on(DEFAULT, "%1", REMOTE_TITLE, REMOTE_SHELL)
+}
+
+/// Each of these types `ecs_connect` (or another marker) at a bash prompt, by editing the line.
+const EDITING_KEYS_SPELL_A_MARKER: &[&str] = &[
+    // from the review
+    "tmux send-keys -t %2 connect M-b ecs_ Enter",
+    "tmux send-keys -t %2 connect M-Left ecs_ Enter",
+    "tmux send-keys -t %2 connect C-Left ecs_ Enter",
+    "tmux send-keys -t %2 connect C-u ecs_ C-y Enter",
+    "tmux send-keys -t %2 ecs_connetc C-t Enter",
+    // word motion and word deletion
+    "tmux send-keys -t %2 ecs Home M-f _connect Enter",
+    "tmux send-keys -t %2 ecs Home C-Right _connect Enter",
+    "tmux send-keys -t %2 ecs_junk Left Left Left Left M-d connect Enter",
+    "tmux send-keys -t %2 ecs_junk M-BSpace connect Enter",
+    "tmux send-keys -t %2 connect M-b ecs_ M-f Enter",
+    // transposition, undo
+    "tmux send-keys -t %2 ecs_ connect M-t Enter",
+    "tmux send-keys -t %2 ecs_ X 'C-_' connect Enter",
+    "tmux send-keys -t %2 ecs_ X C-x C-u connect Enter",
+    // kill and yank
+    "tmux send-keys -t %2 connect C-w ecs_ C-y Enter",
+    "tmux send-keys -t %2 connect Home C-k ecs_ C-y Enter",
+    "tmux send-keys -t %2 connect C-a C-k ecs_ C-y Enter",
+    // in the same command string as the text, in two send-keys
+    "tmux send-keys -t %2 connect; tmux send-keys -t %2 M-b ecs_ Enter",
+];
+
+/// The same, written with keys the line-editor model does apply (these block today and must keep
+/// blocking: they pin the modelled keys next to the ones that are not).
+const MODELLED_KEYS_SPELL_A_MARKER: &[&str] = &[
+    "tmux send-keys -t %2 connect C-a ecs_ Enter",
+    "tmux send-keys -t %2 nnect Home ecs_co End Enter",
+    "tmux send-keys -t %2 ecs_cnnect C-b C-b C-b C-b C-b o Enter",
+    "tmux send-keys -t %2 ecs_conect C-b C-b C-b C-b C-f n Enter",
+    "tmux send-keys -t %2 ecs_connec Left Left Right Right t Enter",
+    "tmux send-keys -t %2 connect Home ecs_ End Enter",
+];
+
+#[test]
+fn bypass_editing_and_meta_keys_assemble_a_marker_in_a_local_pane() {
+    assert_all_blocked(EDITING_KEYS_SPELL_A_MARKER, RULE_COMMAND, "no tmux server", FakeProbe::default);
+    assert_all_blocked(EDITING_KEYS_SPELL_A_MARKER, RULE_COMMAND, "only local panes", pane_two_world);
+}
+
+#[test]
+fn bypass_editing_and_meta_keys_assemble_a_marker_while_a_remote_pane_is_open() {
+    // The marker text is found whatever else is on the server; or the call is "can't tell".
+    assert_all_blocked_by_any_rule(EDITING_KEYS_SPELL_A_MARKER, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+#[test]
+fn bypass_editing_and_meta_keys_assemble_an_aws_marker_in_a_local_pane() {
+    let commands = [
+        "tmux send-keys -t %2 execute-command M-b 'aws ecs ' Enter",
+        "tmux send-keys -t %2 start-session M-b 'aws ssm ' Enter",
+        "tmux send-keys -t %2 manager-plugin M-b session- Enter",
+        "tmux send-keys -t %2 ecs_shell C-w ecs_ C-y Enter",
+    ];
+    assert_all_blocked(&commands, RULE_COMMAND, "no tmux server", FakeProbe::default);
+    assert_all_blocked(&commands, RULE_COMMAND, "only local panes", pane_two_world);
+}
+
+#[test]
+fn modelled_editing_keys_that_spell_a_marker_stay_blocked() {
+    assert_all_blocked(MODELLED_KEYS_SPELL_A_MARKER, RULE_COMMAND, "no tmux server", FakeProbe::default);
+    assert_all_blocked(MODELLED_KEYS_SPELL_A_MARKER, RULE_COMMAND, "only local panes", pane_two_world);
+}
+
+const MIXED_WITH_AN_UNMODELLED_KEY: &[&str] = &[
+    "tmux send-keys -t %2 'ls' M-b 'x'",
+    "tmux send-keys -t %2 'ls -la' M-f Enter",
+    "tmux send-keys -t %2 'git status' C-r",
+    "tmux send-keys -t %2 'make test' M-d Enter",
+    "tmux send-keys -t %2 'ls' C-t Enter",
+    "tmux send-keys -t %2 'ls' C-y Enter",
+];
+
+#[test]
+fn bypass_text_mixed_with_a_key_the_editor_cannot_apply_is_blocked_while_a_remote_pane_is_open() {
+    // Fail closed: the line cannot be told, and typing into the wrong shell is worse than a
+    // refused keystroke. Whether the rule is `command` or `tmux_input` is the guard's choice.
+    assert_all_blocked_by_any_rule(MIXED_WITH_AN_UNMODELLED_KEY, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+#[test]
+fn text_mixed_with_a_key_the_editor_cannot_apply_is_allowed_when_it_cannot_spell_a_marker_and_nothing_is_remote() {
+    assert_all_allowed(MIXED_WITH_AN_UNMODELLED_KEY, "no tmux server", FakeProbe::default);
+    assert_all_allowed(MIXED_WITH_AN_UNMODELLED_KEY, "only local panes", pane_two_world);
+}
+
+#[test]
+fn ordinary_typing_into_a_local_pane_stays_allowed_with_and_without_a_remote_pane_elsewhere() {
+    let ordinary = [
+        "tmux send-keys -t %2 ls Enter",
+        "tmux send-keys -t %2 C-c",
+        "tmux send-keys -t %2 'git status' Enter",
+        "tmux send-keys -t %2 'cargo test' Enter",
+        "tmux send-keys -t %2 Up Enter",
+        "tmux send-keys -t %2 C-l",
+        "tmux send-keys -t %2 Escape",
+        // modelled exactly, and the result is not a marker
+        "tmux send-keys -t %2 'ls -la' Left Left x Enter",
+        "tmux send-keys -t %2 'git log --oneline' Home 'echo ' Enter",
+    ];
+    assert_all_allowed(&ordinary, "no tmux server", FakeProbe::default);
+    assert_all_allowed(&ordinary, "only local panes", pane_two_world);
+    assert_all_allowed(&ordinary, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+// ── false positives: commands that only MENTION a marker ─────────────────────────────────
+//
+// A command whose every simple command is an inert program (its arguments are data: git
+// commit/log/grep/…, grep, rg, echo, printf, cat/tee/wc/head/tail/sed/awk on files, `gh pr
+// create`) and that never puts a marker in command position is not a way to open a shell.
+
+const INERT_MENTIONS: &[&str] = &[
+    r#"git commit -m "fix: guard blocks ecs_connect in the shell""#,
+    "git commit -m 'docs: aws ecs execute-command is blocked'",
+    r#"git commit -m "docs: aws ssm start-session and session-manager-plugin are blocked""#,
+    r#"git commit -m "feat: ecs_shell, ecs_run_task and ecs_open_tmux_pane are blocked""#,
+    "git grep -n ecs_connect",
+    "git log --grep=ecs_connect",
+    "git log --oneline -S execute-command",
+    "git show HEAD | grep ecs_connect",
+    "git diff | grep -n execute-command | head",
+    "git add src/ecs_connect.rs",
+    r#"git tag -a v1 -m "ecs_connect guard""#,
+    r#"git notes add -m "mentions ecs_connect""#,
+    "grep -rn ecs_connect docs src",
+    "grep -n 'aws ecs execute-command' notes.md",
+    "egrep -c 'ecs_shell|ecs_connect' notes.md",
+    "fgrep ecs_connect notes.md",
+    r#"rg "ecs_connect|execute-command""#,
+    "rg -n session-manager-plugin docs",
+    "ag ecs_connect src",
+    r#"echo "ecs_connect is blocked""#,
+    "echo 'aws ecs execute-command is blocked'",
+    r#"printf 'ecs_connect\n' > notes.txt"#,
+    "echo ecs_connect >> notes.txt",
+    r#"echo "ecs_connect" | tee notes.txt"#,
+    "wc -l docs/ecs_connect.md",
+    "head -n 5 ecs_shell.md",
+    "sed -n '1,20p' ecs_connect.md",
+    "awk '/ecs_connect/ { print $1 }' notes.md",
+    r#"gh pr create --title t --body "mentions ecs_connect""#,
+    r#"gh pr comment 5 --body "the guard blocks aws ecs execute-command""#,
+    // here-documents written into a file
+    "cat <<'EOF' > notes.md\n# Guard\nThe guard blocks ecs_connect and aws ecs execute-command.\nEOF",
+    "cat >> notes.md <<EOF\nThe guard blocks ecs_connect.\nEOF",
+    "cat > notes.md <<'EOF'\nexample: ecs_connect ap production portal\nEOF",
+];
+
+#[test]
+fn benign_commands_that_only_mention_a_marker_are_allowed_in_every_world() {
+    assert_in_every_world(INERT_MENTIONS, "an inert command that mentions a marker", None);
+}
+
+#[test]
+fn benign_commands_that_only_mention_a_tmux_input_command_are_allowed_while_a_pane_is_remote() {
+    assert_in_every_world(
+        &[
+            r#"echo "tmux send-keys is how the guard works""#,
+            r#"git commit -m "tmux send-keys guard""#,
+            "grep -rn 'tmux send-keys' docs src",
+            "rg 'send-keys|paste-buffer' src",
+            r#"git commit -m "fix: tmux paste-buffer and pipe-pane are input commands""#,
+            "echo 'tmux respawn-pane -k kills the shell' >> notes.md",
+        ],
+        "an inert command that mentions a tmux input command",
+        None,
+    );
+}
+
+#[test]
+fn benign_tmux_source_file_of_a_plain_path_is_allowed_while_a_pane_is_remote() {
+    // It was "can't tell" (a sourced file may hold any tmux command). With no input command in
+    // the same command it cannot type into anything the guard is told about.
+    assert_in_every_world(
+        &["tmux source-file ~/.tmux.conf", "tmux source-file /tmp/x.conf", "tmux source ~/.tmux.conf"],
+        "source-file with no input command in the call",
+        None,
+    );
+}
+
+#[test]
+fn tmux_source_file_beside_an_input_command_to_a_remote_pane_is_still_blocked() {
+    assert_all_blocked(
+        &["tmux source-file ~/.tmux.conf; tmux send-keys -t %1 x", r"tmux source-file ~/.tmux.conf \; send-keys -t %1 x"],
+        RULE_TMUX_INPUT,
+        "an input command to the remote pane",
+        remote_pane_world,
+    );
+}
+
+#[test]
+fn bypass_an_unresolvable_target_is_blocked_while_a_pane_is_remote_and_the_block_says_why() {
+    // Session `work` does not exist on the server: the probe answers Ok(None) for the pane.
+    // Fail closed (it may be a pane the probe cannot see yet), but say exactly why.
+    let command = "tmux send-keys -t work:0.1 ls Enter";
+    match evaluate(&bash(command), &remote_pane_world()) {
+        Ok(GuardVerdict::Block { rule_id, detail }) => {
+            assert_eq!(rule_id, RULE_TMUX_INPUT, "{detail}");
+            assert!(detail.contains("work:0.1"), "the detail names the target: {detail:?}");
+            assert!(detail.contains("could not be resolved"), "the detail says why: {detail:?}");
+        }
+        other => panic!("expected a block by `{RULE_TMUX_INPUT}`, got {other:?}"),
+    }
+    // Nothing remote on the server: nothing to protect, so it is allowed.
+    assert_allowed(evaluate(&bash(command), &local_world()), "unresolvable target, no remote pane");
+    assert_allowed(evaluate(&bash(command), &all_local_world()), "unresolvable target, all panes local");
+}
+
+// ── the exemption must not open a hole: these stay blocked in every world ────────────────
+
+#[test]
+fn bypass_inert_a_marker_piped_into_a_shell_or_interpreter_is_blocked() {
+    assert_in_every_world(
+        &[
+            "echo ecs_connect | sh",
+            "echo 'ecs_connect' | bash",
+            "echo ecs_connect | env sh",
+            "echo ecs_connect | eval",
+            "echo ecs_connect | /bin/sh",
+            "echo ecs_connect | zsh",
+            "echo ecs_connect | sh -s",
+            r#"echo "ecs_connect" | tee /dev/stderr | sh"#,
+            "printf 'ecs_connect\\n' | xargs",
+            "printf 'ecs_connect\\n' | xargs sh -c",
+            "git log --grep=x | echo ecs_connect | sh",
+            "cat <<EOF | sh\necs_connect ap\nEOF",
+            "cat <<'EOF' | bash\necs_connect ap\nEOF",
+            "git show HEAD | grep ecs_connect | sh",
+        ],
+        "a marker that reaches a shell",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_inert_a_marker_in_command_position_anywhere_in_the_command_is_blocked() {
+    assert_in_every_world(
+        &[
+            "git commit -m x; ecs_connect",
+            "echo x | grep y; ecs_connect ap",
+            "echo hi && ecs_connect ap",
+            "echo hi || ecs_connect ap",
+            "git commit -m x && aws ecs execute-command --cluster c",
+            "echo hi; aws ssm start-session --target i-1",
+            "echo hi; session-manager-plugin x",
+            "echo hi; ecs_shell ap",
+            "git log | head; ecs_run_task ap production portal migrate",
+            "ecs_connect ap",
+            "(ecs_connect ap)",
+            "{ ecs_connect ap; }",
+            "if true; then ecs_connect ap; fi",
+            "echo hi &\necs_connect ap",
+        ],
+        "a marker in command position",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_inert_a_marker_run_through_a_wrapper_command_is_blocked() {
+    assert_in_every_world(
+        &["sudo ecs_connect", "env ecs_connect", "command ecs_connect", "exec ecs_connect", "nohup ecs_connect ap", "time ecs_connect ap", "xargs ecs_connect"],
+        "a wrapper in front of a marker",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_inert_a_marker_inside_a_command_substitution_in_command_position_is_blocked() {
+    assert_in_every_world(
+        &[
+            "$(echo ecs_connect)",
+            "`echo ecs_connect`",
+            "echo $(ecs_connect ap)",
+            "echo `ecs_connect ap`",
+            "echo \"$(ecs_connect ap)\"",
+            "echo hi; source <(echo ecs_connect)",
+            "echo hi; . <(echo ecs_connect)",
+            "cat > notes.md <<EOF\nrun $(ecs_connect ap)\nEOF",
+            "cat > notes.md <<EOF\nrun `ecs_connect ap`\nEOF",
+        ],
+        "a marker that a substitution runs",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_inert_a_shell_is_not_an_inert_program_and_nor_is_its_input() {
+    assert_in_every_world(
+        &[
+            "bash -c 'echo ecs_connect'",
+            "sh -c \"echo ecs_connect\"",
+            "eval 'echo ecs_connect'",
+            "bash <<EOF\necs_connect ap\nEOF",
+            "bash <<'EOF'\necs_connect ap\nEOF",
+            "sh <<EOF\necho hi\necs_connect ap\nEOF",
+            "cat <<EOF > x.sh\nthe text\nEOF\nbash x.sh && ecs_connect",
+            "echo ecs_connect > /dev/tcp/h/1",
+            "echo ecs_connect > /dev/tcp/h/1 && echo done",
+        ],
+        "a shell, or a command that reaches one",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_inert_a_command_that_cannot_be_parsed_is_not_exempt() {
+    assert_in_every_world(
+        &[
+            "echo ecs_connect \"unterminated",
+            "git commit -m \"ecs_connect",
+            "git commit -m x; echo 'ecs_connect",
+            "echo ecs_connect $(unterminated",
+            "echo ecs_connect (",
+            "git log --grep=ecs_connect | (",
+            "echo hi; ecs_connect ap \"",
+        ],
+        "an inert command beside something the parser cannot read",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_inert_programs_that_can_run_a_program_are_not_inert_when_they_do() {
+    // Each of these is "inert" by name and runs its argument by option or by program text.
+    assert_in_every_world(
+        &[
+            "awk 'BEGIN { system(\"ecs_connect ap\") }'",
+            "awk 'BEGIN { \"ecs_connect ap\" | getline x }'",
+            "sed -n '1e ecs_connect ap' notes.md",
+            "rg --pre ecs_connect x docs",
+            "git -c core.pager=ecs_connect log",
+            "git -c alias.x='!ecs_connect ap' x",
+            "git -c core.sshCommand=ecs_connect fetch",
+        ],
+        "an inert program told to run a marker",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_expansion_only_command_word_is_blocked() {
+    // The guard does not track assignments, but a command word made of nothing except two or
+    // more expansions can be anything, including a marker built in the line before.
+    assert_in_every_world(
+        &[
+            "$a$b ap",
+            "${a}${b} ap",
+            "$a$b",
+            "a=ecs_; b=connect; $a$b",
+            "a=ecs_; b=connect; ${a}${b} ap production portal",
+            "a=x; $a$b",
+            "echo hi && $a$b ap",
+            "git commit -m x; $a$b",
+            "echo hi | $a$b",
+        ],
+        "a command word made only of expansions",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn benign_command_words_with_literal_parts_and_expansions_in_argument_position_are_allowed() {
+    // (A lone `$CC` or `$EDITOR` as the command word is deliberately not decided here.)
+    assert_in_every_world(
+        &[
+            "$HOME/bin/tool run",
+            "${DIR}/${NAME} --flag",
+            "echo $a$b",
+            "ls $a$b",
+            "cp $a$b dest",
+            "out=$a$b",
+            "for x in $a$b; do echo $x; done",
+            "echo ${a}${b} > notes.txt",
+        ],
+        "expansions that are not the whole command word",
+        None,
+    );
+}
+
+// ── the benign corpus ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn benign_corpus_has_no_false_positives() {
+    const CORPUS: &[&str] = &[
+        // git
+        "git status",
+        "git diff --stat",
+        "git log --oneline -20",
+        "git checkout -b feature/x",
+        "git add -A",
+        r#"git commit -m "fix: handle empty input""#,
+        "git push -u origin HEAD",
+        "git pull --rebase",
+        "git stash list",
+        "git rebase origin/main",
+        "git branch -a",
+        "git remote -v",
+        "git fetch --all --prune",
+        "git show HEAD~1 --stat",
+        "git blame src/main.rs",
+        r#"git commit -m "fix: guard blocks ecs_connect in the shell""#,
+        "git commit -m 'docs: explain aws ecs execute-command is blocked'",
+        r#"git commit -m "tmux send-keys guard""#,
+        r#"git commit -m "chore: mention session-manager-plugin in docs""#,
+        "git grep -n ecs_connect",
+        "git log --grep=ecs_connect",
+        "git show HEAD | grep ecs_connect",
+        "git diff | grep -n execute-command | head",
+        // cargo and make
+        "cargo build --release",
+        "cargo test --lib",
+        "cargo clippy --all-targets -- -D warnings",
+        "cargo fmt --check",
+        "cargo run -- --help",
+        "cargo check",
+        "cargo doc --no-deps",
+        "make",
+        "make test",
+        "make install-daemon",
+        "make -j8 build",
+        // files and the shell
+        "ls -la",
+        "ls ~/Code/ecs-tools",
+        "cat README.md",
+        "head -n 20 Cargo.toml",
+        "tail -f /tmp/log.txt",
+        "wc -l src/*.rs",
+        "find . -name '*.rs' -not -path './target/*'",
+        "mkdir -p build/{debug,release}",
+        "rm -rf target/debug/incremental",
+        "cp file.{js,ts} dir/",
+        "mv old.txt new.txt",
+        "pwd",
+        "which cargo",
+        "du -sh target",
+        "sort -u names.txt",
+        "diff a.txt b.txt",
+        "chmod +x scripts/run.sh",
+        "touch notes.md",
+        "echo $PATH",
+        r#"echo ${HOME}/bin $PATH "$@""#,
+        "echo ${X:-default}",
+        // searching
+        "grep -rn TODO src",
+        "grep -rn ecs_connect docs src",
+        r#"rg "ecs_connect|execute-command""#,
+        r#"rg -n "fn main" src"#,
+        "rg --files -g '*.rs' | head",
+        "egrep -c 'ecs_shell' notes.md",
+        // echo, printf, here-documents
+        r#"echo "ecs_connect is blocked""#,
+        r#"echo "tmux send-keys is how the guard works""#,
+        r#"printf 'ecs_connect\n' > notes.txt"#,
+        "echo ecs_connect >> notes.txt",
+        "cat <<'EOF' > notes.md\n# Guard\nThe guard blocks ecs_connect.\nEOF",
+        "cat >> notes.md <<EOF\nThe guard blocks aws ecs execute-command.\nEOF",
+        // aws (read-only)
+        "aws s3 ls",
+        "aws s3 cp build.zip s3://bucket/build.zip",
+        "aws ecs list-clusters",
+        "aws ecs describe-services --cluster c --services s",
+        "aws ecs list-tasks --cluster c",
+        "aws ecs describe-task-definition --task-definition td",
+        "aws sts get-caller-identity",
+        "aws logs tail /ecs/portal --since 10m",
+        "aws ssm get-parameter --name /x/y",
+        "aws ecr get-login-password --region us-east-1",
+        // node
+        "npm install",
+        "npm run build",
+        "npm test -- --watch=false",
+        "npx prettier --check .",
+        "node script.js",
+        // docker
+        "docker ps",
+        "docker build -t app:latest .",
+        "docker compose up -d",
+        "docker logs -f app",
+        "docker exec -it app sh",
+        // ssh
+        "ssh devbox",
+        "ssh -L 8080:localhost:80 devbox",
+        "ssh-add -l",
+        "ssh-keygen -t ed25519",
+        "scp file devbox:/tmp/",
+        // gh
+        "gh pr list",
+        "gh pr view 123 --json title",
+        r#"gh pr create --title t --body "mentions ecs_connect""#,
+        "gh pr checks 12",
+        r#"gh pr comment 5 --body "mentions ecs_connect""#,
+        // terraform and friends
+        "terraform plan -out=tfplan",
+        "terraform fmt -check",
+        "terraform validate",
+        "terraform apply tfplan",
+        "kubectl get pods",
+        r#"python3 -c "print('hello')""#,
+        "curl -s localhost:8080/health",
+        // tmux
+        "tmux ls",
+        "tmux new -d -s x",
+        "tmux send-keys -t %0 'cargo test' Enter",
+        "tmux capture-pane -p -t %0",
+        "tmux list-panes -a",
+        "tmux display-message -p '#{pane_title}'",
+        "tmux source-file ~/.tmux.conf",
+    ];
+    assert!(CORPUS.len() >= 105, "the corpus is {} commands", CORPUS.len());
+
+    let mut failures = Vec::new();
+    for (world_name, world) in three_worlds() {
+        for command in CORPUS {
+            let verdict = evaluate(&bash(command), &world());
+            if verdict != Ok(GuardVerdict::Allow) {
+                failures.push(format!("  [{world_name}] {command:?} -> {verdict:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "ordinary commands must not be blocked:\n{}", failures.join("\n"));
+}
+
+// ── round 2, Cody's extras: what the inert exemption must not let through ────────────────
+
+#[test]
+fn bypass_inert_a_command_substitution_the_tokenizer_skips_still_runs() {
+    // `${x:-$(…)}`, `$(( a[$(…)] ))` and `$[ ]` run commands the tokenizer does not parse.
+    assert_all_blocked(
+        &[
+            "echo ${x:-$(ecs_connect ap)}",
+            "echo $((a[$(ecs_connect ap)]))",
+            "echo $[a[$(ecs_connect ap)]]",
+            "echo hi > /dev/tcp/localhost/1; ecs_connect ap",
+            "echo ecs_connect > /dev/tcp/localhost/1",
+        ],
+        RULE_COMMAND,
+        "inert program, hidden command",
+        FakeProbe::default,
+    );
+}
+
+#[test]
+fn bypass_a_source_file_before_a_send_to_a_session_target_is_checked_against_the_server() {
+    // `source-file` is allowed alone, but it may change what `prod` names.
+    let world = || {
+        FakeProbe::default()
+            .pane_on(DEFAULT, "prod", "zsh", LOCAL_SHELL)
+            .other_pane_on(DEFAULT, REMOTE_TITLE, REMOTE_SHELL)
+    };
+    assert_all_blocked(
+        &["tmux source-file ~/.tmux.conf; tmux send-keys -t prod x Enter"],
+        RULE_TMUX_INPUT,
+        "source-file may select another pane",
+        world,
+    );
+    assert_all_allowed(&["tmux source-file ~/.tmux.conf"], "source-file alone", world);
 }
