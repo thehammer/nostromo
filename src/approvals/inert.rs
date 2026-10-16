@@ -98,10 +98,11 @@ fn awk_reads_files(args: &[&str]) -> bool {
 /// `git <subcommand> …` for the subcommands whose arguments are data (messages,
 /// patterns, paths, refs), without the options that run a program.
 fn git_inert(args: &[&str]) -> bool {
-    const SUBCOMMANDS: &[&str] = &[
-        "commit", "log", "grep", "diff", "show", "add", "status", "tag", "notes", "push", "pull", "fetch", "branch",
-        "checkout", "switch", "stash", "merge",
-    ];
+    const SUBCOMMANDS: &[&str] = &["commit", "log", "grep", "diff", "show", "add", "status", "tag", "notes"];
+    // Options that run a program. git takes any unambiguous prefix of a long
+    // option (`--upload=…` is `--upload-pack=…`), so a prefix counts too.
+    const RUNS_A_PROGRAM: &[&str] =
+        &["--exec", "--receive-pack", "--upload-pack", "--open-files-in-pager", "--ext-diff", "--textconv", "--pager"];
     // Global options that run nothing: `-C <dir>`, `--no-pager`, `-P`.
     let mut i = 0;
     while i < args.len() {
@@ -115,10 +116,13 @@ fn git_inert(args: &[&str]) -> bool {
     if !SUBCOMMANDS.contains(sub) {
         return false;
     }
-    !args[i + 1..].iter().any(|a| {
-        ["--exec", "--receive-pack", "--upload-pack", "--open-files-in-pager", "--ext-diff", "--textconv", "--pager"]
-            .iter()
-            .any(|o| a.starts_with(o))
-            || (a.starts_with("-O") && !a.starts_with("--"))
+    !args[i + 1..].iter().any(|a| match a.strip_prefix("--") {
+        Some(long) => {
+            let name = long.split('=').next().unwrap_or_default();
+            // A bare `--` ends the options.
+            !name.is_empty() && RUNS_A_PROGRAM.iter().any(|o| o[2..].starts_with(name) || name.starts_with(&o[2..]))
+        }
+        // `-O<pager>` of `git grep`, alone or at the end of a cluster (`-nOcmd`).
+        None => a.starts_with('-') && a.contains('O'),
     })
 }

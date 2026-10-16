@@ -2929,3 +2929,32 @@ fn bypass_a_source_file_before_a_send_to_a_session_target_is_checked_against_the
     );
     assert_all_allowed(&["tmux source-file ~/.tmux.conf"], "source-file alone", world);
 }
+
+#[test]
+fn bypass_inert_git_options_that_run_a_program_are_not_exempt_even_abbreviated() {
+    // git takes any unambiguous prefix of a long option, and `-O<cmd>` may end a short cluster.
+    assert_all_blocked(
+        &[
+            "git grep --open-files-in-pa=ecs_connect x",
+            "git grep -nOecs_connect x",
+            "git grep -O'ecs_connect ap' x",
+            "git log --ext-d -p",
+            "git fetch --upload=ecs_connect origin",
+            "git push --receive-pack=ecs_connect origin",
+            "git pull origin",
+        ]
+        .map(|c| format!("{c} # ecs_connect"))
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>(),
+        RULE_COMMAND,
+        "git options that run a program",
+        FakeProbe::default,
+    );
+    // `--` ends the options and is ordinary.
+    assert_all_allowed(
+        &["git log --oneline -- docs/ecs_connect.md", "git add -- src/ecs_connect.rs", "git grep --no-index -e ecs_connect -- docs"],
+        "options end at --",
+        FakeProbe::default,
+    );
+}

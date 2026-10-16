@@ -390,10 +390,11 @@ fn tmux_mention_re() -> &'static Regex {
 
 /// A tmux config file or directory (`~/.tmux.conf`, `~/.tmux/plugins`,
 /// `~/.config/tmux/tmux.conf`) or socket directory (`/tmp/tmux-501/default`): a
-/// name that holds `tmux`, not a tmux call.
+/// path that holds `tmux`, not a tmux call. Only these path shapes, with a `/`
+/// before them: a bare `tmux.conf` or `.tmux` could be a copy of the binary.
 fn tmux_config_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\.tmux(?:\.conf)?\b|\btmux\.conf\b|/tmux/|/tmux-\d+/").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?i)/\.tmux\.conf\b|/\.tmux/|/tmux/tmux\.conf\b|/tmux-\d+/").unwrap())
 }
 
 /// A tmux command that types or pipes into a pane, named without the binary
