@@ -22,3 +22,7 @@ macOS/icon/build/
 Shared/NostromoKit/.build/
 iOS/Nostromo.xcodeproj/project.xcworkspace/
 iOS/Nostromo.xcodeproj/xcuserdata/
+
+# rwx sandbox local files (logs from `rwx logs`, sync state and patch-rejected diffs)
+.rwx/downloads/
+.rwx/sandboxes/
