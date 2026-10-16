@@ -856,6 +856,15 @@ impl LogBuf {
     /// Captures every event on this thread. `#[tokio::test]` defaults to a
     /// current-thread runtime, so the server's tasks run here too.
     fn capture(&self) -> tracing::subscriber::DefaultGuard {
+        // tracing-core treats a lone live dispatcher as the global one. While
+        // this capture is the only one alive (say the other capturing test has
+        // finished), a callsite first hit on another test's thread is judged by
+        // that thread's absent subscriber and cached as "never", and this
+        // capture silently misses it (CI's Build & Lint did, every run). A
+        // second dispatcher kept alive for the whole binary keeps the registry
+        // in its multi-dispatcher mode, where every live one is asked.
+        static KEEP_MULTI_DISPATCH: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        KEEP_MULTI_DISPATCH.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let subscriber = tracing_subscriber::fmt()
             .with_writer(self.clone())
             .with_max_level(tracing::Level::TRACE)
