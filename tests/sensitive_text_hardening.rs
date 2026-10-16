@@ -1411,3 +1411,12 @@ fn a_bare_url_prefix_does_not_exempt_an_address() {
         ],
     );
 }
+
+#[test]
+fn a_hidden_character_between_two_letters_may_be_a_separator() {
+    let zw = '\u{200B}';
+    assert_flags(
+        Class::Mrn,
+        &[format!("MRN{zw}A9981734"), format!("mrn{zw}A9981734")],
+    );
+}

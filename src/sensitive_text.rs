@@ -314,6 +314,8 @@ enum Spaced {
     No,
     /// All of them.
     All,
+    /// Every hidden run, ambiguous or not (the fail-closed fallback).
+    Every,
     /// Only those next to a word: a letter on one side and a non-letter on the
     /// other (`SSN<ZWSP>2<ZWSP>19`: the label is cut off, the number is not).
     AtWords,
@@ -343,12 +345,15 @@ fn build_view(pieces: &[Piece], spaced: Spaced) -> (View, bool) {
         }
         let before = i.checked_sub(1).and_then(|k| pieces.get(k));
         let after = pieces.get(j);
-        if let (Some(b), Some(a)) = (before, after) {
+        if spaced == Spaced::Every {
+            let end = pieces.get(j - 1).map_or(piece.origin.1, |p| p.origin.1);
+            view.push(' ', (piece.origin.0, end));
+        } else if let (Some(b), Some(a)) = (before, after) {
             if is_ambiguous(b.c, a.c) {
                 any_ambiguous = true;
                 let space = match spaced {
                     Spaced::No => false,
-                    Spaced::All => true,
+                    Spaced::All | Spaced::Every => true,
                     Spaced::AtWords => b.c.is_ascii_alphabetic() != a.c.is_ascii_alphabetic(),
                 };
                 if space {
@@ -408,6 +413,12 @@ fn scan_normalised(text: &str, cfg: &GuardConfig) -> Vec<Finding> {
     let pieces = fold(text);
     let (dropped, any_ambiguous) = build_view(&pieces, Spaced::No);
     let mut out = map_back(&dropped, scan_plain(&dropped.text, cfg));
+    if pieces.iter().any(|p| p.hidden) {
+        // Fail closed: also read every hidden run as a space (a letter-letter run
+        // can be a separator too: `MRN<ZWSP>A9981734`).
+        let (spaced, _) = build_view(&pieces, Spaced::Every);
+        out.extend(map_back(&spaced, scan_plain(&spaced.text, cfg)));
+    }
     if any_ambiguous {
         for mode in [Spaced::All, Spaced::AtWords] {
             let (spaced, _) = build_view(&pieces, mode);
