@@ -1197,8 +1197,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         let departing = ghosts.filter { ghost in !columnViews.contains { $0 === ghost.view } }
         guard let first = departing.first else { return }
         var region = departing.dropFirst().reduce(first.frame) { $0.union($1.frame) }
-        region.size.height = min(region.height, firstMessageTop(below: region.minY) - region.minY)
-        guard region.height >= 1 else { return }
+        region.size.height = min(region.size.height, firstMessageTop(below: region.minY) - region.minY)
+        guard region.size.height >= 1 else { return }
         let container = RollInGhostView(frame: region)
         for ghost in departing {
             Self.hideFromAccessibility(ghost.view)
