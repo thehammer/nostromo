@@ -66,7 +66,15 @@ pub struct Word {
     /// True if the word contains an expansion the tokenizer can't evaluate
     /// (`$VAR`, `${…}`, `$( )`, backticks, `$(( ))`) outside single quotes.
     pub dynamic: bool,
+    /// [`Word::text`] with each unexpanded expansion (`$VAR`, `${…}`, `$( )`,
+    /// backticks, `$(( ))`) replaced by [`WILDCARD`], so a quote boundary
+    /// survives (`"ecs_"$U"connect"` is `ecs_␀connect`, not `ecs_$Uconnect`).
+    /// Equal to `text` when the word has no expansion.
+    pub pattern: String,
 }
+
+/// Stands for an unexpanded expansion in [`Word::pattern`].
+pub const WILDCARD: char = '\u{0}';
 
 /// A top-level separator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +128,16 @@ const PREFIX_WORDS: &[&str] = &[
 ];
 
 fn parse_at_depth(src: &str, depth: u32) -> ShellParse {
-    let mut p = Parser { src, b: src.as_bytes(), pos: 0, depth, nest: 0, pending: Vec::new(), out: ShellParse::default() };
+    let mut p = Parser {
+        src,
+        b: src.as_bytes(),
+        pos: 0,
+        depth,
+        nest: 0,
+        pending: Vec::new(),
+        out: ShellParse::default(),
+        wild: Vec::new(),
+    };
     if p.parse_list(false).is_err() {
         p.out.unparsed = true;
     }
@@ -172,6 +189,8 @@ struct Parser<'a> {
     nest: u32,
     pending: Vec<PendingHereDoc>,
     out: ShellParse,
+    /// Byte ranges of the word being read (in its `text`) that are expansions.
+    wild: Vec<Range<usize>>,
 }
 
 impl<'a> Parser<'a> {
@@ -348,7 +367,8 @@ impl<'a> Parser<'a> {
             self.nested(|p| p.parse_list(true))?;
             let span = start..self.pos;
             cmd.touch(&span);
-            cmd.words.push(Word { text: self.src[span.clone()].to_owned(), span, dynamic: true });
+            let text = self.src[span.clone()].to_owned();
+            cmd.words.push(Word { pattern: WILDCARD.to_string(), text, span, dynamic: true });
             return Ok(());
         }
         if self.starts_with("<<<") {
@@ -407,6 +427,16 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let mut text: Vec<u8> = Vec::new();
         let mut dynamic = false;
+        // A nested word (inside `$( )`) must not see this word's ranges.
+        let outer_wild = std::mem::take(&mut self.wild);
+        let word = self.read_word_parts(&mut text, &mut dynamic);
+        let wild = std::mem::replace(&mut self.wild, outer_wild);
+        word?;
+        let pattern = pattern_of(&text, &wild);
+        Ok(Word { text: String::from_utf8_lossy(&text).into_owned(), span: start..self.pos, dynamic, pattern })
+    }
+
+    fn read_word_parts(&mut self, text: &mut Vec<u8>, dynamic: &mut bool) -> Step<()> {
         while let Some(c) = self.peek() {
             match c {
                 _ if Self::is_meta(c) => break,
@@ -430,21 +460,21 @@ impl<'a> Parser<'a> {
                 }
                 b'"' => {
                     self.pos += 1;
-                    dynamic |= self.read_double_quoted(&mut text)?;
+                    *dynamic |= self.read_double_quoted(text)?;
                 }
                 b'$' if self.peek_at(1) == Some(b'\'') => {
                     self.pos += 2;
-                    self.read_ansi_c(&mut text)?;
+                    self.read_ansi_c(text)?;
                 }
                 b'$' if self.peek_at(1) == Some(b'"') => {
                     self.pos += 2;
-                    dynamic |= self.read_double_quoted(&mut text)?;
+                    *dynamic |= self.read_double_quoted(text)?;
                 }
-                b'$' | b'`' => dynamic |= self.read_dollar_or_backtick(&mut text)?,
-                _ => self.copy_char(&mut text),
+                b'$' | b'`' => *dynamic |= self.read_dollar_or_backtick(text)?,
+                _ => self.copy_char(text),
             }
         }
-        Ok(Word { text: String::from_utf8_lossy(&text).into_owned(), span: start..self.pos, dynamic })
+        Ok(())
     }
 
     /// The rest of a `"…"` string (opening quote consumed). Returns whether it
@@ -492,7 +522,14 @@ impl<'a> Parser<'a> {
         } else {
             self.pos += 1;
             match self.peek() {
-                Some(c) if c.is_ascii_alphanumeric() || b"_@*#?$!-".contains(&c) => {}
+                // `$1` takes one digit; `$VAR` takes its whole name.
+                Some(c) if c.is_ascii_digit() => self.pos += 1,
+                Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
+                    while self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                        self.pos += 1;
+                    }
+                }
+                Some(c) if b"@*#?$!-".contains(&c) => self.pos += 1,
                 // A lone `$` is literal.
                 _ => {
                     text.push(b'$');
@@ -500,6 +537,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.wild.push(text.len()..text.len() + (self.pos - start));
         text.extend_from_slice(&self.b[start..self.pos]);
         Ok(true)
     }
@@ -537,6 +575,7 @@ impl<'a> Parser<'a> {
             nest: self.nest + 1,
             pending: Vec::new(),
             out: ShellParse::default(),
+            wild: Vec::new(),
         };
         let ok = sub.parse_list(false).is_ok();
         // Map spans back onto this input when the text was copied verbatim.
@@ -583,7 +622,9 @@ impl<'a> Parser<'a> {
                 }
                 b'"' => {
                     self.pos += 1;
+                    let seen = self.wild.len();
                     self.read_double_quoted(&mut Vec::new())?;
+                    self.wild.truncate(seen);
                     continue;
                 }
                 _ => {}
@@ -758,6 +799,19 @@ enum Payload {
     Text(String, Range<usize>),
     /// A shell reading its script from stdin (here-docs, here-strings).
     Stdin,
+}
+
+/// `text` with each byte range in `wild` (ascending, disjoint) replaced by [`WILDCARD`].
+fn pattern_of(text: &[u8], wild: &[Range<usize>]) -> String {
+    let mut out = Vec::with_capacity(text.len());
+    let mut at = 0;
+    for r in wild {
+        out.extend_from_slice(&text[at..r.start]);
+        out.extend_from_slice(WILDCARD.encode_utf8(&mut [0; 4]).as_bytes());
+        at = r.end;
+    }
+    out.extend_from_slice(&text[at..]);
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The index of the word that is the command actually run, skipping

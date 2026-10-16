@@ -25,6 +25,44 @@ pub const ENTRY_VERSION: u32 = 1;
 /// Files dated more than this many days before `now` are deleted by `sweep`.
 pub const RETENTION_DAYS: i64 = 90;
 
+/// Longest string (bytes) the audit log records from a blocked tool input; longer ones
+/// are cut at a character boundary and end with a `[truncated …]` note.
+pub const MAX_RECORDED_STRING_BYTES: usize = 16 * 1024;
+
+/// `input` as the audit log records it: every string with invisible and bidi
+/// characters shown as `⟨U+202E⟩` (a newline or tab stays) and cut at
+/// [`MAX_RECORDED_STRING_BYTES`]. Object keys are left as they are.
+pub fn sanitize_recorded(input: &Value) -> Value {
+    match input {
+        Value::String(s) => Value::String(sanitize_string(s)),
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_recorded).collect()),
+        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), sanitize_recorded(v))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// One string as [`sanitize_recorded`] records it.
+pub fn sanitize_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(MAX_RECORDED_STRING_BYTES + 16));
+    let mut cut = false;
+    for c in s.chars() {
+        let shown = if crate::data::work::is_invisible(c) && !matches!(c, '\n' | '\t') {
+            format!("\u{27E8}U+{:04X}\u{27E9}", c as u32)
+        } else {
+            c.to_string()
+        };
+        if out.len() + shown.len() > MAX_RECORDED_STRING_BYTES {
+            cut = true;
+            break;
+        }
+        out.push_str(&shown);
+    }
+    if cut {
+        out.push_str("\u{2026}[truncated]");
+    }
+    out
+}
+
 /// One audit line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -173,7 +211,13 @@ impl AuditLog {
     pub fn append(&self, entry: &Entry) -> io::Result<()> {
         let mut line = serde_json::to_vec(entry).map_err(io::Error::other)?;
         line.push(b'\n');
-        let file = OpenOptions::new().create(true).append(true).mode(0o600).open(self.file_for(entry.ts))?;
+        // O_NOFOLLOW: a symlink planted at today's file must not carry the entry somewhere else.
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.file_for(entry.ts))?;
         // The umask can only narrow the mode; this keeps a pre-existing file private too.
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         let _lock = FileLock::exclusive(&file)?;

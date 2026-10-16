@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use nostromo::approvals::audit::{AuditLog, Entry, Event};
+use nostromo::approvals::audit::{self, AuditLog, Entry, Event};
 use nostromo::approvals::guard::{self, GuardVerdict, HookPayload, SystemPaneProbe, FAIL_CLOSED_MESSAGE};
 use nostromo::approvals::ApprovalsPaths;
 
@@ -93,10 +93,11 @@ fn run() -> Result<()> {
     // still blocks.
     let mut entry = Entry::new(
         Event::GuardBlocked {
-            tool_name: payload.tool_name,
-            input: payload.tool_input,
+            tool_name: audit::sanitize_string(&payload.tool_name),
+            // What the log shows must not hide text (bidi, zero-width) or be huge.
+            input: audit::sanitize_recorded(&payload.tool_input),
             rule: rule_id.to_owned(),
-            detail: Some(detail),
+            detail: Some(audit::sanitize_string(&detail)),
         },
         chrono::Utc::now(),
     );

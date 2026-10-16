@@ -14,6 +14,10 @@ pub mod audit;
 pub mod guard;
 pub mod shell;
 
+mod expand;
+mod keys;
+mod tmux_bin;
+
 use std::path::{Path, PathBuf};
 
 /// Env var overriding the approvals directory. Tests must set it.

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use nostromo::approvals::audit::{Entry, Event};
+use nostromo::approvals::audit::{Entry, Event, MAX_RECORDED_STRING_BYTES};
 use nostromo::approvals::guard::{
     deny_output_json, evaluate, hook_settings_json, resolve_guard_path, GuardError, GuardVerdict, HookPayload,
     PaneInfo, PaneProbe, ProbeError, TmuxSocket, BLOCK_RUN_TASK, FAIL_CLOSED_MESSAGE, GUARD_BIN_ENV, GUARD_MESSAGE,
@@ -40,8 +40,11 @@ struct FakeProbe {
     all: HashMap<TmuxSocket, Vec<PaneInfo>>,
     all_error: Option<ProbeError>,
     subtrees: HashMap<u32, Vec<String>>,
+    pending: HashMap<(TmuxSocket, String), String>,
+    pending_errors: HashMap<(TmuxSocket, String), ProbeError>,
     next_pid: u32,
     calls: AtomicUsize,
+    pending_calls: AtomicUsize,
 }
 
 impl FakeProbe {
@@ -78,8 +81,24 @@ impl FakeProbe {
         self
     }
 
+    /// The line the cursor is on in pane `target` (what `pending_input` reports).
+    fn pending_on(mut self, socket: TmuxSocket, target: &str, line: &str) -> Self {
+        self.pending.insert((socket, target.into()), line.into());
+        self
+    }
+
+    fn pending_fails_with(mut self, socket: TmuxSocket, target: &str, e: ProbeError) -> Self {
+        self.pending_errors.insert((socket, target.into()), e);
+        self
+    }
+
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// How many times the guard asked what a pane has typed on its prompt line.
+    fn pending_calls(&self) -> usize {
+        self.pending_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -111,6 +130,16 @@ impl PaneProbe for FakeProbe {
         let mut out = vec![TmuxSocket::Default];
         out.extend(self.all.keys().filter(|s| **s != TmuxSocket::Default).cloned());
         Ok(out)
+    }
+
+    fn pending_input(&self, socket: &TmuxSocket, target: &str) -> Result<Option<String>, ProbeError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.pending_calls.fetch_add(1, Ordering::SeqCst);
+        let key = (socket.clone(), target.to_string());
+        if let Some(e) = self.pending_errors.get(&key) {
+            return Err(e.clone());
+        }
+        Ok(self.pending.get(&key).cloned())
     }
 }
 
@@ -1418,4 +1447,664 @@ fn bypass_a_command_alias_change_is_checked_against_the_server() {
 fn bypass_aws_service_and_operation_on_different_lines_of_opaque_text() {
     let command = "python3 -c \"import os; os.system('''aws ecs --profile p\nexecute-command --cluster c''')\"";
     assert_blocked(evaluate(&bash(command), &FakeProbe::default()), RULE_COMMAND, command);
+}
+
+// ── regressions: review fix-ups (split typing, expansions, renamed tmux, relative targets) ─
+//
+// Every `bypass_*` test below failed on the code that preceded its fix.
+
+const REMOTE_TITLE: &str = "production:ap:portal";
+
+fn work() -> TmuxSocket {
+    TmuxSocket::Name("work".into())
+}
+
+/// A server with one local pane, `%0`.
+fn local_world() -> FakeProbe {
+    FakeProbe::default().pane_on(DEFAULT, "%0", "zsh", LOCAL_SHELL)
+}
+
+/// `%0` local and `%1` an ECS shell.
+fn remote_pane_world() -> FakeProbe {
+    FakeProbe::default().pane_on(DEFAULT, "%0", "zsh", LOCAL_SHELL).pane_on(DEFAULT, "%1", REMOTE_TITLE, REMOTE_SHELL)
+}
+
+/// `%0` and `%1` local, and a remote pane nobody addresses.
+fn remote_elsewhere_world() -> FakeProbe {
+    FakeProbe::default()
+        .pane_on(DEFAULT, "%0", "zsh", LOCAL_SHELL)
+        .pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL)
+        .other_pane_on(DEFAULT, REMOTE_TITLE, REMOTE_SHELL)
+}
+
+/// `%0` and `%1` local, nothing remote anywhere.
+fn all_local_world() -> FakeProbe {
+    FakeProbe::default().pane_on(DEFAULT, "%0", "zsh", LOCAL_SHELL).pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL)
+}
+
+/// Every command must be blocked by `rule` in the world `world` builds. Reports all that are not,
+/// so one run shows the whole gap.
+#[track_caller]
+fn assert_all_blocked(commands: &[&str], rule: &str, what: &str, world: impl Fn() -> FakeProbe) {
+    let failures: Vec<String> = commands
+        .iter()
+        .filter_map(|c| {
+            let verdict = evaluate(&bash(c), &world());
+            (rule_of(&verdict) != Some(rule)).then(|| format!("  {c:?} -> {verdict:?}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{what}: expected a block by `{rule}` for:\n{}", failures.join("\n"));
+}
+
+/// Every command must be allowed in the world `world` builds. Reports all that are not.
+#[track_caller]
+fn assert_all_allowed(commands: &[&str], what: &str, world: impl Fn() -> FakeProbe) {
+    let failures: Vec<String> = commands
+        .iter()
+        .filter_map(|c| {
+            let verdict = evaluate(&bash(c), &world());
+            (verdict != Ok(GuardVerdict::Allow)).then(|| format!("  {c:?} -> {verdict:?}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{what}: expected an allow for:\n{}", failures.join("\n"));
+}
+
+// ── B1: markers typed through split send-keys arguments ──────────────────────────────────
+
+const TYPED_MARKERS: &[&str] = &[
+    // arguments are joined with no separator; Space and Enter are keys
+    "tmux send-keys -t %0 ecs_c onnect Space ap Enter",
+    "tmux send-keys -t %0 e c s _ c o n n e c t Enter",
+    r#"tmux send-keys -t %0 "aws ecs exe" "cute-command --cluster c" Enter"#,
+    r#"tmux send-keys -t %0 "aws ssm start-" "session --target i-1" Enter"#,
+    // across calls of one command string
+    "tmux send-keys -l 'ecs_'; tmux send-keys -l 'connect'",
+    "tmux send-keys -l 'ecs_' && tmux send-keys -l 'connect'",
+    "tmux send-keys -t %0 -l 'ecs_'; tmux send-keys -t %2 -l 'connect'",
+    "tmux send-keys -t %0 -l ecs_; sleep 1; tmux send-keys -t %0 -l connect",
+    r"tmux send-keys -t %0 -l ecs_ \; send-keys -t %0 -l connect",
+    "/tmp/t send-keys -t %0 -l ecs_; /tmp/t send-keys -t %0 -l connect",
+    // -H takes hex bytes: this spells ecs_connect
+    "tmux send-keys -t %0 -H 65 63 73 5f 63 6f 6e 6e 65 63 74",
+    // typed text that is a marker only after line editing
+    "tmux send-keys -t %0 ecs_cX BSpace onnect",
+    "tmux send-keys -t %0 nnect Home ecs_co End",
+    "tmux send-keys -t %0 ecs_conect Left Left Left n",
+    "tmux send-keys -t %0 ecs_connec Left Right t",
+    "tmux send-keys -t %0 ecs_connec Home End t",
+    // a buffer filled in pieces, then pasted
+    "tmux set-buffer -b a 'ecs_'; tmux set-buffer -a -b a 'connect'; tmux paste-buffer -b a -t %0",
+    "tmux set-buffer 'aws ecs exec'; tmux set-buffer -a 'ute-command'; tmux paste-buffer -t %0",
+    // text the pane's shell expands into a marker
+    "tmux send-keys -t %0 -l 'ecs_${U}connect'",
+    "tmux send-keys -t %0 -l 'aws ecs execute-comman{d,}'",
+    "tmux send-keys -t %0 -l 'ecs_{connect,}'",
+];
+
+#[test]
+fn bypass_split_send_keys_arguments_spell_a_marker() {
+    // No tmux server, or only a local pane: the text itself is what is wrong.
+    assert_all_blocked(TYPED_MARKERS, RULE_COMMAND, "no tmux server", FakeProbe::default);
+    assert_all_blocked(TYPED_MARKERS, RULE_COMMAND, "a local pane", local_world);
+}
+
+#[test]
+fn a_marker_typed_through_send_keys_is_decided_without_probing() {
+    for command in TYPED_MARKERS {
+        let probe = local_world();
+        let verdict = evaluate(&bash(command), &probe);
+        assert_eq!(rule_of(&verdict), Some(RULE_COMMAND), "{command}: {verdict:?}");
+        assert_eq!(probe.calls(), 0, "{command}: no tmux was asked");
+    }
+}
+
+#[test]
+fn typing_ordinary_text_into_a_local_pane_stays_allowed() {
+    const TYPED: &[&str] = &[
+        "tmux send-keys -t %0 'cargo test' Enter",
+        "tmux send-keys -t %0 C-c",
+        "tmux send-keys -t %0 -l 'echo ecs'",
+        "tmux send-keys -t %0 'ls ~/Code/ecs-tools' Enter",
+        "tmux send-keys -t %0 -l 'ecs_' ; tmux send-keys -t %0 'info'",
+        "tmux send-keys -t %0 -l 'aws ecs describe-clusters'",
+        // with -l every argument is text, so `BSpace` is not a key: this types `ecs_conXBSpacenect`
+        "tmux send-keys -t %0 -l ecs_conX BSpace nect",
+        // editing that does not end in a marker
+        "tmux send-keys -t %0 ecs_connec Left x",
+        // Enter ends the line: the shell sees `ecs_` and then `connect`
+        "tmux send-keys -t %0 ecs_ Enter connect",
+    ];
+    assert_all_allowed(TYPED, "no tmux server", FakeProbe::default);
+    assert_all_allowed(TYPED, "a local pane", local_world);
+}
+
+#[test]
+fn bypass_a_marker_completed_on_the_prompt_line_the_pane_already_holds() {
+    // The pane shows `ecs_` at its prompt; typing `connect` finishes the command.
+    for (pending, command) in [
+        ("user@host % ecs_", "tmux send-keys -t %0 -l connect"),
+        ("user@host % ecs_", "tmux send-keys -t %0 connect Enter"),
+        ("aws ecs ", "tmux send-keys -t %0 -l execute-command"),
+        ("$ aws ssm start-", "tmux send-keys -t %0 -l session"),
+        ("% session-manager-", "tmux send-keys -t %0 -l plugin"),
+    ] {
+        let probe = local_world().pending_on(DEFAULT, "%0", pending);
+        assert_blocked(evaluate(&bash(command), &probe), RULE_COMMAND, &format!("{pending:?} + {command}"));
+    }
+}
+
+#[test]
+fn text_the_pane_shows_does_not_count_unless_the_typed_text_completes_a_marker_with_it() {
+    for (pending, command) in [
+        // the marker is entirely in what the pane already shows
+        ("output: ecs_connect", "tmux send-keys -t %0 -l ls Enter"),
+        ("output: ecs_connect", "tmux send-keys -t %0 Space ls Enter"),
+        ("user@host % # was: aws ecs execute-command", "tmux send-keys -t %0 -l ' && ls'"),
+        // joined, it is not a marker
+        ("user@host % ecs ", "tmux send-keys -t %0 -l connect"),
+        ("user@host % ecs_", "tmux send-keys -t %0 -l info"),
+    ] {
+        let probe = local_world().pending_on(DEFAULT, "%0", pending);
+        assert_allowed(evaluate(&bash(command), &probe), &format!("{pending:?} + {command}"));
+    }
+}
+
+#[test]
+fn a_pane_whose_prompt_line_cannot_be_read_does_not_stop_typing_into_it() {
+    let command = "tmux send-keys -t %0 -l connect";
+
+    assert_allowed(evaluate(&bash(command), &local_world()), "pending_input says it cannot tell (Ok(None))");
+
+    let failing = local_world().pending_fails_with(DEFAULT, "%0", timeout());
+    let verdict = evaluate(&bash(command), &failing);
+    assert_allowed(verdict, "pending_input fails: the call is not an error and not a block");
+    assert!(failing.pending_calls() >= 1, "it was asked");
+}
+
+#[test]
+fn the_prompt_line_is_only_read_when_something_is_typed() {
+    for command in ["tmux send-keys -t %0 Enter", "tmux send-keys -t %0 C-c", "tmux send-keys -t %0 Enter Enter"] {
+        let probe = local_world().pending_on(DEFAULT, "%0", "user@host % ecs_");
+        assert_allowed(evaluate(&bash(command), &probe), command);
+        assert_eq!(probe.pending_calls(), 0, "{command}: nothing typed, so nothing to join");
+    }
+}
+
+// ── B2: brace expansion and empty expansions ─────────────────────────────────────────────
+
+/// Command lines real bash runs as a marker, with the environment each needs to do so.
+const EXPANDS_TO_A_MARKER: &[(&str, &[(&str, &str)])] = &[
+    ("ecs_{connect,} ap production portal", &[]),
+    ("ecs_{conn,x}{ect,} ap", &[]),
+    ("ecs_{connect,{a,b}} ap", &[]),
+    ("ecs_run_tas{k,} ap production portal", &[]),
+    ("aws ecs execute-comman{d,} --cluster c", &[]),
+    ("aws ssm start-sessio{n,} --target i-1", &[]),
+    ("aws ecs run-tas{k,} --cluster c", &[]),
+    ("aws ec{s,} execute-command --cluster c", &[]),
+    ("aws {ecs,execute-command} --cluster c", &[]),
+    ("ecs_${U}connect ap production portal", &[]),
+    ("ecs_$@connect ap", &[]),
+    ("ecs_$*connect ap", &[]),
+    ("ecs_$()connect ap", &[]),
+    ("ecs_``connect ap", &[]),
+    ("ecs_$(echo)connect ap", &[]),
+    ("ecs_c${x:-o}nnect ap", &[]),
+    ("aws ecs execute-${U}command --cluster c", &[]),
+    ("aws ecs run-${U}task --cluster c", &[]),
+    (r#""ecs_"$U"connect" ap production portal"#, &[]),
+    ("${P}session-manager-plugin x", &[]),
+    // an earlier word that is only known at run time can be the service
+    ("aws $S execute-command --cluster c", &[("S", "ecs")]),
+];
+
+fn real_bash() -> Option<&'static str> {
+    ["/bin/bash", "/usr/bin/bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash"].into_iter().find(|p| Path::new(p).is_file())
+}
+
+/// The words real bash makes of `line`. Nothing but `printf` runs (plus whatever a `$( )` in
+/// the line holds, which here is only `echo`), in an empty environment.
+fn bash_words(shell: &str, line: &str, env: &[(&str, &str)]) -> Vec<String> {
+    let out = Command::new(shell)
+        .args(["--norc", "--noprofile", "-c"])
+        .arg(format!("printf '%s\\n' {line}"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .envs(env.iter().copied())
+        .output()
+        .expect("run bash");
+    assert!(out.status.success(), "bash rejected {line:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect()
+}
+
+/// Whether these words, run as a command, would open a remote shell (the rule, restated).
+fn words_open_a_remote_shell(words: &[String]) -> bool {
+    let lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    if lower.iter().any(|w| ["ecs_connect", "ecs_shell", "ecs_open_tmux_pane", "ecs_run_task", "session-manager-plugin"].contains(&w.as_str())) {
+        return true;
+    }
+    let then = |first: &str, op: &str| lower.iter().position(|w| w == first).is_some_and(|i| lower[i + 1..].iter().any(|w| w == op));
+    then("ecs", "execute-command") || then("ssm", "start-session") || then("ecs", "run-task")
+}
+
+#[test]
+fn bypass_expansions_that_real_bash_turns_into_a_marker_are_blocked() {
+    let shell = real_bash();
+    if shell.is_none() {
+        eprintln!("no bash installed: checking the guard without the proof that bash expands these");
+    }
+    let mut failures = Vec::new();
+    for (line, env) in EXPANDS_TO_A_MARKER {
+        if let Some(shell) = shell {
+            let words = bash_words(shell, line, env);
+            if !words_open_a_remote_shell(&words) {
+                failures.push(format!("  TEST BUG: bash does not turn {line:?} into a marker: {words:?}"));
+            }
+        }
+        let verdict = evaluate(&bash(line), &FakeProbe::default());
+        if rule_of(&verdict) != Some(RULE_COMMAND) {
+            failures.push(format!("  {line:?} -> {verdict:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "expected a block by `{RULE_COMMAND}` for:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn bypass_brace_and_empty_expansions_spell_a_marker_inside_wrappers() {
+    let mut commands: Vec<String> = Vec::new();
+    for inner in ["ecs_{connect,} ap production portal", "aws ecs execute-comman{d,} --cluster c", "ecs_${U}connect ap"] {
+        commands.push(format!("bash -c '{inner}'"));
+        commands.push(format!("sh -c \"{inner}\""));
+        commands.push(format!("eval \"{inner}\""));
+        commands.push(format!("eval '{inner}'"));
+        commands.push(format!("bash <<EOF\n{inner}\nEOF"));
+        commands.push(format!("bash <<'EOF'\n{inner}\nEOF"));
+        commands.push(format!("cd /tmp && {inner}"));
+        commands.push(format!("echo start; ({inner})"));
+    }
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    assert_all_blocked(&refs, RULE_COMMAND, "wrapped", FakeProbe::default);
+}
+
+/// Run `evaluate` on its own thread so a guard that tries to enumerate a huge expansion fails
+/// this test instead of hanging the run.
+fn evaluate_within(command: &str, limit: std::time::Duration) -> Result<GuardVerdict, GuardError> {
+    let command = command.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(evaluate(&bash(&command), &FakeProbe::default()));
+    });
+    rx.recv_timeout(limit).unwrap_or_else(|_| panic!("evaluate did not finish within {limit:?}"))
+}
+
+#[test]
+fn bypass_a_word_with_more_expansions_than_the_cap_is_blocked_not_enumerated() {
+    // 26 * 26 * 26 = 17576 words, and the cap is 4096 per word.
+    for command in [
+        "echo {a..z}{a..z}{a..z}",
+        "bash -c 'echo {a..z}{a..z}{a..z}'",
+        "echo {a,b,c,d,e,f,g,h}{a,b,c,d,e,f,g,h}{a,b,c,d,e,f,g,h}{a,b,c,d,e,f,g,h}{a,b,c,d,e,f,g,h}",
+        // 26^8 is about 2 * 10^11: counting it must not mean building it
+        "echo {a..z}{a..z}{a..z}{a..z}{a..z}{a..z}{a..z}{a..z}",
+    ] {
+        let verdict = evaluate_within(command, std::time::Duration::from_secs(20));
+        assert_blocked(verdict, RULE_COMMAND, command);
+    }
+}
+
+#[test]
+fn numeric_ranges_and_small_expansions_are_not_counted_against_the_cap() {
+    assert_all_allowed(
+        &[
+            "echo {1..100000}",
+            "for i in {1..5000}; do echo $i; done",
+            "echo {a..z}{a..z}",
+            "mkdir -p src/{a,b,c}/{x,y,z}",
+        ],
+        "under the cap",
+        FakeProbe::default,
+    );
+}
+
+#[test]
+fn benign_commands_stay_allowed() {
+    const BENIGN: &[&str] = &[
+        "tmux ls",
+        "tmux capture-pane -p -t %0",
+        r#"git commit -m "fix ecs""#,
+        "cargo test",
+        "echo ecs",
+        "ls ~/Code/ecs-tools",
+        "cp file.{js,ts,tsx} dir/",
+        "mkdir -p src/{a,b,c}/{x,y,z}",
+        r#"echo ${HOME}/bin $PATH "$@""#,
+        "rm -rf build/{debug,release}",
+        r#"curl -d '{"a":1,"b":2}' http://localhost/x"#,
+        "aws ecs describe-clusters --cluster c",
+        "aws ecs list-tasks",
+        "aws s3 ls",
+        "docker build -t ${name}-task .",
+        "echo $ECS_CONNECT",
+        "echo ${X:-default}",
+        "uv pip install foo",
+        "grep pi file",
+        "cargo run",
+        "npm run build",
+        "git log --oneline | head",
+        "ssh-keygen -t ed25519",
+        "kubectl get pods",
+        r#"python3 -c "print('hello')""#,
+        "ls /opt/homebrew/bin",
+    ];
+    let mut failures = Vec::new();
+    for (world, probe) in [("no tmux server", FakeProbe::default as fn() -> FakeProbe), ("a local-only tmux server", local_world as fn() -> FakeProbe)] {
+        for command in BENIGN {
+            let verdict = evaluate(&bash(command), &probe());
+            if verdict != Ok(GuardVerdict::Allow) {
+                failures.push(format!("  [{world}] {command:?} -> {verdict:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "ordinary commands must not be blocked:\n{}", failures.join("\n"));
+}
+
+// ── B3: a renamed, linked or obfuscated tmux is still tmux ───────────────────────────────
+
+/// Input commands aimed at `%1`, through a tmux the text does not call `tmux`.
+const RENAMED_TMUX_TO_PANE_1: &[&str] = &[
+    "ln -s $(which tmux) /tmp/t; /tmp/t send-keys -t %1 x Enter",
+    "/tmp/t send-keys -t %1 x Enter",
+    "tm[u]x send-keys -t %1 x Enter",
+    "t* send-keys -t %1 x Enter",
+    "tm$Uux send-keys -t %1 x Enter",
+    "tm{u,u}x send-keys -t %1 x Enter",
+    "tmu${U}x send-keys -t %1 x Enter",
+    "cd /opt/homebrew/bin; ./t?ux send-keys -t %1 x Enter",
+    "exec -a x /opt/homebrew/bin/tmu? send-keys -t %1 x Enter",
+    "xargs /tmp/t send-keys -t %1 x",
+    "/tmp/t pasteb -t %1",
+    "/tmp/t send -t %1 x",
+    "/tmp/t pipe-pane -t %1 'cat'",
+];
+
+#[test]
+fn bypass_a_renamed_tmux_is_still_tmux() {
+    assert_all_blocked(RENAMED_TMUX_TO_PANE_1, RULE_TMUX_INPUT, "%1 is a remote pane", remote_pane_world);
+}
+
+#[test]
+fn a_renamed_tmux_typing_into_a_local_pane_is_allowed() {
+    // (`ln -s $(which tmux) …` names tmux as a word of its own, which can reasonably make the
+    // call "can't tell" while a remote pane is open anywhere: it is only held to the worlds
+    // with no remote pane.)
+    let aimed_at_a_local_pane: Vec<&str> = RENAMED_TMUX_TO_PANE_1.iter().copied().filter(|c| !c.starts_with("ln -s")).collect();
+    assert_all_allowed(&aimed_at_a_local_pane, "%1 is local, a remote pane is elsewhere", remote_elsewhere_world);
+    assert_all_allowed(RENAMED_TMUX_TO_PANE_1, "no remote pane", all_local_world);
+    assert_all_allowed(RENAMED_TMUX_TO_PANE_1, "no tmux server", FakeProbe::default);
+}
+
+#[test]
+fn bypass_a_renamed_tmux_with_no_target_is_checked_against_every_pane_of_the_server() {
+    let untargeted = [
+        "/tmp/t send-keys x Enter",
+        "tm[u]x send-keys x Enter",
+        "tm$Uux send-keys x Enter",
+        "xargs /tmp/t send-keys x",
+        "/tmp/t paste-buffer",
+    ];
+    assert_all_blocked(&untargeted, RULE_TMUX_INPUT, "a remote pane exists", remote_elsewhere_world);
+    assert_all_allowed(&untargeted, "no remote pane", all_local_world);
+}
+
+#[test]
+fn bypass_a_renamed_tmux_on_a_named_server_is_checked_on_that_server() {
+    let command = "/tmp/t -L work send-keys -t %1 x";
+    let remote_on_work = || FakeProbe::default().pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL).pane_on(work(), "%1", REMOTE_TITLE, REMOTE_SHELL);
+    let local_on_work = || FakeProbe::default().pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL).pane_on(work(), "%1", "zsh", LOCAL_SHELL);
+    assert_blocked(evaluate(&bash(command), &remote_on_work()), RULE_TMUX_INPUT, command);
+    assert_allowed(evaluate(&bash(command), &local_on_work()), command);
+}
+
+#[test]
+fn bypass_tmux_driven_from_an_interpreter_is_checked_against_every_pane_of_every_server() {
+    let commands = [
+        r#"python3 -c 'import libtmux; s=libtmux.Server(); s.panes[0].send_keys("x")'"#,
+        r#"python3 -c 'import os; os.system("t"+"mux send-keys -t %1 x Enter")'"#,
+    ];
+    assert_all_blocked(&commands, RULE_TMUX_INPUT, "remote pane on the default server", remote_pane_world);
+    assert_all_blocked(&commands, RULE_TMUX_INPUT, "remote pane on another server", || {
+        FakeProbe::default().pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL).other_pane_on(work(), REMOTE_TITLE, REMOTE_SHELL)
+    });
+    assert_all_allowed(&commands, "no remote pane", all_local_world);
+    assert_all_allowed(&commands, "no tmux server", FakeProbe::default);
+}
+
+#[test]
+fn bypass_a_path_that_resolves_to_the_real_tmux_is_tmux_whatever_it_is_called() {
+    let fixed = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux", "/opt/local/bin/tmux"];
+    let Some(real) = fixed.iter().find(|p| Path::new(p).is_file()) else {
+        eprintln!("skipped: no tmux at a fixed install path");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let zz = dir.path().join("zz");
+    std::os::unix::fs::symlink(real, &zz).unwrap();
+    let zz = zz.display();
+
+    // A tmux command that is not an input verb: it can run other tmux commands, so it can't be told.
+    let indirect = [format!("{zz} run-shell 'true'"), format!("{zz} \"$VERB\" -t %1 x")];
+    let indirect: Vec<&str> = indirect.iter().map(String::as_str).collect();
+    assert_all_blocked(&indirect, RULE_TMUX_INPUT, "a remote pane exists", remote_elsewhere_world);
+    assert_all_allowed(&indirect, "no remote pane", all_local_world);
+    assert_all_allowed(&indirect, "no tmux server", FakeProbe::default);
+
+    let direct = [format!("{zz} send-keys -t %1 x")];
+    let direct: Vec<&str> = direct.iter().map(String::as_str).collect();
+    assert_all_blocked(&direct, RULE_TMUX_INPUT, "%1 is remote", remote_pane_world);
+    assert_all_allowed(&direct, "%1 is local", remote_elsewhere_world);
+
+    // Control: a link to a program that is not tmux gets no tmux treatment for its arguments.
+    let other = dir.path().join("yy");
+    std::os::unix::fs::symlink("/bin/echo", &other).unwrap();
+    let not_tmux = [format!("{} \"$VERB\" -t %1 x", other.display())];
+    let not_tmux: Vec<&str> = not_tmux.iter().map(String::as_str).collect();
+    assert_all_allowed(&not_tmux, "a link to echo", remote_elsewhere_world);
+}
+
+#[test]
+fn bypass_respawn_pane_with_k_kills_the_production_shell() {
+    let kills_remote = [
+        "tmux respawn-pane -k -t %1 'zsh'",
+        "tmux respawn-pane -kt %1",
+        "tmux respawn-pane -t %1 -k",
+        "tmux respawnp -k -t %1",
+    ];
+    assert_all_blocked(&kills_remote, RULE_TMUX_INPUT, "%1 is remote", remote_pane_world);
+
+    // Without -k, respawn-pane refuses to touch a live pane; -k on a local pane is fine.
+    assert_all_allowed(&["tmux respawn-pane -t %1", "tmux respawn-pane -k -t %0", "tmux respawn-pane -kt %0"], "harmless", remote_pane_world);
+    assert_all_allowed(&kills_remote, "%1 is local", remote_elsewhere_world);
+}
+
+#[test]
+fn bypass_respawn_pane_with_k_and_a_target_that_cannot_be_told_is_checked_against_the_server() {
+    let dynamic = [r#"tmux respawn-pane -k "$P""#, r#"tmux respawn-pane -k -t "$P""#, "tmux respawn-pane -k"];
+    assert_all_blocked(&dynamic, RULE_TMUX_INPUT, "a remote pane exists", remote_elsewhere_world);
+    assert_all_allowed(&dynamic, "no remote pane", all_local_world);
+    assert_all_allowed(&dynamic, "no tmux server", FakeProbe::default);
+}
+
+#[test]
+fn tmux_commands_that_are_not_input_stay_allowed_while_a_pane_is_remote() {
+    assert_all_allowed(
+        &[
+            "tmux ls",
+            "tmux capture-pane -p -t %0",
+            "tmux display-message -p -t %0 '#{pane_title}'",
+            "tmux list-panes -a",
+            "ls -la",
+            "cargo test",
+            "git commit -m x",
+            r#"python3 -c "print(1)""#,
+            "/tmp/t send-keys -t %0 x Enter",
+            "tm[u]x send-keys -t %0 x Enter",
+        ],
+        "a remote pane is open elsewhere",
+        remote_pane_world,
+    );
+}
+
+#[test]
+fn a_command_that_names_no_marker_and_no_tmux_makes_no_probe_calls() {
+    for command in ["cargo test", "ls ~/Code/ecs-tools", "git commit -m x", "ls -la", r#"python3 -c "print(1)""#, "echo ecs"] {
+        let probe = remote_pane_world();
+        assert_allowed(evaluate(&bash(command), &probe), command);
+        assert_eq!(probe.calls(), 0, "{command}");
+    }
+}
+
+// ── nits ─────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn bypass_relative_pane_targets_are_resolved_by_tmux_from_where_the_agent_is_so_they_cannot_be_told() {
+    for target in ["{next}", "{previous}", "{last}", "{top}", "{up-of}", ":+1", "!"] {
+        let command = format!("tmux send-keys -t {target} x");
+        // A probe resolves the target from its own position, so it can answer "a local pane"
+        // for a target that, for the agent, is the remote one.
+        let remote = FakeProbe::default().pane_on(DEFAULT, target, "zsh", LOCAL_SHELL).other_pane_on(DEFAULT, REMOTE_TITLE, REMOTE_SHELL);
+        assert_blocked(evaluate(&bash(&command), &remote), RULE_TMUX_INPUT, &command);
+
+        let all_local = FakeProbe::default().pane_on(DEFAULT, target, "zsh", LOCAL_SHELL).other_pane_on(DEFAULT, "zsh", LOCAL_SHELL);
+        assert_allowed(evaluate(&bash(&command), &all_local), &command);
+    }
+}
+
+#[test]
+fn bypass_tmux_pane_from_the_environment_aims_input_at_a_pane_the_guard_cannot_name() {
+    // The remote pane is on a server the default lookup would never visit.
+    let world = || {
+        FakeProbe::default()
+            .pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL)
+            .other_pane_on(TmuxSocket::Path("/tmp/other/tmux-501/default".into()), REMOTE_TITLE, REMOTE_SHELL)
+    };
+    let commands = ["TMUX_PANE=%1 tmux send-keys x", "export TMUX_PANE=%1; tmux send-keys x", "env TMUX_PANE=%1 tmux send-keys x"];
+    assert_all_blocked(&commands, RULE_TMUX_INPUT, "a remote pane on another server", world);
+    assert_all_allowed(&commands, "all panes local", || FakeProbe::default().pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL));
+}
+
+#[test]
+fn tool_names_that_contain_an_ecs_shell_tool_are_blocked_by_name() {
+    for tool in [
+        "mcp__x__ecs_connect_tool",
+        "ecs_connect_session",
+        "my_ecs_shell",
+        "mcp__a__ecs_open_tmux_pane_v2",
+        "ecs_run_task2",
+    ] {
+        assert_blocked(evaluate(&tool_call(tool, json!({})), &FakeProbe::default()), RULE_TOOL_NAME, tool);
+    }
+    for tool in ["Bash", "mcp__x__ecs_info", "ecs_build_command", "ecs_copy_command", "mcp__x__ecs_list_tasks", "Read"] {
+        assert_allowed(evaluate(&tool_call(tool, json!({})), &FakeProbe::default()), tool);
+    }
+}
+
+#[test]
+fn bypass_the_audit_entry_of_a_block_shows_hidden_characters_and_is_capped() {
+    let sb = Sandbox::new();
+    let command = format!("\u{202e}ecs_connect ap production portal {}", "x".repeat(100 * 1024));
+    let payload = json!({ "session_id": "s-1", "tool_use_id": "toolu_1", "tool_name": "Bash",
+                          "tool_input": { "command": command, "description": "x" } });
+
+    let run = sb.pre_tool_use(&payload);
+
+    assert_eq!(run.code, Some(0), "{:?}", run.stderr);
+    assert_eq!(trimmed(&run.stdout), deny_output_json());
+    let lines = sb.audit_lines();
+    assert_eq!(lines.len(), 1, "{}", lines.len());
+    match &lines[0].1.event {
+        Event::GuardBlocked { input, detail, .. } => {
+            let recorded = input["command"].as_str().expect("the command is recorded");
+            assert!(!recorded.contains('\u{202e}'), "a raw U+202E reached the log");
+            assert!(recorded.contains("\u{27E8}U+202E\u{27E9}"), "it is shown as its code point");
+            assert!(recorded.contains("ecs_connect"), "what was matched is still readable");
+            assert!(recorded.contains("\u{2026}[truncated"), "the cut is marked");
+            assert!(recorded.len() <= MAX_RECORDED_STRING_BYTES + 64, "{} bytes recorded", recorded.len());
+            assert_eq!(input["description"], json!("x"), "other fields are kept");
+            assert!(!detail.as_deref().unwrap_or_default().contains('\u{202e}'), "detail: {detail:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    for file in std::fs::read_dir(&sb.approvals).unwrap() {
+        let text = std::fs::read_to_string(file.unwrap().path()).unwrap();
+        assert!(!text.contains('\u{202e}'), "the audit file holds a raw U+202E");
+    }
+}
+
+#[test]
+fn bypass_a_symlinked_audit_file_is_not_written_through_by_the_guard() {
+    let sb = Sandbox::new();
+    std::fs::create_dir_all(&sb.approvals).unwrap();
+    let victim = sb.home.join("victim.txt");
+    std::fs::write(&victim, "keep me\n").unwrap();
+    // Today's file, whichever UTC day the run lands on.
+    let today = chrono::Utc::now().date_naive();
+    for offset in [-1, 0, 1] {
+        let day = today + chrono::Duration::days(offset);
+        std::os::unix::fs::symlink(&victim, sb.approvals.join(format!("audit-{}.jsonl", day.format("%Y-%m-%d")))).unwrap();
+    }
+
+    let run = sb.pre_tool_use(&json!({ "tool_name": "Bash", "tool_input": { "command": "ecs_connect ap production portal" } }));
+
+    let denied = trimmed(&run.stdout) == deny_output_json() && run.code == Some(0);
+    assert!(denied || run.code == Some(2), "must deny or fail closed, never allow: {run:?}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n", "the link target was written to");
+}
+
+#[test]
+fn the_guards_own_tmux_probes_ignore_the_agents_tmux_environment() {
+    let ok = Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
+        eprintln!("tmux is not installed: skipping the scrubbed-environment test");
+        return;
+    }
+    // A short path: a unix socket path is limited to about 100 bytes.
+    let dir = tempfile::Builder::new().prefix("rg").tempdir_in("/tmp").unwrap();
+    let sock = dir.path().join("s");
+    let sb = Sandbox::new();
+    let tmux = |args: &[&str]| {
+        let out = Command::new("tmux")
+            .arg("-S")
+            .arg(&sock)
+            .args(["-f", "/dev/null"])
+            .args(args)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .expect("tmux");
+        assert!(out.status.success(), "tmux {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    struct KillServer<'a>(&'a Path);
+    impl Drop for KillServer<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux").arg("-S").arg(self.0).arg("kill-server").output();
+        }
+    }
+    tmux(&["new-session", "-d", "-x", "100", "-y", "30", "sleep 300"]);
+    let _cleanup = KillServer(&sock);
+    let pane = tmux(&["list-panes", "-a", "-F", "#{pane_id}"]).lines().next().expect("a pane").trim().to_owned();
+    let payload = json!({ "session_id": "s", "tool_use_id": "t", "tool_name": "Bash",
+                          "tool_input": { "command": format!("tmux -S {} send-keys -t {pane} x", sock.display()) } });
+    let hostile = |c: &mut Command| {
+        c.env("TMUX", "/nonexistent/sock,1,0").env("TMUX_PANE", "%99").env("TMUX_TMPDIR", dir.path());
+    };
+
+    tmux(&["select-pane", "-t", pane.as_str(), "-T", REMOTE_TITLE]);
+    let remote = sb.guard_with(&["pre-tool-use"], payload.to_string().as_bytes(), hostile);
+    assert_eq!(remote.code, Some(0), "{remote:?}");
+    assert_eq!(trimmed(&remote.stdout), deny_output_json(), "a remote pane is still found: {remote:?}");
+
+    tmux(&["select-pane", "-t", pane.as_str(), "-T", "zsh"]);
+    let local = sb.guard_with(&["pre-tool-use"], payload.to_string().as_bytes(), hostile);
+    assert_eq!((local.code, local.stdout.as_str()), (Some(0), ""), "a local pane is still allowed: {local:?}");
 }

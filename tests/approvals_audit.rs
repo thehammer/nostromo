@@ -10,7 +10,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event, RETENTION_DAYS};
+use nostromo::approvals::audit::{
+    sanitize_recorded, AuditFilter, AuditLog, Entry, Event, MAX_RECORDED_STRING_BYTES, RETENTION_DAYS,
+};
+use nostromo::data::work::is_invisible;
 use serde_json::{json, Value};
 
 fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
@@ -401,4 +404,167 @@ fn sweeping_an_empty_store_deletes_nothing() {
     let root = tempfile::tempdir().unwrap();
     let log = AuditLog::open(&root.path().join("a")).unwrap();
     assert_eq!(log.sweep(at(2026, 10, 15, 12, 0, 0)).unwrap(), 0);
+}
+
+// ── what a blocked tool input looks like once recorded ───────────────────────────────────
+//
+// The `nostromo-guard` binary records `sanitize_recorded(tool_input)`: whoever reads the log (a
+// terminal, a review UI) must not be steered by hidden characters or flooded by a huge string.
+
+/// The string that `sanitize_recorded` returns for `s`, wrapped as a top-level JSON string.
+fn sanitized(s: &str) -> String {
+    match sanitize_recorded(&json!(s)) {
+        Value::String(out) => out,
+        other => panic!("a string must stay a string, got {other:?}"),
+    }
+}
+
+#[test]
+fn bypass_invisible_and_bidi_characters_are_shown_as_their_code_point() {
+    for (c, shown) in [
+        ('\u{202E}', "\u{27E8}U+202E\u{27E9}"),
+        ('\u{200B}', "\u{27E8}U+200B\u{27E9}"),
+        ('\u{2066}', "\u{27E8}U+2066\u{27E9}"),
+        ('\u{FEFF}', "\u{27E8}U+FEFF\u{27E9}"),
+        ('\u{0007}', "\u{27E8}U+0007\u{27E9}"),
+        ('\u{E0041}', "\u{27E8}U+E0041\u{27E9}"),
+    ] {
+        assert_eq!(sanitized(&format!("ecs{c}_connect")), format!("ecs{shown}_connect"), "U+{:04X}", c as u32);
+    }
+    assert_eq!(sanitized("a\u{202E}b\u{202E}c"), "a\u{27E8}U+202E\u{27E9}b\u{27E8}U+202E\u{27E9}c", "every occurrence");
+}
+
+#[test]
+fn bypass_no_invisible_character_survives_sanitizing() {
+    // Every code point `is_invisible` knows (newline, tab and carriage return are left to the
+    // implementation: a multi-line command is legitimate).
+    let hidden: Vec<char> = (0..=0x10FFFFu32)
+        .filter_map(char::from_u32)
+        .filter(|c| is_invisible(*c) && !matches!(c, '\n' | '\t' | '\r'))
+        .collect();
+    assert!(hidden.len() > 100, "the predicate covers many code points: {}", hidden.len());
+    let input: String = hidden.iter().map(|c| format!("[{c}]")).collect();
+    let expected: String = hidden.iter().map(|c| format!("[\u{27E8}U+{:04X}\u{27E9}]", *c as u32)).collect();
+
+    assert!(input.len() < MAX_RECORDED_STRING_BYTES && expected.len() < MAX_RECORDED_STRING_BYTES, "the cap is not in play here");
+
+    let out = sanitized(&input);
+
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn sanitizing_reaches_every_string_in_nested_objects_and_arrays_and_leaves_the_rest_alone() {
+    let input = json!({
+        "command": "ls\u{202E}",
+        "nested": { "list": ["a\u{200B}b", 5, null, true, 1.5, ["deep\u{2066}"], { "k": "v\u{202E}" }] },
+        "number": 7,
+        "flag": false,
+        "nothing": null,
+        "empty": "",
+    });
+
+    let out = sanitize_recorded(&input);
+
+    assert_eq!(
+        out,
+        json!({
+            "command": "ls\u{27E8}U+202E\u{27E9}",
+            "nested": { "list": ["a\u{27E8}U+200B\u{27E9}b", 5, null, true, 1.5, ["deep\u{27E8}U+2066\u{27E9}"], { "k": "v\u{27E8}U+202E\u{27E9}" }] },
+            "number": 7,
+            "flag": false,
+            "nothing": null,
+            "empty": "",
+        })
+    );
+}
+
+#[test]
+fn ordinary_strings_and_values_are_recorded_unchanged() {
+    let input = json!({
+        "command": "git commit -m \"fix: h\u{e9}llo \u{2713} \u{65e5}\u{672c}\u{8a9e} \u{1F680}\" && echo 'a\\b' $HOME",
+        "description": "plain text, with: punctuation (and) {braces} [brackets] <angles>",
+        "n": [1, 2, 3],
+    });
+    assert_eq!(sanitize_recorded(&input), input);
+    assert_eq!(sanitize_recorded(&json!({})), json!({}));
+    assert_eq!(sanitize_recorded(&json!(null)), json!(null));
+}
+
+#[test]
+fn a_string_of_exactly_the_cap_is_unchanged_and_one_byte_more_is_cut_with_a_note() {
+    let at_cap = "a".repeat(MAX_RECORDED_STRING_BYTES);
+    assert_eq!(sanitized(&at_cap), at_cap);
+
+    let over = "a".repeat(MAX_RECORDED_STRING_BYTES + 1);
+    let out = sanitized(&over);
+    assert_ne!(out, over);
+    let note_at = out.find("\u{2026}[truncated").expect("a note starting `\u{2026}[truncated`");
+    assert!(out[..note_at].chars().all(|c| c == 'a'));
+    assert!(note_at <= MAX_RECORDED_STRING_BYTES, "at most the cap is kept: {note_at}");
+    assert!(note_at > MAX_RECORDED_STRING_BYTES / 2, "the text is kept, not just a note: {note_at}");
+    assert!(out.len() <= MAX_RECORDED_STRING_BYTES + 64, "the note is short: {} bytes", out.len());
+}
+
+#[test]
+fn a_long_string_deep_in_the_value_is_cut_too() {
+    let long = "z".repeat(5 * MAX_RECORDED_STRING_BYTES);
+    let out = sanitize_recorded(&json!({ "a": [{ "b": long }], "short": "ok" }));
+    let cut = out["a"][0]["b"].as_str().unwrap();
+    assert!(cut.len() <= MAX_RECORDED_STRING_BYTES + 64, "{}", cut.len());
+    assert!(cut.contains("\u{2026}[truncated"));
+    assert_eq!(out["short"], json!("ok"));
+}
+
+#[test]
+fn cutting_never_splits_a_multibyte_character() {
+    // 3-byte and 4-byte characters, with the cap landing inside one of them.
+    for c in ['\u{65e5}', '\u{1F680}', '\u{e9}'] {
+        for lead in 0..4 {
+            let text = format!("{}{}", "a".repeat(lead), c.to_string().repeat(MAX_RECORDED_STRING_BYTES));
+            let out = sanitized(&text);
+            let note_at = out.find("\u{2026}[truncated").unwrap_or_else(|| panic!("{c:?}+{lead}: no note"));
+            let kept = &out[..note_at];
+            assert!(kept.len() <= MAX_RECORDED_STRING_BYTES, "{c:?}+{lead}: {} bytes kept", kept.len());
+            assert!(kept.len() > MAX_RECORDED_STRING_BYTES / 2, "{c:?}+{lead}");
+            assert!(kept.chars().skip(lead).all(|k| k == c), "{c:?}+{lead}: whole characters only");
+            assert!(out.len() <= MAX_RECORDED_STRING_BYTES + 64, "{c:?}+{lead}");
+        }
+    }
+}
+
+#[test]
+fn a_long_run_of_hidden_characters_is_shown_and_cut_not_passed_through() {
+    // Each one becomes a 12-byte marker, so this is far over the cap once shown.
+    let out = sanitized(&"\u{202E}".repeat(MAX_RECORDED_STRING_BYTES));
+    assert!(!out.contains('\u{202E}'), "no raw U+202E survives");
+    assert!(out.contains("\u{27E8}U+202E\u{27E9}"));
+    assert!(out.len() <= MAX_RECORDED_STRING_BYTES + 64, "{} bytes", out.len());
+    assert!(out.contains("\u{2026}[truncated"));
+}
+
+// ── the daily file is never a way to write somewhere else ────────────────────────────────
+
+#[test]
+fn bypass_appending_through_a_symlinked_daily_file_fails_and_leaves_the_target_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let log = AuditLog::open(&root.path().join("approvals")).unwrap();
+    let entry = blocked(at(2026, 10, 16, 12, 0, 0), None);
+
+    // The file exists: a link to something the user owns and cares about.
+    let victim = root.path().join("victim.txt");
+    std::fs::write(&victim, "keep me\n").unwrap();
+    std::os::unix::fs::symlink(&victim, log.file_for(entry.ts)).unwrap();
+    assert!(log.append(&entry).is_err(), "appending through a symlink must fail");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n", "the target is untouched");
+
+    // The link dangles: the target must not be created through it either.
+    let entry = blocked(at(2026, 10, 17, 12, 0, 0), None);
+    let missing = root.path().join("not-created.txt");
+    std::os::unix::fs::symlink(&missing, log.file_for(entry.ts)).unwrap();
+    assert!(log.append(&entry).is_err(), "a dangling symlink is refused too");
+    assert!(!missing.exists(), "nothing was created through the link");
+
+    // Other days are unaffected.
+    log.append(&blocked(at(2026, 10, 18, 12, 0, 0), None)).expect("a normal file still works");
 }

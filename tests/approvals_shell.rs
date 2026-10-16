@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nostromo::approvals::shell::{parse, HereDoc, SepKind, ShellParse, SimpleCommand, MAX_DEPTH};
+use nostromo::approvals::shell::{parse, HereDoc, SepKind, ShellParse, SimpleCommand, MAX_DEPTH, WILDCARD};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -326,6 +326,84 @@ fn separators_inside_a_substitution_are_not_top_level_separators() {
         assert!(sep_kinds(input).is_empty(), "input {input:?}");
         assert!(cmds(input).len() >= 3, "inner commands found for {input:?}: {:?}", cmds(input));
     }
+}
+
+// ── 4b. `Word::pattern`: the text with each unexpanded expansion as a wildcard ────────
+
+/// The `pattern` of the word at `index` in the outermost command of `input` (the one that
+/// spans the most text; a `$( )` inside it is a command of its own).
+#[track_caller]
+fn pattern_of(input: &str, index: usize) -> String {
+    let p = parse(input);
+    let outer = p.commands.iter().max_by_key(|c| c.span.len()).expect("a command");
+    outer.words[index].pattern.clone()
+}
+
+/// `s` with `@` standing for [`WILDCARD`], so expected values read.
+fn wild(s: &str) -> String {
+    s.replace('@', &WILDCARD.to_string())
+}
+
+#[test]
+fn a_word_with_no_expansion_has_a_pattern_equal_to_its_text() {
+    let c = only_command(r#"echo plain 'a $b' "q r" $'\x41' a\ b \$X"#);
+    for w in &c.words {
+        assert_eq!(w.pattern, w.text, "{:?}", w.text);
+        assert!(!w.pattern.contains(WILDCARD));
+    }
+}
+
+#[test]
+fn an_unquoted_variable_between_quoted_pieces_is_one_wildcard_and_keeps_the_quote_boundary() {
+    // The text is `ecs_$Uconnect`: the variable is `$U`, and the quotes say where it ends.
+    let c = only_command(r#"echo "ecs_"$U"connect""#);
+    assert_eq!(c.words[1].text, "ecs_$Uconnect");
+    assert_eq!(c.words[1].pattern, wild("ecs_@connect"));
+    assert!(c.words[1].dynamic);
+}
+
+#[test]
+fn each_kind_of_expansion_becomes_exactly_one_wildcard() {
+    for (input, expected) in [
+        ("echo ${P}session-manager-plugin", "@session-manager-plugin"),
+        ("echo ${X:-a b}", "@"),
+        ("echo $HOME", "@"),
+        ("echo a$(echo x)b", "a@b"),
+        ("echo a`echo x`b", "a@b"),
+        ("echo a$((1+2))b", "a@b"),
+        (r#"echo "a $X b""#, "a @ b"),
+        (r#"echo "$(echo "a b")""#, "@"),
+        ("echo $@", "@"),
+        ("echo ecs_$@connect", "ecs_@connect"),
+        ("echo ecs_$*connect", "ecs_@connect"),
+    ] {
+        assert_eq!(pattern_of(input, 1), wild(expected), "input {input:?}");
+    }
+}
+
+#[test]
+fn every_expansion_in_a_word_is_its_own_wildcard() {
+    assert_eq!(pattern_of("echo a${X}-b${Y}c${Z}", 1), wild("a@-b@c@"));
+    assert_eq!(pattern_of("echo a$X-b$Y", 1), wild("a@-b@"));
+    assert_eq!(pattern_of("echo ${A}${B}", 1), wild("@@"));
+}
+
+#[test]
+fn text_that_only_looks_like_an_expansion_is_not_a_wildcard() {
+    assert_eq!(pattern_of("echo '$HOME'", 1), "$HOME");
+    assert_eq!(pattern_of(r"echo \$HOME", 1), "$HOME");
+    assert_eq!(pattern_of(r#"echo "\$HOME""#, 1), "$HOME");
+    assert_eq!(pattern_of("echo 'a$(x)b'", 1), "a$(x)b");
+}
+
+#[test]
+fn a_nested_command_word_has_its_own_pattern() {
+    // The outer word holds one expansion; the commands inside it are parsed on their own.
+    let p = parse("echo x$(ecs_${U}connect y)z");
+    let outer = p.commands.iter().find(|c| c.texts()[0] == "echo").expect("the outer command");
+    assert_eq!(outer.words[1].pattern, wild("x@z"));
+    let inner = p.commands.iter().find(|c| c.texts()[0].starts_with("ecs_")).expect("the inner command");
+    assert_eq!(inner.words[0].pattern, wild("ecs_@connect"));
 }
 
 // ── 5. subshells, groups, process substitution ────────────────────────────────
