@@ -62,7 +62,7 @@ The binary can be used directly: `sensitive-text-scan < file` prints `line_no<TA
 
 ## Changing a pattern
 
-1. Add the positive to `positives.txt` or the look-alike to `benign.txt`, then the table test.
+1. Add the positive to `positives.txt` or the look-alike to `benign.txt`, then the table test. Secret-shaped positives must be masked: put a `¦` (U+00A6, stripped by the test loader) inside the key, or GitHub push protection will reject the push.
 2. Change the pattern in `src/sensitive_text.rs`.
 3. `cargo test --test sensitive_text_corpus`. The benign budget is 1%; do not trade a miss for a false alarm silently.
 
