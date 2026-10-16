@@ -19,7 +19,8 @@ path).
    path. The code must satisfy the requirement built from the pin file,
    `identifier "com.hammer.nostromo" and (cdhash H"<arm64>" or cdhash H"<x86_64>")`,
    and the kernel's status flags for it must show a valid signature under the
-   hardened runtime, with no `get-task-allow` and no debugger attached.
+   hardened runtime, **enforced** by the kernel (`CS_HARD`, `CS_KILL` and
+   `CS_ENFORCEMENT`), with no `get-task-allow` and no debugger attached.
    Where the executable lives, and what an `Info.plist` beside it says, don't
    matter. The pin is re-read on every such connection, so a reinstall needs no
    daemon restart.
@@ -65,6 +66,10 @@ when it is missing or unusable, in which case no app can answer). An app that
 connects without the claim (an app older than the daemon) logs
 `genuine bundle, no mac_app claim: old app? reinstall app and daemon together`;
 a refused claim logs `mac_app claim refused: <reason>; run make mac-install …`.
+On a Mac where the kernel does not enforce the hardened runtime (System
+Integrity Protection disabled) the claim is always refused, and reinstalling
+can't help: the log reads `mac_app claim refused: RuntimeNotEnforced; SIP
+disabled or runtime not enforced: operator app cannot answer`.
 
 **Debug builds can't answer.** `make mac` / `mac-run` builds carry
 `get-task-allow` (so Xcode can attach) and aren't pinned, so the daemon refuses
@@ -90,6 +95,13 @@ Developer ID Team ID and a root-owned install:
   event and VoiceOver is off, or the event is older than 1 s; a press within
   1 s of a real event in the sheet's window is still accepted;
 - edit any other user-writable file.
+
+**SIP disabled ⇒ the operator app cannot answer.** With System Integrity
+Protection disabled the kernel sets `CS_RUNTIME` but enforces nothing, so a
+library inserted with `DYLD_INSERT_LIBRARIES` runs inside the signed app. The
+daemon therefore requires the enforcement bits and refuses every claim
+(`RuntimeNotEnforced`) on such a host. This fails closed: decisions can't be
+answered there at all.
 
 The pin is not a root of trust: it raises the bar from "run a process" to
 "rewrite installed files", and every pin read is logged.

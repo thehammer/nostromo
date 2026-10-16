@@ -13,8 +13,10 @@
 //!   by pid or path), checks it against the requirement
 //!   `identifier "<id>" and (cdhash H"<a>" or …)` built from the pin file
 //!   `make mac-install` writes ([`OperatorPin`]), and reads the kernel's status
-//!   flags for it: it must be valid and run under the hardened runtime, and
-//!   must be neither debuggable (`get-task-allow`) nor being debugged.
+//!   flags for it: it must be valid and run under the hardened runtime, the
+//!   kernel must be **enforcing** that runtime (`CS_HARD`, `CS_KILL` and
+//!   `CS_ENFORCEMENT`; absent when SIP is disabled), and it must be neither
+//!   debuggable (`get-task-allow`) nor being debugged.
 //!
 //! Where the executable lives, and what an `Info.plist` next to it says, no
 //! longer matter: a fake bundle claiming the Nostromo bundle id has another
@@ -31,7 +33,9 @@
 //! **and** rewrite the pin to match, replace the daemon or its launchd plist,
 //! or post OS-level events into the app if its host holds Accessibility or
 //! Input Monitoring permission. The pin is not a root of trust: it raises the
-//! bar from "run a process" to "rewrite installed files". See
+//! bar from "run a process" to "rewrite installed files". With SIP disabled
+//! the kernel enforces no runtime, so the operator app cannot answer at all
+//! ([`UnverifiedReason::RuntimeNotEnforced`]). See
 //! `docs/operator-app-trust.md`.
 //!
 //! [`classify_peer`] is the **only** place that assigns `OperatorApp`.
@@ -98,6 +102,10 @@ pub enum UnverifiedReason {
     RequirementFailed,
     /// Not signed with the hardened runtime.
     NoRuntime,
+    /// Signed with the hardened runtime, but the kernel does not enforce it
+    /// (`CS_HARD`, `CS_KILL` or `CS_ENFORCEMENT` missing): System Integrity
+    /// Protection is disabled, so the runtime blocks no injected library.
+    RuntimeNotEnforced,
     /// Signed with `get-task-allow`: a debugger may attach.
     GetTaskAllow,
     /// A debugger is attached.
@@ -263,12 +271,18 @@ pub fn claim_diagnostic(info: Option<&PeerInfo>, client_kind: Option<&str>, trus
         return None;
     }
     const FIX: &str = "run make mac-install (installs, signs and pins the app)";
+    const NOT_ENFORCED: &str = "SIP disabled or runtime not enforced: operator app cannot answer";
     match client_kind {
         None if info.is_some_and(|i| i.path_bundle_id.as_deref() == Some(APP_BUNDLE_ID)) => {
             Some("genuine bundle, no mac_app claim: old app? reinstall app and daemon together".to_string())
         }
         Some(MAC_APP_CLIENT_KIND) => Some(match info.map(|i| &i.code) {
             None => format!("mac_app claim refused: the peer could not be identified; {FIX}"),
+            // Reinstalling cannot help here: the host itself does not enforce
+            // the runtime.
+            Some(CodeIdentity::Unverified { reason: reason @ UnverifiedReason::RuntimeNotEnforced }) => {
+                format!("mac_app claim refused: {reason}; {NOT_ENFORCED}")
+            }
             Some(CodeIdentity::Unverified { reason }) => format!("mac_app claim refused: {reason}; {FIX}"),
             Some(CodeIdentity::Pinned { identifier }) => {
                 format!("mac_app claim refused: identifier {identifier} is not accepted by this daemon; {FIX}")
@@ -429,18 +443,51 @@ pub fn audit_token(_fd: BorrowedFd<'_>) -> Option<AuditToken> {
 // ── the code check ───────────────────────────────────────────────────────────
 
 /// Kernel code-signing status bits (`<kern/cs_blobs.h>`).
-#[cfg(target_os = "macos")]
 mod cs {
     pub const VALID: u32 = 0x0000_0001;
     pub const GET_TASK_ALLOW: u32 = 0x0000_0004;
+    /// The kernel kills the process rather than let it map invalid pages.
+    pub const HARD: u32 = 0x0000_0100;
+    /// The kernel kills the process if its signature becomes invalid.
+    pub const KILL: u32 = 0x0000_0200;
+    /// The kernel enforces code signing on the process.
+    pub const ENFORCEMENT: u32 = 0x0000_1000;
     pub const RUNTIME: u32 = 0x0001_0000;
     pub const DEBUGGED: u32 = 0x1000_0000;
 }
 
+/// Judges the kernel's status flags for a peer whose code already satisfied
+/// the pin. Pure, so every combination is unit-tested on any platform.
+///
+/// `CS_RUNTIME` says only that the signature asks for the hardened runtime;
+/// the kernel still sets it when System Integrity Protection is disabled and
+/// nothing is enforced (a spike on a SIP-disabled host: `0x22010001`, and a
+/// `DYLD_INSERT_LIBRARIES` library ran). So the enforcement bits are required
+/// too. `CS_FORCED_LV` (`0x10`) is deliberately not required: whether the
+/// kernel sets it may vary by OS version. A SIP-enabled host gives
+/// `0x22011311` for the installed recipe.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn check_status_flags(status: u32) -> Result<(), UnverifiedReason> {
+    const ENFORCED: u32 = cs::HARD | cs::KILL | cs::ENFORCEMENT;
+    if status & cs::VALID == 0 {
+        Err(UnverifiedReason::NotValid)
+    } else if status & cs::RUNTIME == 0 {
+        Err(UnverifiedReason::NoRuntime)
+    } else if status & cs::GET_TASK_ALLOW != 0 {
+        Err(UnverifiedReason::GetTaskAllow)
+    } else if status & cs::DEBUGGED != 0 {
+        Err(UnverifiedReason::Debugged)
+    } else if status & ENFORCED != ENFORCED {
+        Err(UnverifiedReason::RuntimeNotEnforced)
+    } else {
+        Ok(())
+    }
+}
+
 /// The code `token` names, checked against `pin`: looked up by audit token,
 /// validated against [`OperatorPin::requirement`] (resources included), then
-/// required to be valid and under the hardened runtime, and refused when
-/// debuggable or being debugged, by the kernel's own status flags.
+/// judged by the kernel's own status flags ([`check_status_flags`]): valid,
+/// under an enforced hardened runtime, not debuggable, not being debugged.
 #[cfg(target_os = "macos")]
 pub fn verify_code(token: &AuditToken, pin: &OperatorPin) -> CodeIdentity {
     match check_code(token, pin) {
@@ -478,17 +525,7 @@ fn check_code(token: &AuditToken, pin: &OperatorPin) -> Result<(), UnverifiedRea
         }
     })?;
     let status = dynamic_status(&code).ok_or(UnverifiedReason::NotValid)?;
-    if status & cs::VALID == 0 {
-        Err(UnverifiedReason::NotValid)
-    } else if status & cs::RUNTIME == 0 {
-        Err(UnverifiedReason::NoRuntime)
-    } else if status & cs::GET_TASK_ALLOW != 0 {
-        Err(UnverifiedReason::GetTaskAllow)
-    } else if status & cs::DEBUGGED != 0 {
-        Err(UnverifiedReason::Debugged)
-    } else {
-        Ok(())
-    }
+    check_status_flags(status)
 }
 
 /// The kernel's status flags for running `code`
@@ -847,7 +884,7 @@ mod tests {
 
     // ── classify_peer ─────────────────────────────────────────────────────────
 
-    const ALL_REASONS: [UnverifiedReason; 11] = [
+    const ALL_REASONS: [UnverifiedReason; 12] = [
         UnverifiedReason::NotChecked,
         UnverifiedReason::NoPin,
         UnverifiedReason::BadPin,
@@ -855,6 +892,7 @@ mod tests {
         UnverifiedReason::NoSuchCode,
         UnverifiedReason::RequirementFailed,
         UnverifiedReason::NoRuntime,
+        UnverifiedReason::RuntimeNotEnforced,
         UnverifiedReason::GetTaskAllow,
         UnverifiedReason::Debugged,
         UnverifiedReason::NotValid,
@@ -953,7 +991,7 @@ mod tests {
             names,
             [
                 "NotChecked", "NoPin", "BadPin", "NoToken", "NoSuchCode", "RequirementFailed", "NoRuntime",
-                "GetTaskAllow", "Debugged", "NotValid", "Unsupported",
+                "RuntimeNotEnforced", "GetTaskAllow", "Debugged", "NotValid", "Unsupported",
             ]
         );
     }
@@ -1017,7 +1055,7 @@ mod tests {
 
     #[test]
     fn a_refused_mac_app_claim_is_diagnosed_with_its_reason_and_the_fix() {
-        for reason in ALL_REASONS {
+        for reason in ALL_REASONS.into_iter().filter(|r| *r != UnverifiedReason::RuntimeNotEnforced) {
             let info = peer(unverified(reason));
             let trust = classify_peer(Some(&info), Some(MAC_APP_CLIENT_KIND), false);
             assert_eq!(
@@ -1034,6 +1072,55 @@ mod tests {
         let trust = classify_peer(Some(&qa), Some(MAC_APP_CLIENT_KIND), false);
         let text = claim_diagnostic(Some(&qa), Some(MAC_APP_CLIENT_KIND), trust).unwrap();
         assert!(text.starts_with("mac_app claim refused: ") && text.contains(QA_BUNDLE_ID) && text.ends_with(FIX), "{text}");
+    }
+
+    #[test]
+    fn a_host_that_does_not_enforce_the_runtime_is_diagnosed_without_a_reinstall_fix() {
+        let info = peer(unverified(UnverifiedReason::RuntimeNotEnforced));
+        let trust = classify_peer(Some(&info), Some(MAC_APP_CLIENT_KIND), false);
+        let text = claim_diagnostic(Some(&info), Some(MAC_APP_CLIENT_KIND), trust).unwrap();
+        assert_eq!(
+            text,
+            "mac_app claim refused: RuntimeNotEnforced; SIP disabled or runtime not enforced: operator app cannot answer"
+        );
+        // Never advice to turn a protection off.
+        assert!(!text.to_lowercase().contains("disable "), "{text}");
+    }
+
+    // ── check_status_flags ────────────────────────────────────────────────────
+
+    /// The installed recipe on a SIP-enabled host (spike, macOS 26.5.1).
+    const ENFORCED_RUNTIME: u32 = 0x2201_1311;
+    /// The same recipe on a SIP-disabled host (GitHub macos-26 runner).
+    const UNENFORCED_RUNTIME: u32 = 0x2201_0001;
+
+    #[test]
+    fn an_enforced_hardened_runtime_passes() {
+        assert_eq!(check_status_flags(ENFORCED_RUNTIME), Ok(()));
+        // CS_FORCED_LV (0x10) is not required.
+        assert_eq!(check_status_flags(ENFORCED_RUNTIME & !0x10), Ok(()));
+    }
+
+    #[test]
+    fn a_runtime_the_host_does_not_enforce_is_refused() {
+        assert_eq!(check_status_flags(UNENFORCED_RUNTIME), Err(UnverifiedReason::RuntimeNotEnforced));
+        for missing in [cs::HARD, cs::KILL, cs::ENFORCEMENT] {
+            assert_eq!(
+                check_status_flags(ENFORCED_RUNTIME & !missing),
+                Err(UnverifiedReason::RuntimeNotEnforced),
+                "missing {missing:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_other_status_refusals_still_hold() {
+        assert_eq!(check_status_flags(ENFORCED_RUNTIME & !cs::VALID), Err(UnverifiedReason::NotValid));
+        // Ad-hoc without the runtime (spike: 0x22000201).
+        assert_eq!(check_status_flags(0x2200_0201), Err(UnverifiedReason::NoRuntime));
+        // The runtime with get-task-allow (spike: 0x22011315).
+        assert_eq!(check_status_flags(0x2201_1315), Err(UnverifiedReason::GetTaskAllow));
+        assert_eq!(check_status_flags(ENFORCED_RUNTIME | cs::DEBUGGED), Err(UnverifiedReason::Debugged));
     }
 
     #[test]

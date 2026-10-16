@@ -16,6 +16,15 @@ be made to run someone else's code, so the scripts guarantee:
     it (get-task-allow, allow-dyld-environment-variables,
     disable-library-validation), or with a foreign identifier.
 
+The DYLD test depends on the host. The hardened runtime only blocks an
+inserted library where the kernel enforces it (SIP enabled: CS_HARD, CS_KILL
+and CS_ENFORCEMENT set on the process). GitHub's macOS runners run with SIP
+disabled, so there the test instead proves the host is non-enforcing (the
+kernel flags, and `csrutil status` independently) and that the injection did
+happen, and prints that blocking is proven only on enforcing hosts. It is
+never a skip, and an injection on an enforcing host always fails
+(`dyld_verdict`, `DyldVerdictTests`).
+
 Every test builds a scratch .app in a temp dir from a tiny C program; nothing
 touches /Applications, ~/.nostromo or a running app. CI runs this on
 macos-latest via `make python-test` and fails on any skip, so a missing tool
@@ -31,6 +40,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -52,10 +62,25 @@ FORBIDDEN_ENTITLEMENTS = (
 
 CSFLAGS_ENV = "OPERATOR_PIN_TEST_CSFLAGS"
 
+# Kernel code-signing status bits (<kern/cs_blobs.h>).
+CS_HARD = 0x100
+CS_KILL = 0x200
+CS_ENFORCEMENT = 0x1000
+CS_RUNTIME = 0x10000
+# All three are set when the host enforces the hardened runtime (macOS with
+# SIP enabled gives 0x22011311 for the signed app); none is set on a host
+# with SIP disabled, such as GitHub's macOS runners (0x22010001).
+CS_ENFORCING = CS_HARD | CS_KILL | CS_ENFORCEMENT
+
+NON_ENFORCING_HOST_NOTE = (
+    "host does not enforce the hardened runtime (SIP disabled): "
+    "injection-blocking proven only on enforcing hosts"
+)
+
 # The scratch executable. When $OPERATOR_PIN_TEST_CSFLAGS names a file, it
 # writes the kernel's code-signing status flags for itself there (csops
-# CS_OPS_STATUS), so a DYLD failure can show whether the process really ran
-# under the hardened runtime (CS_RUNTIME 0x10000).
+# CS_OPS_STATUS), so the DYLD test knows whether the host enforced the
+# hardened runtime on it.
 MAIN_C = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -128,6 +153,48 @@ def _check(args, **kw):
 def _read_bytes(path):
     with open(path, "rb") as f:
         return f.read()
+
+
+def signature_flag_names(code_directory_line):
+    """The names in `codesign -dv`'s `flags=0x10002(adhoc,runtime)`."""
+    m = re.search(r"flags=0x[0-9a-f]+\(([^)]*)\)", code_directory_line)
+    return m.group(1).split(",") if m else []
+
+
+def dyld_verdict(injected, kernel_flags, signature_flags, csrutil_status):
+    """Judge one DYLD_INSERT_LIBRARIES run of the runtime-signed operator app.
+
+    Returns None when the result is the one the host should produce, or a
+    message saying what is wrong. Never a pass for a real failure:
+
+    * The host enforces the hardened runtime (CS_HARD, CS_KILL and
+      CS_ENFORCEMENT all set on the process): the library must not have run.
+    * The host enforces none of them: the runtime cannot block anything, so
+      the test instead proves it is looking at exactly that host. The
+      signature carries `runtime`, the kernel set CS_RUNTIME, `csrutil status`
+      independently reports SIP disabled, and the library did run. Any other
+      combination (no runtime, SIP reported enabled, no injection) fails.
+    * Some but not all of the three bits: unexplained, so it fails.
+    """
+    enforced = kernel_flags & CS_ENFORCING
+    facts = (f"kernel CS flags 0x{kernel_flags:08x}, signature flags {signature_flags}, "
+             f"csrutil: {csrutil_status.strip()!r}, injected: {injected}")
+    if enforced == CS_ENFORCING:
+        return f"an inserted library ran inside the operator app on an enforcing host ({facts})" if injected else None
+    if enforced:
+        return f"the host enforces only part of the hardened runtime; cannot judge the run ({facts})"
+    problems = []
+    if "runtime" not in signature_flags:
+        problems.append("the signature does not carry the hardened runtime")
+    if not kernel_flags & CS_RUNTIME:
+        problems.append("the kernel did not set CS_RUNTIME on the process")
+    if not re.search(r"\bstatus:\s*disabled\.?\s*$", csrutil_status.strip()):
+        problems.append("csrutil does not report SIP disabled, so the host is not shown to be non-enforcing")
+    if not injected:
+        problems.append("the library did not run, which a non-enforcing host should allow")
+    if problems:
+        return "non-enforcing host, but " + "; ".join(problems) + f" ({facts})"
+    return None
 
 
 class _Scratch(unittest.TestCase):
@@ -301,6 +368,8 @@ class DyldInjectionTests(_Scratch):
         _check(["cc", "-dynamiclib", "-o", cls.dylib, src])
 
     def run_injected(self, app):
+        """Run `app` with the scratch library inserted. Returns whether the
+        library ran, and the kernel's CS status flags for the process."""
         marker = os.path.join(self.tmp, f"injected-{self._n}")
         csflags = os.path.join(self.tmp, f"csflags-{self._n}")
         env = _env()
@@ -310,43 +379,87 @@ class DyldInjectionTests(_Scratch):
         r = subprocess.run([self.exe(app)], capture_output=True, text=True, env=env, timeout=30)
         self.assertEqual(r.returncode, 0, f"the scratch executable did not run:\n{r.stderr}")
         with open(csflags) as f:
-            self.last_csflags = f.read().strip()
-        return os.path.exists(marker)
+            flags = int(f.read().strip(), 16)
+        return os.path.exists(marker), flags
 
-    def injection_diagnosis(self, app):
-        """What the host says about runtime enforcement, for a failure message."""
-        def out(args):
-            r = _run(args)
-            return (r.stdout + r.stderr).strip()
-        cd = [l for l in out(["codesign", "-dv", app]).splitlines() if l.startswith("CodeDirectory")]
-        return (
-            f"\n  kernel CS flags of the injected process: {self.last_csflags} "
-            f"(CS_RUNTIME 0x10000, CS_VALID 0x1)"
-            f"\n  signature: {cd}"
-            f"\n  csrutil status: {out(['csrutil', 'status'])}"
-            f"\n  nvram boot-args: {out(['nvram', 'boot-args'])}"
-            f"\n  sw_vers: {out(['sw_vers', '-productVersion'])}"
-        )
+    def assertInjectionBlocked(self, app):
+        injected, kernel_flags = self.run_injected(app)
+        signature = signature_flag_names(self.code_directory(app))
+        csrutil = _run(["csrutil", "status"])
+        problem = dyld_verdict(injected, kernel_flags, signature, csrutil.stdout + csrutil.stderr)
+        if problem:
+            self.fail(problem)
+        if not kernel_flags & CS_ENFORCING:
+            print(f"\n  {self.id()}: {NON_ENFORCING_HOST_NOTE}", file=sys.stderr)
 
     def test_control_a_plain_ad_hoc_app_is_injectable(self):
         # Proves the harness can see an injection at all; without it the next
-        # test would pass for any reason.
+        # tests would pass for any reason. Strict on every host.
         app = self.make_app(universal=False)
         self.codesign(app, runtime=False)
-        self.assertTrue(self.run_injected(app),
+        injected, _ = self.run_injected(app)
+        self.assertTrue(injected,
                         "control failed: DYLD_INSERT_LIBRARIES did not load into a plain ad-hoc app, "
                         "so this harness cannot detect injection")
 
     def test_the_signed_operator_app_does_not_load_an_inserted_library(self):
-        app = self.signed_app(universal=False)
-        self.assertFalse(self.run_injected(app),
-                         "an inserted library ran inside the operator app" + self.injection_diagnosis(app))
+        self.assertInjectionBlocked(self.signed_app(universal=False))
 
     def test_the_signed_universal_operator_app_does_not_load_an_inserted_library(self):
-        app = self.signed_app(universal=True)
-        self.assertFalse(self.run_injected(app),
-                         "an inserted library ran inside the universal operator app"
-                         + self.injection_diagnosis(app))
+        self.assertInjectionBlocked(self.signed_app(universal=True))
+
+
+class DyldVerdictTests(unittest.TestCase):
+    """The host-conditional DYLD judgement must never turn a real failure into
+    a pass. Pure: no processes run."""
+
+    ENFORCING = 0x22011311       # signed app, SIP enabled (macOS 26.5.1)
+    NON_ENFORCING = 0x22010001   # signed app, SIP disabled (GitHub macos-26 runner)
+    RUNTIME_SIG = ["adhoc", "runtime"]
+    SIP_ON = "System Integrity Protection status: enabled.\n"
+    SIP_OFF = "System Integrity Protection status: disabled.\n"
+
+    def test_an_injection_on_an_enforcing_host_fails(self):
+        for csrutil in (self.SIP_ON, self.SIP_OFF, ""):
+            with self.subTest(csrutil=csrutil):
+                problem = dyld_verdict(True, self.ENFORCING, self.RUNTIME_SIG, csrutil)
+                self.assertIsNotNone(problem)
+                self.assertIn("enforcing host", problem)
+
+    def test_each_enforcement_bit_alone_cannot_excuse_an_injection(self):
+        for missing in (CS_HARD, CS_KILL, CS_ENFORCEMENT):
+            with self.subTest(missing=hex(missing)):
+                self.assertIsNotNone(dyld_verdict(True, self.ENFORCING & ~missing, self.RUNTIME_SIG, self.SIP_OFF))
+                self.assertIsNotNone(dyld_verdict(False, self.ENFORCING & ~missing, self.RUNTIME_SIG, self.SIP_OFF))
+
+    def test_no_injection_on_an_enforcing_host_passes(self):
+        self.assertIsNone(dyld_verdict(False, self.ENFORCING, self.RUNTIME_SIG, self.SIP_ON))
+
+    def test_an_injection_on_a_host_shown_to_be_non_enforcing_passes(self):
+        self.assertIsNone(dyld_verdict(True, self.NON_ENFORCING, self.RUNTIME_SIG, self.SIP_OFF))
+
+    def test_a_non_enforcing_host_needs_csrutil_to_report_sip_disabled(self):
+        for csrutil in (self.SIP_ON, "", "csrutil: command not found",
+                        "System Integrity Protection status: unknown (Custom Configuration)."):
+            with self.subTest(csrutil=csrutil):
+                problem = dyld_verdict(True, self.NON_ENFORCING, self.RUNTIME_SIG, csrutil)
+                self.assertIsNotNone(problem)
+                self.assertIn("csrutil", problem)
+
+    def test_a_non_enforcing_host_needs_the_runtime_in_the_signature_and_the_kernel(self):
+        self.assertIsNotNone(dyld_verdict(True, self.NON_ENFORCING, ["adhoc"], self.SIP_OFF))
+        self.assertIsNotNone(dyld_verdict(True, self.NON_ENFORCING & ~CS_RUNTIME, self.RUNTIME_SIG, self.SIP_OFF))
+
+    def test_a_non_enforcing_host_must_show_the_injection(self):
+        problem = dyld_verdict(False, self.NON_ENFORCING, self.RUNTIME_SIG, self.SIP_OFF)
+        self.assertIsNotNone(problem)
+        self.assertIn("did not run", problem)
+
+    def test_signature_flag_names_parses_codesign_output(self):
+        line = "CodeDirectory v=20500 size=242 flags=0x10002(adhoc,runtime) hashes=1+7 location=embedded"
+        self.assertEqual(signature_flag_names(line), ["adhoc", "runtime"])
+        self.assertEqual(signature_flag_names("CodeDirectory v=20400 flags=0x2(adhoc)"), ["adhoc"])
+        self.assertEqual(signature_flag_names("garbage"), [])
 
 
 class WriteOperatorPinTests(_Scratch):
