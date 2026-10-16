@@ -284,6 +284,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         var columnCount: Int
         /// A message's block indices rendered so far.
         var blockCount: Int
+
+        var columns: Range<Int> { firstColumn ..< firstColumn + columnCount }
     }
 
     /// The rendered items, in order, each over `columnCount` columns from `firstColumn`.
@@ -1111,8 +1113,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         var union: NSRect?
         _ = firstColumn { i, top -> Bool? in
             if wanted.contains(i) {
-                let rect = NSRect(x: Self.blocksLeadingInset, y: top,
-                                  width: Self.blockWidth(paneWidth: islandWidth), height: columnHeights[i])
+                let rect = columnRect(i, top: top)
                 union = union.map { $0.union(rect) } ?? rect
             }
             return i >= last ? true : nil
@@ -1141,19 +1142,22 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             var columns: [Int] = []
             for slot in slots {
                 if case .message = slot.identity { break }
-                if case .group = slot.identity { columns += slot.firstColumn ..< slot.firstColumn + slot.columnCount }
+                if case .group = slot.identity { columns += slot.columns }
             }
             return columns
         }
         guard let slot = slots.first(where: { $0.identity == .message(ordinal) }) else { return [] }
-        return Array(slot.firstColumn ..< slot.firstColumn + slot.columnCount)
+        return Array(slot.columns)
     }
 
     private func columnFrame(_ column: Int) -> NSRect? {
-        firstColumn { i, top -> NSRect? in
-            i == column ? NSRect(x: Self.blocksLeadingInset, y: top,
-                                 width: Self.blockWidth(paneWidth: islandWidth), height: columnHeights[i]) : nil
-        }
+        firstColumn { i, top -> NSRect? in i == column ? columnRect(i, top: top) : nil }
+    }
+
+    /// Column `i`, whose top is `top`, in this view's coordinates.
+    private func columnRect(_ i: Int, top: CGFloat) -> NSRect {
+        NSRect(x: Self.blocksLeadingInset, y: top,
+               width: Self.blockWidth(paneWidth: islandWidth), height: columnHeights[i])
     }
 
     /// The views of messages that are about to leave this island, with where they sit in it, so
