@@ -1157,7 +1157,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     }
 
     /// The views of messages that are about to leave this island, with where they sit in it, so
-    /// `collapse` can play them out after the reconcile removed them.
+    /// `collapse` can play them out after the reconcile removed them. The groups before the first
+    /// message (`FocusPlanner.leadingGroups`) never animate: they are tool rows, not text.
     private func ghostViews(forMessages ordinals: Set<Int>) -> [(view: NSView, frame: NSRect)] {
         var ghosts: [(view: NSView, frame: NSRect)] = []
         for ordinal in ordinals where ordinal != FocusPlanner.leadingGroups {
