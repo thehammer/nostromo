@@ -31,6 +31,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
         &ClientMsg::Hello {
             client_id: "activity-it".into(),
             protocol_version: 4,
+            client_kind: None,
         },
     )
     .await;
@@ -60,6 +61,8 @@ async fn activity_snapshot_request_yields_an_activity_snapshot() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .unwrap();
 

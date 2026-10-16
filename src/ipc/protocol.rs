@@ -1094,6 +1094,13 @@ pub enum ClientMsg {
     Hello {
         client_id: String,
         protocol_version: u32,
+        /// What the client says it is. The Mac app sends `"mac_app"`; together
+        /// with the verified bundle of the connecting process (see
+        /// [`crate::ipc::peer_verify::classify_peer`]) that makes the connection
+        /// the operator app. A claim alone grants nothing. Absent from older
+        /// clients, which connect as ordinary local peers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_kind: Option<String>,
     },
     Subscribe {
         #[serde(deserialize_with = "lenient_topics")]
@@ -2234,6 +2241,61 @@ mod tests {
         let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true })
             .unwrap();
         assert_eq!(v["renders_decisions"], true);
+    }
+
+    // ── Hello.client_kind (AP1) ──────────────────────────────────────────────
+
+    #[test]
+    fn a_hello_from_an_older_client_without_client_kind_still_decodes() {
+        let json = r#"{"type":"hello","client_id":"old-app","protocol_version":4}"#;
+        let msg: ClientMsg = serde_json::from_str(json).expect("an old Hello must still decode");
+        match msg {
+            ClientMsg::Hello { client_id, protocol_version, client_kind } => {
+                assert_eq!(client_id, "old-app");
+                assert_eq!(protocol_version, 4);
+                assert_eq!(client_kind, None);
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hello_carrying_client_kind_mac_app_decodes_it() {
+        let json = r#"{"type":"hello","client_id":"app","protocol_version":4,"client_kind":"mac_app"}"#;
+        match serde_json::from_str::<ClientMsg>(json).unwrap() {
+            ClientMsg::Hello { client_kind, .. } => assert_eq!(client_kind.as_deref(), Some("mac_app")),
+            other => panic!("expected Hello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hello_without_client_kind_is_encoded_without_the_key() {
+        let v = serde_json::to_value(ClientMsg::Hello {
+            client_id: "c".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client_kind: None,
+        })
+        .unwrap();
+        assert!(
+            v.as_object().unwrap().get("client_kind").is_none(),
+            "a client that claims nothing must send nothing (older daemons see an identical Hello): {v}"
+        );
+    }
+
+    #[test]
+    fn a_hello_with_client_kind_round_trips() {
+        round_trip_client(ClientMsg::Hello {
+            client_id: "app".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client_kind: Some("mac_app".into()),
+        });
+        let v = serde_json::to_value(ClientMsg::Hello {
+            client_id: "app".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client_kind: Some("mac_app".into()),
+        })
+        .unwrap();
+        assert_eq!(v["client_kind"], "mac_app");
     }
 
     #[test]

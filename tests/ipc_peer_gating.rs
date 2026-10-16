@@ -55,6 +55,7 @@ use nostromo::ipc::{
     stream_json::{SessionState, Turn, TurnDelta},
     PtyManager, SessionManager,
 };
+use nostromo::ipc::peer_verify::{testing::FakePeerVerifier, MAC_APP_CLIENT_KIND};
 use nostromo::mcp::tools::create_focus::create_focus;
 use nostromo::mcp::tools::{ask_decision, dispatch, tool_descriptors_for, ToolResult};
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
@@ -113,6 +114,11 @@ async fn spawn_server() -> Harness {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
+        // Every Unix connection here plays the Mac app (verified bundle + the
+        // `mac_app` claim in `handshake`); `tests/ipc_operator_app.rs` covers
+        // other local processes.
+        Arc::new(FakePeerVerifier::always_app()),
+        false,
     )
     .expect("bind unix socket");
 
@@ -204,7 +210,12 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Vec<ServerMsg> {
     send(
         stream,
-        &ClientMsg::Hello { client_id: "peer-gating-it".into(), protocol_version: PROTOCOL_VERSION },
+        &ClientMsg::Hello {
+            client_id: "peer-gating-it".into(),
+            protocol_version: PROTOCOL_VERSION,
+            // Claimed over TCP too: the claim never lifts a network peer.
+            client_kind: Some(MAC_APP_CLIENT_KIND.into()),
+        },
     )
     .await;
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
@@ -3578,7 +3589,10 @@ async fn a_session_resumed_when_the_registry_is_missing_but_the_store_lists_sess
     assert!(!restarted.sensitive_tags().tag_is_sensitive("cody-fresh"));
 }
 
-// ── 5. a network peer is not an operator for sensitive decisions ─────────────
+// ── 5. a network peer is not an operator ──────────────────────────────────────
+//
+// It can't answer (`DecisionAnswer` is refused over TCP), so since AP1 it is
+// not an operator for any focus, sensitive or not.
 
 fn ask_args(tag: &str) -> Value {
     json!({
@@ -3596,7 +3610,7 @@ async fn ask(state: &McpSharedState, tag: &str) -> Value {
 }
 
 #[tokio::test]
-async fn a_tcp_client_that_renders_decisions_is_no_operator_for_a_sensitive_focus_but_is_for_an_ordinary_one() {
+async fn a_tcp_client_that_renders_decisions_is_no_operator_for_any_focus() {
     let h = spawn_server().await;
     let state = mcp_state(&h);
     h.session_mgr.lock().unwrap().sensitive_tags().mark_tag("cody-derived");
@@ -3614,19 +3628,19 @@ async fn a_tcp_client_that_renders_decisions_is_no_operator_for_a_sensitive_focu
     }
     assert_eq!(
         ask(&state, "cody-x").await,
-        json!({"error": "timeout"}),
-        "for an ordinary focus the network peer is a valid operator (the request is posed, nobody answers)"
+        json!({"error": "no_operator"}),
+        "a network peer can't answer, so it is no operator for an ordinary focus either"
     );
 }
 
 #[tokio::test]
-async fn a_tcp_client_naming_the_decision_topic_is_not_an_operator_for_a_sensitive_focus_either() {
+async fn a_tcp_client_naming_the_decision_topic_is_not_an_operator_either() {
     let h = spawn_server().await;
     let state = mcp_state(&h);
     let (_tcp, _) = h.tcp(vec![Topic::Decision]).await;
 
     assert_eq!(ask(&state, "fred").await, json!({"error": "no_operator"}));
-    assert_eq!(ask(&state, "cody-x").await, json!({"error": "timeout"}));
+    assert_eq!(ask(&state, "cody-x").await, json!({"error": "no_operator"}));
 }
 
 #[tokio::test]
@@ -4156,11 +4170,19 @@ fn decision_args(tag: &str) -> Value {
 /// An agent on the ORDINARY focus `tag` asks a decision; a TCP peer that
 /// renders decisions receives it. Returns that peer, the agent's still-pending
 /// `ask_decision` call and the request id.
+///
+/// The Mac app (a Unix connection here) is connected for the whole test: only
+/// it counts as someone who can answer, so without it the agent would get
+/// `no_operator` and nothing would be posed.
 async fn pose_decision(h: &Harness, tag: &str) -> (TcpStream, tokio::task::JoinHandle<Value>, String) {
     let state = mcp_state(h);
+    let (app, _) = h.unix(vec![Topic::Decision]).await;
     let (mut tcp, _) = h.tcp(vec![Topic::Decision]).await;
     let args = decision_args(tag);
-    let pending = tokio::spawn(async move { ask_decision::handle(&state, &args, None).await });
+    let pending = tokio::spawn(async move {
+        let _app = app;
+        ask_decision::handle(&state, &args, None).await
+    });
     let frames = recv_until(&mut tcp, |m| matches!(m, ServerMsg::DecisionRequest { .. })).await;
     let Some(ServerMsg::DecisionRequest { request_id, .. }) = frames.last().cloned() else {
         panic!("expected a DecisionRequest, got {frames:?}");
@@ -5131,7 +5153,7 @@ mod background_tasks {
         /// Hello, Welcome, Subscribe to everything (empty topic list), Ping, Pong.
         async fn new(stream: S) -> Self {
             let mut tap = Tap { stream, raw: Vec::new(), frames: Vec::new(), parsed: 0 };
-            tap.send(&ClientMsg::Hello { client_id: "tasks-it".into(), protocol_version: PROTOCOL_VERSION }).await;
+            tap.send(&ClientMsg::Hello { client_id: "tasks-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None }).await;
             tap.wait_until("the welcome", |f| count_type(f, "welcome") > 0).await;
             tap.send(&ClientMsg::Subscribe { topics: vec![], renders_decisions: false }).await;
             tap.sync().await;

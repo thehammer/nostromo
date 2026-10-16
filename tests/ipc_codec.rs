@@ -61,6 +61,7 @@ async fn codec_client_msg_hello_round_trip() {
     let msg = ClientMsg::Hello {
         client_id: "test-client".to_string(),
         protocol_version: PROTOCOL_VERSION,
+        client_kind: None,
     };
     let bytes = serde_json::to_vec(&msg).unwrap();
     let (mut reader, mut writer) = tokio::io::duplex(256);

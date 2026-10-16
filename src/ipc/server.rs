@@ -34,6 +34,7 @@ use super::{
         outbound, refuse_for_network, withheld_msg, within_work_send, PeerTrust,
         SensitiveTags, Transport,
     },
+    peer_verify::{classify_peer, PeerInfo, PeerVerifier},
     protocol::{
         ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
         MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
@@ -44,6 +45,9 @@ use super::{
 use crate::data::work::{
     fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
 };
+
+/// The refusal a `DecisionAnswer` from anyone but the verified Mac app gets.
+const NOT_OPERATOR_APP: &str = "not_operator_app: only the verified Nostromo app may answer";
 
 /// The optional capability advertised in `Welcome.features`: this daemon serves
 /// the `work` topic and its frames.
@@ -86,12 +90,20 @@ impl Server {
     /// `DaemonMcpBackend` so `nostromo.ask_decision` and this IPC layer share
     /// one source of truth for outstanding requests and `Topic::Decision`
     /// subscribers.
+    ///
+    /// `verifier` resolves the process behind each Unix connection, and
+    /// `qa_mode` (`NOSTROMO_QA_DAEMON=1`) also accepts the QA instance's bundle
+    /// id; together with the `Hello` they decide whether a connection is the
+    /// operator app (see [`classify_peer`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn bind(
         socket_path: &Path,
         pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
         perri_state_dir: PathBuf,
         decisions: Arc<Mutex<DecisionRegistry>>,
+        verifier: Arc<dyn PeerVerifier>,
+        qa_mode: bool,
     ) -> Result<Self> {
         // Remove stale socket file so bind doesn't fail.
         let _ = std::fs::remove_file(socket_path);
@@ -118,8 +130,9 @@ impl Server {
         tokio::spawn(retain_broadcasts(tx.subscribe(), Arc::clone(&retained), republish.clone()));
 
         let retained_for_loop = Arc::clone(&retained);
+        let unix_peers = UnixPeers { verifier, qa_mode };
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions, retained_for_loop).await {
+            if let Err(e) = accept_loop(listener, unix_peers, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions, retained_for_loop).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -180,8 +193,42 @@ impl Drop for Server {
 
 // ── accept loops ──────────────────────────────────────────────────────────────
 
+/// How the Unix accept loop identifies its peers.
+#[derive(Clone)]
+struct UnixPeers {
+    verifier: Arc<dyn PeerVerifier>,
+    qa_mode: bool,
+}
+
+/// Who a connection is, as far as the accept loop could tell before the
+/// `Hello`. The trust of a Unix peer is settled only after it (see
+/// [`PeerOrigin::trust_after_hello`]).
+enum PeerOrigin {
+    /// A Unix-socket peer and what the verifier resolved about it.
+    Unix { info: Option<PeerInfo>, qa_mode: bool },
+    Tcp,
+}
+
+impl PeerOrigin {
+    fn trust_after_hello(&self, client_kind: Option<&str>) -> PeerTrust {
+        match self {
+            PeerOrigin::Unix { info, qa_mode } => classify_peer(info.as_ref(), client_kind, *qa_mode),
+            PeerOrigin::Tcp => PeerTrust::from_transport(Transport::Tcp),
+        }
+    }
+
+    fn info(&self) -> Option<&PeerInfo> {
+        match self {
+            PeerOrigin::Unix { info, .. } => info.as_ref(),
+            PeerOrigin::Tcp => None,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     listener: UnixListener,
+    peers: UnixPeers,
     tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
@@ -199,9 +246,26 @@ async fn accept_loop(
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
                 let retained = Arc::clone(&retained);
-                let trust = PeerTrust::from_transport(Transport::Unix);
+                let peers = peers.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, trust, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
+                    // Resolve the peer off the accept loop (and off the async
+                    // workers): the lookup is synchronous, and a slow one must
+                    // not hold up other connections.
+                    let verifier = Arc::clone(&peers.verifier);
+                    let (stream, info) = match tokio::task::spawn_blocking(move || {
+                        let info = verifier.inspect(&stream);
+                        (stream, info)
+                    })
+                    .await
+                    {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            warn!("peer lookup failed: {e}");
+                            return;
+                        }
+                    };
+                    let origin = PeerOrigin::Unix { info, qa_mode: peers.qa_mode };
+                    if let Err(e) = handle_client(stream, origin, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -233,9 +297,8 @@ async fn accept_loop_tcp(
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
                 let retained = Arc::clone(&retained);
-                let trust = PeerTrust::from_transport(Transport::Tcp);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, trust, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
+                    if let Err(e) = handle_client(stream, PeerOrigin::Tcp, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -256,13 +319,14 @@ async fn accept_loop_tcp(
 /// whose `ReadHalf`/`WriteHalf` are always `Unpin`, so the handshake and
 /// the `select!` loop below need no stream-specific code.
 ///
-/// `trust` says how far this peer is trusted (derived from its transport by the
-/// accept loop). A network peer is never sent Teri/Fred data and its requests
-/// for it are refused; see [`super::peer`].
+/// `origin` is the transport and, for a Unix peer, what the verifier resolved
+/// about it. The connection's [`PeerTrust`] is settled from it and the `Hello`.
+/// A network peer is never sent Teri/Fred data and its requests for it are
+/// refused; see [`super::peer`]. Only the operator app may answer a decision.
 #[allow(clippy::too_many_arguments)]
 async fn handle_client<S>(
     stream: S,
-    trust: PeerTrust,
+    origin: PeerOrigin,
     mut broadcast_rx: broadcast::Receiver<ServerMsg>,
     broadcast_tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
@@ -285,10 +349,11 @@ where
     // `conn_key` is a server-minted UUID used as the registry routing key so
     // that a malicious client cannot hijack another connection's targeted
     // channel by sending a pre-known client_id.
-    let (claimed_id, conn_key) = match hello {
+    let (claimed_id, conn_key, trust) = match hello {
         ClientMsg::Hello {
             ref client_id,
             protocol_version,
+            ref client_kind,
         } => {
             if protocol_version < MIN_CLIENT_VERSION {
                 let err = ServerMsg::Error {
@@ -301,7 +366,8 @@ where
                     "client version {protocol_version} too old (need {MIN_CLIENT_VERSION}+)"
                 );
             }
-            (client_id.clone(), Uuid::new_v4().to_string())
+            let trust = origin.trust_after_hello(client_kind.as_deref());
+            (client_id.clone(), Uuid::new_v4().to_string(), trust)
         }
         other => {
             let err = ServerMsg::Error {
@@ -322,7 +388,14 @@ where
         ],
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
-    debug!(claimed_id, conn_key, "client welcomed");
+    debug!(
+        claimed_id,
+        conn_key,
+        ?trust,
+        peer_pid = origin.info().map(|i| i.pid),
+        peer_exe = ?origin.info().map(|i| &i.exe),
+        "client welcomed"
+    );
 
     // ── Subscribe ─────────────────────────────────────────────────────────────
 
@@ -352,9 +425,15 @@ where
     // operator iff it named `Topic::Decision` explicitly, or set
     // `renders_decisions: true` — the only way to make that claim without a
     // full topic enumeration when subscribing to everything.
-    let mut is_operator = topics.contains(&Topic::Decision) || renders_decisions;
+    //
+    // And only the verified Mac app counts (AP1): it is the only peer whose
+    // answer is accepted. Any other local peer, or a network peer, still
+    // receives decisions it subscribed to, but someone who can't answer must
+    // not keep `ask_decision` from failing fast with `no_operator`.
+    let can_answer = trust == PeerTrust::OperatorApp;
+    let mut is_operator = can_answer && (topics.contains(&Topic::Decision) || renders_decisions);
     if is_operator {
-        add_operator(&decisions, &conn_key, trust);
+        decisions.lock().unwrap().add_operator(&conn_key);
     }
 
     // ── Register per-client targeted channel ──────────────────────────────────
@@ -592,8 +671,8 @@ where
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
                         if let ClientMsg::Subscribe { topics: new_topics, renders_decisions } = msg {
-                            if !is_operator && (new_topics.contains(&Topic::Decision) || renders_decisions) {
-                                add_operator(&decisions, &conn_key, trust);
+                            if can_answer && !is_operator && (new_topics.contains(&Topic::Decision) || renders_decisions) {
+                                decisions.lock().unwrap().add_operator(&conn_key);
                                 is_operator = true;
                             }
                             // Replay retained frames only for the topics this
@@ -614,7 +693,7 @@ where
                             replay_messages(&mut writer, frames).await;
                             continue;
                         }
-                        handle_client_msg(msg, trust, &sensitive, &conn_key, &claimed_id, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
+                        handle_client_msg(msg, trust, origin.info(), &sensitive, &conn_key, &claimed_id, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -646,19 +725,6 @@ where
     }
 
     result
-}
-
-/// Record `conn_key` as a client that renders decisions. A network peer is
-/// tracked apart from a local one: it is never sent a decision for a sensitive
-/// focus, so it must not keep `nostromo.ask_decision` from failing fast with
-/// `no_operator` when the Mac is closed (see `DecisionRegistry::has_operator_for`).
-fn add_operator(decisions: &Arc<Mutex<DecisionRegistry>>, conn_key: &str, trust: PeerTrust) {
-    let mut registry = decisions.lock().unwrap();
-    if trust.is_network() {
-        registry.add_network_operator(conn_key);
-    } else {
-        registry.add_operator(conn_key);
-    }
 }
 
 /// Serialize and write each message in order, best-effort: a message that
@@ -709,6 +775,7 @@ where
 fn handle_client_msg(
     msg: ClientMsg,
     trust: PeerTrust,
+    peer: Option<&PeerInfo>,
     sensitive: &SensitiveTags,
     conn_key: &str,
     client_id: &str,
@@ -1150,6 +1217,21 @@ fn handle_client_msg(
         }
 
         ClientMsg::DecisionAnswer { request_id, choice_id } => {
+            // Only the verified Mac app answers for the human: an agent's own
+            // script on this socket must not answer the agent's decision. The
+            // request stays pending, untouched.
+            if trust != PeerTrust::OperatorApp {
+                warn!(
+                    conn_key,
+                    %request_id,
+                    ?trust,
+                    peer_pid = peer.map(|p| p.pid),
+                    peer_exe = ?peer.map(|p| &p.exe),
+                    "DecisionAnswer refused: not the verified Nostromo app"
+                );
+                let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP.to_string() });
+                return;
+            }
             let outcome = decisions.lock().unwrap().answer(&request_id, choice_id);
             match outcome {
                 AnswerOutcome::Answered { promoted } => {

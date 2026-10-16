@@ -40,6 +40,8 @@ async fn spawn_server() -> (Server, u16, TempDir) {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .expect("bind unix socket");
 
@@ -70,6 +72,7 @@ async fn do_handshake(mut stream: &mut TcpStream) {
     let hello = ClientMsg::Hello {
         client_id: "test-ios-client".to_string(),
         protocol_version: PROTOCOL_VERSION,
+        client_kind: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&hello).unwrap())
         .await
@@ -159,6 +162,7 @@ async fn tcp_and_unix_share_broadcast() {
     let hello = ClientMsg::Hello {
         client_id: "broadcast-test".to_string(),
         protocol_version: PROTOCOL_VERSION,
+        client_kind: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&hello).unwrap())
         .await
@@ -218,6 +222,7 @@ async fn tcp_rejects_old_protocol_version() {
     let hello = ClientMsg::Hello {
         client_id: "old-client".to_string(),
         protocol_version: 0,
+        client_kind: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&hello).unwrap())
         .await

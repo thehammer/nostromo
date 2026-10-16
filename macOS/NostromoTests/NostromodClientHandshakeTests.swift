@@ -63,6 +63,8 @@ final class FakeDaemon {
         let topics: [String]
         /// The frame's `tag`, for session frames.
         var tag: String = ""
+        /// The `client_kind` a `hello` carried, if any.
+        var clientKind: String? = nil
     }
 
     let path: String
@@ -173,7 +175,8 @@ final class FakeDaemon {
 
             let topics = (json["topics"] as? [String]) ?? []
             let tag = (json["tag"] as? String) ?? ""
-            lock.lock(); perConnection[index].append(Frame(type: type, topics: topics, tag: tag)); lock.unlock()
+            let frame = Frame(type: type, topics: topics, tag: tag, clientKind: json["client_kind"] as? String)
+            lock.lock(); perConnection[index].append(frame); lock.unlock()
 
             switch type {
             case "hello":
@@ -388,6 +391,16 @@ final class NostromodClientHandshakeTests: XCTestCase {
         XCTAssertTrue(Set(first.topics).isSubset(of: Set(subs[1].topics)),
                       "the second subscribe replaces the first, so it must keep the base topics: \(subs[1].topics)")
         XCTAssertEqual(subs.count, 2, "exactly one follow-up subscribe is expected")
+    }
+
+    // The daemon lets a connection answer an agent's decision only if its hello says it is the
+    // Mac app (and the connecting process is the app bundle). An older daemon ignores the key.
+    func testTheHelloSaysThisIsTheMacApp() throws {
+        _ = try connectClient(to: [.init(features: nil)])
+
+        XCTAssertTrue(waitUntil(5) { !self.daemon.frames(connection: 0, ofType: "hello").isEmpty },
+                      "the client never sent a hello")
+        XCTAssertEqual(daemon.frames(connection: 0, ofType: "hello").first?.clientKind, "mac_app")
     }
 
     func testAWelcomeThatAdvertisesOtherFeaturesButNotWorkDoesNotGetWork() throws {
