@@ -42,11 +42,11 @@ public enum SyntaxHighlighter {
               let spec = SyntaxLanguages.spec(for: language), !spec.isPlain,
               code.utf16.count <= maxUTF16 else { return [] }
         let units = Array(code.utf16)
-        var newlines = 0
-        for unit in units where unit == 10 { newlines += 1 }
-        guard newlines < maxLines else { return [] }
+        var newlines: [Int] = []
+        for (index, unit) in units.enumerated() where unit == 10 { newlines.append(index) }
+        guard newlines.count < maxLines else { return [] }
 
-        let scanner = SyntaxScanner(units, spec: spec)
+        let scanner = SyntaxScanner(units, newlines: newlines, spec: spec)
         scanner.run()
         steps = scanner.steps
         return scanner.tokens
@@ -103,6 +103,8 @@ final class SyntaxScanner {
     private(set) var tokens: [SyntaxToken] = []
 
     private let u: [UInt16]
+    /// Positions of every `\n`, ascending (found once, with the line cap check).
+    private let newlineIndices: [Int]
     private let n: Int
     private let spec: SyntaxLanguageSpec
     private let stepLimit: Int
@@ -119,14 +121,14 @@ final class SyntaxScanner {
     private var failed: [String: (from: Int, stop: Int)] = [:]
     private var lastFailStop = 0
     private var nestedCommentsBroken = false
-    private var lineEndCache: (from: Int, end: Int)?
     /// Heredoc bodies waiting for the end of the line that opened them.
     private var pendingEOL = -1
     private var pendingBodies: [Range<Int>] = []
 
-    init(_ units: [UInt16], spec: SyntaxLanguageSpec) {
+    init(_ units: [UInt16], newlines: [Int], spec: SyntaxLanguageSpec) {
         u = units
         n = units.count
+        newlineIndices = newlines
         self.spec = spec
         stepLimit = 32 * units.count + 1024
         let f = spec.features
@@ -188,14 +190,18 @@ final class SyntaxScanner {
         lastEnd = end
     }
 
-    /// Index of the `\n` ending the line that contains `from`, or `n`. The last
-    /// answer is cached, so repeated asks on one long line (`<<EOF <<EOF ...`) stay linear.
+    /// Index of the `\n` ending the line that contains `from`, or `n`: a binary
+    /// search over the newline positions, so asking about the same long line again
+    /// and again (`<<EOF <<EOF ...`) stays cheap.
     private func lineEnd(from: Int) -> Int {
-        if let cached = lineEndCache, from >= cached.from, from <= cached.end { tick(); return cached.end }
-        var j = from
-        while j < n && u[j] != U.nl { tick(); j += 1 }
-        lineEndCache = (from, j)
-        return j
+        tick()
+        var low = 0
+        var high = newlineIndices.count
+        while low < high {
+            let mid = (low + high) / 2
+            if newlineIndices[mid] < from { low = mid + 1 } else { high = mid }
+        }
+        return low < newlineIndices.count ? newlineIndices[low] : n
     }
 
     private func scanWord(from i: Int) -> Int {

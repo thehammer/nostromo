@@ -1098,7 +1098,7 @@ extension MarkdownCodeBlockTests {
         try assertEveryGlyphIsThePlainOne(markdown: "Compare `-> :: ---` in prose.", needle: "-> :: ---", what: "inline code")
     }
 
-    func testTheCodeFontCarriesTheLigatureAndContextualAlternatesOffSettings() throws {
+    func testTheCodeFontCarriesTheContextualAlternatesOffSetting() throws {
         try XCTSkipIf(NSFont(name: "FiraCodeNF-Reg", size: 12) == nil, "Fira Code not installed")
         let font = Theme.codeFont(size: 12)
         let raw = font.fontDescriptor.fontAttributes[.featureSettings] as? [Any] ?? []
@@ -1113,7 +1113,9 @@ extension MarkdownCodeBlockTests {
             }
             if let type, let selector { pairs.append([type, selector]) }
         }
-        XCTAssertTrue(pairs.contains([Int(kLigaturesType), Int(kCommonLigaturesOffSelector)]), "common ligatures are not turned off: \(pairs)")
+        // Fira Code draws its arrows through `calt`; it has no AAT common-ligatures
+        // feature, so CoreText drops that request from the descriptor and reads back
+        // only `[36, 1]` (seen on CI). `calt` off is what the glyph tests above prove.
         XCTAssertTrue(pairs.contains([Int(kContextualAlternatesType), Int(kContextualAlternatesOffSelector)]), "contextual alternates (calt) are not turned off: \(pairs)")
     }
 
