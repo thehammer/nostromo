@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import CoreText
 import NostromoKit
 
 // Contract: a fenced code block in an assistant message renders as a code block, and nothing else does.
@@ -669,43 +670,24 @@ final class MarkdownCodeBlockTests: XCTestCase {
 
     private static let legibilityWidth: CGFloat = 520
 
-    private func renderCard(keyWindow: Bool, file: StaticString = #filePath, line: UInt = #line) -> Sample? {
-        _ = NSApplication.shared
-        let dark = NSAppearance(named: .darkAqua)
-        let height = MarkdownCardView.measuredHeight(markdown: fixture, width: Self.legibilityWidth)
-        let size = NSSize(width: Self.legibilityWidth, height: height)
-        let window: NSWindow = keyWindow ? makeRigWindow(self, size: size, appearance: dark) : notKeyWindow(size: size, appearance: dark)
-        XCTAssertEqual(window.isKeyWindow, keyWindow, file: file, line: line)
+    /// A card laid out and drawn into a bitmap, with the machinery to sample the pixels under a range of
+    /// its text. Shared by `renderCard` (the legibility tests) and the syntax-highlighting pixel tests.
+    private struct Rendered {
+        let host: NSView
+        let card: MarkdownCardView
+        let tv: NSTextView
+        let rep: NSBitmapImageRep
+        let scale: CGFloat
 
-        let host = NSView(frame: NSRect(origin: .zero, size: size))
-        host.wantsLayer = true
-        host.layer?.backgroundColor = Theme.bg.cgColor
-        window.contentView = host
-        let card = MarkdownCardView(markdown: fixture)
-        card.presetWidth = Self.legibilityWidth
-        card.frame = host.bounds
-        host.addSubview(card)
-        host.layoutSubtreeIfNeeded()
-        card.layoutSubtreeIfNeeded()
-        rigSettle()
-
-        guard let tv = textView(of: card), let lm = tv.layoutManager, let tc = tv.textContainer else {
-            XCTFail("no text view in the card", file: file, line: line); return nil
+        /// The glyph rect of `chars`, in `host` coordinates.
+        func rect(of chars: NSRange) -> NSRect? {
+            guard let lm = tv.layoutManager, let tc = tv.textContainer else { return nil }
+            lm.ensureLayout(for: tc)
+            let glyphs = lm.glyphRange(forCharacterRange: chars, actualCharacterRange: nil)
+            let local = lm.boundingRect(forGlyphRange: glyphs, in: tc)
+            let origin = tv.textContainerOrigin
+            return tv.convert(local.offsetBy(dx: origin.x, dy: origin.y), to: host)
         }
-        lm.ensureLayout(for: tc)
-        let sqlChars = (tv.string as NSString).range(of: sqlLine)
-        guard sqlChars.location != NSNotFound else { XCTFail("the SELECT line is not in the card", file: file, line: line); return nil }
-        let sqlGlyphs = lm.glyphRange(forCharacterRange: sqlChars, actualCharacterRange: nil)
-        let local = lm.boundingRect(forGlyphRange: sqlGlyphs, in: tc)
-        let origin = tv.textContainerOrigin
-        let sqlRect = tv.convert(local.offsetBy(dx: origin.x, dy: origin.y), to: host)
-
-        host.displayIfNeeded()
-        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
-            XCTFail("could not render the card", file: file, line: line); return nil
-        }
-        host.cacheDisplay(in: host.bounds, to: rep)
-        let scale = CGFloat(rep.pixelsWide) / host.bounds.width
 
         func pixels(in rect: NSRect) -> [NSColor] {
             let r = rect.intersection(host.bounds)
@@ -720,17 +702,74 @@ final class MarkdownCodeBlockTests: XCTestCase {
             }
             return out
         }
+    }
+
+    /// `markdown` as a card in a dark host inside a key or non-key window, drawn into a bitmap. When
+    /// `select` is given, that substring is selected (the text view made first responder) before drawing.
+    private func renderedCard(keyWindow: Bool, markdown: String, textColor: NSColor = Theme.fg, select: String? = nil,
+                              file: StaticString = #filePath, line: UInt = #line) -> Rendered? {
+        _ = NSApplication.shared
+        let dark = NSAppearance(named: .darkAqua)
+        let height = MarkdownCardView.measuredHeight(markdown: markdown, width: Self.legibilityWidth)
+        let size = NSSize(width: Self.legibilityWidth, height: height)
+        let window: NSWindow = keyWindow ? makeRigWindow(self, size: size, appearance: dark) : notKeyWindow(size: size, appearance: dark)
+        XCTAssertEqual(window.isKeyWindow, keyWindow, file: file, line: line)
+
+        let host = NSView(frame: NSRect(origin: .zero, size: size))
+        host.wantsLayer = true
+        host.layer?.backgroundColor = Theme.bg.cgColor
+        window.contentView = host
+        let card = MarkdownCardView(markdown: markdown, textColor: textColor)
+        card.presetWidth = Self.legibilityWidth
+        card.frame = host.bounds
+        host.addSubview(card)
+        host.layoutSubtreeIfNeeded()
+        card.layoutSubtreeIfNeeded()
+        rigSettle()
+
+        guard let tv = textView(of: card), let lm = tv.layoutManager, let tc = tv.textContainer else {
+            XCTFail("no text view in the card", file: file, line: line); return nil
+        }
+        lm.ensureLayout(for: tc)
+        if let select {
+            let r = (tv.string as NSString).range(of: select)
+            guard r.location != NSNotFound else { XCTFail("\(select.debugDescription) is not in the card", file: file, line: line); return nil }
+            _ = window.makeFirstResponder(tv)
+            tv.setSelectedRange(r)
+        }
+
+        host.displayIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+            XCTFail("could not render the card", file: file, line: line); return nil
+        }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / host.bounds.width
+        return Rendered(host: host, card: card, tv: tv, rep: rep, scale: scale)
+    }
+
+    /// Samples the card for `markdown` (default: the reported message) at the glyph rect of `target`
+    /// (default: its SELECT line).
+    private func renderCard(keyWindow: Bool, markdown: String? = nil, target: String? = nil, textColor: NSColor = Theme.fg,
+                            file: StaticString = #filePath, line: UInt = #line) -> Sample? {
+        let markdown = markdown ?? fixture
+        let target = target ?? sqlLine
+        guard let rendered = renderedCard(keyWindow: keyWindow, markdown: markdown, textColor: textColor, file: file, line: line) else { return nil }
+        let host = rendered.host
+        let chars = (rendered.tv.string as NSString).range(of: target)
+        guard chars.location != NSNotFound else { XCTFail("\(target.debugDescription) is not in the card", file: file, line: line); return nil }
+        guard let targetRect = rendered.rect(of: chars) else { XCTFail("no layout for the target", file: file, line: line); return nil }
+
         func median(_ colors: [NSColor]) -> NSColor? {
             let sorted = colors.sorted { luminance($0) < luminance($1) }
             return sorted.isEmpty ? nil : sorted[sorted.count / 2]
         }
 
         // The glyph rect lies inside the block, so its median pixel is the block's fill (glyphs are sparse).
-        let inBlock = pixels(in: sqlRect.insetBy(dx: 1, dy: 1))
+        let inBlock = rendered.pixels(in: targetRect.insetBy(dx: 1, dy: 1))
         // The card's own padding ring, left of the text view: outside every block.
-        let ring = pixels(in: NSRect(x: 3, y: 14, width: 7, height: max(host.bounds.height - 28, 1)))
+        let ring = rendered.pixels(in: NSRect(x: 3, y: 14, width: 7, height: max(host.bounds.height - 28, 1)))
         guard let codeBase = median(inBlock), let codeText = inBlock.max(by: { luminance($0) < luminance($1) }), let cardBase = median(ring) else {
-            XCTFail("nothing drawn: \(inBlock.count) pixels in \(sqlRect), \(ring.count) in the card ring", file: file, line: line)
+            XCTFail("nothing drawn: \(inBlock.count) pixels in \(targetRect), \(ring.count) in the card ring", file: file, line: line)
             return nil
         }
         return Sample(codeBase: codeBase, codeText: codeText, cardBase: cardBase)
@@ -763,5 +802,418 @@ final class MarkdownCodeBlockTests: XCTestCase {
 
     func testTheSelectionHighlightStaysVisibleOnTheCodeSurface() {
         XCTAssertGreaterThanOrEqual(contrast(Theme.selectionBackground, Theme.codeBlockBackground), 3.0, "selected code must stand out from the code surface")
+    }
+}
+
+// MARK: - Syntax highlighting
+
+// Contract: the code in a fenced block is coloured by what it is (colour only, never font or size), the
+// colours stay legible on the code surface, a folded message dims them but keeps their hues, selection
+// and copy and VoiceOver are unaffected, Fira Code's ligatures stay off, and no height moves.
+extension MarkdownCodeBlockTests {
+
+    private var highlighted: String { MarkdownFenceFixtures.highlightedMessage }
+    private static let swiftLet = "```swift\nlet value = 1\n```"
+    private static let ligatureText = "-> :: --- != => <= /* //"
+
+    // MARK: Helpers
+
+    private func sameColour(_ a: NSColor?, _ b: NSColor) -> Bool {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) < 0.004 && abs(a.greenComponent - b.greenComponent) < 0.004
+            && abs(a.blueComponent - b.blueComponent) < 0.004
+    }
+
+    private func foregroundColours(in s: NSAttributedString, _ r: NSRange) -> [NSColor?] {
+        var out: [NSColor?] = []
+        s.enumerateAttribute(.foregroundColor, in: r) { v, _, _ in out.append(v as? NSColor) }
+        return out
+    }
+
+    private func hsb(_ color: NSColor) -> (h: Double, s: Double, b: Double) {
+        let c = color.usingColorSpace(.sRGB) ?? color
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        c.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        return (Double(h) * 360, Double(s), Double(b))
+    }
+
+    private func hueDistance(_ a: Double, _ b: Double) -> Double {
+        let d = abs(a - b).truncatingRemainder(dividingBy: 360)
+        return min(d, 360 - d)
+    }
+
+    /// The range of each code block's code in `text`, found in document order (the same code can repeat).
+    private func blockRanges(_ blocks: [MarkdownFences.CodeBlock], in text: String) -> [NSRange] {
+        let ns = text as NSString
+        var cursor = 0
+        var out: [NSRange] = []
+        for block in blocks {
+            let r = ns.range(of: block.code, options: [], range: NSRange(location: cursor, length: ns.length - cursor))
+            XCTAssertNotEqual(r.location, NSNotFound, "block \(block.info.debugDescription) is not in the text")
+            out.append(r)
+            if r.location != NSNotFound { cursor = r.location + r.length }
+        }
+        return out
+    }
+
+    /// The `let` of the first Swift block's `let answer = 42`, and the `answer` after it.
+    private func letAndAnswer(in s: NSAttributedString) -> (let: NSRange, answer: NSRange) {
+        let r = range(of: "let answer = 42", in: s)
+        return (NSRange(location: r.location, length: 3), NSRange(location: r.location + 4, length: 6))
+    }
+
+    // MARK: Attributes
+
+    func testTheKeywordOfAHighlightedBlockIsColouredAndPlainTextKeepsTheProseColour() {
+        let s = render(highlighted)
+        let (letRange, answerRange) = letAndAnswer(in: s)
+        XCTAssertEqual((s.string as NSString).substring(with: letRange), "let")
+        for c in foregroundColours(in: s, letRange) {
+            XCTAssertTrue(sameColour(c, Theme.syntaxColor(.keyword, dimmed: false)), "`let` is not the keyword colour: \(String(describing: c))")
+        }
+        for c in foregroundColours(in: s, answerRange) {
+            XCTAssertTrue(sameColour(c, Theme.fg), "a plain identifier is not the code's normal colour: \(String(describing: c))")
+        }
+    }
+
+    func testThePlainAndNoInfoFencesCarryOnlyTheNormalColour() {
+        let s = render(highlighted)
+        let blocks = codeBlocks(highlighted)
+        let ranges = blockRanges(blocks, in: s.string)
+        var plain = 0
+        for (block, r) in zip(blocks, ranges) where block.language == nil || block.language == "text" {
+            plain += 1
+            XCTAssertEqual(block.code, "let answer = 42")
+            for c in foregroundColours(in: s, r) {
+                XCTAssertTrue(sameColour(c, Theme.fg), "fence \(block.info.debugDescription) is coloured: \(String(describing: c))")
+            }
+        }
+        XCTAssertEqual(plain, 2, "the fixture has one `text` fence and one fence with no info string")
+    }
+
+    func testEveryLanguageFenceOfTheFixtureColoursSomething() {
+        let s = render(highlighted)
+        let blocks = codeBlocks(highlighted)
+        for (block, r) in zip(blocks, blockRanges(blocks, in: s.string)) where block.language != nil && block.language != "text" {
+            let colours = foregroundColours(in: s, r)
+            XCTAssertTrue(colours.contains { !sameColour($0, Theme.fg) }, "the \(block.info) block has no coloured token")
+        }
+    }
+
+    func testTheNonCodeProseAroundHighlightedBlocksIsNeverColouredByTheTokenizer() {
+        let s = render(highlighted)
+        for needle in ["Highlighting sample.", "Done."] {
+            for c in foregroundColours(in: s, range(of: needle, in: s)) {
+                XCTAssertTrue(sameColour(c, Theme.fg), "\(needle) is coloured: \(String(describing: c))")
+            }
+        }
+    }
+
+    func testAFoldedMessageDimsTheKeywordAndPaintsPlainTextInTheFoldedProseColour() {
+        let s = MarkdownRenderer.render(highlighted, baseFont: base13, textColor: Theme.foldedProse)
+        let (letRange, answerRange) = letAndAnswer(in: s)
+        for c in foregroundColours(in: s, letRange) {
+            XCTAssertTrue(sameColour(c, Theme.syntaxColor(.keyword, dimmed: true)), "folded `let` is not the dimmed keyword colour: \(String(describing: c))")
+        }
+        for c in foregroundColours(in: s, answerRange) {
+            XCTAssertTrue(sameColour(c, Theme.foldedProse), "folded plain identifier is not foldedProse: \(String(describing: c))")
+        }
+        let blocks = codeBlocks(highlighted)
+        for (block, r) in zip(blocks, blockRanges(blocks, in: s.string)) where block.language == nil || block.language == "text" {
+            for c in foregroundColours(in: s, r) { XCTAssertTrue(sameColour(c, Theme.foldedProse), "folded plain fence is coloured: \(String(describing: c))") }
+        }
+    }
+
+    func testHighlightingChangesOnlyColourNeverFontOrBackground() {
+        // Each highlighted block is still one monospaced, upright, 12 pt run family on the code surface.
+        let s = render(highlighted)
+        let blocks = codeBlocks(highlighted)
+        for (block, r) in zip(blocks, blockRanges(blocks, in: s.string)) {
+            assertMonospacedUpright(s, r, "block \(block.info.debugDescription)")
+            for font in fonts(in: s, r) { XCTAssertEqual(font?.pointSize, 12, "block \(block.info.debugDescription)") }
+            XCTAssertNotNil(assertOneSharedBlock(s, r, "block \(block.info.debugDescription)"))
+        }
+    }
+
+    // MARK: Palette contrast
+
+    func testEveryTokenColourIsLegibleOnTheCodeSurfaceNormalAndDimmed() {
+        for kind in SyntaxTokenKind.allCases {
+            for dimmed in [false, true] {
+                let c = Theme.syntaxColor(kind, dimmed: dimmed)
+                let ratio = contrast(c, Theme.codeBlockBackground)
+                print("[SyntaxPalette] \(kind.rawValue) \(dimmed ? "dimmed" : "normal") \(name(c)) contrast \(String(format: "%.2f", ratio))")
+                XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(kind) \(dimmed ? "dimmed" : "normal") on the code surface")
+            }
+        }
+    }
+
+    func testDimmedTokensKeepTheirHueAndAreNoBrighterThanTheNormalOnes() {
+        for kind in SyntaxTokenKind.allCases {
+            let base = Theme.syntaxColor(kind, dimmed: false)
+            let dim = Theme.syntaxColor(kind, dimmed: true)
+            XCTAssertLessThanOrEqual(hueDistance(hsb(base).h, hsb(dim).h), 1.0, "\(kind): hue moved when dimmed")
+            XCTAssertLessThanOrEqual(luminance(dim), luminance(base) + 1e-9, "\(kind): dimmed is brighter than normal")
+        }
+    }
+
+    func testEveryTokenColourIsAnExplicitComponentColour() {
+        for kind in SyntaxTokenKind.allCases {
+            for dimmed in [false, true] {
+                XCTAssertEqual(Theme.syntaxColor(kind, dimmed: dimmed).type, .componentBased, "\(kind) \(dimmed ? "dimmed" : "normal")")
+            }
+        }
+    }
+
+    // MARK: Rendered pixels
+
+    private struct KeywordPixels {
+        let keywordBrightest: NSColor
+        let keywordMostSaturated: NSColor
+        let fill: NSColor
+        let plainMaxSaturation: Double
+    }
+
+    private func keywordPixels(keyWindow: Bool, textColor: NSColor = Theme.fg,
+                               file: StaticString = #filePath, line: UInt = #line) -> KeywordPixels? {
+        guard let r = renderedCard(keyWindow: keyWindow, markdown: Self.swiftLet, textColor: textColor, file: file, line: line) else { return nil }
+        let ns = r.tv.string as NSString
+        let letChars = ns.range(of: "let"), valueChars = ns.range(of: "value"), all = NSRange(location: 0, length: ns.length)
+        guard letChars.location != NSNotFound, valueChars.location != NSNotFound,
+              let letRect = r.rect(of: letChars), let valueRect = r.rect(of: valueChars), let lineRect = r.rect(of: all)
+        else { XCTFail("the snippet is not laid out: \(ns.debugDescription)", file: file, line: line); return nil }
+        let letPixels = r.pixels(in: letRect.insetBy(dx: 1, dy: 1))
+        let valuePixels = r.pixels(in: valueRect.insetBy(dx: 1, dy: 1))
+        let linePixels = r.pixels(in: lineRect.insetBy(dx: 1, dy: 1)).sorted { luminance($0) < luminance($1) }
+        guard let brightest = letPixels.max(by: { luminance($0) < luminance($1) }),
+              let saturated = letPixels.max(by: { hsb($0).s < hsb($1).s }),
+              !valuePixels.isEmpty, !linePixels.isEmpty
+        else { XCTFail("nothing drawn: \(letPixels.count) `let` pixels, \(valuePixels.count) `value` pixels", file: file, line: line); return nil }
+        return KeywordPixels(keywordBrightest: brightest, keywordMostSaturated: saturated, fill: linePixels[linePixels.count / 2],
+                             plainMaxSaturation: valuePixels.map { hsb($0).s }.max() ?? 0)
+    }
+
+    private func assertKeywordIsDrawnInItsHue(_ p: KeywordPixels, dimmed: Bool, _ label: String,
+                                              file: StaticString = #filePath, line: UInt = #line) {
+        let expected = hsb(Theme.syntaxColor(.keyword, dimmed: dimmed))
+        let got = hsb(p.keywordMostSaturated)
+        XCTAssertGreaterThanOrEqual(got.s, 0.2, "\(label): the keyword is not visibly coloured (most saturated pixel \(name(p.keywordMostSaturated)))", file: file, line: line)
+        XCTAssertLessThanOrEqual(hueDistance(got.h, expected.h), 10, "\(label): keyword hue \(got.h) is not the keyword colour's \(expected.h)", file: file, line: line)
+        XCTAssertLessThanOrEqual(p.plainMaxSaturation, 0.06, "\(label): plain text is coloured", file: file, line: line)
+    }
+
+    func testAKeywordIsDrawnColouredAndPlainTextIsNotInTheKeyWindow() throws {
+        let p = try XCTUnwrap(keywordPixels(keyWindow: true))
+        assertKeywordIsDrawnInItsHue(p, dimmed: false, "key window")
+        XCTAssertGreaterThanOrEqual(contrast(p.keywordBrightest, p.fill), 4.5, "key window: the keyword on the code surface")
+    }
+
+    func testAKeywordIsDrawnColouredAndPlainTextIsNotInAWindowThatIsNotKey() throws {
+        let p = try XCTUnwrap(keywordPixels(keyWindow: false))
+        assertKeywordIsDrawnInItsHue(p, dimmed: false, "non-key window")
+        XCTAssertGreaterThanOrEqual(contrast(p.keywordBrightest, p.fill), 4.5, "non-key window: the keyword on the code surface")
+    }
+
+    func testTheHighlightedCodeLooksTheSameWhetherOrNotItsWindowIsKey() throws {
+        let key = try XCTUnwrap(keywordPixels(keyWindow: true))
+        let notKey = try XCTUnwrap(keywordPixels(keyWindow: false))
+        XCTAssertEqual(contrast(key.keywordBrightest, notKey.keywordBrightest), 1.0, accuracy: 0.05, "the keyword dims in an inactive window")
+        XCTAssertEqual(contrast(key.fill, notKey.fill), 1.0, accuracy: 0.05, "the code surface dims in an inactive window")
+    }
+
+    func testAKeywordInAFoldedCardIsStillColouredAndPlainTextIsNot() throws {
+        for keyWindow in [true, false] {
+            let label = keyWindow ? "folded, key window" : "folded, non-key window"
+            let p = try XCTUnwrap(keywordPixels(keyWindow: keyWindow, textColor: Theme.foldedProse))
+            assertKeywordIsDrawnInItsHue(p, dimmed: true, label)
+            XCTAssertGreaterThanOrEqual(contrast(p.keywordBrightest, p.fill), 4.5, "\(label): the dimmed keyword on the code surface")
+        }
+    }
+
+    // MARK: Selection legibility
+
+    func testSelectedCodeUsesTheSelectionForegroundNotTheTokenColour() throws {
+        let card = MarkdownCardView(markdown: Self.swiftLet)
+        let tv = try XCTUnwrap(textView(of: card))
+        let fg = try XCTUnwrap(tv.selectedTextAttributes[.foregroundColor] as? NSColor)
+        XCTAssertTrue(sameColour(fg, Theme.selectionForeground), "selected text must draw in the selection colour: \(name(fg))")
+    }
+
+    func testASelectedKeywordIsDrawnInTheSelectionColourAndStaysLegibleOnTheHighlight() throws {
+        let r = try XCTUnwrap(renderedCard(keyWindow: true, markdown: Self.swiftLet, select: "let"))
+        let chars = (r.tv.string as NSString).range(of: "let")
+        let rect = try XCTUnwrap(r.rect(of: chars))
+        let pixels = r.pixels(in: rect.insetBy(dx: 1, dy: 1))
+        let brightest = try XCTUnwrap(pixels.max(by: { luminance($0) < luminance($1) }), "nothing drawn under the selected keyword")
+        XCTAssertEqual(contrast(brightest, Theme.selectionForeground), 1.0, accuracy: 0.05,
+                       "the selected keyword is drawn in its token hue (\(name(brightest))), not the selection foreground")
+        // The same floor `TranscriptSelectionColorTests` pins for prose: selected text on the highlight.
+        XCTAssertGreaterThanOrEqual(contrast(brightest, Theme.selectionBackground), 3.0,
+                                    "selected keyword \(name(brightest)) on the selection highlight")
+    }
+
+    // MARK: Ligatures off
+
+    private func laidOutGlyphs(of markdown: String, needle: String, file: StaticString = #filePath, line: UInt = #line)
+        throws -> (lm: NSLayoutManager, tv: NSTextView, glyphs: NSRange, chars: NSRange) {
+        let window = makeRigWindow(self, size: NSSize(width: 900, height: 600))
+        let card = attachedCard(markdown, width: 520, in: window)
+        let tv = try XCTUnwrap(textView(of: card), file: file, line: line)
+        let lm = try XCTUnwrap(tv.layoutManager, "TextKit 1", file: file, line: line)
+        let tc = try XCTUnwrap(tv.textContainer, file: file, line: line)
+        lm.ensureLayout(for: tc)
+        let chars = (tv.string as NSString).range(of: needle)
+        XCTAssertNotEqual(chars.location, NSNotFound, "\(needle.debugDescription) is not in the card", file: file, line: line)
+        return (lm, tv, lm.glyphRange(forCharacterRange: chars, actualCharacterRange: nil), chars)
+    }
+
+    /// One glyph per character, and (with Fira Code) each glyph is the font's own glyph for its character:
+    /// Fira Code's `calt` draws `->` and friends with one-for-one substitutions, so a count cannot see them.
+    private func assertEveryGlyphIsThePlainOne(markdown: String, needle: String, what: String,
+                                               file: StaticString = #filePath, line: UInt = #line) throws {
+        let (lm, tv, glyphs, chars) = try laidOutGlyphs(of: markdown, needle: needle, file: file, line: line)
+        XCTAssertEqual(glyphs.length, chars.length, "\(what): one glyph per UTF-16 unit", file: file, line: line)
+        try XCTSkipIf(NSFont(name: "FiraCodeNF-Reg", size: 12) == nil, "Fira Code not installed")
+
+        let ns = tv.string as NSString
+        var substituted: [String] = []
+        for g in glyphs.location ..< NSMaxRange(glyphs) {
+            let ci = lm.characterIndexForGlyph(at: g)
+            guard let font = tv.textStorage?.attribute(.font, at: ci, effectiveRange: nil) as? NSFont else {
+                XCTFail("\(what): no font at \(ci)", file: file, line: line); continue
+            }
+            var unit = ns.character(at: ci)
+            var plain: CGGlyph = 0
+            XCTAssertTrue(CTFontGetGlyphsForCharacters(font as CTFont, &unit, &plain, 1), "\(what): \(font.fontName) has no glyph for U+\(String(unit, radix: 16))", file: file, line: line)
+            if lm.cgGlyph(at: g) != plain { substituted.append(ns.substring(with: NSRange(location: ci, length: 1))) }
+        }
+        XCTAssertEqual(substituted, [], "\(what): these characters are drawn with a substituted (ligature) glyph", file: file, line: line)
+    }
+
+    func testCodeBlocksDrawEveryGlyphAsTheFontsPlainGlyphForItsCharacter() throws {
+        try assertEveryGlyphIsThePlainOne(markdown: "```text\n\(Self.ligatureText)\n```", needle: Self.ligatureText, what: "code block")
+    }
+
+    func testInlineCodeDrawsEveryGlyphAsTheFontsPlainGlyphForItsCharacter() throws {
+        try assertEveryGlyphIsThePlainOne(markdown: "Compare `-> :: ---` in prose.", needle: "-> :: ---", what: "inline code")
+    }
+
+    func testTheCodeFontCarriesTheContextualAlternatesOffSetting() throws {
+        try XCTSkipIf(NSFont(name: "FiraCodeNF-Reg", size: 12) == nil, "Fira Code not installed")
+        let font = Theme.codeFont(size: 12)
+        let raw = font.fontDescriptor.fontAttributes[.featureSettings] as? [Any] ?? []
+        var pairs: [[Int]] = []
+        for entry in raw {
+            guard let dict = entry as? [AnyHashable: Any] else { continue }
+            var type: Int?, selector: Int?
+            for (k, v) in dict {
+                let key = (k.base as? String) ?? (k.base as? NSFontDescriptor.FeatureKey)?.rawValue ?? ""
+                if key == NSFontDescriptor.FeatureKey.typeIdentifier.rawValue { type = (v as? NSNumber)?.intValue }
+                if key == NSFontDescriptor.FeatureKey.selectorIdentifier.rawValue { selector = (v as? NSNumber)?.intValue }
+            }
+            if let type, let selector { pairs.append([type, selector]) }
+        }
+        // Fira Code draws its arrows through `calt`; it has no AAT common-ligatures
+        // feature, so CoreText drops that request from the descriptor and reads back
+        // only `[36, 1]` (seen on CI). `calt` off is what the glyph tests above prove.
+        XCTAssertTrue(pairs.contains([Int(kContextualAlternatesType), Int(kContextualAlternatesOffSelector)]), "contextual alternates (calt) are not turned off: \(pairs)")
+    }
+
+    func testInlineCodeAlsoTurnsLigaturesOff() {
+        let s = render("Compare `-> :: ---` in prose.")
+        let r = range(of: "-> :: ---", in: s)
+        s.enumerateAttribute(.ligature, in: r) { v, _, _ in XCTAssertEqual(v as? Int, 0, "inline code must set .ligature to 0") }
+    }
+
+    // MARK: Height parity
+
+    func testMeasuredHeightEqualsTheLaidOutHeightForTheHighlightedFixtureAtEveryWidth() throws {
+        let window = makeRigWindow(self, size: NSSize(width: 1500, height: 1200))
+        for width in parityWidths {
+            let card = attachedCard(highlighted, width: width, in: window)
+            defer { card.removeFromSuperview() }
+            let tv = try XCTUnwrap(textView(of: card))
+            let lm = try XCTUnwrap(tv.layoutManager, "the card's text view must stay on TextKit 1")
+            let tc = try XCTUnwrap(tv.textContainer)
+            lm.ensureLayout(for: tc)
+            let measured = MarkdownCardView.measuredHeight(markdown: highlighted, width: width)
+            XCTAssertEqual(lm.usedRect(for: tc).height + 24, measured, accuracy: 0.5, "width \(width)")
+            XCTAssertEqual(card.frame.height, measured, accuracy: 0.01, "width \(width)")
+        }
+    }
+
+    func testColourChangesNoHeightEachLanguageFenceIsAsTallAsTheSameCodeUnderATextFence() {
+        for block in codeBlocks(highlighted) {
+            for width in [300, 737.25] as [CGFloat] {
+                let coloured = MarkdownCardView.measuredHeight(markdown: "```\(block.info)\n\(block.code)\n```", width: width)
+                let plain = MarkdownCardView.measuredHeight(markdown: "```text\n\(block.code)\n```", width: width)
+                XCTAssertEqual(coloured, plain, accuracy: 0.01, "\(block.info.debugDescription) at \(width) pt")
+            }
+        }
+    }
+
+    /// The height of `markdown` with every 12 pt code run set in plain `firaCode` with `.ligature: 0`
+    /// (the code font as it was before this feature), laid out as `measuredHeight` does.
+    private func baselineHeight(_ markdown: String, width: CGFloat) -> CGFloat {
+        let s = NSMutableAttributedString(attributedString: render(markdown))
+        var runs: [NSRange] = []
+        s.enumerateAttribute(.font, in: NSRange(location: 0, length: s.length)) { v, r, _ in
+            if let f = v as? NSFont, f.pointSize == 12 { runs.append(r) }
+        }
+        for r in runs { s.addAttributes([.font: Theme.firaCode(size: 12), .ligature: 0], range: r) }
+        let storage = NSTextStorage(attributedString: s)
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: max(width - 24, 1), height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.widthTracksTextView = false
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        layout.ensureLayout(for: container)
+        return layout.usedRect(for: container).height + 24
+    }
+
+    func testTurningTheLigatureFeaturesOffChangesNoHeight() {
+        for markdown in ["```text\n\(Self.ligatureText)\n```", "Compare `\(Self.ligatureText)` in prose."] {
+            for width in [300, 737.25] as [CGFloat] {
+                XCTAssertEqual(MarkdownCardView.measuredHeight(markdown: markdown, width: width), baselineHeight(markdown, width: width),
+                               accuracy: 0.5, "\(markdown.debugDescription) at \(width) pt")
+            }
+        }
+    }
+
+    // MARK: Copy and VoiceOver
+
+    func testCopyingAHighlightedBlockGivesExactlyItsCode() throws {
+        let window = makeRigWindow(self, size: NSSize(width: 900, height: 1200))
+        let card = attachedCard(highlighted, width: 520, in: window)
+        let tv = try XCTUnwrap(textView(of: card))
+        let blocks = codeBlocks(highlighted)
+        for (block, r) in zip(blocks, blockRanges(blocks, in: tv.string)) {
+            tv.setSelectedRange(r)
+            let pb = newPasteboard()
+            pb.clearContents()
+            XCTAssertTrue(tv.writeSelection(to: pb, types: tv.writablePasteboardTypes))
+            XCTAssertEqual(pb.string(forType: .string), block.code, "copy of the \(block.info.debugDescription) block")
+        }
+    }
+
+    func testVoiceOverReadsEveryHighlightedBlockVerbatimAndNoFence() throws {
+        let window = makeRigWindow(self, size: NSSize(width: 900, height: 1200))
+        let card = attachedCard(highlighted, width: 520, in: window)
+        let tv = try XCTUnwrap(textView(of: card))
+        let value = try XCTUnwrap(tv.accessibilityValue() as? String)
+        for block in codeBlocks(highlighted) { XCTAssertTrue(value.contains(block.code), "VoiceOver text lost or altered the \(block.info.debugDescription) block") }
+        XCTAssertFalse(value.contains("```"))
+    }
+
+    func testVoiceOverSpeaksTheKeywordAsItsTextNotItsColour() throws {
+        let window = makeRigWindow(self, size: NSSize(width: 900, height: 1200))
+        let card = attachedCard(highlighted, width: 520, in: window)
+        let tv = try XCTUnwrap(textView(of: card))
+        let r = (tv.string as NSString).range(of: "let answer = 42")
+        XCTAssertNotEqual(r.location, NSNotFound)
+        let keyword = NSRange(location: r.location, length: 3)
+        let ax = try XCTUnwrap(tv.accessibilityAttributedString(for: keyword))
+        XCTAssertEqual(ax.string, "let")
     }
 }
