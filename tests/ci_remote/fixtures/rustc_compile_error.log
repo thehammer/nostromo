@@ -1,0 +1,16 @@
+Build & Lint	Build	2026-10-16T00:00:00.0000000Z # synthetic: hand-written in the `gh run view --log-failed` format; no real sample of this failure exists in recent CI
+Build & Lint	Build	2026-10-16T00:00:01.0000000Z    Compiling nostromo v0.1.0 (/home/runner/work/nostromo/nostromo)
+Build & Lint	Build	2026-10-16T00:00:01.0000001Z error[E0425]: cannot find value `pane_idd` in this scope
+Build & Lint	Build	2026-10-16T00:00:01.0000002Z   --> src/ipc/panes.rs:214:21
+Build & Lint	Build	2026-10-16T00:00:01.0000003Z    |
+Build & Lint	Build	2026-10-16T00:00:01.0000004Z 214 |         let id = pane_idd;
+Build & Lint	Build	2026-10-16T00:00:01.0000005Z    |                  ^^^^^^^^ help: a local variable with a similar name exists: `pane_id`
+Build & Lint	Build	2026-10-16T00:00:01.0000006Z 
+Build & Lint	Build	2026-10-16T00:00:01.0000007Z error[E0308]: mismatched types
+Build & Lint	Build	2026-10-16T00:00:01.0000008Z    --> src/data/store.rs:77:18
+Build & Lint	Build	2026-10-16T00:00:01.0000009Z     |
+Build & Lint	Build	2026-10-16T00:00:02.0000010Z 77  |     let n: u32 = len();
+Build & Lint	Build	2026-10-16T00:00:02.0000011Z     |            ---   ^^^^^ expected `u32`, found `usize`
+Build & Lint	Build	2026-10-16T00:00:02.0000012Z 
+Build & Lint	Build	2026-10-16T00:00:02.0000013Z error: could not compile `nostromo` (lib) due to 2 previous errors
+Build & Lint	Build	2026-10-16T00:00:02.0000014Z ##[error]Process completed with exit code 101.

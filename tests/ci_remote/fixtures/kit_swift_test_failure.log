@@ -1,0 +1,26 @@
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:00.0000000Z # synthetic: hand-written in the `gh run view --log-failed` format; no real sample of this failure exists in recent CI
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000000Z Building for debugging...
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000001Z [1/1] Write swift-version--58304C5D6DBC2206.txt
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000002Z Build complete! (4.21s)
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000003Z Test Suite 'All tests' started at 2026-10-16 00:00:05.123.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000004Z Test Suite 'NostromoKitPackageTests.xctest' started at 2026-10-16 00:00:05.124.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000005Z Test Suite 'FrameCodecTests' started at 2026-10-16 00:00:05.124.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000006Z Test Case '-[NostromoKitTests.FrameCodecTests testRoundTrip]' started.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000007Z Test Case '-[NostromoKitTests.FrameCodecTests testRoundTrip]' passed (0.001 seconds).
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000008Z Test Case '-[NostromoKitTests.FrameCodecTests testOversizedFrameIsRejected]' started.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:01.0000009Z /Users/runner/work/nostromo/nostromo/Shared/NostromoKit/Tests/NostromoKitTests/FrameCodecTests.swift:42: error: -[NostromoKitTests.FrameCodecTests testOversizedFrameIsRejected] : XCTAssertThrowsError failed: did not throw an error
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000010Z Test Case '-[NostromoKitTests.FrameCodecTests testOversizedFrameIsRejected]' failed (0.002 seconds).
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000011Z Test Case '-[NostromoKitTests.FrameCodecTests testRoundTrip]' failed (0.001 seconds).
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000012Z Test Suite 'FrameCodecTests' failed at 2026-10-16 00:00:05.130.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000013Z 	 Executed 2 tests, with 2 failures (0 unexpected) in 0.003 (0.006) seconds
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000014Z ◇ Test run started.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000015Z ◇ Testing Library Version: 1501
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000016Z ◇ Test decodesEveryFrameKind() started.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000017Z ◇ Test "Pane titles survive a round trip" started.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000018Z ✘ Test decodesEveryFrameKind() recorded an issue at DecodeTests.swift:17:9: Expectation failed: (kinds.count → 3) == 4
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:02.0000019Z ✘ Test "Pane titles survive a round trip" recorded an issue at TitleTests.swift:30:5: Expectation failed: (a → "x") == (b → "y")
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:03.0000020Z ✘ Test decodesEveryFrameKind() failed after 0.004 seconds with 1 issue.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:03.0000021Z ✘ Test "Pane titles survive a round trip" failed after 0.005 seconds with 1 issue.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:03.0000022Z ✘ Test run with 2 tests in 1 suite failed after 0.006 seconds with 2 issues.
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:03.0000023Z error: fatalError
+Swift tests (NostromoKit)	make kit-test	2026-10-16T00:00:03.0000024Z ##[error]Process completed with exit code 1.
