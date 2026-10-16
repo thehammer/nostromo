@@ -252,3 +252,17 @@ Blocked: CORE-1301 waits on the index migration in PR #4835.
 - [ ] Add PORTAL-1F2 to the weekly Sentry digest
 - [ ] Archive the 2026-09 boards under .claude/wip/archive
 - [ ] Final check of facility 8812 after the retry job completes
+
+## Joiner look-alikes
+3f2b8c1e-9a47-4d6b-b0e5-7c21a8f4d903
+1.2.3-45-6789
+v1.2.3-45-6789
+a1-219-09-9999
+x2_219-09-9999
+1219-09-9999
+219-09-9999a
+a219-09-9999
+9a3c5e71-4111-1111-1111-111111111111
+1760611331000/1760611331001
+https://sentry.example.org/organizations/carefeed/issues/PORTAL-1F2/events/3f2b8c1e9a474d6bb0e57c21a8f4d903/
+https://carefeed.atlassian.net/browse/CORE-1234

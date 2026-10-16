@@ -131,3 +131,7 @@ secret	config has password: corr¦ecthorsebattery in the sample
 secret	- [ ] api_key: abcd¦1234efgh pasted into the ticket
 secret	API_¦KEY=abcd1234efgh5678 in the env dump
 secret	- [ ] PASS¦WORD=hunter2hunter2 in the CI env block
+# A plain word joined to a value with - _ or / does not hide it (not secrets, no mask needed).
+ssn	SSN-219-09-9999
+phone	tel-312-555-0142
+card	card-4111111111111111

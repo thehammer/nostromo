@@ -29,7 +29,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-CLASSES = ("ssn", "card", "dob", "mrn", "phone", "personal_email", "secret")
+CLASSES = ("ssn", "card", "dob", "mrn", "phone", "personal_email", "secret", "oversize")
 DEFAULT_SCAN_CMD = ["cargo", "run", "--quiet", "--bin", "sensitive-text-scan"]
 
 
