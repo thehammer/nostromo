@@ -139,7 +139,10 @@ How the app tells (`macOS/Nostromo/Security/`), two signals, either one enough:
 **a stale event**: AppKit leaves `NSApp.currentEvent` set to the last event it
 dispatched, even in later timer and dispatch callbacks, so a press arriving
 more than **1 s** (`HumanGesture.maxEventAge`) after that event is refused
-(`staleEvent`).
+(`staleEvent`). An event stamped in the **future** by more than **0.25 s**
+(`HumanGesture.maxFutureSkew`) is refused too (`futureEvent`): a real event is
+stamped when it happened, and the age check alone would let any future
+timestamp pass.
 
 What the daemon checks on its side (only the pinned, installed app may answer
 at all) is in [`operator-app-trust.md`](operator-app-trust.md).

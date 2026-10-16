@@ -140,13 +140,29 @@ async fn main() -> Result<()> {
             "operator-app pin unusable: no app can answer decisions; run make mac-install (installs, signs and pins the app)"
         ),
     }
+    // The operator app must run from the installed path, not just match the
+    // pin (the pin file is user-writable). `NOSTROMO_OPERATOR_APP_PATH`, read
+    // from THIS process's environment only, overrides it for a dev install.
+    let verifier = match std::env::var_os(nostromo::ipc::peer_verify::APP_PATH_ENV).filter(|v| !v.is_empty()) {
+        Some(path) => {
+            warn!(
+                path = ?path,
+                "{} set: the operator app is accepted from that path instead of {}",
+                nostromo::ipc::peer_verify::APP_PATH_ENV,
+                nostromo::ipc::peer_verify::INSTALLED_APP_EXE
+            );
+            nostromo::ipc::peer_verify::MacPeerVerifier::with_app_exe(pin_path, path)
+        }
+        None => nostromo::ipc::peer_verify::MacPeerVerifier::new(pin_path),
+    };
+    info!(app = %verifier.app_exe().display(), "operator app must run from");
     let server = Server::bind(
         &socket_path,
         Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         config.perri_state_dir(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(pin_path)),
+        Arc::new(verifier),
         qa_mode,
     )
     .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;

@@ -897,6 +897,55 @@ async fn a_refused_operator_answer_is_logged_with_why_and_the_nonce_is_never_log
 }
 
 #[tokio::test]
+async fn refused_answers_to_one_decision_log_that_it_stays_pending_once_and_the_decision_stays_answerable() {
+    let log = LogBuf::default();
+    let _guard = log.capture();
+    let env = env(FakePeerVerifier::scripted(vec![Some(app_info())], Some(script_info()))).await;
+    let mut scene = scene(&env).await;
+    let request_id = scene.request_id.clone();
+
+    // Three refusals of different kinds (no nonce, wrong nonce, an agent's script) for ONE decision.
+    let frames = answer(&mut scene.app, &request_id, Some("yes"), None).await;
+    assert_refused_and_untouched(&env, &mut scene, &frames, "no nonce").await;
+    let frames = answer(&mut scene.app, &request_id, Some("yes"), Some(&"0".repeat(64))).await;
+    assert_refused_and_untouched(&env, &mut scene, &frames, "wrong nonce").await;
+    let frames = answer(&mut scene.observer, &request_id, Some("yes"), None).await;
+    assert_refused_and_untouched(&env, &mut scene, &frames, "a plain local peer").await;
+
+    let text = log.text();
+    let pending_warnings: Vec<&str> = text.lines().filter(|l| l.contains("decision stays pending")).collect();
+    assert_eq!(pending_warnings.len(), 1, "one warning per decision, not per refusal:\n{text}");
+    assert!(pending_warnings[0].contains("WARN"), "{text}");
+    assert!(pending_warnings[0].contains(&request_id), "names the decision: {text}");
+    assert!(!text.contains(&scene.nonce), "the operator nonce must never appear in the logs:\n{text}");
+    // Every refusal is still logged on its own, as before.
+    assert!(text.contains("DecisionAnswer refused: wrong operator nonce"), "{text}");
+
+    assert_still_answerable(&mut scene).await;
+}
+
+#[tokio::test]
+async fn each_decision_whose_answer_is_refused_gets_its_own_stays_pending_warning() {
+    let log = LogBuf::default();
+    let _guard = log.capture();
+    let env = env(FakePeerVerifier::scripted(vec![Some(app_info())], Some(script_info()))).await;
+    let (mut app, _nonce) = connect_operator(&env).await;
+    let (first, _rx1) = pose(&env, "cody-x");
+    let (second, _rx2) = pose(&env, "cody-y");
+    assert_eq!(recv_decision_request(&mut app).await, first);
+    assert_eq!(recv_decision_request(&mut app).await, second);
+
+    for id in [&first, &second, &first, &second] {
+        answer(&mut app, id, Some("yes"), None).await;
+    }
+
+    let text = log.text();
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains("decision stays pending")).collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines.iter().any(|l| l.contains(&first)) && lines.iter().any(|l| l.contains(&second)), "{text}");
+}
+
+#[tokio::test]
 async fn a_genuine_app_without_a_claim_and_a_refused_mac_app_claim_are_each_warned_about() {
     let log = LogBuf::default();
     let _guard = log.capture();

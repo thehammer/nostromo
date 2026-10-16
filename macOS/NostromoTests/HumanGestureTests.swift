@@ -313,6 +313,72 @@ final class HumanGestureTests: XCTestCase {
         XCTAssertEqual(verdict(event, control, at: clock).isHuman, true)
     }
 
+    // MARK: Future events
+    //
+    // `now - timestamp <= maxEventAge` alone passes ANY timestamp in the future,
+    // so a forged event stamped ahead of the clock would never go stale. A real
+    // event is stamped when it happened; only `maxFutureSkew` of clock-read
+    // ordering is tolerated. `now` = 100 and quarter-second offsets stay exact.
+
+    func testTheMaximumFutureSkewIsAQuarterSecond() {
+        XCTAssertEqual(HumanGesture.maxFutureSkew, 0.25)
+    }
+
+    func testRefusesAMouseUpStampedHalfASecondAheadOfTheClock() {
+        let (window, control) = makeWindowAndControl()
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: clock + 0.5)
+        XCTAssertEqual(verdict(event, control, at: clock), .refused(reason: .futureEvent))
+    }
+
+    func testRefusesAKeyDownStampedHalfASecondAheadOfTheClock() {
+        let (window, control) = makeWindowAndControl()
+        let event = GestureFixtures.key(.keyDown, in: window, timestamp: clock + 0.5)
+        XCTAssertEqual(verdict(event, control, at: clock), .refused(reason: .futureEvent))
+    }
+
+    func testRefusesAnEventStampedFarInTheFutureWhichTheAgeCheckAloneWouldNeverCallStale() {
+        let (window, control) = makeWindowAndControl()
+        for offset in [1.0, 60.0, 86_400.0, 1_000_000.0] {
+            let mouse = GestureFixtures.mouse(.leftMouseDown, in: window, timestamp: clock + offset)
+            XCTAssertEqual(verdict(mouse, control, at: clock), .refused(reason: .futureEvent), "mouse +\(offset)")
+            let key = GestureFixtures.key(.keyDown, in: window, timestamp: clock + offset)
+            XCTAssertEqual(verdict(key, control, at: clock), .refused(reason: .futureEvent), "key +\(offset)")
+        }
+    }
+
+    func testAcceptsAMouseUpATenthOfASecondAheadOfTheClock() {
+        let (window, control) = makeWindowAndControl()
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: clock + 0.1)
+        XCTAssertEqual(verdict(event, control, at: clock).isHuman, true)
+    }
+
+    func testAcceptsAKeyDownATenthOfASecondAheadOfTheClock() {
+        let (window, control) = makeWindowAndControl()
+        let event = GestureFixtures.key(.keyDown, in: window, timestamp: clock + 0.1)
+        XCTAssertEqual(verdict(event, control, at: clock).isHuman, true)
+    }
+
+    func testAcceptsAnEventExactlyTheMaximumFutureSkewAhead() {
+        let (window, control) = makeWindowAndControl()
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: clock + HumanGesture.maxFutureSkew)
+        XCTAssertEqual(event.timestamp, 100.25, "harness: the timestamp must survive NSEvent exactly")
+        XCTAssertEqual(verdict(event, control, at: clock).isHuman, true)
+    }
+
+    func testRefusesAnEventJustPastTheMaximumFutureSkew() {
+        let (window, control) = makeWindowAndControl()
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: clock + HumanGesture.maxFutureSkew + 0.125)
+        XCTAssertEqual(verdict(event, control, at: clock), .refused(reason: .futureEvent))
+    }
+
+    func testTheDefaultClockIsTheEventClockSoARealFutureEventIsRefused() {
+        let (window, control) = makeWindowAndControl()
+        // No `now` injected: the production clock must be NSEvent.timestamp's.
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window,
+                                          timestamp: ProcessInfo.processInfo.systemUptime + 60)
+        XCTAssertEqual(verdict(event, control), .refused(reason: .futureEvent))
+    }
+
     func testAStaleHardwareStyleEventIsRefusedEvenThoughItCarriesNoMarker() throws {
         let (window, control) = makeWindowAndControl()
         let event = try GestureFixtures.throughCGEvent(
@@ -587,6 +653,32 @@ final class DecisionSheetHumanGestureTests: XCTestCase {
         try assertStillArmed("a 5 s old click must not answer")
     }
 
+    // MARK: A future-stamped event does not answer
+
+    func testAChoiceWhoseCurrentEventIsStampedInTheFutureDoesNotAnswer() throws {
+        sheet.now = { 100 }
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: 100.5)
+        sheet.currentEvent = { event }
+        try choiceButton("approve").performClick(nil)
+        try assertStillArmed("an event stamped ahead of the clock is not a person's click")
+    }
+
+    func testDismissWhoseCurrentEventIsStampedInTheFutureDoesNotDismiss() throws {
+        sheet.now = { 100 }
+        let event = GestureFixtures.key(.keyDown, in: window, timestamp: 100.5)
+        sheet.currentEvent = { event }
+        try dismissButton().performClick(nil)
+        try assertStillArmed("an Esc stamped ahead of the clock is not a person's keypress")
+    }
+
+    func testAClickAFewMillisecondsAheadOfTheSheetsClockStillAnswers() throws {
+        sheet.now = { 100 }
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: 100.05)
+        sheet.currentEvent = { event }
+        try choiceButton("approve").performClick(nil)
+        XCTAssertEqual(answers, ["approve"])
+    }
+
     func testAFreshClickStillAnswersAfterAStaleOneWasRefused() throws {
         sheet.now = { 100 }
         let stale = GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: 98.5)
@@ -710,5 +802,50 @@ final class DecisionSheetHumanGestureTests: XCTestCase {
         window.performClose(nil)
         XCTAssertEqual(answers.count, 1, "\(answers)")
         XCTAssertEqual(store.resolution(for: requestId), .dismissed)
+    }
+
+    // `window.close()` (unlike the close box or `performClose`) never asks
+    // `windowShouldClose`, so `windowWillClose` can run with NO gesture check at
+    // all. Whatever reaches it, all it may ever do is dismiss.
+
+    func testWindowWillCloseOnAnArmedSheetOnlyDismissesEvenWithNoEventAndVoiceOverOff() throws {
+        sheet.currentEvent = { nil }
+        sheet.voiceOverEnabled = { false }
+        willClose()
+        XCTAssertEqual(answers, [nil], "a close answers with a dismissal (nil), never a choice id: \(answers)")
+        XCTAssertEqual(store.resolution(for: requestId), .dismissed)
+    }
+
+    func testClosingTheWindowDirectlyWithNoGestureDismissesAndNeverChoosesAnything() throws {
+        sheet.currentEvent = { nil }
+        sheet.voiceOverEnabled = { false }
+        window.close()
+        XCTAssertEqual(answers, [nil], "\(answers)")
+        XCTAssertEqual(store.resolution(for: requestId), .dismissed)
+    }
+
+    func testClosingTheWindowDirectlyWithAMarkedChoiceClickStillOnlyDismisses() throws {
+        // A synthesised click that the button refused does not turn into an approval
+        // through the close path either.
+        let event = try GestureFixtures.marked(GestureFixtures.mouse(.leftMouseUp, in: window))
+        sheet.currentEvent = { event }
+        try choiceButton("approve").performClick(nil)
+        try assertStillArmed()
+        window.close()
+        XCTAssertEqual(answers, [nil], "\(answers)")
+        XCTAssertEqual(store.resolution(for: requestId), .dismissed)
+    }
+
+    func testClosingTheWindowDirectlyAfterAChoiceDoesNotSendASecondAnswer() throws {
+        let click = GestureFixtures.mouse(.leftMouseUp, in: window)
+        sheet.currentEvent = { click }
+        try choiceButton("approve").performClick(nil)
+        XCTAssertEqual(answers, ["approve"])
+
+        sheet.currentEvent = { nil }
+        window.close()
+        willClose()
+        XCTAssertEqual(answers, ["approve"], "a resolved sheet must not answer again on close: \(answers)")
+        XCTAssertEqual(store.resolution(for: requestId), .choice("approve"))
     }
 }

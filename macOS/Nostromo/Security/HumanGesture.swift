@@ -15,6 +15,12 @@ enum HumanGestureRefusal: String, Equatable {
     /// `AXPress` from another process) can arrive while a stale human event is
     /// still "current".
     case staleEvent
+    /// The event's timestamp is in the future by more than
+    /// `HumanGesture.maxFutureSkew`. A real event is stamped when it happened,
+    /// so one stamped ahead of the clock can't be a person's click; without
+    /// this the age check (`now - timestamp <= maxEventAge`) would pass any
+    /// future timestamp.
+    case futureEvent
 }
 
 enum HumanGestureVerdict: Equatable {
@@ -42,6 +48,10 @@ enum HumanGesture {
     /// within milliseconds; one second leaves room for a busy main thread.
     static let maxEventAge: TimeInterval = 1.0
 
+    /// How far (in seconds) an event's timestamp may be ahead of `now` before
+    /// it is refused as `.futureEvent`: room for clock-read ordering, no more.
+    static let maxFutureSkew: TimeInterval = 0.25
+
     /// - Parameters:
     ///   - now: the current time on `NSEvent.timestamp`'s clock (seconds since
     ///     boot). A seam for tests.
@@ -65,7 +75,11 @@ enum HumanGesture {
         guard let window = control.window, event.window === window else {
             return .refused(reason: .notAUserEvent)
         }
-        guard now() - event.timestamp <= maxEventAge else {
+        let age = now() - event.timestamp
+        guard age >= -maxFutureSkew else {
+            return .refused(reason: .futureEvent)
+        }
+        guard age <= maxEventAge else {
             return .refused(reason: .staleEvent)
         }
         let source = event.cgEvent

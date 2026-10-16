@@ -1337,6 +1337,17 @@ fn handle_client_msg(
             };
             if let Some(why) = refusal {
                 warn!(conn_key, %request_id, peer_pid = peer.map(|p| p.pid), "{why}");
+                // A refusal never resolves the decision: the asking agent keeps
+                // waiting until its own timeout (`timeout_secs`, default 300).
+                // Say so once per decision, so the log explains the stall.
+                if decisions.lock().unwrap().first_refusal(&request_id) {
+                    warn!(
+                        conn_key,
+                        %request_id,
+                        "decision stays pending (the agent waits until its timeout) because its answer was \
+                         refused: {why}. Run make mac-install and relaunch the app, then ask again"
+                    );
+                }
                 let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP.to_string() });
                 return;
             }

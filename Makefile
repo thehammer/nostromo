@@ -167,12 +167,16 @@ mac-icon:
 	  echo "NOTE: Assets.xcassets not wired into the project yet — icon built, run again after wiring."; \
 	fi
 
-## Release build of the GUI (ad-hoc signed, predictable output path)
+## Release build of the GUI (ad-hoc signed, predictable output path).
+## The previous product is removed first and the build's own status decides
+## (`pipefail`), so a failed build can never be signed, pinned and installed
+## from a STALE product left by an earlier run.
 mac-release:
-	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo \
+	@rm -rf "$(APP_RELEASE)"
+	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo \
 	  -configuration Release -derivedDataPath build \
 	  CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build \
-	  2>&1 | grep -E "error:|warning:|BUILD" || true
+	  2>&1 | grep -E "error:|warning:|BUILD"
 	@test -d "$(APP_RELEASE)" && echo "built → $(APP_RELEASE)" || { echo "release build failed"; exit 1; }
 
 ## Run the shared NostromoKit logic test suite (SwiftPM, headless). This is
@@ -235,7 +239,9 @@ ios-install-all: ios-build
 ## 1. Sign the build product (ad-hoc, hardened runtime, no entitlements) BEFORE
 ##    copying it: re-signing in /Applications would rewrite a file that may be
 ##    running (the same vnode concern as `install-daemon`).
-## 2. Copy it into /Applications.
+## 2. Copy it into /Applications: to a temp dir beside it, verify the copy,
+##    then swap by rename (scripts/install-operator-app.sh), so a failed copy
+##    leaves the old app in place.
 ## 3. Pin it: write its identifier and cdhashes to $(OPERATOR_PIN). The daemon
 ##    reads the pin on every connection, so it needs no restart.
 ##
@@ -244,9 +250,7 @@ ios-install-all: ios-build
 OPERATOR_PIN = $(HOME)/.nostromo/operator-app.pin
 mac-install: mac-release
 	scripts/sign-operator-app.sh "$(APP_RELEASE)"
-	@rm -rf "$(INSTALLED)"
-	@cp -R "$(APP_RELEASE)" "$(INSTALLED)"
-	@xattr -cr "$(INSTALLED)" 2>/dev/null || true
+	scripts/install-operator-app.sh "$(APP_RELEASE)" "$(INSTALLED)"
 	scripts/write-operator-pin.sh "$(INSTALLED)" "$(OPERATOR_PIN)"
 	@echo "installed → $(INSTALLED)  (launch from Spotlight/Launchpad like any app)"
 	@echo "relaunch Nostromo; restart is not needed for the daemon (it reads the pin per connection)"

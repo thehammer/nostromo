@@ -2,6 +2,7 @@
 
     scripts/sign-operator-app.sh <app>
     scripts/write-operator-pin.sh <app> <pin-file>
+    scripts/install-operator-app.sh <src-app> <dest-app>
 
 The daemon lets exactly one Nostromo.app answer an agent's decision: the one
 whose running code matches a cdhash in the pin file (src/ipc/peer_verify.rs,
@@ -12,7 +13,12 @@ be made to run someone else's code, so the scripts guarantee:
     entitlements, so DYLD_INSERT_LIBRARIES is ignored and nothing can attach;
   * write-operator-pin.sh pins one cdhash per architecture slice plus the
     identifier, mode 0600, atomically;
-  * both refuse an app without the runtime, with an entitlement that reopens
+  * install-operator-app.sh copies the signed app beside its destination,
+    checks the copy (same checks, same cdhash per slice), and only then swaps
+    it in by rename, so a failed install leaves the old app untouched and no
+    temp directory behind (`make mac-install` uses it);
+  * the Makefile's `mac-release` can't succeed from a stale product;
+  * all of sign / pin refuse an app without the runtime, with an entitlement that reopens
     it (get-task-allow, allow-dyld-environment-variables,
     disable-library-validation), or with a foreign identifier.
 
@@ -48,6 +54,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SIGN = os.path.join(REPO_ROOT, "scripts", "sign-operator-app.sh")
 PIN = os.path.join(REPO_ROOT, "scripts", "write-operator-pin.sh")
 CHECKS = os.path.join(REPO_ROOT, "scripts", "lib", "operator-app-checks.sh")
+INSTALL = os.path.join(REPO_ROOT, "scripts", "install-operator-app.sh")
+MAKEFILE = os.path.join(REPO_ROOT, "Makefile")
 
 IDENTIFIER = "com.hammer.nostromo"
 QA_IDENTIFIER = "com.hammer.nostromo.qa"
@@ -270,6 +278,9 @@ class _Scratch(unittest.TestCase):
 
     def pin(self, app, pin_path):
         return _run(["bash", PIN, app, pin_path], cwd=REPO_ROOT)
+
+    def install(self, src, dest):
+        return _run(["bash", INSTALL, src, dest], cwd=REPO_ROOT)
 
     def signed_app(self, **kw):
         app = self.make_app(**kw)
@@ -627,12 +638,232 @@ class WriteOperatorPinTests(_Scratch):
         self.assert_refused_and_untouched(os.path.join(self.tmp, "missing.app"), "a missing bundle")
 
 
+def tree_snapshot(root):
+    """Every path under `root` (itself included) mapped to what is there: file
+    bytes and mode, a symlink's target, or "dir". Equal snapshots mean a
+    byte-identical tree."""
+    snap = {}
+    for here, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = os.path.join(here, name)
+            rel = os.path.relpath(path, root)
+            if os.path.islink(path):
+                snap[rel] = ("link", os.readlink(path))
+            elif os.path.isdir(path):
+                snap[rel] = ("dir",)
+            else:
+                snap[rel] = ("file", stat.S_IMODE(os.stat(path).st_mode), _read_bytes(path))
+    return snap
+
+
+class InstallOperatorAppTests(_Scratch):
+    """scripts/install-operator-app.sh <src> <dest>: verified, then swapped by rename."""
+
+    OLD_MARKER = "OLD-INSTALL-MARKER"
+
+    def setUp(self):
+        super().setUp()
+        self.parent = os.path.join(self.tmp, "Applications")
+        os.makedirs(self.parent)
+        self.dest = os.path.join(self.parent, "Nostromo.app")
+
+    def installed_old_app(self):
+        """A signed app already at `dest`, with a file the new one doesn't have."""
+        old = self.signed_app(name="old")
+        shutil.copytree(old, self.dest, symlinks=True)
+        with open(os.path.join(self.dest, self.OLD_MARKER), "w") as f:
+            f.write("the previous install\n")
+        return old
+
+    def assert_no_temp_dirs(self, what):
+        leftovers = [n for n in os.listdir(self.parent) if ".install." in n or n.startswith(".")]
+        self.assertEqual(leftovers, [], f"{what}: temp dirs left in the destination's parent")
+
+    def assert_cdhashes_equal(self, src, dest):
+        archs = self.archs(src)
+        self.assertEqual(sorted(self.archs(dest)), sorted(archs), "same architecture slices")
+        for arch in archs:
+            self.assertEqual(self.cdhash(dest, arch), self.cdhash(src, arch), f"cdhash of the {arch} slice")
+
+    def assert_install_ok(self, src, dest=None):
+        r = self.install(src, dest or self.dest)
+        self.assertEqual(r.returncode, 0, f"install-operator-app.sh failed:\n{r.stdout}\n{r.stderr}")
+        return r
+
+    # -- success --
+
+    def test_installs_a_signed_app_at_a_fresh_destination(self):
+        src = self.signed_app()
+        self.assert_install_ok(src)
+        self.assertTrue(os.path.isfile(self.exe(self.dest)), "the app's executable is installed")
+        self.assertEqual(_run(["codesign", "--verify", "--strict", self.dest]).returncode, 0,
+                         "the installed app still verifies")
+        self.assertTrue(os.path.isdir(src), "the build product is left where it was")
+        self.assert_no_temp_dirs("a fresh install")
+        self.assertEqual(os.listdir(self.parent), ["Nostromo.app"])
+
+    def test_the_installed_copy_has_the_same_cdhash_as_the_source_on_every_slice(self):
+        for universal in (True, False):
+            with self.subTest(universal=universal):
+                dest = os.path.join(self.parent, f"Nostromo-{universal}.app")
+                src = self.signed_app(universal=universal)
+                self.assert_install_ok(src, dest)
+                self.assert_cdhashes_equal(src, dest)
+
+    def test_replaces_an_existing_install_and_the_old_app_is_gone(self):
+        self.installed_old_app()
+        src = self.signed_app(name="new")
+        self.assertTrue(os.path.exists(os.path.join(self.dest, self.OLD_MARKER)), "harness: old app in place")
+        self.assert_install_ok(src)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, self.OLD_MARKER)),
+                         "nothing of the previous install may survive inside the new one")
+        self.assert_cdhashes_equal(src, self.dest)
+        self.assert_no_temp_dirs("a replacing install")
+        self.assertEqual(os.listdir(self.parent), ["Nostromo.app"], "the old app is not left beside the new one")
+
+    def test_a_trailing_slash_on_either_path_is_fine(self):
+        src = self.signed_app()
+        self.assert_install_ok(src + "/", self.dest + "/")
+        self.assert_cdhashes_equal(src, self.dest)
+        self.assert_no_temp_dirs("a trailing slash")
+
+    # -- refusals: the existing install is byte-identical afterwards --
+
+    def assert_refused_and_old_install_untouched(self, src, what, because=None):
+        self.installed_old_app()
+        before = tree_snapshot(self.dest)
+        r = self.install(src, self.dest)
+        self.assertRefused(r, what)
+        if because:
+            self.assertIn(because, r.stderr, f"{what}: refused for another reason")
+        self.assertEqual(tree_snapshot(self.dest), before, f"{what}: the existing install was changed")
+        self.assertEqual(os.listdir(self.parent), ["Nostromo.app"], f"{what}: something was left beside it")
+        self.assert_no_temp_dirs(what)
+
+    def test_an_unsigned_app_is_refused_and_the_old_install_is_untouched(self):
+        self.assert_refused_and_old_install_untouched(self.make_app(), "an unsigned app")
+
+    def test_an_app_without_the_hardened_runtime_is_refused_and_the_old_install_is_untouched(self):
+        app = self.make_app()
+        self.codesign(app, runtime=False)
+        self.assert_refused_and_old_install_untouched(app, "an app without the runtime", because="hardened runtime")
+
+    def test_an_app_with_a_reopening_entitlement_is_refused_and_the_old_install_is_untouched(self):
+        app = self.make_app()
+        ent = "com.apple.security.get-task-allow"
+        self.codesign(app, runtime=True, entitlements=self.entitlements_plist([ent]))
+        self.assert_refused_and_old_install_untouched(app, f"an app with {ent}", because=ent)
+
+    def test_an_app_with_a_foreign_identifier_is_refused_and_the_old_install_is_untouched(self):
+        app = self.make_app(identifier="com.example.other")
+        self.codesign(app, runtime=True)
+        self.assert_refused_and_old_install_untouched(app, "a foreign identifier", because="com.example.other")
+
+    def test_an_app_whose_signature_no_longer_verifies_is_refused_and_the_old_install_is_untouched(self):
+        app = self.signed_app()
+        with open(os.path.join(app, "Contents", "Info.plist"), "ab") as f:
+            f.write(b"\n<!-- tampered -->\n")
+        self.assert_refused_and_old_install_untouched(app, "a tampered app")
+
+    def test_a_missing_source_is_refused_and_the_old_install_is_untouched(self):
+        self.assert_refused_and_old_install_untouched(os.path.join(self.tmp, "missing.app"), "a missing source")
+
+    def test_a_refused_app_installs_nothing_at_a_fresh_destination(self):
+        self.assertRefused(self.install(self.make_app(), self.dest), "an unsigned app")
+        self.assertEqual(os.listdir(self.parent), [], "no destination and no temp dir")
+
+    def test_a_destination_whose_parent_does_not_exist_is_refused(self):
+        src = self.signed_app()
+        dest = os.path.join(self.tmp, "no-such-dir", "Nostromo.app")
+        self.assertRefused(self.install(src, dest), "an install into a missing directory")
+        self.assertFalse(os.path.exists(os.path.dirname(dest)), "the script must not create the parent")
+
+    def test_the_wrong_number_of_arguments_is_a_usage_error(self):
+        for args in ([], ["only-one"], ["a", "b", "c"]):
+            with self.subTest(args=args):
+                r = _run(["bash", INSTALL] + args, cwd=REPO_ROOT)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn("usage", r.stderr)
+
+
+def make_recipe(target):
+    """The recipe lines of Makefile `target`, backslash continuations joined,
+    leading tab and `@` removed."""
+    with open(MAKEFILE) as f:
+        lines = f.read().splitlines()
+    start = next((i for i, l in enumerate(lines) if re.match(rf"{re.escape(target)}\s*:(?!=)", l)), None)
+    assert start is not None, f"no `{target}:` rule in the Makefile"
+    recipe, pending = [], ""
+    for line in lines[start + 1:]:
+        if not line.startswith("\t"):
+            if line.strip() == "" or line.lstrip().startswith("#"):
+                continue
+            break
+        body = line[1:]
+        if body.endswith("\\"):
+            pending += body[:-1].strip() + " "
+            continue
+        recipe.append((pending + body).lstrip("@- ").strip())
+        pending = ""
+    assert recipe, f"`{target}` has no recipe"
+    return recipe
+
+
+class MakefileInstallRecipeTests(unittest.TestCase):
+    """Static checks on `mac-release` and `mac-install`: a stale or half-copied
+    app must never be signed, pinned and installed."""
+
+    def test_mac_release_does_not_swallow_the_builds_failure(self):
+        recipe = "\n".join(make_recipe("mac-release"))
+        self.assertNotIn("|| true", recipe)
+
+    def test_mac_release_uses_the_builds_own_exit_status_through_the_pipe(self):
+        build = next(l for l in make_recipe("mac-release") if "xcodebuild" in l)
+        self.assertIn("|", build, "harness: the build output is filtered through a pipe")
+        self.assertIn("pipefail", build.split("xcodebuild")[0],
+                      "pipefail must be set in the same shell, before xcodebuild")
+
+    def test_mac_release_removes_the_previous_product_before_building(self):
+        recipe = make_recipe("mac-release")
+        removal = next((i for i, l in enumerate(recipe) if re.search(r'rm -rf\s+"?\$\(APP_RELEASE\)"?', l)), None)
+        build = next(i for i, l in enumerate(recipe) if "xcodebuild" in l)
+        self.assertIsNotNone(removal, f"the old product is never removed: {recipe}")
+        self.assertLess(removal, build, "the old product must be removed BEFORE xcodebuild runs")
+
+    def test_mac_release_still_fails_when_no_product_was_built(self):
+        recipe = make_recipe("mac-release")
+        check = next((l for l in recipe if "test -d" in l and "$(APP_RELEASE)" in l), "")
+        self.assertIn("exit 1", check)
+
+    def test_mac_install_installs_through_the_install_script_and_not_a_bare_rm_and_copy(self):
+        recipe = make_recipe("mac-install")
+        install = next((l for l in recipe if "scripts/install-operator-app.sh" in l), None)
+        self.assertIsNotNone(install, f"mac-install does not call scripts/install-operator-app.sh: {recipe}")
+        self.assertIn('"$(APP_RELEASE)" "$(INSTALLED)"', install)
+        text = "\n".join(recipe)
+        self.assertNotRegex(text, r'rm -rf\s+"?\$\(INSTALLED\)"?', "never delete the installed app before the new one is verified")
+        self.assertNotRegex(text, r'\bcp -R\b', "copying straight into place is what the script replaced")
+
+    def test_mac_install_signs_then_installs_then_pins(self):
+        recipe = make_recipe("mac-install")
+        order = [next((i for i, l in enumerate(recipe) if script in l), None)
+                 for script in ("scripts/sign-operator-app.sh", "scripts/install-operator-app.sh",
+                                "scripts/write-operator-pin.sh")]
+        self.assertNotIn(None, order, f"missing a step: {recipe}")
+        self.assertEqual(order, sorted(order), f"wrong order: {recipe}")
+
+    def test_mac_install_depends_on_mac_release(self):
+        with open(MAKEFILE) as f:
+            rule = next(l for l in f.read().splitlines() if l.startswith("mac-install:"))
+        self.assertIn("mac-release", rule.split(":", 1)[1].split())
+
+
 class ShellcheckTests(unittest.TestCase):
 
     def test_the_scripts_are_shellcheck_clean(self):
         _require("shellcheck")
         r = _run(["shellcheck", "-x", "scripts/sign-operator-app.sh", "scripts/write-operator-pin.sh",
-                  "scripts/lib/operator-app-checks.sh"], cwd=REPO_ROOT)
+                  "scripts/install-operator-app.sh", "scripts/lib/operator-app-checks.sh"], cwd=REPO_ROOT)
         self.assertEqual(r.returncode, 0, f"shellcheck findings:\n{r.stdout}\n{r.stderr}")
 
 

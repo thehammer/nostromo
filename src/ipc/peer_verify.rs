@@ -16,11 +16,18 @@
 //!   flags for it: it must be valid and run under the hardened runtime, the
 //!   kernel must be **enforcing** that runtime (`CS_HARD`, `CS_KILL` and
 //!   `CS_ENFORCEMENT`; absent when SIP is disabled), and it must be neither
-//!   debuggable (`get-task-allow`) nor being debugged.
+//!   debuggable (`get-task-allow`) nor being debugged, **and**
+//! - that code runs from the **installed app's path**
+//!   ([`INSTALLED_APP_EXE`], or the daemon's own `NOSTROMO_OPERATOR_APP_PATH`).
+//!   The pin file is user-writable, so a cdhash in it proves nothing about
+//!   *which* binary is meant: without this, a same-uid process could compile
+//!   any client, sign it with the app's identifier, write its cdhash into the
+//!   pin and be "the app". With it, that process must also put its binary at
+//!   the installed path ([`UnverifiedReason::WrongPath`] otherwise).
 //!
-//! Where the executable lives, and what an `Info.plist` next to it says, no
-//! longer matter: a fake bundle claiming the Nostromo bundle id has another
-//! cdhash. `path_bundle_id` is still read, for a diagnostic only.
+//! What an `Info.plist` next to the executable says doesn't matter: a fake
+//! bundle claiming the Nostromo bundle id has another cdhash.
+//! `path_bundle_id` is still read, for a diagnostic only.
 //!
 //! The socket's peer is the **last process to use it**, not the one that
 //! connected, and a process can `exec` another image under the same pid. So an
@@ -29,11 +36,14 @@
 //! the same process (see [`still_same_operator`]).
 //!
 //! Residual risks (closable only with a Developer ID Team ID and a root-owned
-//! install): a same-uid attacker can replace `/Applications/Nostromo.app`
-//! **and** rewrite the pin to match, replace the daemon or its launchd plist,
-//! or post OS-level events into the app if its host holds Accessibility or
-//! Input Monitoring permission. The pin is not a root of trust: it raises the
-//! bar from "run a process" to "rewrite installed files". With SIP disabled
+//! install): a same-uid attacker that is an admin can replace
+//! `/Applications/Nostromo.app` with a re-signed binary **and** rewrite the pin
+//! to match (both are needed: the pin alone is not enough, and neither is the
+//! binary alone), replace the daemon or its launchd plist (which also sets the
+//! path override), or post OS-level events into the app if its host holds
+//! Accessibility or Input Monitoring permission. Neither the pin nor the path
+//! is a root of trust: together they raise the bar from "run a process" to
+//! "replace the user's installed app and rewrite the pin". With SIP disabled
 //! the kernel enforces no runtime, so the operator app cannot answer at all
 //! ([`UnverifiedReason::RuntimeNotEnforced`]). See
 //! `docs/operator-app-trust.md`.
@@ -44,6 +54,8 @@ use std::fmt;
 use std::io::Read;
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
+
+use tracing::warn;
 
 use super::peer::PeerTrust;
 
@@ -56,6 +68,15 @@ pub const QA_BUNDLE_ID: &str = "com.hammer.nostromo.qa";
 pub const MAC_APP_CLIENT_KIND: &str = "mac_app";
 /// The pin file's name, next to the daemon's socket.
 pub const PIN_FILE_NAME: &str = "operator-app.pin";
+/// Where the operator app's executable must run from: the installed app
+/// (`make mac-install`). A compile-time constant; see [`APP_PATH_ENV`] for the
+/// only way to change it.
+pub const INSTALLED_APP_EXE: &str = "/Applications/Nostromo.app/Contents/MacOS/Nostromo";
+/// A dev-install override of [`INSTALLED_APP_EXE`]. Read by `nostromd` from
+/// **its own environment** at startup, never from the peer and never from a
+/// file the agent could write (the daemon's launchd plist can be, which is a
+/// residual risk already: whoever controls it owns the daemon).
+pub const APP_PATH_ENV: &str = "NOSTROMO_OPERATOR_APP_PATH";
 
 /// What the daemon could learn about the process behind a Unix connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +121,10 @@ pub enum UnverifiedReason {
     /// The code does not satisfy the pin's requirement (another identifier or
     /// cdhash).
     RequirementFailed,
+    /// The code satisfies the pin but is not running from the installed app's
+    /// path (see [`INSTALLED_APP_EXE`]): a rewritten pin alone must not make
+    /// an arbitrary binary the app.
+    WrongPath,
     /// Not signed with the hardened runtime.
     NoRuntime,
     /// Signed with the hardened runtime, but the kernel does not enforce it
@@ -146,17 +171,32 @@ pub trait PeerVerifier: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct MacPeerVerifier {
     pin_path: PathBuf,
+    app_exe: PathBuf,
 }
 
 impl MacPeerVerifier {
     /// A verifier that reads the pin from `pin_path` on every check, so a
-    /// reinstall (which rewrites the pin) needs no daemon restart.
+    /// reinstall (which rewrites the pin) needs no daemon restart, and accepts
+    /// pinned code only at [`INSTALLED_APP_EXE`].
     pub fn new(pin_path: impl Into<PathBuf>) -> Self {
-        Self { pin_path: pin_path.into() }
+        Self::with_app_exe(pin_path, INSTALLED_APP_EXE)
+    }
+
+    /// Like [`MacPeerVerifier::new`], but pinned code must run from `app_exe`
+    /// instead. For the daemon's own `NOSTROMO_OPERATOR_APP_PATH` (a dev
+    /// install) and for tests. Never feed this anything the peer or an
+    /// agent-writable file chose.
+    pub fn with_app_exe(pin_path: impl Into<PathBuf>, app_exe: impl Into<PathBuf>) -> Self {
+        Self { pin_path: pin_path.into(), app_exe: app_exe.into() }
     }
 
     pub fn pin_path(&self) -> &Path {
         &self.pin_path
+    }
+
+    /// The path pinned code must run from.
+    pub fn app_exe(&self) -> &Path {
+        &self.app_exe
     }
 }
 
@@ -175,10 +215,35 @@ impl PeerVerifier for MacPeerVerifier {
             match (&token, OperatorPin::load(&self.pin_path)) {
                 (_, Err(reason)) => CodeIdentity::Unverified { reason },
                 (None, Ok(_)) => CodeIdentity::Unverified { reason: no_token_reason() },
-                (Some(token), Ok(pin)) => verify_code(token, &pin),
+                (Some(token), Ok(pin)) => self.bind_to_installed_path(verify_code(token, &pin), &exe),
             }
         };
         Some(PeerInfo { pid, pidversion, exe, path_bundle_id, code })
+    }
+}
+
+impl MacPeerVerifier {
+    /// Pinned code stays pinned only when it runs from the installed app's
+    /// path. Anything else was already refused.
+    fn bind_to_installed_path(&self, code: CodeIdentity, exe: &Path) -> CodeIdentity {
+        if matches!(code, CodeIdentity::Pinned { .. }) && !same_file(exe, &self.app_exe) {
+            warn!(
+                peer_exe = %exe.display(),
+                expected = %self.app_exe.display(),
+                "pinned code is running from a path other than the installed app: refused (WrongPath)"
+            );
+            return CodeIdentity::Unverified { reason: UnverifiedReason::WrongPath };
+        }
+        code
+    }
+}
+
+/// Do `a` and `b` canonicalise to the same existing path? Either failing to
+/// canonicalise (not installed, deleted since) is "no".
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -282,6 +347,13 @@ pub fn claim_diagnostic(info: Option<&PeerInfo>, client_kind: Option<&str>, trus
             // the runtime.
             Some(CodeIdentity::Unverified { reason: reason @ UnverifiedReason::RuntimeNotEnforced }) => {
                 format!("mac_app claim refused: {reason}; {NOT_ENFORCED}")
+            }
+            Some(CodeIdentity::Unverified { reason: reason @ UnverifiedReason::WrongPath }) => {
+                format!(
+                    "mac_app claim refused: {reason}; pinned code must run from {INSTALLED_APP_EXE} \
+                     (or the daemon's {APP_PATH_ENV}); it ran from {}",
+                    info.map_or_else(String::new, |i| i.exe.display().to_string())
+                )
             }
             Some(CodeIdentity::Unverified { reason }) => format!("mac_app claim refused: {reason}; {FIX}"),
             Some(CodeIdentity::Pinned { identifier }) => {
@@ -884,13 +956,14 @@ mod tests {
 
     // ── classify_peer ─────────────────────────────────────────────────────────
 
-    const ALL_REASONS: [UnverifiedReason; 12] = [
+    const ALL_REASONS: [UnverifiedReason; 13] = [
         UnverifiedReason::NotChecked,
         UnverifiedReason::NoPin,
         UnverifiedReason::BadPin,
         UnverifiedReason::NoToken,
         UnverifiedReason::NoSuchCode,
         UnverifiedReason::RequirementFailed,
+        UnverifiedReason::WrongPath,
         UnverifiedReason::NoRuntime,
         UnverifiedReason::RuntimeNotEnforced,
         UnverifiedReason::GetTaskAllow,
@@ -971,7 +1044,9 @@ mod tests {
         assert_eq!(classify_peer(Some(&fake), Some(MAC_APP_CLIENT_KIND), false), PeerTrust::LocalOther);
         assert_eq!(classify_peer(Some(&fake), Some(MAC_APP_CLIENT_KIND), true), PeerTrust::LocalOther);
 
-        // The pinned code, run from anywhere and with no bundle around it.
+        // The pinned code, run from anywhere and with no bundle around it. (`classify_peer`
+        // trusts the code identity it is given; binding pinned code to the installed path
+        // happens earlier, in `MacPeerVerifier::inspect`, which turns it into `WrongPath`.)
         let moved = PeerInfo {
             pid: 1,
             pidversion: 1,
@@ -990,8 +1065,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "NotChecked", "NoPin", "BadPin", "NoToken", "NoSuchCode", "RequirementFailed", "NoRuntime",
-                "RuntimeNotEnforced", "GetTaskAllow", "Debugged", "NotValid", "Unsupported",
+                "NotChecked", "NoPin", "BadPin", "NoToken", "NoSuchCode", "RequirementFailed", "WrongPath",
+                "NoRuntime", "RuntimeNotEnforced", "GetTaskAllow", "Debugged", "NotValid", "Unsupported",
             ]
         );
     }
@@ -1055,7 +1130,8 @@ mod tests {
 
     #[test]
     fn a_refused_mac_app_claim_is_diagnosed_with_its_reason_and_the_fix() {
-        for reason in ALL_REASONS.into_iter().filter(|r| *r != UnverifiedReason::RuntimeNotEnforced) {
+        let special = [UnverifiedReason::RuntimeNotEnforced, UnverifiedReason::WrongPath];
+        for reason in ALL_REASONS.into_iter().filter(|r| !special.contains(r)) {
             let info = peer(unverified(reason));
             let trust = classify_peer(Some(&info), Some(MAC_APP_CLIENT_KIND), false);
             assert_eq!(
@@ -1085,6 +1161,22 @@ mod tests {
         );
         // Never advice to turn a protection off.
         assert!(!text.to_lowercase().contains("disable "), "{text}");
+    }
+
+    #[test]
+    fn pinned_code_at_the_wrong_path_is_diagnosed_with_the_expected_path_the_override_and_where_it_ran() {
+        let info = PeerInfo {
+            exe: PathBuf::from("/tmp/evil/Nostromo"),
+            path_bundle_id: None,
+            ..peer(unverified(UnverifiedReason::WrongPath))
+        };
+        let trust = classify_peer(Some(&info), Some(MAC_APP_CLIENT_KIND), false);
+        assert_eq!(trust, PeerTrust::LocalOther);
+        let text = claim_diagnostic(Some(&info), Some(MAC_APP_CLIENT_KIND), trust).unwrap();
+        assert!(text.starts_with("mac_app claim refused: WrongPath"), "{text}");
+        assert!(text.contains(INSTALLED_APP_EXE), "names the installed path: {text}");
+        assert!(text.contains(APP_PATH_ENV), "names the override variable: {text}");
+        assert!(text.contains("/tmp/evil/Nostromo"), "names where the peer actually ran: {text}");
     }
 
     // ── check_status_flags ────────────────────────────────────────────────────
@@ -1138,6 +1230,120 @@ mod tests {
         assert_eq!(claim_diagnostic(Some(&script), None, PeerTrust::LocalOther), None);
         assert_eq!(claim_diagnostic(None, None, PeerTrust::LocalOther), None);
         assert_eq!(claim_diagnostic(Some(&script), Some("cli"), PeerTrust::LocalOther), None);
+    }
+
+    // ── the installed-path binding ────────────────────────────────────────────
+
+    /// A regular file `<dir>/<name>` with `contents`.
+    fn file(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_file_is_the_same_file_as_itself_and_as_a_symlink_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = file(dir.path(), "app", "x");
+        assert!(same_file(&exe, &exe));
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+        assert!(same_file(&exe, &link));
+        assert!(same_file(&link, &exe));
+        // A path spelled through `.` and `..` is still the same file.
+        assert!(same_file(&exe, &dir.path().join("../").join(dir.path().file_name().unwrap()).join("app")));
+    }
+
+    #[test]
+    fn two_different_files_are_not_the_same_file_even_with_identical_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = file(dir.path(), "a", "same bytes");
+        let b = file(dir.path(), "b", "same bytes");
+        assert!(!same_file(&a, &b));
+        let link_to_b = dir.path().join("link-to-b");
+        std::os::unix::fs::symlink(&b, &link_to_b).unwrap();
+        assert!(!same_file(&a, &link_to_b));
+    }
+
+    #[test]
+    fn a_path_that_does_not_exist_is_the_same_file_as_nothing_not_even_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = file(dir.path(), "real", "x");
+        let missing = dir.path().join("missing");
+        assert!(!same_file(&real, &missing));
+        assert!(!same_file(&missing, &real));
+        assert!(!same_file(&missing, &missing));
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+        assert!(!same_file(&dangling, &real));
+        assert!(!same_file(&dangling, &dangling));
+    }
+
+    #[test]
+    fn pinned_code_is_accepted_only_at_the_installed_apps_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = file(dir.path(), "installed", "app");
+        let elsewhere = file(dir.path(), "elsewhere", "app");
+        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &installed);
+        assert_eq!(verifier.app_exe(), installed.as_path());
+
+        assert_eq!(verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &installed), pinned(APP_BUNDLE_ID));
+        assert_eq!(
+            verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &elsewhere),
+            unverified(UnverifiedReason::WrongPath)
+        );
+        assert_eq!(
+            verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &dir.path().join("gone")),
+            unverified(UnverifiedReason::WrongPath),
+            "an exe that cannot be resolved is not the installed app"
+        );
+        // Whatever the identifier: the path binding does not care which pinned identifier it is.
+        assert_eq!(
+            verifier.bind_to_installed_path(pinned(QA_BUNDLE_ID), &elsewhere),
+            unverified(UnverifiedReason::WrongPath)
+        );
+    }
+
+    #[test]
+    fn pinned_code_whose_installed_app_is_missing_is_refused_as_wrong_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = file(dir.path(), "peer", "x");
+        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), dir.path().join("not-installed"));
+        assert_eq!(
+            verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &exe),
+            unverified(UnverifiedReason::WrongPath)
+        );
+    }
+
+    #[test]
+    fn code_that_is_not_pinned_passes_through_the_path_binding_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = file(dir.path(), "installed", "app");
+        let elsewhere = file(dir.path(), "elsewhere", "app");
+        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &installed);
+        for reason in ALL_REASONS {
+            // At the right path and at the wrong one: the original refusal is kept, never
+            // replaced (a WrongPath would hide why the code was really refused).
+            for exe in [&installed, &elsewhere] {
+                assert_eq!(verifier.bind_to_installed_path(unverified(reason), exe), unverified(reason), "{reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn by_default_the_app_must_run_from_the_installed_applications_path() {
+        let verifier = MacPeerVerifier::new("/nonexistent/operator-app.pin");
+        assert_eq!(verifier.app_exe(), Path::new(INSTALLED_APP_EXE));
+        assert_eq!(INSTALLED_APP_EXE, "/Applications/Nostromo.app/Contents/MacOS/Nostromo");
+        assert_eq!(verifier.pin_path(), Path::new("/nonexistent/operator-app.pin"));
+        assert_eq!(APP_PATH_ENV, "NOSTROMO_OPERATOR_APP_PATH");
+    }
+
+    #[test]
+    fn the_installed_path_can_be_overridden_for_a_dev_install() {
+        let verifier = MacPeerVerifier::with_app_exe("/p/pin", "/dev/install/Nostromo");
+        assert_eq!(verifier.app_exe(), Path::new("/dev/install/Nostromo"));
+        assert_eq!(verifier.pin_path(), Path::new("/p/pin"));
     }
 
     // ── the pin ───────────────────────────────────────────────────────────────

@@ -42,7 +42,7 @@ use nostromo::ipc::{
     decisions::DecisionRegistry,
     peer_verify::{
         audit_token, still_same_operator, verify_code, CodeIdentity, MacPeerVerifier, OperatorPin, PeerInfo,
-        PeerVerifier, UnverifiedReason, APP_BUNDLE_ID, PIN_FILE_NAME,
+        PeerVerifier, UnverifiedReason, APP_BUNDLE_ID, INSTALLED_APP_EXE, PIN_FILE_NAME,
     },
     protocol::{ClientMsg, DecisionChoice, ServerMsg, Topic, PROTOCOL_VERSION},
     server::Server,
@@ -174,6 +174,10 @@ struct Helpers {
     no_runtime: PathBuf,
     /// Another build, `-i com.hammer.nostromo -o runtime` + `get-task-allow`.
     get_task_allow: PathBuf,
+    /// Another build (another cdhash), `-i com.hammer.nostromo -o runtime`:
+    /// passes every code check except being the pinned cdhash. Stands for an
+    /// attacker's own client signed with the app's identifier.
+    impostor: PathBuf,
 }
 
 fn run(cmd: &mut Command) -> std::process::Output {
@@ -274,7 +278,11 @@ fn helpers() -> &'static Helpers {
         fs::write(&ent, GET_TASK_ALLOW_ENTITLEMENTS).unwrap();
         codesign(&get_task_allow, APP_BUNDLE_ID, true, Some(&ent));
 
-        Helpers { pinned, unpinned, fake_bundle_exe, no_runtime, get_task_allow }
+        let impostor = dir.join("impostor-helper");
+        compile(&dir, "impostor", &impostor);
+        codesign(&impostor, APP_BUNDLE_ID, true, None);
+
+        Helpers { pinned, unpinned, fake_bundle_exe, no_runtime, get_task_allow, impostor }
     })
 }
 
@@ -402,14 +410,27 @@ fn bytes_file(dir: &Path, bytes: &[u8]) -> PathBuf {
 }
 
 /// Connect `binary` (it writes `a`, then holds), and return what the verifier
-/// makes of it, checking code against a pin for `pin_binary`.
+/// makes of it, checking code against a pin for `pin_binary`. The verifier's
+/// installed-app path is `binary` itself: the path binding is not in play.
 fn verify_helper(binary: &Path, pin_binary: &Path) -> PeerInfo {
+    verify_helper_at(binary, pin_binary, binary)
+}
+
+/// As [`verify_helper`], with the verifier told that the installed app lives
+/// at `app_exe` (the path binding).
+fn verify_helper_at(binary: &Path, pin_binary: &Path, app_exe: &Path) -> PeerInfo {
+    inspect_helper(binary, pin_binary, |pin| MacPeerVerifier::with_app_exe(pin, app_exe))
+}
+
+/// As [`verify_helper_at`], for a verifier the caller builds from the pin's path
+/// (e.g. [`MacPeerVerifier::new`], which uses the real installed-app path).
+fn inspect_helper(binary: &Path, pin_binary: &Path, verifier: impl FnOnce(PathBuf) -> MacPeerVerifier) -> PeerInfo {
     let (dir, listener, socket) = listen();
     let pin = write_pin_for(dir.path(), APP_BUNDLE_ID, pin_binary);
     let mut helper = Helper::spawn(binary, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "hold", None);
     let mut stream = accept(&listener, &mut helper);
     assert_eq!(read_byte(&mut stream, "the helper's first byte"), b'a');
-    let info = MacPeerVerifier::new(pin).inspect(stream.as_fd(), true).expect("the helper is alive and identifiable");
+    let info = verifier(pin).inspect(stream.as_fd(), true).expect("the helper is alive and identifiable");
     assert_eq!(info.pid, helper.pid(), "the peer is the helper");
     info
 }
@@ -464,6 +485,101 @@ fn pinned_code_that_allows_a_debugger_to_attach_is_refused() {
     assert_eq!(info.code, unverified(UnverifiedReason::GetTaskAllow));
 }
 
+// ── the installed-path binding ───────────────────────────────────────────────
+//
+// The pin file is user-writable, so a cdhash in it must not by itself make a
+// binary "the app": pinned code is accepted only when it runs from the
+// installed app's path.
+
+#[test]
+fn pinned_code_running_from_another_existing_file_than_the_installed_app_is_refused_as_wrong_path() {
+    let h = helpers();
+    // The installed app is (some other file at) h.unpinned; the pinned helper runs from elsewhere.
+    let info = verify_helper_at(&h.pinned, &h.pinned, &h.unpinned);
+    assert_eq!(info.code, unverified(UnverifiedReason::WrongPath));
+}
+
+#[test]
+fn pinned_code_is_refused_as_wrong_path_when_nothing_is_installed_at_the_expected_path() {
+    let h = helpers();
+    let nowhere = tempfile::tempdir().unwrap();
+    let missing = nowhere.path().join("Nostromo.app/Contents/MacOS/Nostromo");
+    assert!(!missing.exists());
+    let info = verify_helper_at(&h.pinned, &h.pinned, &missing);
+    assert_eq!(info.code, unverified(UnverifiedReason::WrongPath));
+}
+
+#[test]
+fn rewriting_the_pin_to_name_an_attackers_binary_does_not_make_it_the_app_when_it_is_not_at_the_installed_path() {
+    let h = helpers();
+    // The attacker signs its own client with the app's identifier and writes ITS cdhash
+    // into the (user-writable) pin: the code check alone passes...
+    let at_its_own_path = verify_helper(&h.impostor, &h.impostor);
+    assert_eq!(
+        at_its_own_path.code,
+        CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() },
+        "precondition: with the path binding out of play the rewritten pin does match"
+    );
+    // ...but the real app lives elsewhere (the installed path), so it is refused.
+    let info = verify_helper_at(&h.impostor, &h.impostor, &h.pinned);
+    assert_eq!(info.code, unverified(UnverifiedReason::WrongPath));
+}
+
+#[test]
+fn residual_risk_an_attacker_who_also_replaces_the_installed_app_and_rewrites_the_pin_is_accepted() {
+    // Documented in docs/operator-app-trust.md: the pin and the path are not a root of
+    // trust. Replace the binary AT the installed path AND rewrite the pin to match, and
+    // the verifier (by design) calls it the app. This test pins that boundary: if it ever
+    // starts failing, the doc's residual-risk section needs updating too.
+    let h = helpers();
+    let info = verify_helper_at(&h.impostor, &h.impostor, &h.impostor);
+    assert_eq!(info.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+}
+
+#[test]
+fn a_binary_with_the_apps_identifier_but_another_cdhash_fails_the_requirement_even_at_the_installed_path() {
+    let h = helpers();
+    // The pin is the genuine app's (original pin); the impostor sits at the expected path
+    // (it replaced the installed binary) but its cdhash is not the pinned one.
+    let info = verify_helper_at(&h.impostor, &h.pinned, &h.impostor);
+    assert_eq!(info.code, unverified(UnverifiedReason::RequirementFailed));
+}
+
+#[test]
+fn the_installed_app_may_be_named_through_a_symlink() {
+    let h = helpers();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("Nostromo-link");
+    std::os::unix::fs::symlink(&h.pinned, &link).unwrap();
+    let info = verify_helper_at(&h.pinned, &h.pinned, &link);
+    assert_eq!(info.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+}
+
+#[test]
+fn a_symlink_to_a_different_binary_is_not_the_installed_app() {
+    let h = helpers();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("Nostromo-link");
+    std::os::unix::fs::symlink(&h.unpinned, &link).unwrap();
+    let info = verify_helper_at(&h.pinned, &h.pinned, &link);
+    assert_eq!(info.code, unverified(UnverifiedReason::WrongPath));
+}
+
+#[test]
+#[allow(clippy::redundant_closure)] // `new` is generic over `Into<PathBuf>`; the closure pins the argument type
+fn by_default_the_app_must_run_from_the_installed_applications_path() {
+    let h = helpers();
+    let dir = tempfile::tempdir().unwrap();
+    let verifier = MacPeerVerifier::new(dir.path().join(PIN_FILE_NAME));
+    assert_eq!(verifier.app_exe(), Path::new(INSTALLED_APP_EXE));
+    assert_eq!(INSTALLED_APP_EXE, "/Applications/Nostromo.app/Contents/MacOS/Nostromo");
+
+    // A correctly signed and pinned helper that is run from a temp dir (not from
+    // /Applications) is not the app: it used to be Pinned wherever it ran.
+    let info = inspect_helper(&h.pinned, &h.pinned, |pin| MacPeerVerifier::new(pin));
+    assert_eq!(info.code, unverified(UnverifiedReason::WrongPath));
+}
+
 #[test]
 fn a_token_taken_before_an_exec_names_no_code_afterwards_and_a_fresh_one_names_the_new_image() {
     let h = helpers();
@@ -496,7 +612,7 @@ fn a_token_taken_before_an_exec_names_no_code_afterwards_and_a_fresh_one_names_t
 fn a_forked_child_writing_on_the_apps_socket_is_another_peer() {
     let h = helpers();
     let (dir, listener, socket) = listen();
-    let verifier = MacPeerVerifier::new(write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned));
+    let verifier = MacPeerVerifier::with_app_exe(write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned), &h.pinned);
     let mut helper = Helper::spawn(&h.pinned, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "gofork", None);
     let mut stream = accept(&listener, &mut helper);
     assert_eq!(read_byte(&mut stream, "the app's byte"), b'a');
@@ -602,7 +718,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
     let socket_path = tmp.path().join("d.sock");
     let pin = write_pin_for(tmp.path(), APP_BUNDLE_ID, &h.pinned);
     let verifier = Arc::new(LateVerifier {
-        inner: MacPeerVerifier::new(pin),
+        inner: MacPeerVerifier::with_app_exe(pin, &h.pinned),
         delay: Duration::from_millis(750),
         reinspects: Default::default(),
     });

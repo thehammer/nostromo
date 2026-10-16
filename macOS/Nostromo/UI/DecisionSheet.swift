@@ -220,6 +220,11 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
     /// below. `resolved` (already `true` in the latter case, set by
     /// `closeWithoutAnswering` before it ever calls `endSheet`) is what tells
     /// these two cases apart — only the former must actually answer.
+    ///
+    /// Security: `window.close()` (anything that isn't the close box) skips
+    /// `windowShouldClose`, so this can run with NO gesture check. It must
+    /// therefore only ever resolve as a **dismissal** (`choiceId: nil`), never
+    /// an approval; never pass a choice id here.
     func windowWillClose(_ notification: Notification) {
         resolve(choiceId: nil)
     }
