@@ -105,6 +105,13 @@ impl PaneProbe for FakeProbe {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.subtrees.get(&pid).cloned().unwrap_or_default())
     }
+
+    fn servers(&self, _extra_dirs: &[PathBuf]) -> Result<Vec<TmuxSocket>, ProbeError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut out = vec![TmuxSocket::Default];
+        out.extend(self.all.keys().filter(|s| **s != TmuxSocket::Default).cloned());
+        Ok(out)
+    }
 }
 
 fn timeout() -> ProbeError {
@@ -1139,4 +1146,199 @@ fn guard_binary_latency_bench() {
     let p95 = ms[(ms.len() * 95) / 100];
     eprintln!("nostromo-guard fast path over {} runs: p50 = {p50:.1} ms, p95 = {p95:.1} ms (target p95 < 20 ms)", ms.len());
     println!("guard_latency p50_ms={p50:.1} p95_ms={p95:.1}");
+}
+
+// ── regressions: bypasses found in security review ───────────────────────────────────────
+//
+// Each test names the bypass it pins. Every one of them was allowed before its fix.
+
+#[test]
+fn bypass_tmux_short_verb_prefixes_reach_the_pane_rule() {
+    // tmux runs any unambiguous prefix of a command name: `tmux pi -t %7 cat` is pipe-pane.
+    for verb in ["pi", "pip", "pipe-p", "pa", "pas", "paste", "send-k", "send-p", "send-prefix", "SEND-KEYS"] {
+        let command = format!("tmux {verb} -t %7 x");
+        let remote = FakeProbe::default().pane_on(DEFAULT, "%7", "bash", REMOTE_SHELL);
+        assert_blocked(evaluate(&bash(&command), &remote), RULE_TMUX_INPUT, &command);
+        let local = FakeProbe::default().pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL);
+        assert_allowed(evaluate(&bash(&command), &local), &command);
+    }
+}
+
+#[test]
+fn bypass_tmux_short_buffer_verbs_are_checked_against_the_server() {
+    // `loa` is load-buffer: the buffer is pasted later, so whichever pane gets it can't be told.
+    for verb in ["loa", "lo", "load-b", "set-b", "setb"] {
+        let command = format!("tmux {verb} /tmp/x");
+        let remote = FakeProbe::default().other_pane_on(DEFAULT, "production:ap:portal", REMOTE_SHELL);
+        assert_blocked(evaluate(&bash(&command), &remote), RULE_TMUX_INPUT, &command);
+        let local = FakeProbe::default().other_pane_on(DEFAULT, "zsh", LOCAL_SHELL);
+        assert_allowed(evaluate(&bash(&command), &local), &command);
+    }
+}
+
+#[test]
+fn bypass_tmux_commands_that_run_other_tmux_commands_are_checked() {
+    // if-shell, bind-key, run-shell, source-file, … run tmux commands the guard can't see.
+    for command in [
+        "tmux if-shell true 'pi -t %7 cat'",
+        "tmux if true 'loa /tmp/x'",
+        "tmux bind-key x pi -t %7 cat",
+        "tmux run-shell -C 'pi -t %7 cat'",
+        "tmux source-file /tmp/cmds.tmux",
+        "tmux source /tmp/cmds.tmux",
+        "tmux set-hook -g pane-focus-in 'pi -t %7 cat'",
+        "tmux confirm-before 'pi -t %7 cat'",
+        "tmux command-prompt -I x 'pi -t %7 cat'",
+        "tmux \"$VERB\" -t %7 x",
+    ] {
+        let remote = FakeProbe::default().pane_on(DEFAULT, "%7", "bash", REMOTE_SHELL);
+        assert_blocked(evaluate(&bash(command), &remote), RULE_TMUX_INPUT, command);
+        let local = FakeProbe::default().pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL);
+        assert_allowed(evaluate(&bash(command), &local), command);
+    }
+}
+
+#[test]
+fn tmux_short_names_of_read_only_commands_still_make_no_probe_calls() {
+    for command in ["tmux ls", "tmux lsp -a", "tmux display -p x", "tmux set -g mouse on", "tmux show -g", "tmux kill-server"] {
+        let probe = FakeProbe::default().pane_on(DEFAULT, "%7", "production:ap:portal", REMOTE_SHELL);
+        assert_allowed(evaluate(&bash(command), &probe), command);
+        assert_eq!(probe.calls(), 0, "{command}");
+    }
+}
+
+#[test]
+fn bypass_uppercase_tmux_is_tmux() {
+    // macOS file systems are case-insensitive: `TMUX` runs tmux. Paired with a lowercase call
+    // to a local pane, the uppercase one used to go unseen.
+    for upper in ["TMUX send-keys -t %7 x", "/opt/homebrew/bin/TMUX send-keys -t %7 x", "Tmux send -t %7 x"] {
+        let command = format!("{upper}; tmux send-keys -t %3 y");
+        let remote = FakeProbe::default()
+            .pane_on(DEFAULT, "%3", "zsh", LOCAL_SHELL)
+            .pane_on(DEFAULT, "%7", "bash", REMOTE_SHELL);
+        assert_blocked(evaluate(&bash(&command), &remote), RULE_TMUX_INPUT, &command);
+        let local = FakeProbe::default()
+            .pane_on(DEFAULT, "%3", "zsh", LOCAL_SHELL)
+            .pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL);
+        assert_allowed(evaluate(&bash(&command), &local), &command);
+    }
+}
+
+#[test]
+fn bypass_a_server_the_guard_cannot_name_is_checked_on_every_server() {
+    // %7 is local on the default server; the remote pane is on another server.
+    let world = || {
+        FakeProbe::default()
+            .pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL)
+            .other_pane_on(TmuxSocket::Path("/tmp/other/tmux-501/default".into()), "production:ap:portal", REMOTE_SHELL)
+    };
+    for command in [
+        r#"tmux -L "$S" send-keys -t %7 x"#,
+        r#"tmux -S "$SOCK" send-keys -t %7 x"#,
+        "TMUX_TMPDIR=/tmp/other tmux send-keys -t %7 x",
+        "TMUX=/tmp/other/tmux-501/default,1,0 tmux send-keys -t %7 x",
+        "export TMUX_TMPDIR=/tmp/other; tmux send-keys -t %7 x",
+        "TMUX_TMPDIR=/tmp/other tmux -L work send-keys -t %7 x",
+        r#"python3 -c "import os; os.system('tmux -L work send-keys -t %7 x')""#,
+    ] {
+        assert_blocked(evaluate(&bash(command), &world()), RULE_TMUX_INPUT, command);
+        let all_local = FakeProbe::default().pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL);
+        assert_allowed(evaluate(&bash(command), &all_local), command);
+    }
+}
+
+#[test]
+fn bypass_aws_global_options_between_the_service_and_the_operation() {
+    for command in [
+        "aws ecs --profile p execute-command --cluster c --task t --interactive --command bash",
+        "aws ecs --region us-east-1 --profile=p execute-command --cluster c --task t --interactive --command bash",
+        "aws --profile p ecs --debug execute-command --cluster c --task t --interactive --command bash",
+        "aws ecs --query 'a b' execute-command --cluster c --task t --interactive --command bash",
+        "aws ssm --region us-east-1 start-session --target i-1",
+        "aws ecs --profile p run-task --cluster c --task-definition td",
+        "python3 -c \"import os; os.system('aws ecs --profile p execute-command --cluster c')\"",
+    ] {
+        assert_blocked(evaluate(&bash(command), &FakeProbe::default()), RULE_COMMAND, command);
+    }
+    assert_allowed(
+        evaluate(&bash("aws ecs --profile p describe-services --cluster c --services s"), &FakeProbe::default()),
+        "a read-only call with global options",
+    );
+}
+
+#[test]
+fn bypass_running_the_output_of_ecs_build_command() {
+    // ecs_build_command prints the `aws ecs execute-command …` line; running that output opens the shell.
+    for command in [
+        r#"eval "$(ecs_build_command ap production portal)""#,
+        "eval `ecs_build_command ap production portal`",
+        "source <(ecs_build_command ap production portal)",
+        ". <(ecs_build_command ap production portal)",
+        "bash <(ecs_build_command ap production portal)",
+        r#"bash -c "$(ecs_build_command ap production portal)""#,
+        "$(ecs_build_command ap production portal)",
+        "ecs_build_command ap production portal | bash",
+        "ecs_build_command ap production portal | sh -s",
+        "ecs_build_command ap production portal |& zsh",
+        "ecs_build_command ap production portal |\nbash",
+        "ecs_build_command ap production portal | cat | bash",
+        "(ecs_build_command ap production portal) | bash",
+        "{ ecs_build_command ap production portal; } | source /dev/stdin",
+        "ecs_build_command ap production portal > >(bash)",
+        "source ~/.claude/layers/carefeed/lib/services/ecs/ecs.sh && eval \"$(ecs_build_command ap production portal)\"",
+    ] {
+        assert_blocked(evaluate(&bash(command), &FakeProbe::default()), RULE_COMMAND, command);
+    }
+    for command in [
+        "ecs_build_command ap production portal",
+        "ecs_build_command ap production portal | pbcopy",
+        "ecs_build_command ap production portal || echo failed",
+        "source ~/.claude/layers/carefeed/lib/services/ecs/ecs.sh && ecs_build_command ap production portal",
+    ] {
+        assert_allowed(evaluate(&bash(command), &FakeProbe::default()), command);
+    }
+}
+
+#[test]
+fn bypass_a_guard_that_outlives_the_hook_timeout_blocks_instead() {
+    // The session kills a hook at 30 s and lets the call through; the guard's watchdog exits 2
+    // first. Stdin is left open so the guard waits forever.
+    let sandbox = Sandbox::new();
+    let mut cmd = Command::new(GUARD_BIN);
+    cmd.arg("pre-tool-use").env("NOSTROMO_GUARD_TEST_WATCHDOG_MS", "300");
+    sandbox.arm(&mut cmd);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let started = std::time::Instant::now();
+    let mut child = cmd.spawn().expect("spawn");
+    let _held_open = child.stdin.take();
+    let out = child.wait_with_output().expect("wait");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "the watchdog fired");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(FAIL_CLOSED_MESSAGE) && stderr.contains("timed out"), "{stderr}");
+}
+
+#[test]
+fn bypass_a_tmux_planted_on_path_does_not_answer_for_the_real_one() {
+    let fixed = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux", "/opt/local/bin/tmux"];
+    if !fixed.iter().any(|p| Path::new(p).is_file()) {
+        eprintln!("skipped: no tmux at a fixed install path");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let bin = sandbox.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let marker = sandbox.home.join("planted-tmux-ran");
+    let fake = bin.join("tmux");
+    std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let payload = json!({"tool_name": "Bash", "tool_input": {"command": "tmux send-keys \"$P\" x"}});
+    let run = sandbox.guard_with(&["pre-tool-use"], payload.to_string().as_bytes(), |c| {
+        c.env("PATH", &path);
+    });
+    assert_eq!(run.code, Some(0), "{run:?}");
+    assert!(!marker.exists(), "the guard ran the tmux planted on PATH");
 }

@@ -117,14 +117,20 @@ pub trait PaneProbe {
     fn all_panes(&self, socket: &TmuxSocket) -> Result<Vec<PaneInfo>, ProbeError>;
     /// The argument strings of `pid` and all its descendants.
     fn subtree_args(&self, pid: u32) -> Result<Vec<String>, ProbeError>;
+    /// Every tmux server that might be running: the default one and each
+    /// socket in tmux's socket directory and in `extra_dirs`.
+    fn servers(&self, extra_dirs: &[PathBuf]) -> Result<Vec<TmuxSocket>, ProbeError>;
 }
 
 /// The real probe: runs `tmux` and `ps`, each with a [`PROBE_TIMEOUT`].
 #[derive(Debug, Default)]
 pub struct SystemPaneProbe {
     /// `ps` output, read once per probe (one hook call).
-    processes: OnceLock<Result<Vec<(u32, u32, String)>, ProbeError>>,
+    processes: OnceLock<Result<ProcessTable, ProbeError>>,
 }
+
+/// `(pid, ppid, args)` for every process.
+type ProcessTable = Vec<(u32, u32, String)>;
 
 /// How long one `tmux` or `ps` run may take.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -139,7 +145,7 @@ impl SystemPaneProbe {
     }
 
     fn tmux(socket: &TmuxSocket, args: &[&str]) -> Command {
-        let mut cmd = Command::new("tmux");
+        let mut cmd = Command::new(tmux_program());
         match socket {
             TmuxSocket::Default => {}
             TmuxSocket::Name(n) => {
@@ -173,10 +179,10 @@ impl SystemPaneProbe {
         Err(ProbeError::Failed { command: label, message: stderr.trim().to_owned() })
     }
 
-    fn processes(&self) -> Result<&Vec<(u32, u32, String)>, ProbeError> {
+    fn processes(&self) -> Result<&ProcessTable, ProbeError> {
         self.processes
             .get_or_init(|| {
-                let mut cmd = Command::new("ps");
+                let mut cmd = Command::new("/bin/ps");
                 cmd.args(["-axo", "pid=,ppid=,args="]);
                 let out = run_with_timeout(&mut cmd, "ps")?;
                 if !out.status.success() {
@@ -198,6 +204,22 @@ impl SystemPaneProbe {
             .as_ref()
             .map_err(Clone::clone)
     }
+}
+
+/// tmux at a fixed install location, so a `tmux` an agent puts earlier on
+/// `PATH` can't answer for it. Falls back to `PATH` only when none exists.
+fn tmux_program() -> &'static str {
+    ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux", "/opt/local/bin/tmux", "/run/current-system/sw/bin/tmux"]
+        .into_iter()
+        .find(|p| Path::new(p).is_file())
+        .unwrap_or("tmux")
+}
+
+/// tmux's socket directory: `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`.
+fn tmux_socket_dir() -> PathBuf {
+    let base = std::env::var_os("TMUX_TMPDIR").filter(|d| !d.is_empty()).unwrap_or_else(|| "/tmp".into());
+    // SAFETY: getuid(2) has no preconditions and cannot fail.
+    PathBuf::from(base).join(format!("tmux-{}", unsafe { libc::getuid() }))
 }
 
 fn parse_pane_line(line: &str) -> Option<PaneInfo> {
@@ -235,6 +257,24 @@ impl PaneProbe for SystemPaneProbe {
             }
         }
         Ok(found)
+    }
+
+    fn servers(&self, extra_dirs: &[PathBuf]) -> Result<Vec<TmuxSocket>, ProbeError> {
+        use std::os::unix::fs::FileTypeExt;
+        let mut out = vec![TmuxSocket::Default];
+        for dir in std::iter::once(tmux_socket_dir()).chain(extra_dirs.iter().cloned()) {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(ProbeError::Failed { command: format!("listing {}", dir.display()), message: e.to_string() }),
+            };
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_socket()) {
+                    out.push(TmuxSocket::Path(entry.path().to_string_lossy().into_owned()));
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -275,9 +315,12 @@ fn tool_name_re() -> &'static Regex {
 fn command_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        let run_task = if BLOCK_RUN_TASK { r"|\becs_run_task\b|\becs\s+run-task\b" } else { "" };
+        // Global options may sit between the service and the operation
+        // (`aws ecs --profile p execute-command`).
+        let opts = r"\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*";
+        let run_task = if BLOCK_RUN_TASK { format!(r"|\becs_run_task\b|\becs{opts}run-task\b") } else { String::new() };
         Regex::new(&format!(
-            r"(?i)\becs_connect\b|\becs_shell\b|\becs_open_tmux_pane\b|\becs\s+execute-command\b|\bssm\s+start-session\b|\bsession-manager-plugin\b{run_task}"
+            r"(?i)\becs_connect\b|\becs_shell\b|\becs_open_tmux_pane\b|\becs{opts}execute-command\b|\bssm{opts}start-session\b|\bsession-manager-plugin\b{run_task}"
         ))
         .unwrap()
     })
@@ -297,22 +340,100 @@ fn remote_process_re() -> &'static Regex {
     })
 }
 
-/// `tmux` as a word in the normalized text (counts possible invocations).
+/// `tmux` as a word in the normalized text (counts possible invocations). Any
+/// case: macOS file systems are case-insensitive, so `TMUX` runs tmux too.
 fn tmux_word_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\btmux\b").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?i)\btmux\b").unwrap())
 }
 
-/// tmux verbs that put input into a pane (or into a buffer to paste). Also
-/// matches tmux's accepted prefixes (`send-k`, `paste`, `pipe`, `load`).
-fn is_tmux_input_verb(name: &str) -> bool {
-    ["send", "paste", "pipe", "load", "set-b"].iter().any(|v| name.starts_with(v)) || name == "setb"
+/// An assignment that points tmux at another server (`TMUX=…`, `TMUX_TMPDIR=…`).
+fn tmux_env_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\b(TMUX|TMUX_TMPDIR)=(\S*)").unwrap())
 }
 
-/// The gate for the tmux rule: `tmux` plus an input verb anywhere in the text.
-/// It must accept everything [`is_tmux_input_verb`] does (a cheap superset).
+/// What a tmux command can do to a pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TmuxKind {
+    /// Puts no input into a pane.
+    Safe,
+    /// Puts input into the pane named by `-t` (the current pane without one).
+    Pane,
+    /// Puts input somewhere the guard can't tell: a buffer pasted later, or
+    /// tmux commands it runs (`if-shell`, `bind-key`, `source-file`, …).
+    Indirect,
+}
+
+/// Every tmux command: (name, alias, kind). tmux runs an exact name or alias,
+/// else the command that a prefix names.
+const TMUX_COMMANDS: &[(&str, &str, TmuxKind)] = {
+    use TmuxKind::{Indirect as I, Pane as P, Safe as S};
+    &[
+        ("attach-session", "attach", S), ("bind-key", "bind", I), ("break-pane", "breakp", S),
+        ("capture-pane", "capturep", S), ("choose-buffer", "", I), ("choose-client", "", I),
+        ("choose-tree", "", I), ("clear-history", "clearhist", S), ("clear-prompt-history", "clearphist", S),
+        ("clock-mode", "", S), ("command-prompt", "", I), ("confirm-before", "confirm", I),
+        ("copy-mode", "", S), ("customize-mode", "", S), ("delete-buffer", "deleteb", S),
+        ("detach-client", "detach", S), ("display-menu", "menu", I), ("display-message", "display", S),
+        ("display-panes", "displayp", I), ("display-popup", "popup", I), ("find-window", "findw", S),
+        ("has-session", "has", S), ("if-shell", "if", I), ("join-pane", "joinp", S),
+        ("kill-pane", "killp", S), ("kill-server", "", S), ("kill-session", "", S),
+        ("kill-window", "killw", S), ("last-pane", "lastp", S), ("last-window", "last", S),
+        ("link-window", "linkw", S), ("list-buffers", "lsb", S), ("list-clients", "lsc", S),
+        ("list-commands", "lscm", S), ("list-keys", "lsk", S), ("list-panes", "lsp", S),
+        ("list-sessions", "ls", S), ("list-windows", "lsw", S), ("load-buffer", "loadb", I),
+        ("lock-client", "lockc", S), ("lock-server", "lock", S), ("lock-session", "locks", S),
+        ("move-pane", "movep", S), ("move-window", "movew", S), ("new-session", "new", S),
+        ("new-window", "neww", S), ("next-layout", "nextl", S), ("next-window", "next", S),
+        ("paste-buffer", "pasteb", P), ("pipe-pane", "pipep", P), ("previous-layout", "prevl", S),
+        ("previous-window", "prev", S), ("refresh-client", "refresh", S), ("rename-session", "rename", S),
+        ("rename-window", "renamew", S), ("resize-pane", "resizep", S), ("resize-window", "resizew", S),
+        ("respawn-pane", "respawnp", S), ("respawn-window", "respawnw", S), ("rotate-window", "rotatew", S),
+        ("run-shell", "run", I), ("save-buffer", "saveb", S), ("select-layout", "selectl", S),
+        ("select-pane", "selectp", S), ("select-window", "selectw", S), ("send-keys", "send", P),
+        ("send-prefix", "", P), ("server-access", "", S), ("set-buffer", "setb", I),
+        ("set-environment", "setenv", S), ("set-hook", "", I), ("set-option", "set", S),
+        ("set-window-option", "setw", S), ("show-buffer", "showb", S), ("show-environment", "showenv", S),
+        ("show-hooks", "", S), ("show-messages", "showmsgs", S), ("show-options", "show", S),
+        ("show-prompt-history", "showphist", S), ("show-window-options", "showw", S),
+        ("source-file", "source", I), ("split-window", "splitw", S), ("start-server", "start", S),
+        ("suspend-client", "suspendc", S), ("swap-pane", "swapp", S), ("swap-window", "swapw", S),
+        ("switch-client", "switchc", S), ("unbind-key", "unbind", S), ("unlink-window", "unlinkw", S),
+        ("wait-for", "wait", S),
+    ]
+};
+
+/// What tmux command `name` is. An exact name or alias is that command; any
+/// other prefix is the most dangerous command it could name (tmux would run
+/// an unambiguous one and reject the rest, so erring high only over-blocks).
+fn tmux_kind(name: &str) -> TmuxKind {
+    let name = name.to_ascii_lowercase();
+    if name.is_empty() || name.starts_with('-') {
+        return TmuxKind::Safe;
+    }
+    if let Some(&(_, _, kind)) = TMUX_COMMANDS.iter().find(|(n, a, _)| *n == name || *a == name) {
+        return kind;
+    }
+    let named = || TMUX_COMMANDS.iter().filter(|(n, _, _)| n.starts_with(name.as_str())).map(|(_, _, k)| *k);
+    if named().any(|k| k == TmuxKind::Indirect) {
+        TmuxKind::Indirect
+    } else if named().any(|k| k == TmuxKind::Pane) {
+        TmuxKind::Pane
+    } else {
+        TmuxKind::Safe
+    }
+}
+
+/// Some word after a `tmux` in `text` could be a tmux input command. Used
+/// when tmux appears where the tokenizer can't follow it (an interpreter's
+/// string, an unparsed command).
 fn mentions_tmux_input(text: &str) -> bool {
-    text.contains("tmux") && ["send", "paste", "pipe", "load", "setb", "set-b"].iter().any(|v| text.contains(v))
+    tmux_word_re().find_iter(text).any(|m| {
+        text[m.end()..]
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .any(|w| tmux_kind(w) != TmuxKind::Safe)
+    })
 }
 
 /// Decide whether this tool call may run.
@@ -321,13 +442,14 @@ fn mentions_tmux_input(text: &str) -> bool {
 /// 2. Every `command` / `cmd` / `script` string, with quotes and backslashes
 ///    deleted (so `bash -c`, `eval`, here-doc bodies and `e"c"s_connect` are
 ///    all one searchable text), and word by word as the shell would see it
-///    ([`RULE_COMMAND`]).
-/// 3. tmux input verbs: the target pane is probed; a target that can't be
-///    told blocks if any pane on that server is remote ([`RULE_TMUX_INPUT`]).
+///    ([`RULE_COMMAND`]). Running the output of `ecs_build_command` counts.
+/// 3. tmux input commands: the target pane is probed; a target that can't be
+///    told blocks if any pane on that server (every server, when the server
+///    can't be told either) is remote ([`RULE_TMUX_INPUT`]).
 ///
-/// Fast path: only rule 3 does I/O, and only for text that mentions `tmux`
-/// and an input verb; anything else is decided in memory. `Err` only when a
-/// probe fails where the answer matters.
+/// Fast path: only rule 3 does I/O, and only for text that mentions `tmux`;
+/// anything else is decided in memory. `Err` only when a probe fails where
+/// the answer matters.
 pub fn evaluate(payload: &HookPayload, probe: &dyn PaneProbe) -> Result<GuardVerdict, GuardError> {
     if tool_name_re().is_match(&payload.tool_name) {
         return Ok(block(RULE_TOOL_NAME, format!("tool {}", payload.tool_name)));
@@ -343,8 +465,14 @@ pub fn evaluate(payload: &HookPayload, probe: &dyn PaneProbe) -> Result<GuardVer
         if let Some(m) = command_re().find(&words) {
             return Ok(block(RULE_COMMAND, format!("command matches `{}`", m.as_str())));
         }
-        let text = format!("{normalized}\n{words}").to_lowercase();
-        if !mentions_tmux_input(&text) {
+        if let Some(op) = parsed.commands.iter().find_map(|c| aws_remote_shell(&c.texts())) {
+            return Ok(block(RULE_COMMAND, format!("command runs `{op}`")));
+        }
+        let lower = format!("{normalized}\n{words}").to_lowercase();
+        if runs_built_command(&lower) {
+            return Ok(block(RULE_COMMAND, "command runs the output of `ecs_build_command`".to_owned()));
+        }
+        if !lower.contains("tmux") {
             continue;
         }
         if let Some(verdict) = tmux_rule(&normalized, &parsed, probe)? {
@@ -364,52 +492,117 @@ fn command_strings(input: &Value) -> Vec<&str> {
     ["command", "cmd", "script"].iter().filter_map(|k| obj.get(*k).and_then(Value::as_str)).collect()
 }
 
+/// `aws … ecs … execute-command` (and `ssm … start-session`, `ecs … run-task`)
+/// in one command's words, whatever global options sit between them.
+fn aws_remote_shell(words: &[&str]) -> Option<String> {
+    let lower: Vec<String> = words.iter().map(|w| w.to_ascii_lowercase()).collect();
+    let mut ops = vec![("ecs", "execute-command"), ("ssm", "start-session")];
+    if BLOCK_RUN_TASK {
+        ops.push(("ecs", "run-task"));
+    }
+    ops.into_iter().find_map(|(service, op)| {
+        let at = lower.iter().position(|w| w == service)?;
+        lower[at + 1..].iter().any(|w| w == op).then(|| format!("{service} {op}"))
+    })
+}
+
+/// Commands that only show their input; piping the built command into one is fine.
+const VIEWERS: &[&str] = &["pbcopy", "cat", "less", "more", "head", "tail", "grep", "wc"];
+
+/// `lower` runs what `ecs_build_command` prints (the full `aws ecs
+/// execute-command …` line): inside `$( )`, backticks or a process
+/// substitution (so `eval`, `source <( )` and `bash -c "$( )"`), or piped
+/// into anything but a viewer.
+fn runs_built_command(lower: &str) -> bool {
+    lower.match_indices("ecs_build_command").any(|(at, name)| {
+        let before = &lower[..at];
+        if ["$(", "`", "<(", ">("].iter().any(|s| before.contains(s)) {
+            return true;
+        }
+        // `||` passes no output; `|&` is a pipe.
+        let after = lower[at + name.len()..].replace("||", ";").replace("|&", "|");
+        // Every later pipe stage must be a viewer (a pipe into nothing visible,
+        // as at a line end, counts as running it).
+        after.contains(">(")
+            || after.split('|').skip(1).any(|stage| {
+                stage.split_whitespace().next().is_none_or(|first| !VIEWERS.contains(&shell::basename(first)))
+            })
+    })
+}
+
+/// Where to look for remote panes when the target can't be told.
+type Scope = Option<TmuxSocket>;
+
 /// One `tmux` invocation's input commands.
 struct TmuxCall {
-    /// `None`: the `-L`/`-S` value is an unexpanded variable.
-    socket: Option<TmuxSocket>,
-    /// `Some(target)` per input verb with a literal `-t`; `None` when it can't be told.
+    /// `None`: the server can't be told (`-L "$S"`, a `TMUX=` assignment, …).
+    socket: Scope,
+    /// `Some(target)` per input command with a literal `-t`; `None` when it can't be told.
     targets: Vec<Option<String>>,
 }
 
 /// Rule 3: tmux input aimed at a remote pane. `None` when nothing is remote.
 fn tmux_rule(normalized: &str, parsed: &ShellParse, probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
-    let calls: Vec<TmuxCall> = parsed.commands.iter().filter_map(tmux_call).collect();
-    // Every `tmux` in the text must be one we understood; otherwise (an
-    // interpreter's string, a script file being written, a parse failure)
-    // the target can't be told.
-    let mut cant_tell: Vec<TmuxSocket> = Vec::new();
-    if parsed.unparsed || tmux_word_re().find_iter(normalized).count() > calls.len() || calls.iter().all(|c| c.targets.is_empty()) {
-        cant_tell.push(TmuxSocket::Default);
-        cant_tell.extend(calls.iter().filter_map(|c| c.socket.clone()));
+    let env_moved = tmux_env_re().is_match(normalized);
+    let calls: Vec<TmuxCall> = parsed.commands.iter().filter_map(|c| tmux_call(c, env_moved)).collect();
+    // Scopes to check whole; `None` is every server.
+    let mut cant_tell: Vec<Scope> = Vec::new();
+    // A `tmux` the tokenizer didn't see as a command (an interpreter's string,
+    // a script being written, a parse failure) may be aimed anywhere.
+    let opaque = parsed.unparsed || tmux_word_re().find_iter(normalized).count() > calls.len();
+    if opaque && mentions_tmux_input(&normalized.to_lowercase()) {
+        cant_tell.push(None);
     }
     for call in &calls {
-        let socket = call.socket.clone().unwrap_or(TmuxSocket::Default);
         for target in &call.targets {
-            // Without a literal target and a known socket there is nothing to probe.
-            let (Some(target), Some(_)) = (target, &call.socket) else {
-                cant_tell.push(socket.clone());
+            // Without a literal target and a known server there is nothing to probe.
+            let (Some(target), Some(socket)) = (target, &call.socket) else {
+                cant_tell.push(call.socket.clone());
                 continue;
             };
-            match probe.pane(&socket, target) {
+            match probe.pane(socket, target) {
                 Ok(Some(pane)) => match is_remote(&pane, probe) {
                     Ok(true) => {
                         return Ok(Some(block(RULE_TMUX_INPUT, format!("tmux input to remote pane {target} ({})", pane.title))))
                     }
                     Ok(false) => {}
-                    Err(_) => cant_tell.push(socket.clone()),
+                    Err(_) => cant_tell.push(Some(socket.clone())),
                 },
-                Ok(None) | Err(_) => cant_tell.push(socket.clone()),
+                Ok(None) | Err(_) => cant_tell.push(Some(socket.clone())),
             }
         }
     }
-    any_remote_pane(&cant_tell, probe)
+    any_remote_pane(&cant_tell, &socket_dirs(normalized), probe)
 }
 
-/// Block if any pane on any of `sockets` is remote (the target can't be told).
-fn any_remote_pane(sockets: &[TmuxSocket], probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
+/// The tmux socket directories named by literal `TMUX_TMPDIR=` / `TMUX=`
+/// assignments in the text, beyond the ones the probe already knows.
+fn socket_dirs(normalized: &str) -> Vec<PathBuf> {
+    // SAFETY: getuid(2) has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    tmux_env_re()
+        .captures_iter(normalized)
+        .filter_map(|c| {
+            let value = c.get(2)?.as_str();
+            if value.is_empty() || value.contains('$') {
+                return None;
+            }
+            match &c[1] {
+                "TMUX_TMPDIR" => Some(Path::new(value).join(format!("tmux-{uid}"))),
+                _ => Path::new(value.split(',').next()?).parent().map(Path::to_path_buf),
+            }
+        })
+        .collect()
+}
+
+/// Block if any pane in any of `scopes` is remote (the target can't be told).
+fn any_remote_pane(scopes: &[Scope], extra_dirs: &[PathBuf], probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
+    let mut sockets: Vec<TmuxSocket> = scopes.iter().flatten().cloned().collect();
+    if scopes.iter().any(Option::is_none) {
+        sockets.extend(probe.servers(extra_dirs)?);
+    }
     let mut checked: Vec<&TmuxSocket> = Vec::new();
-    for socket in sockets {
+    for socket in &sockets {
         if checked.contains(&socket) {
             continue;
         }
@@ -433,11 +626,13 @@ fn is_remote(pane: &PaneInfo, probe: &dyn PaneProbe) -> Result<bool, ProbeError>
     Ok(probe.subtree_args(pane.pid)?.iter().any(|a| remote_process_re().is_match(a)))
 }
 
-/// The tmux invocation in `cmd`, if any word of it is `tmux`.
-fn tmux_call(cmd: &SimpleCommand) -> Option<TmuxCall> {
-    let at = cmd.words.iter().position(|w| shell::basename(&w.text) == "tmux")?;
+/// The tmux invocation in `cmd`, if any word of it is `tmux` (any case).
+/// `env_moved`: the text reassigns `TMUX` / `TMUX_TMPDIR`, so the default
+/// and `-L` servers can't be told.
+fn tmux_call(cmd: &SimpleCommand, env_moved: bool) -> Option<TmuxCall> {
+    let at = cmd.words.iter().position(|w| shell::basename(&w.text).eq_ignore_ascii_case("tmux"))?;
     let words = &cmd.words[at + 1..];
-    let mut socket = Some(TmuxSocket::Default);
+    let mut socket = (!env_moved).then_some(TmuxSocket::Default);
     let mut i = 0;
     // Global options: `-L name`, `-S path`, `-f file`, `-c cmd`, `-T features`, flags.
     while i < words.len() && words[i].text.starts_with('-') && words[i].text.len() > 1 {
@@ -449,6 +644,7 @@ fn tmux_call(cmd: &SimpleCommand) -> Option<TmuxCall> {
         if let Some((flag, value, dynamic)) = option_value(w, "LSfcT", words, &mut i) {
             match flag {
                 'L' | 'S' if dynamic => socket = None,
+                'L' if env_moved => socket = None,
                 'L' => socket = Some(TmuxSocket::Name(value)),
                 'S' => socket = Some(TmuxSocket::Path(value)),
                 _ => {}
@@ -458,10 +654,10 @@ fn tmux_call(cmd: &SimpleCommand) -> Option<TmuxCall> {
     let mut targets = Vec::new();
     for sub in split_tmux_commands(&words[i..]) {
         let Some((name, args)) = sub.split_first() else { continue };
-        if !is_tmux_input_verb(&name.text) {
+        let kind = if name.dynamic { TmuxKind::Indirect } else { tmux_kind(&name.text) };
+        if kind == TmuxKind::Safe {
             continue;
         }
-        let buffer_only = name.text.starts_with("load") || name.text.starts_with("set");
         let mut target: Option<Option<String>> = None;
         let mut j = 0;
         while j < args.len() && args[j].text.starts_with('-') && args[j].text.len() > 1 {
@@ -474,8 +670,7 @@ fn tmux_call(cmd: &SimpleCommand) -> Option<TmuxCall> {
                 target = Some((!dynamic && !value.is_empty()).then_some(value));
             }
         }
-        // A buffer verb has no pane target: whatever pastes it later can't be told.
-        targets.push(if buffer_only { None } else { target.flatten() });
+        targets.push(if kind == TmuxKind::Indirect { None } else { target.flatten() });
     }
     Some(TmuxCall { socket, targets })
 }

@@ -21,7 +21,7 @@ fn the_approvals_dir_is_the_env_override_and_a_test_binary_can_never_reach_the_r
     // Without it, a debug test binary must refuse to resolve `~/.nostromo/approvals`, and say why.
     std::env::remove_var(APPROVALS_DIR_ENV);
     if cfg!(debug_assertions) {
-        let outcome = catch_unwind(AssertUnwindSafe(|| ApprovalsPaths::resolve()));
+        let outcome = catch_unwind(AssertUnwindSafe(ApprovalsPaths::resolve));
         let payload = outcome.expect_err("resolving the real home from a test binary must panic");
         let message = payload
             .downcast_ref::<String>()

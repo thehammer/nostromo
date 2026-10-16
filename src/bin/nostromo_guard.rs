@@ -13,10 +13,13 @@
 //! probe failure the decision depends on, an audit write failure), a panic,
 //! or an unknown subcommand exits 2 with `FAIL_CLOSED_MESSAGE` on stderr,
 //! which the CLI treats as a block. The session's hook wrapper turns a
-//! missing binary into the same exit 2.
+//! missing binary into the same exit 2. A guard still running after
+//! [`WATCHDOG`] exits 2 too: the session kills a hook at 30 s and lets the
+//! call through, so the guard must never get that far.
 
 use std::io::Read;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use nostromo::approvals::audit::{AuditLog, Entry, Event};
@@ -29,11 +32,15 @@ const MAX_STDIN: u64 = 4 * 1024 * 1024;
 /// Exit status that makes the CLI block the call and show stderr.
 const BLOCKING_ERROR: u8 = 2;
 
+/// The guard's own deadline, well under the session's 30 s hook timeout.
+const WATCHDOG: Duration = Duration::from_secs(20);
+
 fn main() -> ExitCode {
     std::panic::set_hook(Box::new(|info| {
         eprintln!("{FAIL_CLOSED_MESSAGE} (guard panicked: {info})");
         std::process::exit(i32::from(BLOCKING_ERROR));
     }));
+    start_watchdog();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -41,6 +48,25 @@ fn main() -> ExitCode {
             ExitCode::from(BLOCKING_ERROR)
         }
     }
+}
+
+/// Block (exit 2) if the guard hasn't finished within [`WATCHDOG`].
+fn start_watchdog() {
+    let after = watchdog_delay();
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        eprintln!("{FAIL_CLOSED_MESSAGE} (guard timed out after {after:?})");
+        std::process::exit(i32::from(BLOCKING_ERROR));
+    });
+}
+
+/// [`WATCHDOG`]; debug builds let a test shorten it.
+fn watchdog_delay() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("NOSTROMO_GUARD_TEST_WATCHDOG_MS").ok().and_then(|v| v.parse().ok()) {
+        return Duration::from_millis(ms);
+    }
+    WATCHDOG
 }
 
 fn run() -> Result<()> {
