@@ -349,8 +349,10 @@ fn command_re() -> &'static Regex {
         let run_task_word = if BLOCK_RUN_TASK { "|ecs_run_task" } else { "" };
         let run_task = if BLOCK_RUN_TASK { format!(r"|\becs{opts}run-task\b") } else { String::new() };
         // A name right after a `$` is a variable (`echo $ECS_CONNECT`), not a command.
+        // Nothing else is required before it: `git grep -Oecs_connect` and
+        // `-nO"ecs_connect"` glue the marker to a flag.
         Regex::new(&format!(
-            r"(?i)(?:^|[^\w$])(?:ecs_connect|ecs_shell|ecs_open_tmux_pane{run_task_word})\b|\becs{opts}execute-command\b|\bssm{opts}start-session\b|\bsession-manager-plugin\b{run_task}"
+            r"(?i)(?:^|[^$])(?:ecs_connect|ecs_shell|ecs_open_tmux_pane{run_task_word})\b|\becs{opts}execute-command\b|\bssm{opts}start-session\b|\bsession-manager-plugin\b{run_task}"
         ))
         .unwrap()
     })
@@ -623,8 +625,12 @@ pub fn evaluate(payload: &HookPayload, probe: &dyn PaneProbe) -> Result<GuardVer
 
 /// Rules 2 to 4 for one command string.
 fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
-    let parsed = shell::parse(raw);
-    let normalized = unquote(raw);
+    // The shell deletes a backslash-newline before it reads anything (in double
+    // quotes, here-docs and unquoted text), so `$\<newline>(cmd)` is `$(cmd)`:
+    // every scan reads the text with them gone.
+    let joined = join_continuations(raw);
+    let parsed = shell::parse(&joined);
+    let normalized = unquote(&joined);
     // Each command's words after quote removal (resolves `$'\x65…'`).
     let words = parsed.commands.iter().map(|c| c.texts().join(" ")).collect::<Vec<_>>().join("\n");
     let Ok(texts) = scan_texts(&[&normalized, &words]) else {
@@ -697,6 +703,31 @@ fn built_from_expansions(word: &Word) -> bool {
 
 fn block(rule_id: &'static str, detail: String) -> GuardVerdict {
     GuardVerdict::Block { rule_id, detail }
+}
+
+/// `text` with each line continuation (a backslash that is not itself escaped,
+/// then a newline) deleted, as the shell does.
+fn join_continuations(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('\n') => {
+                chars.next();
+            }
+            // An escaped backslash: the next one can't start a continuation.
+            Some('\\') => {
+                out.push_str("\\\\");
+                chars.next();
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// `text` with quotes and backslashes deleted.

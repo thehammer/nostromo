@@ -12,7 +12,10 @@
 //! Keys that move or rearrange text in ways that depend on the shell and its
 //! key bindings (word motion `M-b` / `C-Left`, yank `C-y`, transpose `C-t`,
 //! undo `C-_`, history recall `Up`, `Escape` sequences, …) are **not**
-//! applied: they are [`Key::Inexact`]. A call that mixes typed text with one
+//! applied: they are [`Key::Inexact`]. A control byte in typed text is the key a
+//! terminal sends for it ([`key_for_char`]): `connect\x01ecs_` types `ecs_connect`.
+//! Text typed after a kill (`C-u`, `C-k`, `C-w`) is inexact too: a yank can restore
+//! what was killed. A call that mixes typed text with one
 //! is "can't tell" ([`Typed::inexact`]); the guard blocks it when a remote
 //! pane is open, or when the text typed could still spell a marker
 //! ([`could_spell_marker`]). Nothing here runs anything.
@@ -110,14 +113,14 @@ pub fn send_keys(args: &[Word]) -> Vec<Key> {
     for arg in &parsed.keys {
         if parsed.hex {
             if let Some(c) = u32::from_str_radix(arg.trim_start_matches("0x"), 16).ok().and_then(char::from_u32) {
-                once.push(Key::Char(c));
+                once.push(key_for_char(c));
             }
         } else if parsed.literal {
-            once.extend(arg.chars().map(Key::Char));
+            once.extend(arg.chars().map(key_for_char));
         } else if let Some(key) = key_named(arg) {
             once.push(key);
         } else {
-            once.extend(arg.chars().map(Key::Char));
+            once.extend(arg.chars().map(key_for_char));
         }
     }
     let mut out = Vec::with_capacity(once.len() * parsed.repeat);
@@ -188,7 +191,32 @@ fn modified_key(lower: &str) -> Option<Key> {
 
 /// The keys that type `text` (a pasted buffer): each newline is Enter.
 pub fn keys_of_text(text: &str) -> Vec<Key> {
-    text.chars().map(|c| if c == '\n' { Key::Enter } else { Key::Char(c) }).collect()
+    text.chars().map(key_for_char).collect()
+}
+
+/// The key a character of typed text is. A control character is the key a
+/// terminal sends for it, whatever way it got into the text (`send-keys -l
+/// $'a\x01b'`, `-H 01`, a pasted buffer): `\x01` is `C-a`, so `connect\x01ecs_`
+/// types `ecs_connect`. The same keys as [`key_named`] map to the same [`Key`];
+/// every other control character (`ESC`, `C-t`, `C-y`, …) is [`Key::Inexact`].
+pub fn key_for_char(c: char) -> Key {
+    match c {
+        '\r' | '\n' => Key::Enter,
+        '\t' => Key::Tab,
+        '\x08' | '\x7f' => Key::Backspace,
+        '\x01' => Key::Home,
+        '\x02' => Key::Left,
+        '\x04' => Key::Delete,
+        '\x05' => Key::End,
+        '\x06' => Key::Right,
+        '\x0b' => Key::KillToEnd,
+        '\x15' => Key::KillToStart,
+        '\x17' => Key::KillWord,
+        // `C-@`, `C-c`, `C-g`, `C-l`, `C-z`, `C-\`: the line is left alone.
+        '\x00' | '\x03' | '\x07' | '\x0c' | '\x1a' | '\x1c' => Key::Inert,
+        c if (c as u32) < 0x20 => Key::Inexact,
+        c => Key::Char(c),
+    }
 }
 
 /// What a run of keys leaves in the shell's input, in the ways it can be read.
@@ -236,9 +264,14 @@ pub fn type_keys(keys: &[Key]) -> Typed {
     let mut lines: Vec<String> = Vec::new();
     let mut line: Vec<char> = Vec::new();
     let mut cursor = 0usize;
+    // Text was killed (`C-u`, `C-k`, `C-w`): it sits in the shell's kill ring,
+    // and a yank (typed in this call or an earlier one) puts it back.
+    let mut killed = false;
     for key in keys {
         match *key {
             Key::Char(c) => {
+                // Text typed after a kill may be rejoined with the killed text.
+                typed.inexact |= killed;
                 line.insert(cursor, c);
                 cursor += 1;
                 typed.spaced.push(c);
@@ -285,11 +318,13 @@ pub fn type_keys(keys: &[Key]) -> Typed {
                 typed.spaced.push(' ');
             }
             Key::KillToStart => {
+                killed |= line[..cursor].iter().any(|c| !c.is_whitespace());
                 line.drain(..cursor);
                 cursor = 0;
                 typed.spaced.push(' ');
             }
             Key::KillToEnd => {
+                killed |= line[cursor..].iter().any(|c| !c.is_whitespace());
                 line.truncate(cursor);
                 typed.spaced.push(' ');
             }
@@ -301,6 +336,7 @@ pub fn type_keys(keys: &[Key]) -> Typed {
                 while start > 0 && !line[start - 1].is_whitespace() {
                     start -= 1;
                 }
+                killed |= line[start..cursor].iter().any(|c| !c.is_whitespace());
                 line.drain(start..cursor);
                 cursor = start;
                 typed.spaced.push(' ');

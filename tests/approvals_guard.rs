@@ -2509,8 +2509,6 @@ const INERT_MENTIONS: &[&str] = &[
     r#"echo "ecs_connect" | tee notes.txt"#,
     "wc -l docs/ecs_connect.md",
     "head -n 5 ecs_shell.md",
-    "sed -n '1,20p' ecs_connect.md",
-    "awk '/ecs_connect/ { print $1 }' notes.md",
     r#"gh pr create --title t --body "mentions ecs_connect""#,
     r#"gh pr comment 5 --body "the guard blocks aws ecs execute-command""#,
     // here-documents written into a file
@@ -2957,4 +2955,346 @@ fn bypass_inert_git_options_that_run_a_program_are_not_exempt_even_abbreviated()
         "options end at --",
         FakeProbe::default,
     );
+}
+
+// ── round 3 ──────────────────────────────────────────────────────────────────────────────
+//
+// N1: raw control bytes in literal send-keys text are line-editor keys.
+// N2: a backslash-newline between `$` and `(` hides a command substitution.
+// N3: the inert-program flag deny-list is replaced by an allow-list, and anything dynamic in a
+//     marker-mentioning command (a `$`, a backtick, a brace or glob in a flag word) is not inert.
+
+/// Literal text that carries a control byte which the shell's line editor applies, so the line
+/// that results spells a marker. (`$'…'` is decoded by the tokenizer; the guard sees `\x01`.)
+const CONTROL_BYTES_SPELL_A_MARKER: &[&str] = &[
+    r#"tmux send-keys -t %0 -l $'connect\x01ecs_\r'"#,
+    "tmux send-keys -t %0 -H 63 6f 6e 6e 65 63 74 01 65 63 73 5f",
+    r#"tmux send-keys -t %0 -l $'ecs_\x0bconnect'"#,
+    r#"tmux send-keys -t %0 -l $'connect\x1bbecs_'"#,
+    r#"tmux send-keys -t %0 -l $'connect\x15ecs_'"#,
+    r#"tmux send-keys -t %0 -l $'connect\x15ecs_\x19'"#,
+    r#"tmux send-keys -t %0 $'connect\x01ecs_'"#,
+    "tmux send-keys -t %0 -H 63 6f 6e 6e 65 63 74 1b 62 65 63 73 5f",
+    r#"tmux set-buffer $'connect\x01ecs_'; tmux paste-buffer -t %0"#,
+];
+
+/// Ordinary literal text and hex keys: no control byte that edits the line.
+const PLAIN_LITERAL_KEYS: &[&str] = &[
+    "tmux send-keys -t %2 -l 'ls -la'",
+    "tmux send-keys -t %2 C-c",
+    "tmux send-keys -t %2 -H 6c 73 0d",
+    r#"tmux send-keys -t %2 -l $'ls -la\r'"#,
+];
+
+#[test]
+fn bypass_raw_control_bytes_in_literal_send_keys_text_assemble_a_marker_in_a_local_pane() {
+    assert_all_blocked(CONTROL_BYTES_SPELL_A_MARKER, RULE_COMMAND, "no tmux server", FakeProbe::default);
+    assert_all_blocked(CONTROL_BYTES_SPELL_A_MARKER, RULE_COMMAND, "only local panes", pane_two_world);
+}
+
+#[test]
+fn bypass_raw_control_bytes_in_literal_send_keys_text_assemble_a_marker_while_a_remote_pane_is_open() {
+    assert_all_blocked_by_any_rule(
+        CONTROL_BYTES_SPELL_A_MARKER,
+        "a remote pane is open elsewhere",
+        pane_two_with_remote_elsewhere_world,
+    );
+}
+
+#[test]
+fn plain_literal_send_keys_text_and_hex_keys_stay_allowed_with_and_without_a_remote_pane_elsewhere() {
+    assert_all_allowed(PLAIN_LITERAL_KEYS, "no tmux server", FakeProbe::default);
+    assert_all_allowed(PLAIN_LITERAL_KEYS, "only local panes", pane_two_world);
+    assert_all_allowed(PLAIN_LITERAL_KEYS, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+/// A backslash-newline is deleted by the shell before it reads `$(`.
+const LINE_CONTINUATION_HIDES_A_SUBSTITUTION: &[&str] = &[
+    "echo \"$\\\n(ecs_connect)\"",
+    "git commit -m \"x $\\\n(ecs_connect)\"",
+    "cat <<EOF\n$\\\n(ecs_connect)\nEOF",
+    // Bash reads a quoted here-doc body literally, but the guard still must not exempt a body that
+    // holds a marker and a backslash-newline.
+    "cat <<'EOF'\n$\\\n(ecs_connect)\nEOF",
+    // A continuation inside the marker word.
+    "echo ecs_\\\nconnect",
+    // A one-line unquoted here-doc that runs a substitution (no continuation).
+    "cat > notes.md <<EOF\nrun $(ecs_connect ap)\nEOF",
+];
+
+#[test]
+fn bypass_a_line_continuation_between_dollar_and_paren_hides_a_command_substitution() {
+    assert_in_every_world(
+        LINE_CONTINUATION_HIDES_A_SUBSTITUTION,
+        "a backslash-newline that hides a substitution or splits a marker",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn benign_quoted_heredoc_with_a_literal_substitution_and_no_continuation_is_allowed() {
+    assert_in_every_world(
+        &["cat > notes.md <<'EOF'\nuse $(ecs_connect) here\nEOF"],
+        "a quoted here-doc is literal text",
+        None,
+    );
+}
+
+/// Options that run a program, written so that a deny-list of option names misses them.
+const FLAGS_THAT_RUN_A_PROGRAM: &[&str] = &[
+    // dynamic arguments
+    r#"git grep "$(echo '--open-files-in-pager=aws ecs execute-command --cluster c')" x"#,
+    r#"rg "$(echo --pre=aws\ ecs\ execute-command)" x"#,
+    // ag: `--pager`, and its abbreviations
+    "ag --page='aws ecs execute-command --cluster c' x f",
+    "ag --pag='aws ecs execute-command' x f",
+    // rg
+    "rg --pre='ecs_connect ap' x docs",
+    "rg --pre-glob '*.md' --pre ecs_connect x",
+    "rg --hostname-bin ecs_connect x",
+    "rg -z ecs_connect docs",
+    "rg --search-zip ecs_connect docs",
+    "rg --pr=ecs_connect x",
+    // git grep
+    "git grep -O'ecs_connect ap' x",
+    "git grep --open-files-in-pager ecs_connect x",
+    "git grep --open-files-in-pa=ecs_connect x",
+    "git grep -nOecs_connect x",
+    // git global options other than --no-pager (and -P) are not inert
+    "git -c core.pager='ecs_connect ap' log",
+    "git -c alias.x='!ecs_connect ap' x",
+    "git --exec-path=/tmp/x log --grep=ecs_connect",
+    "git -C /tmp/evil log --grep=ecs_connect",
+    // anything not on the allow-list of flags
+    "grep --unknown-flag ecs_connect docs",
+    // external diff and textconv
+    "git log --ext-diff --grep=ecs_connect",
+    "git diff --textconv ecs_connect",
+    "git log --ext ecs_connect",
+    // a flag built by brace expansion or a glob
+    "git grep {-O,x}'ecs_connect ap' x",
+    "git grep -n{O,} ecs_connect x",
+    "git grep -[O]ecs_connect x",
+];
+
+#[test]
+fn bypass_flags_that_run_a_program_are_blocked_however_they_are_spelled() {
+    assert_in_every_world(FLAGS_THAT_RUN_A_PROGRAM, "an inert program told to run a marker", Some(RULE_COMMAND));
+}
+
+#[test]
+fn bypass_awk_and_sed_are_no_longer_inert_programs() {
+    assert_in_every_world(
+        &[
+            "awk '/ecs_connect/ { print $1 }' notes.md",
+            "sed -n '1,20p' ecs_connect.md",
+            "sed -n 'p' ecs_connect.md",
+        ],
+        "awk and sed beside a marker",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_an_expansion_anywhere_in_a_command_that_mentions_a_marker_is_not_inert() {
+    assert_in_every_world(
+        &[
+            r#"git commit -m "x $HOME ecs_connect""#,
+            r#"git commit -m "see ${x} ecs_connect""#,
+            r#"echo "$1 ecs_connect""#,
+            r#"git commit -m "a $\"b\" ecs_connect""#,
+            "echo `date` ecs_connect",
+            "cat <(echo hi) ecs_connect",
+        ],
+        "a marker beside an expansion",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn benign_literal_mentions_in_inert_programs_with_ordinary_flags_are_allowed() {
+    assert_in_every_world(
+        &[
+            "git grep -n foo",
+            "git grep -n ecs_connect",
+            r#"rg -n "pattern" src"#,
+            r#"rg -n "ecs_connect|execute-command" docs"#,
+            r#"grep -rn "text" docs"#,
+            "grep -rn ecs_connect docs src",
+            r#"git commit -m "msg with ecs_connect""#,
+            r#"git commit -am "docs: ecs_connect is blocked""#,
+            "git log --oneline -S execute-command",
+            "git log --grep=ecs_connect",
+            "git log -n 5 --grep ecs_connect",
+            "git diff --stat | grep ecs_connect",
+            "git show HEAD --name-only | grep -n ecs_connect",
+            "ag -n ecs_connect src",
+            "ag -i -l ecs_connect docs",
+            r#"git tag -a v1 -m "ecs_connect guard""#,
+            r#"git notes add -m "mentions ecs_connect""#,
+            "git grep --no-index -e ecs_connect -- docs",
+            "git log --oneline -- docs/ecs_connect.md",
+            "echo $ECS_CONNECT",
+        ],
+        "a literal mention with ordinary flags",
+        None,
+    );
+}
+
+// ── nits ─────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn bypass_a_marker_glued_to_other_text_is_found() {
+    assert_in_every_world(
+        &[
+            "git grep -Oecs_connect x",
+            r#"git grep -nO"ecs_connect" x"#,
+            "xecs_connect",
+            "echo foo-ecs_connect | sh",
+            "ls --colorecs_connect",
+        ],
+        "a marker glued to a flag, a word or a hyphen",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn benign_inert_programs_after_a_harmless_prefix_or_inside_a_group_are_allowed() {
+    assert_in_every_world(
+        &[
+            r#"cd /repo && git commit -m "fix ecs_connect""#,
+            "cd docs && ls && pwd && git grep -n ecs_connect",
+            "git grep ecs_connect | sort | uniq -c",
+            "git grep -n ecs_connect | sort -n | uniq",
+            r#"true && git commit -m "ecs_connect""#,
+            r#"test -f notes.md && git commit -m "ecs_connect""#,
+            r#"[ -d docs ] && echo "ecs_connect is blocked""#,
+            r#"{ echo "ecs_connect is blocked"; echo more; } > notes.md"#,
+            "{ git grep -n ecs_connect; } > found.txt",
+            r#"false || echo "ecs_connect""#,
+        ],
+        "a harmless builtin, test or group beside an inert mention",
+        None,
+    );
+}
+
+#[test]
+fn bypass_a_marker_beside_a_program_that_is_not_inert_is_blocked() {
+    assert_in_every_world(
+        &[
+            r#"git commit -m "ecs_connect" && git push"#,
+            "cd /repo && cargo run -- ecs_connect",
+            "make deploy ecs_connect",
+            "sort --compress-program=ecs_connect x",
+            "sort --compress-pr=ecs_connect x",
+            "cd /repo && ecs_connect ap",
+            "{ ecs_connect ap; }",
+        ],
+        "a marker that something other than an inert program receives",
+        Some(RULE_COMMAND),
+    );
+}
+
+#[test]
+fn bypass_a_harmless_prefix_does_not_open_an_exemption_for_any_round_3_bypass() {
+    let wrap = |c: &str| format!("cd /repo && {c}");
+
+    let shell_lines: Vec<String> = LINE_CONTINUATION_HIDES_A_SUBSTITUTION
+        .iter()
+        .chain(FLAGS_THAT_RUN_A_PROGRAM)
+        .filter(|c| !c.contains("\\\n"))
+        .map(|c| wrap(c))
+        .collect();
+    let shell_lines: Vec<&str> = shell_lines.iter().map(String::as_str).collect();
+    assert!(shell_lines.len() >= 20, "the loop covers {} lines", shell_lines.len());
+    assert_in_every_world(&shell_lines, "a bypass behind `cd /repo &&`", Some(RULE_COMMAND));
+
+    let tmux_lines: Vec<String> = CONTROL_BYTES_SPELL_A_MARKER.iter().map(|c| wrap(c)).collect();
+    let tmux_lines: Vec<&str> = tmux_lines.iter().map(String::as_str).collect();
+    assert_all_blocked(&tmux_lines, RULE_COMMAND, "a control-byte bypass behind `cd /repo &&`, local panes", pane_two_world);
+    assert_all_blocked(&tmux_lines, RULE_COMMAND, "a control-byte bypass behind `cd /repo &&`, no server", FakeProbe::default);
+}
+
+// ── round 3 corpus ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn benign_ordinary_commands_round3_have_no_false_positives() {
+    const CORPUS: &[&str] = &[
+        // cargo, make
+        "cargo test --test approvals_guard",
+        "cargo build --workspace",
+        "cargo bench --no-run",
+        "cargo install --path .",
+        "cargo update -p serde",
+        "cargo tree -d",
+        "make lint",
+        "make build-release",
+        // git
+        "git log --oneline --graph --decorate -n 10",
+        "git diff HEAD~1 -- src/lib.rs",
+        r#"git grep -n "fn main" -- src"#,
+        "git grep -l TODO",
+        "git log --author=hammer --since=2.weeks",
+        r#"git commit -am "wip""#,
+        "git commit --amend --no-edit",
+        "git cherry-pick abc123",
+        "git reset --soft HEAD~1",
+        "git restore --staged src/lib.rs",
+        "git worktree list",
+        "git show HEAD:Cargo.toml",
+        "git diff --name-only main...HEAD",
+        "git tag -l 'v*'",
+        "git log -n 5 --grep fix",
+        r#"git commit -m "bump $VERSION""#,
+        // searching and text
+        r#"rg -n "TODO|FIXME" src tests"#,
+        "rg -i --hidden foo",
+        r#"rg -l "use std" src"#,
+        "rg --files-with-matches foo -g '*.md'",
+        "grep -rIn --include='*.rs' foo src",
+        "ag -n foo src",
+        "ls -lh target/release",
+        "cat Cargo.lock | head -n 5",
+        "awk '{print $1}' notes.md",
+        "sed -n '1,20p' Cargo.toml",
+        "sed -i 's/a/b/' notes.md",
+        r#"echo "$HOME/bin" > notes.txt"#,
+        r#"echo "$(date)" >> log.txt"#,
+        // docker, node, curl
+        "docker compose logs -f web",
+        "docker run --rm -it alpine sh",
+        "npm ci",
+        "npm run lint -- --fix",
+        "npx jest --watch=false",
+        "curl -fsSL -o /tmp/x https://example.com/x",
+        r#"curl -X POST -H 'Content-Type: application/json' -d '{"a":1}' localhost:8080/api"#,
+        // aws (read-only)
+        "aws ecs describe-tasks --cluster c --tasks t",
+        "aws ecs list-services --cluster c",
+        "aws ecs describe-clusters --clusters c",
+        "aws logs describe-log-groups",
+        "aws ssm describe-parameters",
+        // tmux to a local pane
+        "tmux send-keys -t %2 'cargo test' Enter",
+        "tmux send-keys -t %2 -l 'ls -la'",
+        "tmux send-keys -t %2 C-c",
+        "tmux send-keys -t %2 -H 6c 73 0d",
+    ];
+    assert!(CORPUS.len() >= 40, "the corpus is {} commands", CORPUS.len());
+
+    let worlds: [(&str, World); 3] = [
+        ("no tmux server", FakeProbe::default as World),
+        ("only local panes", pane_two_world as World),
+        ("a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world as World),
+    ];
+    let mut failures = Vec::new();
+    for (world_name, world) in worlds {
+        for command in CORPUS {
+            let verdict = evaluate(&bash(command), &world());
+            if verdict != Ok(GuardVerdict::Allow) {
+                failures.push(format!("  [{world_name}] {command:?} -> {verdict:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "ordinary commands must not be blocked:\n{}", failures.join("\n"));
 }
