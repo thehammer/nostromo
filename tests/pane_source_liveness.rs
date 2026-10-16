@@ -109,7 +109,7 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();
@@ -236,7 +236,7 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();
@@ -409,7 +409,7 @@ async fn attaching_client_gets_perri_state_replayed() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();
@@ -478,7 +478,7 @@ async fn attaching_client_with_empty_topics_gets_layout_and_perri_replayed() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();
@@ -548,7 +548,7 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();
@@ -643,7 +643,7 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();

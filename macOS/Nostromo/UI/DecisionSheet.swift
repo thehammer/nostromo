@@ -48,6 +48,9 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
     var currentEvent: () -> NSEvent? = { NSApp.currentEvent }
     /// Whether VoiceOver is on. A seam for tests.
     var voiceOverEnabled: () -> Bool = { NSWorkspace.shared.isVoiceOverEnabled }
+    /// The current time on `NSEvent.timestamp`'s clock, for the stale-event
+    /// check. A seam for tests.
+    var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     /// - Parameters:
     ///   - resolution: the resolution already recorded for `requestId` in
@@ -198,9 +201,13 @@ final class DecisionSheet: NSWindowController, NSWindowDelegate {
     /// socket, or an Accessibility press from another process, does nothing
     /// and the sheet stays.
     private func isHumanGesture(on control: NSView) -> Bool {
-        switch HumanGesture.permit(currentEvent(), control: control, voiceOverEnabled: voiceOverEnabled) {
+        switch HumanGesture.permit(currentEvent(), control: control,
+                                   voiceOverEnabled: voiceOverEnabled, now: now) {
         case .human(let sourcePid, let sourceState):
-            sheetLog.info("decision \(self.requestId, privacy: .public) answered by a user gesture (event source pid \(sourcePid.map(String.init) ?? "none", privacy: .public), state \(sourceState.map(String.init) ?? "none", privacy: .public))")
+            // `.notice` so it persists in `log show`: the real source pid/state
+            // of a hardware event is the data a later "refuse a foreign source
+            // pid" rule needs (see `HumanGesture`).
+            sheetLog.notice("decision \(self.requestId, privacy: .public) answered by a user gesture (event source pid \(sourcePid.map(String.init) ?? "none", privacy: .public), state \(sourceState.map(String.init) ?? "none", privacy: .public))")
             return true
         case .refused(let reason):
             sheetLog.notice("synthetic input refused: \(reason.rawValue, privacy: .public) on decision \(self.requestId, privacy: .public)")

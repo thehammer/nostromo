@@ -17,6 +17,7 @@
 //! on connect and removed on disconnect.
 
 use std::collections::BTreeMap;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -34,7 +35,7 @@ use super::{
         outbound, refuse_for_network, withheld_msg, within_work_send, PeerTrust,
         SensitiveTags, Transport,
     },
-    peer_verify::{classify_peer, PeerInfo, PeerVerifier},
+    peer_verify::{classify_peer, claim_diagnostic, still_same_operator, PeerInfo, PeerVerifier, MAC_APP_CLIENT_KIND},
     protocol::{
         ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
         MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
@@ -200,19 +201,42 @@ struct UnixPeers {
     qa_mode: bool,
 }
 
-/// Who a connection is, as far as the accept loop could tell before the
-/// `Hello`. The trust of a Unix peer is settled only after it (see
-/// [`PeerOrigin::trust_after_hello`]).
+/// Who a connection is. A Unix peer is resolved by the verifier after its
+/// `Hello` (see [`PeerOrigin::resolve`]), and again for every `DecisionAnswer`
+/// (see [`PeerOrigin::still_the_operator`]).
 enum PeerOrigin {
-    /// A Unix-socket peer and what the verifier resolved about it.
-    Unix { info: Option<PeerInfo>, qa_mode: bool },
+    Unix {
+        verifier: Arc<dyn PeerVerifier>,
+        /// A dup of the accepted socket, so the verifier can look at the peer
+        /// again at answer time while the stream itself is split and owned by
+        /// the read and write halves.
+        fd: Arc<OwnedFd>,
+        qa_mode: bool,
+        /// What the verifier resolved after the `Hello`.
+        info: Option<PeerInfo>,
+    },
     Tcp,
 }
 
 impl PeerOrigin {
-    fn trust_after_hello(&self, client_kind: Option<&str>) -> PeerTrust {
+    /// Settle the connection's trust from the peer and its `Hello` claim. The
+    /// verifier runs off the async workers (it is synchronous, and a slow one
+    /// must not hold up other connections), and runs the code-signing check
+    /// only when the `Hello` claims to be the Mac app.
+    async fn resolve(&mut self, client_kind: Option<&str>) -> PeerTrust {
         match self {
-            PeerOrigin::Unix { info, qa_mode } => classify_peer(info.as_ref(), client_kind, *qa_mode),
+            PeerOrigin::Unix { verifier, fd, qa_mode, info } => {
+                let verify_code = client_kind == Some(MAC_APP_CLIENT_KIND);
+                let (verifier, peer_fd) = (Arc::clone(verifier), Arc::clone(fd));
+                *info = match tokio::task::spawn_blocking(move || verifier.inspect(peer_fd.as_fd(), verify_code)).await {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        warn!("peer lookup failed: {e}");
+                        None
+                    }
+                };
+                classify_peer(info.as_ref(), client_kind, *qa_mode)
+            }
             PeerOrigin::Tcp => PeerTrust::from_transport(Transport::Tcp),
         }
     }
@@ -223,6 +247,64 @@ impl PeerOrigin {
             PeerOrigin::Tcp => None,
         }
     }
+
+    /// Re-inspect the peer now, after a `DecisionAnswer` frame was read, and
+    /// check it is still the very process verified at `Hello`
+    /// ([`still_same_operator`]). `Err` names what failed; any failure refuses.
+    async fn still_the_operator(&self) -> Result<(), String> {
+        let PeerOrigin::Unix { verifier, fd, info: Some(accepted), .. } = self else {
+            return Err("DecisionAnswer refused: no verified peer to re-check".to_string());
+        };
+        let (verifier, peer_fd, was) = (Arc::clone(verifier), Arc::clone(fd), accepted.clone());
+        let now = tokio::task::spawn_blocking(move || verifier.reinspect(peer_fd.as_fd(), &was))
+            .await
+            .map_err(|e| format!("DecisionAnswer refused: answer-time re-inspection failed: {e}"))?;
+        if still_same_operator(accepted, now.as_ref()) {
+            return Ok(());
+        }
+        Err(match now {
+            None => "DecisionAnswer refused: answer-time re-inspection could not identify the peer".to_string(),
+            Some(now) => format!(
+                "DecisionAnswer refused: the peer is no longer the process verified at Hello \
+                 (pid {} -> {}, pidversion {} -> {}, code {:?})",
+                accepted.pid, now.pid, accepted.pidversion, now.pidversion, now.code
+            ),
+        })
+    }
+}
+
+/// A fresh per-connection operator nonce: 64 hex digits, two v4 UUIDs' worth
+/// (244 bits) from the OS CSPRNG (`uuid` draws v4 ids from `getrandom`).
+fn new_operator_nonce() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+/// Constant-time equality, so a wrong nonce's timing says nothing about how
+/// much of it was right.
+fn nonce_matches(expected: &str, got: &str) -> bool {
+    let (a, b) = (expected.as_bytes(), got.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// May this connection's `DecisionAnswer` be applied? Only for the operator
+/// app, and only when the frame echoes the connection's nonce **and** the peer,
+/// inspected again now, is still the process verified at `Hello`. The nonce is
+/// checked first, so a frame without it never costs a re-inspection.
+async fn check_operator_answer(
+    origin: &PeerOrigin,
+    issued: Option<&str>,
+    sent: Option<&str>,
+) -> Result<(), String> {
+    let Some(sent) = sent else {
+        return Err(
+            "DecisionAnswer without operator nonce: app older than daemon? reinstall app and daemon together"
+                .to_string(),
+        );
+    };
+    if !issued.is_some_and(|issued| nonce_matches(issued, sent)) {
+        return Err("DecisionAnswer refused: wrong operator nonce".to_string());
+    }
+    origin.still_the_operator().await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -248,23 +330,16 @@ async fn accept_loop(
                 let retained = Arc::clone(&retained);
                 let peers = peers.clone();
                 tokio::spawn(async move {
-                    // Resolve the peer off the accept loop (and off the async
-                    // workers): the lookup is synchronous, and a slow one must
-                    // not hold up other connections.
-                    let verifier = Arc::clone(&peers.verifier);
-                    let (stream, info) = match tokio::task::spawn_blocking(move || {
-                        let info = verifier.inspect(&stream);
-                        (stream, info)
-                    })
-                    .await
-                    {
-                        Ok(resolved) => resolved,
+                    // Keep a dup of the socket for the verifier: the stream
+                    // itself moves into the handler and is split there.
+                    let fd = match stream.as_fd().try_clone_to_owned() {
+                        Ok(fd) => Arc::new(fd),
                         Err(e) => {
-                            warn!("peer lookup failed: {e}");
+                            warn!("cannot duplicate the peer socket: {e}");
                             return;
                         }
                     };
-                    let origin = PeerOrigin::Unix { info, qa_mode: peers.qa_mode };
+                    let origin = PeerOrigin::Unix { verifier: peers.verifier, fd, qa_mode: peers.qa_mode, info: None };
                     if let Err(e) = handle_client(stream, origin, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
                         debug!("client disconnected: {e:#}");
                     }
@@ -326,7 +401,7 @@ async fn accept_loop_tcp(
 #[allow(clippy::too_many_arguments)]
 async fn handle_client<S>(
     stream: S,
-    origin: PeerOrigin,
+    mut origin: PeerOrigin,
     mut broadcast_rx: broadcast::Receiver<ServerMsg>,
     broadcast_tx: broadcast::Sender<ServerMsg>,
     pty_mgr: Arc<Mutex<PtyManager>>,
@@ -349,7 +424,7 @@ where
     // `conn_key` is a server-minted UUID used as the registry routing key so
     // that a malicious client cannot hijack another connection's targeted
     // channel by sending a pre-known client_id.
-    let (claimed_id, conn_key, trust) = match hello {
+    let (claimed_id, conn_key, client_kind) = match hello {
         ClientMsg::Hello {
             ref client_id,
             protocol_version,
@@ -366,8 +441,7 @@ where
                     "client version {protocol_version} too old (need {MIN_CLIENT_VERSION}+)"
                 );
             }
-            let trust = origin.trust_after_hello(client_kind.as_deref());
-            (client_id.clone(), Uuid::new_v4().to_string(), trust)
+            (client_id.clone(), Uuid::new_v4().to_string(), client_kind.clone())
         }
         other => {
             let err = ServerMsg::Error {
@@ -378,6 +452,12 @@ where
         }
     };
 
+    let trust = origin.resolve(client_kind.as_deref()).await;
+    // Issued only once the peer is verified as the operator app, and required
+    // in every `DecisionAnswer`: bytes written before verification (say, by a
+    // process that then `exec`s the app) cannot contain it.
+    let operator_nonce = (trust == PeerTrust::OperatorApp).then(new_operator_nonce);
+
     let welcome = ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
@@ -386,16 +466,19 @@ where
             FEATURE_MODEL.to_string(),
             FEATURE_TASKS.to_string(),
         ],
+        operator_nonce: operator_nonce.clone(),
     };
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
-    debug!(
-        claimed_id,
-        conn_key,
-        ?trust,
-        peer_pid = origin.info().map(|i| i.pid),
-        peer_exe = ?origin.info().map(|i| &i.exe),
-        "client welcomed"
-    );
+    // Never log the nonce.
+    let peer_pid = origin.info().map(|i| i.pid);
+    let peer_exe = origin.info().map(|i| i.exe.display().to_string());
+    if trust == PeerTrust::OperatorApp {
+        info!(claimed_id, conn_key, ?trust, peer_pid, peer_exe, "operator app welcomed");
+    } else if let Some(note) = claim_diagnostic(origin.info(), client_kind.as_deref(), trust) {
+        warn!(claimed_id, conn_key, ?trust, peer_pid, peer_exe, "{note}");
+    } else {
+        debug!(claimed_id, conn_key, ?trust, peer_pid, peer_exe, "client welcomed");
+    }
 
     // ── Subscribe ─────────────────────────────────────────────────────────────
 
@@ -693,7 +776,17 @@ where
                             replay_messages(&mut writer, frames).await;
                             continue;
                         }
-                        handle_client_msg(msg, trust, origin.info(), &sensitive, &conn_key, &claimed_id, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
+                        // A `DecisionAnswer` from the operator app is checked
+                        // here, where awaiting is possible: the nonce, then a
+                        // fresh look at the peer. The dispatch below applies it
+                        // only on `Some(Ok(()))`.
+                        let answer_check = match &msg {
+                            ClientMsg::DecisionAnswer { operator_nonce: sent, .. } if trust == PeerTrust::OperatorApp => {
+                                Some(check_operator_answer(&origin, operator_nonce.as_deref(), sent.as_deref()).await)
+                            }
+                            _ => None,
+                        };
+                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -776,6 +869,7 @@ fn handle_client_msg(
     msg: ClientMsg,
     trust: PeerTrust,
     peer: Option<&PeerInfo>,
+    answer_check: Option<Result<(), String>>,
     sensitive: &SensitiveTags,
     conn_key: &str,
     client_id: &str,
@@ -1216,7 +1310,7 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::DecisionAnswer { request_id, choice_id } => {
+        ClientMsg::DecisionAnswer { request_id, choice_id, .. } => {
             // Only the verified Mac app answers for the human: an agent's own
             // script on this socket must not answer the agent's decision. The
             // request stays pending, untouched.
@@ -1229,6 +1323,20 @@ fn handle_client_msg(
                     peer_exe = ?peer.map(|p| &p.exe),
                     "DecisionAnswer refused: not the verified Nostromo app"
                 );
+                let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP.to_string() });
+                return;
+            }
+            // The operator app, but this frame must also carry the
+            // connection's nonce and come from the process verified at Hello
+            // (`check_operator_answer`). Refused before the registry is
+            // touched, so a refusal changes nothing.
+            let refusal = match answer_check {
+                Some(Ok(())) => None,
+                Some(Err(why)) => Some(why),
+                None => Some("DecisionAnswer refused: not checked".to_string()),
+            };
+            if let Some(why) = refusal {
+                warn!(conn_key, %request_id, peer_pid = peer.map(|p| p.pid), "{why}");
                 let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP.to_string() });
                 return;
             }

@@ -89,7 +89,7 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();
@@ -152,7 +152,7 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();
@@ -411,7 +411,7 @@ async fn serve_with_session_mgr() -> (
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();

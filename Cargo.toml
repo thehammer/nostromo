@@ -110,6 +110,13 @@ unicode-normalization = "0.1.25"
 # Private scratch dir for the model catalogue probe.
 tempfile = "3"
 
+# Verifies the code behind a socket peer by audit token (peer_verify). Both
+# were already in the lock graph (via native-tls); macOS only, so the Linux
+# build never links the Security framework.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+core-foundation = "0.10"
+
 [dev-dependencies]
 nostromo = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["yaml"] }

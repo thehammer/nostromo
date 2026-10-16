@@ -119,13 +119,34 @@ async fn main() -> Result<()> {
             nostromo::ipc::peer_verify::QA_BUNDLE_ID
         );
     }
+    // The installed app's pin (`make mac-install` writes it) sits next to the
+    // socket: ~/.nostromo/operator-app.pin for the user, a sibling of the QA
+    // daemon's own socket for QA. It is read again on every connection that
+    // claims to be the app; this read only reports it.
+    let pin_path = socket_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(nostromo::ipc::peer_verify::PIN_FILE_NAME);
+    match nostromo::ipc::peer_verify::OperatorPin::load(&pin_path) {
+        Ok(pin) => info!(
+            pin = %pin_path.display(),
+            identifier = pin.identifier(),
+            cdhashes = pin.cdhashes().len(),
+            "operator-app pin parsed"
+        ),
+        Err(reason) => warn!(
+            pin = %pin_path.display(),
+            %reason,
+            "operator-app pin unusable: no app can answer decisions; run make mac-install (installs, signs and pins the app)"
+        ),
+    }
     let server = Server::bind(
         &socket_path,
         Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         config.perri_state_dir(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(pin_path)),
         qa_mode,
     )
     .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;

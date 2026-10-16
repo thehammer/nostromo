@@ -1298,10 +1298,17 @@ pub enum ClientMsg {
     /// meaningful outcome, not a default choice — so unlike most optional
     /// fields in this protocol, this one is **not** `skip_serializing_if`:
     /// it is always present on the wire, as a string or as `null`.
+    ///
+    /// `operator_nonce` echoes the nonce this connection's `Welcome` carried.
+    /// The daemon applies an answer only when it matches (AP1b): bytes a
+    /// process wrote before the daemon verified it cannot contain it. Additive:
+    /// absent from the wire when `None`.
     DecisionAnswer {
         request_id: String,
         #[serde(default)]
         choice_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
     },
 
     /// Request a full ambient-activity snapshot (all streams) for one focus.
@@ -1583,6 +1590,12 @@ pub enum ServerMsg {
         /// does not change.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
+        /// A per-connection secret, present only when the daemon verified the
+        /// peer as the operator app. Every `DecisionAnswer` on this connection
+        /// must echo it. Additive: absent otherwise, so `PROTOCOL_VERSION` does
+        /// not change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
     },
     Activity(ActivityEvent),
     MotherJobs {
@@ -3347,11 +3360,13 @@ mod tests {
         round_trip_client(ClientMsg::DecisionAnswer {
             request_id: "req-1".into(),
             choice_id: Some("approve".into()),
+            operator_nonce: None,
         });
 
         let v = serde_json::to_value(ClientMsg::DecisionAnswer {
             request_id: "req-1".into(),
             choice_id: Some("approve".into()),
+            operator_nonce: None,
         })
         .unwrap();
         assert_eq!(v["type"], "decision_answer");
@@ -3368,11 +3383,13 @@ mod tests {
         round_trip_client(ClientMsg::DecisionAnswer {
             request_id: "req-2".into(),
             choice_id: None,
+            operator_nonce: None,
         });
 
         let v = serde_json::to_value(ClientMsg::DecisionAnswer {
             request_id: "req-2".into(),
             choice_id: None,
+            operator_nonce: None,
         })
         .unwrap();
         assert!(
@@ -3380,6 +3397,47 @@ mod tests {
             "choice_id must be present on the wire even when dismissed"
         );
         assert!(v["choice_id"].is_null(), "a dismissed answer must serialize choice_id as null");
+    }
+
+    /// The operator nonce is additive: absent from the wire when `None` (an
+    /// app that predates it decodes the same), echoed verbatim when present.
+    #[test]
+    fn decision_answer_carries_the_operator_nonce_only_when_present() {
+        let v = serde_json::to_value(ClientMsg::DecisionAnswer {
+            request_id: "req-1".into(),
+            choice_id: None,
+            operator_nonce: None,
+        })
+        .unwrap();
+        assert!(!v.as_object().unwrap().contains_key("operator_nonce"), "{v}");
+
+        let with = ClientMsg::DecisionAnswer {
+            request_id: "req-1".into(),
+            choice_id: Some("approve".into()),
+            operator_nonce: Some("ab12".into()),
+        };
+        round_trip_client(with.clone());
+        assert_eq!(serde_json::to_value(with).unwrap()["operator_nonce"], "ab12");
+
+        let old: ClientMsg =
+            serde_json::from_str(r#"{"type":"decision_answer","request_id":"r","choice_id":null}"#).unwrap();
+        assert!(matches!(old, ClientMsg::DecisionAnswer { operator_nonce: None, .. }));
+    }
+
+    #[test]
+    fn welcome_carries_the_operator_nonce_only_when_present() {
+        let plain = ServerMsg::Welcome { protocol_version: PROTOCOL_VERSION, daemon_pid: 1, features: vec![], operator_nonce: None };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("operator_nonce"), "{v}");
+
+        let operator = ServerMsg::Welcome {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_pid: 1,
+            features: vec![],
+            operator_nonce: Some("cd34".into()),
+        };
+        round_trip_server(operator.clone());
+        assert_eq!(serde_json::to_value(operator).unwrap()["operator_nonce"], "cd34");
     }
 
     #[test]

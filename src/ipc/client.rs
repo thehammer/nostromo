@@ -398,6 +398,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             daemon_pid,
             features: vec![],
+            operator_nonce: None,
         };
         write_frame(&mut writer, &serde_json::to_vec(&welcome).unwrap())
             .await
