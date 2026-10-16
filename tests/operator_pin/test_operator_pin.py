@@ -50,7 +50,30 @@ FORBIDDEN_ENTITLEMENTS = (
     "com.apple.security.cs.disable-library-validation",
 )
 
-MAIN_C = "int main(void) { return 0; }\n"
+CSFLAGS_ENV = "OPERATOR_PIN_TEST_CSFLAGS"
+
+# The scratch executable. When $OPERATOR_PIN_TEST_CSFLAGS names a file, it
+# writes the kernel's code-signing status flags for itself there (csops
+# CS_OPS_STATUS), so a DYLD failure can show whether the process really ran
+# under the hardened runtime (CS_RUNTIME 0x10000).
+MAIN_C = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
+int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+int main(void) {
+    const char *path = getenv("OPERATOR_PIN_TEST_CSFLAGS");
+    if (!path) return 0;
+    uint32_t flags = 0;
+    if (csops(getpid(), 0, &flags, sizeof flags) != 0) return 3;
+    FILE *f = fopen(path, "w");
+    if (!f) return 4;
+    fprintf(f, "0x%08x\n", flags);
+    fclose(f);
+    return 0;
+}
+"""
 
 # A library that proves it was loaded: its constructor writes the file named
 # by $OPERATOR_PIN_TEST_MARKER.
@@ -279,12 +302,31 @@ class DyldInjectionTests(_Scratch):
 
     def run_injected(self, app):
         marker = os.path.join(self.tmp, f"injected-{self._n}")
+        csflags = os.path.join(self.tmp, f"csflags-{self._n}")
         env = _env()
         env["DYLD_INSERT_LIBRARIES"] = self.dylib
         env[MARKER_ENV] = marker
+        env[CSFLAGS_ENV] = csflags
         r = subprocess.run([self.exe(app)], capture_output=True, text=True, env=env, timeout=30)
         self.assertEqual(r.returncode, 0, f"the scratch executable did not run:\n{r.stderr}")
+        with open(csflags) as f:
+            self.last_csflags = f.read().strip()
         return os.path.exists(marker)
+
+    def injection_diagnosis(self, app):
+        """What the host says about runtime enforcement, for a failure message."""
+        def out(args):
+            r = _run(args)
+            return (r.stdout + r.stderr).strip()
+        cd = [l for l in out(["codesign", "-dv", app]).splitlines() if l.startswith("CodeDirectory")]
+        return (
+            f"\n  kernel CS flags of the injected process: {self.last_csflags} "
+            f"(CS_RUNTIME 0x10000, CS_VALID 0x1)"
+            f"\n  signature: {cd}"
+            f"\n  csrutil status: {out(['csrutil', 'status'])}"
+            f"\n  nvram boot-args: {out(['nvram', 'boot-args'])}"
+            f"\n  sw_vers: {out(['sw_vers', '-productVersion'])}"
+        )
 
     def test_control_a_plain_ad_hoc_app_is_injectable(self):
         # Proves the harness can see an injection at all; without it the next
@@ -298,12 +340,13 @@ class DyldInjectionTests(_Scratch):
     def test_the_signed_operator_app_does_not_load_an_inserted_library(self):
         app = self.signed_app(universal=False)
         self.assertFalse(self.run_injected(app),
-                         "an inserted library ran inside the operator app")
+                         "an inserted library ran inside the operator app" + self.injection_diagnosis(app))
 
     def test_the_signed_universal_operator_app_does_not_load_an_inserted_library(self):
         app = self.signed_app(universal=True)
         self.assertFalse(self.run_injected(app),
-                         "an inserted library ran inside the universal operator app")
+                         "an inserted library ran inside the universal operator app"
+                         + self.injection_diagnosis(app))
 
 
 class WriteOperatorPinTests(_Scratch):
