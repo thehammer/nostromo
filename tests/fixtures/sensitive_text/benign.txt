@@ -1,0 +1,254 @@
+# Tracker board
+## Now
+- [ ] PORTAL-1F2 retry failed queue jobs on facility 8812 (see gh run view 9912)
+- [x] PAYMENTS-9Z fix double-charge on refund webhook, merged in PR #4821
+- [ ] CORE-1234 backfill missing facility settings for org 40412
+- [ ] INT-77 confirm vendor sandbox credentials work, ask in the integrations channel
+- [ ] Review PR #4830 before standup, then re-run gh run view 9912 --log-failed
+- [ ] php artisan queue:retry 8812 after the deploy finishes
+- [ ] php artisan migrate --step=3 on staging, then verify the schema diff
+- [x] Bump php from 8.3.11 to 8.3.12 in the Dockerfile
+- [ ] Tag release v2.14.0 and cut the changelog
+- [ ] Investigate build 1.2.3-45-6789 failing the version parse
+- [ ] git describe printed v2.14.0-45-g6bd7bca, make the footer show it
+- [ ] Cherry-pick d174668e b5c9a0f1 is wrong, use d174668eb5c9a0f13e7d24a698c1f0b74a2e6d83 instead
+- [ ] Revert eb8bde4c0a97f3d215b6e8a9c4d07f312b9e5a68 on main if CI stays red
+- [x] Merged 6bd7bca (verified Mac app answers decisions) and 4684270 (tracker board engine)
+- [ ] Compare e5ef36a against d174668 for the AirPlay window flap
+## Sentry
+- [ ] PORTAL-1F2 TypeError in ReferralController@show, 14 events in the last hour
+- [ ] PAYMENTS-9Z timeout calling the processor, first seen 2026-10-15
+- [ ] PORTAL-3A7 N+1 query on the resident list, p95 up to 1.8s
+- [ ] REFERRAL-MONITOR-2K queue worker OOM, bump memory to 1024 MiB
+- [ ] APP-8C memory warning on the family app, iOS 18.2 only
+- [x] PORTAL-0X9 resolved in release 2026.10.14
+- [ ] Triage the 3 new PAYMENTS-A1 events before the weekly review
+## Jira
+- [ ] CORE-1234 backfill facility settings
+- [ ] CORE-1301 slow admin search on the portal
+- [ ] INT-77 vendor webhook retries
+- [ ] PAYM-412 reconcile weekly payout totals
+- [ ] APP-219 push notification opt-in copy
+- [x] CORE-1198 remove the dead feature flag
+- [ ] INT-85 rotate vendor sandbox access (no secrets in the ticket)
+## CI and releases
+- [ ] gh run view 10234567890 shows the clippy job timing out
+- [ ] make ci-remote fails at the rwx sandbox step, check the run output
+- [ ] cargo test --test tracker_ops passes locally but not in CI
+- [ ] cargo clippy --all-targets -- -D warnings is red on main
+- [ ] Rerun failed jobs for run 9912 with gh run rerun 9912 --failed
+- [ ] PR #4821 needs one more approval from the payments team
+- [ ] PR #4835 touches the migrations folder, ask for a second look
+- [ ] Link https://github.com/carefeed/portal/pull/4821 in the release notes
+- [ ] https://github.com/carefeed/nostromo/actions/runs/9912 has the failing log
+- [ ] Watch the deploy at https://portal.carefeed.com/health and confirm 200 OK
+- [ ] Image digest sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 matches the build
+- [ ] Confirm container 3f2b8c1e-9a47-4d6b-b0e5-7c21a8f4d903 restarted cleanly
+- [ ] Trace id a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d from Datadog for PORTAL-1F2
+- [ ] Request 7d9e0c12-4b6a-4f35-9a18-c3e5d7f20b64 returned 502 from the load balancer
+- [ ] Idempotency key 0b6f3a91-8e2d-47c5-a1f0-5d9c7e4b2a68 reused by the retry job
+- [ ] Queue job 7f3a9c21 stuck in reserved state for 40 minutes
+- [ ] job_id=9b2f41d7 failed three times, move to the dead letter queue
+- [ ] Batch 3125550142 is an internal batch id, not a phone number
+- [ ] Order id 312-5550-142 in the support export looks wrong
+- [ ] Support ticket ORD-312-555-014 was filed twice
+- [ ] Shipment ref 4412-0098-77 duplicated in the sheet
+- [ ] Import file has 123456789 rows, that cannot be right
+- [ ] Row counter overflowed at 1234567890 on the staging import
+- [ ] Epoch 1760611331000 in the log is 2026-10-16 10:42 UTC
+- [ ] Microsecond epoch 1760611331000000 showed up in the audit column
+- [ ] Placeholder 1234567890123456 in the sample fixture is not a real card
+- [ ] Fixture counter reset after 1234 5678 9012 3456 iterations
+## AWS and infra
+- [ ] Role arn:aws:iam::123456789012:role/portal-prod-task needs ecs:ExecuteCommand
+- [ ] arn:aws:ecs:us-east-1:123456789012:task/portal-prod/9f8e7d6c5b4a39281706f5e4d3c2b1a0 stopped with exit 137
+- [ ] arn:aws:ecs:us-east-1:123456789012:service/portal-prod/web has desired count 4
+- [ ] Account 123456789012 owns the staging VPC
+- [ ] CloudWatch alarm portal-prod-queue-depth-high flapping between 02:00 and 02:15
+- [ ] CloudWatch alarm payments-prod-5xx-rate-critical fired at 2026-10-15T10:42:11Z
+- [ ] Silence TargetTracking-service/portal-prod/web-AlarmHigh-4c1e2a7f-5b90-4d12-8e3f-6a7b8c9d0e1f during the deploy
+- [ ] Open port 8080 on the sandbox only, keep 5432 private
+- [ ] Redis on port 6379 is fine, but 6380 is not reachable
+- [ ] Health check hits 10.0.3.17 and times out
+- [ ] NAT gateway uses 172.16.0.4 as the next hop
+- [ ] Bastion at 192.168.10.25 lost its route
+- [ ] Allow 203.0.113.195 through the WAF for the vendor test
+- [ ] Set DATABASE_URL to postgres://localhost:5432/portal for local runs
+- [ ] Local cache lives at redis://localhost:6379/0
+- [ ] Dev database listens on mysql://127.0.0.1:3306/portal
+- [ ] Cron */5 * * * * runs the queue health probe
+- [ ] Cron 0 3 * * 1-5 prunes the old exports
+- [ ] Cron 15 2 * * * rotates the log files
+- [ ] CPU stayed under 45% but memory hit 92%
+- [ ] Error budget at 99.95% availability for the quarter
+- [ ] p95 latency down from 480ms to 310ms after the index
+- [ ] Scale web from 2 vCPU to 4 vCPU for the open enrollment spike
+- [ ] RDS storage grew by 12 GiB this week
+- [ ] S3 bucket carefeed-prod-exports holds 4.2 TB of old reports
+## Billing and money
+- [ ] Refund of $1,234.56 posted twice for facility 8812
+- [ ] Monthly platform fee is $9.99 per seat
+- [ ] Reconcile the $12,450.00 payout against the weekly report
+- [ ] Credit memo for $87.50 pending approval
+- [ ] Total invoiced: $1,204,300.75 across 212 facilities
+- [ ] Late fee waived for org 40412 this month
+- [ ] Discount of 15% applied to the annual plan
+- [ ] Tax rate 8.25% looks wrong for the new region
+## Dates and times
+- [ ] Feature released 03/14/2024 and still has no docs
+- [ ] Deploy on Mar 5, 2026 was rolled back at 10:42
+- [ ] Retro scheduled for 2026-10-20 at 14:00 CT
+- [ ] Audit window closes 10/31/2026
+- [ ] Freeze starts Oct 28 and ends Nov 2
+- [ ] Contract renewal due 2026-12-01
+- [ ] Standup moved to 09:30 on Monday
+- [ ] Logs between 2026-10-15T10:42:11Z and 2026-10-15T10:58:03Z are missing
+- [ ] Event stamped 2026-10-15T10:42:11.123-05:00 arrived out of order
+- [ ] Nightly job takes 00:42:17 on average
+- [ ] The new tracker was born from PRD 33, write up the lessons
+- [ ] Rename the Reborn feature flag after the 2026-10-15 rollout
+- [ ] Unborn rows in the migration are skipped
+## Versions and packages
+- [ ] Bump eslint@8.57.0 to the next minor
+- [ ] Pin lodash@4.17.21 until the audit passes
+- [ ] Upgrade node from 20.18.0 to 22.9.0 in CI
+- [ ] Rust toolchain 1.84.1 required by the new crate
+- [ ] Laravel 11.28.0 changes the queue retry signature
+- [ ] Python 3.12.7 is what the scripts folder assumes
+- [ ] Postgres 16.4 upgrade planned for November
+- [ ] v0.9.4-rc.2 of the bridge crashes on launch
+- [ ] Release train 2026.10.14 ships on Thursday
+- [ ] Package version 1.2.3-45-6789 from the build is not semver
+## Docs and notes
+- [ ] Write the runbook at docs/runbooks/queue-backlog.md
+- [ ] Update src/tracker/ops.rs to reject duplicate ids
+- [ ] Tail /var/log/nostromo/daemon.log while reproducing
+- [ ] Add scripts/tracker/guard_false_alarm_scan.py to the CI target
+- [ ] Move the old notes from ~/.claude/notes to the repo
+- [ ] File a bug under .claude/bugs/open/ for the AirPlay window flap
+- [ ] Run ~/.claude/bin/doc-mgr path bug "window flap on display change"
+- [ ] Read docs/prd/33-agent-tracker.md before touching the board format
+- [ ] Mask SSN and DOB columns in the staging export, see PORTAL-1F2
+- [ ] Add MRN to the guard class list in the design doc
+- [ ] Explain why the medical record sync is slow on facility 8812
+- [ ] Validate phone number format on the intake form
+- [ ] Validate email format on the family invite form
+- [ ] Trim the token budget for the planner prompt
+- [ ] Move the service credentials into the secret manager
+- [ ] Schedule password rotation for the service accounts
+- [ ] Document the Bearer token handshake for the MCP bridge
+- [ ] Decode the JWT claims in the debugger to check expiry
+- [ ] Rotate AWS_SECRET_ACCESS_KEY in SSM after the audit
+- [ ] Rotate the API key for the vendor sandbox on Friday
+- [ ] Support asked whether token=abc in the sample curl is real, it is not
+- [ ] Remove the placeholder secret=xyz from the docs example
+- [ ] Mention the private key requirement in the onboarding guide
+- [ ] Write risk-assessment-checklist-template-for-the-q4-audit in the shared drive
+- [ ] Branch feature/agent-tracker-t0g-sensitive-guard is ahead of main by two commits
+- [ ] Branch fix/task-runner-worker-queue-priority-handling needs a rebase
+## Mixed and long
+- [ ] PORTAL-1F2 retry failed queue jobs on facility 8812 (see gh run view 9912), then run php artisan queue:retry 8812 and watch portal-prod-queue-depth-high clear before 02:15, finally post the summary in the integrations channel with PR #4821 linked
+- [ ] Long note: the nightly import for org 40412 started at 02:00, hit the 10.0.3.17 replica at 02:07, retried 3 times with job ids 7f3a9c21 and 9b2f41d7, and finished at 02:41 with 12 warnings, none of which block the release v2.14.0 scheduled for 2026-10-20
+- [ ] Checklist for the deploy: freeze main, tag v2.14.0, run make ci-remote, wait for gh run view 10234567890 to go green, run php artisan migrate --step=3, verify the health endpoint, unfreeze main
+- Short note
+- Done
+- [ ] Ship it
+- [ ] fix typo
+- [x] merge #4821
+Plain sentence with no checkbox about the weekly sync on facility 8812.
+Another plain line mentioning PR #4830 and Sentry PORTAL-3A7.
+Reminder: org 40412 asked about export timing again.
+Waiting on the vendor, nothing to do until Thursday.
+Notes from the call: deploy window is 02:00 to 04:00 CT, rollback owner is the on-call engineer.
+Standup notes: Cody on the sensitive guard, Redd on the tests, Marty on cleanup.
+Parking lot: should the tracker board support sub-tasks, or only flat items.
+Decision: keep the change log append-only, diffs are computed on read.
+Open question: who owns the Sentry triage rotation in November.
+Blocked: CORE-1301 waits on the index migration in PR #4835.
+- [ ] Ping hammer@carefeed.com about the access review
+- [ ] Ask perri@carefeed.com to look at PR #4835
+- [ ] Dependabot commits come from dependabot@users.noreply.github.com, do not flag them
+- [ ] Commit author 123456+user@users.noreply.github.com has no public profile
+- [ ] Co-author trailer uses 98765+claude-helper@users.noreply.github.com in the squash
+- [ ] Send the weekly digest from support@carefeed.com and cc ops@carefeed.com
+- [ ] Reply-to for the digest is no-reply@carefeed.com
+- [ ] Rename café menu rendering ✓ in the family app
+- [ ] Fix the em dash — rendering in the PDF header
+- [ ] Arrow → glyph shows as a box on older iOS
+- [ ] Résumé upload fails for names with accents, e.g. José
+- [ ] Add 日本語 locale smoke test to the family app
+- [ ] Emoji 🚀 in the release title breaks the Slack formatter
+- [ ] Wire the → navigation for the tracker pane
+- [ ] Check the ✓ and ✗ markers in the board renderer
+- [ ] Review the ADR for the guard module before Friday
+- [ ] Update CLAUDE.md with the tracker conventions
+- [ ] Verify launchctl list shows the daemon after login
+- [ ] Run cargo fmt --all -- --check before pushing
+- [ ] Run cargo test --release --test sensitive_text_corpus -- --ignored for the bench
+- [ ] Add a --step flag to the dry-run script
+- [ ] Use git rebase origin/main instead of merge
+- [ ] Run gh pr checks 4821 and gh pr view 4821 --web
+- [ ] rwx run .rwx/ci.yml --init commit=6bd7bca
+- [ ] ssh into the bastion via aws ssm start-session, never paste output into tickets
+- [ ] tail -f storage/logs/laravel.log | grep PORTAL-1F2
+- [ ] curl -s https://portal.carefeed.com/api/health | jq .status
+- [ ] docker compose up -d redis && php artisan queue:work --tries=3
+- [ ] terraform plan -target=module.portal_web and review the diff
+- [ ] sed -n 1,40p src/tracker/ops.rs to compare the headers
+- [ ] grep -rn "TODO" src/tracker | wc -l
+- [ ] find . -name "*.rs" -newer Cargo.toml
+- [ ] kill -9 on the stuck worker pid 48213 and restart the daemon
+- [ ] Port 5173 is used by the web dev server
+- [ ] Check ulimit -n returns 10240 on the build box
+- [ ] Memory limit 1024 MiB, soft limit 768 MiB
+- [ ] Disk at 83% on the CI runner, prune the cache
+- [ ] Timeout 30s on the webhook, retry 3x with backoff 2s 4s 8s
+- [ ] Rate limit 60 requests per minute per facility
+- [ ] Queue depth 1200 at 02:10, 340 at 02:30
+- [ ] Throughput 2400 jobs per minute at peak
+- [ ] Uptime 99.99% over the last 30 days
+- [ ] Row counts: facilities 212, orgs 48, residents 18400
+- [ ] Facility 8812 and org 40412 are the repro accounts
+- [ ] Staging has 7 facilities, 3 orgs, and 112 users
+- [ ] Support volume down 18% week over week
+- [ ] NPS moved from 41 to 47 after the redesign
+- [ ] Sprint 42 velocity: 38 points committed, 34 delivered
+- [ ] Capacity next sprint: 5 engineers, 8 working days
+- [ ] Estimate for CORE-1234: 3 days plus 1 day review
+- [ ] Spike: 2 hours max on the Datadog monitor
+- [ ] Add monitor for portal-prod-queue-depth-high with threshold 500
+- [ ] Datadog dashboard shows 4xx rate at 0.4% and 5xx at 0.02%
+- [ ] Statsig gate tracker_board_v2 is at 25% rollout
+- [ ] Feature flag tracker_guard_strict defaults to off in staging
+- [ ] Add env var TRACKER_GUARD_ENABLED=1 to the daemon plist
+- [ ] Set RUST_LOG=nostromo=debug for the repro
+- [ ] Export NOSTROMO_HOME=/tmp/nostromo-test before running
+- [ ] Update ~/Library/LaunchAgents/com.carefeed.nostromd.plist
+- [ ] Config key work_email_domains lists carefeed.com and users.noreply.github.com
+- [ ] Confirm the guard allows work email domains in lowercase and uppercase
+- [ ] Doc: tracker items are plain markdown, one per line, ids are stable
+- [ ] Add a section for blocked items to the board render
+- [ ] Sort the board by priority, then by last touched
+- [ ] Show age in days next to each open item, e.g. 3d, 12d
+- [ ] Collapse done items older than 14 days
+- [ ] Render the change log as a table with time, actor, and op
+- [ ] Keep the diff output under 200 lines
+- [ ] Reject board writes larger than 256 KiB
+- [ ] Scan the board before every write, reject when the guard fires
+- [ ] Log only the class and the line number when the guard fires
+- [ ] Never echo matched text in errors or logs
+- [ ] Run the false alarm scan across the last 30 days of boards
+- [ ] Count flagged lines per class and report the rate
+- [ ] Target false alarm rate stays under 1% of lines
+- [ ] Target miss rate stays at 0 on the positives corpus
+- [ ] Verify the scan binary prints line numbers and classes only
+- [ ] Cover the multibyte case: héllo ✓ with a note after it
+- [ ] Linear time check: ten times the input gives ten times the findings
+- [ ] Hostile input check: one very long line of repeated characters
+- [ ] Write the follow-up for T0h once T0g merges
+- [ ] Hand off T0g to Redd, then to Marty for the refactor pass
+- [ ] Close PR #4821 once the payments team signs off
+- [ ] Reopen PORTAL-1F2 if it fires again after the deploy
+- [ ] Add PORTAL-1F2 to the weekly Sentry digest
+- [ ] Archive the 2026-09 boards under .claude/wip/archive
+- [ ] Final check of facility 8812 after the retry job completes

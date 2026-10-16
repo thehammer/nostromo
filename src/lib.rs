@@ -17,6 +17,7 @@ pub mod model;
 pub mod mother;
 pub mod perri_cli;
 pub mod pty;
+pub mod sensitive_text;
 pub mod sessions;
 pub mod tracker;
 pub mod transcript;
