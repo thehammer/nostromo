@@ -52,11 +52,11 @@ func longTranscript(_ count: Int = 8) -> [ChatTurn] {
     return turns
 }
 
-func errorChip() -> TurnBlock {
+private func errorChip() -> TurnBlock {
     .resultSummary(ResultSummaryData(durationMs: 5, costUSD: 0.01, isError: true))
 }
 
-func disclosureButton(in view: NSView) -> NSButton? {
+private func disclosureButton(in view: NSView) -> NSButton? {
     rigAllSubviews(of: view).compactMap { $0 as? NSButton }.first
 }
 
