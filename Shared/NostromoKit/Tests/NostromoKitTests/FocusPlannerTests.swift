@@ -933,6 +933,118 @@ final class FocusPlannerTests: XCTestCase {
         XCTAssertEqual(p.items(holding: [1]), rig.planner.items(holding: [1]))
     }
 
+    // MARK: - Presentation hold: the groups before the first message (FV3)
+    //
+    // The first roll-in has no outgoing message, but the groups that come before the turn's first
+    // message roll into activity all the same, and a reader may be looking at them.
+    // `FocusPlanner.leadingGroups` (-1) stands for them in `items(holding:)`.
+    //
+    // A group ends at any non-empty prose and at any boundary, so before the first message a row
+    // holds one group; two leading groups are separated by a boundary and sit in two rows.
+
+    private let leading = FocusPlanner.leadingGroups
+
+    func testTheLeadingGroupsSentinelIsMinusOneSoItCanNeverBeAMessageOrdinal() {
+        XCTAssertEqual(FocusPlanner.leadingGroups, -1)
+    }
+
+    func testHoldingTheLeadingGroupsShowsTheGroupAtItsPlaceInsteadOfInTheRow() throws {
+        let p = planner([call(id: "a"), call(id: "b"), prose])
+        let full = try XCTUnwrap(segments(p.items()).first)
+        XCTAssertEqual(shape(p.items()), ["act[g0]", "msg0"])
+        guard case .group(let group) = full.members[0] else { return XCTFail("the row holds the group") }
+
+        let held = p.items(holding: [leading])
+
+        XCTAssertEqual(shape(held), ["grp0", "msg0"])
+        XCTAssertEqual(held[0], .group(group), "the same group, shown as a group item")
+        XCTAssertTrue(segments(held).isEmpty, "no row is left with nothing in it")
+    }
+
+    func testHoldingTheLeadingGroupsShowsEachOfSeveralGroupsAtItsPlaceAroundTheBoundaryBetweenThem() {
+        // tools a (blocks 0-1), a note (2), tools b (3-4), then the first message (5).
+        let p = planner(tools("a") + [FoldBlock.boundary(.note)] + tools("b") + [prose])
+        XCTAssertEqual(shape(p.items()), ["act[g0]", "b2", "act[g1]", "msg0"])
+
+        XCTAssertEqual(shape(p.items(holding: [leading])), ["grp0", "b2", "grp1", "msg0"])
+    }
+
+    func testTheContinuationAfterTheLeadingGroupsIsARowKeyedByItsFirstMember() throws {
+        // call a, message 0, call b, then the latest message: one row [g0, m0, g1] keyed by the group.
+        let p = planner([call(id: "a"), prose, call(id: "b"), prose])
+        XCTAssertEqual(shape(p.items()), ["act[g0,m0,g1]", "msg1"])
+        XCTAssertEqual(segments(p.items()).map(\.key), ["a:g:a"])
+
+        let held = p.items(holding: [leading])
+
+        XCTAssertEqual(shape(held), ["grp0", "act[m0,g1]", "msg1"])
+        XCTAssertEqual(segments(held).map(\.key), ["a:m:T#0"], "the continuation is keyed by its own first member")
+    }
+
+    func testHoldingTheLeadingGroupsAndALaterMessageTogetherSplitsAtEachOfThem() {
+        let p = planner([call(id: "a"), prose, call(id: "b"), prose, call(id: "c"), prose])
+        XCTAssertEqual(shape(p.items()), ["act[g0,m0,g1,m1,g2]", "msg2"])
+
+        XCTAssertEqual(shape(p.items(holding: [leading, 1])), ["grp0", "act[m0,g1]", "msg1", "grp2", "msg2"])
+        XCTAssertEqual(shape(p.items(holding: [leading, 0])), ["grp0", "msg0", "act[g1,m1,g2]", "msg2"])
+        XCTAssertEqual(shape(p.items(holding: [leading, 0, 1])), ["grp0", "msg0", "grp1", "msg1", "grp2", "msg2"])
+        let keys = segments(p.items(holding: [leading, 1])).map(\.key)
+        XCTAssertEqual(Set(keys).count, keys.count, "row keys stay unique")
+    }
+
+    func testHoldingTheLeadingGroupsOfATurnThatStartsWithProseChangesNothing() {
+        let startingWithProse: [[FoldBlock]] = [heldBlocks, [prose] + tools("a") + [prose], [prose, card] + tools("a") + [prose]]
+        for blocks in startingWithProse {
+            let p = planner(blocks)
+            XCTAssertEqual(p.items(holding: [leading]), p.items())
+        }
+    }
+
+    func testGroupsAfterABoundaryThatFollowsAMessageAreNotLeadingGroups() {
+        // m0, g0, a card, g1, then the latest message: g1 comes after message 0, so it is not leading.
+        let p = planner([prose] + tools("a") + [card] + tools("b") + [prose])
+        XCTAssertEqual(shape(p.items()), ["act[m0,g0]", "b3", "act[g1]", "msg1"])
+
+        XCTAssertEqual(p.items(holding: [leading]), p.items())
+        XCTAssertEqual(shape(p.items(holding: [leading, 0])), ["msg0", "grp0", "b3", "act[g1]", "msg1"],
+                       "only a real message ordinal reaches into a row that starts with a message")
+    }
+
+    func testGroupsBeforeAFirstMessageThatFollowsALeadingBoundaryAreStillLeading() {
+        // A card first, then tools, then the first message.
+        let p = planner([card] + tools("a") + [prose])
+        XCTAssertEqual(shape(p.items()), ["b0", "act[g0]", "msg0"])
+
+        XCTAssertEqual(shape(p.items(holding: [leading])), ["b0", "grp0", "msg0"])
+    }
+
+    func testHoldingTheLeadingGroupsBeforeAnyMessageHasArrivedChangesNothing() {
+        let onlyGroups = planner(tools("a") + [FoldBlock.boundary(.note)] + tools("b"))
+        XCTAssertEqual(shape(onlyGroups.items()), ["grp0", "b2", "grp1"])
+        XCTAssertEqual(onlyGroups.items(holding: [leading]), onlyGroups.items(), "nothing has rolled in yet")
+
+        let onlyACard = planner([card, prose])
+        XCTAssertEqual(onlyACard.items(holding: [leading]), onlyACard.items(), "no group to hold")
+    }
+
+    func testHoldingTheLeadingGroupsKeepsEveryItemInOrderAndOnlyUnfoldsTheGroupsBeforeTheFirstMessage() {
+        let split: [FoldBlock] = tools("a") + [FoldBlock.boundary(.note)] + tools("b") + [prose] + tools("c") + [prose]
+        let afterACard: [FoldBlock] = [card] + tools("a") + [prose, card] + tools("b") + [prose]
+        let turns: [[FoldBlock]] = [
+            [call(id: "a"), prose],
+            [call(id: "a"), prose, call(id: "b"), prose],
+            split,
+            afterACard,
+        ]
+        for (n, blocks) in turns.enumerated() {
+            let p = planner(blocks)
+            for held: Set<Int> in [[-1], [-1, 0], [-1, 1], [-1, 0, 1]] {
+                XCTAssertEqual(atoms(p.items(holding: held)), atoms(p.items()), "turn \(n), holding \(held.sorted())")
+                XCTAssertEqual(p.items(), planner(blocks).items(), "holding is a view: turn \(n)")
+            }
+        }
+    }
+
     // MARK: - Planner cost is linear in segment size
 
     /// One turn of `n` rolled-in messages and no boundary: (prose, call, result) `n` times, then

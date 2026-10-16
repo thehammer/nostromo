@@ -262,8 +262,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private var plannerEnded = false
     /// The planner's items as the ops so far leave them (`FocusPlanner.replay`).
     private var plan: [FocusItem] = []
-    /// Messages whose roll-in this pane holds back (FV2's interim hold): presented through
-    /// `FocusPlanner.items(holding:)`, at their place, as conversation.
+    /// Messages whose roll-in this pane holds back (FV3): presented through
+    /// `FocusPlanner.items(holding:)`, at their place, as conversation. `FocusPlanner.leadingGroups`
+    /// stands for the groups before the first message.
     private var held: Set<Int>
     /// The latest message's ordinal, from the planner's `.latestChanged`.
     private var latestOrdinal: Int?
@@ -325,13 +326,20 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// Fired when the operator opens or closes an activity row.
     var onActivityToggle: ((_ key: String, _ isExpanded: Bool) -> Void)?
 
-    /// Asked, during a live update, when a newer message rolls the latest one into activity:
-    /// whether to hold that roll-in back (the pane is not following the tail). Held, the
-    /// outgoing message stays where it is as conversation (`onHold`) until `releaseHolds()`.
-    var holdsRollIns: () -> Bool = { false }
+    /// Asked, during a live update, when a newer message rolls a message into activity (the
+    /// latest one, or the groups before the first message): hold the roll-in back, or let it go
+    /// through and say how it plays (`RollInHolds.decide`). Held, the outgoing message stays where
+    /// it is as conversation (`onHold`) until `releaseHolds`.
+    var decideRollIn: (_ ordinal: Int) -> RollInDecision = { _ in .roll(.none) }
 
     /// A roll-in was held back: the outgoing message's ordinal, so the pane can remember it.
     var onHold: ((_ ordinal: Int) -> Void)?
+
+    /// A hold was dropped to stay under `RollInPolicy.maxHeldPerTurn`: the pane forgets it.
+    var onHoldDropped: ((_ ordinal: Int) -> Void)?
+
+    /// Plays the collapse of a message that rolls in on screen. Set by `RollInHolds.wire`.
+    var animator: RollInAnimating = SystemRollInAnimator()
 
     /// Fired when the turn ended in error while streaming and its last group (which has a
     /// failed call) was opened by the stuck-turn rule, so the auto entry can be recorded.
@@ -362,7 +370,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// - Parameters:
     ///   - folds: how tool groups and activity rows resolve; nil means the operator's explicit
     ///     choices in `interaction`, else the Focus default (collapsed).
-    ///   - heldOrdinals: messages whose roll-in the pane is holding back (`holdsRollIns`).
+    ///   - heldOrdinals: messages whose roll-in the pane is holding back (`decideRollIn`).
     init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState,
          folds: FoldResolver? = nil, heldOrdinals: Set<Int> = [], now: @escaping () -> Date = Date.init) {
         self.contentAvailable = contentAvailable
@@ -507,16 +515,29 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         return changed
     }
 
-    /// Release every held roll-in: the held messages fold into their rows. `turn` is this turn
-    /// as it stands (its blocks are read during the call only). The caller keeps the reading
-    /// position (`ReplView.applyFoldChange`).
-    func releaseHolds(turn: ChatTurn) {
-        guard !held.isEmpty else { return }
-        held = []
+    /// Release held roll-ins (all of them, or `ordinals`): the held messages fold into their rows.
+    /// `turn` is this turn as it stands (its blocks are read during the call only). The caller
+    /// keeps the reading position (`ReplView.applyFoldChange`). `animation`: collapse the
+    /// departing messages (an on-screen release in a following pane) or not.
+    ///
+    /// Returns the open states carried to a row's key: a row the operator opened while a hold
+    /// split its segment is keyed by its own first member, and the whole segment, once the hold
+    /// is released, is keyed by the segment's first member, so the state moves with it.
+    @discardableResult
+    func releaseHolds(turn: ChatTurn, ordinals: Set<Int>? = nil,
+                      animation: RollInAnimation = .none) -> [String: Bool] {
+        let released = ordinals.map { held.intersection($0) } ?? held
+        guard !released.isEmpty else { return [:] }
+        let ghosts = animation == .none ? [] : ghostViews(forMessages: released)
+        let carried = carriedOpenStates(releasing: released)
+        held.subtract(released)
         let blocks = turn.blocks
-        reconcile(with: plan, blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil })
+        reconcile(with: held.isEmpty ? plan : planner.items(holding: held),
+                  blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil })
+        collapse(ghosts, animation: animation)
         invalidateIntrinsicContentSize()
         needsLayout = true
+        return carried
     }
 
     /// Messages whose roll-in this view is holding back.
@@ -559,10 +580,12 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         }
 
         let settled = trackOpenGroup(through: ops, ending: ending)
-        if live { holdRollIns(in: ops) }
+        let rolling = live ? decideRollIns(in: ops) : (animation: RollInAnimation.none, ordinals: Set<Int>())
+        let ghosts = rolling.animation == .none ? [] : ghostViews(forMessages: rolling.ordinals)
         plan = FocusPlanner.replay(ops, onto: plan)
         reconcile(with: held.isEmpty ? plan : planner.items(holding: held),
                   blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil })
+        collapse(ghosts, animation: rolling.animation)
 
         if ending { openStuckGroup(live: live) }
         if live {
@@ -599,16 +622,35 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         return settled.compactMap { latest[$0] ?? groupViews[$0]?.group }
     }
 
-    /// A roll-in arrived (a newer message moved the latest one into activity). In a pane that
-    /// does not follow the tail it is held back: the outgoing message stays as it is.
-    private func holdRollIns(in ops: [FocusOp]) {
+    /// Roll-ins arrived (a newer message moved the latest one, or the groups before the first
+    /// message, into activity): ask the pane about each outgoing message, before anything
+    /// changes. A held one stays as it is (`held`, `onHold`); the others go through, and those
+    /// the pane says play an animation are returned (the longest wins) with their ordinals.
+    ///
+    /// The groups before the first message have no outgoing message; `FocusPlanner.leadingGroups`
+    /// stands for them, so a reader scrolled up in an open group does not see it fold away.
+    private func decideRollIns(in ops: [FocusOp]) -> (animation: RollInAnimation, ordinals: Set<Int>) {
         var latest = latestOrdinal
+        var animation = RollInAnimation.none
+        var animated: Set<Int> = []
         for op in ops {
             switch op {
             case .rollIn:
-                if let outgoing = latest, !held.contains(outgoing), holdsRollIns() {
+                let outgoing = latest ?? FocusPlanner.leadingGroups
+                guard !held.contains(outgoing) else { break }
+                switch decideRollIn(outgoing) {
+                case .hold:
+                    if held.count >= RollInPolicy.maxHeldPerTurn, let oldest = held.min() {
+                        held.remove(oldest)
+                        onHoldDropped?(oldest)
+                    }
                     held.insert(outgoing)
                     onHold?(outgoing)
+                case .roll(let played):
+                    if played != .none {
+                        animation = played
+                        animated.insert(outgoing)
+                    }
                 }
             case .latestChanged(let message):
                 latest = message.ordinal
@@ -617,6 +659,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             }
         }
         latestOrdinal = latest
+        return (animation, animated)
     }
 
     /// Bring the views to `items`: items that match what is rendered (same identity, in the
@@ -1055,6 +1098,119 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             }
             guard let row = columnViews[i] as? ActivityRowView, let rect = row.rowRect(forGroupKey: key) else { return nil }
             return rect.offsetBy(dx: Self.blocksLeadingInset, dy: top)
+        }
+    }
+
+    // MARK: - Roll-in holds (FV3)
+
+    /// Where a held message (or `FocusPlanner.leadingGroups`) sits in this view's coordinates;
+    /// nil when it has no views here (it is folded, or not rendered).
+    func rollInRect(ordinal: Int) -> NSRect? {
+        let wanted = columns(ofHeld: ordinal)
+        guard let last = wanted.last else { return nil }
+        var union: NSRect?
+        _ = firstColumn { i, top -> Bool? in
+            if wanted.contains(i) {
+                let rect = NSRect(x: Self.blocksLeadingInset, y: top,
+                                  width: Self.blockWidth(paneWidth: islandWidth), height: columnHeights[i])
+                union = union.map { $0.union(rect) } ?? rect
+            }
+            return i >= last ? true : nil
+        }
+        return union
+    }
+
+    /// The operator holds a text selection inside this message, or is dragging one out in it.
+    func hasSelection(inMessage ordinal: Int) -> Bool {
+        columns(ofHeld: ordinal).contains { Self.holdsSelection(in: columnViews[$0]) }
+    }
+
+    /// The first responder is text inside `view` that has a selection (a label's field editor
+    /// included), or the left button is down in it, which is a drag that has selected nothing yet.
+    private static func holdsSelection(in view: NSView) -> Bool {
+        guard let text = view.window?.firstResponder as? NSTextView else { return false }
+        let owner: NSView? = text.isFieldEditor ? text.delegate as? NSView : text
+        guard let owner, owner.isDescendant(of: view) else { return false }
+        return text.selectedRange.length > 0 || NSEvent.pressedMouseButtons & 1 != 0
+    }
+
+    /// The columns a message (or `FocusPlanner.leadingGroups`: the groups before the first
+    /// message) is rendered in. Empty when it is not rendered as an item of its own.
+    private func columns(ofHeld ordinal: Int) -> [Int] {
+        if ordinal == FocusPlanner.leadingGroups {
+            var columns: [Int] = []
+            for slot in slots {
+                if case .message = slot.identity { break }
+                if case .group = slot.identity { columns += slot.firstColumn ..< slot.firstColumn + slot.columnCount }
+            }
+            return columns
+        }
+        guard let slot = slots.first(where: { $0.identity == .message(ordinal) }) else { return [] }
+        return Array(slot.firstColumn ..< slot.firstColumn + slot.columnCount)
+    }
+
+    private func columnFrame(_ column: Int) -> NSRect? {
+        firstColumn { i, top -> NSRect? in
+            i == column ? NSRect(x: Self.blocksLeadingInset, y: top,
+                                 width: Self.blockWidth(paneWidth: islandWidth), height: columnHeights[i]) : nil
+        }
+    }
+
+    /// The views of messages that are about to leave this island, with where they sit in it, so
+    /// `collapse` can play them out after the reconcile removed them.
+    private func ghostViews(forMessages ordinals: Set<Int>) -> [(view: NSView, frame: NSRect)] {
+        var ghosts: [(view: NSView, frame: NSRect)] = []
+        for ordinal in ordinals where ordinal != FocusPlanner.leadingGroups {
+            for column in columns(ofHeld: ordinal) {
+                if let frame = columnFrame(column) { ghosts.append((columnViews[column], frame)) }
+            }
+        }
+        return ghosts
+    }
+
+    /// Play the departing messages' collapse over the island, then drop them. The reconcile has
+    /// removed their views and the geometry is already final (the pane's pin re-asserts at the
+    /// bottom at once), so this is only what the reader sees for `duration`; a ghost never takes
+    /// a click.
+    private func collapse(_ ghosts: [(view: NSView, frame: NSRect)], animation: RollInAnimation) {
+        guard case .collapse(let duration) = animation else { return }
+        let departing = ghosts.filter { ghost in !columnViews.contains { $0 === ghost.view } }
+        guard let first = departing.first else { return }
+        let region = departing.dropFirst().reduce(first.frame) { $0.union($1.frame) }
+        let container = RollInGhostView(frame: region)
+        for ghost in departing {
+            container.addSubview(ghost.view)
+            ghost.view.frame = ghost.frame.offsetBy(dx: -region.minX, dy: -region.minY)
+        }
+        addSubview(container)
+        animator.collapse(container, duration: duration) { [weak container] in container?.removeFromSuperview() }
+    }
+
+    /// Open states to move to the key a released hold gives a row. While a message is held a
+    /// segment is split, and the part after the held message is keyed by its own first member;
+    /// released, the whole segment is keyed by its first member again, so a choice the operator
+    /// made on the split row would be lost. Applied here and returned for the pane to record.
+    private func carriedOpenStates(releasing released: Set<Int>) -> [String: Bool] {
+        let before = planner.items(holding: held)
+        let after = planner.items(holding: held.subtracting(released))
+        var carried: [String: Bool] = [:]
+        for case .activity(let row) in before {
+            guard let state = folds.activityStates[row.key], let first = row.members.first else { continue }
+            let id = Self.memberID(first)
+            for case .activity(let target) in after
+            where target.key != row.key && target.members.contains(where: { Self.memberID($0) == id }) {
+                guard folds.activityStates[target.key] == nil else { continue }
+                folds.activityStates[target.key] = state
+                carried[target.key] = state
+            }
+        }
+        return carried
+    }
+
+    private static func memberID(_ member: ActivityMember) -> String {
+        switch member {
+        case .message(let message): return "m\(message.ordinal)"
+        case .group(let group):     return "g\(group.id)"
         }
     }
 

@@ -21,63 +21,84 @@ private typealias F = FoldFixtures
 
 // MARK: - Content
 
-private func fillerBlocks(_ count: Int, tag: String) -> [TurnBlock] {
+func fillerBlocks(_ count: Int, tag: String) -> [TurnBlock] {
     (0 ..< count).map { TurnBlock.text("\(tag) paragraph \($0). \(F.prose) \(F.prose) \(F.prose)") }
 }
 
 /// Notes (a boundary: never folded, never a message). Content below a group that leaves the group
 /// where it is: under the Focus layout a group with a message after it folds into an activity row,
 /// while a group followed only by boundaries is the TF2/TF3 group row at the top level.
-private func noteBlocks(_ count: Int, tag: String) -> [TurnBlock] {
+func noteBlocks(_ count: Int, tag: String) -> [TurnBlock] {
     (0 ..< count).map { TurnBlock.note("\(tag) note \($0). \(F.prose) \(F.prose) \(F.prose) \(F.prose)") }
 }
 
 /// A complete turn: prose, one group of four calls (`g:h<n>_0`), a note.
-private func historyTurn(_ n: Int) -> ChatTurn {
+func historyTurn(_ n: Int) -> ChatTurn {
     F.turn([.text("History \(n) opening. \(F.prose)")] + F.run(4, prefix: "h\(n)_")
            + [.note("History \(n) closing. \(F.prose) \(F.prose) \(F.prose)")], user: "history \(n)")
 }
 
 /// A complete, tall turn: opening prose, one group of four calls (`g:L<n>_0`), then ten
 /// notes, so a viewport can sit inside the turn with the group above it.
-private func longTurn(_ n: Int) -> ChatTurn {
+func longTurn(_ n: Int) -> ChatTurn {
     F.turn([.text("Long \(n) opening. \(F.prose)")] + F.run(4, prefix: "L\(n)_") + noteBlocks(10, tag: "long \(n)"),
            user: "long \(n)")
 }
 
 /// `count` tall turns and a short complete tail turn.
-private func longTranscript(_ count: Int = 8) -> [ChatTurn] {
+func longTranscript(_ count: Int = 8) -> [ChatTurn] {
     var turns: [ChatTurn] = (0 ..< count).map(longTurn)
     turns.append(F.turn([.text("Tail.")], user: "tail"))
     return turns
 }
 
-private func errorChip() -> TurnBlock {
+func errorChip() -> TurnBlock {
     .resultSummary(ResultSummaryData(durationMs: 5, costUSD: 0.01, isError: true))
 }
 
-private func disclosureButton(in view: NSView) -> NSButton? {
+func disclosureButton(in view: NSView) -> NSButton? {
     rigAllSubviews(of: view).compactMap { $0 as? NSButton }.first
 }
 
 // MARK: - The rig
 
-private final class ScrollRigClip: NSClipView { override var isFlipped: Bool { true } }
+/// The collapse animation of an on-screen roll-in, recorded instead of played. Completes at once
+/// (so a test sees the final state with no timer) unless `completesAtOnce` is off, in which case
+/// `finishAll()` completes what is pending.
+final class RigRollInAnimator: RollInAnimating {
+    struct Request { let ghost: NSView; let duration: TimeInterval }
+    private(set) var requests: [Request] = []
+    var completesAtOnce = true
+    private var pending: [() -> Void] = []
+
+    func collapse(_ ghost: NSView, duration: TimeInterval, completion: @escaping () -> Void) {
+        requests.append(Request(ghost: ghost, duration: duration))
+        if completesAtOnce { completion() } else { pending.append(completion) }
+    }
+
+    func finishAll() {
+        let done = pending
+        pending = []
+        done.forEach { $0() }
+    }
+}
+
+final class ScrollRigClip: NSClipView { override var isFlipped: Bool { true } }
 
 /// A thing near the top of the viewport, named so it can be found again after its view was rebuilt:
 /// the turn, and the index of the item among the turn view's subviews.
-private struct ScrollLandmark {
+struct ScrollLandmark {
     let turnID: UUID
     let subviewIndex: Int
 }
 
-private struct ScrollProbe {
+struct ScrollProbe {
     let landmark: ScrollLandmark
     /// Screen y (relative to the top of the viewport) when it was taken.
     let y: CGFloat
 }
 
-private final class ScrollRig {
+final class ScrollRig {
     let contentWidth: CGFloat = 880
     let window: RigWindow
     let scrollView = NSScrollView()
@@ -100,11 +121,14 @@ private final class ScrollRig {
     var autoOpened: [String] = []
     /// `key=state` for every activity-row toggle the operator made, as the pane's `onActivityToggle` saw it (FV2).
     var activityToggles: [String] = []
-    /// Ordinals the pane was told to hold back (FV2's interim hold), in order.
+    /// Ordinals the pane was told to hold back (FV3), in order.
     var holds: [Int] = []
-    /// Overrides the interim hold policy (`!followTail.isPinned`, what `ReplView` wires) for a test
-    /// that needs a roll-in to go through while the pane is not following.
-    var holdPolicy: (() -> Bool)?
+    /// The pane's roll-in holds: the same `RollInHolds` `ReplView` owns, so the tests drive the real methods.
+    var rollInHolds: RollInHolds!
+    /// Reduce Motion, as the pane would read it from the system.
+    var reduceMotion = false
+    /// Plays (records) the collapse of an on-screen roll-in; completes it at once unless a test says otherwise.
+    let animator = RigRollInAnimator()
     var coordinator: TranscriptViewportCoordinator!
 
     init(_ testCase: XCTestCase, turns: [ChatTurn], size: NSSize = NSSize(width: 900, height: 600)) {
@@ -133,9 +157,13 @@ private final class ScrollRig {
         followTail.requestPass = { [unowned self] in self.passRequested = true }
         followTail.onFlip = { [unowned self] flip in
             self.flips.append(flip)
-            // ReplView: becoming pinned (following, or Jump to latest) releases every hold.
-            if flip.pinned { self.releaseHolds() }
+            // ReplView: following again releases what the policy no longer holds; Jump to latest
+            // and a send release everything.
+            if flip.pinned {
+                self.rollInHolds.pinned(jumpedToLatest: flip.cause == .jumpToLatest || flip.cause == .send)
+            }
         }
+        followTail.onScroll = { [unowned self] in self.rollInHolds.scrolled() }
         virtualizer.foldState = { [unowned self] turn in self.store.state(for: turn.id) }
 
         coordinator = TranscriptViewportCoordinator(virtualizer: virtualizer, scrollView: scrollView,
@@ -148,6 +176,14 @@ private final class ScrollRig {
             self.virtualizer.splice(turns: self.turns, from: 0)
             self.runPass()
         }
+        rollInHolds = RollInHolds(
+            scrollView: scrollView, store: store,
+            viewFor: { [unowned self] id in self.materialized[id] },
+            turnFor: { [unowned self] id in self.turns.first { $0.id == id } },
+            applyChange: { [unowned self] ids, mutation in self.coordinator.applyFoldChange(turnIds: ids, mutation: mutation) })
+        rollInHolds.isFollowingTail = { [unowned self] in self.followTail.isPinned }
+        rollInHolds.reduceMotion = { [unowned self] in self.reduceMotion }
+        rollInHolds.animator = animator
     }
 
     /// Lay the turns out and park at the bottom, like a pane that has been following.
@@ -173,10 +209,11 @@ private final class ScrollRig {
                                 folds: FoldResolver(state: state, expandedByDefault: expandedByDefault),
                                 heldOrdinals: state.heldOrdinals)
         let id = turn.id
-        view.holdsRollIns = { [unowned self] in self.holdPolicy?() ?? !self.followTail.isPinned }
+        rollInHolds.wire(view, turn: id)
+        let recorded = view.onHold
         view.onHold = { [unowned self] ordinal in
             self.holds.append(ordinal)
-            self.store.hold(turn: id, ordinal: ordinal)
+            recorded?(ordinal)
         }
         view.onActivityToggle = { [unowned self] key, open in
             self.activityToggles.append("\(key)=\(open)")
@@ -321,19 +358,6 @@ private final class ScrollRig {
         runPass()
     }
 
-    /// What `ReplView` does when the pane becomes pinned: forget every hold and re-present those
-    /// turns, off screen, with the reading position anchored.
-    func releaseHolds() {
-        let ids = store.releaseAllHolds()
-        guard !ids.isEmpty else { return }
-        coordinator.applyFoldChange(turnIds: ids) {
-            for id in ids {
-                guard let index = self.turns.firstIndex(where: { $0.id == id }) else { continue }
-                self.materialized[id]?.releaseHolds(turn: self.turns[index])
-            }
-        }
-    }
-
     /// The index of the group view among its turn view's subviews.
     func columnIndex(ofGroup key: String, inTurn id: UUID) -> Int? {
         guard let turnView = materialized[id], let group = turnView.groupView(forKey: key) else { return nil }
@@ -399,7 +423,7 @@ private final class ScrollRig {
 }
 
 /// The regression assertion: what the operator was looking at has not moved.
-private func assertStill(_ rig: ScrollRig, _ probe: ScrollProbe, _ context: String,
+func assertStill(_ rig: ScrollRig, _ probe: ScrollProbe, _ context: String,
                          file: StaticString = #filePath, line: UInt = #line) {
     guard let y = rig.screenY(of: probe.landmark) else {
         return XCTFail("the first visible item is no longer on screen: \(context)", file: file, line: line)
@@ -1599,10 +1623,10 @@ final class ToolFoldSubagentScrollTests: XCTestCase {
 
 // MARK: - Focus: roll-ins, holds and activity rows (FV2)
 
-private func focusMessage(_ tag: String) -> TurnBlock { .text("\(tag) \(F.prose) \(F.prose)") }
+func focusMessage(_ tag: String) -> TurnBlock { .text("\(tag) \(F.prose) \(F.prose)") }
 
 /// An activity row (`opening` and one group of three calls) above a tall latest message.
-private func activityTurn(_ n: Int) -> ChatTurn {
+func activityTurn(_ n: Int) -> ChatTurn {
     F.turn([focusMessage("Act \(n) opening")] + F.run(3, prefix: "A\(n)_") + fillerBlocks(10, tag: "act \(n)"),
            user: "activity \(n)")
 }
@@ -1639,7 +1663,7 @@ final class FocusScrollTests: XCTestCase {
         XCTAssertTrue(rig.flips.filter { !$0.pinned }.isEmpty, "following never stopped")
     }
 
-    // MARK: not following: the interim hold
+    // MARK: not following: a message on screen is held (FV3 refines FV2's interim hold of every roll-in)
 
     private func holdingRig() -> (ScrollRig, ChatTurn) {
         // The outgoing message is three text blocks tall, so it is on screen however the geometry rounds.
@@ -1778,7 +1802,13 @@ final class FocusScrollTests: XCTestCase {
                                    "precondition: a lane member is on screen")
         let before = rig.screenY(of: member)
         let probe = try XCTUnwrap(rig.probe())
-        rig.holdPolicy = { false }   // off screen roll-ins go through (FV3's rule); this is the layout half
+        // FV3: a non-following pane holds only a message that is on screen. The outgoing (latest)
+        // message sits at the end of the open lane, below the viewport, so the roll-in goes through.
+        let tailView = try XCTUnwrap(rig.materialized[tail.id])
+        let outgoing = try XCTUnwrap(tailView.rollInRect(ordinal: 16).map { tailView.convert($0, to: rig.doc) },
+                                     "precondition: the latest message has views of its own")
+        XCTAssertFalse(RollInPolicy.isVisible(outgoing, in: rig.clip.bounds),
+                       "precondition: the outgoing message is off screen, so the policy lets the roll-in through")
 
         // A note between, so it is a newer message (contract §2.1) and nothing trails the old one.
         rig.append([.note("Model changed to Opus."), focusMessage("NEWER-MSG")])

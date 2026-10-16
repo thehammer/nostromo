@@ -37,9 +37,10 @@ struct TurnInteractionState: Equatable {
     /// (Focus view). In memory per pane until FV4 moves it, with `groupStates`, to the store.
     var activityStates: [String: Bool] = [:]
 
-    /// Ordinals of messages whose roll-in this pane is holding back (FV2's interim hold): they
-    /// stay on screen as conversation, at their place, until the pane follows the tail again.
-    /// Per pane and transient, never persisted (contract §2.5).
+    /// Ordinals of messages whose roll-in this pane is holding back (FV3's reader-protected
+    /// roll-in): they stay on screen as conversation, at their place, until `RollInPolicy` lets
+    /// them go. `FocusPlanner.leadingGroups` stands for the groups before the turn's first message.
+    /// Per pane and transient, never persisted and never broadcast (contract §2.5).
     var heldOrdinals: Set<Int> = []
 
     var isEmpty: Bool {
@@ -63,6 +64,13 @@ struct TurnInteractionState: Equatable {
 final class TurnInteractionStore {
 
     private var states: [UUID: TurnInteractionState] = [:]
+
+    /// The turns that hold at least one message back. Kept as holds come and go, so asking
+    /// "is anything held?" (every scroll does) is O(1) and walking the holds is O(held turns).
+    private(set) var heldTurns: Set<UUID> = []
+
+    /// Whether any turn holds a message back.
+    var hasHolds: Bool { !heldTurns.isEmpty }
 
     /// Interaction state for a turn. An unknown turn has none, which is the
     /// same thing as "nothing has been done to it".
@@ -102,25 +110,45 @@ final class TurnInteractionStore {
     /// Hold back the roll-in of message `ordinal` of `turn`.
     func hold(turn: UUID, ordinal: Int) {
         states[turn, default: TurnInteractionState()].heldOrdinals.insert(ordinal)
+        heldTurns.insert(turn)
+    }
+
+    /// Release some of `turn`'s holds.
+    func release(turn: UUID, ordinals: Set<Int>) {
+        guard states[turn] != nil else { return }
+        states[turn]?.heldOrdinals.subtract(ordinals)
+        settleHolds(of: turn)
+    }
+
+    /// Drop every hold of `turn`: it was removed or replaced.
+    func dropHolds(turn: UUID) {
+        guard states[turn] != nil else { return }
+        states[turn]?.heldOrdinals = []
+        settleHolds(of: turn)
     }
 
     /// Release every hold in the pane. Returns the turns that had any.
     @discardableResult
     func releaseAllHolds() -> Set<UUID> {
-        var released: Set<UUID> = []
-        for (id, state) in states where !state.heldOrdinals.isEmpty {
-            released.insert(id)
-            states[id]?.heldOrdinals = []
-            if states[id]?.isEmpty == true { states.removeValue(forKey: id) }
-        }
+        let released = heldTurns
+        for id in released { dropHolds(turn: id) }
         return released
     }
 
-    func removeAll() { states.removeAll() }
+    private func settleHolds(of turn: UUID) {
+        if states[turn]?.heldOrdinals.isEmpty != false { heldTurns.remove(turn) }
+        if states[turn]?.isEmpty == true { states.removeValue(forKey: turn) }
+    }
+
+    func removeAll() {
+        states.removeAll()
+        heldTurns.removeAll()
+    }
 
     /// Forget every turn that is no longer in the transcript.
     func prune(keeping ids: Set<UUID>) {
         states = states.filter { ids.contains($0.key) }
+        heldTurns.formIntersection(ids)
     }
 
     /// Turns currently carrying state, for tests and diagnostics.

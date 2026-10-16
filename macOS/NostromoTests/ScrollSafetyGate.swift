@@ -56,7 +56,14 @@ final class SafetyRig {
     /// `key=state` for every toggle the operator made, as the pane's `onGroupToggle` saw it.
     var groupToggles: [String] = []
     var autoOpened: [String] = []
+    /// `key=state` for every activity-row toggle the operator made, as the pane's `onActivityToggle` saw it.
+    var activityToggles: [String] = []
     var coordinator: TranscriptViewportCoordinator!
+    /// The pane's roll-in holds: the same `RollInHolds` `ReplView` owns, wired the way `ScrollRig` wires it, so
+    /// the gate can run roll-in scenarios.
+    var rollInHolds: RollInHolds!
+    var reduceMotion = false
+    let animator = RigRollInAnimator()
 
     /// The composer, laid out under the clip view the way `ReplView` stacks them: its height
     /// constraint drives the clip height.
@@ -103,7 +110,13 @@ final class SafetyRig {
         followTail.contentWidth = { [unowned self] in self.contentWidth }
         followTail.isMaterializing = { [unowned self] in self.isMaterializing }
         followTail.requestPass = { [unowned self] in self.passRequested = true }
-        followTail.onFlip = { [unowned self] in self.flips.append($0) }
+        followTail.onFlip = { [unowned self] flip in
+            self.flips.append(flip)
+            if flip.pinned {
+                self.rollInHolds.pinned(jumpedToLatest: flip.cause == .jumpToLatest || flip.cause == .send)
+            }
+        }
+        followTail.onScroll = { [unowned self] in self.rollInHolds.scrolled() }
         virtualizer.foldState = { [unowned self] turn in self.store.state(for: turn.id) }
 
         coordinator = TranscriptViewportCoordinator(virtualizer: virtualizer, scrollView: scrollView,
@@ -116,6 +129,14 @@ final class SafetyRig {
             self.virtualizer.splice(turns: self.turns, from: 0)
             self.runPass()
         }
+        rollInHolds = RollInHolds(
+            scrollView: scrollView, store: store,
+            viewFor: { [unowned self] id in self.materialized[id] },
+            turnFor: { [unowned self] id in self.turns.first { $0.id == id } },
+            applyChange: { [unowned self] ids, mutation in self.coordinator.applyFoldChange(turnIds: ids, mutation: mutation) })
+        rollInHolds.isFollowingTail = { [unowned self] in self.followTail.isPinned }
+        rollInHolds.reduceMotion = { [unowned self] in self.reduceMotion }
+        rollInHolds.animator = animator
     }
 
     /// Lay the turns out and park at the bottom, like a pane that has been following.
@@ -138,8 +159,18 @@ final class SafetyRig {
     private func makeView(for turn: ChatTurn) -> ChatTurnView {
         let state = store.state(for: turn.id)
         let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: state,
-                                folds: FoldResolver(state: state, expandedByDefault: expandedByDefault))
+                                folds: FoldResolver(state: state, expandedByDefault: expandedByDefault),
+                                heldOrdinals: state.heldOrdinals)
         let id = turn.id
+        rollInHolds.wire(view, turn: id)
+        view.onActivityToggle = { [unowned self] key, open in
+            self.activityToggles.append("\(key)=\(open)")
+            self.store.setActivity(turn: id, key: key, open)
+            self.pending.insert(id)
+            if let index = self.turns.firstIndex(where: { $0.id == id }) {
+                self.coordinator.noteUserToggle(turnIndex: index, itemKey: key)
+            }
+        }
         view.onGroupToggle = { [unowned self] key, open in
             self.groupToggles.append("\(key)=\(open)")
             self.store.setGroup(turn: id, key: key, open)
@@ -317,6 +348,14 @@ extension SafetyRig {
         textView.setSelectedRange(Self.typedSelection)
     }
 
+    /// The durable identity (`ChatTurn.identityKey`) of the turn at the viewport top. The snapshot's own
+    /// `turnKey` is the turn's content key, which changes when a block is appended to that turn, so an
+    /// event that streams into the turn at the top would false-fail a comparison of it.
+    func firstVisibleTurnIdentity() -> String? {
+        let index = virtualizer.index(atY: clip.bounds.minY)
+        return turns.indices.contains(index) ? turns[index].identityKey : nil
+    }
+
     /// What the probe reports for this pane, taken the way `ReplView.anchorSnapshot` does.
     func snapshot(window index: Int = 0) -> TranscriptAnchorSnapshot {
         let anchor = virtualizer.captureAnchor(viewportTop: clip.bounds.minY) { [unowned self] i, y in
@@ -336,6 +375,7 @@ extension SafetyRig {
                       file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(followTail.isPinned, following, "\(name): setup follows the tail = \(following)", file: file, line: line)
         let before = snapshot()
+        let turnBefore = firstVisibleTurnIdentity()
         let barBefore = inputBar.frame.height
         let scrollBefore = composerScroll?.frame
         let responderBefore = window.firstResponder
@@ -348,7 +388,7 @@ extension SafetyRig {
         settle()
 
         let after = snapshot()
-        XCTAssertEqual(after.firstVisible?.turnKey, before.firstVisible?.turnKey, "\(name): first visible turn changed", file: file, line: line)
+        XCTAssertEqual(firstVisibleTurnIdentity(), turnBefore, "\(name): first visible turn changed", file: file, line: line)
         XCTAssertEqual(after.firstVisible?.itemKey, before.firstVisible?.itemKey, "\(name): first visible item changed", file: file, line: line)
         let drift = abs((after.firstVisible?.offsetPt ?? .infinity) - (before.firstVisible?.offsetPt ?? 0))
         XCTAssertLessThanOrEqual(drift, 1, "\(name): first visible block moved by \(drift) pt", file: file, line: line)
