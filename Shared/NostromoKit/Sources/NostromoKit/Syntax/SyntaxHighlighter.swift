@@ -65,7 +65,7 @@ private enum U {
     static let lt: UInt16 = 60, eq: UInt16 = 61, gt: UInt16 = 62, question: UInt16 = 63
     static let at: UInt16 = 64, lbracket: UInt16 = 91, backslash: UInt16 = 92
     static let rbracket: UInt16 = 93, underscore: UInt16 = 95, backtick: UInt16 = 96
-    static let lbrace: UInt16 = 123, pipe: UInt16 = 124, rbrace: UInt16 = 125, tilde: UInt16 = 126
+    static let lbrace: UInt16 = 123, pipe: UInt16 = 124, rbrace: UInt16 = 125
 }
 
 /// A string form: how one kind of literal opens, escapes, interpolates and closes.
@@ -210,6 +210,12 @@ final class SyntaxScanner {
         return j
     }
 
+    private func scanASCIIIdentifier(from p: Int) -> Int {
+        var j = p
+        while isAlpha(at(j)) || isDigit(at(j)) || at(j) == U.underscore { tick(); j += 1 }
+        return j
+    }
+
     private func isKnownFailure(_ key: String, at p: Int) -> Bool {
         guard let f = failed[key] else { return false }
         return p >= f.from && p < f.stop
@@ -267,8 +273,11 @@ final class SyntaxScanner {
         return true
     }
 
-    // MARK: Comments
+}
 
+// MARK: - Comments
+
+extension SyntaxScanner {
     private func tryComment(_ i: Int) -> Int? {
         let c = u[i]
         for marker in lineComments where c == marker[0] && matches(marker, at: i) {
@@ -323,8 +332,11 @@ final class SyntaxScanner {
             || p == U.lparen || p == U.rparen
     }
 
-    // MARK: Words and numbers
+}
 
+// MARK: - Words and numbers
+
+extension SyntaxScanner {
     private static let pythonPrefixes: Set<String> = ["r", "b", "u", "f", "rb", "br", "fr", "rf"]
 
     private func tryWord(_ i: Int) -> Int? {
@@ -392,8 +404,9 @@ final class SyntaxScanner {
         var j = i
         if json && u[j] == U.minus { j += 1 }
         guard isDigit(at(j)) else { return nil }
-        if u[j] == 48, let radix = at(j + 1) as UInt16?, radix == 120 || radix == 88 || radix == 111
-            || radix == 79 || radix == 98 || radix == 66 {
+        let radix = at(j + 1)
+        if u[j] == 48 && (radix == 120 || radix == 88 || radix == 111
+                          || radix == 79 || radix == 98 || radix == 66) {   // 0x 0o 0b
             j += 2
             while isDigit(at(j)) || isAlpha(at(j)) || at(j) == U.underscore { tick(); j += 1 }
         } else {
@@ -415,8 +428,11 @@ final class SyntaxScanner {
         return j
     }
 
-    // MARK: Strings
+}
 
+// MARK: - Strings
+
+extension SyntaxScanner {
     private func tryString(_ i: Int) -> Int? {
         guard let (form, content) = stringForm(at: i) else { return nil }
         return runString(form, tokenStart: i, content: content)
@@ -579,7 +595,8 @@ final class SyntaxScanner {
         return k
     }
 
-    /// `index` if `hashes` `#` follow it... the end of the closer; nil if they don't.
+    /// The index after `hashes` `#` starting at `index` (the end of a raw-string
+    /// closer), or nil if they don't all follow.
     private func closerHashes(after index: Int, _ hashes: Int) -> Int? {
         var k = index
         for _ in 0..<hashes {
@@ -617,8 +634,11 @@ final class SyntaxScanner {
         return nil
     }
 
-    // MARK: Language-specific starts
+}
 
+// MARK: - Language dispatch
+
+extension SyntaxScanner {
     private func trySpecific(_ i: Int) -> Int? {
         let c = u[i]
         if sql { return nil }
@@ -631,8 +651,11 @@ final class SyntaxScanner {
         return nil
     }
 
-    // PHP
+}
 
+// MARK: - PHP
+
+extension SyntaxScanner {
     private func tryPHP(_ i: Int, _ c: UInt16) -> Int? {
         switch c {
         case U.lt:
@@ -682,12 +705,11 @@ final class SyntaxScanner {
         return j
     }
 
-    private func scanASCIIIdentifier(from p: Int) -> Int {
-        var j = p
-        while (isAlpha(at(j)) || isDigit(at(j)) || at(j) == U.underscore) { tick(); j += 1 }
-        return j
-    }
+}
 
+// MARK: - Heredocs (shared by PHP and Bash)
+
+extension SyntaxScanner {
     private enum HeredocStrip { case none, tabs, whitespace }
 
     /// The end (exclusive) of the closing line's identifier, searching whole lines
@@ -719,8 +741,11 @@ final class SyntaxScanner {
         return nil
     }
 
-    // Bash
+}
 
+// MARK: - Bash
+
+extension SyntaxScanner {
     private func tryBash(_ i: Int, _ c: UInt16) -> Int? {
         switch c {
         case U.dollar:
@@ -793,12 +818,15 @@ final class SyntaxScanner {
         return max(last.upperBound, i + 1)
     }
 
-    // Swift
+}
 
+// MARK: - Swift
+
+extension SyntaxScanner {
     private static let swiftDirectives: Set<String> = [
         "if", "else", "elseif", "endif", "available", "unavailable", "selector", "keyPath",
         "warning", "error", "sourceLocation", "file", "line", "function", "column", "colorLiteral",
-        "imageLiteral", "fileLiteral", "line",
+        "imageLiteral", "fileLiteral",
     ]
 
     private func trySwift(_ i: Int, _ c: UInt16) -> Int? {
@@ -828,8 +856,11 @@ final class SyntaxScanner {
         return i + hashes
     }
 
-    // Rust
+}
 
+// MARK: - Rust
+
+extension SyntaxScanner {
     private func tryRust(_ i: Int, _ c: UInt16) -> Int? {
         if c == U.hash {
             let bang = at(i + 1) == U.bang
@@ -881,8 +912,11 @@ final class SyntaxScanner {
         return runString(form, tokenStart: start, content: hashesAt + hashes + 1)
     }
 
-    // Python
+}
 
+// MARK: - Python
+
+extension SyntaxScanner {
     private func tryPython(_ i: Int, _ c: UInt16) -> Int? {
         guard c == U.at && atLineStart(i) else { return nil }
         var j = i + 1
@@ -891,8 +925,11 @@ final class SyntaxScanner {
         return max(j, i + 1)
     }
 
-    // MARK: Diff
+}
 
+// MARK: - Diff
+
+extension SyntaxScanner {
     private func runDiff() {
         var ls = 0
         var inHeader = true
@@ -951,8 +988,11 @@ final class SyntaxScanner {
         return matches(Array("@@".utf16), at: third)
     }
 
-    // MARK: YAML
+}
 
+// MARK: - YAML
+
+extension SyntaxScanner {
     private func runYAML() {
         var ls = 0
         var blockParentIndent: Int?
