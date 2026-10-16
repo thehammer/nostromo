@@ -1,0 +1,36 @@
+Build & Lint	UNKNOWN STEP	2026-10-14T23:06:20.4233694Z ^[[1m^[[92m  Downloaded^[[0m unicode-normalization v0.1.25
+Build & Lint	UNKNOWN STEP	2026-10-14T23:06:20.6013979Z ^[[1m^[[92m   Compiling^[[0m tinyvec_macros v0.1.1
+Build & Lint	UNKNOWN STEP	2026-10-14T23:06:21.9571862Z ^[[1m^[[92m   Compiling^[[0m tinyvec v1.11.0
+Build & Lint	UNKNOWN STEP	2026-10-14T23:06:26.2039633Z ^[[1m^[[92m   Compiling^[[0m unicode-normalization v0.1.25
+Build & Lint	UNKNOWN STEP	2026-10-14T23:06:27.1648457Z ^[[1m^[[92m   Compiling^[[0m nostromo v0.1.0 (/home/runner/work/nostromo/nostromo)
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:43.3223817Z ^[[1m^[[92m    Finished^[[0m `dev` profile [unoptimized + debuginfo] target(s) in 3m 24s
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.6845791Z ##[group]Run cargo clippy --all-targets -- -D warnings
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.6855659Z ^[[36;1mcargo clippy --all-targets -- -D warnings^[[0m
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.8077562Z shell: /usr/bin/bash -e {0}
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.8081848Z env:
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.8085586Z   CARGO_TERM_COLOR: always
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.8088212Z   CARGO_HOME: /home/runner/.cargo
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.8091690Z   CARGO_INCREMENTAL: 0
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:45.8099873Z ##[endgroup]
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:47.7254340Z ^[[1m^[[92m    Checking^[[0m tinyvec_macros v0.1.1
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:47.7500208Z ^[[1m^[[92m    Checking^[[0m tinyvec v1.11.0
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:47.9309279Z ^[[1m^[[92m    Checking^[[0m unicode-normalization v0.1.25
+Build & Lint	UNKNOWN STEP	2026-10-14T23:09:48.1386993Z ^[[1m^[[92m    Checking^[[0m nostromo v0.1.0 (/home/runner/work/nostromo/nostromo)
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9786051Z ^[[1m^[[91merror^[[0m^[[1m: consider using `sort_by_key`^[[0m
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9789791Z    ^[[1m^[[94m--> ^[[0msrc/ipc/tasks.rs:909:9
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9792931Z     ^[[1m^[[94m|^[[0m
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9796926Z ^[[1m^[[94m909^[[0m ^[[1m^[[94m|^[[0m         ended.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9803796Z     ^[[1m^[[94m|^[[0m         ^[[1m^[[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[[0m
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9810460Z     ^[[1m^[[94m|^[[0m
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9811379Z     ^[[1m^[[94m= ^[[0m^[[1mhelp^[[0m: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_sort_by
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9834070Z     ^[[1m^[[94m= ^[[0m^[[1mnote^[[0m: `-D clippy::unnecessary-sort-by` implied by `-D warnings`
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9839191Z     ^[[1m^[[94m= ^[[0m^[[1mhelp^[[0m: to override `-D warnings` add `#[allow(clippy::unnecessary_sort_by)]`
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9844466Z ^[[1m^[[96mhelp^[[0m: try
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9848036Z     ^[[1m^[[94m|^[[0m
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9855119Z ^[[1m^[[94m909^[[0m ^[[91m- ^[[0m        ended.^[[91msort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)))^[[0m;
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9859182Z ^[[1m^[[94m909^[[0m ^[[92m+ ^[[0m        ended.^[[92msort_by_key(|a| std::cmp::Reverse((a.0, a.1)))^[[0m;
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9859825Z     ^[[1m^[[94m|^[[0m
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:02.9864099Z 
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:03.7952048Z ^[[1m^[[91merror^[[0m: could not compile `nostromo` (lib) due to 1 previous error
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:03.8547517Z ##[error]Process completed with exit code 101.
+Build & Lint	UNKNOWN STEP	2026-10-14T23:10:03.9493390Z Post job cleanup.

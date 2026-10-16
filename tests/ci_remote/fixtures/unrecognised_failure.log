@@ -1,0 +1,40 @@
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:05.6475810Z test ordinary_visible_text_survives_in_a_reason_and_only_the_emoji_variation_selector_goes ... ok
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:05.8403577Z test ordinary_visible_text_and_emoji_survive_in_a_detail_body ... ok
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:05.8989663Z test ordinary_visible_text_and_emoji_survive_in_a_list_title ... ok
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:05.8990272Z 
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:05.8990851Z test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:05.8991284Z 
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:05.9000534Z ^[[1m^[[92m   Doc-tests^[[0m nostromo
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:08.6823688Z 
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:08.6824533Z running 2 tests
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:08.6831211Z test src/transcript/integration.rs - transcript::integration (line 4) ... ignored
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:08.7517248Z test src/mdns.rs - mdns (line 9) - compile ... ok
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:08.7517610Z 
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:08.7517963Z test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.07s
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:08.7518416Z 
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:10.3446227Z Post job cleanup.
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:10.6483953Z (node:22923) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:10.6484867Z (Use `node --trace-deprecation ...` to show where the warning was created)
+Build & Lint	UNKNOWN STEP	2026-10-15T22:06:10.6677825Z [command]/usr/bin/tar --posix -cf cache.tzst --exclude cache.tzst -P -C /home/runner/work/nostromo/nostromo --files-from manifest.txt --use-compress-program zstdmt
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:41.0212501Z ##[warning]You are running out of disk space. The runner will stop working when the machine runs out of disk space. Free space left: 85 MB
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.1711195Z zstd: error 70 : Write error : cannot write block : No space left on device 
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.1916285Z /usr/bin/tar: cache.tzst: Wrote only 4096 of 10240 bytes
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.1916789Z /usr/bin/tar: Child returned status 70
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.5001746Z ##[error]No space left on device : '/home/runner/actions-runner/cached/2.337.0/_diag/pages/742443db-9701-8303-87d9-63c1e96de2b8_b668096f-0a0e-5ac0-8438-55a6056e61c5_1.log'
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.5165261Z Post job cleanup.
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.7171332Z [command]/usr/bin/git version
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.7891069Z git version 2.55.0
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.7934192Z Temporarily overriding HOME='/home/runner/work/_temp/05ae17c3-a17c-4a8e-a361-cf74eaffff05' before making global git config changes
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.7935539Z Adding repository directory to the temporary git global config as a safe directory
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.7941987Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/nostromo/nostromo
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.7996971Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.8038122Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.9059920Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.9080154Z http.https://github.com/.extraheader
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.9094138Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.9142930Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.9452790Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.9493663Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:50.9924485Z Cleaning up orphan processes
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:51.0216613Z Terminate orphan process: pid (22923) (MainThread)
+Build & Lint	UNKNOWN STEP	2026-10-15T22:09:51.0254767Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@v4, actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

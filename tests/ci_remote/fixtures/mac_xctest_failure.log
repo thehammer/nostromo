@@ -1,0 +1,139 @@
+Swift tests (Mac app)	make mac-test	﻿2026-10-10T13:44:37.4830310Z ##[group]Run make mac-test
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:37.4830610Z ^[[36;1mmake mac-test^[[0m
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:37.4868090Z shell: /bin/bash -e {0}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:37.4868280Z env:
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:37.4868450Z   CARGO_TERM_COLOR: always
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:37.4868700Z ##[endgroup]
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:38.4412410Z set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:38.4462830Z 	  -destination 'platform=macOS' -derivedDataPath build test \
+Swift tests (Mac app)	make mac-test	2026-10-10T13:44:38.4564310Z 	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8203110Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.011 (0.014) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8211490Z make: *** [mac-test] Error 65
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8212060Z 	 Executed 44 tests, with 0 failures (0 unexpected) in 0.120 (0.155) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8224140Z 	 Executed 7 tests, with 0 failures (0 unexpected) in 0.009 (0.010) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8267210Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.008 (0.011) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8272740Z 2026-10-10 13:45:49.641386+0000 xctest[22257:59748] [Connection] Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut" UserInfo={NSDebugDescription=connection to service named com.apple.linkd.autoShortcut}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8276060Z 2026-10-10 13:45:49.643432+0000 xctest[22257:59758] [Connection] Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut" UserInfo={NSDebugDescription=connection to service named com.apple.linkd.autoShortcut}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8278390Z 2026-10-10 13:45:49.643474+0000 xctest[22257:59758] [Connection] Unable to re-register with Process Instance Registry, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut" UserInfo={NSDebugDescription=connection to service named com.apple.linkd.autoShortcut}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8281060Z 2026-10-10 13:45:49.644148+0000 xctest[22257:59747] [Connection] Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut" UserInfo={NSDebugDescription=connection to service named com.apple.linkd.autoShortcut}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8288810Z 2026-10-10 13:45:49.644204+0000 xctest[22257:59747] [Connection] Unable to re-register with Process Instance Registry, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut" UserInfo={NSDebugDescription=connection to service named com.apple.linkd.autoShortcut}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8312530Z 2026-10-10 13:45:49.644772+0000 xctest[22257:59748] [Connection] Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut" UserInfo={NSDebugDescription=connection to service named com.apple.linkd.autoShortcut}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8321800Z 2026-10-10 13:45:49.644791+0000 xctest[22257:59748] [Connection] Unable to re-register with Process Instance Registry, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut" UserInfo={NSDebugDescription=connection to service named com.apple.linkd.autoShortcut}
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8323160Z 	 Executed 14 tests, with 0 failures (0 unexpected) in 3.634 (3.641) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8323630Z 	 Executed 9 tests, with 0 failures (0 unexpected) in 1.821 (1.828) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8324230Z 	 Executed 11 tests, with 0 failures (0 unexpected) in 3.665 (3.673) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8325990Z 	 Executed 6 tests, with 0 failures (0 unexpected) in 0.007 (0.010) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8326500Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.089 (0.091) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8327060Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 0.008 (0.011) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8329200Z 	 Executed 26 tests, with 0 failures (0 unexpected) in 17.302 (17.318) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8335120Z 	 Executed 4 tests, with 0 failures (0 unexpected) in 1.022 (1.026) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8336440Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 1.205 (1.208) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8338140Z 	 Executed 6 tests, with 0 failures (0 unexpected) in 0.213 (0.217) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8342590Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:387: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentAvailable] : XCTAssertEqualWithAccuracy failed: ("96.0") is not equal to ("99.0") +/- ("1.0") - tool-call (contentAvailable: true): expected 99.0 pt, got 96.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8348510Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:387: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentAvailable] : XCTAssertEqualWithAccuracy failed: ("851.0") is not equal to ("973.0") +/- ("1.0") - tool-result-expanded (contentAvailable: true): expected 973.0 pt, got 851.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8355050Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:387: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentAvailable] : XCTAssertEqualWithAccuracy failed: ("483.0") is not equal to ("536.0") +/- ("1.0") - tool-result-error-expanded (contentAvailable: true): expected 536.0 pt, got 483.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8361020Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:387: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentAvailable] : XCTAssertEqualWithAccuracy failed: ("98.0") is not equal to ("101.0") +/- ("1.0") - error-message (contentAvailable: true): expected 101.0 pt, got 98.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8367310Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:387: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentAvailable] : XCTAssertEqualWithAccuracy failed: ("548.0") is not equal to ("554.0") +/- ("1.0") - mixed-agentic (contentAvailable: true): expected 554.0 pt, got 548.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8371790Z Test Case '-[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentAvailable]' failed (1.524 seconds).
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8376020Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:398: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentUnavailable] : XCTAssertEqualWithAccuracy failed: ("115.0") is not equal to ("118.0") +/- ("1.0") - tool-call (contentAvailable: false): expected 118.0 pt, got 115.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8380080Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:398: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentUnavailable] : XCTAssertEqualWithAccuracy failed: ("150.0") is not equal to ("156.0") +/- ("1.0") - tool-result-expanded (contentAvailable: false): expected 156.0 pt, got 150.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8383550Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:398: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentUnavailable] : XCTAssertEqualWithAccuracy failed: ("150.0") is not equal to ("156.0") +/- ("1.0") - tool-result-error-expanded (contentAvailable: false): expected 156.0 pt, got 150.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8385920Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:398: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentUnavailable] : XCTAssertEqualWithAccuracy failed: ("117.0") is not equal to ("120.0") +/- ("1.0") - error-message (contentAvailable: false): expected 120.0 pt, got 117.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8388310Z /Users/runner/work/nostromo/nostromo/macOS/NostromoTests/ChatTurnViewLayoutTests.swift:398: error: -[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentUnavailable] : XCTAssertEqualWithAccuracy failed: ("567.0") is not equal to ("573.0") +/- ("1.0") - mixed-agentic (contentAvailable: false): expected 573.0 pt, got 567.0 pt
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8390710Z Test Case '-[NostromoTests.ChatTurnViewLayoutTests testRenderedHeightMatchesGoldensWithContentUnavailable]' failed (0.096 seconds).
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8391620Z Test Suite 'ChatTurnViewLayoutTests' failed at 2026-10-10 13:46:21.283.
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8392330Z 	 Executed 15 tests, with 10 failures (0 unexpected) in 2.730 (2.738) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8393000Z 	 Executed 10 tests, with 0 failures (0 unexpected) in 0.028 (0.031) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8393570Z 	 Executed 14 tests, with 0 failures (0 unexpected) in 0.011 (0.015) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8394250Z 	 Executed 26 tests, with 0 failures (0 unexpected) in 0.029 (0.054) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8394720Z 	 Executed 20 tests, with 0 failures (0 unexpected) in 5.460 (5.470) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8395300Z 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8395880Z 	 Executed 52 tests, with 0 failures (0 unexpected) in 0.121 (0.155) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8396550Z 	 Executed 6 tests, with 0 failures (0 unexpected) in 0.109 (0.112) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8406650Z 	 Executed 12 tests, with 0 failures (0 unexpected) in 0.010 (0.015) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8407940Z 	 Executed 25 tests, with 0 failures (0 unexpected) in 0.027 (0.049) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8409250Z 	 Executed 14 tests, with 0 failures (0 unexpected) in 0.025 (0.030) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8410500Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 0.018 (0.031) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8412170Z 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.008 (0.009) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8413650Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.009 (0.010) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8415350Z 	 Executed 17 tests, with 0 failures (0 unexpected) in 0.088 (0.096) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8416860Z 	 Executed 37 tests, with 0 failures (0 unexpected) in 0.082 (0.099) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8419690Z 	 Executed 17 tests, with 0 failures (0 unexpected) in 0.016 (0.023) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8424890Z 	 Executed 21 tests, with 0 failures (0 unexpected) in 0.134 (0.153) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8425710Z 	 Executed 19 tests, with 0 failures (0 unexpected) in 0.012 (0.017) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8427230Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 3.292 (3.296) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8430650Z 	 Executed 9 tests, with 0 failures (0 unexpected) in 0.012 (0.015) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8431610Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.229 (0.230) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8432230Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.024 (0.025) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8432920Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 0.019 (0.025) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8434290Z 	 Executed 22 tests, with 0 failures (0 unexpected) in 0.065 (0.084) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8434850Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.014 (0.019) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8435460Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.008 (0.013) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8436090Z 	 Executed 15 tests, with 0 failures (0 unexpected) in 0.044 (0.056) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8436660Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 3.180 (3.184) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8437210Z 	 Executed 4 tests, with 0 failures (0 unexpected) in 0.004 (0.006) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8439780Z 	 Executed 6 tests, with 0 failures (0 unexpected) in 0.583 (0.585) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8442060Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 0.482 (0.486) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8443870Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.007 (0.010) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8444740Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.005 (0.008) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8445570Z 	 Executed 4 tests, with 0 failures (0 unexpected) in 6.553 (6.556) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8446330Z 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8446790Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8447470Z 	 Executed 12 tests, with 0 failures (0 unexpected) in 0.741 (0.769) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8448270Z 	 Executed 7 tests, with 0 failures (0 unexpected) in 0.013 (0.016) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8449080Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.011 (0.013) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8449730Z 	 Executed 56 tests, with 0 failures (0 unexpected) in 0.207 (0.266) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8450320Z 	 Executed 25 tests, with 0 failures (0 unexpected) in 0.184 (0.246) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8450970Z 	 Executed 23 tests, with 0 failures (0 unexpected) in 0.142 (0.181) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8451810Z 	 Executed 10 tests, with 0 failures (0 unexpected) in 0.035 (0.052) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8452510Z 	 Executed 10 tests, with 0 failures (0 unexpected) in 0.064 (0.082) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8453170Z 	 Executed 11 tests, with 0 failures (0 unexpected) in 0.072 (0.098) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8453660Z 	 Executed 15 tests, with 0 failures (0 unexpected) in 0.055 (0.071) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8454220Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 0.029 (0.036) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8454760Z 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.373 (0.376) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8455250Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8456290Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.117 (0.119) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8456810Z 	 Executed 4 tests, with 0 failures (0 unexpected) in 1.447 (1.449) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8457430Z 	 Executed 10 tests, with 0 failures (0 unexpected) in 14.196 (14.202) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8457940Z 	 Executed 29 tests, with 0 failures (0 unexpected) in 0.027 (0.046) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8458520Z 	 Executed 10 tests, with 0 failures (0 unexpected) in 0.020 (0.023) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8459180Z 	 Executed 15 tests, with 0 failures (0 unexpected) in 0.032 (0.039) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8459910Z 	 Executed 14 tests, with 0 failures (0 unexpected) in 0.154 (0.162) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8460710Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 9.423 (9.425) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8461170Z 	 Executed 22 tests, with 0 failures (0 unexpected) in 5.293 (5.303) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8461780Z 	 Executed 10 tests, with 0 failures (0 unexpected) in 0.007 (0.012) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8462270Z 	 Executed 4 tests, with 0 failures (0 unexpected) in 0.005 (0.007) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8462910Z 	 Executed 16 tests, with 0 failures (0 unexpected) in 0.037 (0.042) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8463580Z 	 Executed 64 tests, with 0 failures (0 unexpected) in 0.101 (0.146) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8464740Z 	 Executed 7 tests, with 0 failures (0 unexpected) in 0.010 (0.012) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8465280Z 	 Executed 7 tests, with 0 failures (0 unexpected) in 0.034 (0.037) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8465950Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.017 (0.020) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8466490Z 	 Executed 4 tests, with 0 failures (0 unexpected) in 0.036 (0.041) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8466940Z 	 Executed 10 tests, with 0 failures (0 unexpected) in 0.031 (0.039) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8467460Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.053 (0.055) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8468010Z 	 Executed 9 tests, with 0 failures (0 unexpected) in 0.829 (0.832) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8468470Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8468990Z 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.025 (0.027) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8469450Z 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.230 (0.232) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8470150Z 	 Executed 4 tests, with 0 failures (0 unexpected) in 0.023 (0.027) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8470610Z 	 Executed 12 tests, with 0 failures (0 unexpected) in 0.105 (0.119) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8471380Z 	 Executed 2 tests, with 0 failures (0 unexpected) in 5.191 (5.192) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8471850Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8472420Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 5.959 (5.964) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8473000Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 0.049 (0.052) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8473460Z 	 Executed 7 tests, with 0 failures (0 unexpected) in 2.019 (2.026) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8474050Z 	 Executed 20 tests, with 0 failures (0 unexpected) in 0.129 (0.134) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8474500Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.006 (0.008) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8475020Z 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.013 (0.014) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8475470Z 	 Executed 44 tests, with 0 failures (0 unexpected) in 1.578 (1.602) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8476070Z 	 Executed 26 tests, with 0 failures (0 unexpected) in 7.326 (7.339) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8476570Z 	 Executed 22 tests, with 0 failures (0 unexpected) in 0.056 (0.063) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8477110Z 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.387 (0.390) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8477810Z 	 Executed 8 tests, with 0 failures (0 unexpected) in 1.379 (1.384) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8480140Z 	 Executed 15 tests, with 0 failures (0 unexpected) in 0.031 (0.039) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8480760Z Test Suite 'NostromoTests.xctest' failed at 2026-10-10 13:47:43.326.
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8481330Z 	 Executed 1228 tests, with 10 failures (0 unexpected) in 113.058 (114.008) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8482030Z Test Suite 'All tests' failed at 2026-10-10 13:47:43.326.
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8482660Z 	 Executed 1228 tests, with 10 failures (0 unexpected) in 113.058 (114.010) seconds
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8483290Z ** TEST FAILED **
+Swift tests (Mac app)	make mac-test	2026-10-10T13:47:51.8528210Z ##[error]Process completed with exit code 2.

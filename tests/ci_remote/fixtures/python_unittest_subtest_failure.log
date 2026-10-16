@@ -1,0 +1,36 @@
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9324970Z   test_overrides_convert_from_the_superview (test_hit_test_policy.HitTestPolicy.test_overrides_convert_from_the_superview) (file='ToolGroupView.swift') ... FAIL
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9325760Z   test_overrides_convert_from_the_superview (test_hit_test_policy.HitTestPolicy.test_overrides_convert_from_the_superview) (file='ToolGroupView.swift') ... FAIL
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9326430Z test_pass_through_exemption_is_narrow (test_hit_test_policy.HitTestPolicy.test_pass_through_exemption_is_narrow) ... ok
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9326760Z 
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9326840Z ======================================================================
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9327420Z FAIL: test_overrides_convert_from_the_superview (test_hit_test_policy.HitTestPolicy.test_overrides_convert_from_the_superview) (file='ToolGroupView.swift')
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9327940Z ----------------------------------------------------------------------
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9328180Z Traceback (most recent call last):
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9328620Z   File "/Users/runner/work/nostromo/nostromo/tests/hit_test_policy/test_hit_test_policy.py", line 56, in test_overrides_convert_from_the_superview
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9329170Z     self.assertTrue(any(s in body for s in SAFE) or passes_point_straight_to_super(body),
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9329510Z     ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9329810Z                     f"{path}: hitTest must use OverlayHitTest.hit or convert the point "
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9330120Z                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9330680Z                     "from the superview — AppKit passes superview coordinates.")
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9330980Z                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9332000Z AssertionError: False is not true : /Users/runner/work/nostromo/nostromo/tests/hit_test_policy/../../macOS/Nostromo/UI/Views/ToolGroupView.swift: hitTest must use OverlayHitTest.hit or convert the point from the superview — AppKit passes superview coordinates.
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9332700Z 
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9332770Z ======================================================================
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9333300Z FAIL: test_overrides_convert_from_the_superview (test_hit_test_policy.HitTestPolicy.test_overrides_convert_from_the_superview) (file='ToolGroupView.swift')
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9333920Z ----------------------------------------------------------------------
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9334150Z Traceback (most recent call last):
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9334580Z   File "/Users/runner/work/nostromo/nostromo/tests/hit_test_policy/test_hit_test_policy.py", line 56, in test_overrides_convert_from_the_superview
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9335100Z     self.assertTrue(any(s in body for s in SAFE) or passes_point_straight_to_super(body),
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9335430Z     ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9335720Z                     f"{path}: hitTest must use OverlayHitTest.hit or convert the point "
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9336000Z                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9336300Z                     "from the superview — AppKit passes superview coordinates.")
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9336560Z                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9337390Z AssertionError: False is not true : /Users/runner/work/nostromo/nostromo/tests/hit_test_policy/../../macOS/Nostromo/UI/Views/ToolGroupView.swift: hitTest must use OverlayHitTest.hit or convert the point from the superview — AppKit passes superview coordinates.
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9338230Z 
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9338340Z ----------------------------------------------------------------------
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9338560Z Ran 4 tests in 0.028s
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9338650Z 
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9338790Z FAILED (failures=2)
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9338950Z make: *** [python-test] Error 1
+Python tooling tests	UNKNOWN STEP	2026-10-14T00:08:39.9346240Z ##[error]Process completed with exit code 2.

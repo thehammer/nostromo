@@ -1,4 +1,4 @@
-.PHONY: build release install test python-test qa-selftest clean daemon install-daemon uninstall-daemon
+.PHONY: build release install test python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
 
 build:
 	cargo build
@@ -31,12 +31,21 @@ python-test:
 	python3 -m unittest discover -s tests/launch_smoke -v
 	python3 -m unittest discover -s tests/ci_policy -v
 	python3 -m unittest discover -s tests/operator_pin -v
+	python3 -m unittest discover -s tests/ci_remote -v
 	python3 -m unittest discover -s scripts/qa/tests -v
 
 ## Self-test of the read-only QA scripts (scripts/qa) against a fake app-control CLI.
 ## Hermetic: never touches the running app. Also part of `make python-test` (so CI).
 qa-selftest:
 	python3 -m unittest discover -s scripts/qa/tests -v
+
+## Run CI (.github/workflows/ci.yml) on a pushed branch and report the failing jobs and
+## tests, instead of running xcodebuild locally. Dispatches a `workflow_dispatch` run,
+## waits for it, and prints `FAILED <job>: <test>` lines. See docs/ci.md.
+##   make ci-remote [BRANCH=<branch, default: current>] [ONLY=all|rust|python|swift|mac|kit|ios]
+##   make ci-remote RUN=<run id>   # attach to an existing run (e.g. a PR's CI run); no dispatch
+ci-remote:
+	python3 scripts/ci_remote.py $(if $(BRANCH),--branch $(BRANCH)) $(if $(ONLY),--only $(ONLY)) $(if $(RUN),--run-id $(RUN))
 
 clean:
 	cargo clean

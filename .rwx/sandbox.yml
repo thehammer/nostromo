@@ -1,0 +1,96 @@
+# RWX test sandbox: one persistent cloud sandbox per worktree + branch, so Rust and
+# Python checks run off the laptop. Same Linux toolchain as the CI `Build & Lint` job
+# (current Rust stable, clippy), plus rustfmt, Python 3 and shellcheck.
+#
+#   rwx sandbox exec -- cargo test --lib some::module
+#
+# Local edits (staged, unstaged, untracked) sync up before each exec and the sandbox's
+# changes sync back after; gitignored files (target/) never sync. Guide:
+# docs/rwx-sandbox.md. Mother resets this sandbox at job start and stops it at job end.
+on:
+  cli:
+    init:
+      commit-sha: ${{ event.git.sha }}
+
+base:
+  image: ubuntu:24.04
+  config: rwx/base 1.2.0
+
+tasks:
+  # No `github-token`: nostromo is a public repo, so the clone is anonymous. The Carefeed
+  # RWX GitHub token is scoped to the Carefeed org and would be wrong here.
+  - key: code
+    call: git/clone 2.2.0
+    with:
+      repository: https://github.com/thehammer/nostromo.git
+      ref: ${{ init.commit-sha }}
+      preserve-git-dir: true
+
+  # `ring` and rusqlite's bundled SQLite need a C compiler. No OpenSSL: reqwest uses rustls.
+  - key: system
+    run: |
+      sudo apt-get update -qq
+      sudo apt-get install -y build-essential pkg-config python3 shellcheck curl ca-certificates
+      sudo apt-get clean
+
+  # Never cached: asks static.rust-lang.org which version `stable` is today. The `rust`
+  # task keys its cache on this value, so a new stable release rebuilds the toolchain
+  # instead of freezing the first version this config ever saw.
+  - key: rust-stable-version
+    cache: false
+    run: |
+      curl -fsSL -o channel.toml https://static.rust-lang.org/dist/channel-rust-stable.toml
+      v="$(awk '/^\[pkg\.rust\]/ { f = 1; next } f && /^version/ { gsub(/"/, "", $3); print $3; exit }' channel.toml)"
+      [ -n "$v" ] || { echo "could not read the stable version" >&2; exit 1; }
+      printf '%s' "$v" > "$RWX_VALUES/version"
+      echo "rust stable: $v"
+
+  # Matches CI's `dtolnay/rust-toolchain@stable`. rust-toolchain.toml says
+  # `channel = "stable"`, which resolves to the toolchain installed here.
+  - key: rust
+    use: system
+    env:
+      RUST_STABLE_VERSION: ${{ tasks.rust-stable-version.values.version }}
+    run: |
+      curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable -c clippy -c rustfmt
+      printf '%s' "$HOME/.cargo/bin:$PATH" > "$RWX_ENV/PATH"
+      "$HOME/.cargo/bin/rustc" -V
+      test "$("$HOME/.cargo/bin/rustc" -V | cut -d' ' -f2)" = "${RUST_STABLE_VERSION%% *}"
+
+  # Compiles every dependency once, from the manifests only, so the layer is reused until
+  # Cargo.toml, Cargo.lock or the toolchain change. Mother resets the sandbox at every job
+  # start; without this layer each job would recompile every crate. The stub sources are
+  # deleted afterwards so they never shadow the real tree. Any env var that changes
+  # compilation (RUSTFLAGS, CARGO_PROFILE_*) must match on `sandbox`, or this is not reused.
+  - key: deps
+    use: [code, rust]
+    filter:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+    run: |
+      mkdir -p src/bin
+      # The four [[bin]] paths in Cargo.toml, plus the lib.
+      for f in src/main.rs src/bin/nostromd.rs src/bin/nostromo_mcp_bridge.rs src/bin/nostromo_activity_hook.rs; do
+        echo "fn main() {}" > "$f"
+      done
+      : > src/lib.rs
+      cargo test --no-run
+      cargo clippy --all-targets
+      rm -rf src
+
+  - key: sandbox
+    use: [code, deps]
+    # 4 vCPU / 16 GB (about $1.01 per awake hour). The first full `cargo test` build took
+    # about 4 minutes here, so 8 vCPU was not tried. See docs/rwx-sandbox.md for timings.
+    runner:
+      cpus: 4
+      memory: 16gb
+    # 15 minutes, not admin-portal's 10: a restart after an idle stop re-runs the
+    # incremental build of the nostromo crate (about 70 s), so stopping too eagerly costs.
+    run: rwx-sandbox --inactivity-timeout 15m
+    env:
+      # Short path for unix-socket tests: a long TMPDIR overflows sockaddr_un's SUN_LEN
+      # (mother::broker_client). It must stay short.
+      TMPDIR: /tmp
+      CARGO_TERM_COLOR: never
