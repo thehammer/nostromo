@@ -343,6 +343,13 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// Plays the collapse of a message that rolls in on screen. Set by `RollInHolds.wire`.
     var animator: RollInAnimating = SystemRollInAnimator()
 
+    /// The most messages this turn holds back at once. Set by `RollInHolds.wire`.
+    var holdLimit: () -> Int = { RollInPolicy.maxHeldPerTurn }
+
+    /// At the limit, which hold to release to make room, given what is held (`RollInPolicy.holdToDrop`
+    /// when wired: the oldest the reader is not looking at). Set by `RollInHolds.wire`.
+    var holdToDrop: (_ held: Set<Int>) -> Int? = { $0.min() }
+
     /// Fired when the turn ended in error while streaming and its last group (which has a
     /// failed call) was opened by the stuck-turn rule, so the auto entry can be recorded.
     var onAutoOpen: ((_ groupKey: String) -> Void)?
@@ -642,9 +649,12 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
                 guard !held.contains(outgoing) else { break }
                 switch decideRollIn(outgoing) {
                 case .hold:
-                    if held.count >= RollInPolicy.maxHeldPerTurn, let oldest = held.min() {
-                        held.remove(oldest)
-                        onHoldDropped?(oldest)
+                    if held.count >= holdLimit(), let dropped = holdToDrop(held) {
+                        // Folding a message the reader may be looking at: name the reading position
+                        // first, as the pane does for every change that moves content.
+                        onWillChangeHeight?()
+                        held.remove(dropped)
+                        onHoldDropped?(dropped)
                     }
                     held.insert(outgoing)
                     onHold?(outgoing)
@@ -1122,17 +1132,17 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     }
 
     /// The operator holds a text selection inside this message, or is dragging one out in it.
-    func hasSelection(inMessage ordinal: Int) -> Bool {
-        columns(ofHeld: ordinal).contains { Self.holdsSelection(in: columnViews[$0]) }
+    func hasSelection(inMessage ordinal: Int, isLeftMouseDown: Bool) -> Bool {
+        columns(ofHeld: ordinal).contains { Self.holdsSelection(in: columnViews[$0], isLeftMouseDown: isLeftMouseDown) }
     }
 
     /// The first responder is text inside `view` that has a selection (a label's field editor
     /// included), or the left button is down in it, which is a drag that has selected nothing yet.
-    private static func holdsSelection(in view: NSView) -> Bool {
+    private static func holdsSelection(in view: NSView, isLeftMouseDown: Bool) -> Bool {
         guard let text = view.window?.firstResponder as? NSTextView else { return false }
         let owner: NSView? = text.isFieldEditor ? text.delegate as? NSView : text
         guard let owner, owner.isDescendant(of: view) else { return false }
-        return text.selectedRange.length > 0 || NSEvent.pressedMouseButtons & 1 != 0
+        return text.selectedRange.length > 0 || isLeftMouseDown
     }
 
     /// The columns a message (or `FocusPlanner.leadingGroups`: the groups before the first
@@ -1176,19 +1186,44 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// Play the departing messages' collapse over the island, then drop them. The reconcile has
     /// removed their views and the geometry is already final (the pane's pin re-asserts at the
     /// bottom at once), so this is only what the reader sees for `duration`; a ghost never takes
-    /// a click.
+    /// a click, and is not there for VoiceOver.
+    ///
+    /// The ghost keeps to the part of the old message's place that no message of the new layout
+    /// covers, which is the activity row it folds into: it never draws over a message the reader
+    /// is about to read. When the new layout covers all of it there is nothing to play, and the
+    /// roll-in is instant. Neither case changes the turn's height: a ghost is only drawn.
     private func collapse(_ ghosts: [(view: NSView, frame: NSRect)], animation: RollInAnimation) {
         guard case .collapse(let duration) = animation else { return }
         let departing = ghosts.filter { ghost in !columnViews.contains { $0 === ghost.view } }
         guard let first = departing.first else { return }
-        let region = departing.dropFirst().reduce(first.frame) { $0.union($1.frame) }
+        var region = departing.dropFirst().reduce(first.frame) { $0.union($1.frame) }
+        region.size.height = min(region.height, firstMessageTop(below: region.minY) - region.minY)
+        guard region.height >= 1 else { return }
         let container = RollInGhostView(frame: region)
         for ghost in departing {
+            Self.hideFromAccessibility(ghost.view)
             container.addSubview(ghost.view)
             ghost.view.frame = ghost.frame.offsetBy(dx: -region.minX, dy: -region.minY)
         }
         addSubview(container)
         animator.collapse(container, duration: duration) { [weak container] in container?.removeFromSuperview() }
+    }
+
+    /// Where the first message that reaches below `y` begins, in this view's coordinates; no limit
+    /// when none does. At or above `y` when that message covers `y` itself.
+    private func firstMessageTop(below y: CGFloat) -> CGFloat {
+        var top = CGFloat.greatestFiniteMagnitude
+        for slot in slots {
+            guard case .message(let ordinal) = slot.identity, let rect = rollInRect(ordinal: ordinal),
+                  rect.maxY > y else { continue }
+            top = min(top, rect.minY)
+        }
+        return top
+    }
+
+    private static func hideFromAccessibility(_ view: NSView) {
+        view.setAccessibilityElement(false)
+        view.subviews.forEach(hideFromAccessibility)
     }
 
     /// Open states to move to the key a released hold gives a row. While a message is held a

@@ -36,8 +36,16 @@ enum RollInPolicy {
 
     /// The most messages one turn holds back at once. Holds are self-limiting (only what is on
     /// screen or selected is held, and a held message that leaves the viewport rolls in), so the
-    /// cap is a backstop: past it the oldest (topmost) hold is released to make room.
+    /// cap is a backstop: past it one hold is released to make room (`holdToDrop`).
     static let maxHeldPerTurn = 16
+
+    /// Which hold to release when a turn is at its cap: the lowest (oldest, topmost) ordinal the
+    /// reader is not looking at (`isProtected`: on screen, or holding a selection). When the reader
+    /// is looking at all of them, the lowest anyway. Nil when nothing is held.
+    static func holdToDrop(among held: Set<Int>, isProtected: (Int) -> Bool) -> Int? {
+        let ordered = held.sorted()
+        return ordered.first { !isProtected($0) } ?? ordered.first
+    }
 
     /// Whether any part of `messageRect` is inside `visibleRect`. Rects that only touch (a zero
     /// height or zero width overlap) are not visible, and neither is an empty message rect.
@@ -142,6 +150,16 @@ final class RollInHolds {
     var isFollowingTail: () -> Bool = { true }
     /// The system's Reduce Motion setting. Injected so a test can flip it.
     var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// The left mouse button is down. A drag that has selected nothing yet has a zero-length
+    /// selection and this is the only sign of it. Injected so a test can press the button.
+    var isLeftMouseDown: () -> Bool = { NSEvent.pressedMouseButtons & 1 != 0 }
+    /// The most messages one turn holds back at once. Injected so a test can shrink it.
+    var maxHeldPerTurn = RollInPolicy.maxHeldPerTurn
+    /// Runs `work` once the event being handled is over. A mouse-up and a change of first
+    /// responder are seen in the middle of AppKit's own handling of them (the text view is still
+    /// finishing its selection; the window is still moving focus), and a release rebuilds views,
+    /// so it waits. Injected so a test runs it when it says so.
+    var afterEvent: (@escaping () -> Void) -> Void = { work in DispatchQueue.main.async(execute: work) }
     /// Plays an on-screen collapse. Injected so a test completes it synchronously.
     var animator: RollInAnimating = SystemRollInAnimator()
 
@@ -150,6 +168,9 @@ final class RollInHolds {
 
     private var releasing = false
     private var observer: NSObjectProtocol?
+    private var mouseUpMonitor: Any?
+    private var responderObservation: NSKeyValueObservation?
+    private weak var observedWindow: NSWindow?
 
     /// - Parameters:
     ///   - viewFor: a turn's view, nil when it is not materialized.
@@ -167,10 +188,15 @@ final class RollInHolds {
         observer = NotificationCenter.default.addObserver(
             forName: NSTextView.didChangeSelectionNotification, object: nil, queue: nil
         ) { [weak self] note in self?.selectionDidChange(note) }
+        mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            if let self, event.window != nil, event.window === self.scrollView.window { self.mouseWentUp() }
+            return event
+        }
     }
 
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
+        if let mouseUpMonitor { NSEvent.removeMonitor(mouseUpMonitor) }
     }
 
     // MARK: Wiring a turn view
@@ -178,6 +204,15 @@ final class RollInHolds {
     /// Give a turn's view its roll-in hooks. Call when the view is built.
     func wire(_ view: ChatTurnView, turn id: UUID) {
         view.animator = animator
+        view.holdLimit = { [weak self] in self?.maxHeldPerTurn ?? RollInPolicy.maxHeldPerTurn }
+        view.holdToDrop = { [weak self, weak view] held in
+            guard let self, let view else { return held.min() }
+            return RollInPolicy.holdToDrop(among: held) { ordinal in
+                guard let measured = self.geometry(of: view, ordinal: ordinal) else { return false }
+                return RollInPolicy.isVisible(measured.rect, in: measured.visible)
+                    || view.hasSelection(inMessage: ordinal, isLeftMouseDown: self.isLeftMouseDown())
+            }
+        }
         view.decideRollIn = { [weak self, weak view] ordinal in
             guard let self, let view else { return .roll(.none) }
             return self.decide(view, ordinal: ordinal)
@@ -190,9 +225,11 @@ final class RollInHolds {
     /// or not). Called by the view during a live update, before it changes anything.
     func decide(_ view: ChatTurnView, ordinal: Int) -> RollInDecision {
         guard let (rect, visible) = geometry(of: view, ordinal: ordinal) else { return .roll(.none) }
+        observeFirstResponder()
         let following = isFollowingTail()
+        let selecting = view.hasSelection(inMessage: ordinal, isLeftMouseDown: isLeftMouseDown())
         if RollInPolicy.shouldHold(followingTail: following, messageRect: rect, visibleRect: visible,
-                                   selectionInMessage: view.hasSelection(inMessage: ordinal)) {
+                                   selectionInMessage: selecting) {
             return .hold
         }
         return .roll(RollInPolicy.animation(onScreen: RollInPolicy.isVisible(rect, in: visible),
@@ -203,6 +240,15 @@ final class RollInHolds {
 
     /// The viewport moved (`FollowTailController.onScroll`).
     func scrolled() { reevaluate() }
+
+    /// The left button went up in this pane's window: a drag that was holding a message is over (it
+    /// selected something, which still holds, or nothing, which does not), and a click that took
+    /// focus out of the held message's text has finished. Runs after the event, like a scroll.
+    func mouseWentUp() { reevaluateAfterEvent() }
+
+    /// The window's first responder changed. A held message whose text no longer has focus has no
+    /// selection to protect.
+    func firstResponderChanged() { reevaluateAfterEvent() }
 
     /// The pane became pinned (it follows the tail again). `jumpedToLatest`: the operator pressed
     /// Jump to latest or sent a message, which completes every roll-in; scrolling back down to
@@ -231,7 +277,8 @@ final class RollInHolds {
                 let shouldRelease = RollInPolicy.shouldRelease(
                     followingTail: following, messageRect: measured?.rect ?? .zero,
                     visibleRect: measured?.visible ?? viewport,
-                    selectionInMessage: view.hasSelection(inMessage: ordinal), jumpedToLatest: jumpedToLatest)
+                    selectionInMessage: view.hasSelection(inMessage: ordinal, isLeftMouseDown: isLeftMouseDown()),
+                    jumpedToLatest: jumpedToLatest)
                 guard shouldRelease else { continue }
                 due[id, default: []].insert(ordinal)
                 onScreen = onScreen || (visible && !jumpedToLatest)
@@ -241,6 +288,21 @@ final class RollInHolds {
         }
         guard !due.isEmpty else { return }
         release(due, animation: animation)
+    }
+
+    private func reevaluateAfterEvent() {
+        guard store.hasHolds else { return }
+        afterEvent { [weak self] in self?.reevaluate() }
+    }
+
+    /// Watch the window's first responder while something is held. The window is not known when
+    /// the pane is built, and a pane's window can change, so this runs where holds are decided.
+    private func observeFirstResponder() {
+        guard let window = scrollView.window, window !== observedWindow else { return }
+        observedWindow = window
+        responderObservation = window.observe(\.firstResponder, options: []) { [weak self] _, _ in
+            self?.firstResponderChanged()
+        }
     }
 
     // MARK: Release

@@ -215,4 +215,37 @@ final class RollInPolicyTests: XCTestCase {
     func testATurnHoldsAtMostSixteenMessagesBack() {
         XCTAssertEqual(RollInPolicy.maxHeldPerTurn, 16)
     }
+
+    // MARK: Which hold goes at the bound
+
+    func testWithNothingHeldThereIsNothingToDrop() {
+        XCTAssertNil(RollInPolicy.holdToDrop(among: [], isProtected: { _ in false }))
+        XCTAssertNil(RollInPolicy.holdToDrop(among: [], isProtected: { _ in true }))
+    }
+
+    func testWhenTheReaderIsNotLookingAtAnyHoldTheLowestOrdinalIsDropped() {
+        XCTAssertEqual(RollInPolicy.holdToDrop(among: [7, 3, 12, 5], isProtected: { _ in false }), 3)
+        XCTAssertEqual(RollInPolicy.holdToDrop(among: [4], isProtected: { _ in false }), 4)
+    }
+
+    func testTheLowestOrdinalTheReaderIsNotLookingAtIsDroppedAndTheOnesTheyAreLookingAtAreKept() {
+        // 3 is selected, 5 is on screen; 7 and 12 are not looked at.
+        let protected: Set<Int> = [3, 5]
+        XCTAssertEqual(RollInPolicy.holdToDrop(among: [12, 7, 5, 3], isProtected: { protected.contains($0) }), 7)
+        // A protected one in the middle does not matter; the lowest unprotected is still the oldest.
+        XCTAssertEqual(RollInPolicy.holdToDrop(among: [3, 5, 7], isProtected: { $0 == 5 }), 3)
+        XCTAssertEqual(RollInPolicy.holdToDrop(among: [3, 5, 7], isProtected: { $0 != 7 }), 7)
+    }
+
+    func testWhenTheReaderIsLookingAtEveryHoldTheLowestOrdinalIsDroppedAnyway() {
+        XCTAssertEqual(RollInPolicy.holdToDrop(among: [9, 2, 6], isProtected: { _ in true }), 2)
+    }
+
+    func testTheHoldToDropIsAlwaysOneOfTheHolds() {
+        let held: Set<Int> = [-1, 0, 4]   // -1 is `FocusPlanner.leadingGroups`' place: the lowest
+        for protected in [Set<Int>(), [-1], [0], [4], [-1, 0], [-1, 0, 4]] {
+            let dropped = RollInPolicy.holdToDrop(among: held, isProtected: { protected.contains($0) })
+            XCTAssertTrue(dropped.map { held.contains($0) } ?? false, "protected \(protected): dropped \(String(describing: dropped))")
+        }
+    }
 }

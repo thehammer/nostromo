@@ -23,10 +23,13 @@ import NostromoKit
 //
 // No wall clock, no real pasteboard / UserDefaults / ~/.nostromo.
 //
-// A real mouse drag cannot be simulated in a logic test (no window server). What the pane reads
-// as "the reader is selecting here" is the first responder's text view holding a non-empty
-// selection (a drag in progress also counts, through the left button, which the pane asks
-// AppKit and a test cannot press). That selection is the observable state these tests build.
+// A real mouse drag cannot be simulated in a logic test (no window server), so the two things the
+// pane reads of one are injected. "The reader is selecting here" is the first responder's text
+// view holding a non-empty selection, which these tests build for real; a drag that has selected
+// nothing yet (zero-length selection, button down) is the same text view with `rig.mouseDown` set,
+// the stand-in for the left button, which the pane otherwise asks AppKit. The end of an event (a
+// mouse-up, a click that moves focus) is when the test calls `rig.flushAfterEvent()`: the pane
+// runs what it deferred until then, and no run loop is spun.
 
 private typealias F = FoldFixtures
 private typealias X = FocusFixtures
@@ -203,10 +206,15 @@ final class FocusRollInScrollTests: XCTestCase {
 
     /// A live turn whose latest message (ordinal 1) is markdown (`SEL-0` ... `SEL-5`), with `word` of
     /// it selected. Following the tail, or scrolled up until the message is below the viewport.
-    private func selectionScene(following: Bool, word: String = "SEL-5") throws
+    ///
+    /// `rowAbove: false` makes the selected message the first thing in the turn (ordinal 0), so the
+    /// roll-in that folds it creates the activity row (and has room to play a collapse in); the
+    /// default has an activity row already above it (ordinal 1).
+    private func selectionScene(following: Bool, word: String = "SEL-5", rowAbove: Bool = true) throws
         -> (rig: ScrollRig, live: ChatTurn, selection: HeldSelection) {
-        let live = F.turn([focusMessage("Earlier")] + F.run(2, prefix: "a") + tallMarkdownMessage("SEL"),
-                          complete: false, user: "live")
+        let ordinal = rowAbove ? 1 : 0
+        let lead = rowAbove ? [focusMessage("Earlier")] + F.run(2, prefix: "a") : []
+        let live = F.turn(lead + tallMarkdownMessage("SEL"), complete: false, user: "live")
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
         rig.start()
         XCTAssertTrue(rig.followTail.isPinned, "precondition: the pane follows the tail")
@@ -220,7 +228,7 @@ final class FocusRollInScrollTests: XCTestCase {
             rig.userScroll(to: yJustAbove(rig, turn: live.id))
             rig.settle()
             XCTAssertFalse(rig.followTail.isPinned, "precondition: the operator scrolled up")
-            XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 1), false, "precondition: the message is off screen")
+            XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: ordinal), false, "precondition: the message is off screen")
         }
         XCTAssertTrue(rig.window.firstResponder === selection.textView, "precondition: the selection holds focus")
         return (rig, live, selection)
@@ -398,9 +406,12 @@ final class FocusRollInScrollTests: XCTestCase {
     }
 
     func testClearingTheSelectionInAFollowingPaneCompletesTheRollInWithOneShortCollapse() throws {
-        let (rig, live, selection) = try followingSelection()
+        // The selected message is the first thing in the turn: folding it creates the activity row
+        // and the collapse plays in the place the row takes. (With a row already above it there is
+        // nothing to play: see `testARollInIntoAnExistingRowHasNothingToPlayAndIsInstant`.)
+        let (rig, live, selection) = try followingSelection(rowAbove: false)
         arrive(rig, "NEXT-MSG")
-        XCTAssertEqual(held(rig, turn: live.id), [1], "precondition: the roll-in was held")
+        XCTAssertEqual(held(rig, turn: live.id), [0], "precondition: the roll-in was held")
 
         clearSelection(selection)
 
@@ -446,8 +457,9 @@ final class FocusRollInScrollTests: XCTestCase {
         XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5)
     }
 
-    private func followingSelection(word: String = "SEL-5") throws -> (rig: ScrollRig, live: ChatTurn, selection: HeldSelection) {
-        let scene = try selectionScene(following: true, word: word)
+    private func followingSelection(word: String = "SEL-5", rowAbove: Bool = true) throws
+        -> (rig: ScrollRig, live: ChatTurn, selection: HeldSelection) {
+        let scene = try selectionScene(following: true, word: word, rowAbove: rowAbove)
         XCTAssertLessThanOrEqual(scene.rig.gapBelowViewport, 0.5, "precondition: at the true bottom")
         return scene
     }
@@ -455,9 +467,10 @@ final class FocusRollInScrollTests: XCTestCase {
     // MARK: - 6. A roll-in while the reader is selecting
 
     func testAMessageBeingSelectedInTheMiddleIsKeptWhileTheNextMessageStreamsInBlockByBlock() throws {
-        // A drag cannot be performed here; a non-empty selection held by the first responder is
-        // the state the pane reads (see the header). Selecting in the middle block of a six-block
-        // message, then streaming the next message in a block at a time, is the shape of it.
+        // A drag is not performed here (see the header); a non-empty selection held by the first
+        // responder is the state a finished drag leaves, and the injected left button covers a drag
+        // that has selected nothing yet (see section 6b). Selecting in the middle block of a
+        // six-block message, then streaming the next message in a block at a time, is the shape of it.
         let (rig, live, selection) = try followingSelection(word: "SEL-2")
         let view = try XCTUnwrap(rig.materialized[live.id])
         let blocks = (0 ..< 6).compactMap { textBlock(containing: "SEL-\($0)", in: view) }
@@ -481,6 +494,249 @@ final class FocusRollInScrollTests: XCTestCase {
         rig.append([.text("DRAG-NEXT second block")])
         assertKept("after the new message grew")
         XCTAssertEqual(held(rig, turn: live.id), [1])
+    }
+
+    // MARK: - 6b. The button is down and nothing is selected yet (a drag that has just started)
+
+    /// The reader presses the left button in the card the selection scene gave focus to, with
+    /// nothing selected yet: a zero-length selection and a pressed button, which is all a drag looks
+    /// like until it has moved over some text.
+    private func pressWithNothingSelected(_ rig: ScrollRig, _ selection: HeldSelection) {
+        clearSelection(selection)   // no hold exists yet, so this reevaluates nothing
+        rig.mouseDown = true
+        XCTAssertEqual(selection.textView.selectedRange.length, 0, "precondition: nothing is selected")
+        XCTAssertTrue(rig.window.firstResponder === selection.textView, "precondition: the card has focus")
+    }
+
+    func testAPressedButtonWithNothingSelectedYetHoldsTheLatestMessageInAFollowingPane() throws {
+        let (rig, live, selection) = try followingSelection()
+        pressWithNothingSelected(rig, selection)
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        let blocks = (0 ..< 6).compactMap { textBlock(containing: "SEL-\($0)", in: view) }
+        XCTAssertEqual(blocks.count, 6, "precondition: the message is six top-level text blocks")
+
+        arrive(rig, "NEXT-MSG")
+
+        XCTAssertEqual(rig.holds, [1], "the message under the pressed button is held although the pane follows the tail")
+        XCTAssertEqual(held(rig, turn: live.id), [1])
+        XCTAssertTrue(rig.materialized[live.id] === view)
+        for (index, block) in blocks.enumerated() {
+            XCTAssertTrue(textBlock(containing: "SEL-\(index)", in: view) === block,
+                          "block \(index) of the message is still a top-level text block, the same view")
+        }
+        XCTAssertNotNil(textBlock(containing: "NEXT-MSG", in: view), "the new message appears")
+        XCTAssertTrue(rig.window.firstResponder === selection.textView, "the card keeps focus")
+        XCTAssertTrue(rig.animator.requests.isEmpty, "a held roll-in plays nothing")
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "the pane is still at the true bottom")
+    }
+
+    func testAPressedButtonWithNothingSelectedYetHoldsAnOffScreenMessageInAPaneThatIsNotFollowing() throws {
+        let (rig, live, selection) = try selectionScene(following: false)
+        pressWithNothingSelected(rig, selection)
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        let block = try XCTUnwrap(textBlock(containing: selection.text, in: view))
+        let reading = try XCTUnwrap(topReading(rig))
+
+        arrive(rig, "NEXT-MSG")
+
+        XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 1), false, "precondition: the message is off screen")
+        XCTAssertEqual(rig.holds, [1], "an off-screen message would roll in at once; the pressed button holds it")
+        XCTAssertEqual(held(rig, turn: live.id), [1])
+        XCTAssertTrue(textBlock(containing: selection.text, in: view) === block, "the same view")
+        XCTAssertNotNil(textBlock(containing: "NEXT-MSG", in: view))
+        assertReadingStill(rig, reading, "after a roll-in was held by the pressed button")
+        XCTAssertTrue(rig.animator.requests.isEmpty)
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testTheSameMessageWithTheButtonUpAndNothingSelectedIsNotHeld() throws {
+        // The control for the two tests above: the same focus and the same zero-length selection,
+        // but the button is up, so there is no drag and an off-screen message rolls in at once.
+        let (rig, live, selection) = try selectionScene(following: false)
+        clearSelection(selection)
+        XCTAssertFalse(rig.mouseDown)
+        let reading = try XCTUnwrap(topReading(rig))
+
+        arrive(rig, "NEXT-MSG")
+
+        XCTAssertTrue(rig.holds.isEmpty, "a caret with the button up protects nothing")
+        XCTAssertTrue(held(rig, turn: live.id).isEmpty)
+        XCTAssertFalse(X.contains(selection.text, in: try XCTUnwrap(rig.materialized[live.id])), "the message rolled in at once")
+        assertReadingStill(rig, reading, "after an off-screen roll-in")
+    }
+
+    func testReleasingTheButtonOverAHeldOffScreenMessageRollsItInWithoutMovingTheReaderAndNotBefore() throws {
+        let (rig, live, selection) = try selectionScene(following: false)
+        pressWithNothingSelected(rig, selection)
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(held(rig, turn: live.id), [1], "precondition: the roll-in was held")
+        let reading = try XCTUnwrap(topReading(rig))
+
+        // The button is still down: looking again, by any trigger, releases nothing.
+        rig.rollInHolds.scrolled()
+        rig.rollInHolds.reevaluate()
+        rig.rollInHolds.firstResponderChanged()
+        rig.flushAfterEvent()
+        rig.settle()
+        XCTAssertEqual(held(rig, turn: live.id), [1], "the button is down: the message stays held")
+        XCTAssertNotNil(textBlock(containing: selection.text, in: try XCTUnwrap(rig.materialized[live.id])))
+
+        rig.mouseDown = false
+        rig.rollInHolds.mouseWentUp()
+        XCTAssertEqual(held(rig, turn: live.id), [1], "the mouse-up is seen in the middle of the event: the release waits for its end")
+
+        rig.flushAfterEvent()
+        rig.settle()
+
+        XCTAssertTrue(held(rig, turn: live.id).isEmpty, "the button went up over nothing: the roll-in completed")
+        XCTAssertFalse(rig.store.hasHolds)
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertFalse(X.contains(selection.text, in: view), "the message is folded")
+        XCTAssertEqual(rowSummary(view)?.hasPrefix("2 messages"), true, rowSummary(view) ?? "no row")
+        XCTAssertNotNil(textBlock(containing: "NEXT-MSG", in: view))
+        assertReadingStill(rig, reading, "after the button went up and the held roll-in completed")
+        XCTAssertTrue(rig.animator.requests.isEmpty, "a release in a pane that is not following is never animated")
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testReleasingTheButtonInAFollowingPaneCompletesTheRollInWithOneCollapseAtTheBottom() throws {
+        let (rig, live, selection) = try followingSelection(rowAbove: false)
+        pressWithNothingSelected(rig, selection)
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(held(rig, turn: live.id), [0], "precondition: the roll-in was held")
+        XCTAssertTrue(rig.animator.requests.isEmpty, "precondition: a held roll-in plays nothing")
+
+        rig.rollInHolds.scrolled()
+        rig.flushAfterEvent()
+        XCTAssertEqual(held(rig, turn: live.id), [0], "the button is down: the message stays held")
+
+        rig.mouseDown = false
+        rig.rollInHolds.mouseWentUp()
+        rig.flushAfterEvent()
+        rig.settle()
+
+        XCTAssertTrue(held(rig, turn: live.id).isEmpty)
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertFalse(X.contains(selection.text, in: view), "the message is folded")
+        XCTAssertEqual(rig.animator.requests.count, 1, "it was on screen in a following pane: one collapse")
+        XCTAssertLessThanOrEqual(try XCTUnwrap(rig.animator.requests.first).duration, 0.15)
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "the pane is at the true bottom")
+    }
+
+    func testAPressedButtonInAnotherTurnsTextDoesNotHoldARollIn() throws {
+        let other = F.turn([.text("OTHER-0 **bold** \(F.prose) \(F.prose)")], user: "other")
+        let live = F.turn([focusMessage("OLD-MSG")] + F.run(1, prefix: "a"), complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [other, live])
+        rig.start()
+        let otherView = try XCTUnwrap(rig.materialized[other.id], "precondition: the other turn is built")
+        let textView = try XCTUnwrap(X.all(NSTextView.self, in: otherView).first { $0.string.contains("OTHER-0") },
+                                     "precondition: the other turn shows a card")
+        XCTAssertTrue(rig.window.makeFirstResponder(textView))
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        rig.mouseDown = true
+        rig.followTail.scrollToBottom()
+        rig.settle()
+        XCTAssertTrue(rig.followTail.isPinned, "precondition: the pane follows the tail")
+
+        arrive(rig, "NEXT-MSG")
+
+        XCTAssertTrue(rig.holds.isEmpty, "the button is down in a different turn's text: nothing to protect here")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertFalse(X.contains("OLD-MSG", in: view), "the message rolled in")
+        XCTAssertEqual(rig.animator.requests.count, 1, "an on-screen roll-in in a following pane collapses as usual")
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5)
+        XCTAssertTrue(rig.window.firstResponder === textView, "the other turn's text keeps focus")
+    }
+
+    func testAPressedButtonInAnOlderMessageHoldsThatMessageAndNotTheOnesThatRollInLater() throws {
+        let (rig, live, selection) = try selectionScene(following: false)
+        pressWithNothingSelected(rig, selection)
+
+        arrive(rig, "M2-MSG")
+        XCTAssertEqual(held(rig, turn: live.id), [1], "M1, under the pressed button, is held")
+        arrive(rig, "M3-MSG")   // M2 is the outgoing message now, below the viewport, with no focus in it
+
+        XCTAssertEqual(rig.holds, [1], "only M1 was ever held: the button is down in M1, not in M2")
+        XCTAssertEqual(held(rig, turn: live.id), [1])
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertFalse(X.contains("M2-MSG", in: view), "M2 rolled in at once")
+        XCTAssertNotNil(textBlock(containing: selection.text, in: view), "M1 is still a top-level message")
+        XCTAssertNotNil(textBlock(containing: "M3-MSG", in: view))
+    }
+
+    // MARK: - 6c. Releasing a hold without scrolling: the end of a click, a change of focus
+
+    func testClickingAwayFromAHeldSelectionInAFollowingPaneReleasesItAfterTheEventAndTheBottomHolds() throws {
+        let (rig, live, selection) = try followingSelection()
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(held(rig, turn: live.id), [1], "precondition: the roll-in was held by the selection")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+
+        // The reader has copied the text and clicks somewhere else: focus leaves the card.
+        XCTAssertTrue(rig.window.makeFirstResponder(nil))
+
+        XCTAssertEqual(held(rig, turn: live.id), [1], "focus moves in the middle of the click: the release waits for its end")
+        XCTAssertNotNil(textBlock(containing: selection.text, in: view))
+
+        rig.flushAfterEvent()
+        rig.settle()
+
+        XCTAssertTrue(held(rig, turn: live.id).isEmpty, "the card no longer has focus: nothing is selected, the roll-in completed")
+        XCTAssertFalse(X.contains(selection.text, in: view), "the message is folded")
+        XCTAssertNotNil(textBlock(containing: "NEXT-MSG", in: view))
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "the pane is at the true bottom")
+    }
+
+    func testClickingAwayFromAHeldSelectionInAPaneThatIsNotFollowingReleasesItWithoutMovingTheReader() throws {
+        let (rig, live, selection) = try selectionScene(following: false)
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(held(rig, turn: live.id), [1], "precondition: the roll-in was held by the selection")
+        let reading = try XCTUnwrap(topReading(rig))
+
+        XCTAssertTrue(rig.window.makeFirstResponder(nil))
+        XCTAssertEqual(held(rig, turn: live.id), [1], "the release waits for the end of the event")
+        rig.flushAfterEvent()
+        rig.settle()
+
+        XCTAssertTrue(held(rig, turn: live.id).isEmpty, "the roll-in completed")
+        XCTAssertFalse(X.contains(selection.text, in: try XCTUnwrap(rig.materialized[live.id])))
+        assertReadingStill(rig, reading, "after focus left the held message and the roll-in completed")
+        XCTAssertTrue(rig.animator.requests.isEmpty)
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testTheEndOfAClickNeverReleasesAHoldWhoseSelectionStillStands() throws {
+        let (rig, live, selection) = try selectionScene(following: false)
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(held(rig, turn: live.id), [1], "precondition")
+        rig.mouseDown = true   // the drag that made the selection
+
+        rig.mouseDown = false
+        rig.rollInHolds.mouseWentUp()
+        rig.flushAfterEvent()
+        rig.settle()
+
+        XCTAssertEqual(held(rig, turn: live.id), [1], "the selection still stands: the message stays held")
+        XCTAssertNotNil(textBlock(containing: selection.text, in: try XCTUnwrap(rig.materialized[live.id])))
+        XCTAssertEqual(selection.textView.selectedRange, selection.range, "and so does the selection")
+        XCTAssertTrue(rig.window.firstResponder === selection.textView)
+    }
+
+    func testAMouseUpOrAChangeOfFocusWithNothingHeldDoesNoWork() throws {
+        let (rig, _) = holdingScene()
+        XCTAssertFalse(rig.store.hasHolds, "precondition: nothing is held")
+        let before = rig.rollInHolds.evaluations
+
+        rig.rollInHolds.mouseWentUp()
+        rig.rollInHolds.firstResponderChanged()
+        XCTAssertTrue(rig.window.makeFirstResponder(nil))
+
+        XCTAssertEqual(rig.queuedAfterEvent, 0, "nothing is scheduled for the end of the event")
+        rig.flushAfterEvent()
+        XCTAssertEqual(rig.rollInHolds.evaluations, before, "no message was examined")
     }
 
     // MARK: - 7. Off-screen roll-ins
@@ -528,7 +784,7 @@ final class FocusRollInScrollTests: XCTestCase {
 
     // MARK: - 8. Following through ten roll-ins
 
-    func testAFollowingPaneStaysAtTheTrueBottomThroughTenRollInsAndEachCollapsesOnceForNoMoreThan150Milliseconds() throws {
+    func testAFollowingPaneStaysAtTheTrueBottomThroughTenRollInsAndOnlyTheOneThatCreatesTheRowCollapsesForNoMoreThan150Milliseconds() throws {
         let live = F.turn([focusMessage("Starting")], complete: false, user: "go")
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
         rig.start()
@@ -542,8 +798,11 @@ final class FocusRollInScrollTests: XCTestCase {
             XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "after roll-in \(n) the viewport ends at the true bottom")
             XCTAssertTrue(rig.followTail.isPinned, "after roll-in \(n)")
             // The turn opened with a message, so every roll-in has an outgoing message ("Starting",
-            // then "Message 0" ...), and it is on screen at the tail: roll-in n is the (n+1)th collapse.
-            XCTAssertEqual(rig.animator.requests.count, n + 1, "roll-in \(n) requests exactly one collapse")
+            // then "Message 0" ...). Only the first one has anything to play: the row does not exist
+            // yet, and the old message collapses into the place it takes. Every later outgoing message
+            // sits right below a row that is already there, and the new message starts exactly where
+            // the old one did, so the roll-in is instant (the ghost never draws over the new message).
+            XCTAssertEqual(rig.animator.requests.count, 1, "after roll-in \(n): roll-in 0 collapsed once, none after it")
         }
 
         for request in rig.animator.requests {
@@ -913,6 +1172,87 @@ final class FocusRollInScrollTests: XCTestCase {
         }
     }
 
+    // MARK: - 16b. Which hold goes when the bound is reached
+
+    /// What the turn's view reported about the holds released to make room.
+    private final class DropLog {
+        var dropped: [Int] = []
+        /// What was still held at the moment the view named the reading position, before folding.
+        var heldWhenNamed: [Set<Int>] = []
+    }
+
+    /// A pane that is not following, a bound of two holds, and a live turn of: M0 (markdown, `SEL-5`
+    /// selected, below the viewport), then M1 (`m1Blocks` blocks) and M2 (`m2Blocks`), each held
+    /// while it was on screen when the next one arrived. Held: M0 (selected) and M1.
+    private func capScene(m1Blocks: Int, m2Blocks: Int) throws
+        -> (rig: ScrollRig, live: ChatTurn, selection: HeldSelection, log: DropLog) {
+        let (rig, live, selection) = try selectionScene(following: false, rowAbove: false)
+        rig.rollInHolds.maxHeldPerTurn = 2
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        let log = DropLog()
+        let forget = view.onHoldDropped
+        view.onHoldDropped = { ordinal in
+            log.dropped.append(ordinal)
+            forget?(ordinal)
+        }
+        let name = view.onWillChangeHeight
+        view.onWillChangeHeight = { [unowned view] in
+            log.heldWhenNamed.append(view.heldOrdinals)
+            name?()
+        }
+        arrive(rig, "M1-MSG", tallBlocks: m1Blocks)
+        XCTAssertEqual(held(rig, turn: live.id), [0], "precondition: M0 is held by its selection")
+        readFromJustAboveTheBottom(rig)
+        XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 1), true, "precondition: M1 is on screen")
+        arrive(rig, "M2-MSG", tallBlocks: m2Blocks)
+        XCTAssertEqual(held(rig, turn: live.id), [0, 1], "precondition: M0 is held by its selection, M1 by being on screen")
+        XCTAssertTrue(log.dropped.isEmpty, "precondition: nothing was dropped yet")
+        return (rig, live, selection, log)
+    }
+
+    func testAtTheBoundTheHoldReleasedIsTheOldestOneTheReaderIsNotLookingAtNotTheSelectedOne() throws {
+        let (rig, live, selection, log) = try capScene(m1Blocks: 16, m2Blocks: 20)
+        // The reader is on M2; M1 is above the viewport, though nothing has looked at it yet.
+        scrollQuietly(rig, to: rig.doc.frame.height - rig.viewportHeight - 60)
+        XCTAssertEqual(held(rig, turn: live.id), [0, 1], "precondition: nothing has looked at the holds")
+        XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 1), false, "precondition: M1 is above the viewport")
+        XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 2), true, "precondition: M2 is on screen")
+        let reading = try XCTUnwrap(topReading(rig))
+
+        arrive(rig, "M3-MSG", tallBlocks: 2)   // M2 is on screen, so its roll-in is held: one hold has to go
+
+        XCTAssertEqual(log.dropped, [1], "M1 went: M0 is older but holds the reader's selection")
+        XCTAssertEqual(held(rig, turn: live.id), [0, 2])
+        XCTAssertEqual(rig.holds, [0, 1, 2], "every roll-in was held when it happened")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertFalse(X.contains("M1-MSG", in: view), "M1 rolled in")
+        XCTAssertTrue(textBlock(containing: selection.text, in: view) === selection.block, "the selected message is the same view")
+        XCTAssertEqual(selection.textView.selectedRange, selection.range, "the selection survived")
+        XCTAssertTrue(rig.window.firstResponder === selection.textView)
+        XCTAssertNotNil(textBlock(containing: "M2-MSG", in: view), "M2 is held")
+        XCTAssertTrue(log.heldWhenNamed.contains([0, 1]), "the reading position was named before M1 folded (held then: \(log.heldWhenNamed))")
+        assertReadingStill(rig, reading, "after a hold was released to make room")
+    }
+
+    func testAtTheBoundWhenTheReaderIsLookingAtEveryHoldTheOldestGoesAnywayWithoutMovingTheReader() throws {
+        let (rig, live, selection, log) = try capScene(m1Blocks: 16, m2Blocks: 2)
+        readFromJustAboveTheBottom(rig)   // M1 and the start of M2 are on screen
+        XCTAssertEqual(held(rig, turn: live.id), [0, 1], "precondition: both holds stand")
+        XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 1), true, "precondition: M1 is on screen")
+        XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 2), true, "precondition: M2 is on screen")
+        let reading = try XCTUnwrap(topReading(rig))
+
+        arrive(rig, "M3-MSG", tallBlocks: 2)
+
+        XCTAssertEqual(log.dropped, [0], "everything held is selected or on screen: the oldest goes")
+        XCTAssertEqual(held(rig, turn: live.id), [1, 2])
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertFalse(X.contains(selection.text, in: view), "M0 rolled in, selection and all")
+        XCTAssertNotNil(textBlock(containing: "M1-MSG", in: view), "M1 is still held")
+        XCTAssertTrue(log.heldWhenNamed.contains([0, 1]), "the reading position was named before M0 folded (held then: \(log.heldWhenNamed))")
+        assertReadingStill(rig, reading, "after the oldest hold was released to make room")
+    }
+
     // MARK: - 17. Cost
 
     private func scrollCost(turnCount: Int, holding: Bool) throws -> (events: Int, evaluations: Int) {
@@ -975,10 +1315,12 @@ final class FocusRollInScrollTests: XCTestCase {
     }
 
     func testTheCollapseIsPlayedOnAGhostWhileTheGeometryIsAlreadyFinalAndTheGhostNeverTakesAClick() throws {
-        let (rig, live, selection) = try followingSelection()
+        // Selected message first in the turn, so the roll-in has an activity row to fold into and the
+        // ghost has room to play in (the ghost never draws over the new latest message).
+        let (rig, live, selection) = try followingSelection(rowAbove: false)
         arrive(rig, "NEXT-MSG")
         rig.animator.completesAtOnce = false
-        XCTAssertEqual(held(rig, turn: live.id), [1], "precondition")
+        XCTAssertEqual(held(rig, turn: live.id), [0], "precondition")
 
         clearSelection(selection)   // releases the hold in a following pane: on screen, so it collapses
 
@@ -1028,6 +1370,98 @@ final class FocusRollInScrollTests: XCTestCase {
         XCTAssertTrue(ghosts(in: view).isEmpty)
         XCTAssertFalse(X.contains("OLD-MSG", in: view))
         XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5)
+    }
+
+    /// A following pane whose live turn is one message and a call; a newer message arrives and the
+    /// collapse of the old one is left playing (the old message is the first thing in the turn, so
+    /// the roll-in creates the activity row and the ghost plays in the place the row takes).
+    private func playingGhost() throws -> (rig: ScrollRig, live: ChatTurn, view: ChatTurnView, ghost: RollInGhostView) {
+        let live = F.turn([focusMessage("OLD-MSG")] + F.run(1, prefix: "a"), complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
+        rig.animator.completesAtOnce = false
+        rig.start()
+        arrive(rig, "NEW-MSG")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        let ghost = try XCTUnwrap(ghosts(in: view).first, "precondition: the old message plays on a ghost")
+        XCTAssertEqual(ghosts(in: view).count, 1, "precondition: one ghost")
+        return (rig, live, view, ghost)
+    }
+
+    func testAGhostAndEverythingInItIsHiddenFromVoiceOver() throws {
+        let scene = try playingGhost()
+        let inGhost: [NSView] = [scene.ghost] + rigAllSubviews(of: scene.ghost)
+        XCTAssertTrue(inGhost.contains { X.contains("OLD-MSG", in: $0) }, "precondition: the ghost shows the departing message")
+        XCTAssertGreaterThan(inGhost.count, 1, "precondition: the ghost holds the message's views")
+
+        for view in inGhost {
+            XCTAssertFalse(view.isAccessibilityElement(), "\(rigChain(view)) in the ghost is still there for VoiceOver")
+        }
+        XCTAssertNotNil(scene.rig.materialized[scene.live.id])
+    }
+
+    func testAGhostNeverCoversTheNewLatestMessage() throws {
+        let scene = try playingGhost()
+        let latest = try XCTUnwrap(scene.view.rollInRect(ordinal: 1), "the new message (ordinal 1) is rendered")
+        XCTAssertNotNil(textBlock(containing: "NEW-MSG", in: scene.view))
+
+        XCTAssertGreaterThan(scene.ghost.frame.height, 0, "the ghost has something to play over")
+        XCTAssertLessThanOrEqual(scene.ghost.frame.maxY, latest.minY + 0.5,
+                                 "the ghost (\(scene.ghost.frame)) draws into the new message (\(latest))")
+        XCTAssertFalse(scene.ghost.frame.intersection(latest).height > 0.5, "the ghost and the new message overlap")
+    }
+
+    func testAGhostIsOnlyDrawnSoTheTurnIsAsTallAsWhenTheRollInIsInstant() throws {
+        let turns = (0 ..< 4).map(longTurn)
+            + [F.turn([focusMessage("OLD-MSG")] + F.run(1, prefix: "a"), complete: false, user: "live")]
+        let live = try XCTUnwrap(turns.last)
+        let instant = ScrollRig(self, turns: turns)
+        instant.start()
+        arrive(instant, "NEW-MSG")
+        let playing = ScrollRig(self, turns: turns)
+        playing.animator.completesAtOnce = false
+        playing.start()
+        arrive(playing, "NEW-MSG")
+        let instantView = try XCTUnwrap(instant.materialized[live.id])
+        let playingView = try XCTUnwrap(playing.materialized[live.id])
+        XCTAssertEqual(ghosts(in: playingView).count, 1, "precondition: a ghost is playing")
+        XCTAssertTrue(ghosts(in: instantView).isEmpty, "precondition: the other roll-in finished at once")
+
+        XCTAssertEqual(playingView.islandHeight(), instantView.islandHeight(), accuracy: 0.5, "the turn's height")
+        XCTAssertEqual(playingView.frame.height, instantView.frame.height, accuracy: 0.5, "the turn's frame")
+        XCTAssertEqual(playing.doc.frame.height, instant.doc.frame.height, accuracy: 0.5, "the pane's content height")
+        XCTAssertEqual(playing.clip.bounds.minY, instant.clip.bounds.minY, accuracy: 0.5, "the viewport")
+
+        let during = playingView.islandHeight()
+        playing.animator.finishAll()
+        XCTAssertTrue(ghosts(in: playingView).isEmpty)
+        XCTAssertEqual(playingView.islandHeight(), during, accuracy: 0.001, "removing the ghost changes no height")
+        XCTAssertEqual(playing.doc.frame.height, instant.doc.frame.height, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(playing.gapBelowViewport, 0.5)
+    }
+
+    func testARollInIntoAnExistingRowHasNothingToPlayAndIsInstant() throws {
+        // The row already exists above the old message, so the new message starts exactly where the
+        // old one did: a collapse would draw the old message over the new one. There is no ghost and
+        // no animation request, and the roll-in is complete and final at once.
+        let live = F.turn([focusMessage("Earlier")] + F.run(2, prefix: "a") + tallMessage("OLD", blocks: 4),
+                          complete: false, user: "live")
+        let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
+        rig.animator.completesAtOnce = false   // so a request, if there were one, would stay pending
+        rig.start()
+        XCTAssertTrue(rig.followTail.isPinned, "precondition: the pane follows the tail")
+        XCTAssertEqual(isOnScreen(rig, turn: live.id, ordinal: 1), true, "precondition: the old message is on screen")
+
+        arrive(rig, "NEW-MSG")
+
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertTrue(rig.animator.requests.isEmpty, "nothing to play: no animation was requested")
+        XCTAssertTrue(ghosts(in: view).isEmpty, "and no ghost was made")
+        XCTAssertFalse(X.contains("OLD-", in: view), "the old message is already folded")
+        XCTAssertEqual(rowSummary(view)?.hasPrefix("2 messages"), true, rowSummary(view) ?? "no row")
+        XCTAssertNotNil(textBlock(containing: "NEW-MSG", in: view))
+        XCTAssertTrue(rig.holds.isEmpty)
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "the geometry is final")
     }
 
     func testARollInGhostNeverTakesAHitWhateverItCovers() {
@@ -1092,9 +1526,9 @@ final class FocusRollInComposerTests: XCTestCase {
         (0 ..< blocks).map { TurnBlock.text("\(tag)-\($0) \(F.prose) \(F.prose) \(F.prose)") }
     }
 
-    private func makeRig(following: Bool) -> (rig: SafetyRig, live: ChatTurn) {
-        let live = F.turn([focusMessage("Earlier")] + F.run(2, prefix: "a") + tallMessage("HELD") + F.run(2, prefix: "b"),
-                          complete: false, user: "live")
+    private func makeRig(following: Bool, live custom: ChatTurn? = nil) -> (rig: SafetyRig, live: ChatTurn) {
+        let live = custom ?? F.turn([focusMessage("Earlier")] + F.run(2, prefix: "a") + tallMessage("HELD") + F.run(2, prefix: "b"),
+                                    complete: false, user: "live")
         let rig = SafetyRig(self, turns: (0 ..< 4).map { SafetyFixtures.tallTurn($0) } + [live])
         rig.start()
         if !following {
@@ -1130,25 +1564,30 @@ final class FocusRollInComposerTests: XCTestCase {
     }
 
     func testAFollowingPanesRollInsAndTheirCollapsesNeverTouchTheComposer() throws {
-        let (rig, live) = makeRig(following: true)
+        // The turn opens with a message, so the first roll-in creates the activity row and collapses
+        // the old message into the place the row takes; the later ones fold into a row that is
+        // already there and are instant (see `testARollInIntoAnExistingRowHasNothingToPlayAndIsInstant`).
+        let (rig, live) = makeRig(following: true, live: F.turn([focusMessage("Starting")], complete: false, user: "live"))
         let before = composer(rig)
         XCTAssertTrue(rig.followTail.isPinned)
 
-        for n in 0 ..< 3 {
+        rig.animator.completesAtOnce = false
+        arrive(rig, "Message 0")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertEqual(rig.animator.requests.count, 1, "precondition: the first roll-in collapsed")
+        XCTAssertEqual(view.subviews.compactMap { $0 as? RollInGhostView }.count, 1, "precondition: a collapse is playing")
+        assertUntouched(rig, before, "while a collapse is playing")
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "while a collapse is playing")
+
+        rig.animator.finishAll()
+        assertUntouched(rig, before, "after the collapse finished")
+
+        for n in 1 ..< 4 {
             arrive(rig, "Message \(n)")
             assertUntouched(rig, before, "roll-in \(n)")
             XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "roll-in \(n)")
         }
-        XCTAssertEqual(rig.animator.requests.count, 3, "precondition: each on-screen roll-in collapsed")
-
-        rig.animator.completesAtOnce = false
-        arrive(rig, "Message 3")
-        let view = try XCTUnwrap(rig.materialized[live.id])
-        XCTAssertEqual(view.subviews.compactMap { $0 as? RollInGhostView }.count, 1, "precondition: a collapse is playing")
-        assertUntouched(rig, before, "while a collapse is playing")
-
-        rig.animator.finishAll()
-        assertUntouched(rig, before, "after the collapse finished")
+        XCTAssertTrue(rig.followTail.isPinned)
     }
 
     func testAHeldRollInInAPaneThatIsNotFollowingMovesNothingAndNeverTouchesTheComposer() throws {
@@ -1186,5 +1625,131 @@ final class FocusRollInComposerTests: XCTestCase {
         XCTAssertFalse(rig.store.hasHolds, "precondition: the hold was released by the jump")
         XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5)
         assertUntouched(rig, before, "after Jump to latest")
+    }
+
+    // MARK: The button, and the end of a click
+
+    /// Off screen, the way a reader scrolled to the end of the turn before sees the live turn.
+    private func scrollAboveTheLiveTurn(_ rig: SafetyRig) {
+        rig.userScroll(to: max(0, rig.virtualizer.offset(of: rig.turns.count - 1) + 10 - rig.viewportHeight))
+        rig.settle()
+    }
+
+    func testAPressedButtonInTheComposerDoesNotHoldAnOffScreenRollInAndMovesNothing() throws {
+        let (rig, live) = makeRig(following: false)
+        scrollAboveTheLiveTurn(rig)
+        XCTAssertFalse(rig.followTail.isPinned, "precondition: the reader is not following")
+        rig.mouseDown = true   // the button is down in the composer: a click or a drag over its text
+
+        rig.assertNoMove("an off-screen roll-in while the button is down in the composer", following: false) {
+            arrive(rig, "NEXT-MSG")
+        }
+
+        XCTAssertFalse(rig.store.hasHolds, "the button is down outside the message: nothing is held")
+        XCTAssertFalse(FocusFixtures.contains("HELD-0", in: try XCTUnwrap(rig.materialized[live.id])), "the message rolled in at once")
+    }
+
+    /// A live turn whose latest message (ordinal 1) is markdown (`SEL-0` ... `SEL-5`) with `SEL-5`
+    /// selected in the card; the composer holds partly typed text. Following, or scrolled until the
+    /// message is below the viewport.
+    private func selectedScene(following: Bool) throws -> (rig: SafetyRig, live: ChatTurn, textView: NSTextView) {
+        let message = (0 ..< 6).map { TurnBlock.text("SEL-\($0) **bold \($0)** \(F.prose) \(F.prose) \(F.prose)") }
+        let live = F.turn([focusMessage("Earlier")] + F.run(2, prefix: "a") + message, complete: false, user: "live")
+        let rig = SafetyRig(self, turns: (0 ..< 4).map { SafetyFixtures.tallTurn($0) } + [live])
+        rig.start()
+        rig.focusComposer()
+        let view = try XCTUnwrap(rig.materialized[live.id], "the turn is built")
+        let textView = try XCTUnwrap(FocusFixtures.all(NSTextView.self, in: view).first { $0.string.contains("SEL-5") },
+                                     "a card shows SEL-5")
+        let range = (textView.string as NSString).range(of: "SEL-5")
+        XCTAssertTrue(rig.window.makeFirstResponder(textView), "the card takes focus")
+        textView.setSelectedRange(range)
+        rig.followTail.scrollToBottom()
+        rig.settle()
+        if !following {
+            scrollAboveTheLiveTurn(rig)
+            XCTAssertFalse(rig.followTail.isPinned, "precondition: the operator scrolled up")
+        }
+        XCTAssertEqual(textView.selectedRange, range, "precondition: the text is selected")
+        XCTAssertTrue(rig.window.firstResponder === textView, "precondition: the card holds focus")
+        return (rig, live, textView)
+    }
+
+    func testClickingTheComposerAfterCopyingFromAHeldSelectionInAFollowingPaneReleasesItAfterTheEvent() throws {
+        let (rig, live, _) = try selectedScene(following: true)
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(rig.store.state(for: live.id).heldOrdinals, [1], "precondition: the selection held the roll-in")
+
+        XCTAssertTrue(rig.window.makeFirstResponder(rig.textView), "the reader clicks into the composer")
+        XCTAssertEqual(rig.store.state(for: live.id).heldOrdinals, [1], "focus moves in the middle of the click: the release waits")
+        rig.flushAfterEvent()
+        rig.settle()
+
+        XCTAssertFalse(rig.store.hasHolds, "the held message no longer has focus: the roll-in completed")
+        let view = try XCTUnwrap(rig.materialized[live.id])
+        XCTAssertFalse(FocusFixtures.contains("SEL-", in: view), "the message is folded")
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "the pane is at the true bottom")
+        XCTAssertTrue(rig.window.firstResponder === rig.textView, "the composer has focus")
+        XCTAssertEqual(rig.textView.string, SafetyRig.typedText, "the composer text is untouched")
+    }
+
+    func testClickingTheComposerAfterCopyingFromAHeldSelectionInAPaneThatIsNotFollowingReleasesItWithoutAJump() throws {
+        let (rig, live, _) = try selectedScene(following: false)
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(rig.store.state(for: live.id).heldOrdinals, [1], "precondition: the selection held the roll-in")
+        let before = rig.snapshot()
+        let turnBefore = rig.firstVisibleTurnIdentity()
+        XCTAssertNotNil(before.firstVisible, "precondition: the transcript has a first visible block")
+
+        // `assertNoMove` does not fit: the click itself moves first responder, which it asserts does not change.
+        XCTAssertTrue(rig.window.makeFirstResponder(rig.textView), "the reader clicks into the composer")
+        XCTAssertTrue(rig.store.hasHolds, "the release waits for the end of the click")
+        rig.flushAfterEvent()
+        rig.settle()
+
+        XCTAssertFalse(rig.store.hasHolds, "the roll-in completed")
+        let after = rig.snapshot()
+        XCTAssertEqual(rig.firstVisibleTurnIdentity(), turnBefore)
+        XCTAssertEqual(after.firstVisible?.itemKey, before.firstVisible?.itemKey, "first visible item changed")
+        XCTAssertLessThanOrEqual(abs((after.firstVisible?.offsetPt ?? .infinity) - (before.firstVisible?.offsetPt ?? 0)), 1,
+                                 "the first visible block moved")
+        XCTAssertFalse(rig.followTail.isPinned)
+        XCTAssertTrue(rig.window.firstResponder === rig.textView, "the composer has focus")
+        XCTAssertEqual(rig.textView.string, SafetyRig.typedText, "the composer text is untouched")
+    }
+
+    func testTheEndOfAClickThatLeavesTheSelectionStandingMovesNothingAndReleasesNothing() throws {
+        let (rig, live, textView) = try selectedScene(following: false)
+        arrive(rig, "NEXT-MSG")
+        XCTAssertEqual(rig.store.state(for: live.id).heldOrdinals, [1], "precondition")
+        let selected = textView.selectedRange
+        rig.mouseDown = true   // the drag that made the selection
+
+        rig.assertNoMove("the button went up with the selection still standing", following: false) {
+            rig.mouseDown = false
+            rig.rollInHolds.mouseWentUp()
+            rig.flushAfterEvent()
+        }
+
+        XCTAssertEqual(rig.store.state(for: live.id).heldOrdinals, [1], "the selection still holds the message")
+        XCTAssertEqual(textView.selectedRange, selected, "and the selection is intact")
+    }
+
+    func testAMouseUpOrAChangeOfFocusWithNothingHeldMovesNothingAndSchedulesNothing() throws {
+        for following in [true, false] {
+            let (rig, _) = makeRig(following: following)
+            XCTAssertFalse(rig.store.hasHolds, "precondition: nothing is held")
+            let before = rig.rollInHolds.evaluations
+
+            rig.assertNoMove("a mouse-up and a focus change with nothing held (following: \(following))", following: following) {
+                rig.rollInHolds.mouseWentUp()
+                rig.rollInHolds.firstResponderChanged()
+                XCTAssertEqual(rig.queuedAfterEvent, 0, "nothing is scheduled for the end of the event")
+                rig.flushAfterEvent()
+            }
+
+            XCTAssertEqual(rig.rollInHolds.evaluations, before, "no message was examined")
+        }
     }
 }

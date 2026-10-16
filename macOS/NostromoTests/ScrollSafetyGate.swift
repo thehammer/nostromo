@@ -64,6 +64,11 @@ final class SafetyRig {
     var rollInHolds: RollInHolds!
     var reduceMotion = false
     let animator = RigRollInAnimator()
+    /// The left mouse button, as the pane would read it from AppKit. A test presses and releases it.
+    var mouseDown = false
+    /// Work the pane asked to run once the current event is over (a mouse-up, a change of first
+    /// responder), held until a test says the event ended.
+    private var afterEventQueue: [() -> Void] = []
 
     /// The composer, laid out under the clip view the way `ReplView` stacks them: its height
     /// constraint drives the clip height.
@@ -137,6 +142,20 @@ final class SafetyRig {
         rollInHolds.isFollowingTail = { [unowned self] in self.followTail.isPinned }
         rollInHolds.reduceMotion = { [unowned self] in self.reduceMotion }
         rollInHolds.animator = animator
+        rollInHolds.isLeftMouseDown = { [unowned self] in self.mouseDown }
+        rollInHolds.afterEvent = { [unowned self] work in self.afterEventQueue.append(work) }
+    }
+
+    /// How many pieces of work are waiting for the end of the event.
+    var queuedAfterEvent: Int { afterEventQueue.count }
+
+    /// The event is over: run what the pane deferred until now (and what that defers in turn).
+    func flushAfterEvent() {
+        while !afterEventQueue.isEmpty {
+            let work = afterEventQueue
+            afterEventQueue = []
+            work.forEach { $0() }
+        }
     }
 
     /// Lay the turns out and park at the bottom, like a pane that has been following.

@@ -130,6 +130,11 @@ final class ScrollRig {
     /// Plays (records) the collapse of an on-screen roll-in; completes it at once unless a test says otherwise.
     let animator = RigRollInAnimator()
     var coordinator: TranscriptViewportCoordinator!
+    /// The left mouse button, as the pane would read it from AppKit. A test presses and releases it.
+    var mouseDown = false
+    /// Work the pane asked to run once the current event is over (a mouse-up, a change of first
+    /// responder). Held here so a test decides when the event ends and no run loop is spun.
+    private var afterEventQueue: [() -> Void] = []
 
     init(_ testCase: XCTestCase, turns: [ChatTurn], size: NSSize = NSSize(width: 900, height: 600)) {
         window = makeRigWindow(testCase, size: size)
@@ -184,6 +189,20 @@ final class ScrollRig {
         rollInHolds.isFollowingTail = { [unowned self] in self.followTail.isPinned }
         rollInHolds.reduceMotion = { [unowned self] in self.reduceMotion }
         rollInHolds.animator = animator
+        rollInHolds.isLeftMouseDown = { [unowned self] in self.mouseDown }
+        rollInHolds.afterEvent = { [unowned self] work in self.afterEventQueue.append(work) }
+    }
+
+    /// How many pieces of work are waiting for the end of the event.
+    var queuedAfterEvent: Int { afterEventQueue.count }
+
+    /// The event is over: run what the pane deferred until now (and what that defers in turn).
+    func flushAfterEvent() {
+        while !afterEventQueue.isEmpty {
+            let work = afterEventQueue
+            afterEventQueue = []
+            work.forEach { $0() }
+        }
     }
 
     /// Lay the turns out and park at the bottom, like a pane that has been following.
