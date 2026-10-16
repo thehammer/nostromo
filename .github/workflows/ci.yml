@@ -5,8 +5,24 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual run on any pushed branch, with an optional job selector. Used by
+  # `make ci-remote` (scripts/ci_remote.py) so a job can run CI before it has a
+  # PR. GitHub only offers this trigger once it exists on the default branch.
+  workflow_dispatch:
+    inputs:
+      only:
+        description: >-
+          Which jobs to run. all = every job; rust = Build & Lint; python = Python
+          tooling tests; swift = Mac app + NostromoKit + iOS simulator build; mac =
+          Swift tests (Mac app); kit = Swift tests (NostromoKit); ios = iOS simulator
+          build.
+        type: choice
+        options: [all, rust, python, swift, mac, kit, ios]
+        default: all
 
 # Least privilege: every job here only checks out code, builds, tests and uploads artifacts.
+# A dispatch needs nothing more here: the *caller's* token needs `actions: write`,
+# which `gh`'s `repo` and `workflow` scopes include.
 permissions:
   contents: read
 
@@ -15,7 +31,8 @@ env:
 
 jobs:
   build:
-    name: Build & Lint
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Build & Lint (dispatch)' || 'Build & Lint' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -47,7 +64,8 @@ jobs:
         run: cargo test
 
   python-tooling:
-    name: Python tooling tests
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","python"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Python tooling tests (dispatch)' || 'Python tooling tests' }}
     # macOS, not ubuntu. The suite includes `ShellScriptSyntaxTests` (needs bash
     # and shellcheck), `ShellScriptCpuGuardDeadPidTests` (exercises the driver's
     # `ps -o time=` guard, whose output format differs between BSD and GNU ps)
@@ -97,20 +115,37 @@ jobs:
   #   * `macos-26` + an explicitly selected Xcode, same pins as
   #     macos-launch-smoke.yml, so a runner-image rollover shows up as a diff
   #     here rather than as an unexplained red.
-  #   * Concurrency is per job and ref, cancelling superseded *pull request*
-  #     runs only. Runs on `main` are never cancelled, so every merge commit
-  #     gets a verdict.
+  #   * Concurrency is per job, event and ref, cancelling superseded *pull
+  #     request* runs only. Runs on `main` are never cancelled, so every merge
+  #     commit gets a verdict. The event name is in the group because GitHub
+  #     keeps at most one *pending* run per group and drops the older pending
+  #     one even with cancel-in-progress false: without it, a dispatch on
+  #     `main` would share a group with `main` pushes and could displace a
+  #     pending push run. A dispatch on a feature branch (`refs/heads/x`) never
+  #     shares a group with that branch's PR runs (`refs/pull/N/merge`). Two
+  #     dispatches on one branch queue; a third replaces the pending second.
+  #   * `workflow_dispatch` (see `only` above): every job's `if:` maps the
+  #     selector to jobs, and push / PR events always run every job. Each job's
+  #     `name:` is unchanged for push and PR but gets a ` (dispatch)` suffix on
+  #     a dispatch. A skipped job still posts a check run under its name on the
+  #     head SHA, and a skipped required check counts as passing; so without
+  #     the suffix a dispatch with `only=swift` on a PR's head commit would post
+  #     a skipped `Build & Lint` and silently satisfy the required check. The
+  #     suffixed names never match a required check.
+  #   * `push` stays `main`-only: pushing a feature branch triggers nothing until
+  #     a PR is opened or someone dispatches.
   #   * No dependency or DerivedData cache. The project has no remote SwiftPM
   #     dependencies (NostromoKit is a local package), so there is nothing to
   #     cache safely, and restoring stale DerivedData could make a stale build
   #     product pass a test the current source would fail.
   # ---------------------------------------------------------------------------
   swift-tests-mac:
-    name: Swift tests (Mac app)
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (Mac app) (dispatch)' || 'Swift tests (Mac app)' }}
     runs-on: macos-26
     timeout-minutes: 45
     concurrency:
-      group: swift-tests-mac-${{ github.ref }}
+      group: swift-tests-mac-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     steps:
@@ -161,11 +196,12 @@ jobs:
           retention-days: 14
 
   swift-tests-kit:
-    name: Swift tests (NostromoKit)
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","kit"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (NostromoKit) (dispatch)' || 'Swift tests (NostromoKit)' }}
     runs-on: macos-26
     timeout-minutes: 30
     concurrency:
-      group: swift-tests-kit-${{ github.ref }}
+      group: swift-tests-kit-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     steps:
@@ -195,11 +231,12 @@ jobs:
           retention-days: 14
 
   ios-simulator-build:
-    name: iOS simulator build
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'iOS simulator build (dispatch)' || 'iOS simulator build' }}
     runs-on: macos-26
     timeout-minutes: 30
     concurrency:
-      group: ios-simulator-build-${{ github.ref }}
+      group: ios-simulator-build-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     steps:

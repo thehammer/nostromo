@@ -1,0 +1,7 @@
+iOS simulator build	Build for iOS Simulator	2026-10-16T00:00:00.0000000Z # synthetic: hand-written in the `gh run view --log-failed` format; no real sample of this failure exists in recent CI
+iOS simulator build	Build for iOS Simulator	2026-10-16T00:00:01.0000000Z /Users/runner/work/nostromo/nostromo/iOS/Nostromo/Views/PaneListView.swift:88:17: error: cannot find 'paneTitle' in scope
+iOS simulator build	Build for iOS Simulator	2026-10-16T00:00:01.0000001Z /Users/runner/work/nostromo/nostromo/iOS/Nostromo/Views/PaneListView.swift:88:17: error: cannot find 'paneTitle' in scope
+iOS simulator build	Build for iOS Simulator	2026-10-16T00:00:01.0000002Z /Users/runner/work/nostromo/nostromo/Shared/NostromoKit/Sources/NostromoKit/Wire.swift:12:5: warning: variable 'x' was never mutated; consider changing to 'let' constant
+iOS simulator build	Build for iOS Simulator	2026-10-16T00:00:01.0000003Z /Users/runner/work/nostromo/nostromo/Shared/NostromoKit/Sources/NostromoKit/Wire.swift:130:9: error: missing return in instance method expected to return 'Int'
+iOS simulator build	Build for iOS Simulator	2026-10-16T00:00:01.0000004Z ** BUILD FAILED **
+iOS simulator build	Build for iOS Simulator	2026-10-16T00:00:01.0000005Z ##[error]Process completed with exit code 1.

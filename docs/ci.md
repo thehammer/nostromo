@@ -17,6 +17,9 @@ skipped reports as "skipped", which a required check treats as passing.
 | `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.5 min |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
 
+Every job except the advisory launch smoke can also be dispatched by hand on a
+branch, alone or in groups; see "Running CI on a branch (dispatch)" below.
+
 `make mac-test` and `make kit-test` remain the local commands; the Swift
 jobs run exactly those Makefile targets, so a local failure and a PR-checks
 failure are the same failure.
@@ -33,8 +36,8 @@ failure are the same failure.
   `ChatTurnViewLayoutTests`' rendered-height goldens (recorded with Fira Code)
   then come out several to ~120 pt short. If you regenerate those goldens or
   bump the font, update the version and checksum in `ci.yml` together.
-- Concurrency is per job and ref; a newer push to a PR cancels the older run
-  (pushes to `main` are never cancelled).
+- Concurrency is per job, event and ref; a newer push to a PR cancels the older
+  run (pushes to `main` and dispatches are never cancelled).
 - Nothing is cached. NostromoKit is a local SwiftPM package and the Xcode
   projects have no remote package dependencies, so there is nothing safe to
   cache, and restoring stale DerivedData could let a stale build product
@@ -59,6 +62,96 @@ names above: `Swift tests (Mac app)`, `Swift tests (NostromoKit)` and
 `iOS simulator build` (and `Build & Lint` / `Python tooling tests` if they
 are not already required). Keep `Launch smoke (advisory)` out of the
 required set; see its promotion criteria below.
+
+## Running CI on a branch (dispatch)
+
+`ci.yml` has a `workflow_dispatch` trigger, so CI can run on any **pushed**
+branch without a PR, and `make ci-remote` wraps it. Use it instead of running
+`xcodebuild` locally (gigabytes of DerivedData, and the Mac suite changes the
+display state of the machine you are working on).
+
+```
+make ci-remote                          # current branch, every job
+make ci-remote ONLY=kit                 # only Swift tests (NostromoKit)
+make ci-remote BRANCH=feature/x ONLY=mac
+make ci-remote RUN=<run id>             # attach to an existing run (e.g. a PR's CI run); no dispatch
+```
+
+It dispatches the run, waits (default timeout 50 min), prints one line per job
+state change, and on failure prints `FAILED <job>: <test or error>` lines parsed
+from the failed-step logs (XCTest, Swift Testing, cargo test, rustc/clippy,
+Swift compiler, Python unittest; a failed job with no recognised line gets its
+last 30 log lines tagged `[unparsed]`). Exit codes: 0 green, 1 a job failed,
+2 could not start, 3 timed out or run not found. It never cancels a run; on a
+timeout or Ctrl-C it prints `make ci-remote RUN=<id>` to reattach.
+
+`scripts/ci_remote.py` needs `gh` logged in with the `repo` and `workflow`
+scopes (those include `actions: write`, which dispatching needs; the workflow's
+own `permissions:` stay `contents: read`).
+
+### The `only` selector
+
+| `ONLY` | Jobs that run |
+|---|---|
+| `all` (default) | every job |
+| `rust` | `Build & Lint` |
+| `python` | `Python tooling tests` |
+| `swift` | `Swift tests (Mac app)`, `Swift tests (NostromoKit)`, `iOS simulator build` |
+| `mac` | `Swift tests (Mac app)` |
+| `kit` | `Swift tests (NostromoKit)` |
+| `ios` | `iOS simulator build` |
+
+Push and pull-request events always run every job.
+
+### Check names carry a `(dispatch)` suffix
+
+On a dispatch every job's name is its normal name plus ` (dispatch)`, for
+example `Build & Lint (dispatch)`; on push and PR the names are unchanged.
+Why: a skipped job still posts a check run under its name on the head commit,
+and a skipped required check counts as passing. If the names were identical, a
+dispatch with `ONLY=swift` on a PR's head commit would post a *skipped*
+`Build & Lint` and silently satisfy the required check. With the suffix,
+dispatch results never count as PR checks. (A PR still needs its own PR-event
+run to merge; a green dispatch is feedback, not a merge gate.)
+
+### Concurrency
+
+The event name is part of each Swift job's concurrency group, and
+`cancel-in-progress` stays true only for `pull_request`. GitHub keeps at most
+one *pending* run per group and drops the older pending one regardless of
+`cancel-in-progress`; without the event name a dispatch on `main` would share a
+group with `main` pushes and could displace a pending push run, leaving a merge
+commit without a verdict. A dispatch on a feature branch (`refs/heads/x`) never
+shares a group with that branch's PR runs (`refs/pull/N/merge`). Two dispatches
+on one branch queue; a third replaces the pending second.
+
+### Requirements and limits
+
+- The branch must be **pushed**: CI only sees what is on `origin`.
+  `make ci-remote` refuses (exit 2, "push first") when local `HEAD` differs from
+  the remote branch, and never dispatches then.
+- The branch must contain this change. An older branch has no dispatch trigger
+  and GitHub rejects the dispatch; `make ci-remote` says so ("rebase onto
+  main").
+- GitHub only offers `workflow_dispatch` once the trigger exists on the default
+  branch, so dispatch works after this change is on `main`.
+- `push` stays `main`-only, so pushing a feature branch triggers nothing until a
+  PR is opened or someone dispatches.
+
+### Cost
+
+The repo is public, so standard GitHub-hosted runners (including `macos-26`)
+cost **$0**. The real limit is concurrency: a personal Free account runs at most
+5 macOS jobs at once (an assumption from GitHub's published limits; check
+Settings > Billing). A full dispatch uses 4 macOS jobs (python-tooling, mac, kit,
+ios), so two simultaneous full dispatches plus a PR run will queue. Prefer
+`ONLY=swift`, `mac` or `kit`. Typical wall time: about 14 min for everything
+(`Build & Lint` dominates), about 7.5 min without it, about 2 min for `kit`.
+
+If the repo ever goes private (rates assumed; check current pricing): a full
+run bills about 14 macOS minutes (8 + 2 + 2 + 2, rounded up per job) at about
+$0.06-0.08/min plus about 15 Linux minutes at about $0.006-0.008/min, so about
+$1.0-1.25 per full run, and about $0.5-0.65 for `ONLY=mac`.
 
 ## `macos-launch-smoke` (advisory)
 
