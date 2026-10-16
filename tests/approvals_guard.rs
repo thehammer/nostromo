@@ -1342,3 +1342,64 @@ fn bypass_a_tmux_planted_on_path_does_not_answer_for_the_real_one() {
     assert_eq!(run.code, Some(0), "{run:?}");
     assert!(!marker.exists(), "the guard ran the tmux planted on PATH");
 }
+
+// ── regressions: bypasses found in the follow-up automated security review ──────────────
+
+#[test]
+fn bypass_a_tmux_command_alias_is_not_a_safe_command() {
+    // `command-alias` makes any name a tmux command; a name tmux doesn't define can't be told.
+    let command = "tmux set -s command-alias[100] zz=send-keys; tmux zz -t %7 x";
+    let remote = FakeProbe::default().pane_on(DEFAULT, "%7", "bash", REMOTE_SHELL);
+    assert_blocked(evaluate(&bash(command), &remote), RULE_TMUX_INPUT, command);
+    let local = FakeProbe::default().pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL);
+    assert_allowed(evaluate(&bash(command), &local), command);
+}
+
+#[test]
+fn bypass_opaque_tmux_text_is_checked_whatever_the_word_order() {
+    // The input verb comes before `tmux` in a string the tokenizer can't follow.
+    let command = r#"python3 -c "k='send-keys -t %7 x'; import os; os.system('tmux ' + k)""#;
+    let remote = FakeProbe::default().other_pane_on(DEFAULT, "production:ap:portal", REMOTE_SHELL);
+    assert_blocked(evaluate(&bash(command), &remote), RULE_TMUX_INPUT, command);
+    assert_allowed(evaluate(&bash(command), &FakeProbe::default()), "no remote pane");
+}
+
+#[test]
+fn bypass_a_tmux_word_hidden_from_the_text_count() {
+    // `$'\x74mux'` is tmux only after quote removal; it used to hide the opaque python call.
+    let command = r#"$'\x74mux' ls; python3 -c "import os; os.system('tmux send-keys -t %7 x')""#;
+    let remote = FakeProbe::default().pane_on(DEFAULT, "%7", "bash", REMOTE_SHELL);
+    assert_blocked(evaluate(&bash(command), &remote), RULE_TMUX_INPUT, command);
+    let local = FakeProbe::default().pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL);
+    assert_allowed(evaluate(&bash(command), &local), command);
+}
+
+#[test]
+fn bypass_aws_option_values_the_option_pattern_did_not_model() {
+    // Inside a string the tokenizer can't follow, `--query a b` broke the option-shaped regex.
+    for command in [
+        r#"python3 -c "import os; os.system('aws ecs --query a b execute-command --cluster c')""#,
+        r#"python3 -c "import os; os.system('aws ssm --query a b start-session --target i-1')""#,
+    ] {
+        assert_blocked(evaluate(&bash(command), &FakeProbe::default()), RULE_COMMAND, command);
+    }
+}
+
+#[test]
+fn bypass_unsetting_the_tmux_environment_moves_the_server() {
+    let world = || {
+        FakeProbe::default()
+            .pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL)
+            .other_pane_on(TmuxSocket::Path("/tmp/tmux-501/default".into()), "production:ap:portal", REMOTE_SHELL)
+    };
+    for command in [
+        "unset TMUX; tmux send-keys -t %7 x",
+        "env -u TMUX tmux send-keys -t %7 x",
+        "env -i tmux send-keys -t %7 x",
+        "env --ignore-environment tmux send-keys -t %7 x",
+    ] {
+        assert_blocked(evaluate(&bash(command), &world()), RULE_TMUX_INPUT, command);
+        let all_local = FakeProbe::default().pane_on(DEFAULT, "%7", "zsh", LOCAL_SHELL);
+        assert_allowed(evaluate(&bash(command), &all_local), command);
+    }
+}

@@ -315,9 +315,9 @@ fn tool_name_re() -> &'static Regex {
 fn command_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Global options may sit between the service and the operation
-        // (`aws ecs --profile p execute-command`).
-        let opts = r"\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*";
+        // Anything may sit between the service and the operation on the same
+        // line (`aws ecs --profile p execute-command`, option values with spaces).
+        let opts = r"\b[^\n]*\b";
         let run_task = if BLOCK_RUN_TASK { format!(r"|\becs_run_task\b|\becs{opts}run-task\b") } else { String::new() };
         Regex::new(&format!(
             r"(?i)\becs_connect\b|\becs_shell\b|\becs_open_tmux_pane\b|\becs{opts}execute-command\b|\bssm{opts}start-session\b|\bsession-manager-plugin\b{run_task}"
@@ -347,7 +347,14 @@ fn tmux_word_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)\btmux\b").unwrap())
 }
 
-/// An assignment that points tmux at another server (`TMUX=…`, `TMUX_TMPDIR=…`).
+/// Text that may point tmux at another server than the hook's own: any
+/// mention of `TMUX` / `TMUX_TMPDIR` (assigned, unset, …) or `env -i` / `-u`.
+fn tmux_env_moved_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\bTMUX(?:_TMPDIR)?\b|\benv\s+(?:-\w*[iu]\b|--unset|--ignore-environment|-(?:\s|$))").unwrap())
+}
+
+/// A literal assignment that points tmux at another server (`TMUX=…`, `TMUX_TMPDIR=…`).
 fn tmux_env_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\b(TMUX|TMUX_TMPDIR)=(\S*)").unwrap())
@@ -407,6 +414,7 @@ const TMUX_COMMANDS: &[(&str, &str, TmuxKind)] = {
 /// What tmux command `name` is. An exact name or alias is that command; any
 /// other prefix is the most dangerous command it could name (tmux would run
 /// an unambiguous one and reject the rest, so erring high only over-blocks).
+/// A name that is neither may be a user `command-alias`: it can't be told.
 fn tmux_kind(name: &str) -> TmuxKind {
     let name = name.to_ascii_lowercase();
     if name.is_empty() || name.starts_with('-') {
@@ -420,20 +428,11 @@ fn tmux_kind(name: &str) -> TmuxKind {
         TmuxKind::Indirect
     } else if named().any(|k| k == TmuxKind::Pane) {
         TmuxKind::Pane
-    } else {
+    } else if named().next().is_some() {
         TmuxKind::Safe
+    } else {
+        TmuxKind::Indirect
     }
-}
-
-/// Some word after a `tmux` in `text` could be a tmux input command. Used
-/// when tmux appears where the tokenizer can't follow it (an interpreter's
-/// string, an unparsed command).
-fn mentions_tmux_input(text: &str) -> bool {
-    tmux_word_re().find_iter(text).any(|m| {
-        text[m.end()..]
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-            .any(|w| tmux_kind(w) != TmuxKind::Safe)
-    })
 }
 
 /// Decide whether this tool call may run.
@@ -475,7 +474,7 @@ pub fn evaluate(payload: &HookPayload, probe: &dyn PaneProbe) -> Result<GuardVer
         if !lower.contains("tmux") {
             continue;
         }
-        if let Some(verdict) = tmux_rule(&normalized, &parsed, probe)? {
+        if let Some(verdict) = tmux_rule(&normalized, &words, &parsed, probe)? {
             return Ok(verdict);
         }
     }
@@ -542,15 +541,21 @@ struct TmuxCall {
 }
 
 /// Rule 3: tmux input aimed at a remote pane. `None` when nothing is remote.
-fn tmux_rule(normalized: &str, parsed: &ShellParse, probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
-    let env_moved = tmux_env_re().is_match(normalized);
+fn tmux_rule(
+    normalized: &str,
+    words: &str,
+    parsed: &ShellParse,
+    probe: &dyn PaneProbe,
+) -> Result<Option<GuardVerdict>, GuardError> {
+    let env_moved = tmux_env_moved_re().is_match(normalized) || tmux_env_moved_re().is_match(words);
     let calls: Vec<TmuxCall> = parsed.commands.iter().filter_map(|c| tmux_call(c, env_moved)).collect();
     // Scopes to check whole; `None` is every server.
     let mut cant_tell: Vec<Scope> = Vec::new();
     // A `tmux` the tokenizer didn't see as a command (an interpreter's string,
-    // a script being written, a parse failure) may be aimed anywhere.
-    let opaque = parsed.unparsed || tmux_word_re().find_iter(normalized).count() > calls.len();
-    if opaque && mentions_tmux_input(&normalized.to_lowercase()) {
+    // a script being written, a parse failure) may be aimed anywhere. Count in
+    // both forms: `$'\x74mux'` is tmux only after quote removal.
+    let mentions = tmux_word_re().find_iter(normalized).count().max(tmux_word_re().find_iter(words).count());
+    if parsed.unparsed || mentions > calls.len() {
         cant_tell.push(None);
     }
     for call in &calls {
