@@ -34,7 +34,7 @@ use super::{
     scrollback::ScrollbackBuf,
 };
 
-use crate::pty::host::{ENV_MCP_SOCKET, ENV_NOSTROMO_PTY, ENV_PTY_ID, ENV_SESSION_ID, ENV_VIEW_ID};
+use crate::pty::{ENV_MCP_SOCKET, ENV_NOSTROMO_PTY, ENV_PTY_ID, ENV_SESSION_ID, ENV_VIEW_ID};
 
 // ── PTY chunk ─────────────────────────────────────────────────────────────────
 

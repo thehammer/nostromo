@@ -144,10 +144,6 @@ first responder. Clicking it expands a small per-agent panel; there is no
 agent selector styled as `PaneTree` tabs, since an activity stream isn't a
 view in the placement vocabulary.
 
-The Rust TUI is unchanged — it keeps its existing `AgentBus`-fed status-bar
-rendering (`src/ui/chrome.rs`), reading straight from the same tailed
-`activity.jsonl`.
-
 iOS (`ios-curated-view-parity` W4) renders the same three broadcasts as a
 real surface, not just a decode target: `ActivityTickerBar` is a
 fixed-height, single-line bar composed above `TranscriptView`'s input bar

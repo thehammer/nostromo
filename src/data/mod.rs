@@ -2,10 +2,8 @@
 //!
 //! Each data source runs in its own tokio task, polls on an interval and on
 //! dirty-file wakeup, and pushes snapshots to a `tokio::sync::watch` channel.
-//! Views read the latest value on each render tick.
+//! `nostromd` and the MCP tools read the latest value on demand.
 
-pub mod break_glass;
-pub mod daemon_bridge;
 pub mod dirty_file;
 pub mod file_source;
 pub mod fred_calendar;
@@ -15,8 +13,6 @@ pub mod fred_mailbox;
 pub mod fred_mailbox_native;
 pub mod github_client;
 pub mod graph_client;
-pub mod mother_broker_source;
-pub mod mother_poll;
 pub mod perri_current_pr;
 pub mod perri_pr;
 pub mod perri_pr_native;
@@ -25,10 +21,7 @@ pub mod perri_queue_native;
 pub mod perri_queue_targeted;
 pub mod perri_suppress;
 pub mod relay_client;
-pub mod posture_events_watcher;
 pub mod rate_limits;
-pub mod rate_limits_watcher;
-pub mod right_panel_source;
 pub mod teri_todos;
 pub mod tickets;
 pub mod unified_diff;

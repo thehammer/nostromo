@@ -2,17 +2,13 @@
 name = "nostromo"
 version = "0.1.0"
 edition = "2021"
-description = "A Ratatui-based AI agent IDE — unified dashboard for fred, perri, claudia, cody, and mother"
+description = "nostromd: the Nostromo daemon, MCP bridge and hooks behind the Nostromo macOS/iOS apps"
 authors = ["thehammer"]
 license = "MIT"
 
 [lib]
 name = "nostromo"
 path = "src/lib.rs"
-
-[[bin]]
-name = "nostromo"
-path = "src/main.rs"
 
 [[bin]]
 name = "nostromd"
@@ -41,23 +37,9 @@ path = "src/bin/sensitive_text_scan.rs"
 test-support = []
 
 [dependencies]
-# TUI
-ratatui = "0.30"
-ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
-crossterm = "0.28"
-
-# Image rendering (calendar pixel renderer)
-image = "0.25"
-tiny-skia = "0.11"
-fontdue = "0.9"
-
 # Embedded PTY
 portable-pty = "0.8"
 vt100 = "0.16"
-bytes = "1"
-
-# Syntax highlighting
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 
 # Markdown parsing (transcript pane phase 2)
 pulldown-cmark = { version = "0.12", default-features = false }
@@ -113,7 +95,6 @@ octocrab = "0.41"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 serde_yaml = "0.9"
 url = "2"
-unicode-width = "0.1"
 unicode-normalization = "0.1.25"
 # Private scratch dir for the model catalogue probe.
 tempfile = "3"
@@ -127,7 +108,6 @@ core-foundation = "0.10"
 
 [dev-dependencies]
 nostromo = { path = ".", features = ["test-support"] }
-insta = { version = "1", features = ["yaml"] }
 wiremock = "0.6"
 # Enables tokio::time::{pause, advance} for deterministic staleness-tick tests
 # (pane_source_liveness / pane_sources staleness tests). Unified with the main

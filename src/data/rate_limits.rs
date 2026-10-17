@@ -12,8 +12,6 @@
 
 use std::collections::BTreeMap;
 
-use ratatui::style::Color;
-
 // ── RateLimits ────────────────────────────────────────────────────────────────
 
 /// Snapshot of Claude's 5-hour and 7-day rate-limit windows.
@@ -148,24 +146,6 @@ impl BudgetPosture {
             Self::Cruise => "Cruise",
             Self::Push => "Push",
             Self::PutTheHammerDown => "Put the hammer down",
-        }
-    }
-
-    pub fn color(&self) -> Color {
-        match self {
-            // Legacy mapping (from low-budget-pressure → high).
-            Self::Flush => Color::LightGreen,
-            Self::Normal => Color::DarkGray,
-            Self::Elevated => Color::Yellow,
-            Self::Conservative => Color::Rgb(255, 165, 0),
-            Self::Critical => Color::LightRed,
-            // New vocabulary mapping (pace-oriented).
-            // Pump the brakes = burning budget too fast = warn red.
-            Self::PumpTheBrakes => Color::LightRed,
-            Self::EaseUp => Color::Rgb(255, 165, 0),
-            Self::Cruise => Color::DarkGray,
-            Self::Push => Color::Yellow,
-            Self::PutTheHammerDown => Color::LightGreen,
         }
     }
 }
