@@ -20,7 +20,7 @@ use nostromo::data::teri_todos::{TeriTodo, TeriTodosSnapshot};
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::protocol::{ClientMsg, ServerMsg, Topic, MAX_FRAME_LEN, PROTOCOL_VERSION};
-use nostromo::ipc::{PtyManager, Server, SessionManager};
+use nostromo::ipc::{Server, SessionManager};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 
@@ -41,11 +41,9 @@ fn spawn() -> Daemon {
         tmp.path().join("mcp.sock"),
         tmp.path().join("mcp-config.json"),
     );
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
     let server = Server::bind(
         &socket_path,
-        pty_mgr,
         session_mgr,
         tmp.path().join("perri-state"),
         decisions,

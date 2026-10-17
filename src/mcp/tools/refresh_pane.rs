@@ -391,8 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_daemon_backend_returns_not_supported() {
-        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = McpSharedState::for_test(event_tx);
+        let state = McpSharedState::for_test();
         let args =
             json!({ "view_id": "perri", "pane_id": "queue", "source": "perri.list_pr_queue" });
         let result = refresh_pane_content(&state, &args, None).await;

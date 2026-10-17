@@ -597,7 +597,7 @@ pub enum ServerClass<'a> {
 // rebinding the port) is tracked separately in
 // `.claude/wip/nostromd-tcp-47100-exposure/index.md`. Until then these families
 // are knowingly reachable by any network peer, because gating them one by one
-// would be theatre while `pty_spawn` runs arbitrary commands:
+// would be theatre while `pty_spawn` ran arbitrary commands (retired in R2; it is now a tombstone):
 //
 //   * client → daemon: `focus_registry_push`, `perri_action`, `mother_action`,
 //     `mother_resume`, `decision_answer`, `pty_kill`/`pty_attach`/`pty_resize`,
@@ -693,14 +693,6 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::MotherStatusline(_)
         | ServerMsg::Pong
         | ServerMsg::Error { .. }
-        | ServerMsg::PtySpawned { .. }
-        | ServerMsg::PtyOutput { .. }
-        | ServerMsg::PtyExited { .. }
-        | ServerMsg::PtyScrollback { .. }
-        | ServerMsg::PtyAttached { .. }
-        | ServerMsg::PtyDetach { .. }
-        | ServerMsg::PtyListResp { .. }
-        | ServerMsg::PtyIdentity { .. }
         | ServerMsg::ActivityHealth { .. }
         | ServerMsg::Withheld { .. }
         | ServerMsg::DaemonReconnected => ServerClass::Open,
@@ -791,6 +783,11 @@ pub enum NetworkPolicy {
 /// process or session, answer a prompt/decision/permission, act on a Mother job
 /// or a PR, rewrite the registry, close a pane or inject text, and must not
 /// return Teri/Fred-derived data (see [`targets_sensitive_session`]).
+///
+/// The `Pty*` verbs are retired tombstones (R2): the daemon no longer hosts PTYs,
+/// so every one is answered with `pty_host_removed` and does nothing. They keep
+/// their entries below (and their ordinals) so the table stays stable; the
+/// reasons given for them are historical.
 ///
 /// Why each allowed verb is safe:
 /// * `Hello`/`Subscribe`/`Ping`: handshake and topic selection; the outbound
@@ -1569,6 +1566,30 @@ mod tests {
              (ordinal 0..{CLIENT_MSG_VARIANTS}); a new verb needs an `ordinal` arm, a bumped \
              constant and a fixture"
         );
+    }
+
+    /// The seven PTY verbs are tombstoned in the daemon but stay on the wire, so their
+    /// ordinals (and the variant count) must not shift.
+    #[test]
+    fn retired_pty_verbs_keep_their_ordinals() {
+        let by_name = |name: &str| -> usize {
+            let matches: Vec<usize> = every_client_msg()
+                .iter()
+                .filter(|m| variant_name(m) == name)
+                .map(ordinal)
+                .collect();
+            assert_eq!(matches.len(), 1, "exactly one fixture for {name}");
+            matches[0]
+        };
+        assert_eq!(by_name("PtySpawn"), 3);
+        assert_eq!(by_name("PtyInput"), 4);
+        assert_eq!(by_name("PtyResize"), 5);
+        assert_eq!(by_name("PtyKill"), 6);
+        assert_eq!(by_name("PtyAttach"), 7);
+        assert_eq!(by_name("PtyDetach"), 8);
+        assert_eq!(by_name("PtyList"), 9);
+        assert_eq!(CLIENT_MSG_VARIANTS, 39);
+        assert_eq!(every_client_msg().len(), 39);
     }
 
     #[test]

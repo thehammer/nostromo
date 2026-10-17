@@ -9,12 +9,10 @@
 
 use nostromo::mcp::{state::McpSharedState, tools};
 use serde_json::Value;
-use tokio::sync::mpsc;
 
 /// Build a minimal `McpSharedState` for dispatch tests.
 fn test_state() -> McpSharedState {
-    let (tx, _rx) = mpsc::unbounded_channel();
-    McpSharedState::for_test(tx)
+    McpSharedState::for_test()
 }
 
 /// Dispatch a tool call and return the decoded JSON body (unwraps the

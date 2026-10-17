@@ -12,14 +12,12 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Build a populated `McpSharedState` with one view + one PTY registered.
 async fn make_state() -> Arc<McpSharedState> {
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let state = Arc::new(McpSharedState::for_test(tx));
+    let state = Arc::new(McpSharedState::for_test());
 
     state.views_meta.write().await.push(ViewMeta {
         id: "perri",

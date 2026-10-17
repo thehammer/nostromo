@@ -64,10 +64,9 @@ pub fn get_current_pr(state: &McpSharedState, tag: Option<&str>) -> Value {
 /// daemon doesn't support it", which is a different and wrong answer.
 ///
 /// `selected_index` is deliberately not included here: this handler is
-/// synchronous, and on the TUI host reading the selected index means an
-/// async round trip through `PerriView` — adding the key here would make the
-/// response shape differ by host, which is worse for callers than not having
-/// it. Use `perri.get_selected_index` instead.
+/// synchronous and the selected index lives behind the daemon backend — adding
+/// the key here would make the response shape differ by host, which is worse
+/// for callers than not having it. Use `perri.get_selected_index` instead.
 ///
 /// `current_pin` (W5 — current-pr-collision) is this focus's same pin in the
 /// terse `{repo, number}` shape, via the same
@@ -130,8 +129,7 @@ mod tests {
     /// `snap` is published as **`"perri"`'s** PR under review (W7): the pin is
     /// per-focus, so every assertion below reads it back with the same tag.
     fn state_with_pr(snap: Option<crate::data::perri_pr::PrSnapshot>) -> McpSharedState {
-        let (event_tx, _dropped_rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = McpSharedState::for_test(event_tx);
+        let state = McpSharedState::for_test();
         if let Some(snap) = snap {
             state.set_pr_for("perri", snap);
         }

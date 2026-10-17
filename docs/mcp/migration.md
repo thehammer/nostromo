@@ -156,9 +156,6 @@ running without an MCP-enabled Nostromo.  Add this banner at the top of each:
 2. Open a Claude Code session in a Perri REPL pane.
 3. Ask Claude to call `nostromo.get_self()` — verify view context comes back.
 4. Ask Claude to call `perri.list_pr_queue()` — verify queue data appears.
-5. Ask Claude to call `nostromo.notify({ "message": "MCP migration complete", "level": "info" })` — verify a toast appears briefly in the status bar.
-6. Ask Claude to call `nostromo.register_status_segment({ "view_id": "perri", "segment_id": "test", "text": "✓ MCP live", "color": "sage" })` — switch to the Perri tab and verify the segment appears in the status bar.
-7. Call `nostromo.clear_status_segment({ "view_id": "perri", "segment_id": "test" })` and verify it disappears.
 
 ---
 

@@ -30,7 +30,7 @@ use nostromo::data::work::{SourceState, SourceStatus, WorkItem, WorkSource};
 use nostromo::mcp::tools::teri::{get_work_item, list_work_items};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, watch, Notify};
+use tokio::sync::{broadcast, watch, Notify};
 use tokio::task::JoinSet;
 use wiremock::matchers::{body_partial_json, header, method, path, query_param};
 use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -2391,8 +2391,7 @@ fn rig(jira: Arc<JiraWorkSource>, dir: &Path) -> Rig {
         repo_docs_root: Some(dir.join("no-code-here")),
         ..HubDeps::new(btx, trx)
     });
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let mut state = McpSharedState::for_test(event_tx);
+    let mut state = McpSharedState::for_test();
     state.work_hub = Some(hub.clone());
     Rig { hub, state, _ttx: ttx }
 }

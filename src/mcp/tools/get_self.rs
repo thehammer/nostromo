@@ -107,7 +107,7 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
         .unwrap_or_else(|| (view_id.to_string(), vec![]));
     drop(views);
 
-    // No `pr_under_review` on the TUI path: it has no focus registry, so it
+    // No `pr_under_review` outside the daemon: it has no focus registry, so it
     // has no focus to answer for. Degrading by omission is what `create_focus`
     // and `show` already do here.
     json!({
@@ -124,11 +124,9 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
 mod tests {
     use super::*;
     use crate::mcp::state::{PtyIdentity, ViewMeta};
-    use tokio::sync::mpsc;
 
     async fn make_state() -> McpSharedState {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let state = McpSharedState::for_test(tx);
+        let state = McpSharedState::for_test();
 
         // Register one view.
         state.views_meta.write().await.push(ViewMeta {

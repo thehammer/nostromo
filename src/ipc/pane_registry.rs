@@ -261,8 +261,8 @@ impl PaneRegistry {
 
     /// Snapshot of every registered focus's tree, used to replay layout state
     /// to a newly connected or reconnecting client. `focused_pane` is `None`
-    /// because the registry does not persist focus state — the agent's next
-    /// `set_pane_focus` call will update it.
+    /// because the registry does not persist focus state —
+    /// the client's next focus change will update it.
     pub fn all_layouts(&self) -> Vec<(String, PaneTree, Option<String>)> {
         self.trees
             .iter()

@@ -34,7 +34,7 @@ use nostromo::mcp::tools::teri::publish_picks;
 use nostromo::mcp::tools::{dispatch, tool_descriptors, tool_descriptors_for, ToolResult};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, watch};
 
 #[allow(dead_code)]
 #[path = "support/fence_scan.rs"]
@@ -2554,8 +2554,7 @@ fn a_transcript_directory_is_named_after_the_canonical_cwd_not_a_symlink_to_it()
 // ── 6. MCP ────────────────────────────────────────────────────────────────────
 
 fn mcp_state(rig: &Rig) -> McpSharedState {
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let mut state = McpSharedState::for_test(event_tx);
+    let mut state = McpSharedState::for_test();
     state.work_hub = Some(rig.hub.clone());
     state
 }
@@ -2646,8 +2645,7 @@ async fn malformed_publish_arguments_are_invalid_argument_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn without_a_hub_the_picks_tools_say_they_are_not_available() {
-    let (event_tx, _rx) = mpsc::unbounded_channel();
-    let state = McpSharedState::for_test(event_tx);
+    let state = McpSharedState::for_test();
     assert!(state.work_hub.is_none());
 
     let published = publish_picks(&state, &picks_args(&["todo:1", "todo:2", "todo:3"]));

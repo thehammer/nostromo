@@ -15,7 +15,7 @@ use nostromo::ipc::protocol::ServerMsg;
 use nostromo::mcp::tools::teri::{get_work_item, list_work_items};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, watch};
 
 #[allow(dead_code)]
 #[path = "support/fence_scan.rs"]
@@ -95,8 +95,7 @@ async fn rig_at(todos: Vec<TeriTodo>, docs_root: Option<PathBuf>) -> Rig {
     }));
     isolate_sent_ledger();
     let hub = WorkHub::spawn(HubDeps { repo_docs_root: Some(docs_root), ..HubDeps::new(btx, trx) });
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let mut state = McpSharedState::for_test(event_tx);
+    let mut state = McpSharedState::for_test();
     state.work_hub = Some(hub.clone());
 
     // Wait until the hub has published (and so can answer for) every todo.
@@ -320,8 +319,7 @@ async fn each_source_status_says_whether_its_list_is_known_to_be_whole() {
 
 #[tokio::test]
 async fn without_a_hub_list_work_items_does_not_panic_and_returns_no_items() {
-    let (event_tx, _rx) = mpsc::unbounded_channel();
-    let state = McpSharedState::for_test(event_tx);
+    let state = McpSharedState::for_test();
     assert!(state.work_hub.is_none());
 
     let result = list_work_items(&state, &json!({}));
@@ -375,8 +373,7 @@ async fn get_work_item_reports_an_error_for_unknown_or_missing_ids() {
 
 #[tokio::test]
 async fn without_a_hub_get_work_item_reports_an_error() {
-    let (event_tx, _rx) = mpsc::unbounded_channel();
-    let state = McpSharedState::for_test(event_tx);
+    let state = McpSharedState::for_test();
 
     let d = get_work_item(&state, &json!({"id": "todo:1"})).await;
 

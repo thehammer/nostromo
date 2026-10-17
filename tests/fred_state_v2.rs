@@ -1340,9 +1340,7 @@ fn mcp_state(
     mailbox: watch::Receiver<Option<MailboxSnapshot>>,
     calendar: watch::Receiver<Option<CalendarSnapshot>>,
 ) -> McpSharedState {
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-    std::mem::forget(event_rx);
-    let mut state = McpSharedState::for_test(event_tx);
+    let mut state = McpSharedState::for_test();
     state.fred_mailbox_rx = mailbox;
     state.fred_calendar_rx = calendar;
     state

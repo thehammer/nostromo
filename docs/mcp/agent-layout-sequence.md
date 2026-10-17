@@ -18,12 +18,8 @@ Tools shipped in this PR and available to all daemon-hosted sessions:
 | `nostromo.set_pane_content` | ✅ |
 | `nostromo.set_pane_layout` | ✅ |
 | `nostromo.create_focus` | ✅ |
-| `nostromo.set_pane_focus` | ⏳ Phase 2 |
-| `nostromo.register_status_segment` | ⏳ Phase 2 |
-| `nostromo.notify` | ⏳ Phase 2 |
-| `nostromo.switch_active_view` | ⏳ Phase 2 |
 
-Phase 1 assembly sequences use only the ✅ tools. Phase 2 additions (focus, status segments, notifications) are shown as comments so prompts can be augmented without a rewrite.
+Assembly sequences use only these tools.
 
 ---
 
@@ -74,14 +70,6 @@ if (featured) {
 // ── Ratios ──────────────────────────────────────────────────────────────────
 await nostromo.set_pane_layout({ view_id: self.view_id,
     ratios: { jobs: 0.35, detail: 0.40, log: 0.25 } })
-
-// ── Phase 2 additions (uncomment when available) ────────────────────────────
-// const running = jobs.filter(j => j.state === "running").length
-// const awaiting = jobs.filter(j => j.state === "awaiting").length
-// await nostromo.register_status_segment({ view_id: self.view_id,
-//     segment_id: "fleet",
-//     text: `${running} running · ${awaiting} awaiting`,
-//     color: awaiting > 0 ? "amber" : "sage" })
 ```
 
 ### iOS degradation
@@ -116,9 +104,6 @@ if (current) {
 // ── Ratios ──────────────────────────────────────────────────────────────────
 await nostromo.set_pane_layout({ view_id: self.view_id,
     ratios: { queue: 0.30, diff: 0.55, repl: 0.15 } })
-
-// ── Phase 2 additions ────────────────────────────────────────────────────────
-// await nostromo.set_pane_focus({ view_id: self.view_id, pane_id: "diff" })
 ```
 
 ### iOS degradation
@@ -153,13 +138,6 @@ await nostromo.set_pane_content({ view_id: self.view_id, pane_id: "calendar",
 // ── Ratios ──────────────────────────────────────────────────────────────────
 await nostromo.set_pane_layout({ view_id: self.view_id,
     ratios: { inbox: 0.50, calendar: 0.50 } })
-
-// ── Phase 2 additions ────────────────────────────────────────────────────────
-// const nextMtg = events.find(e => new Date(e.start) > new Date())
-// await nostromo.register_status_segment({ view_id: self.view_id,
-//     segment_id: "unread",
-//     text: `${emails.length} unread · next ${nextMtg?.title ?? "free"} ${fmtTime(nextMtg?.start)}`,
-//     color: "blue" })
 ```
 
 ### iOS degradation
@@ -186,13 +164,6 @@ await nostromo.set_pane_content({ view_id: self.view_id, pane_id: "todos",
 // ── Ratios ──────────────────────────────────────────────────────────────────
 await nostromo.set_pane_layout({ view_id: self.view_id,
     ratios: { todos: 0.45, repl: 0.55 } })
-
-// ── Phase 2 additions ────────────────────────────────────────────────────────
-// const dueToday = todos.filter(t => t.dueDate === today() && !t.done).length
-// await nostromo.register_status_segment({ view_id: self.view_id,
-//     segment_id: "open",
-//     text: `${todos.filter(t=>!t.done).length} open · ${dueToday} due today`,
-//     color: "sage" })
 ```
 
 ### iOS degradation

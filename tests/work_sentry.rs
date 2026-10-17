@@ -35,7 +35,7 @@ use nostromo::mcp::tools::teri::{get_work_item, list_work_items};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{broadcast, mpsc, watch, Notify};
+use tokio::sync::{broadcast, watch, Notify};
 use tracing_subscriber::fmt::MakeWriter;
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -2696,7 +2696,6 @@ async fn detail_without_a_token_is_not_configured_and_makes_no_requests() {
 struct HubKeepAlive {
     _docs: tempfile::TempDir,
     _todos: watch::Sender<Option<TeriTodosSnapshot>>,
-    _events: Box<dyn std::any::Any>,
 }
 
 /// An MCP state whose hub has Sentry (pointed at the fake server) as its only
@@ -2728,10 +2727,9 @@ async fn hub_with_sentry_frames(
         repo_docs_root: Some(docs.path().join("code")),
         ..HubDeps::new(btx, trx)
     });
-    let (event_tx, events) = mpsc::unbounded_channel();
-    let mut state = McpSharedState::for_test(event_tx);
+    let mut state = McpSharedState::for_test();
     state.work_hub = Some(hub);
-    (state, HubKeepAlive { _docs: docs, _todos: todos, _events: Box::new(events) }, brx)
+    (state, HubKeepAlive { _docs: docs, _todos: todos }, brx)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

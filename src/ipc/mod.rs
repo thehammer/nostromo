@@ -1,4 +1,4 @@
-//! Unix socket IPC between the `nostromd` daemon and TUI clients.
+//! Unix socket IPC between the `nostromd` daemon and its clients.
 //!
 //! Protocol: length-prefixed JSON frames (4-byte big-endian u32 length prefix).
 //!
@@ -6,13 +6,12 @@
 //! - [`codec`]           — frame read/write primitives
 //! - [`protocol`]        — message type definitions + socket path resolution
 //! - [`scrollback`]      — PTY scrollback ring buffer
-//! - [`pty_manager`]     — daemon-side PTY lifecycle management
 //! - [`stream_json`]     — stream-json turn model + parser
 //! - [`tasks`]           — background-task registry (activity panel)
 //! - [`task_output`]     — task output sanitiser, file validator, tail read
 //! - [`session_manager`] — daemon-side persistent stream-json session lifecycle
 //! - [`server`]          — daemon-side accept loop and fan-out broadcaster
-//! - [`client`]          — TUI-side connection and subscription
+//! - [`client`]          — client-side connection and subscription
 //! - [`decisions`]       — daemon-side decision-modal request registry (W6)
 //! - [`peer`]            — peer trust and what each peer may see or do
 //! - [`peer_verify`]     — who is on the other end of a Unix connection (the Mac app?)
@@ -25,7 +24,6 @@ pub mod peer;
 pub mod peer_verify;
 pub mod perri_state;
 pub mod protocol;
-pub mod pty_manager;
 pub mod scrollback;
 pub mod server;
 pub mod session_manager;
@@ -35,6 +33,5 @@ pub mod tasks;
 
 pub use client::{ConnectionState, DaemonClient};
 pub use protocol::{default_socket_path, ClientMsg, ServerMsg, Topic};
-pub use pty_manager::PtyManager;
 pub use server::Server;
 pub use session_manager::SessionManager;

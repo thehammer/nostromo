@@ -913,12 +913,11 @@ async fn a_show_for_the_pr_already_under_review_does_not_reset_anything() {
     assert!(ids.contains(&conversation), "the conversation tab survives");
 }
 
-// ── 8. scoped withdrawal — perri loses the seven raw tools ────────────────────
+// ── 8. scoped withdrawal — perri loses the six raw tools ────────────────────
 
-const RAW_PANE_TOOLS: [&str; 7] = [
+const RAW_PANE_TOOLS: [&str; 6] = [
     "nostromo.set_pane_content",
     "nostromo.set_pane_layout",
-    "nostromo.set_pane_focus",
     "nostromo.create_pane",
     "nostromo.reset_panes",
     "nostromo.apply_layout",
@@ -926,7 +925,7 @@ const RAW_PANE_TOOLS: [&str; 7] = [
 ];
 
 #[tokio::test]
-async fn a_policy_denying_perri_removes_the_seven_raw_tools_from_her_list_and_refuses_her_calls_distinctly_from_unknown_tool(
+async fn a_policy_denying_perri_removes_the_six_raw_tools_from_her_list_and_refuses_her_calls_distinctly_from_unknown_tool(
 ) {
     let home = HomeOverride::new();
     home.write_tool_policy(INTENDED_PERRI_POLICY);

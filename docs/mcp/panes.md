@@ -1186,15 +1186,6 @@ Two things a client must do to stay correct under recycling:
 
 ## Global mutation tools
 
-### `nostromo.switch_active_view({ view_id })`
-
-Switches the active tab, calling `blur()` on the previous view and `focus()` on the new one.
-
-### `nostromo.set_pane_focus({ view_id, pane_id })`
-
-Focuses the named view (same as `switch_active_view`; the `pane_id` is recorded for
-future sub-pane focus routing in Phase 4).
-
 ### `nostromo.set_pane_content({ view_id, pane_id, content })`
 
 Content payload shape:
@@ -1226,7 +1217,7 @@ invariants (exactly one `repl` leaf, unique ids, well-formed splits), fetches
 each pane's bound data source **server-side, with no LLM involvement**, and
 broadcasts one `FocusLayout` plus one `PaneContent` per non-repl pane.
 
-It is purely additive — `create_pane`, `set_pane_layout`, `set_pane_focus`,
+It is purely additive — `create_pane`, `set_pane_layout`,
 `set_pane_content`, and `reset_panes` are unchanged and still work for
 freeform / agent-judgment layout work.
 

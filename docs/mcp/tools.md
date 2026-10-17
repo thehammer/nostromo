@@ -33,7 +33,7 @@ Returns identity information about the calling Nostromo PTY session.
 most recently (W7). It is always present on the daemon path and `null` when
 this focus has no PR under review — an absent key and a null key are different
 on the wire, and an agent can only act on one of them. It is omitted entirely
-on the TUI path, which has no focus registry to answer for.
+outside the daemon, which has no focus registry to answer for.
 
 Source: `src/mcp/tools/get_self.rs`
 
@@ -543,18 +543,6 @@ Source: `src/mcp/tools/refresh_pane.rs`
 
 ---
 
-### `nostromo.set_pane_focus`
-
-Focus a specific pane within a view (also switches the active view tab).
-
-**Input**: `{ "view_id": "perri", "pane_id": "diff" }`
-
-**Output**: `{ "ok": true }`
-
-Source: `src/mcp/tools/set_pane.rs`
-
----
-
 ### `nostromo.set_pane_layout`
 
 Update a view's pane-split ratios.
@@ -573,26 +561,13 @@ Source: `src/mcp/tools/set_pane.rs`
 
 ---
 
-### `nostromo.switch_active_view`
-
-Switch the globally-active Nostromo view tab.
-
-**Input**: `{ "view_id": "mother" }`
-
-**Output**: `{ "ok": true }`
-
-Source: `src/mcp/tools/switch_view.rs`
-
----
-
 ### `perri.load_pr`
 
-Load a pull request into Perri's current-PR pane(s). Two hosts, different
-behavior:
+Load a pull request into Perri's current-PR pane(s). Requires `nostromd`
+(without one it returns `{"error":"not_supported","detail":"requires nostromd"}`).
 
-- **Daemon (`nostromd`)**: writes `<perri_state_dir>/current-pr/<tag>.json` +
-  touches `current-pr.dirty` (the same file contract `PerriView` writes —
-  see `src/data/perri_current_pr.rs`), signals the native PR source's
+It writes `<perri_state_dir>/current-pr/<tag>.json` +
+  touches `current-pr.dirty` (see `src/data/perri_current_pr.rs`), signals the native PR source's
   refresh channel for that focus, and pushes to every one of the focus's
   resolved **current-PR target(s)** (see the live-pane-sources bindings
   section above — only a pane bound to `perri.get_current_pr`, plus the
@@ -685,10 +660,6 @@ behavior:
   two-consecutive-push rule as any other focus. A sweep on each push also
   collects pins whose focus disappeared while the daemon was not running.
 
-- **Standalone TUI**: writes the same file/sentinel through `PerriView`, no
-  pane-push/settle/pending behavior (the TUI's own render loop already
-  reads `current-pr.json`'s watch channel every frame).
-
 **Input**:
 ```json
 {
@@ -704,10 +675,9 @@ current-PR target pane ids actually pushed to, possibly empty), or — when the
 refetch didn't settle — `{ "ok": true, "pane_ids": [...], "pending": ...,
 "retryable": ..., "detail": "..." }` (daemon; see **"When the refetch doesn't
 settle"** above for the `pending`/`retryable` combinations), optionally with a
-`warnings` array. The standalone TUI path returns `{ "ok": true }` with no
-`pane_ids`.
+`warnings` array.
 
-**Errors**: `invalid_args` (missing/zero `number`, missing/empty `repo`, a repo slug outside `owner/repo` form / `[A-Za-z0-9._-]`, or a focus tag that is not a safe filename), `unidentified_caller` (daemon only — no `view_id` and no usable `pty_id`), `not_supported` (daemon only — Perri's state dir isn't configured), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only — the daemon path never hits these; that's the bug this tool used to have).
+**Errors**: `invalid_args` (missing/zero `number`, missing/empty `repo`, a repo slug outside `owner/repo` form / `[A-Za-z0-9._-]`, or a focus tag that is not a safe filename), `unidentified_caller` (no `view_id` and no usable `pty_id`), `not_supported` (no daemon, or Perri's state dir isn't configured), `io_error`.
 
 Source: `src/mcp/tools/perri_mutators.rs`, `src/data/perri_current_pr.rs`
 
@@ -718,7 +688,7 @@ Source: `src/mcp/tools/perri_mutators.rs`, `src/data/perri_current_pr.rs`
 Clear the currently-loaded PR from every pane that's showing it — whichever
 layout template built the focus, and whatever those panes happen to be named.
 
-- **Daemon**: removes the calling focus's `current-pr/<tag>.json` (a no-op,
+Requires `nostromd`. It removes the calling focus's `current-pr/<tag>.json` (a no-op,
   not an error, if it's already absent) and only that focus's — no other
   focus's PR changes. Touches both `current-pr.dirty` and `queue.dirty`,
   signals both native sources' refresh channels, then closes every curated
@@ -732,14 +702,11 @@ layout template built the focus, and whatever those panes happen to be named.
   `Loading` (first paint only — same suppression rule) then the current
   PR-queue list (via the same fetcher `nostromo.apply_layout` uses), fetched
   once and pushed to every queue pane found.
-- **Standalone TUI**: removes the file/touches the sentinel via `PerriView`
-  only — no pane pushes.
-
 **Input**: `{ "view_id": "optional — daemon-hosted only" }`
 
 **Output**: `{ "ok": true, "cleared": ["<pane ids pushed the no-PR placeholder>"], "queue": ["<pane ids refreshed with the queue>"], "closed": ["<pane ids the curated teardown closed>"] }`, optionally with a `warnings` array (daemon).
 
-**Errors**: `invalid_args` (a focus tag that is not a safe filename), `unidentified_caller` (daemon only — no `view_id` and no usable `pty_id`; clearing "the PR under review" with no focus to clear it *for* would, pre-W7, have wiped whichever focus held the global slot), `not_supported` (daemon only), `io_error`, `event_loop_closed` / `event_loop_timeout` (TUI only).
+**Errors**: `invalid_args` (a focus tag that is not a safe filename), `unidentified_caller` (no `view_id` and no usable `pty_id`; clearing "the PR under review" with no focus to clear it *for* would, pre-W7, have wiped whichever focus held the global slot), `not_supported` (no daemon), `io_error`.
 
 Source: `src/mcp/tools/perri_mutators.rs`
 
@@ -750,18 +717,15 @@ Source: `src/mcp/tools/perri_mutators.rs`
 Set the selected PR index in Perri's queue list, clamped to the current
 queue length (`0` when the queue is empty).
 
-- **Daemon**: an **agent-scoped, in-memory** index
+Requires `nostromd`. An **agent-scoped, in-memory** index
   (`DaemonMcpBackend::perri.selected_index`) — bookkeeping only. It moves no
   GUI highlight; there is no wire/client concept of "selected row" yet (a
   follow-up, not covered by this tool).
-- **Standalone TUI**: moves `PerriView`'s own selection — the same state
-  keyboard navigation moves, so it does visibly move the highlighted row.
-
 **Input**: `{ "index": 2 }`
 
 **Output**: `{ "ok": true }`
 
-**Errors**: `invalid_args` (missing/non-integer `index`), `event_loop_closed` / `event_loop_timeout` (TUI only).
+**Errors**: `invalid_args` (missing/non-integer `index`), `not_supported` (no daemon).
 
 Source: `src/mcp/tools/perri_mutators.rs`
 
@@ -770,15 +734,13 @@ Source: `src/mcp/tools/perri_mutators.rs`
 ### `perri.get_selected_index`
 
 Returns the selected PR index — see `perri.set_selected_index` for what
-"selected" means on each host. Newly registered by this fix: the handler
-existed but had no `tool_descriptors()` entry or `dispatch()` arm, so it was
-unreachable on **either** host.
+"selected" means. Requires `nostromd`.
 
 **Input**: *(none)*
 
 **Output**: `{ "index": 0 }`
 
-**Errors**: `event_loop_closed` / `event_loop_timeout` (TUI only).
+**Errors**: `not_supported` (no daemon).
 
 Source: `src/mcp/tools/perri_mutators.rs`
 
@@ -813,7 +775,7 @@ Enqueue a plan file as a new Mother job (`mother add`).
 - `repo`, `branch`, `repo_path`, `base`, `label` and every `depends_on` entry
   are rejected (`invalid_args`) if they start with `-`.
 
-**Output**: `{ "id": "job-id" }` (the TUI additionally returns `title` / `status`).
+**Output**: `{ "id": "job-id" }` .
 Errors: `invalid_args`, `plan_not_found`, `mother_cli_error` (carries the CLI's
 stderr; includes CLI timeouts — every daemon-side `mother` call is bounded at
 30 s, stdin closed, process killed on timeout; override with
@@ -861,86 +823,6 @@ Source: `src/mcp/tools/mother_mutators.rs`
 
 ---
 
-## Phase 4 — Notifications and status segments
-
-### `nostromo.notify`
-
-Post a transient toast notification to the Nostromo status bar.  The toast
-auto-expires after **5 seconds**.
-
-**Input**:
-```json
-{
-  "message": "Build complete ✓",
-  "level":   "info",
-  "view_id": "cody"
-}
-```
-
-- `level`: `"info"` (default) | `"warn"` | `"error"`
-- `view_id`: optional; informational attribution only (does not filter display)
-
-**Output**: `{ "ok": true }`
-
-Source: `src/mcp/tools/notify.rs`
-
-**Distinct from `ServerMsg::Notification` (W5 — current-pr-collision).** This
-tool's toast is a *TUI* status-bar affordance, routed through
-`state.event_tx`, whose receiver the daemon deliberately drops — so on the
-daemon-hosted path this always returns `{"error":"event_loop_gone"}`. A
-separate, daemon → GUI wire message, `ServerMsg::Notification { tag, level,
-message }`, exists end to end (daemon variant, `Topic::Layout` gate, macOS
-client decode, toast rendering) as of W5, but currently has **no production
-caller** — it was landed as reusable transport for a same-PR advisory that a
-later wedge (W9) wires the first real trigger for. `level` there is
-`info`/`warning`/`alert` (mirroring macOS's `ToastSeverity`), a different
-vocabulary than this tool's own `info`/`warn`/`error` — the two are
-unrelated, not a typo.
-
----
-
-### `nostromo.register_status_segment`
-
-Add or update a named status-bar segment for a view.  The segment is displayed
-in the status bar **only when the named view is the active tab**.
-
-**Input**:
-```json
-{
-  "view_id":    "perri",
-  "segment_id": "pending_review",
-  "text":       "3 PRs",
-  "color":      "amber"
-}
-```
-
-- `color`: named (`red`, `amber`, `sage`, `blue`, `muted`) or 6-digit hex (`#ff8800`).
-- Multiple segments for the same view are shown in `segment_id` alphabetical order.
-
-**Output**: `{ "ok": true }`
-
-Source: `src/mcp/tools/status_segment.rs`
-
----
-
-### `nostromo.clear_status_segment`
-
-Remove a named status-bar segment.
-
-**Input**:
-```json
-{
-  "view_id":    "perri",
-  "segment_id": "pending_review"
-}
-```
-
-**Output**: `{ "ok": true }`
-
-Source: `src/mcp/tools/status_segment.rs`
-
----
-
 ## Decision modals (W6)
 
 ### `nostromo.ask_decision`
@@ -952,8 +834,7 @@ bounded `prompt`, an optional bounded `detail` string, and 2 or more labelled
 choices. An agent that wants to show something has the raw pane tools (or a
 future curated `nostromo.show`); this tool can only ask.
 
-Daemon-hosted only — the standalone TUI MCP server has no window to attach a
-sheet to.
+Daemon-hosted only — without a daemon there is no window to attach a sheet to.
 
 **Input**:
 ```json
@@ -1001,7 +882,7 @@ sheet to.
 - `{ "error": "timeout" }` — nobody answered within `timeout_secs`.
 - `{ "error": "cancelled" }` — the asking session died while this call was
   outstanding.
-- `{ "error": "not_supported" }` — TUI-hosted only.
+- `{ "error": "not_supported" }` — not daemon-hosted.
 
 **Queueing.** At most one outstanding request per focus tag is ever on the
 wire at a time. A second `ask_decision` call for the same tag while the first
@@ -1092,7 +973,7 @@ Source: `src/mcp/tools/ask_decision.rs`, `src/ipc/decisions.rs`, `src/ipc/protoc
 closed vocabulary of five view types, and a deterministic placement engine
 (`src/mcp/views/`) that decides where each view lands with no LLM inference
 in the decision itself. This is where the PRD's central reversal lands:
-`set_pane_content`, `set_pane_layout`, `set_pane_focus`, `create_pane`,
+`set_pane_content`, `set_pane_layout`, `create_pane`,
 `reset_panes`, `apply_layout`, and `refresh_pane_content` become
 implementation details this layer uses internally, rather than tools an
 interactive agent reaches for directly. See `docs/mcp/panes.md`'s "Placement
@@ -1439,7 +1320,6 @@ agents:
     deny:
       - nostromo.set_pane_content
       - nostromo.set_pane_layout
-      - nostromo.set_pane_focus
       - nostromo.create_pane
       - nostromo.reset_panes
       - nostromo.apply_layout

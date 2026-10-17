@@ -6,7 +6,7 @@
 //!
 //! Both operate against the daemon's [`PaneRegistry`] and broadcast a fresh
 //! `ServerMsg::FocusLayout` so every connected client re-renders. They are only
-//! meaningful in daemon-hosted mode; called against a TUI-hosted server they
+//! meaningful in daemon-hosted mode; called against a server that isn't daemon-hosted they
 //! return the stable `not_supported` error.
 
 use serde_json::{json, Value};

@@ -12,8 +12,7 @@
 //! agent that wants to show something has `nostromo.show` (a later wedge) or
 //! the raw pane tools; this tool can only ask.
 //!
-//! Daemon-hosted only — this tool has no meaning for the standalone TUI MCP
-//! server, which has no window to attach a sheet to.
+//! Daemon-hosted only — without a daemon there is no window to attach a sheet to.
 
 use std::collections::HashSet;
 use std::time::Duration;

@@ -31,7 +31,7 @@ pub async fn handle_for(state: &McpSharedState, network_driven: bool) -> Value {
     let views = state.views_meta.read().await.clone();
 
     let mut result = Vec::with_capacity(views.len() + 4);
-    // The daemon has no TUI to fill `views_meta`; report the built-in sources
+    // The daemon has no view host to fill `views_meta`; report the built-in sources
     // from the live channels instead.
     if state.daemon.is_some() {
         result.extend(builtin_entries(state));

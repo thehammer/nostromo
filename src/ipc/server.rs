@@ -2,7 +2,7 @@
 //!
 //! Accepts Unix socket connections, performs the `Hello`/`Welcome` handshake,
 //! fans out broadcast `ServerMsg`s to subscribed clients, **and** handles
-//! incoming PTY commands from each client (Phase 5b).
+//! incoming session commands from each client.
 //!
 //! ## Architecture
 //!
@@ -10,11 +10,11 @@
 //! maintains a three-way `tokio::select!`:
 //!
 //! 1. **Broadcast** — activity / Mother events → write to socket.
-//! 2. **Targeted** — PTY output / control messages aimed at this client.
-//! 3. **Socket reads** — incoming `ClientMsg` (PTY commands).
+//! 2. **Targeted** — session output / control messages aimed at this client.
+//! 3. **Socket reads** — incoming `ClientMsg`.
 //!
-//! The targeted channel is registered with [`PtyManager::client_sender_registry`]
-//! on connect and removed on disconnect.
+//! The targeted channel is registered with the session manager's
+//! client-sender registry on connect and removed on disconnect.
 
 use std::collections::BTreeMap;
 use std::os::fd::{AsFd, OwnedFd};
@@ -40,12 +40,14 @@ use super::{
         ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
         MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
-    pty_manager::PtyManager,
     session_manager::{ModelRequestOutcome, SessionManager, SwitchRequest},
 };
 use crate::data::work::{
     fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
 };
+
+/// The answer to every retired `ClientMsg::Pty*` verb.
+const PTY_HOST_REMOVED: &str = "pty_host_removed: the daemon no longer hosts PTYs (the Rust TUI was removed)";
 
 /// The refusal a `DecisionAnswer` from anyone but the verified Mac app gets.
 const NOT_OPERATOR_APP: &str = "not_operator_app: only the verified Nostromo app may answer";
@@ -80,8 +82,8 @@ pub struct Server {
 impl Server {
     /// Bind a `UnixListener` at `socket_path`.
     ///
-    /// `pty_mgr` and `session_mgr` are shared with every client handler for PTY
-    /// and persistent-session command routing respectively.
+    /// `session_mgr` is shared with every client handler for persistent-session
+    /// command routing.
     ///
     /// `perri_state_dir` is forwarded to the `PerriAction` handler so the
     /// `"approve"` arm can write the Phase 1 approval signal (approvals.jsonl +
@@ -99,7 +101,6 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     pub fn bind(
         socket_path: &Path,
-        pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
         perri_state_dir: PathBuf,
         decisions: Arc<Mutex<DecisionRegistry>>,
@@ -133,7 +134,7 @@ impl Server {
         let retained_for_loop = Arc::clone(&retained);
         let unix_peers = UnixPeers { verifier, qa_mode };
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, unix_peers, tx_clone, pty_mgr, session_mgr, perri_state_dir, decisions, retained_for_loop).await {
+            if let Err(e) = accept_loop(listener, unix_peers, tx_clone, session_mgr, perri_state_dir, decisions, retained_for_loop).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -160,8 +161,8 @@ impl Server {
         let _ = self.tx.send(msg);
     }
 
-    /// Attach a TCP listener that shares the same broadcast channel and PTY/
-    /// session managers as the Unix socket listener.
+    /// Attach a TCP listener that shares the same broadcast channel and
+    /// session manager as the Unix socket listener.
     ///
     /// Both transports run the identical `handle_client` handshake loop, so iOS
     /// (and any other TCP peer) behaves exactly like the macOS TUI client.
@@ -171,7 +172,6 @@ impl Server {
     pub fn bind_tcp(
         &self,
         listener: TcpListener,
-        pty_mgr: Arc<Mutex<PtyManager>>,
         session_mgr: Arc<Mutex<SessionManager>>,
         perri_state_dir: PathBuf,
         decisions: Arc<Mutex<DecisionRegistry>>,
@@ -179,7 +179,7 @@ impl Server {
         let tx = self.tx.clone();
         let retained = Arc::clone(&self.retained);
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, pty_mgr, session_mgr, perri_state_dir, decisions, retained).await {
+            if let Err(e) = accept_loop_tcp(listener, tx, session_mgr, perri_state_dir, decisions, retained).await {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -312,7 +312,6 @@ async fn accept_loop(
     listener: UnixListener,
     peers: UnixPeers,
     tx: broadcast::Sender<ServerMsg>,
-    pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
@@ -322,7 +321,6 @@ async fn accept_loop(
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let rx = tx.subscribe();
-                let pty_mgr = Arc::clone(&pty_mgr);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
@@ -340,7 +338,7 @@ async fn accept_loop(
                         }
                     };
                     let origin = PeerOrigin::Unix { verifier: peers.verifier, fd, qa_mode: peers.qa_mode, info: None };
-                    if let Err(e) = handle_client(stream, origin, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
+                    if let Err(e) = handle_client(stream, origin, rx, broadcast_tx, session_mgr, psd, decisions, retained).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -355,7 +353,6 @@ async fn accept_loop(
 async fn accept_loop_tcp(
     listener: TcpListener,
     tx: broadcast::Sender<ServerMsg>,
-    pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
@@ -366,14 +363,13 @@ async fn accept_loop_tcp(
             Ok((stream, addr)) => {
                 info!(%addr, "TCP IPC client connected");
                 let rx = tx.subscribe();
-                let pty_mgr = Arc::clone(&pty_mgr);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
                 let retained = Arc::clone(&retained);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, PeerOrigin::Tcp, rx, broadcast_tx, pty_mgr, session_mgr, psd, decisions, retained).await {
+                    if let Err(e) = handle_client(stream, PeerOrigin::Tcp, rx, broadcast_tx, session_mgr, psd, decisions, retained).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -404,7 +400,6 @@ async fn handle_client<S>(
     mut origin: PeerOrigin,
     mut broadcast_rx: broadcast::Receiver<ServerMsg>,
     broadcast_tx: broadcast::Sender<ServerMsg>,
-    pty_mgr: Arc<Mutex<PtyManager>>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
@@ -530,12 +525,6 @@ where
 
     let (targeted_tx, mut targeted_rx) = mpsc::unbounded_channel::<ServerMsg>();
     {
-        let mgr = pty_mgr.lock().unwrap();
-        let registry = mgr.client_sender_registry();
-        let mut senders = registry.lock().unwrap();
-        senders.insert(conn_key.clone(), targeted_tx.clone());
-    }
-    {
         // The session manager keeps its own client-sender registry for session
         // attach fan-out.
         let mgr = session_mgr.lock().unwrap();
@@ -549,7 +538,7 @@ where
     // until the agent next sends a structural mutation. Replay one FocusLayout
     // per registered focus so the client starts with a complete picture.
     // `focused_pane` is omitted (None) — the registry does not persist it;
-    // the agent's next `set_pane_focus` call will re-establish it.
+    // the client re-establishes it.
     if subscribed(&topics, Topic::Layout) {
         let mut snapshots: Vec<ServerMsg> = {
             let mgr = session_mgr.lock().unwrap();
@@ -719,7 +708,7 @@ where
                 }
             }
 
-            // Targeted messages (PTY output, PtySpawned, PtyAttached, etc.)
+            // Targeted messages (session replies, refusals, errors).
             Some(msg) = targeted_rx.recv() => {
                 // Targeted frames (session transcripts, replies, summaries)
                 // go through the same gate as broadcasts; the only
@@ -786,7 +775,7 @@ where
                             }
                             _ => None,
                         };
-                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &pty_mgr, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
+                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -803,12 +792,8 @@ where
     debug!(
         claimed_id,
         conn_key,
-        "client handler exiting; detaching PTYs + sessions"
+        "client handler exiting; detaching sessions"
     );
-    {
-        let mut mgr = pty_mgr.lock().unwrap();
-        mgr.on_client_disconnect(&conn_key);
-    }
     {
         let mut mgr = session_mgr.lock().unwrap();
         mgr.on_client_disconnect(&conn_key);
@@ -854,7 +839,7 @@ where
     write_frame(writer, bytes).await
 }
 
-// ── PTY command dispatch ──────────────────────────────────────────────────────
+// ── client command dispatch ──────────────────────────────────────────────────────
 
 /// `conn_key` is the server-minted UUID for this connection (not the
 /// client-supplied `client_id` from the Hello frame, which is `client_id`:
@@ -873,7 +858,6 @@ fn handle_client_msg(
     sensitive: &SensitiveTags,
     conn_key: &str,
     client_id: &str,
-    pty_mgr: &Arc<Mutex<PtyManager>>,
     session_mgr: &Arc<Mutex<SessionManager>>,
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
     broadcast_tx: &broadcast::Sender<ServerMsg>,
@@ -893,80 +877,16 @@ fn handle_client_msg(
             let _ = targeted_tx.send(ServerMsg::Pong);
         }
 
-        ClientMsg::PtySpawn {
-            pty_id,
-            cmd,
-            args,
-            cols,
-            rows,
-            cwd,
-            client_tag,
-        } => {
-            let result = {
-                let mut mgr = pty_mgr.lock().unwrap();
-                mgr.spawn_pty(pty_id, &cmd, &args, cols, rows, cwd, client_tag)
-            };
-            match result {
-                Ok((id, nostromo_pty_id, nostromo_session_id)) => {
-                    let _ = targeted_tx.send(ServerMsg::PtySpawned { pty_id: id.clone() });
-                    // Send PtyIdentity follow-up so the TUI can register the PTY
-                    // with McpSharedState.  Sent as a separate message to avoid a
-                    // protocol-version bump.
-                    let _ = targeted_tx.send(ServerMsg::PtyIdentity {
-                        pty_id: id,
-                        nostromo_pty_id,
-                        nostromo_session_id,
-                    });
-                }
-                Err(e) => {
-                    warn!(conn_key, cmd, "PtySpawn failed: {e:#}");
-                    let _ = targeted_tx.send(ServerMsg::Error {
-                        message: format!("PtySpawn failed: {e}"),
-                    });
-                }
-            }
-        }
-
-        ClientMsg::PtyAttach { pty_id } => {
-            let result = {
-                let mut mgr = pty_mgr.lock().unwrap();
-                mgr.attach(&pty_id, conn_key)
-            };
-            if let Err(e) = result {
-                let _ = targeted_tx.send(ServerMsg::Error {
-                    message: format!("PtyAttach failed: {e}"),
-                });
-            }
-        }
-
-        ClientMsg::PtyDetach { pty_id } => {
-            let mut mgr = pty_mgr.lock().unwrap();
-            mgr.detach(&pty_id, conn_key);
-        }
-
-        ClientMsg::PtyInput { pty_id, bytes } => {
-            let mut mgr = pty_mgr.lock().unwrap();
-            if let Err(e) = mgr.send_input(&pty_id, &bytes) {
-                warn!(conn_key, "PtyInput error: {e}");
-            }
-        }
-
-        ClientMsg::PtyResize { pty_id, cols, rows } => {
-            let mut mgr = pty_mgr.lock().unwrap();
-            if let Err(e) = mgr.resize_pty(&pty_id, cols, rows) {
-                warn!(conn_key, "PtyResize error: {e}");
-            }
-        }
-
-        ClientMsg::PtyKill { pty_id } => {
-            let mut mgr = pty_mgr.lock().unwrap();
-            mgr.kill_pty(&pty_id);
-        }
-
-        ClientMsg::PtyList => {
-            let mgr = pty_mgr.lock().unwrap();
-            let ptys = mgr.list_with_ids();
-            let _ = targeted_tx.send(ServerMsg::PtyListResp { ptys });
+        // Retired (R2): the daemon no longer hosts PTYs. The verbs still decode
+        // (FND-1 ordinals stay stable) and are answered with a clear error.
+        ClientMsg::PtySpawn { .. }
+        | ClientMsg::PtyAttach { .. }
+        | ClientMsg::PtyDetach { .. }
+        | ClientMsg::PtyInput { .. }
+        | ClientMsg::PtyResize { .. }
+        | ClientMsg::PtyKill { .. }
+        | ClientMsg::PtyList => {
+            let _ = targeted_tx.send(ServerMsg::Error { message: PTY_HOST_REMOVED.to_owned() });
         }
 
         // ── persistent session commands (protocol v3) ─────────────────────────

@@ -12,7 +12,7 @@ use nostromo::ipc::{
     decisions::DecisionRegistry,
     protocol::{ClientMsg, ServerMsg, Topic, PROTOCOL_VERSION},
     server::Server,
-    PtyManager, SessionManager,
+    SessionManager,
 };
 use tempfile::TempDir;
 use tokio::net::TcpStream;
@@ -25,7 +25,6 @@ async fn spawn_server() -> (Server, u16, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let socket_path = tmp.path().join("test.sock");
 
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     // Private store (and so private model files): `SessionManager::new()`
     // would point at the real `~/.nostromo`.
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
@@ -36,7 +35,6 @@ async fn spawn_server() -> (Server, u16, TempDir) {
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -56,7 +54,6 @@ async fn spawn_server() -> (Server, u16, TempDir) {
 
     server.bind_tcp(
         tcp_listener,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         decisions,
