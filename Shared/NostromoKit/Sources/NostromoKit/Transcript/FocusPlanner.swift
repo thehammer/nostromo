@@ -264,6 +264,11 @@ public struct FocusPlanner {
         return items
     }
 
+    /// Stands in `items(holding:)` for the groups that precede the turn's first message: the
+    /// first roll-in has no outgoing message, but the groups before it roll into activity all the
+    /// same, and a reader may be looking at them.
+    public static let leadingGroups = -1
+
     /// The items with each held message presented as `.message` at its chronological place
     /// instead of inside its segment (contract §2.1 "Presentation hold"). A pure function of
     /// the plan.
@@ -272,13 +277,21 @@ public struct FocusPlanner {
     /// message stays a segment under the same key; what comes after a held message is shown as
     /// TF2 `.group` items, or, if it contains a message that is not held, as a segment under
     /// the key of its own first member. Holding a message that has not rolled in does nothing.
+    ///
+    /// `leadingGroups` holds the groups that come before the turn's first message the same way:
+    /// each is shown as a `.group` item at its place.
     public func items(holding ordinals: Set<Int>) -> [FocusItem] {
         let plan = items()
         guard !ordinals.isEmpty else { return plan }
+        let holdsLeading = ordinals.contains(Self.leadingGroups)
+        var seenMessage = false
         var out: [FocusItem] = []
         for item in plan {
-            guard case .activity(let segment) = item, segment.holds(ordinals) else {
+            if case .message = item { seenMessage = true }
+            guard case .activity(let segment) = item,
+                  segment.holds(ordinals, leadingGroups: holdsLeading && !seenMessage) else {
                 out.append(item)
+                if case .activity(let segment) = item, segment.messageCount > 0 { seenMessage = true }
                 continue
             }
             meter.visits += 2 * segment.members.count
@@ -296,12 +309,24 @@ public struct FocusPlanner {
                 }
             }
             for member in segment.members {
-                if case .message(let message) = member, ordinals.contains(message.ordinal) {
-                    flush()
-                    isPrefix = false
-                    out.append(.message(message))
-                } else {
-                    stretch.append(member)
+                switch member {
+                case .message(let message):
+                    seenMessage = true
+                    if ordinals.contains(message.ordinal) {
+                        flush()
+                        isPrefix = false
+                        out.append(.message(message))
+                    } else {
+                        stretch.append(member)
+                    }
+                case .group(let group):
+                    if holdsLeading && !seenMessage {
+                        flush()
+                        isPrefix = false
+                        out.append(.group(group))
+                    } else {
+                        stretch.append(member)
+                    }
                 }
             }
             flush()
@@ -575,8 +600,20 @@ private extension FocusItem {
 }
 
 private extension ActivitySegment {
-    func holds(_ ordinals: Set<Int>) -> Bool {
-        members.contains { if case .message(let m) = $0 { return ordinals.contains(m.ordinal) } else { return false } }
+    /// A held message is a member, or `leadingGroups` is set (no message has come before this
+    /// segment) and a group sits ahead of the segment's first message.
+    func holds(_ ordinals: Set<Int>, leadingGroups: Bool) -> Bool {
+        var seenMessage = false
+        for member in members {
+            switch member {
+            case .message(let message):
+                if ordinals.contains(message.ordinal) { return true }
+                seenMessage = true
+            case .group:
+                if leadingGroups && !seenMessage { return true }
+            }
+        }
+        return false
     }
 }
 

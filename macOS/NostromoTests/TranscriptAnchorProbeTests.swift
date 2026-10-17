@@ -140,4 +140,111 @@ final class ScrollSafetyGateSelfTests: XCTestCase {
             rig.assertNoMove("scroll", following: false) { rig.userScroll(to: rig.clip.bounds.minY + 20) }
         }
     }
+
+    // MARK: The 1 pt tolerance
+
+    /// Put the viewport top 2 pt into the first text block of turn `index`, so the first visible block
+    /// is that block and a plain scroll moves its offset by exactly the scroll distance.
+    private func scrollIntoFirstBlock(of rig: SafetyRig, turn index: Int) throws {
+        let view = try XCTUnwrap(rig.materialized[rig.turns[index].id], "the turn is built")
+        let block = try XCTUnwrap(view.subviews.compactMap { $0 as? TextBlockView }.first, "the turn opens with a text block")
+        rig.userScroll(to: rig.doc.convert(block.bounds, from: block).minY + 2)
+        rig.settle()
+        XCTAssertFalse(rig.followTail.isPinned, "precondition: the pane is not following")
+    }
+
+    func testAScrollOfExactlyOnePointPassesTheScrolledUpGate() throws {
+        let rig = SafetyRig.scrolledUp(self)
+        try scrollIntoFirstBlock(of: rig, turn: 3)
+        // The first visible block stays the same block; its offset changes by the scroll distance.
+        rig.assertNoMove("scroll 1.0", following: false) { rig.userScroll(to: rig.clip.bounds.minY + 1.0) }
+    }
+
+    func testAScrollOfOneAndAHalfPointsFailsTheScrolledUpGate() throws {
+        let rig = SafetyRig.scrolledUp(self)
+        try scrollIntoFirstBlock(of: rig, turn: 3)
+        XCTExpectFailure("1.5 pt is past the 1 pt tolerance") {
+            rig.assertNoMove("scroll 1.5", following: false) { rig.userScroll(to: rig.clip.bounds.minY + 1.5) }
+        }
+    }
+
+    // MARK: Following the tail
+
+    func testAMoveWhileFollowingTheTailFailsTheFollowingGate() {
+        let rig = SafetyRig.followingTail(self)
+        XCTExpectFailure("scrolling up 40 pt leaves the true bottom (and stops following)") {
+            rig.assertNoMove("scroll up 40", following: true) { rig.userScroll(to: rig.clip.bounds.minY - 40) }
+        }
+    }
+
+    // MARK: Streaming into the turn at the top of the viewport
+
+    /// A pane scrolled into the first block of turn 3, which is still running (incomplete), composer focused.
+    private func streamingAtTheTop() throws -> SafetyRig {
+        var turns = SafetyFixtures.transcript()
+        turns[3].isComplete = false
+        let rig = SafetyRig(self, turns: turns)
+        rig.start()
+        rig.userScroll(to: rig.virtualizer.offset(of: 3) + 40)
+        rig.followTail.setPinned(false, cause: .harness)
+        rig.settle()
+        rig.focusComposer()
+        try scrollIntoFirstBlock(of: rig, turn: 3)
+        XCTAssertEqual(rig.firstVisibleTurnIdentity(), turns[3].identityKey, "precondition: the viewport top is in the running turn")
+        return rig
+    }
+
+    func testStreamingABlockIntoTheTurnAtTheTopOfTheViewportPassesTheGate() throws {
+        let rig = try streamingAtTheTop()
+        let turnKeyBefore = rig.snapshot().firstVisible?.turnKey
+
+        rig.assertNoMove("stream into the top turn", following: false) {
+            rig.append([.text("A streamed paragraph. \(FoldFixtures.prose)")], toTurnAt: 3)
+        }
+
+        // The content key of the turn changed with the append (the reason the gate compares the
+        // turn's durable identity), and the gate still held.
+        XCTAssertNotEqual(rig.snapshot().firstVisible?.turnKey, turnKeyBefore, "precondition: the append changed the turn")
+    }
+
+    func testStreamingIntoTheTurnAtTheTopWhileTheViewportMovesStillFailsTheGate() throws {
+        let rig = try streamingAtTheTop()
+        XCTExpectFailure("the viewport moved 20 pt in the same event") {
+            rig.assertNoMove("stream and scroll", following: false) {
+                rig.append([.text("A streamed paragraph. \(FoldFixtures.prose)")], toTurnAt: 3)
+                rig.userScroll(to: rig.clip.bounds.minY + 20)
+            }
+        }
+    }
+
+    // MARK: A roll-in at the tail of a following pane
+
+    func testARollInAtTheTailOfAFollowingPaneKeepsTheBottomAndTheComposerThoughTheTopLineMoves() {
+        // `assertNoMove` does not apply here, and that is correct, not a gap in the gate: it also
+        // compares the first visible block. A following pane keeps the bottom, so when the roll-in
+        // folds the old message (and the calls after it) into one row and the new message is shorter,
+        // the turn shrinks and the line at the top of the viewport is a different, earlier one. What
+        // must hold is what the operator is promised: the bottom, still following, the composer.
+        let message = (0 ..< 6).map { TurnBlock.text("HELD-\($0) \(FoldFixtures.prose) \(FoldFixtures.prose) \(FoldFixtures.prose)") }
+        let live = FoldFixtures.turn([focusMessage("Earlier")] + FoldFixtures.run(2, prefix: "a") + message
+                                     + FoldFixtures.run(2, prefix: "b"), complete: false, user: "live")
+        let rig = SafetyRig(self, turns: (0 ..< 4).map { SafetyFixtures.tallTurn($0) } + [live])
+        rig.start()
+        rig.focusComposer()
+        XCTAssertTrue(rig.followTail.isPinned, "precondition: the pane follows the tail")
+        let bar = rig.inputBar.frame.height
+        let scrollFrame = rig.composerScroll?.frame
+
+        rig.append(FoldFixtures.run(1, prefix: "call-next-") + [focusMessage("NEXT-MSG")])
+
+        XCTAssertTrue(rig.store.state(for: live.id).heldOrdinals.isEmpty, "precondition: the roll-in went through (nothing held)")
+        XCTAssertTrue(rig.followTail.isPinned, "still following")
+        XCTAssertLessThanOrEqual(rig.gapBelowViewport, 0.5, "the pane is at the true bottom")
+        XCTAssertEqual(rig.snapshot().bottomOffsetPt, 0, accuracy: 0.5)
+        XCTAssertTrue(rig.window.firstResponder === rig.textView, "the composer keeps focus")
+        XCTAssertEqual(rig.textView.string, SafetyRig.typedText, "the composer text is untouched")
+        XCTAssertEqual(rig.textView.selectedRange(), SafetyRig.typedSelection, "the composer selection is untouched")
+        XCTAssertEqual(rig.inputBar.frame.height, bar, accuracy: 0.5, "the input bar did not change height")
+        XCTAssertEqual(rig.composerScroll?.frame, scrollFrame, "the composer text scroll frame did not change")
+    }
 }

@@ -775,7 +775,7 @@ final class FocusLiveLayoutTests: XCTestCase {
         let stream = FocusStream([X.message("LATEST-MSG")])
         let latest = try XCTUnwrap(X.columns(stream.view).first)
         var queries = 0
-        stream.view.holdsRollIns = { queries += 1; return true }
+        stream.view.decideRollIn = { _ in queries += 1; return .hold }
 
         for (n, block) in F.run(3, prefix: "t").enumerated() {
             stream.append([block])
@@ -848,14 +848,14 @@ final class FocusLiveLayoutTests: XCTestCase {
         XCTAssertEqual(inAPane.measured, alone.measured, "other turns in the pane cost nothing")
     }
 
-    // MARK: Interim hold
+    // MARK: Hold (the view's half; the policy is `RollInPolicy`)
 
     func testAHeldRollInKeepsTheOutgoingMessageVisibleAsConversationAndReleasingFoldsIt() throws {
         let stream = FocusStream([X.message("FIRST-MSG")] + F.run(2, prefix: "a") + [X.message("OLD-MSG")])
         let oldView = try XCTUnwrap(X.columns(stream.view).last)
         var holds: [Int] = []
         var queries = 0
-        stream.view.holdsRollIns = { queries += 1; return true }
+        stream.view.decideRollIn = { _ in queries += 1; return .hold }
         stream.view.onHold = { holds.append($0) }
 
         // A note between, so the newer message is a new message (contract §2.1).
@@ -880,7 +880,7 @@ final class FocusLiveLayoutTests: XCTestCase {
 
     func testAHeldRollInShowsTheGroupsBetweenTheOutgoingAndTheNewMessageAsGroupRows() {
         let stream = FocusStream([X.message("FIRST-MSG")] + F.run(2, prefix: "a") + [X.message("OLD-MSG")] + F.run(3, prefix: "b"))
-        stream.view.holdsRollIns = { true }
+        stream.view.decideRollIn = { _ in .hold }
 
         stream.append([X.message("NEW-MSG")])
 
@@ -907,6 +907,49 @@ final class FocusLiveLayoutTests: XCTestCase {
 
         XCTAssertEqual(X.kinds(view), ["ActivityRowView", "TextBlockView", "ToolGroupView", "TextBlockView"])
         XCTAssertTrue(X.contains("OLD-MSG", in: X.columns(view)[1]))
+    }
+
+    func testAViewHoldsAtMostSixteenRollInsAndDropsTheOldestHoldFirstTellingThePane() {
+        let stream = FocusStream([X.message("MSG-0")])
+        var held: [Int] = []
+        var dropped: [Int] = []
+        stream.view.decideRollIn = { _ in .hold }   // hold everything: the bound is what limits it
+        stream.view.onHold = { held.append($0) }
+        stream.view.onHoldDropped = { dropped.append($0) }
+
+        for n in 1 ... 20 {
+            stream.append([.note("Model changed \(n)."), X.message("MSG-\(n)")])
+            XCTAssertLessThanOrEqual(stream.view.heldOrdinals.count, RollInPolicy.maxHeldPerTurn, "after message \(n)")
+        }
+
+        XCTAssertEqual(held, Array(0 ..< 20), "every roll-in was held when it happened")
+        XCTAssertEqual(dropped, [0, 1, 2, 3], "the oldest holds were released, oldest first, and the pane was told of each")
+        XCTAssertEqual(stream.view.heldOrdinals, Set(4 ..< 20))
+        for n in 0 ..< 4 {
+            XCTAssertFalse(X.contains("MSG-\(n) ", in: stream.view), "message \(n) rolled into the row when its hold was dropped")
+        }
+        for n in 4 ... 20 {
+            XCTAssertTrue(X.contains("MSG-\(n) ", in: stream.view), "message \(n) is still conversation")
+        }
+    }
+
+    func testAHoldIsNeitherAskedForNorRecordedForTheGroupsBeforeTheFirstMessageUnlessThePaneHoldsThem() throws {
+        let stream = FocusStream(F.run(2, prefix: "lead"))
+        var asked: [Int] = []
+        var held: [Int] = []
+        stream.view.decideRollIn = { ordinal in asked.append(ordinal); return .hold }
+        stream.view.onHold = { held.append($0) }
+
+        stream.append([X.message("FIRST-MSG")])
+
+        XCTAssertEqual(asked, [FocusPlanner.leadingGroups], "the first roll-in is asked about as the leading groups")
+        XCTAssertEqual(held, [FocusPlanner.leadingGroups])
+        XCTAssertEqual(X.kinds(stream.view), ["ToolGroupView", "TextBlockView"], "held, the group stays a group at its place")
+
+        stream.view.releaseHolds(turn: stream.turn)
+
+        XCTAssertTrue(stream.view.heldOrdinals.isEmpty)
+        XCTAssertEqual(X.kinds(stream.view), ["ActivityRowView", "TextBlockView"], "released, the group is in the row")
     }
 }
 

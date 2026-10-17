@@ -95,6 +95,8 @@ class ReplView: NSView {
     private var isPinnedToBottom: Bool { followTail.isPinned }
     /// Keeps the reading position across a pass, and the toggled row in place (see there).
     private var viewport: TranscriptViewportCoordinator!
+    /// Which roll-ins wait for the reader and when they complete (FV3). Per pane, transient.
+    private var rollInHolds: RollInHolds!
     /// The elapsed time on running tool-group rows: one tick for the pane, only while needed.
     private let elapsedTicker = ElapsedTicker()
     /// "Tool activity finished, N failed calls", for VoiceOver, when this pane is focused.
@@ -196,15 +198,29 @@ class ReplView: NSView {
         followTail.requestPass     = { [weak self] in self?.schedulePass() }
         followTail.onFlip          = { [weak self] flip in
             self?.logFollowTailFlip(flip)
-            // Following the tail again (scrolled back down, Jump to latest, a send): every
-            // held roll-in completes.
-            if flip.pinned { self?.releaseHeldRollIns() }
+            // Following the tail again: roll-ins the policy no longer holds complete. Jump to
+            // latest and a send complete them all.
+            if flip.pinned {
+                self?.rollInHolds.pinned(jumpedToLatest: flip.cause == .jumpToLatest || flip.cause == .send)
+            }
         }
+        followTail.onScroll = { [weak self] in self?.rollInHolds.scrolled() }
 
         viewport = TranscriptViewportCoordinator(
             virtualizer: virtualizer, scrollView: scrollView, followTail: followTail,
             islandFor: { [weak self] index in self?.island(at: index) })
         viewport.foldChangeApplied = { [weak self] turnIds in self?.foldChangeApplied(turnIds) }
+        rollInHolds = RollInHolds(
+            scrollView: scrollView, store: interactions,
+            viewFor: { [weak self] id in self?.turnViews[id] as? ChatTurnView },
+            turnFor: { [weak self] id in
+                guard let self, let turn = self.session.turns.first(where: { $0.id == id }) else { return nil }
+                switch self.session.hydrated(turn) {
+                case .full(let hydrated), .unavailable(let hydrated): return hydrated
+                }
+            },
+            applyChange: { [weak self] turnIds, mutation in self?.applyFoldChange(turnIds: turnIds, mutation: mutation) })
+        rollInHolds.isFollowingTail = { [weak self] in self?.isPinnedToBottom ?? true }
         elapsedTicker.islands = { [weak self] in
             self?.turnViews.values.compactMap { $0 as? ElapsedTicking } ?? []
         }
@@ -390,6 +406,8 @@ class ReplView: NSView {
                 turnViews.removeValue(forKey: turn.id)?.removeFromSuperview()
                 pendingRemeasure.remove(turn.id)
                 session.payloadStore.unpin(turn.id)
+                // New content under an old id: whatever was held was about the old content.
+                interactions.dropHolds(turn: turn.id)
             }
             // The other half of the bound. A splice is the one event that can
             // remove turns from the list, and the retention cap reports itself as
@@ -470,22 +488,6 @@ class ReplView: NSView {
         }
         contentDirty = true
         schedulePass()
-    }
-
-    /// FV2's interim hold, released: the pane follows the tail again, so every roll-in it held
-    /// back completes, keeping the reading position (a pinned pane stays at the bottom).
-    private func releaseHeldRollIns() {
-        let ids = interactions.releaseAllHolds()
-        guard !ids.isEmpty else { return }
-        let turns = session.turns.filter { ids.contains($0.id) }
-        applyFoldChange(turnIds: ids) {
-            for turn in turns {
-                guard let view = turnViews[turn.id] as? ChatTurnView else { continue }
-                switch session.hydrated(turn) {
-                case .full(let t), .unavailable(let t): view.releaseHolds(turn: t)
-                }
-            }
-        }
     }
 
     /// Record the stuck-turn auto-open for a turn that completed while not materialized (the
@@ -717,13 +719,9 @@ class ReplView: NSView {
             self.pendingRemeasure.insert(turn.id)
             self.schedulePass()
         }
-        // FV2's interim hold (FV3 refines it): a newer message would roll the latest one into
-        // the activity row; in a pane that is not following the tail it waits, so text never
-        // folds away under a reader. Released when the pane follows the tail again.
-        view.holdsRollIns = { [weak self] in !(self?.isPinnedToBottom ?? true) }
-        view.onHold = { [weak self] ordinal in
-            self?.interactions.hold(turn: turn.id, ordinal: ordinal)
-        }
+        // FV3: a newer message rolls the latest one into the activity row unless the reader is
+        // looking at it or has text selected in it (`RollInPolicy`); holds are this pane's own.
+        rollInHolds.wire(view, turn: turn.id)
         // An open group is about to build its next batch of rows: note the reading position
         // before its height changes.
         view.onWillChangeHeight = { [weak self] in self?.viewport.noteProgrammaticChange() }

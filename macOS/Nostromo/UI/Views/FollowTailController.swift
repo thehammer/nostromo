@@ -48,6 +48,9 @@ final class FollowTailController {
     var requestPass: () -> Void = {}
     /// Called on every flip of `isPinned`.
     var onFlip: ((Flip) -> Void)?
+    /// Called after the clip view's bounds changed and the change was classified, except for a
+    /// change the pane's own pass made (the reader's roll-in holds re-evaluate on it).
+    var onScroll: (() -> Void)?
 
     private var lastClipBounds: NSRect = .zero
     private var passSkippedForWidth = false
@@ -159,6 +162,7 @@ final class FollowTailController {
         classifyClipBoundsChange(cause: liveScrollInFlight ? .userScroll : .boundsChange)
         guard !isMaterializing() else { return }
         requestPass()
+        onScroll?()
     }
 
     /// Fold the clip view's latest bounds into the follow-tail state.

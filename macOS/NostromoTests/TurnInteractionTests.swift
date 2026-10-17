@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import NostromoKit
 
 // TurnInteractionStore, AskQuestionView, ToolResultView, AskQuestionData,
 // ToolResultData are compiled into this target directly (logic test — no
@@ -460,5 +461,247 @@ final class TurnInteractionStoreGroupStateTests: XCTestCase {
         XCTAssertNotEqual(a, b)
         b.groupStates["g:x"] = true
         XCTAssertEqual(a, b)
+    }
+}
+
+// MARK: - Roll-in holds (FV3)
+
+/// A pane's held roll-ins live in its `TurnInteractionStore`, next to what the operator did to the
+/// turn, and nowhere else. They are transient and per pane: these pin how they come and go, that
+/// "is anything held?" answers without a walk (every scroll asks), and that a hold can never
+/// outlive its turn or leave an empty record behind.
+final class TurnInteractionStoreHoldTests: XCTestCase {
+
+    func testAStoreHoldsNothingUntilAMessageIsHeld() {
+        let store = TurnInteractionStore()
+
+        XCTAssertFalse(store.hasHolds)
+        XCTAssertTrue(store.heldTurns.isEmpty)
+        XCTAssertTrue(store.state(for: UUID()).heldOrdinals.isEmpty)
+    }
+
+    func testHoldingAMessageRecordsItsOrdinalForThatTurnOnly() {
+        let store = TurnInteractionStore()
+        let turn = UUID(), other = UUID()
+
+        store.hold(turn: turn, ordinal: 3)
+
+        XCTAssertEqual(store.state(for: turn).heldOrdinals, [3])
+        XCTAssertTrue(store.state(for: other).heldOrdinals.isEmpty, "a hold is per turn")
+        XCTAssertTrue(store.hasHolds)
+        XCTAssertEqual(store.heldTurns, [turn])
+    }
+
+    func testSeveralMessagesOfOneTurnCanBeHeldAndHoldingOneTwiceIsOneHold() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+
+        store.hold(turn: turn, ordinal: 1)
+        store.hold(turn: turn, ordinal: 2)
+        store.hold(turn: turn, ordinal: 2)
+
+        XCTAssertEqual(store.state(for: turn).heldOrdinals, [1, 2])
+        XCTAssertEqual(store.heldTurns, [turn])
+    }
+
+    func testTheLeadingGroupsAreHeldLikeAnyOtherOrdinal() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+
+        store.hold(turn: turn, ordinal: FocusPlanner.leadingGroups)
+
+        XCTAssertEqual(store.state(for: turn).heldOrdinals, [-1])
+        XCTAssertTrue(store.hasHolds)
+    }
+
+    func testReleasingSomeOfATurnsHoldsKeepsTheOthersAndTheTurnHeld() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.hold(turn: turn, ordinal: 1)
+        store.hold(turn: turn, ordinal: 2)
+        store.hold(turn: turn, ordinal: 3)
+
+        store.release(turn: turn, ordinals: [1, 3])
+
+        XCTAssertEqual(store.state(for: turn).heldOrdinals, [2])
+        XCTAssertEqual(store.heldTurns, [turn])
+        XCTAssertTrue(store.hasHolds)
+    }
+
+    func testReleasingTheLastHoldOfATurnMakesTheTurnNotHeld() {
+        let store = TurnInteractionStore()
+        let held = UUID(), other = UUID()
+        store.hold(turn: held, ordinal: 1)
+        store.hold(turn: other, ordinal: 4)
+
+        store.release(turn: held, ordinals: [1])
+
+        XCTAssertEqual(store.heldTurns, [other])
+        XCTAssertTrue(store.hasHolds, "another turn still holds")
+
+        store.release(turn: other, ordinals: [4])
+
+        XCTAssertFalse(store.hasHolds)
+        XCTAssertTrue(store.heldTurns.isEmpty)
+    }
+
+    func testReleasingAMessageThatIsNotHeldOrATurnThatIsUnknownChangesNothing() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.hold(turn: turn, ordinal: 2)
+
+        store.release(turn: turn, ordinals: [7])
+        store.release(turn: UUID(), ordinals: [2])
+
+        XCTAssertEqual(store.state(for: turn).heldOrdinals, [2])
+        XCTAssertEqual(store.trackedTurnCount, 1, "releasing an unknown turn does not create a record for it")
+    }
+
+    func testReleasingTheLastHoldOfATurnWithNoOtherStateRemovesTheTurnsRecord() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.hold(turn: turn, ordinal: 1)
+        XCTAssertEqual(store.trackedTurnCount, 1)
+
+        store.release(turn: turn, ordinals: [1])
+
+        XCTAssertEqual(store.trackedTurnCount, 0, "an empty record would leak one entry per turn the operator ever read")
+        XCTAssertTrue(store.state(for: turn).isEmpty)
+    }
+
+    func testReleasingTheLastHoldOfATurnKeepsWhatTheOperatorDidToIt() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.setGroup(turn: turn, key: "g:a", true)
+        store.setActivity(turn: turn, key: "a:m:T#0", true)
+        store.hold(turn: turn, ordinal: 1)
+
+        store.release(turn: turn, ordinals: [1])
+
+        XCTAssertEqual(store.trackedTurnCount, 1)
+        XCTAssertEqual(store.state(for: turn).groupStates, ["g:a": true])
+        XCTAssertEqual(store.state(for: turn).activityStates, ["a:m:T#0": true])
+        XCTAssertTrue(store.state(for: turn).heldOrdinals.isEmpty)
+        XCTAssertFalse(store.hasHolds)
+    }
+
+    func testOtherStateAloneNeverMakesATurnHeld() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+
+        store.setGroup(turn: turn, key: "g:a", true)
+        store.setActivity(turn: turn, key: "a:g:a", false)
+        store.recordAnswer(turn: turn, block: 0, option: 1)
+
+        XCTAssertFalse(store.hasHolds)
+        XCTAssertTrue(store.heldTurns.isEmpty)
+    }
+
+    func testDroppingATurnsHoldsReleasesAllOfThem() {
+        let store = TurnInteractionStore()
+        let turn = UUID(), other = UUID()
+        store.hold(turn: turn, ordinal: 1)
+        store.hold(turn: turn, ordinal: 2)
+        store.hold(turn: other, ordinal: 1)
+
+        store.dropHolds(turn: turn)
+
+        XCTAssertTrue(store.state(for: turn).heldOrdinals.isEmpty)
+        XCTAssertEqual(store.heldTurns, [other])
+        XCTAssertEqual(store.state(for: other).heldOrdinals, [1], "another turn's hold is not touched")
+        XCTAssertEqual(store.trackedTurnCount, 1)
+    }
+
+    func testDroppingTheHoldsOfATurnThatHasNoneChangesNothing() {
+        let store = TurnInteractionStore()
+        let known = UUID()
+        store.setGroup(turn: known, key: "g:a", true)
+
+        store.dropHolds(turn: known)
+        store.dropHolds(turn: UUID())
+
+        XCTAssertEqual(store.trackedTurnCount, 1)
+        XCTAssertEqual(store.state(for: known).groupStates, ["g:a": true])
+    }
+
+    func testReleasingAllHoldsReturnsTheTurnsThatHadAnyAndLeavesNothingHeld() {
+        let store = TurnInteractionStore()
+        let a = UUID(), b = UUID(), none = UUID()
+        store.hold(turn: a, ordinal: 1)
+        store.hold(turn: a, ordinal: 2)
+        store.hold(turn: b, ordinal: 5)
+        store.setGroup(turn: none, key: "g:z", true)
+
+        let released = store.releaseAllHolds()
+
+        XCTAssertEqual(released, [a, b])
+        XCTAssertFalse(store.hasHolds)
+        XCTAssertTrue(store.heldTurns.isEmpty)
+        XCTAssertTrue(store.state(for: a).heldOrdinals.isEmpty)
+        XCTAssertEqual(store.trackedTurnCount, 1, "only the turn with other state keeps a record")
+    }
+
+    func testReleasingAllHoldsOfAStoreWithNoneReturnsNothing() {
+        let store = TurnInteractionStore()
+
+        XCTAssertEqual(store.releaseAllHolds(), [])
+        XCTAssertFalse(store.hasHolds)
+    }
+
+    func testPruningDropsTheHoldsOfTurnsThatLeftTheTranscriptAndKeepsTheRest() {
+        let store = TurnInteractionStore()
+        let kept = UUID(), gone = UUID()
+        store.hold(turn: kept, ordinal: 1)
+        store.hold(turn: gone, ordinal: 1)
+
+        store.prune(keeping: [kept])
+
+        XCTAssertEqual(store.heldTurns, [kept])
+        XCTAssertEqual(store.state(for: kept).heldOrdinals, [1])
+        XCTAssertTrue(store.state(for: gone).heldOrdinals.isEmpty)
+        XCTAssertTrue(store.hasHolds)
+
+        store.prune(keeping: [])
+
+        XCTAssertFalse(store.hasHolds, "with every turn gone nothing is held")
+        XCTAssertEqual(store.trackedTurnCount, 0)
+    }
+
+    func testClearingTheTranscriptForgetsEveryHold() {
+        let store = TurnInteractionStore()
+        store.hold(turn: UUID(), ordinal: 1)
+        store.hold(turn: UUID(), ordinal: 2)
+
+        store.removeAll()
+
+        XCTAssertFalse(store.hasHolds)
+        XCTAssertTrue(store.heldTurns.isEmpty)
+        XCTAssertEqual(store.trackedTurnCount, 0)
+    }
+
+    func testAHoldCanBeMadeAgainAfterTheStoreWasClearedOrReleased() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.hold(turn: turn, ordinal: 1)
+        store.removeAll()
+
+        store.hold(turn: turn, ordinal: 2)
+
+        XCTAssertEqual(store.state(for: turn).heldOrdinals, [2])
+        XCTAssertTrue(store.hasHolds)
+
+        store.release(turn: turn, ordinals: [2])
+        store.hold(turn: turn, ordinal: 3)
+
+        XCTAssertEqual(store.state(for: turn).heldOrdinals, [3])
+        XCTAssertEqual(store.heldTurns, [turn])
+    }
+
+    func testAStateWithAHoldIsNotEmptyAndDiffersFromOneWithout() {
+        var held = TurnInteractionState()
+        held.heldOrdinals = [1]
+
+        XCTAssertFalse(held.isEmpty)
+        XCTAssertNotEqual(held, TurnInteractionState())
     }
 }
