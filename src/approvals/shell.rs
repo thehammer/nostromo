@@ -264,6 +264,9 @@ impl<'a> Parser<'a> {
     /// closing the current `( … )` / `$( … )` (consumed).
     fn parse_list(&mut self, in_parens: bool) -> Step<()> {
         let mut cmd = Builder::default();
+        // Open `case … esac` blocks in this list: a `)` there ends a pattern, it
+        // does not close a group.
+        let mut cases = 0u32;
         loop {
             self.skip_blanks();
             let Some(c) = self.peek() else {
@@ -329,6 +332,10 @@ impl<'a> Parser<'a> {
                 }
                 b')' => {
                     self.finish(&mut cmd);
+                    if cases > 0 {
+                        self.pos += 1;
+                        continue;
+                    }
                     if !in_parens {
                         return Err(Unbalanced);
                     }
@@ -343,6 +350,17 @@ impl<'a> Parser<'a> {
                         && self.src[word.span.clone()].bytes().all(|c| c.is_ascii_digit());
                     cmd.touch(&word.span);
                     if !fd {
+                        // `case` and `esac` as written, where a command may start.
+                        let keywords_only = cmd.words.iter().all(|w| {
+                            matches!(w.text.as_str(), "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "{" | "!" | "time")
+                        });
+                        if keywords_only {
+                            match &self.src[word.span.clone()] {
+                                "case" => cases += 1,
+                                "esac" => cases = cases.saturating_sub(1),
+                                _ => {}
+                            }
+                        }
                         cmd.words.push(word);
                     }
                 }
@@ -613,7 +631,9 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// After `${`: skip to the matching `}` (quotes inside are honoured).
+    /// After `${`: skip to the matching `}`. Quotes, `$'…'` (an escaped quote does
+    /// not end it), `$( )` (its commands are parsed, so a `}` inside is theirs),
+    /// `$(( ))` and backticks inside are honoured.
     fn skip_braces(&mut self) -> Step<()> {
         let mut depth = 1u32;
         while depth > 0 {
@@ -630,6 +650,25 @@ impl<'a> Parser<'a> {
                     let seen = self.wild.len();
                     self.read_double_quoted(&mut Vec::new())?;
                     self.wild.truncate(seen);
+                    continue;
+                }
+                b'`' => {
+                    self.read_backticks()?;
+                    continue;
+                }
+                b'$' if self.peek_at(1) == Some(b'\'') => {
+                    self.pos += 2;
+                    self.read_ansi_c(&mut Vec::new())?;
+                    continue;
+                }
+                b'$' if self.starts_with("$((") => {
+                    self.pos += 3;
+                    self.skip_arithmetic()?;
+                    continue;
+                }
+                b'$' if self.starts_with("$(") => {
+                    self.pos += 2;
+                    self.nested(|p| p.parse_list(true))?;
                     continue;
                 }
                 _ => {}
@@ -719,6 +758,9 @@ impl<'a> Parser<'a> {
     fn read_heredoc_bodies(&mut self) -> Step<()> {
         for hd in std::mem::take(&mut self.pending) {
             let body_start = self.pos;
+            // In an unquoted here-doc a backslash-newline joins two lines, so the line
+            // after one is part of the body even if it reads like the delimiter.
+            let mut continued = false;
             let body_end = loop {
                 if self.pos >= self.b.len() {
                     return Err(Unbalanced);
@@ -730,9 +772,10 @@ impl<'a> Parser<'a> {
                 if hd.strip_tabs {
                     line = line.trim_start_matches('\t');
                 }
-                if line == hd.delimiter {
+                if line == hd.delimiter && !continued {
                     break line_start;
                 }
+                continued = !hd.quoted && (line.len() - line.trim_end_matches('\\').len()) % 2 == 1;
             };
             let body_span = body_start..body_end;
             let body = &self.src[body_span.clone()];

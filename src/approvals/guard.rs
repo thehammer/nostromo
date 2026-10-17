@@ -629,11 +629,19 @@ fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Opti
     // quotes, here-docs and unquoted text), so `$\<newline>(cmd)` is `$(cmd)`:
     // every scan reads the text with them gone.
     let joined = join_continuations(raw);
-    let parsed = shell::parse(&joined);
+    let parsed = parse_both(raw, &joined);
     let normalized = unquote(&joined);
     // Each command's words after quote removal (resolves `$'\x65…'`).
     let words = parsed.commands.iter().map(|c| c.texts().join(" ")).collect::<Vec<_>>().join("\n");
-    let Ok(texts) = scan_texts(&[&normalized, &words]) else {
+    // The same text decoded without any tokenizer (`$'\x65cs_connect'`, `aws ecs
+    // $'execute\x2dcommand'`): a `$` before a quote dropped, `\xHH`, `\NNN`, `\uXXXX`
+    // and `\UXXXXXXXX` written out, quotes and backslashes deleted. It does not depend
+    // on where the tokenizer is in the text, so a parse that lost its place (a `#`
+    // comment, a here-doc, a `case` arm, `${…}`) hides nothing from it.
+    let decoded: Vec<String> = if joined == raw { vec![decode_text(&joined)] } else { vec![decode_text(&joined), decode_text(raw)] };
+    let mut bases: Vec<&str> = vec![&normalized, &words];
+    bases.extend(decoded.iter().map(String::as_str));
+    let Ok(texts) = scan_texts(&bases) else {
         return Ok(Some(block(RULE_COMMAND, "brace expansion too large to scan".to_owned())));
     };
     // A command that only mentions a marker, as data, is not a remote shell.
@@ -649,7 +657,7 @@ fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Opti
     if let Some(w) = parsed.commands.iter().flat_map(|c| &c.words).find(|w| expand::could_spell(&w.pattern, word_markers())) {
         return Ok(Some(block(RULE_COMMAND, format!("word `{}` could expand to a production-shell command", snippet(&w.text)))));
     }
-    let lower = format!("{normalized}\n{words}").to_lowercase();
+    let lower = format!("{normalized}\n{words}\n{}", decoded.join("\n")).to_lowercase();
     if runs_built_command(&lower) || texts[2..].iter().any(|t| runs_built_command(&t.to_lowercase())) {
         return Ok(Some(block(RULE_COMMAND, "command runs the output of `ecs_build_command`".to_owned())));
     }
@@ -692,7 +700,7 @@ fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Opti
     if let Some(detail) = typed_marker(&typed) {
         return Ok(Some(block(RULE_COMMAND, detail)));
     }
-    tmux_rule(&normalized, &calls, opaque, typed.keys.inexact, probe)
+    tmux_rule(&normalized, &calls, opaque, typed.keys.cant_tell(), probe)
 }
 
 /// A command word with an expansion in it and more than that (`$a$b`,
@@ -725,6 +733,73 @@ fn join_continuations(text: &str) -> String {
                 chars.next();
             }
             _ => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// The commands of `raw`, read with its line continuations removed (`joined`)
+/// and as written. They differ where a shell does not join (a `#` comment, a
+/// quoted here-doc body: `echo # \<newline>$'\x65cs_connect'` runs the second
+/// line), so the commands either reading finds count.
+fn parse_both(raw: &str, joined: &str) -> shell::ShellParse {
+    let mut parsed = shell::parse(joined);
+    if joined != raw {
+        let as_written = shell::parse(raw);
+        for c in as_written.commands {
+            if !parsed.commands.iter().any(|p| p.texts() == c.texts()) {
+                parsed.commands.push(c);
+            }
+        }
+        parsed.unparsed |= as_written.unparsed;
+        parsed.expanding_heredoc |= as_written.expanding_heredoc;
+    }
+    parsed
+}
+
+/// `text` as a shell would decode it before it reads a word, with no regard for
+/// quoting or where a command starts: a `$` right before a quote is dropped
+/// (`$'x'`, `$"x"`), `\xHH`, `\NNN` (octal), `\uXXXX` and `\UXXXXXXXX` are the
+/// character they name, and quotes and the remaining backslashes are deleted
+/// (`'ec''s_connect'`, `"ecs_"connect`, `''`). Only ever scanned in addition
+/// to the text as written.
+fn decode_text(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '$' if matches!(c.get(i + 1), Some('\'' | '"')) => i += 1,
+            '\'' | '"' => i += 1,
+            '\\' => {
+                let (radix, max, skip) = match c.get(i + 1) {
+                    Some('x') => (16, 2, 2),
+                    Some('u') => (16, 4, 2),
+                    Some('U') => (16, 8, 2),
+                    Some('0'..='7') => (8, 3, 1),
+                    // An escaped backslash or quote: both go.
+                    Some('\\' | '\'' | '"') => {
+                        i += 2;
+                        continue;
+                    }
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let digits: String = c[i + skip..].iter().take(max).take_while(|d| d.is_digit(radix)).collect();
+                match u32::from_str_radix(&digits, radix).ok().and_then(char::from_u32) {
+                    Some(ch) if !digits.is_empty() => {
+                        out.push(ch);
+                        i += skip + digits.len();
+                    }
+                    _ => i += 1,
+                }
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
         }
     }
     out
@@ -768,7 +843,7 @@ fn scan_texts(bases: &[&str]) -> Result<Vec<String>, TooLarge> {
 
 /// The marker in typed or pending text (the pane's shell reads it as a command line).
 fn marker_in_typed(text: &str) -> Option<String> {
-    match scan_texts(&[&unquote(text)]) {
+    match scan_texts(&[&unquote(text), &decode_text(text)]) {
         Ok(texts) => texts.iter().find_map(|t| marker_find(t)),
         Err(TooLarge) => Some("brace expansion too large to scan".to_owned()),
     }
@@ -870,6 +945,12 @@ impl TypedText {
         let mut typed: Vec<Key> = Vec::new();
         for sub in calls.iter().flat_map(|c| &c.subs) {
             let name = sub.name.as_str();
+            if typed.len() > keys::MAX_TYPED {
+                // Too much to follow (`send-keys -N` in many calls): the rest can't be told.
+                typed.truncate(keys::MAX_TYPED);
+                typed.push(Key::Unknown);
+                break;
+            }
             if could_be(name, "send-keys", "send") {
                 typed.extend(keys::send_keys(&sub.args));
             }
@@ -895,9 +976,9 @@ fn typed_marker(typed: &TypedText) -> Option<String> {
     // Text typed along with a key that rearranges it in a way the line editor
     // doesn't apply (`connect M-b ecs_`): the line can't be told, so text that
     // could still be reordered into a marker is blocked.
-    if typed.keys.inexact && keys::could_spell_marker(&typed.keys.joined, word_markers()) {
+    if typed.keys.cant_tell() && keys::could_spell_marker(&typed.keys.joined, word_markers()) {
         return Some(
-            "keys sent to tmux mix text that could spell a production-shell command with an editing key the guard can't apply (`M-b`, `C-y`, `C-t`, …)"
+            "keys sent to tmux mix text that could spell a production-shell command with a key the guard can't apply or read (`M-b`, `C-y`, `0x…`, `-H` …)"
                 .to_owned(),
         );
     }
@@ -928,7 +1009,8 @@ type Why = String;
 
 /// Rule 4: tmux input aimed at a remote pane. `None` when nothing is remote.
 /// `inexact`: the keys of the calls include one the line editor can't apply
-/// next to typed text, so what the pane's shell reads can't be told.
+/// next to typed text, or one the guard can't read as tmux does, so what the
+/// pane's shell reads can't be told.
 fn tmux_rule(normalized: &str, calls: &[TmuxCall], opaque: bool, inexact: bool, probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
     // Scopes to check whole (`None` is every server), and why each is.
     let mut cant_tell: Vec<(Scope, Why)> = Vec::new();
@@ -942,7 +1024,7 @@ fn tmux_rule(normalized: &str, calls: &[TmuxCall], opaque: bool, inexact: bool, 
         if inexact && call.inputs.iter().any(|i| !i.keys.is_empty()) {
             cant_tell.push((
                 call.socket.clone(),
-                "keys mixing typed text with an editing key the guard can't apply (`M-b`, `C-y`, `C-t`, …)".to_owned(),
+                "keys mixing typed text with an editing key the guard can't apply (`M-b`, `C-y`, `C-t`, …), or a key it can't read (`0x…`, `-H` …)".to_owned(),
             ));
         }
         for input in &call.inputs {

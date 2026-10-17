@@ -809,3 +809,117 @@ fn random_shell_fragments_with_payloads_heredocs_and_non_ascii_never_panic_or_ha
     ];
     must_finish_within(Duration::from_secs(60), move || fuzz(&tokens, 5_000, 0xbadc0de));
 }
+
+// ── 10. round 4: constructs that used to desync the tokenizer ─────────────────
+
+/// What a shell would run is found, and the parse is not `unparsed`.
+#[track_caller]
+fn assert_found_and_balanced(input: &str, texts: &[&str]) {
+    let p = parse(input);
+    assert!(!p.unparsed, "{input:?} should balance");
+    assert!(
+        find(&p, texts).is_some(),
+        "expected a command {texts:?} in {input:?}, found {:?}",
+        p.commands.iter().map(|c| c.texts()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_case_statement_balances_and_the_commands_after_esac_are_found() {
+    for input in [
+        "case $x in a|b) :;; esac ; $'\\x65cs_connect'",
+        "case $x in a|b) :;; esac\n$'\\x65cs_connect'",
+        "for i in 1; do case $i in a|b) :;; esac; done; $'\\x65cs_connect'",
+        "if true; then case $x in a) :;; esac; fi; $'\\x65cs_connect'",
+        "echo $(case x in x) echo y;; esac) ; $'\\x65cs_connect'",
+        "case $x in a) case $y in b) :;; esac;; esac; $'\\x65cs_connect'",
+    ] {
+        // `$'\x65cs_connect'` is a word whose text is `ecs_connect`.
+        assert_found_and_balanced(input, &["ecs_connect"]);
+    }
+}
+
+#[test]
+fn the_commands_inside_case_arms_are_found_too() {
+    let input = "case $x in a) echo one;; b|c) echo two;; *) ecs_connect ap;; esac; ls";
+    let p = parse(input);
+    assert!(!p.unparsed);
+    for texts in [&["echo", "one"][..], &["echo", "two"], &["ecs_connect", "ap"], &["ls"]] {
+        assert!(find(&p, texts).is_some(), "{texts:?} missing from {:?}", p.commands.iter().map(|c| c.texts()).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn a_close_paren_outside_a_case_is_still_unbalanced() {
+    // `case` as an argument is not a case statement, so its `)` is a stray one.
+    assert!(parse("echo case ) ; ls").unparsed);
+    assert!(parse("echo x ) ; ls").unparsed);
+    assert!(!parse("(echo x) ; ls").unparsed);
+}
+
+#[test]
+fn a_parameter_expansion_with_an_escaped_quote_or_a_brace_inside_does_not_swallow_the_rest() {
+    for input in [
+        "echo ${x:-$'\\''} ; $'\\x65cs_connect'",
+        "echo ${x:-$(echo })} ; $'\\x65cs_connect'",
+        "echo ${x:-`echo }`} ; $'\\x65cs_connect'",
+        "echo ${x:-$((1 + 2))} ; $'\\x65cs_connect'",
+        "echo ${x:-\"}\"} ; $'\\x65cs_connect'",
+        "echo ${x:-'}'} ; $'\\x65cs_connect'",
+    ] {
+        assert_found_and_balanced(input, &["ecs_connect"]);
+    }
+}
+
+#[test]
+fn a_command_substitution_inside_a_parameter_expansion_is_exposed() {
+    assert_found_and_balanced("echo ${x:-$(ecs_connect ap)}", &["ecs_connect", "ap"]);
+}
+
+#[test]
+fn a_backslash_at_the_end_of_a_comment_does_not_continue_it() {
+    // The comment ends at the newline; the next line is a command of its own.
+    let input = "echo hi # \\\n$'\\x65cs_connect'";
+    let p = parse(input);
+    assert!(!p.unparsed);
+    assert_eq!(cmds(input), vec![vec!["echo", "hi"], vec!["ecs_connect"]]);
+}
+
+#[test]
+fn a_quoted_heredoc_ends_at_a_delimiter_line_even_after_a_line_ending_in_a_backslash() {
+    for op in ["<<'EOF'", "<<\"EOF\"", "<<\\EOF"] {
+        let input = format!("cat {op}\nfoo\\\nEOF\n$'\\x65cs_connect'");
+        let p = parse(&input);
+        assert!(!p.unparsed, "{op}");
+        assert_eq!(p.heredocs.len(), 1, "{op}");
+        assert!(p.heredocs[0].quoted, "{op}");
+        assert_eq!(body(&input, &p.heredocs[0]), "foo\\\n", "{op}");
+        assert!(find(&p, &["ecs_connect"]).is_some(), "{op}: the line after the here-doc is a command");
+    }
+}
+
+#[test]
+fn an_unquoted_heredoc_does_not_end_at_a_delimiter_line_that_a_backslash_joined_to_the_line_before() {
+    // `foo\` + newline + `EOF` is the one body line `fooEOF`: the here-doc goes on to the real `EOF`.
+    let input = "cat <<EOF\nfoo\\\nEOF\nbar\nEOF\nls";
+    let p = parse(input);
+    assert!(!p.unparsed);
+    assert_eq!(p.heredocs.len(), 1);
+    assert_eq!(body(input, &p.heredocs[0]), "foo\\\nEOF\nbar\n");
+    assert_eq!(cmds(input), vec![vec!["cat"], vec!["ls"]]);
+}
+
+#[test]
+fn an_unquoted_heredoc_ends_at_a_delimiter_line_after_an_escaped_backslash() {
+    // Two backslashes are one literal backslash: no continuation, so `EOF` ends the body.
+    let input = "cat <<EOF\nfoo\\\\\nEOF\nls";
+    let p = parse(input);
+    assert!(!p.unparsed);
+    assert_eq!(body(input, &p.heredocs[0]), "foo\\\\\n");
+    assert_eq!(cmds(input), vec![vec!["cat"], vec!["ls"]]);
+}
+
+#[test]
+fn an_unquoted_heredoc_whose_only_delimiter_line_was_joined_is_unterminated() {
+    assert!(parse("cat <<EOF\nfoo\\\nEOF\n").unparsed);
+}

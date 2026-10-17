@@ -46,6 +46,11 @@ pub enum Key {
     /// (`M-b`, `C-Left`, `C-y`, `C-t`, `C-_`, `C-x`, `Up`, `Escape`, …): the line
     /// that results can't be told. It ends the text like a space.
     Inexact,
+    /// An argument the guard can't read as tmux does (`0x` followed by something
+    /// that is not a clean hex number, a `-H` value `strtol` would not accept,
+    /// `-F` format text, a repeat count past [`MAX_TYPED`]): what is typed can't be
+    /// told, with or without text next to it ([`Typed::unknown`]).
+    Unknown,
 }
 
 /// The arguments of one `send-keys` call, split into flags and keys.
@@ -54,15 +59,19 @@ struct SendKeysArgs<'a> {
     hex: bool,
     /// `-X` / `-M`: the arguments are copy-mode commands or mouse events, not keys.
     not_keys: bool,
+    /// `-F`: the arguments are tmux formats (`#{…}`), expanded before they are typed.
+    format: bool,
     repeat: usize,
     keys: Vec<&'a str>,
 }
 
-/// The most times `send-keys -N` repeats its keys that is modelled.
-const MAX_REPEAT: usize = 64;
+/// The most keys one run of `send-keys` calls is modelled for (the keys of every
+/// call, each repeated by its `-N`). Past it the line can't be told
+/// ([`Key::Unknown`]).
+pub const MAX_TYPED: usize = 100_000;
 
 fn parse_send_keys(args: &[Word]) -> SendKeysArgs<'_> {
-    let mut out = SendKeysArgs { literal: false, hex: false, not_keys: false, repeat: 1, keys: Vec::new() };
+    let mut out = SendKeysArgs { literal: false, hex: false, not_keys: false, format: false, repeat: 1, keys: Vec::new() };
     let mut i = 0;
     while i < args.len() {
         let w = args[i].text.as_str();
@@ -81,6 +90,7 @@ fn parse_send_keys(args: &[Word]) -> SendKeysArgs<'_> {
                 'l' => out.literal = true,
                 'H' => out.hex = true,
                 'X' | 'M' => out.not_keys = true,
+                'F' => out.format = true,
                 c @ ('c' | 'N' | 't') => {
                     let rest: String = cluster[k + 1..].iter().collect();
                     let value = if rest.is_empty() {
@@ -90,7 +100,9 @@ fn parse_send_keys(args: &[Word]) -> SendKeysArgs<'_> {
                         rest
                     };
                     if c == 'N' {
-                        out.repeat = value.parse::<usize>().unwrap_or(1).clamp(1, MAX_REPEAT);
+                        // tmux refuses a count that is not a number >= 1 (nothing is sent):
+                        // read as once, which types the most that call could.
+                        out.repeat = value.trim().parse::<usize>().unwrap_or(1).max(1);
                     }
                     break;
                 }
@@ -103,7 +115,8 @@ fn parse_send_keys(args: &[Word]) -> SendKeysArgs<'_> {
     out
 }
 
-/// The keys `send-keys` (with `args`, after its name) types.
+/// The keys `send-keys` (with `args`, after its name) types: `-N` applied, as
+/// tmux does, to all the keys that follow the options.
 pub fn send_keys(args: &[Word]) -> Vec<Key> {
     let parsed = parse_send_keys(args);
     if parsed.not_keys {
@@ -111,23 +124,78 @@ pub fn send_keys(args: &[Word]) -> Vec<Key> {
     }
     let mut once = Vec::new();
     for arg in &parsed.keys {
+        if parsed.format && arg.contains('#') {
+            // A format can expand to any text (`#{s/…/…/:…}`).
+            once.push(Key::Unknown);
+        }
         if parsed.hex {
-            if let Some(c) = u32::from_str_radix(arg.trim_start_matches("0x"), 16).ok().and_then(char::from_u32) {
-                once.push(key_for_char(c));
-            }
+            once.push(hex_byte(arg).map_or(Key::Unknown, key_for_char));
         } else if parsed.literal {
             once.extend(arg.chars().map(key_for_char));
-        } else if let Some(key) = key_named(arg) {
-            once.push(key);
         } else {
-            once.extend(arg.chars().map(key_for_char));
+            push_arg(arg, &mut once);
         }
+    }
+    if once.len().saturating_mul(parsed.repeat) > MAX_TYPED {
+        // One round is still scanned; the rest can't be told.
+        once.push(Key::Unknown);
+        return once;
     }
     let mut out = Vec::with_capacity(once.len() * parsed.repeat);
     for _ in 0..parsed.repeat {
         out.extend_from_slice(&once);
     }
     out
+}
+
+/// What `send-keys` types for one argument that is not `-l` / `-H`: the key it
+/// names, else its characters.
+fn push_arg(arg: &str, out: &mut Vec<Key>) {
+    if let Some(key) = key_named(arg) {
+        out.push(key);
+    } else if let Some(hex) = arg.strip_prefix("0x") {
+        // tmux reads `0x…` with `sscanf("%x")` (white space and a sign are skipped,
+        // anything after the digits is ignored). Only `0x` and hex digits is taken as
+        // written; anything else can't be told (and its text is kept).
+        match hex_number(hex) {
+            Some((value, true)) => out.extend(char::from_u32(value).map(key_for_char).or(Some(Key::Unknown))),
+            _ => {
+                out.push(Key::Unknown);
+                out.extend(arg.chars().map(key_for_char));
+            }
+        }
+    } else {
+        // `0X65` is text to tmux 3.5 (and a key to a version that ignores case).
+        if arg.len() > 2 && arg.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
+            out.push(Key::Unknown);
+        }
+        out.extend(arg.chars().map(key_for_char));
+    }
+}
+
+/// `digits` (after `0x`) as a number, and whether nothing but hex digits was
+/// there. `None` when there is no digit.
+fn hex_number(digits: &str) -> Option<(u32, bool)> {
+    let n = digits.bytes().take_while(u8::is_ascii_hexdigit).count();
+    if n == 0 {
+        return None;
+    }
+    let value = u32::from_str_radix(&digits[..n], 16).ok()?;
+    Some((value, n == digits.len()))
+}
+
+/// What `send-keys -H` types for one argument: tmux reads it with `strtol(s, &end,
+/// 16)` and sends the byte if it is 0 to 255 and nothing follows the number. So
+/// leading white space, a `+` and a `0x` / `0X` are fine; anything else is not typed
+/// (here: `None`, a key the guard can't tell).
+fn hex_byte(arg: &str) -> Option<char> {
+    let s = arg.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let s = s.strip_prefix('+').unwrap_or(s);
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(s, 16).ok().filter(|v| *v <= 0xff).and_then(char::from_u32)
 }
 
 /// The key a name stands for, `None` when the argument is plain text.
@@ -138,6 +206,10 @@ fn key_named(name: &str) -> Option<Key> {
         Some(c) if c.chars().count() == 1 => format!("c-{c}"),
         _ => lower,
     };
+    // Keypad keys type their character (`KP-` is `-`).
+    if let Some(key) = keypad_key(&lower) {
+        return Some(key);
+    }
     Some(match lower.as_str() {
         "space" => Key::Char(' '),
         "enter" | "kpenter" | "c-m" | "c-j" => Key::Enter,
@@ -153,9 +225,36 @@ fn key_named(name: &str) -> Option<Key> {
         "c-w" => Key::KillWord,
         // History recall and escape sequences (`Escape b` is `M-b`).
         "escape" | "up" | "down" => Key::Inexact,
-        "btab" | "ppage" | "npage" | "pageup" | "pagedown" | "ic" | "insert" => Key::Inert,
+        "btab" | "ppage" | "npage" | "pageup" | "pagedown" | "pgup" | "pgdn" | "ic" | "insert" | "any" => Key::Inert,
         _ => return modified_key(&lower),
     })
+}
+
+/// The keypad keys tmux names, and what each types.
+fn keypad_key(lower: &str) -> Option<Key> {
+    let c = match lower.strip_prefix("kp")? {
+        "/" => '/',
+        "*" => '*',
+        "-" => '-',
+        "+" => '+',
+        "." => '.',
+        "enter" => return Some(Key::Enter),
+        d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => d.chars().next()?,
+        _ => return None,
+    };
+    Some(Key::Char(c))
+}
+
+/// Mouse, focus and paste-marker keys: they type nothing.
+fn no_text_key(lower: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:(?:mousedown|mouseup|mousedrag|mousedragend|mousemove|wheelup|wheeldown|secondclick|doubleclick|tripleclick)[1-3]?(?:pane|status|statusleft|statusright|statusdefault|border)|focusin|focusout|pastestart|pasteend)$",
+        )
+        .unwrap()
+    })
+    .is_match(lower)
 }
 
 /// `C-`, `M-` and `S-` keys (any mix, `C-M-b`), function keys and keypad keys.
@@ -174,9 +273,9 @@ fn modified_key(lower: &str) -> Option<Key> {
             | "btab" | "enter" | "escape" | "space" | "ppage" | "npage" | "pageup" | "pagedown"
     );
     let function = base.len() > 1 && base.starts_with('f') && base[1..].bytes().all(|b| b.is_ascii_digit());
-    let keypad = base.starts_with("kp") && base.len() > 2;
+    let keypad = keypad_key(base).is_some();
     if !modified {
-        return (function || keypad).then_some(Key::Inert);
+        return (function || no_text_key(base)).then_some(Key::Inert);
     }
     if !(single || named || function || keypad) {
         return None;
@@ -184,7 +283,7 @@ fn modified_key(lower: &str) -> Option<Key> {
     // Keys the shell reads as no text change.
     Some(match lower {
         "c-c" | "c-g" | "c-l" | "c-z" | "c-\\" | "c-@" => Key::Inert,
-        _ if function || keypad => Key::Inert,
+        _ if function => Key::Inert,
         _ => Key::Inexact,
     })
 }
@@ -232,9 +331,17 @@ pub struct Typed {
     pub tab_words: Vec<String>,
     /// A [`Key::Inexact`] was typed along with text: `edited` can't be trusted.
     pub inexact: bool,
+    /// A [`Key::Unknown`] was typed: what the call types can't be told at all.
+    pub unknown: bool,
 }
 
 impl Typed {
+    /// What the keys type can't be told: an editing key the guard doesn't apply
+    /// next to text, or a key it can't read.
+    pub fn cant_tell(&self) -> bool {
+        self.inexact || self.unknown
+    }
+
     /// The distinct texts to scan.
     pub fn texts(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
@@ -342,6 +449,10 @@ pub fn type_keys(keys: &[Key]) -> Typed {
                 typed.spaced.push(' ');
             }
             Key::Inert => typed.spaced.push(' '),
+            Key::Unknown => {
+                typed.unknown = true;
+                typed.spaced.push(' ');
+            }
             Key::Inexact => {
                 typed.inexact = true;
                 typed.spaced.push(' ');
@@ -521,5 +632,97 @@ mod tests {
         b.set(&words(&["-a", "-b", "a", "connect"]));
         assert_eq!(b.pasted(&words(&["-b", "a", "-t", "%0"])), Some("ecs_connect"));
         assert_eq!(b.pasted(&words(&["-t", "%0"])), Some("ecs_connect"));
+    }
+
+    // ── round 4 ──
+
+    /// The keys of several `send-keys` calls, one after another (what a command string of
+    /// `send-keys …; send-keys …` types).
+    fn typed_calls(calls: &[&[&str]]) -> Typed {
+        let keys: Vec<Key> = calls.iter().flat_map(|args| send_keys(&words(args))).collect();
+        type_keys(&keys)
+    }
+
+    #[test]
+    fn hex_key_names_type_the_character_they_name() {
+        assert_eq!(typed(&["0x65", "0x63", "0x73"]).edited, "ecs");
+        assert_eq!(typed(&["0x65", "cs_", "0x63", "onnect"]).edited, "ecs_connect");
+        // `0x01` is C-a (Home), `0x0d` is Enter
+        assert_eq!(typed(&["connect", "0x01", "ecs_"]).edited, "ecs_connect");
+        assert_eq!(typed(&["ls", "0x0d"]).edited, "ls\n");
+        assert!(!typed(&["0x65", "0x63", "0x6c", "0x73"]).cant_tell());
+    }
+
+    #[test]
+    fn hex_key_names_that_are_not_clean_numbers_are_keys_the_guard_cannot_read() {
+        // tmux types `e` for `0x65zz` and ignores the rest; `0X65` is text to one version of tmux
+        // and a key to another: either way the guard can't tell what is typed.
+        for key in ["0x65zz", "0xZZ", "0X65"] {
+            assert!(typed(&[key]).unknown, "{key}");
+            assert!(typed(&["ecs_", key, "connect"]).cant_tell(), "{key}");
+        }
+    }
+
+    #[test]
+    fn keypad_keys_type_their_character() {
+        assert_eq!(typed(&["execute", "KP-", "command"]).edited, "execute-command");
+        assert_eq!(typed(&["KP+", "KP*", "KP/", "KP.", "KP0", "KP5", "KP9"]).edited, "+*/.059");
+        assert_eq!(typed(&["ls", "KPEnter"]).edited, "ls\n");
+        assert!(!typed(&["KP-", "KP5"]).cant_tell());
+    }
+
+    #[test]
+    fn any_and_nul_type_nothing_and_leave_the_line_alone() {
+        for key in ["Any", "any", "ANY", "0x00"] {
+            let t = typed(&["ecs_", key, "connect"]);
+            assert_eq!(t.edited, "ecs_connect", "{key}");
+            assert!(!t.cant_tell(), "{key}");
+        }
+    }
+
+    #[test]
+    fn hex_flag_reads_each_argument_as_strtol_does() {
+        // leading white space, `0x` and `0X` are fine
+        assert_eq!(typed(&["-H", "65", "63", "73"]).edited, "ecs");
+        assert_eq!(typed(&["-H", "0x65", "0X63", " 73"]).edited, "ecs");
+        assert_eq!(typed(&["-H", " 65", " 63", " 73", " 5f", " 63", " 6f", " 6e", " 6e", " 65", " 63", " 74"]).edited, "ecs_connect");
+        assert!(!typed(&["-H", "0X65", " 63"]).cant_tell());
+        // anything after the number, or no number, is not a key the guard can read
+        for arg in ["65zz", "zz", ""] {
+            assert!(typed(&["-H", arg]).unknown, "{arg:?}");
+        }
+    }
+
+    #[test]
+    fn a_repeat_count_applies_exactly_up_to_the_bound() {
+        // 100 characters, then 100 BSpace in another call: the line is empty
+        let x = "X".repeat(100);
+        let t = typed_calls(&[&[x.as_str()], &["-N", "100", "BSpace"]]);
+        assert_eq!(t.edited, "");
+        assert!(!t.cant_tell());
+        // …and 99 leave one
+        assert_eq!(typed_calls(&[&[x.as_str()], &["-N", "99", "BSpace"]]).edited, "X");
+        // `ecs_`, 100 characters, 100 BSpace, `connect`: a marker
+        let first = format!("ecs_{x}");
+        let t = typed_calls(&[&[first.as_str()], &["-N", "100", "BSpace"], &["connect"]]);
+        assert_eq!(t.edited, "ecs_connect");
+        // the count may be attached to the flag
+        assert_eq!(typed_calls(&[&[x.as_str()], &["-N100", "BSpace"]]).edited, "");
+        assert_eq!(typed(&["-N", "3", "ab"]).edited, "ababab");
+    }
+
+    #[test]
+    fn a_run_of_keys_past_the_bound_is_one_the_guard_cannot_tell() {
+        let at_bound = typed(&["-N", &MAX_TYPED.to_string(), "x"]);
+        assert!(!at_bound.unknown, "exactly the bound is still followed");
+        assert_eq!(at_bound.joined.len(), MAX_TYPED);
+
+        for count in [MAX_TYPED + 1, 1_000_000, 1_000_000_000] {
+            let past = typed(&["-N", &count.to_string(), "x"]);
+            assert!(past.unknown, "-N {count}");
+            assert!(past.cant_tell(), "-N {count}");
+            // nothing like `count` characters was built for it
+            assert!(past.joined.len() <= MAX_TYPED + 1, "-N {count}: {} characters", past.joined.len());
+        }
     }
 }

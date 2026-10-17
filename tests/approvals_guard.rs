@@ -3298,3 +3298,382 @@ fn benign_ordinary_commands_round3_have_no_false_positives() {
     }
     assert!(failures.is_empty(), "ordinary commands must not be blocked:\n{}", failures.join("\n"));
 }
+
+// ── round 4 ──────────────────────────────────────────────────────────────────────────────
+//
+// R4-A: tmux `send-keys` key names, flags and repeat counts that type a marker without the
+//       guard noticing (`0x65` is `e`, `KP-` is `-`, `Any` types nothing, `-H` is `strtol`,
+//       `-N 100` repeats a hundred times).
+// R4-B: a tokenizer that lost its place (a `#` comment ending in a backslash, a quoted
+//       here-doc, a `case` arm, `${x:-$'\''}`) used to hide every command after it.
+//
+// Every marker here is synthetic: the corpus goes through `evaluate`, never through a shell.
+
+/// A marker must be blocked by `command` where nothing is remote, and by some rule while a remote
+/// pane is open elsewhere (`%0` and `%2` are local in all three worlds).
+#[track_caller]
+fn assert_blocked_in_the_round_4_worlds(commands: &[&str], what: &str) {
+    assert_all_blocked(commands, RULE_COMMAND, &format!("{what}, no tmux server"), FakeProbe::default);
+    assert_all_blocked(commands, RULE_COMMAND, &format!("{what}, only local panes"), pane_two_world);
+    assert_all_blocked_by_any_rule(commands, &format!("{what}, a remote pane is open elsewhere"), pane_two_with_remote_elsewhere_world);
+}
+
+/// `evaluate` on its own thread, in the world `world` builds, so a guard that tries to follow a
+/// huge repeat count fails this test instead of hanging the run.
+fn evaluate_in_within(command: &str, world: World, limit: std::time::Duration) -> Result<GuardVerdict, GuardError> {
+    let command = command.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(evaluate(&bash(&command), &world()));
+    });
+    rx.recv_timeout(limit).unwrap_or_else(|_| panic!("evaluate did not finish within {limit:?}"))
+}
+
+// ── R4-A: key names, flags and repeat counts ─────────────────────────────────────────────
+
+/// Each of these types a marker into the pane.
+const KEYS_THAT_TYPE_A_MARKER: &[&str] = &[
+    // `0x65` is the key for the character 0x65, `e`
+    "tmux send-keys -t %0 0x65 0x63 0x73 0x5f 0x63 0x6f 0x6e 0x6e 0x65 0x63 0x74",
+    "tmux send-keys -t %0 0x65 0x63 0x73 0x5f 0x63 0x6f 0x6e 0x6e 0x65 0x63 0x74 Enter",
+    "tmux send-keys -t %0 0x65 cs_ 0x63 onnect Enter",
+    "tmux send-keys -t %0 'aws ecs ' 0x65 xecute-command Enter",
+    // `0x01` is C-a (Home)
+    "tmux send-keys -t %0 connect 0x01 ecs_",
+    "tmux send-keys -t %0 connect 0x01 ecs_ Enter",
+    "tmux send-keys -t %0 execute-command 0x01 'aws ecs ' Enter",
+    // `Any` (and `0x00`) type nothing, so they only split what is typed
+    "tmux send-keys -t %0 ecs_ Any connect",
+    "tmux send-keys -t %0 ecs_ any connect",
+    "tmux send-keys -t %0 ecs_ ANY connect",
+    "tmux send-keys -t %0 ecs_ 0x00 connect",
+    "tmux send-keys -t %0 'aws ecs ' Any execute-command Enter",
+    // `KP-` types a hyphen
+    "tmux send-keys -t %0 'aws ecs execute' KP- 'command' Enter",
+    "tmux send-keys -t %0 'aws ssm start' KP- 'session' Enter",
+    "tmux send-keys -t %0 session KP- manager KP- plugin",
+    "tmux send-keys -t %0 'aws ecs execute' KP- 'command'; tmux send-keys -t %0 Enter",
+    // `-H` reads each argument with `strtol(…, 16)`: `0X` and leading white space are fine
+    "tmux send-keys -t %0 -H 0X65 0X63 0X73 0X5f 0X63 0X6f 0X6e 0X6e 0X65 0X63 0X74",
+    "tmux send-keys -t %0 -H ' 65' ' 63' ' 73' ' 5f' ' 63' ' 6f' ' 6e' ' 6e' ' 65' ' 63' ' 74'",
+    "tmux send-keys -t %0 -H 0x65 0x63 0x73 0x5f 0x63 0x6f 0x6e 0x6e 0x65 0x63 0x74",
+    // a key the guard can't read, next to text that could still be a marker
+    "tmux send-keys -t %0 ecs_ 0x65zz connect",
+    "tmux send-keys -t %0 ecs_ 0xZZ connect",
+    "tmux send-keys -t %0 ecs_ 0X65 connect",
+    "tmux send-keys -t %0 connect 0x65zz ecs_",
+    "tmux send-keys -t %0 'aws ecs ' 0xZZ execute-command",
+];
+
+#[test]
+fn bypass_key_names_and_hex_forms_that_tmux_types_assemble_a_marker() {
+    assert_blocked_in_the_round_4_worlds(KEYS_THAT_TYPE_A_MARKER, "a key name or flag that types a marker");
+}
+
+#[test]
+fn bypass_a_marker_typed_through_key_names_is_decided_without_probing() {
+    for command in KEYS_THAT_TYPE_A_MARKER.iter().filter(|c| !c.contains("0x65zz") && !c.contains("0xZZ") && !c.contains("0X65 ")) {
+        let probe = pane_two_world();
+        let verdict = evaluate(&bash(command), &probe);
+        assert_eq!(rule_of(&verdict), Some(RULE_COMMAND), "{command}: {verdict:?}");
+        assert_eq!(probe.calls(), 0, "{command}: no tmux was asked");
+    }
+}
+
+/// Repeat counts past the old clamp of 64: `ecs_` and a hundred `X`, a hundred BSpace, `connect`.
+fn repeat_counts_that_empty_the_line() -> Vec<String> {
+    let mut out = Vec::new();
+    for n in [65usize, 100, 500] {
+        let x = "X".repeat(n);
+        out.push(format!("tmux send-keys -t %0 ecs_{x}; tmux send-keys -N {n} -t %0 BSpace; tmux send-keys -t %0 connect"));
+        out.push(format!("tmux send-keys -t %0 ecs_{x}; tmux send-keys -t %0 -N {n} BSpace; tmux send-keys -t %0 connect Enter"));
+    }
+    let x = "X".repeat(100);
+    out.push(format!("tmux send-keys -t %0 ecs_{x}; tmux send-keys -N100 -t %0 BSpace; tmux send-keys -t %0 connect"));
+    out.push(format!("tmux send-keys -t %0 ecs_{x} && tmux send-keys -N 100 -t %0 BSpace && tmux send-keys -t %0 connect"));
+    out
+}
+
+#[test]
+fn bypass_a_repeat_count_past_sixty_four_deletes_what_it_says() {
+    let commands = repeat_counts_that_empty_the_line();
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    assert_blocked_in_the_round_4_worlds(&refs, "a repeat count that empties the line");
+}
+
+#[test]
+fn a_repeat_count_one_short_of_emptying_the_line_leaves_text_that_is_not_a_marker() {
+    // 100 characters, 99 BSpace: `ecs_X` is left, then `connect`. The count is applied exactly.
+    let x = "X".repeat(100);
+    let command = format!("tmux send-keys -t %0 ecs_{x}; tmux send-keys -N 99 -t %0 BSpace; tmux send-keys -t %0 connect");
+    for (name, world) in [("no tmux server", FakeProbe::default as World), ("only local panes", pane_two_world as World), ("a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world as World)] {
+        assert_allowed(evaluate(&bash(&command), &world()), name);
+    }
+}
+
+#[test]
+fn bypass_a_repeat_count_past_what_the_guard_follows_is_not_followed_blind() {
+    // `-N 1000000` is past the 100 000 keys the guard simulates: what the pane ends up holding
+    // can't be told. With a remote pane open that blocks; it never errors, hangs or panics.
+    let limit = std::time::Duration::from_secs(20);
+    for command in ["tmux send-keys -t %2 -N 1000000 x", "tmux send-keys -t %2 -N 1000000000 BSpace", "tmux send-keys -N 1000000 -t %2 x Enter"] {
+        let verdict = evaluate_in_within(command, pane_two_with_remote_elsewhere_world, limit);
+        assert!(matches!(verdict, Ok(GuardVerdict::Block { .. })), "{command}: {verdict:?}");
+        // Nothing is remote: nothing typed could be a marker, so it is allowed, and quickly.
+        assert_allowed(evaluate_in_within(command, pane_two_world, limit), command);
+        assert_allowed(evaluate_in_within(command, FakeProbe::default, limit), command);
+    }
+}
+
+#[test]
+fn bypass_many_calls_with_large_repeat_counts_add_up_to_more_than_the_guard_follows() {
+    // 3 x 60 000 keys in one command string: no single call is past the bound, the sum is.
+    let call = "tmux send-keys -t %2 -N 60000 X";
+    let command = format!("{call}; {call}; {call}");
+    let limit = std::time::Duration::from_secs(20);
+    let verdict = evaluate_in_within(&command, pane_two_with_remote_elsewhere_world, limit);
+    assert!(matches!(verdict, Ok(GuardVerdict::Block { .. })), "{verdict:?}");
+    assert_allowed(evaluate_in_within(&command, pane_two_world, limit), "only local panes");
+}
+
+/// Keys the guard can't read as tmux does: while a remote pane is open, what they type can't be
+/// told, so they are blocked even with no marker in sight.
+const KEYS_THE_GUARD_CANT_READ: &[&str] = &[
+    "tmux send-keys -t %2 -H 65zz",
+    "tmux send-keys -t %2 -H zz",
+    "tmux send-keys -t %2 0xZZ",
+    "tmux send-keys -t %2 0x65zz",
+    "tmux send-keys -t %2 0X65",
+    "tmux send-keys -t %2 ls 0xZZ Enter",
+];
+
+#[test]
+fn bypass_a_key_the_guard_cant_read_is_blocked_while_a_remote_pane_is_open() {
+    assert_all_blocked_by_any_rule(KEYS_THE_GUARD_CANT_READ, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+#[test]
+fn a_key_the_guard_cant_read_is_allowed_when_nothing_is_remote_and_no_marker_could_be_typed() {
+    assert_all_allowed(KEYS_THE_GUARD_CANT_READ, "no tmux server", FakeProbe::default);
+    assert_all_allowed(KEYS_THE_GUARD_CANT_READ, "only local panes", pane_two_world);
+}
+
+/// Ordinary use of key names, hex and counts, none of it a marker.
+const ORDINARY_KEYS: &[&str] = &[
+    "tmux send-keys -t %2 -l 'ls -la'",
+    "tmux send-keys -t %2 C-c",
+    "tmux send-keys -t %2 'git status' Enter",
+    "tmux send-keys -t %2 -H 6c 73 0d",
+    "tmux send-keys -t %2 -N 3 x",
+    "tmux send-keys -t %2 KP5 KPEnter",
+    "tmux send-keys -t %2 0x6c 0x73 Enter",
+    "tmux send-keys -t %2 -N 2 Down",
+    "tmux send-keys -t %2 F5",
+    "tmux send-keys -t %2 ls Any Enter",
+    "tmux send-keys -t %2 'cargo build' KP- -release Enter",
+    "tmux send-keys -t %2 -N 100 x",
+    "tmux send-keys -t %2 -N 100 BSpace",
+];
+
+#[test]
+fn ordinary_key_names_hex_keys_and_repeat_counts_stay_allowed_in_every_world() {
+    assert_all_allowed(ORDINARY_KEYS, "no tmux server", FakeProbe::default);
+    assert_all_allowed(ORDINARY_KEYS, "only local panes", pane_two_world);
+    assert_all_allowed(ORDINARY_KEYS, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+#[test]
+fn history_recall_stays_allowed_unless_a_remote_pane_is_open_and_then_follows_the_existing_rule() {
+    // `Up Enter` is a documented residual: with no text typed beside it there is nothing to mix
+    // up, so it is allowed in every world (the round-2 test pins it with a remote pane elsewhere).
+    let history = ["tmux send-keys -t %2 Up Enter", "tmux send-keys -t %2 -N 3 Up Enter"];
+    assert_all_allowed(&history, "no tmux server", FakeProbe::default);
+    assert_all_allowed(&history, "only local panes", pane_two_world);
+    assert_all_allowed(&history, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+// ── R4-B: a tokenizer that lost its place used to hide what came after it ─────────────────
+
+/// Commands a shell runs that hold a marker the guard must find (every one is a synthetic
+/// string: nothing here is run).
+const R4_PAYLOADS: &[&str] = &[
+    r"$'\x65cs_connect'",
+    "$'ecs_connect'",
+    "ecs_connect",
+    r"$'\145cs_connect'",
+    r"aws ecs $'execute\x2dcommand'",
+    r"aws ssm $'start\x2dsession'",
+    "aws ecs execute-command --cluster c --task t",
+];
+
+/// Each shape puts `payload` where a shell runs it, after something that threw the tokenizer off.
+fn desync_shapes(payload: &str) -> Vec<String> {
+    vec![
+        // 1. a `#` comment is not continued by a backslash-newline
+        format!("echo hi # \\\n{payload}"),
+        format!("echo hi # a comment ending in a backslash \\\nls\n{payload}"),
+        // 2. a quoted here-doc body is literal: a backslash-newline does not join it to `EOF`
+        format!("cat <<'EOF'\nfoo\\\nEOF\n{payload}"),
+        format!("cat <<\"EOF\"\nfoo\\\nEOF\n{payload}"),
+        format!("cat <<\\EOF\nfoo\\\nEOF\n{payload}"),
+        // 3. a `case` arm's `)` closes the pattern, not a group
+        format!("case $x in a|b) :;; esac ; {payload}"),
+        format!("case $x in a|b) :;; esac\n{payload}"),
+        format!("for i in 1; do case $i in a|b) :;; esac; done; {payload}"),
+        format!("if true; then case $x in a) :;; esac; fi; {payload}"),
+        format!("echo $(case x in x) echo y;; esac) ; {payload}"),
+        // 4. a `${…}` that holds a quote or a `}` of its own
+        format!("echo ${{x:-$'\\''}} ; {payload}"),
+        format!("echo ${{x:-$(echo }})}} ; {payload}"),
+    ]
+}
+
+#[test]
+fn bypass_a_marker_after_something_that_threw_the_tokenizer_off_is_blocked() {
+    let commands: Vec<String> = R4_PAYLOADS.iter().flat_map(|p| desync_shapes(p)).collect();
+    assert!(commands.len() >= 80, "the corpus is {} commands", commands.len());
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    assert_all_blocked(&refs, RULE_COMMAND, "no tmux server", FakeProbe::default);
+    assert_all_blocked(&refs, RULE_COMMAND, "only local panes", pane_two_world);
+    assert_all_blocked_by_any_rule(&refs, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+}
+
+#[test]
+fn bypass_a_comment_ending_in_a_backslash_does_not_hide_the_next_line() {
+    // The three the review ran in bash, zsh and dash: all of them run the second line.
+    let commands = [
+        "echo hi # \\\n$'\\x65cs_connect'",
+        "echo hi # \\\n$'ecs_connect'",
+        "echo hi # \\\naws ecs $'execute\\x2dcommand'",
+        "echo hi # \\\naws ssm $'start\\x2dsession'",
+        "ls # \\\n\\\n$'\\x65cs_connect'",
+    ];
+    assert_in_every_world(&commands, "a comment that ends in a backslash", Some(RULE_COMMAND));
+}
+
+#[test]
+fn bypass_a_quoted_heredoc_body_ending_in_a_backslash_does_not_hide_what_follows_it() {
+    let commands = ["cat <<'EOF'\nfoo\\\nEOF\n$'\\x65cs_connect'", "cat <<'EOF'\nfoo\\\nEOF\naws ecs $'execute\\x2dcommand'"];
+    assert_in_every_world(&commands, "a quoted here-doc", Some(RULE_COMMAND));
+}
+
+#[test]
+fn bypass_a_case_statement_does_not_hide_what_follows_it() {
+    let commands = [
+        "case $x in a|b) :;; esac ; $'\\x65cs_connect'",
+        "case $x in a|b) :;; esac ; $'ecs_connect'",
+        "case $x in a|b) :;; esac ; aws ecs $'execute\\x2dcommand'",
+        "for i in 1; do case $i in a|b) :;; esac; done; $'\\x65cs_connect'",
+        "if true; then case $x in a) :;; esac; fi; $'\\x65cs_connect'",
+        "echo $(case x in x) echo y;; esac) ; $'\\x65cs_connect'",
+    ];
+    assert_in_every_world(&commands, "a case statement", Some(RULE_COMMAND));
+}
+
+#[test]
+fn bypass_a_parameter_expansion_with_a_quote_or_a_brace_inside_does_not_hide_what_follows_it() {
+    let commands = [
+        "echo ${x:-$'\\''} ; $'\\x65cs_connect'",
+        "echo ${x:-$(echo })} ; $'\\x65cs_connect'",
+        "echo ${x:-$'\\''} ; aws ecs $'execute\\x2dcommand'",
+        "echo ${x:-$(echo })} ; aws ssm $'start\\x2dsession'",
+    ];
+    assert_in_every_world(&commands, "a parameter expansion", Some(RULE_COMMAND));
+}
+
+#[test]
+fn bypass_a_desync_shape_behind_a_harmless_prefix_is_still_blocked() {
+    let commands: Vec<String> = R4_PAYLOADS.iter().flat_map(|p| desync_shapes(p)).map(|c| format!("cd /repo && {c}")).collect();
+    let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    assert_all_blocked(&refs, RULE_COMMAND, "no tmux server", FakeProbe::default);
+    assert_all_blocked(&refs, RULE_COMMAND, "only local panes", pane_two_world);
+}
+
+#[test]
+fn bypass_a_decoded_marker_is_found_in_text_the_tokenizer_cannot_parse() {
+    // The marker is found whatever the tokenizer made of the rest of the text.
+    let commands = [
+        "echo ) ; $'\\x65cs_connect'",
+        "echo \"x $'\\x65cs_connect'",
+        "echo $(unterminated ; $'\\x65cs_connect'",
+        "( echo ; $'\\x65cs_connect'",
+        "echo ) ; aws ecs $'execute\\x2dcommand'",
+    ];
+    assert_in_every_world(&commands, "text the tokenizer cannot parse", Some(RULE_COMMAND));
+}
+
+#[test]
+fn a_command_the_tokenizer_cannot_parse_is_not_an_error_and_is_decided_on_what_it_mentions() {
+    // No tmux, no marker: never an `Err`, and allowed when nothing is remote.
+    for command in ["echo \"x", "echo ) ; ls", "echo $(unterminated"] {
+        assert_allowed(evaluate(&bash(command), &FakeProbe::default()), command);
+        assert_allowed(evaluate(&bash(command), &pane_two_world()), command);
+        let verdict = evaluate(&bash(command), &pane_two_with_remote_elsewhere_world());
+        assert!(verdict.is_ok(), "{command}: {verdict:?}");
+    }
+}
+
+#[test]
+fn an_unparsable_command_with_a_tmux_input_verb_is_blocked_while_a_remote_pane_is_open() {
+    // The text can't be read as a tmux call, so the keys can't be aimed: can't tell. With nothing
+    // remote it is allowed.
+    let commands = ["tmux send-keys -t %2 ls Enter ; echo \"x", "tmux send-keys -t %2 ls Enter ; echo ) ; ls", "echo \"x ; tmux send-keys -t %2 ls Enter"];
+    assert_all_blocked_by_any_rule(&commands, "a remote pane is open elsewhere", pane_two_with_remote_elsewhere_world);
+    assert_all_allowed(&commands, "no tmux server", FakeProbe::default);
+    assert_all_allowed(&commands, "only local panes", pane_two_world);
+}
+
+#[test]
+fn benign_ordinary_commands_round4_have_no_false_positives() {
+    let corpus: Vec<String> = vec![
+        // case … esac
+        "case \"$1\" in start) echo starting;; stop) echo stopping;; *) echo usage;; esac".into(),
+        "case $x in a|b) echo ab;; esac; echo done".into(),
+        "case $x in a|b) :;; esac ; ls -la".into(),
+        "for f in *.rs; do case $f in main.rs) echo main;; *) echo other;; esac; done".into(),
+        "if [ -f Cargo.toml ]; then case $(uname) in Darwin) echo mac;; Linux) echo linux;; esac; fi".into(),
+        "echo $(case x in x) echo y;; esac) ; date".into(),
+        "case $OSTYPE in darwin*) open .;; *) xdg-open .;; esac".into(),
+        // ${x:-default}
+        "echo ${x:-default}".into(),
+        "echo ${x:-$(date)}".into(),
+        "echo ${HOME:-/tmp}/bin".into(),
+        "x=${y:-$(pwd)}; cd \"$x\"".into(),
+        "echo \"${x:-$(git rev-parse --short HEAD)}\"".into(),
+        "echo ${x:-$'a\\tb'}".into(),
+        "echo ${x:-$'\\''}; ls".into(),
+        "echo ${x:-$(echo })}; ls".into(),
+        "echo ${x#prefix} ${x%suffix} ${#x}".into(),
+        // $'…'
+        "echo $'a\\tb'".into(),
+        "git log --format=$'%h'".into(),
+        "git log --pretty=format:$'%an <%ae>' -n 3".into(),
+        "printf $'%s\\n' hello".into(),
+        "echo $'caf\\xc3\\xa9'".into(),
+        "echo $'\\x41\\x42'".into(),
+        "echo $'\\101\\102'".into(),
+        "read -r line <<<$'a b'".into(),
+        // a comment ending in a backslash, an ordinary next line
+        "echo hi # a comment ending in a backslash \\\nls -la".into(),
+        "for i in 1 2 3; do echo $i; done # done \\\necho after".into(),
+        // here-docs with a backslash line
+        "cat <<'EOF'\nfoo\\\nbar\nEOF".into(),
+        "cat <<'EOF'\nfoo\\\nEOF\nls -la".into(),
+        "cat <<EOF\nfoo\\\nEOF\nbar\nEOF".into(),
+        "cat > notes.md <<'EOF'\npath C:\\temp\\\nEOF\ngit add notes.md".into(),
+        // send-keys to a local pane
+        "tmux send-keys -t %2 -N 2 Down".into(),
+        "tmux send-keys -t %2 F5".into(),
+        "tmux send-keys -t %2 -N 5 Up".into(),
+        "tmux send-keys -t %2 PageDown".into(),
+        "tmux send-keys -t %2 'make test' Enter".into(),
+        "tmux send-keys -t %2 C-c C-c".into(),
+        "tmux send-keys -t %2 0x6c 0x73 Enter".into(),
+        "tmux send-keys -t %2 -H 6c 73 0d".into(),
+        "tmux send-keys -t %2 KP5 KPEnter".into(),
+    ];
+    assert!(corpus.len() >= 25, "the corpus is {} commands", corpus.len());
+    let refs: Vec<&str> = corpus.iter().map(String::as_str).collect();
+    assert_all_allowed(&refs, "no tmux server", FakeProbe::default);
+    assert_all_allowed(&refs, "only local panes", pane_two_world);
+}
