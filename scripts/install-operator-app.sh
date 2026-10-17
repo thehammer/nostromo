@@ -4,6 +4,13 @@
 # verifies and has the same cdhash(es) as <src>, and only then swap it in by
 # renaming. A failed copy or check leaves the old app (if any) in place.
 #
+# When <dest> exists the swap is ONE atomic `renamex_np(RENAME_SWAP)` (through
+# python3's ctypes; the shell has no such tool), so <dest> never stops existing:
+# a client connecting mid-install sees the old app or the new one. Without
+# python3, or on a filesystem that cannot swap, it falls back to two renames,
+# and then there is a gap of a few milliseconds in which <dest> does not exist
+# (an operator app that connects then is refused as WrongPath and retries).
+#
 #   scripts/install-operator-app.sh <signed/Nostromo.app> </Applications/Nostromo.app>
 #
 # <src> must already be signed (scripts/sign-operator-app.sh) and pass the
@@ -40,11 +47,26 @@ have=$(cdhashes "$tmp/new.app")
 [ -n "$want" ] && [ "$want" = "$have" ] \
   || operator_app_fail "the copy's cdhash differs from the build product's (want: $want; have: $have); $dest left as it was"
 
+# swap_atomically <a> <b>: exchange two existing paths in one step.
+swap_atomically() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -I -c '
+import ctypes, sys
+RENAME_SWAP = 2
+libc = ctypes.CDLL(None, use_errno=True)
+rc = libc.renamex_np(sys.argv[1].encode(), sys.argv[2].encode(), RENAME_SWAP)
+sys.exit(0 if rc == 0 else 1)
+' "$1" "$2" 2>/dev/null
+}
+
 if [ -e "$dest" ]; then
-  mv "$dest" "$tmp/old.app"
-  if ! mv "$tmp/new.app" "$dest"; then
-    mv "$tmp/old.app" "$dest"
-    operator_app_fail "could not move the new app into place; restored the old $dest"
+  # After a swap, $tmp/new.app holds the OLD app; the exit trap removes it with $tmp.
+  if ! swap_atomically "$tmp/new.app" "$dest"; then
+    mv "$dest" "$tmp/old.app"
+    if ! mv "$tmp/new.app" "$dest"; then
+      mv "$tmp/old.app" "$dest"
+      operator_app_fail "could not move the new app into place; restored the old $dest"
+    fi
   fi
 else
   mv "$tmp/new.app" "$dest"

@@ -23,26 +23,36 @@ path).
    `CS_ENFORCEMENT`), with no `get-task-allow` and no debugger attached.
    The pin is re-read on every such connection, so a reinstall needs no daemon
    restart.
-2. **The installed path.** Code that satisfies the pin must also be running
-   **from the installed app**: the peer's executable path (`proc_pidpath` of
-   the audit token's pid), canonicalised, must be
-   `/Applications/Nostromo.app/Contents/MacOS/Nostromo` (also canonicalised).
-   Anything else is `Unverified(WrongPath)`, logged as a warning. The path is a
-   compile-time constant, changeable only through `NOSTROMO_OPERATOR_APP_PATH`
-   in **the daemon's own environment** (a dev install, say). It is never read
-   from the peer or from a file. This exists because the pin file alone proves
-   nothing about *which* binary is meant: it is a user-writable file naming a
-   cdhash, so without the path a same-uid process could compile any client,
-   sign it `-i com.hammer.nostromo -o runtime`, write its cdhash into the pin
-   and be "the app". What an `Info.plist` beside the executable says doesn't
-   matter either way.
+2. **The installed app.** Code that satisfies the pin must also **be the
+   installed app**, decided on what the kernel reports, never on a name the
+   peer controls. In the same step as the code check, the daemon reads the
+   peer's image once: its raw `proc_pidpath` (the kernel rebuilds it from the
+   vnode, so it names no symlink) and the device and inode of the file the
+   kernel mapped as that image (its region table, `PROC_PIDREGIONPATHINFO`).
+   It opens the installed app itself, `/Applications/Nostromo.app/Contents/MacOS/Nostromo`,
+   and reads that one open file's device and inode and the kernel's spelling of
+   its path (`F_GETPATH`). The peer is the app only if **both** the raw path
+   equals that spelling, compared as bytes, **and** the identities are equal.
+   Anything else is `Unverified(WrongPath)`, logged as a warning. The peer's
+   path is **never canonicalised or looked up**: a second look at a path the
+   peer controls can be beaten without any rights, by re-pointing a directory
+   (see "Directory-swap race" below). The installed path is a compile-time
+   constant, changeable only through `NOSTROMO_OPERATOR_APP_PATH` in **the
+   daemon's own environment** (a dev install, say). It is never read from the
+   peer or from a file. This exists because the pin file alone proves nothing
+   about *which* binary is meant: it is a user-writable file naming a cdhash,
+   so without it a same-uid process could compile any client, sign it
+   `-i com.hammer.nostromo -o runtime`, write its cdhash into the pin and be
+   "the app". What an `Info.plist` beside the executable says doesn't matter
+   either way.
 3. **The nonce.** Only a connection verified as the operator app gets an
    `operator_nonce` in its `Welcome` (128+ random bits, per connection, never
    logged). Every `DecisionAnswer` must echo it. Bytes a process wrote before
    it was verified can't contain it.
 4. **At answer time.** The daemon inspects the socket's peer again, after the
    frame was read, and requires the same pid **and** pidversion as at `Hello`,
-   still running pinned code at the installed path. The kernel attributes a
+   still running pinned code that is the installed app (step 2 is repeated, so
+   it also sees the installed app replaced since). The kernel attributes a
    socket to the last process that used it, and `exec` keeps the pid but
    changes the pidversion. So an answer written by a forked sibling sharing the
    socket, or after an `exec`, is refused.
@@ -124,7 +134,8 @@ Developer ID Team ID and a root-owned install:
 - **Replace `/Applications/Nostromo.app` with a re-signed binary of their own
   and rewrite `~/.nostromo/operator-app.pin` to match.** Both steps are needed:
   rewriting the pin alone no longer makes a binary elsewhere "the app" (it is
-  refused as `WrongPath`), and replacing the app alone fails the cdhash. But
+  refused as `WrongPath`, and a directory swap does not change that), and
+  replacing the app alone fails the cdhash. But
   neither is out of reach: the user is an admin, so `/Applications` is
   writable by their own agent, and the pin is a file they own. The attack is
   noisy (the user's app is replaced and stops being the app they built) but it
@@ -151,10 +162,32 @@ answered there at all.
 
 **What is closed.** A process anywhere on disk (a fake bundle, a re-signed
 copy, a script) can't answer, **even if its cdhash is written into the pin**:
-it must also run from the installed app's path. Neither can DYLD injection or
-debugger attach into the installed app, or exec-after-connect, pre-buffered
-answers or fd sharing. A copied, **unmodified** genuine app elsewhere is
-refused too (wrong path), though it would otherwise pass on its cdhash.
+it must also *be* the installed app's file, at the installed app's path.
+Neither can DYLD injection or debugger attach into the installed app, or
+exec-after-connect, pre-buffered answers or fd sharing. A copied, **unmodified**
+genuine app elsewhere is refused too (wrong path), though it would otherwise
+pass on its cdhash.
+
+**Directory-swap race (closed).** The first version of the path binding read
+the peer's path, ran the code check, then canonicalised the stored path string
+against the live filesystem. An attacker with no admin rights could sign a
+client `-i com.hammer.nostromo -o runtime`, pin its cdhash, run it from
+`~/x/Nostromo` and keep `renamex_np(RENAME_SWAP)`-ing `~/x` with a symlink to
+`/Applications/Nostromo.app/Contents/MacOS`; whenever the canonicalisation
+landed while the symlink was in place, the client was "the installed app"
+(42 of 200 inspections in a reproduction). Now nothing derived from the peer
+is resolved: the raw path is compared as bytes and the file identity must match
+too, and the answer-time re-check repeats both. This is covered by the
+automated test
+`swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_makes_it_the_app`
+(`tests/peer_code_identity_macos.rs`: a swap loop runs alongside 300
+inspections and re-checks, expecting zero `Pinned`).
+
+**What the binding does not stop.** It does not stop anyone who can change the
+installed app itself: replacing `/Applications/Nostromo.app` as an admin user
+(with the pin rewritten to match), or editing the daemon's launchd plist or
+environment (`NOSTROMO_OPERATOR_APP_PATH`). It proves "this is the file at the
+installed path now", not "this is the file the user built".
 
 **Behaviour change.** Only the pinned, runtime-signed install, running from the
 installed path, answers decisions. Debug builds and an un-reinstalled app
@@ -215,6 +248,11 @@ pin, restore it afterwards with `make mac-pin`.
    rm -rf "$work"
    make mac-pin
    ```
+
+   The directory-swap variant of (b) (swap the client's directory with a
+   symlink to the installed app's directory while it runs) is covered by the
+   automated test `swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_makes_it_the_app`;
+   there is no need to repeat it by hand.
 
    To see the documented residual, start a **scratch** daemon with
    `NOSTROMO_OPERATOR_APP_PATH="$work/client"` and the rewritten pin: the

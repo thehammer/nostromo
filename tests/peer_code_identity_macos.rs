@@ -35,6 +35,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -563,6 +564,97 @@ fn a_symlink_to_a_different_binary_is_not_the_installed_app() {
     std::os::unix::fs::symlink(&h.unpinned, &link).unwrap();
     let info = verify_helper_at(&h.pinned, &h.pinned, &link);
     assert_eq!(info.code, unverified(UnverifiedReason::WrongPath));
+}
+
+// ── the directory-swap race ──────────────────────────────────────────────────
+//
+// The path the kernel reports for a peer is a snapshot; resolving it through the
+// filesystem *later* (canonicalize) is a second look at a name the peer controls.
+// A same-uid attacker needs no rights for this: run a pinned-cdhash client from
+// `<dir>/x/Nostromo`, and keep `renamex_np(RENAME_SWAP)`-ing `<dir>/x` with a
+// symlink to the installed app's directory. Whenever the verifier resolves the
+// stored name while the symlink is in place, it lands on the installed binary.
+
+/// Exchanges `a` and `b` (a directory and a symlink) atomically, over and over,
+/// until `stop`. Returns how many swaps it made.
+fn swap_loop(a: PathBuf, b: PathBuf, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    std::thread::spawn(move || {
+        let (a, b) = (CString::new(a.as_os_str().as_bytes()).unwrap(), CString::new(b.as_os_str().as_bytes()).unwrap());
+        let mut swaps = 0u64;
+        while !stop.load(Ordering::Relaxed) {
+            // SAFETY: both are valid NUL-terminated paths for the duration of the call.
+            let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+            assert_eq!(rc, 0, "RENAME_SWAP failed: {}", std::io::Error::last_os_error());
+            swaps += 1;
+        }
+        swaps
+    })
+}
+
+#[test]
+fn swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_makes_it_the_app() {
+    const ATTEMPTS: u32 = 300;
+    let h = helpers();
+    let root = tempfile::tempdir().unwrap();
+
+    // The "installed app": a copy of the pinned helper in its own directory. The attacker's
+    // client is ANOTHER copy of it (same cdhash, so the code check and the pin cannot tell
+    // them apart: only where it is and which file it is can).
+    let installed_dir = root.path().join("installed");
+    let attacker_dir = root.path().join("x");
+    fs::create_dir(&installed_dir).unwrap();
+    fs::create_dir(&attacker_dir).unwrap();
+    let installed = installed_dir.join("Nostromo");
+    let attacker = attacker_dir.join("Nostromo");
+    fs::copy(&h.pinned, &installed).unwrap();
+    fs::copy(&h.pinned, &attacker).unwrap();
+    let trap = root.path().join("trap");
+    std::os::unix::fs::symlink(&installed_dir, &trap).unwrap();
+
+    // Preconditions, so a pass is not vacuous: the installed copy IS accepted at the
+    // installed path, and the attacker's copy, standing still, is refused.
+    let genuine = verify_helper_at(&installed, &installed, &installed);
+    assert_eq!(genuine.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+    let standing_still = verify_helper_at(&attacker, &installed, &installed);
+    assert_eq!(standing_still.code, unverified(UnverifiedReason::WrongPath));
+
+    // The race: the attacker's client is connected; the directory it runs from is swapped
+    // with the symlink in a tight loop while the daemon inspects it again and again.
+    let (dir, listener, socket) = listen();
+    let verifier = MacPeerVerifier::with_app_exe(write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned), &installed);
+    let mut helper = Helper::spawn(&attacker, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "hold", None);
+    let mut stream = accept(&listener, &mut helper);
+    assert_eq!(read_byte(&mut stream, "the attacker's first byte"), b'a');
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = swap_loop(attacker_dir.clone(), trap.clone(), Arc::clone(&stop));
+    let mut pinned = 0;
+    let mut outcomes = Vec::new();
+    for attempt in 0..ATTEMPTS {
+        // Alternate the Hello-time inspection and the answer-time re-check.
+        let info = if attempt % 2 == 0 {
+            verifier.inspect(stream.as_fd(), true)
+        } else {
+            verifier.reinspect(stream.as_fd(), &standing_still)
+        }
+        .expect("the attacker is alive and identifiable");
+        assert_eq!(info.pid, helper.pid());
+        if matches!(info.code, CodeIdentity::Pinned { .. }) {
+            pinned += 1;
+        }
+        outcomes.push(info.code);
+    }
+    stop.store(true, Ordering::Relaxed);
+    let swaps = swapper.join().unwrap();
+
+    assert!(swaps >= u64::from(ATTEMPTS), "the swap loop must really have run alongside ({swaps} swaps)");
+    assert_eq!(pinned, 0, "{pinned} of {ATTEMPTS} inspections called the attacker the installed app");
+    assert!(
+        outcomes.iter().all(|code| *code == unverified(UnverifiedReason::WrongPath)),
+        "every inspection must refuse as WrongPath: {outcomes:?}"
+    );
 }
 
 #[test]

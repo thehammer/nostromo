@@ -17,13 +17,20 @@
 //!   kernel must be **enforcing** that runtime (`CS_HARD`, `CS_KILL` and
 //!   `CS_ENFORCEMENT`; absent when SIP is disabled), and it must be neither
 //!   debuggable (`get-task-allow`) nor being debugged, **and**
-//! - that code runs from the **installed app's path**
-//!   ([`INSTALLED_APP_EXE`], or the daemon's own `NOSTROMO_OPERATOR_APP_PATH`).
+//! - that code **is the installed app**: the peer's running image is the file at
+//!   [`INSTALLED_APP_EXE`] (or the daemon's own `NOSTROMO_OPERATOR_APP_PATH`).
 //!   The pin file is user-writable, so a cdhash in it proves nothing about
 //!   *which* binary is meant: without this, a same-uid process could compile
 //!   any client, sign it with the app's identifier, write its cdhash into the
-//!   pin and be "the app". With it, that process must also put its binary at
-//!   the installed path ([`UnverifiedReason::WrongPath`] otherwise).
+//!   pin and be "the app". With it, that process must also *be* the installed
+//!   binary ([`UnverifiedReason::WrongPath`] otherwise). It is decided on
+//!   kernel-reported facts only, read once per inspection, never by resolving a
+//!   name the peer controls: the raw `proc_pidpath` of the image must equal the
+//!   kernel's spelling of the installed app's path (`F_GETPATH` of the open
+//!   installed file), **and** the device and inode of the file the kernel
+//!   mapped as the image (its region table) must equal those of the installed
+//!   file. (Canonicalising the peer's path is exactly what a directory swap
+//!   with a symlink beats; see [`is_installed_app`].)
 //!
 //! What an `Info.plist` next to the executable says doesn't matter: a fake
 //! bundle claiming the Nostromo bundle id has another cdhash.
@@ -86,7 +93,7 @@ pub struct PeerInfo {
     /// The kernel's per-image generation of `pid`: it changes when the process
     /// `exec`s. 0 when no audit token was available.
     pub pidversion: u32,
-    /// The executable's path (`proc_pidpath`). Diagnostic only.
+    /// The executable's path (`proc_pidpath`, raw). Diagnostic only.
     pub exe: PathBuf,
     /// `CFBundleIdentifier` of the app bundle enclosing `exe`, if any.
     /// Diagnostic only (the "old app" warning); never a reason to trust.
@@ -121,9 +128,9 @@ pub enum UnverifiedReason {
     /// The code does not satisfy the pin's requirement (another identifier or
     /// cdhash).
     RequirementFailed,
-    /// The code satisfies the pin but is not running from the installed app's
-    /// path (see [`INSTALLED_APP_EXE`]): a rewritten pin alone must not make
-    /// an arbitrary binary the app.
+    /// The code satisfies the pin but is not the installed app (see
+    /// [`INSTALLED_APP_EXE`]): not at its path, or not that file. A rewritten
+    /// pin alone must not make an arbitrary binary the app.
     WrongPath,
     /// Not signed with the hardened runtime.
     NoRuntime,
@@ -207,44 +214,138 @@ impl PeerVerifier for MacPeerVerifier {
             Some(token) => (token.pid(), token.pidversion()),
             None => (peer_pid(fd)?, 0),
         };
-        let exe = exe_of(pid)?;
-        let path_bundle_id = bundle_id_for_exe(&exe);
+        // The peer's image is read ONCE, here, straight from the kernel, and
+        // BEFORE the audit-token code check: if the peer `exec`s in between,
+        // the token no longer names running code and the check refuses
+        // (`NoSuchCode`). Nothing below looks at the filesystem again for a
+        // name the peer controls.
+        let image = peer_image(pid)?;
+        let path_bundle_id = bundle_id_for_exe(&image.path);
         let code = if !verify {
             CodeIdentity::Unverified { reason: UnverifiedReason::NotChecked }
         } else {
             match (&token, OperatorPin::load(&self.pin_path)) {
                 (_, Err(reason)) => CodeIdentity::Unverified { reason },
                 (None, Ok(_)) => CodeIdentity::Unverified { reason: no_token_reason() },
-                (Some(token), Ok(pin)) => self.bind_to_installed_path(verify_code(token, &pin), &exe),
+                (Some(token), Ok(pin)) => self.bind_to_installed_app(verify_code(token, &pin), &image),
             }
         };
-        Some(PeerInfo { pid, pidversion, exe, path_bundle_id, code })
+        Some(PeerInfo { pid, pidversion, exe: image.path, path_bundle_id, code })
     }
 }
 
 impl MacPeerVerifier {
-    /// Pinned code stays pinned only when it runs from the installed app's
-    /// path. Anything else was already refused.
-    fn bind_to_installed_path(&self, code: CodeIdentity, exe: &Path) -> CodeIdentity {
-        if matches!(code, CodeIdentity::Pinned { .. }) && !same_file(exe, &self.app_exe) {
-            warn!(
-                peer_exe = %exe.display(),
-                expected = %self.app_exe.display(),
-                "pinned code is running from a path other than the installed app: refused (WrongPath)"
-            );
-            return CodeIdentity::Unverified { reason: UnverifiedReason::WrongPath };
+    /// Pinned code stays pinned only when its running image IS the installed
+    /// app (see [`is_installed_app`]). The installed app is looked at now, on
+    /// every check, so the answer-time re-check sees a replacement too.
+    /// Anything else was already refused.
+    fn bind_to_installed_app(&self, code: CodeIdentity, image: &PeerImage) -> CodeIdentity {
+        if !matches!(code, CodeIdentity::Pinned { .. }) {
+            return code;
         }
-        code
+        let installed = installed_app(&self.app_exe);
+        if installed.as_ref().is_some_and(|installed| is_installed_app(image, installed)) {
+            return code;
+        }
+        warn!(
+            peer_exe = %image.path.display(),
+            expected = %self.app_exe.display(),
+            "pinned code is not the installed app (not at its path, or not that file): refused (WrongPath)"
+        );
+        CodeIdentity::Unverified { reason: UnverifiedReason::WrongPath }
     }
 }
 
-/// Do `a` and `b` canonicalise to the same existing path? Either failing to
-/// canonicalise (not installed, deleted since) is "no".
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
+/// A file's identity: the device and inode, which no rename or symlink can
+/// change for a file that exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+/// The peer's running image as the kernel reports it, read once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PeerImage {
+    /// `proc_pidpath`, **raw**. The kernel rebuilds it from the vnode, so it
+    /// names no symlink. It is only ever compared as bytes, never resolved
+    /// through the filesystem: a path the peer controls can be re-pointed
+    /// (`renamex_np(RENAME_SWAP)` of a directory with a symlink) between two
+    /// looks at it.
+    path: PathBuf,
+    /// The identity of the file the kernel mapped as the image, when it could
+    /// be read.
+    id: Option<FileId>,
+}
+
+/// The installed app, in the kernel's own spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstalledApp {
+    /// What the kernel reports for the file at [`INSTALLED_APP_EXE`] (or the
+    /// daemon's override): the same spelling `proc_pidpath` uses.
+    path: PathBuf,
+    id: FileId,
+}
+
+/// Is the peer's image the installed app? Both must hold: the raw path the
+/// kernel reports for the image is the installed app's path, **and** the image
+/// is the very file (device and inode) the installed path names now. Neither
+/// alone decides, and no peer-controlled name is resolved to decide it.
+fn is_installed_app(image: &PeerImage, installed: &InstalledApp) -> bool {
+    image.path == installed.path && image.id == Some(installed.id)
+}
+
+/// Opens the daemon's own `app_exe` (a constant or the daemon's environment,
+/// never the peer's) and reads its identity and the kernel's spelling of its
+/// path from that one open file. `None` when nothing is installed there.
+fn installed_app(app_exe: &Path) -> Option<InstalledApp> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file = std::fs::File::open(app_exe).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
     }
+    Some(InstalledApp { path: path_of_open_file(&file)?, id: FileId { dev: device_of(&meta), ino: meta.ino() } })
+}
+
+/// `st_dev` as the kernel's region table spells it: on macOS a `u32` (`stat`
+/// has it as an `i32`, which would sign-extend for a device with a high major).
+#[cfg(target_os = "macos")]
+fn device_of(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    u64::from(meta.dev() as u32)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn device_of(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.dev()
+}
+
+/// The kernel's path for an open file (`F_GETPATH`, the same vnode-to-path
+/// routine `proc_pidpath` uses).
+#[cfg(target_os = "macos")]
+fn path_of_open_file(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes
+    // into `buf`, which is that long.
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    buf.truncate(len);
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn path_of_open_file(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -696,9 +797,11 @@ fn app_bundle_of(exe: &Path) -> Option<&Path> {
     is_app.then_some(app)
 }
 
-/// The executable path of `pid` (`proc_pidpath`).
+/// The running image of `pid`, read from the kernel once: its raw
+/// `proc_pidpath` and, where the kernel's region table offers it, the identity
+/// of the file mapped at that path.
 #[cfg(target_os = "macos")]
-fn exe_of(pid: i32) -> Option<PathBuf> {
+fn peer_image(pid: i32) -> Option<PeerImage> {
     use std::os::unix::ffi::OsStringExt;
 
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
@@ -708,12 +811,68 @@ fn exe_of(pid: i32) -> Option<PathBuf> {
         return None;
     }
     buf.truncate(len as usize);
-    Some(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+    let id = mapped_file_id(pid, &buf);
+    Some(PeerImage { path: PathBuf::from(std::ffi::OsString::from_vec(buf)), id })
 }
 
+/// `struct proc_regionwithpathinfo` (`<sys/proc_info.h>`): a `proc_regioninfo`
+/// (96 bytes, ending in the region's address and size) followed by the
+/// `vnode_info_path` of the file mapped there.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct RegionWithPath {
+    region: [u8; 80],
+    address: u64,
+    size: u64,
+    vnode: libc::vnode_info_path,
+}
+
+/// The device and inode of the file the kernel has mapped from `path`
+/// (`proc_pidpath`'s answer) into `pid`. The kernel's own vnode, found through
+/// the process's region table (`PROC_PIDREGIONPATHINFO`), not through the
+/// filesystem. `None` if no region maps a file at exactly that path.
+#[cfg(target_os = "macos")]
+fn mapped_file_id(pid: i32, path: &[u8]) -> Option<FileId> {
+    /// `PROC_PIDREGIONPATHINFO`.
+    const FLAVOR: libc::c_int = 8;
+    /// The main image's `__TEXT` sits near the bottom of the address space; a
+    /// process with this many regions below it is not asked any further.
+    const MAX_REGIONS: usize = 4096;
+
+    let mut address = 0u64;
+    for _ in 0..MAX_REGIONS {
+        // SAFETY: an all-zero RegionWithPath is a valid value (plain integers).
+        let mut info: RegionWithPath = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<RegionWithPath>() as libc::c_int;
+        // SAFETY: `info` is valid for writes of `size` bytes.
+        let got = unsafe { libc::proc_pidinfo(pid, FLAVOR, address, (&mut info as *mut RegionWithPath).cast(), size) };
+        if got != size || info.size == 0 {
+            return None;
+        }
+        // SAFETY: vip_path is MAXPATHLEN bytes; reading them as `u8` is fine.
+        let raw: &[u8] = unsafe {
+            std::slice::from_raw_parts(info.vnode.vip_path.as_ptr().cast::<u8>(), std::mem::size_of_val(&info.vnode.vip_path))
+        };
+        let region_path = raw.split(|&b| b == 0).next().unwrap_or_default();
+        if region_path == path {
+            let stat = &info.vnode.vip_vi.vi_stat;
+            return Some(FileId { dev: u64::from(stat.vst_dev), ino: stat.vst_ino });
+        }
+        address = info.address.checked_add(info.size)?;
+    }
+    None
+}
+
+/// The running image of `pid`: `/proc/<pid>/exe`, and the file that magic link
+/// opens (an identity, not a name).
 #[cfg(not(target_os = "macos"))]
-fn exe_of(pid: i32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+fn peer_image(pid: i32) -> Option<PeerImage> {
+    use std::os::unix::fs::MetadataExt;
+
+    let link = format!("/proc/{pid}/exe");
+    let path = std::fs::read_link(&link).ok()?;
+    let id = std::fs::metadata(&link).ok().map(|m| FileId { dev: device_of(&m), ino: m.ino() });
+    Some(PeerImage { path, id })
 }
 
 /// Stand-ins for the Mac app and for other local processes, for tests that
@@ -1241,65 +1400,121 @@ mod tests {
         path
     }
 
+    /// The peer image the kernel would report for a process running `installed`.
+    fn image_of(installed: &InstalledApp) -> PeerImage {
+        PeerImage { path: installed.path.clone(), id: Some(installed.id) }
+    }
+
     #[test]
-    fn a_file_is_the_same_file_as_itself_and_as_a_symlink_to_it() {
+    fn the_installed_app_is_known_by_the_kernels_path_and_the_files_identity() {
+        use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let exe = file(dir.path(), "app", "x");
-        assert!(same_file(&exe, &exe));
+        let meta = fs::metadata(&exe).unwrap();
+        let known = installed_app(&exe).unwrap();
+        assert_eq!(known.id, FileId { dev: device_of(&meta), ino: meta.ino() });
+        assert_eq!(known.path, fs::canonicalize(&exe).unwrap(), "the kernel's spelling names no symlink");
+
+        // Named through a symlink or a `..` spelling: the same installed app.
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&exe, &link).unwrap();
-        assert!(same_file(&exe, &link));
-        assert!(same_file(&link, &exe));
-        // A path spelled through `.` and `..` is still the same file.
-        assert!(same_file(&exe, &dir.path().join("../").join(dir.path().file_name().unwrap()).join("app")));
+        assert_eq!(installed_app(&link), Some(known.clone()));
+        let dotted = dir.path().join("../").join(dir.path().file_name().unwrap()).join("app");
+        assert_eq!(installed_app(&dotted), Some(known));
     }
 
     #[test]
-    fn two_different_files_are_not_the_same_file_even_with_identical_contents() {
+    fn two_different_files_are_not_the_same_installed_app_even_with_identical_contents() {
         let dir = tempfile::tempdir().unwrap();
-        let a = file(dir.path(), "a", "same bytes");
-        let b = file(dir.path(), "b", "same bytes");
-        assert!(!same_file(&a, &b));
-        let link_to_b = dir.path().join("link-to-b");
-        std::os::unix::fs::symlink(&b, &link_to_b).unwrap();
-        assert!(!same_file(&a, &link_to_b));
+        let a = installed_app(&file(dir.path(), "a", "same bytes")).unwrap();
+        let b = installed_app(&file(dir.path(), "b", "same bytes")).unwrap();
+        assert_ne!(a.id, b.id);
+        assert!(!is_installed_app(&image_of(&a), &b));
+        assert!(!is_installed_app(&image_of(&b), &a));
     }
 
     #[test]
-    fn a_path_that_does_not_exist_is_the_same_file_as_nothing_not_even_itself() {
+    fn nothing_is_installed_at_a_missing_dangling_or_non_file_path() {
         let dir = tempfile::tempdir().unwrap();
-        let real = file(dir.path(), "real", "x");
         let missing = dir.path().join("missing");
-        assert!(!same_file(&real, &missing));
-        assert!(!same_file(&missing, &real));
-        assert!(!same_file(&missing, &missing));
+        assert_eq!(installed_app(&missing), None);
         let dangling = dir.path().join("dangling");
         std::os::unix::fs::symlink(&missing, &dangling).unwrap();
-        assert!(!same_file(&dangling, &real));
-        assert!(!same_file(&dangling, &dangling));
+        assert_eq!(installed_app(&dangling), None);
+        assert_eq!(installed_app(dir.path()), None, "a directory is not an executable");
     }
 
     #[test]
-    fn pinned_code_is_accepted_only_at_the_installed_apps_path() {
+    fn an_image_is_the_installed_app_only_when_both_its_raw_path_and_its_identity_match() {
         let dir = tempfile::tempdir().unwrap();
-        let installed = file(dir.path(), "installed", "app");
-        let elsewhere = file(dir.path(), "elsewhere", "app");
-        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &installed);
-        assert_eq!(verifier.app_exe(), installed.as_path());
+        let installed = installed_app(&file(dir.path(), "installed", "app")).unwrap();
+        let other = installed_app(&file(dir.path(), "other", "app")).unwrap();
 
-        assert_eq!(verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &installed), pinned(APP_BUNDLE_ID));
+        assert!(is_installed_app(&image_of(&installed), &installed));
+        // The right path, another file (the installed file was replaced, or the path lies).
+        assert!(!is_installed_app(&PeerImage { path: installed.path.clone(), id: Some(other.id) }, &installed));
+        // The right path, identity unknown: a path alone never decides.
+        assert!(!is_installed_app(&PeerImage { path: installed.path.clone(), id: None }, &installed));
+        // The installed file's identity, another path (a hard link, a symlink spelling).
+        assert!(!is_installed_app(&PeerImage { path: other.path.clone(), id: Some(installed.id) }, &installed));
+    }
+
+    #[test]
+    fn a_path_the_peer_names_is_compared_as_bytes_and_never_resolved_through_the_filesystem() {
+        // The swap-race defence in miniature: a peer-reported path that merely RESOLVES to the
+        // installed app (a symlink to it, or a `..` spelling) is not the installed path. If
+        // the verifier canonicalised the peer's path, each of these would pass.
+        let dir = tempfile::tempdir().unwrap();
+        let installed = installed_app(&file(dir.path(), "installed", "app")).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&installed.path, &link).unwrap();
+        let dotted = dir.path().join("../").join(dir.path().file_name().unwrap()).join("installed");
+        for peer_path in [link, dotted] {
+            let image = PeerImage { path: peer_path.clone(), id: Some(installed.id) };
+            assert!(!is_installed_app(&image, &installed), "{}", peer_path.display());
+        }
+    }
+
+    #[test]
+    fn pinned_code_is_accepted_only_as_the_installed_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = file(dir.path(), "installed", "app");
+        let installed = installed_app(&exe).unwrap();
+        let elsewhere = installed_app(&file(dir.path(), "elsewhere", "app")).unwrap();
+        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &exe);
+        assert_eq!(verifier.app_exe(), exe.as_path());
+
+        assert_eq!(verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&installed)), pinned(APP_BUNDLE_ID));
         assert_eq!(
-            verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &elsewhere),
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&elsewhere)),
             unverified(UnverifiedReason::WrongPath)
         );
+        let right_path_wrong_file = PeerImage { path: installed.path.clone(), id: Some(elsewhere.id) };
         assert_eq!(
-            verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &dir.path().join("gone")),
-            unverified(UnverifiedReason::WrongPath),
-            "an exe that cannot be resolved is not the installed app"
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &right_path_wrong_file),
+            unverified(UnverifiedReason::WrongPath)
         );
-        // Whatever the identifier: the path binding does not care which pinned identifier it is.
+        // Whatever the identifier: the binding does not care which pinned identifier it is.
         assert_eq!(
-            verifier.bind_to_installed_path(pinned(QA_BUNDLE_ID), &elsewhere),
+            verifier.bind_to_installed_app(pinned(QA_BUNDLE_ID), &image_of(&elsewhere)),
+            unverified(UnverifiedReason::WrongPath)
+        );
+    }
+
+    #[test]
+    fn the_installed_app_is_looked_at_on_every_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = file(dir.path(), "installed", "app");
+        let before = installed_app(&exe).unwrap();
+        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &exe);
+        assert_eq!(verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&before)), pinned(APP_BUNDLE_ID));
+
+        // The installed file is replaced by another one at the same path: the image that
+        // was the app a moment ago is not any more.
+        fs::remove_file(&exe).unwrap();
+        fs::write(&exe, "replacement").unwrap();
+        assert_eq!(
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&before)),
             unverified(UnverifiedReason::WrongPath)
         );
     }
@@ -1307,25 +1522,30 @@ mod tests {
     #[test]
     fn pinned_code_whose_installed_app_is_missing_is_refused_as_wrong_path() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = file(dir.path(), "peer", "x");
+        let somewhere = installed_app(&file(dir.path(), "peer", "x")).unwrap();
         let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), dir.path().join("not-installed"));
         assert_eq!(
-            verifier.bind_to_installed_path(pinned(APP_BUNDLE_ID), &exe),
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&somewhere)),
             unverified(UnverifiedReason::WrongPath)
         );
     }
 
     #[test]
-    fn code_that_is_not_pinned_passes_through_the_path_binding_untouched() {
+    fn code_that_is_not_pinned_passes_through_the_binding_untouched() {
         let dir = tempfile::tempdir().unwrap();
-        let installed = file(dir.path(), "installed", "app");
-        let elsewhere = file(dir.path(), "elsewhere", "app");
-        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &installed);
+        let exe = file(dir.path(), "installed", "app");
+        let installed = installed_app(&exe).unwrap();
+        let elsewhere = installed_app(&file(dir.path(), "elsewhere", "app")).unwrap();
+        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &exe);
         for reason in ALL_REASONS {
-            // At the right path and at the wrong one: the original refusal is kept, never
+            // At the right place and at the wrong one: the original refusal is kept, never
             // replaced (a WrongPath would hide why the code was really refused).
-            for exe in [&installed, &elsewhere] {
-                assert_eq!(verifier.bind_to_installed_path(unverified(reason), exe), unverified(reason), "{reason}");
+            for installed in [&installed, &elsewhere] {
+                assert_eq!(
+                    verifier.bind_to_installed_app(unverified(reason), &image_of(installed)),
+                    unverified(reason),
+                    "{reason}"
+                );
             }
         }
     }
@@ -1520,6 +1740,23 @@ mod tests {
         assert_ne!(token.pidversion(), 0, "a live process has a nonzero pidversion");
         assert_eq!(token.pid(), token.0[5] as i32);
         assert_eq!(token.pidversion(), token.0[7]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_kernel_reports_this_processs_image_as_a_raw_path_and_the_identity_of_that_file() {
+        use std::os::unix::fs::MetadataExt;
+        let exe = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let meta = fs::metadata(&exe).unwrap();
+
+        let image = peer_image(std::process::id() as i32).expect("this process has an image");
+        assert_eq!(image.path, exe, "proc_pidpath names no symlink");
+        assert_eq!(image.id, Some(FileId { dev: device_of(&meta), ino: meta.ino() }));
+        // ...and the installed-app side speaks the same spelling for the same file.
+        let known = installed_app(&exe).unwrap();
+        assert!(is_installed_app(&image, &known));
+        // A process that does not exist has no image.
+        assert_eq!(peer_image(i32::MAX), None);
     }
 
     #[cfg(target_os = "macos")]
