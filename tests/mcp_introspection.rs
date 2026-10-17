@@ -150,6 +150,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             phases: vec![],
             cycles: vec![],
             origin: None,
+            ..Default::default()
         },
         MotherJob {
             id: "job-queued-2".to_string(),
@@ -171,6 +172,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             phases: vec![],
             cycles: vec![],
             origin: None,
+            ..Default::default()
         },
         MotherJob {
             id: "job-awaiting-3".to_string(),
@@ -192,6 +194,7 @@ fn sample_mother_jobs() -> Vec<MotherJob> {
             phases: vec![],
             cycles: vec![],
             origin: None,
+            ..Default::default()
         },
     ]
 }
