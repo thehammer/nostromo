@@ -194,6 +194,19 @@ directory (tests). Neither changes what is blocked.
   or `tee`) is exempt, as is `echo 'send-keys -t prod x' > conf` followed, in another call, by
   `tmux source-file conf` (allowed while a pane is remote when the call has no input command). The
   guard doesn't read files. Same limit as a script written and run later, above.
+- **Decoders and interpreters.** `base64 -d | sh`, `xxd -r -p | sh`, `rev | sh` and
+  `python -c "os.system('ecs_'+'connect')"` hide the marker beyond the forms the guard decodes. Same class as
+  `$(printf …)` above.
+- **Shell loops and cumulative tmux repeats.** A loop around `tmux send-keys` calls
+  (`for i in 1 2 3; do tmux send-keys -t %0 Left; done`) isn't unrolled. A huge `-N` (99999 or more) on a
+  cursor key makes the typed-text model give up on later calls in the same line; the leftover "unknown key"
+  blocks only when the text typed so far already looks like a marker, so `connect`, `-N 99999 Left`, `ecs_`
+  spelled across calls is allowed. A follow-up should block unconditionally when the bound truncates a call list.
+- **Same-call file assembly.** `ecs_build_command production ap > /tmp/c.sh && sh /tmp/c.sh` is allowed, like
+  the `load-buffer` form above: the guard doesn't follow a command written to a file and run in the same call.
+- **Over-blocking while a remote pane is open.** Typing `tmux ls` into a local pane through `send-keys`, a
+  `vim x` / Escape / `:wq` key sequence, a quoted here-doc containing a backslash-newline followed by another
+  command, and an unterminated here-doc are blocked only while a pane is remote. They are allowed otherwise.
 - **The stopping rule.** The guard is a denylist. It aims to stop what an agent would plausibly produce
   *without trying to evade it*, and the obvious deliberate encodings (quotes, `$'\x..'`, `0x65` key names,
   `KP-`, `-N` repeats, brace and empty expansions, split `send-keys`). Truly adversarial obfuscation is a
