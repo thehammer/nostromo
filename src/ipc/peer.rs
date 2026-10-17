@@ -597,7 +597,7 @@ pub enum ServerClass<'a> {
 // rebinding the port) is tracked separately in
 // `.claude/wip/nostromd-tcp-47100-exposure/index.md`. Until then these families
 // are knowingly reachable by any network peer, because gating them one by one
-// would be theatre while `pty_spawn` runs arbitrary commands:
+// would be theatre while `pty_spawn` ran arbitrary commands (retired in R2; it is now a tombstone):
 //
 //   * client → daemon: `focus_registry_push`, `perri_action`, `mother_action`,
 //     `mother_resume`, `decision_answer`, `pty_kill`/`pty_attach`/`pty_resize`,
@@ -783,6 +783,11 @@ pub enum NetworkPolicy {
 /// process or session, answer a prompt/decision/permission, act on a Mother job
 /// or a PR, rewrite the registry, close a pane or inject text, and must not
 /// return Teri/Fred-derived data (see [`targets_sensitive_session`]).
+///
+/// The `Pty*` verbs are retired tombstones (R2): the daemon no longer hosts PTYs,
+/// so every one is answered with `pty_host_removed` and does nothing. They keep
+/// their entries below (and their ordinals) so the table stays stable; the
+/// reasons given for them are historical.
 ///
 /// Why each allowed verb is safe:
 /// * `Hello`/`Subscribe`/`Ping`: handshake and topic selection; the outbound
