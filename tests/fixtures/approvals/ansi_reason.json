@@ -1,0 +1,30 @@
+{
+  "description": "ANSI SGR, a CSI erase-line, and an OSC title sequence in decision_reason; ANSI in description too.",
+  "tool_uses": [
+    {
+      "id": "toolu_ansi_reason_0",
+      "name": "Bash",
+      "input": {
+        "command": "rm -rf build/",
+        "description": "\u001b[1mremove\u001b[0m build"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "rm -rf build/",
+          "description": "\u001b[1mremove\u001b[0m build"
+        },
+        "description": "\u001b[1mremove\u001b[0m build",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_ansi_reason_0",
+        "decision_reason": "\u001b[31mDangerous\u001b[0m command\u001b[2K matched\u001b]0;evil\u0007 your rule"
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "description": "Cyrillic em (U+043C) instead of Latin m: `r\u043c -rf x`.",
+  "tool_uses": [
+    {
+      "id": "toolu_cyrillic_0",
+      "name": "Bash",
+      "input": {
+        "command": "r\u043c -rf x",
+        "description": "remove x"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "r\u043c -rf x",
+          "description": "remove x"
+        },
+        "description": "remove x",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_cyrillic_0"
+      }
+    }
+  ]
+}

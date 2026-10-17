@@ -1,0 +1,73 @@
+{
+  "description": "ONE assistant line with three Bash tool_uses and three requests.",
+  "tool_uses": [
+    {
+      "id": "toolu_parallel_3_0",
+      "name": "Bash",
+      "input": {
+        "command": "rm -rf /tmp/p1",
+        "description": "step 1"
+      }
+    },
+    {
+      "id": "toolu_parallel_3_1",
+      "name": "Bash",
+      "input": {
+        "command": "rm -rf /tmp/p2",
+        "description": "step 2"
+      }
+    },
+    {
+      "id": "toolu_parallel_3_2",
+      "name": "Bash",
+      "input": {
+        "command": "rmdir /tmp/p3",
+        "description": "step 3"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "rm -rf /tmp/p1",
+          "description": "step 1"
+        },
+        "description": "step 1",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_parallel_3_0"
+      }
+    },
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "rm -rf /tmp/p2",
+          "description": "step 2"
+        },
+        "description": "step 2",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_parallel_3_1"
+      }
+    },
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "rmdir /tmp/p3",
+          "description": "step 3"
+        },
+        "description": "step 3",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_parallel_3_2"
+      }
+    }
+  ]
+}

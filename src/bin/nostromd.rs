@@ -88,6 +88,26 @@ async fn main() -> Result<()> {
         info!(guard = %guard_path.display(), "production-shell guard");
     }
     session_mgr.lock().unwrap().set_guard_path(guard_path);
+    // The approval broker: hears every permission request of an approval-capable
+    // session, logs it and always answers it. A request found unresolved in the
+    // log was pending when the last daemon died; it ends as `restart_crash` before
+    // any session can start. Without a broker (the directory can't be made) the
+    // sessions' readers deny every request themselves.
+    match nostromo::approvals::broker::ApprovalBroker::open(&nostromo::approvals::ApprovalsPaths::resolve()) {
+        Ok(broker) => {
+            let now = chrono::Utc::now();
+            match broker.startup_reconcile(now) {
+                Ok(0) => {}
+                Ok(n) => warn!(count = n, "permission requests were pending when the daemon last stopped"),
+                Err(e) => warn!("approval log reconcile failed: {e}"),
+            }
+            if let Err(e) = broker.sweep(now) {
+                warn!("approval log sweep failed: {e}");
+            }
+            session_mgr.lock().unwrap().configure_approvals(broker);
+        }
+        Err(e) => error!("approvals unavailable ({e}): every permission request will be denied"),
+    }
     // Seed the session-id reverse index from the on-disk store so activity
     // events from sessions spawned by a *previous* daemon process (this one
     // predates a fresh process's in-memory index) still attribute correctly
@@ -221,11 +241,20 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_sweep = std::time::Instant::now();
             loop {
                 interval.tick().await;
                 let mgr = &mut *session_mgr.lock().unwrap();
                 mgr.reap_and_recover();
                 mgr.emit_pending_summaries();
+                // The approval log keeps 90 days; the daemon sweeps it at start
+                // and then once a day.
+                if last_sweep.elapsed() >= std::time::Duration::from_secs(24 * 60 * 60) {
+                    last_sweep = std::time::Instant::now();
+                    if let Some(Err(e)) = mgr.approvals().map(|b| b.sweep(chrono::Utc::now())) {
+                        warn!("approval log sweep failed: {e}");
+                    }
+                }
             }
         });
     }
@@ -513,6 +542,9 @@ async fn main() -> Result<()> {
     // Kill all child processes cleanly before exiting.
     {
         let mut mgr = session_mgr.lock().unwrap();
+        // First, tell every agent with a permission request pending that it was
+        // not approved (and give it a moment to hear it).
+        mgr.prepare_shutdown(std::time::Duration::from_secs(2));
         mgr.kill_all_on_shutdown();
     }
 

@@ -1,0 +1,30 @@
+{
+  "description": "An MCP tool call (slack send_message).",
+  "tool_uses": [
+    {
+      "id": "toolu_mcp_0",
+      "name": "mcp__slack__send_message",
+      "input": {
+        "channel": "#general",
+        "text": "hello team"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "mcp__slack__send_message",
+        "display_name": "slack - send_message (MCP)",
+        "input": {
+          "channel": "#general",
+          "text": "hello team"
+        },
+        "description": "Send a message to #general",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_mcp_0",
+        "mcp_server": "slack"
+      }
+    }
+  ]
+}

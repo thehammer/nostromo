@@ -1,0 +1,33 @@
+{
+  "description": "A safetyCheck prompt: protected path, not classifier-approvable.",
+  "tool_uses": [
+    {
+      "id": "toolu_safety_check_0",
+      "name": "Bash",
+      "input": {
+        "command": "echo 127.0.0.1 evil >> /etc/hosts",
+        "description": "edit hosts"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "echo 127.0.0.1 evil >> /etc/hosts",
+          "description": "edit hosts"
+        },
+        "description": "edit hosts",
+        "decision_reason_type": "safetyCheck",
+        "tool_use_id": "toolu_safety_check_0",
+        "decision_reason": "Command targets a protected path",
+        "blocked_path": "/etc/hosts",
+        "classifier_approvable": false,
+        "permission_suggestions": []
+      }
+    }
+  ]
+}

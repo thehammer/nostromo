@@ -1,0 +1,29 @@
+{
+  "description": "tmux send-keys at pane %9 (a test-injected fake pane probe calls %9 remote).",
+  "tool_uses": [
+    {
+      "id": "toolu_guard_send_keys_0",
+      "name": "Bash",
+      "input": {
+        "command": "tmux send-keys -t %9 'ls' Enter",
+        "description": "type into a pane"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "tmux send-keys -t %9 'ls' Enter",
+          "description": "type into a pane"
+        },
+        "description": "type into a pane",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_guard_send_keys_0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "description": "NotebookEdit tool replacing a cell.",
+  "tool_uses": [
+    {
+      "id": "toolu_notebook_edit_0",
+      "name": "NotebookEdit",
+      "input": {
+        "notebook_path": "/tmp/x/analysis.ipynb",
+        "new_source": "import pandas as pd\ndf = pd.read_csv('a.csv')\n",
+        "cell_id": "cell-3",
+        "edit_mode": "replace"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "NotebookEdit",
+        "display_name": "NotebookEdit",
+        "input": {
+          "notebook_path": "/tmp/x/analysis.ipynb",
+          "new_source": "import pandas as pd\ndf = pd.read_csv('a.csv')\n",
+          "cell_id": "cell-3",
+          "edit_mode": "replace"
+        },
+        "description": "Edit cell cell-3 of /tmp/x/analysis.ipynb",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_notebook_edit_0"
+      }
+    }
+  ]
+}

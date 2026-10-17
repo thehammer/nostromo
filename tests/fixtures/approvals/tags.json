@@ -1,0 +1,29 @@
+{
+  "description": "Unicode tag characters (U+E0041 ... ) embedded in a Bash command.",
+  "tool_uses": [
+    {
+      "id": "toolu_tags_0",
+      "name": "Bash",
+      "input": {
+        "command": "echo hi\udb40\udc41\udb40\udc42\udb40\udc43\udb40\udc7f there",
+        "description": "say hi"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "echo hi\udb40\udc41\udb40\udc42\udb40\udc43\udb40\udc7f there",
+          "description": "say hi"
+        },
+        "description": "say hi",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_tags_0"
+      }
+    }
+  ]
+}

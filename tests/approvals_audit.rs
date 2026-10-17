@@ -46,6 +46,7 @@ fn request(ts: DateTime<Utc>, tag: Option<&str>) -> Entry {
             reason: None,
             flags: None,
             options: None,
+            cli_request: None,
         },
         ts,
     );
@@ -170,11 +171,12 @@ fn every_event() -> Vec<(&'static str, Event)> {
                 reason: Some(json!({ "kind": "x" })),
                 flags: Some(json!(["a"])),
                 options: Some(json!([{ "id": "once" }])),
+                cli_request: Some(json!({ "subtype": "can_use_tool" })),
             },
         ),
         (
             "outcome",
-            Event::Outcome { outcome: "allow_once".into(), rule: Some(json!({ "tool": "Bash" })), by_window: Some("w1".into()), latency_ms: Some(1234) },
+            Event::Outcome { outcome: "allow_once".into(), rule: Some(json!({ "tool": "Bash" })), by_window: Some("w1".into()), latency_ms: Some(1234), watchdog: false },
         ),
         ("refusal", Event::Refusal { refusal_code: "not_operator".into(), peer: Some(json!({ "trust": "local_other", "pid": 7 })) }),
         ("guard_blocked", blocked_event("ecs_connect")),
@@ -202,7 +204,7 @@ fn every_event_kind_round_trips_through_json_under_its_snake_case_name() {
 
 #[test]
 fn a_minimal_event_leaves_its_optional_fields_out() {
-    let e = Entry::new(Event::Outcome { outcome: "deny".into(), rule: None, by_window: None, latency_ms: None }, at(2026, 3, 4, 10, 0, 0));
+    let e = Entry::new(Event::Outcome { outcome: "deny".into(), rule: None, by_window: None, latency_ms: None, watchdog: false }, at(2026, 3, 4, 10, 0, 0));
 
     let v: Value = serde_json::to_value(&e).unwrap();
 

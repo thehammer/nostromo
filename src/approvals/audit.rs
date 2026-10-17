@@ -120,6 +120,9 @@ pub enum Event {
         flags: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options: Option<Value>,
+        /// The CLI's `request` object, exactly as received (every field it sent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cli_request: Option<Value>,
     },
     Outcome {
         outcome: String,
@@ -129,6 +132,9 @@ pub enum Event {
         by_window: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         latency_ms: Option<u64>,
+        /// The watchdog ended the request: the normal path had not answered in time.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        watchdog: bool,
     },
     Refusal {
         refusal_code: String,
