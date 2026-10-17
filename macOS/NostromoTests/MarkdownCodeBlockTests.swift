@@ -1073,7 +1073,14 @@ extension MarkdownCodeBlockTests {
                                                file: StaticString = #filePath, line: UInt = #line) throws {
         let (lm, tv, glyphs, chars) = try laidOutGlyphs(of: markdown, needle: needle, file: file, line: line)
         XCTAssertEqual(glyphs.length, chars.length, "\(what): one glyph per UTF-16 unit", file: file, line: line)
-        try XCTSkipIf(NSFont(name: "FiraCodeNF-Reg", size: 12) == nil, "Fira Code not installed")
+        if NSFont(name: "FiraCodeNF-Reg", size: 12) == nil {
+            // CI installs the pinned font, so a missing font there is a real failure, not a skip.
+            if ProcessInfo.processInfo.environment["CI"] != nil {
+                XCTFail("Fira Code is not installed on CI: the ligature tests must run, not skip")
+                return
+            }
+            throw XCTSkip("Fira Code not installed")
+        }
 
         let ns = tv.string as NSString
         var substituted: [String] = []
@@ -1099,7 +1106,14 @@ extension MarkdownCodeBlockTests {
     }
 
     func testTheCodeFontCarriesTheContextualAlternatesOffSetting() throws {
-        try XCTSkipIf(NSFont(name: "FiraCodeNF-Reg", size: 12) == nil, "Fira Code not installed")
+        if NSFont(name: "FiraCodeNF-Reg", size: 12) == nil {
+            // CI installs the pinned font, so a missing font there is a real failure, not a skip.
+            if ProcessInfo.processInfo.environment["CI"] != nil {
+                XCTFail("Fira Code is not installed on CI: the ligature tests must run, not skip")
+                return
+            }
+            throw XCTSkip("Fira Code not installed")
+        }
         let font = Theme.codeFont(size: 12)
         let raw = font.fontDescriptor.fontAttributes[.featureSettings] as? [Any] ?? []
         var pairs: [[Int]] = []
