@@ -1,3 +1,5 @@
+> Retired October 2026. The only consumer of `~/.nostromo/break-glass.json` was the Rust TUI's break-glass modal, which was removed. Nothing reads the sentinel now. Kept for history.
+
 # Break-Glass Convention
 
 nostromo implements a **nostromo-local** break-glass sentinel convention.

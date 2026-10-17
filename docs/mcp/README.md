@@ -1,7 +1,7 @@
 # Nostromo MCP Server — Phase 1
 
 Nostromo exposes an in-process MCP server so agents running inside its PTY
-views can query the TUI's state.
+views can query nostromd's state.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ nostromo-mcp-bridge
   │
   │  Unix domain socket  (~/.nostromo/mcp.sock)
   ▼
-Nostromo TUI (McpServer / McpSharedState)
+nostromd (McpServer / McpSharedState)
 ```
 
 The bridge binary connects to the socket and pipes stdin/stdout bidirectionally.
