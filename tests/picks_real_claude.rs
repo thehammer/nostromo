@@ -178,7 +178,10 @@ fn the_real_claude_can_call_exactly_the_picks_tools_under_the_picks_session_argu
     // ── the session, started the way production starts the picks session ─────
     let cwd = tempfile::tempdir().unwrap();
     let session_id = uuid::Uuid::new_v4().to_string();
-    let mut args = build_claude_args_with("", "picks probe", false, &session_id, false, Some(&picks_restrictions()));
+    // The real guard binary, as production wires it.
+    let guard_settings =
+        nostromo::approvals::guard::hook_settings_json(std::path::Path::new(env!("CARGO_BIN_EXE_nostromo-guard")));
+    let mut args = build_claude_args_with("", "picks probe", false, &session_id, false, Some(&picks_restrictions()), &guard_settings);
     args.extend(["--mcp-config".into(), mcp_config.to_string_lossy().into_owned()]);
     args.extend(["--model".into(), "haiku".into()]);
 

@@ -52,9 +52,9 @@ clean:
 
 # ── daemon targets ────────────────────────────────────────────────────────────
 
-## Build the nostromd daemon binary (release).
+## Build the nostromd daemon binary and its production-shell guard (release).
 daemon:
-	cargo build --release --bin nostromd
+	cargo build --release --bin nostromd --bin nostromo-guard
 
 ## Install the daemon binary and register the launchd agent.
 ##
@@ -67,10 +67,30 @@ install-daemon: daemon
 	@# Never overwrite the running binary in place: macOS caches the code signature per
 	@# vnode, so an in-place `cp` over a signed binary (and ~/.local/bin/nostromd is often a
 	@# symlink to ~/.cargo/bin/nostromd) makes launchd's next spawn die with
-	@# OS_REASON_CODESIGNING and crash-loop the daemon. Remove first (new inode), copy, re-sign.
+	@# OS_REASON_CODESIGNING and crash-loop the daemon. So each binary is copied to a new file
+	@# (new inode) and re-signed there, and only then moved over the old one.
+	@# nostromd looks for the production-shell guard (the PreToolUse hook every daemon session
+	@# runs) beside its own symlink-resolved executable, so it goes next to the real nostromd.
+	@# Both are staged and signed BEFORE either is replaced: a failed copy or codesign must not
+	@# leave a new nostromd beside a missing or stale guard (missing, every agent tool call is
+	@# blocked). The guard is moved into place BEFORE nostromd, so there is never a new daemon
+	@# beside a stale guard.
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
-	  rm -f "$$real" && cp target/release/nostromd "$$real" && codesign --force -s - "$$real"
-	@echo "Installed nostromd to $(HOME)/.local/bin/nostromd"
+	  guard="$$(dirname "$$real")/nostromo-guard"; \
+	  stage_daemon="$$real.new.$$$$"; stage_guard="$$guard.new.$$$$"; \
+	  rm -f "$$stage_daemon" "$$stage_guard"; \
+	  if cp target/release/nostromd "$$stage_daemon" && codesign --force -s - --identifier nostromd "$$stage_daemon" \
+	      && cp target/release/nostromo-guard "$$stage_guard" && codesign --force -s - --identifier nostromo-guard "$$stage_guard"; then :; \
+	  else \
+	    rm -f "$$stage_daemon" "$$stage_guard"; \
+	    echo "install-daemon: could not copy and sign nostromd and nostromo-guard; nothing was replaced" >&2; exit 1; \
+	  fi; \
+	  if rm -f "$$guard" && mv "$$stage_guard" "$$guard" && rm -f "$$real" && mv "$$stage_daemon" "$$real"; then :; \
+	  else \
+	    rm -f "$$stage_daemon" "$$stage_guard"; \
+	    echo "install-daemon: could not move the new binaries into place; reinstall with make install-daemon" >&2; exit 1; \
+	  fi; \
+	  echo "Installed nostromd to $$real"; echo "Installed nostromo-guard to $$guard"
 	sed \
 		-e 's|__PREFIX__|$(HOME)/.local|g' \
 		-e 's|__HOME__|$(HOME)|g' \
@@ -92,6 +112,8 @@ install-daemon: daemon
 uninstall-daemon:
 	launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  rm -f "$$(dirname "$$real")/nostromo-guard"
 	rm -f "$(HOME)/.local/bin/nostromd"
 	@echo "nostromd uninstalled"
 

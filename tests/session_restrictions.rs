@@ -8,10 +8,11 @@
 //! arguments it was started with. Killing the whole process group on stop is
 //! covered next to the implementation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use nostromo::approvals::guard::hook_settings_json;
 use nostromo::data::work::picks::{
     picks_restrictions, PICKS_BUILTIN_TOOLS, PICKS_MAX_BUDGET_USD, PICKS_MCP_TOOLS, PICKS_TAG,
 };
@@ -35,6 +36,31 @@ fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 
 fn has(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
+}
+
+/// The production-shell guard's inline `--settings` JSON, for a guard binary at a fixed path.
+fn guard_settings() -> String {
+    hook_settings_json(Path::new("/opt/x/nostromo-guard"))
+}
+
+/// Where the two-element sequence `a, b` starts in `args`.
+fn position_of_pair(args: &[String], a: &str, b: &str) -> Option<usize> {
+    args.windows(2).position(|w| w[0] == a && w[1] == b)
+}
+
+/// `args` with exactly the two elements `--settings, <guard>` removed (and nothing else): what the
+/// vector was before the guard existed.
+#[track_caller]
+fn without_the_guard(args: &[String], guard: &str) -> Vec<String> {
+    assert_eq!(args.iter().filter(|a| *a == "--settings").count(), 1, "one --settings, ours: {args:?}");
+    let at = position_of_pair(args, "--settings", guard).unwrap_or_else(|| panic!("no `--settings <guard>` in {args:?}"));
+    let mut rest = args.to_vec();
+    rest.drain(at..at + 2);
+    rest
+}
+
+fn strings(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|s| s.to_string()).collect()
 }
 
 /// What the hidden picks session must be started with, whoever built the vector: no agent (the
@@ -63,7 +89,7 @@ fn assert_is_the_picks_session_vector(args: &[String]) {
 fn a_restricted_session_runs_without_the_permission_bypass_and_denies_what_is_not_allowed() {
     let r = restrictions();
 
-    let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid-1", false, Some(&r));
+    let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid-1", false, Some(&r), &guard_settings());
 
     assert!(!has(&args, "--dangerously-skip-permissions"), "{args:?}");
     assert_eq!(value_of(&args, "--permission-mode"), Some("dontAsk"), "{args:?}");
@@ -73,7 +99,7 @@ fn a_restricted_session_runs_without_the_permission_bypass_and_denies_what_is_no
 #[test]
 fn the_picks_session_is_built_with_no_agent_only_project_settings_and_the_closed_tool_list() {
     // Exactly as production builds it: an empty agent name and the picks restrictions.
-    let args = build_claude_args_with("", "Teri picks", false, "sid-1", false, Some(&picks_restrictions()));
+    let args = build_claude_args_with("", "Teri picks", false, "sid-1", false, Some(&picks_restrictions()), &guard_settings());
 
     assert_is_the_picks_session_vector(&args);
     assert_eq!(value_of(&args, "-n"), Some("Teri picks"));
@@ -85,7 +111,7 @@ fn the_picks_session_is_built_with_no_agent_only_project_settings_and_the_closed
 #[test]
 fn every_restricted_session_loads_only_project_settings_and_no_slash_commands() {
     for agent in ["", "teri:teri", "some-agent"] {
-        let args = build_claude_args_with(agent, "View", false, "sid-1", false, Some(&restrictions()));
+        let args = build_claude_args_with(agent, "View", false, "sid-1", false, Some(&restrictions()), &guard_settings());
 
         assert_eq!(value_of(&args, "--setting-sources"), Some("project"), "agent {agent:?}: {args:?}");
         assert!(has(&args, "--disable-slash-commands"), "agent {agent:?}: {args:?}");
@@ -95,11 +121,11 @@ fn every_restricted_session_loads_only_project_settings_and_no_slash_commands() 
 #[test]
 fn an_empty_agent_name_means_no_agent_flag_and_a_real_name_still_gets_one() {
     for restricted in [None, Some(restrictions())] {
-        let none = build_claude_args_with("", "View", false, "sid-1", false, restricted.as_ref());
+        let none = build_claude_args_with("", "View", false, "sid-1", false, restricted.as_ref(), &guard_settings());
         assert!(!has(&none, "--agent"), "restricted: {}: {none:?}", restricted.is_some());
         assert!(!none.iter().any(|a| a.is_empty()), "no empty argument is passed either: {none:?}");
 
-        let named = build_claude_args_with("cody", "View", false, "sid-1", false, restricted.as_ref());
+        let named = build_claude_args_with("cody", "View", false, "sid-1", false, restricted.as_ref(), &guard_settings());
         assert_eq!(value_of(&named, "--agent"), Some("cody"), "restricted: {}: {named:?}", restricted.is_some());
     }
 }
@@ -108,7 +134,7 @@ fn an_empty_agent_name_means_no_agent_flag_and_a_real_name_still_gets_one() {
 fn a_restricted_session_gets_exactly_the_listed_builtin_and_allowed_tools_and_the_budget() {
     let r = restrictions();
 
-    let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid-1", false, Some(&r));
+    let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid-1", false, Some(&r), &guard_settings());
 
     assert_eq!(value_of(&args, "--tools"), Some("ToolSearch,Read"), "{args:?}");
     assert_eq!(value_of(&args, "--allowedTools"), Some("mcp__nostromo__a,mcp__nostromo__b,ToolSearch"), "{args:?}");
@@ -120,7 +146,7 @@ fn a_restricted_session_gets_exactly_the_listed_builtin_and_allowed_tools_and_th
 fn without_a_budget_there_is_no_spend_flag() {
     let r = SessionRestrictions { max_budget_usd: None, ..restrictions() };
 
-    let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid-1", false, Some(&r));
+    let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid-1", false, Some(&r), &guard_settings());
 
     assert!(!has(&args, "--max-budget-usd"), "{args:?}");
 }
@@ -129,7 +155,7 @@ fn without_a_budget_there_is_no_spend_flag() {
 fn a_restricted_session_keeps_the_agent_view_and_session_id_arguments() {
     let r = restrictions();
 
-    let fresh = build_claude_args_with("teri:teri", "Teri picks", false, "sid-9", false, Some(&r));
+    let fresh = build_claude_args_with("teri:teri", "Teri picks", false, "sid-9", false, Some(&r), &guard_settings());
     assert_eq!(value_of(&fresh, "--agent"), Some("teri:teri"));
     assert_eq!(value_of(&fresh, "-n"), Some("Teri picks"));
     assert_eq!(value_of(&fresh, "--session-id"), Some("sid-9"));
@@ -137,19 +163,26 @@ fn a_restricted_session_keeps_the_agent_view_and_session_id_arguments() {
     assert_eq!(value_of(&fresh, "--input-format"), Some("stream-json"));
     assert_eq!(value_of(&fresh, "--output-format"), Some("stream-json"));
 
-    let resumed = build_claude_args_with("teri:teri", "Teri picks", false, "sid-9", true, Some(&r));
+    let resumed = build_claude_args_with("teri:teri", "Teri picks", false, "sid-9", true, Some(&r), &guard_settings());
     assert_eq!(value_of(&resumed, "--resume"), Some("sid-9"));
 }
 
 #[test]
 fn an_unrestricted_session_is_exactly_what_it_was_before() {
-    let plain = build_claude_args("cody", "Cody view", true, "sid-2", true);
+    let g = guard_settings();
+    let plain = build_claude_args("cody", "Cody view", true, "sid-2", true, &g);
 
-    assert_eq!(plain, build_claude_args_with("cody", "Cody view", true, "sid-2", true, None));
+    assert_eq!(plain, build_claude_args_with("cody", "Cody view", true, "sid-2", true, None, &g));
     assert!(has(&plain, "--dangerously-skip-permissions"), "{plain:?}");
     assert_eq!(
-        plain,
-        [
+        position_of_pair(&plain, "--settings", &g),
+        Some(1),
+        "the guard hook comes right after the permission bypass: {plain:?}"
+    );
+    // T-AP0g-6: take the two guard elements away and it is the vector from before the guard.
+    assert_eq!(
+        without_the_guard(&plain, &g),
+        strings(&[
             "--dangerously-skip-permissions",
             "--input-format",
             "stream-json",
@@ -165,8 +198,8 @@ fn an_unrestricted_session_is_exactly_what_it_was_before() {
             "Cody view",
             "--resume",
             "sid-2",
-        ],
-        "an ordinary session's arguments do not change"
+        ]),
+        "nothing but the guard changed for an ordinary session"
     );
     for flag in [
         "--permission-mode",
@@ -179,6 +212,62 @@ fn an_unrestricted_session_is_exactly_what_it_was_before() {
     ] {
         assert!(!has(&plain, flag), "{flag} must not appear on an ordinary session: {plain:?}");
     }
+}
+
+#[test]
+fn a_restricted_session_is_exactly_what_it_was_before_plus_the_guard_hook() {
+    let g = guard_settings();
+    let r = restrictions();
+
+    let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid-1", false, Some(&r), &g);
+
+    assert_eq!(
+        position_of_pair(&args, "--permission-mode", "dontAsk").map(|at| (args[at + 2].as_str(), args[at + 3].as_str())),
+        Some(("--settings", g.as_str())),
+        "the guard hook comes right after `--permission-mode dontAsk`: {args:?}"
+    );
+    // T-AP0g-6: take the two guard elements away and it is the vector from before the guard.
+    assert_eq!(
+        without_the_guard(&args, &g),
+        strings(&[
+            "--permission-mode",
+            "dontAsk",
+            "--tools",
+            "ToolSearch,Read",
+            "--allowedTools",
+            "mcp__nostromo__a,mcp__nostromo__b,ToolSearch",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "project",
+            "--disable-slash-commands",
+            "--max-budget-usd",
+            "1.5",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--agent",
+            "teri:teri",
+            "-n",
+            "Teri picks",
+            "--session-id",
+            "sid-1",
+        ]),
+        "nothing but the guard changed for a restricted session"
+    );
+}
+
+#[test]
+fn restricted_and_unrestricted_sessions_carry_the_identical_guard_settings() {
+    let g = guard_settings();
+    let unrestricted = build_claude_args_with("cody", "V", false, "sid", false, None, &g);
+    let restricted = build_claude_args_with("cody", "V", false, "sid", false, Some(&restrictions()), &g);
+
+    let guard_of = |args: &[String]| value_of(args, "--settings").map(str::to_owned);
+    assert_eq!(guard_of(&unrestricted).as_deref(), Some(g.as_str()));
+    assert_eq!(guard_of(&restricted), guard_of(&unrestricted));
 }
 
 #[test]
@@ -439,5 +528,87 @@ async fn an_unrestricted_tag_is_not_made_sensitive_by_having_an_empty_or_ordinar
 
     assert!(!tags.tag_is_sensitive("plain-no-agent"));
     assert!(!tags.tag_is_sensitive("plain-cody"));
+    mgr.kill_all_on_shutdown();
+}
+
+// ── the production-shell guard (AP0g) ─────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_manager_runs_the_guard_binary_named_by_the_environment_or_one_that_fails_closed() {
+    // Never a binary found beside the test executable. (No env is mutated here: either answer is fine.)
+    let (mgr, _dir) = manager();
+    let from_env = std::env::var_os(nostromo::approvals::guard::GUARD_BIN_ENV).filter(|v| !v.is_empty()).map(PathBuf::from);
+
+    let expected = from_env.unwrap_or_else(|| PathBuf::from(nostromo::approvals::guard::GUARD_SENTINEL_PATH));
+    assert_eq!(mgr.guard_path(), expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_counts_as_guarded_only_with_this_managers_exact_guard_hook() {
+    let (mut mgr, _dir) = manager();
+    mgr.set_guard_path(PathBuf::from("/opt/x/nostromo-guard"));
+    assert_eq!(mgr.guard_path(), Path::new("/opt/x/nostromo-guard"));
+    let g = hook_settings_json(mgr.guard_path());
+
+    let unrestricted = build_claude_args("cody", "V", false, "sid", false, &g);
+    let restricted = build_claude_args_with("cody", "V", false, "sid", false, Some(&restrictions()), &g);
+    assert!(mgr.session_has_guard(&unrestricted), "{unrestricted:?}");
+    assert!(mgr.session_has_guard(&restricted), "{restricted:?}");
+
+    // No hook at all.
+    assert!(!mgr.session_has_guard(&without_the_guard(&unrestricted, &g)));
+    assert!(!mgr.session_has_guard(&[]));
+    // A hook for some other binary.
+    let other = hook_settings_json(Path::new("/opt/y/nostromo-guard"));
+    assert!(!mgr.session_has_guard(&build_claude_args("cody", "V", false, "sid", false, &other)));
+    // A tampered hook: hooks switched off, or the JSON merely not byte-identical.
+    let off = g.replace(r#""disableAllHooks":false"#, r#""disableAllHooks":true"#);
+    assert_ne!(off, g);
+    assert!(!mgr.session_has_guard(&build_claude_args("cody", "V", false, "sid", false, &off)));
+    assert!(!mgr.session_has_guard(&build_claude_args("cody", "V", false, "sid", false, &format!("{g} "))));
+    // The JSON in some other position does not count: it must be the value of `--settings`.
+    assert!(!mgr.session_has_guard(&strings(&["-n", &g, "--session-id", "sid"])));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_session_the_manager_starts_gets_the_guard_hook_right_after_its_permission_flag() {
+    let (mut mgr, dir) = manager();
+    mgr.set_guard_path(PathBuf::from("/opt/x/nostromo-guard"));
+    mgr.restrict_tag(PICKS_TAG, picks_restrictions());
+    let g = hook_settings_json(mgr.guard_path());
+
+    mgr.spawn_session(PICKS_TAG.into(), String::new(), "guard-restricted-view".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("the restricted session starts");
+    mgr.spawn_session("guard-plain".into(), "cody".into(), "guard-unrestricted-view".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("the unrestricted session starts");
+
+    let restricted = &runs_of("guard-restricted-view", 1).await[0];
+    let at = position_of_pair(restricted, "--permission-mode", "dontAsk").expect("dontAsk");
+    assert_eq!(&restricted[at + 2..at + 4], [String::from("--settings"), g.clone()], "{restricted:?}");
+    assert!(mgr.session_has_guard(restricted), "{restricted:?}");
+
+    let plain = &runs_of("guard-unrestricted-view", 1).await[0];
+    let at = position_of_pair(plain, "--dangerously-skip-permissions", "--settings").expect("--settings follows the bypass");
+    assert_eq!(plain[at + 1], "--settings");
+    assert_eq!(plain[at + 2], g, "{plain:?}");
+    assert!(mgr.session_has_guard(plain), "{plain:?}");
+    mgr.kill_all_on_shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_started_after_the_guard_path_changes_runs_the_new_guard() {
+    let (mut mgr, dir) = manager();
+    mgr.set_guard_path(PathBuf::from("/opt/x/nostromo-guard"));
+    mgr.spawn_session("guard-moved-a".into(), "cody".into(), "guard-moved-view-a".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("starts");
+
+    mgr.set_guard_path(PathBuf::from("/opt/z/nostromo-guard"));
+    mgr.spawn_session("guard-moved-b".into(), "cody".into(), "guard-moved-view-b".into(), Some(dir.path().to_path_buf()), None, false)
+        .expect("starts");
+
+    let first = &runs_of("guard-moved-view-a", 1).await[0];
+    let second = &runs_of("guard-moved-view-b", 1).await[0];
+    assert_eq!(value_of(first, "--settings"), Some(hook_settings_json(Path::new("/opt/x/nostromo-guard")).as_str()));
+    assert_eq!(value_of(second, "--settings"), Some(hook_settings_json(Path::new("/opt/z/nostromo-guard")).as_str()));
     mgr.kill_all_on_shutdown();
 }

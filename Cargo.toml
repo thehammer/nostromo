@@ -27,6 +27,10 @@ name = "nostromo-activity-hook"
 path = "src/bin/nostromo_activity_hook.rs"
 
 [[bin]]
+name = "nostromo-guard"
+path = "src/bin/nostromo_guard.rs"
+
+[[bin]]
 name = "sensitive-text-scan"
 path = "src/bin/sensitive_text_scan.rs"
 

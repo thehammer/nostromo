@@ -71,7 +71,7 @@ tasks:
     run: |
       mkdir -p src/bin
       # The [[bin]] paths in Cargo.toml (add a new one here too), plus the lib.
-      for f in src/main.rs src/bin/nostromd.rs src/bin/nostromo_mcp_bridge.rs src/bin/nostromo_activity_hook.rs src/bin/sensitive_text_scan.rs; do
+      for f in src/main.rs src/bin/nostromd.rs src/bin/nostromo_mcp_bridge.rs src/bin/nostromo_activity_hook.rs src/bin/sensitive_text_scan.rs src/bin/nostromo_guard.rs; do
         echo "fn main() {}" > "$f"
       done
       : > src/lib.rs

@@ -4,6 +4,7 @@ use clap::ValueEnum;
 
 pub mod activity;
 pub mod agent_bus;
+pub mod approvals;
 pub mod mdns;
 pub mod app;
 pub mod config;

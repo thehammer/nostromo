@@ -1,0 +1,9 @@
+{
+  "session_id": "s-1",
+  "tool_use_id": "toolu_1",
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "bypassPermissions",
+  "cwd": "/tmp",
+  "tool_name": "mcp__ecs__ecs_connect",
+  "tool_input": {}
+}
