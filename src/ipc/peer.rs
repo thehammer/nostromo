@@ -1571,6 +1571,30 @@ mod tests {
         );
     }
 
+    /// The seven PTY verbs are tombstoned in the daemon but stay on the wire, so their
+    /// ordinals (and the variant count) must not shift.
+    #[test]
+    fn retired_pty_verbs_keep_their_ordinals() {
+        let by_name = |name: &str| -> usize {
+            let matches: Vec<usize> = every_client_msg()
+                .iter()
+                .filter(|m| variant_name(m) == name)
+                .map(ordinal)
+                .collect();
+            assert_eq!(matches.len(), 1, "exactly one fixture for {name}");
+            matches[0]
+        };
+        assert_eq!(by_name("PtySpawn"), 3);
+        assert_eq!(by_name("PtyInput"), 4);
+        assert_eq!(by_name("PtyResize"), 5);
+        assert_eq!(by_name("PtyKill"), 6);
+        assert_eq!(by_name("PtyAttach"), 7);
+        assert_eq!(by_name("PtyDetach"), 8);
+        assert_eq!(by_name("PtyList"), 9);
+        assert_eq!(CLIENT_MSG_VARIANTS, 39);
+        assert_eq!(every_client_msg().len(), 39);
+    }
+
     #[test]
     fn the_network_allow_list_is_exactly_the_explicit_read_only_set() {
         let mut allowed: Vec<String> = every_client_msg()

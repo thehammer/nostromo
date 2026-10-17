@@ -2755,17 +2755,6 @@ async fn unix_session_tags(unix: &mut UnixStream) -> Vec<String> {
         .expect("session_list_resp")
 }
 
-async fn unix_pty_ids(unix: &mut UnixStream) -> Vec<String> {
-    attack(unix, ClientMsg::PtyList)
-        .await
-        .into_iter()
-        .find_map(|m| match m {
-            ServerMsg::PtyListResp { ptys } => Some(ptys.into_iter().map(|p| p.pty_id).collect()),
-            _ => None,
-        })
-        .expect("pty_list_resp")
-}
-
 async fn wait_for_file(path: &std::path::Path) -> bool {
     for _ in 0..200 {
         if path.exists() {
@@ -2834,10 +2823,14 @@ async fn a_unix_client_can_still_spawn_a_session_for_an_ordinary_agent_and_tag()
     assert!(h.session_mgr.lock().unwrap().has_live_session("x1"));
 }
 
+/// True when `path` never shows up within a short bound.
+async fn file_never_appears(path: &std::path::Path) -> bool {
+    tokio::time::timeout(Duration::from_millis(600), wait_for_file(path)).await.is_err()
+}
+
 #[tokio::test]
-async fn a_tcp_client_cannot_spawn_a_pty_and_nothing_is_run() {
+async fn a_tcp_pty_spawn_is_still_refused_before_any_handler() {
     let h = spawn_server().await;
-    let (mut unix, _) = h.unix(vec![]).await;
     let (mut tcp, _) = h.tcp(vec![]).await;
     let marker = h._tmp.path().join("tcp-pty-spawn-marker");
 
@@ -2848,78 +2841,77 @@ async fn a_tcp_client_cannot_spawn_a_pty_and_nothing_is_run() {
     .await;
     assert_refused(&frames, "pty_spawn");
     assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtySpawned { .. })), "{frames:?}");
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!marker.exists(), "the refused pty_spawn ran its command");
-    assert!(unix_pty_ids(&mut unix).await.is_empty(), "a PTY was created");
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { message } if message.starts_with("pty_host_removed"))),
+        "the refusal must come from the network policy, not the handler: {frames:?}"
+    );
+    assert!(file_never_appears(&marker).await, "the refused pty_spawn ran its command");
 }
 
 #[tokio::test]
-async fn a_tcp_client_cannot_type_into_a_pty_but_a_unix_client_can() {
-    let h = spawn_server().await;
-    let (mut unix, _) = h.unix(vec![]).await;
-    let (mut tcp, _) = h.tcp(vec![]).await;
-    let dir = h._tmp.path();
-    let (unix_marker, tcp_marker, later_marker) =
-        (dir.join("unix-input"), dir.join("tcp-input"), dir.join("later-input"));
-
-    send(&mut unix, &pty_spawn_msg("unix-pty-1", vec![])).await;
-    let spawned =
-        recv_until(&mut unix, |m| matches!(m, ServerMsg::PtySpawned { .. } | ServerMsg::Error { .. })).await;
-    assert!(matches!(spawned.last(), Some(ServerMsg::PtySpawned { .. })), "{spawned:?}");
-
-    // Control: a Unix peer's input reaches the shell.
-    send(
-        &mut unix,
-        &ClientMsg::PtyInput {
-            pty_id: "unix-pty-1".into(),
-            bytes: format!("touch {}\n", unix_marker.display()).into_bytes(),
-        },
-    )
-    .await;
-    assert!(wait_for_file(&unix_marker).await, "a Unix peer's pty_input must reach the shell");
-
-    let frames = attack(
-        &mut tcp,
-        ClientMsg::PtyInput {
-            pty_id: "unix-pty-1".into(),
-            bytes: format!("touch {}\n", tcp_marker.display()).into_bytes(),
-        },
-    )
-    .await;
-    assert_refused(&frames, "pty_input");
-
-    // The shell is still alive and processing input, so the absence of the
-    // TCP peer's marker is down to the refusal.
-    send(
-        &mut unix,
-        &ClientMsg::PtyInput {
-            pty_id: "unix-pty-1".into(),
-            bytes: format!("touch {}\n", later_marker.display()).into_bytes(),
-        },
-    )
-    .await;
-    assert!(wait_for_file(&later_marker).await);
-    assert!(!tcp_marker.exists(), "a network peer's input was executed");
-
-    send(&mut unix, &ClientMsg::PtyKill { pty_id: "unix-pty-1".into() }).await;
-}
-
-#[tokio::test]
-async fn a_unix_client_can_still_spawn_a_pty() {
+async fn a_unix_pty_spawn_is_answered_pty_host_removed_and_runs_nothing() {
     let h = spawn_server().await;
     let (mut unix, _) = h.unix(vec![]).await;
     let marker = h._tmp.path().join("unix-pty-spawn-marker");
 
-    send(
+    let frames = attack(
         &mut unix,
-        &pty_spawn_msg("unix-pty-2", vec!["-c".into(), format!("touch {}", marker.display())]),
+        pty_spawn_msg("unix-pty-2", vec!["-c".into(), format!("touch {}", marker.display())]),
     )
     .await;
-    let spawned =
-        recv_until(&mut unix, |m| matches!(m, ServerMsg::PtySpawned { .. } | ServerMsg::Error { .. })).await;
-    assert!(matches!(spawned.last(), Some(ServerMsg::PtySpawned { .. })), "{spawned:?}");
-    assert!(wait_for_file(&marker).await, "a Unix peer's pty_spawn must run its command");
+    assert_pty_host_removed(&frames, "pty_spawn");
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtySpawned { .. })), "{frames:?}");
+    assert!(file_never_appears(&marker).await, "a tombstoned pty_spawn ran its command");
+}
+
+#[tokio::test]
+async fn every_other_pty_verb_over_unix_is_answered_pty_host_removed() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let msgs = [
+        ("pty_input", ClientMsg::PtyInput { pty_id: "p".into(), bytes: b"touch x\n".to_vec() }),
+        ("pty_resize", ClientMsg::PtyResize { pty_id: "p".into(), cols: 100, rows: 30 }),
+        ("pty_kill", ClientMsg::PtyKill { pty_id: "p".into() }),
+        ("pty_attach", ClientMsg::PtyAttach { pty_id: "p".into() }),
+    ];
+    for (what, msg) in msgs {
+        let frames = attack(&mut unix, msg).await;
+        assert_pty_host_removed(&frames, what);
+    }
+}
+
+#[tokio::test]
+async fn pty_list_and_pty_detach_are_answered_pty_host_removed_on_both_transports() {
+    // `network_policy` Allows both verbs for a network peer (read-only), so over TCP they
+    // reach the handler and get the same tombstone answer as over Unix.
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    let frames = attack(&mut unix, ClientMsg::PtyList).await;
+    assert_pty_host_removed(&frames, "unix pty_list");
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtyListResp { .. })), "{frames:?}");
+    let frames = attack(&mut unix, ClientMsg::PtyDetach { pty_id: "p".into() }).await;
+    assert_pty_host_removed(&frames, "unix pty_detach");
+
+    let frames = attack(&mut tcp, ClientMsg::PtyList).await;
+    assert_pty_host_removed(&frames, "tcp pty_list");
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtyListResp { .. })), "{frames:?}");
+    let frames = attack(&mut tcp, ClientMsg::PtyDetach { pty_id: "p".into() }).await;
+    assert_pty_host_removed(&frames, "tcp pty_detach");
+}
+
+#[tokio::test]
+async fn a_tcp_client_cannot_feed_attach_or_kill_a_pty_and_is_refused_not_tombstoned() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    for (what, msg) in [
+        ("pty_input", ClientMsg::PtyInput { pty_id: "p".into(), bytes: b"touch x\n".to_vec() }),
+        ("pty_attach", ClientMsg::PtyAttach { pty_id: "p".into() }),
+    ] {
+        let frames = attack(&mut tcp, msg).await;
+        assert_refused(&frames, what);
+    }
 }
 
 const SENSITIVE_TOOLS: [&str; 7] = [
@@ -3237,9 +3229,7 @@ async fn focus_scoped_tools_refuse_a_sensitive_target_for_a_network_driven_sessi
     let calls: Vec<(&str, Value)> = vec![
         ("nostromo.get_render_state", json!({})),
         ("nostromo.set_pane_content", json!({"pane_id": "p", "content": {"type": "text", "text": "x"}})),
-        ("nostromo.set_pane_focus", json!({"pane_id": "p"})),
         ("nostromo.set_pane_layout", json!({"ratios": [1.0]})),
-        ("nostromo.switch_active_view", json!({})),
         ("nostromo.create_pane", json!({"pane_id": "p", "position": "right"})),
         ("nostromo.reset_panes", json!({})),
         ("nostromo.refresh_pane_content", json!({"pane_id": "p", "source": "perri.list_pr_queue"})),
@@ -3271,6 +3261,33 @@ async fn focus_scoped_tools_refuse_a_sensitive_target_for_a_network_driven_sessi
     // And an ordinary explicit target stays usable.
     let ordinary = call(&state, "nostromo.get_render_state", json!({"view_id": "cody-ok"}), "cody-nd").await;
     assert!(tool_is_ok(&ordinary), "{}", describe(&ordinary));
+}
+
+#[tokio::test]
+async fn removed_tools_are_unknown_even_to_a_network_driven_session() {
+    let h = spawn_server().await;
+    let state = mcp_state(&h);
+    let (mut unix, _) = h.unix(vec![]).await;
+    spawn_fake_session(&mut unix, "cody-nd", "cody", "v-r2-rm-nd").await;
+    spawn_fake_session(&mut unix, "cody-ok", "cody", "v-r2-rm-ok").await;
+    h.session_mgr.lock().unwrap().sensitive_tags().mark_network_driven("cody-nd");
+
+    for tool in [
+        "nostromo.notify",
+        "nostromo.register_status_segment",
+        "nostromo.clear_status_segment",
+        "nostromo.switch_active_view",
+        "nostromo.set_pane_focus",
+    ] {
+        for caller in ["cody-nd", "cody-ok"] {
+            let result = call(&state, tool, json!({"view_id": "cody-ok", "pane_id": "p"}), caller).await;
+            assert!(
+                matches!(&result, ToolResult::UnknownTool(n) if n == tool),
+                "{tool} as {caller} must be an unknown tool, got {}",
+                describe(&result)
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -4047,9 +4064,9 @@ async fn assert_no_fake_call(tool: &str, needle: &str) {
 
 /// The connection still serves a read-only request after the refusals.
 async fn assert_still_usable<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) {
-    let frames = attack(stream, ClientMsg::PtyList).await;
+    let frames = attack(stream, ClientMsg::SessionList).await;
     assert!(
-        frames.iter().any(|m| matches!(m, ServerMsg::PtyListResp { .. })),
+        frames.iter().any(|m| matches!(m, ServerMsg::SessionListResp { .. })),
         "the connection must stay usable for read-only requests: {frames:?}"
     );
 }
@@ -4356,76 +4373,45 @@ async fn a_tcp_client_cannot_replace_the_focus_registry_but_a_unix_client_can() 
 
 // ── ptys ─────────────────────────────────────────────────────────────────────
 
-async fn unix_pty_info(unix: &mut UnixStream, pty_id: &str) -> Option<nostromo::ipc::protocol::PtyInfo> {
-    attack(unix, ClientMsg::PtyList).await.into_iter().find_map(|m| match m {
-        ServerMsg::PtyListResp { ptys } => ptys.into_iter().find(|p| p.pty_id == pty_id),
-        _ => None,
-    })
-}
-
-async fn spawn_unix_pty(unix: &mut UnixStream, pty_id: &str) {
-    send(unix, &pty_spawn_msg(pty_id, vec![])).await;
-    let spawned = recv_until(unix, |m| matches!(m, ServerMsg::PtySpawned { .. } | ServerMsg::Error { .. })).await;
-    assert!(matches!(spawned.last(), Some(ServerMsg::PtySpawned { .. })), "{spawned:?}");
+/// The tombstone answer every Pty* verb gets now that the daemon no longer hosts PTYs.
+fn assert_pty_host_removed(frames: &[ServerMsg], what: &str) {
+    assert!(
+        frames.iter().any(|m| matches!(m, ServerMsg::Error { message } if message.starts_with("pty_host_removed"))),
+        "{what}: expected an `error` frame starting with `pty_host_removed`, got {frames:?}"
+    );
 }
 
 #[tokio::test]
-async fn a_tcp_client_cannot_kill_a_pty_but_a_unix_client_can() {
+async fn a_tcp_client_cannot_kill_a_pty_and_a_unix_client_is_told_the_host_is_gone() {
     let h = spawn_server().await;
     let (mut unix, _) = h.unix(vec![]).await;
     let (mut tcp, _) = h.tcp(vec![]).await;
-    spawn_unix_pty(&mut unix, "r5-kill").await;
-    spawn_unix_pty(&mut unix, "r5-kill-control").await;
-    let marker = h._tmp.path().join("r5-kill-still-alive");
 
-    // Control first: a local kill ends a PTY.
-    send(&mut unix, &ClientMsg::PtyKill { pty_id: "r5-kill-control".into() }).await;
-    for _ in 0..200 {
-        if unix_pty_info(&mut unix, "r5-kill-control").await.map(|p| p.alive) != Some(true) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert_ne!(
-        unix_pty_info(&mut unix, "r5-kill-control").await.map(|p| p.alive),
-        Some(true),
-        "a local pty_kill must kill the PTY"
-    );
-
+    // Over TCP the refusal still happens before any handler runs.
     let frames = attack(&mut tcp, ClientMsg::PtyKill { pty_id: "r5-kill".into() }).await;
     assert_refused(&frames, "pty_kill");
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { message } if message.starts_with("pty_host_removed"))), "{frames:?}");
     assert_still_usable(&mut tcp).await;
 
-    // The shell is alive and still takes input.
-    assert_eq!(unix_pty_info(&mut unix, "r5-kill").await.map(|p| p.alive), Some(true), "the PTY was killed");
-    send(
-        &mut unix,
-        &ClientMsg::PtyInput { pty_id: "r5-kill".into(), bytes: format!("touch {}\n", marker.display()).into_bytes() },
-    )
-    .await;
-    assert!(wait_for_file(&marker).await, "the PTY's shell no longer runs commands");
-    send(&mut unix, &ClientMsg::PtyKill { pty_id: "r5-kill".into() }).await;
+    // Over Unix the verb is a tombstone.
+    let frames = attack(&mut unix, ClientMsg::PtyKill { pty_id: "r5-kill".into() }).await;
+    assert_pty_host_removed(&frames, "pty_kill");
 }
 
 #[tokio::test]
-async fn a_tcp_client_cannot_resize_a_pty_but_a_unix_client_can() {
+async fn a_tcp_client_cannot_resize_a_pty_and_a_unix_client_is_told_the_host_is_gone() {
     let h = spawn_server().await;
     let (mut unix, _) = h.unix(vec![]).await;
     let (mut tcp, _) = h.tcp(vec![]).await;
-    spawn_unix_pty(&mut unix, "r5-resize").await;
-
-    // Control first: a local resize applies.
-    send(&mut unix, &ClientMsg::PtyResize { pty_id: "r5-resize".into(), cols: 100, rows: 30 }).await;
-    let _ = sync(&mut unix).await;
-    let before = unix_pty_info(&mut unix, "r5-resize").await.expect("the pty");
-    assert_eq!((before.cols, before.rows), (100, 30), "a local pty_resize must apply");
 
     let frames = attack(&mut tcp, ClientMsg::PtyResize { pty_id: "r5-resize".into(), cols: 133, rows: 47 }).await;
     assert_refused(&frames, "pty_resize");
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { message } if message.starts_with("pty_host_removed"))), "{frames:?}");
     assert_still_usable(&mut tcp).await;
-    let after = unix_pty_info(&mut unix, "r5-resize").await.expect("the pty");
-    assert_eq!((after.cols, after.rows), (100, 30), "a network peer resized the PTY");
-    send(&mut unix, &ClientMsg::PtyKill { pty_id: "r5-resize".into() }).await;
+
+    let frames =
+        attack(&mut unix, ClientMsg::PtyResize { pty_id: "r5-resize".into(), cols: 100, rows: 30 }).await;
+    assert_pty_host_removed(&frames, "pty_resize");
 }
 
 // ── sessions ─────────────────────────────────────────────────────────────────
@@ -4577,7 +4563,6 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
     let h = spawn_server().await;
     let (mut unix, _) = h.unix(vec![]).await;
     spawn_fake_session(&mut unix, "cody-ro", "cody", "v-r5-ro").await;
-    spawn_unix_pty(&mut unix, "r5-ro").await;
     let (mut tcp, _) = h.tcp(vec![]).await;
 
     let no_error = |frames: &[ServerMsg], what: &str| {
@@ -4589,8 +4574,9 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
     let frames = attack(&mut tcp, ClientMsg::SessionAttach { tag: "cody-ro".into() }).await;
     assert!(frames.iter().any(|m| matches!(m, ServerMsg::SessionTurns { .. })), "{frames:?}");
     no_error(&attack(&mut tcp, ClientMsg::SessionDetach { tag: "cody-ro".into() }).await, "session_detach");
+    // `pty_list` is still Allowed by the policy, so it reaches the (tombstoned) handler.
     let frames = attack(&mut tcp, ClientMsg::PtyList).await;
-    assert!(frames.iter().any(|m| matches!(m, ServerMsg::PtyListResp { .. })), "{frames:?}");
+    assert_pty_host_removed(&frames, "pty_list");
     // `pty_attach` is NOT read-only: it takes the PTY's single attachment slot from the Mac
     // client (killing its live stream), so a network peer is refused. (Round 5 review.)
     let frames = attack(&mut tcp, ClientMsg::PtyAttach { pty_id: "r5-ro".into() }).await;
@@ -4600,7 +4586,8 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
         !frames.iter().any(|m| matches!(m, ServerMsg::PtyDetach { .. })),
         "the refused TCP pty_attach must not detach the local client: {frames:?}"
     );
-    no_error(&attack(&mut tcp, ClientMsg::PtyDetach { pty_id: "r5-ro".into() }).await, "pty_detach");
+    let frames = attack(&mut tcp, ClientMsg::PtyDetach { pty_id: "r5-ro".into() }).await;
+    assert_pty_host_removed(&frames, "pty_detach");
     let frames = attack(&mut tcp, ClientMsg::FocusList).await;
     assert!(frames.iter().any(|m| matches!(m, ServerMsg::FocusListResp { .. })), "{frames:?}");
     let frames = attack(&mut tcp, ClientMsg::ActivitySnapshotRequest { tag: "cody-ro".into() }).await;
@@ -4609,8 +4596,6 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
         &attack(&mut tcp, ClientMsg::Subscribe { topics: vec![Topic::Activity], renders_decisions: false }).await,
         "a second subscribe",
     );
-
-    send(&mut unix, &ClientMsg::PtyKill { pty_id: "r5-ro".into() }).await;
 }
 
 /// A test that reaches the real `~/.nostromo/teri/sent.json` rewrites the
