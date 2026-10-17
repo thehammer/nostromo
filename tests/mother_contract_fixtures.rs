@@ -745,3 +745,29 @@ fn the_mother_jobs_frame_for_the_fixture_snapshots_matches_the_golden() {
         .unwrap_or_else(|e| panic!("read {}: {e} (UPDATE_GOLDEN=1 to create)", path.display()));
     assert_eq!(frame, golden, "the MotherJobs wire form changed; regenerate with UPDATE_GOLDEN=1 if intended");
 }
+
+// ── a Go producer writes nil slices and unset values as `null` ───────────────
+
+#[test]
+fn null_members_inside_a_key_are_read_as_missing_not_as_a_type_error() {
+    let mut job = kitchen_sink();
+    job["id"] = json!("null-members-1");
+    job["gates"]["not_run"] = Value::Null;
+    job["gates"]["results"][0]["blocking"] = Value::Null;
+    job["review_wave"]["lenses"] = Value::Null;
+    job["progress"]["flags"] = Value::Null;
+    job["progress"]["paused"] = Value::Null;
+    job["decision"]["options"][0]["takes_text"] = Value::Null;
+
+    let (jobs, skipped, log) = decode_one(job);
+    assert_eq!(skipped, 0, "{log}");
+    assert!(warn_lines(&log).is_empty(), "null members are not malformed: {log}");
+    let j = &jobs[0];
+    let gates = j.gates.as_ref().expect("gates survives");
+    assert!(gates.not_run.is_empty() && !gates.results[0].blocking);
+    assert!(j.review_wave.as_ref().expect("review_wave survives").lenses.is_empty());
+    let progress = j.progress.as_ref().expect("progress survives");
+    assert!(progress.flags.is_empty() && !progress.paused);
+    assert_eq!(progress.pct, Some(55));
+    assert!(!j.decision.as_ref().expect("decision survives").options[0].takes_text);
+}

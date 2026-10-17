@@ -266,7 +266,8 @@ final class MotherCrewWireTests: XCTestCase {
         XCTAssertEqual(before.title, after.title, file: file, line: line)
         XCTAssertEqual(before.state, after.state, file: file, line: line)
         XCTAssertEqual(before.repo, after.repo, file: file, line: line)
-        XCTAssertEqual(before.prUrl, after.prUrl, file: file, line: line)
+        // `pr_url` is itself a crew key, so the job's own copy changes when it is the broken one.
+        if brokenField != "pr_url" { XCTAssertEqual(before.prUrl, after.prUrl, file: file, line: line) }
         XCTAssertEqual(before.question, after.question, file: file, line: line)
         XCTAssertEqual(before.createdAt, after.createdAt, file: file, line: line)
     }

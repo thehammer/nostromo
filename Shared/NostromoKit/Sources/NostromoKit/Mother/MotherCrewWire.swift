@@ -20,9 +20,25 @@ import Foundation
 // MARK: - Open enums
 
 // Each keeps a value this build does not know as `.unknown(raw)`, so a value
-// Mother adds later never fails a decode.
+// Mother adds later never fails a decode. On the wire each is a bare string.
 
-public enum MotherGateResult: Equatable, Codable {
+public protocol MotherOpenEnum: Equatable, Codable {
+    init(_ raw: String)
+    var raw: String { get }
+}
+
+extension MotherOpenEnum {
+    public init(from decoder: Decoder) throws {
+        self.init(try decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(raw)
+    }
+}
+
+public enum MotherGateResult: MotherOpenEnum {
     case passed, failed, skipped, unavailable
     case unknown(String)
 
@@ -45,18 +61,9 @@ public enum MotherGateResult: Equatable, Codable {
         case .unknown(let s): return s
         }
     }
-
-    public init(from decoder: Decoder) throws {
-        self.init(try decoder.singleValueContainer().decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.singleValueContainer()
-        try c.encode(raw)
-    }
 }
 
-public enum MotherLensState: Equatable, Codable {
+public enum MotherLensState: MotherOpenEnum {
     case pending, running, done, skipped, error
     case unknown(String)
 
@@ -81,18 +88,9 @@ public enum MotherLensState: Equatable, Codable {
         case .unknown(let s): return s
         }
     }
-
-    public init(from decoder: Decoder) throws {
-        self.init(try decoder.singleValueContainer().decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.singleValueContainer()
-        try c.encode(raw)
-    }
 }
 
-public enum MotherDecisionOptionID: Equatable, Codable {
+public enum MotherDecisionOptionID: MotherOpenEnum {
     case resumeWithGuidance, escalate, overrideOpen, cancel
     case unknown(String)
 
@@ -115,18 +113,9 @@ public enum MotherDecisionOptionID: Equatable, Codable {
         case .unknown(let s): return s
         }
     }
-
-    public init(from decoder: Decoder) throws {
-        self.init(try decoder.singleValueContainer().decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.singleValueContainer()
-        try c.encode(raw)
-    }
 }
 
-public enum MotherAttentionReason: Equatable, Codable {
+public enum MotherAttentionReason: MotherOpenEnum {
     case progressStalled, burnAhead, gatesIncomplete, decisionAwaiting
     case unknown(String)
 
@@ -149,15 +138,6 @@ public enum MotherAttentionReason: Equatable, Codable {
         case .unknown(let s): return s
         }
     }
-
-    public init(from decoder: Decoder) throws {
-        self.init(try decoder.singleValueContainer().decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.singleValueContainer()
-        try c.encode(raw)
-    }
 }
 
 // MARK: - Decoding helpers
@@ -167,6 +147,11 @@ extension KeyedDecodingContainer {
     /// the wrong type still throws (the whole top-level key is then dropped).
     fileprivate func value<T: Decodable>(_ key: Key, _ fallback: T) throws -> T {
         try decodeIfPresent(T.self, forKey: key) ?? fallback
+    }
+
+    /// The key exists and is not null (what Rust's `lenient::present` reads).
+    fileprivate func isPresent(_ key: Key) -> Bool {
+        contains(key) && ((try? decodeNil(forKey: key)) != true)
     }
 }
 
@@ -277,11 +262,8 @@ public struct MotherGates: Equatable, Codable {
         finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
         results = try c.value(.results, [])
         notRun = try c.value(.notRun, [])
-        if !c.contains(.overridden) || (try? c.decodeNil(forKey: .overridden)) == true {
-            overridden = false
-        } else {
-            overridden = (try? c.decode(Bool.self, forKey: .overridden)) ?? true
-        }
+        // Only presence matters; a bare bool (our own encoding) is taken as is.
+        overridden = c.isPresent(.overridden) && ((try? c.decode(Bool.self, forKey: .overridden)) ?? true)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -844,9 +826,8 @@ public struct MotherCrewState: Equatable, Codable {
             }
         }
 
-        let crewKeyPresent = c.contains(.crew) && ((try? c.decodeNil(forKey: .crew)) != true)
         let flagged = (try? c.decodeIfPresent(Bool.self, forKey: .crewOptIn)) ?? false
-        optedIn = crewKeyPresent || flagged
+        optedIn = c.isPresent(.crew) || flagged
         activity = read(String.self, .activity)
         prUrl = read(String.self, .prUrl)
         gates = read(MotherGates.self, .gates)

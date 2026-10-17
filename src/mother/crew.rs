@@ -10,7 +10,7 @@
 //! Wire payloads carry no free text, so none of these types has a field for
 //! gate output, finding text, claim quotes or checklist text (`excerpt`,
 //! `summary`, `quote`, `output`, `text`). Do not add one, even an optional one.
-//! The `labels` and `consequence` strings are Mother-templated option text.
+//! The `label` and `consequence` strings are Mother-templated option text.
 
 use serde::{Deserialize, Serialize};
 
@@ -275,6 +275,7 @@ impl<'de> Deserialize<'de> for ProgressFlag {
 /// (job id when known, key path, error class; deduped per run exactly like the
 /// job-level warning in [`super::decode`]).
 pub mod lenient {
+    use crate::mother::decode::{describe, warn_unreadable_key};
     use serde::de::{DeserializeOwned, Deserializer, Error as _, Unexpected};
     use serde::Deserialize;
     use serde_json::Value;
@@ -304,21 +305,35 @@ pub mod lenient {
         D: Deserializer<'de>,
         T: DeserializeOwned + Default,
     {
-        let value = Value::deserialize(d)?;
+        let mut value = Value::deserialize(d)?;
         if value.is_null() {
             return Ok(T::default());
         }
         if !shape.accepts(&value) {
-            super::super::decode::warn_unreadable_key(key, ".", "invalid type");
+            warn_unreadable_key(key, ".", "invalid type");
             return Ok(T::default());
         }
+        // A Go producer writes a nil slice as `null`: read a null object member as missing
+        // (so its default applies) rather than as a type error that would drop the key.
+        strip_null_members(&mut value);
         match serde_path_to_error::deserialize::<_, T>(value) {
             Ok(t) => Ok(t),
             Err(e) => {
-                let (path, class) = super::super::decode::describe(&e);
-                super::super::decode::warn_unreadable_key(key, &path, class);
+                let (path, class) = describe(&e);
+                warn_unreadable_key(key, &path, class);
                 Ok(T::default())
             }
+        }
+    }
+
+    fn strip_null_members(v: &mut Value) {
+        match v {
+            Value::Object(m) => {
+                m.retain(|_, member| !member.is_null());
+                m.values_mut().for_each(strip_null_members);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip_null_members),
+            _ => {}
         }
     }
 

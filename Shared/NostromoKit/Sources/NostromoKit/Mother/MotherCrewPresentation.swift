@@ -93,17 +93,11 @@ public enum MotherGateRows {
         guard let gates else { return [] }
         var rows: [MotherCrewRow] = []
 
-        let headerTitle: String
-        if let n = gates.attempt, let max = gates.maxAttempts {
-            headerTitle = "gates \(n)/\(max)"
-        } else {
-            headerTitle = "gates"
-        }
-        let headerSpoken: String
-        if let n = gates.attempt, let max = gates.maxAttempts {
-            headerSpoken = "Gates, attempt \(n) of \(max)"
-        } else {
-            headerSpoken = "Gates"
+        var headerTitle = "gates"
+        var headerSpoken = "Gates"
+        if let n = gates.attempt, let cap = gates.maxAttempts {
+            headerTitle += " \(n)/\(cap)"
+            headerSpoken += ", attempt \(n) of \(cap)"
         }
         rows.append(MotherCrewRow(
             id: "gates:header", kind: .header, title: headerTitle,
@@ -141,9 +135,9 @@ public enum MotherGateRows {
         let role = entry.blocking ? "blocking" : "advisory"
         parts.append(role)
         spoken.append(role)
-        if let n = attempt, let max = maxAttempts {
-            parts.append("attempt \(n)/\(max)")
-            spoken.append("attempt \(n) of \(max)")
+        if let n = attempt, let cap = maxAttempts {
+            parts.append("attempt \(n)/\(cap)")
+            spoken.append("attempt \(n) of \(cap)")
         }
         return MotherCrewRow(
             id: "gate:\(entry.name)", kind: .item, glyph: glyph(entry.result), title: entry.name,
@@ -169,7 +163,9 @@ public enum MotherGateRows {
     }
 
     static func duration(_ seconds: Int) -> String {
-        seconds < 60 ? "\(seconds)s" : String(format: "%dm %02ds", seconds / 60, seconds % 60)
+        if seconds < 60 { return "\(seconds)s" }
+        let rest = seconds % 60
+        return "\(seconds / 60)m \(rest < 10 ? "0" : "")\(rest)s"
     }
 
     static func spokenDuration(_ seconds: Int) -> String {
@@ -203,10 +199,10 @@ public enum MotherLensRows {
             rows.append(row(for: lens))
         }
 
-        if let a = wave.adherence, let state = a.state {
-            let text = "Adherence: " + [state, a.verdict].compactMap { $0 }.joined(separator: " · ")
+        if let a = wave.adherence, a.state != nil || a.verdict != nil {
+            let text = "Adherence: " + [a.state, a.verdict].compactMap { $0 }.joined(separator: " · ")
             rows.append(MotherCrewRow(
-                id: "lenses:adherence", kind: .note, glyph: glyph(MotherLensState(state)), title: text, accessibility: text
+                id: "lenses:adherence", kind: .note, glyph: adherenceGlyph(a.state), title: text, accessibility: text
             ))
         }
         if let c = wave.claims {
@@ -257,6 +253,16 @@ public enum MotherLensRows {
         case .skipped: return "–"
         case .error: return "✗"
         case .unknown: return "?"
+        }
+    }
+
+    private static func adherenceGlyph(_ state: String?) -> String {
+        switch state {
+        case "done", "passed": return "✓"
+        case "running": return "…"
+        case "pending": return "·"
+        case "error", "failed": return "✗"
+        default: return "?"
         }
     }
 
@@ -360,7 +366,7 @@ public struct MotherHoldSummary: Equatable {
         }
         return MotherHoldSummary(
             kind: kind, question: job.question, options: options,
-            accessibility: "\(kind). \(options.count) options."
+            accessibility: "\(kind). \(options.count) \(options.count == 1 ? "option" : "options")."
         )
     }
 }
