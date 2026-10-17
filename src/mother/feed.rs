@@ -6,7 +6,7 @@
 //! a `mother.cancel_job` is visible to `mother.list_jobs` immediately instead
 //! of after the next poll).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -66,6 +66,8 @@ pub struct JobsFeed {
     /// 2 s poller racing a mutator's refresh would otherwise re-publish the
     /// pre-mutation list).
     applied: Arc<AtomicU64>,
+    /// Jobs in the latest published `mother list` that could not be read.
+    skipped: Arc<AtomicUsize>,
 }
 
 impl Default for JobsFeed {
@@ -81,6 +83,7 @@ impl JobsFeed {
             source_tx: Arc::new(watch::channel(MotherSourceState::Loading).0),
             issued: Arc::new(AtomicU64::new(0)),
             applied: Arc::new(AtomicU64::new(0)),
+            skipped: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -108,11 +111,23 @@ impl JobsFeed {
     /// Publish a successful `mother list` unless a newer one already landed.
     /// Returns whether it was published.
     pub fn publish_jobs_at(&self, ticket: u64, jobs: Vec<MotherJob>) -> bool {
+        self.publish_jobs_counted_at(ticket, jobs, 0)
+    }
+
+    /// [`JobsFeed::publish_jobs_at`], also recording how many jobs of that
+    /// list could not be read.
+    pub fn publish_jobs_counted_at(&self, ticket: u64, jobs: Vec<MotherJob>, skipped: usize) -> bool {
         if !self.claim(ticket) {
             return false;
         }
+        self.skipped.store(skipped, Ordering::SeqCst);
         self.publish_jobs(jobs);
         true
+    }
+
+    /// How many jobs in the latest published list could not be read.
+    pub fn skipped_count(&self) -> usize {
+        self.skipped.load(Ordering::SeqCst)
     }
 
     /// Record a failed `mother list` unless a newer result already landed.
@@ -154,9 +169,9 @@ impl JobsFeed {
     /// success.
     pub async fn refresh(&self) -> anyhow::Result<Vec<MotherJob>> {
         let ticket = self.begin();
-        match super::list_jobs().await {
-            Ok(jobs) => {
-                self.publish_jobs_at(ticket, jobs.clone());
+        match super::list_jobs_counted().await {
+            Ok((jobs, skipped)) => {
+                self.publish_jobs_counted_at(ticket, jobs.clone(), skipped);
                 Ok(jobs)
             }
             Err(e) => {
@@ -206,5 +221,17 @@ mod ticket_tests {
         assert!(feed.publish_jobs_at(a, vec![job("j", "queued")]));
         assert!(feed.publish_jobs_at(b, vec![job("j", "running")]));
         assert_eq!(feed.jobs_rx().borrow()[0].state, "running");
+    }
+
+    #[test]
+    fn skipped_count_follows_the_latest_published_list() {
+        let feed = JobsFeed::new();
+        assert_eq!(feed.skipped_count(), 0);
+        let t = feed.begin();
+        assert!(feed.publish_jobs_counted_at(t, vec![job("j", "queued")], 2));
+        assert_eq!(feed.skipped_count(), 2);
+        let t = feed.begin();
+        assert!(feed.publish_jobs_at(t, vec![]));
+        assert_eq!(feed.skipped_count(), 0);
     }
 }

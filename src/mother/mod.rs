@@ -9,6 +9,7 @@
 //! - `NOSTROMO_MOTHER_CLI_TIMEOUT_MS` — bound on every `mother` CLI call (default: 30000)
 
 pub mod broker_client;
+pub mod decode;
 pub mod feed;
 pub mod protocol;
 
@@ -251,14 +252,22 @@ impl MotherJob {
 /// A non-zero exit is an `Err` carrying the CLI's stderr — a failed list must
 /// never read as "no jobs".
 pub async fn list_jobs() -> Result<Vec<MotherJob>> {
+    Ok(list_jobs_counted().await?.0)
+}
+
+/// Like [`list_jobs`], also returning how many jobs could not be read and were
+/// skipped (see [`decode::parse_jobs`]).
+pub async fn list_jobs_counted() -> Result<(Vec<MotherJob>, usize)> {
     let out = run_output(&["list", "--format", "json"]).await?;
     if !out.status.success() {
         let detail = trimmed_stderr(&out.stderr);
         warn!("mother list failed: {detail}");
         return Err(cli_failure("list", detail).into());
     }
-    let jobs: Vec<MotherJob> = serde_json::from_slice(&out.stdout)?;
-    Ok(jobs)
+    // The serde message can embed a payload value; report only the class.
+    decode::parse_jobs(&out.stdout).map_err(|e| {
+        anyhow::anyhow!("mother list output is not a readable JSON job array ({:?})", e.classify())
+    })
 }
 
 /// Read the last `n` lines from the job's log file using pure Rust I/O

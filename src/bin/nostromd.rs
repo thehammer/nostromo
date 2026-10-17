@@ -596,9 +596,9 @@ async fn run_job_poller(
         // Ticket taken BEFORE the list starts: a mutator's refresh that starts
         // later and finishes first wins, and this (older) result is dropped.
         let ticket = jobs_feed.begin();
-        match mother::list_jobs().await {
-            Ok(jobs) => {
-                tracing::debug!(count = jobs.len(), "mother poll ok");
+        match mother::list_jobs_counted().await {
+            Ok((jobs, skipped)) => {
+                tracing::debug!(count = jobs.len(), skipped, "mother poll ok");
                 // A job queued from a work item is registered work-derived
                 // before anything about it is published or broadcast.
                 sensitive.note_jobs(&jobs);
@@ -626,7 +626,7 @@ async fn run_job_poller(
                 // Publish live job list to the peek poller and MCP readers, unless a
                 // newer list (e.g. a mutator's refresh) already landed; then do not
                 // re-broadcast the older state either.
-                if !jobs_feed.publish_jobs_at(ticket, jobs.clone()) {
+                if !jobs_feed.publish_jobs_counted_at(ticket, jobs.clone(), skipped) {
                     tracing::debug!("mother poll result superseded by a newer list; skipping publish");
                     continue;
                 }

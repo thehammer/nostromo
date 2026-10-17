@@ -1,0 +1,28 @@
+[
+  {
+    "id": "hc-fixture-1",
+    "state": "running",
+    "repo": "example/repo",
+    "isolation": "worktree",
+    "title": "Synthetic headless job",
+    "created_at": "2026-01-01T00:00:00Z",
+    "started_at": "2026-01-01T00:00:05Z",
+    "finished_at": null,
+    "progress": {"phase": "gates", "pct": 40, "steps": [{"name": "lint", "ok": true}]},
+    "gates": [{"name": "tests", "status": "pass", "duration_ms": 1200}],
+    "pr": {"number": 1, "draft": true, "url": "https://example.invalid/pr/1"},
+    "cost_usd": 0.25
+  },
+  {
+    "id": "hc-fixture-2",
+    "state": "awaiting",
+    "repo": "example/repo",
+    "isolation": "worktree",
+    "title": "Synthetic second job",
+    "created_at": "2026-01-01T01:00:00Z",
+    "started_at": null,
+    "finished_at": null,
+    "lens": {"wave": 2, "findings": [{"id": "f1", "severity": "low"}]},
+    "hold": {"gate": "review", "answered": false}
+  }
+]

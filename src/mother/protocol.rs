@@ -208,10 +208,30 @@ pub struct HelloData {
 // ── Snapshot event ────────────────────────────────────────────────────────────
 
 /// Payload of the `snapshot` event sent in response to `subscribe`.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Built with [`SnapshotData::decode`], which decodes each job on its own.
+#[derive(Debug, Clone)]
 pub struct SnapshotData {
     pub sub: String,
+    /// Jobs that decoded; unreadable ones are skipped (see [`super::decode`]).
     pub jobs: Vec<MotherJob>,
+    /// How many snapshot jobs could not be read.
+    pub skipped: usize,
+}
+
+impl SnapshotData {
+    /// `sub` and a `jobs` array are required (hard error otherwise); each job
+    /// is then decoded independently.
+    pub fn decode(data: serde_json::Value) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            sub: String,
+            jobs: Vec<serde_json::Value>,
+        }
+        let raw: Raw = serde_json::from_value(data)?;
+        let (jobs, skipped) = super::decode::decode_jobs(raw.jobs);
+        Ok(Self { sub: raw.sub, jobs, skipped })
+    }
 }
 
 // ── State / await / current_activity event payloads ───────────────────────────
