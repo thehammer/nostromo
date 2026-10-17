@@ -9,7 +9,7 @@ release:
 install: release
 	cargo install --path .
 	@# The `nostromo` TUI binary no longer exists, and `cargo install` does not remove an old ~/.cargo/bin/nostromo.
-	@echo "installed nostromd, nostromo-mcp-bridge, nostromo-activity-hook, nostromo-guard to ~/.cargo/bin"
+	@echo "installed nostromd, nostromo-mcp-bridge, nostromo-activity-hook, nostromo-guard, sensitive-text-scan to ~/.cargo/bin"
 	@# Restart the daemon if it's registered with launchd so the new binary takes effect.
 	@launchctl kickstart -k "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null && echo "nostromd restarted" || echo "nostromd not registered with launchd (skipping restart)"
 

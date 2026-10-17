@@ -12,7 +12,7 @@ claude (inside a PTY pane)
   ▼
 nostromo-mcp-bridge
   │
-  │  Unix domain socket  (~/.nostromo/mcp.sock)
+  │  Unix domain socket  (~/.nostromo/mcp-daemon.sock)
   ▼
 nostromd (McpServer / McpSharedState)
 ```
@@ -86,7 +86,7 @@ Returns identity information about the calling PTY session.
 
 ```sh
 # In one terminal — start Nostromo and open Perri.
-# The MCP socket is created at ~/.nostromo/mcp.sock.
+# The MCP socket is created at ~/.nostromo/mcp-daemon.sock.
 
 # In another terminal — send a raw Hello + initialize + tools/call:
 (
@@ -94,5 +94,5 @@ Returns identity information about the calling PTY session.
   printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}\n'
   printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nostromo.get_self","arguments":{}}}\n'
   sleep 1
-) | socat - UNIX-CONNECT:$HOME/.nostromo/mcp.sock
+) | socat - UNIX-CONNECT:$HOME/.nostromo/mcp-daemon.sock
 ```
