@@ -205,13 +205,15 @@ public enum MotherLensRows {
 
         if let a = wave.adherence, let state = a.state {
             let text = "Adherence: " + [state, a.verdict].compactMap { $0 }.joined(separator: " · ")
-            rows.append(MotherCrewRow(id: "lenses:adherence", kind: .note, title: text, accessibility: text))
+            rows.append(MotherCrewRow(
+                id: "lenses:adherence", kind: .note, glyph: glyph(MotherLensState(state)), title: text, accessibility: text
+            ))
         }
         if let c = wave.claims {
             // Citations are checked for existence, not for correctness: never say "correct".
             let text = "citations found \(c.verified) · not found \(c.refuted) · unverified \(c.unverified)"
             rows.append(MotherCrewRow(
-                id: "lenses:claims", kind: .note, title: text,
+                id: "lenses:claims", kind: .note, glyph: "·", title: text,
                 accessibility: "Citations found \(c.verified), not found \(c.refuted), unverified \(c.unverified)"
             ))
         }

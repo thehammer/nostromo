@@ -428,7 +428,8 @@ final class MotherCrewPresentationTests: XCTestCase {
             XCTAssertTrue(row.accessibility.contains(words), "\(raw): \(row.accessibility)")
             XCTAssertTrue(row.detail.contains("skipped"), row.detail)
             XCTAssertFalse(row.detail.contains("blocking") || row.detail.contains("advisory"), "skipped lenses show no counts: \(row.detail)")
-            if raw != words {
+            // "budget" is itself part of "over budget", so only codes that aren't can be checked.
+            if raw != words && !words.contains(raw) {
                 XCTAssertFalse(row.detail.contains(raw), "the raw code must not leak when there are words: \(row.detail)")
             }
         }

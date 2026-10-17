@@ -68,7 +68,8 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         title      = try c.decode(String.self, forKey: .title)
         repo       = try c.decodeIfPresent(String.self, forKey: .repo)
         branch     = try c.decodeIfPresent(String.self, forKey: .branch)
-        prUrl      = try c.decodeIfPresent(String.self, forKey: .prUrl)
+        // A crew-contract key: a malformed value never costs the job.
+        prUrl      = (try? c.decodeIfPresent(String.self, forKey: .prUrl)) ?? nil
         createdAt  = try c.decodeIfPresent(String.self, forKey: .createdAt)
         startedAt  = try c.decodeIfPresent(String.self, forKey: .startedAt)
         finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
