@@ -1,7 +1,6 @@
 //! Daemon-side persistent stream-json session manager.
 //!
-//! `SessionManager` is to stream-json sessions what [`super::pty_manager::PtyManager`]
-//! is to PTYs: it owns long-lived `claude` child processes on behalf of
+//! `SessionManager` owns long-lived `claude` child processes on behalf of
 //! `nostromd` so a session survives the GUI disconnecting, crashing, or
 //! restarting. It is the daemon-side home of the persistent
 //! `--input-format stream-json --output-format stream-json` session host.
@@ -30,8 +29,7 @@
 //! shared [`SessionTranscript`] and broadcasts [`SessionEvent`]s. A per-attached
 //! client forwarder converts events into `ServerMsg::SessionTurnDelta` /
 //! `SessionState` / `SessionExited` and writes them to the client's
-//! per-connection sender — exactly mirroring `PtyManager`'s pattern, except
-//! **multiple** clients may attach to one tag (mirroring is a broadcast).
+//! per-connection sender; **multiple** clients may attach to one tag (mirroring is a broadcast).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};

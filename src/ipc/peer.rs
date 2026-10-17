@@ -693,14 +693,6 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::MotherStatusline(_)
         | ServerMsg::Pong
         | ServerMsg::Error { .. }
-        | ServerMsg::PtySpawned { .. }
-        | ServerMsg::PtyOutput { .. }
-        | ServerMsg::PtyExited { .. }
-        | ServerMsg::PtyScrollback { .. }
-        | ServerMsg::PtyAttached { .. }
-        | ServerMsg::PtyDetach { .. }
-        | ServerMsg::PtyListResp { .. }
-        | ServerMsg::PtyIdentity { .. }
         | ServerMsg::ActivityHealth { .. }
         | ServerMsg::Withheld { .. }
         | ServerMsg::DaemonReconnected => ServerClass::Open,

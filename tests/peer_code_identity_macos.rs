@@ -47,7 +47,7 @@ use nostromo::ipc::{
     },
     protocol::{ClientMsg, DecisionChoice, ServerMsg, Topic, PROTOCOL_VERSION},
     server::Server,
-    PtyManager, SessionManager,
+    SessionManager,
 };
 
 const HELPER_C: &str = r#"
@@ -824,7 +824,6 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
     let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
     let server = Server::bind(
         &socket_path,
-        Arc::new(Mutex::new(PtyManager::new())),
         Arc::new(Mutex::new(SessionManager::with_store_path(tmp.path().join("sessions.json")))),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),

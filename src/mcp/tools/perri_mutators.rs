@@ -6,13 +6,12 @@
 //! - `perri.set_selected_index({ index })`
 //! - `perri.get_selected_index()`
 //!
-//! ## Two hosts
+//! ## Hosting
 //!
 //! Each handler branches on `state.daemon`:
 //!
 //! - **Daemon-hosted** (`nostromd`): `load_pr`/`clear_current_pr` write
-//!   through [`crate::data::perri_current_pr`] — the same file contract
-//!   `PerriView` (TUI) writes — signal the native sources' refresh channels,
+//!   through [`crate::data::perri_current_pr`], signal the native sources' refresh channels,
 //!   and push `ServerMsg::PaneContent` broadcasts for the caller's live
 //!   PR-content pane(s) (and, for `clear_current_pr`, its queue pane),
 //!   resolved from the focus's actual pane tree rather than a fixed
@@ -22,28 +21,24 @@
 //!   `get_selected_index` read/write an agent-scoped
 //!   `Arc<AtomicUsize>` on `DaemonMcpBackend::perri` — it moves no GUI
 //!   highlight (see `PerriDaemonState` doc comment).
-//! - **TUI-hosted**: unchanged from before this fix — posts an
-//!   `AppEvent::McpCommand` and awaits a reply from `PerriView` via the app's
-//!   own event loop.
+//! - **Not daemon-hosted**: every handler answers
+//!   `{"error": "not_supported", "detail": "requires nostromd"}`.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use tracing::warn;
 
 use crate::data::{perri_current_pr, perri_pr::PrSnapshots};
-use crate::event::AppEvent;
 use crate::ipc::pane_registry::PaneRegistry;
 use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
 use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::DaemonMcpBackend;
 use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
 use crate::mcp::tools::show;
-use crate::mcp::{command::McpCommand, state::McpSharedState};
-
-const COMMAND_TIMEOUT_SECS: u64 = 5;
+use crate::mcp::state::McpSharedState;
 
 // ── handlers ─────────────────────────────────────────────────────────────────
 
@@ -79,27 +74,7 @@ pub async fn load_pr(state: &McpSharedState, args: &Value, pty_id: Option<&str>)
         .await;
     }
 
-    // ── legacy TUI path ─────────────────────────────────────────────────────
-    let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::PerriLoadPr {
-        number,
-        repo,
-        highlights,
-        reply: tx,
-    };
-    if state
-        .event_tx
-        .send(AppEvent::McpCommand(Box::new(cmd)))
-        .is_err()
-    {
-        return json!({ "error": "event_loop_closed" });
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(()))) => json!({ "ok": true }),
-        Ok(Ok(Err(e))) => json!({ "error": e }),
-        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
-        Err(_) => json!({ "error": "event_loop_timeout" }),
-    }
+    json!({ "error": "not_supported", "detail": "requires nostromd" })
 }
 
 /// Handle `perri.clear_current_pr()`.
@@ -109,22 +84,7 @@ pub async fn clear_current_pr(state: &McpSharedState, args: &Value, pty_id: Opti
         return clear_current_pr_daemon(state, daemon, args, pty_id).await;
     }
 
-    // ── legacy TUI path ─────────────────────────────────────────────────────
-    let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::PerriClearCurrentPr { reply: tx };
-    if state
-        .event_tx
-        .send(AppEvent::McpCommand(Box::new(cmd)))
-        .is_err()
-    {
-        return json!({ "error": "event_loop_closed" });
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(()))) => json!({ "ok": true }),
-        Ok(Ok(Err(e))) => json!({ "error": e }),
-        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
-        Err(_) => json!({ "error": "event_loop_timeout" }),
-    }
+    json!({ "error": "not_supported", "detail": "requires nostromd" })
 }
 
 /// Handle `perri.set_selected_index({ index })`.
@@ -154,22 +114,7 @@ pub async fn set_selected_index(
         return json!({ "ok": true });
     }
 
-    // ── legacy TUI path ─────────────────────────────────────────────────────
-    let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::SetPerriSelectedIndex { index, reply: tx };
-    if state
-        .event_tx
-        .send(AppEvent::McpCommand(Box::new(cmd)))
-        .is_err()
-    {
-        return json!({ "error": "event_loop_closed" });
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(()))) => json!({ "ok": true }),
-        Ok(Ok(Err(e))) => json!({ "error": e }),
-        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
-        Err(_) => json!({ "error": "event_loop_timeout" }),
-    }
+    json!({ "error": "not_supported", "detail": "requires nostromd" })
 }
 
 /// Handle `perri.get_selected_index()`.
@@ -179,22 +124,7 @@ pub async fn get_selected_index(state: &McpSharedState, _pty_id: Option<&str>) -
         return json!({ "index": daemon.perri.selected_index.load(Ordering::SeqCst) });
     }
 
-    // ── legacy TUI path ─────────────────────────────────────────────────────
-    let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::GetPerriSelectedIndex { reply: tx };
-    if state
-        .event_tx
-        .send(AppEvent::McpCommand(Box::new(cmd)))
-        .is_err()
-    {
-        return json!({ "error": "event_loop_closed" });
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(idx))) => json!({ "index": idx }),
-        Ok(Ok(Err(e))) => json!({ "error": e }),
-        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
-        Err(_) => json!({ "error": "event_loop_timeout" }),
-    }
+    json!({ "error": "not_supported", "detail": "requires nostromd" })
 }
 
 // ── daemon-hosted implementations ───────────────────────────────────────────
@@ -1312,7 +1242,6 @@ mod tests {
 
     #[tokio::test]
     async fn load_pr_no_state_dir_returns_not_supported() {
-        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let dir = TempDir::new().unwrap();
         let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
             dir.path().join("panes.json"),
@@ -1329,8 +1258,7 @@ mod tests {
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
         };
-        let mut state = McpSharedState::for_daemon(backend);
-        state.event_tx = event_tx;
+        let state = McpSharedState::for_daemon(backend);
 
         let args = json!({ "number": 1, "repo": "acme/web" });
         let result = load_pr(&state, &args, Some("perri")).await;

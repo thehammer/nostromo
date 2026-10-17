@@ -1,7 +1,6 @@
 //! The mother / set_pane / perri mutating tools need `nostromd`: against an
 //! `McpSharedState` that is not daemon-hosted they answer
-//! `{"error": "not_supported", "detail": "requires nostromd"}` and post no
-//! `McpCommand` (there is no TUI event loop to receive one).
+//! `{"error": "not_supported", "detail": "requires nostromd"}`.
 //!
 //! Each test builds a non-daemon state, serves it on a temp-dir socket, calls
 //! the tool through a real MCP client connection with arguments that pass
@@ -9,22 +8,16 @@
 
 use std::sync::Arc;
 
-use nostromo::{
-    event::AppEvent,
-    mcp::{McpServer, McpSharedState},
-};
+use nostromo::mcp::{McpServer, McpSharedState};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-async fn make_state_with_channel() -> (Arc<McpSharedState>, mpsc::UnboundedReceiver<AppEvent>) {
-    let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
-    let state = Arc::new(McpSharedState::for_test(tx));
-    (state, rx)
+fn make_state() -> Arc<McpSharedState> {
+    Arc::new(McpSharedState::for_test())
 }
 
 async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) {
@@ -123,7 +116,7 @@ async fn call_tool(
 async fn assert_not_supported(tool: &str, args: Value) {
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp_not_supported.sock");
-    let (state, mut rx) = make_state_with_channel().await;
+    let state = make_state();
     let _server = McpServer::bind(socket_path.clone(), (*state).clone())
         .await
         .unwrap();
@@ -136,7 +129,6 @@ async fn assert_not_supported(tool: &str, args: Value) {
         json!({ "error": "not_supported", "detail": "requires nostromd" }),
         "{tool}"
     );
-    assert!(rx.try_recv().is_err(), "{tool} must not post an McpCommand");
 }
 
 #[tokio::test]

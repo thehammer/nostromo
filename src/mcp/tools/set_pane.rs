@@ -2,22 +2,16 @@
 //!
 //! ## Tools
 //! - `nostromo.set_pane_content({ view_id, pane_id, content })` — write content to a pane
-//! - `nostromo.set_pane_focus({ view_id, pane_id })` — focus a pane within a view
 //! - `nostromo.set_pane_layout({ view_id, ratios })` — update split ratios
 
 use serde_json::{json, Value};
-use tokio::sync::oneshot;
-use tracing::warn;
 
-use crate::event::AppEvent;
 use crate::ipc::protocol::{PaneContentWire, PrListItem, ServerMsg};
 use crate::mcp::{
-    command::{McpCommand, PaneContent},
+    command::PaneContent,
     pane_sources::broadcast_pane_content,
     state::McpSharedState,
 };
-
-const COMMAND_TIMEOUT_SECS: u64 = 5;
 
 /// The full set of `PaneContentWire` discriminator names. Used by
 /// `parse_pane_content`'s `"json_snapshot"` arm to catch a classic mistake:
@@ -72,59 +66,7 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
         return json!({ "ok": true });
     }
 
-    let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::SetPaneContent {
-        view_id,
-        pane_id,
-        content,
-        reply: tx,
-    };
-    if state
-        .event_tx
-        .send(AppEvent::McpCommand(Box::new(cmd)))
-        .is_err()
-    {
-        warn!("set_pane_content: event_tx closed");
-        return json!({ "error": "event_loop_closed" });
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(()))) => json!({ "ok": true }),
-        Ok(Ok(Err(e))) => json!({ "error": e }),
-        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
-        Err(_) => json!({ "error": "event_loop_timeout" }),
-    }
-}
-
-/// Handle `nostromo.set_pane_focus`.
-pub async fn set_pane_focus(state: &McpSharedState, args: &Value) -> Value {
-    let view_id = match args.get("view_id").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return json!({ "error": "invalid_args", "detail": "missing view_id" }),
-    };
-    let pane_id = match args.get("pane_id").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return json!({ "error": "invalid_args", "detail": "missing pane_id" }),
-    };
-
-    let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::SetPaneFocus {
-        view_id,
-        pane_id,
-        reply: tx,
-    };
-    if state
-        .event_tx
-        .send(AppEvent::McpCommand(Box::new(cmd)))
-        .is_err()
-    {
-        return json!({ "error": "event_loop_closed" });
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(()))) => json!({ "ok": true }),
-        Ok(Ok(Err(e))) => json!({ "error": e }),
-        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
-        Err(_) => json!({ "error": "event_loop_timeout" }),
-    }
+    json!({ "error": "not_supported", "detail": "requires nostromd" })
 }
 
 /// Handle `nostromo.set_pane_layout`.
@@ -163,25 +105,7 @@ pub async fn set_pane_layout(state: &McpSharedState, args: &Value) -> Value {
         };
     }
 
-    let (tx, rx) = oneshot::channel();
-    let cmd = McpCommand::SetPaneLayout {
-        view_id,
-        ratios,
-        reply: tx,
-    };
-    if state
-        .event_tx
-        .send(AppEvent::McpCommand(Box::new(cmd)))
-        .is_err()
-    {
-        return json!({ "error": "event_loop_closed" });
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(()))) => json!({ "ok": true }),
-        Ok(Ok(Err(e))) => json!({ "error": e }),
-        Ok(Err(_)) => json!({ "error": "event_loop_closed" }),
-        Err(_) => json!({ "error": "event_loop_timeout" }),
-    }
+    json!({ "error": "not_supported", "detail": "requires nostromd" })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

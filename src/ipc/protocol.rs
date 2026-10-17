@@ -4,7 +4,6 @@
 //! body.  Maximum frame size is 4 MiB.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -117,21 +116,6 @@ where
         .into_iter()
         .map(|v| serde_json::from_value(v).unwrap_or(Topic::Unknown))
         .collect())
-}
-
-/// Metadata about a daemon-owned PTY.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PtyInfo {
-    pub pty_id: String,
-    pub cmd: String,
-    pub args: Vec<String>,
-    pub alive: bool,
-    pub cols: u16,
-    pub rows: u16,
-    /// Unix timestamp of the last activity (write to PTY output).
-    pub last_activity: Option<SystemTime>,
-    /// Tag identifying which view/agent owns this PTY (e.g. `"fred"`, `"cody"`).
-    pub client_tag: String,
 }
 
 // ── persistent session metadata ──────────────────────────────────────────────
@@ -1118,8 +1102,9 @@ pub enum ClientMsg {
     },
     Ping,
 
-    // ── PTY commands ──────────────────────────────────────────────────────────
-    /// Spawn a new PTY in the daemon.
+    // ── Retired PTY commands (R2) ─────────────────────────────────────────────
+    /// Retired (R2, 2026-10): decoded and answered with `pty_host_removed`; kept so FND-1 ordinals stay stable.
+    /// Formerly: spawn a new PTY in the daemon.
     PtySpawn {
         pty_id: String,
         cmd: String,
@@ -1131,38 +1116,42 @@ pub enum ClientMsg {
         client_tag: String,
     },
 
-    /// Send raw bytes to a PTY's stdin.
+    /// Retired (R2, 2026-10): decoded and answered with `pty_host_removed`; kept so FND-1 ordinals stay stable.
+    /// Formerly: send raw bytes to a PTY's stdin.
     PtyInput {
         pty_id: String,
         #[serde(with = "base64_bytes")]
         bytes: Vec<u8>,
     },
 
-    /// Resize a PTY.
+    /// Retired (R2, 2026-10): decoded and answered with `pty_host_removed`; kept so FND-1 ordinals stay stable.
+    /// Formerly: resize a PTY.
     PtyResize {
         pty_id: String,
         cols: u16,
         rows: u16,
     },
 
-    /// Kill a PTY and its child process.
+    /// Retired (R2, 2026-10): decoded and answered with `pty_host_removed`; kept so FND-1 ordinals stay stable.
+    /// Formerly: kill a PTY and its child process.
     PtyKill {
         pty_id: String,
     },
 
-    /// Attach to an existing PTY: daemon sends PtyAttached + PtyScrollback,
-    /// then starts streaming PtyOutput.  A second attach to an already-attached
-    /// PTY succeeds; the prior client receives PtyDetach first.
+    /// Retired (R2, 2026-10): decoded and answered with `pty_host_removed`; kept so FND-1 ordinals stay stable.
+    /// Formerly: attach to an existing PTY.
     PtyAttach {
         pty_id: String,
     },
 
-    /// Stop receiving output from a PTY without killing it.
+    /// Retired (R2, 2026-10): decoded and answered with `pty_host_removed`; kept so FND-1 ordinals stay stable.
+    /// Formerly: stop receiving output from a PTY without killing it.
     PtyDetach {
         pty_id: String,
     },
 
-    /// Request a snapshot of all live PTYs owned by this daemon.
+    /// Retired (R2, 2026-10): decoded and answered with `pty_host_removed`; kept so FND-1 ordinals stay stable.
+    /// Formerly: request a snapshot of all live PTYs owned by this daemon.
     PtyList,
 
     // ── persistent session commands (protocol v3) ─────────────────────────────
@@ -1648,65 +1637,6 @@ pub enum ServerMsg {
     Pong,
     Error {
         message: String,
-    },
-
-    // ── PTY responses ─────────────────────────────────────────────────────────
-    /// The requested PTY was successfully spawned.
-    PtySpawned {
-        pty_id: String,
-    },
-
-    /// Live output from an attached PTY.
-    PtyOutput {
-        pty_id: String,
-        #[serde(with = "base64_bytes")]
-        bytes: Vec<u8>,
-    },
-
-    /// PTY child process exited.
-    PtyExited {
-        pty_id: String,
-        exit_code: Option<i32>,
-    },
-
-    /// Scrollback replay sent immediately after PtyAttached.
-    /// Contains the entire current ring buffer as a single concatenated chunk.
-    PtyScrollback {
-        pty_id: String,
-        #[serde(with = "base64_bytes")]
-        bytes: Vec<u8>,
-    },
-
-    /// Attach acknowledgement — sent before PtyScrollback.
-    PtyAttached {
-        pty_id: String,
-        cols: u16,
-        rows: u16,
-    },
-
-    /// Sent to a previously attached client when a new client steals attach.
-    PtyDetach {
-        pty_id: String,
-    },
-
-    /// Response to PtyList.
-    PtyListResp {
-        ptys: Vec<PtyInfo>,
-    },
-
-    /// Sent immediately after `PtySpawned` to convey the Nostromo identity
-    /// env vars injected into the child process.
-    ///
-    /// Using a follow-up message rather than extending `PtySpawned` avoids a
-    /// protocol version bump; clients that don't understand this message will
-    /// simply ignore it.
-    PtyIdentity {
-        /// Daemon-side `pty_id` that this identity corresponds to.
-        pty_id: String,
-        /// Value of `NOSTROMO_PTY_ID` injected into the child env.
-        nostromo_pty_id: String,
-        /// Value of `NOSTROMO_SESSION_ID` injected into the child env.
-        nostromo_session_id: String,
     },
 
     // ── persistent session responses (protocol v3) ───────────────────────────

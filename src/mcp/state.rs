@@ -22,7 +22,6 @@ use crate::{
         tickets::{TicketCache, TicketRegistry},
         work::hub::WorkHub,
     },
-    event::AppEvent,
     ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
     mcp::tool_stats::ToolStats,
     mother::{JobsFeed, MotherJob, MotherSourceState, MotherStatus},
@@ -49,7 +48,7 @@ pub struct PtyIdentity {
 pub struct ViewMeta {
     /// Stable lowercase identifier (e.g. `"perri"`).
     pub id: &'static str,
-    /// Human-readable title shown in the TUI tab bar.
+    /// Human-readable title shown in the tab bar.
     pub title: String,
     /// Logical pane ids within this view.
     pub pane_ids: Vec<&'static str>,
@@ -114,14 +113,12 @@ pub struct TicketRegistryState {
     pub cache: Arc<TicketCache>,
 }
 
-/// Backend for an MCP server hosted **inside `nostromd`** (rather than the TUI).
+/// Backend for an MCP server hosted **inside `nostromd`**.
 ///
-/// The TUI routes pane mutations through `event_tx` → `AppEvent::McpCommand` →
-/// its own event loop. That path cannot reach the macOS app, which is a separate
-/// process talking to the daemon over IPC. So when the MCP server runs in the
-/// daemon, pane tools instead mutate the daemon-owned [`PaneRegistry`] directly
-/// (under its mutex) and fan the result out to every connected client as a
-/// `ServerMsg` broadcast. `create_focus` additionally spawns a daemon session.
+/// The macOS app is a separate process talking to the daemon over IPC, so pane
+/// tools mutate the daemon-owned [`PaneRegistry`] directly (under its mutex)
+/// and fan the result out to every connected client as a `ServerMsg`
+/// broadcast. `create_focus` additionally spawns a daemon session.
 ///
 /// Cheap to clone — every field is `Arc`/`Sender`-backed.
 #[derive(Clone)]
@@ -150,12 +147,9 @@ pub struct DaemonMcpBackend {
 /// Backed by `Arc`s so cloning is O(1).
 #[derive(Clone)]
 pub struct McpSharedState {
-    /// For future mutating tools: post an `AppEvent::McpCommand(...)`.
-    pub event_tx: mpsc::UnboundedSender<AppEvent>,
-
-    /// Set when this MCP server is hosted by `nostromd` rather than the TUI.
-    /// Pane/focus tools branch on this: `Some` → mutate the daemon registry and
-    /// broadcast; `None` → the legacy TUI `event_tx` path.
+    /// Set when this MCP server is hosted by `nostromd`.
+    /// Mutating tools branch on this: `Some` → mutate the daemon registry and
+    /// broadcast; `None` → `not_supported` (`requires nostromd`).
     pub daemon: Option<DaemonMcpBackend>,
 
     /// Metadata about every registered view.  Populated once at startup.
@@ -199,10 +193,9 @@ pub struct McpSharedState {
     pub work_hub: Option<Arc<WorkHub>>,
 
     // ── event-mirrored receivers (Phase 2) ────────────────────────────────────
-    // These wrap AppEvent-driven data (Mother jobs/status, rate limits, posture)
-    // in watch channels so MCP tool handlers can read them without going through
-    // the event loop.
-    /// Mirror of the most recent `AppEvent::MotherJobs`.
+    // These wrap daemon-fed data (Mother jobs/status, rate limits, posture)
+    // in watch channels so MCP tool handlers can read them without an event loop.
+    /// Mirror of the most recent Mother jobs feed.
     pub mother_jobs_rx: watch::Receiver<Vec<MotherJob>>,
 
     /// Whether `mother_jobs_rx` can be trusted (loading / fresh / stale / error).
@@ -214,13 +207,13 @@ pub struct McpSharedState {
     /// next poll.
     pub mother_feed: Option<JobsFeed>,
 
-    /// Mirror of the most recent `AppEvent::MotherStatusline`.
+    /// Mirror of the most recent Mother statusline.
     pub mother_status_rx: watch::Receiver<Option<MotherStatus>>,
 
-    /// Mirror of the most recent `AppEvent::RateLimitsChanged`.
+    /// Mirror of the most recent rate limits.
     pub rate_limits_rx: watch::Receiver<Option<RateLimits>>,
 
-    /// Mirror of the most recent `AppEvent::PostureChanged`.
+    /// Mirror of the most recent budget posture.
     pub budget_posture_rx: watch::Receiver<Option<BudgetPosture>>,
 
     /// On-demand MCP tool-dispatch latency store (see [`crate::mcp::tool_stats`]).
@@ -237,7 +230,6 @@ impl McpSharedState {
     /// Construct with all required watch receivers.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        event_tx: mpsc::UnboundedSender<AppEvent>,
         perri_queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
         perri_pr_rx: watch::Receiver<PrSnapshots>,
         fred_mailbox_rx: watch::Receiver<Option<MailboxSnapshot>>,
@@ -249,7 +241,6 @@ impl McpSharedState {
         budget_posture_rx: watch::Receiver<Option<BudgetPosture>>,
     ) -> Self {
         Self {
-            event_tx,
             daemon: None,
             views_meta: Arc::new(RwLock::new(Vec::new())),
             ptys: Arc::new(RwLock::new(HashMap::new())),
@@ -346,7 +337,7 @@ impl McpSharedState {
     /// This is intentionally not `#[cfg(test)]` — integration tests in the
     /// `tests/` directory are compiled as separate crates and need access to it
     /// without `--cfg test` in scope.
-    pub fn for_test(event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+    pub fn for_test() -> Self {
         let (_, perri_queue_rx) = watch::channel(None);
         let (perri_pr_tx, perri_pr_rx) = watch::channel(no_prs());
         let (_, fred_mailbox_rx) = watch::channel(None);
@@ -357,7 +348,6 @@ impl McpSharedState {
         let (_, rate_limits_rx) = watch::channel(None);
         let (_, budget_posture_rx) = watch::channel(None);
         let mut state = Self::new(
-            event_tx,
             perri_queue_rx,
             perri_pr_rx,
             fred_mailbox_rx,
@@ -375,12 +365,8 @@ impl McpSharedState {
     /// Construct an `McpSharedState` for an MCP server hosted inside `nostromd`,
     /// wiring in the daemon's live data sources so MCP tools like
     /// `perri.list_pr_queue` and `mother.list_jobs` return real data.
-    ///
-    /// The `event_tx` is connected to a dropped receiver so any accidental call
-    /// to a legacy TUI-only mutator fails fast rather than blocking.
     pub fn for_daemon(daemon: DaemonMcpBackend) -> Self {
-        let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
-        let mut state = Self::for_test(event_tx);
+        let mut state = Self::for_test();
         state.daemon = Some(daemon);
         state
     }
@@ -390,8 +376,7 @@ impl McpSharedState {
     /// `fred.get_state`, `mother.list_jobs`, etc. return live data instead of
     /// the empty stubs from `for_test`.
     pub fn for_daemon_with_sources(daemon: DaemonMcpBackend, sources: DaemonSources) -> Self {
-        let (event_tx, _dropped_rx) = mpsc::unbounded_channel();
-        let mut state = Self::for_test(event_tx);
+        let mut state = Self::for_test();
         state.daemon = Some(daemon);
         state.perri_queue_rx = sources.perri_queue_rx;
         state.perri_pr_rx = sources.perri_pr_rx;

@@ -45,7 +45,7 @@ use nostromo::{
         pane_registry::PaneRegistry,
         perri_state::{build_perri_state, WatchPerriStateProvider},
         protocol::ServerMsg,
-        PtyManager, Server, SessionManager,
+        Server, SessionManager,
     },
     mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
     mother::{self, statusline_cache_path, MotherStatus},
@@ -76,9 +76,6 @@ async fn main() -> Result<()> {
 
     // ── Config ────────────────────────────────────────────────────────────────
     let config = Config::load(None).context("loading config")?;
-
-    // ── PTY manager ───────────────────────────────────────────────────────────
-    let pty_mgr: Arc<Mutex<PtyManager>> = Arc::new(Mutex::new(PtyManager::new()));
 
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
@@ -167,7 +164,6 @@ async fn main() -> Result<()> {
     info!(app = %verifier.app_exe().display(), "operator app must run from");
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         config.perri_state_dir(),
         Arc::clone(&decisions),
@@ -199,7 +195,6 @@ async fn main() -> Result<()> {
 
     server.bind_tcp(
         tcp_listener,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         config.perri_state_dir(),
         Arc::clone(&decisions),
@@ -513,13 +508,9 @@ async fn main() -> Result<()> {
         _ = sigint.recv()  => info!("received SIGINT"),
     }
 
-    info!("nostromd shutting down; killing all PTYs and sessions");
+    info!("nostromd shutting down; killing all sessions");
 
     // Kill all child processes cleanly before exiting.
-    {
-        let mut mgr = pty_mgr.lock().unwrap();
-        mgr.kill_all_on_shutdown();
-    }
     {
         let mut mgr = session_mgr.lock().unwrap();
         mgr.kill_all_on_shutdown();

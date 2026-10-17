@@ -19,7 +19,7 @@ use std::time::Duration;
 use nostromo::ipc::decisions::DecisionRegistry;
 use nostromo::ipc::pane_registry::{PaneRegistry, SplitPosition};
 use nostromo::ipc::protocol::{ClientMsg, ServerMsg, Topic};
-use nostromo::ipc::{PtyManager, Server, SessionManager};
+use nostromo::ipc::{Server, SessionManager};
 use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState};
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -42,7 +42,6 @@ async fn make_harness() -> Harness {
     let raw_socket_path = dir.path().join("nostromod.sock");
     let mcp_socket_path = dir.path().join("mcp-render-state.sock");
 
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         dir.path().join("sessions.json"),
     )));
@@ -63,7 +62,6 @@ async fn make_harness() -> Harness {
 
     let raw_server = Server::bind(
         &raw_socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         dir.path().join("perri-state"),
         Arc::clone(&decisions),

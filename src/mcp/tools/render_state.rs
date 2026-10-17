@@ -206,8 +206,7 @@ mod tests {
 
     #[test]
     fn compute_with_no_windows_reporting_is_null_not_true() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = McpSharedState::for_test(tx);
+        let state = McpSharedState::for_test();
         // `state.daemon` is `None` in `for_test`, so this exercises the
         // `not_supported` branch — the daemon-backed case (windows: []
         // when a tag has no reports) is covered by the integration test in

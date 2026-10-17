@@ -21,7 +21,7 @@ use nostromo::mcp::tools::teri::{get_work_item, list_work_items, publish_picks};
 use nostromo::mcp::tools::{dispatch, ToolResult};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, watch};
 
 #[allow(dead_code)]
 #[path = "support/fence_scan.rs"]
@@ -142,8 +142,7 @@ async fn rig(todos: Vec<TeriTodo>) -> Rig {
         picks_path: Some(dir.path().join("picks.json")),
         ..HubDeps::new(btx, trx)
     });
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let mut state = McpSharedState::for_test(event_tx);
+    let mut state = McpSharedState::for_test();
     state.work_hub = Some(hub.clone());
 
     let deadline = tokio::time::Instant::now() + WAIT;

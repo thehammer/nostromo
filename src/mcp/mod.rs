@@ -63,7 +63,7 @@ pub mod tool_stats;
 pub mod tools;
 pub mod views;
 
-pub use command::{McpCommand, PaneContent};
+pub use command::PaneContent;
 pub use server::McpServer;
 pub use socket::{daemon_socket_path, default_socket_path, write_bridge_mcp_config};
 pub use state::{

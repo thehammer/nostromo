@@ -114,8 +114,8 @@ pub fn load() -> ToolPolicy {
 /// Daemon-hosted: the `pty_id` is the focus tag, and the focus registry maps it
 /// to an `agent_name` — the same two steps `get_self` takes, so a dispatched
 /// focus (`perri-a1b2c3d4`) resolves to `perri` without this module knowing
-/// anything about tag shapes. TUI-hosted: the PTY registry's `view_id` is the
-/// nearest equivalent.
+/// anything about tag shapes. Outside the daemon: the PTY registry's `view_id` is
+/// the nearest equivalent.
 ///
 /// `None` means "could not resolve", which every caller must read as
 /// "unfiltered".
@@ -169,7 +169,6 @@ agents:
     deny:
       - nostromo.set_pane_content
       - nostromo.set_pane_layout
-      - nostromo.set_pane_focus
       - nostromo.create_pane
       - nostromo.reset_panes
       - nostromo.apply_layout
@@ -211,7 +210,6 @@ mod tests {
         for tool in [
             "nostromo.set_pane_content",
             "nostromo.set_pane_layout",
-            "nostromo.set_pane_focus",
             "nostromo.create_pane",
             "nostromo.reset_panes",
             "nostromo.apply_layout",

@@ -23,8 +23,8 @@ pub fn default_socket_path() -> PathBuf {
 
 /// Socket path for the **daemon-hosted** MCP server.
 ///
-/// Distinct from [`default_socket_path`] (the TUI's `mcp.sock`) so a daemon and
-/// a TUI can run side by side without colliding. Honours `NOSTROMO_MCP_SOCKET`
+/// Distinct from [`default_socket_path`] (the legacy `mcp.sock`) so the two
+/// can't collide. Honours `NOSTROMO_MCP_SOCKET`
 /// when set in the daemon's own environment, else `~/.nostromo/mcp-daemon.sock`.
 pub fn daemon_socket_path() -> PathBuf {
     if let Ok(v) = std::env::var(MCP_SOCKET_ENV) {

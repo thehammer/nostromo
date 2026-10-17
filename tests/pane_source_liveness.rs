@@ -20,7 +20,7 @@ use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::pane_registry::{PaneRegistry, SplitPosition};
 use nostromo::ipc::perri_state::WatchPerriStateProvider;
 use nostromo::ipc::protocol::{ClientMsg, PaneContentWire, ServerMsg, Topic};
-use nostromo::ipc::{PtyManager, Server, SessionManager};
+use nostromo::ipc::{Server, SessionManager};
 use nostromo::mcp::pane_sources::{bound_pane_contents, McpPaneContentProvider};
 use nostromo::mcp::tools::apply_layout::apply_layout;
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
@@ -100,12 +100,10 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
             tmp.path().join("mcp-config.json"),
         );
     }
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -227,12 +225,10 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
             tmp.path().join("mcp-config.json"),
         );
     }
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -391,7 +387,6 @@ async fn attaching_client_gets_perri_state_replayed() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let (_queue_tx, queue_rx) = tokio::sync::watch::channel(Some(seeded_queue_snapshot()));
@@ -405,7 +400,6 @@ async fn attaching_client_gets_perri_state_replayed() {
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -469,12 +463,10 @@ async fn attaching_client_with_empty_topics_gets_layout_and_perri_replayed() {
             queue_rx, pr_rx,
         )));
     }
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -528,7 +520,6 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     // Both watch channels are still at their initial `None` — neither the PR
@@ -544,7 +535,6 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -591,7 +581,6 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     fn pr(repo: &str, number: u64) -> Arc<PrSnapshot> {
@@ -639,7 +628,6 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),

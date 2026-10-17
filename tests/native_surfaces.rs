@@ -18,7 +18,7 @@ use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::protocol::{
     ClientMsg, FocusMeta, PaneTree, ServerMsg, SessionAction, Topic, PROTOCOL_VERSION,
 };
-use nostromo::ipc::{PtyManager, Server, SessionManager};
+use nostromo::ipc::{Server, SessionManager};
 use nostromo::mcp::tools::apply_layout::apply_layout;
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
 use serde_json::json;
@@ -55,11 +55,9 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         tmp.path().join("mcp.sock"),
         tmp.path().join("mcp-config.json"),
     );
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -73,7 +71,6 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
     let tcp_port = tcp_listener.local_addr().unwrap().port();
     server.bind_tcp(
         tokio::net::TcpListener::from_std(tcp_listener).unwrap(),
-        pty_mgr,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),

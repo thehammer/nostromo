@@ -1518,8 +1518,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_daemon_backend_returns_not_supported() {
-        let (event_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = McpSharedState::for_test(event_tx);
+        let state = McpSharedState::for_test();
         let result =
             apply_layout(&state, &json!({ "name": "perri-standard" }), Some("perri")).await;
         assert_eq!(result["error"], "not_supported");

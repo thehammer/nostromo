@@ -3,8 +3,6 @@
 //! Phase 1: `nostromo.get_self`
 //! Phase 2: 12 new read-only introspection tools across all views.
 //! Phase 3: Pane mutation and cross-view dispatch tools.
-//! Phase 4: `nostromo.notify`, `nostromo.register_status_segment`,
-//!           `nostromo.clear_status_segment`.
 
 pub mod apply_layout;
 pub mod ask_decision;
@@ -18,15 +16,12 @@ pub mod list_views;
 pub mod mother;
 pub mod mother_mutators;
 pub mod nostromo_meta;
-pub mod notify;
 pub mod perri;
 pub mod perri_mutators;
 pub mod refresh_pane;
 pub mod render_state;
 pub mod set_pane;
 pub mod show;
-pub mod status_segment;
-pub mod switch_view;
 pub mod teri;
 
 use serde_json::{json, Value};
@@ -268,18 +263,6 @@ pub fn tool_descriptors() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "nostromo.set_pane_focus",
-            "description": "Focus a specific pane within a view (also switches the active view tab).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "view_id": { "type": "string" },
-                    "pane_id": { "type": "string" }
-                },
-                "required": ["view_id", "pane_id"]
-            }
-        }),
-        json!({
             "name": "nostromo.set_pane_layout",
             "description": "Update a view's pane-split ratios. Ratios are view-specific JSON (e.g. { top_row: 0.6, queue: 0.4 } for Perri).",
             "inputSchema": {
@@ -373,21 +356,10 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["agent", "title"]
             }
         }),
-        json!({
-            "name": "nostromo.switch_active_view",
-            "description": "Switch the globally-active Nostromo view tab. Calls blur() on the old view and focus() on the new.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "view_id": { "type": "string", "description": "View id to activate" }
-                },
-                "required": ["view_id"]
-            }
-        }),
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
-            "description": "Load a pull request into Perri's diff pane — pinning it as *one focus's* PR under review (W7), not the machine's. Writes that focus's pin file and triggers the native watcher. When hosted in nostromd (daemon): pushes the diff pane's content itself (your `highlights`, if given, become the pane's final content; otherwise a Loading state followed by a server-rendered PR summary once the refetch catches up — bounded by a settle timeout), and moves the agent-scoped selected index to this PR if it's in the current queue. When hosted in the standalone TUI: writes the file and returns once `PerriView` has applied it, with no pane-push/pending behavior. If the refetch does not settle, the result carries BOTH `pending` and `retryable` plus a human-readable `detail` — branch on `retryable`, not on `pending`: `{ \"pending\": true, \"retryable\": true }` means the settle timeout elapsed and the fetch may yet land (asking again later is reasonable), while `{ \"pending\": false, \"retryable\": false }` means the PR source task is gone, so nothing is in flight and retrying can never help — stop. A settled refetch (the normal case) has neither field. `ok` is true in every one of those cases: the pin was written and the panes were painted. Errors: invalid_args, unidentified_caller (daemon only — no `view_id` and no usable pty_id; a pin belonging to no focus would paint nothing while reporting success), not_supported (daemon only, when Perri's state dir isn't configured), io_error, event_loop_closed, event_loop_timeout (TUI only).",
+            "description": "Load a pull request into Perri's diff pane — pinning it as *one focus's* PR under review (W7), not the machine's. Writes that focus's pin file and triggers the native watcher. Pushes the diff pane's content itself (your `highlights`, if given, become the pane's final content; otherwise a Loading state followed by a server-rendered PR summary once the refetch catches up — bounded by a settle timeout), and moves the agent-scoped selected index to this PR if it's in the current queue. If the refetch does not settle, the result carries BOTH `pending` and `retryable` plus a human-readable `detail` — branch on `retryable`, not on `pending`: `{ \"pending\": true, \"retryable\": true }` means the settle timeout elapsed and the fetch may yet land (asking again later is reasonable), while `{ \"pending\": false, \"retryable\": false }` means the PR source task is gone, so nothing is in flight and retrying can never help — stop. A settled refetch (the normal case) has neither field. `ok` is true in every one of those cases: the pin was written and the panes were painted. Errors: invalid_args, unidentified_caller (no `view_id` and no usable pty_id; a pin belonging to no focus would paint nothing while reporting success), not_supported (no daemon, or Perri's state dir isn't configured), io_error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -401,7 +373,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "perri.clear_current_pr",
-            "description": "Clear one focus's PR under review (W7) — and only that focus's; no other focus's PR changes. When hosted in nostromd (daemon): also closes every curated review tab whose PR just stopped being under review, and re-pushes the PR queue pane. Errors: invalid_args (a focus tag that isn't a safe filename), unidentified_caller (daemon only — no `view_id` and no usable pty_id; clearing \"the PR under review\" with no focus to clear it *for* would wipe whichever focus happened to hold the slot), not_supported (daemon only), io_error, event_loop_closed, event_loop_timeout (TUI only).",
+            "description": "Clear one focus's PR under review (W7) — and only that focus's; no other focus's PR changes. Also closes every curated review tab whose PR just stopped being under review, and re-pushes the PR queue pane. Errors: invalid_args (a focus tag that isn't a safe filename), unidentified_caller (no `view_id` and no usable pty_id; clearing \"the PR under review\" with no focus to clear it *for* would wipe whichever focus happened to hold the slot), not_supported (no daemon), io_error.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -412,7 +384,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "perri.set_selected_index",
-            "description": "Set the agent-scoped selected PR index in Perri's queue list, clamped to the current queue length (0 when empty). Daemon-hosted: this index is agent-scoped bookkeeping only — it does not move any GUI highlight (no wire/client concept of selection exists yet). TUI-hosted: moves `PerriView`'s own selection, same as keyboard navigation.",
+            "description": "Set the agent-scoped selected PR index in Perri's queue list, clamped to the current queue length (0 when empty). This index is agent-scoped bookkeeping only — it does not move any GUI highlight (no wire/client concept of selection exists yet).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -429,7 +401,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         json!({
             "name": "mother.enqueue_job",
-            "description": "Enqueue a plan file as a new Mother job via `mother add`. Returns { id } (plus title/status in the TUI). `repo` (a bare repo NAME such as `nostromo`, as `mother add --repo NAME` takes — not an owner/slug) and `branch` are required. The plan file must contain a `suggested_config` block. Values for repo/branch/base/label/repo_path/depends_on must not start with `-`.",
+            "description": "Enqueue a plan file as a new Mother job via `mother add`. Returns { id }. `repo` (a bare repo NAME such as `nostromo`, as `mother add --repo NAME` takes — not an owner/slug) and `branch` are required. The plan file must contain a `suggested_config` block. Values for repo/branch/base/label/repo_path/depends_on must not start with `-`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -490,57 +462,10 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["id"]
             }
         }),
-        // ── Phase 4: notifications & status segments ───────────────────────
-        json!({
-            "name": "nostromo.notify",
-            "description": "Post a transient toast notification to the Nostromo status bar. The toast auto-expires after 5 s.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "message": { "type": "string", "description": "Notification text" },
-                    "level": {
-                        "type": "string",
-                        "enum": ["info", "warn", "error"],
-                        "description": "Severity level (default: info)"
-                    },
-                    "view_id": { "type": "string", "description": "Optional view id requesting the notification (informational)" }
-                },
-                "required": ["message"]
-            }
-        }),
-        json!({
-            "name": "nostromo.register_status_segment",
-            "description": "Add or update a named status-bar segment for a view. Segment is displayed when the view is active.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "view_id":    { "type": "string", "description": "View id (e.g. 'perri', 'fred')" },
-                    "segment_id": { "type": "string", "description": "Stable identifier for this segment within the view" },
-                    "text":       { "type": "string", "description": "Text to display" },
-                    "color": {
-                        "type": "string",
-                        "description": "Named color (red, amber, sage, blue, muted) or 6-digit hex (#rrggbb)"
-                    }
-                },
-                "required": ["view_id", "segment_id", "text"]
-            }
-        }),
-        json!({
-            "name": "nostromo.clear_status_segment",
-            "description": "Remove a named status-bar segment for a view.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "view_id":    { "type": "string" },
-                    "segment_id": { "type": "string" }
-                },
-                "required": ["view_id", "segment_id"]
-            }
-        }),
         // ── decision modals (W6) ────────────────────────────────────────────
         json!({
             "name": "nostromo.ask_decision",
-            "description": "Pose a decision as a modal over the window and block until the operator answers, dismisses it, or the call times out. Not a content channel: there is no free-form content field — only a bounded prompt, an optional bounded detail string, and 2+ labelled choices. Returns { ok: true, choice_id } when the operator picks an option, or { ok: true, outcome: \"dismissed\" } when the modal is dismissed without choosing (a distinct outcome, not a default choice). Errors: invalid_args (fewer than two choices, duplicate choice ids, an empty/over-long prompt, detail, or label), no_operator (no client is subscribed to receive it — returned immediately rather than blocking), timeout (nobody answered within timeout_secs), cancelled (the asking session died while this call was outstanding), not_supported (TUI-hosted only — there is no window to attach a sheet to).",
+            "description": "Pose a decision as a modal over the window and block until the operator answers, dismisses it, or the call times out. Not a content channel: there is no free-form content field — only a bounded prompt, an optional bounded detail string, and 2+ labelled choices. Returns { ok: true, choice_id } when the operator picks an option, or { ok: true, outcome: \"dismissed\" } when the modal is dismissed without choosing (a distinct outcome, not a default choice). Errors: invalid_args (fewer than two choices, duplicate choice ids, an empty/over-long prompt, detail, or label), no_operator (no client is subscribed to receive it — returned immediately rather than blocking), timeout (nobody answered within timeout_secs), cancelled (the asking session died while this call was outstanding), not_supported (no daemon).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -636,12 +561,10 @@ const SENSITIVE_VIEW_IDS: [&str; 3] = ["fred", "teri", "mother"];
 
 /// Tools whose target is a focus/view (`view_id`, else the caller's own
 /// focus): what they read, repaint or echo belongs to that focus.
-const FOCUS_SCOPED_TOOLS: [&str; 17] = [
+const FOCUS_SCOPED_TOOLS: [&str; 15] = [
     "nostromo.get_render_state",
     "nostromo.set_pane_content",
-    "nostromo.set_pane_focus",
     "nostromo.set_pane_layout",
-    "nostromo.switch_active_view",
     "nostromo.create_pane",
     "nostromo.reset_panes",
     "nostromo.apply_layout",
@@ -890,17 +813,9 @@ async fn dispatch_inner(
             let args = arguments.cloned().unwrap_or_default();
             set_pane::set_pane_content(state, &args).await
         }
-        "nostromo.set_pane_focus" => {
-            let args = arguments.cloned().unwrap_or_default();
-            set_pane::set_pane_focus(state, &args).await
-        }
         "nostromo.set_pane_layout" => {
             let args = arguments.cloned().unwrap_or_default();
             set_pane::set_pane_layout(state, &args).await
-        }
-        "nostromo.switch_active_view" => {
-            let args = arguments.cloned().unwrap_or_default();
-            switch_view::switch_active_view(state, &args).await
         }
 
         // ── agent-driven pane layout (Phase 1) ────────────────────────────
@@ -960,20 +875,6 @@ async fn dispatch_inner(
         "mother.retry_job" => {
             let args = arguments.cloned().unwrap_or_default();
             mother_mutators::retry_job(state, &args).await
-        }
-
-        // ── Phase 4: notifications & status segments ────────────────────────
-        "nostromo.notify" => {
-            let args = arguments.cloned().unwrap_or_default();
-            notify::handle(state, &args).await
-        }
-        "nostromo.register_status_segment" => {
-            let args = arguments.cloned().unwrap_or_default();
-            status_segment::register(state, &args).await
-        }
-        "nostromo.clear_status_segment" => {
-            let args = arguments.cloned().unwrap_or_default();
-            status_segment::clear(state, &args).await
         }
 
         // ── decision modals (W6) ───────────────────────────────────────────

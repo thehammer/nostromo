@@ -25,7 +25,7 @@ use nostromo::{
     },
     mother::{MotherJob, MotherStatus},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 // ── fixture data ──────────────────────────────────────────────────────────────
 
@@ -54,7 +54,6 @@ fn seeded_state(
     rate_limits: Option<RateLimits>,
     budget_posture: Option<BudgetPosture>,
 ) -> McpSharedState {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let (_, perri_queue_rx) = watch::channel(perri_queue);
     let (_, perri_pr_rx) =
         watch::channel(perri_pr.map_or_else(no_prs, |snap| one_pr(BUILTIN_PERRI_TAG, snap)));
@@ -66,7 +65,6 @@ fn seeded_state(
     let (_, rate_limits_rx) = watch::channel(rate_limits);
     let (_, budget_posture_rx) = watch::channel(budget_posture);
     McpSharedState::new(
-        tx,
         perri_queue_rx,
         perri_pr_rx,
         mailbox_rx,

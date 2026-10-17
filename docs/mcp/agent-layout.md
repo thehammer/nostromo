@@ -5,8 +5,7 @@ session assemble its own pane workspace on its first turn, instead of the shape
 being frozen in a hand-written Swift view. It is the foundation of the
 "agent is the window manager" vision (Phase 1: imperative pane tools).
 
-It is distinct from — and additive to — the TUI's in-process MCP server
-(`docs/mcp/panes.md`), which is unchanged.
+See `docs/mcp/panes.md` for the pane tool reference.
 
 ## Architecture
 
@@ -184,8 +183,7 @@ dir), `project_required` / `not_a_git_repo` (Mother destination), `spawn_failed`
 Every tool returns either a success object or
 `{ "error": "<snake_case_code>", "detail"?: "…" }` — never a panic, never a
 malformed frame. The daemon-hosted tools mutate the registry under its mutex and
-broadcast synchronously, so they do not use the 5 s event-loop command timeout
-the TUI path uses.
+broadcast synchronously.
 
 ## The curated flow (curated-agent-views W5)
 
@@ -214,7 +212,7 @@ engine rather than by the calling agent. See `docs/mcp/tools.md`'s
 `docs/mcp/panes.md`'s "Placement rules" section for how a show is placed.
 
 **This does not remove the raw tools above.** `create_pane`, `reset_panes`,
-`set_pane_layout`, `set_pane_content`, `set_pane_focus`, `apply_layout`, and
+`set_pane_layout`, `set_pane_content`, `apply_layout`, and
 `refresh_pane_content` are unchanged, still callable, and still the only way
 to assemble a layout that isn't one of the five curated view types — this is
 exactly how Mother's, Fred's, and Teri's views work today, and how Perri's own

@@ -53,7 +53,7 @@ use nostromo::ipc::{
     server::Server,
     session_manager::CLAUDE_BIN_ENV,
     stream_json::{SessionState, Turn, TurnDelta},
-    PtyManager, SessionManager,
+    SessionManager,
 };
 use nostromo::ipc::peer_verify::{testing::FakePeerVerifier, MAC_APP_CLIENT_KIND};
 use nostromo::mcp::tools::create_focus::create_focus;
@@ -100,7 +100,6 @@ async fn spawn_server() -> Harness {
     let tmp = TempDir::new().expect("tempdir");
     let socket_path = tmp.path().join("test.sock");
 
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     // A private id store: sessions spawned by these tests must never touch the
     // operator's `~/.nostromo/daemon-sessions.json`.
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
@@ -110,7 +109,6 @@ async fn spawn_server() -> Harness {
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -129,7 +127,6 @@ async fn spawn_server() -> Harness {
 
     server.bind_tcp(
         tcp_listener,
-        pty_mgr,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -2840,7 +2837,6 @@ async fn a_tcp_pty_spawn_is_still_refused_before_any_handler() {
     )
     .await;
     assert_refused(&frames, "pty_spawn");
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtySpawned { .. })), "{frames:?}");
     assert!(
         !frames.iter().any(|m| matches!(m, ServerMsg::Error { message } if message.starts_with("pty_host_removed"))),
         "the refusal must come from the network policy, not the handler: {frames:?}"
@@ -2860,7 +2856,6 @@ async fn a_unix_pty_spawn_is_answered_pty_host_removed_and_runs_nothing() {
     )
     .await;
     assert_pty_host_removed(&frames, "pty_spawn");
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtySpawned { .. })), "{frames:?}");
     assert!(file_never_appears(&marker).await, "a tombstoned pty_spawn ran its command");
 }
 
@@ -2890,13 +2885,11 @@ async fn pty_list_and_pty_detach_are_answered_pty_host_removed_on_both_transport
 
     let frames = attack(&mut unix, ClientMsg::PtyList).await;
     assert_pty_host_removed(&frames, "unix pty_list");
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtyListResp { .. })), "{frames:?}");
     let frames = attack(&mut unix, ClientMsg::PtyDetach { pty_id: "p".into() }).await;
     assert_pty_host_removed(&frames, "unix pty_detach");
 
     let frames = attack(&mut tcp, ClientMsg::PtyList).await;
     assert_pty_host_removed(&frames, "tcp pty_list");
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::PtyListResp { .. })), "{frames:?}");
     let frames = attack(&mut tcp, ClientMsg::PtyDetach { pty_id: "p".into() }).await;
     assert_pty_host_removed(&frames, "tcp pty_detach");
 }
@@ -4583,8 +4576,8 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
     assert_refused(&frames, "pty_attach");
     let frames = sync(&mut unix).await;
     assert!(
-        !frames.iter().any(|m| matches!(m, ServerMsg::PtyDetach { .. })),
-        "the refused TCP pty_attach must not detach the local client: {frames:?}"
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "the refused TCP pty_attach must not reach the local client: {frames:?}"
     );
     let frames = attack(&mut tcp, ClientMsg::PtyDetach { pty_id: "r5-ro".into() }).await;
     assert_pty_host_removed(&frames, "pty_detach");

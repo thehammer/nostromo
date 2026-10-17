@@ -41,7 +41,7 @@ use nostromo::ipc::{
     },
     protocol::{ClientMsg, DecisionChoice, DecisionResolution, ServerMsg, Topic, PROTOCOL_VERSION},
     server::Server,
-    PtyManager, SessionManager,
+    SessionManager,
 };
 use nostromo::mcp::tools::ask_decision;
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
@@ -68,13 +68,11 @@ struct Env {
 async fn env_with(verifier: Arc<dyn PeerVerifier>, qa_mode: bool) -> Env {
     let tmp = TempDir::new().expect("tempdir");
     let socket_path = tmp.path().join("test.sock");
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(tmp.path().join("sessions.json"))));
     let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
@@ -88,7 +86,6 @@ async fn env_with(verifier: Arc<dyn PeerVerifier>, qa_mode: bool) -> Env {
     let tcp_port = tcp_listener.local_addr().unwrap().port();
     server.bind_tcp(
         tcp_listener,
-        pty_mgr,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),

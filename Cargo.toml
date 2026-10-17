@@ -37,7 +37,7 @@ path = "src/bin/sensitive_text_scan.rs"
 test-support = []
 
 [dependencies]
-# Embedded PTY
+# Embedded PTY: unused until terminal-pane 1a's TerminalManager; keep
 portable-pty = "0.8"
 vt100 = "0.16"
 

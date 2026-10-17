@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::protocol::{ClientMsg, ServerMsg, Topic};
-use nostromo::ipc::{PtyManager, Server, SessionManager};
+use nostromo::ipc::{Server, SessionManager};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -80,12 +80,10 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
@@ -143,12 +141,10 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
 
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
@@ -401,13 +397,11 @@ async fn serve_with_session_mgr() -> (
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let decisions = Arc::new(Mutex::new(
         nostromo::ipc::decisions::DecisionRegistry::default(),
     ));
     let server = Server::bind(
         &socket_path,
-        Arc::clone(&pty_mgr),
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
