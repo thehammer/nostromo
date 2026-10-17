@@ -563,8 +563,18 @@ private struct DecisionAnswerMsg: Encodable {
     let type_ = "decision_answer"
     let requestId: String
     let choiceId: String?
+    /// The nonce the daemon issued in this connection's `welcome`. Omitted when
+    /// nil; `choice_id` is always present, `null` for a dismissal.
+    let operatorNonce: String?
     enum CodingKeys: String, CodingKey {
-        case type_ = "type", requestId = "request_id", choiceId = "choice_id"
+        case type_ = "type", requestId = "request_id", choiceId = "choice_id", operatorNonce = "operator_nonce"
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(requestId, forKey: .requestId)
+        try c.encode(choiceId, forKey: .choiceId)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
     }
 }
 
@@ -602,6 +612,14 @@ class NostromodClient {
     private var fd: Int32 = -1            // POSIX AF_UNIX socket (NWConnection's
                                          // .unix endpoint fails with ENETDOWN).
     private let sendLock = NSLock()
+    /// The `operator_nonce` from the `welcome` of the connection on `sock`, if
+    /// the daemon verified this app as the operator. Echoed in every
+    /// `decision_answer` written to that same socket, and never to another:
+    /// cleared when the socket is torn down and when a new one connects (fd
+    /// numbers are reused). Guarded by `sendLock`.
+    private var operatorNonce: (sock: Int32, value: String)?
+    /// Whether the "not verified as the operator" error was logged already.
+    private var loggedNoOperatorNonce = false
     private let socketPath: String
     private let q = DispatchQueue(label: "com.hammer.nostromo.ipc", qos: .utility)
     private var reconnectDelay: TimeInterval = 1.0
@@ -677,6 +695,9 @@ class NostromodClient {
         }
 
         log.info("Connected to nostromd at \(self.socketPath, privacy: .public)")
+        sendLock.lock()
+        operatorNonce = nil
+        sendLock.unlock()
         fd = sock
         reconnectDelay = 1.0
         sendHello()
@@ -839,8 +860,32 @@ class NostromodClient {
     /// daemon actually consumes (unlike `SessionAnswerPermission`, which is a
     /// deliberate no-op) — see `ClientMsg::DecisionAnswer` in
     /// `src/ipc/protocol.rs`.
+    ///
+    /// The frame carries the `operator_nonce` of the connection it is written
+    /// to: the nonce and the socket are read under the same lock as the write,
+    /// so a reconnect in between can't pair one connection's nonce with
+    /// another's socket.
     func decisionAnswer(requestId: String, choiceId: String?) {
-        send(DecisionAnswerMsg(requestId: requestId, choiceId: choiceId), type: "decision_answer")
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("decision_answer dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(DecisionAnswerMsg(requestId: requestId, choiceId: choiceId,
+                                                                 operatorNonce: nonce))
+        else { return }
+        writeFrameLocked(body, to: curFd, type: "decision_answer", tag: nil)
+    }
+
+    /// Record (or clear) the operator nonce from the `welcome` on `sock`.
+    private func noteWelcome(operatorNonce nonce: String?, on sock: Int32) {
+        sendLock.lock()
+        operatorNonce = nonce.map { (sock: sock, value: $0) }
+        let logNow = nonce == nil && !loggedNoOperatorNonce
+        if logNow { loggedNoOperatorNonce = true }
+        sendLock.unlock()
+        if logNow {
+            log.error("daemon did not verify this app as the operator; decisions can't be answered from it. Run make mac-install")
+        }
     }
 
     // MARK: - Focus registry commands (Phase 1)
@@ -945,13 +990,17 @@ class NostromodClient {
         guard fd >= 0, let body = try? encoder.encode(msg)
         else { log.debug("send dropped — not connected (fd=\(self.fd, privacy: .public))"); return }
 
-        var bigEndianLen = UInt32(body.count).bigEndian
-        var frame = Data(bytes: &bigEndianLen, count: 4)
-        frame.append(body)
-
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
         guard curFd >= 0 else { return }
+        writeFrameLocked(body, to: curFd, type: type, tag: tag)
+    }
+
+    /// Write one length-prefixed frame to `curFd`. The caller holds `sendLock`.
+    private func writeFrameLocked(_ body: Data, to curFd: Int32, type: String, tag: String?) {
+        var bigEndianLen = UInt32(body.count).bigEndian
+        var frame = Data(bytes: &bigEndianLen, count: 4)
+        frame.append(body)
         var wroteFully = false
         frame.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             guard let base = raw.baseAddress else { return }
@@ -982,6 +1031,9 @@ class NostromodClient {
         }
         log.info("read loop ended (fd=\(sock, privacy: .public)) — reconnecting")
         Darwin.close(sock)
+        sendLock.lock()
+        if operatorNonce?.sock == sock { operatorNonce = nil }
+        sendLock.unlock()
         if fd == sock { fd = -1 }
         connected.send(false)
         latency.noteDisconnect()
@@ -1019,6 +1071,7 @@ class NostromodClient {
         // Re-sending an attach later is not an option: the daemon would start a second
         // forwarder and every delta would render twice.
         if type_ == "welcome", fd == sock {
+            noteWelcome(operatorNonce: json["operator_nonce"] as? String, on: sock)
             subscribeToAdvertisedFeatures(json["features"] as? [String] ?? [])
             connected.send(true)
         }

@@ -63,7 +63,7 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();

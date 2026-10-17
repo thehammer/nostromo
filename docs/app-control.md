@@ -122,10 +122,30 @@ user gesture. A `click`, `key` or `type` aimed at one does nothing: the sheet
 stays up and the app logs `synthetic input refused`. That holds whether or not
 app-control is enabled.
 
-How the app tells: every request runs inside `SyntheticInputGate.begin()` /
-`end()`, and every event `click`, `drag` and `key` synthesise carries
-`SyntheticInputGate.marker` in its `CGEvent` source user data
-(`macOS/Nostromo/Security/`). `HumanGesture.permit` refuses either.
+How the app tells (`macOS/Nostromo/Security/`), two signals, either one enough:
+
+- **Depth gate.** Every request runs inside `SyntheticInputGate.begin()` /
+  `end()` on the main thread, so anything a control sees while one runs is
+  synthetic. This is what catches `click`, `drag` and `type`.
+- **Marker.** Only `key` events carry `SyntheticInputGate.marker` in their
+  `CGEvent` source user data, so one delivered after the request returned is
+  still recognised. Clicks and drags are **not** stamped: rebuilding a mouse
+  event through `NSEvent(cgEvent:)` recomputes its window location from its
+  screen location, unreliably (see the `SyntheticInputGate.stamped` doc). They
+  are delivered while the request runs, so the depth gate covers them.
+
+`HumanGesture.permit` refuses either. It also refuses an event-less action
+(an Accessibility `AXPress` from another process) unless VoiceOver is on, and
+**a stale event**: AppKit leaves `NSApp.currentEvent` set to the last event it
+dispatched, even in later timer and dispatch callbacks, so a press arriving
+more than **1 s** (`HumanGesture.maxEventAge`) after that event is refused
+(`staleEvent`). An event stamped in the **future** by more than **0.25 s**
+(`HumanGesture.maxFutureSkew`) is refused too (`futureEvent`): a real event is
+stamped when it happened, and the age check alone would let any future
+timestamp pass.
+
+What the daemon checks on its side (only the pinned, installed app may answer
+at all) is in [`operator-app-trust.md`](operator-app-trust.md).
 
 **QA-only switch.** An isolated QA build may accept synthetic input on those
 controls when it is launched with `NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT=1` **and**

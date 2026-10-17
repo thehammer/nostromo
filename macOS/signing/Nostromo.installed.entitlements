@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements of the installed Nostromo.app (`make mac-install`), signed ad-hoc
+  with the hardened runtime by scripts/sign-operator-app.sh. Deliberately empty:
+  the app links only system frameworks and /usr/lib/swift, so it needs no
+  hardened-runtime exception. Never add get-task-allow,
+  allow-dyld-environment-variables or disable-library-validation: each one
+  reopens the app to debugger attach or library injection, and the daemon
+  (src/ipc/peer_verify.rs) refuses an app that carries them. Not used by the
+  Xcode project; Debug builds keep Xcode's own signing.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

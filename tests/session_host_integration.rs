@@ -54,7 +54,7 @@ async fn session_round_trip_drives_real_claude() {
     let pty_mgr = Arc::new(Mutex::new(PtyManager::new()));
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(store_path)));
     let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
-    let _server = Server::bind(&socket_path, pty_mgr, session_mgr, tmp.join("perri-state"), decisions, Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier), false).unwrap();
+    let _server = Server::bind(&socket_path, pty_mgr, session_mgr, tmp.join("perri-state"), decisions, Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.join("operator-app.pin"))), false).unwrap();
 
     // Give the listener a moment to bind.
     tokio::time::sleep(Duration::from_millis(100)).await;

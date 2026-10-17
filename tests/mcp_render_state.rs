@@ -67,7 +67,7 @@ async fn make_harness() -> Harness {
         Arc::clone(&session_mgr),
         dir.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(dir.path().join("operator-app.pin"))),
         false,
     )
     .expect("raw server should bind");

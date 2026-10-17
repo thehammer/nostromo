@@ -1433,7 +1433,7 @@ mod tests {
             ClientMsg::MotherAction { job_id: "j".into(), action: MotherActionKind::Cancel },
             ClientMsg::MotherResume { job_id: "j".into(), answer: "a".into() },
             ClientMsg::PerriAction { action: "clear".into(), pr_number: None, repo: None, tag: None },
-            ClientMsg::DecisionAnswer { request_id: "r".into(), choice_id: None },
+            ClientMsg::DecisionAnswer { request_id: "r".into(), choice_id: None, operator_nonce: None },
             ClientMsg::ActivitySnapshotRequest { tag: "x1".into() },
             ClientMsg::RenderedShape {
                 tag: "x1".into(),

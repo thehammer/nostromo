@@ -554,7 +554,8 @@ async fn raw_recv_none_within(stream: &mut UnixStream, within: Duration) {
 }
 
 /// Connect, Hello/Welcome, then Subscribe to `topics` with an explicit
-/// `renders_decisions` flag. Mirrors `tests/activity.rs`'s `handshake()`. A
+/// `renders_decisions` flag. Returns the Welcome's `operator_nonce`, which a
+/// `DecisionAnswer` from this connection must echo. Mirrors `tests/activity.rs`'s `handshake()`. A
 /// short real sleep afterward gives the server a moment to finish registering
 /// this connection's subscription (and, per the decision-operator-gate fix,
 /// its operator status) before the test starts driving the registry directly
@@ -566,15 +567,19 @@ async fn raw_handshake(
     client_id: &str,
     topics: Vec<Topic>,
     renders_decisions: bool,
-) {
+) -> Option<String> {
     raw_send(
         stream,
         &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4, client_kind: Some("mac_app".into()) },
     )
     .await;
-    assert!(matches!(raw_recv(stream).await, ServerMsg::Welcome { .. }));
+    let operator_nonce = match raw_recv(stream).await {
+        ServerMsg::Welcome { operator_nonce, .. } => operator_nonce,
+        other => panic!("expected Welcome, got {other:?}"),
+    };
     raw_send(stream, &ClientMsg::Subscribe { topics, renders_decisions }).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
+    operator_nonce
 }
 
 /// A subscribed client sees the request, then — once answered directly on
@@ -872,7 +877,7 @@ async fn a_subscriber_with_explicit_decision_topic_counts_as_operator_and_ask_de
     let harness = make_combined_harness().await;
 
     let mut operator = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
-    raw_handshake(&mut operator, "macos-operator", vec![Topic::Decision], false).await;
+    let nonce = raw_handshake(&mut operator, "macos-operator", vec![Topic::Decision], false).await;
 
     let (mut reader, mut writer) = connect(&harness.mcp_socket_path, "perri").await;
     let call = tokio::spawn(async move {
@@ -892,7 +897,7 @@ async fn a_subscriber_with_explicit_decision_topic_counts_as_operator_and_ask_de
     };
     raw_send(
         &mut operator,
-        &ClientMsg::DecisionAnswer { request_id, choice_id: Some("approve".into()) },
+        &ClientMsg::DecisionAnswer { request_id, choice_id: Some("approve".into()), operator_nonce: nonce },
     )
     .await;
 
@@ -915,7 +920,7 @@ async fn a_wildcard_subscriber_with_renders_decisions_true_counts_as_operator_an
     let harness = make_combined_harness().await;
 
     let mut operator = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
-    raw_handshake(&mut operator, "future-ios-operator", vec![], true).await;
+    let nonce = raw_handshake(&mut operator, "future-ios-operator", vec![], true).await;
 
     let (mut reader, mut writer) = connect(&harness.mcp_socket_path, "perri").await;
     let call = tokio::spawn(async move {
@@ -935,7 +940,7 @@ async fn a_wildcard_subscriber_with_renders_decisions_true_counts_as_operator_an
     };
     raw_send(
         &mut operator,
-        &ClientMsg::DecisionAnswer { request_id, choice_id: Some("approve".into()) },
+        &ClientMsg::DecisionAnswer { request_id, choice_id: Some("approve".into()), operator_nonce: nonce },
     )
     .await;
 

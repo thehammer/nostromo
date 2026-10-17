@@ -40,7 +40,7 @@ async fn spawn_server() -> (Server, u16, TempDir) {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .expect("bind unix socket");

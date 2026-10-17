@@ -121,6 +121,9 @@ pub struct DecisionRegistry {
     /// setting `renders_decisions: true` on that frame. See
     /// [`Self::has_operator`].
     operators: HashSet<String>,
+    /// Ids of active requests whose answer-time refusal was already logged
+    /// (see [`Self::first_refusal`]). Same growth argument as `resolved`.
+    refusals_logged: HashSet<String>,
     /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
     /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
     /// for the multi-window decision-sheet bug: every presenting window (not
@@ -142,6 +145,14 @@ impl DecisionRegistry {
     /// first), not a constructor argument.
     pub fn configure_broadcast(&mut self, tx: broadcast::Sender<ServerMsg>) {
         self.broadcast = Some(tx);
+    }
+
+    /// Whether this is the first refused answer for `request_id` while it is
+    /// still pending (a refusal never resolves it, so the asking agent keeps
+    /// waiting until its own timeout). False for later refusals and for ids
+    /// that are not active, so the daemon can log the reason once per decision.
+    pub fn first_refusal(&mut self, request_id: &str) -> bool {
+        self.active.contains_key(request_id) && self.refusals_logged.insert(request_id.to_string())
     }
 
     // ── submission ────────────────────────────────────────────────────────────
@@ -1125,5 +1136,73 @@ mod tests {
         assert!(!registry.has_operator());
         assert!(!registry.has_operator_for(false));
         assert!(!registry.has_operator_for(true));
+    }
+
+    // ── first_refusal: log a refused answer once per pending decision ───────────
+
+    #[test]
+    fn the_first_refused_answer_for_a_pending_decision_is_reported_once_and_later_ones_are_not() {
+        let mut registry = DecisionRegistry::new();
+        let (request_id, _rx, _) = submit_simple(&mut registry, "mother", "Ship it?");
+        assert!(registry.first_refusal(&request_id));
+        assert!(!registry.first_refusal(&request_id));
+        assert!(!registry.first_refusal(&request_id));
+    }
+
+    #[test]
+    fn each_pending_decision_gets_its_own_first_refusal() {
+        let mut registry = DecisionRegistry::new();
+        let (a, _rx_a, _) = submit_simple(&mut registry, "mother", "A?");
+        let (b, _rx_b, _) = submit_simple(&mut registry, "cody", "B?");
+        assert!(registry.first_refusal(&a));
+        assert!(registry.first_refusal(&b), "refusing A's answer must not use up B's");
+        assert!(!registry.first_refusal(&a));
+        assert!(!registry.first_refusal(&b));
+    }
+
+    #[test]
+    fn a_refusal_for_an_id_that_was_never_requested_is_not_reported() {
+        let mut registry = DecisionRegistry::new();
+        assert!(!registry.first_refusal("no-such-request"));
+        let (request_id, _rx, _) = submit_simple(&mut registry, "mother", "Ship it?");
+        assert!(!registry.first_refusal("no-such-request"));
+        assert!(registry.first_refusal(&request_id), "an unknown id must not disturb a real one");
+    }
+
+    #[test]
+    fn a_refusal_for_a_decision_that_is_already_resolved_is_not_reported() {
+        let mut registry = DecisionRegistry::new();
+        let (answered, _rx1, _) = submit_simple(&mut registry, "mother", "Answered?");
+        expect_answered_with_no_promotion(registry.answer(&answered, Some("approve".into())), "answering");
+        assert!(!registry.first_refusal(&answered));
+
+        let (timed_out, _rx2, _) = submit_simple(&mut registry, "cody", "Timed out?");
+        registry.timeout_request(&timed_out);
+        assert!(!registry.first_refusal(&timed_out));
+
+        let (cancelled, _rx3, _) = submit_simple(&mut registry, "perri", "Cancelled?");
+        registry.cancel_tag("perri");
+        assert!(!registry.first_refusal(&cancelled));
+    }
+
+    #[test]
+    fn a_decision_still_waiting_in_the_queue_is_not_reported_until_it_is_the_active_one() {
+        let mut registry = DecisionRegistry::new();
+        let (first, _rx1, _) = submit_simple(&mut registry, "mother", "First?");
+        let (second, _rx2, _) = submit_simple(&mut registry, "mother", "Second?");
+        assert!(!registry.first_refusal(&second), "nobody was shown the queued decision, so nothing was refused for it");
+
+        expect_promoted(registry.answer(&first, Some("approve".into())), "answering the first promotes the second");
+        assert!(registry.first_refusal(&second));
+    }
+
+    #[test]
+    fn a_refused_answer_leaves_the_decision_pending_and_answerable() {
+        let mut registry = DecisionRegistry::new();
+        let (request_id, mut rx, _) = submit_simple(&mut registry, "mother", "Ship it?");
+        assert!(registry.first_refusal(&request_id));
+        assert!(rx.try_recv().is_err(), "reporting a refusal must not resolve the decision");
+        expect_answered_with_no_promotion(registry.answer(&request_id, Some("approve".into())), "a later genuine answer");
+        assert!(matches!(rx.try_recv(), Ok(DecisionOutcome::Answered(id)) if id == "approve"));
     }
 }

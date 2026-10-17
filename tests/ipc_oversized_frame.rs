@@ -49,7 +49,7 @@ fn spawn() -> Daemon {
         session_mgr,
         tmp.path().join("perri-state"),
         decisions,
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
         false,
     )
     .unwrap();

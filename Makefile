@@ -30,6 +30,7 @@ python-test:
 	python3 -m unittest discover -s tests/app_control -v
 	python3 -m unittest discover -s tests/launch_smoke -v
 	python3 -m unittest discover -s tests/ci_policy -v
+	python3 -m unittest discover -s tests/operator_pin -v
 	python3 -m unittest discover -s tests/ci_remote -v
 	python3 -m unittest discover -s scripts/qa/tests -v
 	python3 -m unittest discover -s scripts/tracker/tests -v
@@ -125,7 +126,7 @@ IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21# Hammer's iPhone Pro
 IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE# Hammer's iPad Pro
 IOS_APP_RELEASE  = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
 
-.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install kit-test ios-build ios-install ios-install-ipad ios-install-all mac-smoke mac-smoke-validate
+.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install mac-pin mac-verify-install kit-test ios-build ios-install ios-install-ipad ios-install-all mac-smoke mac-smoke-validate
 
 # Release build uses an explicit derived-data path so the product location is
 # predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
@@ -189,12 +190,16 @@ mac-icon:
 	  echo "NOTE: Assets.xcassets not wired into the project yet — icon built, run again after wiring."; \
 	fi
 
-## Release build of the GUI (ad-hoc signed, predictable output path)
+## Release build of the GUI (ad-hoc signed, predictable output path).
+## The previous product is removed first and the build's own status decides
+## (`pipefail`), so a failed build can never be signed, pinned and installed
+## from a STALE product left by an earlier run.
 mac-release:
-	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo \
+	@rm -rf "$(APP_RELEASE)"
+	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo \
 	  -configuration Release -derivedDataPath build \
 	  CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build \
-	  2>&1 | grep -E "error:|warning:|BUILD" || true
+	  2>&1 | grep -E "error:|warning:|BUILD"
 	@test -d "$(APP_RELEASE)" && echo "built → $(APP_RELEASE)" || { echo "release build failed"; exit 1; }
 
 ## Run the shared NostromoKit logic test suite (SwiftPM, headless). This is
@@ -250,12 +255,45 @@ ios-install-all: ios-build
 	  "$(IOS_APP_RELEASE)"
 	@echo "installed → iPad ($(IPAD_DEVICE_ID))"
 
-## Install the Release build into /Applications (run at milestones).
+## Install the Release build into /Applications (run at milestones), as the
+## operator app: the only app the daemon lets answer an agent's decision
+## (docs/operator-app-trust.md).
+##
+## 1. Sign the build product (ad-hoc, hardened runtime, no entitlements) BEFORE
+##    copying it: re-signing in /Applications would rewrite a file that may be
+##    running (the same vnode concern as `install-daemon`).
+## 2. Copy it into /Applications: to a temp dir beside it, verify the copy,
+##    then swap by rename (scripts/install-operator-app.sh), so a failed copy
+##    leaves the old app in place.
+## 3. Pin it: write its identifier and cdhashes to $(OPERATOR_PIN). The daemon
+##    reads the pin on every connection, so it needs no restart.
+##
+## Deploy app and daemon together: `make mac-install`, `make install-daemon`,
+## then relaunch the app.
+OPERATOR_PIN = $(HOME)/.nostromo/operator-app.pin
 mac-install: mac-release
-	@rm -rf "$(INSTALLED)"
-	@cp -R "$(APP_RELEASE)" "$(INSTALLED)"
-	@xattr -cr "$(INSTALLED)" 2>/dev/null || true
+	scripts/sign-operator-app.sh "$(APP_RELEASE)"
+	scripts/install-operator-app.sh "$(APP_RELEASE)" "$(INSTALLED)"
+	scripts/write-operator-pin.sh "$(INSTALLED)" "$(OPERATOR_PIN)"
 	@echo "installed → $(INSTALLED)  (launch from Spotlight/Launchpad like any app)"
+	@echo "relaunch Nostromo; restart is not needed for the daemon (it reads the pin per connection)"
+
+## Re-pin the installed app only (no build, no copy).
+mac-pin:
+	scripts/write-operator-pin.sh "$(INSTALLED)" "$(OPERATOR_PIN)"
+
+## Show how the installed app is signed and pinned, and fail unless the pin
+## matches it.
+mac-verify-install:
+	@codesign -dv "$(INSTALLED)" 2>&1 | grep -E '^(Identifier|CodeDirectory|Signature)'
+	@echo "entitlements:"; codesign -d --entitlements - --xml "$(INSTALLED)" 2>/dev/null; echo
+	@echo "pin ($(OPERATOR_PIN)):"; cat "$(OPERATOR_PIN)"
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	  scripts/write-operator-pin.sh "$(INSTALLED)" "$$tmp/expected.pin" >/dev/null && \
+	  grep -v '^#' "$$tmp/expected.pin" | sort > "$$tmp/want" && \
+	  grep -v '^#' "$(OPERATOR_PIN)" | sort > "$$tmp/have" && \
+	  if cmp -s "$$tmp/want" "$$tmp/have"; then echo "OK: the pin matches $(INSTALLED)"; \
+	  else echo "MISMATCH: the pin does not match $(INSTALLED); run make mac-pin"; exit 1; fi
 
 ## Launch smoke test (L4 — docs/ios-verification.md): build the Debug app,
 ## launch it against a fixture daemon, and assert it reaches a real

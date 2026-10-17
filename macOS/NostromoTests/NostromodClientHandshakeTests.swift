@@ -46,6 +46,9 @@ final class FakeDaemon {
         /// note, as the daemon does: WITHOUT the note when the connection's latest `subscribe`
         /// does not name `model`.
         var attachNote: String?
+        /// `welcome.operator_nonce`, issued when the daemon verified the peer as the operator
+        /// app; `nil` omits the key (an unverified peer, or an older daemon).
+        var operatorNonce: String? = nil
 
         enum End {
             case never
@@ -55,6 +58,8 @@ final class FakeDaemon {
             case afterFirstSubscribe(delay: TimeInterval)
             /// Close this long after the first `session_attach` arrives (and was answered).
             case afterFirstAttach(delay: TimeInterval)
+            /// Close shortly after the first `decision_answer` arrives.
+            case afterFirstDecisionAnswer
         }
     }
 
@@ -65,6 +70,8 @@ final class FakeDaemon {
         var tag: String = ""
         /// The `client_kind` a `hello` carried, if any.
         var clientKind: String? = nil
+        /// The whole decoded frame, for assertions on keys (present, absent, null).
+        var json: [String: Any] = [:]
     }
 
     let path: String
@@ -175,13 +182,15 @@ final class FakeDaemon {
 
             let topics = (json["topics"] as? [String]) ?? []
             let tag = (json["tag"] as? String) ?? ""
-            let frame = Frame(type: type, topics: topics, tag: tag, clientKind: json["client_kind"] as? String)
+            let frame = Frame(type: type, topics: topics, tag: tag, clientKind: json["client_kind"] as? String,
+                              json: json)
             lock.lock(); perConnection[index].append(frame); lock.unlock()
 
             switch type {
             case "hello":
                 var welcome: [String: Any] = ["type": "welcome", "protocol_version": 4, "daemon_pid": 4242]
                 if let features = script.features { welcome["features"] = features }
+                if let nonce = script.operatorNonce { welcome["operator_nonce"] = nonce }
                 if script.welcomeDelay > 0 { Thread.sleep(forTimeInterval: script.welcomeDelay) }
                 writeFrame(conn, welcome)
             case "subscribe":
@@ -196,7 +205,7 @@ final class FakeDaemon {
                     if topics.contains(topic) { closeAt = Date().addingTimeInterval(0.1) }
                 case .afterFirstSubscribe(let delay):
                     if closeAt == nil { closeAt = Date().addingTimeInterval(delay) }
-                case .afterFirstAttach:
+                case .afterFirstAttach, .afterFirstDecisionAnswer:
                     break
                 }
             case "session_attach":
@@ -213,6 +222,10 @@ final class FakeDaemon {
                 }
                 if case .afterFirstAttach(let delay) = script.end, closeAt == nil {
                     closeAt = Date().addingTimeInterval(delay)
+                }
+            case "decision_answer":
+                if case .afterFirstDecisionAnswer = script.end, closeAt == nil {
+                    closeAt = Date().addingTimeInterval(0.1)
                 }
             case "ping":
                 writeFrame(conn, ["type": "pong"])
@@ -523,6 +536,121 @@ final class NostromodClientHandshakeTests: XCTestCase {
                        "the follow-up replaces the first, so it keeps the base topics and adds both: \(before[1].topics)")
         XCTAssertEqual(daemon.subscribes(connection: 0).count, 2, "no further subscribe follows")
         assertModelSubscribedBeforeSpawnAndAttach(connection: 0)
+    }
+
+    // MARK: - The operator nonce (AP1b)
+    //
+    // A daemon that verified this app as the operator issues an `operator_nonce` in the
+    // `welcome` of that connection. The client echoes it in every `decision_answer` written to
+    // THAT connection, and never to another one: a nonce is a per-connection credential, so
+    // after a reconnect only the new welcome's nonce (or none) may be sent.
+
+    private func decisionAnswers(connection i: Int) -> [[String: Any]] {
+        daemon.frames(connection: i, ofType: "decision_answer").map(\.json)
+    }
+
+    /// Wait until connection `i` exists and its welcome was processed.
+    private func waitForWelcome(connection i: Int, _ c: NostromodClient, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(waitUntil(10) { self.daemon.connectionCount > i && c.connected.value },
+                      "connection \(i) never completed its handshake (connections: \(daemon.connectionCount))",
+                      file: file, line: line)
+    }
+
+    private func waitForDecisionAnswer(connection i: Int, count: Int = 1, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(waitUntil(5) { self.decisionAnswers(connection: i).count >= count },
+                      "connection \(i) never received decision_answer #\(count)", file: file, line: line)
+    }
+
+    func testADecisionAnswerEchoesTheNonceFromTheWelcome() throws {
+        let c = try connectClient(to: [.init(features: nil, operatorNonce: "nonce-A1b2")])
+        waitForWelcome(connection: 0, c)
+
+        c.decisionAnswer(requestId: "req-1", choiceId: "approve")
+        waitForDecisionAnswer(connection: 0)
+
+        let frame = try XCTUnwrap(decisionAnswers(connection: 0).first)
+        XCTAssertEqual(frame["request_id"] as? String, "req-1")
+        XCTAssertEqual(frame["choice_id"] as? String, "approve")
+        XCTAssertEqual(frame["operator_nonce"] as? String, "nonce-A1b2", "frame: \(frame)")
+    }
+
+    func testADismissalCarriesANullChoiceAndTheNonce() throws {
+        let c = try connectClient(to: [.init(features: nil, operatorNonce: "nonce-dismiss")])
+        waitForWelcome(connection: 0, c)
+
+        c.decisionAnswer(requestId: "req-2", choiceId: nil)
+        waitForDecisionAnswer(connection: 0)
+
+        let frame = try XCTUnwrap(decisionAnswers(connection: 0).first)
+        XCTAssertTrue(frame.keys.contains("choice_id"), "a dismissal still names choice_id (as null): \(frame)")
+        XCTAssertTrue(frame["choice_id"] is NSNull, "a dismissal's choice_id is null: \(frame)")
+        XCTAssertEqual(frame["operator_nonce"] as? String, "nonce-dismiss")
+    }
+
+    func testEveryDecisionAnswerOnTheConnectionCarriesItsNonce() throws {
+        let c = try connectClient(to: [.init(features: nil, operatorNonce: "nonce-many")])
+        waitForWelcome(connection: 0, c)
+
+        c.decisionAnswer(requestId: "req-a", choiceId: "approve")
+        c.decisionAnswer(requestId: "req-b", choiceId: nil)
+        waitForDecisionAnswer(connection: 0, count: 2)
+
+        let nonces = decisionAnswers(connection: 0).map { $0["operator_nonce"] as? String }
+        XCTAssertEqual(nonces, ["nonce-many", "nonce-many"])
+    }
+
+    func testTheNonceKeyIsAbsentWhenTheWelcomeHadNone() throws {
+        let c = try connectClient(to: [.init(features: nil)])
+        waitForWelcome(connection: 0, c)
+
+        c.decisionAnswer(requestId: "req-3", choiceId: "deny")
+        waitForDecisionAnswer(connection: 0)
+
+        let frame = try XCTUnwrap(decisionAnswers(connection: 0).first)
+        XCTAssertFalse(frame.keys.contains("operator_nonce"),
+                       "with no nonce the key must be omitted, not sent empty or null: \(frame)")
+        XCTAssertEqual(frame["request_id"] as? String, "req-3")
+        XCTAssertEqual(frame["choice_id"] as? String, "deny")
+    }
+
+    func testAfterAReconnectOnlyTheNewWelcomesNonceIsSent() throws {
+        let c = try connectClient(to: [
+            .init(features: nil, end: .afterFirstDecisionAnswer, operatorNonce: "nonce-old"),
+            .init(features: nil, operatorNonce: "nonce-new"),
+        ])
+        waitForWelcome(connection: 0, c)
+        c.decisionAnswer(requestId: "req-before", choiceId: "approve")
+        waitForDecisionAnswer(connection: 0)
+        XCTAssertEqual(decisionAnswers(connection: 0).first?["operator_nonce"] as? String, "nonce-old")
+
+        waitForWelcome(connection: 1, c)
+        c.decisionAnswer(requestId: "req-after", choiceId: "deny")
+        waitForDecisionAnswer(connection: 1)
+
+        let after = try XCTUnwrap(decisionAnswers(connection: 1).first)
+        XCTAssertEqual(after["request_id"] as? String, "req-after")
+        XCTAssertEqual(after["operator_nonce"] as? String, "nonce-new",
+                       "the new connection must carry its own welcome's nonce: \(after)")
+        XCTAssertEqual(decisionAnswers(connection: 1).count, 1)
+    }
+
+    func testAfterAReconnectToADaemonThatIssuedNoNonceTheOldNonceIsNotSent() throws {
+        let c = try connectClient(to: [
+            .init(features: nil, end: .afterFirstDecisionAnswer, operatorNonce: "nonce-stale"),
+            .init(features: nil),
+        ])
+        waitForWelcome(connection: 0, c)
+        c.decisionAnswer(requestId: "req-before", choiceId: "approve")
+        waitForDecisionAnswer(connection: 0)
+        XCTAssertEqual(decisionAnswers(connection: 0).first?["operator_nonce"] as? String, "nonce-stale")
+
+        waitForWelcome(connection: 1, c)
+        c.decisionAnswer(requestId: "req-after", choiceId: nil)
+        waitForDecisionAnswer(connection: 1)
+
+        let after = try XCTUnwrap(decisionAnswers(connection: 1).first)
+        XCTAssertFalse(after.keys.contains("operator_nonce"),
+                       "the previous connection's nonce must not leak to this one: \(after)")
     }
 }
 
