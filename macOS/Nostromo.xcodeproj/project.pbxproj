@@ -7,6 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AP0000000000000000001011 /* SyntheticInputGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001010 /* SyntheticInputGate.swift */; };
+		AP0000000000000000001012 /* SyntheticInputGate.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001010 /* SyntheticInputGate.swift */; };
+		AP0000000000000000001021 /* HumanGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001020 /* HumanGesture.swift */; };
+		AP0000000000000000001022 /* HumanGesture.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001020 /* HumanGesture.swift */; };
+		AP0000000000000000001031 /* SyntheticInputGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001030 /* SyntheticInputGateTests.swift */; };
+		AP0000000000000000001041 /* HumanGestureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001040 /* HumanGestureTests.swift */; };
+		AP0000000000000000001052 /* DecisionSheet.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000020 /* DecisionSheet.swift */; };
 		WK0000000000000000000002 /* WorkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000001 /* WorkModels.swift */; };
 		WK0000000000000000000003 /* WorkModels.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000001 /* WorkModels.swift */; };
 		WK0000000000000000000005 /* WorkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000004 /* WorkStore.swift */; };
@@ -412,6 +419,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		AP0000000000000000001010 /* SyntheticInputGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticInputGate.swift; sourceTree = "<group>"; };
+		AP0000000000000000001020 /* HumanGesture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HumanGesture.swift; sourceTree = "<group>"; };
+		AP0000000000000000001030 /* SyntheticInputGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticInputGateTests.swift; sourceTree = "<group>"; };
+		AP0000000000000000001040 /* HumanGestureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HumanGestureTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000001 /* WorkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkModels.swift; sourceTree = "<group>"; };
 		WK0000000000000000000004 /* WorkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkStore.swift; sourceTree = "<group>"; };
 		WK0000000000000000000095 /* WorkScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkScheduler.swift; sourceTree = "<group>"; };
@@ -740,6 +751,7 @@
 				AA0000020000000000000010 /* Data */,
 				AA0000020000000000000011 /* UI */,
 				AC0000000000000000000001 /* AppControl */,
+				AP0000000000000000001001 /* Security */,
 			);
 			path = Nostromo;
 			sourceTree = "<group>";
@@ -799,6 +811,15 @@
 				ZZ0000000000000000BA0300 /* TaskRequests.swift */,
 			);
 			path = Data;
+			sourceTree = "<group>";
+		};
+		AP0000000000000000001001 /* Security */ = {
+			isa = PBXGroup;
+			children = (
+				AP0000000000000000001010 /* SyntheticInputGate.swift */,
+				AP0000000000000000001020 /* HumanGesture.swift */,
+			);
+			path = Security;
 			sourceTree = "<group>";
 		};
 		AC0000000000000000000001 /* AppControl */ = {
@@ -983,6 +1004,8 @@
 				TT000000000000000000050 /* TranscriptCopyTests.swift */,
 				SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */,
 				AM00000000000000000000F0 /* AppControlMouseTests.swift */,
+				AP0000000000000000001030 /* SyntheticInputGateTests.swift */,
+				AP0000000000000000001040 /* HumanGestureTests.swift */,
 				PS00000000000000000000F0 /* ProseSelectionTests.swift */,
 				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
@@ -1209,6 +1232,8 @@
 				HH0000000000000000000B1 /* OverlayHitTest.swift in Sources */,
 				AC0000000000000000000011 /* AppControlProtocol.swift in Sources */,
 				AC0000000000000000000021 /* AppControlServer.swift in Sources */,
+				AP0000000000000000001011 /* SyntheticInputGate.swift in Sources */,
+				AP0000000000000000001021 /* HumanGesture.swift in Sources */,
 				HH0000000000000000000A1 /* ImagePasteboard.swift in Sources */,
 				HH000000000000000000041 /* MemoryWatchdog.swift in Sources */,
 				HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */,
@@ -1405,6 +1430,11 @@
 				TT000000000000000000052 /* TranscriptCopyTests.swift in Sources */,
 				SC00000000000000000000F1 /* TranscriptSelectionColorTests.swift in Sources */,
 				AM00000000000000000000F1 /* AppControlMouseTests.swift in Sources */,
+				AP0000000000000000001012 /* SyntheticInputGate.swift in TestSources */,
+				AP0000000000000000001022 /* HumanGesture.swift in TestSources */,
+				AP0000000000000000001031 /* SyntheticInputGateTests.swift in Sources */,
+				AP0000000000000000001041 /* HumanGestureTests.swift in Sources */,
+				AP0000000000000000001052 /* DecisionSheet.swift in TestSources */,
 				PS00000000000000000000F1 /* ProseSelectionTests.swift in Sources */,
 				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,

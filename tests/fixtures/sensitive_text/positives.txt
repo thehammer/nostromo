@@ -1,0 +1,137 @@
+# Sensitive-text guard positives. Format: class	text. Every value is synthetic.
+# Each line carries exactly one sensitive item of the tagged class.
+# Classes: ssn, card, dob, mrn, phone, personal_email, secret.
+# Lines starting with '#' and blank lines are ignored by the corpus test.
+# The mask character U+00A6 (broken bar) is removed by the test loader. Secret lines carry it
+# inside each key so GitHub push protection does not mistake these invented tokens for real ones.
+ssn	- [ ] Call back resident, SSN on the form was 219-09-9999, see PORTAL-1F2
+ssn	- [ ] CORE-1234 intake form has SSN 412-67-8901 typed into the notes field
+ssn	Resident gave 531-22-4410 over the phone, need to scrub it from the ticket
+ssn	- [x] Removed pasted SSN (301-55-7782) from the support thread
+ssn	ssn: 145-30-2216 appears in the export, PAYMENTS-9Z follow-up
+ssn	- [ ] Verify 723-18-5503 is not stored in the audit log table
+ssn	Family member read out 089-41-6620 while we were on the call
+ssn	- [ ] INT-77 vendor sent a CSV with social 219-09-9999 in column F
+ssn	Social security number 123-45-6789 was in the screenshot attached to PR #4821
+ssn	- [ ] Redact 665-12-3456 from the migration dry-run output
+ssn	note: tenant wrote "my ssn is 899-99-9999." in the free text box
+ssn	- [ ] Check why 001-01-0001 survived the scrubber on facility 8812
+ssn	Pasted into chat: 219-09-9999
+ssn	219-09-9999 was leaked via the debug log, rotate and purge
+card	- [ ] Resident pasted card 4111111111111111 into the billing note, PAYMENTS-9Z
+card	- [ ] Scrub 4111 1111 1111 1111 from the support transcript
+card	Test charge used 5555-5555-5555-4444 on the sandbox for facility 8812
+card	- [ ] Amex 378282246310005 showed up in the webhook payload
+card	Discover 6011111111111117 found in the CSV export
+card	- [ ] Old Visa 4222222222222 (13 digit) in the legacy notes field
+card	cc: 4012 8888 8888 1881 was typed in the memo
+card	- [ ] Mastercard 5105-1051-0510-5100 in the refund ticket
+card	Amex 3714 496353 98431 spoken on a recorded call
+card	- [ ] Diners 30569309025904 found in the audit extract
+card	JCB 3530111333300000 pasted into the Slack handoff
+card	- [ ] 2223003122003222 pasted by a resident, see PORTAL-1F2
+card	- [ ] Card number: 4000056655665556, expiry omitted
+card	Customer wrote 4111-1111-1111-1111 in the notes
+card	- [ ] Purge 6011 0009 9013 9424 from the payment retry logs
+card	- [ ] Card (5200 8282 8282 8210) appears in the PDF, redo the OCR pass
+card	pan 371449635398431 leaked in debug output
+card	- [ ] 4917300800000000 appeared in the refund CSV
+card	- [ ] Remove 5555555555554444 from the fixtures directory
+dob	- [ ] Resident record shows DOB 03/14/1941, confirm with the family, PORTAL-1F2
+dob	Intake note: D.O.B: 1938-07-02 typed into the wrong field
+dob	- [ ] date of birth: Mar 5, 1944 appears in the free text on the ticket
+dob	Caller said the resident was born on 1/2/1950 and moved in last spring
+dob	- [ ] birth date 1947-11-30 pasted into the support thread
+dob	- [x] Removed DOB: 11/02/1936 from the export
+dob	dob 1/9/1942 was in the screenshot
+dob	- [ ] Date of Birth: March 22, 1939 visible in the PDF preview
+dob	Family listed DOB - 07/04/1945 on the admission form
+dob	- [ ] CORE-1234 she was born 1946-03-09 according to the intake call
+dob	born on Jan 17, 1948, per the daughter
+dob	- [ ] Scrub "DOB (per family): 03/14/1941" from the notes
+dob	D.O.B. 05/22/1940 on the old resident card
+dob	- [ ] DOB: Oct 9, 1937 shows in the audit trail
+dob	- [ ] Birth Date: 12/25/1943 copied from the form
+dob	- [ ] DATE OF BIRTH 1949-04-18 found in a log line
+mrn	- [ ] Resident chart reference MRN 00482913 pasted into the ticket
+mrn	Handoff note says MRN: A123456 for the new admit
+mrn	- [ ] medical record number 7731902 was in the support thread
+mrn	- [ ] medical record # 55-2231 shows in the audit log, INT-77
+mrn	mrn: 99120345 copied into the Slack handoff
+mrn	- [ ] Medical Record Number: 4410928 appears in the CSV
+mrn	- [x] Removed MRN 7731902 from the debug dump
+mrn	- [ ] MRN: B7731902 in the ticket description
+mrn	- [ ] MRN 55-2231 on the screenshot
+mrn	- [ ] Please scrub MRN 10458831 from the PR #4821 description
+mrn	Medical record # 3320145 mentioned during the call
+mrn	- [ ] mrn A9981734 found in the transcript
+phone	- [ ] Call back resident at (312) 555-0142 before Friday, see PORTAL-1F2
+phone	Daughter's number is 312-555-0142, left a voicemail
+phone	- [ ] Update contact to 312.555.0142 on the facility profile
+phone	- [ ] Reach her at +1 312 555 0142 after the shift change
+phone	Pasted +13125550142 into the ticket
+phone	- [ ] Family phone (773) 555-0188 was in the Slack handoff
+phone	- [ ] Scrub 773-555-0167 from the export
+phone	Call +1 (630) 555-0109 for the intake
+phone	- [ ] Daughter can be reached at 1-847-555-0123
+phone	- [ ] Replace 312 555 0142 in the sample data
+phone	- [ ] +1-312-555-0175 listed as emergency contact
+phone	phone: (708) 555-0131 in the transcript
+phone	- [ ] Text 224.555.0148 about the appointment
+phone	- [ ] Resident's son: (815) 555-0199, extension not given
+phone	- [ ] Caller ID showed +1 872 555 0113 on the duty line
+phone	+19175550166 appears in the webhook body
+personal_email	- [ ] Resident's daughter wrote from dorothy.hale@gmail.com about the invoice
+personal_email	Reply came from r.kowalski@yahoo.com, forward to support
+personal_email	- [ ] Add marcus.lee@outlook.com to the do-not-contact list
+personal_email	- [ ] Remove janet_ortiz@hotmail.com from the test fixtures
+personal_email	Family contact is s.patel@icloud.com per the intake form
+personal_email	- [ ] Purge tom.reilly@aol.com from the digest recipients
+personal_email	- [ ] Daughter's address linda@smithfamily.net is in the notes
+personal_email	- [ ] Bounce from alex.brandt@brightmail.io on the weekly digest
+personal_email	- [ ] Consolidate contact jmorales@morales-law.com in staging data
+personal_email	Resident email: helen.park@proton.me copied into the ticket
+personal_email	- [ ] gmail user nina.vasquez+tester@gmail.com signed up twice
+personal_email	- [ ] PORTAL-1F2 mentions bob.nguyen@yahoo.co.uk in the stack trace
+personal_email	- [ ] Mail from pat.obrien@gmail.com bounced on the weekly send
+personal_email	- [ ] Normalize MARY.JONES@GMAIL.COM before the lookup
+secret	- [ ] Rotate the leaked key AKIA¦IOSFODNN7EXAMPLE found in the CI log
+secret	access key id ASIA¦IOSFODNN7EXAMPLE showed up in the debug output
+secret	- [ ] AKIA¦ABCDEFGHIJKLMNOP was pasted into the ticket, revoke it
+secret	- [ ] ASIA¦ZYXWVUTSRQPONMLK in the env dump, expire the session
+secret	aws_¦secret_access_key = wJal¦rXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY pasted in the notes
+secret	- [ ] AWS_¦SECRET_ACCESS_KEY=abcdEFGHijklMNOPqrstUVWXyz0A1B2C3D4E5FGH in the .env sample
+secret	- [ ] Revoke ghp_¦AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 from the build config
+secret	gho_¦ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210 oauth token in the log
+secret	- [ ] ghs_¦QwErTyUiOpAsDfGhJkLzXcVbNm1234567890 found in the Actions output
+secret	- [ ] ghu_¦MnBvCxZaSdFgHjKlPoIuYtReWq0987654321 in the user token cache
+secret	- [ ] gith¦ub_pat_ABCDEFGHIJKLMNOPQRSTUV_AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfG in the CI variables
+secret	- [ ] Bot token xoxb¦-123456789012-123456789012-AbCdEfGhIjKlMnOpQrStUvWx pasted in the thread
+secret	xoxp¦-123456789012-123456789012-123456789012-abcdef0123456789abcdef0123456789 user token in the notes
+secret	- [ ] xoxa¦-2-123456789012-123456789012-AbCdEfGhIjKlMnOpQrStUvWx in the app manifest
+secret	- [ ] xoxr¦-123456789012-123456789012-AbCdEfGhIjKlMnOpQrStUvWx refresh token in the log
+secret	- [ ] sk-a¦nt-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-AbCdEfGhIjKlMnOpQrStUvWxYz in the planner env
+secret	- [ ] sk-a¦nt-admin01-ZyXwVuTsRqPoNmLkJiHgFeDcBa-QwErTyUiOpAsDfGhJkLzXcVbNm leaked in a paste
+secret	Model vendor key sk-A¦bCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOp in the sample env
+secret	- [ ] sk_l¦ive_AbCdEfGhIjKlMnOpQrStUvWx in the payments notes, revoke it
+secret	- [ ] rk_l¦ive_ZyXwVuTsRqPoNmLkJiHgFeDc rest¦ricted key pasted
+secret	- [ ] JWT eyJh¦bGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.c2lnbmF0dXJlLWludmVudGVk in the browser log
+secret	Auth¦orization header carried eyJh¦bGciOiJSUzI1NiJ9.eyJpc3MiOiJwb3J0YWwiLCJzdWIiOiIxMDAyIn0.QWJjRGVmR2hpSmtMbU5vUHFSc1R1Vg in the trace
+secret	- [ ] Someone committed ----¦-BEGIN RSA PRIVATE KEY----- to the repo, purge history
+secret	pasted block starts with ----¦-BEGIN PRIVATE KEY----- in the ticket
+secret	- [ ] ----¦-BEGIN OPENSSH PRIVATE KEY----- header found in a gist
+secret	- [ ] ----¦-BEGIN EC PRIVATE KEY----- found in the fixtures
+secret	Request log shows Auth¦orization: Bearer AbCd¦EfGhIjKlMnOpQrStUvWxYz0123 in the clear
+secret	- [ ] curl -H "Auth¦orization: Bearer ZyXw¦VuTsRqPoNmLkJiHgFeDcBa" in shell history
+secret	- [ ] DATA¦BASE_URL=postgres://sv¦c_portal:Sup3¦rS3cret@dbho¦st/portal in the .env paste
+secret	- [ ] conn¦ection string postgres://user:pass@host/db found in the doc
+secret	- [ ] mysql://root:toor1234@dbhost:3306¦/portal in the compose file
+secret	- [ ] pass¦word=hunter2hunter2 appeared in the request log
+secret	config has password: corr¦ecthorsebattery in the sample
+secret	- [ ] api_key: abcd¦1234efgh pasted into the ticket
+secret	API_¦KEY=abcd1234efgh5678 in the env dump
+secret	- [ ] PASS¦WORD=hunter2hunter2 in the CI env block
+# A plain word joined to a value with - _ or / does not hide it (not secrets, no mask needed).
+ssn	SSN-219-09-9999
+phone	tel-312-555-0142
+card	card-4111111111111111

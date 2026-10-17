@@ -63,6 +63,8 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .unwrap();
     // A network listener beside the Unix socket, for the leak test.
@@ -101,7 +103,7 @@ async fn recv(s: &mut UnixStream) -> ServerMsg {
 
 async fn connect(d: &Daemon) -> UnixStream {
     let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
-    send(&mut s, &ClientMsg::Hello { client_id: "native-surfaces-it".into(), protocol_version: PROTOCOL_VERSION })
+    send(&mut s, &ClientMsg::Hello { client_id: "native-surfaces-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None })
         .await;
     assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
     send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false }).await;
@@ -379,7 +381,7 @@ async fn spawn_and_collect(s: &mut UnixStream, tag: &str) -> Vec<ServerMsg> {
 /// What a client connecting right now is told about `tag`'s layout.
 async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
     let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
-    send(&mut s, &ClientMsg::Hello { client_id: "replay-probe".into(), protocol_version: PROTOCOL_VERSION }).await;
+    send(&mut s, &ClientMsg::Hello { client_id: "replay-probe".into(), protocol_version: PROTOCOL_VERSION, client_kind: None }).await;
     assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
     send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false }).await;
     let frames = sync(&mut s).await;
@@ -467,6 +469,7 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
         &serde_json::to_vec(&ClientMsg::Hello {
             client_id: "native-surfaces-tcp".into(),
             protocol_version: PROTOCOL_VERSION,
+            client_kind: None,
         })
         .unwrap(),
     )

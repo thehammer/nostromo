@@ -2333,6 +2333,7 @@ dependencies = [
  "notify",
  "oauth2",
  "octocrab",
+ "plist",
  "portable-pty",
  "pulldown-cmark",
  "ratatui",

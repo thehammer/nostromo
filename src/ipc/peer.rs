@@ -37,11 +37,13 @@ pub enum Transport {
 
 /// How far a peer is trusted.
 ///
-/// `OperatorApp` is reserved for a verified Nostromo Mac app (terminal-pane
-/// 1a adds the bundle verifier); nothing here assigns it yet.
+/// `OperatorApp` is assigned only by [`super::peer_verify::classify_peer`]
+/// after the `Hello`: the verified Nostromo Mac app, the one peer that may
+/// answer an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerTrust {
-    /// A Unix-socket peer verified to be the Nostromo app. Not yet assigned.
+    /// A Unix-socket peer verified to be the Nostromo app (bundle id of the
+    /// connecting process plus the `mac_app` claim). See `peer_verify`.
     OperatorApp,
     /// Any other local (Unix-socket) peer.
     LocalOther,
@@ -50,6 +52,8 @@ pub enum PeerTrust {
 }
 
 impl PeerTrust {
+    /// The trust a transport alone gives: a TCP peer, or a Unix peer before
+    /// its `Hello` (never the operator app; see `peer_verify::classify_peer`).
     pub fn from_transport(transport: Transport) -> Self {
         match transport {
             Transport::Unix => PeerTrust::LocalOther,
@@ -1386,7 +1390,7 @@ mod tests {
     /// One of every `ClientMsg` variant, for exhaustive classification checks.
     fn every_client_msg() -> Vec<ClientMsg> {
         vec![
-            ClientMsg::Hello { client_id: "c".into(), protocol_version: 4 },
+            ClientMsg::Hello { client_id: "c".into(), protocol_version: 4, client_kind: None },
             ClientMsg::Subscribe { topics: vec![], renders_decisions: false },
             ClientMsg::Ping,
             ClientMsg::PtySpawn {

@@ -30,6 +30,10 @@ path = "src/bin/nostromo_activity_hook.rs"
 name = "nostromo-guard"
 path = "src/bin/nostromo_guard.rs"
 
+[[bin]]
+name = "sensitive-text-scan"
+path = "src/bin/sensitive_text_scan.rs"
+
 [features]
 # Test-only seams (e.g. pointing the Jira source at a local mock server). The
 # crate enables it for its own tests through the self dev-dependency below;
@@ -90,6 +94,8 @@ clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
+# Reads the enclosing .app's Info.plist to identify a socket peer (peer_verify).
+plist = "1"
 regex = "1"
 
 # SQLite (Teri todos)

@@ -43,6 +43,12 @@ def passes_point_straight_to_super(body):
     return "super.hitTest(" in body and "point" not in body.replace("super.hitTest(point)", "")
 
 
+def never_claims_a_hit(body):
+    """An override whose whole body is `nil` (a pass-through overlay that never takes a click) never
+    interprets the point, so it cannot have the #185 bug."""
+    return re.fullmatch(r"\s*nil\s*\}\s*", body) is not None
+
+
 class HitTestPolicy(unittest.TestCase):
     def test_every_override_is_found(self):
         # Guards the scanner itself: the two known overlays must be seen, or the
@@ -53,7 +59,8 @@ class HitTestPolicy(unittest.TestCase):
     def test_overrides_convert_from_the_superview(self):
         for path, body in hit_test_bodies():
             with self.subTest(file=os.path.basename(path)):
-                self.assertTrue(any(s in body for s in SAFE) or passes_point_straight_to_super(body),
+                self.assertTrue(any(s in body for s in SAFE) or passes_point_straight_to_super(body)
+                                or never_claims_a_hit(body),
                                 f"{path}: hitTest must use OverlayHitTest.hit or convert the point "
                                 "from the superview — AppKit passes superview coordinates.")
 
@@ -61,6 +68,13 @@ class HitTestPolicy(unittest.TestCase):
         self.assertTrue(passes_point_straight_to_super("\n  layout()\n  return super.hitTest(point)\n}"))
         self.assertFalse(passes_point_straight_to_super("\n  return bounds.contains(point) ? self : nil\n}"))
         self.assertFalse(passes_point_straight_to_super("\n  let p = convert(point, from: self)\n  return super.hitTest(p)\n}"))
+
+    def test_never_claims_exemption_is_narrow(self):
+        self.assertTrue(never_claims_a_hit(" nil }"))
+        self.assertTrue(never_claims_a_hit("\n  nil\n}"))
+        self.assertFalse(never_claims_a_hit(" bounds.contains(point) ? self : nil }"))
+        self.assertFalse(never_claims_a_hit(" point.x > 0 ? nil : nil }"))
+        self.assertFalse(never_claims_a_hit(" super.hitTest(point) }"))
 
     def test_no_override_converts_the_point_from_self(self):
         for path, body in hit_test_bodies():

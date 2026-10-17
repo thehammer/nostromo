@@ -734,9 +734,17 @@ final class FocusToneTests: XCTestCase {
         let conversation = TextBlockView(text: markdown)
         let folded = TextBlockView(text: markdown, tone: .folded)
 
-        XCTAssertTrue(X.proseColors(in: conversation).allSatisfy { X.same($0, Theme.fg) })
-        XCTAssertTrue(X.proseColors(in: folded).allSatisfy { X.same($0, Theme.foldedProse) },
+        // The code block is highlighted: its `let` and `42` are token colours, not `fg`. Every visible
+        // run is the tone's text colour or a token colour of that tone (dimmed in the folded view).
+        func isToneOrToken(_ color: NSColor, tone: NSColor, dimmed: Bool) -> Bool {
+            X.same(color, tone) || SyntaxTokenKind.allCases.contains { X.same(color, Theme.syntaxColor($0, dimmed: dimmed)) }
+        }
+        XCTAssertTrue(X.proseColors(in: conversation).allSatisfy { isToneOrToken($0, tone: Theme.fg, dimmed: false) },
+                      "\(X.proseColors(in: conversation))")
+        XCTAssertTrue(X.proseColors(in: folded).allSatisfy { isToneOrToken($0, tone: Theme.foldedProse, dimmed: true) },
                       "\(X.proseColors(in: folded))")
+
+        var letColours: [NSColor] = []
         for view in [conversation, folded] {
             let storage = try XCTUnwrap(X.all(NSTextView.self, in: view).first?.textStorage)
             let range = (storage.string as NSString).range(of: "let answer")
@@ -744,7 +752,11 @@ final class FocusToneTests: XCTestCase {
             let style = storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
             XCTAssertTrue(X.same(style?.textBlocks.first?.backgroundColor, Theme.codeBlockBackground),
                           "the code block keeps its background in either tone")
+            letColours.append(try XCTUnwrap(storage.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor))
         }
+        XCTAssertTrue(X.same(letColours[0], Theme.syntaxColor(.keyword, dimmed: false)), "`let` is a keyword in the conversation")
+        XCTAssertTrue(X.same(letColours[1], Theme.syntaxColor(.keyword, dimmed: true)), "`let` is a dimmed keyword in the folded view")
+        XCTAssertFalse(X.same(letColours[1], letColours[0]), "the `let` run dimmed when the message folded")
     }
 
     func testTheTwoColoursAreExplicitComponentColours() {
@@ -763,7 +775,7 @@ final class FocusLiveLayoutTests: XCTestCase {
         let stream = FocusStream([X.message("LATEST-MSG")])
         let latest = try XCTUnwrap(X.columns(stream.view).first)
         var queries = 0
-        stream.view.holdsRollIns = { queries += 1; return true }
+        stream.view.decideRollIn = { _ in queries += 1; return .hold }
 
         for (n, block) in F.run(3, prefix: "t").enumerated() {
             stream.append([block])
@@ -836,14 +848,14 @@ final class FocusLiveLayoutTests: XCTestCase {
         XCTAssertEqual(inAPane.measured, alone.measured, "other turns in the pane cost nothing")
     }
 
-    // MARK: Interim hold
+    // MARK: Hold (the view's half; the policy is `RollInPolicy`)
 
     func testAHeldRollInKeepsTheOutgoingMessageVisibleAsConversationAndReleasingFoldsIt() throws {
         let stream = FocusStream([X.message("FIRST-MSG")] + F.run(2, prefix: "a") + [X.message("OLD-MSG")])
         let oldView = try XCTUnwrap(X.columns(stream.view).last)
         var holds: [Int] = []
         var queries = 0
-        stream.view.holdsRollIns = { queries += 1; return true }
+        stream.view.decideRollIn = { _ in queries += 1; return .hold }
         stream.view.onHold = { holds.append($0) }
 
         // A note between, so the newer message is a new message (contract §2.1).
@@ -868,7 +880,7 @@ final class FocusLiveLayoutTests: XCTestCase {
 
     func testAHeldRollInShowsTheGroupsBetweenTheOutgoingAndTheNewMessageAsGroupRows() {
         let stream = FocusStream([X.message("FIRST-MSG")] + F.run(2, prefix: "a") + [X.message("OLD-MSG")] + F.run(3, prefix: "b"))
-        stream.view.holdsRollIns = { true }
+        stream.view.decideRollIn = { _ in .hold }
 
         stream.append([X.message("NEW-MSG")])
 
@@ -895,6 +907,49 @@ final class FocusLiveLayoutTests: XCTestCase {
 
         XCTAssertEqual(X.kinds(view), ["ActivityRowView", "TextBlockView", "ToolGroupView", "TextBlockView"])
         XCTAssertTrue(X.contains("OLD-MSG", in: X.columns(view)[1]))
+    }
+
+    func testAViewHoldsAtMostSixteenRollInsAndDropsTheOldestHoldFirstTellingThePane() {
+        let stream = FocusStream([X.message("MSG-0")])
+        var held: [Int] = []
+        var dropped: [Int] = []
+        stream.view.decideRollIn = { _ in .hold }   // hold everything: the bound is what limits it
+        stream.view.onHold = { held.append($0) }
+        stream.view.onHoldDropped = { dropped.append($0) }
+
+        for n in 1 ... 20 {
+            stream.append([.note("Model changed \(n)."), X.message("MSG-\(n)")])
+            XCTAssertLessThanOrEqual(stream.view.heldOrdinals.count, RollInPolicy.maxHeldPerTurn, "after message \(n)")
+        }
+
+        XCTAssertEqual(held, Array(0 ..< 20), "every roll-in was held when it happened")
+        XCTAssertEqual(dropped, [0, 1, 2, 3], "the oldest holds were released, oldest first, and the pane was told of each")
+        XCTAssertEqual(stream.view.heldOrdinals, Set(4 ..< 20))
+        for n in 0 ..< 4 {
+            XCTAssertFalse(X.contains("MSG-\(n) ", in: stream.view), "message \(n) rolled into the row when its hold was dropped")
+        }
+        for n in 4 ... 20 {
+            XCTAssertTrue(X.contains("MSG-\(n) ", in: stream.view), "message \(n) is still conversation")
+        }
+    }
+
+    func testAHoldIsNeitherAskedForNorRecordedForTheGroupsBeforeTheFirstMessageUnlessThePaneHoldsThem() throws {
+        let stream = FocusStream(F.run(2, prefix: "lead"))
+        var asked: [Int] = []
+        var held: [Int] = []
+        stream.view.decideRollIn = { ordinal in asked.append(ordinal); return .hold }
+        stream.view.onHold = { held.append($0) }
+
+        stream.append([X.message("FIRST-MSG")])
+
+        XCTAssertEqual(asked, [FocusPlanner.leadingGroups], "the first roll-in is asked about as the leading groups")
+        XCTAssertEqual(held, [FocusPlanner.leadingGroups])
+        XCTAssertEqual(X.kinds(stream.view), ["ToolGroupView", "TextBlockView"], "held, the group stays a group at its place")
+
+        stream.view.releaseHolds(turn: stream.turn)
+
+        XCTAssertTrue(stream.view.heldOrdinals.isEmpty)
+        XCTAssertEqual(X.kinds(stream.view), ["ActivityRowView", "TextBlockView"], "released, the group is in the row")
     }
 }
 

@@ -37,4 +37,56 @@ SELECT REPLACE(job_class,'App\\Modules\\Referrals\\Jobs\\','') job, status, outc
 ```
 Tell me when you've run it and I'll check the result.
 """#
+
+    /// One fenced block per supported language (plus a `text` fence and a fence
+    /// with no info string), each short and containing at least one keyword, so
+    /// the Mac tests can check that every language colours something and that
+    /// plain fences stay plain. The first block is Swift: `let answer = 42`.
+    public static let highlightedMessage: String = #"""
+Highlighting sample.
+```swift
+let answer = 42
+struct Point { var x: Int } // origin
+```
+```sql
+SELECT id, name FROM users WHERE active = TRUE -- active only
+```
+```php
+<?php
+$referral = Referral::find(14464);
+```
+```bash
+if [ -n "$HOME" ]; then echo "$HOME"; fi # home
+```
+```json
+{"name": "nostromo", "count": 3, "ok": true}
+```
+```yaml
+name: nostromo # app
+items:
+  - one
+```
+```rust
+fn main() { let s: &'static str = "hi"; }
+```
+```python
+def f(x):
+    return None if x else "y"
+```
+```js
+const x = `a ${b}`; // note
+```
+```diff
+@@ -1,2 +1,2 @@
+-old
++new
+```
+```text
+let answer = 42
+```
+```
+let answer = 42
+```
+Done.
+"""#
 }

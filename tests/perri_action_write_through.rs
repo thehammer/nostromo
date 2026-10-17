@@ -39,6 +39,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
         &ClientMsg::Hello {
             client_id: "perri-action-it".into(),
             protocol_version: 4,
+            client_kind: None,
         },
     )
     .await;
@@ -88,6 +89,8 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .unwrap();
 
@@ -149,6 +152,8 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .unwrap();
 
@@ -406,6 +411,8 @@ async fn serve_with_session_mgr() -> (
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier),
+        false,
     )
     .unwrap();
     (socket_path, perri_state_dir, tmp, server, session_mgr)
