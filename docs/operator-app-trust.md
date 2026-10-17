@@ -178,10 +178,16 @@ landed while the symlink was in place, the client was "the installed app"
 (42 of 200 inspections in a reproduction). Now nothing derived from the peer
 is resolved: the raw path is compared as bytes and the file identity must match
 too, and the answer-time re-check repeats both. This is covered by the
-automated test
+automated tests. The deterministic one,
+`a_directory_swap_between_reading_the_peers_path_and_the_comparison_never_makes_it_the_app`
+(`src/ipc/peer_verify.rs`, runs on every platform), performs the swap exactly
+between the recorded path read and the comparison, and asserts that the old
+resolve-the-string check is fooled by that very state while the identity
+binding refuses. The end-to-end one,
 `swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_makes_it_the_app`
-(`tests/peer_code_identity_macos.rs`: a swap loop runs alongside 300
-inspections and re-checks, expecting zero `Pinned`).
+(`tests/peer_code_identity_macos.rs`), runs a real `RENAME_SWAP` loop alongside
+300 inspections and re-checks, expecting zero `Pinned`; being a race, it is a
+smoke test of the whole path, not the proof.
 
 **What the binding does not stop.** It does not stop anyone who can change the
 installed app itself: replacing `/Applications/Nostromo.app` as an admin user
@@ -251,8 +257,9 @@ pin, restore it afterwards with `make mac-pin`.
 
    The directory-swap variant of (b) (swap the client's directory with a
    symlink to the installed app's directory while it runs) is covered by the
-   automated test `swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_makes_it_the_app`;
-   there is no need to repeat it by hand.
+   automated tests `a_directory_swap_between_reading_the_peers_path_and_the_comparison_never_makes_it_the_app`
+   (deterministic) and `swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_makes_it_the_app`
+   (end to end); there is no need to repeat it by hand.
 
    To see the documented residual, start a **scratch** daemon with
    `NOSTROMO_OPERATOR_APP_PATH="$work/client"` and the rewritten pin: the

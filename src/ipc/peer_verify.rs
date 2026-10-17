@@ -1510,11 +1510,78 @@ mod tests {
         assert_eq!(verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&before)), pinned(APP_BUNDLE_ID));
 
         // The installed file is replaced by another one at the same path: the image that
-        // was the app a moment ago is not any more.
-        fs::remove_file(&exe).unwrap();
-        fs::write(&exe, "replacement").unwrap();
+        // was the app a moment ago is not any more. The replacement is created FIRST and
+        // renamed over the original, so the two files coexist and their inodes differ.
+        // (Removing the original and writing a new file at the same path lets a filesystem
+        // such as the ext4 CI runner hand the new file the freed inode: the identity would
+        // then be unchanged and the binding rightly could not tell them apart.)
+        let replacement = file(dir.path(), "replacement", "replacement");
+        fs::rename(&replacement, &exe).unwrap();
+        assert_ne!(installed_app(&exe).unwrap().id, before.id, "the replacement must be a different file");
         assert_eq!(
             verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&before)),
+            unverified(UnverifiedReason::WrongPath)
+        );
+    }
+
+    /// The ORIGINAL (vulnerable) comparison, kept only so the test below can show the
+    /// scenario really defeats it: it canonicalised the path string recorded from the
+    /// peer, at compare time, against the live filesystem (`git show 0697a10~1`).
+    fn legacy_same_file(a: &Path, b: &Path) -> bool {
+        match (fs::canonicalize(a), fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Deterministic form of the directory-swap race (the thread-loop form is
+    /// `tests/peer_code_identity_macos.rs`). The race window is "between the kernel
+    /// path read and the comparison"; here the swap happens exactly there, so there is
+    /// nothing left to chance and it runs on every platform.
+    #[test]
+    fn a_directory_swap_between_reading_the_peers_path_and_the_comparison_never_makes_it_the_app() {
+        let root = tempfile::tempdir().unwrap();
+        let installed_dir = root.path().join("installed");
+        let attacker_dir = root.path().join("x");
+        fs::create_dir(&installed_dir).unwrap();
+        fs::create_dir(&attacker_dir).unwrap();
+        let installed_exe = file(&installed_dir, "Nostromo", "same bytes");
+        let attacker_exe = file(&attacker_dir, "Nostromo", "same bytes");
+        let verifier = MacPeerVerifier::with_app_exe(root.path().join(PIN_FILE_NAME), &installed_exe);
+        let installed = installed_app(&installed_exe).unwrap();
+
+        // Step 1, "inspect": the kernel's one report of the attacker's running image (read
+        // BEFORE the swap, as the verifier does), recorded as plain values.
+        let attacker = installed_app(&attacker_exe).unwrap();
+        let image = image_of(&attacker);
+        assert_eq!(
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image),
+            unverified(UnverifiedReason::WrongPath),
+            "standing still, the attacker is not the app"
+        );
+
+        // The swap, in the window: the attacker's directory is exchanged for a symlink to
+        // the installed app's directory (what `renamex_np(RENAME_SWAP)` does atomically).
+        fs::rename(&attacker_dir, root.path().join("x-moved")).unwrap();
+        std::os::unix::fs::symlink(&installed_dir, &attacker_dir).unwrap();
+
+        // The scenario is real: the path string recorded for the attacker now RESOLVES to
+        // the installed binary, so a comparison that resolves it is fooled (the old check).
+        assert!(
+            legacy_same_file(&image.path, &installed_exe),
+            "the swap must make the recorded path resolve to the installed app, or this test proves nothing"
+        );
+
+        // Step 2, the comparison: refused. The raw path differs from the installed
+        // app's, and the identity recorded at step 1 is the attacker's, not the app's.
+        assert!(!is_installed_app(&image, &installed));
+        assert_eq!(
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image),
+            unverified(UnverifiedReason::WrongPath)
+        );
+        // And as every re-check does, with the installed app looked at afresh.
+        assert_eq!(
+            verifier.bind_to_installed_app(pinned(QA_BUNDLE_ID), &image),
             unverified(UnverifiedReason::WrongPath)
         );
     }

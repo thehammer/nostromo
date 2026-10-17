@@ -574,6 +574,13 @@ fn a_symlink_to_a_different_binary_is_not_the_installed_app() {
 // `<dir>/x/Nostromo`, and keep `renamex_np(RENAME_SWAP)`-ing `<dir>/x` with a
 // symlink to the installed app's directory. Whenever the verifier resolves the
 // stored name while the symlink is in place, it lands on the installed binary.
+//
+// This is the end-to-end, racing form: a smoke test of the whole `inspect` path. Being
+// a race it cannot by itself prove the old check fails; the deterministic proof (the
+// swap placed exactly between the path read and the comparison, with the old check
+// shown to be fooled) is the unit test
+// `a_directory_swap_between_reading_the_peers_path_and_the_comparison_never_makes_it_the_app`
+// in `src/ipc/peer_verify.rs`.
 
 /// Exchanges `a` and `b` (a directory and a symlink) atomically, over and over,
 /// until `stop`. Returns how many swaps it made.
