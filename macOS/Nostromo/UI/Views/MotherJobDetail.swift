@@ -957,15 +957,13 @@ final class MotherJobDetail: NSView {
         let followsTail = logIsAtBottom()
         let savedOrigin = clip.bounds.origin
         logTextView.textStorage?.setAttributedString(result)
-        if followsTail {
-            logTextView.scrollRangeToVisible(NSRange(location: result.length, length: 0))
-        } else {
-            // Replacing the text resets the scroll position; put it back (clamped to the new height).
-            if let container = logTextView.textContainer { logTextView.layoutManager?.ensureLayout(for: container) }
-            let maxY = max(0, (logScrollView.documentView?.frame.height ?? 0) - clip.bounds.height)
-            clip.scroll(to: NSPoint(x: savedOrigin.x, y: min(savedOrigin.y, maxY)))
-            logScrollView.reflectScrolledClipView(clip)
-        }
+        // The text view sizes itself to its layout: force that layout before scrolling.
+        if let container = logTextView.textContainer { logTextView.layoutManager?.ensureLayout(for: container) }
+        let maxY = max(0, (logScrollView.documentView?.frame.height ?? 0) - clip.bounds.height)
+        // Following the tail goes to the end; otherwise put the old position back (clamped to the new height).
+        let targetY = followsTail ? maxY : min(savedOrigin.y, maxY)
+        clip.scroll(to: NSPoint(x: savedOrigin.x, y: targetY))
+        logScrollView.reflectScrolledClipView(clip)
     }
 
     /// The log is scrolled to its end (within 4 pt), or too short to scroll.
