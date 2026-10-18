@@ -36,7 +36,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     )
     .await;
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
-    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false }).await;
+    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false }).await;
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

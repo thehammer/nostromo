@@ -103,7 +103,7 @@ async fn connect(d: &Daemon) -> UnixStream {
     send(&mut s, &ClientMsg::Hello { client_id: "native-surfaces-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None })
         .await;
     assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
-    send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false }).await;
+    send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false, renders_approvals: false }).await;
     sync(&mut s).await;
     s
 }
@@ -380,7 +380,7 @@ async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
     let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
     send(&mut s, &ClientMsg::Hello { client_id: "replay-probe".into(), protocol_version: PROTOCOL_VERSION, client_kind: None }).await;
     assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
-    send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false }).await;
+    send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false, renders_approvals: false }).await;
     let frames = sync(&mut s).await;
     layouts_for(&frames, tag).last().map(|t| (*t).clone())
 }
@@ -475,7 +475,7 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
     assert!(matches!(recv_any(&mut tcp).await, ServerMsg::Welcome { .. }));
     write_frame(
         &mut tcp,
-        &serde_json::to_vec(&ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false })
+        &serde_json::to_vec(&ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false, renders_approvals: false })
             .unwrap(),
     )
     .await

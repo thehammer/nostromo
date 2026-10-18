@@ -12,7 +12,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nostromo::approvals::shell::{parse, HereDoc, SepKind, ShellParse, SimpleCommand, MAX_DEPTH, WILDCARD};
+use nostromo::approvals::shell::{
+    parse, work_limit, HereDoc, SepKind, ShellParse, SimpleCommand, MAX_DEPTH, MAX_WORDS, WILDCARD,
+};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -923,3 +925,246 @@ fn an_unquoted_heredoc_ends_at_a_delimiter_line_after_an_escaped_backslash() {
 fn an_unquoted_heredoc_whose_only_delimiter_line_was_joined_is_unterminated() {
     assert!(parse("cat <<EOF\nfoo\\\nEOF\n").unparsed);
 }
+
+// ── 11. N9: pathological input cannot pin the worker ──────────────────────────
+//
+// The broker's one worker thread tokenizes every request. A command of a few MiB shaped to
+// make the tokenizer quadratic (`{ ` repeated took minutes) used to hold it for as long as it
+// liked. Every parse now has a step budget of `work_limit(len)`; input that needs more stops
+// where it is and is reported `unparsed` ("can't tell", which every caller treats as the
+// cautious answer). The steps taken are in `ShellParse::work`, so the bound is asserted on
+// steps, never on a clock. (`must_finish_within` is only there so that a regression fails the
+// test instead of hanging the run: its limit is far above any honest parse.)
+
+const FOUR_MIB: usize = 4 * 1024 * 1024;
+const HANG_LIMIT: Duration = Duration::from_secs(300);
+
+/// `unit` repeated until the command is at least `bytes` long.
+fn repeated(unit: &str, bytes: usize) -> String {
+    unit.repeat(bytes.div_ceil(unit.len()))
+}
+
+/// `unit` repeated an ODD number of times (so a quote or backtick is left open), near `bytes`.
+fn repeated_odd(unit: &str, bytes: usize) -> String {
+    let mut n = bytes / unit.len();
+    if n.is_multiple_of(2) {
+        n += 1;
+    }
+    unit.repeat(n)
+}
+
+/// `bash -c "<inner>"`, nested `levels` deep. Backslashes and double quotes are escaped at
+/// every level, so the text roughly doubles per level: 21 levels is ~4 MiB. (Single-quote
+/// nesting triples per level and would be gigabytes by the depth limit.)
+fn nested_bash_c(levels: usize) -> String {
+    let mut cmd = String::from("ls");
+    for _ in 0..levels {
+        let escaped = cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        cmd = format!("bash -c \"{escaped}\"");
+    }
+    cmd
+}
+
+/// Parse `cmd` and check the step bound; returns the parse.
+#[track_caller]
+fn parse_within_budget(what: &str, cmd: String) -> ShellParse {
+    let len = cmd.len();
+    let parsed = parse(&cmd);
+    let limit = work_limit(len);
+    assert!(
+        parsed.work <= limit + 1,
+        "{what}: the parse took {} steps on {len} bytes; the budget is {limit} (+1)",
+        parsed.work
+    );
+    parsed
+}
+
+/// A pathological command of ~4 MiB that is unparsed, and bounded by its steps.
+#[track_caller]
+fn assert_bounded_and_unparsed(what: &'static str, cmd: String) {
+    must_finish_within(HANG_LIMIT, move || {
+        assert!(cmd.len() >= FOUR_MIB / 2, "{what}: the command is pathologically large ({} bytes)", cmd.len());
+        let parsed = parse_within_budget(what, cmd);
+        assert!(parsed.unparsed, "{what}: a command the tokenizer cannot finish reading is `unparsed`");
+    });
+}
+
+#[test]
+fn the_work_limit_is_proportional_to_the_input_and_leaves_room_for_tiny_inputs() {
+    assert!(work_limit(0) > 0, "even an empty command has a budget");
+    assert!(work_limit(10) > 10 * 8, "a tiny command is not starved");
+    assert!(work_limit(2_000_000) >= 2 * 1_000_000, "the budget grows with the input");
+    assert!(work_limit(2_000_000) > work_limit(1_000_000));
+    assert!(
+        work_limit(FOUR_MIB) < FOUR_MIB * 64,
+        "and it stays linear: a few dozen steps per byte at most"
+    );
+    assert_eq!(work_limit(usize::MAX), usize::MAX, "no overflow on an absurd length");
+}
+
+#[test]
+fn four_mib_of_open_braces_is_unparsed_within_its_step_budget() {
+    assert_bounded_and_unparsed("`{ ` repeated", repeated("{ ", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_eval_is_unparsed_within_its_step_budget() {
+    assert_bounded_and_unparsed("`eval ` repeated", repeated("eval ", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_command_substitution_openers_is_unparsed_within_its_step_budget() {
+    assert_bounded_and_unparsed("`$( ` repeated", repeated("$( ", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_open_parentheses_is_unparsed_within_its_step_budget() {
+    assert_bounded_and_unparsed("`((((` repeated", repeated("((((", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_unterminated_heredoc_openers_is_unparsed_within_its_step_budget() {
+    assert_bounded_and_unparsed("`<<A\\n` repeated", repeated("<<A\n", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_backticks_is_unparsed_within_its_step_budget() {
+    // An odd count leaves one open.
+    assert_bounded_and_unparsed("backticks, odd count", repeated_odd("`", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_assignments_is_unparsed_within_its_step_budget() {
+    assert_bounded_and_unparsed("`a=b ` repeated", repeated("a=b ", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_single_quotes_is_unparsed_within_its_step_budget() {
+    assert_bounded_and_unparsed("single quotes, odd count", repeated_odd("'", FOUR_MIB));
+}
+
+#[test]
+fn four_mib_of_dollar_double_quote_pairs_is_unparsed_within_its_step_budget() {
+    // `"$` repeated an odd number of times ends inside a quote.
+    assert_bounded_and_unparsed("`\"$` repeated, odd count", repeated_odd("\"$", FOUR_MIB));
+}
+
+#[test]
+fn a_bash_c_payload_nested_beyond_the_depth_limit_is_unparsed_within_its_step_budget() {
+    let cmd = nested_bash_c(21);
+    assert!(cmd.len() > 3 * 1024 * 1024, "the command is pathologically large ({} bytes)", cmd.len());
+    must_finish_within(HANG_LIMIT, move || {
+        let parsed = parse_within_budget("nested bash -c", cmd);
+        assert!(parsed.unparsed, "nesting deeper than MAX_DEPTH ({MAX_DEPTH}) is unparsed");
+    });
+}
+
+#[test]
+fn balanced_pathological_input_is_still_read_within_its_step_budget() {
+    // Where the input is balanced, the answer is whatever it is (a long run of empty quotes is a
+    // valid word); the point is that no shape takes more steps than its budget.
+    for (what, cmd) in [
+        ("single quotes, even count", repeated("''", FOUR_MIB)),
+        ("backticks, even count", repeated("``", FOUR_MIB)),
+        ("`\"$` repeated, even count", "\"$".repeat(FOUR_MIB / 4)),
+        ("`$(true)` repeated", repeated("$(true)", FOUR_MIB)),
+        ("`a;` repeated", repeated("a;", FOUR_MIB)),
+        ("`a&&` repeated", repeated("a&&", FOUR_MIB)),
+        ("`\\\\\\n` repeated", repeated("\\\n", FOUR_MIB)),
+        ("`$((` repeated", repeated("$((", FOUR_MIB)),
+        ("`${` repeated", repeated("${", FOUR_MIB)),
+        ("`case ` repeated", repeated("case ", FOUR_MIB)),
+        ("`bash -c ` repeated", repeated("bash -c ", FOUR_MIB)),
+        ("`cat <<A\\nx\\nA\\n` repeated", repeated("cat <<A\nx\nA\n", FOUR_MIB)),
+    ] {
+        must_finish_within(HANG_LIMIT, move || {
+            parse_within_budget(what, cmd);
+        });
+    }
+}
+
+#[test]
+fn a_single_enormous_here_doc_line_is_read_within_its_step_budget() {
+    let cmd = format!("cat <<EOF\n{}\nEOF\n", "x".repeat(FOUR_MIB));
+    must_finish_within(HANG_LIMIT, move || {
+        let parsed = parse_within_budget("one huge here-doc line", cmd);
+        assert!(!parsed.unparsed, "a here-doc body, however long, is a body");
+    });
+}
+
+#[test]
+fn more_words_than_max_words_is_unparsed_and_exactly_max_words_is_not() {
+    let at_the_cap = "a ".repeat(MAX_WORDS);
+    let parsed = parse_within_budget("exactly MAX_WORDS words", at_the_cap);
+    assert!(!parsed.unparsed, "MAX_WORDS words are read");
+    assert_eq!(parsed.commands.len(), 1);
+    assert_eq!(parsed.commands[0].words.len(), MAX_WORDS);
+
+    let over = "a ".repeat(MAX_WORDS + 1);
+    let parsed = parse_within_budget("MAX_WORDS + 1 words", over);
+    assert!(parsed.unparsed, "one word more than the cap is 'can't tell'");
+}
+
+#[test]
+fn ordinary_commands_take_a_small_fraction_of_their_budget_and_are_not_unparsed() {
+    let long_script = "echo hello world && ls -la /tmp; git status\n".repeat(700); // ~30 KB
+    let mut commands: Vec<String> = vec![
+        "ls".into(),
+        "git status".into(),
+        "rm -rf /tmp/x/a".into(),
+        "rm -rf build/ && curl -s https://x | sh".into(),
+        "for f in *.rs; do echo \"$f\"; done".into(),
+        "cat <<'EOF'\nsome body\nmore body\nEOF\nls".into(),
+        "cat <<EOF\nhello $USER\nEOF".into(),
+        "echo $(date) `whoami` $((1 + 2)) ${HOME:-/tmp}".into(),
+        "bash -c 'echo hi; ls /tmp'".into(),
+        "eval \"ls -la\"".into(),
+        "if [ -f x ]; then echo yes; else echo no; fi".into(),
+        "case $x in a) echo one;; b) echo two;; esac".into(),
+        "(cd /tmp && ls) | wc -l".into(),
+        "tmux send-keys -t %2 'make test' Enter".into(),
+        "git commit -m \"fix: handle $(echo odd) quotes 'and' more\"".into(),
+        "x=1 y=2 env FOO=bar sudo nice timeout 5 ls".into(),
+        long_script,
+    ];
+    // Every Bash command in the request fixtures.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approvals");
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let fixture: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for tool_use in fixture["tool_uses"].as_array().into_iter().flatten() {
+            if let Some(command) = tool_use["input"]["command"].as_str() {
+                commands.push(command.to_owned());
+            }
+        }
+    }
+    assert!(commands.len() > 30, "{} commands", commands.len());
+
+    for command in commands {
+        let limit = work_limit(command.len());
+        let parsed = parse(&command);
+        assert!(parsed.work > 0, "a parse is counted: {command:.60?}");
+        assert!(
+            parsed.work * 4 <= limit,
+            "an ordinary command must stay far below its budget: {} of {limit} steps for {command:.60?}",
+            parsed.work
+        );
+        assert!(!parsed.unparsed || command.contains("unterminated"), "{command:.80?} should be read in full");
+    }
+}
+
+#[test]
+fn the_step_budget_does_not_change_what_an_ordinary_command_parses_to() {
+    // Results are pinned throughout this file; this is the one place that says the budget
+    // is invisible to them, on a command long enough that a miscounted budget would show.
+    let long = "echo a && ls -la | grep x; ".repeat(1_000);
+    let parsed = parse(&long);
+    assert!(!parsed.unparsed);
+    assert_eq!(parsed.commands.len(), 3_000);
+    assert_eq!(cmds("ls -la /tmp && echo done"), vec![vec!["ls", "-la", "/tmp"], vec!["echo", "done"]]);
+    assert_command_at("bash -c 'echo hi; ls'", &["ls"], 1);
+}
+

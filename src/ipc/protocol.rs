@@ -1099,6 +1099,14 @@ pub enum ClientMsg {
         /// promoted to an operator by an absent key.
         #[serde(default)]
         renders_decisions: bool,
+        /// Declares that this client renders permission-approval requests
+        /// (`ApprovalRequest`) and can answer them. Counts only from the
+        /// verified Mac app: it makes the connection an approval presenter,
+        /// the fact the daemon needs before it holds a request for a human
+        /// instead of denying it. `#[serde(default)]`: a client that predates
+        /// the field decodes as `false` and is never a presenter.
+        #[serde(default)]
+        renders_approvals: bool,
     },
     Ping,
 
@@ -1218,8 +1226,8 @@ pub enum ClientMsg {
         action: SessionAction,
     },
 
-    /// Answer a `SessionPermissionRequest` (only used if a stdout-answerable
-    /// permission path is available; the default posture is bypass).
+    /// Superseded by `ApprovalAnswer`: every peer is refused with an `Error`
+    /// and nothing happens.
     SessionAnswerPermission {
         tag: String,
         request_id: String,
@@ -1298,6 +1306,31 @@ pub enum ClientMsg {
         choice_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
+    },
+
+    /// The human's answer to a held permission request (`ApprovalRequest`).
+    /// Applied only from the verified Mac app: it must echo the connection's
+    /// `operator_nonce` and pass the same answer-time peer re-check as a
+    /// `DecisionAnswer`. First answer wins; a later one is refused with
+    /// `ApprovalAnswerRefused`. Refused for network peers.
+    ApprovalAnswer {
+        request_id: String,
+        decision: crate::approvals::wire::ApprovalDecision,
+        /// The Mac window the human answered in (shown in the log).
+        window_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
+    /// The Mac app reports an input it refused to treat as a human's: a
+    /// synthetic click or key aimed at an Allow control. Written to the audit
+    /// log; accepted only from the verified app. Refused for network peers.
+    ApprovalRefusalReport {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// Which control it was aimed at (`allow_once`, …).
+        control: String,
+        channel: crate::approvals::wire::RefusalChannel,
     },
 
     /// Request a full ambient-activity snapshot (all streams) for one focus.
@@ -1665,9 +1698,8 @@ pub enum ServerMsg {
         state: SessionState,
     },
 
-    /// A permission request surfaced on the stream (only emitted if the binary
-    /// surfaces an answerable request; otherwise permissions are bypassed or
-    /// answered natively on the phone).
+    /// Never constructed (superseded by `ApprovalRequest`; a test pins that).
+    /// Classified `LocalOnly`, so even a stray one never reaches a network peer.
     SessionPermissionRequest {
         tag: String,
         request_id: String,
@@ -1799,6 +1831,50 @@ pub enum ServerMsg {
         resolution: DecisionResolution,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         choice_id: Option<String>,
+    },
+
+    // ── permission approvals (AP0b) ──────────────────────────────────────────
+    // Only `ApprovalPending` (a count) may reach a network peer; the rest carry
+    // the command, reason and working directory and are `LocalOnly`.
+    /// A permission request the daemon is holding for a human. Sent to
+    /// connections that render approvals (the verified Mac app).
+    ApprovalRequest {
+        tag: String,
+        request: crate::approvals::wire::ApprovalRequestWire,
+    },
+    /// Every request still held, sent once to a connection that subscribes
+    /// with `renders_approvals` (targeted).
+    ApprovalsSnapshot {
+        requests: Vec<crate::approvals::wire::ApprovalRequestWire>,
+    },
+    /// A held request ended: answered, timed out, the app went away, the
+    /// session stopped. `outcome` is the audit log's name for it.
+    ApprovalResolved {
+        tag: String,
+        request_id: String,
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_window: Option<String>,
+        at_ms: u64,
+    },
+    /// How many requests are held for a focus. The count only: the one approval
+    /// frame a network peer may receive (for a non-sensitive focus).
+    ApprovalPending { tag: String, count: u32 },
+    /// The production-shell guard blocked a call. `summary` is the tool name and
+    /// the first command word only.
+    ApprovalGuardBlocked {
+        tag: String,
+        tool_use_id: String,
+        entry_id: String,
+        at_ms: u64,
+        summary: String,
+    },
+    /// An `ApprovalAnswer` was not applied (targeted).
+    ApprovalAnswerRefused {
+        request_id: String,
+        code: crate::approvals::wire::AnswerRefusal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
     },
 
     /// A daemon-originated, tag-addressed, operator-facing notification (W5
@@ -2106,7 +2182,7 @@ mod tests {
         let msg: ClientMsg =
             serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions } => {
+            ClientMsg::Subscribe { topics, renders_decisions, .. } => {
                 assert_eq!(topics, vec![]);
                 assert!(
                     !renders_decisions,
@@ -2126,7 +2202,7 @@ mod tests {
             serde_json::from_str(r#"{"type":"subscribe","topics":["decision","layout"]}"#)
                 .unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions } => {
+            ClientMsg::Subscribe { topics, renders_decisions, .. } => {
                 assert_eq!(topics, vec![Topic::Decision, Topic::Layout]);
                 assert!(!renders_decisions);
             }
@@ -2165,9 +2241,9 @@ mod tests {
     /// just "some boolean survives a round trip."
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_false_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: false });
+        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: false })
+        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false })
             .unwrap();
         assert_eq!(v["type"], "subscribe");
         assert_eq!(v["topics"], serde_json::json!([]));
@@ -2179,9 +2255,9 @@ mod tests {
 
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_true_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: true });
+        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: true, renders_approvals: false });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true })
+        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true, renders_approvals: false })
             .unwrap();
         assert_eq!(v["renders_decisions"], true);
     }
@@ -4776,5 +4852,452 @@ mod work_wire_tests {
             msg,
             ServerMsg::SessionTaskDetail { preview: None, progress_summary: None, completion_summary: None, prompt: None, .. }
         ));
+    }
+
+    // ── AP0b: the approval frames (golden JSON) ───────────────────────────────
+    //
+    // The strings below are the wire contract (design contract section 4). The Swift
+    // side (`Shared/NostromoKit/.../Approvals/ApprovalWire.swift`) must decode exactly these;
+    // the NostromoKit test target has no `Fixtures/` directory, so the same strings are
+    // embedded here rather than shared as a file. Each is compared as a JSON value (key
+    // order is not part of the contract), and decoded and re-encoded.
+
+    use crate::approvals::display::{ApprovalDisplay, DisplayLine, LineKind, Segment, SegmentKind};
+    use crate::approvals::request::{FoundRule, McpTool, Reason, ReasonKind, ToolKind};
+    use crate::approvals::wire::{
+        AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption, ApprovalRequestWire,
+        DecisionKind, RefusalChannel, SubagentWire,
+    };
+
+    /// An `ApprovalRequestWire` with every optional field set.
+    fn full_approval_wire() -> ApprovalRequestWire {
+        ApprovalRequestWire {
+            request_id: "11111111-2222-3333-4444-555555555555".into(),
+            tag: "cody-1".into(),
+            tool_use_id: "toolu_1".into(),
+            agent: AgentWire {
+                name: "cody".into(),
+                subagent: Some(SubagentWire { agent_id: "agent_abc".into(), agent_type: Some("general-purpose".into()) }),
+            },
+            tool_name: "mcp__slack__post_message".into(),
+            display_name: "Post message".into(),
+            tool_kind: ToolKind::Mcp,
+            mcp: Some(McpTool { server: "slack".into(), tool: "post_message".into() }),
+            input: serde_json::json!({ "channel": "#eng", "text": "hi", "nested": { "a": [1, 2, { "b": null }] } }),
+            display: ApprovalDisplay {
+                lines: vec![
+                    DisplayLine {
+                        number: 1,
+                        kind: LineKind::Json,
+                        cont: false,
+                        segments: vec![
+                            Segment { text: "{".into(), kind: SegmentKind::Plain, cp: None },
+                            Segment { text: "\u{27E8}U+202E RLO\u{27E9}".into(), kind: SegmentKind::Invisible, cp: Some(0x202E) },
+                            Segment { text: "\u{e9}".into(), kind: SegmentKind::NonAscii, cp: Some(0xE9) },
+                        ],
+                    },
+                    DisplayLine {
+                        number: 2,
+                        kind: LineKind::Command,
+                        cont: true,
+                        segments: vec![Segment { text: "&&".into(), kind: SegmentKind::Separator, cp: None }],
+                    },
+                ],
+                command_count: Some(2),
+                invisible_count: 1,
+                non_ascii_count: 1,
+                unparsed: false,
+            },
+            cwd: Some("/work/proj".into()),
+            reason: Reason {
+                kind: ReasonKind::AskRule,
+                text: "your rule Bash(rm:*) in ~/.claude/settings.json".into(),
+                rule: Some(FoundRule {
+                    rule: "Bash(rm:*)".into(),
+                    source_path: "~/.claude/settings.json".into(),
+                    found_by: "nostromo".into(),
+                }),
+            },
+            flags: ApprovalFlags {
+                default_to_no: true,
+                suppress_always_allow_rule: false,
+                requires_user_interaction: true,
+                classifier_approvable: false,
+            },
+            description: Some("post a message".into()),
+            options: ApprovalOption::ALL.to_vec(),
+            session_rule_candidates: vec![],
+            created_at_ms: 1_760_000_000_000,
+            deadline_at_ms: 1_760_000_900_000,
+        }
+    }
+
+    /// `full_approval_wire()` as it goes over the wire.
+    const FULL_APPROVAL_WIRE_JSON: &str = r##"{
+        "request_id": "11111111-2222-3333-4444-555555555555",
+        "tag": "cody-1",
+        "tool_use_id": "toolu_1",
+        "agent": { "name": "cody", "subagent": { "agent_id": "agent_abc", "agent_type": "general-purpose" } },
+        "tool_name": "mcp__slack__post_message",
+        "display_name": "Post message",
+        "tool_kind": "mcp",
+        "mcp": { "server": "slack", "tool": "post_message" },
+        "input": { "channel": "#eng", "text": "hi", "nested": { "a": [1, 2, { "b": null }] } },
+        "display": {
+            "lines": [
+                { "number": 1, "kind": "json", "segments": [
+                    { "text": "{", "kind": "plain" },
+                    { "text": "⟨U+202E RLO⟩", "kind": "invisible", "cp": 8238 },
+                    { "text": "é", "kind": "non_ascii", "cp": 233 }
+                ] },
+                { "number": 2, "kind": "command", "cont": true, "segments": [ { "text": "&&", "kind": "separator" } ] }
+            ],
+            "command_count": 2,
+            "invisible_count": 1,
+            "non_ascii_count": 1,
+            "unparsed": false
+        },
+        "cwd": "/work/proj",
+        "reason": {
+            "kind": "ask_rule",
+            "text": "your rule Bash(rm:*) in ~/.claude/settings.json",
+            "rule": { "rule": "Bash(rm:*)", "source_path": "~/.claude/settings.json", "found_by": "nostromo" }
+        },
+        "flags": {
+            "default_to_no": true,
+            "suppress_always_allow_rule": false,
+            "requires_user_interaction": true,
+            "classifier_approvable": false
+        },
+        "description": "post a message",
+        "options": ["allow_once", "deny", "deny_and_stop", "deny_with_note"],
+        "session_rule_candidates": [],
+        "created_at_ms": 1760000000000,
+        "deadline_at_ms": 1760000900000
+    }"##;
+
+    /// An `ApprovalRequestWire` with only what is required.
+    fn minimal_approval_wire() -> ApprovalRequestWire {
+        ApprovalRequestWire {
+            request_id: "r-min".into(),
+            tag: "t".into(),
+            tool_use_id: "toolu_2".into(),
+            agent: AgentWire { name: "cody".into(), subagent: None },
+            tool_name: "Bash".into(),
+            display_name: "Bash".into(),
+            tool_kind: ToolKind::Bash,
+            mcp: None,
+            input: serde_json::json!({ "command": "ls" }),
+            display: ApprovalDisplay { lines: vec![], command_count: None, invisible_count: 0, non_ascii_count: 0, unparsed: false },
+            cwd: None,
+            reason: Reason { kind: ReasonKind::Other, text: "Claude Code asked for approval".into(), rule: None },
+            flags: ApprovalFlags::default(),
+            description: None,
+            options: vec![ApprovalOption::AllowOnce, ApprovalOption::Deny],
+            session_rule_candidates: vec![],
+            created_at_ms: 1,
+            deadline_at_ms: 2,
+        }
+    }
+
+    const MINIMAL_APPROVAL_WIRE_JSON: &str = r##"{
+        "request_id": "r-min",
+        "tag": "t",
+        "tool_use_id": "toolu_2",
+        "agent": { "name": "cody" },
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "tool_kind": "bash",
+        "input": { "command": "ls" },
+        "display": { "lines": [], "invisible_count": 0, "non_ascii_count": 0, "unparsed": false },
+        "reason": { "kind": "other", "text": "Claude Code asked for approval" },
+        "flags": {
+            "default_to_no": false,
+            "suppress_always_allow_rule": false,
+            "requires_user_interaction": false,
+            "classifier_approvable": false
+        },
+        "options": ["allow_once", "deny"],
+        "session_rule_candidates": [],
+        "created_at_ms": 1,
+        "deadline_at_ms": 2
+    }"##;
+
+    fn json(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap_or_else(|e| panic!("bad golden JSON ({e}): {text}"))
+    }
+
+    /// `msg` encodes to exactly `golden`, and `golden` decodes to a message that encodes the same.
+    #[track_caller]
+    fn assert_server_golden(msg: ServerMsg, golden: &str) {
+        let encoded = serde_json::to_value(&msg).unwrap();
+        assert_eq!(encoded, json(golden), "encoding changed: {encoded}");
+        let decoded: ServerMsg = serde_json::from_str(golden).unwrap_or_else(|e| panic!("golden does not decode ({e}): {golden}"));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), json(golden), "decode then encode is not the identity");
+    }
+
+    #[track_caller]
+    fn assert_client_golden(msg: ClientMsg, golden: &str) {
+        let encoded = serde_json::to_value(&msg).unwrap();
+        assert_eq!(encoded, json(golden), "encoding changed: {encoded}");
+        let decoded: ClientMsg = serde_json::from_str(golden).unwrap_or_else(|e| panic!("golden does not decode ({e}): {golden}"));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), json(golden), "decode then encode is not the identity");
+    }
+
+    #[test]
+    fn approval_request_with_every_field_populated_has_this_exact_wire_form() {
+        let golden = format!(r#"{{"type":"approval_request","tag":"cody-1","request":{FULL_APPROVAL_WIRE_JSON}}}"#);
+        assert_server_golden(ServerMsg::ApprovalRequest { tag: "cody-1".into(), request: full_approval_wire() }, &golden);
+        round_trip_server(ServerMsg::ApprovalRequest { tag: "cody-1".into(), request: full_approval_wire() });
+    }
+
+    #[test]
+    fn approval_request_with_only_the_required_fields_omits_the_optional_keys() {
+        let golden = format!(r#"{{"type":"approval_request","tag":"t","request":{MINIMAL_APPROVAL_WIRE_JSON}}}"#);
+        assert_server_golden(ServerMsg::ApprovalRequest { tag: "t".into(), request: minimal_approval_wire() }, &golden);
+        let v = serde_json::to_value(minimal_approval_wire()).unwrap();
+        for key in ["mcp", "cwd", "description"] {
+            assert!(v.get(key).is_none(), "an absent {key} is omitted, not null: {v}");
+        }
+    }
+
+    #[test]
+    fn the_wire_input_is_the_clis_input_untouched_whatever_shape_it_has() {
+        for input in [
+            serde_json::json!("a bare string"),
+            serde_json::json!(null),
+            serde_json::json!([1, "two", { "three": [] }]),
+            serde_json::json!({ "zeta": 1, "alpha": { "b": [true, null, 1.5e300, "\u{202E}x"] } }),
+        ] {
+            let mut wire = minimal_approval_wire();
+            wire.input = input.clone();
+            let v = serde_json::to_value(ServerMsg::ApprovalRequest { tag: "t".into(), request: wire }).unwrap();
+            assert_eq!(v["request"]["input"], input);
+        }
+    }
+
+    #[test]
+    fn approvals_snapshot_has_this_exact_wire_form_empty_and_full() {
+        assert_server_golden(ServerMsg::ApprovalsSnapshot { requests: vec![] }, r#"{"type":"approvals_snapshot","requests":[]}"#);
+        let golden = format!(r#"{{"type":"approvals_snapshot","requests":[{FULL_APPROVAL_WIRE_JSON},{MINIMAL_APPROVAL_WIRE_JSON}]}}"#);
+        assert_server_golden(
+            ServerMsg::ApprovalsSnapshot { requests: vec![full_approval_wire(), minimal_approval_wire()] },
+            &golden,
+        );
+    }
+
+    #[test]
+    fn approval_resolved_has_this_exact_wire_form_with_and_without_by_window() {
+        assert_server_golden(
+            ServerMsg::ApprovalResolved {
+                tag: "cody-1".into(),
+                request_id: "r1".into(),
+                outcome: "allowed_once".into(),
+                by_window: Some("win-1".into()),
+                at_ms: 1_760_000_000_123,
+            },
+            r#"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"allowed_once","by_window":"win-1","at_ms":1760000000123}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalResolved {
+                tag: "cody-1".into(),
+                request_id: "r1".into(),
+                outcome: "timed_out".into(),
+                by_window: None,
+                at_ms: 7,
+            },
+            r#"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"timed_out","at_ms":7}"#,
+        );
+    }
+
+    #[test]
+    fn approval_pending_has_this_exact_wire_form_and_carries_nothing_but_a_tag_and_a_count() {
+        assert_server_golden(
+            ServerMsg::ApprovalPending { tag: "cody-1".into(), count: 2 },
+            r#"{"type":"approval_pending","tag":"cody-1","count":2}"#,
+        );
+        let v = serde_json::to_value(ServerMsg::ApprovalPending { tag: "cody-1".into(), count: 0 }).unwrap();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["count", "tag", "type"], "the only approval frame a LAN peer may see has no room for content");
+    }
+
+    #[test]
+    fn approval_guard_blocked_has_this_exact_wire_form() {
+        assert_server_golden(
+            ServerMsg::ApprovalGuardBlocked {
+                tag: "cody-1".into(),
+                tool_use_id: "toolu_9".into(),
+                entry_id: "entry-1".into(),
+                at_ms: 5,
+                summary: "Bash ecs_connect".into(),
+            },
+            r#"{"type":"approval_guard_blocked","tag":"cody-1","tool_use_id":"toolu_9","entry_id":"entry-1","at_ms":5,"summary":"Bash ecs_connect"}"#,
+        );
+    }
+
+    #[test]
+    fn approval_answer_refused_has_this_exact_wire_form_with_and_without_an_outcome() {
+        assert_server_golden(
+            ServerMsg::ApprovalAnswerRefused {
+                request_id: "r1".into(),
+                code: AnswerRefusal::AlreadyResolved,
+                outcome: Some("allowed_once".into()),
+            },
+            r#"{"type":"approval_answer_refused","request_id":"r1","code":"already_resolved","outcome":"allowed_once"}"#,
+        );
+        for (code, name) in [
+            (AnswerRefusal::RequiresSecureConnection, "requires_secure_connection"),
+            (AnswerRefusal::NotOperatorApp, "not_operator_app"),
+            (AnswerRefusal::UnknownRequest, "unknown_request"),
+        ] {
+            assert_server_golden(
+                ServerMsg::ApprovalAnswerRefused { request_id: "r1".into(), code, outcome: None },
+                &format!(r#"{{"type":"approval_answer_refused","request_id":"r1","code":"{name}"}}"#),
+            );
+            assert_eq!(code.as_str(), name, "the audit log writes the same code the wire carries");
+        }
+    }
+
+    #[test]
+    fn approval_answer_has_this_exact_wire_form_for_every_decision_kind() {
+        assert_client_golden(
+            ClientMsg::ApprovalAnswer {
+                request_id: "r1".into(),
+                decision: ApprovalDecision { kind: DecisionKind::AllowOnce, note: None },
+                window_id: "win-1".into(),
+                operator_nonce: Some("ab12".into()),
+            },
+            r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"allow_once"},"window_id":"win-1","operator_nonce":"ab12"}"#,
+        );
+        assert_client_golden(
+            ClientMsg::ApprovalAnswer {
+                request_id: "r1".into(),
+                decision: ApprovalDecision { kind: DecisionKind::Deny, note: Some("use /tmp/y".into()) },
+                window_id: "win-1".into(),
+                operator_nonce: Some("ab12".into()),
+            },
+            r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"deny","note":"use /tmp/y"},"window_id":"win-1","operator_nonce":"ab12"}"#,
+        );
+        assert_client_golden(
+            ClientMsg::ApprovalAnswer {
+                request_id: "r1".into(),
+                decision: ApprovalDecision { kind: DecisionKind::DenyAndStop, note: None },
+                window_id: "win-2".into(),
+                operator_nonce: None,
+            },
+            r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"deny_and_stop"},"window_id":"win-2"}"#,
+        );
+    }
+
+    #[test]
+    fn an_approval_answer_without_a_nonce_still_decodes_and_the_daemon_refuses_it_later() {
+        // A Mac older than the nonce sends none: the frame must decode (so it can be refused
+        // by name and logged), never be dropped as malformed.
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"allow_once"},"window_id":"w"}"#,
+        )
+        .unwrap();
+        assert!(matches!(msg, ClientMsg::ApprovalAnswer { operator_nonce: None, .. }), "{msg:?}");
+    }
+
+    #[test]
+    fn an_unknown_decision_kind_does_not_decode_so_it_can_never_be_read_as_an_allow() {
+        for kind in ["allow", "allow_session", "approve", "", "ALLOW_ONCE"] {
+            let text = format!(
+                r#"{{"type":"approval_answer","request_id":"r1","decision":{{"kind":"{kind}"}},"window_id":"w"}}"#
+            );
+            assert!(serde_json::from_str::<ClientMsg>(&text).is_err(), "{kind:?} must not decode");
+        }
+    }
+
+    #[test]
+    fn approval_refusal_report_has_this_exact_wire_form_for_every_channel() {
+        for (channel, name) in [
+            (RefusalChannel::AppControl, "app_control"),
+            (RefusalChannel::Accessibility, "accessibility"),
+            (RefusalChannel::Unknown, "unknown"),
+        ] {
+            assert_client_golden(
+                ClientMsg::ApprovalRefusalReport { request_id: Some("r1".into()), control: "allow_once".into(), channel },
+                &format!(r#"{{"type":"approval_refusal_report","request_id":"r1","control":"allow_once","channel":"{name}"}}"#),
+            );
+            assert_eq!(channel.as_str(), name);
+        }
+        assert_client_golden(
+            ClientMsg::ApprovalRefusalReport { request_id: None, control: "deny".into(), channel: RefusalChannel::Accessibility },
+            r#"{"type":"approval_refusal_report","control":"deny","channel":"accessibility"}"#,
+        );
+    }
+
+    #[test]
+    fn welcome_with_the_approvals_feature_has_this_exact_wire_form() {
+        assert_server_golden(
+            ServerMsg::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_pid: 9,
+                features: vec!["work".into(), "approvals_v1".into()],
+                operator_nonce: Some("cd34".into()),
+            },
+            r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"features":["work","approvals_v1"],"operator_nonce":"cd34"}"#,
+        );
+    }
+
+    // ── Subscribe.renders_approvals (mirrors renders_decisions) ──────────────────
+
+    #[test]
+    fn subscribe_without_a_renders_approvals_key_decodes_as_false() {
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
+        match msg {
+            ClientMsg::Subscribe { renders_approvals, .. } => {
+                assert!(!renders_approvals, "an absent renders_approvals key must decode to false, never to true");
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_with_renders_decisions_but_no_renders_approvals_key_is_not_a_presenter_claim() {
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":["decision"],"renders_decisions":true}"#).unwrap();
+        match msg {
+            ClientMsg::Subscribe { renders_decisions, renders_approvals, .. } => {
+                assert!(renders_decisions);
+                assert!(!renders_approvals, "claiming to render decisions says nothing about approvals");
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_with_renders_approvals_true_decodes_true() {
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_approvals":true}"#).unwrap();
+        match msg {
+            ClientMsg::Subscribe { renders_approvals, renders_decisions, .. } => {
+                assert!(renders_approvals);
+                assert!(!renders_decisions, "the two claims are independent");
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_with_renders_approvals_false_decodes_false() {
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_approvals":false}"#).unwrap();
+        match msg {
+            ClientMsg::Subscribe { renders_approvals, .. } => assert!(!renders_approvals),
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encoding_subscribe_includes_an_explicit_renders_approvals_key_either_way() {
+        for value in [false, true] {
+            let msg = ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: value };
+            round_trip_client(msg.clone());
+            assert_client_golden(
+                msg,
+                &format!(r#"{{"type":"subscribe","topics":[],"renders_decisions":false,"renders_approvals":{value}}}"#),
+            );
+        }
     }
 }

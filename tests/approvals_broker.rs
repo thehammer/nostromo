@@ -292,6 +292,7 @@ fn session(tag: &str) -> SessionInfo {
         agent: "cody".into(),
         session_id: Some(format!("sid-{tag}")),
         cwd: Some(PathBuf::from("/work/proj")),
+        guarded: true,
     }
 }
 
@@ -312,6 +313,7 @@ impl Rig {
         let probe_log = Arc::clone(&probed);
         let pane_9 = opts.pane_9;
         let parts = BrokerParts {
+            presenters: Default::default(),
             presenter: presenter.clone(),
             probe: Arc::new(move || {
                 Box::new(FakeProbe {
@@ -2437,6 +2439,7 @@ fn broker_on(dir: &Path) -> ApprovalBroker {
     ApprovalBroker::new(
         AuditLog::open(dir).unwrap(),
         BrokerParts {
+            presenters: Default::default(),
             presenter: Arc::new(TestPresenter {
                 hold: false,
                 gate: None,

@@ -13,6 +13,7 @@
 //!   the "Why" line.
 //! - [`display`]: the exact-text breakdown of a request (round-trip safe).
 //! - [`broker`]: hears every permission request, logs it, and always answers it.
+//! - [`wire`]: the payloads of the approval frames the Mac app sees and answers.
 
 pub mod audit;
 pub mod broker;
@@ -20,6 +21,7 @@ pub mod display;
 pub mod guard;
 pub mod request;
 pub mod shell;
+pub mod wire;
 
 mod expand;
 mod inert;

@@ -231,6 +231,7 @@ async fn do_connect(path: &Path) -> Result<(SplitReader, SplitWriter, u32)> {
         // omits Topic::Decision above and must not claim operator status here
         // either.
         renders_decisions: false,
+        renders_approvals: false,
     };
     write_frame(&mut writer, &serde_json::to_vec(&subscribe)?).await?;
     debug!(client_id, "sent Subscribe");

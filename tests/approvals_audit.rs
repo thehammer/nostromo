@@ -178,7 +178,7 @@ fn every_event() -> Vec<(&'static str, Event)> {
             "outcome",
             Event::Outcome { outcome: "allow_once".into(), rule: Some(json!({ "tool": "Bash" })), by_window: Some("w1".into()), latency_ms: Some(1234), watchdog: false },
         ),
-        ("refusal", Event::Refusal { refusal_code: "not_operator".into(), peer: Some(json!({ "trust": "local_other", "pid": 7 })) }),
+        ("refusal", Event::Refusal { refusal_code: "not_operator".into(), peer: Some(json!({ "trust": "local_other", "pid": 7 })), channel: None, control: None }),
         ("guard_blocked", blocked_event("ecs_connect")),
         ("session_rule_granted", Event::SessionRuleGranted { rule: json!({ "tool": "Bash" }) }),
         ("session_rule_revoked", Event::SessionRuleRevoked { rule: json!({ "tool": "Bash" }) }),

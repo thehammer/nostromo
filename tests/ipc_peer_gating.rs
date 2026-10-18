@@ -236,7 +236,7 @@ async fn handshake_with_nonce<S: AsyncRead + AsyncWrite + Unpin>(
         ServerMsg::Welcome { operator_nonce, .. } => operator_nonce,
         other => panic!("expected Welcome, got {other:?}"),
     };
-    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false }).await;
+    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false }).await;
     (nonce, sync(stream).await)
 }
 
@@ -2203,7 +2203,7 @@ async fn a_unix_client_that_subscribed_to_everything_is_not_replayed_retained_fr
     let (mut unix, first) = h.unix(vec![]).await;
     assert!(count(&first, |m| matches!(m, ServerMsg::FredState { .. })) == 1, "{first:?}");
 
-    send(&mut unix, &ClientMsg::Subscribe { topics: vec![], renders_decisions: false }).await;
+    send(&mut unix, &ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false }).await;
     let second = sync(&mut unix).await;
     assert!(second.is_empty(), "nothing was added, so nothing may be replayed again: {second:?}");
 }
@@ -2589,7 +2589,7 @@ async fn a_unix_client_that_adds_the_work_topic_with_a_second_subscribe_is_repla
     assert_eq!(count(&first, |m| matches!(m, ServerMsg::WorkSnapshot { .. })), 0, "{first:?}");
     assert_eq!(count(&first, |m| matches!(m, ServerMsg::ActivityHealth { .. })), 1, "{first:?}");
 
-    send(&mut unix, &ClientMsg::Subscribe { topics: vec![Topic::Activity, Topic::Work], renders_decisions: false })
+    send(&mut unix, &ClientMsg::Subscribe { topics: vec![Topic::Activity, Topic::Work], renders_decisions: false, renders_approvals: false })
         .await;
     let second = sync(&mut unix).await;
 
@@ -2620,7 +2620,7 @@ async fn a_tcp_client_that_adds_the_work_topic_with_a_second_subscribe_is_still_
     let (mut tcp, first) = h.tcp(vec![Topic::Activity]).await;
     assert_no_sensitive(&first);
 
-    send(&mut tcp, &ClientMsg::Subscribe { topics: vec![Topic::Activity, Topic::Work], renders_decisions: false })
+    send(&mut tcp, &ClientMsg::Subscribe { topics: vec![Topic::Activity, Topic::Work], renders_decisions: false, renders_approvals: false })
         .await;
     let second = sync(&mut tcp).await;
     assert_no_sensitive(&second);
@@ -3081,7 +3081,7 @@ async fn a_tcp_peer_cannot_drive_an_existing_ordinary_session_through_list_send_
 }
 
 #[tokio::test]
-async fn a_unix_peer_may_still_answer_a_permission_prompt_without_error() {
+async fn a_unix_peer_answering_a_permission_prompt_the_old_way_is_told_it_is_superseded() {
     let h = spawn_server().await;
     let (mut unix, _) = h.unix(vec![]).await;
     spawn_fake_session(&mut unix, "cody-perm", "cody", "v-r4-perm").await;
@@ -3094,7 +3094,13 @@ async fn a_unix_peer_may_still_answer_a_permission_prompt_without_error() {
         },
     )
     .await;
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })), "{frames:?}");
+    // AP0b: `session_answer_permission` is superseded by `approval_answer` for every
+    // peer. It says so, and does nothing.
+    assert!(
+        frames.iter().any(|m| matches!(m, ServerMsg::Error { message }
+            if message == "session_answer_permission is superseded by approval_answer")),
+        "{frames:?}"
+    );
 }
 
 // ── round 4, 2. read tools are withheld from a network-driven session ─────────
@@ -4586,7 +4592,7 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
     let frames = attack(&mut tcp, ClientMsg::ActivitySnapshotRequest { tag: "cody-ro".into() }).await;
     assert!(frames.iter().any(|m| matches!(m, ServerMsg::ActivitySnapshot { .. })), "{frames:?}");
     no_error(
-        &attack(&mut tcp, ClientMsg::Subscribe { topics: vec![Topic::Activity], renders_decisions: false }).await,
+        &attack(&mut tcp, ClientMsg::Subscribe { topics: vec![Topic::Activity], renders_decisions: false, renders_approvals: false }).await,
         "a second subscribe",
     );
 }
@@ -5159,7 +5165,7 @@ mod background_tasks {
             let mut tap = Tap { stream, raw: Vec::new(), frames: Vec::new(), parsed: 0 };
             tap.send(&ClientMsg::Hello { client_id: "tasks-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None }).await;
             tap.wait_until("the welcome", |f| count_type(f, "welcome") > 0).await;
-            tap.send(&ClientMsg::Subscribe { topics: vec![], renders_decisions: false }).await;
+            tap.send(&ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false }).await;
             tap.sync().await;
             tap
         }

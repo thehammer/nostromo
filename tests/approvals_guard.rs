@@ -3677,3 +3677,70 @@ fn benign_ordinary_commands_round4_have_no_false_positives() {
     assert_all_allowed(&refs, "no tmux server", FakeProbe::default);
     assert_all_allowed(&refs, "only local panes", pane_two_world);
 }
+
+// ── N9: a work-capped parse is "can't tell", and "can't tell" blocks ──────────
+
+mod work_capped {
+    use super::*;
+
+    /// ~4 MiB that the tokenizer gives up on (`{ ` repeated is not a command it can finish reading).
+    fn pathological_prefix() -> String {
+        "{ ".repeat(2 * 1024 * 1024)
+    }
+
+    /// Evaluate on a thread of its own so a regression fails instead of hanging the run.
+    fn evaluate_within(payload: HookPayload, probe: FakeProbe) -> Result<GuardVerdict, GuardError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(evaluate(&payload, &probe));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(300)).expect("the guard finished")
+    }
+
+    #[test]
+    fn a_huge_command_that_sends_keys_to_tmux_is_blocked_when_any_pane_is_remote() {
+        let command = format!("{}\ntmux send-keys -t %1 x Enter", pathological_prefix());
+        // %1 is a local pane: read in full, the call would be allowed.
+        let world = || {
+            FakeProbe::default()
+                .pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL)
+                .other_pane_on(DEFAULT, "staging:x:y", REMOTE_SHELL)
+        };
+        assert_allowed(evaluate(&bash("tmux send-keys -t %1 x Enter"), &world()), "control: the same send, read in full");
+
+        let verdict = evaluate_within(bash(&command), world());
+
+        assert_blocked(verdict, RULE_TMUX_INPUT, "the tokenizer gave up, so the guard cannot tell where the keys go");
+    }
+
+    #[test]
+    fn a_huge_command_that_sends_keys_to_tmux_is_allowed_when_no_pane_is_remote() {
+        let command = format!("{}\ntmux send-keys -t %1 x Enter", pathological_prefix());
+        let local_only = FakeProbe::default().pane_on(DEFAULT, "%1", "zsh", LOCAL_SHELL).other_pane_on(DEFAULT, "editor", &["vim"]);
+
+        assert_allowed(evaluate_within(bash(&command), local_only), "nothing to protect on this server");
+        assert_allowed(evaluate_within(bash(&command), FakeProbe::default()), "no tmux server answers");
+    }
+
+    #[test]
+    fn a_huge_command_that_names_an_ecs_shell_is_blocked_whatever_the_panes_are() {
+        for tail in [
+            "ecs_connect production portal web",
+            "ecs_open_tmux_pane production portal web",
+            "aws ecs execute-command --cluster c --task t --interactive --command sh",
+        ] {
+            let command = format!("{}\n{tail}", pathological_prefix());
+
+            let verdict = evaluate_within(bash(&command), FakeProbe::default());
+
+            assert_blocked(verdict, RULE_COMMAND, tail);
+        }
+    }
+
+    #[test]
+    fn a_huge_command_with_the_word_split_by_quotes_is_blocked_too() {
+        let command = format!("{}\ne\"c\"s_connect production portal web", pathological_prefix());
+
+        assert_blocked(evaluate_within(bash(&command), FakeProbe::default()), RULE_COMMAND, "quote-split ecs_connect");
+    }
+}

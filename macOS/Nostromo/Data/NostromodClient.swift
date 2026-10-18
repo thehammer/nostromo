@@ -26,9 +26,15 @@ private struct ClientHello: Encodable {
 private struct ClientSubscribe: Encodable {
     let type_  = "subscribe"
     let topics: [String]
+    /// Whether this app shows permission-approval requests. The daemon holds a
+    /// request for a human only while a verified app that says so is connected,
+    /// so claiming it before the approval card exists would leave requests
+    /// waiting for a screen that is not there. See `NostromodClient.rendersApprovals`.
+    let rendersApprovals = NostromodClient.rendersApprovals
     enum CodingKeys: String, CodingKey {
         case type_  = "type"
         case topics
+        case rendersApprovals = "renders_approvals"
     }
 }
 
@@ -230,6 +236,21 @@ enum ServerMsg {
     /// Answer to a `session_model_set` / `model_default_set` of this connection.
     case modelRequestResult(requestId: String, status: ModelRequestStatusWire,
                             code: String?, message: String?, warning: String?)
+
+    // ── permission approvals (AP0b; nothing renders them until AP2a) ─────────
+    /// A request the daemon is holding for a human. Only sent to a connection that
+    /// subscribed with `renders_approvals`, which this app does not yet.
+    case approvalRequest(tag: String, request: ApprovalRequestWire)
+    /// Every request still held (targeted, on subscribe with `renders_approvals`).
+    case approvalsSnapshot([ApprovalRequestWire])
+    /// A held request ended.
+    case approvalResolved(ApprovalResolvedFrame)
+    /// How many requests a focus has held.
+    case approvalPending(tag: String, count: Int)
+    /// The production-shell guard blocked a call.
+    case approvalGuardBlocked(ApprovalGuardBlockedFrame)
+    /// An `approval_answer` was not applied.
+    case approvalAnswerRefused(ApprovalAnswerRefusedFrame)
 
     // ── background tasks ──────────────────────────────────────────────────────
     /// Every background task of a session (full snapshot; replaces the last).
@@ -739,6 +760,12 @@ class NostromodClient {
         // `welcome` advertises them (see `subscribeToAdvertisedFeatures`).
         send(ClientSubscribe(topics: NostromodClient.baseTopics), type: "subscribe")
     }
+
+    /// Does this app claim to render permission-approval requests? **Not yet**: the
+    /// approval card arrives with AP2a, which flips this (and the test that pins it,
+    /// `testMacDoesNotClaimRendersApprovalsYet`) deliberately. While it is false the
+    /// daemon never holds a request for this app: every one is denied at once, as before.
+    static let rendersApprovals = false
 
     /// Topics every daemon this app can talk to understands.
     static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
@@ -1316,6 +1343,49 @@ class NostromodClient {
             if let m = try? decoder.decode(ModelRequestResultResp.self, from: raw) {
                 return .modelRequestResult(requestId: m.request_id, status: m.status,
                                            code: m.code, message: m.message, warning: m.warning)
+            }
+
+        // ── permission approvals ─────────────────────────────────────────────
+        case "approval_request":
+            if let m = try? decoder.decode(ApprovalRequestFrame.self, from: raw) {
+                return .approvalRequest(tag: m.tag, request: m.request)
+            } else {
+                log.error("failed to decode approval_request")
+            }
+
+        case "approvals_snapshot":
+            if let m = try? decoder.decode(ApprovalsSnapshotFrame.self, from: raw) {
+                return .approvalsSnapshot(m.requests)
+            } else {
+                log.error("failed to decode approvals_snapshot")
+            }
+
+        case "approval_resolved":
+            if let m = try? decoder.decode(ApprovalResolvedFrame.self, from: raw) {
+                return .approvalResolved(m)
+            } else {
+                log.error("failed to decode approval_resolved")
+            }
+
+        case "approval_pending":
+            if let m = try? decoder.decode(ApprovalPendingFrame.self, from: raw) {
+                return .approvalPending(tag: m.tag, count: m.count)
+            } else {
+                log.error("failed to decode approval_pending")
+            }
+
+        case "approval_guard_blocked":
+            if let m = try? decoder.decode(ApprovalGuardBlockedFrame.self, from: raw) {
+                return .approvalGuardBlocked(m)
+            } else {
+                log.error("failed to decode approval_guard_blocked")
+            }
+
+        case "approval_answer_refused":
+            if let m = try? decoder.decode(ApprovalAnswerRefusedFrame.self, from: raw) {
+                return .approvalAnswerRefused(m)
+            } else {
+                log.error("failed to decode approval_answer_refused")
             }
 
         case "session_tasks":

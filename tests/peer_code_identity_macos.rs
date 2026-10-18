@@ -845,7 +845,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         protocol_version: PROTOCOL_VERSION,
         client_kind: Some("mac_app".into()),
     });
-    bytes.extend(frame(&ClientMsg::Subscribe { topics: vec![Topic::Decision], renders_decisions: false }));
+    bytes.extend(frame(&ClientMsg::Subscribe { topics: vec![Topic::Decision], renders_decisions: false, renders_approvals: false }));
     bytes.extend(frame(&ClientMsg::DecisionAnswer {
         request_id: request_id.clone(),
         choice_id: Some("yes".into()),
