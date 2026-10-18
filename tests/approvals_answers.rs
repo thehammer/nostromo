@@ -243,6 +243,23 @@ impl Rig {
         }
     }
 
+    /// Frames until one satisfies `want`. The outcome is logged just before its frame is
+    /// broadcast, so a frame read right after `wait_outcome` can race it. Polls in real
+    /// time without parking the (paused) runtime.
+    async fn frames_until(&mut self, what: &str, want: impl Fn(&ServerMsg) -> bool) -> Vec<ServerMsg> {
+        let start = Instant::now();
+        let mut all = Vec::new();
+        loop {
+            all.extend(self.frames());
+            if all.iter().any(&want) {
+                return all;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "no frame for {what}: {all:?}");
+            std::thread::sleep(Duration::from_millis(2));
+            tokio::task::yield_now().await;
+        }
+    }
+
     fn writes(&self) -> Vec<(String, Value)> {
         self.sink.writes()
     }
@@ -730,16 +747,8 @@ async fn a_held_request_is_denied_timed_out_at_exactly_fifteen_minutes() {
     assert_eq!(outcome_name(&outcome), "timed_out");
     assert_eq!(rig.writes(), [("cli-toolu_1".to_owned(), deny_body(TIMED_OUT_MESSAGE))]);
     assert!(TIMED_OUT_MESSAGE.contains("within 15 minutes"));
-    // The outcome is logged just before the broadcast, so wait for the frame.
-    let mut frames = Vec::new();
-    let start = Instant::now();
-    while !frames.iter().any(|m| matches!(m, ServerMsg::ApprovalResolved { request_id, outcome, by_window: None, .. }
-        if *request_id == wire.request_id && outcome == "timed_out"))
-    {
-        assert!(start.elapsed() < Duration::from_secs(10), "the cards are told: {frames:?}");
-        frames.extend(rig.frames());
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    rig.frames_until("timed_out", |m| matches!(m, ServerMsg::ApprovalResolved { request_id, outcome, by_window: None, .. }
+        if *request_id == wire.request_id && outcome == "timed_out")).await;
     assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "app"), already("timed_out"));
 }
 
@@ -765,8 +774,8 @@ async fn when_the_last_presenter_leaves_held_requests_are_denied_no_app_after_th
 
     assert_eq!(outcome_name(&outcome), "no_app");
     assert_eq!(rig.writes(), [("cli-toolu_1".to_owned(), deny_body(NO_APP_MESSAGE))]);
-    assert!(rig.frames().iter().any(|m| matches!(m, ServerMsg::ApprovalResolved { request_id, outcome, .. }
-        if *request_id == wire.request_id && outcome == "no_app")));
+    rig.frames_until("no_app", |m| matches!(m, ServerMsg::ApprovalResolved { request_id, outcome, .. }
+        if *request_id == wire.request_id && outcome == "no_app")).await;
     assert!(PRESENTER_GRACE < Duration::from_secs(5), "the PRD's bound: denied well inside 5 s");
 }
 
@@ -931,7 +940,9 @@ async fn a_session_that_stops_cancels_its_held_requests_and_nothing_is_written()
 
     assert_eq!(outcome_name(&rig.wait_outcome("toolu_1").await), "cancelled");
     assert!(rig.writes().is_empty(), "never write to a session that is gone");
-    let frames = rig.frames();
+    let frames = rig
+        .frames_until("cancelled", |m| matches!(m, ServerMsg::ApprovalPending { tag, count: 0 } if tag == T))
+        .await;
     assert!(
         frames.iter().any(|m| matches!(m, ServerMsg::ApprovalResolved { request_id, outcome, .. }
             if *request_id == wire.request_id && outcome == "cancelled")),
