@@ -67,7 +67,7 @@ use super::wire::{
 };
 use super::ApprovalsPaths;
 use crate::data::work::is_invisible;
-use crate::ipc::protocol::ServerMsg;
+use crate::ipc::protocol::{ServerMsg, MAX_FRAME_LEN};
 
 // ── the words an agent is told (contract §6.2, verbatim) ──────────────────────
 
@@ -95,8 +95,11 @@ pub const INVALID_REQUEST_MESSAGE: &str =
 
 /// How long a held request waits for a human (user default U1).
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-/// The same constant under its earlier name.
-pub const REQUEST_TIMEOUT: Duration = APPROVAL_TIMEOUT;
+/// What the agent is told when a request is too large to show.
+pub const TOO_LARGE_MESSAGE: &str = "This permission request is too large for Nostromo to show, so it was denied. Tell the user what you wanted to do; do not retry it.";
+/// Room left under [`MAX_FRAME_LEN`] for the frame's envelope: a held request, or all
+/// of them in one snapshot, must serialize to at most `MAX_FRAME_LEN - FRAME_MARGIN`.
+const FRAME_MARGIN: usize = 64 * 1024;
 /// How long the last approval-rendering app may be gone (a reconnect) before
 /// every held request is denied `no_app`.
 pub const PRESENTER_GRACE: Duration = Duration::from_secs(3);
@@ -141,6 +144,8 @@ pub enum Outcome {
     Cancelled,
     GuardBlocked,
     InvalidRequest,
+    /// The request cannot be shown: its frame would not fit.
+    TooLarge,
 }
 
 impl Outcome {
@@ -160,6 +165,7 @@ impl Outcome {
             Self::Cancelled => "cancelled",
             Self::GuardBlocked => "guard_blocked",
             Self::InvalidRequest => "invalid_request",
+            Self::TooLarge => "too_large",
         }
     }
 }
@@ -351,6 +357,14 @@ impl ApprovalPresenters {
         !lock(&self.sets).apps.is_empty()
     }
 
+    fn is_presenter(&self, conn: &str) -> bool {
+        lock(&self.sets).presenters.contains(conn)
+    }
+
+    fn remove_presenter(&self, conn: &str) -> bool {
+        lock(&self.sets).presenters.remove(conn)
+    }
+
     fn add_app(&self, conn: &str) {
         lock(&self.sets).apps.insert(conn.to_owned());
     }
@@ -392,7 +406,7 @@ pub struct BrokerParts {
     pub presenters: ApprovalPresenters,
     pub probe: ProbeFactory,
     pub settings: Arc<dyn SettingsSource>,
-    /// How long a held request waits ([`REQUEST_TIMEOUT`]).
+    /// How long a held request waits ([`APPROVAL_TIMEOUT`]).
     pub timeout: Duration,
 }
 
@@ -406,7 +420,7 @@ impl BrokerParts {
             presenters,
             probe: Arc::new(|| Box::new(SystemPaneProbe::new())),
             settings: Arc::new(FileSettings::new()),
-            timeout: REQUEST_TIMEOUT,
+            timeout: APPROVAL_TIMEOUT,
         }
     }
 }
@@ -434,6 +448,8 @@ pub enum AnswerResult {
     AlreadyResolved { outcome: String },
     /// No held request has this id.
     UnknownRequest,
+    /// The answering connection is not one the request was shown to.
+    NotPresenter,
 }
 
 impl AnswerResult {
@@ -443,6 +459,7 @@ impl AnswerResult {
             Self::Applied { .. } => None,
             Self::AlreadyResolved { outcome } => Some((AnswerRefusal::AlreadyResolved, Some(outcome))),
             Self::UnknownRequest => Some((AnswerRefusal::UnknownRequest, None)),
+            Self::NotPresenter => Some((AnswerRefusal::NotOperatorApp, None)),
         }
     }
 }
@@ -1043,6 +1060,15 @@ impl ApprovalBroker {
         self.snapshot()
     }
 
+    /// Connection `conn` resubscribed without `renders_approvals`: it stops being a
+    /// presenter (it stays a verified app). If it was the last one, held requests
+    /// get [`PRESENTER_GRACE`], as when it disconnects.
+    pub fn presenter_revoked(&self, conn: &str) {
+        if self.inner.parts.presenters.remove_presenter(conn) && !self.has_approval_presenter() {
+            self.presenter_lost();
+        }
+    }
+
     /// Connection `conn` is gone. If it was the last presenter, held requests
     /// get [`PRESENTER_GRACE`] for one to reconnect, then are denied `no_app`.
     pub fn app_disconnected(&self, conn: &str) {
@@ -1058,6 +1084,10 @@ impl ApprovalBroker {
     }
 
     /// Every request held for a human, oldest first.
+    ///
+    /// The result always fits one frame: requests (oldest first) are added until the
+    /// next would push the frame past the limit, and each one left out is denied
+    /// `too_large`, never dropped silently.
     pub fn snapshot(&self) -> Vec<ApprovalRequestWire> {
         let mut wires: Vec<ApprovalRequestWire> = lock(&self.inner.state)
             .pending
@@ -1066,7 +1096,19 @@ impl ApprovalBroker {
             .filter_map(|p| p.wire.clone())
             .collect();
         wires.sort_by_key(|w| w.created_at_ms);
-        wires
+        let mut used = 0usize;
+        let mut kept = Vec::with_capacity(wires.len());
+        for wire in wires {
+            let size = wire_len(&wire);
+            if used + size > MAX_FRAME_LEN - FRAME_MARGIN {
+                self.inner
+                    .finish(&wire.request_id, Ending::deny(Outcome::TooLarge, TOO_LARGE_MESSAGE));
+            } else {
+                used += size;
+                kept.push(wire);
+            }
+        }
+        kept
     }
 
     /// The human's answer to held request `request_id`, from window `window_id`
@@ -1080,6 +1122,12 @@ impl ApprovalBroker {
         window_id: &str,
         conn_key: &str,
     ) -> AnswerResult {
+        // Only a connection the request was shown to answers it.
+        if !self.inner.parts.presenters.is_presenter(conn_key) {
+            return AnswerResult::NotPresenter;
+        }
+        let window_id = sanitize_string(window_id);
+        let window_id = window_id.as_str();
         let input = {
             let st = lock(&self.inner.state);
             match st.pending.get(request_id) {
@@ -1538,6 +1586,10 @@ impl Inner {
     /// show it to the presenters. `epoch_at_check`: the presenter epoch when the
     /// presenter was asked; a change since means one came or went in between.
     fn hold(&self, request_id: &str, wire: ApprovalRequestWire, input: Value, epoch_at_check: u64) {
+        if wire_len(&wire) > MAX_FRAME_LEN - FRAME_MARGIN {
+            self.finish(request_id, Ending::deny(Outcome::TooLarge, TOO_LARGE_MESSAGE));
+            return;
+        }
         let tag = wire.tag.clone();
         let mut st = lock(&self.state);
         let Some(p) = st.pending.get_mut(request_id) else {
@@ -1610,6 +1662,11 @@ struct Finished {
     outcome: Outcome,
     /// The id of the `outcome` entry.
     entry_id: String,
+}
+
+/// The serialized size of the frame that shows `wire`.
+fn wire_len(wire: &ApprovalRequestWire) -> usize {
+    serde_json::to_vec(wire).map_or(usize::MAX, |v| v.len())
 }
 
 fn now_ms() -> u64 {

@@ -28,7 +28,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event};
 use nostromo::approvals::broker::{
     restart_note_text, ApprovalBroker, BrokerParts, Incoming, Presenter, SessionInfo, SessionSink,
-    APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, REQUEST_TIMEOUT, RESTART_MESSAGE,
+    APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, APPROVAL_TIMEOUT, RESTART_MESSAGE,
     RESTART_NOTES_FILE, TIMED_OUT_MESSAGE, UNSUPPORTED_REQUEST_ERROR,
 };
 use nostromo::approvals::guard::{
@@ -299,7 +299,7 @@ impl World {
                     })
                 }),
                 settings: Arc::new(NoRules),
-                timeout: REQUEST_TIMEOUT,
+                timeout: APPROVAL_TIMEOUT,
             },
         );
         let barrier_generation = broker.register_session(
@@ -431,7 +431,7 @@ impl World {
     }
 
     async fn run_out_the_clock(&mut self) {
-        tokio::time::advance(REQUEST_TIMEOUT + Duration::from_secs(120)).await;
+        tokio::time::advance(APPROVAL_TIMEOUT + Duration::from_secs(120)).await;
         settle().await;
         self.barrier().await;
     }
@@ -1383,7 +1383,7 @@ fn an_unanswered_prompt_is_denied_after_fifteen_minutes_in_the_contract_s_words(
             settle().await;
             assert!(fake.responses().is_empty());
 
-            tokio::time::advance(REQUEST_TIMEOUT).await;
+            tokio::time::advance(APPROVAL_TIMEOUT).await;
             let responses = fake.wait_responses(1).await;
 
             assert_eq!(
@@ -1718,7 +1718,7 @@ fn a_message_that_is_only_queued_neither_takes_the_crash_note_nor_carries_it() {
         );
 
         // The turn ends (the prompt times out); the queued message is written, without the note.
-        tokio::time::advance(REQUEST_TIMEOUT).await;
+        tokio::time::advance(APPROVAL_TIMEOUT).await;
         let texts = wait_until("the queued message to be written", || {
             let t = fake.user_texts();
             (t.len() >= 2).then_some(t)

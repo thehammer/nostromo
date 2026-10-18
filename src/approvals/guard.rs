@@ -5,6 +5,7 @@
 //! [`PaneProbe`] alone: no config file, env switch, permission mode or rule
 //! list can turn a block into an allow.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, OnceLock};
@@ -746,8 +747,10 @@ fn parse_both(raw: &str, joined: &str) -> shell::ShellParse {
     let mut parsed = shell::parse(joined);
     if joined != raw {
         let as_written = shell::parse(raw);
+        let owned = |c: &shell::SimpleCommand| -> Vec<String> { c.texts().into_iter().map(str::to_owned).collect() };
+        let mut seen: HashSet<Vec<String>> = parsed.commands.iter().map(owned).collect();
         for c in as_written.commands {
-            if !parsed.commands.iter().any(|p| p.texts() == c.texts()) {
+            if seen.insert(owned(&c)) {
                 parsed.commands.push(c);
             }
         }
