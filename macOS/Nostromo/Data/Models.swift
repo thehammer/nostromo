@@ -216,7 +216,7 @@ enum JobPhaseState: String, Equatable {
 /// One agent step within a Mother job or pipeline cycle.
 ///
 /// All fields are decoded defensively: missing keys / unknown values never throw.
-struct JobPhase: Decodable {
+struct JobPhase: Decodable, Equatable {
     let agent:       String
     let requestType: String?
     let state:       JobPhaseState
@@ -258,7 +258,7 @@ struct JobPhase: Decodable {
 }
 
 /// One cycle within a pipeline Mother job.
-struct JobCycle: Decodable {
+struct JobCycle: Decodable, Equatable {
     let cycle:  Int
     let phases: [JobPhase]
 
@@ -294,12 +294,19 @@ struct PhaseRibbonModel {
 
 // MARK: - Mother
 
-struct MotherStatus {
+struct MotherStatus: Equatable {
     var running:   Int = 0
     var queued:    Int = 0
     var failed:    Int = 0
     var awaiting:  Int = 0
     var succeeded: Int = 0
+    /// Jobs waiting on the operator: held (`gate_hold`, `review_hold`, an open decision) or with
+    /// an unacknowledged decision / gates-incomplete flag. Each job counts once.
+    var needsYou:  Int = 0
+    /// Jobs with an unacknowledged `progress_stalled` flag.
+    var stalled:   Int = 0
+    /// Jobs with an unacknowledged `burn_ahead` flag.
+    var burning:   Int = 0
 
     var isEmpty: Bool { running == 0 && queued == 0 && failed == 0 && awaiting == 0 }
 
@@ -322,12 +329,19 @@ struct MotherStatus {
             case "succeeded": s.succeeded += 1
             default: break
             }
+            // A finished job needs nobody, whatever flags it still carries.
+            guard !["succeeded", "failed", "cancelled"].contains(job.state) else { continue }
+            let open = job.crew.attention.filter { !$0.acked }.map(\.reason)
+            if open.contains(.progressStalled) { s.stalled += 1 }
+            if open.contains(.burnAhead) { s.burning += 1 }
+            let needsAnswer = open.contains { $0 != .progressStalled && $0 != .burnAhead }
+            if job.holdSummary != nil || needsAnswer { s.needsYou += 1 }
         }
         return s
     }
 }
 
-struct MotherJob: Identifiable {
+struct MotherJob: Identifiable, Equatable {
     let id:              String
     let state:           String
     let repo:            String
@@ -345,6 +359,58 @@ struct MotherJob: Identifiable {
     var kind:   String?    = nil   // "pipeline" for multi-cycle jobs; nil for standard
     var phases: [JobPhase] = []    // flat phase list (standard jobs)
     var cycles: [JobCycle] = []    // per-cycle phases (pipeline jobs)
+    /// Headless-crew data: gates, review wave, decision, attention, progress. Empty for a job with none.
+    var crew:   MotherCrewState = MotherCrewState()
+
+    /// Apply a `progress_updated` overlay. A strictly older `updated_at` is ignored (events can
+    /// arrive out of order, or after a `query.get` that already has a later one); a tie goes to
+    /// the overlay that arrived last. Returns whether the job changed.
+    @discardableResult
+    mutating func applyProgress(_ incoming: MotherProgress) -> Bool {
+        guard MotherJob.isNewer(incoming, than: crew.progress, orEqual: true), crew.progress != incoming else { return false }
+        crew.progress = incoming
+        return true
+    }
+
+    /// The job as a `query.get` read it, with the newer of the two progress overlays kept:
+    /// a `progress_updated` event that raced the refresh must not be undone by it.
+    func replacing(with refreshed: MotherJob) -> MotherJob {
+        var out = refreshed
+        if let mine = crew.progress, !MotherJob.isNewer(refreshed.crew.progress, than: mine) {
+            out.crew.progress = mine
+        }
+        return out
+    }
+
+    /// `candidate` is newer than `stored`: no stored overlay, or a later `updated_at` (or an equal
+    /// one, when `orEqual`). Without a timestamp on the candidate there is nothing to order by,
+    /// so a stored overlay is kept.
+    private static func isNewer(_ candidate: MotherProgress?, than stored: MotherProgress?, orEqual: Bool = false) -> Bool {
+        guard let candidate else { return false }
+        guard let stored else { return true }
+        guard let new = parseISO(candidate.updatedAt) else { return false }
+        guard let old = parseISO(stored.updatedAt) else { return true }
+        return orEqual ? new >= old : new > old
+    }
+
+    private static func parseISO(_ s: String?) -> Date? {
+        guard let s else { return nil }
+        let frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = frac.date(from: s) { return d }
+        let basic = ISO8601DateFormatter()
+        basic.formatOptions = [.withInternetDateTime]
+        return basic.date(from: s)
+    }
+
+    /// The hold Mother put this job in (gates exhausted, review hold, open decision), if any.
+    var holdSummary: MotherHoldSummary? { MotherHoldSummary.make(kitJob) }
+
+    /// The job as NostromoKit's presentation models read it (progress line, hold summary, panel).
+    var kitJob: NostromoKit.MotherJob {
+        NostromoKit.MotherJob(id: id, state: state, title: title, repo: repo.isEmpty ? nil : repo,
+                              question: question, crew: crew)
+    }
 
     /// Computed ribbon model; nil when the job carries no phase data.
     var phaseRibbonModel: PhaseRibbonModel? {
@@ -395,6 +461,9 @@ struct MotherJobSlim: Decodable {
     let kind:            String?
     let phases:          [JobPhase]?   // nil → empty array in toMotherJob()
     let cycles:          [JobCycle]?   // nil → empty array in toMotherJob()
+    /// Gates, review wave, decision, attention, progress — each key read leniently,
+    /// so a malformed one never costs the job (`MotherCrewState(jobDecoder:)`).
+    let crew:            MotherCrewState
 
     enum CodingKeys: String, CodingKey {
         case id, state, repo, isolation, title, question, kind, phases, cycles
@@ -405,6 +474,30 @@ struct MotherJobSlim: Decodable {
         case pausedReason    = "paused_reason"
         case adherenceStatus = "adherence_status"
         case currentTier     = "current_tier"
+    }
+
+    /// Every pre-crew field decodes exactly as the synthesized `Decodable` did (a required
+    /// key that is missing or the wrong type throws; an optional one that is wrong throws
+    /// too); `crew` is added on top and cannot fail.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id              = try c.decode(String.self, forKey: .id)
+        state           = try c.decode(String.self, forKey: .state)
+        repo            = try c.decode(String.self, forKey: .repo)
+        isolation       = try c.decode(String.self, forKey: .isolation)
+        title           = try c.decode(String.self, forKey: .title)
+        createdAt       = try c.decodeIfPresent(String.self, forKey: .createdAt)
+        startedAt       = try c.decodeIfPresent(String.self, forKey: .startedAt)
+        finishedAt      = try c.decodeIfPresent(String.self, forKey: .finishedAt)
+        planPath        = try c.decodeIfPresent(String.self, forKey: .planPath)
+        question        = try c.decodeIfPresent(String.self, forKey: .question)
+        pausedReason    = try c.decodeIfPresent(String.self, forKey: .pausedReason)
+        adherenceStatus = try c.decodeIfPresent(String.self, forKey: .adherenceStatus)
+        currentTier     = try c.decodeIfPresent(String.self, forKey: .currentTier)
+        kind            = try c.decodeIfPresent(String.self, forKey: .kind)
+        phases          = try c.decodeIfPresent([JobPhase].self, forKey: .phases)
+        cycles          = try c.decodeIfPresent([JobCycle].self, forKey: .cycles)
+        crew            = (try? MotherCrewState(jobDecoder: decoder)) ?? MotherCrewState()
     }
 
     private static let fmtFrac: ISO8601DateFormatter = {
@@ -435,7 +528,8 @@ struct MotherJobSlim: Decodable {
                   currentTier:     currentTier,
                   kind:            kind,
                   phases:          phases ?? [],
-                  cycles:          cycles ?? [])
+                  cycles:          cycles ?? [],
+                  crew:            crew)
     }
 }
 

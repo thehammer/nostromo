@@ -268,7 +268,7 @@ public enum MotherLensRows {
 
     static func skipReasonWords(_ reason: String) -> String {
         switch reason {
-        case "path_scope": return "no matching files"
+        case "path_scope": return "not in scope"
         case "posture": return "not needed for this repo"
         case "budget": return "over budget"
         case "removed_by_plan": return "removed by the plan"

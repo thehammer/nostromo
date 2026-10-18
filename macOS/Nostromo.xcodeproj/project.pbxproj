@@ -99,6 +99,8 @@
 		AA0000020000000000000110 /* ToastBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000040 /* ToastBannerView.swift */; };
 		AA0000020000000000000111 /* SessionHealthStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000041 /* SessionHealthStatusView.swift */; };
 		AA0000020000000000000120 /* MotherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
+		MC0000000000000000000002 /* MotherJobDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = MC0000000000000000000001 /* MotherJobDetail.swift */; };
+		MC0000000000000000000003 /* MotherJobDetail.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MC0000000000000000000001 /* MotherJobDetail.swift */; };
 		AA0000020000000000000122 /* PerriView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000022 /* PerriView.swift */; };
 		AA0000020000000000000123 /* ReplView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000023 /* ReplView.swift */; };
 		FT0000000000000000000011 /* FollowTailPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = FT0000000000000000000001 /* FollowTailPolicy.swift */; };
@@ -486,6 +488,7 @@
 		AA0000020000000000000040 /* ToastBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastBannerView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000041 /* SessionHealthStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHealthStatusView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000020 /* MotherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherView.swift; sourceTree = "<group>"; };
+		MC0000000000000000000001 /* MotherJobDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobDetail.swift; sourceTree = "<group>"; };
 		AA0000020000000000000022 /* PerriView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000023 /* ReplView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplView.swift; sourceTree = "<group>"; };
 		FT0000000000000000000001 /* FollowTailPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowTailPolicy.swift; sourceTree = "<group>"; };
@@ -920,6 +923,7 @@
 				WK0000000000000000000055 /* TeriBindings.swift */,
 				WK0000000000000000000057 /* FredBindings.swift */,
 				AA0000020000000000000020 /* MotherView.swift */,
+				MC0000000000000000000001 /* MotherJobDetail.swift */,
 				AA0000020000000000000022 /* PerriView.swift */,
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
@@ -1263,6 +1267,7 @@
 				AA0000020000000000000110 /* ToastBannerView.swift in Sources */,
 				AA0000020000000000000111 /* SessionHealthStatusView.swift in Sources */,
 			AA0000020000000000000120 /* MotherView.swift in Sources */,
+			MC0000000000000000000002 /* MotherJobDetail.swift in Sources */,
 				AA0000020000000000000122 /* PerriView.swift in Sources */,
 				EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */,
 				AA0000020000000000000123 /* ReplView.swift in Sources */,
@@ -1440,6 +1445,7 @@
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,
 				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
+				MC0000000000000000000003 /* MotherJobDetail.swift in TestSources */,
 				BB00000000000000000000B4 /* Models.swift in TestSources */,
 				HH0000000000000000000A2 /* ImagePasteboard.swift in TestSources */,
 				HH0000000000000000000A3 /* ThumbnailLoader.swift in TestSources */,

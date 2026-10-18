@@ -23,6 +23,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
     /// Mother's progress indicator, e.g. "≈55% · gates 1/3 · ETA ~5-15 min"
     /// (see `MotherProgressLine`). Nil when the job has none.
     public let progressLine: String?
+    /// The spoken form of `progressLine` (VoiceOver); falls back to the line itself.
+    public let progressAccessibility: String?
     /// Short attention labels, e.g. "Needs decision" (see `MotherAttentionBadges`).
     public let attentionBadges: [String]
 
@@ -35,7 +37,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         question: String? = nil,
         relativeTimestamp: String? = nil,
         progressLine: String? = nil,
-        attentionBadges: [String] = []
+        attentionBadges: [String] = [],
+        progressAccessibility: String? = nil
     ) {
         self.id               = id
         self.state            = state
@@ -46,6 +49,13 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.relativeTimestamp = relativeTimestamp
         self.progressLine     = progressLine
         self.attentionBadges  = attentionBadges
+        self.progressAccessibility = progressAccessibility
+    }
+
+    /// Running and awaiting rows reserve a second line for progress and attention, so a
+    /// job gaining progress does not change its row's height.
+    public var reservesProgressLine: Bool {
+        state == "running" || state == "awaiting"
     }
 
     /// Terminal states → the row's swipe action is "Archive".

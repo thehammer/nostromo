@@ -415,7 +415,7 @@ final class MotherCrewPresentationTests: XCTestCase {
 
     func testSkippedLensShowsItsReasonInWordsAndNoFindingCounts() {
         let reasons: [(String, String)] = [
-            ("path_scope", "no matching files"),
+            ("path_scope", "not in scope"),
             ("posture", "not needed for this repo"),
             ("budget", "over budget"),
             ("removed_by_plan", "removed by the plan"),

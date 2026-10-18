@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import NostromoKit
 import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "broker")
@@ -75,6 +76,12 @@ enum BrokerEvent {
         pausedReason: String?,
         toState:      String?
     )
+    /// Mother's `progress_updated` overlay for one job (the broker's newest `updated_at` wins).
+    case progress(jobId: String, MotherProgress)
+    /// A crew event (gate, wave, decision or attention change) for one job: the broker's
+    /// record is authoritative, so AppStore re-reads the job with `query.get` instead of
+    /// folding the event itself.
+    case crewChanged(jobId: String)
     /// Liveness ping — ignore.
     case ping
     /// Client reconnected after disconnect — AppStore must clear jobMap and await next snapshot.
@@ -84,7 +91,8 @@ enum BrokerEvent {
 // MARK: - Internal pending-command record
 
 private struct PendingCommand {
-    let completion: (Result<Void, BrokerError>) -> Void
+    /// Gets the ack's `data` on success.
+    let completion: (Result<[String: Any], BrokerError>) -> Void
     let timer:      DispatchWorkItem
 }
 
@@ -125,7 +133,13 @@ class MotherBrokerClient {
     private let socketPath:  String
     private let q = DispatchQueue(label: "com.hammer.nostromo.broker", qos: .utility)
     private var reconnectDelay: TimeInterval = 1.0
-    private var advertisedCaps: [String] = []
+    private let capsLock = NSLock()
+    private var _advertisedCaps: [String] = []
+    /// What the broker's hello advertised (empty until connected, and for an unknown broker).
+    private var advertisedCaps: [String] {
+        get { capsLock.lock(); defer { capsLock.unlock() }; return _advertisedCaps }
+        set { capsLock.lock(); _advertisedCaps = newValue; capsLock.unlock() }
+    }
 
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
@@ -151,6 +165,15 @@ class MotherBrokerClient {
     init(socketPath: String = MotherBrokerClient.defaultSocketPath) {
         self.socketPath = socketPath
     }
+
+    // MARK: - Capabilities (B4: a feature is used only when the broker advertises it)
+
+    /// `progress_updated` events and the `progress` subscription.
+    var supportsProgress: Bool { advertisedCaps.contains("progress") }
+    /// `answer` with an option id (MC3).
+    var supportsAnswerOption: Bool { advertisedCaps.contains("answer.option") }
+    /// The `ack` command (MC3).
+    var supportsAck: Bool { advertisedCaps.contains("ack") }
 
     // MARK: - Lifecycle
 
@@ -179,6 +202,34 @@ class MotherBrokerClient {
     func forceStart(job: String,
                     completion: @escaping (Result<Void, BrokerError>) -> Void) {
         sendCommand(type: "force-start", jobId: job, extra: [:], completion: completion)
+    }
+
+    /// Re-read one job. The broker's record is authoritative; the ack's `data.job` is the raw job.
+    func queryGet(job: String,
+                  completion: @escaping (Result<MotherJob, BrokerError>) -> Void) {
+        sendRaw(type: "query.get", jobId: job, extra: [:]) { [weak self] result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let data):
+                if let raw = data["job"] as? [String: Any], let decoded = self?.decodeJob(raw) {
+                    completion(.success(decoded))
+                } else {
+                    completion(.failure(.code(.internal, message: "query.get returned no readable job")))
+                }
+            }
+        }
+    }
+
+    // MARK: - Crew events
+
+    /// The event kinds that change a job's gates, review wave, decision or attention
+    /// (index bet B3). `progress_updated` is not one: it is applied directly.
+    static func isCrewEventKind(_ t: String) -> Bool {
+        t.hasPrefix("gates_") || t.hasPrefix("pr_marked_") || t.hasPrefix("review_cycle_")
+            || t.hasPrefix("decision_") || t.hasPrefix("attention_")
+            || ["gate_result", "gate_fix_started", "lens_skipped", "reviewed", "claims_verified",
+                "review_wave_completed", "criterion_checked"].contains(t)
     }
 
     // MARK: - Connection lifecycle (private)
@@ -299,7 +350,9 @@ class MotherBrokerClient {
         let caps    = Set(advertisedCaps)
         // Intersect with advertised to avoid malformed rejection; if caps is empty (unknown broker)
         // send the full desired set — the broker should accept known categories.
-        let filtered = caps.isEmpty ? Array(desired) : Array(desired.intersection(caps))
+        var filtered = caps.isEmpty ? Array(desired) : Array(desired.intersection(caps))
+        // `progress` is newer than the rest: only ever asked for when advertised.
+        if caps.contains("progress") { filtered.append("progress") }
 
         let envelope: [String: Any] = [
             "v":   1,
@@ -320,6 +373,12 @@ class MotherBrokerClient {
 
     private func sendCommand(type: String, jobId: String, extra: [String: Any],
                              completion: @escaping (Result<Void, BrokerError>) -> Void) {
+        sendRaw(type: type, jobId: jobId, extra: extra) { completion($0.map { _ in () }) }
+    }
+
+    /// Send a command and hand its ack's `data` to `completion` (main queue).
+    private func sendRaw(type: String, jobId: String, extra: [String: Any],
+                         completion: @escaping (Result<[String: Any], BrokerError>) -> Void) {
         let id = UUID().uuidString
         var data: [String: Any] = ["job": jobId]
         extra.forEach { data[$0.key] = $0.value }
@@ -469,7 +528,7 @@ class MotherBrokerClient {
 
         let dataDict = json["data"] as? [String: Any] ?? [:]
         if (dataDict["ok"] as? Bool) == true {
-            DispatchQueue.main.async { cmd.completion(.success(())) }
+            DispatchQueue.main.async { cmd.completion(.success(dataDict)) }
         } else {
             let errDict = dataDict["error"]   as? [String: Any] ?? [:]
             let codeStr = errDict["code"]     as? String        ?? "internal"
@@ -517,6 +576,21 @@ class MotherBrokerClient {
                 return
             }
 
+            if t == "progress_updated" {
+                if let progress = decodeProgress(dataDict) {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.events.send(.progress(jobId: jobId, progress))
+                    }
+                }
+                return
+            }
+            if Self.isCrewEventKind(t) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.events.send(.crewChanged(jobId: jobId))
+                }
+                return
+            }
+
             let question     = dataDict["question"]      as? String
             let pausedReason = dataDict["paused_reason"] as? String
             let toState      = dataDict["to_state"]      as? String
@@ -542,6 +616,15 @@ class MotherBrokerClient {
         return slim.toMotherJob()
     }
 
+    /// A `progress_updated` event's `data` is the overlay itself plus `job` and `category`.
+    private func decodeProgress(_ dict: [String: Any]) -> MotherProgress? {
+        var overlay = dict
+        overlay.removeValue(forKey: "job")
+        overlay.removeValue(forKey: "category")
+        guard let data = try? JSONSerialization.data(withJSONObject: overlay) else { return nil }
+        return try? JSONDecoder().decode(MotherProgress.self, from: data)
+    }
+
     // MARK: - Pending command cleanup
 
     private func failAllPending(with error: BrokerError) {
@@ -561,5 +644,56 @@ class MotherBrokerClient {
         let fmt = ISO8601DateFormatter()
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fmt.string(from: Date())
+    }
+}
+
+// MARK: - MotherJobRefresher
+
+/// Turns a burst of crew events into one `query.get` per job.
+///
+/// The first request for a job starts a debounce window; further requests inside it
+/// add nothing. When the window closes the job is fetched (at most one fetch per job in
+/// flight). A request that arrives while a fetch is in flight is remembered, and one
+/// more fetch follows it. A failed fetch keeps the job as it was. Main queue only.
+final class MotherJobRefresher {
+    typealias Fetch = (_ job: String, _ done: @escaping (Result<MotherJob, BrokerError>) -> Void) -> Void
+
+    private let debounce: TimeInterval
+    private let fetch: Fetch
+    private let apply: (MotherJob) -> Void
+    private var pendingWindows: [String: DispatchWorkItem] = [:]
+    private var inFlight = Set<String>()
+    private var dirty = Set<String>()
+
+    init(debounce: TimeInterval = 0.3, fetch: @escaping Fetch, apply: @escaping (MotherJob) -> Void) {
+        self.debounce = debounce
+        self.fetch = fetch
+        self.apply = apply
+    }
+
+    func request(job: String) {
+        if inFlight.contains(job) { dirty.insert(job); return }
+        guard pendingWindows[job] == nil else { return }
+        let work = DispatchWorkItem { [weak self] in self?.fire(job) }
+        pendingWindows[job] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: work)
+    }
+
+    /// Forget everything pending (the connection dropped; the next snapshot is the truth).
+    func cancelAll() {
+        pendingWindows.values.forEach { $0.cancel() }
+        pendingWindows.removeAll()
+        dirty.removeAll()
+    }
+
+    private func fire(_ job: String) {
+        pendingWindows.removeValue(forKey: job)
+        inFlight.insert(job)
+        fetch(job) { [weak self] result in
+            guard let self else { return }
+            self.inFlight.remove(job)
+            if case .success(let refreshed) = result { self.apply(refreshed) }
+            if self.dirty.remove(job) != nil { self.request(job: job) }
+        }
     }
 }
