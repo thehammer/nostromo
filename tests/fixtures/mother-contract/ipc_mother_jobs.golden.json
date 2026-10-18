@@ -1,0 +1,237 @@
+{
+  "type": "mother_jobs",
+  "jobs": [
+    {
+      "id": "j-gates1",
+      "state": "running",
+      "repo": "Carefeed/admin-portal",
+      "isolation": "worktree",
+      "title": "Add facility export endpoint",
+      "created_at": "2026-10-17T11:40:00Z",
+      "started_at": "2026-10-17T11:41:05.250Z",
+      "finished_at": null,
+      "plan_path": "/tmp/plans/j-gates1.md",
+      "question": null,
+      "paused_reason": null,
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": "tier_0",
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": [],
+      "activity": "gating",
+      "pr_url": "https://github.com/Carefeed/admin-portal/pull/4321",
+      "crew_opt_in": true,
+      "gates": {
+        "mode": "enforce",
+        "posture": "normal",
+        "status": "running",
+        "attempt": 1,
+        "max_attempts": 3,
+        "head_sha": "9d1c4e7",
+        "started_at": "2026-10-17T11:59:58.000Z",
+        "finished_at": null,
+        "results": [],
+        "not_run": []
+      },
+      "progress": {
+        "v": 1,
+        "pct": 55,
+        "label": "Implementing",
+        "stage": "implement",
+        "signals": {
+          "stage": "implement",
+          "gates": null,
+          "elapsed_active_s": 420,
+          "cost": 1.12
+        },
+        "eta": {
+          "lo_s": 300,
+          "hi_s": 900,
+          "label": "5-15 min",
+          "basis": "fleet"
+        },
+        "paused": false,
+        "moved_back": null,
+        "flags": [],
+        "updated_at": "2026-10-17T12:00:00.000Z"
+      }
+    },
+    {
+      "id": "j-wave1",
+      "state": "running",
+      "repo": "Carefeed/admin-portal",
+      "isolation": "worktree",
+      "title": "Rework consent form validation",
+      "created_at": "2026-10-17T11:20:00Z",
+      "started_at": "2026-10-17T11:21:10.500Z",
+      "finished_at": null,
+      "plan_path": "/tmp/plans/j-wave1.md",
+      "question": null,
+      "paused_reason": null,
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": "tier_1",
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": [],
+      "activity": "review_wave",
+      "pr_url": "https://github.com/Carefeed/admin-portal/pull/4388",
+      "crew_opt_in": true,
+      "review_wave": {
+        "mode": "enforce",
+        "cycle": 1,
+        "cycle_cap": 2,
+        "status": "running",
+        "budget_usd": 3.0,
+        "spent_usd": 0.0,
+        "lenses": [
+          {
+            "reviewer": "archie:adherence",
+            "lens": "adherence",
+            "state": "pending",
+            "skip_reason": null,
+            "findings": {
+              "blocking": 0,
+              "advisory": 0
+            },
+            "cost_usd": 0.0,
+            "examined_files": 0
+          },
+          {
+            "reviewer": "perri:correctness",
+            "lens": "correctness",
+            "state": "pending",
+            "skip_reason": null,
+            "findings": {
+              "blocking": 0,
+              "advisory": 0
+            },
+            "cost_usd": 0.0,
+            "examined_files": 0
+          },
+          {
+            "reviewer": "perri:phi-security",
+            "lens": "phi-security",
+            "state": "pending",
+            "skip_reason": null,
+            "findings": {
+              "blocking": 0,
+              "advisory": 0
+            },
+            "cost_usd": 0.0,
+            "examined_files": 0
+          },
+          {
+            "reviewer": "perri:ops-infra",
+            "lens": "ops-infra",
+            "state": "skipped",
+            "skip_reason": "path_scope",
+            "findings": {
+              "blocking": 0,
+              "advisory": 0
+            },
+            "cost_usd": 0.0,
+            "examined_files": 0
+          }
+        ],
+        "adherence": {
+          "state": "pending",
+          "verdict": null
+        },
+        "coverage_gaps": 0,
+        "claims": {
+          "verified": 0,
+          "refuted": 0,
+          "unverified": 0
+        }
+      }
+    },
+    {
+      "id": "j-hold1",
+      "state": "awaiting",
+      "repo": "Carefeed/payments",
+      "isolation": "worktree",
+      "title": "Backfill invoice totals",
+      "created_at": "2026-10-17T11:10:00Z",
+      "started_at": "2026-10-17T11:11:20Z",
+      "finished_at": null,
+      "plan_path": "/tmp/plans/j-hold1.md",
+      "question": "Gate attempts are exhausted (3 of 3) with 1 gate still red: unit. Choose how to proceed: resume with guidance, escalate, override and open the PR, or cancel.",
+      "paused_reason": "gate_hold",
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": "tier_0",
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": [],
+      "activity": "gate_hold",
+      "pr_url": "https://github.com/Carefeed/payments/pull/907",
+      "crew_opt_in": true,
+      "gates": {
+        "mode": "enforce",
+        "posture": "normal",
+        "status": "exhausted",
+        "attempt": 3,
+        "max_attempts": 3,
+        "head_sha": "e41b7f0",
+        "started_at": "2026-10-17T11:58:00.000Z",
+        "finished_at": "2026-10-17T12:00:00.000Z",
+        "results": [
+          {
+            "name": "unit",
+            "result": "failed",
+            "blocking": true,
+            "duration_s": 201,
+            "exit_code": 1,
+            "unavailable_reason": null
+          }
+        ],
+        "not_run": []
+      },
+      "decision": {
+        "id": "d-0001",
+        "kind": "gate_hold",
+        "options": [
+          {
+            "id": "resume_with_guidance",
+            "label": "Resume with guidance",
+            "consequence": "Worker resumes in the same session with your note; gates re-run.",
+            "takes_text": true
+          },
+          {
+            "id": "escalate",
+            "label": "Escalate",
+            "consequence": "Re-run one tier up.",
+            "takes_text": false
+          },
+          {
+            "id": "override_open",
+            "label": "Override and open",
+            "consequence": "Mark the PR ready with red gates recorded as overridden.",
+            "takes_text": false
+          },
+          {
+            "id": "cancel",
+            "label": "Cancel",
+            "consequence": "Stop the job.",
+            "takes_text": false
+          }
+        ],
+        "opened_at": "2026-10-17T12:00:02.000Z",
+        "resolved_at": null,
+        "resolution": null
+      },
+      "attention": [
+        {
+          "reason": "decision_awaiting",
+          "since": "2026-10-17T12:00:02.000Z",
+          "acked": null
+        }
+      ]
+    }
+  ]
+}

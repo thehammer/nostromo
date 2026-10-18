@@ -23,6 +23,9 @@ public struct MotherJob: Codable, Identifiable, Equatable {
     /// The question text set when a Mother worker calls `mother await`.
     /// Non-nil only when `state == "awaiting"`.
     public let question:   String?
+    /// Headless-crew data (gates, review wave, decision, attention, progress),
+    /// read leniently key by key. Empty for a job with none.
+    public let crew:       MotherCrewState
 
     enum CodingKeys: String, CodingKey {
         case id, state, title, repo, branch, question
@@ -42,7 +45,8 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         createdAt: String? = nil,
         startedAt: String? = nil,
         finishedAt: String? = nil,
-        question: String? = nil
+        question: String? = nil,
+        crew: MotherCrewState = MotherCrewState()
     ) {
         self.id         = id
         self.state      = state
@@ -54,5 +58,38 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         self.startedAt  = startedAt
         self.finishedAt = finishedAt
         self.question   = question
+        self.crew       = crew
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id         = try c.decode(String.self, forKey: .id)
+        state      = try c.decode(String.self, forKey: .state)
+        title      = try c.decode(String.self, forKey: .title)
+        repo       = try c.decodeIfPresent(String.self, forKey: .repo)
+        branch     = try c.decodeIfPresent(String.self, forKey: .branch)
+        // A crew-contract key: a malformed value never costs the job.
+        prUrl      = (try? c.decodeIfPresent(String.self, forKey: .prUrl)) ?? nil
+        createdAt  = try c.decodeIfPresent(String.self, forKey: .createdAt)
+        startedAt  = try c.decodeIfPresent(String.self, forKey: .startedAt)
+        finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
+        question   = try c.decodeIfPresent(String.self, forKey: .question)
+        crew       = (try? MotherCrewState(jobDecoder: decoder)) ?? MotherCrewState()
+    }
+
+    /// Writes the crew keys flat, next to the job's own, in the daemon's form.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(state, forKey: .state)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(repo, forKey: .repo)
+        try c.encodeIfPresent(branch, forKey: .branch)
+        try c.encodeIfPresent(prUrl, forKey: .prUrl)
+        try c.encodeIfPresent(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(startedAt, forKey: .startedAt)
+        try c.encodeIfPresent(finishedAt, forKey: .finishedAt)
+        try c.encodeIfPresent(question, forKey: .question)
+        try crew.encode(to: encoder)
     }
 }

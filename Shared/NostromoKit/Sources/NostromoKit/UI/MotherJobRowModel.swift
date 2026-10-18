@@ -20,6 +20,11 @@ public struct MotherJobRowModel: Identifiable, Equatable {
     /// Pre-formatted relative timestamp string (e.g. "5m ago", "2h30m").
     /// Formatted by the caller from whatever date representation it has.
     public let relativeTimestamp: String?
+    /// Mother's progress indicator, e.g. "≈55% · gates 1/3 · ETA ~5-15 min"
+    /// (see `MotherProgressLine`). Nil when the job has none.
+    public let progressLine: String?
+    /// Short attention labels, e.g. "Needs decision" (see `MotherAttentionBadges`).
+    public let attentionBadges: [String]
 
     public init(
         id: String,
@@ -28,7 +33,9 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         repo: String? = nil,
         branch: String? = nil,
         question: String? = nil,
-        relativeTimestamp: String? = nil
+        relativeTimestamp: String? = nil,
+        progressLine: String? = nil,
+        attentionBadges: [String] = []
     ) {
         self.id               = id
         self.state            = state
@@ -37,6 +44,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.branch           = branch
         self.question         = question
         self.relativeTimestamp = relativeTimestamp
+        self.progressLine     = progressLine
+        self.attentionBadges  = attentionBadges
     }
 
     /// Terminal states → the row's swipe action is "Archive".
