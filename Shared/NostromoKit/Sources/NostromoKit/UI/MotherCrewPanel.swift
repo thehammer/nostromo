@@ -168,13 +168,13 @@ public struct MotherCrewPanel: View {
         HStack(spacing: 6) {
             ForEach(Array(model.badges.enumerated()), id: \.offset) { _, badge in
                 Text("⚑ \(badge.label)\(badge.acked ? " · acknowledged" : "")")
-                    .foregroundStyle(badge.acked ? colors.muted : badgeColor(badge.reason))
+                    .foregroundStyle(badgeTint(badge))
                     .lineLimit(1)
                     .padding(.horizontal, 6)
                     .frame(height: MotherCrewPanelMetrics.row - 2)
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
-                            .stroke(badge.acked ? colors.muted : badgeColor(badge.reason), lineWidth: 1)
+                            .stroke(badgeTint(badge), lineWidth: 1)
                     )
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(badge.accessibility)
@@ -230,11 +230,12 @@ public struct MotherCrewPanel: View {
         }
     }
 
-    private func badgeColor(_ reason: MotherAttentionReason) -> Color {
-        switch reason {
-        case .gatesIncomplete, .decisionAwaiting: return colors.warn
+    /// An acknowledged badge is muted; otherwise its reason sets the color.
+    private func badgeTint(_ badge: MotherAttentionBadge) -> Color {
+        if badge.acked { return colors.muted }
+        switch badge.reason {
+        case .gatesIncomplete, .decisionAwaiting, .unknown: return colors.warn
         case .progressStalled, .burnAhead: return colors.bad
-        case .unknown: return colors.warn
         }
     }
 }

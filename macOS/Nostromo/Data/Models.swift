@@ -393,14 +393,20 @@ struct MotherJob: Identifiable, Equatable {
         return orEqual ? new >= old : new > old
     }
 
+    private static let isoWithFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let isoWithoutFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     private static func parseISO(_ s: String?) -> Date? {
         guard let s else { return nil }
-        let frac = ISO8601DateFormatter()
-        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = frac.date(from: s) { return d }
-        let basic = ISO8601DateFormatter()
-        basic.formatOptions = [.withInternetDateTime]
-        return basic.date(from: s)
+        return isoWithFraction.date(from: s) ?? isoWithoutFraction.date(from: s)
     }
 
     /// The hold Mother put this job in (gates exhausted, review hold, open decision), if any.

@@ -281,10 +281,8 @@ class Broker:
         """`attention` lists the unacknowledged reasons, `attention_reasons` all of them with `acked`."""
         reasons = [r for r in j.get("attention_reasons", []) if r["reason"] != reason]
         old = next((r for r in j.get("attention_reasons", []) if r["reason"] == reason), None)
-        if change == "raised":
-            reasons.append({"reason": reason, "since": (old or {}).get("since") or now_iso(), "acked": False})
-        elif change == "acked":
-            reasons.append({"reason": reason, "since": (old or {}).get("since") or now_iso(), "acked": True})
+        if change in ("raised", "acked"):
+            reasons.append({"reason": reason, "since": (old or {}).get("since") or now_iso(), "acked": change == "acked"})
         j["attention_reasons"] = reasons
         j["attention"] = [{"reason": r["reason"], "since": r["since"]} for r in reasons if not r["acked"]]
 

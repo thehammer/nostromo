@@ -1249,23 +1249,27 @@ extension MotherJobDetail {
         DispatchQueue.global(qos: .userInitiated).async {
             let content: MotherDetailsContent
             if let bin = host.motherBinary() {
-                if let r = ProcessRunner.runCapturingStdout(bin, arguments: ["status", id], timeout: timeout) {
-                    let text = String(decoding: r.data, as: UTF8.self)
-                    if r.timedOut {
-                        content = .unavailable("mother status did not answer within \(Int(timeout)) seconds.")
-                    } else if text.isEmpty {
-                        content = .unavailable("mother status printed nothing (exit \(r.status)).")
-                    } else {
-                        content = .text(text)
-                    }
-                } else {
-                    content = .unavailable("mother status could not be started.")
-                }
+                content = Self.statusContent(binary: bin, jobId: id, timeout: timeout)
             } else {
                 content = .unavailable("The mother command was not found.")
             }
             DispatchQueue.main.async { completion(content) }
         }
+    }
+
+    /// Run `mother status <id>` and classify the outcome. Blocking: call off the main thread.
+    private static func statusContent(binary: URL, jobId: String, timeout: TimeInterval) -> MotherDetailsContent {
+        guard let r = ProcessRunner.runCapturingStdout(binary, arguments: ["status", jobId], timeout: timeout) else {
+            return .unavailable("mother status could not be started.")
+        }
+        if r.timedOut {
+            return .unavailable("mother status did not answer within \(Int(timeout)) seconds.")
+        }
+        let text = String(decoding: r.data, as: UTF8.self)
+        if text.isEmpty {
+            return .unavailable("mother status printed nothing (exit \(r.status)).")
+        }
+        return .text(text)
     }
 
     /// Open the Details sheet for the current job.
