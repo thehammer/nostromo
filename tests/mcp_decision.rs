@@ -575,7 +575,7 @@ async fn raw_handshake(
         ServerMsg::Welcome { operator_nonce, .. } => operator_nonce,
         other => panic!("expected Welcome, got {other:?}"),
     };
-    raw_send(stream, &ClientMsg::Subscribe { topics, renders_decisions }).await;
+    raw_send(stream, &ClientMsg::Subscribe { topics, renders_decisions, renders_approvals: false }).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     operator_nonce
 }

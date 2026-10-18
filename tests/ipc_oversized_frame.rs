@@ -89,7 +89,7 @@ async fn connect(d: &Daemon, topics: Vec<Topic>) -> (UnixStream, Vec<ServerMsg>)
         Ok(ServerMsg::Welcome { .. }) => {}
         other => panic!("expected Welcome, got {other:?}"),
     }
-    send(&mut s, &ClientMsg::Subscribe { topics, renders_decisions: false }).await;
+    send(&mut s, &ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false }).await;
     let replay = sync(&mut s).await.unwrap_or_else(|e| panic!("subscribe sync failed: {e}"));
     (s, replay)
 }

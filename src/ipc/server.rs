@@ -42,6 +42,8 @@ use super::{
     },
     session_manager::{ModelRequestOutcome, SessionManager, SwitchRequest},
 };
+use crate::approvals::broker::ApprovalBroker;
+use crate::approvals::wire::{AnswerRefusal, RefusalChannel};
 use crate::data::work::{
     fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
 };
@@ -64,6 +66,13 @@ const FEATURE_MODEL: &str = "model";
 /// `session_tasks` and `session_task_detail` (the background activity panel).
 /// Clients use it to decide whether to show the panel's chip.
 const FEATURE_TASKS: &str = "tasks";
+
+/// The optional capability advertised in `Welcome.features`: this daemon can hold
+/// a permission request for the Mac app and takes its answer (`approval_*`).
+const FEATURE_APPROVALS: &str = "approvals_v1";
+
+/// What `SessionAnswerPermission` is answered with, from every peer.
+const ANSWER_PERMISSION_SUPERSEDED: &str = "session_answer_permission is superseded by approval_answer";
 
 /// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
 /// local client that subscribes after the frame was sent.
@@ -125,6 +134,11 @@ impl Server {
         let (tx, _) = broadcast::channel::<ServerMsg>(512);
         let tx_clone = tx.clone();
         let path = socket_path.to_path_buf();
+
+        // The approval broker, if the daemon has one, broadcasts its frames on this channel.
+        if let Some(broker) = session_mgr.lock().unwrap().approvals() {
+            broker.configure_broadcast(tx.clone());
+        }
 
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
@@ -460,6 +474,7 @@ where
             FEATURE_WORK.to_string(),
             FEATURE_MODEL.to_string(),
             FEATURE_TASKS.to_string(),
+            FEATURE_APPROVALS.to_string(),
         ],
         operator_nonce: operator_nonce.clone(),
     };
@@ -480,11 +495,13 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (mut topics, renders_decisions): (Vec<Topic>, bool) = match sub {
-        ClientMsg::Subscribe { topics, renders_decisions } => (topics, renders_decisions),
+    let (mut topics, renders_decisions, renders_approvals): (Vec<Topic>, bool, bool) = match sub {
+        ClientMsg::Subscribe { topics, renders_decisions, renders_approvals } => {
+            (topics, renders_decisions, renders_approvals)
+        }
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
-            (vec![], false)
+            (vec![], false, false)
         }
         other => {
             anyhow::bail!("expected Subscribe, got {other:?}");
@@ -514,6 +531,25 @@ where
         decisions.lock().unwrap().add_operator(&conn_key);
     }
 
+    // ── Approval presenters (AP0b) ────────────────────────────────────────────
+    // Only the verified Mac app that says it renders approvals is a presenter: the
+    // one kind of connection a permission request is held for, shown to, and
+    // answered by. Tracked apart from decision operators.
+    let broker = session_mgr.lock().unwrap().approvals().cloned();
+    if can_answer {
+        if let Some(broker) = &broker {
+            broker.app_connected(&conn_key);
+        }
+    }
+    let mut presents_approvals = false;
+    let mut approvals_replay: Vec<ServerMsg> = Vec::new();
+    if can_answer && renders_approvals {
+        if let Some(broker) = &broker {
+            presents_approvals = true;
+            approvals_replay.push(ServerMsg::ApprovalsSnapshot { requests: broker.presenter_connected(&conn_key) });
+        }
+    }
+
     // ── Register per-client targeted channel ──────────────────────────────────
     // Use `conn_key` (server-minted UUID) as the registry key — not the
     // client-supplied `claimed_id` — so no remote peer can impersonate an
@@ -532,6 +568,11 @@ where
         let mut senders = registry.lock().unwrap();
         senders.insert(conn_key.clone(), targeted_tx.clone());
     }
+
+    // The requests already held, for a connection that just became a presenter
+    // (registered above, so one held from here on is also broadcast to it; the
+    // app dedupes by request id).
+    replay_messages(&mut writer, std::mem::take(&mut approvals_replay)).await;
 
     // ── Layout replay — push existing pane trees to newly subscribed client ──
     // A freshly connected or reconnected client would otherwise see empty panes
@@ -685,7 +726,7 @@ where
                     Ok(msg) => {
                         // Trust gate first: a network peer never gets a
                         // sensitive frame, whatever its topic list says.
-                        if !message_matches_topics(&msg, &topics) {
+                        if !deliver_broadcast(&msg, &topics, presents_approvals) {
                             continue;
                         }
                         let Some(msg) = outbound(trust, msg, &sensitive) else {
@@ -742,10 +783,20 @@ where
                         // A later `Subscribe` replaces the topic list: a client
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
-                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions } = msg {
+                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals } = msg {
                             if can_answer && !is_operator && (new_topics.contains(&Topic::Decision) || renders_decisions) {
                                 decisions.lock().unwrap().add_operator(&conn_key);
                                 is_operator = true;
+                            }
+                            // A resubscribe that claims it renders approvals makes the
+                            // verified app a presenter (and replays what is held); it
+                            // stays one until the connection ends.
+                            if can_answer && renders_approvals && !presents_approvals {
+                                if let Some(broker) = &broker {
+                                    presents_approvals = true;
+                                    let requests = broker.presenter_connected(&conn_key);
+                                    replay_messages(&mut writer, [ServerMsg::ApprovalsSnapshot { requests }]).await;
+                                }
                             }
                             // Replay retained frames only for the topics this
                             // subscribe adds; a network peer gets none.
@@ -770,7 +821,10 @@ where
                         // fresh look at the peer. The dispatch below applies it
                         // only on `Some(Ok(()))`.
                         let answer_check = match &msg {
-                            ClientMsg::DecisionAnswer { operator_nonce: sent, .. } if trust == PeerTrust::OperatorApp => {
+                            ClientMsg::DecisionAnswer { operator_nonce: sent, .. }
+                            | ClientMsg::ApprovalAnswer { operator_nonce: sent, .. }
+                                if trust == PeerTrust::OperatorApp =>
+                            {
                                 Some(check_operator_answer(&origin, operator_nonce.as_deref(), sent.as_deref()).await)
                             }
                             _ => None,
@@ -800,6 +854,9 @@ where
     }
     if is_operator {
         decisions.lock().unwrap().remove_operator(&conn_key);
+    }
+    if let Some(broker) = &broker {
+        broker.app_disconnected(&conn_key);
     }
 
     result
@@ -868,6 +925,24 @@ fn handle_client_msg(
     // but an explicitly allowed read-only request changes nothing.
     if trust.is_network() && refuse_for_network(&msg, sensitive) {
         log_network_model_refusal(&msg, session_mgr, sensitive);
+        // An attempt to answer a permission request over the network is a
+        // security event: it is logged before the peer is told no.
+        if let ClientMsg::ApprovalAnswer { request_id, .. } = &msg {
+            let broker = session_mgr.lock().unwrap().approvals().cloned();
+            let (tx, reply) = (targeted_tx.clone(), refusal_reply());
+            audit_refusal_then(
+                broker,
+                Some(request_id.clone()),
+                AnswerRefusal::RequiresSecureConnection.as_str(),
+                peer_json(trust, peer),
+                None,
+                None,
+                move || {
+                    let _ = tx.send(reply);
+                },
+            );
+            return;
+        }
         refuse_over_network(&msg, targeted_tx);
         return;
     }
@@ -1027,12 +1102,82 @@ fn handle_client_msg(
         }
 
         ClientMsg::SessionAnswerPermission { tag, .. } => {
-            // No stdout-answerable permission path surfaced in the spiked
-            // binary; the default posture is bypass and any prompt is answered
-            // natively on the phone via remote control. Accepted as a no-op so
-            // future binaries / the Swift client can wire it without a protocol
-            // change.
-            debug!(conn_key, %tag, "SessionAnswerPermission received (no-op in v1)");
+            // Superseded by `ApprovalAnswer` (AP0b): refused for every peer, with
+            // no side effect.
+            debug!(conn_key, %tag, "SessionAnswerPermission refused: superseded by approval_answer");
+            let _ = targeted_tx.send(ServerMsg::Error { message: ANSWER_PERMISSION_SUPERSEDED.to_string() });
+        }
+
+        ClientMsg::ApprovalAnswer { request_id, decision, window_id, .. } => {
+            let broker = session_mgr.lock().unwrap().approvals().cloned();
+            let refused = |code: AnswerRefusal, outcome: Option<String>| ServerMsg::ApprovalAnswerRefused {
+                request_id: request_id.clone(),
+                code,
+                outcome,
+            };
+            // Only the verified Mac app answers for the human, and only with the
+            // connection's nonce from a process still verified (checked by the
+            // caller). Anything else changes nothing and is logged.
+            let not_allowed = if trust != PeerTrust::OperatorApp {
+                Some("not the verified Nostromo app".to_string())
+            } else {
+                match answer_check {
+                    Some(Ok(())) => None,
+                    Some(Err(why)) => Some(why),
+                    None => Some("ApprovalAnswer refused: not checked".to_string()),
+                }
+            };
+            if let Some(why) = not_allowed {
+                warn!(conn_key, %request_id, ?trust, peer_pid = peer.map(|p| p.pid), "ApprovalAnswer refused: {why}");
+                let (tx, reply) = (targeted_tx.clone(), refused(AnswerRefusal::NotOperatorApp, None));
+                audit_refusal_then(
+                    broker,
+                    Some(request_id),
+                    AnswerRefusal::NotOperatorApp.as_str(),
+                    peer_json(trust, peer),
+                    None,
+                    None,
+                    move || {
+                        let _ = tx.send(reply);
+                    },
+                );
+                return;
+            }
+            let Some(broker) = broker else {
+                let _ = targeted_tx.send(refused(AnswerRefusal::UnknownRequest, None));
+                return;
+            };
+            // Writing the answer to the session and the audit log is blocking I/O.
+            let (tx, conn, peer) = (targeted_tx.clone(), conn_key.to_string(), peer_json(trust, peer));
+            tokio::task::spawn_blocking(move || {
+                let result = broker.answer(&request_id, &decision, &window_id, &conn);
+                if let Some((code, outcome)) = result.refusal() {
+                    broker.record_refusal(Some(&request_id), code.as_str(), peer, None, None);
+                    let _ = tx.send(ServerMsg::ApprovalAnswerRefused {
+                        request_id,
+                        code,
+                        outcome: outcome.map(str::to_owned),
+                    });
+                }
+                // Applied: the resolution is broadcast to every presenter, this one included.
+            });
+        }
+
+        ClientMsg::ApprovalRefusalReport { request_id, control, channel } => {
+            if trust != PeerTrust::OperatorApp {
+                debug!(conn_key, ?trust, "ApprovalRefusalReport dropped: not the verified Nostromo app");
+                return;
+            }
+            let broker = session_mgr.lock().unwrap().approvals().cloned();
+            audit_refusal_then(
+                broker,
+                request_id,
+                "synthetic_input_refused",
+                peer_json(trust, peer),
+                Some(channel),
+                Some(control),
+                || {},
+            );
         }
 
         ClientMsg::SessionList => {
@@ -1623,6 +1768,47 @@ fn seed_fred(
 /// Answer a refused request from a network peer with
 /// `requires_secure_connection`, in the targeted frame that matches the
 /// request (or a plain `Error` for requests that have no result frame).
+/// The refusal frame an `ApprovalAnswer` from a network peer is answered with.
+fn refusal_reply() -> ServerMsg {
+    let refusal = WorkError::requires_secure_connection();
+    ServerMsg::Error { message: format!("{}: {}", refusal.code, refusal.message) }
+}
+
+/// Who a peer is, for the audit log: `{trust, pid?, exe?}`.
+fn peer_json(trust: PeerTrust, peer: Option<&PeerInfo>) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "trust": match trust {
+            PeerTrust::OperatorApp => "operator_app",
+            PeerTrust::LocalOther => "local_other",
+            PeerTrust::Tcp => "tcp",
+        },
+    });
+    if let Some(p) = peer {
+        v["pid"] = serde_json::json!(p.pid);
+        v["exe"] = serde_json::json!(p.exe.display().to_string());
+    }
+    v
+}
+
+/// Write a `refusal` audit entry on the blocking pool, then run `then` (the reply
+/// to the peer), so the peer is never told "refused" before the log says so.
+fn audit_refusal_then(
+    broker: Option<ApprovalBroker>,
+    request_id: Option<String>,
+    code: &'static str,
+    peer: serde_json::Value,
+    channel: Option<RefusalChannel>,
+    control: Option<String>,
+    then: impl FnOnce() + Send + 'static,
+) {
+    tokio::task::spawn_blocking(move || {
+        if let Some(broker) = broker {
+            broker.record_refusal(request_id.as_deref(), code, peer, channel, control.as_deref());
+        }
+        then();
+    });
+}
+
 fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<ServerMsg>) {
     let refusal = WorkError::requires_secure_connection();
     let reply = match msg {
@@ -1817,8 +2003,35 @@ fn subscribed(topics: &[Topic], topic: Topic) -> bool {
     topics.is_empty() || topics.contains(&topic)
 }
 
+/// Does this broadcast go to a connection with these topics, which does or does
+/// not present approvals (is the verified Mac app and subscribed with
+/// `renders_approvals`)? The approval frames that carry a command go to
+/// presenters and nobody else; the count goes to a presenter, to a `decision`
+/// subscriber and to an everything-subscriber. Network redaction still applies
+/// after this (see [`outbound`]).
+fn deliver_broadcast(msg: &ServerMsg, topics: &[Topic], presents_approvals: bool) -> bool {
+    match msg {
+        ServerMsg::ApprovalRequest { .. }
+        | ServerMsg::ApprovalsSnapshot { .. }
+        | ServerMsg::ApprovalResolved { .. }
+        | ServerMsg::ApprovalGuardBlocked { .. }
+        | ServerMsg::ApprovalAnswerRefused { .. } => presents_approvals,
+        ServerMsg::ApprovalPending { .. } => presents_approvals || message_matches_topics(msg, topics),
+        other => message_matches_topics(other, topics),
+    }
+}
+
 fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
     match msg {
+        // Presenters only (see `deliver_broadcast`): never by topic.
+        ServerMsg::ApprovalRequest { .. }
+        | ServerMsg::ApprovalsSnapshot { .. }
+        | ServerMsg::ApprovalResolved { .. }
+        | ServerMsg::ApprovalGuardBlocked { .. }
+        | ServerMsg::ApprovalAnswerRefused { .. }
+        | ServerMsg::SessionPermissionRequest { .. } => false,
+        // The count: for anyone who follows decisions (an empty list included).
+        ServerMsg::ApprovalPending { .. } => subscribed(topics, Topic::Decision),
         ServerMsg::Activity(_)
         | ServerMsg::ActivitySnapshot { .. }
         | ServerMsg::ActivityHealth { .. } => subscribed(topics, Topic::Activity),

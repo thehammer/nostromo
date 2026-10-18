@@ -144,6 +144,13 @@ pub enum Event {
         refusal_code: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer: Option<Value>,
+        /// For a report of a refused synthetic input: how it arrived
+        /// (`app_control`, `accessibility`, `unknown`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        /// For such a report: which control it was aimed at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        control: Option<String>,
     },
     GuardBlocked {
         tool_name: String,

@@ -140,6 +140,7 @@ struct Rig {
 
 fn parts() -> BrokerParts {
     BrokerParts {
+        presenters: Default::default(),
         presenter: Arc::new(NoPresenter),
         probe: Arc::new(|| Box::new(NoPanes)),
         settings: Arc::new(NoRules),
@@ -153,6 +154,7 @@ fn session(tag: &str) -> SessionInfo {
         agent: "cody".into(),
         session_id: Some(format!("sid-{tag}")),
         cwd: Some(PathBuf::from("/work/proj")),
+        guarded: true,
     }
 }
 
@@ -316,8 +318,11 @@ async fn a_request_that_cannot_be_read_also_keeps_its_input_once() {
 #[tokio::test(start_paused = true)]
 async fn display_text_of_a_huge_command_is_cut_at_the_recorded_string_limit_but_input_stays_whole() {
     let rig = Rig::new();
-    let command = "echo hello world\n".repeat(8_000); // 136 000 bytes
-    assert!(command.len() > 8 * MAX_RECORDED_STRING_BYTES);
+    // Over the recorded-string limit, under the display cap (32 KiB), so it is
+    // displayed in full and the log cuts the text.
+    let command = "echo hello world\n".repeat(1_800); // 30 600 bytes
+    assert!(command.len() > MAX_RECORDED_STRING_BYTES);
+    assert!(command.len() < nostromo::approvals::display::MAX_DISPLAY_COMMAND_BYTES);
     rig.submit("cli-1", bash_request("toolu_huge", &command));
 
     let entry = rig.request_entry("toolu_huge").await;

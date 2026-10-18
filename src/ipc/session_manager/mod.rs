@@ -467,6 +467,10 @@ pub struct SessionManager {
     /// non-daemon use; such a session's requests are denied at once by its
     /// reader instead.
     approvals: Option<ApprovalBroker>,
+    /// Test hook ([`SessionManager::omit_guard_hook_for_test`]): spawn sessions
+    /// without the guard's `--settings` element, to prove the broker holds
+    /// nothing for them.
+    omit_guard_hook: bool,
 }
 
 impl SessionManager {
@@ -525,6 +529,7 @@ impl SessionManager {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(crate::approvals::guard::GUARD_SENTINEL_PATH)),
             approvals: None,
+            omit_guard_hook: false,
         }
     }
 
@@ -536,6 +541,14 @@ impl SessionManager {
     /// The approval broker, if one is configured.
     pub fn approvals(&self) -> Option<&ApprovalBroker> {
         self.approvals.as_ref()
+    }
+
+    /// Spawn sessions from now on **without** the guard hook in their arguments.
+    /// For the ordering-rule test only: such a session must never have a request
+    /// held for a human.
+    #[doc(hidden)]
+    pub fn omit_guard_hook_for_test(&mut self) {
+        self.omit_guard_hook = true;
     }
 
     /// The guard binary sessions spawned from now on run as their PreToolUse hook.
@@ -802,7 +815,11 @@ impl SessionManager {
             &effective_id,
             resume,
             self.restrictions.get(&tag),
-            &crate::approvals::guard::hook_settings_json(&self.guard_path),
+            &if self.omit_guard_hook {
+                "{}".to_owned()
+            } else {
+                crate::approvals::guard::hook_settings_json(&self.guard_path)
+            },
         );
         // The focus's recorded model, read at every spawn (restart and crash
         // recovery come through here too). No record: no flag, as before.
@@ -1021,12 +1038,16 @@ impl SessionManager {
         // An approval-capable session (unrestricted, not remote-control; the
         // same test as the `--permission-prompt-tool` flag) gets a broker to
         // answer its permission requests.
+        let guarded = self.session_has_guard(&args);
         let approval_generation = self.approvals.as_ref().filter(|_| !restricted && !remote_control).map(|broker| {
             let info = ApprovalSessionInfo {
                 tag: tag.clone(),
                 agent: agent_name.clone(),
                 session_id: Some(session_id.clone()),
                 cwd: Some(task_dir.clone()),
+                // The ordering rule: a request is held for a human only when the
+                // session carries the guard hook (see `ApprovalBroker`).
+                guarded,
             };
             let sink = Arc::new(StdinSink { stdin: Arc::clone(&shared.stdin), exited: Arc::clone(&shared.exited) });
             broker.register_session(info, sink)

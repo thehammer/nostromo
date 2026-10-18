@@ -648,7 +648,6 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::SessionTurns { tag, .. }
         | ServerMsg::SessionTurnDelta { tag, .. }
         | ServerMsg::SessionState { tag, .. }
-        | ServerMsg::SessionPermissionRequest { tag, .. }
         | ServerMsg::SessionExited { tag, .. }
         | ServerMsg::SessionDown { tag, .. }
         | ServerMsg::SessionSummaryUpdate { tag, .. }
@@ -659,6 +658,21 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::Notification { tag, .. }
         | ServerMsg::ActivitySnapshot { tag, .. }
         | ServerMsg::PerriState { tag, .. } => ServerClass::Focus(tag),
+        // How many permission requests a focus has held for a human: the count
+        // and nothing else. A network peer gets it for a non-sensitive focus only.
+        ServerMsg::ApprovalPending { tag, .. } => ServerClass::Focus(tag),
+
+        // The permission-approval frames that carry a command, a reason, a
+        // working directory or a guard summary go to the verified Mac app and
+        // nobody else: never to a network peer, whatever it subscribed to.
+        // (`SessionPermissionRequest` is never constructed; it is classified so
+        // that even a stray one stays on the box.)
+        ServerMsg::SessionPermissionRequest { .. }
+        | ServerMsg::ApprovalRequest { .. }
+        | ServerMsg::ApprovalsSnapshot { .. }
+        | ServerMsg::ApprovalResolved { .. }
+        | ServerMsg::ApprovalGuardBlocked { .. }
+        | ServerMsg::ApprovalAnswerRefused { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -848,6 +862,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::MotherResume { .. }
         | ClientMsg::PerriAction { .. }
         | ClientMsg::DecisionAnswer { .. }
+        | ClientMsg::ApprovalAnswer { .. }
+        | ClientMsg::ApprovalRefusalReport { .. }
         | ClientMsg::RenderedShape { .. }
         | ClientMsg::WorkDetailRequest { .. }
         | ClientMsg::WorkRefresh { .. }
@@ -908,6 +924,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::FocusList
         | ClientMsg::PerriAction { .. }
         | ClientMsg::DecisionAnswer { .. }
+        // Name a request id (or none), never a tag; refused for a network peer anyway.
+        | ClientMsg::ApprovalAnswer { .. }
+        | ClientMsg::ApprovalRefusalReport { .. }
         | ClientMsg::WorkDetailRequest { .. }
         | ClientMsg::WorkRefresh { .. }
         | ClientMsg::PicksRefresh { .. }
@@ -978,6 +997,9 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
         // A task list passes unchanged: it has no sensitive field by
         // construction (see `TaskMeta`, and the key-set test below).
         ServerMsg::SessionTasks { .. } => msg,
+        // The approval count carries a tag and a number, nothing to trim (only a
+        // non-sensitive focus's reaches here; see `classify_server_msg`).
+        ServerMsg::ApprovalPending { .. } => msg,
         // What a model state says beyond the model itself is not for the LAN:
         // Bishop's budget posture, and who asked for the last change.
         ServerMsg::SessionModelState(mut state) => {
@@ -1388,7 +1410,7 @@ mod tests {
     fn every_client_msg() -> Vec<ClientMsg> {
         vec![
             ClientMsg::Hello { client_id: "c".into(), protocol_version: 4, client_kind: None },
-            ClientMsg::Subscribe { topics: vec![], renders_decisions: false },
+            ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false },
             ClientMsg::Ping,
             ClientMsg::PtySpawn {
                 pty_id: "p".into(),
@@ -1472,6 +1494,20 @@ mod tests {
                 clear: false,
                 request_id: "r".into(),
             },
+            ClientMsg::ApprovalAnswer {
+                request_id: "r".into(),
+                decision: crate::approvals::wire::ApprovalDecision {
+                    kind: crate::approvals::wire::DecisionKind::AllowOnce,
+                    note: None,
+                },
+                window_id: "w".into(),
+                operator_nonce: None,
+            },
+            ClientMsg::ApprovalRefusalReport {
+                request_id: None,
+                control: "allow_once".into(),
+                channel: crate::approvals::wire::RefusalChannel::Unknown,
+            },
         ]
     }
 
@@ -1508,7 +1544,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 39;
+    const CLIENT_MSG_VARIANTS: usize = 41;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -1552,6 +1588,8 @@ mod tests {
             ClientMsg::SessionModelSet { .. } => 36,
             ClientMsg::ModelDefaultsRequest {} => 37,
             ClientMsg::ModelDefaultSet { .. } => 38,
+            ClientMsg::ApprovalAnswer { .. } => 39,
+            ClientMsg::ApprovalRefusalReport { .. } => 40,
         }
     }
 
@@ -1588,8 +1626,8 @@ mod tests {
         assert_eq!(by_name("PtyAttach"), 7);
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
-        assert_eq!(CLIENT_MSG_VARIANTS, 39);
-        assert_eq!(every_client_msg().len(), 39);
+        assert_eq!(CLIENT_MSG_VARIANTS, 41);
+        assert_eq!(every_client_msg().len(), 41);
     }
 
     #[test]

@@ -55,8 +55,8 @@ fn timed_bash(what: &str, command: &str) -> ApprovalDisplay {
 }
 
 #[test]
-fn the_limits_are_a_quarter_mib_and_one_fixed_line() {
-    assert_eq!(MAX_DISPLAY_COMMAND_BYTES, 256 * 1024);
+fn the_limits_are_32_kib_and_one_fixed_line() {
+    assert_eq!(MAX_DISPLAY_COMMAND_BYTES, 32 * 1024);
     assert_eq!(COMMAND_TOO_LARGE_LINE, "(command too large to display)");
 }
 
@@ -127,22 +127,22 @@ fn a_command_just_under_the_cap_is_displayed_in_full_and_still_reassembles_byte_
 }
 
 #[test]
-fn a_160_kb_command_of_40000_short_lines_is_displayed_in_full_in_bounded_time() {
-    let command = "a;b\n".repeat(40_000);
-    assert_eq!(command.len(), 160_000);
+fn a_32_kb_command_of_8000_short_lines_is_displayed_in_full_in_bounded_time() {
+    let command = "a;b\n".repeat(8_000);
+    assert_eq!(command.len(), 32_000);
 
-    let d = timed_bash("40,000 lines of `a;b`", &command);
+    let d = timed_bash("8,000 lines of `a;b`", &command);
 
     assert!(!d.shown_text().contains(COMMAND_TOO_LARGE_LINE));
     assert_eq!(d.reassemble(), command);
     assert_eq!(
         d.lines.len(),
-        80_001,
+        16_001,
         "each `a;` and `b` is its own numbered line, as for a short command, and the \
          newline that ends the command leaves an empty last line (as it always did)"
     );
     assert_eq!(d.lines[0].number, 1);
-    assert_eq!(d.lines[80_000].number, 80_001);
+    assert_eq!(d.lines[16_000].number, 16_001);
 }
 
 #[test]

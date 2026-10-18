@@ -191,6 +191,7 @@ fn session(tag: &str) -> SessionInfo {
         agent: "cody".into(),
         session_id: Some(format!("sid-{tag}")),
         cwd: Some(PathBuf::from("/work")),
+        guarded: true,
     }
 }
 
@@ -211,6 +212,7 @@ impl World {
         let broker = ApprovalBroker::new(
             AuditLog::open(&approvals_dir).unwrap(),
             BrokerParts {
+                presenters: Default::default(),
                 presenter: presenter.clone(),
                 probe: Arc::new(|| Box::new(NoPanes)),
                 settings: Arc::new(NoRules),
@@ -1129,10 +1131,12 @@ fn code_lines(src: &str) -> impl Iterator<Item = (usize, &str)> {
 
 #[test]
 fn no_allow_answer_exists_anywhere_in_the_broker_or_the_reader_path() {
-    // The deny-only guarantee of this slice, as a grep: no code in the broker, the
-    // reader / answer path or the line parser can even spell an allow answer.
+    // The deny-only guarantee, as a grep, narrowed in AP0b to the one allow there
+    // is: nothing in the reader / answer path or the line parser can spell an allow
+    // answer, and the broker spells exactly one (`Ending::response`), built only
+    // by `Ending::allow_once`, which only `ApprovalBroker::answer` calls (the
+    // server calls that for the verified app's `allow_once` alone).
     for (name, src) in [
-        ("src/approvals/broker.rs", include_str!("../src/approvals/broker.rs")),
         (
             "src/ipc/session_manager/mod.rs",
             include_str!("../src/ipc/session_manager/mod.rs"),
@@ -1146,6 +1150,16 @@ fn no_allow_answer_exists_anywhere_in_the_broker_or_the_reader_path() {
             );
         }
     }
+    let broker = include_str!("../src/approvals/broker.rs");
+    let spells: Vec<_> = code_lines(broker)
+        .filter(|(_, l)| l.contains("\"allow\"") || l.contains("\\\"allow\\\""))
+        .collect();
+    assert_eq!(spells.len(), 1, "exactly one allow answer in the broker: {spells:?}");
+    assert!(spells[0].1.contains("\"updatedInput\""), "{spells:?}");
+    let constructors: Vec<_> = code_lines(broker)
+        .filter(|(_, l)| l.contains("Ending::allow_once(") && !l.contains("fn "))
+        .collect();
+    assert_eq!(constructors.len(), 1, "one place builds the allow ending: {constructors:?}");
 }
 
 // ── N8: the restart (resume) arm of the real argv builder, end to end ─────────

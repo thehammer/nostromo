@@ -264,6 +264,7 @@ fn session(tag: &str) -> SessionInfo {
         agent: "cody".into(),
         session_id: Some(format!("sid-{tag}")),
         cwd: Some(PathBuf::from("/work")),
+        guarded: true,
     }
 }
 
@@ -290,6 +291,7 @@ impl World {
         let broker = ApprovalBroker::new(
             log,
             BrokerParts {
+                presenters: Default::default(),
                 presenter: presenter.clone(),
                 probe: Arc::new(move || {
                     Box::new(FakeProbe {

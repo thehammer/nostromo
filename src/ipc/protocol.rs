@@ -1099,6 +1099,14 @@ pub enum ClientMsg {
         /// promoted to an operator by an absent key.
         #[serde(default)]
         renders_decisions: bool,
+        /// Declares that this client renders permission-approval requests
+        /// (`ApprovalRequest`) and can answer them. Counts only from the
+        /// verified Mac app: it makes the connection an approval presenter,
+        /// the fact the daemon needs before it holds a request for a human
+        /// instead of denying it. `#[serde(default)]`: a client that predates
+        /// the field decodes as `false` and is never a presenter.
+        #[serde(default)]
+        renders_approvals: bool,
     },
     Ping,
 
@@ -1218,8 +1226,8 @@ pub enum ClientMsg {
         action: SessionAction,
     },
 
-    /// Answer a `SessionPermissionRequest` (only used if a stdout-answerable
-    /// permission path is available; the default posture is bypass).
+    /// Superseded by `ApprovalAnswer`: every peer is refused with an `Error`
+    /// and nothing happens.
     SessionAnswerPermission {
         tag: String,
         request_id: String,
@@ -1298,6 +1306,31 @@ pub enum ClientMsg {
         choice_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
+    },
+
+    /// The human's answer to a held permission request (`ApprovalRequest`).
+    /// Applied only from the verified Mac app: it must echo the connection's
+    /// `operator_nonce` and pass the same answer-time peer re-check as a
+    /// `DecisionAnswer`. First answer wins; a later one is refused with
+    /// `ApprovalAnswerRefused`. Refused for network peers.
+    ApprovalAnswer {
+        request_id: String,
+        decision: crate::approvals::wire::ApprovalDecision,
+        /// The Mac window the human answered in (shown in the log).
+        window_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
+    /// The Mac app reports an input it refused to treat as a human's: a
+    /// synthetic click or key aimed at an Allow control. Written to the audit
+    /// log; accepted only from the verified app. Refused for network peers.
+    ApprovalRefusalReport {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// Which control it was aimed at (`allow_once`, …).
+        control: String,
+        channel: crate::approvals::wire::RefusalChannel,
     },
 
     /// Request a full ambient-activity snapshot (all streams) for one focus.
@@ -1665,9 +1698,8 @@ pub enum ServerMsg {
         state: SessionState,
     },
 
-    /// A permission request surfaced on the stream (only emitted if the binary
-    /// surfaces an answerable request; otherwise permissions are bypassed or
-    /// answered natively on the phone).
+    /// Never constructed (superseded by `ApprovalRequest`; a test pins that).
+    /// Classified `LocalOnly`, so even a stray one never reaches a network peer.
     SessionPermissionRequest {
         tag: String,
         request_id: String,
@@ -1799,6 +1831,50 @@ pub enum ServerMsg {
         resolution: DecisionResolution,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         choice_id: Option<String>,
+    },
+
+    // ── permission approvals (AP0b) ──────────────────────────────────────────
+    // Only `ApprovalPending` (a count) may reach a network peer; the rest carry
+    // the command, reason and working directory and are `LocalOnly`.
+    /// A permission request the daemon is holding for a human. Sent to
+    /// connections that render approvals (the verified Mac app).
+    ApprovalRequest {
+        tag: String,
+        request: crate::approvals::wire::ApprovalRequestWire,
+    },
+    /// Every request still held, sent once to a connection that subscribes
+    /// with `renders_approvals` (targeted).
+    ApprovalsSnapshot {
+        requests: Vec<crate::approvals::wire::ApprovalRequestWire>,
+    },
+    /// A held request ended: answered, timed out, the app went away, the
+    /// session stopped. `outcome` is the audit log's name for it.
+    ApprovalResolved {
+        tag: String,
+        request_id: String,
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_window: Option<String>,
+        at_ms: u64,
+    },
+    /// How many requests are held for a focus. The count only: the one approval
+    /// frame a network peer may receive (for a non-sensitive focus).
+    ApprovalPending { tag: String, count: u32 },
+    /// The production-shell guard blocked a call. `summary` is the tool name and
+    /// the first command word only.
+    ApprovalGuardBlocked {
+        tag: String,
+        tool_use_id: String,
+        entry_id: String,
+        at_ms: u64,
+        summary: String,
+    },
+    /// An `ApprovalAnswer` was not applied (targeted).
+    ApprovalAnswerRefused {
+        request_id: String,
+        code: crate::approvals::wire::AnswerRefusal,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
     },
 
     /// A daemon-originated, tag-addressed, operator-facing notification (W5
@@ -2106,7 +2182,7 @@ mod tests {
         let msg: ClientMsg =
             serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions } => {
+            ClientMsg::Subscribe { topics, renders_decisions, .. } => {
                 assert_eq!(topics, vec![]);
                 assert!(
                     !renders_decisions,
@@ -2126,7 +2202,7 @@ mod tests {
             serde_json::from_str(r#"{"type":"subscribe","topics":["decision","layout"]}"#)
                 .unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions } => {
+            ClientMsg::Subscribe { topics, renders_decisions, .. } => {
                 assert_eq!(topics, vec![Topic::Decision, Topic::Layout]);
                 assert!(!renders_decisions);
             }
@@ -2165,9 +2241,9 @@ mod tests {
     /// just "some boolean survives a round trip."
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_false_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: false });
+        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: false })
+        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false })
             .unwrap();
         assert_eq!(v["type"], "subscribe");
         assert_eq!(v["topics"], serde_json::json!([]));
@@ -2179,9 +2255,9 @@ mod tests {
 
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_true_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: true });
+        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: true, renders_approvals: false });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true })
+        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true, renders_approvals: false })
             .unwrap();
         assert_eq!(v["renders_decisions"], true);
     }

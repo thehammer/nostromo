@@ -29,8 +29,9 @@ const MAX_DIFF_CELLS: usize = 4_000_000;
 /// shown at all: its display is the single line [`COMMAND_TOO_LARGE_LINE`]. (No
 /// human reads a command this long, and the broker's one worker thread builds
 /// the display of every request.) It is not the command: it does not reassemble
-/// to it, so nothing can mistake it for the command that would run.
-pub const MAX_DISPLAY_COMMAND_BYTES: usize = 256 * 1024;
+/// to it, so nothing can mistake it for the command that would run. (32 KiB: the
+/// shell tokenizer also stops at a step budget; see [`super::shell::work_limit`].)
+pub const MAX_DISPLAY_COMMAND_BYTES: usize = 32 * 1024;
 
 /// What is shown instead of a Bash command over [`MAX_DISPLAY_COMMAND_BYTES`].
 pub const COMMAND_TOO_LARGE_LINE: &str = "(command too large to display)";

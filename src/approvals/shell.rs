@@ -11,6 +11,13 @@
 //! Unbalanced input (an open quote, `$(`, backtick or parenthesis, a stray
 //! `)`, an unterminated here-doc) or nesting deeper than [`MAX_DEPTH`] sets
 //! [`ShellParse::unparsed`]. What was found up to that point is still reported.
+//!
+//! **Bounded work.** Every parse has a step budget proportional to the input's
+//! length ([`work_limit`]) and a cap on the words it will build ([`MAX_WORDS`]).
+//! Input that needs more (pathological, never a real command) stops where it is and
+//! is reported `unparsed`: "can't tell", which every caller treats as the cautious
+//! answer. The steps taken are in [`ShellParse::work`], so a test can pin the bound
+//! without a clock.
 
 use std::ops::Range;
 
@@ -18,6 +25,19 @@ use std::ops::Range;
 /// limits of this size: `-c` / `eval` / here-doc payloads, and `$( )` /
 /// backticks / parentheses within one text.
 pub const MAX_DEPTH: u32 = 16;
+
+/// Steps a parse may take per byte of input (nested payloads share the budget).
+pub const WORK_PER_BYTE: usize = 16;
+/// Steps a parse may take beyond `WORK_PER_BYTE` per byte, for tiny inputs.
+pub const WORK_BASE: usize = 4096;
+/// Most words one parse builds (all payloads together). A command with more is
+/// reported `unparsed`.
+pub const MAX_WORDS: usize = 50_000;
+
+/// The most steps [`parse`] takes on an input of `len` bytes before it gives up.
+pub fn work_limit(len: usize) -> usize {
+    len.saturating_mul(WORK_PER_BYTE).saturating_add(WORK_BASE)
+}
 
 /// The result of [`parse`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +57,9 @@ pub struct ShellParse {
     /// unquoted delimiter and a body with `$(` or a backtick: the shell runs
     /// that text, and the tokenizer does not parse it.
     pub expanding_heredoc: bool,
+    /// Steps the parse took (never more than [`work_limit`] of the input, plus one
+    /// step's overrun).
+    pub work: usize,
 }
 
 /// One simple command: its words after quote removal, without redirections
@@ -119,7 +142,38 @@ pub struct HereDoc {
 
 /// Tokenize `cmd`.
 pub fn parse(cmd: &str) -> ShellParse {
-    parse_at_depth(cmd, 0)
+    let mut work = Work { limit: work_limit(cmd.len()), used: 0, words: 0 };
+    let mut out = parse_at_depth(cmd, 0, &mut work);
+    out.work = work.used;
+    out
+}
+
+/// What a parse (all its nested payloads together) may still spend.
+struct Work {
+    limit: usize,
+    used: usize,
+    words: usize,
+}
+
+impl Work {
+    /// Spend `n` steps. `Err` once the budget is gone (and on every later call).
+    fn spend(&mut self, n: usize) -> Step<()> {
+        self.used = self.used.saturating_add(n);
+        if self.used > self.limit {
+            return Err(Unbalanced);
+        }
+        Ok(())
+    }
+
+    /// Count one more word.
+    fn word(&mut self) -> Step<()> {
+        self.words += 1;
+        if self.words > MAX_WORDS {
+            self.used = self.limit.saturating_add(1);
+            return Err(Unbalanced);
+        }
+        Ok(())
+    }
 }
 
 /// Shells whose `-c` payload, here-doc or here-string is parsed as a script.
@@ -131,7 +185,7 @@ const PREFIX_WORDS: &[&str] = &[
     "exec", "nohup", "env", "sudo", "nice", "timeout", "caffeinate",
 ];
 
-fn parse_at_depth(src: &str, depth: u32) -> ShellParse {
+fn parse_at_depth(src: &str, depth: u32, work: &mut Work) -> ShellParse {
     let mut p = Parser {
         src,
         b: src.as_bytes(),
@@ -141,6 +195,7 @@ fn parse_at_depth(src: &str, depth: u32) -> ShellParse {
         pending: Vec::new(),
         out: ShellParse::default(),
         wild: Vec::new(),
+        work,
     };
     if p.parse_list(false).is_err() {
         p.out.unparsed = true;
@@ -166,7 +221,6 @@ struct PendingHereDoc {
 }
 
 /// The command being assembled.
-#[derive(Default)]
 struct Builder {
     words: Vec<Word>,
     start: Option<usize>,
@@ -174,6 +228,21 @@ struct Builder {
     /// Indexes into `Parser::pending` of here-docs this command opened.
     heredocs: Vec<usize>,
     herestrings: Vec<String>,
+    /// Every word so far is a keyword that may precede a command (`then`, `{`, …).
+    keywords_only: bool,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            words: Vec::new(),
+            start: None,
+            end: 0,
+            heredocs: Vec::new(),
+            herestrings: Vec::new(),
+            keywords_only: true,
+        }
+    }
 }
 
 impl Builder {
@@ -195,9 +264,16 @@ struct Parser<'a> {
     out: ShellParse,
     /// Byte ranges of the word being read (in its `text`) that are expansions.
     wild: Vec<Range<usize>>,
+    /// The step budget, shared with every nested parse.
+    work: &'a mut Work,
 }
 
 impl<'a> Parser<'a> {
+    /// One step of work.
+    fn tick(&mut self) -> Step<()> {
+        self.work.spend(1)
+    }
+
     fn peek(&self) -> Option<u8> {
         self.b.get(self.pos).copied()
     }
@@ -268,6 +344,7 @@ impl<'a> Parser<'a> {
         // does not close a group.
         let mut cases = 0u32;
         loop {
+            self.tick()?;
             self.skip_blanks();
             let Some(c) = self.peek() else {
                 self.finish(&mut cmd);
@@ -351,16 +428,15 @@ impl<'a> Parser<'a> {
                     cmd.touch(&word.span);
                     if !fd {
                         // `case` and `esac` as written, where a command may start.
-                        let keywords_only = cmd.words.iter().all(|w| {
-                            matches!(w.text.as_str(), "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "{" | "!" | "time")
-                        });
-                        if keywords_only {
+                        if cmd.keywords_only {
                             match &self.src[word.span.clone()] {
                                 "case" => cases += 1,
                                 "esac" => cases = cases.saturating_sub(1),
                                 _ => {}
                             }
                         }
+                        cmd.keywords_only &= is_command_keyword(&word.text);
+                        self.work.word()?;
                         cmd.words.push(word);
                     }
                 }
@@ -390,6 +466,8 @@ impl<'a> Parser<'a> {
             let span = start..self.pos;
             cmd.touch(&span);
             let text = self.src[span.clone()].to_owned();
+            cmd.keywords_only = false;
+            self.work.word()?;
             cmd.words.push(Word { pattern: WILDCARD.to_string(), text, span, dynamic: true });
             return Ok(());
         }
@@ -460,6 +538,7 @@ impl<'a> Parser<'a> {
 
     fn read_word_parts(&mut self, text: &mut Vec<u8>, dynamic: &mut bool) -> Step<()> {
         while let Some(c) = self.peek() {
+            self.tick()?;
             match c {
                 _ if Self::is_meta(c) => break,
                 b'\\' => match self.peek_at(1) {
@@ -504,6 +583,7 @@ impl<'a> Parser<'a> {
     fn read_double_quoted(&mut self, text: &mut Vec<u8>) -> Step<bool> {
         let mut dynamic = false;
         loop {
+            self.tick()?;
             match self.peek().ok_or(Unbalanced)? {
                 b'"' => {
                     self.pos += 1;
@@ -571,6 +651,7 @@ impl<'a> Parser<'a> {
         let mut inner = String::new();
         let mut escaped = false;
         loop {
+            self.tick()?;
             match self.peek().ok_or(Unbalanced)? {
                 b'`' => break,
                 b'\\' if matches!(self.peek_at(1), Some(b'`' | b'\\' | b'$')) => {
@@ -598,6 +679,7 @@ impl<'a> Parser<'a> {
             pending: Vec::new(),
             out: ShellParse::default(),
             wild: Vec::new(),
+            work: &mut *self.work,
         };
         let ok = sub.parse_list(false).is_ok();
         self.out.expanding_heredoc |= sub.out.expanding_heredoc;
@@ -621,6 +703,7 @@ impl<'a> Parser<'a> {
     fn skip_arithmetic(&mut self) -> Step<()> {
         let mut depth = 2u32;
         while depth > 0 {
+            self.tick()?;
             match self.peek().ok_or(Unbalanced)? {
                 b'(' => depth += 1,
                 b')' => depth -= 1,
@@ -637,6 +720,7 @@ impl<'a> Parser<'a> {
     fn skip_braces(&mut self) -> Step<()> {
         let mut depth = 1u32;
         while depth > 0 {
+            self.tick()?;
             match self.peek().ok_or(Unbalanced)? {
                 b'{' => depth += 1,
                 b'}' => depth -= 1,
@@ -681,6 +765,7 @@ impl<'a> Parser<'a> {
     /// The rest of a `$'…'` string (`$'` consumed), with ANSI-C escapes resolved.
     fn read_ansi_c(&mut self, text: &mut Vec<u8>) -> Step<()> {
         loop {
+            self.tick()?;
             match self.peek().ok_or(Unbalanced)? {
                 b'\'' => {
                     self.pos += 1;
@@ -767,6 +852,8 @@ impl<'a> Parser<'a> {
                 }
                 let line_start = self.pos;
                 let line_end = self.b[line_start..].iter().position(|&c| c == b'\n').map_or(self.b.len(), |n| line_start + n);
+                // A line costs its length: looking for the delimiter is a pass over it.
+                self.work.spend(line_end - line_start + 1)?;
                 self.pos = (line_end + 1).min(self.b.len());
                 let mut line = &self.src[line_start..line_end];
                 if hd.strip_tabs {
@@ -814,6 +901,11 @@ impl<'a> Parser<'a> {
         }
         let span = start..cmd.end;
         let index = self.out.commands.len();
+        // Finding the command word and its payload passes over the words once.
+        if self.work.spend(cmd.words.len()).is_err() {
+            self.out.unparsed = true;
+            return;
+        }
         let payloads = command_payloads(&cmd.words);
         self.out.commands.push(SimpleCommand { words: cmd.words, span: span.clone(), depth: self.depth });
         match payloads {
@@ -838,11 +930,20 @@ impl<'a> Parser<'a> {
             self.out.unparsed = true;
             return;
         }
-        let sub = parse_at_depth(text, self.depth + 1);
+        if self.work.spend(text.len()).is_err() {
+            self.out.unparsed = true;
+            return;
+        }
+        let sub = parse_at_depth(text, self.depth + 1, self.work);
         self.out.unparsed |= sub.unparsed;
         self.out.expanding_heredoc |= sub.expanding_heredoc;
         self.out.commands.extend(sub.commands.into_iter().map(|c| SimpleCommand { span: span.clone(), ..c }));
     }
+}
+
+/// A word that may start a command without being the command (`then`, `{`, …).
+fn is_command_keyword(w: &str) -> bool {
+    matches!(w, "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "{" | "!" | "time")
 }
 
 /// What a finished command runs as a nested script.

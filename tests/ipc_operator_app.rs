@@ -165,7 +165,7 @@ async fn connect_unix_with_nonce(
         ServerMsg::Welcome { operator_nonce, .. } => operator_nonce,
         other => panic!("a Hello must always be welcomed, got {other:?}"),
     };
-    send(&mut s, &ClientMsg::Subscribe { topics, renders_decisions }).await;
+    send(&mut s, &ClientMsg::Subscribe { topics, renders_decisions, renders_approvals: false }).await;
     sync(&mut s).await;
     (s, nonce)
 }
@@ -191,7 +191,7 @@ async fn connect_tcp(env: &Env, topics: Vec<Topic>, renders_decisions: bool) -> 
     let mut s = TcpStream::connect(("127.0.0.1", env.tcp_port)).await.expect("tcp connect");
     send(&mut s, &hello(None)).await;
     assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
-    send(&mut s, &ClientMsg::Subscribe { topics, renders_decisions }).await;
+    send(&mut s, &ClientMsg::Subscribe { topics, renders_decisions, renders_approvals: false }).await;
     sync(&mut s).await;
     s
 }

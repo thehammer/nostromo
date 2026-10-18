@@ -128,7 +128,7 @@ async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
     assert!(matches!(raw_recv(stream).await, ServerMsg::Welcome { .. }));
     raw_send(
         stream,
-        &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false },
+        &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false, renders_approvals: false },
     )
     .await;
     // Give the server a moment to finish registering this connection before
