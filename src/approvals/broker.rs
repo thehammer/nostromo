@@ -1129,11 +1129,11 @@ impl ApprovalBroker {
                 refusal_code: code.to_owned(),
                 peer: Some(peer),
                 channel: channel.map(|c| c.as_str().to_owned()),
-                control: control.map(|c| sanitize_string(c)),
+                control: control.map(sanitize_string),
             },
             Utc::now(),
         );
-        e.request_id = request_id.map(|r| sanitize_string(r));
+        e.request_id = request_id.map(sanitize_string);
         self.inner.append(e);
     }
 

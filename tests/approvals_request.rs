@@ -1347,3 +1347,58 @@ fn a_wildcard_ask_rule_is_named_in_the_why_line() {
         "`Bash(ls*)` does not cover `rm x`; the next rule does"
     );
 }
+
+// ── N9: a pathological command cannot pin the worker through an ask rule ──────
+//
+// `AskRule::matches` tokenizes the FULL command (the display cap does not apply to it), and
+// runs on the broker's single worker thread. `shell::parse` is bounded by a step budget, so
+// matching is too: each shape below is ~4 MiB. The thread and its generous limit are only
+// there so that a regression fails this test instead of hanging the run.
+
+#[test]
+fn matching_an_ask_rule_against_a_four_mib_pathological_command_returns() {
+    const FOUR_MIB: usize = 4 * 1024 * 1024;
+    let shapes: Vec<(&str, String)> = vec![
+        ("open braces", "{ ".repeat(FOUR_MIB / 2)),
+        ("eval", "eval ".repeat(FOUR_MIB / 5)),
+        ("command substitution openers", "$( ".repeat(FOUR_MIB / 3)),
+        ("open parentheses", "((((".repeat(FOUR_MIB / 4)),
+        ("here-doc openers", "<<A\n".repeat(FOUR_MIB / 4)),
+        ("assignments", "a=b ".repeat(FOUR_MIB / 4)),
+        ("single quotes", "'".repeat(FOUR_MIB + 1)),
+        ("dollar quote pairs", "\"$".repeat(FOUR_MIB / 4 + 1)),
+        ("backticks", "`".repeat(FOUR_MIB + 1)),
+    ];
+    let rules = ["Bash(rm:*)", "Bash(rm -rf /tmp/x)", "Bash(ls *)", "Bash(ls*)", "Bash", "Edit(*.rs)"];
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for (what, command) in shapes {
+            let input = json!({ "command": command });
+            for rule in rules {
+                let rule = AskRule { rule: rule.into(), source_path: "~/.claude/settings.json".into() };
+                let matched = rule.matches("Bash", &input);
+                // None of these runs `rm` or `ls`: only a rule with no content covers them.
+                let _ = tx.send((what, rule.rule.clone(), matched));
+            }
+        }
+    });
+    let mut seen = 0;
+    while seen < 9 * rules.len() {
+        let (what, rule, matched) = rx
+            .recv_timeout(std::time::Duration::from_secs(300))
+            .unwrap_or_else(|_| panic!("matching did not finish after {seen} of {} cases", 9 * rules.len()));
+        assert_eq!(matched, rule == "Bash", "{what} against {rule}: only the whole-tool rule covers it");
+        seen += 1;
+    }
+}
+
+#[test]
+fn an_ordinary_command_still_matches_its_ask_rule() {
+    let rm = AskRule { rule: "Bash(rm:*)".into(), source_path: "~/.claude/settings.json".into() };
+    assert!(rm.matches("Bash", &json!({ "command": "rm -rf /tmp/x/a" })));
+    assert!(rm.matches("Bash", &json!({ "command": "ls && rm -rf /tmp/x/a" })));
+    assert!(rm.matches("Bash", &json!({ "command": "bash -c 'echo hi; rm -rf /tmp/x'" })));
+    assert!(!rm.matches("Bash", &json!({ "command": "ls -la" })));
+}
+

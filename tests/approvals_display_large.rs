@@ -155,3 +155,31 @@ fn a_short_command_is_displayed_exactly_as_before() {
     assert_eq!(d.reassemble(), "ls /tmp && rm -rf /tmp/x; echo done");
     assert_eq!(d.command_count, Some(3));
 }
+
+#[test]
+fn a_command_of_exactly_the_cap_is_displayed_and_one_byte_over_is_replaced() {
+    let at = command_of("x", MAX_DISPLAY_COMMAND_BYTES);
+    let d = timed_bash("exactly at the cap", &at);
+    assert!(!d.shown_text().contains(COMMAND_TOO_LARGE_LINE), "at the cap it is shown, not replaced");
+    assert_eq!(d.reassemble(), at);
+
+    let over = command_of("x", MAX_DISPLAY_COMMAND_BYTES + 1);
+    let d = timed_bash("one byte over the cap", &over);
+    assert!(d.shown_text().contains(COMMAND_TOO_LARGE_LINE), "one byte over, it is not");
+    assert_ne!(d.reassemble(), over);
+}
+
+#[test]
+fn a_command_the_tokenizer_cannot_finish_reading_is_still_displayed_in_full_under_the_cap() {
+    // Under the display cap the whole text is shown even when the tokenizer gives up on it
+    // (`unparsed` says so); nothing is elided. (T-INV-2)
+    let command = "$( ".repeat(MAX_DISPLAY_COMMAND_BYTES / 3);
+    assert!(command.len() <= MAX_DISPLAY_COMMAND_BYTES);
+
+    let d = timed_bash("an unreadable command under the cap", &command);
+
+    assert!(d.unparsed, "the tokenizer could not read it");
+    assert!(!d.shown_text().contains(COMMAND_TOO_LARGE_LINE));
+    assert_eq!(d.reassemble(), command, "everything is shown");
+}
+

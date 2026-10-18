@@ -416,6 +416,23 @@ final class NostromodClientHandshakeTests: XCTestCase {
         XCTAssertEqual(daemon.frames(connection: 0, ofType: "hello").first?.clientKind, "mac_app")
     }
 
+    // The ordering rule (AP0b): the daemon holds a permission request for a human only while a
+    // verified app that SAYS it renders approvals is connected, so this app must not say so until
+    // the approval card exists. AP2a flips `NostromodClient.rendersApprovals` and inverts this
+    // test on purpose; until then every request is denied at once, exactly as before.
+    func testMacDoesNotClaimRendersApprovalsYet() throws {
+        XCTAssertFalse(NostromodClient.rendersApprovals, "no approval card exists yet")
+        // A daemon that advertises approvals and work: two subscribes, and neither claims it.
+        _ = try connectClient(to: [.init(features: ["approvals_v1", "work"])])
+
+        XCTAssertTrue(waitUntil(5) { self.daemon.subscribes(connection: 0).count >= 2 },
+                      "the client never sent its subscribes")
+        for sub in daemon.subscribes(connection: 0) {
+            XCTAssertEqual(sub.json["renders_approvals"] as? Bool, false,
+                           "every subscribe says, explicitly, that this app does not render approvals: \(sub.json)")
+        }
+    }
+
     func testAWelcomeThatAdvertisesOtherFeaturesButNotWorkDoesNotGetWork() throws {
         let c = try connectClient(to: [.init(features: ["some_future_feature"], rejectsTopics: ["work"])])
 

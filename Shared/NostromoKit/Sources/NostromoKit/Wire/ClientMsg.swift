@@ -36,20 +36,28 @@ struct ClientHello: Encodable {
 /// construction site must state it explicitly, so a future flip to `true`
 /// (once a client can actually render a decision) is a visible, one-word diff
 /// rather than an easy-to-miss omission.
+///
+/// `rendersApprovals` declares that this client shows permission-approval
+/// requests (`approval_request`) and can answer them. The daemon honours it only
+/// from the verified Mac app. Defaults to `false` on the wire: iOS never
+/// presents approvals, and the Mac app does not yet either (AP2a flips it).
 struct ClientSubscribe: Encodable {
     let type_:            String = "subscribe"
     let topics:            [String]
     let rendersDecisions:  Bool
+    let rendersApprovals:  Bool
 
-    init(topics: [String], rendersDecisions: Bool) {
+    init(topics: [String], rendersDecisions: Bool, rendersApprovals: Bool = false) {
         self.topics = topics
         self.rendersDecisions = rendersDecisions
+        self.rendersApprovals = rendersApprovals
     }
 
     enum CodingKeys: String, CodingKey {
         case type_            = "type"
         case topics
         case rendersDecisions = "renders_decisions"
+        case rendersApprovals = "renders_approvals"
     }
 }
 

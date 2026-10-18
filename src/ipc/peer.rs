@@ -2566,4 +2566,226 @@ mod tests {
         assert!(!json.contains("SECRET-OUTPUT"), "{json}");
         assert!(!json.contains("/private/tmp"), "{json}");
     }
+
+    // ── AP0b: the approval frames ─────────────────────────────────────────────
+
+    /// Every new `ServerMsg` that carries (or can carry) a command, a reason, a working
+    /// directory or a guard summary.
+    fn approval_content_frames() -> Vec<(&'static str, ServerMsg)> {
+        use crate::approvals::display::ApprovalDisplay;
+        use crate::approvals::request::{Reason, ReasonKind, ToolKind};
+        use crate::approvals::wire::{AgentWire, AnswerRefusal, ApprovalFlags, ApprovalRequestWire};
+        let wire = ApprovalRequestWire {
+            request_id: "r1".into(),
+            tag: "cody-plain".into(),
+            tool_use_id: "toolu_1".into(),
+            agent: AgentWire { name: "cody".into(), subagent: None },
+            tool_name: "Bash".into(),
+            display_name: "Bash".into(),
+            tool_kind: ToolKind::Bash,
+            mcp: None,
+            input: serde_json::json!({ "command": "rm -rf /tmp/SECRET-COMMAND" }),
+            display: ApprovalDisplay { lines: vec![], command_count: None, invisible_count: 0, non_ascii_count: 0, unparsed: false },
+            cwd: Some("/SECRET/cwd".into()),
+            reason: Reason { kind: ReasonKind::Other, text: "SECRET-REASON".into(), rule: None },
+            flags: ApprovalFlags::default(),
+            description: None,
+            options: vec![],
+            session_rule_candidates: vec![],
+            created_at_ms: 1,
+            deadline_at_ms: 2,
+        };
+        vec![
+            ("approval_request", ServerMsg::ApprovalRequest { tag: "cody-plain".into(), request: wire.clone() }),
+            ("approvals_snapshot", ServerMsg::ApprovalsSnapshot { requests: vec![wire] }),
+            (
+                "approval_resolved",
+                ServerMsg::ApprovalResolved {
+                    tag: "cody-plain".into(),
+                    request_id: "r1".into(),
+                    outcome: "denied".into(),
+                    by_window: None,
+                    at_ms: 3,
+                },
+            ),
+            (
+                "approval_guard_blocked",
+                ServerMsg::ApprovalGuardBlocked {
+                    tag: "cody-plain".into(),
+                    tool_use_id: "toolu_1".into(),
+                    entry_id: "e1".into(),
+                    at_ms: 4,
+                    summary: "Bash ecs_connect".into(),
+                },
+            ),
+            (
+                "approval_answer_refused",
+                ServerMsg::ApprovalAnswerRefused {
+                    request_id: "r1".into(),
+                    code: AnswerRefusal::NotOperatorApp,
+                    outcome: None,
+                },
+            ),
+            (
+                "session_permission_request",
+                ServerMsg::SessionPermissionRequest {
+                    tag: "cody-plain".into(),
+                    request_id: "r1".into(),
+                    tool: "Bash".into(),
+                    input: serde_json::json!({ "command": "rm -rf /tmp/SECRET-COMMAND" }),
+                },
+            ),
+        ]
+    }
+
+    fn approval_pending(tag: &str) -> ServerMsg {
+        ServerMsg::ApprovalPending { tag: tag.into(), count: 3 }
+    }
+
+    #[test]
+    fn every_approval_frame_that_carries_content_is_local_only() {
+        for (name, msg) in approval_content_frames() {
+            assert_eq!(classify_server_msg(&msg), ServerClass::LocalOnly, "{name}");
+            assert_eq!(is_sensitive_server_msg(&msg), SensitiveClass::NotSensitive, "{name}: LocalOnly is not Teri/Fred data");
+        }
+    }
+
+    #[test]
+    fn the_approval_count_is_scoped_to_its_focus_and_is_the_only_approval_frame_that_is() {
+        assert_eq!(classify_server_msg(&approval_pending("cody-plain")), ServerClass::Focus("cody-plain"));
+        assert_eq!(classify_server_msg(&approval_pending("fred")), ServerClass::Focus("fred"));
+    }
+
+    #[test]
+    fn a_network_peer_is_sent_none_of_the_local_only_approval_frames_in_any_path() {
+        let tags = SensitiveTags::in_memory();
+        for (name, msg) in approval_content_frames() {
+            assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{name}");
+            assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(), "{name}");
+            for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
+                assert!(may_receive(trust, &msg, &tags), "{name}: a local peer is not filtered here (routing decides)");
+            }
+        }
+    }
+
+    #[test]
+    fn a_network_peer_is_sent_the_approval_count_for_a_non_sensitive_tag_and_not_for_a_sensitive_one() {
+        let tags = SensitiveTags::in_memory();
+        tags.mark_tag("cody-work");
+
+        let plain = approval_pending("cody-plain");
+        assert!(may_receive(PeerTrust::Tcp, &plain, &tags));
+        assert_eq!(
+            serde_json::to_value(outbound(PeerTrust::Tcp, plain.clone(), &tags).expect("delivered")).unwrap(),
+            serde_json::to_value(&plain).unwrap(),
+            "redaction leaves the count exactly as it is"
+        );
+
+        for sensitive in ["cody-work", "fred", "teri"] {
+            assert!(
+                outbound(PeerTrust::Tcp, approval_pending(sensitive), &tags).is_none(),
+                "a network peer must never see the count for {sensitive}"
+            );
+            assert!(
+                outbound(PeerTrust::LocalOther, approval_pending(sensitive), &tags).is_some(),
+                "a local peer may: {sensitive}"
+            );
+        }
+    }
+
+    #[test]
+    fn when_the_sensitive_registry_is_unreadable_a_network_peer_gets_no_approval_count_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_path_beside(&dir.path().join("daemon-sessions.json"));
+        std::fs::write(&path, b"{not json").unwrap();
+        let tags = SensitiveTags::persisted(path);
+
+        assert!(outbound(PeerTrust::Tcp, approval_pending("cody-anything"), &tags).is_none());
+    }
+
+    #[test]
+    fn redact_for_network_passes_the_approval_count_through_unchanged() {
+        let tags = SensitiveTags::in_memory();
+        let msg = approval_pending("cody-plain");
+
+        let redacted = redact_for_network(msg.clone(), &tags);
+
+        assert_eq!(serde_json::to_value(&redacted).unwrap(), serde_json::to_value(&msg).unwrap());
+    }
+
+    #[test]
+    fn the_approval_client_messages_and_the_superseded_permission_answer_are_refused_for_network_peers() {
+        let tags = SensitiveTags::in_memory();
+        let msgs = vec![
+            ClientMsg::ApprovalAnswer {
+                request_id: "r".into(),
+                decision: crate::approvals::wire::ApprovalDecision {
+                    kind: crate::approvals::wire::DecisionKind::AllowOnce,
+                    note: None,
+                },
+                window_id: "w".into(),
+                operator_nonce: Some("n".into()),
+            },
+            ClientMsg::ApprovalRefusalReport {
+                request_id: None,
+                control: "allow_once".into(),
+                channel: crate::approvals::wire::RefusalChannel::AppControl,
+            },
+            ClientMsg::SessionAnswerPermission {
+                tag: "cody-plain".into(),
+                request_id: "r".into(),
+                decision: PermissionDecision::Allow,
+            },
+        ];
+        for msg in &msgs {
+            assert_eq!(network_policy(msg), NetworkPolicy::Refused, "{msg:?}");
+            assert!(refused_for_network(msg), "{msg:?}");
+            assert!(refuse_for_network(msg, &tags), "{msg:?}");
+        }
+    }
+
+    #[test]
+    fn nothing_in_src_constructs_session_permission_request_outside_tests() {
+        // `SessionPermissionRequest` is superseded by `ApprovalRequest`. It stays in the protocol
+        // (an older client decodes it), classified `LocalOnly`, and is never built. Allowed
+        // mentions: comments, the enum's own definition, and patterns that name no field
+        // (`ServerMsg::SessionPermissionRequest { .. }`). A test module (everything from the
+        // first `#[cfg(test)]` module of a file) is not scanned.
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        assert!(files.len() > 50, "the source tree was found: {} files", files.len());
+
+        let mut offenders = Vec::new();
+        let mut mentions = 0;
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let production = text.split("#[cfg(test)]\nmod ").next().unwrap_or(&text);
+            for (n, line) in production.lines().enumerate() {
+                if !line.contains("SessionPermissionRequest") {
+                    continue;
+                }
+                mentions += 1;
+                let t = line.trim();
+                let is_comment = t.starts_with("//");
+                let is_definition = file.ends_with("ipc/protocol.rs") && t == "SessionPermissionRequest {";
+                let is_pattern = t.contains("SessionPermissionRequest { .. }");
+                if !(is_comment || is_definition || is_pattern) {
+                    offenders.push(format!("{}:{}: {t}", file.display(), n + 1));
+                }
+            }
+        }
+        assert!(mentions >= 3, "the scan finds the definition and the classification arms: {mentions}");
+        assert!(offenders.is_empty(), "something constructs (or destructures) SessionPermissionRequest:\n{}", offenders.join("\n"));
+    }
 }

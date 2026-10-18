@@ -1300,6 +1300,13 @@ class AppStore: ObservableObject {
         case .sessionTasks, .sessionTaskDetail:
             break   // BA3 routes these to BackgroundTaskStore
 
+        // Permission approvals (AP0b): decoded, shown by nothing until AP2a. This app
+        // does not yet subscribe with `renders_approvals`, so the daemon sends none of
+        // these but the count.
+        case .approvalRequest, .approvalsSnapshot, .approvalResolved, .approvalPending,
+             .approvalGuardBlocked, .approvalAnswerRefused:
+            break
+
         case .pong, .unknown:
             break
         }
