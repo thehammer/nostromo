@@ -1,0 +1,179 @@
+{
+  "type": "mother_jobs",
+  "jobs": [
+    {
+      "id": "20260508T144457Z-6e3043a1",
+      "state": "running",
+      "repo": "nostromo",
+      "isolation": "worktree",
+      "title": "nostromo phase 3 — Mother integration + inline approval",
+      "created_at": "2026-05-08T14:44:57.264280Z",
+      "started_at": "2026-05-08T14:44:58.903773Z",
+      "finished_at": null,
+      "plan_path": "/Users/hammer/.mother/events/20260508T144457Z-6e3043a1-plan.md",
+      "question": null,
+      "paused_reason": null,
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": "tier_1",
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": []
+    },
+    {
+      "id": "20260508T144522Z-63e0f6f4",
+      "state": "queued",
+      "repo": "nostromo",
+      "isolation": "worktree",
+      "title": "nostromo phase 4 — native Graph + GitHub data clients",
+      "created_at": "2026-05-08T14:45:22.731073Z",
+      "started_at": null,
+      "finished_at": null,
+      "plan_path": "/Users/hammer/.mother/events/20260508T144522Z-63e0f6f4-plan.md",
+      "question": null,
+      "paused_reason": null,
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": "tier_0",
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": []
+    },
+    {
+      "id": "20260507T091200Z-aabbccdd",
+      "state": "awaiting",
+      "repo": "admin-portal",
+      "isolation": "worktree",
+      "title": "example awaiting job",
+      "created_at": "2026-05-07T09:12:00Z",
+      "started_at": "2026-05-07T09:12:05Z",
+      "finished_at": null,
+      "plan_path": "/Users/hammer/.mother/events/20260507T091200Z-aabbccdd-plan.md",
+      "question": "Should the migration run in a transaction? Option A: yes (safe). Option B: no (faster).",
+      "paused_reason": "user",
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": "tier_0",
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": []
+    },
+    {
+      "id": "plain-origin-1",
+      "state": "running",
+      "repo": "nostromo",
+      "isolation": "worktree",
+      "title": "queued from a work item",
+      "created_at": "2026-05-09T10:00:00Z",
+      "started_at": "2026-05-09T10:00:03Z",
+      "finished_at": null,
+      "plan_path": "/tmp/plan.md",
+      "question": null,
+      "paused_reason": null,
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": "tier_2",
+      "current_activity": "editing src/lib.rs",
+      "kind": null,
+      "phases": [
+        {
+          "agent": "cody",
+          "request_type": "implement",
+          "state": "running",
+          "started_at": "2026-05-09T10:00:04Z",
+          "finished_at": null,
+          "findings": null
+        },
+        {
+          "agent": "perri",
+          "request_type": "review",
+          "state": "done",
+          "started_at": "2026-05-09T10:30:00Z",
+          "finished_at": "2026-05-09T10:40:00Z",
+          "findings": 3
+        }
+      ],
+      "cycles": [],
+      "origin": {
+        "label": "teri-send"
+      }
+    },
+    {
+      "id": "plain-pipeline-1",
+      "state": "awaiting",
+      "repo": "nostromo",
+      "isolation": "worktree",
+      "title": "pipeline job",
+      "created_at": "2026-05-09T11:00:00Z",
+      "started_at": null,
+      "finished_at": null,
+      "plan_path": null,
+      "question": "Proceed with the migration?",
+      "paused_reason": "adherence_blocked",
+      "adherence_notes": "check the migration",
+      "adherence_status": "blocked_for_human",
+      "current_tier": null,
+      "current_activity": null,
+      "kind": "pipeline",
+      "phases": [],
+      "cycles": [
+        {
+          "cycle": 1,
+          "phases": [
+            {
+              "agent": "archie",
+              "request_type": "plan",
+              "state": "done",
+              "started_at": "2026-05-09T11:00:05Z",
+              "finished_at": "2026-05-09T11:05:00Z",
+              "findings": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "plain-failed-1",
+      "state": "failed",
+      "repo": "other",
+      "isolation": "none",
+      "title": "failed job",
+      "created_at": "2026-05-09T12:00:00Z",
+      "started_at": "2026-05-09T12:00:01Z",
+      "finished_at": "2026-05-09T12:30:00Z",
+      "plan_path": null,
+      "question": null,
+      "paused_reason": null,
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": null,
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": []
+    },
+    {
+      "id": "plain-done-1",
+      "state": "succeeded",
+      "repo": "other",
+      "isolation": "worktree",
+      "title": "finished job",
+      "created_at": "2026-05-09T13:00:00Z",
+      "started_at": "2026-05-09T13:00:01Z",
+      "finished_at": "2026-05-09T13:10:00Z",
+      "plan_path": null,
+      "question": null,
+      "paused_reason": null,
+      "adherence_notes": null,
+      "adherence_status": null,
+      "current_tier": null,
+      "current_activity": null,
+      "kind": null,
+      "phases": [],
+      "cycles": []
+    }
+  ]
+}

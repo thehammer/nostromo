@@ -5799,3 +5799,132 @@ mod background_tasks {
         assert_no_task_text_or_paths(&tcp.text(), &s, "the network peer");
     }
 }
+
+// ── MC1-7: headless-crew keys on Mother jobs ─────────────────────────────────
+
+/// A job as `mother list --format json` reports it for a repo that opted in to
+/// the headless crew: gates, a lens wave, an open decision, attention and the
+/// progress overlay. `label` is the `--label` it was added under.
+fn crew_mother_job(id: &str, label: &str) -> nostromo::mother::MotherJob {
+    serde_json::from_value(json!({
+        "id": id,
+        "state": "awaiting",
+        "title": format!("title of {id}"),
+        "origin": {"label": label},
+        "paused_reason": "gate_hold",
+        "activity": "gate_hold",
+        "pr_url": "https://github.com/Carefeed/payments/pull/907",
+        "crew": {"mode": "enforce"},
+        "gates": {
+            "mode": "enforce", "posture": "normal", "status": "exhausted",
+            "attempt": 3, "max_attempts": 3, "head_sha": "e41b7f0",
+            "results": [{"name": "unit", "result": "failed", "blocking": true, "duration_s": 201, "exit_code": 1}],
+            "not_run": [], "override": null
+        },
+        "review_wave": {
+            "mode": "enforce", "cycle": 1, "cycle_cap": 2, "status": "running",
+            "lenses": [{"reviewer": "perri:correctness", "lens": "correctness", "state": "done",
+                        "findings": {"blocking": 0, "advisory": 2}, "cost_usd": 0.42, "examined_files": 7}],
+            "adherence": {"state": "done", "verdict": "pass"},
+            "coverage_gaps": 0,
+            "claims": {"verified": 2, "refuted": 0, "unverified": 0}
+        },
+        "decision": {
+            "id": "d-0001", "kind": "gate_hold",
+            "options": [{"id": "escalate", "label": "Escalate", "consequence": "Re-run one tier up.", "takes_text": false}],
+            "opened_at": "2026-10-17T12:00:02.000Z", "resolved_at": null, "resolution": null
+        },
+        "attention": [{"reason": "decision_awaiting", "since": "2026-10-17T12:00:02.000Z"}],
+        "attention_reasons": [{"reason": "decision_awaiting", "since": "2026-10-17T12:00:02.000Z", "acked": false}],
+        "last_answer": {"source": "nostromo_app", "option": "escalate", "at": "2026-10-17T11:00:00.000Z"},
+        "progress": {
+            "v": 1, "pct": 90, "label": "Checking", "stage": "gates",
+            "signals": {"stage": "gates", "gates": {"passed": 2, "failed": 0, "total": 3}, "elapsed_active_s": 900, "cost": 1.4},
+            "eta": {"lo_s": 60, "hi_s": 240, "label": "1-4 min", "basis": "fleet"},
+            "paused": false, "flags": [], "updated_at": "2026-10-17T12:00:00.000Z"
+        },
+        "criteria_source": "checklist"
+    }))
+    .expect("crew mother job")
+}
+
+#[tokio::test]
+async fn a_job_queued_from_a_work_item_is_still_withheld_from_a_tcp_peer_when_it_carries_crew_fields() {
+    let h = spawn_server().await;
+    let jobs = || vec![crew_mother_job("job-crew-work", "teri-send"), crew_mother_job("job-crew-plain", "nightly")];
+    let (mut tcp, mut unix) = (raw_tcp(&h).await, raw_unix(&h).await);
+    let everything = json!({"type": "subscribe", "topics": [], "renders_decisions": false});
+    raw_handshake(&mut tcp, everything.clone()).await.expect("tcp handshake");
+    raw_handshake(&mut unix, everything).await.expect("unix handshake");
+
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    for job in jobs() {
+        h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
+    }
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+    let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
+
+    let both = vec!["job-crew-work".to_owned(), "job-crew-plain".to_owned()];
+    assert_eq!(raw_mother_ids(&unix_frames), (both.clone(), both), "control: a Unix peer sees both jobs");
+    assert_eq!(
+        raw_mother_ids(&tcp_frames),
+        (vec!["job-crew-plain".to_owned()], vec!["job-crew-plain".to_owned()]),
+        "crew fields must not lift the work-send filter: {tcp_frames:?}"
+    );
+    let wire = serde_json::to_string(&tcp_frames).unwrap();
+    assert!(
+        !wire.contains("job-crew-work") && !wire.contains("title of job-crew-work"),
+        "no trace of the withheld job: {wire}"
+    );
+}
+
+#[tokio::test]
+async fn a_tcp_peer_receives_a_non_sensitive_job_s_crew_fields_unchanged() {
+    let h = spawn_server().await;
+    let job = crew_mother_job("job-crew-open", "nightly");
+    let original = serde_json::to_value(&job).expect("serialize original job");
+    let (mut tcp, mut unix) = (raw_tcp(&h).await, raw_unix(&h).await);
+    let everything = json!({"type": "subscribe", "topics": [], "renders_decisions": false});
+    raw_handshake(&mut tcp, everything.clone()).await.expect("tcp handshake");
+    raw_handshake(&mut unix, everything).await.expect("unix handshake");
+
+    h.broadcast(ServerMsg::MotherJobs { jobs: vec![job.clone()] });
+    h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+    let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
+
+    for (who, frames) in [("tcp", &tcp_frames), ("unix", &unix_frames)] {
+        let listed = frames
+            .iter()
+            .find(|f| f["type"] == "mother_jobs")
+            .unwrap_or_else(|| panic!("{who} peer got no mother_jobs frame: {frames:?}"));
+        let delivered = &listed["jobs"][0];
+        assert_eq!(delivered["id"], "job-crew-open", "{who}");
+
+        // Concrete values: the crew data really is on the wire (the equality
+        // check below alone would also pass if the fields were dropped on both sides).
+        assert_eq!(delivered["activity"], "gate_hold", "{who}: {delivered}");
+        assert_eq!(delivered["crew_opt_in"], true, "{who}: {delivered}");
+        assert_eq!(delivered["gates"]["attempt"], 3, "{who}: {delivered}");
+        assert_eq!(delivered["gates"]["results"][0]["name"], "unit", "{who}: {delivered}");
+        assert_eq!(delivered["review_wave"]["lenses"][0]["reviewer"], "perri:correctness", "{who}: {delivered}");
+        assert_eq!(delivered["decision"]["id"], "d-0001", "{who}: {delivered}");
+        assert_eq!(delivered["attention"][0]["reason"], "decision_awaiting", "{who}: {delivered}");
+        assert_eq!(delivered["attention_reasons"][0]["acked"], false, "{who}: {delivered}");
+        assert_eq!(delivered["progress"]["pct"], 90, "{who}: {delivered}");
+        assert_eq!(delivered["progress"]["eta"]["basis"], "fleet", "{who}: {delivered}");
+        assert_eq!(delivered["last_answer"]["option"], "escalate", "{who}: {delivered}");
+        assert_eq!(delivered["criteria_source"], "checklist", "{who}: {delivered}");
+        assert_eq!(delivered["pr_url"], "https://github.com/Carefeed/payments/pull/907", "{who}: {delivered}");
+        assert!(delivered.get("crew").is_none(), "{who}: the opaque crew blob is never forwarded: {delivered}");
+
+        assert_eq!(delivered, &original, "{who}: the delivered job must equal the daemon's job");
+    }
+
+    let awaiting = tcp_frames
+        .iter()
+        .find(|f| f["type"] == "mother_await_detected")
+        .expect("the TCP peer is also told about the awaiting job");
+    assert_eq!(awaiting["decision"]["id"], "d-0001", "{awaiting}");
+    assert_eq!(awaiting["activity"], "gate_hold", "{awaiting}");
+}

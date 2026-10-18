@@ -9,6 +9,7 @@
 //! offending values, so the warning carries only the job id, the failing key
 //! path and a short error class, never the serde message or any value.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
@@ -16,6 +17,28 @@ use serde_json::Value;
 
 use super::protocol::EventData;
 use super::MotherJob;
+
+thread_local! {
+    /// Id of the job being decoded on this thread, so a per-key warning raised
+    /// deep inside serde (see [`super::crew::lenient`]) can name the job.
+    static CURRENT_JOB: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Marks `id` as the job being decoded until dropped.
+struct JobScope;
+
+impl JobScope {
+    fn enter(id: &str) -> Self {
+        CURRENT_JOB.with(|c| *c.borrow_mut() = Some(id.to_owned()));
+        JobScope
+    }
+}
+
+impl Drop for JobScope {
+    fn drop(&mut self) {
+        CURRENT_JOB.with(|c| *c.borrow_mut() = None);
+    }
+}
 
 /// Cap on remembered (id, path) pairs so a pathological stream can't grow the
 /// dedupe set without bound.
@@ -39,6 +62,7 @@ pub fn decode_jobs(elements: Vec<Value>) -> (Vec<MotherJob>, usize) {
             warn_once(None, "id", "missing field");
             continue;
         };
+        let _scope = JobScope::enter(&id);
         match serde_path_to_error::deserialize::<_, MotherJob>(element) {
             Ok(job) => jobs.push(job),
             Err(e) => {
@@ -68,8 +92,17 @@ pub fn decode_event_data(kind: &str, data: &Value) -> Option<EventData> {
     }
 }
 
+/// Warn (content-free, deduped per job and path) that the new job key `key` could
+/// not be read and was dropped to its default. `inner` is the failing path inside
+/// that key (`.` for the key itself), as returned by [`describe`].
+pub(super) fn warn_unreadable_key(key: &str, inner: &str, class: &'static str) {
+    let path = if inner == "." { key.to_owned() } else { format!("{key}.{inner}") };
+    let id = CURRENT_JOB.with(|c| c.borrow().clone());
+    warn_once(id.as_deref(), &path, class);
+}
+
 /// (key path, error class) of a decode failure, with no values in either.
-fn describe(e: &serde_path_to_error::Error<serde_json::Error>) -> (String, &'static str) {
+pub(super) fn describe(e: &serde_path_to_error::Error<serde_json::Error>) -> (String, &'static str) {
     let msg = e.inner().to_string();
     let class = if msg.starts_with("invalid type") {
         "invalid type"
