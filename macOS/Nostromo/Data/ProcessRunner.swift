@@ -55,4 +55,48 @@ enum ProcessRunner {
 
         return (data, proc.terminationStatus)
     }
+
+    /// As `runCapturingStdout`, but a child still running after `timeout` seconds is terminated.
+    /// `timedOut` says whether that happened; `data` is whatever it had written by then.
+    static func runCapturingStdout(
+        _ url: URL,
+        arguments: [String],
+        environment: [String: String]? = nil,
+        timeout: TimeInterval
+    ) -> (data: Data, status: Int32, timedOut: Bool)? {
+        let proc = Process()
+        proc.executableURL = url
+        proc.arguments = arguments
+        if let environment {
+            proc.environment = environment
+        }
+
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+
+        // The drain below blocks until the child closes its end; terminating it is what unblocks it.
+        let lock = NSLock()
+        var timedOut = false
+        let watchdog = DispatchWorkItem {
+            lock.lock(); defer { lock.unlock() }
+            if proc.isRunning {
+                timedOut = true
+                proc.terminate()
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        watchdog.cancel()
+
+        lock.lock(); defer { lock.unlock() }
+        return (data, proc.terminationStatus, timedOut)
+    }
 }

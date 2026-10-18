@@ -14,16 +14,90 @@ the app is watching:
     {"op":"add_job","job":{...}}               queue a new job (emits "queued")
     {"op":"event","kind":"running","job":"j1"} fold a state event + broadcast it
     {"op":"emit","t":"current_activity","data":{"job":"j1","text":"..."}}  raw event
+    {"op":"replay","file":"x.ndjson","speed":1,"wait":false}
+                                               stream a contract fixture's broker events (see "Replay" below)
     {"op":"drop"}                              disconnect all clients (reconnect test)
     {"op":"reset"}                             restore the scenario's jobs, clear recorded commands, then
                                                drop clients so they reconnect and re-snapshot
     {"op":"commands"}                          commands received so far
     {"op":"jobs"}                              current job table
+
+Subscribe categories are honoured: a client only receives the events whose `category` it
+subscribed to (the snapshot and pings always go out). `query.get {job}` is answered with
+`{ok, job}`, the raw job from the table.
+
+Crew scenarios (`crew_gates`, `crew_wave`, `crew_hold`) are seeded from the first snapshot of
+the vendored contract fixtures in tests/fixtures/mother-contract/, and advertise the
+capabilities of the fixture's `hello` (so `progress` is subscribable). `--caps a,b,c` overrides.
+
+Replay. `replay` streams a fixture's `dir: event` lines (never its hello) to the subscribed
+clients, one every 0.5/speed seconds (fixture timestamps are not monotonic, so they are not
+used; speed 0 sends them back to back; `"wait": true` returns when the last one is out):
+  - a snapshot adds the jobs the table lacks (as a `queued` event carrying the full job, the
+    way the real broker announces a new job) and replaces the ones it has, silently;
+  - state events fold into the table, as for any event;
+  - `progress_updated` becomes the job's `progress` overlay;
+  - gate, wave, decision and attention events are folded into the job (a small mirror of what
+    Mother records: enough for `query.get` to return the gate list, lens rows, hold and flags)
+    and then broadcast, so a client that re-reads the job with `query.get` sees them.
+Events for a job the table does not have are skipped.
 """
 import argparse, json, os, socket, socketserver, sys, threading, time, uuid
 from datetime import datetime, timezone
 
 CAPS = ["state", "activity", "await", "current_activity", "quota"]
+
+FIXTURE_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "tests", "fixtures", "mother-contract")
+CREW_FIXTURES = {"crew_gates": "gates_fix_pass.ndjson", "crew_wave": "lens_wave.ndjson", "crew_hold": "gate_hold_answered.ndjson"}
+
+STATE_KINDS = {"queued", "ready", "running", "succeeded", "failed", "cancelled", "resumed", "auto_resumed",
+               "retried", "escalated", "archived"}
+AWAIT_KINDS = {"awaiting_input", "paused_for_quota"}
+HOLD_ACTIVITIES = ("gate_hold", "review_hold")
+
+# The text of the four decision options, as Mother templates them (copied from the gate_hold fixture).
+DECISION_OPTIONS = {
+    "resume_with_guidance": {"id": "resume_with_guidance", "label": "Resume with guidance",
+                             "consequence": "Worker resumes in the same session with your note; gates re-run.", "takes_text": True},
+    "escalate": {"id": "escalate", "label": "Escalate", "consequence": "Re-run one tier up.", "takes_text": False},
+    "override_open": {"id": "override_open", "label": "Override and open",
+                      "consequence": "Mark the PR ready with red gates recorded as overridden.", "takes_text": False},
+    "cancel": {"id": "cancel", "label": "Cancel", "consequence": "Stop the job.", "takes_text": False},
+}
+
+
+def fixture_lines(name):
+    """The parsed NDJSON lines of a vendored contract fixture."""
+    path = os.path.join(FIXTURE_DIR, name) if not os.path.isabs(name) and not os.path.exists(name) else name
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def fixture_caps():
+    """The capabilities the fixtures' hello advertises."""
+    hello = next(m for m in fixture_lines("gates_fix_pass.ndjson") if m["t"] == "hello")
+    return hello["data"]["capabilities"]
+
+
+def fixture_jobs(name):
+    """The jobs of a fixture's first snapshot."""
+    snap = next(m for m in fixture_lines(name) if m["t"] == "snapshot")
+    return json.loads(json.dumps(snap["data"]["jobs"]))   # a private copy per call
+
+
+def category_of(kind, data):
+    """The subscription category an event belongs to."""
+    if isinstance(data, dict) and data.get("category"):
+        return data["category"]
+    if kind in STATE_KINDS:
+        return "state"
+    if kind in AWAIT_KINDS:
+        return "await"
+    if kind in ("current_activity", "quota"):
+        return kind
+    if kind in ("progress_updated", "progress_half"):
+        return "progress"
+    return "activity"
 
 
 def now_iso(offset=0.0):
@@ -68,6 +142,8 @@ SCENARIOS = {
         job("j-cx", "Spike: queue metrics", "cancelled", started=6000, finished=5900),
     ],
 }
+for _name, _file in CREW_FIXTURES.items():
+    SCENARIOS[_name] = (lambda f=_file: fixture_jobs(f))
 SCENARIOS["busy"] = lambda: [job(f"j-{i}", f"Job number {i}", ["queued", "running", "succeeded", "failed"][i % 4],
                                   age=100 + i * 30, started=50 + i * 10 if i % 4 else None) for i in range(40)]
 
@@ -75,10 +151,11 @@ TERMINAL = {"succeeded", "failed", "cancelled"}
 
 
 class Broker:
-    def __init__(self, jobs):
+    def __init__(self, jobs, caps=None):
         self.lock = threading.RLock()
         self.jobs = {j["id"]: j for j in jobs}
-        self.clients = []          # sockets of subscribed clients
+        self.caps = list(caps) if caps is not None else list(CAPS)
+        self.clients = []          # (socket, subscribed categories or None for all) of subscribed clients
         self.all_conns = []
         self.commands = []         # recorded commands (type, data)
 
@@ -96,9 +173,19 @@ class Broker:
             return False
 
     def broadcast(self, t, data):
+        """Send an event to every client subscribed to its category (pings go to all)."""
         with self.lock:
+            if t != "ping" and isinstance(data, dict):
+                data = {**data, "category": category_of(t, data)}
             msg = self.env("event", t, data)
-            self.clients = [c for c in self.clients if self.send(c, msg)]
+            cat = None if t == "ping" else data.get("category")
+            alive = []
+            for sock, cats in self.clients:
+                if cats is not None and cat is not None and cat not in cats:
+                    alive.append((sock, cats))      # not subscribed to this category: skip, keep the client
+                elif self.send(sock, msg):
+                    alive.append((sock, cats))
+            self.clients = alive
 
     # -- state folding (mirrors the app's foldJobState) ------------------------
     def fold(self, jid, kind, **extra):
@@ -112,6 +199,10 @@ class Broker:
                     j["finished_at"] = now_iso()
             elif kind == "awaiting_input":
                 j["state"], j["question"] = "awaiting", extra.get("question")
+                if extra.get("paused_reason"):
+                    j["paused_reason"] = extra["paused_reason"]
+                    if extra["paused_reason"] in HOLD_ACTIVITIES:
+                        j["activity"] = extra["paused_reason"]
             elif kind == "paused_for_quota":
                 j["state"], j["paused_reason"] = "awaiting", extra.get("paused_reason", "quota")
             elif kind in ("resumed", "auto_resumed"):
@@ -119,10 +210,122 @@ class Broker:
             elif kind in ("retried", "escalated"):
                 j["state"] = extra.get("to_state", "ready")
                 j["finished_at"] = None
+            if kind != "awaiting_input" and j.get("activity") in HOLD_ACTIVITIES and j["state"] != "awaiting":
+                j["activity"] = None        # a hold ends with the awaiting state
             data = {"job": jid, **extra}
             if kind == "queued":
                 data = dict(j)
             self.broadcast(kind, data)
+
+    # -- crew events (a small mirror of what Mother records) --------------------
+    def fold_crew(self, jid, kind, d):
+        """Fold a gate, wave, decision or attention event into the job. Returns False if the job is unknown."""
+        with self.lock:
+            j = self.jobs.get(jid)
+            if j is None:
+                return False
+            g, w = j.get("gates"), j.get("review_wave")
+            if kind == "gates_started":
+                j["gates"] = {"mode": d.get("mode"), "posture": d.get("posture"), "status": "running",
+                              "attempt": d.get("attempt"), "max_attempts": d.get("max_attempts"),
+                              "head_sha": d.get("head_sha"), "started_at": now_iso(), "finished_at": None,
+                              "results": [], "not_run": [], "override": None}
+                j["activity"] = "gating"
+            elif kind == "gate_result" and g is not None:
+                entry = {"name": d.get("name"), "result": d.get("result"), "blocking": d.get("blocking", False),
+                         "duration_s": d.get("duration_s"), "exit_code": d.get("exit_code"), "unavailable_reason": None}
+                g["results"] = [r for r in g["results"] if r["name"] != entry["name"]] + [entry]
+            elif kind == "gates_completed" and g is not None:
+                g["status"], g["finished_at"], g["not_run"] = d.get("status"), now_iso(), list(d.get("not_run") or [])
+            elif kind == "gate_fix_started":
+                j["activity"] = "gate_fix"
+            elif kind == "gates_exhausted" and g is not None:
+                g["status"], g["finished_at"] = "exhausted", now_iso()
+            elif kind == "review_cycle_started":
+                w = j.setdefault("review_wave", {"mode": "enforce", "cycle": d.get("cycle"), "cycle_cap": d.get("cycle"),
+                                                  "status": "running", "lenses": [], "claims": None, "coverage_gaps": 0})
+                w["status"], w["cycle"], j["activity"] = "running", d.get("cycle"), "review_wave"
+                for lens in w["lenses"]:
+                    if lens["reviewer"] in (d.get("reviewers") or []) and lens["state"] == "pending":
+                        lens["state"] = "running"
+            elif kind in ("lens_skipped", "reviewed") and w is not None:
+                lens = next((x for x in w["lenses"] if x["reviewer"] == d.get("reviewer")), None)
+                if lens is not None and kind == "lens_skipped":
+                    lens["state"], lens["skip_reason"] = "skipped", d.get("reason")
+                elif lens is not None:
+                    n = d.get("finding_count") or 0
+                    blocking = n if d.get("decision") == "continue" else 0
+                    lens["state"], lens["findings"] = "done", {"blocking": blocking, "advisory": n - blocking}
+            elif kind == "claims_verified" and w is not None:
+                w["claims"] = {k: d.get(k, 0) for k in ("verified", "refuted", "unverified")}
+            elif kind == "review_cycle_completed" and w is not None:
+                w["coverage_gaps"] = d.get("coverage_gaps", 0)
+            elif kind == "review_wave_completed" and w is not None:
+                w["status"] = d.get("status")
+                j["activity"] = None
+            elif kind == "decision_opened":
+                j["decision"] = {"id": d.get("decision_id"), "kind": d.get("kind"), "opened_at": now_iso(),
+                                 "resolved_at": None, "resolution": None,
+                                 "options": [DECISION_OPTIONS.get(o, {"id": o, "label": o, "consequence": "", "takes_text": False})
+                                             for o in d.get("options") or []]}
+                self._attention(j, "raised", "decision_awaiting")
+            elif kind == "decision_resolved" and j.get("decision"):
+                j["decision"].update(resolved_at=now_iso(), resolution={"option": d.get("option"), "source": d.get("source"), "at": now_iso()})
+                self._attention(j, "cleared", "decision_awaiting")
+            elif kind in ("attention_raised", "attention_cleared", "attention_acked"):
+                self._attention(j, kind.split("_")[1], d.get("reason"))
+            return True
+
+    @staticmethod
+    def _attention(j, change, reason):
+        """`attention` lists the unacknowledged reasons, `attention_reasons` all of them with `acked`."""
+        reasons = [r for r in j.get("attention_reasons", []) if r["reason"] != reason]
+        old = next((r for r in j.get("attention_reasons", []) if r["reason"] == reason), None)
+        if change in ("raised", "acked"):
+            reasons.append({"reason": reason, "since": (old or {}).get("since") or now_iso(), "acked": change == "acked"})
+        j["attention_reasons"] = reasons
+        j["attention"] = [{"reason": r["reason"], "since": r["since"]} for r in reasons if not r["acked"]]
+
+    def next_progress_stamp(self):
+        """A millisecond ISO timestamp strictly later than the last one handed out."""
+        last = getattr(self, "_stamp", 0.0)
+        self._stamp = max(time.time(), last + 0.001)
+        return datetime.fromtimestamp(self._stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(self._stamp * 1000) % 1000:03d}Z"
+
+    def replay(self, lines, speed=1.0):
+        """Stream a fixture's events (see the module docstring). Returns the number of events sent."""
+        sent = 0
+        for msg in lines:
+            if msg.get("dir") != "event" or msg.get("t") == "hello":
+                continue
+            kind, d = msg["t"], dict(msg.get("data") or {})
+            jid = d.get("job")
+            if kind == "snapshot":
+                for j in d.get("jobs", []):
+                    with self.lock:
+                        known = j["id"] in self.jobs
+                        self.jobs[j["id"]] = j
+                        if not known:
+                            self.broadcast("queued", dict(j))
+            elif jid is None or jid not in self.jobs:
+                continue            # an event for a job the table does not have
+            elif kind == "progress_updated":
+                with self.lock:
+                    # The fixtures share one `updated_at`; stamp each overlay with a later one so a
+                    # client that keeps "the newest" sees every step.
+                    d["updated_at"] = self.next_progress_stamp()
+                    self.jobs[jid]["progress"] = {k: v for k, v in d.items() if k not in ("job", "category")}
+                self.broadcast(kind, d)
+            elif kind in STATE_KINDS or kind in AWAIT_KINDS:
+                extra = {k: v for k, v in d.items() if k not in ("job", "category")}
+                self.fold(jid, kind, **extra)
+            else:
+                self.fold_crew(jid, kind, d)
+                self.broadcast(kind, d)
+            sent += 1
+            if speed and speed > 0:
+                time.sleep(0.5 / speed)
+        return sent
 
     # -- commands --------------------------------------------------------------
     def apply(self, ctype, data):
@@ -165,7 +368,7 @@ def make_handler(broker):
             sock = self.request
             with broker.lock:
                 broker.all_conns.append(sock)
-            broker.send(sock, broker.env("event", "hello", {"protocol_version": 1, "capabilities": CAPS}))
+            broker.send(sock, broker.env("event", "hello", {"protocol_version": 1, "capabilities": broker.caps}))
             for raw in self.rfile:
                 try:
                     msg = json.loads(raw)
@@ -175,10 +378,17 @@ def make_handler(broker):
                     continue
                 t, id_, data = msg.get("t"), msg.get("id"), msg.get("data") or {}
                 if t == "subscribe":
+                    cats = data.get("categories")
+                    cats = set(cats) if isinstance(cats, list) and cats else None   # none given: everything
                     broker.send(sock, broker.env("ack", t, {"ok": True}, id_))
-                    broker.send(sock, broker.env("event", "snapshot", {"jobs": broker.snapshot()}))
                     with broker.lock:
-                        broker.clients.append(sock)
+                        broker.send(sock, broker.env("event", "snapshot", {"jobs": broker.snapshot()}))
+                        broker.clients.append((sock, cats))
+                elif t == "query.get":
+                    job_ = broker.jobs.get(data.get("job"))
+                    body = ({"ok": True, "job": job_} if job_ is not None
+                            else {"ok": False, "error": {"code": "no_such_job", "message": f"no job {data.get('job')}"}})
+                    broker.send(sock, broker.env("ack", t, body, id_))
                 else:
                     err = broker.apply(t, data)
                     body = {"ok": True} if err is None else {"ok": False, "error": {"code": err[0], "message": err[1]}}
@@ -213,6 +423,13 @@ def make_ctl_handler(broker):
             if op == "emit":
                 broker.broadcast(req["t"], req["data"])
                 return True
+            if op == "replay":
+                lines = fixture_lines(req["file"])
+                speed = float(req.get("speed", 1))
+                if req.get("wait"):
+                    return broker.replay(lines, speed)
+                threading.Thread(target=broker.replay, args=(lines, speed), daemon=True).start()
+                return sum(1 for m in lines if m.get("dir") == "event" and m.get("t") != "hello")
             if op == "drop":
                 with broker.lock:
                     conns, broker.all_conns, broker.clients = broker.all_conns, [], []
@@ -242,12 +459,12 @@ class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     allow_reuse_address = True
 
 
-def serve(sock_path, jobs, ping_secs=15.0, scenario=None):
+def serve(sock_path, jobs, ping_secs=15.0, scenario=None, caps=None):
     """Start broker + control servers; returns (broker, servers). Caller shuts them down."""
     for p in (sock_path, sock_path + ".ctl"):
         if os.path.exists(p):
             os.unlink(p)
-    broker = Broker(jobs)
+    broker = Broker(jobs, caps)
     broker.scenario = scenario
     main = UnixServer(sock_path, make_handler(broker))
     ctl = UnixServer(sock_path + ".ctl", make_ctl_handler(broker))
@@ -266,11 +483,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sock", default="/tmp/fake-mother-broker.sock")
     ap.add_argument("--scenario", default="basic", choices=sorted(SCENARIOS))
+    ap.add_argument("--caps", help="comma-separated capabilities to advertise in hello "
+                                   "(default: the fixture's for crew_* scenarios, else the classic five)")
     a = ap.parse_args()
     if os.path.realpath(a.sock).startswith(os.path.expanduser("~/.mother")):
         sys.exit("refusing to run on the real Mother's directory")
-    serve(a.sock, SCENARIOS[a.scenario](), scenario=SCENARIOS[a.scenario])
-    print(f"fake Mother broker: {a.sock} (control: {a.sock}.ctl) scenario={a.scenario}", flush=True)
+    caps = a.caps.split(",") if a.caps else (fixture_caps() if a.scenario in CREW_FIXTURES else CAPS)
+    serve(a.sock, SCENARIOS[a.scenario](), scenario=SCENARIOS[a.scenario], caps=caps)
+    print(f"fake Mother broker: {a.sock} (control: {a.sock}.ctl) scenario={a.scenario} caps={','.join(caps)}", flush=True)
     try:
         while True:
             time.sleep(3600)

@@ -112,6 +112,10 @@ public struct MotherJobRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+
+                if model.reservesProgressLine {
+                    progressRow
+                }
             }
 
             Spacer()
@@ -124,6 +128,29 @@ public struct MotherJobRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// `≈60% · gates 2/3 · ETA ~25m` and attention badges. The line is always there for
+    /// running and awaiting jobs (blank when there is nothing to say), so it never
+    /// changes the row's height when progress or a flag first arrives.
+    private var progressRow: some View {
+        HStack(spacing: 6) {
+            Text(model.progressLine ?? " ")
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .accessibilityLabel(model.progressAccessibility ?? model.progressLine ?? "")
+                .accessibilityHidden(model.progressLine == nil)
+            Spacer(minLength: 0)
+            ForEach(model.attentionBadges, id: \.self) { badge in
+                Text("⚑ \(badge)")
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel(badge)
+            }
+        }
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(.secondary)
     }
 
     private var stateCircle: some View {

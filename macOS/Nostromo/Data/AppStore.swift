@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Combine
+import NostromoKit
 import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "store")
@@ -152,6 +153,14 @@ class AppStore: ObservableObject {
     /// through the real production code path rather than a parallel one.
     let client = NostromodClient()
     private let broker  = MotherBrokerClient()
+    /// Re-reads a job with `query.get` after its crew events (gates, review wave, decision, attention).
+    private lazy var jobRefresher = MotherJobRefresher(
+        fetch: { [weak self] id, done in
+            guard let self else { done(.failure(.disconnected)); return }
+            self.broker.queryGet(job: id, completion: done)
+        },
+        apply: { [weak self] refreshed in self?.applyRefreshedJob(refreshed) }
+    )
     private var cancellables     = Set<AnyCancellable>()
     /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}", bounded by
     /// an LRU eviction policy budgeted primarily in bytes
@@ -576,15 +585,34 @@ class AppStore: ObservableObject {
             }
             publishJobsAndStatus()
 
+        case .progress(let jobId, let progress):
+            guard jobMap[jobId]?.applyProgress(progress) == true else { return }
+            publishJobsAndStatus()
+
+        case .crewChanged(let jobId):
+            guard jobMap[jobId] != nil else { return }
+            jobRefresher.request(job: jobId)
+
         case .ping:
             break
 
         case .reconnected:
             // Clear stale state; next snapshot will repopulate
+            jobRefresher.cancelAll()
             jobMap.removeAll()
             motherPeeks.removeAll()
             publishJobsAndStatus()
         }
+    }
+
+    /// A `query.get` result: the broker's record replaces ours, except that the newer progress
+    /// overlay wins. A job that left the queue meanwhile stays gone.
+    private func applyRefreshedJob(_ refreshed: MotherJob) {
+        guard let current = jobMap[refreshed.id] else { return }
+        let merged = current.replacing(with: refreshed)
+        guard merged != current else { return }
+        jobMap[refreshed.id] = merged
+        publishJobsAndStatus()
     }
 
     /// Mirror of the broker's foldState: maps event kind → updated MotherJob.
@@ -617,7 +645,8 @@ class AppStore: ObservableObject {
             adherenceStatus: job.adherenceStatus, currentTier: job.currentTier,
             kind:   job.kind,
             phases: job.phases,
-            cycles: job.cycles
+            cycles: job.cycles,
+            crew:   job.crew
         )
     }
 
@@ -629,8 +658,11 @@ class AppStore: ObservableObject {
             if a != b { return a < b }
             return ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast)
         }
-        motherJobs   = jobs
-        motherStatus = MotherStatus.from(jobs: jobs)
+        // Only a real change wakes the views: an equal re-publish (a crew event whose
+        // refreshed job is identical, a state event that folds to the same job) is dropped.
+        let status = MotherStatus.from(jobs: jobs)
+        if jobs != motherJobs { motherJobs = jobs }
+        if status != motherStatus { motherStatus = status }
     }
 
     // MARK: - Mother action methods (called from MotherView)
@@ -1011,7 +1043,7 @@ class AppStore: ObservableObject {
         pendingSelection.map(prDetailCacheKey)
     }
 
-    private static func findBinary(_ name: String) -> URL? {
+    static func findBinary(_ name: String) -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
             "/usr/local/bin/\(name)", "/opt/homebrew/bin/\(name)",
@@ -1355,3 +1387,17 @@ class AppStore: ObservableObject {
 }
 
 extension AppStore: AttentionSink {}
+
+// MARK: - MotherJobDetailHost
+
+/// What the Mother job detail pane asks of the app.
+extension AppStore: MotherJobDetailHost {
+    var brokerConnectedPublisher: AnyPublisher<Bool, Never> { $brokerConnected.eraseToAnyPublisher() }
+    var motherActionErrorPublisher: AnyPublisher<String?, Never> { $motherActionError.eraseToAnyPublisher() }
+    var motherPeeksPublisher: AnyPublisher<[String: MotherPeekPayload], Never> { $motherPeeks.eraseToAnyPublisher() }
+    func peek(for jobId: String) -> MotherPeekPayload? { motherPeeks[jobId] }
+
+    /// A non-default broker (`MOTHER_BROKER_SOCK`, the QA fake) is not the Mother the CLI talks to.
+    var usesDefaultBroker: Bool { ProcessInfo.processInfo.environment["MOTHER_BROKER_SOCK"] == nil }
+    func motherBinary() -> URL? { AppStore.findBinary("mother") }
+}

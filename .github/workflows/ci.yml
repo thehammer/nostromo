@@ -98,11 +98,11 @@ jobs:
         run: |
           set -o pipefail
           make python-test 2>&1 | tee /tmp/pytests.txt
-          # The explicit allowlist the note above asks for. These two tests compare the vendored
+          # The explicit allowlist the note above asks for. These tests compare the vendored
           # Mother contract with a live Mother checkout, which the runner does not have (the
           # comparison runs locally and as an advisory gate: see the docstring in tests/mother_contract/test_contract_fixtures.py).
           # They skip by design on CI; the vendored-copy-versus-manifest tests still run.
-          allow='^test_vendored_copy_matches_mothers_origin_main \(test_contract_fixtures\.UpstreamDriftTests\.test_vendored_copy_matches_mothers_origin_main\) \.\.\. skipped|^test_mothers_contract_check_script_accepts_every_vendored_fixture \(test_contract_fixtures\.MothersOwnCheckerTests\.test_mothers_contract_check_script_accepts_every_vendored_fixture\) \.\.\. skipped'
+          allow='^test_vendored_copy_matches_mothers_origin_main \(test_contract_fixtures\.UpstreamDriftTests\.test_vendored_copy_matches_mothers_origin_main\) \.\.\. skipped|^test_mothers_contract_check_script_accepts_every_vendored_fixture \(test_contract_fixtures\.MothersOwnCheckerTests\.test_mothers_contract_check_script_accepts_every_vendored_fixture\) \.\.\. skipped|^test_every_broker_message_conforms_to_mothers_contract_check \(test_fake_mother_broker\.ContractTest\.test_every_broker_message_conforms_to_mothers_contract_check\) \.\.\. skipped'
           reported=$(grep -E '\.\.\. skipped' /tmp/pytests.txt || true)
           unexpected=$(printf '%s\n' "$reported" | grep -v '^$' | grep -vE "$allow" || true)
           n_allowed=$(printf '%s\n' "$reported" | grep -cE "$allow" || true)
