@@ -157,6 +157,8 @@ def daemon_env(qa_root, base_env, fake_claude, guard_bin):
         "NOSTROMO_GUARD_BIN": guard_bin,
         "NOSTROMO_APPROVALS_DIR": os.path.join(home, ".nostromo", "approvals"),
         "NOSTROMO_QA_DAEMON": "1",
+        # The clone runs from QA_ROOT, not /Applications; MacPeerVerifier needs the path override.
+        "NOSTROMO_OPERATOR_APP_PATH": os.path.join(qa_root, "Nostromo.app", "Contents", "MacOS", "Nostromo"),
     })
     return env
 

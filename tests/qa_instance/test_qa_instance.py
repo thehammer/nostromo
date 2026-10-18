@@ -159,6 +159,11 @@ class EnvTests(unittest.TestCase):
         self.assertNotIn("SECRET_TOKEN", env)
         self.assertNotIn("/Users/real", "".join(env.values()))
 
+    def test_daemon_env_trusts_the_clone_exe_as_operator_app(self):
+        env = qa.daemon_env(self.ROOT_DIR, self.BASE, "f", "g")
+        self.assertEqual(env["NOSTROMO_OPERATOR_APP_PATH"],
+                         self.ROOT_DIR + "/Nostromo.app/Contents/MacOS/Nostromo")
+
     def test_app_env_synthetic_on(self):
         env = qa.app_env(self.ROOT_DIR, self.BASE, synthetic=True)
         self.assertEqual(env["NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT"], "1")
