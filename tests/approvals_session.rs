@@ -28,8 +28,8 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event};
 use nostromo::approvals::broker::{
     restart_note_text, ApprovalBroker, BrokerParts, Incoming, Presenter, SessionInfo, SessionSink,
-    INVALID_REQUEST_MESSAGE, NO_APP_MESSAGE, REQUEST_TIMEOUT, RESTART_MESSAGE, RESTART_NOTES_FILE,
-    TIMED_OUT_MESSAGE,
+    APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, REQUEST_TIMEOUT, RESTART_MESSAGE,
+    RESTART_NOTES_FILE, TIMED_OUT_MESSAGE, UNSUPPORTED_REQUEST_ERROR,
 };
 use nostromo::approvals::guard::{
     self, hook_settings_json, PaneInfo, PaneProbe, ProbeError, TmuxSocket, GUARD_MESSAGE,
@@ -48,6 +48,13 @@ fn fixture_request(name: &str) -> Value {
     fixture(name)["requests"][0]["request"].clone()
 }
 
+/// `request` without its `input` key: what a request entry's `cli_request` holds.
+fn without_input(request: &Value) -> Value {
+    let mut v = request.clone();
+    v.as_object_mut().expect("a request object").remove("input");
+    v
+}
+
 fn fixture(name: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/approvals/{name}.json"));
@@ -55,7 +62,7 @@ fn fixture(name: &str) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
-/// Fixtures the broker answers `no_app` (the guard lets them through).
+/// Fixtures the broker answers `approval_unavailable` (the guard lets them through).
 const ORDINARY: &[&str] = &[
     "simple_rm",
     "compound",
@@ -487,6 +494,12 @@ impl Fake {
             .iter()
             .filter(|f| f["type"] == "control_response")
         {
+            if frame["response"]["subtype"] == "error" {
+                // The answer to a control request that is not a permission prompt:
+                // an error, which carries no behavior at all.
+                assert!(!frame.to_string().contains("behavior"), "{frame}");
+                continue;
+            }
             assert_eq!(frame["response"]["response"]["behavior"], "deny", "{frame}");
             assert!(
                 frame["response"]["response"].get("updatedInput").is_none(),
@@ -694,7 +707,7 @@ fn a_remote_control_session_is_not_approval_capable() {
 // ── PRD 1 + 3: every prompt is answered, recorded, and denied before the clock moves ──
 
 #[test]
-fn every_ordinary_prompt_is_denied_no_app_with_exactly_one_response_and_one_logged_outcome() {
+fn every_ordinary_prompt_is_denied_approval_unavailable_with_exactly_one_response_and_one_logged_outcome() {
     run(Opts::default(), |mut w| async move {
         let fake = w.spawn("focus-1", false);
         let start = tokio::time::Instant::now();
@@ -727,8 +740,8 @@ fn every_ordinary_prompt_is_denied_no_app_with_exactly_one_response_and_one_logg
         for line in &responses {
             assert_eq!(
                 line["response"],
-                deny_frame(answered_id(line), NO_APP_MESSAGE),
-                "the CLI is told no, in the contract's wrapper and words"
+                deny_frame(answered_id(line), APPROVAL_UNAVAILABLE_MESSAGE),
+                "the CLI is told no, in the contract's wrapper and this slice's words"
             );
         }
         let entries = w.entries();
@@ -752,7 +765,11 @@ fn every_ordinary_prompt_is_denied_no_app_with_exactly_one_response_and_one_logg
                 (1, 1),
                 "{name}/{id}: one request entry, one outcome entry"
             );
-            assert_eq!(outcome_name(outcomes[0]), "no_app", "{name}/{id}");
+            assert_eq!(
+                outcome_name(outcomes[0]),
+                "approval_unavailable",
+                "{name}/{id}"
+            );
             assert_eq!(
                 requests[0].request_id, outcomes[0].request_id,
                 "{name}/{id}: the same request"
@@ -783,8 +800,8 @@ fn every_ordinary_prompt_is_denied_no_app_with_exactly_one_response_and_one_logg
             };
             assert_eq!(
                 cli_request.as_ref(),
-                Some(request),
-                "{name}: every field the CLI sent, as received"
+                Some(&without_input(request)),
+                "{name}: every field the CLI sent, as received, but the input (the entry's own `input` holds it, once)"
             );
             assert_eq!(
                 Some(tool_name.as_str()),
@@ -902,38 +919,54 @@ fn a_call_that_runs_without_asking_causes_no_broker_activity() {
     );
 }
 
-// ── other control requests: left alone, nothing breaks (T-AP0a-4) ─────────────
+// ── other control requests: answered with an error, nothing breaks (T-AP0a-4, N3) ──
 
 #[test]
-fn control_requests_that_are_not_permission_prompts_are_left_unanswered_and_nothing_breaks() {
+fn control_requests_that_are_not_permission_prompts_get_one_error_answer_and_nothing_breaks() {
+    // Spec change (PR #270 review N3): these used to be left unanswered; the CLI
+    // would wait for them forever. Now each gets one `error` control_response.
     run(Opts::default(), |mut w| async move {
         let fake = w.spawn("focus-1", false);
 
         w.say("focus-1", "FIXTURE:non_can_use_tool");
+        let responses = fake.wait_responses(1).await;
         w.wait_idle("focus-1").await;
         settle().await;
 
+        assert_eq!(
+            responses[0]["tool_use_id"], "toolu_non_can_use_tool_0",
+            "the answer carries the very id the CLI sent"
+        );
+        let frame = &responses[0]["response"];
+        assert_eq!(frame["type"], "control_response");
+        assert_eq!(frame["response"]["subtype"], "error");
+        assert_eq!(
+            frame["response"]["request_id"], responses[0]["request_id"],
+            "{frame}"
+        );
+        assert_eq!(frame["response"]["error"], UNSUPPORTED_REQUEST_ERROR);
+        assert!(
+            !frame.to_string().contains("behavior"),
+            "an error carries no behavior: {frame}"
+        );
+        assert_eq!(
+            fake.responses().len(),
+            1,
+            "one answer, not one per retry or per line"
+        );
         assert!(
             w.entries().is_empty(),
             "no audit entries: {:?}",
             w.entries()
         );
-        assert!(
-            fake.responses().is_empty(),
-            "no answer was written for a request that is not ours to answer"
-        );
-        assert!(
-            fake.stdin().iter().all(|f| f["type"] == "user"),
-            "{:?}",
-            fake.stdin()
-        );
+        assert_eq!(w.presenter.asked.load(Ordering::SeqCst), 0);
 
         // The session carries on: a real prompt after it is answered as usual.
         w.say("focus-1", "FIXTURE:simple_rm");
-        let responses = fake.wait_responses(1).await;
+        let responses = fake.wait_responses(2).await;
         assert_eq!(
-            responses[0]["response"],
-            deny_frame(answered_id(&responses[0]), NO_APP_MESSAGE)
+            responses[1]["response"],
+            deny_frame(answered_id(&responses[1]), APPROVAL_UNAVAILABLE_MESSAGE)
         );
         fake.assert_never_allowed();
     });
@@ -1016,7 +1049,10 @@ fn a_prompt_the_broker_cannot_read_is_denied_as_invalid_and_the_session_carries_
             let Event::Request { cli_request, .. } = &requests[0].event else {
                 unreachable!()
             };
-            assert_eq!(cli_request.as_ref(), Some(&fixture_request("malformed")));
+            assert_eq!(
+                cli_request.as_ref(),
+                Some(&without_input(&fixture_request("malformed")))
+            );
             assert_eq!(w.presenter.asked.load(Ordering::SeqCst), 0);
             fake.assert_never_allowed();
 
@@ -1025,7 +1061,7 @@ fn a_prompt_the_broker_cannot_read_is_denied_as_invalid_and_the_session_carries_
             let responses = fake.wait_responses(2).await;
             assert_eq!(
                 responses[1]["response"],
-                deny_frame(answered_id(&responses[1]), NO_APP_MESSAGE)
+                deny_frame(answered_id(&responses[1]), APPROVAL_UNAVAILABLE_MESSAGE)
             );
         },
     );
@@ -1089,7 +1125,7 @@ fn a_prompt_withdrawn_the_instant_it_arrives_is_still_ended_exactly_once_when_no
         let outcomes = w.outcomes("toolu_cancel_0");
         assert_eq!(outcomes.len(), 1, "exactly one outcome: {outcomes:?}");
         assert!(
-            ["no_app", "withdrawn"].contains(&outcome_name(&outcomes[0])),
+            ["approval_unavailable", "withdrawn"].contains(&outcome_name(&outcomes[0])),
             "{}",
             outcome_name(&outcomes[0])
         );
@@ -1471,7 +1507,7 @@ fn restarting_a_session_cancels_its_held_prompt_and_the_new_process_never_hears_
             assert_eq!(responses[0]["tool_use_id"], "toolu_subagent_0");
             assert_eq!(
                 responses[0]["response"],
-                deny_frame(answered_id(&responses[0]), NO_APP_MESSAGE)
+                deny_frame(answered_id(&responses[0]), APPROVAL_UNAVAILABLE_MESSAGE)
             );
             w.run_out_the_clock().await;
             let responses = fake.responses();
@@ -1505,11 +1541,11 @@ fn when_the_broker_cannot_take_a_prompt_the_reader_denies_it_itself_and_it_is_st
 
             assert_eq!(
                 responses[0]["response"],
-                deny_frame(answered_id(&responses[0]), NO_APP_MESSAGE),
+                deny_frame(answered_id(&responses[0]), APPROVAL_UNAVAILABLE_MESSAGE),
                 "nothing is left waiting"
             );
             let outcome = w.wait_outcome("toolu_simple_rm_0").await;
-            assert_eq!(outcome_name(&outcome), "no_app");
+            assert_eq!(outcome_name(&outcome), "approval_unavailable");
             let entries = w.entries();
             let requests: Vec<&Entry> = entries.iter().filter(|e| is_request(e)).collect();
             assert_eq!(requests.len(), 1, "a request entry exists");
@@ -1517,7 +1553,10 @@ fn when_the_broker_cannot_take_a_prompt_the_reader_denies_it_itself_and_it_is_st
             let Event::Request { cli_request, .. } = &requests[0].event else {
                 unreachable!()
             };
-            assert_eq!(cli_request.as_ref(), Some(&fixture_request("simple_rm")));
+            assert_eq!(
+                cli_request.as_ref(),
+                Some(&without_input(&fixture_request("simple_rm")))
+            );
             assert_eq!(w.presenter.asked.load(Ordering::SeqCst), 0);
 
             // And again: the session keeps being answered, once per prompt.
@@ -1526,7 +1565,7 @@ fn when_the_broker_cannot_take_a_prompt_the_reader_denies_it_itself_and_it_is_st
             let responses = fake.wait_responses(2).await;
             assert_eq!(
                 responses[1]["response"],
-                deny_frame(answered_id(&responses[1]), NO_APP_MESSAGE)
+                deny_frame(answered_id(&responses[1]), APPROVAL_UNAVAILABLE_MESSAGE)
             );
             w.wait_outcome("toolu_subagent_0").await;
             assert_eq!(w.entries().iter().filter(|e| is_outcome(e)).count(), 2);

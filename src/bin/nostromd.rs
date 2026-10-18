@@ -244,16 +244,26 @@ async fn main() -> Result<()> {
             let mut last_sweep = std::time::Instant::now();
             loop {
                 interval.tick().await;
-                let mgr = &mut *session_mgr.lock().unwrap();
-                mgr.reap_and_recover();
-                mgr.emit_pending_summaries();
                 // The approval log keeps 90 days; the daemon sweeps it at start
                 // and then once a day.
-                if last_sweep.elapsed() >= std::time::Duration::from_secs(24 * 60 * 60) {
+                let sweep_due = last_sweep.elapsed() >= std::time::Duration::from_secs(24 * 60 * 60);
+                let sweeper = {
+                    let mgr = &mut *session_mgr.lock().unwrap();
+                    mgr.reap_and_recover();
+                    mgr.emit_pending_summaries();
+                    sweep_due.then(|| mgr.approvals().cloned()).flatten()
+                };
+                if sweep_due {
                     last_sweep = std::time::Instant::now();
-                    if let Some(Err(e)) = mgr.approvals().map(|b| b.sweep(chrono::Utc::now())) {
-                        warn!("approval log sweep failed: {e}");
-                    }
+                }
+                // Deleting files is disk work: it runs on the blocking pool, off the
+                // session manager's lock.
+                if let Some(broker) = sweeper {
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = broker.sweep(chrono::Utc::now()) {
+                            warn!("approval log sweep failed: {e}");
+                        }
+                    });
                 }
             }
         });

@@ -20,12 +20,44 @@ real CLI 2.1.296 spike captures) and models the permission-prompt flow:
                          has `--permission-prompt-tool stdio`) its
                          control_request lines, then wait for answers;
         CANCEL:<name>    like FIXTURE, but withdraw each request at once;
+        RAW:<kind>[:<arg>]
+                         emit one hand-built (possibly broken) line, see RAW
+                         CUES below; the turn waits for an answer only for the
+                         kinds that expect one;
         runs_freely      an unprompted Bash `git status`;
         (no cue)         a short "ok" turn;
   * `control_response` answers are logged to `<logdir>/responses.jsonl`;
   * a daemon `control_request` with subtype `interrupt` is answered the way
     the real CLI does (captures/run-interrupt.jsonl);
   * EOF on stdin -> exit 0.
+
+RAW CUES (hand-built lines, concatenated as text so nothing here recurses or
+overflows the way a naive json.dumps of a deeply nested value would):
+
+  Answered (the turn waits for the daemon's control_response; `<N>` is the
+  nesting depth of an array placed in `input.n`):
+    deep:<N>             can_use_tool, uuid request_id, input nested N deep
+    deep_id_last:<N>     same, `request_id` is the last top-level key
+    deep_type_last:<N>   same, `type` is the last top-level key
+    deep_subtype_last:<N> same, `request.subtype` comes after `input`
+    deep_decoys:<N>      same, `input` carries decoy request_id/subtype/tool_name
+    numid                small, readable can_use_tool whose request_id is the number 7
+    numid_deep:<N>       numeric request_id 7, input nested N deep
+    oversize             valid can_use_tool line longer than 4 MiB
+    truncated            can_use_tool cut off in the middle of `input`
+    malformed            can_use_tool with a syntax error after the id/subtype/tool_name
+    escaped_id           request_id full of JSON escapes, then a syntax error
+    id_only              cut off before `request.subtype`
+    other:<subtype>      a readable control_request of another subtype
+    other_deep:<subtype> unreadable (deep) control_request of another subtype
+  Not answered (the daemon must not write anything; the fake ends the turn):
+    no_id                control_request cut off before request_id
+    object_id            readable control_request whose request_id is an object
+    garbage              not JSON at all
+    bad_assistant        an `assistant` line cut off in the middle
+    unknown_type         valid JSON, `type` is not one we know
+    deep_assistant:<N>   an `assistant` line nested N deep
+    nested_type:<N>      `assistant` whose nested object looks like a control_request
 
 The main loop is purely event driven (one stdin line in, zero or more frames
 out), so any number of cues can be in flight at once and answers can arrive
@@ -43,6 +75,9 @@ FIXTURE_DIR = os.path.join(
 )
 MODEL = "claude-haiku-4-5"
 CUE_RE = re.compile(r"\b(FIXTURE|CANCEL):([A-Za-z0-9_]+)")
+RAW_RE = re.compile(r"\bRAW:([a-z_]+)(?::([A-Za-z0-9_]+))?")
+OVERSIZE_BYTES = 4 * 1024 * 1024 + 64 * 1024
+RAW_MARK = "ZZ-GARBAGE-MARK-ZZ"
 NO_GRANT = "Claude requested permissions to use {tool}, but you haven't granted it yet."
 USER_REJECTED = (
     "The user doesn't want to proceed with this tool use. The tool use was rejected "
@@ -308,7 +343,10 @@ class FakeClaude:
 
         text = self.message_text(frame)
         cue = CUE_RE.search(text)
-        if cue:
+        raw = RAW_RE.search(text)
+        if raw and not cue:
+            self.run_raw(raw.group(1), raw.group(2))
+        elif cue:
             self.run_fixture(cue.group(2), cancel=(cue.group(1) == "CANCEL"))
         elif "runs_freely" in text:
             self.run_freely()
@@ -409,6 +447,141 @@ class FakeClaude:
         if not waiting:
             self.finish_group(group)
 
+    # ---- hand-built lines (RAW cues) -----------------------------------------
+
+    @staticmethod
+    def request_key(request_id):
+        """Key of a request in `self.requests`: the id itself for a string, a
+        `json:` prefixed rendering for anything else (a number, say)."""
+        if isinstance(request_id, str):
+            return request_id
+        try:
+            return "json:" + json.dumps(request_id, sort_keys=True)
+        except (TypeError, ValueError):
+            return None
+
+    def write_raw(self, text):
+        """One stdout line, exactly as given (no JSON encoding)."""
+        assert "\n" not in text
+        self.out.write(text.encode("utf-8") + b"\n")
+        self.out.flush()
+
+    @staticmethod
+    def nested(depth):
+        """`[[[...]]]`, `depth` levels, built by repetition (no recursion)."""
+        return "[" * depth + "]" * depth
+
+    def raw_spec(self, kind, arg):
+        """(lines, key, tool_use_id): the lines to write, the key of the request
+        the daemon is expected to answer (None: no answer expected), and the tool
+        use the turn is about. `None` for an unknown kind."""
+        uid = str(uuid.uuid4())
+        id_json = json.dumps(uid)
+        depth = int(arg) if arg is not None and arg.isdigit() else 0
+        tool_use_id = "toolu_%s_%s" % (kind, arg if arg is not None else 0)
+        small = '{"command":"rm -rf /tmp/x"}'
+        deep_input = '{"command":"rm -rf /tmp/x","n":' + self.nested(depth) + "}"
+
+        def request(subtype_json, input_json, subtype_last=False):
+            tool = '"tool_name":"Bash","display_name":"Bash"'
+            tail = '"description":"d","tool_use_id":"%s"' % tool_use_id
+            if subtype_last:
+                return '{%s,"input":%s,%s,"subtype":%s}' % (tool, input_json, tail, subtype_json)
+            return '{"subtype":%s,%s,"input":%s,%s}' % (subtype_json, tool, input_json, tail)
+
+        can = '"can_use_tool"'
+        envelope = '{"type":"control_request","request_id":%s,"request":%s}'
+
+        def answered(line, key=uid):
+            return [line], key, tool_use_id
+
+        def ignored(line):
+            return [line], None, tool_use_id
+
+        if kind == "deep":
+            return answered(envelope % (id_json, request(can, deep_input)))
+        if kind == "deep_id_last":
+            return answered('{"type":"control_request","request":%s,"request_id":%s}' % (request(can, deep_input), id_json))
+        if kind == "deep_type_last":
+            return answered('{"request_id":%s,"request":%s,"type":"control_request"}' % (id_json, request(can, deep_input)))
+        if kind == "deep_subtype_last":
+            return answered(envelope % (id_json, request(can, deep_input, subtype_last=True)))
+        if kind == "deep_decoys":
+            decoy = ('{"request_id":"evil-id","subtype":"elicitation","tool_name":"Evil",'
+                     '"type":"assistant","request":{"subtype":"elicitation"},"n":%s}' % self.nested(depth))
+            return answered(envelope % (id_json, request(can, decoy)))
+        if kind == "numid":
+            return answered(envelope % ("7", request(can, small)), key=self.request_key(7))
+        if kind == "numid_deep":
+            return answered(envelope % ("7", request(can, deep_input)), key=self.request_key(7))
+        if kind == "oversize":
+            big = '{"command":"%s"}' % ("x" * OVERSIZE_BYTES)
+            return answered(envelope % (id_json, request(can, big)))
+        if kind == "truncated":
+            line = envelope % (id_json, request(can, small))
+            return answered(line[: line.index("rm -rf") + 6])
+        if kind == "malformed":
+            return answered('{"type":"control_request","request_id":%s,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":}}' % id_json)
+        if kind == "escaped_id":
+            decoded = 'ab"c\\d\u00e9 \U0001F600\n'
+            return answered(
+                '{"type":"control_request","request_id":%s,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":}}'
+                % json.dumps(decoded, ensure_ascii=True),
+                key=decoded,
+            )
+        if kind == "id_only":
+            return answered('{"type":"control_request","request_id":%s,"request":{"input":{"command":"rm' % id_json)
+        if kind == "other" and arg:
+            return answered(envelope % (id_json, '{"subtype":%s,"note":"x","tool_use_id":"%s"}' % (json.dumps(arg), tool_use_id)))
+        if kind == "other_deep" and arg:
+            return answered(envelope % (id_json, '{"subtype":%s,"input":{"n":%s}}' % (json.dumps(arg), self.nested(500))))
+        if kind == "no_id":
+            return ignored('{"type":"control_request","request":{"subtype":"can_use_tool"')
+        if kind == "object_id":
+            return ignored('{"type":"control_request","request_id":{"a":1},"request":{"subtype":"can_use_tool","tool_name":"Bash","input":%s}}' % small)
+        if kind == "garbage":
+            return ignored("this is not json at all %s {{{" % RAW_MARK)
+        if kind == "bad_assistant":
+            return ignored('{"type":"assistant","message":{"content":[{"type":"text","text":"%s' % RAW_MARK)
+        if kind == "unknown_type":
+            return ignored('{"type":"frobnicate","request_id":"x1","request":{"subtype":"can_use_tool","tool_name":"Bash","note":"%s"}}' % RAW_MARK)
+        if kind == "deep_assistant":
+            return ignored('{"type":"assistant","message":{"content":[],"n":%s,"note":"%s"}}' % (self.nested(depth), RAW_MARK))
+        if kind == "nested_type":
+            return ignored(
+                '{"type":"assistant","message":{"type":"control_request","request_id":"evil-id",'
+                '"request":{"subtype":"can_use_tool","tool_name":"Bash"},"n":%s,"note":"%s"}}' % (self.nested(depth), RAW_MARK)
+            )
+        return None
+
+    def run_raw(self, kind, arg):
+        spec = self.raw_spec(kind, arg)
+        if spec is None:
+            self.emit_text("fake_claude_perm: unknown raw cue %s" % kind)
+            self.emit_result(error_text="unknown raw cue %s" % kind)
+            return
+        lines, key, tool_use_id = spec
+        if key is None:
+            for line in lines:
+                self.write_raw(line)
+            self.emit_text("ok")
+            self.emit_result()
+            return
+        tool_uses = [{"type": "tool_use", "id": tool_use_id, "name": "Bash", "input": {"command": "rm -rf /tmp/x"}}]
+        self.emit_assistant(tool_uses)
+        group = {"tool_uses": tool_uses, "denials": [], "emitted_results": set(), "done": False, "waiting": {key}}
+        self.groups.append(group)
+        self.requests[key] = {
+            "tool_use_id": tool_use_id,
+            "tool_name": "Bash",
+            "input": None,
+            "group": group,
+            "state": "pending",
+            "waits": True,
+        }
+        for line in lines:
+            self.write_raw(line)
+
     # ---- group bookkeeping ---------------------------------------------------
 
     @staticmethod
@@ -480,7 +653,8 @@ class FakeClaude:
     def on_control_response(self, frame):
         response = frame.get("response") if isinstance(frame.get("response"), dict) else {}
         request_id = response.get("request_id")
-        known = self.requests.get(request_id) if isinstance(request_id, str) else None
+        key = self.request_key(request_id)
+        known = self.requests.get(key)
         self.record_response(request_id, known["tool_use_id"] if known else None, frame)
         if known is None or known["state"] != "pending":
             return  # late (after cancel/interrupt), duplicate, or never asked
@@ -502,7 +676,7 @@ class FakeClaude:
                 lambda: self.emit_tool_result_error(tool_use_id, message, "permission-rule", "user_reject"),
                 denied=True,
             )
-        group["waiting"].discard(request_id)
+        group["waiting"].discard(key)
         if not group["waiting"]:
             self.finish_group(group)
 

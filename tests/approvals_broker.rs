@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event, RETENTION_DAYS};
 use nostromo::approvals::broker::{
-    restart_note_text, ApprovalBroker, BrokerParts, Incoming, Presenter, SessionInfo, SessionSink,
-    ARRIVAL_WATCHDOG, INVALID_REQUEST_MESSAGE, NO_APP_MESSAGE, REQUEST_TIMEOUT, RESTART_MESSAGE,
+    restart_note_text, ApprovalBroker, BrokerParts, Incoming, Outcome, Presenter, SessionInfo, SessionSink,
+    ARRIVAL_WATCHDOG, INVALID_REQUEST_MESSAGE, APPROVAL_UNAVAILABLE_MESSAGE, NO_APP_MESSAGE, REQUEST_TIMEOUT, RESTART_MESSAGE,
     RESTART_NOTES_FILE, TIMED_OUT_MESSAGE, WATCHDOG_GRACE,
 };
 use nostromo::approvals::guard::{
@@ -55,6 +55,14 @@ fn fixture_request(name: &str) -> Value {
 fn request_as(name: &str, tool_use_id: &str) -> Value {
     let mut v = fixture_request(name);
     v["tool_use_id"] = json!(tool_use_id);
+    v
+}
+
+/// `request` without its `input` key: what a request entry's `cli_request` holds
+/// (the input is recorded once, in the entry's own `input`).
+fn without_input(request: &Value) -> Value {
+    let mut v = request.clone();
+    v.as_object_mut().expect("a request object").remove("input");
     v
 }
 
@@ -502,20 +510,24 @@ fn assert_never_allowed(writes: &[(String, Value)]) {
 // ── the ordinary ending: nobody to ask ────────────────────────────────────────
 
 #[tokio::test(start_paused = true)]
-async fn a_request_with_nobody_to_ask_is_denied_in_the_contract_s_words_and_logged() {
+async fn a_request_with_nobody_to_ask_is_denied_with_the_approval_unavailable_words_and_logged() {
     let rig = Rig::new(Opts::default());
     let value = request_as("simple_rm", "toolu_1");
 
     rig.submit("cli-1", value.clone());
     let outcome = rig.wait_outcome("toolu_1").await;
 
-    assert_eq!(rig.writes(), [("cli-1".to_owned(), deny(NO_APP_MESSAGE))]);
+    assert_eq!(rig.writes(), [("cli-1".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))]);
     assert_eq!(
-        NO_APP_MESSAGE,
-        "Nostromo can't ask anyone right now (the app is closed), so this was denied. Tell the user what you wanted to run.",
-        "the agent's words are the contract's, verbatim"
+        APPROVAL_UNAVAILABLE_MESSAGE,
+        "Nostromo's approval screen isn't available yet, so this was denied. Tell the user what you wanted to run and give them the exact command; do not retry it.",
+        "in this slice the agent is told something true: the screen does not exist yet"
     );
-    assert_eq!(outcome_name(&outcome), "no_app");
+    assert!(
+        !APPROVAL_UNAVAILABLE_MESSAGE.contains("app is closed"),
+        "the app may be open in this slice"
+    );
+    assert_eq!(outcome_name(&outcome), "approval_unavailable");
     assert!(!watchdog_flag(&outcome));
     let entries = rig.entries();
     let requests = requests_for(&entries, "toolu_1");
@@ -548,8 +560,59 @@ async fn a_request_with_nobody_to_ask_is_denied_in_the_contract_s_words_and_logg
     assert_never_allowed(&rig.writes());
 }
 
+#[test]
+fn the_contract_s_no_app_words_stay_defined_for_the_slice_that_has_an_app() {
+    // Not used by any ending in this slice (nobody is asked, so it is never true
+    // that "the app is closed"), but the contract's wording is kept for later.
+    assert_eq!(
+        NO_APP_MESSAGE,
+        "Nostromo can't ask anyone right now (the app is closed), so this was denied. Tell the user what you wanted to run."
+    );
+    assert_eq!(Outcome::NoApp.as_str(), "no_app");
+    assert_eq!(Outcome::NotAvailable.as_str(), "approval_unavailable");
+    assert_eq!(Outcome::DenyWriteFailed.as_str(), "deny_write_failed");
+    assert_ne!(NO_APP_MESSAGE, APPROVAL_UNAVAILABLE_MESSAGE);
+}
+
 #[tokio::test(start_paused = true)]
-async fn every_ordinary_fixture_is_denied_no_app_with_one_response_and_one_outcome_each() {
+async fn ask_user_question_and_exit_plan_mode_requests_get_the_same_approval_unavailable_text() {
+    let rig = Rig::new(Opts::default());
+    rig.submit(
+        "cli-q",
+        json!({
+            "subtype": "can_use_tool",
+            "tool_name": "AskUserQuestion",
+            "input": { "questions": [{ "question": "Which one?", "options": [{ "label": "a" }] }] },
+            "tool_use_id": "toolu_q",
+        }),
+    );
+    rig.submit(
+        "cli-p",
+        json!({
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": { "plan": "1. do the thing" },
+            "tool_use_id": "toolu_p",
+        }),
+    );
+
+    for id in ["toolu_q", "toolu_p"] {
+        assert_eq!(outcome_name(&rig.wait_outcome(id).await), "approval_unavailable", "{id}");
+    }
+
+    let mut writes = rig.writes();
+    writes.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        writes,
+        [
+            ("cli-p".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE)),
+            ("cli-q".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE)),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_ordinary_fixture_is_denied_approval_unavailable_with_one_response_and_one_outcome_each() {
     let rig = Rig::new(Opts::default());
     let start = tokio::time::Instant::now();
 
@@ -557,7 +620,7 @@ async fn every_ordinary_fixture_is_denied_no_app_with_one_response_and_one_outco
         let id = format!("toolu_{name}");
         rig.submit(&format!("cli-{name}"), request_as(name, &id));
         let outcome = rig.wait_outcome(&id).await;
-        assert_eq!(outcome_name(&outcome), "no_app", "{name}");
+        assert_eq!(outcome_name(&outcome), "approval_unavailable", "{name}");
     }
 
     assert_eq!(
@@ -573,7 +636,7 @@ async fn every_ordinary_fixture_is_denied_no_app_with_one_response_and_one_outco
             .filter(|(id, _)| *id == format!("cli-{name}"))
             .collect();
         assert_eq!(answers.len(), 1, "{name}");
-        assert_eq!(answers[0].1, deny(NO_APP_MESSAGE), "{name}");
+        assert_eq!(answers[0].1, deny(APPROVAL_UNAVAILABLE_MESSAGE), "{name}");
         let entries = rig.entries();
         assert_eq!(
             requests_for(&entries, &format!("toolu_{name}")).len(),
@@ -613,8 +676,8 @@ async fn the_request_entry_holds_every_field_the_cli_sent() {
 
     assert_eq!(
         cli_request.as_ref(),
-        Some(&all),
-        "the CLI's request object exactly as received, every field"
+        Some(&without_input(&all)),
+        "the CLI's request object as received, every field but `input` (which is the entry's own `input`, once)"
     );
     assert_eq!(tool_name, "Bash");
     assert_eq!(input, &all["input"]);
@@ -677,7 +740,7 @@ async fn each_flag_fixture_is_logged_whole_with_its_typed_flags() {
         else {
             unreachable!()
         };
-        assert_eq!(cli_request.as_ref(), Some(&value), "{name}");
+        assert_eq!(cli_request.as_ref(), Some(&without_input(&value)), "{name}");
         assert_eq!(tool_name, "Bash", "{name}");
         assert_eq!(input, &value["input"], "{name}");
         assert_eq!(
@@ -873,7 +936,7 @@ async fn typing_into_a_pane_that_is_not_remote_is_not_blocked() {
 
     assert_eq!(
         outcome_name(&outcome),
-        "no_app",
+        "approval_unavailable",
         "the guard only blocks what the probe says is a production shell"
     );
 }
@@ -925,8 +988,8 @@ async fn a_request_that_cannot_be_parsed_is_denied_as_invalid_even_when_someone_
     };
     assert_eq!(
         cli_request.as_ref(),
-        Some(&malformed),
-        "exactly as it arrived"
+        Some(&without_input(&malformed)),
+        "as it arrived, but for the input, which is the entry's own"
     );
     assert_eq!(requests[0].request_id, outcomes.request_id);
     assert_never_allowed(&rig.writes());
@@ -1067,14 +1130,14 @@ async fn a_request_the_worker_never_got_to_is_denied_by_the_watchdog_and_the_wor
         let outcome = rig.wait_outcome("toolu_1").await;
         assert_eq!(
             outcome_name(&outcome),
-            "no_app",
+            "approval_unavailable",
             "force-denied the way an unattended request is"
         );
         assert!(
             watchdog_flag(&outcome),
             "and the log says the watchdog did it"
         );
-        assert_eq!(rig.writes(), [("cli-1".to_owned(), deny(NO_APP_MESSAGE))]);
+        assert_eq!(rig.writes(), [("cli-1".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))]);
 
         // The worker comes back: it finds nothing left to do.
         gate.release();
@@ -1122,7 +1185,7 @@ async fn a_request_still_queued_when_the_watchdog_denies_it_is_logged_whole_and_
     let outcome_a = rig.wait_outcome("toolu_a").await;
 
     for outcome in [&outcome_a, &outcome_b] {
-        assert_eq!(outcome_name(outcome), "no_app");
+        assert_eq!(outcome_name(outcome), "approval_unavailable");
         assert!(watchdog_flag(outcome), "the log says the watchdog did it");
     }
     let mut writes = rig.writes();
@@ -1130,8 +1193,8 @@ async fn a_request_still_queued_when_the_watchdog_denies_it_is_logged_whole_and_
     assert_eq!(
         writes,
         [
-            ("cli-a".to_owned(), deny(NO_APP_MESSAGE)),
-            ("cli-b".to_owned(), deny(NO_APP_MESSAGE))
+            ("cli-a".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE)),
+            ("cli-b".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))
         ]
     );
     let entries = rig.entries();
@@ -1152,8 +1215,8 @@ async fn a_request_still_queued_when_the_watchdog_denies_it_is_logged_whole_and_
     };
     assert_eq!(
         cli_request.as_ref(),
-        Some(&raw_b),
-        "with the CLI's request exactly as received"
+        Some(&without_input(&raw_b)),
+        "with the CLI's request as received (its input is the entry's own `input`)"
     );
     assert_eq!(tool_name, "Bash");
     assert_eq!(input, &raw_b["input"]);
@@ -1220,7 +1283,7 @@ async fn a_request_ended_by_a_cancel_before_the_worker_logged_it_is_still_logged
     let Event::Request { cli_request, .. } = &requests_b[0].event else {
         unreachable!()
     };
-    assert_eq!(cli_request.as_ref(), Some(&raw_b));
+    assert_eq!(cli_request.as_ref(), Some(&without_input(&raw_b)));
     let outcomes_b = outcomes_for(&entries, "toolu_b");
     assert_eq!(outcomes_b.len(), 1);
     assert_eq!(outcome_name(outcomes_b[0]), "withdrawn");
@@ -1395,7 +1458,7 @@ async fn withdrawing_something_unknown_or_already_ended_does_nothing() {
     rig.broker.on_cancel("nobody", "cli-1");
     rig.barrier().await;
 
-    assert_eq!(outcome_name(&rig.outcomes("toolu_1")[0]), "no_app");
+    assert_eq!(outcome_name(&rig.outcomes("toolu_1")[0]), "approval_unavailable");
     assert_eq!(rig.outcomes("toolu_1").len(), 1);
     assert_eq!(rig.writes().len(), 1);
 }
@@ -1628,12 +1691,12 @@ async fn an_old_generation_going_away_does_not_unregister_the_new_one() {
     let outcome = rig.wait_outcome("toolu_new").await;
     assert_eq!(
         outcome_name(&outcome),
-        "no_app",
+        "approval_unavailable",
         "the new process can still be answered"
     );
     assert_eq!(
         new_sink.writes(),
-        [("cli-new".to_owned(), deny(NO_APP_MESSAGE))]
+        [("cli-new".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))]
     );
     assert!(rig.writes().is_empty());
 }
@@ -1752,28 +1815,178 @@ async fn when_the_worker_is_gone_submit_gives_the_frame_back_so_the_caller_can_a
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_request_the_caller_had_to_deny_itself_is_still_on_record_with_no_app() {
+async fn a_request_the_caller_had_to_deny_itself_is_still_on_record_as_approval_unavailable() {
     let rig = Rig::new(Opts::default());
     rig.broker.stop_worker_for_test();
     let value = request_as("simple_rm", "toolu_1");
 
-    rig.broker.record_unqueued_denial(T, rig.generation, &value);
+    rig.broker
+        .record_unqueued_denial(T, rig.generation, &value, || Ok(()));
 
     let entries = rig.entries();
     let requests = requests_for(&entries, "toolu_1");
     let outcomes = outcomes_for(&entries, "toolu_1");
     assert_eq!((requests.len(), outcomes.len()), (1, 1));
-    assert_eq!(outcome_name(outcomes[0]), "no_app");
+    assert_eq!(outcome_name(outcomes[0]), "approval_unavailable");
     assert_eq!(requests[0].request_id, outcomes[0].request_id);
     let Event::Request { cli_request, .. } = &requests[0].event else {
         unreachable!()
     };
-    assert_eq!(cli_request.as_ref(), Some(&value));
+    assert_eq!(cli_request.as_ref(), Some(&without_input(&value)));
     assert_eq!(requests[0].session_id.as_deref(), Some("sid-t1"));
     assert!(
         rig.writes().is_empty(),
         "the caller writes the deny; the broker only records it"
     );
+}
+
+/// (request entries, outcome entries) on record for `tag` right now.
+fn counts_for_tag(rig: &Rig, tag: &str) -> (usize, usize) {
+    let entries = rig.entries();
+    let mine = entries.iter().filter(|e| e.tag.as_deref() == Some(tag));
+    let requests = mine.clone().filter(|e| matches!(e.event, Event::Request { .. })).count();
+    let outcomes = mine.filter(|e| matches!(e.event, Event::Outcome { .. })).count();
+    (requests, outcomes)
+}
+
+fn write_failed() -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::BrokenPipe, "the pipe is closed"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_readers_own_deny_is_logged_as_request_then_answer_then_outcome() {
+    let rig = Rig::new(Opts::default());
+    rig.broker.stop_worker_for_test();
+    let value = request_as("simple_rm", "toolu_1");
+    let seen = std::cell::Cell::new(None);
+    let calls = std::cell::Cell::new(0);
+
+    rig.broker.record_unqueued_denial(T, rig.generation, &value, || {
+        calls.set(calls.get() + 1);
+        seen.set(Some(counts_for_tag(&rig, T)));
+        Ok(())
+    });
+
+    assert_eq!(calls.get(), 1, "the answer is written exactly once");
+    assert_eq!(
+        seen.get(),
+        Some((1, 0)),
+        "the request is on record before the answer is written, and the outcome only after"
+    );
+    assert_eq!(counts_for_tag(&rig, T), (1, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_readers_own_deny_that_could_not_be_written_is_logged_deny_write_failed() {
+    let rig = Rig::new(Opts::default());
+    rig.broker.stop_worker_for_test();
+    let value = request_as("simple_rm", "toolu_1");
+
+    rig.broker
+        .record_unqueued_denial(T, rig.generation, &value, write_failed);
+
+    let entries = rig.entries();
+    let outcomes = outcomes_for(&entries, "toolu_1");
+    assert_eq!(requests_for(&entries, "toolu_1").len(), 1);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcome_name(outcomes[0]), "deny_write_failed");
+    assert_eq!(
+        outcome_rule(outcomes[0]),
+        Some(json!({ "intended_outcome": "approval_unavailable" }))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_request_the_reader_denies_is_logged_as_request_then_answer_then_invalid_request() {
+    let rig = Rig::new(Opts::default());
+    let seen = std::cell::Cell::new(None);
+    let calls = std::cell::Cell::new(0);
+
+    rig.broker
+        .record_unreadable_denial(T, rig.generation, Some("Bash"), || {
+            calls.set(calls.get() + 1);
+            seen.set(Some(counts_for_tag(&rig, T)));
+            Ok(())
+        });
+
+    assert_eq!(calls.get(), 1, "one answer");
+    assert_eq!(seen.get(), Some((1, 0)), "request first, outcome after the answer");
+    let entries: Vec<Entry> = rig
+        .entries()
+        .into_iter()
+        .filter(|e| e.tag.as_deref() == Some(T))
+        .collect();
+    let requests = request_entries(&entries);
+    let outcomes: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| matches!(e.event, Event::Outcome { .. }))
+        .collect();
+    assert_eq!((requests.len(), outcomes.len()), (1, 1));
+    assert_eq!(outcome_name(outcomes[0]), "invalid_request");
+    assert!(requests[0].request_id.is_some());
+    assert_eq!(requests[0].request_id, outcomes[0].request_id);
+    assert_ne!(requests[0].request_id.as_deref(), Some(""));
+    let Event::Request { tool_name, .. } = &requests[0].event else {
+        unreachable!()
+    };
+    assert_eq!(tool_name, "Bash", "the tool name the reader could still read");
+    assert_eq!(requests[0].session_id.as_deref(), Some("sid-t1"));
+    assert_eq!(requests[0].agent.as_deref(), Some("cody"));
+    assert!(requests[0].ts <= outcomes[0].ts);
+    assert!(rig.writes().is_empty(), "the caller writes the deny; the broker only records it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_request_with_no_readable_tool_name_is_recorded_as_unknown() {
+    let rig = Rig::new(Opts::default());
+
+    rig.broker
+        .record_unreadable_denial(T, rig.generation, None, || Ok(()));
+
+    let entries = rig.entries();
+    let requests = request_entries(&entries);
+    assert_eq!(requests.len(), 1);
+    let Event::Request { tool_name, .. } = &requests[0].event else {
+        unreachable!()
+    };
+    assert_eq!(tool_name, "unknown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_request_whose_deny_could_not_be_written_is_logged_deny_write_failed() {
+    let rig = Rig::new(Opts::default());
+
+    rig.broker
+        .record_unreadable_denial(T, rig.generation, Some("Bash"), write_failed);
+
+    let entries = rig.entries();
+    let outcomes: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| matches!(e.event, Event::Outcome { .. }))
+        .collect();
+    assert_eq!(request_entries(&entries).len(), 1);
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcome_name(outcomes[0]), "deny_write_failed");
+    assert_eq!(
+        outcome_rule(outcomes[0]),
+        Some(json!({ "intended_outcome": "invalid_request" }))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_whose_id_could_not_be_read_leaves_one_request_unparseable_entry_and_nothing_else() {
+    let rig = Rig::new(Opts::default());
+
+    rig.broker.record_unparseable(T, rig.generation);
+
+    let entries = rig.entries();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let entry = &entries[0];
+    assert_eq!(outcome_name(entry), "request_unparseable");
+    assert_eq!(entry.tag.as_deref(), Some(T));
+    assert_eq!(entry.request_id, None, "there is no request id to record");
+    assert_eq!(entry.tool_use_id, None);
+    assert!(rig.writes().is_empty(), "nothing can be written: there is no id to answer under");
 }
 
 #[tokio::test(start_paused = true)]
@@ -1838,7 +2051,7 @@ fn a_request_that_ends_while_the_worker_is_busy_is_logged_whole_not_asked_about_
     let Event::Request { cli_request, .. } = &requests_for(&entries, "toolu_b")[0].event else {
         unreachable!()
     };
-    assert_eq!(cli_request.as_ref(), Some(&raw_b));
+    assert_eq!(cli_request.as_ref(), Some(&without_input(&raw_b)));
     assert!(rig.writes().is_empty());
     assert_eq!(
         rig.presenter.asked(T),
@@ -1985,7 +2198,7 @@ struct Run {
 async fn drive(ending: &str) -> Run {
     let tool_use_id = "toolu_1";
     match ending {
-        "no_app" => {
+        "approval_unavailable" => {
             let rig = Rig::new(Opts::default());
             rig.submit("cli-1", request_as("simple_rm", tool_use_id));
             rig.wait_outcome(tool_use_id).await;
@@ -2116,14 +2329,14 @@ async fn drive(ending: &str) -> Run {
 async fn every_ending_writes_the_right_deny_or_nothing_logs_one_outcome_and_never_allows() {
     // (ending, the outcome entry it leaves, what the agent is told, if anything)
     let table: [(&str, &str, Option<&str>); 9] = [
-        ("no_app", "no_app", Some(NO_APP_MESSAGE)),
+        ("approval_unavailable", "approval_unavailable", Some(APPROVAL_UNAVAILABLE_MESSAGE)),
         ("timed_out", "timed_out", Some(TIMED_OUT_MESSAGE)),
         ("restart", "restart", Some(RESTART_MESSAGE)),
         ("restart_crash", "restart_crash", None),
         ("withdrawn", "withdrawn", None),
         ("cancelled", "cancelled", None),
         ("guard_blocked", "guard_blocked", Some(GUARD_MESSAGE)),
-        ("watchdog", "no_app", Some(NO_APP_MESSAGE)),
+        ("watchdog", "approval_unavailable", Some(APPROVAL_UNAVAILABLE_MESSAGE)),
         (
             "invalid_request",
             "invalid_request",

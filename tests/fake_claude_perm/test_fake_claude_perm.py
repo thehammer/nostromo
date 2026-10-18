@@ -725,6 +725,57 @@ class InterruptTest(unittest.TestCase):
         self.assertEqual(response["response"]["request_id"], "m-1")
 
 
+class RawCueTest(unittest.TestCase):
+    """RAW:<kind> cues emit hand-built (possibly broken) lines for the daemon's
+    unreadable-request tests; they are read here as raw bytes."""
+
+    def run_cue(self, cue, answer=None):
+        log_dir = tempfile.mkdtemp(prefix="fcp")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        stdin = json.dumps(user(cue)) + "\n"
+        if answer is not None:
+            stdin += json.dumps(answer) + "\n"
+        proc = subprocess.run(
+            [sys.executable, "-I", os.path.abspath(FAKE)] + PERM_ARGV,
+            input=stdin.encode(), capture_output=True, timeout=TIMEOUT,
+            env={"PATH": os.environ.get("PATH", ""), "FAKE_CLAUDE_LOG_DIR": log_dir},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.split(b"\n")
+
+    def test_deep_cue_nests_the_input_by_the_requested_depth_with_a_uuid_id(self):
+        lines = self.run_cue("RAW:deep:1000")
+        raw = next(l for l in lines if l.startswith(b'{"type":"control_request"'))
+        self.assertIn(b'"n":' + b"[" * 1000 + b"]" * 1000, raw)
+        self.assertIn(b'"subtype":"can_use_tool"', raw)
+
+    def test_numid_cue_uses_the_number_7_as_request_id(self):
+        lines = self.run_cue("RAW:numid")
+        raw = next(l for l in lines if l.startswith(b'{"type":"control_request"'))
+        self.assertEqual(json.loads(raw)["request_id"], 7)
+
+    def test_a_numeric_answer_ends_the_turn(self):
+        lines = self.run_cue("RAW:numid", answer=deny(7))
+        self.assertTrue(any(l.startswith(b'{"duration_api_ms"') for l in lines), lines)
+
+    def test_unanswered_kinds_end_the_turn_at_once_and_the_garbage_line_is_not_json(self):
+        lines = self.run_cue("RAW:garbage")
+        self.assertTrue(any(b"ZZ-GARBAGE-MARK-ZZ" in l for l in lines))
+        self.assertTrue(any(l.startswith(b'{"duration_api_ms"') for l in lines), lines)
+        with self.assertRaises(ValueError):
+            json.loads(next(l for l in lines if b"ZZ-GARBAGE-MARK-ZZ" in l))
+
+    def test_oversize_cue_is_a_valid_line_over_four_mib(self):
+        lines = self.run_cue("RAW:oversize")
+        raw = next(l for l in lines if l.startswith(b'{"type":"control_request"'))
+        self.assertGreater(len(raw), 4 * 1024 * 1024)
+        self.assertEqual(json.loads(raw)["request"]["subtype"], "can_use_tool")
+
+    def test_unknown_raw_kind_ends_the_turn_with_an_error_result(self):
+        lines = self.run_cue("RAW:nonsense")
+        self.assertTrue(any(b"unknown raw cue" in l for l in lines))
+
+
 class HygieneTest(unittest.TestCase):
     def test_fake_requires_the_log_dir_env_var(self):
         proc = subprocess.run([sys.executable, "-I", os.path.abspath(FAKE)], input=b"",

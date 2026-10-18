@@ -9,7 +9,7 @@
 //!   files older than [`RETENTION_DAYS`].
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
@@ -28,6 +28,10 @@ pub const RETENTION_DAYS: i64 = 90;
 /// Longest string (bytes) the audit log records from a blocked tool input; longer ones
 /// are cut at a character boundary and end with a `[truncated …]` note.
 pub const MAX_RECORDED_STRING_BYTES: usize = 16 * 1024;
+
+/// A line longer than this in an audit file is skipped by readers without being held
+/// in memory: no entry is this long (a request's input is capped well below it).
+const MAX_ENTRY_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 /// `input` as the audit log records it: every string with invisible and bidi
 /// characters shown as `⟨U+202E⟩` (a newline or tab stays) and cut at
@@ -234,39 +238,65 @@ impl AuditLog {
     /// Entries with `range.start <= ts < range.end` matching `filter`, oldest
     /// first. Lines that don't parse are skipped.
     pub fn read(&self, range: Range<DateTime<Utc>>, filter: &AuditFilter) -> io::Result<Vec<Entry>> {
-        let mut files: Vec<(NaiveDate, PathBuf)> = self.daily_files()?;
-        files.sort();
-        let (first, last) = (range.start.date_naive(), range.end.date_naive());
         let mut out = Vec::new();
-        for (date, path) in files {
-            if date < first || date > last {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path)?;
-            out.extend(
-                text.lines()
-                    .filter_map(|l| serde_json::from_str::<Entry>(l).ok())
-                    .filter(|e| range.contains(&e.ts))
-                    .filter(|e| filter.tag.as_ref().is_none_or(|t| e.tag.as_ref() == Some(t)))
-                    .filter(|e| filter.event.as_ref().is_none_or(|k| e.event.kind() == k)),
-            );
-        }
+        self.for_each(range, filter, |e| out.push(e))?;
         out.sort_by_key(|e| e.ts);
         Ok(out)
     }
 
+    /// Call `f` for each entry [`Self::read`] would return, file by file and line by
+    /// line (a file is never read whole), in file order rather than sorted. Lines
+    /// that are not an entry (not UTF-8, not JSON, over [`MAX_ENTRY_LINE_BYTES`]) are skipped.
+    pub fn for_each(
+        &self,
+        range: Range<DateTime<Utc>>,
+        filter: &AuditFilter,
+        mut f: impl FnMut(Entry),
+    ) -> io::Result<()> {
+        let mut files: Vec<(NaiveDate, PathBuf)> = self.daily_files()?;
+        files.sort();
+        let (first, last) = (range.start.date_naive(), range.end.date_naive());
+        for (date, path) in files {
+            if date < first || date > last {
+                continue;
+            }
+            for_each_line(&path, |line| {
+                let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
+                    return;
+                };
+                if range.contains(&entry.ts)
+                    && filter.tag.as_ref().is_none_or(|t| entry.tag.as_ref() == Some(t))
+                    && filter.event.as_ref().is_none_or(|k| entry.event.kind() == k)
+                {
+                    f(entry);
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     /// Delete the daily files dated more than [`RETENTION_DAYS`] days before
-    /// `now`. Returns how many were deleted.
+    /// `now`. A file that cannot be deleted does not stop the rest: every one is
+    /// tried, and the first error is returned after the last. `Ok` is how many were deleted.
     pub fn sweep(&self, now: DateTime<Utc>) -> io::Result<usize> {
         let cutoff = now.date_naive() - chrono::Duration::days(RETENTION_DAYS);
         let mut deleted = 0;
+        let mut first_error = None;
         for (date, path) in self.daily_files()? {
             if date < cutoff {
-                std::fs::remove_file(path)?;
-                deleted += 1;
+                match std::fs::remove_file(&path) {
+                    Ok(()) => deleted += 1,
+                    Err(e) => {
+                        tracing::warn!("could not delete {}: {e}", path.display());
+                        first_error.get_or_insert(e);
+                    }
+                }
             }
         }
-        Ok(deleted)
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(deleted),
+        }
     }
 
     /// Every `audit-YYYY-MM-DD.jsonl` in the directory, with its date.
@@ -284,6 +314,38 @@ impl AuditLog {
             }
         }
         Ok(out)
+    }
+}
+
+/// Call `f` with each line of the file at `path` (without its newline), never holding
+/// more than [`MAX_ENTRY_LINE_BYTES`] of one line.
+fn for_each_line(path: &Path, mut f: impl FnMut(&[u8])) -> io::Result<()> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = (&mut reader)
+            .take(MAX_ENTRY_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line)?;
+        if read == 0 {
+            return Ok(());
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            f(&line);
+        } else if line.len() > MAX_ENTRY_LINE_BYTES {
+            // Too long to be an entry: skip the rest of it.
+            let mut rest = Vec::new();
+            loop {
+                rest.clear();
+                let n = (&mut reader).take(1 << 20).read_until(b'\n', &mut rest)?;
+                if n == 0 || rest.last() == Some(&b'\n') {
+                    break;
+                }
+            }
+        } else {
+            f(&line); // the last line, without a newline
+        }
     }
 }
 

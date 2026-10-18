@@ -18,6 +18,7 @@
 
 pub mod client;
 pub mod codec;
+mod control_scan;
 pub mod decisions;
 pub mod pane_registry;
 pub mod peer;

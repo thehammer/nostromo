@@ -48,6 +48,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::control_scan::scan_control_request;
 use super::tasks::{parse_task_event, TaskEvent};
 use crate::model::notes::{LedgerNote, NoteKind};
 
@@ -315,10 +316,27 @@ pub enum ParsedLine {
         subtype: String,
         request: Value,
     },
+    /// A `control_request` that cannot be handled as a [`ParsedLine::ControlRequest`]:
+    /// its JSON does not parse (nested deeper than `serde_json` allows, malformed,
+    /// cut off), the line is longer than [`MAX_CONTROL_REQUEST_PARSE_BYTES`], or its
+    /// `request_id` is not a string. The CLI waits for an answer to such a request
+    /// all the same, so what a shallow scan recovered is handed over to answer it:
+    /// `request_id` (a string or a number, as the same JSON value; `None` when it
+    /// could not be recovered), `subtype` and `tool_name`.
+    UnreadableControlRequest {
+        request_id: Option<Value>,
+        subtype: Option<String>,
+        tool_name: Option<String>,
+    },
     /// The CLI withdrew a request it made earlier (`control_cancel_request`),
     /// e.g. because the turn was interrupted.
     ControlCancel { request_id: String },
 }
+
+/// A `control_request` line longer than this is not parsed as JSON: it is scanned
+/// for its id and answered as unreadable (a request this large is not one a human
+/// could be asked about).
+pub const MAX_CONTROL_REQUEST_PARSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Where a reported model came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,8 +351,37 @@ pub const UNKNOWN_PARENT: &str = "?";
 
 /// Parse one NDJSON line from the stream-json output. Returns `None` for lines
 /// we render nothing from (`rate_limit_event`, hook chatter, blank lines, …).
+///
+/// A `control_request` that cannot be parsed in full (see
+/// [`ParsedLine::UnreadableControlRequest`]) is never dropped: dropping it would
+/// leave the CLI waiting for an answer for ever.
 pub fn parse_line(line: &str) -> Option<ParsedLine> {
-    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    let line = line.trim();
+    let oversize = line.len() > MAX_CONTROL_REQUEST_PARSE_BYTES;
+    if oversize {
+        // Not parsed as JSON if it is a control request; any other line is parsed as always.
+        if let Some(unreadable) = scan_unreadable(line) {
+            return Some(unreadable);
+        }
+    }
+    match serde_json::from_str::<Value>(line) {
+        Ok(v) => parse_value(&v),
+        Err(_) if oversize => None, // already scanned
+        Err(_) => scan_unreadable(line),
+    }
+}
+
+/// A control request that `serde_json` could not read, from a shallow scan of `line`.
+fn scan_unreadable(line: &str) -> Option<ParsedLine> {
+    let hint = scan_control_request(line)?;
+    Some(ParsedLine::UnreadableControlRequest {
+        request_id: hint.request_id,
+        subtype: hint.subtype,
+        tool_name: hint.tool_name,
+    })
+}
+
+fn parse_value(v: &Value) -> Option<ParsedLine> {
     let obj = v.as_object()?;
 
     match obj.get("type")?.as_str()? {
@@ -497,11 +544,24 @@ fn parse_control_response(obj: &serde_json::Map<String, Value>) -> Option<Parsed
 
 fn parse_control_request(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
     let request = obj.get("request").cloned().unwrap_or(Value::Null);
-    Some(ParsedLine::ControlRequest {
-        request_id: obj.get("request_id")?.as_str()?.to_string(),
-        subtype: request.get("subtype").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-        request,
-    })
+    let subtype = request.get("subtype").and_then(|x| x.as_str());
+    match obj.get("request_id") {
+        Some(Value::String(id)) => Some(ParsedLine::ControlRequest {
+            request_id: id.clone(),
+            subtype: subtype.unwrap_or_default().to_string(),
+            request,
+        }),
+        // An id that is not a string is still answered, as the same value.
+        other => Some(ParsedLine::UnreadableControlRequest {
+            request_id: other.filter(|id| id.is_number()).cloned(),
+            subtype: subtype.map(str::to_string),
+            tool_name: request
+                .get("tool_name")
+                .and_then(|x| x.as_str())
+                .filter(|name| name.len() <= 256)
+                .map(str::to_string),
+        }),
+    }
 }
 
 fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
@@ -1147,6 +1207,7 @@ impl SessionTranscript {
             | ParsedLine::ModelFallback { .. }
             | ParsedLine::ControlResponse { .. }
             | ParsedLine::ControlRequest { .. }
+            | ParsedLine::UnreadableControlRequest { .. }
             | ParsedLine::ControlCancel { .. } => vec![],
 
             // Background tasks are the registry's business: a task event
@@ -4163,16 +4224,35 @@ mod tests {
     }
 
     #[test]
-    fn a_control_request_or_cancel_without_a_request_id_is_not_a_line_we_act_on() {
-        // As for `control_response`: with no id there is nothing to answer or withdraw.
+    fn a_cancel_without_a_string_request_id_is_not_a_line_we_act_on() {
+        // With no id there is nothing to withdraw.
         for line in [
-            r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}"#,
-            r#"{"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool"}}"#,
             r#"{"type":"control_cancel_request"}"#,
             r#"{"type":"control_cancel_request","request_id":null}"#,
         ] {
             assert_eq!(parse_line(line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn a_control_request_without_a_string_id_is_unreadable_and_keeps_a_numeric_id() {
+        // The CLI waits for an answer all the same, so it is handed on, not dropped.
+        assert_eq!(
+            parse_line(r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}"#),
+            Some(ParsedLine::UnreadableControlRequest {
+                request_id: None,
+                subtype: Some("can_use_tool".to_string()),
+                tool_name: Some("Bash".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_line(r#"{"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool"}}"#),
+            Some(ParsedLine::UnreadableControlRequest {
+                request_id: Some(serde_json::json!(7)),
+                subtype: Some("can_use_tool".to_string()),
+                tool_name: None,
+            })
+        );
     }
 
     #[test]

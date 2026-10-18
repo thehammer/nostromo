@@ -25,6 +25,16 @@ use crate::data::work::is_invisible;
 /// shown as "all old lines removed, all new lines added" (still lossless).
 const MAX_DIFF_CELLS: usize = 4_000_000;
 
+/// The largest Bash command that is broken down for display. A bigger one is not
+/// shown at all: its display is the single line [`COMMAND_TOO_LARGE_LINE`]. (No
+/// human reads a command this long, and the broker's one worker thread builds
+/// the display of every request.) It is not the command: it does not reassemble
+/// to it, so nothing can mistake it for the command that would run.
+pub const MAX_DISPLAY_COMMAND_BYTES: usize = 256 * 1024;
+
+/// What is shown instead of a Bash command over [`MAX_DISPLAY_COMMAND_BYTES`].
+pub const COMMAND_TOO_LARGE_LINE: &str = "(command too large to display)";
+
 /// What a request looks like on the card: numbered lines of typed segments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalDisplay {
@@ -304,24 +314,49 @@ impl Builder {
     }
 
     fn bash(&mut self, cmd: &str) {
+        if cmd.len() > MAX_DISPLAY_COMMAND_BYTES {
+            self.unparsed = true;
+            self.push_line(
+                LineKind::Command,
+                false,
+                vec![Segment {
+                    text: COMMAND_TOO_LARGE_LINE.to_owned(),
+                    kind: SegmentKind::Plain,
+                    cp: None,
+                }],
+            );
+            return;
+        }
         let parsed = shell::parse(cmd);
         self.command_count = Some(parsed.commands.len() as u32);
         self.unparsed = parsed.unparsed;
-        let seps: Vec<Range<usize>> = parsed
+        // In order of position, so each line's separators and here-document are
+        // found by moving forward, not by looking through all of them per line.
+        let mut seps: Vec<Range<usize>> = parsed
             .separators
             .iter()
             .filter(|s| s.kind != SepKind::Newline)
             .map(|s| s.span.clone())
             .collect();
+        seps.sort_by_key(|s| s.start);
+        let mut heredocs: Vec<&Range<usize>> = parsed.heredocs.iter().map(|hd| &hd.body_span).collect();
+        heredocs.sort_by_key(|span| span.start);
+        let (mut next_sep, mut first_open_heredoc) = (0, 0);
         let mut ls = 0;
         loop {
             let le = cmd[ls..].find('\n').map_or(cmd.len(), |n| ls + n);
-            let kind = parsed
-                .heredocs
+            // Here-documents wholly before this line stay behind.
+            while heredocs
+                .get(first_open_heredoc)
+                .is_some_and(|span| span.end < ls)
+            {
+                first_open_heredoc += 1;
+            }
+            let kind = heredocs[first_open_heredoc..]
                 .iter()
-                .find_map(|hd| {
-                    let span = &hd.body_span;
-                    if span.start <= ls && ls < span.end {
+                .take_while(|span| span.start <= ls)
+                .find_map(|span| {
+                    if ls < span.end {
                         Some(LineKind::HeredocBody)
                     } else if ls == span.end {
                         Some(LineKind::HeredocEnd)
@@ -331,7 +366,13 @@ impl Builder {
                 })
                 .unwrap_or(LineKind::Command);
             if kind == LineKind::Command {
-                self.command_line(cmd, ls..le, &seps);
+                // Separators that start before this line are of an earlier one (or span a newline).
+                while seps.get(next_sep).is_some_and(|s| s.start < ls) {
+                    next_sep += 1;
+                }
+                let end = next_sep + seps[next_sep..].iter().take_while(|s| s.start < le).count();
+                self.command_line(cmd, ls..le, &seps[next_sep..end]);
+                next_sep = end;
             } else {
                 self.text_line(kind, &cmd[ls..le]);
             }
@@ -343,14 +384,12 @@ impl Builder {
     }
 
     /// One original line, cut after each separator that has more text after it.
+    /// `seps` are the separators that start on the line, in order.
     fn command_line(&mut self, cmd: &str, line: Range<usize>, seps: &[Range<usize>]) {
         let mut segs = Vec::new();
         let mut cont = false;
         let mut at = line.start;
-        for sep in seps
-            .iter()
-            .filter(|s| s.start >= line.start && s.end <= line.end)
-        {
+        for sep in seps.iter().filter(|s| s.end <= line.end) {
             if sep.start < at {
                 continue;
             }

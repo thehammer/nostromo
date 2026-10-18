@@ -41,13 +41,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
 use crate::approvals::broker::{
-    deny_response, ApprovalBroker, Incoming, SessionInfo as ApprovalSessionInfo, SessionSink, NO_APP_MESSAGE,
+    deny_response, ApprovalBroker, Incoming, SessionInfo as ApprovalSessionInfo, SessionSink,
+    APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, UNSUPPORTED_REQUEST_ERROR,
 };
 
 use super::decisions::DecisionRegistry;
@@ -2128,6 +2129,17 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
                 route_control_request(&tag, &shared, approvals.as_ref(), request_id, subtype, request);
                 continue;
             }
+            ParsedLine::UnreadableControlRequest { request_id, subtype, tool_name } => {
+                route_unreadable_control_request(
+                    &tag,
+                    &shared,
+                    approvals.as_ref(),
+                    request_id.as_ref(),
+                    subtype.as_deref(),
+                    tool_name.as_deref(),
+                );
+                continue;
+            }
             ParsedLine::ControlCancel { request_id } => {
                 if let Some(link) = &approvals {
                     let cancel = Incoming::Cancel { tag: tag.clone(), cli_request_id: request_id.clone() };
@@ -2220,8 +2232,9 @@ impl SessionSink for StdinSink {
 /// A `control_request` from the CLI. A permission prompt (`can_use_tool`) goes to
 /// the broker by channel, never waiting on it; if the broker cannot take it, the
 /// reader denies it itself, because the CLI must never be left waiting. Any other
-/// subtype is left unanswered, as it always was (our flags give the CLI no other
-/// host-bound request).
+/// subtype gets an error answer: our flags give the CLI no other host-bound request,
+/// and one that arrived anyway (an elicitation, something newer) must not be left
+/// waiting either.
 fn route_control_request(
     tag: &str,
     shared: &Shared,
@@ -2230,8 +2243,10 @@ fn route_control_request(
     subtype: &str,
     request: &serde_json::Value,
 ) {
+    let id = serde_json::Value::String(request_id.to_owned());
     if subtype != "can_use_tool" {
-        debug!(tag, subtype, "control_request from the CLI left unanswered");
+        warn!(tag, subtype, "control_request of an unsupported subtype: answering it with an error");
+        answer_unsupported(tag, shared, &id);
         return;
     }
     let incoming = || Incoming::Request {
@@ -2240,18 +2255,89 @@ fn route_control_request(
         cli_request_id: request_id.to_owned(),
         value: request.clone(),
     };
+    let deny = || deny_unless_exited(shared, &id, APPROVAL_UNAVAILABLE_MESSAGE);
     if let Some(link) = link {
         if link.broker.submit(incoming()).is_ok() {
             return;
         }
-        link.broker.record_unqueued_denial(tag, link.generation, request);
+        warn!(tag, "no approval broker to take a permission request: denying it");
+        link.broker.record_unqueued_denial(tag, link.generation, request, deny);
+        return;
     }
     warn!(tag, "no approval broker to take a permission request: denying it");
-    if !shared.exited.load(Ordering::SeqCst) {
-        if let Err(e) = write_control_response(&shared.stdin, request_id, &deny_response(NO_APP_MESSAGE)) {
-            warn!(tag, "could not write the deny: {e}");
+    if let Err(e) = deny() {
+        warn!(tag, "could not write the deny: {e}");
+    }
+}
+
+/// A `control_request` the reader could not read in full (see
+/// [`ParsedLine::UnreadableControlRequest`]). Dropping it would leave the CLI waiting
+/// for ever (it has no timeout), so it is answered from what the scan recovered:
+///
+/// - a subtype other than `can_use_tool`: an error answer, like any unsupported request;
+/// - otherwise (`can_use_tool`, or a subtype that could not be made out: most likely
+///   a permission prompt) with the request id: a deny, and a `request` + `outcome`
+///   entry in the audit log;
+/// - no request id: nothing can be answered under, so there is a content-free error
+///   in the daemon log and one `request_unparseable` audit entry.
+///
+/// The line itself is never kept or logged: it can be megabytes and hold anything.
+fn route_unreadable_control_request(
+    tag: &str,
+    shared: &Shared,
+    link: Option<&ApprovalLink>,
+    request_id: Option<&serde_json::Value>,
+    subtype: Option<&str>,
+    tool_name: Option<&str>,
+) {
+    let Some(id) = request_id else {
+        error!(tag, "a control request from the CLI could not be read and has no id to answer under");
+        if let Some(link) = link {
+            link.broker.record_unparseable(tag, link.generation);
+        }
+        return;
+    };
+    if subtype.is_some_and(|s| s != "can_use_tool") {
+        warn!(tag, "unreadable control_request of an unsupported subtype: answering it with an error");
+        answer_unsupported(tag, shared, id);
+        return;
+    }
+    warn!(tag, "a permission request could not be read: denying it");
+    let deny = || deny_unless_exited(shared, id, INVALID_REQUEST_MESSAGE);
+    match link {
+        Some(link) => link.broker.record_unreadable_denial(tag, link.generation, tool_name, deny),
+        None => {
+            if let Err(e) = deny() {
+                warn!(tag, "could not write the deny: {e}");
+            }
         }
     }
+}
+
+/// The error answer to a request the host does not handle.
+fn answer_unsupported(tag: &str, shared: &Shared, request_id: &serde_json::Value) {
+    if shared.exited.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Err(e) = write_control_error(&shared.stdin, request_id, UNSUPPORTED_REQUEST_ERROR) {
+        warn!(tag, "could not write the error answer: {e}");
+    }
+}
+
+/// Write a deny to a session that has not exited. This is the reader's own write
+/// (the broker did not take the request, or could not read it).
+///
+/// It cannot deadlock the reader. The write is one small line (a few hundred bytes,
+/// under `PIPE_BUF`), made while the CLI is waiting for exactly this answer, so the
+/// CLI is reading its stdin; the CLI reads stdin whether or not we read its stdout,
+/// so the pipe drains. The only thing ahead of it on the pipe or on the stdin lock
+/// (a leaf lock) is another of our own frames, which the CLI is draining the same
+/// way, and the broker's worker and watchdog write through this same path anyway.
+fn deny_unless_exited(shared: &Shared, request_id: &serde_json::Value, message: &str) -> std::io::Result<()> {
+    if shared.exited.load(Ordering::SeqCst) {
+        return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session has exited"));
+    }
+    write_control_response_to(&shared.stdin, request_id, &deny_response(message)).map_err(std::io::Error::other)
 }
 
 /// After a turn ends or a switch has been applied: apply a switch waiting for
@@ -2476,6 +2562,16 @@ fn write_control_response(
     request_id: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
+    write_control_response_to(stdin, &serde_json::Value::String(request_id.to_owned()), response)
+}
+
+/// [`write_control_response`] for a request id of any JSON value: the CLI's id is
+/// answered as it arrived, a number staying a number.
+fn write_control_response_to(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    request_id: &serde_json::Value,
+    response: &serde_json::Value,
+) -> Result<()> {
     write_frame(
         stdin,
         &serde_json::json!({
@@ -2484,6 +2580,25 @@ fn write_control_response(
                 "subtype": "success",
                 "request_id": request_id,
                 "response": response,
+            },
+        }),
+    )
+}
+
+/// Write the error answer (`subtype: "error"`) to a request the CLI made of us.
+fn write_control_error(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    request_id: &serde_json::Value,
+    error: &str,
+) -> Result<()> {
+    write_frame(
+        stdin,
+        &serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "error",
+                "request_id": request_id,
+                "error": error,
             },
         }),
     )

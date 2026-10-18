@@ -2,7 +2,7 @@
 //! a session's permission requests, logs them, and **always answers them**.
 //!
 //! In this slice nobody can be asked yet ([`Presenter::can_present`] is false
-//! in production), so every request the guard lets through ends as `no_app`: a
+//! in production), so every request the guard lets through ends as `approval_unavailable`: a
 //! clear deny, written to the session, plus a `request` and an `outcome` entry
 //! in the audit log. The shape for holding a request for a human is here too,
 //! and exercised through a test presenter, so the next slice only has to give
@@ -47,7 +47,7 @@ use serde_json::{json, Value};
 use tokio::task::AbortHandle;
 use tracing::{debug, error, info, warn};
 
-use super::audit::{AuditFilter, AuditLog, Entry, Event};
+use super::audit::{sanitize_string, AuditFilter, AuditLog, Entry, Event};
 use super::display::ApprovalDisplay;
 use super::guard::{self, GuardVerdict, HookPayload, PaneProbe, SystemPaneProbe};
 use super::request::{FileSettings, PermissionRequest, SettingsSource};
@@ -55,9 +55,19 @@ use super::ApprovalsPaths;
 
 // ── the words an agent is told (contract §6.2, verbatim) ──────────────────────
 
-/// Nobody can be asked right now.
+/// The contract's words for a request nobody could be asked about because the app is
+/// closed. Not used by any ending in this slice (see [`APPROVAL_UNAVAILABLE_MESSAGE`]):
+/// it stays here for the slice that has an app to be closed.
 pub const NO_APP_MESSAGE: &str =
     "Nostromo can't ask anyone right now (the app is closed), so this was denied. Tell the user what you wanted to run.";
+/// What an agent is told in this slice, where every request is denied because the
+/// approval screen does not exist yet, whether or not the app is open. (An
+/// `AskUserQuestion` or `ExitPlanMode` request, if one reaches `can_use_tool`, gets
+/// these words too.)
+pub const APPROVAL_UNAVAILABLE_MESSAGE: &str = "Nostromo's approval screen isn't available yet, so this was denied. Tell the user what you wanted to run and give them the exact command; do not retry it.";
+/// The error answer to a `control_request` of any subtype but `can_use_tool`: the
+/// host does not handle it.
+pub const UNSUPPORTED_REQUEST_ERROR: &str = "Nostromo does not handle this kind of request.";
 /// A held request nobody answered in time.
 pub const TIMED_OUT_MESSAGE: &str = "No one answered the approval request in Nostromo within 15 minutes, so it was denied. Don't retry it unless the user asks; tell them what you wanted to run.";
 /// The daemon is shutting down.
@@ -91,7 +101,12 @@ pub fn restart_note_text(tool: &str) -> String {
 /// How a request ended (this slice: the endings that need no human).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    /// Nobody could be asked: the app is closed (contract §6.2; later slices).
     NoApp,
+    /// Nobody could be asked: there is no approval screen yet (this slice).
+    NotAvailable,
+    /// The deny could not be written to the session.
+    DenyWriteFailed,
     TimedOut,
     Restart,
     RestartCrash,
@@ -106,6 +121,8 @@ impl Outcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NoApp => "no_app",
+            Self::NotAvailable => "approval_unavailable",
+            Self::DenyWriteFailed => "deny_write_failed",
             Self::TimedOut => "timed_out",
             Self::Restart => "restart",
             Self::RestartCrash => "restart_crash",
@@ -146,14 +163,29 @@ impl Ending {
         }
     }
 
-    fn no_app() -> Self {
-        Self::deny(Outcome::NoApp, NO_APP_MESSAGE)
+    fn unavailable() -> Self {
+        Self::deny(Outcome::NotAvailable, APPROVAL_UNAVAILABLE_MESSAGE)
     }
 
     fn watchdog() -> Self {
         Self {
             watchdog: true,
-            ..Self::no_app()
+            ..Self::unavailable()
+        }
+    }
+
+    /// This ending, but the deny could not be written: the log says so and keeps
+    /// what the outcome would have been.
+    fn write_failed(self) -> Self {
+        let mut rule = match self.rule {
+            Some(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        rule.insert("intended_outcome".into(), json!(self.outcome.as_str()));
+        Self {
+            outcome: Outcome::DenyWriteFailed,
+            rule: Some(Value::Object(rule)),
+            ..self
         }
     }
 
@@ -527,8 +559,16 @@ impl ApprovalBroker {
     }
 
     /// A request the reader had to deny itself because [`Self::submit`] failed:
-    /// log it (`request`, then `outcome: no_app`) so it is not missing from the record.
-    pub fn record_unqueued_denial(&self, tag: &str, generation: u64, value: &Value) {
+    /// log it so it is not missing from the record. The `request` entry is written,
+    /// then `answer` (the reader's write of the deny), then the `outcome`:
+    /// `approval_unavailable`, or `deny_write_failed` if `answer` failed.
+    pub fn record_unqueued_denial(
+        &self,
+        tag: &str,
+        generation: u64,
+        value: &Value,
+        answer: impl FnOnce() -> io::Result<()>,
+    ) {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (ident, cwd) = {
             let st = lock(&self.inner.state);
@@ -536,14 +576,68 @@ impl ApprovalBroker {
             (st.ident(&request_id, tag, generation, value), cwd)
         };
         let parsed = PermissionRequest::from_cli(value);
-        let now = Utc::now();
         self.inner.append(entry(
             request_event(&parsed, value, cwd.as_deref(), &*self.inner.parts.settings),
             &ident,
-            now,
+            Utc::now(),
         ));
-        self.inner
-            .log_outcome(&ident, Outcome::NoApp, &Ending::no_app(), 0);
+        self.inner.answer_and_log(&ident, Ending::unavailable(), answer);
+    }
+
+    /// A permission request the reader could not read (nested too deep, too large,
+    /// malformed, an id that is not a string) but could identify, and denied itself.
+    /// `tool_name` is what the reader could still make out. Logged as `request`, then
+    /// `answer`, then `outcome: invalid_request` (or `deny_write_failed`).
+    pub fn record_unreadable_denial(
+        &self,
+        tag: &str,
+        generation: u64,
+        tool_name: Option<&str>,
+        answer: impl FnOnce() -> io::Result<()>,
+    ) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let ident = lock(&self.inner.state).ident(&request_id, tag, generation, &Value::Null);
+        self.inner.append(entry(
+            Event::Request {
+                tool_name: tool_name.unwrap_or("unknown").to_owned(),
+                input: Value::Null,
+                display_text: None,
+                reason: Some(json!({
+                    "kind": "other",
+                    "text": "Unreadable request: too large, nested too deeply or malformed to read",
+                })),
+                flags: None,
+                options: Some(json!([])),
+                cli_request: None,
+            },
+            &ident,
+            Utc::now(),
+        ));
+        self.inner.answer_and_log(
+            &ident,
+            Ending::deny(Outcome::InvalidRequest, INVALID_REQUEST_MESSAGE),
+            answer,
+        );
+    }
+
+    /// A permission request the reader could not even identify (no request id to
+    /// answer under): one `outcome: request_unparseable` entry for the session, with
+    /// no request id. Nothing of the line is recorded.
+    pub fn record_unparseable(&self, tag: &str, generation: u64) {
+        let ident = lock(&self.inner.state).ident("", tag, generation, &Value::Null);
+        let mut e = entry(
+            Event::Outcome {
+                outcome: "request_unparseable".into(),
+                rule: None,
+                by_window: None,
+                latency_ms: None,
+                watchdog: false,
+            },
+            &ident,
+            Utc::now(),
+        );
+        e.request_id = None;
+        self.inner.append(e);
     }
 
     /// The CLI withdrew request `cli_request_id`: `withdrawn`, nothing written.
@@ -587,48 +681,65 @@ impl ApprovalBroker {
     /// ([`Self::take_restart_note`]). Returns how many were reconciled.
     pub fn startup_reconcile(&self, now: DateTime<Utc>) -> io::Result<usize> {
         let since = now - chrono::Duration::days(super::audit::RETENTION_DAYS + 1);
-        let entries = self.inner.audit.read(
-            since..now + chrono::Duration::days(1),
-            &AuditFilter::default(),
+        let range = since..now + chrono::Duration::days(1);
+        // Two passes over the files, each line by line: the log can hold 90 days of
+        // entries with full inputs, and only the ids and a few fields are kept.
+        let mut ended = std::collections::HashSet::new();
+        self.inner.audit.for_each(
+            range.clone(),
+            &AuditFilter {
+                tag: None,
+                event: Some("outcome".into()),
+            },
+            |e| {
+                ended.extend(e.request_id);
+            },
         )?;
-        let ended: std::collections::HashSet<&str> = entries
-            .iter()
-            .filter(|e| matches!(e.event, Event::Outcome { .. }))
-            .filter_map(|e| e.request_id.as_deref())
-            .collect();
+        // Only what the `restart_crash` outcome needs is kept of each unresolved request.
+        let mut unresolved: Vec<(Entry, String)> = Vec::new();
+        self.inner.audit.for_each(
+            range,
+            &AuditFilter {
+                tag: None,
+                event: Some("request".into()),
+            },
+            |e| {
+                let Event::Request { tool_name, .. } = &e.event else {
+                    return;
+                };
+                let Some(request_id) = e.request_id.as_deref().filter(|id| !ended.contains(*id)) else {
+                    return;
+                };
+                let mut outcome = Entry::new(
+                    Event::Outcome {
+                        outcome: Outcome::RestartCrash.as_str().into(),
+                        rule: None,
+                        by_window: None,
+                        latency_ms: None,
+                        watchdog: false,
+                    },
+                    now,
+                );
+                outcome.request_id = Some(request_id.to_owned());
+                outcome.tag = e.tag.clone();
+                outcome.session_id = e.session_id.clone();
+                outcome.tool_use_id = e.tool_use_id.clone();
+                outcome.agent = e.agent.clone();
+                outcome.subagent = e.subagent.clone();
+                unresolved.push((outcome, tool_name.clone()));
+            },
+        )?;
         let mut count = 0;
         let mut notes = Vec::new();
-        for e in entries
-            .iter()
-            .filter(|e| matches!(e.event, Event::Request { .. }))
-        {
-            let Some(request_id) = e.request_id.as_deref().filter(|id| !ended.contains(id)) else {
-                continue;
-            };
-            let mut outcome = Entry::new(
-                Event::Outcome {
-                    outcome: Outcome::RestartCrash.as_str().into(),
-                    rule: None,
-                    by_window: None,
-                    latency_ms: None,
-                    watchdog: false,
-                },
-                now,
-            );
-            outcome.request_id = Some(request_id.to_owned());
-            outcome.tag = e.tag.clone();
-            outcome.session_id = e.session_id.clone();
-            outcome.tool_use_id = e.tool_use_id.clone();
-            outcome.agent = e.agent.clone();
-            outcome.subagent = e.subagent.clone();
+        for (outcome, tool_name) in unresolved {
             if let Err(e) = self.inner.audit.append(&outcome) {
                 // Left unresolved: the next start tries again.
-                warn!(request_id, "could not write restart_crash: {e}");
+                warn!(request_id = ?outcome.request_id, "could not write restart_crash: {e}");
                 continue;
             }
             count += 1;
-            if let (Some(tag), Event::Request { tool_name, .. }) = (&e.tag, &e.event) {
-                notes.push((tag.clone(), tool_name.clone()));
+            if let Some(tag) = outcome.tag {
+                notes.push((tag, tool_name));
             }
         }
         if !notes.is_empty() {
@@ -777,14 +888,19 @@ impl Inner {
                 .map(|r| Arc::clone(&r.sink));
             (pending, sink)
         };
+        let mut ending = ending;
         let mut outcome = ending.outcome;
         let mut wrote = false;
-        if let Some(message) = &ending.message {
+        if let Some(message) = ending.message.clone() {
             match sink.filter(|s| s.live()) {
                 Some(sink) => {
-                    match sink.respond(&pending.cli_request_id, &deny_response(message)) {
+                    match sink.respond(&pending.cli_request_id, &deny_response(&message)) {
                         Ok(()) => wrote = true,
-                        Err(e) => warn!(tag = %pending.ident.tag, "could not write the deny: {e}"),
+                        Err(e) => {
+                            warn!(tag = %pending.ident.tag, "could not write the deny: {e}");
+                            ending = ending.write_failed();
+                            outcome = ending.outcome;
+                        }
                     }
                 }
                 // The process is gone: say so, and write nothing.
@@ -825,6 +941,19 @@ impl Inner {
             ident,
             arrived_at,
         ));
+    }
+
+    /// Run `answer` (the caller's write of the deny for `ending`), then log the outcome:
+    /// `ending`'s, or `deny_write_failed` if the write failed.
+    fn answer_and_log(&self, ident: &Ident, ending: Ending, answer: impl FnOnce() -> io::Result<()>) {
+        let ending = match answer() {
+            Ok(()) => ending,
+            Err(e) => {
+                warn!(tag = %ident.tag, "could not write the deny: {e}");
+                ending.write_failed()
+            }
+        };
+        self.log_outcome(ident, ending.outcome, &ending, 0);
     }
 
     fn log_outcome(&self, ident: &Ident, outcome: Outcome, ending: &Ending, latency_ms: u64) {
@@ -980,7 +1109,7 @@ impl Inner {
         if self.parts.presenter.can_present(&ident.tag) {
             self.hold(request_id);
         } else {
-            self.finish(request_id, Ending::no_app());
+            self.finish(request_id, Ending::unavailable());
         }
     }
 
@@ -1037,7 +1166,7 @@ fn request_event(
             Event::Request {
                 tool_name: req.tool_name.clone(),
                 input: req.input.clone(),
-                display_text: Some(display.shown_text()),
+                display_text: Some(sanitize_string(&display.shown_text())),
                 reason: serde_json::to_value(req.reason(cwd, settings)).ok(),
                 flags: Some(json!({
                     "default_to_no": req.default_to_no.unwrap_or(false),
@@ -1046,7 +1175,7 @@ fn request_event(
                     "classifier_approvable": req.classifier_approvable.unwrap_or(false),
                 })),
                 options: Some(json!([])),
-                cli_request: Some(raw.clone()),
+                cli_request: Some(without_input(raw)),
             }
         }
         Err(e) => Event::Request {
@@ -1060,8 +1189,22 @@ fn request_event(
             reason: Some(json!({ "kind": "other", "text": format!("Unreadable request: {e}") })),
             flags: None,
             options: Some(json!([])),
-            cli_request: Some(raw.clone()),
+            cli_request: Some(without_input(raw)),
         },
+    }
+}
+
+/// The CLI's request as the log keeps it in `cli_request`: every field but `input`,
+/// which the entry records in full in its own `input`.
+fn without_input(raw: &Value) -> Value {
+    match raw.as_object() {
+        Some(map) => Value::Object(
+            map.iter()
+                .filter(|(k, _)| k.as_str() != "input")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        None => raw.clone(),
     }
 }
 
@@ -1078,7 +1221,7 @@ fn run_worker(inner: Weak<Inner>, rx: Receiver<Job>) {
         if std::panic::catch_unwind(AssertUnwindSafe(|| inner.handle(job))).is_err() {
             error!("approval broker: handling a request panicked; denying it");
             if let Some(id) = request_id {
-                inner.finish(&id, Ending::no_app());
+                inner.finish(&id, Ending::unavailable());
             }
         }
     }
