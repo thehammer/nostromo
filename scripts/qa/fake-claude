@@ -1,0 +1,6 @@
+#!/bin/sh
+# `claude` stand-in for the QA instance (NOSTROMO_CLAUDE_BIN): stream-json, no network, no money.
+# The fake needs a log dir; default it under the (QA) HOME so nothing lands in the user's tree.
+: "${FAKE_CLAUDE_LOG_DIR:=${HOME:?}/.nostromo/fake-claude/$$}"
+export FAKE_CLAUDE_LOG_DIR
+exec python3 -I "$(cd "$(dirname "$0")/../.." && pwd)/tests/support/fake_claude_perm.py" "$@"

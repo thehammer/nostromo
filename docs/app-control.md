@@ -151,6 +151,21 @@ at all) is in [`operator-app-trust.md`](operator-app-trust.md).
 controls when it is launched with `NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT=1` **and**
 its bundle id is not `com.hammer.nostromo`. The user's app never honours it.
 
+## Isolated QA instance
+
+`scripts/qa/qa-instance.sh start [--no-synthetic]` (also `env`, `status`, `stop`) launches a worktree
+`nostromd` and a clone of the app (`com.hammer.nostromo.qa`, signed and pinned like the operator app)
+under a temp `HOME`, with its own sockets, the fake CLI (`scripts/qa/fake-claude`) and the guard binary.
+It never touches the user's app, daemon or `~/.nostromo`. The clone's control socket is
+`$QA_ROOT/app-control.sock`: `NOSTROMO_APP_CONTROL_SOCKET` (read by `AppControlServer`) or
+`bin/nostromo-app --socket PATH` select it. `start` launches the clone with
+`NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT=1` unless `--no-synthetic`. An isolation guard compares the user's
+`~/.nostromo/{focuses,daemon-panes,daemon-sessions,daemon-terminals}.json`, `approvals/` (file list and
+sizes), `app-control.sock` inode, `defaults export com.hammer.nostromo` and the user's `nostromd`/Nostromo
+pids before `start` and after `stop`, and `stop` exits non-zero if anything changed.
+`scripts/qa/approvals-qa-smoke.sh` (also `terminal-qa-smoke.sh`) proves it end to end. It needs a
+logged-in, awake display: not headless, not CI.
+
 ## Limits
 
 Windows must be on-screen and awake: with displays locked or asleep the

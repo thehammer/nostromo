@@ -21,8 +21,13 @@ private let ctlLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "App
 final class AppControlServer {
 
     static let shared = AppControlServer()
+    /// `NOSTROMO_APP_CONTROL_SOCKET` (set by the isolated QA instance so it never touches the
+    /// user's socket), else `~/.nostromo/app-control.sock`.
     static var socketPath: String {
-        FileManager.default.homeDirectoryForCurrentUser
+        if let override = ProcessInfo.processInfo.environment["NOSTROMO_APP_CONTROL_SOCKET"], !override.isEmpty {
+            return override
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".nostromo/app-control.sock").path
     }
 
