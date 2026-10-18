@@ -730,12 +730,16 @@ async fn a_held_request_is_denied_timed_out_at_exactly_fifteen_minutes() {
     assert_eq!(outcome_name(&outcome), "timed_out");
     assert_eq!(rig.writes(), [("cli-toolu_1".to_owned(), deny_body(TIMED_OUT_MESSAGE))]);
     assert!(TIMED_OUT_MESSAGE.contains("within 15 minutes"));
-    let frames = rig.frames();
-    assert!(
-        frames.iter().any(|m| matches!(m, ServerMsg::ApprovalResolved { request_id, outcome, by_window: None, .. }
-            if *request_id == wire.request_id && outcome == "timed_out")),
-        "the cards are told: {frames:?}"
-    );
+    // The outcome is logged just before the broadcast, so wait for the frame.
+    let mut frames = Vec::new();
+    let start = Instant::now();
+    while !frames.iter().any(|m| matches!(m, ServerMsg::ApprovalResolved { request_id, outcome, by_window: None, .. }
+        if *request_id == wire.request_id && outcome == "timed_out"))
+    {
+        assert!(start.elapsed() < Duration::from_secs(10), "the cards are told: {frames:?}");
+        frames.extend(rig.frames());
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "app"), already("timed_out"));
 }
 
