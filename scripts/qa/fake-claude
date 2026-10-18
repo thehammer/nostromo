@@ -1,0 +1,3 @@
+#!/bin/sh
+# `claude` stand-in for the QA instance (NOSTROMO_CLAUDE_BIN): stream-json, no network, no money.
+exec python3 -I "$(cd "$(dirname "$0")/../.." && pwd)/tests/support/fake_claude_perm.py" "$@"
