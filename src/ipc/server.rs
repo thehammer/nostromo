@@ -452,12 +452,13 @@ where
             }
             (client_id.clone(), Uuid::new_v4().to_string(), client_kind.clone())
         }
-        other => {
+        _ => {
+            let kind = frame_type(&hello_bytes);
             let err = ServerMsg::Error {
-                message: format!("expected Hello, got {other:?}"),
+                message: format!("expected Hello, got a {kind} frame"),
             };
             let _ = write_frame(&mut writer, &serde_json::to_vec(&err)?).await;
-            anyhow::bail!("unexpected first message: {other:?}");
+            anyhow::bail!("unexpected first message: a {kind} frame");
         }
     };
 
@@ -503,8 +504,9 @@ where
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
             (vec![], false, false)
         }
-        other => {
-            anyhow::bail!("expected Subscribe, got {other:?}");
+        _ => {
+            // The frame's type only: its content is never logged.
+            anyhow::bail!("expected Subscribe, got a {} frame", frame_type(&sub_bytes));
         }
     };
 
@@ -797,6 +799,12 @@ where
                                     let requests = broker.presenter_connected(&conn_key);
                                     replay_messages(&mut writer, [ServerMsg::ApprovalsSnapshot { requests }]).await;
                                 }
+                            } else if presents_approvals && !renders_approvals {
+                                // Resubscribing without it gives the status up.
+                                presents_approvals = false;
+                                if let Some(broker) = &broker {
+                                    broker.presenter_revoked(&conn_key);
+                                }
                             }
                             // Replay retained frames only for the topics this
                             // subscribe adds; a network peer gets none.
@@ -879,6 +887,29 @@ where
             let _ = write_outbound(writer, &bytes, "replay").await;
         }
     }
+}
+
+/// A client-supplied string made safe to put in a log line: no newlines or
+/// invisible characters, and bounded.
+fn log_safe(s: &str) -> String {
+    let clean = crate::approvals::audit::sanitize_string(s);
+    let mut out: String = clean.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if out.len() > 256 {
+        let mut cut = 256;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+    }
+    out
+}
+
+/// The `type` of a client frame, safe to log; never its content.
+fn frame_type(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str().map(log_safe)))
+        .unwrap_or_else(|| "unreadable".to_owned())
 }
 
 /// Write one server frame. A frame over [`MAX_FRAME_LEN`] cannot be carried:
@@ -1123,7 +1154,8 @@ fn handle_client_msg(
                 }
             };
             if let Some(why) = not_allowed {
-                warn!(conn_key, %request_id, ?trust, peer_pid = peer.map(|p| p.pid), "ApprovalAnswer refused: {why}");
+                let logged_id = log_safe(&request_id);
+                warn!(conn_key, request_id = %logged_id, ?trust, peer_pid = peer.map(|p| p.pid), "ApprovalAnswer refused: {why}");
                 let reply = refused(AnswerRefusal::NotOperatorApp);
                 refuse_approval_answer(
                     broker,
@@ -2103,6 +2135,23 @@ pub fn activity_health_msg(mgr: &SessionManager, hook_installed: bool) -> Server
 mod tests {
     use super::*;
     use crate::ipc::protocol::DecisionChoice;
+
+    #[test]
+    fn log_safe_strips_newlines_and_bounds_length() {
+        let nasty = format!("a\nb\r\nINFO forged line\u{202e}{}", "x".repeat(4 * 1024 * 1024));
+        let out = log_safe(&nasty);
+        assert!(!out.contains('\n') && !out.contains('\r') && !out.contains('\u{202e}'), "{out:?}");
+        assert!(out.len() <= 256, "{}", out.len());
+        assert_eq!(log_safe("req-1"), "req-1");
+    }
+
+    #[test]
+    fn frame_type_names_the_variant_and_never_the_content() {
+        let bytes = br#"{"type":"approval_answer","request_id":"SECRET-CONTENT"}"#;
+        assert_eq!(frame_type(bytes), "approval_answer");
+        assert_eq!(frame_type(b"not json SECRET"), "unreadable");
+        assert_eq!(frame_type(b"{\"type\":\"a\\nb\"}"), "a b");
+    }
 
     fn sample_decision_request() -> ServerMsg {
         ServerMsg::DecisionRequest {

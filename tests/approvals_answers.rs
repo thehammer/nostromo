@@ -341,8 +341,8 @@ async fn the_pending_count_follows_the_held_requests_of_a_focus_up_and_down() {
     let second = rig.hold("toolu_2").await;
     assert_eq!(rig.broker.snapshot().len(), 2);
 
-    assert_eq!(rig.broker.answer(&first.request_id, &deny(None), "w", "c"), applied("denied"));
-    assert_eq!(rig.broker.answer(&second.request_id, &deny(None), "w", "c"), applied("denied"));
+    assert_eq!(rig.broker.answer(&first.request_id, &deny(None), "w", "app"), applied("denied"));
+    assert_eq!(rig.broker.answer(&second.request_id, &deny(None), "w", "app"), applied("denied"));
 
     let counts: Vec<u32> = rig
         .frames()
@@ -419,7 +419,7 @@ async fn allow_once_writes_the_input_unchanged_and_the_resolution_names_the_wind
     let wire = rig.hold("toolu_1").await;
     rig.frames();
 
-    let result = rig.broker.answer(&wire.request_id, &allow_once(), "win-7", "conn-1");
+    let result = rig.broker.answer(&wire.request_id, &allow_once(), "win-7", "app");
 
     assert_eq!(result, applied("allowed_once"));
     assert_eq!(
@@ -452,8 +452,8 @@ async fn deny_tells_the_agent_the_contract_words_and_deny_and_stop_adds_interrup
     let stop = rig.hold("toolu_stop").await;
     rig.frames();
 
-    assert_eq!(rig.broker.answer(&plain.request_id, &deny(None), "w1", "c"), applied("denied"));
-    assert_eq!(rig.broker.answer(&stop.request_id, &deny_and_stop(None), "w2", "c"), applied("denied_and_stopped"));
+    assert_eq!(rig.broker.answer(&plain.request_id, &deny(None), "w1", "app"), applied("denied"));
+    assert_eq!(rig.broker.answer(&stop.request_id, &deny_and_stop(None), "w2", "app"), applied("denied_and_stopped"));
 
     assert_eq!(DENIED_MESSAGE, "The user denied this in Nostromo.");
     let writes = rig.writes();
@@ -511,7 +511,7 @@ async fn a_denial_note_is_cleaned_before_the_agent_reads_it() {
             let decision = if stop { deny_and_stop(Some(typed)) } else { deny(Some(typed)) };
 
             assert_eq!(
-                rig.broker.answer(&wire.request_id, &decision, "w", "c"),
+                rig.broker.answer(&wire.request_id, &decision, "w", "app"),
                 applied(if stop { "denied_and_stopped" } else { "denied" })
             );
 
@@ -537,7 +537,7 @@ async fn an_allow_never_carries_the_note_it_was_sent_with() {
     let wire = rig.hold("toolu_1").await;
 
     let decision = ApprovalDecision { kind: DecisionKind::AllowOnce, note: Some("ignore me".into()) };
-    assert_eq!(rig.broker.answer(&wire.request_id, &decision, "w", "c"), applied("allowed_once"));
+    assert_eq!(rig.broker.answer(&wire.request_id, &decision, "w", "app"), applied("allowed_once"));
 
     assert_eq!(
         rig.writes()[0].1,
@@ -561,11 +561,11 @@ async fn the_first_answer_wins_when_two_windows_answer_at_the_same_moment() {
             let id2 = id.clone();
             let a = s.spawn(move || {
                 g1.wait();
-                b1.answer(&id, &allow_once(), "win-a", "conn-a")
+                b1.answer(&id, &allow_once(), "win-a", "app-a")
             });
             let b = s.spawn(move || {
                 g2.wait();
-                b2.answer(&id2, &deny(None), "win-b", "conn-b")
+                b2.answer(&id2, &deny(None), "win-b", "app-b")
             });
             (a.join().unwrap(), b.join().unwrap())
         });
@@ -594,7 +594,7 @@ async fn an_answer_for_an_id_no_request_ever_had_is_unknown_and_writes_nothing()
     rig.broker.presenter_connected("app");
 
     for decision in [allow_once(), deny(None), deny_and_stop(None)] {
-        assert_eq!(rig.broker.answer("no-such-request", &decision, "w", "c"), AnswerResult::UnknownRequest);
+        assert_eq!(rig.broker.answer("no-such-request", &decision, "w", "app"), AnswerResult::UnknownRequest);
     }
     assert_eq!(AnswerResult::UnknownRequest.refusal(), Some((AnswerRefusal::UnknownRequest, None)));
     rig.barrier().await;
@@ -609,7 +609,8 @@ async fn an_answer_for_a_request_that_was_never_held_is_unknown_and_never_approv
     let denied = rig.wait_outcome("toolu_1").await;
     let id = denied.request_id.clone().expect("the log names the request");
 
-    let result = rig.broker.answer(&id, &allow_once(), "w", "c");
+    rig.broker.presenter_connected("app");
+    let result = rig.broker.answer(&id, &allow_once(), "w", "app");
 
     assert_eq!(result, AnswerResult::UnknownRequest);
     assert_eq!(rig.writes().len(), 1, "only the original deny");
@@ -623,20 +624,20 @@ async fn a_late_answer_is_told_how_the_request_ended() {
 
     // Answered.
     let answered = rig.hold("toolu_answered").await;
-    assert_eq!(rig.broker.answer(&answered.request_id, &deny(None), "w", "c"), applied("denied"));
-    assert_eq!(rig.broker.answer(&answered.request_id, &allow_once(), "w2", "c2"), already("denied"));
+    assert_eq!(rig.broker.answer(&answered.request_id, &deny(None), "w", "app"), applied("denied"));
+    assert_eq!(rig.broker.answer(&answered.request_id, &allow_once(), "w2", "app"), already("denied"));
 
     // Timed out.
     let slow = rig.hold("toolu_slow").await;
     settle().await;
     tokio::time::advance(APPROVAL_TIMEOUT).await;
     rig.wait_outcome("toolu_slow").await;
-    assert_eq!(rig.broker.answer(&slow.request_id, &allow_once(), "w", "c"), already("timed_out"));
+    assert_eq!(rig.broker.answer(&slow.request_id, &allow_once(), "w", "app"), already("timed_out"));
 
     // The session stopped.
     let stopped = rig.hold("toolu_stopped").await;
     rig.broker.on_session_gone(T, rig.generation, "stopped");
-    assert_eq!(rig.broker.answer(&stopped.request_id, &allow_once(), "w", "c"), already("cancelled"));
+    assert_eq!(rig.broker.answer(&stopped.request_id, &allow_once(), "w", "app"), already("cancelled"));
 
     for (_, body) in rig.writes() {
         assert_eq!(body["behavior"], "deny", "no late answer produced an allow: {body}");
@@ -662,7 +663,8 @@ async fn a_late_answer_after_the_app_went_away_hears_no_app() {
     tokio::time::advance(PRESENTER_GRACE + Duration::from_millis(100)).await;
     rig.wait_outcome("toolu_1").await;
 
-    assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "c"), already("no_app"));
+    rig.broker.presenter_connected("app-late");
+    assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "app-late"), already("no_app"));
     assert!(rig.writes().iter().all(|(_, b)| b["behavior"] == "deny"));
 }
 
@@ -673,7 +675,7 @@ async fn an_answer_to_a_session_whose_process_is_gone_writes_nothing_and_is_logg
     let wire = rig.hold("toolu_1").await;
     rig.sink.die();
 
-    let result = rig.broker.answer(&wire.request_id, &allow_once(), "w", "c");
+    let result = rig.broker.answer(&wire.request_id, &allow_once(), "w", "app");
 
     assert_eq!(result, applied("cancelled"), "the answer ended it, but nothing could be delivered");
     assert!(rig.writes().is_empty(), "never write to a process that is gone");
@@ -696,14 +698,14 @@ async fn the_broker_remembers_how_the_last_256_held_requests_ended() {
     let id_of = |i: usize| held.iter().find(|w| w.tool_use_id == format!("toolu_{i}")).unwrap().request_id.clone();
     // End them one by one, in order.
     for i in 0..HELD {
-        assert_eq!(rig.broker.answer(&id_of(i), &deny(None), "w", "c"), applied("denied"));
+        assert_eq!(rig.broker.answer(&id_of(i), &deny(None), "w", "app"), applied("denied"));
     }
 
     // The newest 256 (44..=299) are remembered; the 44 before are not.
-    assert_eq!(rig.broker.answer(&id_of(HELD - 1), &allow_once(), "w", "c"), already("denied"));
-    assert_eq!(rig.broker.answer(&id_of(44), &allow_once(), "w", "c"), already("denied"), "the 256th newest is still there");
-    assert_eq!(rig.broker.answer(&id_of(43), &allow_once(), "w", "c"), AnswerResult::UnknownRequest, "the 257th is forgotten");
-    assert_eq!(rig.broker.answer(&id_of(0), &allow_once(), "w", "c"), AnswerResult::UnknownRequest);
+    assert_eq!(rig.broker.answer(&id_of(HELD - 1), &allow_once(), "w", "app"), already("denied"));
+    assert_eq!(rig.broker.answer(&id_of(44), &allow_once(), "w", "app"), already("denied"), "the 256th newest is still there");
+    assert_eq!(rig.broker.answer(&id_of(43), &allow_once(), "w", "app"), AnswerResult::UnknownRequest, "the 257th is forgotten");
+    assert_eq!(rig.broker.answer(&id_of(0), &allow_once(), "w", "app"), AnswerResult::UnknownRequest);
     assert!(rig.writes().iter().all(|(_, b)| b["behavior"] == "deny"), "a forgotten or late answer never approves");
 }
 
@@ -734,7 +736,7 @@ async fn a_held_request_is_denied_timed_out_at_exactly_fifteen_minutes() {
             if *request_id == wire.request_id && outcome == "timed_out")),
         "the cards are told: {frames:?}"
     );
-    assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "c"), already("timed_out"));
+    assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "app"), already("timed_out"));
 }
 
 // ── the app leaves ────────────────────────────────────────────────────────────
@@ -797,7 +799,7 @@ async fn a_reconnect_within_the_grace_keeps_the_request_and_its_snapshot_redeliv
     tokio::time::advance(Duration::from_secs(60)).await;
     settle().await;
     assert!(rig.writes().is_empty(), "the reconnect cancelled the denial");
-    assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "c"), applied("allowed_once"));
+    assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "app-again"), applied("allowed_once"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -936,4 +938,121 @@ async fn a_session_that_stops_cancels_its_held_requests_and_nothing_is_written()
         "and the count drops to zero: {frames:?}"
     );
     assert!(rig.broker.snapshot().is_empty());
+}
+
+// ── AP0b review fix-ups ───────────────────────────────────────────────────────
+
+use nostromo::ipc::protocol::MAX_FRAME_LEN;
+
+fn big_command(bytes: usize) -> String {
+    format!("echo {}", "x".repeat(bytes))
+}
+
+#[tokio::test(start_paused = true)]
+async fn f1_a_request_too_large_to_show_is_denied_at_hold_and_never_held() {
+    let rig = Rig::new();
+    rig.broker.presenter_connected("app");
+
+    rig.submit_to(T, rig.generation, "toolu_big", &big_command(MAX_FRAME_LEN + 1024));
+    let outcome = rig.wait_outcome("toolu_big").await;
+
+    assert_eq!(outcome_name(&outcome), "too_large");
+    assert!(rig.broker.snapshot().is_empty(), "never held");
+    let writes = rig.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].1["behavior"], "deny");
+    assert!(
+        !writes[0].1["message"].as_str().unwrap().contains("xxxx"),
+        "the deny carries no request content"
+    );
+    let audit = serde_json::to_string(&outcome).unwrap();
+    assert!(audit.len() < 4096, "the outcome entry is content-free");
+}
+
+#[tokio::test(start_paused = true)]
+async fn f1_many_near_limit_requests_never_make_an_oversize_snapshot_and_none_is_dropped_silently() {
+    let rig = Rig::new();
+    rig.broker.presenter_connected("app");
+    let ids: Vec<String> = (0..6).map(|i| format!("toolu_n{i}")).collect();
+    for id in &ids {
+        rig.submit_to(T, rig.generation, id, &big_command(1_300_000));
+    }
+    rig.barrier().await;
+
+    let snapshot = rig.broker.presenter_connected("app-2");
+
+    let frame = serde_json::to_vec(&ServerMsg::ApprovalsSnapshot { requests: snapshot.clone() }).unwrap();
+    assert!(frame.len() <= MAX_FRAME_LEN, "the snapshot frame is {} bytes", frame.len());
+    assert!(!snapshot.is_empty(), "what fits is still shown");
+    for id in &ids {
+        let shown = snapshot.iter().any(|w| w.tool_use_id == *id);
+        let denied = rig.outcomes(id).first().map(|e| outcome_name(e).to_owned());
+        assert!(
+            shown ^ (denied.as_deref() == Some("too_large")),
+            "{id}: either shown or denied too_large, got shown={shown} outcome={denied:?}"
+        );
+    }
+    assert!(snapshot.len() < ids.len(), "some did not fit and were denied");
+}
+
+#[tokio::test(start_paused = true)]
+async fn f2_a_huge_window_id_with_newlines_is_cleaned_and_bounded_before_it_is_logged_or_broadcast() {
+    let mut rig = Rig::new();
+    rig.broker.presenter_connected("app");
+    let wire = rig.hold("toolu_1").await;
+    rig.frames();
+    let window = format!("win\nforged\r\n{}", "w".repeat(4 * 1024 * 1024));
+
+    let result = rig.broker.answer(&wire.request_id, &allow_once(), &window, "app");
+
+    assert_eq!(result, applied("allowed_once"));
+    let limit = nostromo::approvals::audit::MAX_RECORDED_STRING_BYTES + 32;
+    let by_window = rig.frames().into_iter().find_map(|m| match m {
+        ServerMsg::ApprovalResolved { by_window, .. } => by_window,
+        _ => None,
+    });
+    let by_window = by_window.expect("the resolution names a window");
+    assert!(by_window.len() <= limit, "broadcast window id is {} bytes", by_window.len());
+    let outcome = rig.wait_outcome("toolu_1").await;
+    let Event::Outcome { by_window: logged, .. } = &outcome.event else { unreachable!() };
+    assert!(logged.as_deref().unwrap().len() <= limit);
+}
+
+#[tokio::test(start_paused = true)]
+async fn f3_a_verified_app_that_never_rendered_approvals_cannot_answer() {
+    let rig = Rig::new();
+    rig.broker.presenter_connected("app");
+    rig.broker.app_connected("operator-only");
+    let wire = rig.hold("toolu_1").await;
+
+    let result = rig.broker.answer(&wire.request_id, &allow_once(), "w", "operator-only");
+
+    assert_eq!(result, AnswerResult::NotPresenter);
+    assert_eq!(result.refusal().map(|r| r.0), Some(AnswerRefusal::NotOperatorApp));
+    assert!(rig.writes().is_empty(), "nothing reached the CLI");
+    assert_eq!(rig.broker.snapshot().len(), 1, "still held");
+    assert_eq!(rig.broker.answer(&wire.request_id, &deny(None), "w", "app"), applied("denied"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn f5_resubscribing_without_renders_approvals_revokes_presenter_status() {
+    let rig = Rig::new();
+    rig.broker.presenter_connected("app");
+    rig.broker.presenter_connected("app-b");
+    let wire = rig.hold("toolu_1").await;
+
+    rig.broker.presenter_revoked("app");
+
+    assert_eq!(rig.broker.answer(&wire.request_id, &allow_once(), "w", "app"), AnswerResult::NotPresenter);
+    assert!(rig.broker.has_approval_presenter(), "app-b is still one");
+
+    rig.broker.presenter_revoked("app-b");
+    settle().await;
+    tokio::time::advance(PRESENTER_GRACE + Duration::from_millis(100)).await;
+    let outcome = rig.wait_outcome("toolu_1").await;
+    assert_eq!(
+        outcome_name(&outcome),
+        "approval_unavailable",
+        "the last presenter revoking starts the grace (the app is still connected, so not no_app)"
+    );
 }

@@ -36,7 +36,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event};
 use nostromo::approvals::broker::{
     ApprovalBroker, BrokerParts, Incoming, Presenter, SessionInfo, SessionSink,
-    INVALID_REQUEST_MESSAGE, REQUEST_TIMEOUT,
+    INVALID_REQUEST_MESSAGE, APPROVAL_TIMEOUT,
 };
 use nostromo::approvals::guard::{
     self, hook_settings_json, PaneInfo, PaneProbe, ProbeError, TmuxSocket,
@@ -216,7 +216,7 @@ impl World {
                 presenter: presenter.clone(),
                 probe: Arc::new(|| Box::new(NoPanes)),
                 settings: Arc::new(NoRules),
-                timeout: REQUEST_TIMEOUT,
+                timeout: APPROVAL_TIMEOUT,
             },
         );
         let barrier_generation = broker.register_session(

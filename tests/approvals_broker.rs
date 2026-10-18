@@ -32,7 +32,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event, RETENTION_DAYS};
 use nostromo::approvals::broker::{
     restart_note_text, ApprovalBroker, BrokerParts, Incoming, Outcome, Presenter, SessionInfo, SessionSink,
-    ARRIVAL_WATCHDOG, INVALID_REQUEST_MESSAGE, APPROVAL_UNAVAILABLE_MESSAGE, NO_APP_MESSAGE, REQUEST_TIMEOUT, RESTART_MESSAGE,
+    ARRIVAL_WATCHDOG, INVALID_REQUEST_MESSAGE, APPROVAL_UNAVAILABLE_MESSAGE, NO_APP_MESSAGE, APPROVAL_TIMEOUT, RESTART_MESSAGE,
     RESTART_NOTES_FILE, TIMED_OUT_MESSAGE, WATCHDOG_GRACE,
 };
 use nostromo::approvals::guard::{
@@ -262,7 +262,7 @@ impl Default for Opts {
             gate: None,
             pane_9: None,
             settings: Arc::new(NoRules),
-            timeout: REQUEST_TIMEOUT,
+            timeout: APPROVAL_TIMEOUT,
         }
     }
 }
@@ -406,7 +406,7 @@ impl Rig {
 
     /// Run the clock far past every deadline and watchdog; nothing further may happen.
     async fn run_out_the_clock(&self) {
-        tokio::time::advance(REQUEST_TIMEOUT + WATCHDOG_GRACE + Duration::from_secs(60)).await;
+        tokio::time::advance(APPROVAL_TIMEOUT + WATCHDOG_GRACE + Duration::from_secs(60)).await;
         settle().await;
         self.barrier().await;
     }
@@ -1034,12 +1034,12 @@ async fn the_arrival_watchdog_does_not_end_a_request_that_is_being_held() {
 
 #[tokio::test(start_paused = true)]
 async fn an_unanswered_request_is_denied_after_fifteen_minutes() {
-    assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(15 * 60));
+    assert_eq!(APPROVAL_TIMEOUT, Duration::from_secs(15 * 60));
     let rig = Rig::new(holding());
     rig.submit("cli-1", request_as("simple_rm", "toolu_1"));
     rig.arm().await;
 
-    tokio::time::advance(REQUEST_TIMEOUT - Duration::from_secs(1)).await;
+    tokio::time::advance(APPROVAL_TIMEOUT - Duration::from_secs(1)).await;
     settle().await;
     assert!(rig.writes().is_empty(), "not yet: one second early");
 
@@ -1087,7 +1087,7 @@ async fn the_deadline_and_its_watchdog_firing_together_still_end_the_request_onc
     rig.submit("cli-1", request_as("simple_rm", "toolu_1"));
     rig.arm().await;
 
-    tokio::time::advance(REQUEST_TIMEOUT + WATCHDOG_GRACE).await;
+    tokio::time::advance(APPROVAL_TIMEOUT + WATCHDOG_GRACE).await;
     rig.wait_outcome("toolu_1").await;
     settle().await;
 
@@ -1541,7 +1541,7 @@ async fn a_held_request_whose_process_died_is_cancelled_and_not_timed_out_into_a
     rig.arm().await;
     rig.sink.die();
 
-    tokio::time::advance(REQUEST_TIMEOUT).await;
+    tokio::time::advance(APPROVAL_TIMEOUT).await;
 
     assert_eq!(
         outcome_name(&rig.wait_outcome("toolu_1").await),
@@ -1651,7 +1651,7 @@ async fn a_held_request_for_a_replaced_process_or_unknown_session_never_gets_a_w
     );
     rig.arm().await;
 
-    tokio::time::advance(REQUEST_TIMEOUT + WATCHDOG_GRACE).await;
+    tokio::time::advance(APPROVAL_TIMEOUT + WATCHDOG_GRACE).await;
 
     for id in ["toolu_stale", "toolu_unknown"] {
         assert_eq!(
@@ -1759,7 +1759,7 @@ async fn two_sessions_do_not_affect_each_other() {
     rig.barrier().await;
     assert!(rig.outcomes("toolu_b").is_empty());
 
-    tokio::time::advance(REQUEST_TIMEOUT).await;
+    tokio::time::advance(APPROVAL_TIMEOUT).await;
     let outcome = rig.wait_outcome("toolu_b").await;
     assert_eq!(outcome_name(&outcome), "timed_out");
     assert_eq!(
@@ -2214,7 +2214,7 @@ async fn drive(ending: &str) -> Run {
             let rig = Rig::new(holding());
             rig.submit("cli-1", request_as("simple_rm", tool_use_id));
             rig.arm().await;
-            tokio::time::advance(REQUEST_TIMEOUT).await;
+            tokio::time::advance(APPROVAL_TIMEOUT).await;
             rig.wait_outcome(tool_use_id).await;
             rig.run_out_the_clock().await;
             Run {
@@ -2453,7 +2453,7 @@ fn broker_on(dir: &Path) -> ApprovalBroker {
                 })
             }),
             settings: Arc::new(NoRules),
-            timeout: REQUEST_TIMEOUT,
+            timeout: APPROVAL_TIMEOUT,
         },
     )
 }

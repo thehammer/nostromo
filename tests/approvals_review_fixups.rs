@@ -25,7 +25,7 @@ use nostromo::approvals::audit::{
     AuditFilter, AuditLog, Entry, Event, MAX_RECORDED_STRING_BYTES, RETENTION_DAYS,
 };
 use nostromo::approvals::broker::{
-    ApprovalBroker, BrokerParts, Incoming, NoPresenter, SessionInfo, SessionSink, REQUEST_TIMEOUT,
+    ApprovalBroker, BrokerParts, Incoming, NoPresenter, SessionInfo, SessionSink, APPROVAL_TIMEOUT,
 };
 use nostromo::approvals::guard::{PaneInfo, PaneProbe, ProbeError, TmuxSocket};
 use nostromo::approvals::request::{AskRule, SettingsSource};
@@ -144,7 +144,7 @@ fn parts() -> BrokerParts {
         presenter: Arc::new(NoPresenter),
         probe: Arc::new(|| Box::new(NoPanes)),
         settings: Arc::new(NoRules),
-        timeout: REQUEST_TIMEOUT,
+        timeout: APPROVAL_TIMEOUT,
     }
 }
 
