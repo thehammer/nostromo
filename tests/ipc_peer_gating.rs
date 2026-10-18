@@ -3081,7 +3081,7 @@ async fn a_tcp_peer_cannot_drive_an_existing_ordinary_session_through_list_send_
 }
 
 #[tokio::test]
-async fn a_unix_peer_may_still_answer_a_permission_prompt_without_error() {
+async fn a_unix_peer_answering_a_permission_prompt_the_old_way_is_told_it_is_superseded() {
     let h = spawn_server().await;
     let (mut unix, _) = h.unix(vec![]).await;
     spawn_fake_session(&mut unix, "cody-perm", "cody", "v-r4-perm").await;
@@ -3094,7 +3094,13 @@ async fn a_unix_peer_may_still_answer_a_permission_prompt_without_error() {
         },
     )
     .await;
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })), "{frames:?}");
+    // AP0b: `session_answer_permission` is superseded by `approval_answer` for every
+    // peer. It says so, and does nothing.
+    assert!(
+        frames.iter().any(|m| matches!(m, ServerMsg::Error { message }
+            if message == "session_answer_permission is superseded by approval_answer")),
+        "{frames:?}"
+    );
 }
 
 // ── round 4, 2. read tools are withheld from a network-driven session ─────────
