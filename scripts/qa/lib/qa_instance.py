@@ -282,11 +282,23 @@ def kill_pid(pid):
         pass
 
 
-def teardown(qa_root, state):
-    for key in ("app_pid", "daemon_pid"):
-        pid = state.get(key)
-        if pid:
-            kill_pid(pid)
+def proc_start(pid):
+    """The process start time string for pid, or None when it is not running."""
+    r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out else None
+
+
+def is_recorded_process(pid, recorded_start, start_of=proc_start):
+    """True only when pid is still the very process we spawned (guards against pid reuse)."""
+    return bool(recorded_start) and start_of(pid) == recorded_start
+
+
+def teardown(qa_root, state, start_of=proc_start, kill=kill_pid):
+    for key in ("app", "daemon"):
+        pid = state.get(f"{key}_pid")
+        if pid and is_recorded_process(pid, state.get(f"{key}_start"), start_of):
+            kill(pid)
 
 
 def cmd_start(args):
@@ -306,6 +318,7 @@ def cmd_start(args):
                   daemon_env(qa_root, os.environ, fake_claude, guard_bin),
                   os.path.join(qa_root, "nostromd.log"))
         state["daemon_pid"] = d.pid
+        state["daemon_start"] = proc_start(d.pid)
         save_state(qa_root, state)
         wait_for(lambda: os.path.exists(sock) and d.poll() is None, 30, "the QA daemon socket")
 
@@ -319,6 +332,7 @@ def cmd_start(args):
         a = spawn([os.path.join(clone, "Contents", "MacOS", "Nostromo")],
                   app_env(qa_root, os.environ, synthetic), os.path.join(qa_root, "app.log"))
         state["app_pid"] = a.pid
+        state["app_start"] = proc_start(a.pid)
         save_state(qa_root, state)
         ctl = os.path.join(qa_root, "app-control.sock")
         wait_for(lambda: a.poll() is None and run([os.path.join(REPO, "bin", "nostromo-app"), "--socket", ctl, "ping"]).returncode == 0,

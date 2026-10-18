@@ -21,6 +21,25 @@ def read(*parts):
         return f.read()
 
 
+class TeardownPidReuseTests(unittest.TestCase):
+    def test_kills_only_processes_whose_start_time_matches_the_record(self):
+        killed = []
+        starts = {10: "Sun Oct 18 10:00:00 2026", 20: "Sun Oct 18 12:34:56 2026"}  # 20 is a recycled pid
+        state = {"app_pid": 10, "app_start": starts[10], "daemon_pid": 20, "daemon_start": "Sun Oct 18 10:00:01 2026"}
+        qa.teardown("/x", state, start_of=starts.get, kill=killed.append)
+        self.assertEqual(killed, [10])
+
+    def test_no_recorded_start_means_never_kill(self):
+        killed = []
+        qa.teardown("/x", {"app_pid": 10, "daemon_pid": 20}, start_of=lambda p: "t", kill=killed.append)
+        self.assertEqual(killed, [])
+
+    def test_a_gone_process_is_not_killed(self):
+        killed = []
+        qa.teardown("/x", {"app_pid": 10, "app_start": "t"}, start_of=lambda p: None, kill=killed.append)
+        self.assertEqual(killed, [])
+
+
 class PlistTests(unittest.TestCase):
     def test_clone_gets_the_qa_bundle_id_and_keeps_everything_else(self):
         info = {"CFBundleIdentifier": "com.hammer.nostromo", "CFBundleName": "Nostromo", "LSUIElement": True}
