@@ -25,6 +25,9 @@ public struct MotherJobRowModel: Identifiable, Equatable {
     public let progressLine: String?
     /// The spoken form of `progressLine` (VoiceOver); falls back to the line itself.
     public let progressAccessibility: String?
+    /// The surface draws the progress line (the Mac does; iOS does not yet). Only then do running
+    /// and awaiting rows reserve it.
+    public let showsProgressLine: Bool
     /// Short attention labels, e.g. "Needs decision" (see `MotherAttentionBadges`).
     public let attentionBadges: [String]
 
@@ -38,7 +41,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         relativeTimestamp: String? = nil,
         progressLine: String? = nil,
         attentionBadges: [String] = [],
-        progressAccessibility: String? = nil
+        progressAccessibility: String? = nil,
+        showsProgressLine: Bool = false
     ) {
         self.id               = id
         self.state            = state
@@ -50,12 +54,13 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.progressLine     = progressLine
         self.attentionBadges  = attentionBadges
         self.progressAccessibility = progressAccessibility
+        self.showsProgressLine = showsProgressLine
     }
 
     /// Running and awaiting rows reserve a second line for progress and attention, so a
     /// job gaining progress does not change its row's height.
     public var reservesProgressLine: Bool {
-        state == "running" || state == "awaiting"
+        showsProgressLine && (state == "running" || state == "awaiting")
     }
 
     /// Terminal states → the row's swipe action is "Archive".

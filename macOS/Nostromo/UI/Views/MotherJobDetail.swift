@@ -426,6 +426,7 @@ final class MotherJobDetail: NSView {
 
         guard let job else {
             actionIdentity = nil
+            actionStack = nil
             showEmpty()
             return
         }
@@ -1394,9 +1395,9 @@ final class MotherCountsChips: NSView {
         Spec(symbol: "?", label: "Awaiting",  color: Theme.amber,       count: { $0.awaiting },  reservedWidth: nil),
         Spec(symbol: "✓", label: "Succeeded", color: Theme.sage,        count: { $0.succeeded }, reservedWidth: nil),
         Spec(symbol: "!", label: "Failed",    color: Theme.redSweater,  count: { $0.failed },    reservedWidth: nil),
-        Spec(symbol: "⚑", label: "Needs you", color: Theme.amber,       count: { $0.needsYou },  reservedWidth: 92),
-        Spec(symbol: "◔", label: "Stalled",   color: Theme.redSweater,  count: { $0.stalled },   reservedWidth: 76),
-        Spec(symbol: "▲", label: "Burning",   color: Theme.redSweater,  count: { $0.burning },   reservedWidth: 76),
+        Spec(symbol: "⚑", label: "Needs you", color: Theme.amber,       count: { $0.needsYou },  reservedWidth: 96),
+        Spec(symbol: "◔", label: "Stalled",   color: Theme.redSweater,  count: { $0.stalled },   reservedWidth: 84),
+        Spec(symbol: "▲", label: "Burning",   color: Theme.redSweater,  count: { $0.burning },   reservedWidth: 84),
     ]
 
     private final class Chip: NSView {
@@ -1404,20 +1405,20 @@ final class MotherCountsChips: NSView {
         let symbol = NSTextField(labelWithString: "")
         let number = NSTextField(labelWithString: "0")
         let label  = NSTextField(labelWithString: "")
-        let content: NSStackView
+        let content = NSStackView()
 
         init(spec: Spec) {
             self.spec = spec
+            super.init(frame: .zero)
             symbol.stringValue = spec.symbol
             label.stringValue = spec.label
             symbol.font = .systemFont(ofSize: 11)
             number.font = .monospacedDigitSystemFont(ofSize: 16, weight: .light)
             label.font  = .systemFont(ofSize: 10)
-            content = NSStackView(views: [symbol, number, label])
+            [symbol, number, label].forEach { content.addArrangedSubview($0) }
             content.orientation = .horizontal
             content.spacing = 4
             content.alignment = .centerY
-            super.init(frame: .zero)
             content.translatesAutoresizingMaskIntoConstraints = false
             addSubview(content)
             NSLayoutConstraint.activate([
@@ -1428,7 +1429,9 @@ final class MotherCountsChips: NSView {
             if let width = spec.reservedWidth {
                 // A fixed slot: the content sits inside it and may come and go.
                 widthAnchor.constraint(equalToConstant: width).isActive = true
-                content.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor).isActive = true
+                let fit = content.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor)
+                fit.priority = .defaultHigh   // never a hard conflict with the slot width
+                fit.isActive = true
             } else {
                 content.trailingAnchor.constraint(equalTo: trailingAnchor).isActive = true
             }

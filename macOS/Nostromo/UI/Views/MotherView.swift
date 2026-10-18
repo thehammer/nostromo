@@ -341,7 +341,8 @@ private class MotherJobListViewModel: ObservableObject {
             relativeTimestamp: formattedTimestamp(for: job),
             progressLine: progress?.text,
             attentionBadges: MotherAttentionBadges.make(job.crew.attention).filter { !$0.acked }.map(\.label),
-            progressAccessibility: progress?.accessibility
+            progressAccessibility: progress?.accessibility,
+            showsProgressLine: true
         )
     }
 

@@ -8,6 +8,7 @@ runs one and reads the PASS/FAIL lines.
 |---|---|---|
 | `teri-fred-smoke.sh` | Teri tabs, legibility, list → detail, the Send to agent sheet (cancel path), Fred panes, sidebar badges | UI only: tab clicks (never Picks, never Sentry unless asked), row selection, opening and cancelling one sheet; switches to Teri only when told to |
 | `window-placement-check.sh` | one fullscreen window per display, none sharing a display, the last launch's placement log | nothing (reads `windows`, the log, and `system_profiler SPDisplaysDataType -json`) |
+| `mother-crew.sh` | the Mother panel's crew view: a crew job's progress line, gate rows (with exit code on a failed gate) and lens wave (skipped lens in words, citations found) update live from a replayed fixture, and no ambiguous layout in the pane; reads VoiceOver text, not glyphs | needs the fake broker (`--scenario crew_gates`) and a QA build on it; clicks the Mother entry and two jobs; takes keyboard focus for the run and gives it back; resets and replays the fake broker's jobs (sends the real Mother nothing) |
 | `attach-chip.sh`, `mother-tabs.sh`, `mother-queue.sh` | older scenarios; `mother-*` need the fake Mother broker (see their headers) | UI clicks / drops |
 
 ## Running them
