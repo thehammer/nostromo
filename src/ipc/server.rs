@@ -928,18 +928,13 @@ fn handle_client_msg(
         // An attempt to answer a permission request over the network is a
         // security event: it is logged before the peer is told no.
         if let ClientMsg::ApprovalAnswer { request_id, .. } = &msg {
-            let broker = session_mgr.lock().unwrap().approvals().cloned();
-            let (tx, reply) = (targeted_tx.clone(), refusal_reply());
-            audit_refusal_then(
-                broker,
-                Some(request_id.clone()),
-                AnswerRefusal::RequiresSecureConnection.as_str(),
+            refuse_approval_answer(
+                session_mgr.lock().unwrap().approvals().cloned(),
+                targeted_tx,
+                request_id.clone(),
+                AnswerRefusal::RequiresSecureConnection,
+                network_refusal_reply(&msg),
                 peer_json(trust, peer),
-                None,
-                None,
-                move || {
-                    let _ = tx.send(reply);
-                },
             );
             return;
         }
@@ -1110,10 +1105,10 @@ fn handle_client_msg(
 
         ClientMsg::ApprovalAnswer { request_id, decision, window_id, .. } => {
             let broker = session_mgr.lock().unwrap().approvals().cloned();
-            let refused = |code: AnswerRefusal, outcome: Option<String>| ServerMsg::ApprovalAnswerRefused {
+            let refused = |code: AnswerRefusal| ServerMsg::ApprovalAnswerRefused {
                 request_id: request_id.clone(),
                 code,
-                outcome,
+                outcome: None,
             };
             // Only the verified Mac app answers for the human, and only with the
             // connection's nonce from a process still verified (checked by the
@@ -1129,37 +1124,28 @@ fn handle_client_msg(
             };
             if let Some(why) = not_allowed {
                 warn!(conn_key, %request_id, ?trust, peer_pid = peer.map(|p| p.pid), "ApprovalAnswer refused: {why}");
-                let (tx, reply) = (targeted_tx.clone(), refused(AnswerRefusal::NotOperatorApp, None));
-                audit_refusal_then(
+                let reply = refused(AnswerRefusal::NotOperatorApp);
+                refuse_approval_answer(
                     broker,
-                    Some(request_id),
-                    AnswerRefusal::NotOperatorApp.as_str(),
+                    targeted_tx,
+                    request_id,
+                    AnswerRefusal::NotOperatorApp,
+                    reply,
                     peer_json(trust, peer),
-                    None,
-                    None,
-                    move || {
-                        let _ = tx.send(reply);
-                    },
                 );
                 return;
             }
             let Some(broker) = broker else {
-                let _ = targeted_tx.send(refused(AnswerRefusal::UnknownRequest, None));
+                let _ = targeted_tx.send(refused(AnswerRefusal::UnknownRequest));
                 return;
             };
             // Writing the answer to the session and the audit log is blocking I/O.
             let (tx, conn, peer) = (targeted_tx.clone(), conn_key.to_string(), peer_json(trust, peer));
             tokio::task::spawn_blocking(move || {
-                let result = broker.answer(&request_id, &decision, &window_id, &conn);
-                if let Some((code, outcome)) = result.refusal() {
-                    broker.record_refusal(Some(&request_id), code.as_str(), peer, None, None);
-                    let _ = tx.send(ServerMsg::ApprovalAnswerRefused {
-                        request_id,
-                        code,
-                        outcome: outcome.map(str::to_owned),
-                    });
-                }
                 // Applied: the resolution is broadcast to every presenter, this one included.
+                if let Some(refusal) = broker.answer_or_refusal(&request_id, &decision, &window_id, &conn, peer) {
+                    let _ = tx.send(refusal);
+                }
             });
         }
 
@@ -1765,15 +1751,6 @@ fn seed_fred(
     }
 }
 
-/// Answer a refused request from a network peer with
-/// `requires_secure_connection`, in the targeted frame that matches the
-/// request (or a plain `Error` for requests that have no result frame).
-/// The refusal frame an `ApprovalAnswer` from a network peer is answered with.
-fn refusal_reply() -> ServerMsg {
-    let refusal = WorkError::requires_secure_connection();
-    ServerMsg::Error { message: format!("{}: {}", refusal.code, refusal.message) }
-}
-
 /// Who a peer is, for the audit log: `{trust, pid?, exe?}`.
 fn peer_json(trust: PeerTrust, peer: Option<&PeerInfo>) -> serde_json::Value {
     let mut v = serde_json::json!({
@@ -1788,6 +1765,22 @@ fn peer_json(trust: PeerTrust, peer: Option<&PeerInfo>) -> serde_json::Value {
         v["exe"] = serde_json::json!(p.exe.display().to_string());
     }
     v
+}
+
+/// Refuse an `ApprovalAnswer`: log the refusal, then send `reply` (so the peer is
+/// never told "refused" before the log says so).
+fn refuse_approval_answer(
+    broker: Option<ApprovalBroker>,
+    targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
+    request_id: String,
+    code: AnswerRefusal,
+    reply: ServerMsg,
+    peer: serde_json::Value,
+) {
+    let tx = targeted_tx.clone();
+    audit_refusal_then(broker, Some(request_id), code.as_str(), peer, None, None, move || {
+        let _ = tx.send(reply);
+    });
 }
 
 /// Write a `refusal` audit entry on the blocking pool, then run `then` (the reply
@@ -1809,9 +1802,17 @@ fn audit_refusal_then(
     });
 }
 
+/// Answer a refused request from a network peer with
+/// `requires_secure_connection`, in the targeted frame that matches the
+/// request (or a plain `Error` for requests that have no result frame).
 fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<ServerMsg>) {
+    let _ = targeted_tx.send(network_refusal_reply(msg));
+}
+
+/// The frame `refuse_over_network` sends for `msg`.
+fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
     let refusal = WorkError::requires_secure_connection();
-    let reply = match msg {
+    match msg {
         ClientMsg::WorkDetailRequest { request_id, .. } => ServerMsg::WorkDetail {
             request_id: request_id.clone(),
             result: WorkResult::Err(refusal),
@@ -1838,8 +1839,7 @@ fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<Serv
         _ => ServerMsg::Error {
             message: format!("{}: {}", refusal.code, refusal.message),
         },
-    };
-    let _ = targeted_tx.send(reply);
+    }
 }
 
 // ── retained-message cache ────────────────────────────────────────────────────
@@ -2006,19 +2006,23 @@ fn subscribed(topics: &[Topic], topic: Topic) -> bool {
 /// Does this broadcast go to a connection with these topics, which does or does
 /// not present approvals (is the verified Mac app and subscribed with
 /// `renders_approvals`)? The approval frames that carry a command go to
-/// presenters and nobody else; the count goes to a presenter, to a `decision`
-/// subscriber and to an everything-subscriber. Network redaction still applies
-/// after this (see [`outbound`]).
+/// presenters and nobody else; the count also goes to a `decision` subscriber
+/// and to an everything-subscriber. Network redaction still applies after this
+/// (see [`outbound`]).
 fn deliver_broadcast(msg: &ServerMsg, topics: &[Topic], presents_approvals: bool) -> bool {
-    match msg {
+    (presents_approvals && is_approval_frame(msg)) || message_matches_topics(msg, topics)
+}
+
+fn is_approval_frame(msg: &ServerMsg) -> bool {
+    matches!(
+        msg,
         ServerMsg::ApprovalRequest { .. }
-        | ServerMsg::ApprovalsSnapshot { .. }
-        | ServerMsg::ApprovalResolved { .. }
-        | ServerMsg::ApprovalGuardBlocked { .. }
-        | ServerMsg::ApprovalAnswerRefused { .. } => presents_approvals,
-        ServerMsg::ApprovalPending { .. } => presents_approvals || message_matches_topics(msg, topics),
-        other => message_matches_topics(other, topics),
-    }
+            | ServerMsg::ApprovalsSnapshot { .. }
+            | ServerMsg::ApprovalResolved { .. }
+            | ServerMsg::ApprovalGuardBlocked { .. }
+            | ServerMsg::ApprovalAnswerRefused { .. }
+            | ServerMsg::ApprovalPending { .. }
+    )
 }
 
 fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {

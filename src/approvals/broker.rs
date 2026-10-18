@@ -125,9 +125,9 @@ pub fn restart_note_text(tool: &str) -> String {
 /// How a request ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Nobody could be asked: the app is closed (contract §6.2; later slices).
+    /// Nobody could be asked: no verified Mac app is connected (contract §6.2).
     NoApp,
-    /// Nobody could be asked: there is no approval screen yet (this slice).
+    /// Nobody could be asked: the app is open but cannot show the request.
     NotAvailable,
     /// The deny could not be written to the session.
     DenyWriteFailed,
@@ -182,18 +182,6 @@ struct Ending {
 }
 
 impl Ending {
-    fn deny(outcome: Outcome, message: &str) -> Self {
-        Self {
-            outcome,
-            message: Some(message.to_owned()),
-            rule: None,
-            watchdog: false,
-            allow: None,
-            interrupt: false,
-            by_window: None,
-        }
-    }
-
     fn silent(outcome: Outcome) -> Self {
         Self {
             outcome,
@@ -203,6 +191,13 @@ impl Ending {
             allow: None,
             interrupt: false,
             by_window: None,
+        }
+    }
+
+    fn deny(outcome: Outcome, message: &str) -> Self {
+        Self {
+            message: Some(message.to_owned()),
+            ..Self::silent(outcome)
         }
     }
 
@@ -346,6 +341,16 @@ struct PresenterSets {
 }
 
 impl ApprovalPresenters {
+    /// Is a verified app that renders approvals connected?
+    pub fn has_presenter(&self) -> bool {
+        !lock(&self.sets).presenters.is_empty()
+    }
+
+    /// Is a verified app connected, rendering approvals or not?
+    pub fn has_app(&self) -> bool {
+        !lock(&self.sets).apps.is_empty()
+    }
+
     fn add_app(&self, conn: &str) {
         lock(&self.sets).apps.insert(conn.to_owned());
     }
@@ -361,16 +366,6 @@ impl ApprovalPresenters {
         let mut sets = lock(&self.sets);
         sets.apps.remove(conn);
         sets.presenters.remove(conn)
-    }
-
-    /// Is a verified app that renders approvals connected?
-    pub fn has_presenter(&self) -> bool {
-        !lock(&self.sets).presenters.is_empty()
-    }
-
-    /// Is a verified app connected, rendering approvals or not?
-    pub fn has_app(&self) -> bool {
-        !lock(&self.sets).apps.is_empty()
     }
 }
 
@@ -526,9 +521,16 @@ impl State {
             }
         }
     }
-}
 
-impl State {
+    /// What a late answer to `request_id` is told: how the held request ended, or
+    /// that nobody knows it.
+    fn answer_to_ended(&self, request_id: &str) -> AnswerResult {
+        match self.ended.get(request_id) {
+            Some(outcome) => AnswerResult::AlreadyResolved { outcome: outcome.clone() },
+            None => AnswerResult::UnknownRequest,
+        }
+    }
+
     /// The registration of `tag`'s process `generation`, if that process is still the one registered.
     fn session(&self, tag: &str, generation: u64) -> Option<&Registered> {
         self.sessions
@@ -1083,12 +1085,7 @@ impl ApprovalBroker {
             match st.pending.get(request_id) {
                 Some(p) if p.held => p.input.clone(),
                 Some(_) => None,
-                None => {
-                    return match st.ended.get(request_id) {
-                        Some(outcome) => AnswerResult::AlreadyResolved { outcome: outcome.clone() },
-                        None => AnswerResult::UnknownRequest,
-                    }
-                }
+                None => return st.answer_to_ended(request_id),
             }
         };
         let Some(input) = input else {
@@ -1107,11 +1104,28 @@ impl ApprovalBroker {
             }
             // Another answer (or the timeout, or the app quitting) got there between
             // the look above and the removal.
-            None => match lock(&self.inner.state).ended.get(request_id) {
-                Some(outcome) => AnswerResult::AlreadyResolved { outcome: outcome.clone() },
-                None => AnswerResult::UnknownRequest,
-            },
+            None => lock(&self.inner.state).answer_to_ended(request_id),
         }
+    }
+
+    /// [`Self::answer`], and if it was not applied: log the refusal (`peer` is
+    /// `{trust, pid?, exe?}`) and return the frame that tells the answering window.
+    pub fn answer_or_refusal(
+        &self,
+        request_id: &str,
+        decision: &ApprovalDecision,
+        window_id: &str,
+        conn_key: &str,
+        peer: Value,
+    ) -> Option<ServerMsg> {
+        let result = self.answer(request_id, decision, window_id, conn_key);
+        let (code, outcome) = result.refusal()?;
+        self.record_refusal(Some(request_id), code.as_str(), peer, None, None);
+        Some(ServerMsg::ApprovalAnswerRefused {
+            request_id: request_id.to_owned(),
+            code,
+            outcome: outcome.map(str::to_owned),
+        })
     }
 
     /// Record in the audit log that an answer (or a report of a refused input) was
@@ -1431,24 +1445,21 @@ impl Inner {
         value: &Value,
     ) {
         let epoch_at_check = self.grace_epoch.load(Ordering::SeqCst);
-        let session = {
-            let st = lock(&self.state);
-            st.session(&ident.tag, generation).map(|r| r.info.clone())
-        };
+        let session = lock(&self.state)
+            .session(&ident.tag, generation)
+            .map(|r| r.info.clone());
         let cwd = session.as_ref().and_then(|s| s.cwd.clone());
-        let session_gone = session.is_none();
         self.log_request_once(ident, arrived_at, value, cwd.as_deref());
         if !lock(&self.state).pending.contains_key(request_id) {
             return; // it ended while it waited for the worker
         }
-        let parsed = PermissionRequest::from_cli(value);
-        if session_gone {
+        let Some(session) = session else {
             // The process that asked is not the one registered (or none is): there
             // is nobody to answer, and nobody to ask about a process that is gone.
             self.finish(request_id, Ending::silent(Outcome::Cancelled));
             return;
-        }
-        let req = match parsed {
+        };
+        let req = match PermissionRequest::from_cli(value) {
             Ok(req) => req,
             Err(e) => {
                 warn!(tag = %ident.tag, "unreadable permission request: {e}");
@@ -1464,29 +1475,7 @@ impl Inner {
             return;
         }
         // The guard first: no rule, mode or answer is consulted before it.
-        let payload = HookPayload {
-            tool_name: req.tool_name.clone(),
-            tool_input: req.input.clone(),
-            session_id: ident.session_id.clone(),
-            tool_use_id: Some(req.tool_use_id.clone()),
-            permission_mode: None,
-            cwd: cwd.as_ref().map(|c| c.to_string_lossy().into_owned()),
-            hook_event_name: None,
-        };
-        let probe = (self.parts.probe)();
-        let blocked = match guard::evaluate(&payload, &*probe) {
-            Ok(GuardVerdict::Block { rule_id, detail }) => {
-                Some(Ending::guard(guard::GUARD_MESSAGE, rule_id, &detail))
-            }
-            Ok(GuardVerdict::Allow) => None,
-            // The guard could not decide: fail closed, like the hook does.
-            Err(e) => Some(Ending::guard(
-                guard::FAIL_CLOSED_MESSAGE,
-                "guard_error",
-                &e.to_string(),
-            )),
-        };
-        if let Some(ending) = blocked {
+        if let Some(ending) = self.guard_block(&req, ident, cwd.as_deref()) {
             if let Some(done) = self.finish(request_id, ending) {
                 self.broadcast(ServerMsg::ApprovalGuardBlocked {
                     tag: ident.tag.clone(),
@@ -1500,12 +1489,11 @@ impl Inner {
         }
         // The ordering rule, in code: a request is held for a human only if the
         // session carries the guard hook *and* someone who can answer is there.
-        let guarded = session.as_ref().is_some_and(|s| s.guarded);
-        if guarded && self.parts.presenter.can_present(&ident.tag) {
+        if session.guarded && self.parts.presenter.can_present(&ident.tag) {
             let wire = approval_wire(
                 request_id,
                 &ident.tag,
-                session.as_ref().map(|s| s.agent.as_str()).unwrap_or_default(),
+                &session.agent,
                 &req,
                 cwd.as_deref(),
                 &*self.parts.settings,
@@ -1515,8 +1503,34 @@ impl Inner {
         } else {
             self.finish(
                 request_id,
-                Ending::cannot_ask(guarded, self.parts.presenter.app_connected()),
+                Ending::cannot_ask(session.guarded, self.parts.presenter.app_connected()),
             );
+        }
+    }
+
+    /// The ending the guard imposes on `req`, or `None` if it lets the request through.
+    fn guard_block(&self, req: &PermissionRequest, ident: &Ident, cwd: Option<&Path>) -> Option<Ending> {
+        let payload = HookPayload {
+            tool_name: req.tool_name.clone(),
+            tool_input: req.input.clone(),
+            session_id: ident.session_id.clone(),
+            tool_use_id: Some(req.tool_use_id.clone()),
+            permission_mode: None,
+            cwd: cwd.map(|c| c.to_string_lossy().into_owned()),
+            hook_event_name: None,
+        };
+        let probe = (self.parts.probe)();
+        match guard::evaluate(&payload, &*probe) {
+            Ok(GuardVerdict::Block { rule_id, detail }) => {
+                Some(Ending::guard(guard::GUARD_MESSAGE, rule_id, &detail))
+            }
+            Ok(GuardVerdict::Allow) => None,
+            // The guard could not decide: fail closed, like the hook does.
+            Err(e) => Some(Ending::guard(
+                guard::FAIL_CLOSED_MESSAGE,
+                "guard_error",
+                &e.to_string(),
+            )),
         }
     }
 
