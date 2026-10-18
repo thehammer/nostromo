@@ -14,6 +14,139 @@ machine only): `.claude/plans/permission-approval-prompts*.md`,
 `.claude/plans/mother-crew-client*.md`, `.claude/plans/terminal-pane-*.md`,
 `.claude/plans/remove-rust-tui*.md`, `.claude/plans/offload-tests-index.md`.
 
+## Mother features adopted (2026-10-18, Mother `origin/main` `e597389`)
+
+Mother's headless-crew work landed after the first draft. Read from Mother's
+git only (`docs/design.md` "Headless crew contract (Phase 1)", `lib/gates.sh`,
+`lib/crew_config.py`, `CHANGELOG.md`). Each wedge file ends its acceptance
+section with "Mother crew: gates, lenses, checklist and calibration".
+
+**Gates (`.mother/crew.yml`, HC-05/06/08).** The file is read from the job's
+*base ref* at `mother add` and snapshotted into the job, so a wedge cannot add
+or loosen its own gate. Nostromo has none on `origin/main` today. MC5
+(`.claude/plans/mother-crew-client-mc5-nostromo-crew-optin.md`) already plans
+it, in observe mode, so there is no separate W0; the deltas the backplane needs
+are listed below. Gate names used by the wedges are MC5's: `rust-clippy`,
+`rust-test`, `python-test`, `swift-ci`.
+- *Can a gate run RWX or `make ci-remote` commands? Yes, by reading the code;
+  not yet run.* `where: sandbox` makes Mother itself run `rwx sandbox reset`,
+  `rwx sandbox exec -- bash -c '<run>'`, `rwx sandbox stop` (the `run` string
+  must not contain `rwx sandbox exec`). It needs `.rwx/sandbox.yml` at the ref
+  (present) and HEAD pushed; any failure to run is `unavailable`, never
+  `passed`. `where: any` runs `bash -c` in the job worktree on the host, so
+  `make ci-remote ONLY=swift` works there if `gh` is authenticated for the
+  runner (with the `workflow` scope) and HEAD is pushed.
+- *The toolchain guard does not apply to gates.* It is a PreToolUse hook on the
+  worker's Bash tool (`~/.claude/hooks/_carefeed_agent-local-toolchain-guard.sh`,
+  keyed on `MOTHER_JOB_ID`); Mother's supervisor exports `MOTHER_JOB_ID` but
+  runs gates itself, outside any hook. Workers may also call `mother gates run`
+  (it is not a guarded command), but with an unpushed HEAD `make ci-remote`
+  refuses ("push first").
+- *Mode is observe first:* red gates are recorded, never held. Under `enforce`,
+  the PR stays a draft, the same worker session fixes failures (up to 3
+  attempts), then the job holds (`gate_hold`) with options. Pipeline jobs are
+  observe-only regardless.
+- *The whole gate run has one budget* (`gates.budget_minutes`, default 15;
+  overrun is `incomplete`, never passed), separate from each check's
+  `timeout_s` (max 3600).
+
+**Reviewer lenses (HC-12/13).** `correctness`, `phi-security`, `tests`,
+`ops-infra`; a plan adds or removes them in its yaml block
+(`lenses: {add, remove}`), validated at `mother add`; a mandatory lens cannot
+be removed. The patch each lens reads is capped at 120 KB. **Not yet
+automatic:** the parallel adherence-plus-lenses wave on the gated commit is
+Mother PR #75 and is still open; today only `mother review-lens <id> --lens X`
+and `mother merge-findings` exist. Per wedge: W9, W10, W13 (security and wire)
+enable `correctness`, `tests`, `phi-security`, and W13 adds `ops-infra` for the
+Lambda; each of them keeps a manual Perri pass (a lens is a diff-only read
+whose `phi-security` checklist is written for care data, not for this repo's
+trust tiers). W11, W12, W16 add `phi-security` (credentials, replay rings,
+extension) with the normal `perri` entry. W14 (`ops-infra`) and W15
+(`correctness`, `tests`) rely on lenses plus Mother's adherence review.
+
+**Acceptance checklist and progress (HC-09/10/11).** `mother add` seeds a
+checklist only from criteria written `- [ ] **ID-n** text` under a heading
+starting "Acceptance criteria". The wedge files now use `W9-1`, `W10-1`, ...
+so the progress figure, `mother check` and the Mother panel (MC2) have
+something to count.
+
+**Estimates and calibration (HC-09/11).** See "Estimate" below.
+
+**Needs-you, ack and push (HC-03).** `attention_reasons` is
+`[{reason, since, acked}]`; reasons are `progress_stalled`, `burn_ahead`,
+`gates_incomplete`, `decision_awaiting`. `mother ack <job> <reason>` is
+operator-only (refused when `MOTHER_JOB_ID` is set), stored outside job JSON,
+and lapses when the condition's `since` changes. W13, W10 and W11 reuse MC4's
+Kit `NeedsYouAggregator` rules instead of new heuristics (one item per
+awaiting or held job; one per unacked reason except `decision_awaiting`).
+Reconciliation, stated once for the sequence: **an ack at the Mac clears the
+phone push** (the daemon's 2 s poll sees `acked: true`, W13's withdrawal path
+removes the item); **a phone never acks, answers or resumes** (B10); a hold or
+plain question has no ack, it is answered at the Mac; an ack is per host (no
+mutating verb is routed), so a Kobe job is acked on Kobe. Details in W13
+"Acknowledgement and withdrawal".
+
+**Host tagging versus Mother's single-machine design.** Confirmed: *tag on the
+message, not inside the job* still holds. Mother's design is single-user,
+single-machine (`docs/design.md`), its job ids are unique only per machine, its
+contract is additive-only and its fixtures are golden, so `host` stays on the
+IPC envelope and `MotherJob` never gains it. Progress, gates, lens, decision
+and attention keys pass through the daemon as decoded by `src/mother/crew.rs`
+(per key, lenient, re-serialized from known fields). That is not byte-for-byte
+passthrough: the daemon's `signals.cost` is a scalar while Mother's HC-09 `cost`
+is an object, and keys such as `stage_share`, `eta.n` and `moved_back.from_pct`
+are not modelled, so those degrade or drop until MC6 re-vendors recorded
+fixtures. W10 now tests this shape and builds the `work` metadata form from
+enums only (W10-16).
+
+**Notifications.** Mother's own macOS push is suppressed while an `await`
+client is connected only when `MOTHER_NOTIFY_SUPPRESS_WHEN_CLIENT=1` (opt-in
+since #72; default off). W13 neither sets nor reads it. The `client.surfaces`
+registration capability (so a surface such as notifications can be declared) is
+a Mother follow-up that is not built; MC4 uses it on the Mac only when it
+exists, and W13 registers no phone with Mother. The phone push and Mother's Mac
+notification are different devices and can both fire.
+
+### Crew config deltas (for MC5 if not yet dispatched, else a one-line follow-up PR)
+
+1. Merge `.mother/crew.yml` before any backplane wedge is added; a job added
+   earlier carries no `crew` and is ungated (W14 may start ungated).
+2. `python-test` should be `where: sandbox`, not `any`: Python goes through the
+   RWX sandbox like Rust. (MC5 chose `any`; its own verification step already
+   runs `rwx sandbox exec -- make python-test`.)
+3. `gates.budget_minutes: 45`, not 20. A wedge that matches `rust-clippy`,
+   `rust-test` (about 5 min with sandbox start) and `swift-ci` (about 7.5 min)
+   plus `python-test` is about 14 min before any retry, so 20 is `incomplete`
+   waiting to happen.
+4. `lenses.scopes.phi-security` gains `src/push/**`, `infra/**`, `template.yaml`,
+   `Shared/NostromoKit/Sources/NostromoKit/Transport/**`,
+   `Shared/NostromoKit/Sources/NostromoKit/Push/**`,
+   `iOS/NostromoNotificationService/**`; `ops-infra` gains `dist/**`, `infra/**`,
+   `template.yaml`.
+5. After W13 merges: a `relay-test` gate (`cargo test --manifest-path
+   infra/push-relay/Cargo.toml`, `where: sandbox`, `when` `infra/push-relay/**`).
+   The standalone crate is not covered by `cargo test` at the root.
+
+### Needs a Mother-side change (listed, not requested)
+
+- Run the lens wave automatically (PR #75, open); until it merges the lens
+  half of this plan is manual (`mother review-lens`).
+- A wire-safe `phi_sensitive` boolean on the job. The daemon keeps only
+  `crew_opt_in` (the blob is opaque to clients), so W10's PHI override matches
+  repo names only.
+- The `client.surfaces` registration capability (see above), and a way for a
+  phone push to count as a surface without Mother muting itself wrongly.
+- A per-repo addendum for lens checklists: `phi-security` talks about care data,
+  residents and tenants; this repo's risks are token handling, trust tiers and
+  egress. Also no lens covers transcript/scroll safety (MC5 notes the same).
+- An ack path for a plain `awaiting` question or hold (only the four typed
+  reasons can be acked today), if a Mac-side "snooze" should clear a phone push.
+- Confirm whether lens spend (`review_wave.budget_usd`, default $3 per lens,
+  2 cycles) counts against a job's `--max-cost`; this memo assumes it is
+  separate and adds roughly $2-6 of expected spend per security wedge.
+- `progress.signals.cost` shape: the published fixtures are provisional and
+  still show a scalar; the daemon decodes a scalar. Re-record (HC-16/MC6).
+
 ## What changed since 2026-10-10
 
 Thirty-odd PRs merged between the first draft and this refresh. These are the
@@ -86,8 +219,9 @@ ones that change the backplane, and what each wedge does about it.
    tracker board engine T0a with its sensitive-text guard T0g in
    `src/sensitive_text.rs`). Bet **B9** below introduces a per-host *egress
    profile* so that a work host (Kobe) publishes metadata only, and anything
-   from a PHI repo (`admin-portal`, `referral-monitor`, or a Mother job with
-   `crew.phi_sensitive == true`) publishes metadata only from any host. This
+   from a PHI repo (`admin-portal`, `referral-monitor`, matched by repo name;
+   Mother's `crew.phi_sensitive` is not visible to the daemon, see "Mother
+   features adopted") publishes metadata only from any host. This
    withdraws the draft's `publish_sensitive = true` default for Kobe and
    makes work-host enrichment in W16 impossible (Ada sign-off **S8**).
 6. **Ops.** `make install-daemon` now installs **two** signed binaries
@@ -115,7 +249,8 @@ ones that change the backplane, and what each wedge does about it.
 9. **Mother plan format and calibration.** Every wedge carries a
    `suggested_config` with a rationale for every actor, Sonnet throughout, a
    max cost, and the estimate below (wall ≈ 43 min + 2.6 min per actual
-   dollar; ≈ 40 min per hop).
+   dollar; ≈ 40 min per hop). Gates, lenses, the acceptance checklist and
+   retro calibration are layered on top; see "Mother features adopted".
 10. **Fixes to the draft itself.** The 5-line note added to
     `platform-evolution-sequencing.md` said the primary moves to the Mac Mini
     and linked a non-existent `websocket-backplane.md`; it now names Tokyo and
@@ -200,7 +335,8 @@ second filter per downstream peer:
   work-derived tag is a slug of its title.
 - **PHI override.** On any host, a Mother job whose repository is
   `admin-portal` or `referral-monitor` (matched on the repo path's last
-  component, and on `crew.phi_sensitive == true` when Mother sends it), and a
+  component; the daemon keeps only `crew_opt_in`, so Mother's
+  `crew.phi_sensitive` cannot be read today), and a
   focus whose project path is one of those repositories, is published through
   the metadata function even under `personal`. The list is a config value
   (`uplink.phi_repos`, default those two) that can only grow.
@@ -319,6 +455,11 @@ wedge except W14 touches one of those.
 | 6 | **W13** | W12 merged, Ada S1–S8 signed off; same exclusions (it touches the session wire and the iOS project) | session wire, `src/push/`, `infra/push-relay/`, iOS |
 | 7 | **W16** | W13 merged; operator has requested the filtering entitlement | iOS project (new extension target), daemon |
 
+Gates and lenses: a wedge is gated only if MC5's `.mother/crew.yml` (with the
+deltas in "Mother features adopted") is on `origin/main` when `mother add` runs.
+Enqueue W9 onward after it; W14 may go ungated. Run `mother gates check` once
+after the merge to validate the file before the first job.
+
 ```bash
 cd ~/Code/nostromo
 W14=$(mother add --plan-file docs/plans/backplane/W14-linux-primary.md    --repo nostromo --branch feat/backplane-linux-primary    --max-cost 20)
@@ -338,6 +479,38 @@ W16=$(mother add --plan-file docs/plans/backplane/W16-ios-push-enrichment.md --r
 `$W11` if the operator prefers W15 first.)
 
 ## Estimate (calibration: wall ≈ 43 min + 2.6 min per actual $; expected spend ≈ 40% of cap; ±33 min per job)
+
+**Baseline kept.** The numbers below are the original formula and are still the
+plan of record. They predate gates and lenses, so add the gate time per pass
+from the third column; they are not re-fitted.
+
+**Per-pass gate time (observe mode, one pass):** Rust ≈ 5 min (clippy ≈ 0.5,
+`cargo test` ≈ 3.3 from a fresh sandbox, sandbox start ≈ 1.25), `swift-ci` ≈
+7.5 min, `python-test` under 1 min. Enforce adds a pass plus a worker turn per
+failed attempt, up to 3. So W9 +5, W10 +5, W11 +8, W12 +13, W13 +13, W14 +5,
+W15 +8, W16 +13 min. On the critical path that is about +63 min, so about
+**15 h** end to end instead of 14 h. Lens spend is extra and unverified
+(see the Mother-side list).
+
+**Use Mother's own figure as the live estimate.** Every running job shows an
+approximate `≈NN%` and an ETA band in `mother list`, `mother status`, the
+statusline and the Mother panel. The band is calibrated from past jobs: per
+repo once 20 jobs exist, else the fleet, else `?`. Nostromo has few jobs, so
+expect the fleet basis and wide bands for the first wedges; trust the 43 min +
+2.6 min/$ line until a band shows `basis: repo`. The cost signal divides by the
+`--max-cost` cap, and our expected spend is about 40% of the cap, so
+`burn_ahead` (cost fraction at least 0.5 and twice the progress fraction) can
+fire on a normal, slow-starting wedge; ack it rather than raising the cap.
+
+**Record per wedge so `mother retro` calibrates:** job id; cap and actual cost;
+active time; the ETA band at about 50% (`progress_half` event) and whether the
+job finished inside it; gate time per pass, attempts used and any gate left
+`unavailable`; `moved_back` reasons; lens count and spend; whether CI agreed
+with the gates (`gates_ci_agreement`). Keep the rows in
+`docs/plans/backplane/` notes or the PR body; `mother retro` has the tables
+(`stage_calibration`, `progress_accuracy`, `gates`, `gates_ci_agreement`,
+`red_at_presentation`, `interruptions`).
+
 
 | Wedge | Cap | Expected spend | Job time | Starts after |
 |---|---|---|---|---|

@@ -111,31 +111,62 @@ channel — the behaviour Mother's broker already has
 
 ## Acceptance criteria
 
-- CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job;
+- [ ] **W12-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job;
   `swift-tests-kit` on GitHub Actions (`make ci-remote ONLY=kit`). No local
   `cargo`/`swift`. No existing fixture modified; tests are hermetic
   (loopback, paused tokio time).
-- Replay never delivers a frame the live path would have withheld from that
+- [ ] **W12-2** Replay never delivers a frame the live path would have withheld from that
   peer (FND-1 and B10).
-- Every topic-bearing `ServerMsg` on the wire has a `seq` that is strictly
+- [ ] **W12-3** Every topic-bearing `ServerMsg` on the wire has a `seq` that is strictly
   increasing per `(topic, host)` for the daemon's lifetime.
-- Disconnect for up to the ring window and resubscribe with `resume` →
+- [ ] **W12-4** Disconnect for up to the ring window and resubscribe with `resume` →
   exactly the missed frames, in order, no duplicates (asserted by `seq`).
-- Exceeding the ring window → retained snapshot then one `Gap` naming the
+- [ ] **W12-5** Exceeding the ring window → retained snapshot then one `Gap` naming the
   topic and the `from`/`to` bounds.
-- A client that stops reading for 10 s does not raise the broadcast
+- [ ] **W12-6** A client that stops reading for 10 s does not raise the broadcast
   channel's lag for any other client and receives exactly one `Gap {
   client_slow }` once it drains.
-- A WS peer that stops answering pings is closed within 60 s (observed in
+- [ ] **W12-7** A WS peer that stops answering pings is closed within 60 s (observed in
   test with a client that swallows pings).
-- A satellite uplink blip shorter than its ring window produces no `Gap`
+- [ ] **W12-8** A satellite uplink blip shorter than its ring window produces no `Gap`
   downstream; a longer one produces one `Gap { uplink_reconnect }` per
   affected topic.
-- The iOS client resumes on reconnect and on foreground and shows the
+- [ ] **W12-9** The iOS client resumes on reconnect and on foreground and shows the
   missed-updates affordance on `Gap`.
-- Memory: ring usage is bounded by `topics × hosts × 8 MiB` and reported in
+- [ ] **W12-10** Memory: ring usage is bounded by `topics × hosts × 8 MiB` and reported in
   the daemon's health frame.
-- PR body references the sequencing memo (W12).
+- [ ] **W12-11** PR body references the sequencing memo (W12).
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). 
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. Replay rings hold published frames; a `work` host's ring must hold metadata only.
+- **Checklist:** the acceptance items above carry ids (`W12-1` to `W12-11`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -163,4 +194,7 @@ suggested_config:
     model: sonnet
     effort: high
     rationale: "Regression risk for every existing client; review for lost or duplicated frames."
+lenses:
+  add: [correctness, tests, phi-security]
+  remove: []
 ```

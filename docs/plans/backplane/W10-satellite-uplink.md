@@ -138,9 +138,27 @@ open question 2) on the operator's own host.
   tags replaced by `f-` + 8 hex of HMAC-SHA256(host_key, tag). The key is
   random per satellite, stored at `~/.nostromo/uplink-tag-key` (0600). Add
   `pub fn is_phi_scoped(msg, phi_repos) -> bool` for the override (a Mother
-  job whose repo path's last component is in `phi_repos` or whose crew key
-  `phi_sensitive` is true; a focus whose project path's last component is in
-  `phi_repos`).
+  job whose repo path's last component is in `phi_repos`; a focus whose
+  project path's last component is in `phi_repos`). Mother's resolved `crew`
+  blob (with its `phi_sensitive`) is **not** available to the daemon: `MotherJob`
+  deliberately keeps only `crew_opt_in` (`src/mother/mod.rs`), so the name match
+  is the whole override until Mother puts a wire-safe `phi_sensitive` boolean on
+  the job (memo, "Needs a Mother-side change").
+  **Mother overlay keys through the filter.** `host` stays on the envelope, so
+  `MotherJob` and its golden fixtures are untouched. On a `personal` host the
+  decoded crew keys (`activity`, `gates`, `review_wave`, `decision`,
+  `attention_reasons`, `progress`) pass as decoded. In the metadata function
+  keep only enums, counts and numbers: `state`, `paused_reason`, `activity`,
+  `paused_at`, `progress.{pct,stage,paused,eta.{lo_s,hi_s,basis},moved_back.reason,
+  flags[].{reason,since}}`, gate and lens counts, `attention_reasons[]` as
+  `{reason,since,acked}`, and `decision` reduced to present/kind. Drop
+  `progress.label`, `progress.eta.label` and every option or consequence
+  string: Mother templates them, but a client can rebuild them from the enums
+  and nothing else needs the text. Overlay fields are decoded per key and
+  re-serialized from `src/mother/crew.rs`, so a key that struct does not model
+  (for example `progress.signals.stage_share` or `eta.n`) does not reach the
+  satellite's consumers; that is the MC1/MC6 type set, not this wedge's to
+  widen.
 - `src/ipc/uplink.rs` (new, satellite side) — `spawn(config, server:
   &Server)`: reconnect loop with the backoff shape of
   `src/data/relay_client.rs` (1 s → 60 s cap), `Authorization: Bearer` from
@@ -300,50 +318,89 @@ open question 2) on the operator's own host.
 
 ## Acceptance criteria
 
-- CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job,
+- [ ] **W10-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job,
   `swift-tests-kit` on GitHub Actions (`make ci-remote ONLY=kit` to
   re-run). **No local `cargo` or `swift`** (toolchain guard). No existing
   test is modified except to add fixtures with `host` present;
   `tests/fixtures/mother-contract/*.golden.json` are byte-identical.
-- `tests/uplink_egress.rs` covers every `ServerMsg` variant and passes; a
+- [ ] **W10-2** `tests/uplink_egress.rs` covers every `ServerMsg` variant and passes; a
   `work` satellite never emits a planted marker string.
-- In `satellite` mode, `lsof -iTCP -sTCP:LISTEN -p <pid>` shows only
+- [ ] **W10-3** In `satellite` mode, `lsof -iTCP -sTCP:LISTEN -p <pid>` shows only
   loopback listeners and no `_nostromo._tcp` service is registered
   (`dns-sd -B _nostromo._tcp` returns nothing from this host).
-- A satellite's `MotherJobs`, `MotherStatusline`, `ApprovalPending`,
+- [ ] **W10-4** A satellite's `MotherJobs`, `MotherStatusline`, `ApprovalPending`,
   `FocusListResp` and (personal only) `Activity` arrive at the primary's
   subscribers with `host` set; the primary's own carry `host: None`.
-- The six routable read verbs with `host: Some(h)` are answered by a
+- [ ] **W10-5** The six routable read verbs with `host: Some(h)` are answered by a
   `personal` satellite `h` within one round-trip; a `work` `h` →
   `HostUnavailable{egress_metadata}`; unknown or disconnected `h` →
   `HostUnavailable{not_connected}`.
-- B10: no approval or decision answer, Mother resume/action, Perri action
+- [ ] **W10-6** B10: no approval or decision answer, Mother resume/action, Perri action
   or session-driving verb is routed by the primary or dispatched by a
   satellite from its uplink.
-- Retained frames are keyed per host: two satellites' `MotherJobs` coexist
+- [ ] **W10-7** Retained frames are keyed per host: two satellites' `MotherJobs` coexist
   and a reconnecting client receives both.
-- `personal` with `publish_sensitive = false` withholds exactly the frames
+- [ ] **W10-8** `personal` with `publish_sensitive = false` withholds exactly the frames
   `peer::may_receive(PeerTrust::Tcp, …)` would withhold; `true` adds only
   the Teri/Fred/work state frames, and the primary still withholds them
   from `Paired { sensitive: false }` clients. `work` and PHI-scoped frames
   follow `redact_for_uplink_metadata`.
-- With the uplink unreachable, the satellite's Unix-socket clients see no
+- [ ] **W10-9** With the uplink unreachable, the satellite's Unix-socket clients see no
   behaviour change other than a `Hosts`-style status frame indicating
   `uplink: disconnected`; reconnect uses exponential backoff capped at 60 s.
-- A W9 device-admin verb sent by a local client of a satellite is executed
+- [ ] **W10-10** A W9 device-admin verb sent by a local client of a satellite is executed
   on the primary and answered to that client alone, with no connection
   initiated toward the satellite. Pair outcomes arrive within 2 s of
   redemption (PRD-AC12, AC13 transport; W15 renders them).
-- The primary enforces the satellite's registry `admin` capability. A
+- [ ] **W10-11** The primary enforces the satellite's registry `admin` capability. A
   satellite's local config can only narrow it. Satellite enrolment is never
   accepted over an uplink.
-- Admin verbs from a satellite's network peers, or from primary-injected
+- [ ] **W10-12** Admin verbs from a satellite's network peers, or from primary-injected
   messages, are never forwarded upward.
-- Uplink down → `DeviceAdminError { server_unreachable }` within 100 ms,
+- [ ] **W10-13** Uplink down → `DeviceAdminError { server_unreachable }` within 100 ms,
   and every relayed open pairing reports `connection_lost` to its client.
-- `nostromo uplink pair` writes the token file with mode 0600 and never
+- [ ] **W10-14** `nostromo uplink pair` writes the token file with mode 0600 and never
   prints the token.
-- No clippy warnings. PR body references the sequencing memo (W10).
+- [ ] **W10-15** No clippy warnings. PR body references the sequencing memo (W10).
+- [ ] **W10-16** A `work` satellite's `MotherJobs` built from a job in Mother's real
+  HC-09 shape (`progress.signals.cost` as an object, `stage` one of
+  `build|rework|gates|review|present|done`, `eta.n`, `attention_reasons` with
+  `acked`) reaches the primary with the metadata keys above and no title,
+  question, plan, branch, repo, label or option text. If the daemon's
+  `CrewProgress` cannot decode that shape (its `signals.cost` is a scalar today),
+  the test records which keys degrade instead of failing the wedge, and the PR
+  body says so for MC6.
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (always on; sandbox). `swift-ci` is skipped (this wedge touches no Swift paths); the Kit run named in the criteria stays a worker-run check (`make ci-remote ONLY=kit`).
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). Egress filter on a managed laptop; routed frames into a satellite.
+- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-16`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -379,4 +436,7 @@ suggested_config:
     model: sonnet
     effort: xhigh
     rationale: "Egress filter on a managed laptop with PHI repos, routed frames into a satellite, and device admin relayed up; every boundary must be airtight."
+lenses:
+  add: [correctness, tests, phi-security]
+  remove: []
 ```

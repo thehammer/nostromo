@@ -46,6 +46,9 @@ remaining phone-side bets that survive B9/B10:
    error. Work hosts and PHI-repo items always show contract text.
 2. **Withdrawal without opening the app** within 2 minutes (S1), when Apple
    grants the filtering entitlement.
+   It fires for every reason W13 removes an item, including an `ack` at the
+   Mac (`attention_reasons[].acked` flipping on the primary, see W13
+   "Acknowledgement and withdrawal"). W16 adds no phone-side ack or answer.
 
 Decision prompts are not enriched on the lock screen: a decision's prompt and
 choices are focus content that FND-1 classifies `Focus(tag)`, and showing them
@@ -202,19 +205,19 @@ Tests:
 
 Tests (Cody gates):
 
-- CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job; Kit
+- [ ] **W16-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job; Kit
   tests and the iOS build (extension embedded) on GitHub Actions. No
   existing test is modified except W13's engine test, which is extended.
-- `PushDetail` never returns text for a decision, a `work`-host item, a
+- [ ] **W16-2** `PushDetail` never returns text for a decision, a `work`-host item, a
   PHI-scoped item, or a sensitive-tag item to a device without `sensitive:
   true`.
-- No code in the app or the extension sends `DecisionAnswer`,
+- [ ] **W16-3** No code in the app or the extension sends `DecisionAnswer`,
   `ApprovalAnswer`, `MotherResume` or `MotherAction` (a Kit source-policy
   test greps the extension and push sources; B10). Decision notifications use
   the static Open-only category.
-- The fetcher returns within 4.05 s in every case, and a `nil` fetch yields
+- [ ] **W16-4** The fetcher returns within 4.05 s in every case, and a `nil` fetch yields
   contract content byte-identical to the push.
-- A device registered with `nse_withdraw: true` receives withdrawals as a
+- [ ] **W16-5** A device registered with `nse_withdraw: true` receives withdrawals as a
   single mutable-content push whose visible strings pass the W13 vocabulary
   allow-list; a device without it keeps W13's badge-only + background pair.
 
@@ -222,18 +225,49 @@ Tests (Cody gates):
 merge and after installing the new build and Tokyo's daemon; not Cody
 gates):
 
-- A Sendai (personal) Mother item shows the real question's first line
+- [ ] **W16-6** A Sendai (personal) Mother item shows the real question's first line
   within 5 s of arrival; the relay record and the W13 sent log show only the
   contract text.
-- A Kobe (work) item and a decision always show contract text.
-- With the VPN down, every notification shows exact contract text, with no
+- [ ] **W16-7** A Kobe (work) item and a decision always show contract text.
+- [ ] **W16-8** With the VPN down, every notification shows exact contract text, with no
   intermediate state.
-- Filtering build: answering a Mother question at the Mac removes the
+- [ ] **W16-9** Filtering build: answering a Mother question at the Mac removes the
   phone's notification and drops the badge within 2 minutes without opening
   the app, including after a force-quit.
-- PR body records the NSE-over-WireGuard spike result and whether the
+- [ ] **W16-10** PR body records the NSE-over-WireGuard spike result and whether the
   filtering entitlement has been granted, and references
   `docs/prds/push-relay.md` and the sequencing memo (W16).
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). 
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`, `ops-infra`. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. New extension target, on-phone enrichment, a credential shared with the extension.
+- **Checklist:** the acceptance items above carry ids (`W16-1` to `W16-10`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -264,4 +298,7 @@ suggested_config:
     model: sonnet
     effort: high
     rationale: "Leaks of work/PHI/sensitive text via PushDetail and any path that answers from the phone are the failure modes to hunt."
+lenses:
+  add: [correctness, tests, phi-security, ops-infra]
+  remove: []
 ```

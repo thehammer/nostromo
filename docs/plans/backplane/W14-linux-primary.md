@@ -101,23 +101,54 @@ no change to the other wedges.
 
 ## Acceptance criteria
 
-- `[operator, Tokyo; not a Cody gate]` `make install-daemon-linux` on Tokyo
+- [ ] **W14-1** `[operator, Tokyo; not a Cody gate]` `make install-daemon-linux` on Tokyo
   results in `systemctl --user status nostromd` = active, the unit survives `kill -9 <pid>` (restarted
   within 5 s), and `~/.nostromo/nostromd.sock` exists.
-- With `mother` absent from `PATH`, the daemon logs one WARN and keeps
+- [ ] **W14-2** With `mother` absent from `PATH`, the daemon logs one WARN and keeps
   serving; no WARN repeats more often than every 60 s.
-- With no `~/.claude/activity.jsonl`, the daemon stays up and begins
+- [ ] **W14-3** With no `~/.claude/activity.jsonl`, the daemon stays up and begins
   tailing when the file appears.
-- `systemd-analyze verify dist/systemd/nostromd.service` passes in CI.
-- macOS `make install-daemon` behaviour is unchanged.
-- CI is green: the RWX sandbox Rust run (Linux, includes
+- [ ] **W14-4** `systemd-analyze verify dist/systemd/nostromd.service` passes in CI.
+- [ ] **W14-5** macOS `make install-daemon` behaviour is unchanged.
+- [ ] **W14-6** CI is green: the RWX sandbox Rust run (Linux, includes
   `tests/linux_startup.rs`), the `ubuntu-latest` build/lint job with the new
   `systemd-analyze verify` step, and the macOS jobs. No local `cargo`. The
   startup test is hermetic (tempdir `HOME`, empty `PATH`, no network).
-- `make install-daemon-linux` installs both `nostromd` and `nostromo-guard`;
+- [ ] **W14-7** `make install-daemon-linux` installs both `nostromd` and `nostromo-guard`;
   a Linux daemon logs the "operator app verification unavailable" line.
-- PR body references the sequencing memo (W14) and states B7's host as
+- [ ] **W14-8** PR body references the sequencing memo (W14) and states B7's host as
   resolved.
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (always on; sandbox). `swift-ci` is skipped (no Swift paths).
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `ops-infra`. `phi-security` is removed for this plan to save a lens run: it is not mandatory in this repo, and this wedge's `src/mother/mod.rs` edit would otherwise match its path scope. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** Lenses plus Mother's adherence review are enough here; no extra manual Perri pass beyond the `perri` entry below. Packaging only (systemd unit, Makefile, a Linux startup path).
+- **Checklist:** the acceptance items above carry ids (`W14-1` to `W14-8`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -142,4 +173,7 @@ suggested_config:
     model: sonnet
     effort: medium
     rationale: "Service hardening, guard install order and restart semantics deserve a careful read but the surface is small."
+lenses:
+  add: [correctness, tests, ops-infra]
+  remove: [phi-security]
 ```

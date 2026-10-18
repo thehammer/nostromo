@@ -177,23 +177,23 @@ AC25/AC26 (row status), AC35 (Mac toggle), AC37 (no credential on any Mac
 surface).
 
 Technical criteria:
-- CI is green on GitHub Actions (`swift-tests-mac`, `swift-tests-kit`;
+- [ ] **W15-1** CI is green on GitHub Actions (`swift-tests-mac`, `swift-tests-kit`;
   re-run with `make ci-remote ONLY=mac`), including the three new test
   files. No local `xcodebuild`. Tests are hermetic (fake client, no daemon).
-- `DeviceAdminModelTests` assert that a `.refused` human-gesture result
+- [ ] **W15-2** `DeviceAdminModelTests` assert that a `.refused` human-gesture result
   sends nothing for pair, scope-on and revoke.
-- No new transport, socket or listener in the Mac app. All admin traffic
+- [ ] **W15-3** No new transport, socket or listener in the Mac app. All admin traffic
   goes over the existing Unix socket to the local daemon.
-- The Pair window never renders a code unless it holds a `DevicePairing`
+- [ ] **W15-4** The Pair window never renders a code unless it holds a `DevicePairing`
   for its current `request_id`. A late `DevicePairing` for a cancelled
   request is ignored and cancelled.
-- Closing either window leaves no open pairing on the primary (verified
+- [ ] **W15-5** Closing either window leaves no open pairing on the primary (verified
   manually with `nostromo device list` showing no new device, and a
   device redeem then getting "That code isn't right").
-- The `devices` topic is subscribed only when `Welcome.features` contains
+- [ ] **W15-6** The `devices` topic is subscribed only when `Welcome.features` contains
   `"devices"`. Against an older daemon, both menu items show the
   unreachable message rather than hanging.
-- Manual checks (operator, after `make mac-install` on each Mac; list results
+- [ ] **W15-7** Manual checks (operator, after `make mac-install` on each Mac; list results
   in the PR body or a follow-up comment; not Cody gates):
   - On **Kobe** (satellite, WireGuard split-tunnel up), **Pair a Device…** →
     an iPhone scans → the window says "Paired: …" within 2 s; nothing
@@ -206,7 +206,38 @@ Technical criteria:
     no-longer-paired screen within 5 s (PRD-AC24, AC25).
   - Toggle an iPad's **Mail and todos** off → its Fred/Teri tabs show the
     explanation within 5 s; on → content returns (PRD-AC35).
-- PR body references the sequencing memo (W15) and the PRD.
+- [ ] **W15-8** PR body references the sequencing memo (W15) and the PRD.
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). The Rust gates are skipped (no Rust paths).
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`. `phi-security` is removed for this plan to save a lens run: it is not mandatory in this repo and this wedge adds no wire or trust. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** Lenses plus Mother's adherence review are enough here; no extra manual Perri pass beyond the `perri` entry below. Mac UI over W9/W10 verbs; no new wire, no new trust.
+- **Checklist:** the acceptance items above carry ids (`W15-1` to `W15-8`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -236,4 +267,7 @@ suggested_config:
     model: sonnet
     effort: high
     rationale: "Device admin from a managed laptop; check no code is shown without a live pairing and nothing secret is rendered or logged."
+lenses:
+  add: [correctness, tests]
+  remove: [phi-security]
 ```

@@ -27,7 +27,15 @@ design-loop notes **turn 2** (S7, S8). Versus the 2026-10-10 draft:
   (`gate_hold`, `review_hold`, `adherence_blocked`, `operator_hold`,
   `pipeline_blocked`) and attention reasons (`progress_stalled`,
   `burn_ahead`, `gates_incomplete`, `decision_awaiting`); unknown → *needs
-  you*. Keep the mapping consistent with MC4's Kit `NeedsYou` reasons.
+  you*. **Do not invent a second "needs you" heuristic.** The rules are the
+  ones MC4 gives its Kit `MotherNeedsYouProducer`
+  (`.claude/plans/mother-crew-client-mc4-needs-you-and-notifications.md`),
+  which MC4 builds in Kit so iOS can reuse it later: one item per awaiting or
+  held job, plus one per **unacked** attention reason other than
+  `decision_awaiting` (the hold item already covers that one). The daemon
+  mirrors them with the `MotherJob` helpers above, and a shared fixture table
+  (below) keeps Rust and Kit from drifting. Acknowledgement semantics are in
+  "Acknowledgement and withdrawal".
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push"`. New
   `ClientMsg` ordinals per the memo's wire inventory (50–53), `Paired`-only
   and self-scoped.
@@ -170,8 +178,25 @@ Daemon push engine (new module):
   Each item also carries an opaque random `item_ref` (16 hex chars) that is
   the only identifier sent to the relay. Items are derived from snapshots, not
   only from events:
-  - **Mother:** `is_awaiting()` or `is_held_for_operator()`, and
-    `paused_reason` not starting with `quota_`. Works on both full and
+  - **Mother:** the MC4 `MotherNeedsYouProducer` rules, mirrored here:
+    - *Hold item* `Mother{host, job_id}`: `is_awaiting()` or
+      `is_held_for_operator()`, and `paused_reason` not starting with
+      `quota_`. It leaves the waiting set only when the job leaves
+      `awaiting` or its decision resolves (an answer at the Mac). Acking
+      `decision_awaiting` does not remove it (same as MC4).
+    - *Attention item* `MotherAttention{host, job_id, reason, since}` for each
+      entry of `unacked_attention()` whose reason is `progress_stalled`,
+      `burn_ahead` or `gates_incomplete`. It leaves the set when the entry
+      disappears, or when Mother reports it `acked: true`. A reason that
+      lapses and returns carries a new `since`, so it is a new item.
+    - Whether attention items are pushed **individually** or only counted in
+      the badge and summaries is not covered by S1–S8. Recommendation:
+      individual push for `gates_incomplete` only (a presented PR whose gates
+      did not all run); `progress_stalled` and `burn_ahead` are Mother's
+      observe-only flags and only count toward the badge and the next summary.
+      Treat as an open question for the operator; the default until answered
+      is count-only for all three.
+    - Works on both full and
     metadata-shaped `MotherJobs` (W10 keeps state, `paused_reason`,
     `activity`, `paused_at`, attention reasons and the 8-hex id suffix).
   - **Decision:** active `DecisionRequest` until `DecisionResolved` arrives or
@@ -427,6 +452,12 @@ Tests:
 - Additions to `src/ipc/decisions.rs` tests: `deadline`/`agent_class`/
   `local_operator` on the broadcast; `has_operator_for` unchanged (a
   registered push device does not make it true).
+- `tests/push_items.rs` (new): a table of golden Mother jobs (awaiting;
+  held with an open decision; `gates_incomplete` unacked and acked;
+  `progress_stalled` acked then re-raised with a new `since`; `quota_*`
+  pause; work-send) mapped to expected items. The same table is vendored
+  under `tests/fixtures/` for MC4's Kit producer test, so one change updates
+  both; if MC4 has not landed, ship the table and note it in the PR.
 - A B9 test in `tests/push_engine.rs`: a `work` satellite's metadata-only
   `MotherJobs`, `DecisionRequest` and `PerriState` produce the same
   notifications as full frames would for a work host.
@@ -464,88 +495,88 @@ Tests:
 
 Payload contract (tests):
 
-- `tests/push_vocab.rs` passes. For a work-host Mother job with marker strings
+- [ ] **W13-1** `tests/push_vocab.rs` passes. For a work-host Mother job with marker strings
   in question, title, plan, branch and repo, the full relay request body
   contains none of them, and title/body are exactly `Mother · <host>` /
   `Job <8-hex> <reason phrase>`. A personal host gives
   `Mother · <host> · <repo>`. An unclassified host is identical to work.
-- Each Mother reason maps to its phrase. An unknown reason gives *needs you*.
+- [ ] **W13-2** Each Mother reason maps to its phrase. An unknown reason gives *needs you*.
   A `quota_*` pause produces no item.
-- A decision with markers in prompt, detail, choice labels and details, and
+- [ ] **W13-3** A decision with markers in prompt, detail, choice labels and details, and
   session name produces a body naming the agent from the fixed set (or *A
   session*), the choice count, and the minutes left rounded down (*under 1
   min* below 60 s). There is no timeout phrase when `deadline` is `None`.
-- A review renders `PR #<n> · <size> · <k> waiting`, with 49 → small,
+- [ ] **W13-4** A review renders `PR #<n> · <size> · <k> waiting`, with 49 → small,
   50 → medium, 400 → medium, 401 → large, and the size omitted when
   `changed_lines` is `None`. The repo appears only for a personal host whose
   owner is not in `work_owners`.
-- A Summary never contains a repository name.
-- `vocab::conforms` accepts every rendered string and rejects any string
+- [ ] **W13-5** A Summary never contains a repository name.
+- [ ] **W13-6** `vocab::conforms` accepts every rendered string and rejects any string
   containing a token outside the vocabulary. The test asserts rejection, not
   just acceptance.
-- No `ClientMsg` can change host classification. A test sends every push
+- [ ] **W13-7** No `ClientMsg` can change host classification. A test sends every push
   `ClientMsg` from a network peer and asserts `[push.hosts]` is unchanged.
 
 Lifecycle and frequency (tests with paused time and a wiremock relay):
 
-- A Mother or review item is POSTed to the relay between 120 s and 122 s
+- [ ] **W13-8** A Mother or review item is POSTed to the relay between 120 s and 122 s
   after its start. An item resolved before 120 s is never POSTed and logs
   `skipped_resolved_in_grace`.
-- A decision is POSTed within 1 s of its `DecisionRequest` when
+- [ ] **W13-9** A decision is POSTed within 1 s of its `DecisionRequest` when
   `local_operator == false` and no app is connected to the primary.
-- Every POST carries `thread_id` = host label, the correct
+- [ ] **W13-10** Every POST carries `thread_id` = host label, the correct
   `interruption_level` (decision `time-sensitive`, others `active`), and
   `expiration_unix` = the decision deadline or send time + 4 h.
-- When an item leaves the waiting set, the device receives a withdrawal
+- [ ] **W13-11** When an item leaves the waiting set, the device receives a withdrawal
   within 2 s of the primary seeing the change: a badge-only push with the
   new count, plus a background push listing the `item_ref`.
-- Every alert push's `badge` equals the device's waiting-item count across
+- [ ] **W13-12** Every alert push's `badge` equals the device's waiting-item count across
   all hosts, excluding disabled kinds.
-- 4 grace items due within 120 s → exactly one Summary POST and zero
+- [ ] **W13-13** 4 grace items due within 120 s → exactly one Summary POST and zero
   individual POSTs. A decision in the same window is still POSTed
   individually.
-- Quiet hours: zero alert POSTs between start and end. At the end, exactly
+- [ ] **W13-14** Quiet hours: zero alert POSTs between start and end. At the end, exactly
   one Summary iff ≥ 1 enabled item is waiting. The evening summary fires at
   the configured time under the same rule. Withdrawals and badge-only pushes
   are still sent during quiet hours (PRD C4).
-- No item is ever POSTed twice as an individual notification. There are no
+- [ ] **W13-15** No item is ever POSTed twice as an individual notification. There are no
   24 h or daily reminders.
-- A kind turned off on a device → no POSTs of that kind to that device, and
+- [ ] **W13-16** A kind turned off on a device → no POSTs of that kind to that device, and
   it is not counted in that device's summaries or badge.
-- A device revoked through W9's device registry (whichever CLI W9 ships for
+- [ ] **W13-17** A device revoked through W9's device registry (whichever CLI W9 ships for
   revocation) receives no POST issued after
   the revocation (checked on the next send, well within 1 min).
-- Relay unreachable → no retry, no queue, a `relay_unreachable` log line, and
+- [ ] **W13-18** Relay unreachable → no retry, no queue, a `relay_unreachable` log line, and
   `PushStatus.failing_since` set. The next success clears it.
-- `ask_decision` behaviour is unchanged by this wedge (no phone counts as an
+- [ ] **W13-19** `ask_decision` behaviour is unchanged by this wedge (no phone counts as an
   operator; B10). No push code path sends `DecisionAnswer` or
   `ApprovalAnswer`, and no new message carries a decision's prompt, detail
   or choice labels off the originating host.
 
 Relay (relay crate tests):
 
-- Requests without the daemon bearer → 401. Unknown fields or over-long
+- [ ] **W13-20** Requests without the daemon bearer → 401. Unknown fields or over-long
   strings → 400.
-- A stored delivery record has exactly `{push_id, ts, kind, outcome,
+- [ ] **W13-21** A stored delivery record has exactly `{push_id, ts, kind, outcome,
   expires_at}`. `GET /records` never returns a record with `ts` older than
   7 days, even when one is still in the table.
-- Handler logs contain no title, body, host, ref or repo. A test captures
+- [ ] **W13-22** Handler logs contain no title, body, host, ref or repo. A test captures
   log output for a request whose title/body contain markers and asserts none
   appear.
-- `template.yaml` sets the log group retention to 7 days and DynamoDB TTL on
+- [ ] **W13-23** `template.yaml` sets the log group retention to 7 days and DynamoDB TTL on
   `expires_at`.
 
 Sent log and visibility:
 
-- `PushSentLog` returns, for the requesting device only, every attempt in the
+- [ ] **W13-24** `PushSentLog` returns, for the requesting device only, every attempt in the
   last 7 days, with time, kind, host, exact title/body and one of the seven
   outcomes. A 7-day-old entry is gone after the next prune.
 
 iOS:
 
-- `swift-tests-kit` and the iOS build pass on GitHub Actions, including the
+- [ ] **W13-25** `swift-tests-kit` and the iOS build pass on GitHub Actions, including the
   payload parser. A decision notification offers only **Open**.
-- `[device]` (operator-verified on a physical iPhone after the relay is
+- [ ] **W13-26** `[device]` (operator-verified on a physical iPhone after the relay is
   deployed; not a Cody gate):
   - `mother await` on Kobe → a `Mother · kobe` notification ~2 min later,
     stacked separately from a `tokyo` one.
@@ -556,10 +587,79 @@ iOS:
     accepts input.
   - Decision notifications break through a Focus that allows Nostromo's
     time-sensitive notifications.
-- `infra/push-relay/README.md` lets the operator deploy from zero and
+- [ ] **W13-27** `infra/push-relay/README.md` lets the operator deploy from zero and
   contains the privacy note verbatim.
-- PR body references the sequencing memo (W13) and `docs/prds/push-relay.md`,
+- [ ] **W13-28** PR body references the sequencing memo (W13) and `docs/prds/push-relay.md`,
   including its design-loop notes.
+
+- [ ] **W13-29** Acknowledgement and withdrawal (tests, paused clock): a job fixture
+  whose `attention_reasons` entry flips to `acked: true` on the next poll
+  produces the badge-only plus background withdrawal and drops the item from
+  summaries; flipping back with a new `since` is a new item. No `ClientMsg` for
+  `ack`, `answer` or `resume` is added or allowed for a `Paired` peer, and the
+  existing `Refused` cases still pass.
+- [ ] **W13-30** `tests/push_items.rs` passes against the shared golden table, and no
+  free-text field of a job is read by the item derivation.
+
+### Acknowledgement and withdrawal
+
+Mother's `mother ack <job> <reason>` (and the broker's `ack` command) writes
+`$MOTHER_ROOT/acks/<id>.json` and flips `attention_reasons[].acked` on that
+host; Mother refuses it from a worker (`MOTHER_JOB_ID` set). The daemon's
+2-second `mother list --format json` poll then sees `acked: true`, so:
+
+- **An ack at the Mac clears the phone push.** The item leaves the waiting set
+  within the poll interval, and the existing withdrawal path (badge-only push,
+  then a background push listing the `item_ref`) removes the delivered
+  notification. A satellite's ack travels the same way: its own poller
+  uplinks the changed `attention_reasons`.
+- **A phone never acks, answers or resumes.** Acking is an operator act
+  (MC3 gates it behind `HumanGesture` in the Mac app) and B10 keeps every
+  Mother mutation `Refused` for network peers. Tapping a notification opens a
+  read-only screen.
+- **Ack is per host.** No mutating verb is routed (B10), so the Mac cannot ack
+  a Kobe job from its own panel; Kobe's job is acked on Kobe, and the push
+  persists until then or until the job leaves its state.
+- **Holds are not acked, they are answered.** A plain `awaiting` question and a
+  `gate_hold`/`review_hold` have no ack path (only the four typed reasons do);
+  they clear when the Mac answers.
+- Mother's own `MOTHER_NOTIFY_SUPPRESS_WHEN_CLIENT` (opt-in since #72, default
+  off) silences only Mother's macOS notification on the Mac. This wedge
+  neither sets nor reads it and registers no phone as a Mother client surface
+  (the `client.surfaces` capability is a Mother follow-up, not built; MC4 has
+  the Mac-side use). Push and Mother's macOS notification are separate devices
+  and may both fire.
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). The relay crate (`infra/push-relay/`) is a standalone crate, not a workspace member, so `rust-test` does not run it. Until the crew config gains a `relay-test` gate (memo, "Crew config deltas"), the worker runs `rwx sandbox exec -- cargo test --manifest-path infra/push-relay/Cargo.toml` itself and pastes the result into the PR body.
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`, `ops-infra`. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First data to leave the operator's machines, plus a Lambda and its SAM template.
+- **Checklist:** the acceptance items above carry ids (`W13-1` to `W13-30`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -602,4 +702,7 @@ suggested_config:
     model: sonnet
     effort: xhigh
     rationale: "First data to leave the operator's machines; review payload, logging and retention adversarially."
+lenses:
+  add: [correctness, tests, phi-security, ops-infra]
+  remove: []
 ```

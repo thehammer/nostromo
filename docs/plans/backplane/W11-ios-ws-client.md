@@ -127,6 +127,13 @@ side).
   `Hosts.egress == work` render state, ref and reason only and have no
   drill-in that would request content. Add `needsYouCount` per host from
   `ApprovalPending` counts plus Mother `awaiting` jobs; it is display-only.
+  Do not write a second counter: feed Kit's `NeedsYouAggregator` (MC4,
+  `Shared/NostromoKit/.../NeedsYou/`, built for iOS reuse) with a Mother
+  producer (awaiting or held jobs plus unacked attention reasons) and an
+  approvals producer (`ApprovalPending`), and read the per-host count from its
+  snapshot. If MC4 has not merged, keep the count local and name it in the PR
+  as the one place to swap. The phone shows the count and the reason only: no
+  `ack`, no answer, no resume control (B10).
 - `.../Wire/ClientMsg.swift` — add `pairCheck`, `pair`, `deviceUnpairSelf`
   and the optional `host` on `sessionAttach`/`sessionDetach`/
   `activitySnapshotRequest`/`sessionModelGet`/`sessionList`/`focusList`
@@ -268,44 +275,44 @@ AC19–22, AC25–27 (device side), AC30–34, AC35 (device side), AC36, AC37
 as manual checks.
 
 Technical criteria:
-- CI is green: `swift-tests-kit` and the iOS build job on GitHub Actions
+- [ ] **W11-1** CI is green: `swift-tests-kit` and the iOS build job on GitHub Actions
   (re-run with `make ci-remote ONLY=kit` / `ONLY=ios`). No local `swift` or
   `xcodebuild`. Existing wire tests are unmodified apart from added
   fixtures. Tests are hermetic: the in-process `NWListener` on loopback, an
   in-memory credential store; no real server, VPN or camera.
-- No iOS control sends `ApprovalAnswer`, `DecisionAnswer`, `MotherResume`
+- [ ] **W11-2** No iOS control sends `ApprovalAnswer`, `DecisionAnswer`, `MotherResume`
   or `MotherAction` over the WebSocket transport (a Kit test asserts the
   `WebSocketClient` refuses to encode them; B10).
-- A `work`-host fixture (metadata-only `MotherJobs`, pseudonymous
+- [ ] **W11-3** A `work`-host fixture (metadata-only `MotherJobs`, pseudonymous
   `ApprovalPending`) decodes and renders rows without titles.
-- A fresh install (no Keychain item) opens **Pair with Nostromo**. No
+- [ ] **W11-4** A fresh install (no Keychain item) opens **Pair with Nostromo**. No
   discovery sheet, no host/port form, and no permission prompt appear before
   **Scan Code** is tapped.
-- The token lives only in the Keychain (`…ThisDeviceOnly`). It is never in
+- [ ] **W11-5** The token lives only in the Keychain (`…ThisDeviceOnly`). It is never in
   UserDefaults, the content cache, logs, or any view (grep test over
   `os_log` capture in the client tests).
-- Only `Unauthorized` or close code 4001 moves the app to the
+- [ ] **W11-6** Only `Unauthorized` or close code 4001 moves the app to the
   no-longer-paired state. A table-driven test proves that refused, timeout,
   DNS failure, network down, close 1001/1006 and HTTP 5xx at upgrade all
   yield `unreachable`.
-- On `notPaired`, the credential is cleared, then the cache file is deleted,
+- [ ] **W11-7** On `notPaired`, the credential is cleared, then the cache file is deleted,
   then the screen renders. After a relaunch, `ContentCache` has no file and
   `DaemonStore` is empty.
-- The cache is written with `FileProtectionType.complete`, excluded from
+- [ ] **W11-8** The cache is written with `FileProtectionType.complete`, excluded from
   backup, and never contains Fred/Teri data while scope is off.
-- `device_scope` withheld clears on-screen Fred/Teri content at once; the
+- [ ] **W11-9** `device_scope` withheld clears on-screen Fred/Teri content at once; the
   daemon delivers it in under 1 s (W9).
-- After **Pair** on a reachable server, the first `MotherJobs` frame is
+- [ ] **W11-10** After **Pair** on a reachable server, the first `MotherJobs` frame is
   rendered within 3 s (PRD-AC8).
-- A `nostromo://pair` link with a malformed code or host shows an error and
+- [ ] **W11-11** A `nostromo://pair` link with a malformed code or host shows an error and
   never sends anything.
-- The app runs with Local Network permission denied whenever the server is
+- [ ] **W11-12** The app runs with Local Network permission denied whenever the server is
   reached through the VPN or a routed (non-Wi-Fi-subnet) address
   (PRD-AC2 as amended by design-loop note D1). When the server is on the
   same Wi-Fi subnet and access is denied, it shows the
   `localNetworkDenied` state, never "unreachable" and never the pairing
   screen.
-- Manual checks (no stack tooling exists for iOS; list results in the PR
+- [ ] **W11-13** Manual checks (no stack tooling exists for iOS; list results in the PR
   body):
   - iPhone, system Camera pointed at a `nostromo device pair` QR → "Open in
     Nostromo" → confirmation with address and code applied (PRD-AC6).
@@ -316,7 +323,38 @@ Technical criteria:
     after a relaunch; WireGuard back on → reconnects by itself (PRD-AC22).
   - Revoke from the terminal while connected → the no-longer-paired screen
     within 5 s; relaunch shows no content (PRD-AC25, AC27).
-- PR body references the sequencing memo (W11) and the PRD.
+- [ ] **W11-14** PR body references the sequencing memo (W11) and the PRD.
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). The Rust gates are skipped (no Rust paths).
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. Device credential storage and the cache wipe on scope loss.
+- **Checklist:** the acceptance items above carry ids (`W11-1` to `W11-14`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -348,4 +386,7 @@ suggested_config:
     model: sonnet
     effort: high
     rationale: "Token storage, the unauthenticated pairing socket, deep-link validation, on-disk cache contents and the no-answer-from-iOS rule are the client-side surface."
+lenses:
+  add: [correctness, tests, phi-security]
+  remove: []
 ```

@@ -365,49 +365,80 @@ behaviour and terminal output), AC28, AC29, AC31 (server side), AC32 (server
 side), AC35 (daemon and terminal), AC36, AC37 (terminal and logs).
 
 Technical criteria:
-- CI is green on the PR: the Rust build, clippy and tests (RWX sandbox,
+- [ ] **W9-1** CI is green on the PR: the Rust build, clippy and tests (RWX sandbox,
   `rwx sandbox exec -- cargo test …`, and the `ubuntu-latest` job in
   `.github/workflows/ci.yml`), and the Python tooling job. **Do not run
   `cargo` locally** (the toolchain guard blocks it); use the sandbox or
   `make ci-remote ONLY=rust`. Every new test is hermetic: loopback sockets on
   port 0, tempdirs, an injected clock; no real network.
-- `tests/ipc_codec.rs`, `tests/ipc_tcp_transport.rs` and
+- [ ] **W9-2** `tests/ipc_codec.rs`, `tests/ipc_tcp_transport.rs` and
   `tests/ipc_peer_gating.rs` keep every existing case unmodified (gating
   gains new cases only), and `tests/fixtures/mother-contract/*.golden.json`
   are unchanged.
-- With `NOSTROMD_WS_ADDR` unset the daemon binds `127.0.0.1:47101` and logs
+- [ ] **W9-3** With `NOSTROMD_WS_ADDR` unset the daemon binds `127.0.0.1:47101` and logs
   it and the `pair_host`. With `ws_addr = "0.0.0.0:47101"` it binds all
   interfaces. With `NOSTROMD_WS_ADDR=off` no WS listener is bound.
-- `CLIENT_MSG_VARIANTS` and the ordinal table cover every new verb; the
+- [ ] **W9-4** `CLIENT_MSG_VARIANTS` and the ordinal table cover every new verb; the
   FND-1 exhaustiveness tests pass.
-- B10: no `LocalOnly` frame reaches a `Paired` peer, and no approval or
+- [ ] **W9-5** B10: no `LocalOnly` frame reaches a `Paired` peer, and no approval or
   decision answer is accepted from one (the gating cases above).
-- A WS socket without a token can send only `Hello`, `PairCheck` and one
+- [ ] **W9-6** A WS socket without a token can send only `Hello`, `PairCheck` and one
   `Pair`. Anything else gets `Unauthorized { not_paired }` and close.
-- An unknown or revoked token completes the upgrade, receives
+- [ ] **W9-7** An unknown or revoked token completes the upgrade, receives
   `Unauthorized { revoked | unknown }`, and is closed with 4001.
-- Tokens are stored only as SHA-256 hashes. Plaintext appears only in the
+- [ ] **W9-8** Tokens are stored only as SHA-256 hashes. Plaintext appears only in the
   `Paired` frame: never on any CLI output, list, `Devices` frame, or log
   (test (o) greps the captured log).
-- Revoking a device closes its live sockets in under 1 s and leaves every
+- [ ] **W9-9** Revoking a device closes its live sockets in under 1 s and leaves every
   other device's sockets open.
-- A scope change reaches a connected device in under 1 s, in both
+- [ ] **W9-10** A scope change reaches a connected device in under 1 s, in both
   directions, without a reconnect.
-- A pairing is in daemon memory only. It is cancelled when its issuing
+- [ ] **W9-11** A pairing is in daemon memory only. It is cancelled when its issuing
   connection drops, and `devices.json` never contains a code.
-- Lockout follows Approach 5. A wrong-code storm from one IP is also capped
+- [ ] **W9-12** Lockout follows Approach 5. A wrong-code storm from one IP is also capped
   by the 20/min upgrade limit.
-- `nostromo device pair` exits 0 only on `paired`, and non-zero on expiry,
+- [ ] **W9-13** `nostromo device pair` exits 0 only on `paired`, and non-zero on expiry,
   lockout, cancel and lost connection.
-- `nostromo` with no subcommand prints help and exits 0; `make
+- [ ] **W9-14** `nostromo` with no subcommand prints help and exits 0; `make
   install-daemon` installs it signed next to `nostromd`.
-- Device-admin frames (`Devices`, `DevicePairing`, `DevicePairOutcome`,
+- [ ] **W9-15** Device-admin frames (`Devices`, `DevicePairing`, `DevicePairOutcome`,
   `DeviceRevoked`) are never delivered to a `Tcp` or device `Paired` peer.
-- `Welcome.features` includes `"ws"`, `"pair"` and `"devices"` on every
+- [ ] **W9-16** `Welcome.features` includes `"ws"`, `"pair"` and `"devices"` on every
   transport, and `PROTOCOL_VERSION` is still 4.
-- No clippy warnings (`cargo clippy --all-targets -- -D warnings`).
-- PR body references `docs/plans/backplane-sequencing.md` (W9) and
+- [ ] **W9-17** No clippy warnings (`cargo clippy --all-targets -- -D warnings`).
+- [ ] **W9-18** PR body references `docs/plans/backplane-sequencing.md` (W9) and
   `docs/prds/daemon-pairing-flow.md`.
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (always on; sandbox). `swift-ci` is skipped (no Swift paths).
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First authenticated listener and token issuer.
+- **Checklist:** the acceptance items above carry ids (`W9-1` to `W9-18`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
 
 ## Out of scope
 
@@ -447,4 +478,7 @@ suggested_config:
     model: sonnet
     effort: xhigh
     rationale: "First authenticated listener and token issuer; pairing-only sockets, lockout, live trust and B10 refusals are CVE-shaped. Sonnet at xhigh per operator default."
+lenses:
+  add: [correctness, tests, phi-security]
+  remove: []
 ```
