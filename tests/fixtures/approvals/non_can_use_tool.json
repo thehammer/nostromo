@@ -1,0 +1,26 @@
+{
+  "description": "A control_request whose subtype is hook_callback; the daemon must leave it unanswered. The fake does not wait for it.",
+  "tool_uses": [
+    {
+      "id": "toolu_non_can_use_tool_0",
+      "name": "Bash",
+      "input": {
+        "command": "ls /tmp/x",
+        "description": "list x"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "hook_callback",
+        "callback_id": "hook_0",
+        "input": {
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Bash"
+        },
+        "tool_use_id": "toolu_non_can_use_tool_0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "description": "Zero-width / invisible characters U+200B U+200C U+200D U+2060 U+FEFF hidden in `rm -rf x`.",
+  "tool_uses": [
+    {
+      "id": "toolu_zero_width_0",
+      "name": "Bash",
+      "input": {
+        "command": "r\u200bm -rf\u200c \u200dx\u2060\ufeff",
+        "description": "remove x"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "r\u200bm -rf\u200c \u200dx\u2060\ufeff",
+          "description": "remove x"
+        },
+        "description": "remove x",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_zero_width_0"
+      }
+    }
+  ]
+}

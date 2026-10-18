@@ -1,0 +1,25 @@
+{
+  "description": "A can_use_tool request with no tool_use_id and a non-object input (parse-failure ending).",
+  "tool_uses": [
+    {
+      "id": "toolu_malformed_0",
+      "name": "Bash",
+      "input": {
+        "command": "rm -rf /tmp/x/m",
+        "description": "remove m"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": "oops",
+        "description": "remove m",
+        "decision_reason_type": "rule"
+      }
+    }
+  ]
+}

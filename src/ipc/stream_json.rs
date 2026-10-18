@@ -48,6 +48,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::control_scan::scan_control_request;
 use super::tasks::{parse_task_event, TaskEvent};
 use crate::model::notes::{LedgerNote, NoteKind};
 
@@ -307,7 +308,35 @@ pub enum ParsedLine {
         /// The response payload (`response.response`), or `Null`.
         body: Value,
     },
+    /// A request the CLI makes of its host (`control_request`): today only
+    /// `can_use_tool`, the permission prompt. `request` is the inner request
+    /// object, exactly as received (it carries `subtype`).
+    ControlRequest {
+        request_id: String,
+        subtype: String,
+        request: Value,
+    },
+    /// A `control_request` that cannot be handled as a [`ParsedLine::ControlRequest`]:
+    /// its JSON does not parse (nested deeper than `serde_json` allows, malformed,
+    /// cut off), the line is longer than [`MAX_CONTROL_REQUEST_PARSE_BYTES`], or its
+    /// `request_id` is not a string. The CLI waits for an answer to such a request
+    /// all the same, so what a shallow scan recovered is handed over to answer it:
+    /// `request_id` (a string or a number, as the same JSON value; `None` when it
+    /// could not be recovered), `subtype` and `tool_name`.
+    UnreadableControlRequest {
+        request_id: Option<Value>,
+        subtype: Option<String>,
+        tool_name: Option<String>,
+    },
+    /// The CLI withdrew a request it made earlier (`control_cancel_request`),
+    /// e.g. because the turn was interrupted.
+    ControlCancel { request_id: String },
 }
+
+/// A `control_request` line longer than this is not parsed as JSON: it is scanned
+/// for its id and answered as unreadable (a request this large is not one a human
+/// could be asked about).
+pub const MAX_CONTROL_REQUEST_PARSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Where a reported model came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,14 +351,49 @@ pub const UNKNOWN_PARENT: &str = "?";
 
 /// Parse one NDJSON line from the stream-json output. Returns `None` for lines
 /// we render nothing from (`rate_limit_event`, hook chatter, blank lines, …).
+///
+/// A `control_request` that cannot be parsed in full (see
+/// [`ParsedLine::UnreadableControlRequest`]) is never dropped: dropping it would
+/// leave the CLI waiting for an answer for ever.
 pub fn parse_line(line: &str) -> Option<ParsedLine> {
-    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    let line = line.trim();
+    let oversize = line.len() > MAX_CONTROL_REQUEST_PARSE_BYTES;
+    if oversize {
+        // Not parsed as JSON if it is a control request; any other line is parsed as always.
+        if let Some(unreadable) = scan_unreadable(line) {
+            return Some(unreadable);
+        }
+    }
+    match serde_json::from_str::<Value>(line) {
+        Ok(v) => parse_value(&v),
+        Err(_) if oversize => None, // already scanned
+        Err(_) => scan_unreadable(line),
+    }
+}
+
+/// A control request that `serde_json` could not read, from a shallow scan of `line`.
+fn scan_unreadable(line: &str) -> Option<ParsedLine> {
+    let hint = scan_control_request(line)?;
+    Some(ParsedLine::UnreadableControlRequest {
+        request_id: hint.request_id,
+        subtype: hint.subtype,
+        tool_name: hint.tool_name,
+    })
+}
+
+fn parse_value(v: &Value) -> Option<ParsedLine> {
     let obj = v.as_object()?;
 
     match obj.get("type")?.as_str()? {
         "system" => parse_system_event(obj),
 
         "control_response" => parse_control_response(obj),
+
+        "control_request" => parse_control_request(obj),
+
+        "control_cancel_request" => Some(ParsedLine::ControlCancel {
+            request_id: obj.get("request_id")?.as_str()?.to_string(),
+        }),
 
         "assistant" => {
             let msg = obj.get("message")?;
@@ -476,6 +540,28 @@ fn parse_control_response(obj: &serde_json::Map<String, Value>) -> Option<Parsed
         error_code: str_field("error_code"),
         body: response.get("response").cloned().unwrap_or(Value::Null),
     })
+}
+
+fn parse_control_request(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
+    let request = obj.get("request").cloned().unwrap_or(Value::Null);
+    let subtype = request.get("subtype").and_then(|x| x.as_str());
+    match obj.get("request_id") {
+        Some(Value::String(id)) => Some(ParsedLine::ControlRequest {
+            request_id: id.clone(),
+            subtype: subtype.unwrap_or_default().to_string(),
+            request,
+        }),
+        // An id that is not a string is still answered, as the same value.
+        other => Some(ParsedLine::UnreadableControlRequest {
+            request_id: other.filter(|id| id.is_number()).cloned(),
+            subtype: subtype.map(str::to_string),
+            tool_name: request
+                .get("tool_name")
+                .and_then(|x| x.as_str())
+                .filter(|name| name.len() <= 256)
+                .map(str::to_string),
+        }),
+    }
 }
 
 fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
@@ -973,6 +1059,13 @@ impl SessionTranscript {
         self.turns.clone()
     }
 
+    /// Has the result of the call `tool_use_id` been ingested (newest turn first)?
+    pub fn has_tool_result(&self, tool_use_id: &str) -> bool {
+        self.turns.iter().rev().flat_map(|t| t.blocks.iter().rev()).any(|b| {
+            matches!(b, TurnBlock::ToolResult { tool_use_id: Some(id), .. } if id == tool_use_id)
+        })
+    }
+
     /// Current retained payload byte total — see the module-level
     /// `## Retention` docs. Always ≤ [`RETAINED_BYTES`], except for the one
     /// documented escape hatch: a single turn with no blocks left to shed.
@@ -1112,7 +1205,10 @@ impl SessionTranscript {
 
             ParsedLine::Model { session_id: None, .. }
             | ParsedLine::ModelFallback { .. }
-            | ParsedLine::ControlResponse { .. } => vec![],
+            | ParsedLine::ControlResponse { .. }
+            | ParsedLine::ControlRequest { .. }
+            | ParsedLine::UnreadableControlRequest { .. }
+            | ParsedLine::ControlCancel { .. } => vec![],
 
             // Background tasks are the registry's business: a task event
             // never opens a turn or adds a block, so a transcript recorded
@@ -4081,5 +4177,105 @@ mod tests {
         assert_eq!(tasks[0].status, TaskStatus::Completed);
         assert_eq!(tasks[1].status, TaskStatus::Stopped, "killed");
         assert!(tasks.iter().all(|t| t.has_output));
+    }
+
+    // ── CLI requests of the host (permission prompts) ───────────────────────
+    //
+    // Frames copied verbatim from the CLI spike captures (real 2.1.296):
+    // run-deny.jsonl (a rule-forced ask) and run-interrupt.jsonl (the withdrawal).
+
+    const SPIKE_CAN_USE_TOOL: &str = r#"{"type":"control_request","request_id":"315e4b2d-d8ae-4f3e-b81a-fc597edca048","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"rm -rf /tmp/archie-spike/work/victim/a","description":"remove a"},"description":"remove a","decision_reason_type":"rule","tool_use_id":"toolu_spike_0"}}"#;
+    const SPIKE_CANCEL: &str =
+        r#"{"type":"control_cancel_request","request_id":"1b4be05b-b626-44da-9c7c-e5596c1df87f"}"#;
+
+    #[test]
+    fn a_permission_prompt_parses_as_a_control_request_carrying_the_request_object_as_received() {
+        let frame: Value = serde_json::from_str(SPIKE_CAN_USE_TOOL).unwrap();
+
+        match parse_line(SPIKE_CAN_USE_TOOL) {
+            Some(ParsedLine::ControlRequest { request_id, subtype, request }) => {
+                assert_eq!(request_id, "315e4b2d-d8ae-4f3e-b81a-fc597edca048");
+                assert_eq!(subtype, "can_use_tool");
+                assert_eq!(request, frame["request"], "the inner request, field for field");
+            }
+            other => panic!("expected a control request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_control_request_of_another_subtype_names_its_subtype() {
+        let line = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback","callback_id":"hook_0"}}"#;
+
+        match parse_line(line) {
+            Some(ParsedLine::ControlRequest { request_id, subtype, request }) => {
+                assert_eq!((request_id.as_str(), subtype.as_str()), ("r1", "hook_callback"));
+                assert_eq!(request["callback_id"], "hook_0");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_withdrawn_request_parses_as_a_control_cancel_with_its_request_id() {
+        assert_eq!(
+            parse_line(SPIKE_CANCEL),
+            Some(ParsedLine::ControlCancel { request_id: "1b4be05b-b626-44da-9c7c-e5596c1df87f".to_string() })
+        );
+    }
+
+    #[test]
+    fn a_cancel_without_a_string_request_id_is_not_a_line_we_act_on() {
+        // With no id there is nothing to withdraw.
+        for line in [
+            r#"{"type":"control_cancel_request"}"#,
+            r#"{"type":"control_cancel_request","request_id":null}"#,
+        ] {
+            assert_eq!(parse_line(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_control_request_without_a_string_id_is_unreadable_and_keeps_a_numeric_id() {
+        // The CLI waits for an answer all the same, so it is handed on, not dropped.
+        assert_eq!(
+            parse_line(r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}"#),
+            Some(ParsedLine::UnreadableControlRequest {
+                request_id: None,
+                subtype: Some("can_use_tool".to_string()),
+                tool_name: Some("Bash".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_line(r#"{"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool"}}"#),
+            Some(ParsedLine::UnreadableControlRequest {
+                request_id: Some(serde_json::json!(7)),
+                subtype: Some("can_use_tool".to_string()),
+                tool_name: None,
+            })
+        );
+    }
+
+    #[test]
+    fn the_transcript_ignores_control_requests_and_cancels() {
+        let mut t = SessionTranscript::new();
+        t.ingest_line(r#"{"type":"system","subtype":"init","session_id":"s-1","cwd":"/tmp"}"#);
+        let before = t.snapshot().len();
+        let session = t.session_id().map(str::to_owned);
+
+        for line in [SPIKE_CAN_USE_TOOL, SPIKE_CANCEL] {
+            assert!(t.ingest_line(line).is_empty(), "no turn event for {line}");
+            let parsed = parse_line(line).expect("parses");
+            assert!(t.ingest_parsed(parsed).is_empty(), "no turn event for {line}");
+        }
+
+        assert_eq!(t.snapshot().len(), before, "a prompt opens no turn and adds no block");
+        assert_eq!(t.session_id().map(str::to_owned), session);
+    }
+
+    #[test]
+    fn a_control_response_still_parses_as_before() {
+        let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"interrupt-1","response":{"still_queued":[]}}}"#;
+
+        assert!(matches!(parse_line(line), Some(ParsedLine::ControlResponse { .. })), "{:?}", parse_line(line));
     }
 }

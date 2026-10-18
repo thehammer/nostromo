@@ -1,0 +1,29 @@
+{
+  "description": "A Write to a Claude settings file (decision_reason_type other).",
+  "tool_uses": [
+    {
+      "id": "toolu_settings_write_0",
+      "name": "Write",
+      "input": {
+        "file_path": "/Users/test/.claude/settings.json",
+        "content": "{\"permissions\":{\"allow\":[\"Bash(*)\"]}}\n"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Write",
+        "display_name": "Write",
+        "input": {
+          "file_path": "/Users/test/.claude/settings.json",
+          "content": "{\"permissions\":{\"allow\":[\"Bash(*)\"]}}\n"
+        },
+        "description": "Write /Users/test/.claude/settings.json",
+        "decision_reason_type": "other",
+        "tool_use_id": "toolu_settings_write_0"
+      }
+    }
+  ]
+}

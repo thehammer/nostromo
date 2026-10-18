@@ -41,10 +41,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
+
+use crate::approvals::broker::{
+    deny_response, ApprovalBroker, Incoming, SessionInfo as ApprovalSessionInfo, SessionSink,
+    APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, UNSUPPORTED_REQUEST_ERROR,
+};
 
 use super::decisions::DecisionRegistry;
 use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
@@ -302,6 +307,9 @@ struct ManagedSession {
     /// The child leads its own process group (restricted sessions), so a kill
     /// takes its children and subagents with it.
     own_process_group: bool,
+    /// The approval broker's generation number for this process, when the
+    /// session is approval-capable and a broker is configured.
+    approval_generation: Option<u64>,
 }
 
 impl ManagedSession {
@@ -454,6 +462,11 @@ pub struct SessionManager {
     /// [`crate::approvals::guard::resolve_guard_path`]; a path that doesn't
     /// exist fails closed (every tool call is blocked).
     guard_path: PathBuf,
+    /// The approval broker: hears every permission request of an
+    /// approval-capable session and always answers it. `None` in tests and
+    /// non-daemon use; such a session's requests are denied at once by its
+    /// reader instead.
+    approvals: Option<ApprovalBroker>,
 }
 
 impl SessionManager {
@@ -511,7 +524,18 @@ impl SessionManager {
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(crate::approvals::guard::GUARD_SENTINEL_PATH)),
+            approvals: None,
         }
+    }
+
+    /// Give sessions spawned from now on an approval broker to ask.
+    pub fn configure_approvals(&mut self, broker: ApprovalBroker) {
+        self.approvals = Some(broker);
+    }
+
+    /// The approval broker, if one is configured.
+    pub fn approvals(&self) -> Option<&ApprovalBroker> {
+        self.approvals.as_ref()
     }
 
     /// The guard binary sessions spawned from now on run as their PreToolUse hook.
@@ -994,12 +1018,31 @@ impl SessionManager {
             });
         }
 
+        // An approval-capable session (unrestricted, not remote-control; the
+        // same test as the `--permission-prompt-tool` flag) gets a broker to
+        // answer its permission requests.
+        let approval_generation = self.approvals.as_ref().filter(|_| !restricted && !remote_control).map(|broker| {
+            let info = ApprovalSessionInfo {
+                tag: tag.clone(),
+                agent: agent_name.clone(),
+                session_id: Some(session_id.clone()),
+                cwd: Some(task_dir.clone()),
+            };
+            let sink = Arc::new(StdinSink { stdin: Arc::clone(&shared.stdin), exited: Arc::clone(&shared.exited) });
+            broker.register_session(info, sink)
+        });
+        let approvals = self
+            .approvals
+            .clone()
+            .zip(approval_generation)
+            .map(|(broker, generation)| ApprovalLink { broker, generation });
+
         // Reader thread: parse stdout → transcript → broadcast deltas; drain
         // the pending queue on turn completion; signal exit on EOF.
         let reader_shared = shared.clone();
         let tag_for_reader = tag.clone();
         let reader_task =
-            tokio::task::spawn_blocking(move || run_reader(tag_for_reader, stdout, reader_shared));
+            tokio::task::spawn_blocking(move || run_reader(tag_for_reader, stdout, reader_shared, approvals));
 
         Ok(ManagedSession {
             tag,
@@ -1022,6 +1065,7 @@ impl SessionManager {
             stop_reason: None,
             summary_sent: Arc::new(AtomicBool::new(false)),
             own_process_group,
+            approval_generation,
         })
     }
 
@@ -1047,7 +1091,6 @@ impl SessionManager {
         if !session.alive() {
             anyhow::bail!("session {tag} is not alive");
         }
-
         // Decide under the state lock, then release it BEFORE touching stdin
         // (a write to a stalled CLI must not hold `state`, see `Shared`). The
         // message is queued, not written, while a turn runs or a model switch
@@ -1072,10 +1115,24 @@ impl SessionManager {
         };
 
         if should_write {
-            if let Err(e) = write_user_message(&session.shared, &message) {
+            // After a crash left a permission request of this focus pending, its
+            // agent hears about it once, ahead of what it was sent. Only a message
+            // written now carries it (a queued one can still be dropped by an
+            // interrupt), and it is forgotten only once the write has succeeded.
+            let note = self.approvals.as_ref().and_then(|b| b.peek_restart_note(tag));
+            let outgoing = match &note {
+                Some(note) => PendingMessage { text: format!("{note}\n\n{}", message.text), ..message.clone() },
+                None => message.clone(),
+            };
+            if let Err(e) = write_user_message(&session.shared, &outgoing) {
                 // The optimistic MidTurn would otherwise wedge the session.
                 *lock_recover(&session.shared.state) = SessionState::Idle;
                 return Err(e);
+            }
+            if note.is_some() {
+                if let Some(broker) = &self.approvals {
+                    broker.discard_restart_note(tag);
+                }
             }
             session
                 .shared
@@ -1279,6 +1336,11 @@ impl SessionManager {
         }
         let mut ended_tasks = None;
         if let Some(session) = self.sessions.get_mut(tag) {
+            // Before the kill: a request still pending ends `cancelled`, and
+            // nothing is written to a process that is about to die.
+            if let (Some(broker), Some(generation)) = (&self.approvals, session.approval_generation) {
+                broker.on_session_gone(tag, generation, "stopped");
+            }
             session.intentional_stop.store(true, Ordering::SeqCst);
             session.stop_reason = Some(StopReason::User);
             session.kill();
@@ -1343,6 +1405,10 @@ impl SessionManager {
         // flight then fails at once, so `take_carry` can see its outcome
         // instead of waiting on a process that will never read.
         if let Some(session) = self.sessions.get_mut(tag) {
+            // Before the kill, as in `stop`: nothing is written to a dying process.
+            if let (Some(broker), Some(generation)) = (&self.approvals, session.approval_generation) {
+                broker.on_session_gone(tag, generation, "restarted");
+            }
             session.intentional_stop.store(true, Ordering::SeqCst);
             session.kill();
         }
@@ -1891,6 +1957,36 @@ impl SessionManager {
 
     // ── shutdown ────────────────────────────────────────────────────────────
 
+    /// Before shutdown kills the children: deny every pending permission request
+    /// `restart` (the deny is written before this returns), then wait up to
+    /// `timeout` for each affected session to print the result of the call it
+    /// denied, or to exit, so the agent hears why instead of seeing a dead pipe.
+    pub fn prepare_shutdown(&self, timeout: Duration) {
+        let Some(broker) = self.approvals.clone() else { return };
+        let deadline = Instant::now() + timeout;
+        // The denies are written on a helper thread: a write waits for the
+        // session's stdin lock, and another thread may hold it in a long write to a
+        // CLI that stopped reading. Shutdown must not wait on that.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(broker.deny_all_for_shutdown());
+        });
+        let Ok(mut waiting) = rx.recv_timeout(timeout) else {
+            warn!("shutdown: the pending permission requests could not all be denied in time");
+            return;
+        };
+        while !waiting.is_empty() && Instant::now() < deadline {
+            waiting.retain(|(tag, tool_use_id)| {
+                self.sessions
+                    .get(tag)
+                    .is_some_and(|s| s.alive() && !lock_recover(&s.shared.transcript).has_tool_result(tool_use_id))
+            });
+            if !waiting.is_empty() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
     /// Kill all children. Called on SIGTERM.
     pub fn kill_all_on_shutdown(&mut self) {
         for (tag, session) in &mut self.sessions {
@@ -1993,7 +2089,7 @@ impl Default for SessionManager {
 /// deltas, drive turn state, drain the pending queue, and signal EOF. Control
 /// responses are handed to whoever waits for them, and model reports are
 /// recorded; the reader itself never waits on anything but stdout.
-fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
+fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, approvals: Option<ApprovalLink>) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let line = match line {
@@ -2026,6 +2122,31 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
                         error_code: error_code.clone(),
                         body: body.clone(),
                     });
+                }
+                continue;
+            }
+            ParsedLine::ControlRequest { request_id, subtype, request } => {
+                route_control_request(&tag, &shared, approvals.as_ref(), request_id, subtype, request);
+                continue;
+            }
+            ParsedLine::UnreadableControlRequest { request_id, subtype, tool_name } => {
+                route_unreadable_control_request(
+                    &tag,
+                    &shared,
+                    approvals.as_ref(),
+                    request_id.as_ref(),
+                    subtype.as_deref(),
+                    tool_name.as_deref(),
+                );
+                continue;
+            }
+            ParsedLine::ControlCancel { request_id } => {
+                if let Some(link) = &approvals {
+                    let cancel = Incoming::Cancel { tag: tag.clone(), cli_request_id: request_id.clone() };
+                    if link.broker.submit(cancel).is_err() {
+                        // The broker's worker is gone: do it inline.
+                        link.broker.on_cancel(&tag, request_id);
+                    }
                 }
                 continue;
             }
@@ -2074,9 +2195,149 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared) {
     // torn down.
     shared.tasks.end_session(&shared.event_tx);
     lock_recover(&shared.waiters).clear();
+    if let Some(link) = &approvals {
+        // Requests still pending ended with the process: nothing to write to.
+        link.broker.on_session_gone(&tag, link.generation, "exited");
+    }
     shared.broadcast(SessionEvent::Exited { exit_code: None });
     publish_model_state(&shared);
     tracing::warn!(tag = %tag, "session reader EOF — child stdout closed (crash or clean exit)");
+}
+
+/// The approval broker and the generation of the process a reader reads.
+struct ApprovalLink {
+    broker: ApprovalBroker,
+    generation: u64,
+}
+
+/// A session's stdin as the approval broker answers through it.
+struct StdinSink {
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    exited: Arc<AtomicBool>,
+}
+
+impl SessionSink for StdinSink {
+    fn live(&self) -> bool {
+        !self.exited.load(Ordering::SeqCst)
+    }
+
+    fn respond(&self, cli_request_id: &str, response: &serde_json::Value) -> std::io::Result<()> {
+        if !self.live() {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session has exited"));
+        }
+        write_control_response(&self.stdin, cli_request_id, response).map_err(std::io::Error::other)
+    }
+}
+
+/// A `control_request` from the CLI. A permission prompt (`can_use_tool`) goes to
+/// the broker by channel, never waiting on it; if the broker cannot take it, the
+/// reader denies it itself, because the CLI must never be left waiting. Any other
+/// subtype gets an error answer: our flags give the CLI no other host-bound request,
+/// and one that arrived anyway (an elicitation, something newer) must not be left
+/// waiting either.
+fn route_control_request(
+    tag: &str,
+    shared: &Shared,
+    link: Option<&ApprovalLink>,
+    request_id: &str,
+    subtype: &str,
+    request: &serde_json::Value,
+) {
+    let id = serde_json::Value::String(request_id.to_owned());
+    if subtype != "can_use_tool" {
+        warn!(tag, subtype, "control_request of an unsupported subtype: answering it with an error");
+        answer_unsupported(tag, shared, &id);
+        return;
+    }
+    let incoming = || Incoming::Request {
+        tag: tag.to_owned(),
+        generation: link.map_or(0, |l| l.generation),
+        cli_request_id: request_id.to_owned(),
+        value: request.clone(),
+    };
+    let deny = || deny_unless_exited(shared, &id, APPROVAL_UNAVAILABLE_MESSAGE);
+    if let Some(link) = link {
+        if link.broker.submit(incoming()).is_ok() {
+            return;
+        }
+        warn!(tag, "no approval broker to take a permission request: denying it");
+        link.broker.record_unqueued_denial(tag, link.generation, request, deny);
+        return;
+    }
+    warn!(tag, "no approval broker to take a permission request: denying it");
+    if let Err(e) = deny() {
+        warn!(tag, "could not write the deny: {e}");
+    }
+}
+
+/// A `control_request` the reader could not read in full (see
+/// [`ParsedLine::UnreadableControlRequest`]). Dropping it would leave the CLI waiting
+/// for ever (it has no timeout), so it is answered from what the scan recovered:
+///
+/// - a subtype other than `can_use_tool`: an error answer, like any unsupported request;
+/// - otherwise (`can_use_tool`, or a subtype that could not be made out: most likely
+///   a permission prompt) with the request id: a deny, and a `request` + `outcome`
+///   entry in the audit log;
+/// - no request id: nothing can be answered under, so there is a content-free error
+///   in the daemon log and one `request_unparseable` audit entry.
+///
+/// The line itself is never kept or logged: it can be megabytes and hold anything.
+fn route_unreadable_control_request(
+    tag: &str,
+    shared: &Shared,
+    link: Option<&ApprovalLink>,
+    request_id: Option<&serde_json::Value>,
+    subtype: Option<&str>,
+    tool_name: Option<&str>,
+) {
+    let Some(id) = request_id else {
+        error!(tag, "a control request from the CLI could not be read and has no id to answer under");
+        if let Some(link) = link {
+            link.broker.record_unparseable(tag, link.generation);
+        }
+        return;
+    };
+    if subtype.is_some_and(|s| s != "can_use_tool") {
+        warn!(tag, "unreadable control_request of an unsupported subtype: answering it with an error");
+        answer_unsupported(tag, shared, id);
+        return;
+    }
+    warn!(tag, "a permission request could not be read: denying it");
+    let deny = || deny_unless_exited(shared, id, INVALID_REQUEST_MESSAGE);
+    match link {
+        Some(link) => link.broker.record_unreadable_denial(tag, link.generation, tool_name, deny),
+        None => {
+            if let Err(e) = deny() {
+                warn!(tag, "could not write the deny: {e}");
+            }
+        }
+    }
+}
+
+/// The error answer to a request the host does not handle.
+fn answer_unsupported(tag: &str, shared: &Shared, request_id: &serde_json::Value) {
+    if shared.exited.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Err(e) = write_control_error(&shared.stdin, request_id, UNSUPPORTED_REQUEST_ERROR) {
+        warn!(tag, "could not write the error answer: {e}");
+    }
+}
+
+/// Write a deny to a session that has not exited. This is the reader's own write
+/// (the broker did not take the request, or could not read it).
+///
+/// It cannot deadlock the reader. The write is one small line (a few hundred bytes,
+/// under `PIPE_BUF`), made while the CLI is waiting for exactly this answer, so the
+/// CLI is reading its stdin; the CLI reads stdin whether or not we read its stdout,
+/// so the pipe drains. The only thing ahead of it on the pipe or on the stdin lock
+/// (a leaf lock) is another of our own frames, which the CLI is draining the same
+/// way, and the broker's worker and watchdog write through this same path anyway.
+fn deny_unless_exited(shared: &Shared, request_id: &serde_json::Value, message: &str) -> std::io::Result<()> {
+    if shared.exited.load(Ordering::SeqCst) {
+        return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session has exited"));
+    }
+    write_control_response_to(&shared.stdin, request_id, &deny_response(message)).map_err(std::io::Error::other)
 }
 
 /// After a turn ends or a switch has been applied: apply a switch waiting for
@@ -2283,12 +2544,69 @@ fn write_control_request(
     request_id: &str,
     request: serde_json::Value,
 ) -> Result<()> {
-    let frame = serde_json::json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": request,
-    });
-    let mut line = serde_json::to_string(&frame)?;
+    write_frame(
+        stdin,
+        &serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": request,
+        }),
+    )
+}
+
+/// Write the answer to a request the CLI made of us (`request_id` is the CLI's),
+/// `response` being the body (e.g. a permission deny). Callers only write to a
+/// session that has not exited.
+fn write_control_response(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    request_id: &str,
+    response: &serde_json::Value,
+) -> Result<()> {
+    write_control_response_to(stdin, &serde_json::Value::String(request_id.to_owned()), response)
+}
+
+/// [`write_control_response`] for a request id of any JSON value: the CLI's id is
+/// answered as it arrived, a number staying a number.
+fn write_control_response_to(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    request_id: &serde_json::Value,
+    response: &serde_json::Value,
+) -> Result<()> {
+    write_frame(
+        stdin,
+        &serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": response,
+            },
+        }),
+    )
+}
+
+/// Write the error answer (`subtype: "error"`) to a request the CLI made of us.
+fn write_control_error(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    request_id: &serde_json::Value,
+    error: &str,
+) -> Result<()> {
+    write_frame(
+        stdin,
+        &serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "error",
+                "request_id": request_id,
+                "error": error,
+            },
+        }),
+    )
+}
+
+/// Write one JSON frame as a line to the child's stdin (a leaf lock).
+fn write_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, frame: &serde_json::Value) -> Result<()> {
+    let mut line = serde_json::to_string(frame)?;
     line.push('\n');
     let mut guard = lock_recover(stdin);
     let stdin = guard
@@ -2415,6 +2733,12 @@ pub fn build_claude_args(
 /// permission decision, and its `"disableAllHooks":false` wins over a user
 /// setting an agent could write mid-session. Neither the bypass nor the
 /// allow-list may be the thing that lets an agent type into a production shell.
+///
+/// An unrestricted session that is not `--remote-control` is **approval-capable**:
+/// it also gets `--permission-prompt-tool stdio`, right after the guard
+/// `--settings`, so the CLI sends its permission prompts to the daemon instead of
+/// denying them silently. A restricted or remote-control session's arguments are
+/// unchanged.
 pub fn build_claude_args_with(
     agent_name: &str,
     view_name: &str,
@@ -2439,6 +2763,13 @@ pub fn build_claude_args_with(
             // The bypass skips permission checks, not hooks: the guard still
             // vets every tool call.
             args.extend(["--settings".into(), guard_settings.into()]);
+            // An approval-capable session (no restrictions, not remote-control)
+            // sends its permission prompts to us: the user's own ask rules would
+            // otherwise end in a silent, unexplained denial. Whoever answers,
+            // answers over stdin (see `crate::approvals::broker`).
+            if !remote_control {
+                args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
+            }
         }
         Some(r) => {
             // No bypass: nothing outside the allow-list can run, and nothing

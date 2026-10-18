@@ -1,0 +1,29 @@
+{
+  "description": "Write tool: a multi-line new file.",
+  "tool_uses": [
+    {
+      "id": "toolu_write_0",
+      "name": "Write",
+      "input": {
+        "file_path": "/tmp/x/notes.md",
+        "content": "# Notes\n\nfirst line\nsecond line\nthird line\n"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Write",
+        "display_name": "Write",
+        "input": {
+          "file_path": "/tmp/x/notes.md",
+          "content": "# Notes\n\nfirst line\nsecond line\nthird line\n"
+        },
+        "description": "Write /tmp/x/notes.md",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_write_0"
+      }
+    }
+  ]
+}

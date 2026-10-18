@@ -1,0 +1,29 @@
+{
+  "description": "ecs_connect to production.",
+  "tool_uses": [
+    {
+      "id": "toolu_guard_ecs_connect_0",
+      "name": "Bash",
+      "input": {
+        "command": "ecs_connect production portal web",
+        "description": "open a prod shell"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "ecs_connect production portal web",
+          "description": "open a prod shell"
+        },
+        "description": "open a prod shell",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_guard_ecs_connect_0"
+      }
+    }
+  ]
+}

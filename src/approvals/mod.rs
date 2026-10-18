@@ -9,9 +9,16 @@
 //!   (`nostromo-guard pre-tool-use`) in every daemon-hosted session and
 //!   decides from the hook payload and a tmux/ps probe alone.
 //! - [`audit`]: the append-only JSONL audit store under [`ApprovalsPaths`].
+//! - [`request`]: a permission request from the CLI, typed and sanitized, and
+//!   the "Why" line.
+//! - [`display`]: the exact-text breakdown of a request (round-trip safe).
+//! - [`broker`]: hears every permission request, logs it, and always answers it.
 
 pub mod audit;
+pub mod broker;
+pub mod display;
 pub mod guard;
+pub mod request;
 pub mod shell;
 
 mod expand;

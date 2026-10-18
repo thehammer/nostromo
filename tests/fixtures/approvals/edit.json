@@ -1,0 +1,31 @@
+{
+  "description": "Edit tool: multi-line old/new with unchanged lines `fn main() {`, `let a = 1;` and `}`.",
+  "tool_uses": [
+    {
+      "id": "toolu_edit_0",
+      "name": "Edit",
+      "input": {
+        "file_path": "/tmp/x/src/main.rs",
+        "old_string": "fn main() {\n    let a = 1;\n    let b = 2;\n    println!(\"{}\", a + b);\n}\n",
+        "new_string": "fn main() {\n    let a = 1;\n    let b = 3;\n    let c = 4;\n    println!(\"{}\", a + b + c);\n}\n"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Edit",
+        "display_name": "Edit",
+        "input": {
+          "file_path": "/tmp/x/src/main.rs",
+          "old_string": "fn main() {\n    let a = 1;\n    let b = 2;\n    println!(\"{}\", a + b);\n}\n",
+          "new_string": "fn main() {\n    let a = 1;\n    let b = 3;\n    let c = 4;\n    println!(\"{}\", a + b + c);\n}\n"
+        },
+        "description": "Edit /tmp/x/src/main.rs",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_edit_0"
+      }
+    }
+  ]
+}

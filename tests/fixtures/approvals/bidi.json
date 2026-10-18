@@ -1,0 +1,29 @@
+{
+  "description": "Bidi controls U+202E U+2066 U+2067 U+2068 U+2069 inside a Bash command.",
+  "tool_uses": [
+    {
+      "id": "toolu_bidi_0",
+      "name": "Bash",
+      "input": {
+        "command": "echo \u202etxt.exe\u2069 ok \u2066x\u2067y\u2068z\u2069",
+        "description": "print a name"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "echo \u202etxt.exe\u2069 ok \u2066x\u2067y\u2068z\u2069",
+          "description": "print a name"
+        },
+        "description": "print a name",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_bidi_0"
+      }
+    }
+  ]
+}

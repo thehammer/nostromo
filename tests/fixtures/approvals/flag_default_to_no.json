@@ -1,0 +1,30 @@
+{
+  "description": "default_to_no: true.",
+  "tool_uses": [
+    {
+      "id": "toolu_flag_default_to_no_0",
+      "name": "Bash",
+      "input": {
+        "command": "rm -rf /tmp/x/a",
+        "description": "remove a"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "rm -rf /tmp/x/a",
+          "description": "remove a"
+        },
+        "description": "remove a",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_flag_default_to_no_0",
+        "default_to_no": true
+      }
+    }
+  ]
+}
