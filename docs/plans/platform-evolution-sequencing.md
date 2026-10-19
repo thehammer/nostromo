@@ -99,6 +99,12 @@ until the second mobile drop.
 **Decision binding point:** before any iPhone/iPad ships. Not binding
 on the Mac-native app.
 
+**Resolved 2026-10-10 (refreshed 2026-10-18):** VPN-to-home via the
+operator's existing WireGuard (UDM Pro), with the primary daemon on Tokyo
+(always-on Linux), and both Macs (Sendai, and the managed laptop Kobe) as
+outbound-only satellites. No hosted hub; AWS hosts only the APNs push relay.
+See `docs/plans/backplane-sequencing.md`.
+
 ### B3. Auth / pairing model
 Tied to B2. iPhone vision §"Open bets" suggests pairing-flow (QR on Mac
 + scanned on phone) → long-lived device token. We need this even for

@@ -1,0 +1,708 @@
+# W13 — Push notifications: closed-vocabulary push engine on the primary, a stateless AWS relay, and iOS registration
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+
+Read `docs/plans/backplane-sequencing.md` first ("What changed", bets B9
+and B10, "Wire inventory", "Install coordination") and the push PRD's
+design-loop notes **turn 2** (S7, S8). Versus the 2026-10-10 draft:
+- **Withdrawn (S7, B10):** `ClientMsg::DecisionAnswer.host`, the
+  `push_available` input to `has_operator_for`/`ask_decision`, and
+  `ServerMsg::PushAvailability` (PRD clarification C3). Decisions and
+  approvals are answered only by the verified Mac app; a phone that can
+  receive a push is not an operator. `ask_decision` behaviour is unchanged.
+  A decision notification is still sent (it tells the operator to go to the
+  Mac); its only action is Open.
+- **Satellite data is B9-filtered.** A `work` satellite (Kobe) sends
+  metadata-only `MotherJobs`, `DecisionRequest` and `PerriState`
+  (W10's `redact_for_uplink_metadata`). This wedge must build every
+  notification from those metadata fields alone, which the closed
+  vocabulary already requires. The satellite maps `agent` to the fixed set
+  (*Mother / Perri / Fred / Teri / Claudia / A session*) **before** egress, so
+  a raw agent name never leaves Kobe.
+- **Mother crew fields already exist** (MC1): `MotherJob.activity`
+  (`src/mother/mod.rs:223`), `decision`, `attention`/`attention_reasons`,
+  and the helpers `is_awaiting` (`:280`), `open_decision` (`:295`),
+  `unacked_attention` (`:301`), `is_held_for_operator` (`:308`). Only
+  `paused_at` is new. Reason phrases map from `paused_reason`, `activity`
+  (`gate_hold`, `review_hold`, `adherence_blocked`, `operator_hold`,
+  `pipeline_blocked`) and attention reasons (`progress_stalled`,
+  `burn_ahead`, `gates_incomplete`, `decision_awaiting`); unknown → *needs
+  you*. **Do not invent a second "needs you" heuristic.** The rules are the
+  ones MC4 gives its Kit `MotherNeedsYouProducer`
+  (`.claude/plans/mother-crew-client-mc4-needs-you-and-notifications.md`),
+  which MC4 builds in Kit so iOS can reuse it later: one item per awaiting or
+  held job, plus one per **unacked** attention reason other than
+  `decision_awaiting` (the hold item already covers that one). The daemon
+  mirrors them with the `MotherJob` helpers above, and a shared fixture table
+  (below) keeps Rust and Kit from drifting. Acknowledgement semantics are in
+  "Acknowledgement and withdrawal".
+- No `PROTOCOL_VERSION` bump; the primary advertises `"push"`. New
+  `ClientMsg` ordinals per the memo's wire inventory (50–53), `Paired`-only
+  and self-scoped.
+- Tests run in CI: Rust (daemon and the `infra/push-relay` crate) in the RWX
+  sandbox, Kit/iOS on GitHub Actions. Hermetic: `wiremock` stands in for the
+  relay and APNs; no AWS, no APNs, no network.
+- Edits the iOS Xcode project and the session wire: obey the memo's
+  dispatch exclusions. If the operator chooses to split this wedge (memo
+  open question 8), W13a is everything except "iOS app", W13b is "iOS app".
+
+## Context
+
+After W9–W12, a phone sees the primary daemon's state whenever the app is
+open and the VPN is up. When iOS suspends the app (commute, meeting), the
+operator does not learn that a Mother job is waiting on an answer, that an
+agent session raised a decision (default timeout 5 min,
+`src/mcp/tools/ask_decision.rs:38`), or that a PR entered their review queue.
+The only way to reach a suspended app is Apple Push (APNs). APNs needs a
+provider holding a `.p8` signing key, so this wedge adds a small relay in the
+operator's **personal AWS account**. Bet B2 in
+`docs/plans/backplane-sequencing.md` keeps the data plane on WireGuard; the
+relay carries only notification text.
+
+The product contract is `docs/prds/push-relay.md` (Ada's PRD). Read the whole
+file, including **"Design-loop notes for Ada"** at the end: it records the
+operator's answers to the two open questions, sign-offs S1–S6, and
+clarifications C1–C8 that this plan implements. In short:
+
+- Every notification is built only from a **closed vocabulary**: kind, host
+  name, a short reference, and fixed phrases and numbers that Nostromo
+  generates. **No worker-, agent-, person- or GitHub-authored text ever goes
+  to the relay.** Repository names appear only for hosts the operator
+  classified as **personal**; unclassified means **work**.
+- Three kinds (Mother awaiting, decision request, PR review requested) plus a
+  **Summary**. Summaries come from burst coalescing, the 07:00 digest at the
+  end of quiet hours, and an **evening summary at 17:30** (operator answer to
+  open question 1; configurable per device).
+- A **2-minute grace delay** for Mother and review items (skipped if
+  resolved). Decisions go out immediately. Also: quiet hours
+  (default 22:00–07:00, phone-local), per-kind switches per device, and one
+  notification per item over its lifetime.
+- **Withdrawal** of a resolved item's notification, the badge kept equal to
+  the number of waiting items, and expiry (decision deadline, else 4 h).
+- A **Sent notifications** log kept on the operator's machines for 7 days, and
+  a "not delivered since" banner.
+- The relay keeps only `{time, kind, outcome, anonymous device ref}` for
+  7 days.
+
+On-phone enrichment, lock-screen decision actions, and the Notification
+Service Extension that does withdrawal on the phone are **W16**
+(`docs/plans/backplane/W16-ios-push-enrichment.md`), which depends on this
+wedge. This wedge delivers working, contract-text notifications end to end.
+Withdrawal here uses badge-only and background pushes (see S1 in the PRD
+notes).
+
+Where things live:
+
+- **Primary** (Tokyo, `mode = primary`, W10): runs the push engine. It sees
+  every host's frames: local ones on its broadcast channel, and satellite
+  ones arriving host-tagged over the uplink.
+- **Satellites** (Kobe, Sendai): send nothing to the relay. They only stamp
+  facts the primary needs onto frames they already publish.
+
+## Target
+- **Repo:** nostromo (daemon and iOS) plus a new `infra/push-relay/` crate in
+  the same repo
+- **Branch:** `feat/backplane-push-relay`
+- **Base:** `origin/main` (W12 merged; W9–W11 are therefore merged too)
+- **Max cost:** $75 (expected ≈ $30; see the memo's Estimate)
+
+## Files to change
+
+Daemon wire and data (additive; every new field is `#[serde(default)]` and
+skipped when `None`, so W9–W12 fixtures still decode):
+
+- `src/ipc/protocol.rs:1808-1818` (`ServerMsg::DecisionRequest`). Add three
+  fields:
+  - `deadline: Option<DateTime<Utc>>`.
+  - `agent_class: Option<AgentClass>`: the session's agent mapped to the
+    fixed set (`mother | perri | fred | teri | claudia | other`) on the
+    originating daemon. The raw agent name is never put on the wire.
+  - `local_operator: bool`: whether a verified Mac app that renders
+    decisions was connected to the *originating* daemon when it was
+    broadcast.
+  `DecisionResolved` and `PerriState` already gain `host` in W10. There is
+  **no** `host` on `DecisionAnswer` (B10).
+- `src/ipc/decisions.rs` (`DecisionRegistry::submit`). Take `deadline` and
+  `agent_class`, put them on the `DecisionRequest`, and set `local_operator`
+  from `has_operator_for` (`:345`) at broadcast/promotion time.
+  `src/mcp/tools/ask_decision.rs` computes `deadline = now + timeout_secs`
+  before `submit` and maps the tag's `agent_name` (through
+  `SessionManager`, `src/ipc/session_manager/mod.rs`) to `AgentClass`.
+  **Do not change** `has_operator_for`, the operator registry, or the
+  `no_operator` fail-fast in `ask_decision` (B10; AP1).
+- `src/mother/mod.rs:170-250` (`MotherJob`). Add only
+  `#[serde(default)] paused_at: Option<DateTime<Utc>>` (verify it is in
+  `mother list --format json` and in the vendored contract fixtures; if it
+  is not, use first-seen time and skip the field). Leave the tolerant decode
+  (`src/mother/decode.rs`) and the crew types alone; extend the golden
+  fixtures only if the new field appears in Mother's output.
+- `src/data/perri_queue_native.rs:228-235` (`PrDetail`). Deserialise
+  `additions` and `deletions` (`#[serde(default)] Option<u64>`). Then:
+  - `GetPrHeadResult::Open` (`:243`, built at `:1928`) carries
+    `changed_lines: Option<u64>` (additions + deletions).
+  - `ci_state_cached` (`:1709-1742`) returns it alongside the SHA, and the
+    bucket-1/2 fold at `:1108-1113` and `:1259-1262` stores it on `Candidate`
+    (`:357-381`, new `changed_lines: Option<u64>`).
+  - `classify`/`render_items` (`:477-563`) copy it to `PrQueueItem`
+    (`src/data/perri_queue.rs:105-131`, new
+    `#[serde(default, skip_serializing_if = "Option::is_none")]
+    changed_lines: Option<u64>`).
+  - In `src/data/perri_queue_targeted.rs`, add `additions deletions` to the
+    GraphQL probe query (`:840-880`), carry them on `ProbedPr` (`:791`), and
+    write them in `upsert_from_probe`.
+  - No new GitHub requests. The queue tests that count requests must stay
+    unchanged.
+- `src/config.rs:51-136` (`Config`). Add a `push: Option<PushConfig>` table,
+  read **on the primary only**:
+  - `relay_url`.
+  - `relay_token_path` (default `~/.nostromo/push-relay-token`).
+  - `enabled` (default `true`).
+  - `hosts: BTreeMap<String, HostClass>` with `HostClass ∈ { work, personal }`.
+    An absent host is `work`.
+  - `work_owners: Vec<String>` (default `["Carefeed"]`; PRD S5).
+  - `grace_secs` (default 120; tests only).
+  The key is `push.relay_url`, not top-level `relay_url`: `Config.relay_url`
+  (`:105`) is the GitHub relay.
+
+Daemon push engine (new module):
+
+- `src/push/mod.rs`: `PushEngine::spawn(config, server)`. It is primary-only
+  and is a no-op without `[push]`. It subscribes to the broadcast channel,
+  and it also reconciles every 30 s against the retained-frame cache
+  (`retain_broadcasts`, `src/ipc/server.rs:1950`) so that a lagged receiver or
+  a W12 `Gap` cannot strand an item.
+- `src/push/items.rs`: the **item model**. `ItemKey` is one of:
+  - `Mother{host, job_id}`
+  - `Decision{host, request_id}`
+  - `Review{host, repo, number}`
+  Each item also carries an opaque random `item_ref` (16 hex chars) that is
+  the only identifier sent to the relay. Items are derived from snapshots, not
+  only from events:
+  - **Mother:** the MC4 `MotherNeedsYouProducer` rules, mirrored here:
+    - *Hold item* `Mother{host, job_id}`: `is_awaiting()` or
+      `is_held_for_operator()`, and `paused_reason` not starting with
+      `quota_`. It leaves the waiting set only when the job leaves
+      `awaiting` or its decision resolves (an answer at the Mac). Acking
+      `decision_awaiting` does not remove it (same as MC4).
+    - *Attention item* `MotherAttention{host, job_id, reason, since}` for each
+      entry of `unacked_attention()` whose reason is `progress_stalled`,
+      `burn_ahead` or `gates_incomplete`. It leaves the set when the entry
+      disappears, or when Mother reports it `acked: true`. A reason that
+      lapses and returns carries a new `since`, so it is a new item.
+    - Whether attention items are pushed **individually** or only counted in
+      the badge and summaries is not covered by S1–S8. Recommendation:
+      individual push for `gates_incomplete` only (a presented PR whose gates
+      did not all run); `progress_stalled` and `burn_ahead` are Mother's
+      observe-only flags and only count toward the badge and the next summary.
+      Treat as an open question for the operator; the default until answered
+      is count-only for all three.
+    - Works on both full and
+    metadata-shaped `MotherJobs` (W10 keeps state, `paused_reason`,
+    `activity`, `paused_at`, attention reasons and the 8-hex id suffix).
+  - **Decision:** active `DecisionRequest` until `DecisionResolved` arrives or
+    `deadline` passes.
+  - **Review:** present in the PerriState queue with `bucket == "requested"`
+    (PRD clarification C2). A PR seen on two hosts is one item, keeping the
+    first host.
+  The "waiting set" drives the badge, withdrawal and summaries.
+- `src/push/vocab.rs`: **every** fixed phrase as a `const`, plus the
+  renderers that produce `{title, body}` per kind from typed inputs only.
+  Free-text fields (`question`, `prompt`, `title`, `author`, …) are not
+  parameters of any renderer.
+  - **Mother reasons:** map `paused_reason`/`activity` to the PRD's phrases:
+    - `user` → *asked a question*
+    - `adherence_blocked` → *blocked after review*
+    - `operator_hold` → *held after a failure*
+    - `cost_cap` → *paused at its spend cap*
+    - `activity == pipeline_blocked` → *pipeline blocked*
+    - anything else → *needs you*
+  - **Agent set:** render `agent_class` as *Mother / Perri / Fred / Teri /
+    Claudia*, `other` or absent as *A session*.
+  - **Decision timeout:** minutes rounded down; *times out in under 1 min*
+    when below 60 s (S6).
+  - **Review size:** `< 50` → small, `≤ 400` → medium, `> 400` → large. The
+    size phrase is omitted when unknown (S3).
+  - **Job ref:** the 8-hex suffix of Mother's id
+    (`YYYYMMDDTHHMMSSZ-xxxxxxxx`, `~/Code/mother/plugins/mother/bin/mother:74-80`),
+    validated `^[0-9a-f]{8}$`. If it does not validate, the body becomes
+    `A job <reason>`.
+  - **Host label:** must match `^[a-z][a-z0-9-]{0,15}$`, else the literal
+    `host` (C6).
+  - **Repository name:** only when `hosts[host] == personal` (and for reviews
+    also owner ∉ `work_owners`), rendered as the bare repo name without the
+    owner, and must match `^[A-Za-z0-9._-]{1,40}$`, else omitted.
+  - **`conforms(text, &VocabContext) -> Result<(), Offending>`:** the
+    allow-list grammar checker the tests use.
+- `src/push/schedule.rs`: a pure state machine driven by an injected clock
+  (`now` passed in; no `Instant::now()` inside) so tests run on paused time.
+  - **Grace delay:** `due = start + grace_secs`, where `start` is Mother's
+    `paused_at` or first-seen time, and a review's first-seen-in-`requested`
+    time (C1). Decisions are due at once.
+  - **Skip-if-resolved:** logs `skipped_resolved_in_grace`.
+  - **Coalescing with exact lookahead (S2):** when a grace-delayed item comes
+    due, count pending unresolved grace-delayed items due in `[now, now+120 s)`
+    for that device. If the count is ≥ 4, send one Summary covering them and
+    mark them `coalesced` (they never push individually). Decisions are
+    excluded.
+  - **Per-device quiet hours:** IANA tz from the device; use `chrono-tz`, add
+    to `Cargo.toml`. During quiet hours items are logged `held_quiet_hours`
+    and never pushed individually.
+  - **Morning summary** at quiet-hours end, and **evening summary** at
+    `evening_summary` (default 17:30; skipped if inside quiet hours; `None`
+    disables). Each is sent iff ≥ 1 enabled item is still waiting. The morning
+    one fires at the configured end time even when quiet hours are off.
+  - **Per-kind switches:** a disabled kind produces nothing and is excluded
+    from summaries and from that device's badge.
+  - **One notification per item lifetime.** A Mother job that leaves
+    `awaiting` and re-enters is a new item.
+- `src/push/devices.rs`: per-device push registration, stored on the primary
+  in `~/.nostromo/push/devices.json` via atomic write (tmp + rename), keyed by
+  the W9 device id. Each record holds:
+  - `apns_token` and `environment` (`sandbox|production`).
+  - `push_id`: random 128-bit, the relay's *anonymous device reference*.
+  - `capabilities { nse_withdraw: bool }`: set by W16 builds; always `false`
+    here.
+  - `prefs { kinds: {mother, decision, review}: bool, quiet: Option<{start,
+    end}>, evening_summary: Option<HH:MM>, tz: String }`.
+  Before every send, check the W9 device registry. A revoked or unknown device
+  is dropped and its push record deleted, so nothing is sent after revocation.
+- `src/push/publisher.rs`: `POST {relay_url}/push` with `Authorization: Bearer
+  <token>` via `reqwest` (`Cargo.toml:88`), 5 s timeout, **no retry and no
+  queue**. Body (serde, `deny_unknown_fields` mirrored in the relay):
+  `{push_id, apns_token, environment, push_type: alert|background,
+  priority: 5|10, expiration_unix, collapse_id: item_ref, thread_id: host
+  label, interruption_level: active|time-sensitive|passive, title?, body?,
+  badge, mutable_content: bool, data: {item, kind, host, ref, withdraw?:
+  [item_ref]}}`.
+  - `thread_id` = host label groups the lock screen by host.
+  - Decisions use `time-sensitive`; Mother and review use `active`.
+  - Expiration: the decision deadline, else now + 4 h.
+  - Withdrawal when `nse_withdraw == false`: one badge-only alert push
+    (`badge`, no title/body/sound, priority 5) plus one background push with
+    `data.withdraw`. When `nse_withdraw == true`, W16 changes this.
+  The relay's response, `{apns_status, apns_reason}`, determines the outcome
+  logged.
+- `src/push/sent_log.rs`: an append-only `~/.nostromo/push/sent.jsonl` on the
+  primary. Each line: `{ts, push_id, kind, host, title, body, outcome}`, where
+  outcome ∈ `delivered_to_apple | rejected_by_apple | relay_unreachable |
+  held_quiet_hours | coalesced | withdrawn | skipped_resolved_in_grace`.
+  Entries older than 7 days are pruned on every append and hourly. Also
+  tracks per-device `last_ok_at` and `failing_since` for the banner.
+- `src/ipc/protocol.rs` (new messages; `"push"` added to `Welcome.features`):
+  - `ClientMsg::RegisterPush { apns_token, environment, tz }`.
+  - `ClientMsg::SetPushPrefs { prefs }`.
+  - `ClientMsg::PushSentLog` → `ServerMsg::PushSentLog { entries }`, for this
+    device only.
+  - `ClientMsg::PushWaiting` → `ServerMsg::PushWaiting { items: [{item_ref,
+    kind, host, ref}], badge }`: the reconcile-on-open answer.
+  - `ServerMsg::PushStatus { prefs, host_classes, last_ok_at,
+    failing_since }`: targeted reply to the device. Host classes are
+    **read-only**; there is no `ClientMsg` that changes them.
+  - A network peer may only read or write its *own* device's push record.
+  - FND-1: the four new `ClientMsg`s take ordinals 50–53 (or the next free
+    ones; bump `CLIENT_MSG_VARIANTS`) and are `Refused` in `network_policy`
+    and allowed by W9's `paired_extra_allowed` for `Paired` peers only; the
+    three new `ServerMsg`s are `Open` and only ever sent targeted.
+- `src/bin/nostromd.rs:196-260`: in `Primary` mode with `[push]`, call
+  `PushEngine::spawn`.
+- `src/bin/nostromo_cli.rs` (the `nostromo` CLI from W9): add `nostromo
+  push host <name> work|personal`, which edits `[push.hosts]` in the primary's `config.toml`
+  (the engine re-reads `[push.hosts]` on each render, so no restart and no
+  new reload message is needed). Also
+  `nostromo push status`: devices with prefs, last delivery, and the relay
+  URL, but never tokens. Classification can only be changed from a shell on
+  the primary.
+
+Relay (`infra/push-relay/`, new standalone Rust crate, **not** a workspace
+member; build with `cargo lambda`):
+
+- `src/main.rs`: an AWS Lambda behind a function URL. It exposes two
+  endpoints:
+  - `POST /push`: requires the daemon bearer; the body is the schema above
+    with `deny_unknown_fields`, `title` ≤ 64 and `body` ≤ 96 UTF-8 chars,
+    `data` keys exactly the listed ones. It sends to APNs over HTTP/2 with an
+    ES256 provider JWT (`jsonwebtoken`), the `.p8` read from Secrets Manager
+    and cached ≤ 50 min. It sets `apns-push-type`, `apns-priority`,
+    `apns-expiration`, `apns-collapse-id` and `apns-topic`, and returns
+    `{apns_status, apns_reason}`.
+  - `GET /records`: requires the daemon bearer; returns that `push_id`'s
+    delivery records, filtered to `ts > now − 7 d` on read.
+  The relay stores **no** device registry and **no** title, body, host, ref or
+  repo. It writes one DynamoDB item per attempt: `{push_id, ts, kind, outcome,
+  expires_at = ts + 7 d}`, with TTL on `expires_at`. Because TTL deletion is
+  lazy, the read-time filter is what enforces "no record older than 7 days".
+  `kind` ∈ `mother|decision|review|summary|withdraw|badge`.
+  The handler logs only `kind`, a 6-hex prefix of `push_id`, and the APNs
+  status.
+- A safety ceiling of 60 pushes per `push_id` per 10 min (a DynamoDB counter
+  with TTL). Product-level rate shaping is the daemon's job.
+- `template.yaml`: SAM template defining:
+  - the function and its URL (auth NONE; bearer checked in code);
+  - the DynamoDB table with TTL;
+  - the two Secrets Manager secrets (APNs key + key id + team id + topic;
+    daemon token);
+  - the log group with `RetentionInDays: 7`.
+- `README.md`: everything needed to deploy from zero:
+  - create the APNs auth key;
+  - create the two secrets;
+  - `sam build && sam deploy --guided`;
+  - write the function URL into `[push] relay_url` and the token into
+    `~/.nostromo/push-relay-token` on the primary;
+  - rotate the daemon token without redeploy (update the secret; the handler
+    re-reads it at most every 5 min).
+  It also includes the PRD's privacy note verbatim. A short "host names"
+  section says: set `host_name` explicitly in each satellite's `config.toml`,
+  because the default comes from the OS hostname, which an MDM may set (C6).
+- `tests/handler.rs`: run against an APNs stub (`wiremock`). Cover: bearer
+  required; unknown body field → 400; over-long title → 400; record written
+  with exactly `{push_id, ts, kind, outcome, expires_at}`; records older than
+  7 d are not returned even if present in the table (use an in-memory store
+  trait); headers mapped correctly.
+
+iOS app (contract-text notifications, no extension; W16 adds the extension):
+
+- `iOS/Nostromo/NostromoApp.swift`: add an `@UIApplicationDelegateAdaptor`
+  `PushAppDelegate`. It does four things:
+  - Calls `registerForRemoteNotifications` after the operator enables
+    notifications (on the notification settings screen; `UNAuthorizationOptions
+    [.alert, .badge, .sound, .timeSensitive]`).
+  - On a token, sends `RegisterPush` over the W11 `WebSocketClient` whenever
+    connected.
+  - In `didReceiveRemoteNotification` (background push), removes delivered
+    notifications whose `userInfo["item"]` is in `withdraw`.
+  - In the `UNUserNotificationCenterDelegate` tap handler, routes to the item.
+- `iOS/Nostromo/Views/PushItemView.swift` (new): the tap target. It resolves
+  `item_ref` via `PushWaiting` over the VPN and shows the Mother job, the
+  decision (read-only, with "Answer it on your Mac") or the Perri PR. When unreachable, it shows kind, host and ref from
+  `userInfo` plus "Your machines are unreachable" (W11's `.unreachable`
+  state). It is never empty.
+- `iOS/Nostromo/Views/NotificationSettingsView.swift` (new). Contents:
+  - per-kind toggles;
+  - quiet hours start/end with an off switch;
+  - evening summary time with an off switch;
+  - host classes shown read-only;
+  - a link to iOS Settings when authorization is denied;
+  - the "Show Previews: When Unlocked" recommendation (one sentence, shown
+    when enrichment is on for a work host; the enrichment toggles themselves
+    arrive in W16);
+  - the "Sent notifications" entry.
+- `iOS/Nostromo/Views/SentNotificationsView.swift` (new): lists
+  `PushSentLog`.
+- A banner in the root view: when `PushStatus.failing_since` is older than
+  15 min, show `Notifications haven't been delivered since <h:mm a>`.
+- On every foreground connect: request `PushWaiting`, remove delivered
+  notifications whose item is not in it, set
+  `UNUserNotificationCenter.setBadgeCount(badge)`, and do this before the
+  first screen accepts input (gate the root view's hit-testing on the first
+  reconcile or a 2 s timeout).
+- `Shared/NostromoKit/Sources/NostromoKit/Wire/`: Codable types for the new
+  messages. `Shared/NostromoKit/Sources/NostromoKit/Push/PushPayload.swift`
+  (new) parses `userInfo` into `{item, kind, host, ref}` and is shared with
+  W16's extension.
+- `iOS/Nostromo/Nostromo.entitlements` (new; referenced from
+  `iOS/Nostromo.xcodeproj/project.pbxproj` target `Nostromo`, `:155-176`):
+  `aps-environment` and
+  `com.apple.developer.usernotifications.time-sensitive`.
+  `iOS/Nostromo/Info.plist`: `UIBackgroundModes = [remote-notification]`.
+
+Tests:
+
+- `tests/push_vocab.rs` (new). For every kind × host class × Mother reason ×
+  timeout/no-timeout × size bucket:
+  - Feed inputs whose free-text fields (question, title, plan_path, branch,
+    repo for work hosts, prompt, detail, choice labels and details, session
+    name, PR title, author, owner, labels) each contain a unique marker.
+  - Serialise the **entire relay request body**. Assert that no marker
+    appears anywhere in it.
+  - Assert `vocab::conforms` accepts title and body. Assert `conforms`
+    *rejects* each marker when injected, which proves it is an allow-list.
+  - Assert the exact title/body strings from the PRD examples.
+  - Assert an unclassified host renders like a work host.
+  - Assert a quota pause produces no item.
+- `tests/push_schedule.rs` (new; pure, injected clock):
+  - Grace send at 120 s, never before.
+  - Resolved at 119 s → no send and a `skipped_resolved_in_grace` log line.
+  - A decision is sent at t+0.
+  - 4 grace items due within 120 s → exactly one Summary and no individual
+    sends.
+  - 3 grace items → 3 sends.
+  - A decision during a burst → sent individually.
+  - Quiet hours across midnight in `America/Chicago`, including a DST
+    transition day: nothing during; one Summary at the end iff something is
+    still waiting; none if all resolved overnight.
+  - Evening summary at 17:30 iff waiting; skipped when inside quiet hours.
+  - A disabled kind is absent from sends, summaries and the badge.
+  - An item is never sent twice.
+  - A re-entered Mother job is a new item.
+  - A decision deadline passing → withdrawal and expiry.
+- `tests/push_engine.rs` (new; in-process `Server`, `wiremock` relay). Cover:
+  - Satellite-tagged `MotherJobs` with an awaiting job → one relay POST at
+    grace end with `thread_id` = host.
+  - The job leaving `awaiting` after send → withdrawal POSTs (badge-only +
+    background) with the decremented badge.
+  - Relay 500 or timeout → a `relay_unreachable` log line, no retry, and
+    `failing_since` set.
+  - A revoked device → no POST.
+  - Each `PushSentLog` request returns only the requesting device's entries,
+    and none older than 7 days.
+- Additions to `src/data/perri_queue_native.rs`'s existing tests:
+  `changed_lines` populated from the mocked `/pulls/{n}` body
+  (`mount_pr_mocks`, `:2573-2657`, gains `additions`/`deletions`); the
+  request-count assertions are unchanged.
+- Additions to `src/ipc/decisions.rs` tests: `deadline`/`agent_class`/
+  `local_operator` on the broadcast; `has_operator_for` unchanged (a
+  registered push device does not make it true).
+- `tests/push_items.rs` (new): a table of golden Mother jobs (awaiting;
+  held with an open decision; `gates_incomplete` unacked and acked;
+  `progress_stalled` acked then re-raised with a new `since`; `quota_*`
+  pause; work-send) mapped to expected items. The same table is vendored
+  under `tests/fixtures/` for MC4's Kit producer test, so one change updates
+  both; if MC4 has not landed, ship the table and note it in the PR.
+- A B9 test in `tests/push_engine.rs`: a `work` satellite's metadata-only
+  `MotherJobs`, `DecisionRequest` and `PerriState` produce the same
+  notifications as full frames would for a work host.
+- `Shared/NostromoKit/Tests/NostromoKitTests/PushPayloadTests.swift` (new):
+  payload parsing; tolerates unknown keys.
+
+## Approach
+
+1. **Wire and data first.** Add the new fields (`DecisionRequest`
+   `deadline`/`agent_class`/`local_operator`, `MotherJob.paused_at`,
+   `changed_lines`) with defaults. Run the Rust suite in the RWX sandbox and
+   `make ci-remote ONLY=kit` before any behaviour change.
+2. **`vocab.rs` and its tests (TDD).** This is the privacy boundary. Write the
+   marker/allow-list tests first, then the renderers.
+3. **`schedule.rs` as a pure state machine** with an injected clock: grace,
+   lookahead coalescing, quiet hours, summaries, per-kind switches, the
+   one-per-lifetime rule.
+4. **`items.rs` derivation** from snapshots and events, plus the 30 s
+   retained-cache reconcile.
+5. **Devices, prefs and the publisher.** Add the `ClientMsg`/`ServerMsg`
+   handlers and the sent log.
+6. **Relay crate:** handler, SAM template and README. Unit tests against the
+   APNs stub. Deploying is an operator step listed in the README. **Do not
+   deploy from the job.**
+7. **iOS:** registration, settings, sent log, banner, tap routing,
+   reconcile-on-open, entitlements.
+8. **CLI:** `nostromo push host` and `nostromo push status`.
+9. Run the full suite in CI: the RWX sandbox for `cargo test`, clippy and
+   `cargo test --manifest-path infra/push-relay/Cargo.toml` (add that crate
+   to `.rwx/sandbox.yml` if the sandbox does not pick it up), and GitHub
+   Actions for Kit and iOS (`make ci-remote ONLY=kit`, `ONLY=ios`). No local
+   `cargo`, `swift` or `xcodebuild`.
+
+## Acceptance criteria
+
+Payload contract (tests):
+
+- [ ] **W13-1** `tests/push_vocab.rs` passes. For a work-host Mother job with marker strings
+  in question, title, plan, branch and repo, the full relay request body
+  contains none of them, and title/body are exactly `Mother · <host>` /
+  `Job <8-hex> <reason phrase>`. A personal host gives
+  `Mother · <host> · <repo>`. An unclassified host is identical to work.
+- [ ] **W13-2** Each Mother reason maps to its phrase. An unknown reason gives *needs you*.
+  A `quota_*` pause produces no item.
+- [ ] **W13-3** A decision with markers in prompt, detail, choice labels and details, and
+  session name produces a body naming the agent from the fixed set (or *A
+  session*), the choice count, and the minutes left rounded down (*under 1
+  min* below 60 s). There is no timeout phrase when `deadline` is `None`.
+- [ ] **W13-4** A review renders `PR #<n> · <size> · <k> waiting`, with 49 → small,
+  50 → medium, 400 → medium, 401 → large, and the size omitted when
+  `changed_lines` is `None`. The repo appears only for a personal host whose
+  owner is not in `work_owners`.
+- [ ] **W13-5** A Summary never contains a repository name.
+- [ ] **W13-6** `vocab::conforms` accepts every rendered string and rejects any string
+  containing a token outside the vocabulary. The test asserts rejection, not
+  just acceptance.
+- [ ] **W13-7** No `ClientMsg` can change host classification. A test sends every push
+  `ClientMsg` from a network peer and asserts `[push.hosts]` is unchanged.
+
+Lifecycle and frequency (tests with paused time and a wiremock relay):
+
+- [ ] **W13-8** A Mother or review item is POSTed to the relay between 120 s and 122 s
+  after its start. An item resolved before 120 s is never POSTed and logs
+  `skipped_resolved_in_grace`.
+- [ ] **W13-9** A decision is POSTed within 1 s of its `DecisionRequest` when
+  `local_operator == false` and no app is connected to the primary.
+- [ ] **W13-10** Every POST carries `thread_id` = host label, the correct
+  `interruption_level` (decision `time-sensitive`, others `active`), and
+  `expiration_unix` = the decision deadline or send time + 4 h.
+- [ ] **W13-11** When an item leaves the waiting set, the device receives a withdrawal
+  within 2 s of the primary seeing the change: a badge-only push with the
+  new count, plus a background push listing the `item_ref`.
+- [ ] **W13-12** Every alert push's `badge` equals the device's waiting-item count across
+  all hosts, excluding disabled kinds.
+- [ ] **W13-13** 4 grace items due within 120 s → exactly one Summary POST and zero
+  individual POSTs. A decision in the same window is still POSTed
+  individually.
+- [ ] **W13-14** Quiet hours: zero alert POSTs between start and end. At the end, exactly
+  one Summary iff ≥ 1 enabled item is waiting. The evening summary fires at
+  the configured time under the same rule. Withdrawals and badge-only pushes
+  are still sent during quiet hours (PRD C4).
+- [ ] **W13-15** No item is ever POSTed twice as an individual notification. There are no
+  24 h or daily reminders.
+- [ ] **W13-16** A kind turned off on a device → no POSTs of that kind to that device, and
+  it is not counted in that device's summaries or badge.
+- [ ] **W13-17** A device revoked through W9's device registry (whichever CLI W9 ships for
+  revocation) receives no POST issued after
+  the revocation (checked on the next send, well within 1 min).
+- [ ] **W13-18** Relay unreachable → no retry, no queue, a `relay_unreachable` log line, and
+  `PushStatus.failing_since` set. The next success clears it.
+- [ ] **W13-19** `ask_decision` behaviour is unchanged by this wedge (no phone counts as an
+  operator; B10). No push code path sends `DecisionAnswer` or
+  `ApprovalAnswer`, and no new message carries a decision's prompt, detail
+  or choice labels off the originating host.
+
+Relay (relay crate tests):
+
+- [ ] **W13-20** Requests without the daemon bearer → 401. Unknown fields or over-long
+  strings → 400.
+- [ ] **W13-21** A stored delivery record has exactly `{push_id, ts, kind, outcome,
+  expires_at}`. `GET /records` never returns a record with `ts` older than
+  7 days, even when one is still in the table.
+- [ ] **W13-22** Handler logs contain no title, body, host, ref or repo. A test captures
+  log output for a request whose title/body contain markers and asserts none
+  appear.
+- [ ] **W13-23** `template.yaml` sets the log group retention to 7 days and DynamoDB TTL on
+  `expires_at`.
+
+Sent log and visibility:
+
+- [ ] **W13-24** `PushSentLog` returns, for the requesting device only, every attempt in the
+  last 7 days, with time, kind, host, exact title/body and one of the seven
+  outcomes. A 7-day-old entry is gone after the next prune.
+
+iOS:
+
+- [ ] **W13-25** `swift-tests-kit` and the iOS build pass on GitHub Actions, including the
+  payload parser. A decision notification offers only **Open**.
+- [ ] **W13-26** `[device]` (operator-verified on a physical iPhone after the relay is
+  deployed; not a Cody gate):
+  - `mother await` on Kobe → a `Mother · kobe` notification ~2 min later,
+    stacked separately from a `tokyo` one.
+  - Tapping it with the VPN off shows kind, host and ref plus the
+    unreachable message.
+  - Answering at the Mac → the badge drops within 2 min.
+  - Opening the app removes stale notifications before the first screen
+    accepts input.
+  - Decision notifications break through a Focus that allows Nostromo's
+    time-sensitive notifications.
+- [ ] **W13-27** `infra/push-relay/README.md` lets the operator deploy from zero and
+  contains the privacy note verbatim.
+- [ ] **W13-28** PR body references the sequencing memo (W13) and `docs/prds/push-relay.md`,
+  including its design-loop notes.
+
+- [ ] **W13-29** Acknowledgement and withdrawal (tests, paused clock): a job fixture
+  whose `attention_reasons` entry flips to `acked: true` on the next poll
+  produces the badge-only plus background withdrawal and drops the item from
+  summaries; flipping back with a new `since` is a new item. No `ClientMsg` for
+  `ack`, `answer` or `resume` is added or allowed for a `Paired` peer, and the
+  existing `Refused` cases still pass.
+- [ ] **W13-30** `tests/push_items.rs` passes against the shared golden table, and no
+  free-text field of a job is read by the item derivation.
+
+### Acknowledgement and withdrawal
+
+Mother's `mother ack <job> <reason>` (and the broker's `ack` command) writes
+`$MOTHER_ROOT/acks/<id>.json` and flips `attention_reasons[].acked` on that
+host; Mother refuses it from a worker (`MOTHER_JOB_ID` set). The daemon's
+2-second `mother list --format json` poll then sees `acked: true`, so:
+
+- **An ack at the Mac clears the phone push.** The item leaves the waiting set
+  within the poll interval, and the existing withdrawal path (badge-only push,
+  then a background push listing the `item_ref`) removes the delivered
+  notification. A satellite's ack travels the same way: its own poller
+  uplinks the changed `attention_reasons`.
+- **A phone never acks, answers or resumes.** Acking is an operator act
+  (MC3 gates it behind `HumanGesture` in the Mac app) and B10 keeps every
+  Mother mutation `Refused` for network peers. Tapping a notification opens a
+  read-only screen.
+- **Ack is per host.** No mutating verb is routed (B10), so the Mac cannot ack
+  a Kobe job from its own panel; Kobe's job is acked on Kobe, and the push
+  persists until then or until the job leaves its state.
+- **Holds are not acked, they are answered.** A plain `awaiting` question and a
+  `gate_hold`/`review_hold` have no ack path (only the four typed reasons do);
+  they clear when the Mac answers.
+- Mother's own `MOTHER_NOTIFY_SUPPRESS_WHEN_CLIENT` (opt-in since #72, default
+  off) silences only Mother's macOS notification on the Mac. This wedge
+  neither sets nor reads it and registers no phone as a Mother client surface
+  (the `client.surfaces` capability is a Mother follow-up, not built; MC4 has
+  the Mac-side use). Push and Mother's macOS notification are separate devices
+  and may both fire.
+
+## Mother crew: gates, lenses, checklist and calibration
+
+Adopts the Mother features summarised in the memo's "Mother features adopted"
+(read from Mother `origin/main` `e597389`). Assumes the repo's
+`.mother/crew.yml` is merged before this job is added (it is read from the job's
+base ref, so a worker can neither add nor loosen a gate).
+
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). The relay crate (`infra/push-relay/`) is a standalone crate, not a workspace member, so `rust-test` does not run it. Until the crew config gains a `relay-test` gate (memo, "Crew config deltas"), the worker runs `rwx sandbox exec -- cargo test --manifest-path infra/push-relay/Cargo.toml` itself and pastes the result into the PR body.
+  Mother runs them on the pushed head after the worker exits: sandbox gates
+  through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
+  from the job worktree. Gate commands never go through the worker's Bash tool,
+  so the toolchain guard does not apply to them. The worker still runs the same
+  commands itself before opening the PR (`rwx sandbox exec -- ...`,
+  `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
+  observe mode a red gate is recorded, not enforced, so the criteria above remain
+  the contract; if the repo has been promoted to enforce by dispatch time, the
+  same worker session gets up to three fix attempts, then a `gate_hold`.
+- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`, `ops-infra`. Lenses run
+  in parallel with adherence on the gated commit once Mother PR #75 merges
+  (open at the time of writing); until then run
+  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First data to leave the operator's machines, plus a Lambda and its SAM template.
+- **Checklist:** the acceptance items above carry ids (`W13-1` to `W13-30`) so
+  `mother add` seeds Mother's checklist and the progress figure can use it. The
+  worker ticks each with `mother check <job> --done --evidence <short ref>` only
+  when its test or check has passed.
+- **Calibration record** (for `mother retro`; see the memo's Estimate): after the
+  job, note the job id, actual cost and active time against the numbers in the
+  Target section, the ETA band shown at about 50% and whether the job landed in
+  it, gate time per pass and attempts used, and any `moved_back` reason.
+
+## Out of scope
+
+- The Notification Service Extension, on-phone enrichment, lock-screen
+  decision actions, and NSE-based withdrawal. These are **W16**. This wedge
+  sets `capabilities.nse_withdraw = false` everywhere.
+- Any worker-, agent- or third-party-authored text in a relay request, for
+  any kind or host, including as a setting.
+- Answering anything from the phone: decisions, approvals, Mother
+  questions or holds, PR reviews (B10; push PRD S7).
+- An "approval needed" push kind (a follow-up for Ada; count-only if ever).
+- Other notification kinds (job succeeded or failed, calendar, posture,
+  mail).
+- Re-notifying unanswered items, or mirroring Mother's 24 h and daily Mac
+  reminders. Mother's Mac notifications are not changed.
+- Overriding quiet hours for decisions.
+- Live Activities and widgets, Android, and non-Apple push.
+- Carefeed-owned infrastructure. Deploying the relay from the job: deployment
+  is the operator's README step.
+- Making the Perri queue search personal orgs (PRD S5).
+- Durable (on-disk) hold queue across daemon restarts. After a restart, items
+  already waiting are re-derived from snapshots and treated as already
+  notified. They are counted in the badge and summaries but not re-pushed.
+
+```yaml
+suggested_config:
+  cody:
+    model: sonnet
+    effort: high
+    rationale: "Daemon engine, stateless Lambda and iOS across one privacy boundary; schedule semantics are subtle. Sonnet per operator default; pure modules keep it tractable."
+  redd:
+    model: sonnet
+    effort: xhigh
+    rationale: "Allow-list marker tests over the full outbound body and paused-clock schedule tests are the contract; they must be exhaustive per kind and class."
+  marty:
+    model: sonnet
+    effort: medium
+    rationale: "Item derivation and rendering will start tangled with the engine loop; pull them into pure modules."
+  perri:
+    model: sonnet
+    effort: xhigh
+    rationale: "First data to leave the operator's machines; review payload, logging and retention adversarially."
+lenses:
+  add: [correctness, tests, phi-security, ops-infra]
+  remove: []
+```
