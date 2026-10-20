@@ -147,6 +147,7 @@ final class AppControlServer {
         case "drag":        return try drag(req)
         case "hittest":     return try hitTest(req)
         case "transcript-anchor": return try transcriptAnchor(req)
+        case "approvals":   return try approvals(req)
         case "key":         return try key(req)
         case "type":        return try typeText(req)
         case "paste":       return try paste(req)
@@ -472,6 +473,35 @@ final class AppControlServer {
         let index = appDelegate?.windows.firstIndex(where: { $0 === w }) ?? req.int("window") ?? 0
         let data = try JSONEncoder().encode(pane.anchorSnapshot(windowIndex: index))
         return try JSONSerialization.jsonObject(with: data)
+    }
+
+    /// READ-ONLY: the approval cards on screen right now (`approvals list [--focus TAG]`), read from
+    /// the cards' own views. Sends no event, changes no focus, answers nothing. One entry per
+    /// request, with the indexes of every window showing it.
+    private func approvals(_ req: AppControlRequest) throws -> Any {
+        guard (req.string("sub") ?? "list") == "list" else {
+            throw AppControlError.badRequest("approvals: only `list` exists (it is read-only)")
+        }
+        let focus = req.string("focus")
+        var byRequest: [String: [String: Any]] = [:]
+        var order: [String] = []
+        for (index, window) in (appDelegate?.windows ?? []).enumerated() {
+            var hosts: [ApprovalOverlayHost] = []
+            func walk(_ v: NSView) {
+                if let host = v as? ApprovalOverlayHost, !host.isHiddenOrHasHiddenAncestor { hosts.append(host) }
+                v.subviews.forEach(walk)
+            }
+            if let content = window.contentView { walk(content) }
+            for host in hosts where focus == nil || host.tag == focus {
+                for listing in host.listings {
+                    var entry = byRequest[listing.requestID] ?? listing.jsonObject
+                    if byRequest[listing.requestID] == nil { order.append(listing.requestID) }
+                    entry["windows"] = ((entry["windows"] as? [Int]) ?? []) + [index]
+                    byRequest[listing.requestID] = entry
+                }
+            }
+        }
+        return ["approvals": order.compactMap { byRequest[$0] }]
     }
 
     /// Press at one point, drag to another, release — for selecting text.
