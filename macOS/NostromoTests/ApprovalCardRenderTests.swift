@@ -70,9 +70,12 @@ private enum InkCounter {
         let clip = view.contentView.frame   // in the input view's coordinates
         // A bitmap's first row is the top of the picture whatever the view's flippedness is.
         let topOffset = view.isFlipped ? clip.minY - bounds.minY : bounds.maxY - clip.maxY
-        let x0 = max(0, Int(((clip.minX - bounds.minX) * scale).rounded()))
+        // The clip view reaches under the gutter (its bounds start at minus the gutter's width): the text
+        // area starts where the gutter ends, so the gutter's own digits are not counted as text.
+        let textMinX = max(clip.minX, view.verticalRulerView?.frame.maxX ?? clip.minX)
+        let x0 = max(0, Int(((textMinX - bounds.minX) * scale).rounded()))
         let y0 = max(0, Int((topOffset * scale).rounded()))
-        let x1 = min(rep.pixelsWide, x0 + Int((clip.width * scale).rounded()))
+        let x1 = min(rep.pixelsWide, Int(((clip.maxX - bounds.minX) * scale).rounded()))
         let y1 = min(rep.pixelsHigh, y0 + Int((clip.height * scale).rounded()))
         guard x1 > x0, y1 > y0 else { return nil }
         let bandEnd = min(y1, y0 + Int((20 * scale).rounded()))
@@ -227,7 +230,7 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " clipFrame=\(r(view.contentView.frame)) clipBounds=\(r(view.contentView.bounds))"
             + " tvFrame=\(r(tv.frame)) tvBounds=\(r(tv.bounds)) tvSuper=\(tv.superview.map { String(describing: type(of: $0)) } ?? "nil")"
             + " tvOrigin=\(NSStringFromPoint(tv.textContainerOrigin)) tvFlipped=\(tv.isFlipped) tvHidden=\(tv.isHidden) tvAlpha=\(tv.alphaValue)"
-            + " tvVisible=\(r(tv.visibleRect)) docVisible=\(r(view.documentVisibleRect))"
+            + " rulerDrawRect=\(r(view.verticalRulerView.flatMap { ($0 as? ApprovalLineNumberRuler)?.lastDrawRect } ?? .zero)) tvVisible=\(r(tv.visibleRect)) docVisible=\(r(view.documentVisibleRect))"
             + " rulersVisible=\(view.rulersVisible) ruler=\(view.verticalRulerView.map { r($0.frame) } ?? "nil")"
             + " thickness=\(view.verticalRulerView?.ruleThickness ?? -1) required=\(view.verticalRulerView?.requiredThickness ?? -1)"
             + " subviews=" + view.subviews.map { "\(type(of: $0))\(r($0.frame))" }.joined(separator: ",")

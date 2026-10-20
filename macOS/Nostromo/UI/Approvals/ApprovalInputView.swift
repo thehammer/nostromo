@@ -504,15 +504,21 @@ final class ApprovalLineNumberRuler: NSRulerView {
     init() {
         super.init(scrollView: nil, orientation: .verticalRuler)
         clientView = nil
+        clipsToBounds = true
     }
 
     required init(coder: NSCoder) { fatalError("not used") }
 
     override var isFlipped: Bool { true }
 
+    /// TEMPORARY (diagnostic): the last rect AppKit asked the gutter to draw.
+    private(set) var lastDrawRect = NSRect.zero
+
     override func drawHashMarksAndLabels(in rect: NSRect) {
+        lastDrawRect = rect
+        // Only the gutter's own strip: `rect` can reach beyond it (over the text view's text).
         ApprovalPalette.inputBackground.setFill()
-        rect.fill()
+        rect.intersection(bounds).fill()
         guard let owner, let textView = scrollView?.documentView as? NSTextView else { return }
         let attrs: [NSAttributedString.Key: Any] = [.font: Self.font, .foregroundColor: ApprovalPalette.gutterText]
         for index in 0 ..< owner.lineCount {
