@@ -274,6 +274,18 @@ enum ApprovalTestRequests {
         try bash(bidiCommand, id: id, tag: tag)
     }
 
+    /// One command line (no line feed in it) of 1,205 characters: in a narrow card it wraps into dozens of line fragments.
+    static let wrappingCommand = "echo " + String(repeating: "0123456789", count: 120)
+
+    static func wrapping(id: String = "req-1") throws -> ApprovalRequestWire {
+        try bash(wrappingCommand, id: id)
+    }
+
+    /// `count` short command lines: `echo step 01`, `echo step 02`, ...
+    static func shortLines(_ count: Int, id: String = "req-1") throws -> ApprovalRequestWire {
+        try bash((1 ... count).map { String(format: "echo step %02d", $0) }.joined(separator: "\n"), id: id)
+    }
+
     static func cyrillic(id: String = "req-1") throws -> ApprovalRequestWire {
         try bash(cyrillicCommand, id: id)
     }
@@ -497,6 +509,29 @@ enum ApprovalTestViews {
     /// The visible label whose text starts with `prefix`.
     static func label(startingWith prefix: String, in view: NSView) -> NSTextField? {
         labels(in: view).first { $0.stringValue.hasPrefix(prefix) }
+    }
+
+    /// Move the input's clip view to `y` the way a scroll wheel does (not through `scrollToEnd`, which is the test and script entry).
+    static func moveClip(of view: ApprovalInputView, toY y: CGFloat) {
+        view.contentView.scroll(to: NSPoint(x: 0, y: y))
+        view.reflectScrolledClipView(view.contentView)
+    }
+
+    /// Read the input the way a person scrolls through it: from the top to the end, moving the clip view in steps
+    /// that are never larger than what is visible (`step` defaults to half of it; a larger one is cut down to it, so
+    /// no line is ever skipped over). `limit` stops at that clip origin instead of the end.
+    static func readThrough(_ view: ApprovalInputView, step: CGFloat? = nil, upTo limit: CGFloat? = nil) {
+        let visible = view.contentView.bounds.height
+        guard visible > 0 else { return }
+        let increment = max(1, min(step ?? visible / 2, visible))
+        let end = max(0, view.textView.frame.height - visible)
+        let last = min(end, limit ?? end)
+        var y: CGFloat = 0
+        while true {
+            moveClip(of: view, toY: y)
+            if y >= last { break }
+            y = min(y + increment, last)
+        }
     }
 }
 
@@ -866,7 +901,7 @@ final class ApprovalStoreTests: XCTestCase {
         XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.ended("Already denied (timed out)"))
     }
 
-    func testAnAnswerRefusedAsNotFromTheOperatorAppIsNeverSentAgain() throws {
+    func testAnAllowRefusedAsNotFromTheOperatorAppIsNeverSentAgain() throws {
         let (store, recorder) = make()
         store.handle(.request(try ApprovalTestRequests.simpleRm(id: "a")))
         XCTAssertTrue(store.answer("a", allowOnce, windowID: "w1"))
@@ -878,24 +913,155 @@ final class ApprovalStoreTests: XCTestCase {
         }
         XCTAssertFalse(text.isEmpty, "the card says why")
         XCTAssertEqual(store.pendingCount(tag: "cody-1"), 1, "the request is still waiting (it will time out)")
-        XCTAssertFalse(store.answer("a", allowOnce, windowID: "w1"))
-        XCTAssertFalse(store.answer("a", deny, windowID: "w1"))
+        XCTAssertFalse(store.answer("a", allowOnce, windowID: "w1"), "an Allow is never re-sent")
         XCTAssertEqual(recorder.sent.count, 1, "never re-sent")
     }
 
-    func testEveryRefusalThatLeavesTheRequestPendingHoldsItWithoutAResend() throws {
+    func testEveryRefusalThatLeavesTheRequestPendingHoldsItWithoutAResendOfTheAllow() throws {
         for code in ["requires_secure_connection", "not_operator_app", "something_new"] {
             let (store, recorder) = make()
             store.handle(.request(try ApprovalTestRequests.simpleRm(id: "a")))
-            _ = store.answer("a", deny, windowID: "w1")
+            _ = store.answer("a", allowOnce, windowID: "w1")
             store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: code)))
             guard let state = store.entry(id: "a")?.state, case .notSent = state else {
                 XCTFail("\(code): expected .notSent, got \(String(describing: store.entry(id: "a")?.state))")
                 continue
             }
-            XCTAssertFalse(store.answer("a", deny, windowID: "w1"), code)
+            XCTAssertFalse(store.answer("a", allowOnce, windowID: "w1"), code)
             XCTAssertEqual(recorder.sent.count, 1, code)
         }
+    }
+
+    // MARK: A refused answer never strands Deny (N4)
+
+    private func refuse(_ store: ApprovalStore, code: String, id: String = "a") throws {
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: id, code: code)))
+    }
+
+    private func assertNotSent(_ store: ApprovalStore, _ message: String, id: String = "a",
+                               file: StaticString = #filePath, line: UInt = #line) {
+        guard case .notSent? = store.entry(id: id)?.state else {
+            return XCTFail("\(message): expected .notSent, got \(String(describing: store.entry(id: id)?.state))", file: file, line: line)
+        }
+    }
+
+    func testAfterAnyRefusalOnlyADenyCanBeSentAgainAndOnlyOneAttemptAtATime() throws {
+        for code in ["not_operator_app", "requires_secure_connection", "something_new"] {
+            let (store, recorder) = make()
+            store.handle(.request(try ApprovalTestRequests.simpleRm(id: "a")))
+            XCTAssertTrue(store.answer("a", allowOnce, windowID: "w1"), code)
+            XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.inFlight(.allowOnce), code)
+            try refuse(store, code: code)
+            assertNotSent(store, "\(code): after the refusal")
+
+            // Nothing that lets the agent act is accepted again, whatever was refused.
+            XCTAssertFalse(store.answer("a", allowOnce, windowID: "w1"), "\(code): an Allow is never re-sent")
+            XCTAssertFalse(store.answer("a", ApprovalDecisionWire(kind: .denyAndStop), windowID: "w1"), "\(code): nor a Deny & stop")
+            XCTAssertEqual(recorder.sent.count, 1, "\(code): nothing was sent")
+            assertNotSent(store, "\(code): the refused entry is untouched")
+
+            // A Deny is: the request must not be left to time out with the only safe answer unavailable.
+            XCTAssertTrue(store.answer("a", deny, windowID: "w2"), "\(code): a Deny is accepted after a refusal")
+            XCTAssertEqual(recorder.sent.map(\.decision), [allowOnce, deny], code)
+            XCTAssertEqual(recorder.sent.last?.requestID, "a", code)
+            XCTAssertEqual(recorder.sent.last?.windowID, "w2", code)
+            XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.inFlight(.deny), code)
+
+            // One attempt at a time.
+            XCTAssertFalse(store.answer("a", deny, windowID: "w2"), "\(code): a second Deny while one is in flight")
+            XCTAssertFalse(store.answer("a", allowOnce, windowID: "w2"), "\(code): an Allow while one is in flight")
+            XCTAssertEqual(recorder.sent.count, 2, code)
+
+            // Refused again: Deny can be tried again, and a Deny with a note is a Deny.
+            try refuse(store, code: code)
+            assertNotSent(store, "\(code): after the second refusal")
+            XCTAssertFalse(store.answer("a", allowOnce, windowID: "w2"), code)
+            XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny, note: "use trash"), windowID: "w2"), "\(code): a Deny with a note")
+            XCTAssertEqual(recorder.sent.count, 3, code)
+            XCTAssertEqual(recorder.sent.last?.decision, ApprovalDecisionWire(kind: .deny, note: "use trash"), code)
+            XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.inFlight(.deny), code)
+        }
+    }
+
+    func testAnEndedRequestAcceptsNothingEvenAfterARefusal() throws {
+        let (store, recorder) = make()
+        store.handle(.request(try ApprovalTestRequests.simpleRm(id: "a")))
+        XCTAssertTrue(store.answer("a", allowOnce, windowID: "w1"))
+        try refuse(store, code: "not_operator_app")
+        assertNotSent(store, "precondition")
+
+        store.handle(.resolved(try ApprovalTestRequests.resolved(id: "a", outcome: "timed_out")))
+        XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.ended("Denied: no answer in 15 min"))
+
+        XCTAssertFalse(store.answer("a", deny, windowID: "w1"))
+        XCTAssertFalse(store.answer("a", allowOnce, windowID: "w1"))
+        try refuse(store, code: "not_operator_app")
+        XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.ended("Denied: no answer in 15 min"), "a late refusal does not reopen it")
+        XCTAssertFalse(store.answer("a", deny, windowID: "w1"))
+        XCTAssertEqual(recorder.sent.count, 1)
+    }
+
+    func testARequestFrameForAnIdTheStoreHoldsChangesNothingWhateverItsState() throws {
+        let (store, recorder) = make()
+        let request = try ApprovalTestRequests.simpleRm(id: "a")
+        store.handle(.request(request))
+        XCTAssertTrue(store.answer("a", allowOnce, windowID: "w1"))
+
+        store.handle(.request(request))
+        XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.inFlight(.allowOnce), "in flight stays in flight")
+        XCTAssertFalse(store.answer("a", deny, windowID: "w1"))
+
+        try refuse(store, code: "not_operator_app")
+        let held = store.entry(id: "a")?.state
+        store.handle(.request(request))
+        store.handle(.snapshot([request]))
+
+        XCTAssertEqual(store.entry(id: "a")?.state, held, "a refused entry stays refused: it does not come back as waiting")
+        assertNotSent(store, "after the repeated frames")
+        XCTAssertEqual(store.visible(tag: "cody-1").count, 1)
+        XCTAssertFalse(store.answer("a", allowOnce, windowID: "w1"), "and an Allow is still not accepted")
+        XCTAssertEqual(recorder.sent.count, 1)
+    }
+
+    func testADenyRetryAfterARefusalWaitsForTheConnectionLikeAnyAnswer() throws {
+        var online = true
+        let recorder = ApprovalRecorder()
+        let store = recorder.makeStore(canSend: { online })
+        store.handle(.request(try ApprovalTestRequests.simpleRm(id: "a")))
+        XCTAssertTrue(store.answer("a", allowOnce, windowID: "w1"))
+        try refuse(store, code: "requires_secure_connection")
+
+        online = false
+        XCTAssertFalse(store.answer("a", deny, windowID: "w1"), "no connection: nothing is sent")
+        XCTAssertEqual(recorder.sent.count, 1)
+        assertNotSent(store, "and the entry is not consumed")
+
+        online = true
+        XCTAssertTrue(store.answer("a", deny, windowID: "w1"), "the same Deny can be pressed again once the connection is back")
+        XCTAssertEqual(recorder.sent.count, 2)
+    }
+
+    func testARefusedRequestThatTheSnapshotDropsAndListsAgainComesBackWithDenyStillPossible() throws {
+        let (store, recorder) = make()
+        let request = try ApprovalTestRequests.simpleRm(id: "a")
+        store.handle(.request(request))
+        XCTAssertTrue(store.answer("a", allowOnce, windowID: "w1"))
+        try refuse(store, code: "not_operator_app")
+        let refused = store.entry(id: "a")?.state
+
+        store.handle(.snapshot([]))
+        XCTAssertNil(store.entry(id: "a"), "precondition: the daemon no longer held it")
+        store.handle(.snapshot([request]))
+
+        XCTAssertEqual(store.entry(id: "a")?.state, refused, "it is still refused, not 'sent'")
+        XCTAssertFalse(store.answer("a", allowOnce, windowID: "w1"), "an Allow is still never re-sent")
+        XCTAssertTrue(store.answer("a", deny, windowID: "w1"), "Deny is not stranded")
+        XCTAssertEqual(recorder.sent.map(\.decision), [allowOnce, deny])
+
+        // Once a Deny is in flight and the request returns again, it is in flight, not refused.
+        store.handle(.snapshot([]))
+        store.handle(.snapshot([request]))
+        XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.inFlight(.deny))
     }
 
     func testARefusalForAnUnknownRequestChangesNothing() throws {
@@ -1157,6 +1323,41 @@ final class ApprovalCardTests: XCTestCase {
         }
     }
 
+    func testAClickOnTheCardsPaddingEntersTheCardAndMovesFocusToItsInitialKeyViewAndNothingElse() throws {
+        // The plan says "Tab into it, or click": a click on the card's own padding (not a button, not the input)
+        // is how a person with a composer in focus enters the card with the pointer.
+        var composer: NSTextView!
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), prepare: { window in
+            composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+            window.contentView!.addSubview(composer)
+            composer.string = "half a thought"
+            _ = window.makeFirstResponder(composer)
+            composer.setSelectedRange(NSRange(location: 2, length: 4))
+        })
+        XCTAssertTrue(h.window.firstResponder === composer, "precondition: arrival leaves the composer focused")
+        let content = try XCTUnwrap(h.window.contentView)
+
+        // 3 pt inside the card's top-left corner, in the window's coordinates.
+        let click = h.card.convert(NSPoint(x: 3, y: 3), to: content)
+        let hit = try XCTUnwrap(content.hitTest(click), "the click lands on something")
+        XCTAssertTrue(hit === h.card, "the card's own padding is the card, not a button or the input: \(rigChain(hit))")
+        XCTAssertTrue(hit.acceptsFirstResponder, "so AppKit makes it first responder on the click")
+
+        // What AppKit does with a click on a view that accepts first responder.
+        XCTAssertTrue(h.window.makeFirstResponder(hit))
+        let landed = pump { h.window.firstResponder === h.card.initialKeyView }
+
+        XCTAssertTrue(landed, "focus lands on the card's initial key view, not \(String(describing: h.window.firstResponder))")
+        let responder = h.window.firstResponder as? NSView
+        XCTAssertTrue(responder?.isDescendant(of: h.card) == true, "and never anywhere outside the card")
+        XCTAssertTrue(h.window.firstResponder !== h.window, "never the bare window")
+        XCTAssertTrue(h.recorder.sent.isEmpty, "a click on the padding answers nothing")
+        XCTAssertTrue(h.recorder.reports.isEmpty)
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, ApprovalAnswerState.pending)
+        XCTAssertEqual(composer.string, "half a thought", "the composer's text is untouched")
+        XCTAssertEqual(composer.selectedRange(), NSRange(location: 2, length: 4), "and so is its selection")
+    }
+
     func testArrivalLayoutTicksUpdatesAndAnAnswerNeverMoveFocusOrTouchTheComposer() throws {
         var composer: NSTextView!
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.bidi(), prepare: { window in
@@ -1182,23 +1383,138 @@ final class ApprovalCardTests: XCTestCase {
         XCTAssertEqual(composer.selectedRange(), NSRange(location: 2, length: 4))
     }
 
-    // MARK: Allow gated by scrolling (25)
+    // MARK: Allow gated by scrolling (25): every line has to have been on screen
 
-    func testAllowIsDisabledUntilTheInputHasBeenScrolledToItsEnd() throws {
+    private let scrollerStyles: [(name: String, style: NSScroller.Style)] = [("legacy", .legacy), ("overlay", .overlay)]
+
+    /// Switch the input's scroller style and lay the card out again.
+    private func use(_ style: NSScroller.Style, on h: ApprovalCardHarness) {
+        h.card.inputView.scrollerStyle = style
+        h.card.inputView.needsLayout = true
+        h.relayout()
+        h.window.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    /// Scroll through the whole input a person's way: in steps no larger than what is visible.
+    private func readThrough(_ view: ApprovalInputView, step: CGFloat? = nil, upTo limit: CGFloat? = nil) {
+        ApprovalTestViews.readThrough(view, step: step, upTo: limit)
+    }
+
+    /// How many line fragments the input's text is laid out in (a wrapped line is several).
+    private func fragmentCount(of view: ApprovalInputView) -> Int {
+        guard let layout = view.textView.layoutManager, let container = view.textView.textContainer else { return 0 }
+        layout.ensureLayout(for: container)
+        var count = 0
+        layout.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layout.numberOfGlyphs)) { _, _, _, _, _ in
+            count += 1
+        }
+        return count
+    }
+
+    func testAllowIsDisabledUntilEveryLineOfTheInputHasBeenScrolledPast() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
         let allow = try XCTUnwrap(h.card.allowButton)
+        let view = h.card.inputView
 
-        XCTAssertFalse(h.card.inputView.hasShownEveryLine, "precondition: 300 lines do not fit")
+        XCTAssertFalse(view.hasShownEveryLine, "precondition: 300 lines do not fit")
         XCTAssertFalse(allow.isEnabled)
         XCTAssertEqual(allow.title, "Scroll to the end to allow")
         XCTAssertFalse(h.card.canAllow)
 
-        h.card.inputView.scrollToEnd()
+        readThrough(view)
 
-        XCTAssertTrue(h.card.inputView.hasShownEveryLine)
+        XCTAssertTrue(view.hasShownEveryLine, "lines never shown: \(view.linesNotYetShown)")
+        XCTAssertTrue(view.linesNotYetShown.isEmpty)
         XCTAssertTrue(allow.isEnabled)
         XCTAssertEqual(allow.title, "Allow once")
         XCTAssertTrue(h.card.canAllow)
+    }
+
+    func testAJumpToTheEndDoesNotEnableAllowWhileTheMiddleWasNeverShown() throws {
+        let jumps: [(name: String, jump: (ApprovalInputView) -> Void)] = [
+            ("the clip view moved to the bottom", { [unowned self] in self.scrollClip(of: $0, toBottom: true) }),
+            ("scrollToEnd", { $0.scrollToEnd() }),
+        ]
+        for style in scrollerStyles {
+            for jump in jumps {
+                let name = "\(style.name) scroller, \(jump.name)"
+                let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+                use(style.style, on: h)
+                let view = h.card.inputView
+                let allow = try XCTUnwrap(h.card.allowButton, name)
+                XCTAssertFalse(view.hasShownEveryLine, "\(name): precondition")
+                XCTAssertFalse(view.linesNotYetShown.contains(1), "\(name): precondition: the first line was on screen on arrival")
+                XCTAssertTrue(view.linesNotYetShown.contains(300), "\(name): precondition: the last line was not")
+
+                jump.jump(view)
+
+                XCTAssertTrue(view.visibleLineNumbers.contains(300), "\(name): precondition: the end is on screen")
+                XCTAssertFalse(view.visibleLineNumbers.contains(150), "\(name): precondition: the middle is not")
+                XCTAssertFalse(view.hasShownEveryLine, "\(name): a jump shows the end and nothing between")
+                XCTAssertFalse(allow.isEnabled, name)
+                XCTAssertEqual(allow.title, "Scroll to the end to allow", name)
+                XCTAssertFalse(h.card.canAllow, name)
+                XCTAssertFalse(view.linesNotYetShown.contains(1), "\(name): the top stays shown")
+                XCTAssertFalse(view.linesNotYetShown.contains(300), "\(name): the end is now shown")
+                for middle in [60, 150, 240] {
+                    XCTAssertTrue(view.linesNotYetShown.contains(middle), "\(name): line \(middle) was never on screen: \(view.linesNotYetShown.count) lines unseen")
+                }
+            }
+        }
+    }
+
+    func testScrollingThroughEveryLineEnablesAllowWithEitherScrollerStyle() throws {
+        for style in scrollerStyles {
+            let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+            use(style.style, on: h)
+            let view = h.card.inputView
+            XCTAssertFalse(view.hasShownEveryLine, "\(style.name): precondition")
+
+            readThrough(view)
+
+            XCTAssertTrue(view.hasShownEveryLine, "\(style.name) scroller: lines never shown: \(view.linesNotYetShown)")
+            XCTAssertTrue(view.linesNotYetShown.isEmpty, style.name)
+            XCTAssertEqual(h.card.allowButton?.isEnabled, true, style.name)
+            XCTAssertEqual(h.card.allowButton?.title, "Allow once", style.name)
+            XCTAssertTrue(h.card.canAllow, style.name)
+        }
+    }
+
+    func testScrollingInStepsOfExactlyTheVisibleHeightCoversALineThatStraddlesTwoViews() throws {
+        for style in scrollerStyles {
+            let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+            use(style.style, on: h)
+            let view = h.card.inputView
+            let visible = view.contentView.bounds.height
+            XCTAssertGreaterThan(visible, 0, "precondition")
+
+            readThrough(view, step: visible)
+
+            XCTAssertTrue(view.hasShownEveryLine,
+                          "\(style.name) scroller: a line cut by the edge of one view is whole in the union of two: \(view.linesNotYetShown)")
+            XCTAssertEqual(h.card.allowButton?.isEnabled, true, style.name)
+        }
+    }
+
+    func testSkippingLinesWithStepsLargerThanTheVisibleHeightDoesNotEnableAllow() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+        let visible = view.contentView.bounds.height
+        let end = view.textView.frame.height - visible
+        XCTAssertGreaterThan(end, 0, "precondition: there is something to scroll")
+
+        var y: CGFloat = 0
+        while y < end {
+            ApprovalTestViews.moveClip(of: view, toY: y)
+            y += visible + 40   // 40 pt is a few lines nobody saw
+        }
+        ApprovalTestViews.moveClip(of: view, toY: end)
+
+        XCTAssertTrue(view.visibleLineNumbers.contains(300), "precondition: the clip reached the end")
+        XCTAssertFalse(view.hasShownEveryLine, "the lines between the views were never on screen")
+        XCTAssertFalse(view.linesNotYetShown.isEmpty)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+        XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow")
     }
 
     func testScrollingPartwayDoesNotEnableAllow() throws {
@@ -1215,13 +1531,148 @@ final class ApprovalCardTests: XCTestCase {
         XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow")
     }
 
+    func testReadingHalfwayThroughCoversWhatWasReadAndNotWhatIsStillAhead() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+        let half = (view.textView.frame.height - view.contentView.bounds.height) / 2
+
+        readThrough(view, upTo: half)
+
+        XCTAssertFalse(view.hasShownEveryLine)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+        XCTAssertFalse(view.linesNotYetShown.contains(100), "line 100 was scrolled past")
+        XCTAssertTrue(view.linesNotYetShown.contains(250), "line 250 is still ahead")
+        XCTAssertTrue(view.linesNotYetShown.contains(300))
+    }
+
     func testAllowStaysEnabledAfterScrollingBackUp() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
-        h.card.inputView.scrollToEnd()
+        readThrough(h.card.inputView)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true, "precondition: every line has been on screen")
         h.card.inputView.scrollToTop()
 
         XCTAssertFalse(h.card.inputView.visibleLineNumbers.contains(300), "precondition: back at the top")
+        XCTAssertTrue(h.card.inputView.hasShownEveryLine, "coverage never reverts")
         XCTAssertEqual(h.card.allowButton?.isEnabled, true, "every line has been on screen once")
+        XCTAssertEqual(h.card.allowButton?.title, "Allow once")
+    }
+
+    // MARK: A line that wraps has several fragments, and all of them have to be shown
+
+    func testALongWrappedLineNeedsAllOfItsFragmentsShown() throws {
+        for style in scrollerStyles {
+            let name = "\(style.name) scroller"
+            let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.wrapping(), width: 300, maxHeight: 300)
+            use(style.style, on: h)
+            let view = h.card.inputView
+            let allow = try XCTUnwrap(h.card.allowButton, name)
+            XCTAssertEqual(view.displayedLines.count, 1, "\(name): precondition: one line")
+            XCTAssertGreaterThanOrEqual(fragmentCount(of: view), 8, "\(name): precondition: the one line wraps into many fragments")
+            XCTAssertGreaterThan(view.contentHeight(forWidth: view.frame.width), view.frame.height * 2,
+                                 "\(name): precondition: the input area is far too short for all of it")
+            XCTAssertFalse(view.hasShownEveryLine, "\(name): precondition")
+
+            ApprovalTestViews.moveClip(of: view, toY: max(0, view.textView.frame.height - view.contentView.bounds.height))
+
+            XCTAssertGreaterThan(view.contentView.bounds.origin.y, 40, "\(name): precondition: the first fragment is off screen")
+            XCTAssertGreaterThanOrEqual(view.contentView.bounds.maxY, view.textView.frame.height - 1, "\(name): precondition: the last fragment is on screen")
+            XCTAssertFalse(view.hasShownEveryLine, "\(name): the last fragment alone is not the whole line")
+            XCTAssertFalse(allow.isEnabled, name)
+            XCTAssertEqual(allow.title, "Scroll to the end to allow", name)
+            XCTAssertEqual(view.linesNotYetShown, [1], "\(name): line 1 still has text nobody saw")
+
+            readThrough(view)
+
+            XCTAssertTrue(view.hasShownEveryLine, "\(name): unseen: \(view.linesNotYetShown)")
+            XCTAssertTrue(view.linesNotYetShown.isEmpty, name)
+            XCTAssertEqual(allow.isEnabled, true, name)
+        }
+    }
+
+    func testAWrappedLineIsCoveredByStepsOfExactlyTheVisibleHeightToo() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.wrapping(), width: 300, maxHeight: 300)
+        let view = h.card.inputView
+        XCTAssertFalse(view.hasShownEveryLine, "precondition")
+
+        readThrough(view, step: view.contentView.bounds.height)
+
+        XCTAssertTrue(view.hasShownEveryLine, "unseen: \(view.linesNotYetShown)")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+    }
+
+    // MARK: Short inputs
+
+    func testAShortInputThatFitsItsInputAreaEnablesAllowRightAfterLayoutBecauseItIsAllOnScreen() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.shortLines(5))
+        let view = h.card.inputView
+        XCTAssertLessThanOrEqual(view.contentHeight(forWidth: view.frame.width), view.frame.height + 0.5, "precondition: it all fits")
+
+        XCTAssertTrue(view.hasShownEveryLine)
+        XCTAssertTrue(view.linesNotYetShown.isEmpty)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+        XCTAssertEqual(h.card.allowButton?.title, "Allow once")
+    }
+
+    func testAShortInputInACardWhoseInputAreaIsTooShortIsNotEnabledUntilItHasBeenReadThrough() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.shortLines(12), maxHeight: 150)
+        let view = h.card.inputView
+        XCTAssertGreaterThan(view.contentHeight(forWidth: view.frame.width), view.frame.height,
+                             "precondition: twelve short lines do not fit in this card's input area")
+
+        XCTAssertFalse(view.hasShownEveryLine, "short is not the same as fully visible")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+        XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow")
+        XCTAssertFalse(view.linesNotYetShown.isEmpty)
+
+        readThrough(view)
+
+        XCTAssertTrue(view.hasShownEveryLine, "unseen: \(view.linesNotYetShown)")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+    }
+
+    // MARK: Resizing the input
+
+    func testEnlargingTheInputCountsTheLinesThatBecomeVisibleAndShrinkingItNeverTakesThemBack() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+        let width = view.frame.width, height = view.frame.height
+        let visibleBefore = view.visibleLineNumbers
+        let unseenBefore = view.linesNotYetShown
+        XCTAssertFalse(view.hasShownEveryLine, "precondition")
+
+        view.setFrameSize(NSSize(width: width, height: height * 3))
+        view.layoutSubtreeIfNeeded()
+
+        let visibleBigger = view.visibleLineNumbers
+        let unseenBigger = view.linesNotYetShown
+        XCTAssertGreaterThan(visibleBigger.count, visibleBefore.count, "precondition: more text is on screen now")
+        XCTAssertLessThan(unseenBigger.count, unseenBefore.count, "the lines that came into view are counted")
+        for number in visibleBigger.dropLast() {   // the last one may be only partly in
+            XCTAssertFalse(unseenBigger.contains(number), "line \(number) is on screen in full")
+        }
+        XCTAssertFalse(view.hasShownEveryLine)
+
+        view.setFrameSize(NSSize(width: width, height: height))
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(Set(view.linesNotYetShown).isSubset(of: Set(unseenBigger)), "shrinking again takes nothing back")
+        XCTAssertFalse(view.hasShownEveryLine)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+    }
+
+    func testEnlargingTheInputUntilAllTheTextFitsEnablesAllow() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.shortLines(12), maxHeight: 150)
+        let view = h.card.inputView
+        let needed = view.contentHeight(forWidth: view.frame.width)
+        XCTAssertGreaterThan(needed, view.frame.height, "precondition: too short for all of it")
+        XCTAssertFalse(view.hasShownEveryLine, "precondition")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false, "precondition")
+
+        view.setFrameSize(NSSize(width: view.frame.width, height: needed + 40))
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(view.hasShownEveryLine, "unseen: \(view.linesNotYetShown)")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
         XCTAssertEqual(h.card.allowButton?.title, "Allow once")
     }
 
@@ -1315,8 +1766,7 @@ final class ApprovalCardTests: XCTestCase {
     /// Move the input's clip view the way a scroll wheel does (not through `scrollToEnd`, which is the test and script entry).
     private func scrollClip(of view: ApprovalInputView, toBottom: Bool) {
         let target = toBottom ? max(0, view.textView.frame.height - view.contentView.bounds.height) : 0
-        view.contentView.scroll(to: NSPoint(x: 0, y: target))
-        view.reflectScrolledClipView(view.contentView)
+        ApprovalTestViews.moveClip(of: view, toY: target)
     }
 
     func testAScrollMadeDuringAnAppControlRequestDoesNotCountAsHavingShownTheInput() throws {
@@ -1334,30 +1784,62 @@ final class ApprovalCardTests: XCTestCase {
         XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow")
     }
 
-    func testAPersonsScrollToTheEndCountsAfterASyntheticOneDidNot() throws {
+    func testSteppingThroughEveryLineDuringAnAppControlRequestDoesNotCount() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+        XCTAssertFalse(view.hasShownEveryLine, "precondition")
+
+        SyntheticInputGate.begin()
+        readThrough(view)
+        SyntheticInputGate.end()
+
+        XCTAssertTrue(view.visibleLineNumbers.contains(300), "precondition: the clip really walked to the end")
+        XCTAssertFalse(view.hasShownEveryLine, "every line went past, but app-control did the scrolling, not a person")
+        XCTAssertTrue(view.linesNotYetShown.contains(150), "the middle of the input was never shown to anyone")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+        XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow")
+
+        // The same walk once the request is over, with nothing marking it as a person's, still does not count.
+        view.isPersonEvent = { _ in false }
+        readThrough(view)
+        XCTAssertFalse(view.hasShownEveryLine, "only a person's event lets the clip count again")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+    }
+
+    func testAPersonsReadThroughCountsAfterASyntheticOneDidNot() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
         let view = h.card.inputView
         view.isPersonEvent = { _ in true }   // the scrolls below stand for a person's wheel
 
         SyntheticInputGate.begin()
-        scrollClip(of: view, toBottom: true)
+        readThrough(view)
         SyntheticInputGate.end()
         XCTAssertFalse(view.hasShownEveryLine, "precondition")
 
         scrollClip(of: view, toBottom: false)
         XCTAssertFalse(view.hasShownEveryLine, "the top is not the end")
         scrollClip(of: view, toBottom: true)
+        XCTAssertFalse(view.hasShownEveryLine, "and a jump to the end shows the end only")
+        readThrough(view)
 
-        XCTAssertTrue(view.hasShownEveryLine, "a scroll outside any app-control request counts")
+        XCTAssertTrue(view.hasShownEveryLine, "a read-through outside any app-control request counts: unseen \(view.linesNotYetShown)")
         XCTAssertEqual(h.card.allowButton?.isEnabled, true)
         XCTAssertEqual(h.card.allowButton?.title, "Allow once")
     }
 
-    func testAPersonsScrollToTheEndCountsOnItsOwn() throws {
+    func testAPersonsReadThroughCountsOnItsOwn() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
-        scrollClip(of: h.card.inputView, toBottom: true)
+        readThrough(h.card.inputView)
         XCTAssertTrue(h.card.inputView.hasShownEveryLine)
         XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+    }
+
+    func testAPersonsJumpToTheEndDoesNotCountOnItsOwn() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        scrollClip(of: h.card.inputView, toBottom: true)
+        XCTAssertTrue(h.card.inputView.visibleLineNumbers.contains(300), "precondition")
+        XCTAssertFalse(h.card.inputView.hasShownEveryLine)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
     }
 
     // MARK: Round-trip failure
@@ -1768,7 +2250,7 @@ final class ApprovalCardTests: XCTestCase {
         let rows = h.rowGeometry
         XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow", "precondition")
 
-        h.card.inputView.scrollToEnd()
+        readThrough(h.card.inputView)
         h.relayout()
 
         XCTAssertEqual(h.card.allowButton?.title, "Allow once")
@@ -1868,7 +2350,9 @@ final class ApprovalCardTests: XCTestCase {
         let label = try XCTUnwrap(ApprovalTestViews.label(startingWith: "Agent says:", in: h.card),
                                   "the agent's description is shown, labelled: \(ApprovalTestViews.labelTexts(in: h.card))")
         XCTAssertTrue(label.stringValue.contains(description))
-        XCTAssertTrue(ApprovalTestColors.same(label.textColor, ApprovalPalette.mutedText), "muted, not command-coloured")
+        // The label is attributed text now (hidden characters are tokens): read the colour off the text itself.
+        XCTAssertTrue(ApprovalTestColors.same(label.attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil),
+                                              ApprovalPalette.mutedText), "muted, not command-coloured")
         XCTAssertTrue(h.card.isFlipped, "precondition: y grows downward in the card")
         XCTAssertGreaterThanOrEqual(label.frame.minY, h.card.inputView.frame.maxY, "below the exact input, never in its place")
         XCTAssertFalse(h.card.inputView.textView.string.contains(description), "the claim is not part of the input")
@@ -2048,6 +2532,10 @@ final class ApprovalCardTests: XCTestCase {
         ])
 
         h.card.inputView.scrollToEnd()
+        XCTAssertEqual(h.card.listing.options.last, ApprovalCardListing.Option(id: "allow_once", enabled: false, label: "Scroll to the end to allow"),
+                       "a jump to the end shows the end only")
+
+        readThrough(h.card.inputView)
 
         XCTAssertEqual(h.card.listing.options.last, ApprovalCardListing.Option(id: "allow_once", enabled: true, label: "Allow once"))
     }
@@ -2163,7 +2651,7 @@ final class ApprovalCardTests: XCTestCase {
         XCTAssertFalse(h.card.inputView.textView.string.unicodeScalars.contains("\u{202E}"))
     }
 
-    func testAllowWaitsForTheLastExtraLine() throws {
+    func testAllowWaitsForEveryExtraLineNotJustTheLastOne() throws {
         var extras: [String: Any] = [:]
         for n in 0 ..< 40 { extras["k\(String(format: "%02d", n))"] = n }
         let request = try ApprovalTestRequests.bashWithExtras(ApprovalTestRequests.simpleRmCommand, extras: extras)
@@ -2180,7 +2668,13 @@ final class ApprovalCardTests: XCTestCase {
         view.scrollToEnd()
 
         XCTAssertTrue(view.visibleLineNumbers.contains(last))
-        XCTAssertTrue(view.hasShownEveryLine)
+        XCTAssertFalse(view.hasShownEveryLine, "the end of the extra fields is not all of them")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+
+        readThrough(view)
+
+        XCTAssertTrue(view.visibleLineNumbers.contains(last))
+        XCTAssertTrue(view.hasShownEveryLine, "unseen: \(view.linesNotYetShown)")
         XCTAssertEqual(h.card.allowButton?.isEnabled, true)
         XCTAssertEqual(view.displayedLines.last, "}")
     }
@@ -2331,7 +2825,7 @@ final class ApprovalCardTests: XCTestCase {
         XCTAssertTrue(view.isPersonEvent(GestureFixtures.mouse(.leftMouseUp, in: h.window)))
     }
 
-    func testAPersonsScrollThatShowsTheEndCountsAfterALayoutOnlyChange() throws {
+    func testAPersonsReadThroughCountsAfterALayoutOnlyChange() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
         let view = h.card.inputView
 
@@ -2345,9 +2839,344 @@ final class ApprovalCardTests: XCTestCase {
         view.isPersonEvent = { _ in true }   // the scrolls below stand for a person's wheel
         scrollClip(of: view, toBottom: false)
         scrollClip(of: view, toBottom: true)
+        XCTAssertFalse(view.hasShownEveryLine, "a person's jump to the end shows the end only")
+        readThrough(view)
 
-        XCTAssertTrue(view.hasShownEveryLine)
+        XCTAssertTrue(view.hasShownEveryLine, "unseen: \(view.linesNotYetShown)")
         XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+    }
+
+    // MARK: Coverage only counts while the card can be seen (N2)
+
+    func testNothingIsCoveredWhileTheWindowIsNotShowingNotEvenAOneLineInput() throws {
+        let one = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), isOnScreen: { false })
+        XCTAssertFalse(one.card.inputView.hasShownEveryLine, "nobody could have seen it")
+        XCTAssertFalse(one.card.inputView.linesNotYetShown.isEmpty)
+        XCTAssertEqual(one.card.allowButton?.isEnabled, false)
+        XCTAssertEqual(one.card.allowButton?.title, "Scroll to the end to allow")
+        XCTAssertFalse(one.card.canAllow)
+
+        let tall = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300, isOnScreen: { false })
+        let view = tall.card.inputView
+        view.needsLayout = true
+        tall.relayout()
+        readThrough(view)
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: tall.window)
+
+        XCTAssertTrue(view.visibleLineNumbers.contains(300), "precondition: the clip walked to the end")
+        XCTAssertFalse(view.hasShownEveryLine, "scrolling in a window nobody can see changes nothing")
+        XCTAssertEqual(view.linesNotYetShown, Array(1 ... 300), "not a single line was shown")
+        XCTAssertEqual(tall.card.allowButton?.isEnabled, false)
+    }
+
+    func testCoverageIsRecordedWhenTheCardBecomesVisibleAndALayoutRunsNotBefore() throws {
+        var showing = false
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), isOnScreen: { showing })
+        let view = h.card.inputView
+        XCTAssertFalse(view.hasShownEveryLine, "precondition: not showing at arrival")
+
+        view.needsLayout = true
+        h.relayout()
+        XCTAssertFalse(view.hasShownEveryLine, "a layout pass while the window is not showing records nothing")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+
+        showing = true
+        view.needsLayout = true
+        h.relayout()
+
+        XCTAssertTrue(view.hasShownEveryLine, "the next layout pass after the card can be seen records what is on screen")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+        XCTAssertEqual(h.card.allowButton?.title, "Allow once")
+    }
+
+    func testAChangeOfTheWindowsVisibilityRecordsWhatIsOnScreenWithoutAnyLayout() throws {
+        var showing = false
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), isOnScreen: { showing })
+        XCTAssertFalse(h.card.inputView.hasShownEveryLine, "precondition")
+
+        showing = true
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: h.window)
+
+        XCTAssertTrue(h.card.inputView.hasShownEveryLine, "the window became visible: what is on screen counts then")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+    }
+
+    func testALayoutAtZeroHeightCoversNothingAndRealSizeDoes() throws {
+        let window = makeRigWindow(self, size: NSSize(width: 400, height: 300))
+        let view = ApprovalInputView(model: ApprovalDisplayModel(request: try ApprovalTestRequests.simpleRm()))
+        view.isWindowShowing = { true }
+        view.translatesAutoresizingMaskIntoConstraints = true
+        window.contentView?.addSubview(view)
+        view.setFrameSize(NSSize(width: 300, height: 0))
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(view.hasShownEveryLine, "nothing of a zero-height view is on screen")
+        XCTAssertFalse(view.linesNotYetShown.isEmpty)
+
+        view.setFrameSize(NSSize(width: 300, height: 120))
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(view.hasShownEveryLine, "at a real size the one line is shown")
+        XCTAssertTrue(view.linesNotYetShown.isEmpty)
+    }
+
+    private func makeCard(_ request: ApprovalRequestWire, in container: NSView) throws -> ApprovalCardView {
+        let recorder = ApprovalRecorder()
+        let store = recorder.makeStore()
+        store.handle(.request(request))
+        let entry = try XCTUnwrap(store.entry(id: request.id))
+        let card = ApprovalCardView(entry: entry, store: store, windowID: { "w-test" },
+                                    permit: ApprovalCardHarness.humanPermit, isOnScreen: { true })
+        card.frame = NSRect(x: 20, y: 20, width: 560, height: card.preferredHeight(forWidth: 560, maxHeight: 520))
+        container.addSubview(card)
+        return card
+    }
+
+    func testACardInAHiddenViewRecordsNothingUntilItIsUnhidden() throws {
+        for hideTheCardItself in [false, true] {
+            let name = hideTheCardItself ? "the card itself hidden" : "the view around the card hidden"
+            let window = makeRigWindow(self, size: NSSize(width: 640, height: 600))
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 600))
+            window.contentView?.addSubview(container)
+            let card = try makeCard(try ApprovalTestRequests.simpleRm(), in: container)
+            let hidden: NSView = hideTheCardItself ? card : container
+            hidden.isHidden = true   // before anything has been laid out
+
+            container.layoutSubtreeIfNeeded()
+            card.layoutSubtreeIfNeeded()
+
+            XCTAssertFalse(card.inputView.hasShownEveryLine, "\(name): a hidden input shows nothing")
+            XCTAssertEqual(card.allowButton?.isEnabled, false, name)
+
+            hidden.isHidden = false
+            container.layoutSubtreeIfNeeded()
+            card.layoutSubtreeIfNeeded()
+
+            XCTAssertTrue(card.inputView.hasShownEveryLine, "\(name): unhidden, it is on screen")
+            XCTAssertEqual(card.allowButton?.isEnabled, true, name)
+        }
+    }
+
+    // MARK: Hidden characters in the text around the input (N1, N3)
+
+    private let rloToken = "\u{27E8}U+202E RLO\u{27E9}"
+
+    func testAnInvisibleCharacterInAnOtherFieldOfABashInputMakesDenyTheDefault() throws {
+        let request = try ApprovalTestRequests.bashWithExtras("ls", extras: ["timeout": 1, "note": "a\u{202E}b"])
+        XCTAssertEqual(request.display.invisibleCount, 0, "precondition: the daemon's display of the command says none")
+        let h = ApprovalCardHarness(self, request: request, maxHeight: 600)
+        let banner = "This command contains 1 invisible or direction-changing character."
+
+        XCTAssertEqual(h.card.model.invisibleCount, 1, "precondition: the extra field's character is counted")
+        XCTAssertTrue(h.card.options.defaultsToDeny)
+        XCTAssertEqual(h.card.listing.banner, banner)
+        XCTAssertTrue(ApprovalTestViews.labelTexts(in: h.card).contains(banner))
+        XCTAssertTrue(h.card.initialKeyView === h.card.denyButton, "keyboard focus starts on Deny")
+        XCTAssertTrue(h.card.listing.defaultToNoKind)
+
+        let plain = ApprovalCardHarness(self, request: try ApprovalTestRequests.bashWithExtras("ls", extras: ["timeout": 1, "note": "ab"]),
+                                        maxHeight: 600)
+        XCTAssertFalse(plain.card.options.defaultsToDeny, "the same request without the character")
+        XCTAssertNil(plain.card.listing.banner)
+        XCTAssertTrue(plain.card.initialKeyView === plain.card.inputView.textView)
+    }
+
+    /// The label shows the token where the character was: visible, in the warning colour, never the raw character.
+    private func assertTokenised(_ label: NSTextField, what: String, file: StaticString = #filePath, line: UInt = #line) {
+        let text = label.stringValue
+        XCTAssertTrue(text.contains(rloToken), "\(what): the label shows the token: \(text)", file: file, line: line)
+        XCTAssertFalse(text.unicodeScalars.contains("\u{202E}"), "\(what): the raw character is not in the label", file: file, line: line)
+        let shown = label.attributedStringValue
+        let at = (shown.string as NSString).range(of: rloToken)
+        guard at.location != NSNotFound else {
+            return XCTFail("\(what): the token is not in the attributed text: \(shown.string)", file: file, line: line)
+        }
+        for offset in at.location ..< NSMaxRange(at) {
+            XCTAssertTrue(ApprovalTestColors.same(shown.attribute(.foregroundColor, at: offset, effectiveRange: nil), ApprovalPalette.warning),
+                          "\(what): the token is in the warning colour (offset \(offset))", file: file, line: line)
+        }
+        XCTAssertFalse(ApprovalTestColors.same(shown.attribute(.foregroundColor, at: 0, effectiveRange: nil), ApprovalPalette.warning),
+                       "\(what): the text around the token is not", file: file, line: line)
+        let tip = label.toolTip ?? ""
+        XCTAssertTrue(tip.contains(rloToken), "\(what): the tooltip holds the token: \(tip)", file: file, line: line)
+        XCTAssertFalse(tip.unicodeScalars.contains("\u{202E}"), "\(what): and not the raw character", file: file, line: line)
+    }
+
+    /// The card counts it, says so (a request, not a command), and starts keyboard focus on Deny.
+    private func assertCardTreatsItAsWarning(_ h: ApprovalCardHarness, what: String, file: StaticString = #filePath, line: UInt = #line) {
+        let banner = "This request contains 1 invisible or direction-changing character."
+        XCTAssertEqual(h.card.listing.invisibleCount, 1, what, file: file, line: line)
+        XCTAssertEqual(h.card.listing.banner, banner, what, file: file, line: line)
+        XCTAssertTrue(ApprovalTestViews.labelTexts(in: h.card).contains(banner), "\(what): the banner is on the card", file: file, line: line)
+        XCTAssertTrue(h.card.options.defaultsToDeny, what, file: file, line: line)
+        XCTAssertTrue(h.card.listing.defaultToNoKind, what, file: file, line: line)
+        XCTAssertTrue(h.card.initialKeyView === h.card.denyButton, "\(what): keyboard focus starts on Deny", file: file, line: line)
+    }
+
+    func testAHiddenCharacterInWhatTheAgentSaysIsShownAsAToken() throws {
+        let request = try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand, description: "clean\u{202E}up")
+        let h = ApprovalCardHarness(self, request: request)
+        let label = try XCTUnwrap(ApprovalTestViews.label(startingWith: "Agent says:", in: h.card))
+
+        XCTAssertEqual(label.stringValue, "Agent says: “clean\(rloToken)up”")
+        assertTokenised(label, what: "Agent says")
+        XCTAssertEqual(label.maximumNumberOfLines, 4, "the claim is still cut at four lines")
+        assertCardTreatsItAsWarning(h, what: "Agent says")
+    }
+
+    func testAHiddenCharacterInTheReasonIsShownAsAToken() throws {
+        let request = try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand, reasonText: "your rule \u{202E}x")
+        let h = ApprovalCardHarness(self, request: request)
+        let label = try XCTUnwrap(ApprovalTestViews.label(startingWith: "Why:", in: h.card))
+
+        XCTAssertEqual(label.stringValue, "Why: your rule \(rloToken)x")
+        assertTokenised(label, what: "Why")
+        XCTAssertEqual(h.card.listing.reasonLine, "your rule \(rloToken)x")
+        assertCardTreatsItAsWarning(h, what: "Why")
+    }
+
+    func testAHiddenCharacterInTheWorkingDirectoryIsShownAsAToken() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(cwd: "/tmp/\u{202E}x"))
+        let label = try XCTUnwrap(ApprovalTestViews.label(startingWith: "In:", in: h.card))
+
+        XCTAssertEqual(label.stringValue, "In: /tmp/\(rloToken)x")
+        assertTokenised(label, what: "In")
+        assertCardTreatsItAsWarning(h, what: "In")
+    }
+
+    func testAHiddenCharacterInTheAgentsNameIsShownAsATokenInTheHeadline() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand, agentName: "co\u{202E}dy"))
+        let label = try XCTUnwrap(ApprovalTestViews.labels(in: h.card).first { $0.stringValue.contains("wants to run") })
+
+        XCTAssertEqual(label.stringValue, "Co\(rloToken)dy wants to run Bash")
+        assertTokenised(label, what: "headline")
+        XCTAssertEqual(h.card.listing.headline, "Co\(rloToken)dy wants to run Bash")
+        XCTAssertEqual(h.card.listing.agent, "Co\(rloToken)dy")
+        let spoken = h.card.accessibilityLabel() ?? ""
+        XCTAssertTrue(spoken.contains(rloToken), spoken)
+        XCTAssertFalse(spoken.unicodeScalars.contains("\u{202E}"), "VoiceOver is not handed the raw character either")
+        assertCardTreatsItAsWarning(h, what: "headline")
+    }
+
+    func testAPlainRequestShowsNoTokenAndNoBannerAndStartsFocusInTheInput() throws {
+        let request = try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand, cwd: "/private/var/work/x",
+                                                    description: "Clean build outputs")
+        let h = ApprovalCardHarness(self, request: request)
+        let texts = ApprovalTestViews.labelTexts(in: h.card)
+
+        for text in texts { XCTAssertFalse(text.contains("\u{27E8}"), "a token in `\(text)`") }
+        XCTAssertTrue(texts.contains("Cody wants to run Bash"), "\(texts)")
+        XCTAssertTrue(texts.contains("Why: your rule Bash(rm:*) in ~/.claude/settings.json"), "\(texts)")
+        XCTAssertTrue(texts.contains("In: /private/var/work/x"), "\(texts)")
+        XCTAssertTrue(texts.contains("Agent says: “Clean build outputs”"), "\(texts)")
+        XCTAssertEqual(h.card.listing.invisibleCount, 0)
+        XCTAssertNil(h.card.listing.banner)
+        XCTAssertFalse(h.card.options.defaultsToDeny)
+        XCTAssertTrue(h.card.initialKeyView === h.card.inputView.textView)
+    }
+
+    func testANewlineAndOrdinaryNonASCIIInTheAgentsClaimAreNotTokens() throws {
+        let description = "café “quoted” 🙂\nsecond line"
+        let request = try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand, description: description)
+        let h = ApprovalCardHarness(self, request: request)
+        let label = try XCTUnwrap(ApprovalTestViews.label(startingWith: "Agent says:", in: h.card))
+
+        XCTAssertEqual(label.stringValue, "Agent says: “\(description)”", "the line feed stays a line feed")
+        XCTAssertFalse(label.stringValue.contains("\u{27E8}"))
+        XCTAssertEqual(h.card.listing.invisibleCount, 0)
+        XCTAssertNil(h.card.listing.banner)
+        XCTAssertFalse(h.card.options.defaultsToDeny)
+    }
+
+    // MARK: A refused answer leaves Deny available (N4)
+
+    private func refuse(_ h: ApprovalCardHarness, code: String = "not_operator_app") throws {
+        h.store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "req-1", code: code)))
+        h.sync()
+    }
+
+    /// An action delivered to a control anyway (an Accessibility press, a stray `sendAction`).
+    private func forcePress(_ button: NSButton?, file: StaticString = #filePath, line: UInt = #line) {
+        guard let button = button, let action = button.action else { return XCTFail("no such button", file: file, line: line) }
+        button.performClick(nil)
+        _ = NSApp.sendAction(action, to: button.target, from: button)
+    }
+
+    func testAfterARefusedAnswerOnlyDenyIsAvailableAndPressingItSendsADeny() throws {
+        for code in ["not_operator_app", "requires_secure_connection", "something_new"] {
+            let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm())
+            press(h.card.allowButton)
+            h.sync()
+            XCTAssertFalse(h.card.denyButton.isEnabled, "\(code): precondition: the Allow is on its way")
+            try refuse(h, code: code)
+            guard case .notSent? = h.store.entry(id: "req-1")?.state else { return XCTFail("\(code): expected not sent") }
+
+            XCTAssertTrue(h.card.denyButton.isEnabled, "\(code): Deny is never stranded")
+            XCTAssertEqual(h.card.denyMoreButton?.isEnabled, false, code)
+            XCTAssertEqual(h.card.denyAndStopButton?.isEnabled, false, code)
+            XCTAssertEqual(h.card.allowButton?.isEnabled, false, code)
+            XCTAssertEqual(h.card.listing.options.map(\.id), ["deny", "deny_with_note", "deny_and_stop", "allow_once"], code)
+            XCTAssertEqual(h.card.listing.options.map(\.enabled), [true, false, false, false], code)
+            XCTAssertNotEqual(h.card.listing.state, "pending", "\(code): the card says the answer was not sent")
+
+            // Nothing that lets the agent act goes out, however the press arrives.
+            forcePress(h.card.allowButton)
+            forcePress(h.card.denyAndStopButton)
+            XCTAssertEqual(h.recorder.sent.map(\.decision), [ApprovalDecisionWire(kind: .allowOnce)], "\(code): only the first Allow was ever sent")
+            guard case .notSent? = h.store.entry(id: "req-1")?.state else { return XCTFail("\(code): still not sent") }
+
+            // A person's press of Deny goes through the gesture path and is sent.
+            press(h.card.denyButton)
+            XCTAssertEqual(h.recorder.sent.map(\.decision), [ApprovalDecisionWire(kind: .allowOnce), ApprovalDecisionWire(kind: .deny)], code)
+            XCTAssertEqual(h.recorder.sent.last?.windowID, "w-test", code)
+            h.sync()
+            XCTAssertFalse(h.card.denyButton.isEnabled, "\(code): one attempt at a time")
+            XCTAssertEqual(h.card.listing.state, "sending", code)
+            press(h.card.denyButton)
+            XCTAssertEqual(h.recorder.sent.count, 2, "\(code): a second press while it is on its way sends nothing")
+            XCTAssertTrue(h.recorder.reports.isEmpty, code)
+        }
+    }
+
+    func testADenyThatIsRefusedAgainCanBeTriedAgain() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm())
+        press(h.card.allowButton)
+        h.sync()
+        try refuse(h)
+        press(h.card.denyButton)
+        h.sync()
+        XCTAssertFalse(h.card.denyButton.isEnabled, "precondition: the first Deny is on its way")
+
+        try refuse(h, code: "requires_secure_connection")
+
+        XCTAssertTrue(h.card.denyButton.isEnabled, "refused again: Deny is available again")
+        XCTAssertEqual(h.card.listing.options.map(\.enabled), [true, false, false, false])
+        press(h.card.denyButton)
+        XCTAssertEqual(h.recorder.sent.map(\.decision.kind), [.allowOnce, .deny, .deny])
+    }
+
+    func testAfterARefusedAnswerADenyPressFromAnythingButAPersonSendsNothingAndIsReported() throws {
+        var human = true
+        let permit: ApprovalCardView.GesturePermit = { _ in human ? .human(sourcePid: nil, sourceState: nil) : .refused(reason: .appControl) }
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), permit: permit)
+        press(h.card.allowButton)
+        h.sync()
+        try refuse(h)
+        XCTAssertTrue(h.card.denyButton.isEnabled, "precondition")
+
+        human = false
+        press(h.card.denyButton)
+
+        XCTAssertEqual(h.recorder.sent.count, 1, "an app-control press of Deny answers nothing")
+        XCTAssertEqual(h.recorder.reports, [ApprovalRecorder.Report(requestID: "req-1", control: "deny", channel: .appControl)])
+        guard case .notSent? = h.store.entry(id: "req-1")?.state else { return XCTFail("the entry is untouched") }
+        XCTAssertTrue(h.card.denyButton.isEnabled, "and Deny is still there for a person")
+
+        human = true
+        press(h.card.denyButton)
+        XCTAssertEqual(h.recorder.sent.map(\.decision.kind), [.allowOnce, .deny])
+        XCTAssertEqual(h.recorder.reports.count, 1)
     }
 
     // MARK: Accessibility (T-AP2a-4)
@@ -2701,7 +3530,7 @@ final class ApprovalOverlayHostTests: XCTestCase {
         XCTAssertEqual(h.recorder.sent.count, 1)
     }
 
-    func testAnAnswerTheDaemonRefusedAsNotFromTheOperatorAppSaysSoAndLeavesTheCardDisabled() throws {
+    func testAnAnswerTheDaemonRefusedAsNotFromTheOperatorAppSaysSoAndLeavesOnlyDenyAvailable() throws {
         let h = HostHarness(self)
         h.arrive(try ApprovalTestRequests.simpleRm())
         let card = try XCTUnwrap(h.host.card)
@@ -2713,10 +3542,20 @@ final class ApprovalOverlayHostTests: XCTestCase {
         let state = try XCTUnwrap(h.host.listings.first?.state)
         XCTAssertNotEqual(state, "pending", "the card says the answer was not sent")
         XCTAssertFalse(state.isEmpty)
-        XCTAssertFalse(card.denyButton.isEnabled, "nothing is re-sent")
+        XCTAssertTrue(card.denyButton.isEnabled, "the host showed the card the refusal: Deny is still there")
+        XCTAssertEqual(card.allowButton?.isEnabled, false, "an Allow is never re-sent")
+        XCTAssertEqual(card.denyAndStopButton?.isEnabled, false)
+        XCTAssertEqual(card.denyMoreButton?.isEnabled, false)
         card.allowButton?.performClick(nil)
+        XCTAssertEqual(h.recorder.sent.count, 1, "pressing the disabled Allow sends nothing")
+
         card.denyButton.performClick(nil)
-        XCTAssertEqual(h.recorder.sent.count, 1)
+
+        XCTAssertEqual(h.recorder.sent.map(\.decision), [ApprovalDecisionWire(kind: .allowOnce), ApprovalDecisionWire(kind: .deny)],
+                       "a person's Deny is sent so the agent is not left waiting")
+        XCTAssertFalse(card.denyButton.isEnabled, "and it is one attempt at a time")
+        card.denyButton.performClick(nil)
+        XCTAssertEqual(h.recorder.sent.count, 2)
     }
 
     // MARK: Announcement (T-AP2a-4)

@@ -73,6 +73,10 @@ final class ApprovalStore {
     private var order: [String: [String]] = [:]
     /// Every id this process has sent an answer for. Never shrinks.
     private var answered = Set<String>()
+    /// What the card says for an id whose answer the daemon refused and that has not been answered since:
+    /// if the daemon's snapshot drops it and then lists it again, it comes back refused (Deny still
+    /// possible), not as "sent".
+    private var refusalTexts: [String: String] = [:]
     /// Ids whose arrival has been announced to VoiceOver.
     private var announced = Set<String>()
     private var subscription: AnyCancellable?
@@ -154,6 +158,7 @@ final class ApprovalStore {
             return false
         }
         answered.insert(id)
+        refusalTexts[id] = nil
         entry.state = .inFlight(decision.kind)
         entries[id] = entry
         send(id, decision, windowID)
@@ -202,7 +207,10 @@ final class ApprovalStore {
     private func add(_ request: ApprovalRequestWire) {
         guard entries[request.id] == nil else { return }
         // A request this process already answered never comes back as waiting.
-        let state: ApprovalAnswerState = answered.contains(request.id) ? .inFlight(.deny) : .pending
+        var state: ApprovalAnswerState = .pending
+        if answered.contains(request.id) {
+            if let text = refusalTexts[request.id] { state = .notSent(text) } else { state = .inFlight(.deny) }
+        }
         entries[request.id] = ApprovalEntry(request: request, state: state)
         order[request.tag, default: []].append(request.id)
     }
@@ -253,6 +261,7 @@ final class ApprovalStore {
 
     private func hold(_ id: String, text: String) {
         guard var entry = entries[id] else { return }
+        if answered.contains(id) { refusalTexts[id] = text }
         entry.state = .notSent(text)
         entries[id] = entry
         changes.send(entry.request.tag)

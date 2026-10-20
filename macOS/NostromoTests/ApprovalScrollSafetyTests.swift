@@ -130,14 +130,14 @@ final class ApprovalScrollSafetyTests: XCTestCase {
 
     // MARK: The input scrolls inside the card
 
-    func testScrollingTheInputInsideTheCardToItsEndMovesNothingAndEnablesAllow() throws {
+    func testScrollingTheInputInsideTheCardMovesNothingAndAllowWaitsForEveryLine() throws {
         let request = try ApprovalTestRequests.heredoc300()
         for following in [true, false] {
             let p = pane(following: following)
             let card = try arrive(request, in: p)
             let scrollFrame = p.rig.scrollView.frame, barFrame = p.rig.inputBar.frame
             let view = card.inputView
-            XCTAssertEqual(card.allowButton?.isEnabled, false, "precondition: Allow waits for the end")
+            XCTAssertEqual(card.allowButton?.isEnabled, false, "precondition: Allow waits for every line")
             let line = NSRange(location: view.displayedLines.prefix(286).reduce(0) { $0 + $1.utf16.count + 1 },
                                length: view.displayedLines[286].utf16.count)
 
@@ -147,12 +147,20 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             XCTAssertTrue(view.visibleLineNumbers.contains(287), "precondition: the scroll happened inside the card")
             XCTAssertEqual(card.allowButton?.isEnabled, false, "line 287 is not the end")
 
-            p.rig.assertNoMove("the input scrolls to its end (following: \(following))", following: following) {
+            p.rig.assertNoMove("the input jumps to its end (following: \(following))", following: following) {
                 view.scrollToEnd()
             }
-
             XCTAssertTrue(view.visibleLineNumbers.contains(300), "the end of the input is on screen")
-            XCTAssertEqual(card.allowButton?.isEnabled, true, "Allow becomes enabled once the last line has been shown")
+            XCTAssertEqual(card.allowButton?.isEnabled, false, "a jump shows the end and nothing between: Allow still waits")
+            XCTAssertEqual(card.allowButton?.title, "Scroll to the end to allow")
+
+            p.rig.assertNoMove("the input is scrolled through, line by line (following: \(following))", following: following) {
+                ApprovalTestViews.readThrough(view)
+            }
+
+            XCTAssertTrue(view.visibleLineNumbers.contains(300), "the walk ended at the end of the input")
+            XCTAssertTrue(view.hasShownEveryLine, "unseen: \(view.linesNotYetShown)")
+            XCTAssertEqual(card.allowButton?.isEnabled, true, "Allow becomes enabled once every line has been shown")
             XCTAssertEqual(card.allowButton?.title, "Allow once")
             try assertCardFloatsInsideThePane(p, scrollFrame: scrollFrame, barFrame: barFrame, name: "input scrolled (following: \(following))")
         }

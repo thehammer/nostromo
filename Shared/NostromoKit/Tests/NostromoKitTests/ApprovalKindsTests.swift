@@ -238,6 +238,50 @@ final class ApprovalKindsTests: XCTestCase {
         XCTAssertEqual(ApprovalKinds.homeAbbreviated("/tmp/x", home: "/"), "/tmp/x")
     }
 
+    // MARK: - Hidden characters anywhere the card shows make Deny the default (N1, N3)
+
+    /// A Bash request for `ls` whose daemon display says no invisible characters, with `input` extra fields and context.
+    private func lsRequest(extra: Fx.Obj = [:], agentName: String = "cody", cwd: String? = nil,
+                           reasonText: String = "your rule Bash(rm:*) in ~/.claude/settings.json",
+                           description: String? = nil) throws -> ApprovalRequestWire {
+        var input: Fx.Obj = ["command": "ls"]
+        for (key, value) in extra { input[key] = value }
+        return try Fx.request(agentName: agentName, input: input,
+                              display: Fx.display(lines: Fx.plainBashLines("ls"), commandCount: 1),
+                              cwd: cwd, reasonText: reasonText, description: description)
+    }
+
+    func testFocusStartsOnDenyWhenAnOtherFieldOfABashInputHasAnInvisibleCharacter() throws {
+        let request = try lsRequest(extra: ["timeout": 1, "note": "a\u{202E}b"])
+        XCTAssertEqual(request.display.invisibleCount, 0, "precondition: the frame's display of the command says none")
+        XCTAssertTrue(ApprovalCardOptions(request: request).defaultsToDeny,
+                      "the card shows the other fields, so their hidden characters count")
+
+        let plain = try lsRequest(extra: ["timeout": 1, "note": "ab"])
+        XCTAssertFalse(ApprovalCardOptions(request: plain).defaultsToDeny, "the same request without the character")
+    }
+
+    func testFocusStartsOnDenyWhenTheTextAroundTheInputHasAHiddenCharacter() throws {
+        let cases: [(name: String, request: ApprovalRequestWire)] = [
+            ("the agent's claim", try lsRequest(description: "clean\u{202E}up")),
+            ("the reason", try lsRequest(reasonText: "your rule \u{202E}x")),
+            ("the directory", try lsRequest(cwd: "/tmp/\u{202E}x")),
+            ("the agent's name", try lsRequest(agentName: "co\u{202E}dy")),
+            ("a tab in the claim", try lsRequest(description: "a\tb")),
+            ("a zero-width space in the reason", try lsRequest(reasonText: "why\u{200B}not")),
+        ]
+        for item in cases {
+            XCTAssertEqual(item.request.display.invisibleCount, 0, "\(item.name): precondition: the display of the input says none")
+            XCTAssertTrue(ApprovalCardOptions(request: item.request).defaultsToDeny, item.name)
+        }
+    }
+
+    func testFocusDoesNotStartOnDenyForPlainContextTextEvenWithALineFeedAndAccents() throws {
+        let request = try lsRequest(cwd: "/tmp/caf\u{00E9}", reasonText: "your rule “Bash(rm:*)”",
+                                    description: "first line\nsecond line \u{1F642}")
+        XCTAssertFalse(ApprovalCardOptions(request: request).defaultsToDeny)
+    }
+
     // MARK: - Helpers
 
     /// A Bash request for `rm -rf build/` with the given kind, flags, options and agent.

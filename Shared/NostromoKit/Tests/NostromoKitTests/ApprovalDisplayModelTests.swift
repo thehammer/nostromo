@@ -1141,6 +1141,117 @@ final class ApprovalDisplayModelTests: XCTestCase {
         XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified)
     }
 
+    // MARK: - The text around the input shows hidden characters as tokens (N3)
+
+    func testContextRunsTurnEachHiddenCharacterIntoItsCanonicalTokenAndLeaveTheRestPlain() throws {
+        let cases: [(name: String, value: UInt32)] = [
+            ("tab", 0x09), ("carriage return", 0x0D), ("escape", 0x1B), ("zero-width space", 0x200B),
+            ("right-to-left override", 0x202E), ("left-to-right isolate", 0x2066), ("byte order mark", 0xFEFF),
+            ("tag character", 0xE0041), ("line separator", 0x2028),
+        ]
+        for item in cases {
+            let scalar = try XCTUnwrap(Unicode.Scalar(item.value), item.name)
+            var text = "a"
+            text.unicodeScalars.append(scalar)
+            text += "b"
+            let runs = ApprovalDisplayModel.contextRuns(for: text)
+            let token = ApprovalDisplayModel.canonicalToken(forCodePoint: item.value)
+
+            XCTAssertEqual(runs.map(\.kind), [.plain, .invisible, .plain], item.name)
+            XCTAssertEqual(runs.map(\.text), ["a", token, "b"], item.name)
+            XCTAssertEqual(runs[1].codePoint, item.value, item.name)
+            XCTAssertEqual(token, Fx.invisibleToken(scalar), "\(item.name): the daemon's token for it")
+            XCTAssertEqual(ApprovalDisplayModel.contextText(text), "a" + token + "b", item.name)
+            XCTAssertFalse(ApprovalDisplayModel.contextText(text).unicodeScalars.contains(scalar), "\(item.name): the raw character is gone")
+        }
+        XCTAssertEqual(ApprovalDisplayModel.contextText("pay\u{202E}x"), "pay\u{27E8}U+202E RLO\u{27E9}x")
+        XCTAssertEqual(ApprovalDisplayModel.contextText("a\tb\rc"), "a\u{27E8}tab\u{27E9}b\u{27E8}CR\u{27E9}c")
+    }
+
+    func testContextRunsKeepLineFeedsAndOrdinaryNonASCIIPlain() {
+        let plain = ["plain ascii", "line one\nline two", "caf\u{00E9}", "e\u{0301}", "\u{201C}quoted\u{201D}", "\u{1F642} ok",
+                     "\u{65E5}\u{672C}\u{8A9E}", "\u{043C}", "\n", "  "]
+        for text in plain {
+            let runs = ApprovalDisplayModel.contextRuns(for: text)
+            XCTAssertTrue(runs.allSatisfy { $0.kind == .plain }, "`\(text)` has no token")
+            XCTAssertEqual(runs.map(\.text).joined(), text, "`\(text)` is shown as it is")
+            XCTAssertEqual(ApprovalDisplayModel.contextText(text), text)
+        }
+        XCTAssertTrue(ApprovalDisplayModel.contextRuns(for: "").isEmpty)
+        XCTAssertEqual(ApprovalDisplayModel.contextText(""), "")
+    }
+
+    func testACarriageReturnBeforeALineFeedIsATokenThenALineFeedAndNeighbouringHiddenCharactersAreSeparateRuns() {
+        XCTAssertEqual(ApprovalDisplayModel.contextText("a\r\nb"), "a\u{27E8}CR\u{27E9}\nb")
+        let runs = ApprovalDisplayModel.contextRuns(for: "\u{202E}\u{202C}")
+        XCTAssertEqual(runs.map(\.kind), [.invisible, .invisible])
+        XCTAssertEqual(runs.map(\.codePoint), [0x202E, 0x202C])
+    }
+
+    private func requestWithContext(command: String = "ls", agentName: String = "cody", cwd: String? = nil,
+                                    reasonText: String = "your rule Bash(rm:*) in ~/.claude/settings.json",
+                                    description: String? = nil) throws -> ApprovalRequestWire {
+        try Fx.request(agentName: agentName, input: ["command": command],
+                       display: Fx.display(lines: Fx.plainBashLines(command), commandCount: 1),
+                       cwd: cwd, reasonText: reasonText, description: description)
+    }
+
+    func testTheModelCountsHiddenCharactersInTheHeadlineReasonDirectoryAndClaim() throws {
+        let request = try requestWithContext(agentName: "co\u{202E}dy", cwd: "/tmp/\t", reasonText: "r\u{200B}",
+                                             description: "a\u{202E}\u{202E}b")
+        let model = ApprovalDisplayModel(request: request)
+
+        XCTAssertEqual(model.contextInvisibleCount, 5, "one in the name, one in the directory, one in the reason, two in the claim")
+        XCTAssertEqual(model.invisibleCount, 5, "the total the banner and the Deny default use")
+        XCTAssertEqual(model.banner(toolKind: .bash), "This request contains 5 invisible or direction-changing characters.")
+        XCTAssertTrue(model.isVerified, "text around the input has no part in the round-trip check")
+    }
+
+    func testTheTotalAddsTheInputsOwnHiddenCharactersToTheContextOnes() throws {
+        let command = "echo \u{202E}x"
+        let model = ApprovalDisplayModel(request: try requestWithContext(command: command, reasonText: "r\u{200B}"))
+
+        XCTAssertEqual(model.contextInvisibleCount, 1)
+        XCTAssertEqual(model.invisibleCount, 2)
+        XCTAssertEqual(model.banner(toolKind: .bash), "This request contains 2 invisible or direction-changing characters.")
+    }
+
+    func testTheBannerSaysRequestInTheSingularForOneHiddenCharacterInTheContext() throws {
+        let model = ApprovalDisplayModel(request: try requestWithContext(description: "clean\u{202E}up"))
+        XCTAssertEqual(model.banner(toolKind: .bash), "This request contains 1 invisible or direction-changing character.")
+        XCTAssertEqual(model.contextInvisibleCount, 1)
+    }
+
+    func testTheBannerSaysRequestForAnyToolWhenTheContextHasAHiddenCharacter() throws {
+        let request = try Fx.request(toolKind: "mcp", toolName: "mcp__slack__send_message",
+                                     displayName: "slack - send_message (MCP)",
+                                     mcp: ["server": "slack", "tool": "send_message"],
+                                     input: ["channel": "#general", "text": "hello team"],
+                                     display: Fx.display(lines: Fx.jsonDisplayLines(Fx.mcpPretty)),
+                                     reasonText: "why\u{200B}not")
+        let model = ApprovalDisplayModel(request: request)
+        XCTAssertEqual(model.banner(toolKind: .mcp), "This request contains 1 invisible or direction-changing character.")
+    }
+
+    func testHiddenCharactersInTheInputAloneKeepTheCommandAndInputWording() throws {
+        let command = ApprovalDisplayModel(request: try requestWithContext(command: "echo \u{202E}x"))
+        XCTAssertEqual(command.contextInvisibleCount, 0)
+        XCTAssertEqual(command.invisibleCount, 1)
+        XCTAssertEqual(command.banner(toolKind: .bash), "This command contains 1 invisible or direction-changing character.")
+
+        let write = ApprovalDisplayModel(request: try Fx.writeRequest(content: "a\u{202E}b"))
+        XCTAssertEqual(write.contextInvisibleCount, 0)
+        XCTAssertEqual(write.banner(toolKind: .write), "This input contains 1 invisible or direction-changing character.")
+    }
+
+    func testPlainContextTextCountsNothingAndAddsNoBanner() throws {
+        let model = ApprovalDisplayModel(request: try requestWithContext(
+            cwd: "/tmp/caf\u{00E9}", reasonText: "your rule \u{201C}Bash(rm:*)\u{201D}", description: "first line\nsecond line \u{1F642}"))
+        XCTAssertEqual(model.contextInvisibleCount, 0, "a line feed and ordinary non-ASCII are not hidden characters")
+        XCTAssertEqual(model.invisibleCount, 0)
+        XCTAssertNil(model.banner(toolKind: .bash))
+    }
+
     // MARK: - Helpers
 
     /// A Bash request for `command` whose input also has the `extra` fields.
