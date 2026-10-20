@@ -504,6 +504,10 @@ final class ApprovalLineNumberRuler: NSRulerView {
     init() {
         super.init(scrollView: nil, orientation: .verticalRuler)
         clientView = nil
+        // Since macOS 14 a view's drawing is not clipped to its bounds by default. With the gutter
+        // unclipped, the text area to its right (the clip view reaches under the gutter, its bounds
+        // start at minus the gutter's width) rendered blank: the command text was laid out but not
+        // visible. The gutter paints only its own strip.
         clipsToBounds = true
     }
 
@@ -511,14 +515,9 @@ final class ApprovalLineNumberRuler: NSRulerView {
 
     override var isFlipped: Bool { true }
 
-    /// TEMPORARY (diagnostic): the last rect AppKit asked the gutter to draw.
-    private(set) var lastDrawRect = NSRect.zero
-
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        lastDrawRect = rect
-        // Only the gutter's own strip: `rect` can reach beyond it (over the text view's text).
         ApprovalPalette.inputBackground.setFill()
-        rect.intersection(bounds).fill()
+        rect.fill()
         guard let owner, let textView = scrollView?.documentView as? NSTextView else { return }
         let attrs: [NSAttributedString.Key: Any] = [.font: Self.font, .foregroundColor: ApprovalPalette.gutterText]
         for index in 0 ..< owner.lineCount {

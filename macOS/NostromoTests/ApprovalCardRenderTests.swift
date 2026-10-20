@@ -218,44 +218,7 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " scale=\(ink.scale) rendered=\(rendered != nil) inkTotal=\(ink.total) inkFirstLine=\(ink.firstLineBand)"
             + " areaPx=\(ink.width)x\(ink.height)"
         print(diag)
-        let full = diag + " | " + Self.layoutDump(of: view, fixture: fixture, mode: mode)
-        return Measurement(fixture: fixture, ink: ink, diag: full)
-    }
-
-    /// TEMPORARY diagnostics (content-free): the view geometry, a luma histogram of the text area and a PNG of it.
-    private static func layoutDump(of view: ApprovalInputView, fixture: RenderFixture, mode: RenderMode) -> String {
-        let tv = view.textView
-        func r(_ rect: NSRect) -> String { NSStringFromRect(rect) }
-        var out = "ATD-GEOM mode=\(mode.rawValue) fixture=\(fixture.name) view=\(r(view.frame)) bounds=\(r(view.bounds))"
-            + " clipFrame=\(r(view.contentView.frame)) clipBounds=\(r(view.contentView.bounds))"
-            + " tvFrame=\(r(tv.frame)) tvBounds=\(r(tv.bounds)) tvSuper=\(tv.superview.map { String(describing: type(of: $0)) } ?? "nil")"
-            + " tvOrigin=\(NSStringFromPoint(tv.textContainerOrigin)) tvFlipped=\(tv.isFlipped) tvHidden=\(tv.isHidden) tvAlpha=\(tv.alphaValue)"
-            + " rulerDrawRect=\(r(view.verticalRulerView.flatMap { ($0 as? ApprovalLineNumberRuler)?.lastDrawRect } ?? .zero)) tvVisible=\(r(tv.visibleRect)) docVisible=\(r(view.documentVisibleRect))"
-            + " rulersVisible=\(view.rulersVisible) ruler=\(view.verticalRulerView.map { r($0.frame) } ?? "nil")"
-            + " thickness=\(view.verticalRulerView?.ruleThickness ?? -1) required=\(view.verticalRulerView?.requiredThickness ?? -1)"
-            + " subviews=" + view.subviews.map { "\(type(of: $0))\(r($0.frame))" }.joined(separator: ",")
-            + " drawsBg=\(tv.drawsBackground) fgAttr=\(String(describing: tv.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil)))"
-        if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-            view.cacheDisplay(in: view.bounds, to: rep)
-            var hist = [Int](repeating: 0, count: 9)   // luma / 32
-            var maxLuma = 0.0
-            var cells: [String: Int] = [:]
-            for y in 0 ..< rep.pixelsHigh {
-                for x in 0 ..< rep.pixelsWide {
-                    guard let c = rep.colorAt(x: x, y: y) else { continue }
-                    let l = InkCounter.luma(c)
-                    hist[min(8, Int(l / 32))] += 1
-                    maxLuma = max(maxLuma, l)
-                    if l > 60 { cells["\(x / 100)"] = (cells["\(x / 100)"] ?? 0) + 1 }
-                }
-            }
-            out += " | ATD-HIST mode=\(mode.rawValue) fixture=\(fixture.name) px=\(rep.pixelsWide)x\(rep.pixelsHigh) maxLuma=\(maxLuma) hist=\(hist)"
-                + " brightByX100=\(cells.sorted { Int($0.key)! < Int($1.key)! }.map { "\($0.key):\($0.value)" }.joined(separator: ","))"
-            if fixture == .singleLine || fixture == .twelveLines, let png = rep.representation(using: .png, properties: [:]) {
-                out += " | ATD-PNG mode=\(mode.rawValue) fixture=\(fixture.name) \(png.base64EncodedString())"
-            }
-        }
-        return out
+        return Measurement(fixture: fixture, ink: ink, diag: diag)
     }
 
     private func assertDrawn(in mode: RenderMode, file: StaticString = #filePath, line: UInt = #line) throws {
@@ -287,16 +250,6 @@ final class ApprovalCardRenderTests: XCTestCase {
 
     func testTheCommandTextIsDrawnInABareInputViewThatCountsItselfOnScreen() throws {
         try assertDrawn(in: .bareOnScreen)
-    }
-
-    func testTmpRulerRect() throws {
-        var msgs: [String] = []
-        for f in RenderFixture.allCases {
-            let m = try measure(f, in: .bareOnScreen)
-            let marker = m.diag.components(separatedBy: " | ").first { $0.hasPrefix("ATD-GEOM") } ?? ""
-            msgs.append(marker.replacingOccurrences(of: "ATD-GEOM", with: "RECT"))
-        }
-        XCTFail("ATD-RECT " + msgs.joined(separator: " ## "))
     }
 
     /// The ink counter's premise: a here-doc's fill (and the other token fills) alone is not ink.
