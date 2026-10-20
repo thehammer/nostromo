@@ -58,8 +58,9 @@ final class ApprovalTextView: NSTextView {
 
     weak var gutterOwner: ApprovalInputView?
 
-    /// The numbers go on the background pass, before the text: drawing after `super.draw` painted
-    /// nothing (the context is left clipped to the text area; found on CI, not documented).
+    /// The numbers go on the background pass, before the text: on CI, anything drawn in the inset after
+    /// `super.draw` (clipped or not, any colour or font) never reached the bitmap; on the background pass
+    /// it does. The cause was not identified.
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         gutterOwner?.drawGutter(in: rect)
