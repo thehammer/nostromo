@@ -38,6 +38,16 @@ does an appended line that mentions the QA root path, `FIXTURE:` or the bundle i
 The snapshot keeps only each file's length and a SHA-256 of its bytes, never its content, and a failure names the
 file and the kind of marker, never the line.
 
+**The app's home.** The clone resolves `~/.nostromo` through `NostromoHome` (`macOS/Nostromo/Data/NostromoHome.swift`),
+not `FileManager.homeDirectoryForCurrentUser`, which ignores `HOME` (the system user database decides) and once let
+the clone write its focus and placement log into the user's real `~/.nostromo`. The script sets
+`NOSTROMO_QA_HOME=<qa_root>/home`; the helper honours it only for the bundle id `com.hammer.nostromo.qa` and only for
+an existing absolute directory, so the real app can never be redirected by its environment.
+The guard also scans the other top-level `~/.nostromo/*.json` and `~/.nostromo/logs/*.log` files that changed during
+the run: a change fails only if the new bytes mention the QA root path, `FIXTURE:`, the QA bundle id, `cody-qa-` or
+`qa-approvals` (the real app legitimately writes those files); `focuses.json` fails on any change.
+`approvals-card.sh` refuses to start (exit 2) when the real `~/.nostromo/focuses.json` already carries such a marker.
+
 ## Running them
 
 The socket is **opt-in** and the scripts never enable it. If it is off they print how to turn it on

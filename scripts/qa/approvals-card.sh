@@ -35,6 +35,16 @@ done
 start_args=()
 [ "$synthetic" = 1 ] || start_args+=(--no-synthetic)
 
+# A real focuses.json that already carries a QA marker is the leftover of an earlier breach (the QA app
+# once wrote into the user's own ~/.nostromo). Starting on top of it would compound it: refuse, by file
+# name only (never the content).
+real_focuses="$HOME/.nostromo/focuses.json"
+if [ -f "$real_focuses" ] && grep -qE 'FIXTURE:|com\.hammer\.nostromo\.qa|nostromo-qa-|cody-qa-|qa-approvals' "$real_focuses"; then
+  echo "REFUSING TO RUN: $real_focuses already carries a QA marker (FIXTURE:, the QA bundle id, a QA root path, cody-qa-, qa-approvals)." >&2
+  echo "A QA run once wrote into your real ~/.nostromo. Remove the QA entries from that file, then run again." >&2
+  exit 2
+fi
+
 out="$("$instance" start "${start_args[@]+"${start_args[@]}"}")"
 echo "$out"
 root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"

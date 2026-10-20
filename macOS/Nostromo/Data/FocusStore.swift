@@ -17,7 +17,7 @@ final class FocusStore {
     private let storageURL: URL
 
     private convenience init() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
+        let dir = NostromoHome.current
             .appendingPathComponent(".nostromo")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.init(storageURL: dir.appendingPathComponent("focuses.json"))

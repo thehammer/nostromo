@@ -24,7 +24,7 @@ enum DaemonDiagnostics {
     /// socket (`~/.nostromo/mcp.sock`).
     static func mcpSocketPath() -> String {
         if let v = ProcessInfo.processInfo.environment["NOSTROMO_MCP_SOCKET"] { return v }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let home = NostromoHome.current.path
         let daemonSocket = "\(home)/.nostromo/mcp-daemon.sock"
         if FileManager.default.fileExists(atPath: daemonSocket) { return daemonSocket }
         return "\(home)/.nostromo/mcp.sock"

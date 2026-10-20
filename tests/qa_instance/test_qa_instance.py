@@ -3,7 +3,7 @@
 Run with:  python3 -m unittest discover -s tests/qa_instance -v
 Never starts an app, a daemon or any real instance.
 """
-import ast, importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile, unittest
+import ast, hashlib, importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile, unittest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts", "qa", "lib"))
@@ -607,6 +607,259 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
         readme = read("scripts", "qa", "README.md")
         self.assertIn("KEEP=1", readme)
         self.assertIn("session", readme.lower())
+
+
+# ---- QHI: the QA app must never write into the user's real ~/.nostromo ----
+
+MARKER_KINDS = {
+    "fixture": "FIXTURE:simple_rm",
+    "bundle": "com.hammer.nostromo.qa",
+    "qa_root": "/tmp/nostromo-qa-abc123/home",
+    "cody_tag": "cody-qa-xyz",
+    "title": "qa-approvals",
+}
+
+
+class AppEnvQAHomeTests(unittest.TestCase):
+    ROOT_DIR = "/tmp/nostromo-qa-xyz"
+    BASE = {"HOME": "/Users/real", "PATH": "/usr/bin"}
+
+    def test_app_env_points_the_app_at_a_home_inside_the_qa_root(self):
+        for synthetic in (True, False):
+            with self.subTest(synthetic=synthetic):
+                env = qa.app_env(self.ROOT_DIR, self.BASE, synthetic=synthetic)
+                self.assertEqual(env["NOSTROMO_QA_HOME"], self.ROOT_DIR + "/home")
+                self.assertEqual(os.path.commonpath([env["NOSTROMO_QA_HOME"], self.ROOT_DIR]), self.ROOT_DIR)
+
+
+class StateFileGuardTests(unittest.TestCase):
+    SECRET = "SECRET-PAYLOAD-xyzzy-4412"
+    QA_ROOT = "/tmp/nostromo-qa-abc123"
+    LOG = "logs/window-placement.log"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = self.tmp.name
+        self.ns = os.path.join(self.home, ".nostromo")
+        os.makedirs(os.path.join(self.ns, "approvals"))
+        os.makedirs(os.path.join(self.ns, "logs"))
+        for n in qa.WATCHED_FILES:
+            self.write(n, "original " + n)
+        self.write("daemon-sessions-extra.json", '{"a":1}\n')
+        self.write(self.LOG, "line one\nline two\n")
+        self.ps = "  1 /bin/nostromd\n"
+        self.before = self.snap()
+
+    def write(self, rel, text, mode="w"):
+        with open(os.path.join(self.ns, rel), mode) as f:
+            f.write(text)
+
+    def snap(self):
+        return qa.take_snapshot(self.home, self.ps, "", self.QA_ROOT)
+
+    def problems(self, nostromo_dir=True):
+        return qa.compare_snapshots(self.before, self.snap(), os.path.join(self.ns, "approvals"), self.QA_ROOT,
+                                    self.ns if nostromo_dir else None)
+
+    def marker(self, kind):
+        m = MARKER_KINDS[kind]
+        return self.QA_ROOT + "/home" if kind == "qa_root" else m
+
+    def assertClean(self, problems=None):
+        self.assertEqual(self.problems() if problems is None else problems, [])
+
+    def assertNoLeak(self, problems):
+        joined = "\n".join(problems)
+        self.assertNotIn(self.SECRET, joined)
+
+    def test_snapshot_holds_only_length_and_hash_of_state_files(self):
+        self.write("daemon-sessions-extra.json", '{"k":"%s"}' % self.SECRET)
+        snap = self.snap()
+        entry = snap["state_files"]["daemon-sessions-extra.json"]
+        self.assertEqual(set(entry), {"len", "sha256"})
+        self.assertNotIn(self.SECRET, json.dumps(snap))
+        self.assertIn(self.LOG, snap["state_files"])
+        for n in qa.WATCHED_FILES:
+            self.assertNotIn(n, snap["state_files"])
+
+    def test_unchanged_state_is_clean(self):
+        self.assertClean()
+
+    def test_a_top_level_json_rewritten_without_a_marker_is_fine(self):
+        self.write("daemon-sessions-extra.json", '{"a":2,"note":"%s"}' % self.SECRET)
+        self.assertClean()
+
+    def test_a_top_level_json_rewritten_with_each_marker_kind_is_a_problem(self):
+        for kind in MARKER_KINDS:
+            with self.subTest(kind=kind):
+                self.write("daemon-sessions-extra.json", '{"x":"%s %s"}' % (self.SECRET, self.marker(kind)))
+                probs = self.problems()
+                self.assertTrue(any("daemon-sessions-extra.json" in p for p in probs), probs)
+                self.assertNoLeak(probs)
+
+    def test_a_log_appended_without_a_marker_is_fine(self):
+        self.write(self.LOG, "ordinary %s\n" % self.SECRET, "a")
+        self.assertClean()
+
+    def test_a_log_appended_with_each_marker_kind_is_a_problem(self):
+        with open(os.path.join(self.ns, self.LOG)) as f:
+            original = f.read()
+        for kind in MARKER_KINDS:
+            with self.subTest(kind=kind):
+                self.write(self.LOG, original + "%s %s\n" % (self.SECRET, self.marker(kind)))
+                probs = self.problems()
+                self.assertTrue(any(self.LOG in p for p in probs), probs)
+                self.assertNoLeak(probs)
+
+    def test_a_marker_already_in_the_old_bytes_is_not_blamed_on_the_run(self):
+        self.write(self.LOG, "old com.hammer.nostromo.qa line\n")
+        self.before = self.snap()
+        self.write(self.LOG, "clean new line\n", "a")
+        self.assertClean()
+
+    def test_a_marker_split_across_the_snapshot_boundary_is_found(self):
+        self.write(self.LOG, "first\npartial line FIXT")
+        self.before = self.snap()
+        self.write(self.LOG, "URE:simple_rm %s\n" % self.SECRET, "a")
+        probs = self.problems()
+        self.assertTrue(any(self.LOG in p for p in probs), probs)
+        self.assertNoLeak(probs)
+
+    def test_a_new_file_with_a_marker_is_a_problem_and_without_is_fine(self):
+        self.write("brand-new.json", '{"v":"%s"}' % self.SECRET)
+        self.assertClean()
+        self.write("logs/new.log", "%s cody-qa-1\n" % self.SECRET)
+        probs = self.problems()
+        self.assertTrue(any("logs/new.log" in p for p in probs), probs)
+        self.assertFalse(any("brand-new.json" in p for p in probs), probs)
+        self.assertNoLeak(probs)
+
+    def test_focuses_json_changing_at_all_is_a_problem(self):
+        self.write("focuses.json", "changed %s" % self.SECRET)
+        probs = self.problems()
+        self.assertTrue(any("focuses.json" in p for p in probs), probs)
+        self.assertNoLeak(probs)
+
+    def test_a_changed_state_file_is_reported_as_not_inspected_without_a_nostromo_dir(self):
+        self.write("daemon-sessions-extra.json", '{"a":3}')
+        probs = self.problems(nostromo_dir=False)
+        self.assertTrue(any("daemon-sessions-extra.json" in p and "not inspected" in p for p in probs), probs)
+
+    def test_other_file_types_are_ignored(self):
+        self.write("foo.txt", "x")
+        self.write("logs/x.txt", "x")
+        self.before = self.snap()
+        self.write("foo.txt", "com.hammer.nostromo.qa " + self.SECRET)
+        self.write("logs/x.txt", "FIXTURE: " + self.SECRET)
+        self.assertNotIn("foo.txt", self.before["state_files"])
+        self.assertNotIn("logs/x.txt", self.before["state_files"])
+        self.assertClean()
+
+
+class RealFocusesRefusalTests(unittest.TestCase):
+    SCRIPT = os.path.join(ROOT, "scripts", "qa", "approvals-card.sh")
+    SECRET = "SECRET-PAYLOAD-xyzzy-9090"
+
+    def run_with_focuses(self, content):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".nostromo"))
+            path = os.path.join(home, ".nostromo", "focuses.json")
+            with open(path, "w") as f:
+                f.write(content)
+            env = {"HOME": home, "PATH": os.environ.get("PATH", "")}
+            r = subprocess.run(["bash", self.SCRIPT], env=env, capture_output=True, text=True, timeout=60)
+            return r, path
+
+    def test_a_real_focuses_json_carrying_any_qa_marker_is_refused_before_anything_starts(self):
+        for marker in ("FIXTURE:", "com.hammer.nostromo.qa", "nostromo-qa-", "cody-qa-", "qa-approvals"):
+            with self.subTest(marker=marker):
+                r, path = self.run_with_focuses('{"title":"%s %s"}' % (self.SECRET, marker))
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn(path, r.stderr)
+                out = r.stdout + r.stderr
+                self.assertNotIn(self.SECRET, out)
+                self.assertNotIn("QA_ROOT=", r.stdout)
+
+    def test_the_refusal_comes_before_the_instance_is_started(self):
+        sh = read("scripts", "qa", "approvals-card.sh")
+        self.assertIn("exit 2", sh)
+        self.assertIn(".nostromo/focuses.json", sh)
+        self.assertLess(sh.index(".nostromo/focuses.json"), sh.index('"$instance" start'))
+        self.assertLess(sh.index("exit 2"), sh.index('"$instance" start'))
+
+
+def read_abs(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+class NoDirectHomeNostromoPathsTests(unittest.TestCase):
+    """Every path under ~/.nostromo in the Swift sources must come from NostromoHome.current."""
+    SOURCES = [("macOS", "Nostromo"), ("Shared", "NostromoKit", "Sources")]
+    TOKENS = ("homeDirectoryForCurrentUser", "NSHomeDirectory()")
+    # NostromoHome.swift is the one place allowed to read the system home.
+    ALLOWED = {"NostromoHome.swift"}
+
+    @classmethod
+    def code_lines(cls, text):
+        return [("" if l.lstrip().startswith("//") else l) for l in text.splitlines()]
+
+    @classmethod
+    def violations(cls, text):
+        """Line numbers (1-based) where the system home feeds a `.nostromo` path."""
+        lines = cls.code_lines(text)
+        bad = set()
+        for i, l in enumerate(lines):
+            if not any(t in l for t in cls.TOKENS):
+                continue
+            if any(".nostromo" in w for w in lines[i:i + 5]):
+                bad.add(i + 1)
+            m = re.match(r"\s*(?:let|var)\s+(\w+)\b", l)
+            if m:
+                name = m.group(1)
+                for w in lines[i + 1:i + 7]:
+                    if ".nostromo" in w and re.search(r"\b%s\b" % re.escape(name), w):
+                        bad.add(i + 1)
+        return sorted(bad)
+
+    def swift_files(self):
+        for parts in self.SOURCES:
+            for d, _, names in os.walk(os.path.join(ROOT, *parts)):
+                for n in names:
+                    if n.endswith(".swift"):
+                        yield os.path.join(d, n)
+
+    def test_no_swift_source_builds_a_nostromo_path_from_the_system_home(self):
+        offenders = []
+        for path in self.swift_files():
+            if os.path.basename(path) in self.ALLOWED:
+                continue
+            with open(path, encoding="utf-8") as f:
+                hits = self.violations(f.read())
+            offenders += ["%s:%d" % (os.path.relpath(path, ROOT), n) for n in hits]
+        self.assertEqual(offenders, [], "use NostromoHome.current instead of the system home")
+
+    def test_the_scan_is_not_vacuous(self):
+        seen = {os.path.basename(p) for p in self.swift_files() if any(t in read_abs(p) for t in self.TOKENS)}
+        self.assertIn("NostromoHome.swift", seen)
+
+    def test_the_detector_flags_a_direct_home_nostromo_path(self):
+        snippet = 'let u = FileManager.default.homeDirectoryForCurrentUser\n    .appendingPathComponent(".nostromo/x")\n'
+        self.assertTrue(self.violations(snippet))
+        indirect = 'let home = NSHomeDirectory()\nlet p = "\\(home)/.nostromo/x"\n'
+        self.assertTrue(self.violations(indirect))
+
+    def test_the_detector_ignores_comments_and_unrelated_paths(self):
+        self.assertFalse(self.violations('// homeDirectoryForCurrentUser .nostromo\n'))
+        self.assertFalse(self.violations('let h = NSHomeDirectory()\nlet p = h + "/.claude/agents"\n'))
+
+    def test_the_state_stores_use_nostromo_home(self):
+        for rel in ("Data/FocusStore.swift", "Data/WindowPlacementLog.swift", "Data/TranscriptFoldStore.swift",
+                    "Data/ImagePasteboard.swift", "Data/NostromodClient.swift", "Data/DaemonDiagnostics.swift",
+                    "AppControl/AppControlServer.swift"):
+            with self.subTest(file=rel):
+                self.assertIn("NostromoHome.current", read("macOS", "Nostromo", *rel.split("/")))
 
 
 if __name__ == "__main__":

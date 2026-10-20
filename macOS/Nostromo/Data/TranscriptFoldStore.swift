@@ -44,7 +44,7 @@ enum FoldStoreChange: Equatable {
 final class TranscriptFoldStore {
 
     static let shared = TranscriptFoldStore(
-        fileURL: FileManager.default.homeDirectoryForCurrentUser
+        fileURL: NostromoHome.current
             .appendingPathComponent(".nostromo/transcript-folds.v1.json"),
         defaults: .standard,
         scheduler: .main)
