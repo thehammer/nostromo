@@ -60,6 +60,7 @@ final class ApprovalTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        print("ATD-GUTTER draw dirty=\(dirtyRect) owner=\(gutterOwner != nil) frame=\(frame)")  // TMP
         gutterOwner?.drawGutter(in: dirtyRect)
     }
 }
@@ -470,6 +471,7 @@ final class ApprovalInputView: NSScrollView {
     /// coordinates). Only the strip is touched: the fill and the digits are clipped to it.
     fileprivate func drawGutter(in dirty: NSRect) {
         let strip = NSRect(x: 0, y: dirty.minY, width: gutterWidth, height: dirty.height)
+        print("ATD-GUTTER drawGutter lines=\(lineNumbers.count) top0=\(String(describing: lineTop(at: 0))) gutter=\(gutterWidth)")  // TMP
         guard dirty.minX < gutterWidth, strip.height > 0 else { return }
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
