@@ -27,7 +27,7 @@ final class AppControlServer {
         if let override = ProcessInfo.processInfo.environment["NOSTROMO_APP_CONTROL_SOCKET"], !override.isEmpty {
             return override
         }
-        return FileManager.default.homeDirectoryForCurrentUser
+        return NostromoHome.current
             .appendingPathComponent(".nostromo/app-control.sock").path
     }
 

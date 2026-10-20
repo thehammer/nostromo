@@ -23,7 +23,7 @@ enum ImagePasteboard {
     /// Downloads — a screenshot dropped from there would silently never arrive.
     /// The app can read the dropped file, so it copies it somewhere both can.
     static var stagingDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        NostromoHome.current
             .appendingPathComponent(".nostromo/attachments", isDirectory: true)
     }
 

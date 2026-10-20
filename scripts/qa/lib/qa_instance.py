@@ -35,6 +35,11 @@ CONTROL_SOCKET = "app-control.sock"
 # an approval. That is not the QA run's doing: append-only growth is allowed (see `audit_problems`).
 AUDIT_FILE = re.compile(r"^audit-\d{4}-\d{2}-\d{2}\.jsonl$")
 MCP_SOCKET = "mcp.sock"
+# The app reads NOSTROMO_QA_HOME (only under the QA bundle id) to find the directory that holds its
+# `.nostromo`; without it the app uses the system user database's home and writes into the user's own.
+QA_HOME_ENV = "NOSTROMO_QA_HOME"
+# What a QA run leaves in a file it should never have touched (besides `qa_markers`): the focus it makes.
+QA_NAME_MARKERS = {"a QA focus tag (`cody-qa-`)": b"cody-qa-", "the QA session title (`qa-approvals`)": b"qa-approvals"}
 # The session the harness drives: a daemon-created focus running the fake CLI, shown in the sidebar by its label.
 QA_FOCUS_LABEL = "QA approvals"
 QA_FOCUS_TITLE = "qa-approvals"
@@ -166,14 +171,60 @@ def audit_problems(name, old, approvals_dir, qa_root=None):
             for kind, marker in qa_markers(qa_root).items() if marker in appended]
 
 
-def compare_snapshots(before, after, approvals_dir=None, qa_root=None):
+def state_files(nostromo_path):
+    """{relative name: {"len", "sha256"}} for the top-level `*.json` files and `logs/*.log` of the user's
+    ~/.nostromo, except the strictly watched ones (those are compared by hash). Lengths and hashes only."""
+    out = {}
+    for sub_dir, suffix in (("", ".json"), ("logs", ".log")):
+        d = os.path.join(nostromo_path, sub_dir)
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            rel = os.path.join(sub_dir, name) if sub_dir else name
+            full = os.path.join(d, name)
+            if not name.endswith(suffix) or rel in WATCHED_FILES or not os.path.isfile(full):
+                continue
+            try:
+                with open(full, "rb") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            out[rel] = {"len": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    return out
+
+
+def state_file_problems(rel, old, nostromo_dir, qa_root=None):
+    """Problems with one `state_files` entry that changed between its snapshot (`old` is None for a new
+    file) and now. A change is only a problem when the new bytes carry a QA marker: the user's real app
+    legitimately writes these files. New bytes are the appended tail when the snapshot's bytes are an
+    unchanged prefix (a log), else the whole file (a rewritten JSON). Names and marker kinds only, never content."""
+    label = f"~/.nostromo/{rel}"
+    try:
+        with open(os.path.join(nostromo_dir, rel), "rb") as f:
+            data = f.read()
+    except OSError:
+        return []  # gone or unreadable: nothing of the QA run's can be in it
+    start = 0
+    if old is not None and len(data) >= old["len"] and hashlib.sha256(data[:old["len"]]).hexdigest() == old["sha256"]:
+        start = old["len"]
+        if start and data[start - 1:start] != b"\n":  # the snapshot cut a line in half: scan that line whole
+            start = data.rfind(b"\n", 0, start) + 1
+    new_bytes = data[start:]
+    markers = dict(qa_markers(qa_root), **QA_NAME_MARKERS)
+    return [f"{label} changed and mentions {kind} (the QA run wrote into the user's real ~/.nostromo)"
+            for kind, marker in markers.items() if marker in new_bytes]
+
+
+def compare_snapshots(before, after, approvals_dir=None, qa_root=None, nostromo_dir=None):
     """Problems between two guard snapshots (see `take_snapshot`); empty means isolated.
 
     Files, the control-socket inode and `defaults` must be identical, and so must the approvals
     listing apart from the daemon's audit logs: the user's real daemon appends to its dated
     `audit-*.jsonl` during a run, which is allowed when it is append-only and carries no QA marker
     (needs `approvals_dir`, the user's real approvals directory, to inspect; without it any audit
-    growth is reported). The user's own nostromd/Nostromo pids must survive; no new `claude` (or
+    growth is reported). Other top-level `*.json` files and `logs/*.log` of the user's `~/.nostromo` may change
+    (their real app writes them) unless the new bytes carry a QA marker; that needs `nostromo_dir`, the user's
+    real ~/.nostromo (without it any change is reported). `focuses.json` stays strict. The user's own nostromd/Nostromo pids must survive; no new `claude` (or
     other monitored) process may appear."""
     problems = []
     for name, b in before["files"].items():
@@ -191,6 +242,14 @@ def compare_snapshots(before, after, approvals_dir=None, qa_root=None):
             problems.append(f"~/.nostromo/approvals/{name} changed (not inspected: no approvals dir given)")
         else:
             problems.extend(audit_problems(name, b_audit.get(name), approvals_dir, qa_root))
+    b_state, a_state = before.get("state_files", {}), after.get("state_files", {})
+    for name in sorted(a_state):
+        if b_state.get(name) == a_state[name]:
+            continue
+        if nostromo_dir is None:
+            problems.append(f"~/.nostromo/{name} changed (not inspected: no ~/.nostromo dir given)")
+        else:
+            problems.extend(state_file_problems(name, b_state.get(name), nostromo_dir, qa_root))
     if before["control_socket_inode"] != after["control_socket_inode"]:
         problems.append("~/.nostromo/app-control.sock inode changed (the user's socket was replaced)")
     if before["defaults"] != after["defaults"]:
@@ -217,6 +276,7 @@ def take_snapshot(user_home, ps_text, defaults_text, qa_root=None):
         "files": {n: file_sha256(os.path.join(nostromo, n)) for n in WATCHED_FILES},
         "approvals": listing,
         "approvals_audit": audit_files(approvals),
+        "state_files": state_files(nostromo),
         "control_socket_inode": socket_inode(os.path.join(nostromo, CONTROL_SOCKET)),
         "defaults": hashlib.sha256(defaults_text.encode()).hexdigest() if defaults_text else None,
         "processes": process_view(parse_processes(ps_text, qa_root)),
@@ -249,6 +309,7 @@ def app_env(qa_root, base_env, synthetic=True):
     env = {k: v for k, v in base_env.items() if k in ("PATH", "TMPDIR", "LANG")}
     env.update({
         "HOME": home,
+        QA_HOME_ENV: home,
         "NOSTROMOD_SOCKET": os.path.join(qa_root, "nostromd.sock"),
         "NOSTROMD_SOCKET": os.path.join(qa_root, "nostromd.sock"),
         "MOTHER_BROKER_SOCK": os.path.join(qa_root, "no-broker.sock"),
@@ -336,8 +397,12 @@ def user_snapshot(qa_root=None):
     return take_snapshot(os.path.expanduser("~"), ps, d.stdout if d.returncode == 0 else "", qa_root)
 
 
+def user_nostromo_dir():
+    return os.path.join(os.path.expanduser("~"), ".nostromo")
+
+
 def user_approvals_dir():
-    return os.path.join(os.path.expanduser("~"), ".nostromo", APPROVALS_DIR)
+    return os.path.join(user_nostromo_dir(), APPROVALS_DIR)
 
 
 def state_path(qa_root):
@@ -485,7 +550,7 @@ def cmd_start(args):
                  60, "the QA app's control socket")
     except BaseException as e:
         teardown(qa_root, state)
-        problems = compare_snapshots(before, user_snapshot(qa_root), user_approvals_dir(), qa_root)
+        problems = compare_snapshots(before, user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir())
         print(f"start failed: {e}", file=sys.stderr)
         for p in problems:
             print(f"ISOLATION FAILURE: {p}", file=sys.stderr)
@@ -534,7 +599,7 @@ def cmd_stop(args):
     qa_root = resolve_root(args[0] if args else None)
     state = load_state(qa_root)
     teardown(qa_root, state)
-    problems = compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root)
+    problems = compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir())
     # An isolation failure keeps the root: its logs are the evidence (the caller prints them).
     keep = os.environ.get("KEEP") == "1" or bool(problems)
     if not keep:

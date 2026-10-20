@@ -617,7 +617,7 @@ class NostromodClient {
     // Socket path honours NOSTROMD_SOCKET env var, matching the Rust daemon.
     static let defaultSocketPath: String = {
         if let v = ProcessInfo.processInfo.environment["NOSTROMD_SOCKET"] { return v }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let home = NostromoHome.current.path
         return "\(home)/.nostromo/nostromd.sock"
     }()
 

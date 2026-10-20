@@ -19,7 +19,7 @@ final class WindowPlacementLog {
     static let defaultMaxBytes = 256 * 1024
 
     static var defaultFileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        NostromoHome.current
             .appendingPathComponent(".nostromo/logs/window-placement.log")
     }
 
