@@ -222,7 +222,7 @@ enum Theme {
     /// Height of an org-section header row (e.g. "CAREFEED").
     static let navOrgHeaderHeight:  CGFloat = 28
     /// Height of a repo-group header row (non-clickable; sits above indented agent rows).
-    static let navRepoHeaderHeight: CGFloat = 28
+    static let navRepoHeaderHeight: CGFloat = 32
     /// Height of a clickable focus item row.
     static let navItemHeight:       CGFloat = 40
     /// Height of a clickable focus item row that carries a secondary subtitle label.
@@ -231,8 +231,12 @@ enum Theme {
     static let navChildIndent:      CGFloat = 12
     /// Font for org section labels (uppercase, small, muted).
     static let navOrgFont  = NSFont.systemFont(ofSize: 10, weight: .semibold)
-    /// Font for repo-group header labels.
-    static let navRepoFont = NSFont.systemFont(ofSize: 11, weight: .regular)
+    /// Font for repo-group header labels and for the top-level (non-indented) focus rows.
+    static let navRepoFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    /// Colour for repo-group header labels and inactive top-level focus rows (a step brighter than `fgMuted`).
+    static let navRepoColor = NSColor(white: 175/255, alpha: 1)
+    /// Leading inset of a repo-group header label (agent rows nested under it sit at `6 + navChildIndent`).
+    static let navRepoHeaderLeading: CGFloat = 6
     /// Font for optional secondary disambiguation line on agent rows.
     static let navSubFont  = NSFont.systemFont(ofSize: 10, weight: .regular)
 
