@@ -7,6 +7,10 @@ Standard library only. CLI (used by the script):
   card_checks.py drawn REQUEST_ID                 < {"approvals":..., "find":[...]}  -> exit 0 drawn, 1 not
 Text-drawn probe: `find` (views whose text contains the first 12 chars of the card's first line). `find` omits
 hidden views and does not report alpha; if a hit does carry `hidden`/`alpha` they are enforced.
+LIMITATION: `approvals list` carries no card frame, so a hit cannot be scoped to the card's view. If another view
+(e.g. a rendered tool-use row in the transcript) shows the same first 12 chars, a blank card still reports
+"drawn". The per-card screenshot (/tmp/qa-card-<fixture>.png) is the visual cross-check. When a card dict has a
+"frame" key, hits are required to lie inside it.
 """
 import json
 import sys
@@ -75,10 +79,19 @@ def _visible(hit):
     return hit.get("alpha", 1) > 0
 
 
+def _inside(outer, hit, slop=1.0):
+    a, b = outer, hit.get("frame") or {}
+    return (b.get("x", 0) >= a["x"] - slop and b.get("y", 0) >= a["y"] - slop
+            and b.get("x", 0) + b.get("w", 0) <= a["x"] + a["w"] + slop
+            and b.get("y", 0) + b.get("h", 0) <= a["y"] + a["h"] + slop)
+
+
 def text_drawn(card, hits):
-    """(drawn, message). A hit must have a non-empty frame, not hidden, alpha > 0."""
+    """(drawn, message). A hit must have a non-empty frame, not hidden, alpha > 0 (and inside card["frame"] if known)."""
     n = len(card.get("lines") or [])
     good = [h for h in hits or [] if _visible(h)]
+    if card.get("frame"):
+        good = [h for h in good if _inside(card["frame"], h)]
     if good:
         return True, f"text drawn ({len(good)} view(s) match {probe_text(card)!r})"
     return False, f"text not drawn (model has {n} lines)"

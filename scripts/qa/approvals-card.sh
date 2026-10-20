@@ -168,7 +168,12 @@ clear_cards() {
   ids="$(listing_json | python3 "$checks" stale)"
   [ -n "$ids" ] || return 0
   echo "(clearing stale card(s): $(tr '\n' ' ' <<<"$ids"))"
-  ctl click --text "Deny" >/dev/null 2>&1 || true
+  # One Deny click per stale card (each answered card makes the next one the visible one).
+  local _n
+  for _n in $ids; do
+    ctl click --text "Deny" >/dev/null 2>&1 || true
+    sleep 0.5
+  done
   wait_cards gone 10 && return 0
   echo "note: stale card(s) still showing after Deny"; return 1
 }
@@ -210,7 +215,12 @@ prove_drawn() {
 for fixture in "${fixtures[@]}"; do
   echo
   echo "=== FIXTURE:$fixture (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF)) ==="
-  clear_cards || fail "$fixture: could not clear stale card(s) before the cue"
+  if [ "$synthetic" = 1 ]; then
+    clear_cards || fail "$fixture: could not clear stale card(s) before the cue"
+  else
+    # Deny clicks are refused with synthetic input off; the request_id/input match ignores a leftover card.
+    clear_cards >/dev/null || echo "note: a card from an earlier fixture remains (expected with --no-synthetic); matching by input"
+  fi
   expected="$(expected_first_line "$fixture")"
   echo "--- transcript-anchor before"
   before="$(ctl transcript-anchor)"; echo "$before"

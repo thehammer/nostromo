@@ -18,6 +18,7 @@ Robustness (QSR): pending cards are denied before each fixture and at the end; e
 `input` starts with its expected first line (from `tests/fixtures/approvals/<name>.json`) and uses that request_id
 throughout; "Allow once" is clicked only once `enabled:true` (up to 20 s; a timeout FAILs naming the label seen);
 `heredoc_300` must stay gated ("Scroll to the end to allow") after a synthetic End key. Text-drawn probe: `ctl find`
+Known limit: `approvals list` has no card frame, so a `find` hit is not scoped to the card; another view showing the same first 12 characters (a transcript row) can mask a blank card. Check the printed `/tmp/qa-card-<fixture>.png`. With `--no-synthetic` a stale card cannot be Denied, so it is noted (not a FAIL) and ignored by input matching.
 for the first 12 characters of the card's first line must return a view with a non-empty frame (`find` already omits
 hidden views and reports no alpha; `hidden`/`alpha` are enforced when present), else FAIL "text not drawn (model has N
 lines)". Every card is screenshotted to `/tmp/qa-card-<fixture>.png` (QA content only). One `SUMMARY` line per fixture.

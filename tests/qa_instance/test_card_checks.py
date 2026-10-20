@@ -62,6 +62,15 @@ class DrawnTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertFalse(cc.text_drawn(OLD, [bad])[0])
 
+    def test_hit_outside_known_card_frame_is_not_drawn(self):
+        framed = dict(OLD, frame={"x": 0, "y": 100, "w": 200, "h": 50})
+        self.assertFalse(cc.text_drawn(framed, [HIT])[0])  # e.g. the transcript row showing the same text
+        self.assertTrue(cc.text_drawn(framed, [dict(HIT, frame={"x": 5, "y": 110, "w": 50, "h": 10})])[0])
+
+    def test_documented_limit_unscoped_hit_passes_without_card_frame(self):
+        # Without a card frame (approvals list has none) any visible hit counts; the screenshot is the cross-check.
+        self.assertTrue(cc.text_drawn(OLD, [dict(HIT, frame={"x": 900, "y": 900, "w": 5, "h": 5})])[0])
+
     def test_probe_is_first_12_chars_of_first_line(self):
         self.assertEqual(cc.probe_text(NEW), "cat > /tmp/n")
 
