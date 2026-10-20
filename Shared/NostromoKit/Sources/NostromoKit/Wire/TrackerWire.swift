@@ -17,7 +17,7 @@ import Foundation
 // MARK: - Enums
 
 /// An item's status (`Status`, kebab-case on the wire).
-public enum TrackerStatusWire: Equatable {
+public enum TrackerStatusWire: Hashable {
     case todo
     case inProgress
     case blocked
