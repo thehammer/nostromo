@@ -1,5 +1,5 @@
 //! Repo docs work source: every open bug, feature, idea, todo and wip folder
-//! filed with `doc-mgr` under `~/Code/<repo>/.claude/`.
+//! filed with `doc-mgr` under `<code root>/<repo>/.claude/` (code root defaults to `~/Code`).
 //!
 //! Layout read (the doc-mgr layout; legacy `bug-reports/`, `feature-requests/`
 //! and `TODO.md` are out of scope):
@@ -92,12 +92,10 @@ const WIP_DIR: &str = "wip";
 /// First path component (under `.claude`) of everything that can change an item.
 const WATCHED_TOPS: [&str; 5] = ["bugs", "features", "ideas", "todos", "wip"];
 
-/// The directory whose children are the repos: `$NOSTROMO_CODE_ROOT`, else `~/Code`.
+/// The directory whose children are the repos: `$NOSTROMO_CODE_ROOT`, else
+/// `code_root` from `config.toml`, else `~/Code`.
 pub fn code_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("NOSTROMO_CODE_ROOT").filter(|v| !v.is_empty()) {
-        return PathBuf::from(root);
-    }
-    dirs_next::home_dir().unwrap_or_default().join("Code")
+    crate::config::Config::load(None).unwrap_or_default().code_root_dir()
 }
 
 /// Start the source on [`code_root`]. `refresh` is poked by a manual refresh

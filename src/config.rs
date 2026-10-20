@@ -56,6 +56,13 @@ pub struct Config {
     /// TLS is added in Phase 5.
     pub tcp_addr: Option<SocketAddr>,
 
+    /// Folder whose children are your code repos (default: `~/Code`).
+    ///
+    /// Overridden by the `NOSTROMO_CODE_ROOT` environment variable. A leading
+    /// `~` is expanded. See [`crate::data::work::repo_docs::code_root`] for the
+    /// full resolution order; the macOS app resolves it the same way.
+    pub code_root: Option<PathBuf>,
+
     /// Path to the fred state directory (default: `$HOME/.claude/state/fred`).
     pub fred_state: Option<PathBuf>,
     /// Path to the perri state directory (default: `$HOME/.claude/state/perri`).
@@ -139,6 +146,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tcp_addr: None,
+            code_root: None,
             fred_state: None,
             perri_state: None,
             claude_bin: None,
@@ -180,6 +188,17 @@ impl Config {
         let cfg: Config = toml::from_str(&raw)
             .with_context(|| format!("parsing config {}", resolved.display()))?;
         Ok(cfg)
+    }
+
+    /// Folder whose children are the code repos. Resolution order:
+    /// `$NOSTROMO_CODE_ROOT` → `code_root` in `config.toml` → `~/Code`.
+    /// A leading `~` is expanded in either source.
+    pub fn code_root_dir(&self) -> PathBuf {
+        resolve_code_root(
+            std::env::var_os("NOSTROMO_CODE_ROOT").as_deref(),
+            self.code_root.as_deref(),
+            &home_dir(),
+        )
     }
 
     /// Resolved fred state directory.
@@ -256,8 +275,76 @@ fn default_config_path() -> Result<PathBuf> {
     }
 }
 
+/// Pure core of [`Config::code_root_dir`]: `env` wins over `configured`, which
+/// wins over `<home>/Code`. Empty values are ignored; a leading `~` expands to `home`.
+pub fn resolve_code_root(
+    env: Option<&std::ffi::OsStr>,
+    configured: Option<&Path>,
+    home: &Path,
+) -> PathBuf {
+    let chosen = env
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| configured.filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf));
+    match chosen {
+        Some(p) => match p.strip_prefix("~") {
+            Ok(rest) => home.join(rest),
+            Err(_) => p,
+        },
+        None => home.join("Code"),
+    }
+}
+
 fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod code_root_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    const HOME: &str = "/Users/me";
+
+    fn resolve(env: Option<&str>, cfg: Option<&str>) -> PathBuf {
+        resolve_code_root(env.map(OsStr::new), cfg.map(Path::new), Path::new(HOME))
+    }
+
+    #[test]
+    fn defaults_to_home_code_so_existing_setups_are_unchanged() {
+        assert_eq!(resolve(None, None), PathBuf::from("/Users/me/Code"));
+    }
+
+    #[test]
+    fn config_overrides_the_default() {
+        assert_eq!(resolve(None, Some("/work/src")), PathBuf::from("/work/src"));
+    }
+
+    #[test]
+    fn env_overrides_config() {
+        assert_eq!(resolve(Some("/env"), Some("/work/src")), PathBuf::from("/env"));
+    }
+
+    #[test]
+    fn empty_values_fall_through() {
+        assert_eq!(resolve(Some(""), Some("")), PathBuf::from("/Users/me/Code"));
+        assert_eq!(resolve(Some(""), Some("/work/src")), PathBuf::from("/work/src"));
+    }
+
+    #[test]
+    fn tilde_expands() {
+        assert_eq!(
+            resolve(None, Some("~/Software Development")),
+            PathBuf::from("/Users/me/Software Development")
+        );
+        assert_eq!(resolve(Some("~"), None), PathBuf::from("/Users/me"));
+    }
+
+    #[test]
+    fn parses_from_toml() {
+        let cfg: Config = toml::from_str("code_root = \"~/Software Development\"").unwrap();
+        assert_eq!(cfg.code_root, Some(PathBuf::from("~/Software Development")));
+    }
 }

@@ -354,7 +354,7 @@ async fn main() -> Result<()> {
         todos_refresh: Some(todos_refresh),
         jira: Some(Arc::new(nostromo::data::work::jira::JiraWorkSource::from_config(&config))),
         sentry: Some(nostromo::data::work::sentry::SentryConfig::from_environment()),
-        repo_docs_root: None,
+        repo_docs_root: Some(config.code_root_dir()),
         picks_path: Some(nostromo::data::work::picks::default_path()),
         picks_host: None,
         picks_timeout: None,

@@ -25,6 +25,25 @@ cargo build --release
 make install   # installs nostromd, nostromo-mcp-bridge, nostromo-activity-hook, nostromo-guard
 ```
 
+## Configuration
+
+### Code root
+
+Nostromo looks for your repos (Repo docs, the new-Focus project picker, the
+Send to agent sheet) in the folder whose children are the repos. It defaults to
+`~/Code`. To change it, set `code_root` in `config.toml`:
+
+```toml
+code_root = "~/Software Development"
+```
+
+On macOS that file is `~/Library/Application Support/nostromo/config.toml`
+(the path the daemon actually reads, via the `directories` crate). The
+`NOSTROMO_CODE_ROOT` environment variable overrides it for the daemon. The app
+reads the same env var and file, so launch it from a shell with the variable
+set, or use `config.toml`. Restart `nostromd` and relaunch the app after
+changing it.
+
 ## Daemon
 
 `nostromd` is a daemon that runs in the background and serves the macOS and iOS
