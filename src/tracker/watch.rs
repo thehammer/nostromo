@@ -100,7 +100,7 @@ impl BoardFs for RealBoardFs {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !(name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)) {
+            if !is_our_temp_name(&name) {
                 continue;
             }
             // `DirEntry::metadata` does not follow symlinks: only plain files.
@@ -120,6 +120,14 @@ impl BoardFs for RealBoardFs {
 }
 
 const TEMP_PREFIX: &str = ".tracker-";
+
+/// Whether `name` has the exact shape `tempfile` gives our temp files: `.tracker-` + 6 random
+/// ASCII alphanumerics + `.tmp`. A user's own `.tracker-notes.tmp` does not match.
+fn is_our_temp_name(name: &str) -> bool {
+    name.strip_prefix(TEMP_PREFIX)
+        .and_then(|rest| rest.strip_suffix(TEMP_SUFFIX))
+        .is_some_and(|mid| mid.len() == 6 && mid.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
 const TEMP_SUFFIX: &str = ".tmp";
 
 /// Temp file in the target's directory, `fsync`, rename over the target.
@@ -229,4 +237,17 @@ fn watch_dir(dir: &Path, wake: mpsc::UnboundedSender<()>) -> Option<RecommendedW
     .ok()?;
     watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
     Some(watcher)
+}
+
+#[cfg(test)]
+mod temp_name_tests {
+    use super::is_our_temp_name;
+
+    #[test]
+    fn only_the_exact_tempfile_shape_is_ours() {
+        assert!(is_our_temp_name(".tracker-aB3xY9.tmp"));
+        for not_ours in [".tracker-notes.tmp", ".tracker-.tmp", ".tracker-aB3xY9z.tmp", ".tracker-aB3x_9.tmp", "tracker-aB3xY9.tmp", ".tracker-aB3xY9.tmp.bak"] {
+            assert!(!is_our_temp_name(not_ours), "{not_ours}");
+        }
+    }
 }

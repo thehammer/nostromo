@@ -119,6 +119,10 @@ pub fn resolve_board_path(
         return Err(PathNotAllowed);
     }
     let canonical = canonicalize_lenient(&absolute).ok_or(PathNotAllowed)?;
+    // The extension is checked again on the resolved path: `x.md -> .git/hooks/pre-commit` is not a board.
+    if !canonical.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
+        return Err(PathNotAllowed);
+    }
     let allowed_under = |allowed: Option<PathBuf>| {
         allowed
             .and_then(|dir| canonicalize_lenient(&dir))
@@ -160,6 +164,15 @@ fn is_instruction_path(relative: &Path) -> bool {
     let Some(file) = names.last() else {
         return true;
     };
+    // Any dot-component is refused (`.git`, `.cursor`, `.windsurf`, `.clinerules`, `.roo`, `.github`,
+    // `.claude/agent-memory`, ...) except a `.claude` directly followed by `wip` and a file below it.
+    // An allow rule is the closed one: new agent tools keep inventing instruction directories.
+    let dot_ok = |i: usize, n: &str| {
+        n == ".claude" && names.get(i + 1).map(String::as_str) == Some("wip") && i + 2 < names.len()
+    };
+    if names.iter().enumerate().any(|(i, n)| n.starts_with('.') && !dot_ok(i, n)) {
+        return true;
+    }
     file.starts_with('.')
         || INSTRUCTION_FILES.iter().any(|f| f.eq_ignore_ascii_case(file))
         || names.iter().any(|n| n == ".github")
@@ -336,6 +349,29 @@ pub fn display_remote(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_dot_claude_wip_may_hold_a_dot_component() {
+        for denied in [
+            ".claude/agent-memory/x.md",
+            ".claude/loop.md",
+            ".claude/projects/p/memory/m.md",
+            ".claude/wip.md",
+            ".claude/wip",
+            ".cursor/rules/x.md",
+            ".windsurf/rules/x.md",
+            ".clinerules/x.md",
+            ".roo/rules/x.md",
+            ".git/hooks/x.md",
+            "docs/.hidden/x.md",
+            "a/.claude/commands/x.md",
+        ] {
+            assert!(is_instruction_path(Path::new(denied)), "{denied} must be refused");
+        }
+        for allowed in [".claude/wip/topic/index.md", "docs/board.md", "a/.claude/wip/t/index.md"] {
+            assert!(!is_instruction_path(Path::new(allowed)), "{allowed} must be allowed");
+        }
+    }
 
     #[test]
     fn remote_is_shown_as_host_owner_repo_without_credentials() {
