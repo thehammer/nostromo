@@ -6013,7 +6013,8 @@ impl TrackerWorld {
                 "op": "open",
                 "title": format!("{} title", s(0)),
                 "topic": format!("secret-tracker-{}", n + 1),
-                "path": format!("docs/{}/board.md", s(2)),
+                // No `.git` here, so a board may only live under `.claude/wip/`.
+                "path": format!(".claude/wip/{}/board.md", s(2)),
                 "sections": [format!("{} section", s(3))],
             }),
         )

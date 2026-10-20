@@ -65,9 +65,23 @@ pub fn default_path(repo_root: &Path, topic: &str) -> PathBuf {
 pub struct PathNotAllowed;
 
 /// File names that carry instructions to an agent, at any depth.
-const INSTRUCTION_FILES: [&str; 4] = ["CLAUDE.md", "AGENTS.md", "GEMINI.md", "SKILL.md"];
+const INSTRUCTION_FILES: [&str; 5] = [
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    "SKILL.md",
+];
 /// Directories under a `.claude` directory that agents load instructions from.
-const INSTRUCTION_DIRS: [&str; 6] = ["commands", "agents", "skills", "hooks", "plugins", "rules"];
+const INSTRUCTION_DIRS: [&str; 7] = [
+    "commands",
+    "agents",
+    "skills",
+    "hooks",
+    "plugins",
+    "rules",
+    "output-styles",
+];
 
 /// Resolves `requested` (absolute, or relative to the repo root) to the path a
 /// board may live at: a `.md` file whose parent directory, with symlinks
@@ -78,9 +92,10 @@ const INSTRUCTION_DIRS: [&str; 6] = ["commands", "agents", "skills", "hooks", "p
 /// The tool rewrites a board it opens and appends to it on every change, so a
 /// board must never be a file an agent loads as instructions, or the daemon
 /// would plant them without the Edit tool's permission prompt. Refused, for
-/// explicit paths and adoptions alike: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`
-/// and `SKILL.md` at any depth (any case); anything under `.claude/commands`,
-/// `agents`, `skills`, `hooks`, `plugins` or `rules`; anything under `.github`;
+/// explicit paths and adoptions alike: `CLAUDE.md`, `CLAUDE.local.md`,
+/// `AGENTS.md`, `GEMINI.md` and `SKILL.md` at any depth (any case); anything
+/// under `.claude/commands`, `agents`, `skills`, `hooks`, `plugins`, `rules` or
+/// `output-styles`; anything under `.github`;
 /// any file whose name starts with `.`. The rules look at the path with
 /// symlinks resolved, relative to the root it was allowed under.
 ///

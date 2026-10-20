@@ -139,9 +139,9 @@ every change, so a board can never be a file an agent loads as instructions
 are refused, for explicit paths and for adopting an existing file alike, judged
 on the path with symlinks resolved and relative to the root it was allowed under:
 
-- `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `SKILL.md` at any depth (any case);
+- `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `SKILL.md` at any depth (any case);
 - anything under `.claude/commands`, `.claude/agents`, `.claude/skills`,
-  `.claude/hooks`, `.claude/plugins`, `.claude/rules`;
+  `.claude/hooks`, `.claude/plugins`, `.claude/rules`, `.claude/output-styles`;
 - anything under `.github`;
 - any file whose name starts with `.`.
 
