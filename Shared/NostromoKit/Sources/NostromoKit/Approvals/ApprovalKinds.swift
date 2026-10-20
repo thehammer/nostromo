@@ -32,8 +32,8 @@ public struct ApprovalCardOptions: Equatable {
     public let controls: [ApprovalControl]
     /// Set for `requires_user_interaction`.
     public let notice: String?
-    /// Keyboard focus starts on Deny: the CLI said `default_to_no`, or the input has
-    /// invisible or direction-changing characters.
+    /// Keyboard focus starts on Deny: the CLI said `default_to_no`, or anything the card shows
+    /// (the input, its extra fields, the text around it) has invisible or direction-changing characters.
     public let defaultsToDeny: Bool
 
     public var offersAllowOnce: Bool { controls.contains(.allowOnce) }
@@ -50,8 +50,10 @@ public struct ApprovalCardOptions: Equatable {
         self.controls = controls
         self.notice = interactionOnly ? Self.requiresInteractionNotice : nil
         // Counted from the segments too: a frame that under-reports must not lose the Deny default.
+        // The model's total also covers the Bash extra-field lines and the text around the input.
         let shown = request.display.lines.reduce(0) { $0 + $1.segments.filter { $0.kind == .invisible }.count }
-        self.defaultsToDeny = request.flags.defaultToNo || max(request.display.invisibleCount, shown) > 0
+        let modelCount = ApprovalDisplayModel(request: request).invisibleCount
+        self.defaultsToDeny = request.flags.defaultToNo || max(request.display.invisibleCount, shown, modelCount) > 0
     }
 }
 

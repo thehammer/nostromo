@@ -10,9 +10,11 @@ import NostromoKit
 // non-ASCII characters are tinted and carry a tooltip with their code point and
 // name; a here-doc body is set off; an Edit is a diff.
 //
-// It reports `hasShownEveryLine` once the LAST line has been fully on screen at
-// least once (it stays true). The card keeps Allow disabled until then: a person
-// must never approve text they were not shown.
+// It reports `hasShownEveryLine` once EVERY line (every wrapped fragment of every
+// line) has been on screen, in full, at some moment while the card's window was
+// showing (it stays true). The card keeps Allow disabled until then: a person must
+// never approve text they were not shown. Jumping to the end shows the end only, so
+// it does not count for the lines in between; scrolling through them does.
 
 /// The card's colours. Explicit, because the whole app is pinned to Dark Aqua and a
 /// colour that follows the system could flip in a non-key window.
@@ -46,7 +48,7 @@ final class ApprovalTextView: NSTextView {}
 final class ApprovalInputView: NSScrollView {
 
     let textView: ApprovalTextView
-    /// True once the last line has been fully visible. Never goes back to false.
+    /// True once every line has been fully visible (see `coveredCharacters`). Never goes back to false.
     private(set) var hasShownEveryLine = false
     /// Called once, when `hasShownEveryLine` becomes true.
     var onShownEveryLine: (() -> Void)?
@@ -55,12 +57,26 @@ final class ApprovalInputView: NSScrollView {
     private(set) var lineNumbers: [Int] = []
     private var lineStarts: [Int] = []
     private var ignoreProgressUntilPersonScrolls = false
+    /// The UTF-16 offsets of the text that have been on screen, whole line fragments at a time
+    /// (offsets, not fragment numbers, so a re-wrap after a resize keeps what was seen). One
+    /// extra offset, just past the end, stands for a last line with no text. Only grows.
+    private var coveredCharacters = IndexSet()
+    /// Line fragments seen only in part so far: the vertical spans (text-view coordinates) of
+    /// each that have been on screen. A fragment is covered once its spans add up to all of it.
+    private var partlySeen: [NSRange: [ClosedRange<CGFloat>]] = [:]
+    /// The text view's width when `partlySeen` was recorded; a re-wrap invalidates it.
+    private var coverageWidth: CGFloat = 0
+    /// Replaces the window half of "is this on screen?" (a visible, not occluded window). The
+    /// rest (in a window, not hidden, not zero-sized) always applies. Tests set it.
+    var isWindowShowing: (() -> Bool)?
     private var lastClipOriginY: CGFloat = 0
     private let ruler = ApprovalLineNumberRuler()
     private let font = Theme.codeFont(size: 12)
     private static let textInset = NSSize(width: 6, height: 6)
     /// A clip-origin change smaller than this (points) is layout settling, not a scroll.
     private static let scrollNoise: CGFloat = 2
+    /// Spans of a line fragment that meet within this (points) count as one: scroll positions are pixel-snapped.
+    private static let coverageTolerance: CGFloat = 1
 
     init(model: ApprovalDisplayModel) {
         textView = ApprovalTextView(frame: .zero)
@@ -120,6 +136,39 @@ final class ApprovalInputView: NSScrollView {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
+    // MARK: On screen
+
+    /// Coverage is only earned while the card can really be seen: in a window that is visible
+    /// and not occluded, not hidden, and not laid out at zero size.
+    private var isShowingOnScreen: Bool {
+        guard let window, !isHiddenOrHasHiddenAncestor, bounds.width > 0, bounds.height > 0 else { return false }
+        return isWindowShowing?() ?? (window.isVisible && window.occlusionState.contains(.visible))
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let old = window {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: old)
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameVisibleOrNot),
+                                               name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        updateScrollProgress()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        updateScrollProgress()
+    }
+
+    @objc private func windowBecameVisibleOrNot(_ note: Notification) {
+        updateScrollProgress()
+    }
+
     // MARK: Reading
 
     /// Exactly the text in the view, one string per display line.
@@ -139,12 +188,22 @@ final class ApprovalInputView: NSScrollView {
         return Array(lineNumbers[first ... last])
     }
 
+    /// The display line numbers with any text still never shown (empty once `hasShownEveryLine`).
+    var linesNotYetShown: [Int] {
+        guard !lineStarts.isEmpty else { return [] }
+        let total = coverageTotal
+        return lineStarts.indices.compactMap { i in
+            let end = i + 1 < lineStarts.count ? lineStarts[i + 1] : total
+            return end <= lineStarts[i] || coveredCharacters.contains(integersIn: lineStarts[i] ..< end) ? nil : lineNumbers[i]
+        }
+    }
+
     /// The height of all the text at `width` (the whole view's width, gutter and scroller included).
     /// Measured on a scratch layout, so it doesn't depend on the live text view's size, which
     /// isn't known until the card has been laid out.
     func contentHeight(forWidth width: CGFloat) -> CGFloat {
         guard let source = textView.textStorage else { return 0 }
-        let scroller = hasVerticalScroller ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
+        let scroller = hasVerticalScroller ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle) : 0
         let textWidth = max(40, width - ruler.ruleThickness - scroller - 2 * Self.textInset.width)
         let storage = NSTextStorage(attributedString: source)
         let layout = NSLayoutManager()
@@ -158,7 +217,8 @@ final class ApprovalInputView: NSScrollView {
 
     // MARK: Scrolling
 
-    /// Scroll so the last line is on screen. (What a person does with the scroll wheel, for tests and scripts.)
+    /// Jump so the last line is on screen (End, Cmd-Down, a scroller drag). For tests and scripts. A jump
+    /// shows the end and nothing between: only what is on screen after it counts.
     func scrollToEnd() {
         fitTextView()
         textView.scrollRangeToVisible(NSRange(location: (textView.string as NSString).length, length: 0))
@@ -169,19 +229,17 @@ final class ApprovalInputView: NSScrollView {
         textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
     }
 
-    /// Re-check which lines are on screen. Called after layout and every scroll.
+    /// Re-check which lines are on screen and add them to what has been shown. Called after
+    /// layout, on every clip movement and when the window's visibility changes.
     func updateScrollProgress() {
         ruler.needsDisplay = true
         guard !hasShownEveryLine, !ignoreProgressUntilPersonScrolls else { return }
-        guard let layout = textView.layoutManager, let container = textView.textContainer else { return }
+        guard isShowingOnScreen else { return }
         if textView.string.isEmpty { return markShownEveryLine() }
-        guard contentView.bounds.height > 0, bounds.width > 0, textView.frame.width > 0 else { return }
+        guard contentView.bounds.height > 0, textView.frame.width > 0 else { return }
         fitTextView()
-        let lastGlyph = layout.numberOfGlyphs - 1
-        guard lastGlyph >= 0 else { return markShownEveryLine() }
-        let lastLine = layout.lineFragmentUsedRect(forGlyphAt: lastGlyph, effectiveRange: nil)
-        let bottom = lastLine.maxY + textView.textContainerOrigin.y
-        if bottom <= contentView.bounds.maxY + 1 { markShownEveryLine() }
+        coverVisibleFragments()
+        if coveredCharacters.count >= coverageTotal { markShownEveryLine() }
     }
 
     override func layout() {
@@ -198,6 +256,62 @@ final class ApprovalInputView: NSScrollView {
         let height = max(used, contentView.bounds.height)
         if abs(textView.frame.height - height) > 0.5 {
             textView.setFrameSize(NSSize(width: textView.frame.width, height: height))
+        }
+    }
+
+    /// How many offsets must be covered: every character, plus one for a last line with no text.
+    private var coverageTotal: Int {
+        let length = textView.string.utf16.count
+        guard let layout = textView.layoutManager, !layout.extraLineFragmentRect.isEmpty else { return length }
+        return length + 1
+    }
+
+    /// Record the part of each line fragment that is on screen now.
+    private func coverVisibleFragments() {
+        guard let layout = textView.layoutManager, let container = textView.textContainer else { return }
+        if abs(textView.frame.width - coverageWidth) > 0.5 {
+            partlySeen.removeAll()
+            coverageWidth = textView.frame.width
+        }
+        let clip = contentView.bounds
+        let origin = textView.textContainerOrigin
+        let glyphs = layout.glyphRange(forBoundingRect: clip.offsetBy(dx: -origin.x, dy: -origin.y), in: container)
+        if glyphs.length > 0 {
+            layout.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, glyphRange, _ in
+                let chars = layout.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+                self.noteSeen(chars, top: rect.minY + origin.y, bottom: rect.maxY + origin.y, clip: clip)
+            }
+        }
+        let extra = layout.extraLineFragmentRect
+        if !extra.isEmpty {
+            noteSeen(NSRange(location: textView.string.utf16.count, length: 1),
+                     top: extra.minY + origin.y, bottom: extra.maxY + origin.y, clip: clip)
+        }
+    }
+
+    /// A fragment spanning `top ..< bottom` was in `clip`. Cover its characters once all of it has been.
+    private func noteSeen(_ chars: NSRange, top: CGFloat, bottom: CGFloat, clip: NSRect) {
+        guard chars.length > 0 else { return }
+        let range = chars.location ..< NSMaxRange(chars)
+        guard !coveredCharacters.contains(integersIn: range) else { return }
+        let seenTop = max(top, clip.minY), seenBottom = min(bottom, clip.maxY)
+        guard seenBottom > seenTop else { return }
+        var spans = (partlySeen[chars] ?? []) + [seenTop ... seenBottom]
+        spans.sort { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<CGFloat>] = []
+        for span in spans {
+            if let last = merged.last, span.lowerBound <= last.upperBound + Self.coverageTolerance {
+                merged[merged.count - 1] = last.lowerBound ... max(last.upperBound, span.upperBound)
+            } else {
+                merged.append(span)
+            }
+        }
+        if merged.count == 1, merged[0].lowerBound <= top + Self.coverageTolerance,
+           merged[0].upperBound >= bottom - Self.coverageTolerance {
+            coveredCharacters.insert(integersIn: range)
+            partlySeen[chars] = nil
+        } else {
+            partlySeen[chars] = merged
         }
     }
 

@@ -553,6 +553,8 @@ final class ApprovalCardHarness {
 
     /// - Parameters:
     ///   - permit: nil uses the card's own, real, `HumanGesture.permit`.
+    ///   - isOnScreen: stands in for "the window is visible and not occluded" (the rig window is never ordered in),
+    ///     so the input's coverage counts. Pass nil to ask the real window.
     ///   - prepare: runs after the window exists and before the card is added (a composer to hold focus).
     init(_ testCase: XCTestCase, request: ApprovalRequestWire,
          permit: ApprovalCardView.GesturePermit? = ApprovalCardHarness.humanPermit,
@@ -560,6 +562,7 @@ final class ApprovalCardHarness {
          width: CGFloat = 560, maxHeight: CGFloat = 520, windowID: String = "w-test",
          armDelay: TimeInterval = 0,
          canSend: @escaping () -> Bool = { true },
+         isOnScreen: (() -> Bool)? = { true },
          prepare: ((NSWindow) -> Void)? = nil) {
         let window: NSWindow = provided ?? makeRigWindow(testCase, size: NSSize(width: width + 80, height: maxHeight + 80))
         let recorder = ApprovalRecorder()
@@ -567,7 +570,8 @@ final class ApprovalCardHarness {
         store.handle(.request(request))
         prepare?(window)
         let entry = store.entry(id: request.id)!
-        let card = ApprovalCardView(entry: entry, store: store, windowID: { windowID }, permit: permit, armDelay: armDelay)
+        let card = ApprovalCardView(entry: entry, store: store, windowID: { windowID }, permit: permit, armDelay: armDelay,
+                                    isOnScreen: isOnScreen)
         let height = card.preferredHeight(forWidth: width, maxHeight: maxHeight)
         card.frame = NSRect(x: 20, y: 20, width: width, height: height)
         window.contentView!.addSubview(card)
@@ -2424,7 +2428,7 @@ final class ApprovalOverlayHostTests: XCTestCase {
             let store = provided ?? recorder.makeStore()
             let window: NSWindow = providedWindow ?? makeRigWindow(testCase, size: size)
             let host = ApprovalOverlayHost(tag: tag, store: store, windowID: { windowID }, permit: permit,
-                                           armDelay: armDelay, reduceMotion: { reduceMotion })
+                                           armDelay: armDelay, isOnScreen: { true }, reduceMotion: { reduceMotion })
             host.frame = NSRect(origin: .zero, size: size)
             window.contentView!.addSubview(host)
             self.recorder = recorder

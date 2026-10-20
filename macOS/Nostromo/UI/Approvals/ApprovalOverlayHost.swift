@@ -43,6 +43,7 @@ final class ApprovalOverlayHost: NSView {
     private let permit: ApprovalCardView.GesturePermit?
     private let reduceMotion: () -> Bool
     private let cardArmDelay: TimeInterval
+    private let cardIsOnScreen: (() -> Bool)?
     private var subscription: AnyCancellable?
     /// Set while a card is fading out; a newer card or a refresh cancels it.
     private var fadingCard: ApprovalCardView?
@@ -51,6 +52,7 @@ final class ApprovalOverlayHost: NSView {
          windowID: (() -> String)? = nil,
          permit: ApprovalCardView.GesturePermit? = nil,
          armDelay: TimeInterval = ApprovalOverlayHost.armDelay,
+         isOnScreen: (() -> Bool)? = nil,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
         self.focusTag = tag
         self.store = store
@@ -58,6 +60,7 @@ final class ApprovalOverlayHost: NSView {
         self.permit = permit
         self.reduceMotion = reduceMotion
         self.cardArmDelay = armDelay
+        self.cardIsOnScreen = isOnScreen
         super.init(frame: .zero)
         subscription = store.changes
             .filter { [focusTag] in $0 == focusTag }
@@ -122,7 +125,7 @@ final class ApprovalOverlayHost: NSView {
     private func replaceCard(with entry: ApprovalEntry) {
         removeCardNow()
         let new = ApprovalCardView(entry: entry, store: store, windowID: { [weak self] in self?.currentWindowID() ?? "w0" },
-                                   permit: permit, armDelay: cardArmDelay)
+                                   permit: permit, armDelay: cardArmDelay, isOnScreen: cardIsOnScreen)
         new.onNeedsLayout = { [weak self] in self?.needsLayout = true }
         new.setMoreCount(store.moreCount(tag: focusTag))
         addSubview(new)
@@ -130,7 +133,7 @@ final class ApprovalOverlayHost: NSView {
         if store.claimAnnouncement(entry.request.id) {
             // Announced once on arrival, politely: no focus change, no interruption of what is being read.
             NSAccessibility.post(element: new, notification: .announcementRequested,
-                                 userInfo: [.announcement: ApprovalKinds.announcement(for: entry.request),
+                                 userInfo: [.announcement: ApprovalDisplayModel.contextText(ApprovalKinds.announcement(for: entry.request)),
                                             .priority: NSAccessibilityPriorityLevel.high.rawValue])
         }
         needsLayout = true

@@ -20,8 +20,16 @@ private let cardLog = Logger(subsystem: "com.hammer.nostromo", category: "approv
 // What keeps it safe:
 //   * No button has a key equivalent and none is the default: Return and Space do
 //     nothing unless a button has keyboard focus. Arrival never takes focus.
-//   * Allow once stays disabled until the input has shown its last line, and while
+//   * Allow once stays disabled until the input has shown every one of its lines, and while
 //     `ApprovalDisplayModel` can't prove the shown text is the request's text.
+//   * Every string the card draws from the request (the input, the headline, Why, In, Agent
+//     says) shows a hidden or direction-changing character as a visible token.
+//   * After a refused answer nothing can be allowed, but Deny stays available (one attempt at
+//     a time, through the same human-gesture check).
+//   * A click on the card's own padding (not a button or the input) makes the card first
+//     responder, and the card hands focus on to `initialKeyView` (Deny, or the input). The
+//     plan says "Tab into it, or click": this is that. It sends nothing, and it never runs
+//     on arrival.
 //   * Every answer goes through `HumanGesture.permit` first. On a refusal nothing is
 //     answered, the card stays, and the app reports the refusal to the daemon.
 //   * The card holds no answered state. `ApprovalStore` does, so a rebuilt card can't
@@ -152,13 +160,16 @@ final class ApprovalCardView: NSView {
 
     /// - Parameter armDelay: how long after it appears Allow once stays disabled (see
     ///   `ApprovalOverlayHost.armDelay`). Zero arms it at once.
+    /// - Parameter isOnScreen: replaces "the window is visible and not occluded" for the input's
+    ///   coverage (a test's window is never ordered in). Nil asks the window.
     init(entry: ApprovalEntry, store: ApprovalStore, windowID: @escaping () -> String,
-         permit: GesturePermit? = nil, armDelay: TimeInterval = 0) {
+         permit: GesturePermit? = nil, armDelay: TimeInterval = 0, isOnScreen: (() -> Bool)? = nil) {
         request = entry.request
         state = entry.state
         model = ApprovalDisplayModel(request: entry.request)
         options = ApprovalCardOptions(request: entry.request)
         inputView = ApprovalInputView(model: model)
+        inputView.isWindowShowing = isOnScreen
         countdown = ApprovalCountdownLabel(deadlineAtMs: entry.request.deadlineAtMs)
         self.store = store
         self.windowID = windowID
@@ -180,7 +191,7 @@ final class ApprovalCardView: NSView {
 
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel(ApprovalKinds.announcement(for: request))
+        setAccessibilityLabel(ApprovalDisplayModel.contextText(ApprovalKinds.announcement(for: request)))
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -274,13 +285,14 @@ final class ApprovalCardView: NSView {
             }
         }
         return ApprovalCardListing(
-            requestID: request.id, focus: request.tag, agent: ApprovalKinds.asker(for: request),
+            requestID: request.id, focus: request.tag,
+            agent: ApprovalDisplayModel.contextText(ApprovalKinds.asker(for: request)),
             tool: request.toolName, headline: headlineLabel.stringValue,
             input: shownInput(from: texts), lines: lines,
             commandCount: model.commandCount, invisibleCount: model.invisibleCount,
             nonAsciiCount: model.nonAsciiCount,
             banner: bannerLabel.isHidden ? nil : bannerLabel.stringValue,
-            reasonLine: request.reason.text, options: options,
+            reasonLine: ApprovalDisplayModel.contextText(request.reason.text), options: options,
             defaultToNoKind: self.options.defaultsToDeny,
             secondsLeft: countdown.secondsLeft, state: stateDescription)
     }
@@ -397,27 +409,26 @@ final class ApprovalCardView: NSView {
 
     private func buildContent() {
         // Header
-        headlineLabel.stringValue = ApprovalKinds.headline(for: request)
-        headlineLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        headlineLabel.textColor = ApprovalPalette.commandText
         headlineLabel.lineBreakMode = .byTruncatingTail
-        headlineLabel.toolTip = headlineLabel.stringValue
+        let headline = ApprovalKinds.headline(for: request)
+        setContext(headlineLabel, headline, font: .systemFont(ofSize: 13, weight: .semibold), color: ApprovalPalette.commandText)
+        headlineLabel.toolTip = ApprovalDisplayModel.contextText(headline)
 
         moreLabel.font = .systemFont(ofSize: 11)
         moreLabel.textColor = ApprovalPalette.mutedText
         moreLabel.alignment = .right
 
         configureWrapping(whyLabel, lines: 2)
-        whyLabel.stringValue = "Why: \(request.reason.text)"
-        whyLabel.toolTip = request.reason.text
+        setContext(whyLabel, request.reason.text, prefix: "Why: ", font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
+        whyLabel.toolTip = ApprovalDisplayModel.contextText(request.reason.text)
 
         inLabel.font = .systemFont(ofSize: 11)
         inLabel.textColor = ApprovalPalette.mutedText
         inLabel.lineBreakMode = .byTruncatingMiddle
         if let cwd = request.cwd, !cwd.isEmpty {
             let shown = ApprovalKinds.homeAbbreviated(cwd, home: NSHomeDirectory())
-            inLabel.stringValue = "In: \(shown)"
-            inLabel.toolTip = cwd
+            setContext(inLabel, shown, prefix: "In: ", font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
+            inLabel.toolTip = ApprovalDisplayModel.contextText(cwd)
         } else {
             inLabel.isHidden = true
         }
@@ -442,8 +453,9 @@ final class ApprovalCardView: NSView {
         // The agent's claim: below the exact input, muted and labelled.
         configureWrapping(agentSaysLabel, lines: 4)
         if let description = request.description, !description.isEmpty {
-            agentSaysLabel.stringValue = "Agent says: “\(description)”"
-            agentSaysLabel.toolTip = description
+            setContext(agentSaysLabel, description, prefix: "Agent says: “", suffix: "”",
+                       font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
+            agentSaysLabel.toolTip = ApprovalDisplayModel.contextText(description)
         } else {
             agentSaysLabel.isHidden = true
         }
@@ -525,6 +537,35 @@ final class ApprovalCardView: NSView {
         button.setButtonType(.momentaryPushIn)
     }
 
+    /// Show `text` in `label` with every hidden or direction-changing character as a visible token in
+    /// the warning colour (the input's tokens), always left to right so nothing reorders on screen.
+    private func setContext(_ label: NSTextField, _ text: String, prefix: String = "", suffix: String = "",
+                            font: NSFont, color: NSColor) {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = label.lineBreakMode
+        style.baseWritingDirection = .leftToRight
+        let direction = [NSWritingDirection.leftToRight.rawValue | NSWritingDirectionFormatType.override.rawValue]
+        func attrs(_ extra: [NSAttributedString.Key: Any] = [:]) -> [NSAttributedString.Key: Any] {
+            var base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: style,
+                                                       .writingDirection: direction]
+            base.merge(extra) { _, new in new }
+            return base
+        }
+        let out = NSMutableAttributedString(string: prefix, attributes: attrs())
+        for run in ApprovalDisplayModel.contextRuns(for: text) {
+            if run.kind == .invisible {
+                out.append(NSAttributedString(string: run.text, attributes: attrs([
+                    .foregroundColor: ApprovalPalette.warning,
+                    .backgroundColor: ApprovalPalette.warningFill,
+                ])))
+            } else {
+                out.append(NSAttributedString(string: run.text, attributes: attrs()))
+            }
+        }
+        out.append(NSAttributedString(string: suffix, attributes: attrs()))
+        label.attributedStringValue = out
+    }
+
     private func configureWrapping(_ label: NSTextField, lines: Int) {
         label.font = .systemFont(ofSize: 11)
         label.textColor = ApprovalPalette.mutedText
@@ -538,7 +579,11 @@ final class ApprovalCardView: NSView {
 
     private func refresh() {
         let pending = state == .pending
-        denyButton.isEnabled = pending
+        // After a refused answer Deny stays available (a retry, one at a time, by a person's press):
+        // otherwise the agent waits out the 15 minutes. Nothing else is: Allow is never re-sent.
+        var denyable = pending
+        if case .notSent = state { denyable = true }
+        denyButton.isEnabled = denyable
         denyMoreButton?.isEnabled = pending
         denyAndStopButton?.isEnabled = pending
         if let allow = allowButton {

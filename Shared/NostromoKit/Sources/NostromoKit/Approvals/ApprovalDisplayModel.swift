@@ -113,8 +113,12 @@ public struct ApprovalDisplayModel: Equatable {
     /// so a flag like `dangerouslyDisableSandbox` is never approved unseen. Numbered after `lines`.
     public let extraLines: [ApprovalRenderLine]
     public let commandCount: Int?
-    /// Counted from the segments themselves, never trusted from the frame.
+    /// Counted from the segments themselves, never trusted from the frame. Includes the Bash
+    /// extra-field lines and the hidden characters in the text around the input (`contextInvisibleCount`).
     public let invisibleCount: Int
+    /// Hidden or direction-changing characters in the headline, reason, directory and the agent's
+    /// claim (the card shows each as a token, like the input's).
+    public let contextInvisibleCount: Int
     public let nonAsciiCount: Int
     public let unparsed: Bool
     public let roundTrip: ApprovalRoundTrip
@@ -151,10 +155,13 @@ public struct ApprovalDisplayModel: Equatable {
         for run in extras.flatMap(\.runs) {
             if run.kind == .invisible { invisible += 1 } else if run.kind == .nonAscii { nonAscii += 1 }
         }
+        let context = [ApprovalKinds.headline(for: request), request.reason.text, request.cwd ?? "", request.description ?? ""]
+            .reduce(0) { $0 + Self.contextRuns(for: $1).filter { $0.kind == .invisible }.count }
         self.lines = lines
         self.extraLines = extras
         self.commandCount = display.commandCount
-        self.invisibleCount = invisible
+        self.invisibleCount = invisible + context
+        self.contextInvisibleCount = context
         self.nonAsciiCount = nonAscii
         self.unparsed = display.unparsed
         self.roundTrip = Self.check(lines: lines, toolKind: request.toolKind, input: request.input)
@@ -189,7 +196,7 @@ public struct ApprovalDisplayModel: Equatable {
     /// `This command contains N invisible or direction-changing characters.`; nil when none.
     public func banner(toolKind: ApprovalToolKind) -> String? {
         guard invisibleCount > 0 else { return nil }
-        let noun = toolKind == .bash ? "command" : "input"
+        let noun = contextInvisibleCount > 0 ? "request" : (toolKind == .bash ? "command" : "input")
         let what = invisibleCount == 1 ? "1 invisible or direction-changing character"
                                        : "\(invisibleCount) invisible or direction-changing characters"
         return "This \(noun) contains \(what)."
@@ -243,6 +250,35 @@ public struct ApprovalDisplayModel: Equatable {
         }
         flush()
         return runs
+    }
+
+    // MARK: Text around the input
+
+    /// `text` (a headline, a reason, a directory, the agent's claim) as runs: a hidden or
+    /// direction-changing character becomes an invisible run shown as its token, everything else
+    /// (a line feed included, which the label wraps on) stays plain. Same tokens as the input's.
+    public static func contextRuns(for text: String) -> [ApprovalRenderRun] {
+        var runs: [ApprovalRenderRun] = []
+        var plain = ""
+        func flush() {
+            if !plain.isEmpty { runs.append(ApprovalRenderRun(text: plain, kind: .plain, codePoint: nil)); plain = "" }
+        }
+        for scalar in text.unicodeScalars {
+            if scalar.value != 0x0A, isHidden(scalar) || scalar.value == 0x09 || scalar.value == 0x0D {
+                flush()
+                runs.append(ApprovalRenderRun(text: canonicalToken(forCodePoint: scalar.value), kind: .invisible,
+                                              codePoint: scalar.value))
+            } else {
+                plain.unicodeScalars.append(scalar)
+            }
+        }
+        flush()
+        return runs
+    }
+
+    /// `contextRuns(for:)` joined: the text with every hidden character as its visible token.
+    public static func contextText(_ text: String) -> String {
+        contextRuns(for: text).map(\.text).joined()
     }
 
     // MARK: Unicode names

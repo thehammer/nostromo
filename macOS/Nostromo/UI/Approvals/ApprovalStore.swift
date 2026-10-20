@@ -32,7 +32,9 @@ enum ApprovalAnswerState: Equatable {
     /// This app sent the answer (the associated value is what it said); the daemon has not confirmed.
     case inFlight(ApprovalDecisionKind)
     /// The daemon refused the answer for a reason that leaves the request pending.
-    /// The text says why. An answer is never re-sent: the request will time out.
+    /// The text says why. An Allow is never re-sent (the request times out, which denies), but
+    /// a Deny may be tried again by a person (`ApprovalStore.answer`): the agent must not be
+    /// left waiting out the 15 minutes with the only safe answer disabled.
     case notSent(String)
     /// The request ended. The text (`Allowed once`, `Denied: no answer in 15 min`) is shown
     /// for `ApprovalStore.outcomeVisibleSeconds`, then the entry is dropped.
@@ -136,9 +138,21 @@ final class ApprovalStore {
 
     /// Send the human's answer for `id`. Returns false, and sends nothing, if the
     /// request is unknown, not waiting, this process has already answered it, or there is no connection.
+    ///
+    /// One attempt at a time: while an answer is in flight a second one is ignored. The one
+    /// exception is a Deny after the daemon refused an answer (`.notSent`): that is sent again,
+    /// and only a Deny (never an Allow, whatever was refused).
     @discardableResult
     func answer(_ id: String, _ decision: ApprovalDecisionWire, windowID: String) -> Bool {
-        guard var entry = entries[id], entry.state == .pending, !answered.contains(id), canSend() else { return false }
+        guard var entry = entries[id], canSend() else { return false }
+        switch entry.state {
+        case .pending:
+            guard !answered.contains(id) else { return false }
+        case .notSent:
+            guard decision.kind == .deny else { return false }
+        case .inFlight, .ended:
+            return false
+        }
         answered.insert(id)
         entry.state = .inFlight(decision.kind)
         entries[id] = entry
