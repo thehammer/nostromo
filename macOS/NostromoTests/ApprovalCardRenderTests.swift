@@ -289,6 +289,16 @@ final class ApprovalCardRenderTests: XCTestCase {
         try assertDrawn(in: .bareOnScreen)
     }
 
+    func testTmpRulerRect() throws {
+        var msgs: [String] = []
+        for f in RenderFixture.allCases {
+            let m = try measure(f, in: .bareOnScreen)
+            let marker = m.diag.components(separatedBy: " | ").first { $0.hasPrefix("ATD-GEOM") } ?? ""
+            msgs.append(marker.replacingOccurrences(of: "ATD-GEOM", with: "RECT"))
+        }
+        XCTFail("ATD-RECT " + msgs.joined(separator: " ## "))
+    }
+
     /// The ink counter's premise: a here-doc's fill (and the other token fills) alone is not ink.
     func testNoFillTheCardPaintsBehindTextCountsAsInk() {
         let background = InkCounter.luma(ApprovalPalette.inputBackground)
