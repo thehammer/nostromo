@@ -215,8 +215,8 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " scale=\(ink.scale) rendered=\(rendered != nil) inkTotal=\(ink.total) inkFirstLine=\(ink.firstLineBand)"
             + " areaPx=\(ink.width)x\(ink.height)"
         print(diag)
-        print(Self.layoutDump(of: view, fixture: fixture, mode: mode))
-        return Measurement(fixture: fixture, ink: ink, diag: diag)
+        let full = diag + "\n" + Self.layoutDump(of: view, fixture: fixture, mode: mode)
+        return Measurement(fixture: fixture, ink: ink, diag: full)
     }
 
     /// TEMPORARY diagnostics (content-free): the view geometry, a luma histogram of the text area and a PNG of it.
