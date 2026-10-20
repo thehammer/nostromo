@@ -215,7 +215,7 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " scale=\(ink.scale) rendered=\(rendered != nil) inkTotal=\(ink.total) inkFirstLine=\(ink.firstLineBand)"
             + " areaPx=\(ink.width)x\(ink.height)"
         print(diag)
-        let full = diag + "\n" + Self.layoutDump(of: view, fixture: fixture, mode: mode)
+        let full = diag + " | " + Self.layoutDump(of: view, fixture: fixture, mode: mode)
         return Measurement(fixture: fixture, ink: ink, diag: full)
     }
 
@@ -246,10 +246,10 @@ final class ApprovalCardRenderTests: XCTestCase {
                     if l > 60 { cells["\(x / 100)"] = (cells["\(x / 100)"] ?? 0) + 1 }
                 }
             }
-            out += "\nATD-HIST mode=\(mode.rawValue) fixture=\(fixture.name) px=\(rep.pixelsWide)x\(rep.pixelsHigh) maxLuma=\(maxLuma) hist=\(hist)"
+            out += " | ATD-HIST mode=\(mode.rawValue) fixture=\(fixture.name) px=\(rep.pixelsWide)x\(rep.pixelsHigh) maxLuma=\(maxLuma) hist=\(hist)"
                 + " brightByX100=\(cells.sorted { Int($0.key)! < Int($1.key)! }.map { "\($0.key):\($0.value)" }.joined(separator: ","))"
             if fixture == .singleLine || fixture == .twelveLines, let png = rep.representation(using: .png, properties: [:]) {
-                out += "\nATD-PNG mode=\(mode.rawValue) fixture=\(fixture.name) \(png.base64EncodedString())"
+                out += " | ATD-PNG mode=\(mode.rawValue) fixture=\(fixture.name) \(png.base64EncodedString())"
             }
         }
         return out
