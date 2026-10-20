@@ -2330,7 +2330,6 @@ final class ApprovalCardTests: XCTestCase {
     func testAPersonsScrollThatShowsTheEndCountsAfterALayoutOnlyChange() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
         let view = h.card.inputView
-        view.isPersonEvent = { _ in true }   // the scrolls below stand for a person's wheel
 
         SyntheticInputGate.begin()
         scrollClip(of: view, toBottom: true)
@@ -2339,6 +2338,7 @@ final class ApprovalCardTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
         XCTAssertFalse(view.hasShownEveryLine, "precondition")
 
+        view.isPersonEvent = { _ in true }   // the scrolls below stand for a person's wheel
         scrollClip(of: view, toBottom: false)
         scrollClip(of: view, toBottom: true)
 
