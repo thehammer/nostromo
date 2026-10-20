@@ -550,6 +550,7 @@ final class ApprovalCardHarness {
          permit: ApprovalCardView.GesturePermit? = ApprovalCardHarness.humanPermit,
          window provided: NSWindow? = nil,
          width: CGFloat = 560, maxHeight: CGFloat = 520, windowID: String = "w-test",
+         armDelay: TimeInterval = 0,
          prepare: ((NSWindow) -> Void)? = nil) {
         let window: NSWindow = provided ?? makeRigWindow(testCase, size: NSSize(width: width + 80, height: maxHeight + 80))
         let recorder = ApprovalRecorder()
@@ -557,7 +558,7 @@ final class ApprovalCardHarness {
         store.handle(.request(request))
         prepare?(window)
         let entry = store.entry(id: request.id)!
-        let card = ApprovalCardView(entry: entry, store: store, windowID: { windowID }, permit: permit)
+        let card = ApprovalCardView(entry: entry, store: store, windowID: { windowID }, permit: permit, armDelay: armDelay)
         let height = card.preferredHeight(forWidth: width, maxHeight: maxHeight)
         card.frame = NSRect(x: 20, y: 20, width: width, height: height)
         window.contentView!.addSubview(card)
@@ -1211,6 +1212,118 @@ final class ApprovalCardTests: XCTestCase {
         _ = NSApp.sendAction(action, to: allow.target, from: allow)
         XCTAssertTrue(h.recorder.sent.isEmpty, "the rule is checked where the answer is made, not only by the button's enabled flag")
         XCTAssertEqual(h.store.entry(id: "req-1")?.state, ApprovalAnswerState.pending)
+    }
+
+    // MARK: Arming delay (a card that just appeared cannot be allowed at once)
+
+    private func pump(untilArmed card: ApprovalCardView) -> Bool {
+        pump(until: { card.isArmed }, timeout: 2)
+    }
+
+    func testAnUnarmedCardRefusesAllowEvenWhenTheWholeInputHasBeenShown() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), armDelay: 30)
+        let allow = try XCTUnwrap(h.card.allowButton)
+
+        XCTAssertFalse(h.card.isArmed)
+        XCTAssertTrue(h.card.inputView.hasShownEveryLine, "precondition: nothing but the delay holds Allow back")
+        XCTAssertFalse(h.card.canAllow)
+        XCTAssertFalse(allow.isEnabled)
+        XCTAssertEqual(h.card.listing.options.last?.id, "allow_once")
+        XCTAssertEqual(h.card.listing.options.last?.enabled, false)
+
+        allow.performClick(nil)
+        let action = try XCTUnwrap(allow.action)
+        _ = NSApp.sendAction(action, to: allow.target, from: allow)
+
+        XCTAssertTrue(h.recorder.sent.isEmpty, "a click aimed at what was under the pointer a moment ago must not allow")
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, ApprovalAnswerState.pending)
+    }
+
+    func testDenyWorksWhileTheCardIsUnarmed() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), armDelay: 30)
+        XCTAssertFalse(h.card.isArmed)
+        XCTAssertTrue(h.card.denyButton.isEnabled)
+        XCTAssertEqual(h.card.denyAndStopButton?.isEnabled, true)
+
+        press(h.card.denyButton)
+
+        XCTAssertEqual(h.recorder.sent.map { $0.decision }, [ApprovalDecisionWire(kind: .deny)])
+    }
+
+    func testAllowIsEnabledOnceTheDelayHasPassed() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(), armDelay: 0.05)
+        XCTAssertFalse(h.card.isArmed, "precondition: unarmed when it appears")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+
+        XCTAssertTrue(pump(untilArmed: h.card), "the card never armed")
+
+        XCTAssertTrue(h.card.canAllow)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+        XCTAssertEqual(h.card.listing.options.last?.enabled, true)
+        press(h.card.allowButton)
+        XCTAssertEqual(h.recorder.sent.map { $0.decision }, [ApprovalDecisionWire(kind: .allowOnce)])
+    }
+
+    func testArmingDoesNotEnableAllowWhileTheInputIsStillUnseen() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300, armDelay: 0.05)
+        XCTAssertTrue(pump(untilArmed: h.card), "the card never armed")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false, "armed, but the end of the input has not been shown")
+        XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow")
+    }
+
+    func testACardWithNoDelayIsArmedAtOnce() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm())
+        XCTAssertTrue(h.card.isArmed)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+    }
+
+    // MARK: Only a person's scroll counts as having seen the input
+
+    /// Move the input's clip view the way a scroll wheel does (not through `scrollToEnd`, which is the test and script entry).
+    private func scrollClip(of view: ApprovalInputView, toBottom: Bool) {
+        let target = toBottom ? max(0, view.textView.frame.height - view.contentView.bounds.height) : 0
+        view.contentView.scroll(to: NSPoint(x: 0, y: target))
+        view.reflectScrolledClipView(view.contentView)
+    }
+
+    func testAScrollMadeDuringAnAppControlRequestDoesNotCountAsHavingShownTheInput() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+        XCTAssertFalse(view.hasShownEveryLine, "precondition")
+
+        SyntheticInputGate.begin()
+        scrollClip(of: view, toBottom: true)
+        SyntheticInputGate.end()
+
+        XCTAssertTrue(view.visibleLineNumbers.contains(300), "precondition: the clip really is at the end")
+        XCTAssertFalse(view.hasShownEveryLine, "a synthetic scroll is not a person looking at the text")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+        XCTAssertEqual(h.card.allowButton?.title, "Scroll to the end to allow")
+    }
+
+    func testAPersonsScrollToTheEndCountsAfterASyntheticOneDidNot() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+
+        SyntheticInputGate.begin()
+        scrollClip(of: view, toBottom: true)
+        SyntheticInputGate.end()
+        XCTAssertFalse(view.hasShownEveryLine, "precondition")
+
+        scrollClip(of: view, toBottom: false)
+        XCTAssertFalse(view.hasShownEveryLine, "the top is not the end")
+        scrollClip(of: view, toBottom: true)
+
+        XCTAssertTrue(view.hasShownEveryLine, "a scroll outside any app-control request counts")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
+        XCTAssertEqual(h.card.allowButton?.title, "Allow once")
+    }
+
+    func testAPersonsScrollToTheEndCountsOnItsOwn() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        scrollClip(of: h.card.inputView, toBottom: true)
+        XCTAssertTrue(h.card.inputView.hasShownEveryLine)
+        XCTAssertEqual(h.card.allowButton?.isEnabled, true)
     }
 
     // MARK: Round-trip failure
@@ -2033,12 +2146,12 @@ final class ApprovalOverlayHostTests: XCTestCase {
         init(_ testCase: XCTestCase, size: NSSize = NSSize(width: 640, height: 500), tag: String = "cody-1",
              store provided: ApprovalStore? = nil, window providedWindow: NSWindow? = nil,
              permit: ApprovalCardView.GesturePermit? = ApprovalCardHarness.humanPermit,
-             reduceMotion: Bool = true, windowID: String = "w-test") {
+             armDelay: TimeInterval = 0, reduceMotion: Bool = true, windowID: String = "w-test") {
             let recorder = ApprovalRecorder()
             let store = provided ?? recorder.makeStore()
             let window: NSWindow = providedWindow ?? makeRigWindow(testCase, size: size)
             let host = ApprovalOverlayHost(tag: tag, store: store, windowID: { windowID }, permit: permit,
-                                           reduceMotion: { reduceMotion })
+                                           armDelay: armDelay, reduceMotion: { reduceMotion })
             host.frame = NSRect(origin: .zero, size: size)
             window.contentView!.addSubview(host)
             self.recorder = recorder
@@ -2177,6 +2290,60 @@ final class ApprovalOverlayHostTests: XCTestCase {
         XCTAssertFalse(ApprovalTestViews.labelTexts(in: card).contains { $0.hasSuffix(" more") }, "nothing else is waiting")
         XCTAssertEqual(h.host.subviews.count, 1)
         XCTAssertEqual(card.denyButton.isEnabled, true, "the new card is waiting for an answer")
+    }
+
+    // MARK: Arming delay
+
+    func testACardSwappedInForTheNextRequestIsUnarmedAgain() throws {
+        let h = HostHarness(self, armDelay: 0.05)
+        h.arrive(try ApprovalTestRequests.simpleRm(id: "a"))
+        h.arrive(try ApprovalTestRequests.simpleRm(id: "b"))
+        let first = try XCTUnwrap(h.host.card)
+        XCTAssertFalse(first.isArmed, "a new card starts unarmed")
+        XCTAssertEqual(first.allowButton?.isEnabled, false)
+        XCTAssertTrue(waitUntilArmed(first), "the first card never armed")
+        XCTAssertEqual(first.allowButton?.isEnabled, true)
+
+        h.store.handle(.resolved(try ApprovalTestRequests.resolved(id: "a", outcome: "denied")))
+        h.recorder.runScheduled()
+        h.layout()
+
+        let second = try XCTUnwrap(h.host.card)
+        XCTAssertEqual(second.request.id, "b")
+        XCTAssertFalse(second.isArmed, "the next request's card is unarmed again")
+        XCTAssertFalse(second.canAllow)
+        XCTAssertEqual(second.allowButton?.isEnabled, false)
+        second.allowButton?.performClick(nil)
+        XCTAssertTrue(h.recorder.sent.isEmpty)
+        XCTAssertTrue(waitUntilArmed(second), "the second card never armed")
+        XCTAssertEqual(second.allowButton?.isEnabled, true)
+    }
+
+    func testTheHostsDefaultDelayKeepsANewCardUnarmed() throws {
+        let recorder = ApprovalRecorder()
+        let store = recorder.makeStore()
+        let window = makeRigWindow(self, size: NSSize(width: 640, height: 500))
+        let host = ApprovalOverlayHost(tag: "cody-1", store: store, windowID: { "w" }, permit: ApprovalCardHarness.humanPermit,
+                                       reduceMotion: { true })
+        host.frame = NSRect(x: 0, y: 0, width: 640, height: 500)
+        window.contentView!.addSubview(host)
+        store.handle(.request(try ApprovalTestRequests.simpleRm()))
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        let card = try XCTUnwrap(host.card)
+        XCTAssertGreaterThan(ApprovalOverlayHost.armDelay, 0)
+        XCTAssertFalse(card.isArmed)
+        card.allowButton?.performClick(nil)
+        XCTAssertTrue(recorder.sent.isEmpty)
+        XCTAssertEqual(host.focusTag, "cody-1")
+    }
+
+    private func waitUntilArmed(_ card: ApprovalCardView) -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while !card.isArmed && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+        }
+        return card.isArmed
     }
 
     // MARK: Answers and endings through the host

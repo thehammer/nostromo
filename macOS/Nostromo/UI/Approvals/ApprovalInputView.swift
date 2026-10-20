@@ -39,14 +39,9 @@ enum ApprovalPalette {
     static let gutterText = NSColor(white: 150 / 255, alpha: 1)
 }
 
-/// The text view. Its accessibility value is the input spoken line by line, with
-/// every invisible character read by name.
-final class ApprovalTextView: NSTextView {
-    /// What VoiceOver reads (set by `ApprovalInputView`).
-    var spokenText = ""
-
-    override func accessibilityValue() -> Any? { spokenText }
-}
+/// The text view. Its accessibility value is set to the input spoken line by line, with
+/// every invisible character read by name (`ApprovalInputView.render`).
+final class ApprovalTextView: NSTextView {}
 
 final class ApprovalInputView: NSScrollView {
 
@@ -59,6 +54,7 @@ final class ApprovalInputView: NSScrollView {
     /// One entry per display line: its number and where it starts in `textView.string` (UTF-16).
     private(set) var lineNumbers: [Int] = []
     private var lineStarts: [Int] = []
+    private var ignoreProgressUntilPersonScrolls = false
     private let ruler = ApprovalLineNumberRuler()
     private let font = Theme.codeFont(size: 12)
     private static let textInset = NSSize(width: 6, height: 6)
@@ -160,7 +156,7 @@ final class ApprovalInputView: NSScrollView {
     /// Re-check which lines are on screen. Called after layout and every scroll.
     func updateScrollProgress() {
         ruler.needsDisplay = true
-        guard !hasShownEveryLine else { return }
+        guard !hasShownEveryLine, !ignoreProgressUntilPersonScrolls else { return }
         guard let layout = textView.layoutManager, let container = textView.textContainer else { return }
         if textView.string.isEmpty { return markShownEveryLine() }
         guard contentView.bounds.height > 0, bounds.width > 0 else { return }
@@ -205,7 +201,7 @@ final class ApprovalInputView: NSScrollView {
             spoken.append(line.spokenText)
         }
         textView.textStorage?.setAttributedString(text)
-        textView.spokenText = spoken.joined(separator: "\n")
+        textView.setAccessibilityValue(spoken.joined(separator: "\n"))
         ruler.ruleThickness = ApprovalLineNumberRuler.thickness(forLineCount: max(1, model.lines.count))
     }
 
@@ -257,6 +253,13 @@ final class ApprovalInputView: NSScrollView {
     // MARK: Private
 
     @objc private func clipBoundsChanged(_ note: Notification) {
+        // A scroll the app-control socket made is not a person looking at the text: it
+        // doesn't count towards "every line has been shown" until a person scrolls.
+        if SyntheticInputGate.isSynthetic(NSApp.currentEvent) && !SyntheticInputGate.allowsSynthetic {
+            ignoreProgressUntilPersonScrolls = true
+            return
+        }
+        ignoreProgressUntilPersonScrolls = false
         updateScrollProgress()
     }
 

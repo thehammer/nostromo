@@ -34,7 +34,7 @@ final class ApprovalScrollSafetyTests: XCTestCase {
         let recorder = ApprovalRecorder()
         let store = recorder.makeStore()
         let host = ApprovalOverlayHost(tag: "cody-1", store: store, windowID: { "w-gate" },
-                                       permit: ApprovalCardHarness.humanPermit, reduceMotion: { reduceMotion })
+                                       permit: ApprovalCardHarness.humanPermit, armDelay: 0, reduceMotion: { reduceMotion })
         host.translatesAutoresizingMaskIntoConstraints = false
         let content = rig.window.contentView!
         content.addSubview(host, positioned: .above, relativeTo: rig.overlay)

@@ -492,7 +492,7 @@ final class AppControlServer {
                 v.subviews.forEach(walk)
             }
             if let content = window.contentView { walk(content) }
-            for host in hosts where focus == nil || host.tag == focus {
+            for host in hosts where focus == nil || host.focusTag == focus {
                 for listing in host.listings {
                     var entry = byRequest[listing.requestID] ?? listing.jsonObject
                     if byRequest[listing.requestID] == nil { order.append(listing.requestID) }

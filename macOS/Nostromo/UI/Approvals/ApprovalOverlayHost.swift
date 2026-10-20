@@ -28,8 +28,12 @@ final class ApprovalOverlayHost: NSView {
     /// The card is never taller than this share of the pane.
     static let maxHeightFraction: CGFloat = 0.6
     static let fadeDuration: TimeInterval = 0.25
+    /// How long a card that just appeared keeps Allow once disabled: a click aimed at what was
+    /// under the pointer a moment ago must not land on an Allow button that appeared there.
+    static let armDelay: TimeInterval = 0.6
 
-    let tag: String
+    /// The focus this host shows requests for. (Not `tag`: that is `NSView`'s own.)
+    let focusTag: String
 
     /// The card on screen (may be fading out).
     private(set) var card: ApprovalCardView?
@@ -38,6 +42,7 @@ final class ApprovalOverlayHost: NSView {
     private let windowIDProvider: (() -> String)?
     private let permit: ApprovalCardView.GesturePermit?
     private let reduceMotion: () -> Bool
+    private let cardArmDelay: TimeInterval
     private var subscription: AnyCancellable?
     /// Set while a card is fading out; a newer card or a refresh cancels it.
     private var fadingCard: ApprovalCardView?
@@ -45,15 +50,17 @@ final class ApprovalOverlayHost: NSView {
     init(tag: String, store: ApprovalStore,
          windowID: (() -> String)? = nil,
          permit: ApprovalCardView.GesturePermit? = nil,
+         armDelay: TimeInterval = ApprovalOverlayHost.armDelay,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
-        self.tag = tag
+        self.focusTag = tag
         self.store = store
         self.windowIDProvider = windowID
         self.permit = permit
         self.reduceMotion = reduceMotion
+        self.cardArmDelay = armDelay
         super.init(frame: .zero)
         subscription = store.changes
-            .filter { [tag] in $0 == tag }
+            .filter { [focusTag] in $0 == focusTag }
             .sink { [weak self] _ in self?.refresh() }
         refresh()
     }
@@ -99,13 +106,13 @@ final class ApprovalOverlayHost: NSView {
 
     /// Show what the store says this focus should show: the oldest request, or nothing.
     func refresh() {
-        guard let entry = store.current(tag: tag) else {
+        guard let entry = store.current(tag: focusTag) else {
             fadeOutCard()
             return
         }
         if let card, card.request.id == entry.request.id, fadingCard !== card {
             card.update(entry: entry)
-            card.setMoreCount(store.moreCount(tag: tag))
+            card.setMoreCount(store.moreCount(tag: focusTag))
             return
         }
         replaceCard(with: entry)
@@ -114,9 +121,9 @@ final class ApprovalOverlayHost: NSView {
     private func replaceCard(with entry: ApprovalEntry) {
         removeCardNow()
         let new = ApprovalCardView(entry: entry, store: store, windowID: { [weak self] in self?.currentWindowID() ?? "w0" },
-                                   permit: permit)
+                                   permit: permit, armDelay: cardArmDelay)
         new.onNeedsLayout = { [weak self] in self?.needsLayout = true }
-        new.setMoreCount(store.moreCount(tag: tag))
+        new.setMoreCount(store.moreCount(tag: focusTag))
         addSubview(new)
         card = new
         if store.claimAnnouncement(entry.request.id) {

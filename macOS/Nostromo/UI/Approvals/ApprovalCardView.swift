@@ -140,13 +140,17 @@ final class ApprovalCardView: NSView {
     private let buttonRow = NSView()
 
     private var state: ApprovalAnswerState
+    /// False for a moment after the card appears: Allow once can't be pressed yet.
+    private(set) var isArmed = true
     private var inputHeight: CGFloat = 0
 
     // Layout is top-down.
     override var isFlipped: Bool { true }
 
+    /// - Parameter armDelay: how long after it appears Allow once stays disabled (see
+    ///   `ApprovalOverlayHost.armDelay`). Zero arms it at once.
     init(entry: ApprovalEntry, store: ApprovalStore, windowID: @escaping () -> String,
-         permit: GesturePermit? = nil) {
+         permit: GesturePermit? = nil, armDelay: TimeInterval = 0) {
         request = entry.request
         state = entry.state
         model = ApprovalDisplayModel(request: entry.request)
@@ -167,6 +171,13 @@ final class ApprovalCardView: NSView {
         focusRingType = .none
 
         buildContent()
+        if armDelay > 0 {
+            isArmed = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + armDelay) { [weak self] in
+                self?.isArmed = true
+                self?.refresh()
+            }
+        }
         refresh()
 
         setAccessibilityElement(true)
@@ -211,7 +222,7 @@ final class ApprovalCardView: NSView {
     }
 
     var canAllow: Bool {
-        options.offersAllowOnce && model.isVerified && inputView.hasShownEveryLine
+        isArmed && options.offersAllowOnce && model.isVerified && inputView.hasShownEveryLine
     }
 
     /// What Allow once says: the reason it can't be pressed yet, or `Allow once`.
