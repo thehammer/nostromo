@@ -58,9 +58,11 @@ final class ApprovalTextView: NSTextView {
 
     weak var gutterOwner: ApprovalInputView?
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        gutterOwner?.drawGutter(in: dirtyRect)
+    /// The numbers go on the background pass, before the text: drawing after `super.draw` painted
+    /// nothing (the context is left clipped to the text area; found on CI, not documented).
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        gutterOwner?.drawGutter(in: rect)
     }
 }
 
@@ -472,18 +474,11 @@ final class ApprovalInputView: NSScrollView {
 
     // MARK: Drawing support (the gutter)
 
-    /// Paint the line numbers in the gutter strip of the text view (called from its `draw`, in its
-    /// coordinates, after the text view has painted its background). The numbers are right-aligned in
-    /// the strip, which is part of the inset: they can't reach the text. (No clip here: clipping the
-    /// graphics context to the strip drew nothing at all on CI, the plain draw does.)
+    /// Paint the line numbers in the gutter strip of the text view (called from its `drawBackground`,
+    /// in its coordinates, after it has painted its background). The numbers are right-aligned in the
+    /// strip, which is part of the inset: they can't reach the text.
     fileprivate func drawGutter(in dirty: NSRect) {
         guard dirty.minX < gutterWidth, dirty.height > 0 else { return }
-        // TMP variants
-        let g150 = ApprovalPalette.gutterText
-        NSAttributedString(string: "8", attributes: [.font: Self.gutterFont, .foregroundColor: g150]).draw(at: NSPoint(x: 1, y: 0))
-        NSString("8").draw(at: NSPoint(x: 1, y: 10), withAttributes: [.font: Self.gutterFont, .foregroundColor: g150])
-        NSString("8").draw(at: NSPoint(x: 11, y: 0), withAttributes: [.font: Self.gutterFont, .foregroundColor: NSColor.white])
-        NSAttributedString(string: "8", attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.white]).draw(at: NSPoint(x: 11, y: 10))
         let attrs: [NSAttributedString.Key: Any] = [.font: Self.gutterFont, .foregroundColor: ApprovalPalette.gutterText]
         for index in lineNumbers.indices {
             guard let top = lineTop(at: index) else { continue }
