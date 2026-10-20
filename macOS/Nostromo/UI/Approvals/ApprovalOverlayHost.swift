@@ -133,7 +133,7 @@ final class ApprovalOverlayHost: NSView {
         if store.claimAnnouncement(entry.request.id) {
             // Announced once on arrival, politely: no focus change, no interruption of what is being read.
             NSAccessibility.post(element: new, notification: .announcementRequested,
-                                 userInfo: [.announcement: ApprovalDisplayModel.contextText(ApprovalKinds.announcement(for: entry.request)),
+                                 userInfo: [.announcement: ApprovalDisplayModel.contextText(ApprovalKinds.announcement(for: entry.request), keepingLineFeeds: false),
                                             .priority: NSAccessibilityPriorityLevel.high.rawValue])
         }
         needsLayout = true

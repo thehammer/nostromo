@@ -77,6 +77,8 @@ final class ApprovalInputView: NSScrollView {
     private static let scrollNoise: CGFloat = 2
     /// Spans of a line fragment that meet within this (points) count as one: scroll positions are pixel-snapped.
     private static let coverageTolerance: CGFloat = 1
+    /// The clip view must be at least this tall (points) for what is in it to count as shown.
+    private static let minimumCoveringHeight: CGFloat = 16
 
     init(model: ApprovalDisplayModel) {
         textView = ApprovalTextView(frame: .zero)
@@ -239,7 +241,7 @@ final class ApprovalInputView: NSScrollView {
         guard contentView.bounds.height > 0, textView.frame.width > 0 else { return }
         fitTextView()
         coverVisibleFragments()
-        if coveredCharacters.count >= coverageTotal { markShownEveryLine() }
+        if coveredCharacters.contains(integersIn: 0 ..< coverageTotal) { markShownEveryLine() }
     }
 
     override func layout() {
@@ -274,6 +276,9 @@ final class ApprovalInputView: NSScrollView {
             coverageWidth = textView.frame.width
         }
         let clip = contentView.bounds
+        // A view shorter than a line of text shows no line: nothing counts (and the 1 pt tolerance
+        // below can't be chained across tiny slivers).
+        guard clip.height >= Self.minimumCoveringHeight else { return }
         let origin = textView.textContainerOrigin
         let glyphs = layout.glyphRange(forBoundingRect: clip.offsetBy(dx: -origin.x, dy: -origin.y), in: container)
         if glyphs.length > 0 {

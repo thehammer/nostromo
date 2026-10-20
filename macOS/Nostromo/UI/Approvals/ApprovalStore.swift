@@ -233,6 +233,7 @@ final class ApprovalStore {
 
     private func end(_ id: String, text: String) {
         guard var entry = entries[id], !entry.isEnded else { return }
+        refusalTexts[id] = nil
         entry.state = .ended(text)
         entries[id] = entry
         changes.send(entry.request.tag)

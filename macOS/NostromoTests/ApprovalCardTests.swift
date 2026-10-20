@@ -1064,6 +1064,22 @@ final class ApprovalStoreTests: XCTestCase {
         XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.inFlight(.deny))
     }
 
+    func testARefusedAllowThatEndedIsNotBroughtBackAsRefusedByALateSnapshot() throws {
+        let (store, recorder) = make()
+        let request = try ApprovalTestRequests.simpleRm(id: "a")
+        store.handle(.request(request))
+        XCTAssertTrue(store.answer("a", allowOnce, windowID: "w1"))
+        try refuse(store, code: "not_operator_app")
+        store.handle(.resolved(try ApprovalTestRequests.resolved(id: "a", outcome: "timed_out")))
+        recorder.runScheduled()   // the outcome has been shown for its two seconds: the entry is dropped
+        XCTAssertNil(store.entry(id: "a"), "precondition")
+
+        store.handle(.snapshot([request]))   // a stale list still holding it
+
+        XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.inFlight(.deny), "it is inert, not a refused request with Deny on offer")
+        XCTAssertFalse(store.answer("a", deny, windowID: "w1"))
+    }
+
     func testARefusalForAnUnknownRequestChangesNothing() throws {
         let (store, _) = make()
         store.handle(.request(try ApprovalTestRequests.simpleRm(id: "a")))
@@ -1321,6 +1337,46 @@ final class ApprovalCardTests: XCTestCase {
             let landed = pump { h.window.firstResponder === h.card.initialKeyView }
             XCTAssertTrue(landed, "keyboard focus entering the card lands on \(String(describing: h.card.initialKeyView)), not \(String(describing: h.window.firstResponder))")
         }
+    }
+
+    func testAViewShorterThanALineOfTextShowsNothingEvenWhenScrolledPastEverything() throws {
+        let window = makeRigWindow(self, size: NSSize(width: 400, height: 300))
+        let view = ApprovalInputView(model: ApprovalDisplayModel(request: try ApprovalTestRequests.shortLines(8)))
+        view.isWindowShowing = { true }
+        view.translatesAutoresizingMaskIntoConstraints = true
+        window.contentView?.addSubview(view)
+        view.setFrameSize(NSSize(width: 300, height: 8))   // a sliver: no line of text fits in it
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        XCTAssertLessThan(view.contentView.bounds.height, 16, "precondition: a sliver")
+
+        // 3 pt steps through the whole text: gaps between the slivers are under the 1 pt tolerance.
+        let total = view.textView.frame.height
+        var y: CGFloat = 0
+        while y < total {
+            ApprovalTestViews.moveClip(of: view, toY: y)
+            y += max(1, view.contentView.bounds.height - 0.5)
+        }
+
+        XCTAssertFalse(view.hasShownEveryLine, "a sliver shows no line, however many times it is moved")
+        XCTAssertEqual(view.linesNotYetShown, Array(1 ... 8))
+    }
+
+    func testALineFeedInTheNameOrTheDirectoryIsAVisibleTokenAndCountsButOneInTheClaimIsABreak() throws {
+        let cwd = "/tmp/a\nb"
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm(cwd: cwd), maxHeight: 600)
+        let inLabel = try XCTUnwrap(ApprovalTestViews.label(startingWith: "In:", in: h.card))
+        XCTAssertEqual(inLabel.stringValue, "In: /tmp/a\u{27E8}U+000A\u{27E9}b", "one row: the break is a token, nothing after it is cut off")
+        XCTAssertEqual(h.card.model.invisibleCount, 1)
+        XCTAssertTrue(h.card.options.defaultsToDeny)
+        XCTAssertTrue(h.card.initialKeyView === h.card.denyButton)
+
+        let wrapping = ApprovalCardHarness(self, request: try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand,
+                                                                                         description: "first\nsecond"), maxHeight: 600)
+        let agentSays = try XCTUnwrap(ApprovalTestViews.label(startingWith: "Agent says:", in: wrapping.card))
+        XCTAssertEqual(agentSays.stringValue, "Agent says: \u{201C}first\nsecond\u{201D}")
+        XCTAssertEqual(wrapping.card.model.invisibleCount, 0)
+        XCTAssertFalse(wrapping.card.options.defaultsToDeny)
     }
 
     func testAClickOnTheCardsPaddingEntersTheCardAndMovesFocusToItsInitialKeyViewAndNothingElse() throws {

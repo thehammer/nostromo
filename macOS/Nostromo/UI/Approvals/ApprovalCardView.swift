@@ -191,7 +191,7 @@ final class ApprovalCardView: NSView {
 
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel(ApprovalDisplayModel.contextText(ApprovalKinds.announcement(for: request)))
+        setAccessibilityLabel(ApprovalDisplayModel.contextText(ApprovalKinds.announcement(for: request), keepingLineFeeds: false))
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -286,7 +286,7 @@ final class ApprovalCardView: NSView {
         }
         return ApprovalCardListing(
             requestID: request.id, focus: request.tag,
-            agent: ApprovalDisplayModel.contextText(ApprovalKinds.asker(for: request)),
+            agent: ApprovalDisplayModel.contextText(ApprovalKinds.asker(for: request), keepingLineFeeds: false),
             tool: request.toolName, headline: headlineLabel.stringValue,
             input: shownInput(from: texts), lines: lines,
             commandCount: model.commandCount, invisibleCount: model.invisibleCount,
@@ -411,8 +411,8 @@ final class ApprovalCardView: NSView {
         // Header
         headlineLabel.lineBreakMode = .byTruncatingTail
         let headline = ApprovalKinds.headline(for: request)
-        setContext(headlineLabel, headline, font: .systemFont(ofSize: 13, weight: .semibold), color: ApprovalPalette.commandText)
-        headlineLabel.toolTip = ApprovalDisplayModel.contextText(headline)
+        setContext(headlineLabel, headline, wraps: false, font: .systemFont(ofSize: 13, weight: .semibold), color: ApprovalPalette.commandText)
+        headlineLabel.toolTip = ApprovalDisplayModel.contextText(headline, keepingLineFeeds: false)
 
         moreLabel.font = .systemFont(ofSize: 11)
         moreLabel.textColor = ApprovalPalette.mutedText
@@ -427,8 +427,8 @@ final class ApprovalCardView: NSView {
         inLabel.lineBreakMode = .byTruncatingMiddle
         if let cwd = request.cwd, !cwd.isEmpty {
             let shown = ApprovalKinds.homeAbbreviated(cwd, home: NSHomeDirectory())
-            setContext(inLabel, shown, prefix: "In: ", font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
-            inLabel.toolTip = ApprovalDisplayModel.contextText(cwd)
+            setContext(inLabel, shown, prefix: "In: ", wraps: false, font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
+            inLabel.toolTip = ApprovalDisplayModel.contextText(cwd, keepingLineFeeds: false)
         } else {
             inLabel.isHidden = true
         }
@@ -539,8 +539,9 @@ final class ApprovalCardView: NSView {
 
     /// Show `text` in `label` with every hidden or direction-changing character as a visible token in
     /// the warning colour (the input's tokens), always left to right so nothing reorders on screen.
+    /// A line feed is kept as a line break only where the label `wraps`; in a one-row label it is a token.
     private func setContext(_ label: NSTextField, _ text: String, prefix: String = "", suffix: String = "",
-                            font: NSFont, color: NSColor) {
+                            wraps: Bool = true, font: NSFont, color: NSColor) {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = label.lineBreakMode
         style.baseWritingDirection = .leftToRight
@@ -552,7 +553,7 @@ final class ApprovalCardView: NSView {
             return base
         }
         let out = NSMutableAttributedString(string: prefix, attributes: attrs())
-        for run in ApprovalDisplayModel.contextRuns(for: text) {
+        for run in ApprovalDisplayModel.contextRuns(for: text, keepingLineFeeds: wraps) {
             if run.kind == .invisible {
                 out.append(NSAttributedString(string: run.text, attributes: attrs([
                     .foregroundColor: ApprovalPalette.warning,

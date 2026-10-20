@@ -155,8 +155,11 @@ public struct ApprovalDisplayModel: Equatable {
         for run in extras.flatMap(\.runs) {
             if run.kind == .invisible { invisible += 1 } else if run.kind == .nonAscii { nonAscii += 1 }
         }
-        let context = [ApprovalKinds.headline(for: request), request.reason.text, request.cwd ?? "", request.description ?? ""]
-            .reduce(0) { $0 + Self.contextRuns(for: $1).filter { $0.kind == .invisible }.count }
+        func hidden(_ text: String, wraps: Bool) -> Int {
+            Self.contextRuns(for: text, keepingLineFeeds: wraps).filter { $0.kind == .invisible }.count
+        }
+        let context = hidden(ApprovalKinds.headline(for: request), wraps: false) + hidden(request.reason.text, wraps: true)
+            + hidden(request.cwd ?? "", wraps: false) + hidden(request.description ?? "", wraps: true)
         self.lines = lines
         self.extraLines = extras
         self.commandCount = display.commandCount
@@ -256,15 +259,17 @@ public struct ApprovalDisplayModel: Equatable {
 
     /// `text` (a headline, a reason, a directory, the agent's claim) as runs: a hidden or
     /// direction-changing character becomes an invisible run shown as its token, everything else
-    /// (a line feed included, which the label wraps on) stays plain. Same tokens as the input's.
-    public static func contextRuns(for text: String) -> [ApprovalRenderRun] {
+    /// stays plain. Same tokens as the input's. A line feed stays plain (the label wraps on it) only
+    /// with `keepingLineFeeds`; a one-row label (the headline, the directory) would clip what follows
+    /// it, so there it is a token too.
+    public static func contextRuns(for text: String, keepingLineFeeds: Bool = true) -> [ApprovalRenderRun] {
         var runs: [ApprovalRenderRun] = []
         var plain = ""
         func flush() {
             if !plain.isEmpty { runs.append(ApprovalRenderRun(text: plain, kind: .plain, codePoint: nil)); plain = "" }
         }
         for scalar in text.unicodeScalars {
-            if scalar.value != 0x0A, isHidden(scalar) || scalar.value == 0x09 || scalar.value == 0x0D {
+            if !(keepingLineFeeds && scalar.value == 0x0A), isHidden(scalar) || scalar.value == 0x09 || scalar.value == 0x0D {
                 flush()
                 runs.append(ApprovalRenderRun(text: canonicalToken(forCodePoint: scalar.value), kind: .invisible,
                                               codePoint: scalar.value))
@@ -277,8 +282,8 @@ public struct ApprovalDisplayModel: Equatable {
     }
 
     /// `contextRuns(for:)` joined: the text with every hidden character as its visible token.
-    public static func contextText(_ text: String) -> String {
-        contextRuns(for: text).map(\.text).joined()
+    public static func contextText(_ text: String, keepingLineFeeds: Bool = true) -> String {
+        contextRuns(for: text, keepingLineFeeds: keepingLineFeeds).map(\.text).joined()
     }
 
     // MARK: Unicode names

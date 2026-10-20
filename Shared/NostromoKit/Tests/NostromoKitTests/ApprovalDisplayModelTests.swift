@@ -1207,6 +1207,19 @@ final class ApprovalDisplayModelTests: XCTestCase {
         XCTAssertTrue(model.isVerified, "text around the input has no part in the round-trip check")
     }
 
+    func testALineFeedIsATokenInAOneRowLabelAndAPlainBreakWhereTheLabelWraps() throws {
+        XCTAssertEqual(ApprovalDisplayModel.contextText("a\nb", keepingLineFeeds: false), "a\u{27E8}U+000A\u{27E9}b",
+                       "a one-row label would clip what follows the break")
+        XCTAssertEqual(ApprovalDisplayModel.contextText("a\nb", keepingLineFeeds: true), "a\nb")
+        XCTAssertEqual(ApprovalDisplayModel.contextText("a\nb"), "a\nb", "wrapping labels are the default")
+
+        // The headline and the directory are one row each; the reason and the claim wrap.
+        let oneRow = ApprovalDisplayModel(request: try requestWithContext(agentName: "co\ndy", cwd: "/tmp/a\nb"))
+        XCTAssertEqual(oneRow.contextInvisibleCount, 2, "a line feed in the name and in the directory is hidden text")
+        let wrapping = ApprovalDisplayModel(request: try requestWithContext(reasonText: "one\ntwo", description: "x\ny"))
+        XCTAssertEqual(wrapping.contextInvisibleCount, 0, "a line feed in the reason and the claim is just a line break")
+    }
+
     func testTheTotalAddsTheInputsOwnHiddenCharactersToTheContextOnes() throws {
         let command = "echo \u{202E}x"
         let model = ApprovalDisplayModel(request: try requestWithContext(command: command, reasonText: "r\u{200B}"))
