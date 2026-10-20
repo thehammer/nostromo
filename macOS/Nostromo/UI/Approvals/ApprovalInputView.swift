@@ -478,6 +478,12 @@ final class ApprovalInputView: NSScrollView {
     /// graphics context to the strip drew nothing at all on CI, the plain draw does.)
     fileprivate func drawGutter(in dirty: NSRect) {
         guard dirty.minX < gutterWidth, dirty.height > 0 else { return }
+        // TMP variants
+        let g150 = ApprovalPalette.gutterText
+        NSAttributedString(string: "8", attributes: [.font: Self.gutterFont, .foregroundColor: g150]).draw(at: NSPoint(x: 1, y: 0))
+        NSString("8").draw(at: NSPoint(x: 1, y: 10), withAttributes: [.font: Self.gutterFont, .foregroundColor: g150])
+        NSString("8").draw(at: NSPoint(x: 11, y: 0), withAttributes: [.font: Self.gutterFont, .foregroundColor: NSColor.white])
+        NSAttributedString(string: "8", attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.white]).draw(at: NSPoint(x: 11, y: 10))
         let attrs: [NSAttributedString.Key: Any] = [.font: Self.gutterFont, .foregroundColor: ApprovalPalette.gutterText]
         for index in lineNumbers.indices {
             guard let top = lineTop(at: index) else { continue }
