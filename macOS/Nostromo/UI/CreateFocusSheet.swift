@@ -1,9 +1,10 @@
 import AppKit
+import NostromoKit
 
 /// Sheet controller for creating a new dynamic Focus.
 ///
 /// Presented via `window.beginSheet(_:)`. Discovers available agents from
-/// `~/.claude/agents/*.md` and project directories from `~/Code/`.
+/// `~/.claude/agents/*.md` and project directories from the code root (`~/Code` by default).
 final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
 
     private let onCreate: (Focus) -> Void
@@ -247,11 +248,11 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
             .sorted() ?? []
     }
 
-    /// Projects: ~/Code/ subdirectories, excluding git worktrees.
+    /// Projects: subdirectories of the code root (`~/Code` unless configured; see `CodeRoot`), excluding git worktrees.
     /// A worktree has `.git` as a plain file; a normal repo has `.git` as a directory.
     /// Also the project list of the Send to agent sheet.
     static func discoverProjects() -> [String] {
-        let codeDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Code")
+        let codeDir = CodeRoot.resolve()
         let fm = FileManager.default
         return (try? fm.contentsOfDirectory(
             at: codeDir,

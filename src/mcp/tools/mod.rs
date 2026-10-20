@@ -407,9 +407,9 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "plan_path": { "type": "string", "description": "Absolute path to the plan Markdown file; it must contain a `suggested_config` block" },
-                    "repo": { "type": "string", "description": "Bare repository name as `mother add --repo NAME` takes it, e.g. `nostromo` (not `owner/slug`). Required. Unless repo_path is given the checkout is ~/Code/<repo>." },
+                    "repo": { "type": "string", "description": "Bare repository name as `mother add --repo NAME` takes it, e.g. `nostromo` (not `owner/slug`). Required. Unless repo_path is given the checkout is <code root>/<repo> (code root defaults to ~/Code; see `code_root` in config.toml)." },
                     "branch": { "type": "string", "description": "Branch the job works on (required)" },
-                    "repo_path": { "type": "string", "description": "Local path of the repository (default: ~/Code/<repo>)" },
+                    "repo_path": { "type": "string", "description": "Local path of the repository (default: <code root>/<repo>)" },
                     "base": { "type": "string", "description": "Base branch" },
                     "max_cost": { "type": "number", "description": "Maximum cost in dollars" },
                     "label": { "type": "string", "description": "Job label" },
