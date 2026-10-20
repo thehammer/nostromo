@@ -710,7 +710,292 @@ final class ApprovalDisplayModelTests: XCTestCase {
         assertMismatch(request)
     }
 
+    // MARK: - An invisible run must carry its canonical token
+
+    func testTheCanonicalTokenIsTheDaemonsInvisibleToken() {
+        let expected: [(UInt32, String)] = [
+            (0x09, "⟨tab⟩"), (0x0D, "⟨CR⟩"), (0x202E, "⟨U+202E RLO⟩"), (0x200B, "⟨U+200B ZWSP⟩"),
+            (0xFEFF, "⟨U+FEFF BOM⟩"), (0x00AD, "⟨U+00AD SHY⟩"), (0xE0041, "⟨U+E0041⟩"), (0x0000, "⟨U+0000⟩"),
+        ]
+        for (cp, token) in expected {
+            XCTAssertEqual(ApprovalDisplayModel.canonicalToken(forCodePoint: cp), token, "U+\(String(cp, radix: 16))")
+        }
+    }
+
+    func testTheCanonicalTokenAgreesWithEveryTokenTheFixturesBuild() {
+        let scalars: [UInt32] = [0x09, 0x0D, 0x1B, 0x7F, 0x85, 0xAD, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F,
+                                 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2060, 0x2066, 0x2067, 0x2068, 0x2069,
+                                 0x061C, 0xFEFF, 0xE0041, 0xE007F]
+        for cp in scalars {
+            guard let scalar = Unicode.Scalar(cp) else { return XCTFail("U+\(cp)") }
+            XCTAssertEqual(ApprovalDisplayModel.canonicalToken(forCodePoint: cp), Fx.invisibleToken(scalar),
+                           "U+\(String(cp, radix: 16))")
+        }
+    }
+
+    func testAnInvisibleRunWithItsCanonicalTokenIsVerified() throws {
+        let request = try requestWithInvisibleRun(scalar: 0x202E, token: "⟨U+202E RLO⟩", cp: 0x202E)
+        XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified)
+    }
+
+    func testAnInvisibleRunWhoseTextIsNotItsCanonicalTokenIsAMismatch() throws {
+        let cases: [(scalar: UInt32, token: String, cp: Int)] = [
+            (0x202E, "ok", 0x202E),
+            (0x2066, "⟨U+202E RLO⟩", 0x2066),
+            (0x202E, "⟨U+202E LRO⟩", 0x202E),
+            (0x202E, "⟨U+202E⟩", 0x202E),
+            (0x202E, "⟨U+202e RLO⟩", 0x202E),
+            (0x202E, "", 0x202E),
+            (0x09, "⟨TAB⟩", 0x09),
+            (0x09, "\t", 0x09),
+            (0x0D, "⟨U+000D⟩", 0x0D),
+            (0xE0041, "⟨U+E0041 TAG⟩", 0xE0041),
+        ]
+        for c in cases {
+            let request = try requestWithInvisibleRun(scalar: c.scalar, token: c.token, cp: c.cp)
+            assertMismatch(request, "text \(c.token.debugDescription) for U+\(String(c.cp, radix: 16))")
+        }
+    }
+
+    // MARK: - A non-ASCII run must be the single scalar of its code point
+
+    func testANonAsciiRunThatIsNotTheSingleScalarOfItsCodePointIsAMismatch() throws {
+        let cases: [(command: String, text: String, cp: Int?)] = [
+            ("rmx", "m", 0x043C),
+            ("r\u{043C}x", "\u{043C}", nil),
+            ("r\u{043C}x", "\u{043C}", 0x0430),
+            ("r\u{043C}\u{043C}x", "\u{043C}\u{043C}", 0x043C),
+            ("r\u{0430}x", "\u{0430}", 0x043C),
+            ("rmx", "m", 0x6D),
+        ]
+        for c in cases {
+            var run: Fx.Obj = ["text": c.text, "kind": "non_ascii"]
+            if let cp = c.cp { run["cp"] = cp }
+            let request = try Fx.bashRequest(c.command, lines: [
+                Fx.line(1, "command", [Fx.plain("r"), run, Fx.plain("x")]),
+            ])
+            assertMismatch(request, "text \(c.text.debugDescription) cp \(String(describing: c.cp))")
+        }
+    }
+
+    func testAFaithfulNonAsciiRunIsStillVerified() throws {
+        let request = try Fx.bashRequest("r\u{043C}x", lines: [
+            Fx.line(1, "command", [Fx.plain("r"), Fx.nonAscii("\u{043C}"), Fx.plain("x")]),
+        ])
+        XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified)
+    }
+
+    // MARK: - Each tool's display holds only that tool's kinds of line
+
+    func testABashDisplayWithALineThatIsNotPartOfACommandIsAMismatch() throws {
+        for kind in ["file_header", "diff_del", "diff_add", "diff_ctx", "json", "future_kind"] {
+            let request = try Fx.bashRequest("echo one\necho two", lines: [
+                Fx.line(1, "command", [Fx.plain("echo one")]),
+                Fx.line(2, kind, [Fx.plain("echo two")]),
+            ])
+            assertMismatch(request, "a \(kind) line in a Bash display")
+        }
+    }
+
+    func testABashCommandShownEntirelyAsOtherKindsOfLineIsAMismatch() throws {
+        for kind in ["file_header", "diff_del", "diff_add", "json"] {
+            let request = try Fx.bashRequest("echo hi", lines: [Fx.line(1, kind, [Fx.plain("echo hi")])])
+            assertMismatch(request, kind)
+        }
+    }
+
+    func testAnMcpOrOtherToolDisplayWithAnyLineThatIsNotJsonIsAMismatch() throws {
+        for toolKind in ["mcp", "other"] {
+            let control = try jsonToolRequest(toolKind: toolKind, lines: Fx.jsonDisplayLines(Fx.mcpPretty))
+            XCTAssertTrue(ApprovalDisplayModel(request: control).isVerified, "control for \(toolKind)")
+            for kind in ["command", "file_header", "diff_add", "heredoc_body", "future_kind"] {
+                var lines = Fx.jsonDisplayLines(Fx.mcpPretty)
+                lines[1]["kind"] = kind
+                assertMismatch(try jsonToolRequest(toolKind: toolKind, lines: lines), "\(toolKind) with a \(kind) line")
+            }
+        }
+    }
+
+    func testAFileToolDisplayThatIsFaithfulIsVerified() throws {
+        for name in ["edit", "write", "notebook"] {
+            XCTAssertTrue(ApprovalDisplayModel(request: try fileRequest(name)).isVerified, name)
+        }
+    }
+
+    func testAFileToolDisplayWhoseFirstLineIsNotTheHeaderIsAMismatch() throws {
+        for name in ["edit", "write", "notebook"] {
+            assertMismatch(try fileRequest(name, headerFirst: false), name)
+        }
+    }
+
+    func testAFileToolDisplayWithTwoHeadersIsAMismatch() throws {
+        for name in ["edit", "write", "notebook"] {
+            assertMismatch(try fileRequest(name, headers: 2), name)
+        }
+    }
+
+    func testAFileToolDisplayWithNoHeaderIsAMismatch() throws {
+        for name in ["edit", "write", "notebook"] {
+            assertMismatch(try fileRequest(name, headers: 0), name)
+        }
+    }
+
+    func testAWriteDisplayWithADeletionOrContextLineIsAMismatch() throws {
+        for kind in ["diff_del", "diff_ctx"] {
+            var body = fileTool("write").body
+            body[2].kind = kind
+            assertMismatch(try fileRequest("write", body: body), "a \(kind) line in a Write")
+        }
+    }
+
+    func testAWriteDisplayWithAnExtraDeletionLineIsAMismatch() throws {
+        var body = fileTool("write").body
+        body.insert((kind: "diff_del", text: "removed"), at: 1)
+        assertMismatch(try fileRequest("write", body: body))
+    }
+
+    // MARK: - NotebookEdit's new_source
+
+    func testANotebookEditWithAStringNewSourceAndAFaithfulDisplayIsVerified() throws {
+        XCTAssertTrue(ApprovalDisplayModel(request: try Fx.notebookEditRequest()).isVerified)
+        let request = try Fx.request(
+            toolKind: "notebook_edit", toolName: "NotebookEdit", displayName: "NotebookEdit",
+            input: ["notebook_path": Fx.notebookPath, "new_source": "x = 1"],
+            display: Fx.display(lines: Fx.fileDisplayLines(header: Fx.notebookPath,
+                                                           body: [(kind: "diff_add", text: "x = 1")])))
+        XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified)
+    }
+
+    func testANotebookEditWhoseNewSourceIsNotAStringAndIsNotShownIsAMismatch() throws {
+        let values: [Any] = [5, ["a", "b"] as [Any], true]
+        for value in values {
+            let request = try Fx.request(
+                toolKind: "notebook_edit", toolName: "NotebookEdit", displayName: "NotebookEdit",
+                input: ["notebook_path": Fx.notebookPath, "new_source": value],
+                display: Fx.display(lines: Fx.fileDisplayLines(header: Fx.notebookPath, body: [])))
+            assertMismatch(request, "new_source \(value)")
+        }
+    }
+
+    // MARK: - A repeated key in the shown JSON is a mismatch
+
+    func testShownJsonWithARepeatedKeyIsAMismatchInAnyObject() throws {
+        let cases: [(name: String, input: Fx.Obj, pretty: String)] = [
+            ("top level, last value is the input's", ["a": 2],
+             "{\n  \"a\": 1,\n  \"a\": 2\n}"),
+            ("top level, same value twice", ["a": 1],
+             "{\n  \"a\": 1,\n  \"a\": 1\n}"),
+            ("nested object", ["o": ["a": 2]],
+             "{\n  \"o\": {\n    \"a\": 1,\n    \"a\": 2\n  }\n}"),
+            ("object inside an array", ["l": [["a": 2]]],
+             "{\n  \"l\": [\n    {\n      \"a\": 1,\n      \"a\": 2\n    }\n  ]\n}"),
+            ("same key once unescaped", ["a": 2],
+             "{\n  \"a\": 1,\n  \"\\u0061\": 2\n}"),
+        ]
+        for toolKind in ["mcp", "other"] {
+            for c in cases {
+                let request = try jsonToolRequest(toolKind: toolKind, input: c.input,
+                                                  lines: Fx.jsonDisplayLines(c.pretty))
+                assertMismatch(request, "\(toolKind): \(c.name)")
+            }
+        }
+    }
+
+    func testShownJsonThatReusesAKeyNameInDifferentObjectsIsStillVerified() throws {
+        let input: Fx.Obj = ["a": ["a": 1], "b": ["a": 2], "l": [["a": 1], ["a": 2]]]
+        let pretty = "{\n  \"a\": {\n    \"a\": 1\n  },\n  \"b\": {\n    \"a\": 2\n  },\n"
+            + "  \"l\": [\n    {\n      \"a\": 1\n    },\n    {\n      \"a\": 2\n    }\n  ]\n}"
+        for toolKind in ["mcp", "other"] {
+            let request = try jsonToolRequest(toolKind: toolKind, input: input, lines: Fx.jsonDisplayLines(pretty))
+            XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified, toolKind)
+        }
+    }
+
+    func testAKeyLookingTextInsideAStringValueIsNotARepeatedKey() throws {
+        let input: Fx.Obj = ["text": "\"a\": 1, \"a\": 2", "a": 1]
+        let pretty = "{\n  \"a\": 1,\n  \"text\": \"\\\"a\\\": 1, \\\"a\\\": 2\"\n}"
+        let request = try jsonToolRequest(toolKind: "mcp", input: input, lines: Fx.jsonDisplayLines(pretty))
+        XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified)
+    }
+
+    func testFaithfulNestedJsonStaysVerified() throws {
+        XCTAssertTrue(ApprovalDisplayModel(request: try Fx.mcpNestedRequest()).isVerified)
+    }
+
+    func testAnEditsExtrasWithARepeatedKeyAreAMismatch() throws {
+        XCTAssertTrue(ApprovalDisplayModel(request: try Fx.editRequest(replaceAll: true)).isVerified, "control")
+        assertMismatch(try Fx.editRequest(replaceAll: true,
+                                          extraJSON: "{\n  \"replace_all\": false,\n  \"replace_all\": true\n}"))
+    }
+
+    func testAWritesExtrasWithARepeatedKeyAreAMismatch() throws {
+        let faithful = "{\n  \"meta\": {\n    \"a\": 2\n  }\n}"
+        XCTAssertTrue(ApprovalDisplayModel(request: try writeWithExtras(faithful)).isVerified, "control")
+        assertMismatch(try writeWithExtras("{\n  \"meta\": {\n    \"a\": 1,\n    \"a\": 2\n  }\n}"),
+                       "repeated inside a nested object")
+        assertMismatch(try writeWithExtras("{\n  \"meta\": {\n    \"a\": 2\n  },\n  \"meta\": {\n    \"a\": 2\n  }\n}"),
+                       "repeated at the top")
+    }
+
     // MARK: - Helpers
+
+    private func requestWithInvisibleRun(scalar: UInt32, token: String, cp: Int?) throws -> ApprovalRequestWire {
+        let character = try XCTUnwrap(Unicode.Scalar(scalar))
+        var command = "echo "
+        command.unicodeScalars.append(character)
+        command += "x"
+        return try Fx.bashRequest(command, lines: [
+            Fx.line(1, "command", [Fx.plain("echo "), Fx.invisible(token: token, cp: cp), Fx.plain("x")]),
+        ])
+    }
+
+    private func jsonToolRequest(toolKind: String, input: Fx.Obj = ["channel": "#general", "text": "hello team"],
+                                 lines: [Fx.Obj]) throws -> ApprovalRequestWire {
+        try Fx.request(toolKind: toolKind,
+                       toolName: toolKind == "mcp" ? "mcp__slack__send_message" : "WebFetch",
+                       displayName: "Tool", input: input, display: Fx.display(lines: lines))
+    }
+
+    private typealias BodyLine = (kind: String, text: String)
+
+    /// What each file tool's input, header and diff body look like when the display is faithful.
+    private func fileTool(_ name: String) -> (toolKind: String, toolName: String, input: Fx.Obj,
+                                              header: String, body: [BodyLine]) {
+        switch name {
+        case "edit":
+            return ("edit", "Edit",
+                    ["file_path": Fx.editPath, "old_string": Fx.editOld, "new_string": Fx.editNew],
+                    Fx.editPath, Fx.editDiff)
+        case "write":
+            return ("write", "Write", ["file_path": Fx.writePath, "content": Fx.writeContent],
+                    Fx.writePath, Fx.splitLines(Fx.writeContent).map { (kind: "diff_add", text: $0) })
+        default:
+            return ("notebook_edit", "NotebookEdit",
+                    ["notebook_path": Fx.notebookPath, "new_source": Fx.notebookSource],
+                    Fx.notebookPath, Fx.splitLines(Fx.notebookSource).map { (kind: "diff_add", text: $0) })
+        }
+    }
+
+    /// A file-tool request; the defaults are faithful, the parameters bend the display.
+    private func fileRequest(_ name: String, headerFirst: Bool = true, headers: Int = 1,
+                             body: [BodyLine]? = nil) throws -> ApprovalRequestWire {
+        let tool = fileTool(name)
+        var b = Fx.DisplayBuilder()
+        if headerFirst { for _ in 0..<headers { b.text("file_header", tool.header) } }
+        for item in body ?? tool.body { b.text(item.kind, item.text) }
+        if !headerFirst { for _ in 0..<headers { b.text("file_header", tool.header) } }
+        return try Fx.request(toolKind: tool.toolKind, toolName: tool.toolName, displayName: tool.toolName,
+                              input: tool.input, display: Fx.display(lines: b.lines))
+    }
+
+    /// A Write whose input also has `meta: {"a": 2}`; `extraJSON` is what the display shows for it.
+    private func writeWithExtras(_ extraJSON: String) throws -> ApprovalRequestWire {
+        let body = Fx.splitLines(Fx.writeContent).map { (kind: "diff_add", text: $0) }
+        return try Fx.request(
+            toolKind: "write", toolName: "Write", displayName: "Write",
+            input: ["file_path": Fx.writePath, "content": Fx.writeContent, "meta": ["a": 2]],
+            display: Fx.display(lines: Fx.fileDisplayLines(header: Fx.writePath, body: body, extraJSON: extraJSON)))
+    }
 
     private func assertMismatch(_ request: ApprovalRequestWire, _ message: String = "",
                                 file: StaticString = #filePath, line: UInt = #line) {

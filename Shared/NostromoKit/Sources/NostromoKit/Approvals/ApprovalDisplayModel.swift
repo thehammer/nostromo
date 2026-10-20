@@ -196,21 +196,52 @@ public struct ApprovalDisplayModel: Equatable {
 
     // MARK: Round trip (T-INV-2)
 
+    /// The token an invisible character is shown as: `⟨tab⟩`, `⟨CR⟩`, `⟨U+202E RLO⟩`, `⟨U+E0041⟩`.
+    /// The same table as the daemon's `invisible_token` (`src/approvals/display.rs`): a run whose
+    /// text is anything else is not a faithful picture of its code point.
+    public static func canonicalToken(forCodePoint cp: UInt32) -> String {
+        switch cp {
+        case 0x09: return "\u{27E8}tab\u{27E9}"
+        case 0x0D: return "\u{27E8}CR\u{27E9}"
+        default:
+            let hex = String(format: "U+%04X", cp)
+            if let name = invisibleNames[cp] { return "\u{27E8}\(hex) \(name)\u{27E9}" }
+            return "\u{27E8}\(hex)\u{27E9}"
+        }
+    }
+
+    private static let invisibleNames: [UInt32: String] = [
+        0x202A: "LRE", 0x202B: "RLE", 0x202C: "PDF", 0x202D: "LRO", 0x202E: "RLO",
+        0x2066: "LRI", 0x2067: "RLI", 0x2068: "FSI", 0x2069: "PDI",
+        0x200B: "ZWSP", 0x200C: "ZWNJ", 0x200D: "ZWJ", 0x2060: "WJ", 0xFEFF: "BOM",
+        0x00AD: "SHY", 0x061C: "ALM", 0x200E: "LRM", 0x200F: "RLM",
+    ]
+
     private static func check(lines: [ApprovalRenderLine], toolKind: ApprovalToolKind,
                               input: ApprovalJSON) -> ApprovalRoundTrip {
         // Line numbers run 1, 2, 3 … so a "line 287" means the 287th line.
         for (i, line) in lines.enumerated() where line.number != i + 1 {
             return .mismatch("line numbers are out of order at line \(line.number)")
         }
-        // Invisible runs must carry a real code point, and no other run may hide one.
+        // Each run is a faithful picture of what it stands for, and none hides a character.
         for line in lines {
             for run in line.runs {
-                if run.kind == .invisible {
+                switch run.kind {
+                case .invisible:
                     guard let cp = run.codePoint, Unicode.Scalar(cp) != nil else {
                         return .mismatch("an invisible character has no code point (line \(line.number))")
                     }
-                } else if run.text.unicodeScalars.contains(where: isHidden) {
-                    return .mismatch("line \(line.number) hides a character that is not marked")
+                    guard bytesEqual(run.text, canonicalToken(forCodePoint: cp)) else {
+                        return .mismatch("line \(line.number) shows an invisible character as something else")
+                    }
+                case .nonAscii:
+                    guard let cp = run.codePoint, let scalar = Unicode.Scalar(cp),
+                          bytesEqual(run.text, String(Character(scalar))), !scalar.isASCII
+                    else { return .mismatch("line \(line.number) shows a non-ASCII character as something else") }
+                case .plain, .separator:
+                    if run.text.unicodeScalars.contains(where: isHidden) {
+                        return .mismatch("line \(line.number) hides a character that is not marked")
+                    }
                 }
             }
         }
@@ -221,25 +252,35 @@ public struct ApprovalDisplayModel: Equatable {
             return nil
         }
         func has(_ keys: [String]) -> Bool { keys.allSatisfy { string($0) != nil } }
-        let hasHeader = lines.contains { $0.kind == .fileHeader }
 
         switch toolKind {
         case .bash where has(["command"]):
             guard let command = string("command") else { break }
-            return verdict(join(lines, keeping: { !excludedFromText($0, hasHeader: hasHeader) }), command, "the command")
+            guard lines.allSatisfy({ [.command, .heredocBody, .heredocEnd].contains($0.kind) }) else {
+                return .mismatch("the display has lines that are not part of the command")
+            }
+            return verdict(join(lines, keeping: { _ in true }), command, "the command")
         case .edit where has(["file_path", "old_string", "new_string"]):
-            return checkFile(lines, fields: fields, pathKey: "file_path", known: ["file_path", "old_string", "new_string"]) {
+            return checkFile(lines, fields: fields, pathKey: "file_path",
+                             known: ["file_path", "old_string", "new_string"],
+                             bodyKinds: [.diffCtx, .diffDel, .diffAdd]) {
                 let old = verdict(join(lines, keeping: { $0 == .diffCtx || $0 == .diffDel }), string("old_string") ?? "", "the old text")
                 if old != .verified { return old }
-                return verdict(join(lines, keeping: { !excludedFromText($0, hasHeader: hasHeader) }), string("new_string") ?? "", "the new text")
+                return verdict(join(lines, keeping: { $0 == .diffCtx || $0 == .diffAdd }), string("new_string") ?? "", "the new text")
             }
         case .write where has(["file_path", "content"]):
-            return checkFile(lines, fields: fields, pathKey: "file_path", known: ["file_path", "content"]) {
-                verdict(join(lines, keeping: { !excludedFromText($0, hasHeader: hasHeader) }), string("content") ?? "", "the content")
+            return checkFile(lines, fields: fields, pathKey: "file_path", known: ["file_path", "content"],
+                             bodyKinds: [.diffAdd]) {
+                verdict(join(lines, keeping: { $0 == .diffAdd }), string("content") ?? "", "the content")
             }
         case .notebookEdit where has(["notebook_path"]):
-            return checkFile(lines, fields: fields, pathKey: "notebook_path", known: ["notebook_path", "new_source"]) {
-                verdict(join(lines, keeping: { !excludedFromText($0, hasHeader: hasHeader) }), string("new_source") ?? "", "the new source")
+            // `new_source` is accounted for only when it is a string; any other value stays an
+            // extra field that must be shown as JSON (the daemon shows none, so the check fails).
+            let source = string("new_source")
+            return checkFile(lines, fields: fields, pathKey: "notebook_path",
+                             known: source == nil ? ["notebook_path"] : ["notebook_path", "new_source"],
+                             bodyKinds: [.diffAdd]) {
+                verdict(join(lines, keeping: { $0 == .diffAdd }), source ?? "", "the new source")
             }
         default:
             break
@@ -247,16 +288,19 @@ public struct ApprovalDisplayModel: Equatable {
         return checkJSON(lines, expected: input)
     }
 
-    /// A file tool: the header is the path, `body` checks the text, and any other
+    /// A file tool: the first line is the path, `body` checks the text, and any other
     /// field of the input is shown as JSON lines that must be those fields.
     private static func checkFile(_ lines: [ApprovalRenderLine], fields: [String: ApprovalJSON]?,
-                                  pathKey: String, known: [String],
+                                  pathKey: String, known: [String], bodyKinds: Set<ApprovalLineKind>,
                                   body: () -> ApprovalRoundTrip) -> ApprovalRoundTrip {
         guard case .string(let path)? = fields?[pathKey] else { return .mismatch("the path is missing") }
-        let headers = lines.filter { $0.kind == .fileHeader }
-        guard headers.count == 1, let header = headers.first,
+        guard let header = lines.first, header.kind == .fileHeader,
+              lines.filter({ $0.kind == .fileHeader }).count == 1,
               bytesEqual(header.runs.map(\.original).joined(), path)
         else { return .mismatch("the shown path is not the request's path") }
+        guard lines.dropFirst().allSatisfy({ bodyKinds.contains($0.kind) || $0.kind == .json }) else {
+            return .mismatch("the display has lines that are not part of this change")
+        }
         let result = body()
         if result != .verified { return result }
 
@@ -268,21 +312,19 @@ public struct ApprovalDisplayModel: Equatable {
         return checkJSON(jsonLines, expected: .object(extras))
     }
 
-    /// The `json` lines, joined, must parse to exactly the request's JSON.
+    /// The lines must all be JSON, and joined must parse to exactly the request's JSON, with no key twice.
     private static func checkJSON(_ lines: [ApprovalRenderLine], expected: ApprovalJSON) -> ApprovalRoundTrip {
-        let json = lines.filter { $0.kind == .json || $0.kind == .unknown }
-        guard json.count == lines.filter({ $0.kind != .fileHeader }).count else {
+        guard lines.allSatisfy({ $0.kind == .json }) else {
             return .mismatch("the display mixes JSON with other kinds of line")
         }
-        let text = join(json, keeping: { _ in true })
+        let text = join(lines, keeping: { _ in true })
         guard let data = text.data(using: .utf8),
               let parsed = try? JSONDecoder().decode(ApprovalJSON.self, from: data)
         else { return .mismatch("the shown JSON does not parse") }
+        // A dictionary keeps one value per key, so a repeated key would hide the first one.
+        var scanner = JSONKeyScanner(bytes: Array(text.utf8))
+        if scanner.hasDuplicateKey() { return .mismatch("the shown JSON repeats a key") }
         return parsed == expected ? .verified : .mismatch("the shown JSON differs from the request's input")
-    }
-
-    private static func excludedFromText(_ kind: ApprovalLineKind, hasHeader: Bool) -> Bool {
-        kind == .fileHeader || kind == .diffDel || (hasHeader && kind == .json)
     }
 
     /// The text of the lines whose kind passes `keeping`: each line's original text
@@ -330,5 +372,77 @@ private extension ApprovalJSON {
     var objectFields: [String: ApprovalJSON]? {
         if case .object(let fields) = self { return fields }
         return nil
+    }
+}
+
+/// Finds a key that appears twice in one JSON object. Runs on text that already decoded, so
+/// it is well formed and no deeper than the decoder allows.
+private struct JSONKeyScanner {
+    let bytes: [UInt8]
+    private var i = 0
+
+    init(bytes: [UInt8]) { self.bytes = bytes }
+
+    mutating func hasDuplicateKey() -> Bool { value() }
+
+    private var peek: UInt8? { i < bytes.count ? bytes[i] : nil }
+
+    private mutating func skipSpace() {
+        while let c = peek, c == 0x20 || c == 0x0A || c == 0x0D || c == 0x09 { i += 1 }
+    }
+
+    /// Reads a string token (at the opening quote) and returns it decoded.
+    private mutating func string() -> String? {
+        let start = i
+        guard peek == 0x22 else { return nil }
+        i += 1
+        while let c = peek {
+            if c == 0x5C { i += 2; continue }
+            i += 1
+            if c == 0x22 { break }
+        }
+        guard i <= bytes.count else { return nil }
+        return try? JSONDecoder().decode(String.self, from: Data(bytes[start ..< i]))
+    }
+
+    private mutating func value() -> Bool {
+        skipSpace()
+        switch peek {
+        case 0x7B:
+            i += 1
+            var keys = Set<String>()
+            skipSpace()
+            if peek == 0x7D { i += 1; return false }
+            while true {
+                skipSpace()
+                guard let key = string() else { return false }
+                if !keys.insert(key).inserted { return true }
+                skipSpace()
+                guard peek == 0x3A else { return false }
+                i += 1
+                if value() { return true }
+                skipSpace()
+                if peek == 0x2C { i += 1; continue }
+                if peek == 0x7D { i += 1 }
+                return false
+            }
+        case 0x5B:
+            i += 1
+            skipSpace()
+            if peek == 0x5D { i += 1; return false }
+            while true {
+                if value() { return true }
+                skipSpace()
+                if peek == 0x2C { i += 1; continue }
+                if peek == 0x5D { i += 1 }
+                return false
+            }
+        case 0x22:
+            _ = string()
+            return false
+        default:
+            while let c = peek, c != 0x2C, c != 0x5D, c != 0x7D, c != 0x20, c != 0x0A, c != 0x0D, c != 0x09 { i += 1 }
+            return false
+        }
     }
 }
