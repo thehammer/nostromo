@@ -308,6 +308,7 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " requestedScale=\(requested.map { String(describing: $0) } ?? "native")"
             + " scale=\(ink.scale) rendered=\(rendered != nil) inkTotal=\(ink.total) inkFirstLine=\(ink.firstLineBand)"
             + " gutterInk=\(ink.gutterInk) gutterBands=\(ink.gutterBands)"
+            + " gutterDiag=[\(view.gutterDiag)]"
             + " areaPx=\(ink.width)x\(ink.height)"
         print(diag)
         return Measurement(fixture: fixture, ink: ink, diag: diag)

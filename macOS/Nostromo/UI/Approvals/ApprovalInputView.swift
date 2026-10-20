@@ -60,7 +60,7 @@ final class ApprovalTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        print("ATD-GUTTER draw dirty=\(dirtyRect) owner=\(gutterOwner != nil) frame=\(frame)")  // TMP
+        gutterOwner?.gutterDiag += " draw(dirty=\(dirtyRect) owner=\(gutterOwner != nil))"  // TMP
         gutterOwner?.drawGutter(in: dirtyRect)
     }
 }
@@ -112,6 +112,7 @@ final class ApprovalInputView: NSScrollView {
     private var newlyCovered: [(chars: NSRange, top: CGFloat, bottom: CGFloat)] = []
     private var inkRecheckScheduled = false
     private var isUpdatingProgress = false
+    var gutterDiag = ""  // TMP
     private var lastClipOriginY: CGFloat = 0
     private let font = Theme.codeFont(size: 12)
     private static let textInset = NSSize(width: 6, height: 6)
@@ -471,7 +472,7 @@ final class ApprovalInputView: NSScrollView {
     /// coordinates). Only the strip is touched: the fill and the digits are clipped to it.
     fileprivate func drawGutter(in dirty: NSRect) {
         let strip = NSRect(x: 0, y: dirty.minY, width: gutterWidth, height: dirty.height)
-        print("ATD-GUTTER drawGutter lines=\(lineNumbers.count) top0=\(String(describing: lineTop(at: 0))) gutter=\(gutterWidth)")  // TMP
+        gutterDiag += " drawGutter(lines=\(lineNumbers.count) top0=\(String(describing: lineTop(at: 0))) gutter=\(gutterWidth))"  // TMP
         guard dirty.minX < gutterWidth, strip.height > 0 else { return }
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
