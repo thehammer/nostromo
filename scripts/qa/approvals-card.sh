@@ -14,15 +14,26 @@
 # whose CLI is the fake claude), selects its sidebar row and waits for the composer ("Message…").
 #
 # Cards are matched by content: each fixture waits for the card whose `input` starts with that fixture's
-# first command line (from tests/fixtures/approvals/<name>.json) and uses that card's request_id throughout;
-# pending cards are denied before each fixture and at the end. Allow once is clicked only once its option is
-# `enabled:true` (up to 20 s). Text-drawn proof (scripts/qa/lib/card_checks.py): `ctl find` for the first 12
-# chars of the card's first line must hit a visible view (non-empty frame), plus a screenshot at
-# /tmp/qa-card-<fixture>.png (QA content only). One SUMMARY line per fixture.
+# first command line, cut at its first non-ASCII character (from tests/fixtures/approvals/<name>.json; a
+# prefix shorter than 4 characters selects by the exact full input instead), and uses that card's request_id
+# throughout. Two matching cards are "ambiguous card selection", never a pick by position. Pending cards are
+# denied before each fixture and at the end, with the card's own exact "Deny" button (found in `ctl tree`
+# inside the card, clicked by coordinates; never a text search that could hit "Deny & stop"), and after each
+# Deny the request must be gone while the QA session's sidebar row survives. A fixture whose stale cards
+# could not be cleared is skipped (no cue, no Allow click). Allow once is clicked only once its option is
+# `enabled:true` (up to 20 s).
+#
+# Text-drawn proof (scripts/qa/lib/card_checks.py): the card's text viewport (the NSClipView in its
+# ApprovalInputView, taken from `ctl tree`, matched to the card by its first line) is cropped out of
+# `ctl screenshot` and must hold glyph pixels, overall and in the first line's band. A blank text area, an
+# unreadable PNG or a card text view that cannot be located FAILS. `ctl find` of the card's first rendered
+# ASCII characters, inside the card's frame, is a secondary "text in view tree" check. Screenshots, trees and
+# listings live in a private `mktemp -d` directory (printed; removed at the end unless KEEP=1). Fixture names
+# must match [a-z0-9_]+ (exit 2 otherwise). One SUMMARY line per fixture.
 #
 # Everything it sees is printed so it can be pasted into the PR. On a FAIL it first prints what there is
 # to debug with (windows, a truncated tree, the daemon and placement log tails, the QA approvals dir).
-# KEEP=1 keeps the QA root after the run. Exits 0 PASS, 1 FAIL, 3 INCONCLUSIVE (display locked or
+# KEEP=1 keeps the QA root and the scratch directory after the run. Exits 0 PASS, 1 FAIL, 3 INCONCLUSIVE (display locked or
 # asleep: the window is not visible).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,6 +50,16 @@ for a in "$@"; do
   esac
 done
 [ "${#fixtures[@]}" -gt 0 ] || fixtures=(simple_rm heredoc_300 bidi)
+for f in "${fixtures[@]}"; do
+  if ! [[ "$f" =~ ^[a-z0-9_]+$ ]]; then
+    echo "usage: fixture names match [a-z0-9_]+ (got '$f')" >&2
+    exit 2
+  fi
+  if [ ! -f "$repo/tests/fixtures/approvals/$f.json" ]; then
+    echo "usage: no fixture file tests/fixtures/approvals/$f.json" >&2
+    exit 2
+  fi
+done
 start_args=()
 [ "$synthetic" = 1 ] || start_args+=(--no-synthetic)
 
@@ -51,6 +72,17 @@ if [ -f "$real_focuses" ] && grep -qE 'FIXTURE:|com\.hammer\.nostromo\.qa|nostro
   echo "A QA run once wrote into your real ~/.nostromo. Remove the QA entries from that file, then run again." >&2
   exit 2
 fi
+
+# Private scratch directory (mktemp -d: mode 0700) for screenshots, trees and listings of the QA window; nothing
+# is written anywhere else. Removed on exit unless KEEP=1.
+work="$(mktemp -d "${TMPDIR:-/tmp}/qa-card.XXXXXX")"
+# shellcheck disable=SC2329  # invoked by the EXIT trap
+remove_work() {
+  [ -z "${KEEP:-}" ] || return 0
+  case "$work" in */qa-card.*) rm -rf -- "$work" ;; esac
+}
+trap remove_work EXIT
+echo "scratch directory (screenshots, trees): $work"
 
 out="$("$instance" start "${start_args[@]+"${start_args[@]}"}")"
 echo "$out"
@@ -79,6 +111,7 @@ debug_evidence() {
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() {
   local rc=$?
+  remove_work
   [ "$stopped" = 1 ] && return
   [ "$rc" = 0 ] || debug_evidence live
   KEEP="${KEEP:-}" "$instance" stop "$root" || true
@@ -147,43 +180,88 @@ send_cue() {
 checks="$here/lib/card_checks.py"
 listing_json() { ctl approvals list; }
 
-# The expected first line of a fixture's command, read from tests/fixtures/approvals/<name>.json and cut
-# at the first non-ASCII character (the card shows those as tokens).
-expected_first_line() {
+# The fixture's first tool command, read from tests/fixtures/approvals/<name>.json.
+fixture_command() {
   python3 - "$repo/tests/fixtures/approvals/$1.json" <<'PY'
 import json, sys
-cmd = json.load(open(sys.argv[1]))["tool_uses"][0]["input"]["command"].split("\n", 1)[0]
-out = ""
-for ch in cmd:
-    if ord(ch) > 126 or ord(ch) < 32:
-        break
-    out += ch
-print(out)
+print(json.load(open(sys.argv[1]))["tool_uses"][0]["input"]["command"])
 PY
+}
+
+# Click the button titled exactly $2 inside the card $1: its centre comes from `ctl tree` (the ApprovalButton
+# views inside that card's ApprovalCardView), so a "Deny & stop" is never hit by a substring match and a
+# button of another card is never hit. $3=quiet suppresses the reason on failure.
+click_card_button() {
+  local rid="$1" label="$2" quiet="${3:-}" win xy x y
+  listing_json >"$work/click.listing.json" 2>/dev/null || return 1
+  win="$(python3 "$checks" window "$rid" <"$work/click.listing.json")"
+  ctl -w "$win" tree --depth 40 >"$work/click.tree.json" 2>/dev/null || return 1
+  if ! xy="$(python3 "$checks" button "$rid" "$label" "$work/click.listing.json" "$work/click.tree.json")"; then
+    [ "$quiet" = quiet ] || echo "cannot click '$label': $xy"
+    return 1
+  fi
+  read -r x y <<<"$xy"
+  ctl -w "$win" click "$x" "$y" >/dev/null
 }
 
 # Deny every card still pending (poll until gone, up to 10 s). QSR-4: no card leaks across fixtures.
 clear_cards() {
-  local ids
+  local ids rid _n
   ids="$(listing_json | python3 "$checks" stale)"
   [ -n "$ids" ] || return 0
   echo "(clearing stale card(s): $(tr '\n' ' ' <<<"$ids"))"
-  # One Deny click per stale card (each answered card makes the next one the visible one).
-  local _n
+  # One exact Deny click per stale card (each answered card makes the next one the visible one).
   for _n in $ids; do
-    ctl click --text "Deny" >/dev/null 2>&1 || true
+    for rid in $(listing_json | python3 "$checks" stale); do
+      click_card_button "$rid" "Deny" quiet && break
+    done
     sleep 0.5
   done
   wait_cards gone 10 && return 0
   echo "note: stale card(s) still showing after Deny"; return 1
 }
 
-# Wait up to 15 s for the card whose input starts with $1; prints its request_id.
+# Poll up to $2 s until request $1 is no longer listed.
+wait_request_gone() {
+  for _ in $(seq 1 $((${2:-8} * 4))); do
+    listing_json | python3 "$checks" present "$1" || return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+# The QA session survives a Deny: its sidebar row is still on screen. ("Deny & stop" ends the agent's turn.)
+session_survives() {
+  ctl find "$label" 2>/dev/null | python3 "$checks" survives
+}
+
+# Deny card $1 with its own exact Deny button and assert: the request is gone and the session survived.
+deny_and_assert() {
+  local rid="$1"
+  echo "(denying request $rid with the card's own 'Deny' button)"
+  if ! click_card_button "$rid" "Deny"; then
+    fail "$fixture: could not click the card's Deny button"; return 1
+  fi
+  if ! wait_request_gone "$rid" 8; then
+    fail "$fixture: request $rid is still listed after Deny (click refused or missed)"; return 1
+  fi
+  if ! session_survives; then
+    fail "$fixture: SESSION DISAPPEARED after Deny (sidebar row '$label' is gone): 'Deny & stop' was hit, not 'Deny'"
+    return 1
+  fi
+  echo "request $rid gone; session '$label' survived"
+}
+
+# Wait up to 15 s for the card of the fixture whose first command is $1; prints its request_id. Returns 4 on
+# an ambiguous match (more than one card; the reason is printed) and 1 on timeout.
 wait_card_for() {
-  local rid
+  local out rc
   for _ in $(seq 1 60); do
-    rid="$(listing_json | python3 "$checks" pick "$1" || true)"
-    [ -z "$rid" ] || { echo "$rid"; return 0; }
+    rc=0; out="$(listing_json | python3 "$checks" pick "$1")" || rc=$?
+    case "$rc" in
+      0) echo "$out"; return 0 ;;
+      4) echo "$out"; return 4 ;;
+    esac
     sleep 0.25
   done
   return 1
@@ -200,37 +278,90 @@ wait_allow() {
   echo "$st"; return 1
 }
 
-# Text-drawn proof: find the first 12 chars of the card's first line among the drawn views (NSTextView text is
-# searched by `find`; hidden views are already omitted), and screenshot the window. Prints the verdict line.
+# Text-drawn proof for card $1 of fixture $2 (see the header and lib/card_checks.py): the tree, the find hits
+# and a window screenshot go to files in the scratch directory; card_checks.py crops the card's text viewport
+# out of the PNG and counts glyph pixels. Prints the verdict lines; sets drawn_why on failure. A tree that
+# cannot be read, a card that cannot be located, a missing or corrupt screenshot all FAIL.
+drawn_why=""
 prove_drawn() {
-  local rid="$1" fixture="$2" cur probe hits png="/tmp/qa-card-$2.png" msg
-  cur="$(listing_json)"
-  probe="$(python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); import card_checks as c; print(c.probe_text(c.card_by_id(json.loads(sys.argv[2]),sys.argv[3]) or {}))' "$here/lib" "$cur" "$rid")"
-  hits="$(ctl find "$probe" 2>/dev/null || echo '[]')"
-  ctl screenshot "$png" >/dev/null 2>&1 && echo "screenshot: $png" || echo "screenshot: FAILED ($png)"
-  msg="$(python3 -c 'import json,sys; print(json.dumps({"approvals": json.loads(sys.argv[1]), "find": json.loads(sys.argv[2])}))' "$cur" "$hits" | python3 "$checks" drawn "$rid")" || { echo "$msg"; return 1; }
-  echo "$msg"
+  local rid="$1" base="$work/$2" win probe out rc=0
+  listing_json >"$base.listing.json"
+  win="$(python3 "$checks" window "$rid" <"$base.listing.json")"
+  probe="$(python3 "$checks" probe "$rid" <"$base.listing.json")"
+  echo "window $win; find probe: '$probe'"
+  if ! ctl -w "$win" tree --depth 40 >"$base.tree.json" 2>"$base.err"; then
+    drawn_why="cannot locate the card text area: ctl tree failed: $(head -c 300 "$base.err")"
+    echo "$drawn_why"; return 1
+  fi
+  echo '[]' >"$base.find.json"
+  if [ -n "$probe" ]; then
+    ctl -w "$win" find "$probe" >"$base.find.json" 2>/dev/null || echo '[]' >"$base.find.json"
+  fi
+  if ctl -w "$win" screenshot "$base.png" >/dev/null 2>"$base.err"; then
+    echo "screenshot: $base.png"
+  else
+    echo "screenshot: FAILED: $(head -c 300 "$base.err")"; rm -f "$base.png"
+  fi
+  out="$(python3 "$checks" prove "$rid" "$base.listing.json" "$base.tree.json" "$base.find.json" "$base.png")" || rc=$?
+  echo "$out"
+  if [ "$rc" != 0 ]; then
+    drawn_why="$(tr '\n' ' ' <<<"$out")"
+    case "$out" in
+      "cannot locate"*) echo "--- tree excerpt (Approval* views)"; python3 "$checks" excerpt "$base.tree.json" ;;
+    esac
+  fi
+  return "$rc"
+}
+
+# Focus the card's text view with a click inside it, then report which view would get a key (the first
+# responder, from the read-only hittest). Returns 0 only when it is the card's ApprovalTextView.
+card_win=0
+focus_card_text() {
+  local rid="$1" base="$work/$2.focus" win x y resp
+  listing_json >"$base.listing.json"
+  win="$(python3 "$checks" window "$rid" <"$base.listing.json")"
+  card_win="$win"
+  ctl -w "$win" tree --depth 40 >"$base.tree.json" 2>/dev/null || { echo "cannot read the tree to focus the card text view"; return 1; }
+  if ! python3 "$checks" locate "$rid" "$base.listing.json" "$base.tree.json" >"$base.locate.json"; then
+    cat "$base.locate.json"; return 1
+  fi
+  read -r x y < <(python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["center"]; print(c["x"], c["y"])' "$base.locate.json")
+  ctl -w "$win" click "$x" "$y" >/dev/null || { echo "click in the card text view failed"; return 1; }
+  ctl -w "$win" hittest "$x" "$y" >"$base.hit.json" 2>/dev/null || { echo "hittest failed"; return 1; }
+  resp="$(python3 "$checks" responder <"$base.hit.json")"
+  echo "key target: first responder = $resp (hit-tested at $x,$y inside the card's text view)"
+  [ "$resp" = ApprovalTextView ]
 }
 
 for fixture in "${fixtures[@]}"; do
   echo
   echo "=== FIXTURE:$fixture (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF)) ==="
   if [ "$synthetic" = 1 ]; then
-    clear_cards || fail "$fixture: could not clear stale card(s) before the cue"
+    # A failed clear means a stale card may still be showing: no cue and no Allow click for this fixture.
+    if ! clear_cards; then
+      fail "$fixture: could not clear stale card(s) before the cue; skipping this fixture (no cue, no clicks)"
+      continue
+    fi
   else
-    # Deny clicks are refused with synthetic input off; the request_id/input match ignores a leftover card.
+    # Deny clicks are refused with synthetic input off; matching by input ignores a leftover card.
     clear_cards >/dev/null || echo "note: a card from an earlier fixture remains (expected with --no-synthetic); matching by input"
   fi
-  expected="$(expected_first_line "$fixture")"
+  fixture_cmd="$(fixture_command "$fixture")"
+  expected="$(python3 "$checks" expected "$fixture_cmd")"
   echo "--- transcript-anchor before"
   before="$(ctl transcript-anchor)"; echo "$before"
   send_cue "$fixture"
-  if rid="$(wait_card_for "$expected")"; then
-    echo "--- approvals list (card $rid, input starts with: $expected)"
-    listing="$(listing_json)"; echo "$listing"
-  else
-    fail "$fixture: no card whose input starts with '$expected' within 15 s"; continue
-  fi
+  rc=0; rid="$(wait_card_for "$fixture_cmd")" || rc=$?
+  case "$rc" in
+    0)
+      echo "--- approvals list (card $rid, input starts with: $expected)"
+      listing="$(listing_json)"; echo "$listing" ;;
+    4)
+      echo "$rid"
+      fail "$fixture: ambiguous card selection (more than one card starts with '$expected'); not picking one by position"; continue ;;
+    *)
+      fail "$fixture: no card whose input starts with '$expected' (or equals the fixture's input when that prefix is under 4 characters) within 15 s"; continue ;;
+  esac
   echo "--- transcript-anchor after (card showing)"
   after="$(ctl transcript-anchor)"; echo "$after"
   python3 - "$before" "$after" <<'PY' || fail "$fixture: the transcript moved more than 1 pt"
@@ -241,10 +372,13 @@ print(f"first-visible drift: {db:.2f} pt; following {b['following']} -> {a['foll
 sys.exit(0 if db <= 1 and (not b["following"] or a["bottomOffsetPt"] == 0) else 1)
 PY
 
-  echo "--- text drawn?"
-  drawn=drawn
-  prove_drawn "$rid" "$fixture" || { drawn="NOT drawn"; fail "$fixture: text not drawn: the card's command text was not found in the view tree"; }
-  [ "$drawn" = drawn ] && drawn="text drawn"
+  echo "--- text drawn? (glyph pixels in the card's text area of a screenshot)"
+  if prove_drawn "$rid" "$fixture"; then
+    drawn="text drawn (glyph pixels in the card's text area), text in view tree"
+  else
+    drawn="text NOT drawn"
+    fail "$fixture: $drawn: $drawn_why"
+  fi
   summary="$fixture: card ok, $drawn"
 
   if [ "$synthetic" = 1 ]; then
@@ -257,7 +391,7 @@ PY
     if [ "$fixture" = "simple_rm" ]; then
       if [ "$allow_state" = ready ]; then
         echo "--- click Allow once (enabled after ${allow_secs} s)"
-        ctl click --text "Allow once" >/dev/null || fail "$fixture: click failed"
+        click_card_button "$rid" "Allow once" || fail "$fixture: could not click the card's Allow once button"
         if wait_cards gone 8; then
           log="$(find "$root" -name responses.jsonl -print 2>/dev/null | head -1)"
           echo "--- fake CLI log ($log)"
@@ -271,20 +405,29 @@ PY
         fail "$fixture: Allow once never became enabled within 20 s (last seen: ${allow#waiting:})"
       fi
     else
-      lbl="$(python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); import card_checks as c; print(c.allow_state(c.card_by_id(json.loads(sys.argv[2]),sys.argv[3]))[1])' "$here/lib" "$(listing_json)" "$rid")"
+      lbl="$(listing_json | python3 "$checks" label "$rid")"
       echo "Allow once label before scrolling: $lbl"
       if [ "$fixture" = heredoc_300 ]; then
-        # A synthetic End key is not a human scroll: the gate must stay closed.
-        ctl key End --key-code 119 >/dev/null 2>&1 || true
-        sleep 1
-        lbl="$(python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); import card_checks as c; print(c.allow_state(c.card_by_id(json.loads(sys.argv[2]),sys.argv[3]))[1])' "$here/lib" "$(listing_json)" "$rid")"
-        echo "Allow once label after a synthetic End key: $lbl"
-        [ "$lbl" = "Scroll to the end to allow" ] || fail "$fixture: Allow was not gated on scrolling (label: $lbl)"
-        summary="$summary, Allow stays gated (synthetic scroll)"
+        # A synthetic End key is not a human scroll: the gate must stay closed. "Stays gated" only proves the
+        # gate ignores synthetic scrolls if the key reached the card's text view, and `ctl key` goes to the
+        # first responder (by default the composer). So click into the card's text view first, read the first
+        # responder with the read-only hittest, send End only if it is the card text view, and print who got it.
+        if focus_card_text "$rid" "$fixture"; then
+          ctl -w "$card_win" key "$(printf '\357\234\253')" --key-code 119 >/dev/null 2>&1 || true   # U+F72B: NSEndFunctionKey
+          sleep 1
+          after_hit="$work/$fixture.after-end.hit.json"
+          if ctl -w "$card_win" hittest 1 1 >"$after_hit" 2>/dev/null; then
+            echo "key target after End: first responder = $(python3 "$checks" responder <"$after_hit")"
+          fi
+          lbl="$(listing_json | python3 "$checks" label "$rid")"
+          echo "Allow once label after a synthetic End key: $lbl"
+          [ "$lbl" = "Scroll to the end to allow" ] || fail "$fixture: Allow was not gated on scrolling (label: $lbl)"
+          summary="$summary, Allow stays gated (synthetic End key reached the card text view)"
+        else
+          fail "$fixture: the End key would not reach the card's text view (see the key target above), so 'stays gated' would prove nothing; End key not sent"
+        fi
       fi
-      echo "(denying to clear the card)"
-      ctl click --text "Deny" >/dev/null || true
-      wait_cards gone 8 || echo "note: card still showing (deny click refused or not found)"
+      deny_and_assert "$rid" || true
     fi
   else
     echo "--- click Allow once / key Return / key Space must be refused"

@@ -14,14 +14,31 @@ runs one and reads the PASS/FAIL lines.
 
 ### `approvals-card.sh`: the QA session, evidence and env knobs
 
-Robustness (QSR): pending cards are denied before each fixture and at the end; each fixture waits for the card whose
-`input` starts with its expected first line (from `tests/fixtures/approvals/<name>.json`) and uses that request_id
-throughout; "Allow once" is clicked only once `enabled:true` (up to 20 s; a timeout FAILs naming the label seen);
-`heredoc_300` must stay gated ("Scroll to the end to allow") after a synthetic End key. Text-drawn probe: `ctl find`
-Known limit: `approvals list` has no card frame, so a `find` hit is not scoped to the card; another view showing the same first 12 characters (a transcript row) can mask a blank card. Check the printed `/tmp/qa-card-<fixture>.png`. With `--no-synthetic` a stale card cannot be Denied, so it is noted (not a FAIL) and ignored by input matching.
-for the first 12 characters of the card's first line must return a view with a non-empty frame (`find` already omits
-hidden views and reports no alpha; `hidden`/`alpha` are enforced when present), else FAIL "text not drawn (model has N
-lines)". Every card is screenshotted to `/tmp/qa-card-<fixture>.png` (QA content only). One `SUMMARY` line per fixture.
+Robustness (QSR): pending cards are denied before each fixture and at the end, each with the card's own exact "Deny"
+button (located in `ctl tree` inside the card and clicked by coordinates, never a `--text "Deny"` substring that could
+hit "Deny & stop"); after every Deny the request must be gone and the QA session's sidebar row must survive (if it
+vanished the run FAILs loudly). A fixture whose stale cards could not be cleared is skipped: no cue, no Allow click.
+Each fixture waits for the card whose `input` starts with the fixture's first command line cut at its first non-ASCII
+character (from `tests/fixtures/approvals/<name>.json`); a prefix shorter than 4 characters selects by exact full
+input instead; two matching cards are "ambiguous card selection" (FAIL), never picked by position. "Allow once" is
+clicked only once `enabled:true` (up to 20 s; a timeout FAILs naming the label seen). `heredoc_300` must stay gated
+("Scroll to the end to allow") after a synthetic End key; the script first clicks into the card's text view, reads
+the first responder with the read-only `hittest` and prints it ("key target: ..."), and sends End only if the card
+text view would receive it (otherwise FAIL: "stays gated" would prove nothing).
+
+Text-drawn proof (pixels): the card's text viewport (the `NSClipView` inside the card's `ApprovalInputView`, from
+`ctl tree --depth 40`, matched to the card by its first line; it excludes the line-number gutter) is cropped out of
+`ctl screenshot` (PNG decoded with `zlib`/`struct` only; points scaled to pixels by PNG width / window content
+width) and must hold at least 40 pixels whose luminance differs by more than 60/255 from the viewport's modal
+background, in the whole viewport and in the first line's band. A blank text area FAILs "text not drawn: the card's
+text area is blank (model has N lines)"; an unreadable or corrupt PNG FAILs "could not read screenshot"; a card text
+view that cannot be located FAILs "cannot locate the card text area" and prints a tree excerpt. Nothing passes by
+fallback. `ctl find` for the first 12 ASCII characters of the card's rendered first line (cut at the first
+non-ASCII/invisible character, so the bidi fixture's probe is `echo `) is a secondary "text in view tree" check,
+required to hit a view overlapping the card; it matches model text, not glyphs, which is why the pixels decide.
+Screenshots, trees and listings go to a private `mktemp -d` directory (mode 0700, printed at the start, removed at
+the end unless `KEEP=1`); fixture names must match `[a-z0-9_]+` (exit 2 otherwise). With `--no-synthetic` a stale
+card cannot be Denied, so it is noted (not a FAIL) and ignored by input matching. One `SUMMARY` line per fixture.
 Pure checks live in `lib/card_checks.py` (tests: `tests/qa_instance/test_card_checks.py`).
 
 The QA app has only the built-in foci (Fred, Mother, Perri, Teri); the composer exists only inside an agent
