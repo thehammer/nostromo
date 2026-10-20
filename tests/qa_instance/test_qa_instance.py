@@ -40,6 +40,37 @@ class TeardownPidReuseTests(unittest.TestCase):
         self.assertEqual(killed, [])
 
 
+class QAMotherProcessTests(unittest.TestCase):
+    ROOT = "/var/folders/xx/nostromo-qa-abc"
+    PS = "\n".join([
+        "  PID   UID COMMAND",
+        "75097   502 /opt/homebrew/bin/mother-runner supervise HOME=/var/folders/xx/nostromo-qa-abc/home PATH=/usr/bin",
+        "95441   502 /usr/bin/env mother daemon start PATH=/usr/bin HOME=/var/folders/xx/nostromo-qa-abc/home",
+        "  111   502 /opt/homebrew/bin/mother-runner supervise HOME=/Users/x PATH=/usr/bin",
+        "  112   502 /opt/homebrew/bin/mother-runner supervise PATH=/usr/bin",
+        "  113   502 /opt/homebrew/bin/mother-runner supervise HOME=/var/folders/xx/nostromo-qa-abc-other/home",
+        "  114   501 /opt/homebrew/bin/mother-runner supervise HOME=/var/folders/xx/nostromo-qa-abc/home",
+        "  115   502 /bin/zsh -c mother-runner HOME=/var/folders/xx/nostromo-qa-abc/home",
+        "  116   502 /opt/homebrew/bin/mother-runner x HOME=/var/folders/xx/nostromo-qa-abc/home HOME=/Users/x",
+        "  117   502 /opt/homebrew/bin/mother daemon status HOME=/var/folders/xx/nostromo-qa-abc",
+    ])
+
+    def test_only_same_user_mother_processes_with_home_under_the_root_match(self):
+        self.assertEqual(qa.find_qa_mother_pids(self.PS, self.ROOT, 502), [117, 75097])
+
+    def test_stop_kills_exactly_those_pids_and_reports_them(self):
+        killed = []
+        problems = qa.stop_qa_mother(self.ROOT, ps_text=self.PS, kill=killed.append, uid=502)
+        self.assertEqual(killed, [117, 75097])
+        self.assertEqual(len(problems), 2)
+
+    def test_the_real_runner_alone_is_never_touched(self):
+        ps = "  111   502 /opt/homebrew/bin/mother-runner supervise HOME=/Users/x\n"
+        killed = []
+        self.assertEqual(qa.stop_qa_mother(self.ROOT, ps_text=ps, kill=killed.append, uid=502), [])
+        self.assertEqual(killed, [])
+
+
 class CloneBuildTests(unittest.TestCase):
     def test_the_clone_is_built_and_cloned_from_the_release_app_not_the_debug_split_dylib_build(self):
         src = read("scripts", "qa", "lib", "qa_instance.py")

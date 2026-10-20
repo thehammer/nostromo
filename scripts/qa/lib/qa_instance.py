@@ -111,6 +111,28 @@ def parse_processes(ps_output, exclude_marker=None):
     return found
 
 
+MOTHER_PROCESSES = ("mother-runner", "mother")
+_HOME_VAR = re.compile(r"(?:^|\s)HOME=(\S+)")
+
+
+def find_qa_mother_pids(ps_env_text, qa_root, uid):
+    """`ps -axE -o pid,uid,command` text -> sorted pids of same-user `mother-runner`/`mother` processes
+    whose environment `HOME` is the QA root or under it. A runner with any other HOME (the user's real
+    one) never matches. `ps -E` appends the environment after the arguments, so the last `HOME=` wins."""
+    root = qa_root.rstrip("/")
+    pids = []
+    for line in ps_env_text.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        if int(parts[1]) != uid or os.path.basename(parts[2].split(None, 1)[0]) not in MOTHER_PROCESSES:
+            continue
+        homes = _HOME_VAR.findall(parts[2])
+        if homes and (homes[-1] == root or homes[-1].startswith(root + "/")):
+            pids.append(int(parts[0]))
+    return sorted(pids)
+
+
 def process_view(procs):
     """{name: sorted pids}."""
     view = {}
@@ -512,6 +534,16 @@ def teardown(qa_root, state, start_of=proc_start, kill=kill_pid):
             kill(pid)
 
 
+def stop_qa_mother(qa_root, ps_text=None, kill=kill_pid, uid=None):
+    """Kill (SIGTERM first, by exact pid) any Mother process the QA run started; return FAIL lines for it."""
+    if ps_text is None:
+        ps_text = run(["/bin/ps", "-axE", "-o", "pid,uid,command"]).stdout
+    pids = find_qa_mother_pids(ps_text, qa_root, os.getuid() if uid is None else uid)
+    for pid in pids:
+        kill(pid)
+    return [f"the QA run started a Mother process (pid {pid}, HOME under the QA root); it was stopped" for pid in pids]
+
+
 def cmd_start(args):
     synthetic = "--no-synthetic" not in args
     before = user_snapshot()
@@ -599,7 +631,8 @@ def cmd_stop(args):
     qa_root = resolve_root(args[0] if args else None)
     state = load_state(qa_root)
     teardown(qa_root, state)
-    problems = compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir())
+    problems = stop_qa_mother(qa_root)
+    problems += compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir())
     # An isolation failure keeps the root: its logs are the evidence (the caller prints them).
     keep = os.environ.get("KEEP") == "1" or bool(problems)
     if not keep:

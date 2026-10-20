@@ -61,3 +61,25 @@ final class NostromoHomeTests: XCTestCase {
         XCTAssertEqual(resolve(env: [envKey: tempRoot.path], bundleID: nil), realHome.path)
     }
 }
+
+final class MotherDaemonStartDecisionTests: XCTestCase {
+    func testOfflineBrokerOnTheRealAppStartsMother() {
+        XCTAssertTrue(NostromoHome.shouldAttemptMotherDaemonStart(brokerConnected: false, isQA: false))
+    }
+
+    func testOfflineBrokerOnTheQAInstanceNeverStartsMother() {
+        XCTAssertFalse(NostromoHome.shouldAttemptMotherDaemonStart(brokerConnected: false, isQA: true))
+    }
+
+    func testConnectedBrokerNeverStartsMother() {
+        XCTAssertFalse(NostromoHome.shouldAttemptMotherDaemonStart(brokerConnected: true, isQA: false))
+        XCTAssertFalse(NostromoHome.shouldAttemptMotherDaemonStart(brokerConnected: true, isQA: true))
+    }
+
+    func testOnlyTheExactQABundleIDIsTheQAInstance() {
+        XCTAssertTrue(NostromoHome.isQAInstance(bundleID: "com.hammer.nostromo.qa"))
+        XCTAssertFalse(NostromoHome.isQAInstance(bundleID: "com.hammer.nostromo"))
+        XCTAssertFalse(NostromoHome.isQAInstance(bundleID: "com.hammer.nostromo.qa2"))
+        XCTAssertFalse(NostromoHome.isQAInstance(bundleID: nil))
+    }
+}
