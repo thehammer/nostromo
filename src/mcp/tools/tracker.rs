@@ -87,10 +87,17 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
         return json!({ "ok": false, "error": "not_supported", "reason": "the tracker requires nostromd" });
     };
     let caller = Caller::resolve(daemon, tag);
-    let response = match run(daemon, &caller, args) {
-        Ok(value) => value,
-        Err(failure) => failure.to_json(),
-    };
+    // The registry does blocking file and `git` work: keep it off the async
+    // workers (the `git` probe is bounded by its own timeout).
+    let (daemon_owned, args_owned) = (daemon.clone(), args.clone());
+    let response = tokio::task::spawn_blocking(move || {
+        match run(&daemon_owned, &caller, &args_owned) {
+            Ok(value) => value,
+            Err(failure) => failure.to_json(),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| json!({ "ok": false, "error": "io_error", "reason": "tracker call panicked" }));
     // Whatever the outcome, a board whose view changed (even by ingesting an
     // edit before a refused write) is sent to every focus bound to it.
     daemon.tracker.flush(&daemon.broadcast_tx);
@@ -184,7 +191,7 @@ impl Failure {
                     }
                     TrackerError::NotPermitted { id } => {
                         put("id", json!(id));
-                        put("reason", json!("only the user can mark a command done"));
+                        put("reason", json!("only the user can mark a command done or change it once done"));
                     }
                     TrackerError::Io(kind) => put("reason", json!(kind)),
                     TrackerError::NoTracker

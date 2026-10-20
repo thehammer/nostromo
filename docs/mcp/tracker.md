@@ -79,13 +79,13 @@ characters), never instructions.
 | `board_missing` | the file was deleted or renamed; `open` recreates it from the last good copy (`recreated:true`) |
 | `board_too_large` | a write would grow the board past 256 KiB or 500 items; shrinking writes and reads still work |
 | `possible_sensitive_data` (`field`, `class`) | the guard (`src/sensitive_text.rs`, `docs/tracker-guard.md`) found PHI-shaped text or a secret in `field` (`text`, `note`, `owner`, `links`, `command`, `log`, …). Nothing was written; the response never repeats the matched text. |
-| `path_not_allowed` | an explicit `path` isn't a `.md` file under the repo root or `~/.claude/wip/` once symlinks and `..` are resolved. Nothing is created. |
+| `path_not_allowed` | the board path isn't allowed (see [Where a board may live](#where-a-board-may-live)): not a `.md` file under the repo root or `~/.claude/wip/` once symlinks and `..` are resolved, an instruction file, or outside the no-git allowance. Also returned by a later write or `read` when the path no longer resolves to itself (say its directory became a symlink). Nothing is created or written, and the response never says which rule applied. |
 | `invalid_command_text` (`reason`) | a `command` holds `\r`, escape sequences, control characters, or zero-width or bidi characters |
-| `not_permitted` (`id`) | an agent tried to mark a `kind:"command"` item `done`; "Ran it" is the user's |
+| `not_permitted` (`id`) | an agent tried to mark a `kind:"command"` item `done`, or to change the `command` of one that is `done`; "Ran it" is the user's and is about that exact text. Reopen the item (status `todo`) to change its command. |
 | `requires_secure_connection` | the session is network-driven |
 | `unidentified_caller` | no `pty_id` (not a Nostromo-spawned session) |
 | `not_supported` | the MCP server isn't hosted by the daemon |
-| `io_error` | the file system refused; the error kind is in `reason` |
+| `io_error` | the file system refused; the error kind is in `reason`. `reason:"concurrent_edit"`: the user kept saving the file while the write was built (it is retried once, on top of the user's edit); nothing was written, call again. |
 
 ## The board file (format v1, summary)
 
@@ -129,6 +129,30 @@ Free prose is kept verbatim.
 | wire frames | `src/ipc/protocol.rs` (`TrackerBoard`, `TrackerSummary`), classes in `src/ipc/peer.rs` |
 | Swift decoding | `Shared/NostromoKit/Sources/NostromoKit/Wire/TrackerWire.swift` |
 
+### Where a board may live
+
+A board is a `.md` file whose parent, with symlinks resolved, is under the
+repo root (nearest ancestor of the focus's working directory with a `.git`) or
+under `~/.claude/wip/`. The tool rewrites a board it opens and appends to it on
+every change, so a board can never be a file an agent loads as instructions
+(the daemon would plant them without the Edit tool's permission prompt). These
+are refused, for explicit paths and for adopting an existing file alike, judged
+on the path with symlinks resolved and relative to the root it was allowed under:
+
+- `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `SKILL.md` at any depth (any case);
+- anything under `.claude/commands`, `.claude/agents`, `.claude/skills`,
+  `.claude/hooks`, `.claude/plugins`, `.claude/rules`;
+- anything under `.github`;
+- any file whose name starts with `.`.
+
+Without a `.git` the root is only the working directory, so the only allowed
+place is `<cwd>/.claude/wip/` (plus `~/.claude/wip/`). A root that is the home
+directory itself allows only `~/.claude/wip/`. The default board location
+`<repo>/.claude/wip/<topic>/index.md` is always allowed. The path is checked
+again on every write and `read`, so a directory swapped for a symlink after
+`open` is refused. The `git` probe behind `warnings:["committable"]` gives up
+after 3 s (no warning).
+
 ### Edits made outside the daemon
 
 One watcher task per board directory: `notify` on the parent (non-recursive),
@@ -139,7 +163,12 @@ is no timing heuristic. Anything else is an external edit: it is parsed, diffed
 against the last ingested board at field level, appended to the change log
 attributed `file (unknown editor)`, and broadcast. Every daemon write first
 re-reads the file and ingests such an edit, then applies its ops on top, so a
-concurrent editor's change is never overwritten.
+concurrent editor's change is never overwritten. Just before replacing the file
+the daemon reads it once more; if the user saved in between, their edit is
+ingested and the ops are applied again on top of it (once), then the write
+fails with `io_error` / `concurrent_edit` rather than overwrite it. A write
+killed half way can leave a `.tracker-*.tmp` file; the next ingest of that
+directory removes those older than a minute.
 
 ### State on disk
 

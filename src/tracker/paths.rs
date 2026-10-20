@@ -8,8 +8,9 @@
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
@@ -22,13 +23,29 @@ pub fn is_valid_topic(topic: &str) -> bool {
         .is_match(topic)
 }
 
+/// Where a focus's boards may live: the nearest ancestor of its working
+/// directory that holds `.git`, or the working directory itself when none does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoRoot {
+    pub dir: PathBuf,
+    /// A `.git` was found. Without one the root is only the working directory
+    /// and boards are confined to `<dir>/.claude/wip/` (see [`resolve_board_path`]).
+    pub git: bool,
+}
+
 /// The nearest ancestor of `cwd` (itself included) that contains `.git`, else
 /// `cwd`. Walks the file system; runs no git command.
-pub fn repo_root(cwd: &Path) -> PathBuf {
-    cwd.ancestors()
-        .find(|dir| dir.join(".git").exists())
-        .unwrap_or(cwd)
-        .to_path_buf()
+pub fn find_repo_root(cwd: &Path) -> RepoRoot {
+    match cwd.ancestors().find(|dir| dir.join(".git").exists()) {
+        Some(dir) => RepoRoot {
+            dir: dir.to_path_buf(),
+            git: true,
+        },
+        None => RepoRoot {
+            dir: cwd.to_path_buf(),
+            git: false,
+        },
+    }
 }
 
 /// `<repo_root>/.claude/wip/<topic>/index.md`.
@@ -40,25 +57,45 @@ pub fn default_path(repo_root: &Path, topic: &str) -> PathBuf {
         .join("index.md")
 }
 
-/// The path is not under the repo root or `~/.claude/wip/`, is not a `.md`
-/// file, or escapes them through `..` or a symlink.
+/// The path is not an allowed board location: not a `.md` file, not under the
+/// repo root or `~/.claude/wip/`, an instruction file the agent tooling reads
+/// (see [`resolve_board_path`]), or it escapes through `..` or a symlink.
+/// Says nothing about which rule it broke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathNotAllowed;
 
-/// Resolves `requested` (absolute, or relative to `repo_root`) to the path a
+/// File names that carry instructions to an agent, at any depth.
+const INSTRUCTION_FILES: [&str; 4] = ["CLAUDE.md", "AGENTS.md", "GEMINI.md", "SKILL.md"];
+/// Directories under a `.claude` directory that agents load instructions from.
+const INSTRUCTION_DIRS: [&str; 6] = ["commands", "agents", "skills", "hooks", "plugins", "rules"];
+
+/// Resolves `requested` (absolute, or relative to the repo root) to the path a
 /// board may live at: a `.md` file whose parent directory, with symlinks
-/// resolved, is under `repo_root` or `home_wip`. Directories that don't exist
-/// yet are allowed (they are created on open) as long as no `..` appears in the
-/// part that doesn't exist. Creates nothing.
+/// resolved, is under the repo root or `~/.claude/wip/`. Directories that don't
+/// exist yet are allowed (they are created on open) as long as no `..` appears
+/// in the part that doesn't exist. Creates nothing.
+///
+/// The tool rewrites a board it opens and appends to it on every change, so a
+/// board must never be a file an agent loads as instructions, or the daemon
+/// would plant them without the Edit tool's permission prompt. Refused, for
+/// explicit paths and adoptions alike: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`
+/// and `SKILL.md` at any depth (any case); anything under `.claude/commands`,
+/// `agents`, `skills`, `hooks`, `plugins` or `rules`; anything under `.github`;
+/// any file whose name starts with `.`. The rules look at the path with
+/// symlinks resolved, relative to the root it was allowed under.
+///
+/// Without a `.git` the root is only the working directory, so only
+/// `<dir>/.claude/wip/` is allowed there, and a root that is the home
+/// directory itself allows nothing but `~/.claude/wip/`.
 pub fn resolve_board_path(
-    repo_root: &Path,
-    home_wip: Option<&Path>,
+    root: &RepoRoot,
+    home: Option<&Path>,
     requested: &Path,
 ) -> Result<PathBuf, PathNotAllowed> {
     let absolute = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
-        repo_root.join(requested)
+        root.dir.join(requested)
     };
     let is_md = absolute
         .extension()
@@ -67,14 +104,53 @@ pub fn resolve_board_path(
         return Err(PathNotAllowed);
     }
     let canonical = canonicalize_lenient(&absolute).ok_or(PathNotAllowed)?;
-    let under = |root: &Path| {
-        canonicalize_lenient(root).is_some_and(|root| canonical.starts_with(root))
+    let allowed_under = |allowed: Option<PathBuf>| {
+        allowed
+            .and_then(|dir| canonicalize_lenient(&dir))
+            .and_then(|dir| canonical.strip_prefix(dir).ok().map(Path::to_path_buf))
+            .is_some_and(|relative| !is_instruction_path(&relative))
     };
-    if under(repo_root) || home_wip.is_some_and(under) {
+    let root_dir = canonicalize_lenient(&root.dir);
+    let home_is_root = match (&root_dir, home.and_then(canonicalize_lenient)) {
+        (Some(root_dir), Some(home)) => *root_dir == home,
+        _ => false,
+    };
+    let repo_allowed = if home_is_root {
+        None
+    } else if root.git {
+        root_dir
+    } else {
+        // `root_dir` is already canonical; joining keeps a symlinked
+        // `.claude/wip` from widening the allowance.
+        root_dir.map(|dir| dir.join(".claude").join("wip"))
+    };
+    let home_wip = home.map(|h| h.join(".claude").join("wip"));
+    if allowed_under(repo_allowed) || allowed_under(home_wip) {
         Ok(canonical)
     } else {
         Err(PathNotAllowed)
     }
+}
+
+/// Whether `relative` (below the root a board was allowed under) names a file
+/// an agent loads as instructions.
+fn is_instruction_path(relative: &Path) -> bool {
+    let names: Vec<String> = relative
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let Some(file) = names.last() else {
+        return true;
+    };
+    file.starts_with('.')
+        || INSTRUCTION_FILES.iter().any(|f| f.eq_ignore_ascii_case(file))
+        || names.iter().any(|n| n == ".github")
+        || names
+            .windows(2)
+            .any(|w| w[0] == ".claude" && INSTRUCTION_DIRS.contains(&w[1].as_str()))
 }
 
 /// Canonicalises the longest existing prefix of `path` and appends the rest.
@@ -141,11 +217,38 @@ struct GitRun {
     stdout: String,
 }
 
-fn run_git(repo: &Path, command: &GitCommand) -> Option<GitRun> {
+/// How long the whole probe may take. A slow or hung git (a stalled network
+/// file system, a lock) must not hold up a tool call: the probe gives up and
+/// the board simply shows no commit warning.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Runs `command` to completion, or kills it at `deadline`. `None` when it
+/// can't start or runs out of time.
+fn output_before(mut command: Command, deadline: Instant) -> Option<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn run_git(repo: &Path, command: &GitCommand, deadline: Instant) -> Option<GitRun> {
     // The repo's own config is not trusted: no filesystem monitor (a command
     // the config names), and no repository or work tree from the environment.
-    let output = Command::new("git")
-        .arg("--no-optional-locks")
+    let mut git = Command::new("git");
+    git.arg("--no-optional-locks")
         .args(["-c", "core.fsmonitor=false"])
         .arg("-C")
         .arg(repo)
@@ -153,11 +256,8 @@ fn run_git(repo: &Path, command: &GitCommand) -> Option<GitRun> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .env_remove("GIT_INDEX_FILE");
+    let output = output_before(git, deadline)?;
     // 128 is "not a repository" or another failure; only 0 and 1 are answers.
     match output.status.code() {
         Some(0) => Some(GitRun {
@@ -180,12 +280,18 @@ pub fn probe_committable(repo_root: &Path, board: &Path) -> Option<Committable> 
         return None;
     }
     let relative = board.strip_prefix(repo_root).ok()?.to_path_buf();
-    let tracked = run_git(repo_root, &GitCommand::LsFilesErrorUnmatch(relative.clone()))?.success;
-    let ignored = run_git(repo_root, &GitCommand::CheckIgnore(relative))?.success;
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let tracked = run_git(
+        repo_root,
+        &GitCommand::LsFilesErrorUnmatch(relative.clone()),
+        deadline,
+    )?
+    .success;
+    let ignored = run_git(repo_root, &GitCommand::CheckIgnore(relative), deadline)?.success;
     if !tracked && ignored {
         return None;
     }
-    let remote = run_git(repo_root, &GitCommand::RemoteGetUrlOrigin)
+    let remote = run_git(repo_root, &GitCommand::RemoteGetUrlOrigin, deadline)
         .filter(|run| run.success)
         .and_then(|run| display_remote(run.stdout.trim()));
     Some(Committable { remote })
@@ -254,5 +360,20 @@ mod tests {
                 assert!(!args.iter().any(|a| a == banned), "{banned} in {args:?}");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_past_its_deadline_is_killed_and_a_quick_one_returns_its_output() {
+        let started = Instant::now();
+        let mut slow = Command::new("sleep");
+        slow.arg("5");
+        assert!(output_before(slow, Instant::now() + Duration::from_millis(100)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(3), "the deadline was not enforced");
+
+        let mut quick = Command::new("echo");
+        quick.arg("hello");
+        let out = output_before(quick, Instant::now() + Duration::from_secs(10)).expect("output");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");
     }
 }

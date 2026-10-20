@@ -41,6 +41,6 @@ pub use ops::{apply_batch, apply_to_file, Applied, Op, OpError, Upsert, WriteErr
 pub use render::{compact_full, delta_entries, quote_untrusted};
 pub use view::{TrackerBoardView, ViewFacts};
 pub use registry::{
-    CallerFacts, OpenArgs, OpenOutcome, ReadOutcome, RegistryParts, TrackerError, TrackerRegistry,
+    CallerFacts, CONCURRENT_EDIT, OpenArgs, OpenOutcome, ReadOutcome, RegistryParts, TrackerError, TrackerRegistry,
     TrackerSummary, WriteOutcome,
 };

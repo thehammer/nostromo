@@ -49,7 +49,19 @@ pub trait BoardFs: Send + Sync {
     /// `None` when the file doesn't exist.
     fn signature(&self, path: &Path) -> Option<FileSignature>;
     fn create_dir_all(&self, dir: &Path) -> io::Result<()>;
+
+    /// Called after the registry has built a write on top of `path`'s current
+    /// bytes and before it checks they are still what is on disk. A test seam
+    /// for "the user saved in between"; does nothing in production.
+    fn before_commit(&self, _path: &Path) {}
+
+    /// Removes the `.tracker-*.tmp` files a write killed half way left in
+    /// `dir`. Does nothing by default.
+    fn remove_stale_temps(&self, _dir: &Path) {}
 }
+
+/// A temp file this old is not a write in flight.
+const STALE_TEMP_AGE: Duration = Duration::from_secs(60);
 
 /// The real file system.
 #[derive(Debug, Clone, Copy, Default)]
@@ -80,7 +92,35 @@ impl BoardFs for RealBoardFs {
     fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dir)
     }
+
+    fn remove_stale_temps(&self, dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)) {
+                continue;
+            }
+            // `DirEntry::metadata` does not follow symlinks: only plain files.
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            let stale = meta
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= STALE_TEMP_AGE);
+            if meta.is_file() && stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
+
+const TEMP_PREFIX: &str = ".tracker-";
+const TEMP_SUFFIX: &str = ".tmp";
 
 /// Temp file in the target's directory, `fsync`, rename over the target.
 /// An existing file's permissions are kept.
@@ -88,8 +128,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::Builder::new()
-        .prefix(".tracker-")
-        .suffix(".tmp")
+        .prefix(TEMP_PREFIX)
+        .suffix(TEMP_SUFFIX)
         .tempfile_in(dir)?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;

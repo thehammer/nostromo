@@ -29,6 +29,7 @@ use nostromo::mcp::tools::{dispatch, tool_descriptors, ToolResult};
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
 use nostromo::sensitive_text::{scan, GuardConfig};
 use nostromo::tracker::view::{Banner, ViewItem, ViewNode};
+use nostromo::tracker::watch::{BoardFs, FileSignature, RealBoardFs};
 use nostromo::tracker::{
     parse, CallerFacts, FakeClock, RegistryParts, TrackerBoardView, TrackerRegistry,
 };
@@ -160,6 +161,12 @@ fn git(repo: &Path, args: &[&str]) {
 
 impl Fx {
     fn new() -> Fx {
+        Fx::with_fs(Arc::new(RealBoardFs))
+    }
+
+    /// Like `new`, with the file system seam the registry reads and writes
+    /// boards through replaced.
+    fn with_fs(fs: Arc<dyn BoardFs>) -> Fx {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let repo = base.join("repo");
@@ -174,11 +181,9 @@ impl Fx {
         git(&repo, &["config", "core.excludesFile", excludes.to_str().unwrap()]);
 
         let clock = Arc::new(FakeClock::at_secs(1_760_540_000));
-        let registry = Arc::new(TrackerRegistry::new(RegistryParts::hermetic(
-            state_root,
-            home.clone(),
-            clock.clone(),
-        )));
+        let mut parts = RegistryParts::hermetic(state_root, home.clone(), clock.clone());
+        parts.fs = fs;
+        let registry = Arc::new(TrackerRegistry::new(parts));
         let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
             base.join("sessions.json"),
         )));
@@ -1620,4 +1625,414 @@ async fn opening_a_board_broadcasts_its_view_and_summary_to_the_opening_focus() 
     assert!(boards.last().is_some_and(|b| b.is_some()), "{frames:?}");
     let summaries = summary_frames(&frames, TAG_A);
     assert_eq!(summaries.last().map(|s| s.0), Some(true), "{frames:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Review fix-ups: instruction-file path policy (F1)
+// ---------------------------------------------------------------------------
+
+const PARSEABLE: &str = "# Instructions\n\n## Now\n\n- [ ] do the thing\n";
+
+async fn open_path(fx: &Fx, tag: &str, path: &str) -> Value {
+    fx.call(tag, json!({"op": "open", "path": path})).await
+}
+
+#[tokio::test]
+async fn f1_instruction_files_cannot_be_adopted_or_created() {
+    let fx = Fx::new();
+    fx.seat(TAG_A, "sess-a");
+
+    // Refused although a parseable file already sits there (adoption).
+    let existing = [
+        "CLAUDE.md",
+        "AGENTS.md",
+        "docs/CLAUDE.md",
+        ".claude/commands/x.md",
+        ".claude/skills/foo/SKILL.md",
+        ".claude/skills/foo/notes.md",
+        ".github/pull_request_template.md",
+        ".hidden.md",
+        "docs/sub/SKILL.md",
+        ".claude/rules/x.md",
+    ];
+    // Refused and nothing may be created for them.
+    let absent = [
+        "GEMINI.md",
+        "docs/AGENTS.md",
+        "docs/GEMINI.md",
+        ".claude/agents/x.md",
+        ".claude/hooks/x.md",
+        ".claude/plugins/p/x.md",
+        ".github/ISSUE_TEMPLATE/x.md",
+        "docs/.notes.md",
+        "docs/other/SKILL.md",
+        "SKILL.md",
+    ];
+    let mut victims: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for rel in existing {
+        let path = fx.repo.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, PARSEABLE).unwrap();
+        victims.push((path, PARSEABLE.as_bytes().to_vec()));
+    }
+    let parent_existed: Vec<bool> = absent
+        .iter()
+        .map(|rel| fx.repo.join(rel).parent().unwrap().exists())
+        .collect();
+
+    for rel in existing.iter().chain(absent.iter()) {
+        for requested in [rel.to_string(), fx.repo.join(rel).display().to_string()] {
+            let res = open_path(&fx, TAG_A, &requested).await;
+            is_err(&res, "path_not_allowed");
+            assert!(res.get("board").is_none(), "{rel}: nothing of the file is echoed: {res}");
+        }
+    }
+    // Lower-case spelling of a refused name.
+    let res = open_path(&fx, TAG_A, "claude.md").await;
+    is_err(&res, "path_not_allowed");
+    let res = open_path(&fx, TAG_A, "docs/claude.md").await;
+    is_err(&res, "path_not_allowed");
+
+    for (path, bytes) in &victims {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{path:?} was modified");
+    }
+    for (rel, parent) in absent.iter().zip(parent_existed) {
+        let path = fx.repo.join(rel);
+        assert!(!path.exists(), "{path:?} was created");
+        assert_eq!(path.parent().unwrap().exists(), parent, "{path:?}: a directory was created");
+    }
+    assert!(!fx.repo.join("docs/claude.md").exists());
+}
+
+#[tokio::test]
+async fn f1_default_board_locations_and_ordinary_markdown_stay_allowed() {
+    let fx = Fx::new();
+    fx.seat(TAG_A, "sess-a");
+    let res = fx.call(TAG_A, json!({"op": "open", "topic": "plain"})).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    assert!(fx.board_path("plain").is_file());
+
+    let home_board = fx.home.join(".claude/wip/shared/index.md").display().to_string();
+    for path in [".claude/wip/x/board.md", "docs/plan.md", home_board.as_str()] {
+        let res = open_path(&fx, TAG_A, path).await;
+        assert_eq!(res["ok"], json!(true), "{path}: {res}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn f1_instruction_file_behind_a_symlink_is_refused() {
+    let fx = Fx::new();
+    fx.seat(TAG_A, "sess-a");
+    let claude_md = fx.repo.join("CLAUDE.md");
+    std::fs::write(&claude_md, PARSEABLE).unwrap();
+    let commands = fx.repo.join(".claude/commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(commands.join("x.md"), PARSEABLE).unwrap();
+    std::fs::create_dir_all(fx.repo.join(".claude/wip/x")).unwrap();
+    std::os::unix::fs::symlink(&claude_md, fx.repo.join(".claude/wip/x/board.md")).unwrap();
+    std::os::unix::fs::symlink(&commands, fx.repo.join(".claude/wip/link")).unwrap();
+
+    for path in [".claude/wip/x/board.md", ".claude/wip/link/x.md", ".claude/wip/link/new.md"] {
+        let res = open_path(&fx, TAG_A, path).await;
+        is_err(&res, "path_not_allowed");
+    }
+    assert_eq!(std::fs::read(&claude_md).unwrap(), PARSEABLE.as_bytes());
+    assert_eq!(std::fs::read(commands.join("x.md")).unwrap(), PARSEABLE.as_bytes());
+    assert!(!commands.join("new.md").exists());
+}
+
+#[tokio::test]
+async fn f1_without_a_git_root_only_the_cwd_wip_dir_is_allowed() {
+    let fx = Fx::new();
+    // A home-shaped directory with no `.git` here or above it.
+    let plain = fx.base.join("plain-home");
+    std::fs::create_dir_all(plain.join("Documents")).unwrap();
+    std::fs::create_dir_all(plain.join(".claude/wip")).unwrap();
+    std::fs::write(plain.join("notes.md"), PARSEABLE).unwrap();
+    std::fs::write(plain.join("Documents/x.md"), PARSEABLE).unwrap();
+    fx.registry.set_caller_facts(
+        "cody-plain",
+        CallerFacts { cwd: Some(plain.clone()), session_id: Some("sess-p".into()) },
+    );
+
+    for path in ["notes.md", "Documents/x.md", "new.md"] {
+        is_err(&open_path(&fx, "cody-plain", path).await, "path_not_allowed");
+    }
+    assert_eq!(std::fs::read(plain.join("notes.md")).unwrap(), PARSEABLE.as_bytes());
+    assert_eq!(std::fs::read(plain.join("Documents/x.md")).unwrap(), PARSEABLE.as_bytes());
+    assert!(!plain.join("new.md").exists());
+
+    let res = open_path(&fx, "cody-plain", ".claude/wip/t/index.md").await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    let res = fx.call("cody-plain", json!({"op": "open", "topic": "tp"})).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    assert!(plain.join(".claude/wip/tp/index.md").is_file());
+
+    // The cwd is the home directory itself, even though it holds a `.git`.
+    std::fs::create_dir_all(fx.home.join(".git")).unwrap();
+    std::fs::write(fx.home.join("notes.md"), PARSEABLE).unwrap();
+    fx.registry.set_caller_facts(
+        "cody-home",
+        CallerFacts { cwd: Some(fx.home.clone()), session_id: Some("sess-h".into()) },
+    );
+    is_err(&open_path(&fx, "cody-home", "notes.md").await, "path_not_allowed");
+    assert_eq!(std::fs::read(fx.home.join("notes.md")).unwrap(), PARSEABLE.as_bytes());
+    let res = fx.call("cody-home", json!({"op": "open", "topic": "ht"})).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    assert!(fx.home.join(".claude/wip/ht/index.md").is_file());
+}
+
+// ---------------------------------------------------------------------------
+// Review fix-ups: the command of an item the user ran (F2)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn f2_agent_cannot_change_the_command_of_an_item_the_user_ran() {
+    let fx = Fx::new();
+    fx.seat(TAG_A, "sess-a");
+    fx.open(TAG_A, "f2").await;
+    let res = fx.call(TAG_A, command_item("php artisan queue:retry 8812")).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+
+    // The user ticks it in the file.
+    let ticked: Vec<String> = fx
+        .file_str("f2")
+        .split('\n')
+        .map(|l| if l.contains("#cmd-1") { l.replacen("- [ ]", "- [x]", 1) } else { l.to_string() })
+        .collect();
+    std::fs::write(fx.board_path("f2"), ticked.join("\n")).unwrap();
+    assert!(fx.file_changed("f2"));
+    let before = fx.file("f2");
+    let command_and_status = |fx: &Fx| {
+        let view = fx.registry.board_view(TAG_A).unwrap();
+        let item = view_items(&view).into_iter().find(|i| i.id == "cmd-1").unwrap();
+        (item.command.clone(), item.status)
+    };
+    let (command, status) = command_and_status(&fx);
+    assert_eq!(command.as_deref(), Some("php artisan queue:retry 8812"));
+    assert_eq!(format!("{status:?}").to_lowercase(), "done");
+
+    for args in [
+        json!({"op": "upsert", "id": "cmd-1", "command": "rm -rf /"}),
+        json!({"ops": [{"op": "log", "text": "swap"}, {"op": "upsert", "id": "cmd-1", "command": "rm -rf /"}]}),
+    ] {
+        let res = fx.call(TAG_A, args.clone()).await;
+        is_err(&res, "not_permitted");
+        assert_eq!(res["id"], json!("cmd-1"), "{res}");
+        assert_eq!(fx.file("f2"), before, "{args}: nothing is written");
+        assert_eq!(command_and_status(&fx).0.as_deref(), Some("php artisan queue:retry 8812"));
+    }
+
+    // The same command with a changed note is fine, and stays done.
+    let res = fx
+        .call(
+            TAG_A,
+            json!({"op": "upsert", "id": "cmd-1", "command": "php artisan queue:retry 8812", "note": "ran fine"}),
+        )
+        .await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    let (command, status) = command_and_status(&fx);
+    assert_eq!(command.as_deref(), Some("php artisan queue:retry 8812"));
+    assert_eq!(format!("{status:?}").to_lowercase(), "done");
+
+    // Reopening with a new command is the way to change it.
+    let res = fx
+        .call(TAG_A, json!({"op": "upsert", "id": "cmd-1", "status": "todo", "command": "php artisan queue:retry 9"}))
+        .await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    let (command, status) = command_and_status(&fx);
+    assert_eq!(command.as_deref(), Some("php artisan queue:retry 9"));
+    assert_ne!(format!("{status:?}").to_lowercase(), "done");
+}
+
+// ---------------------------------------------------------------------------
+// Review fix-ups: a user save between read and rename (F3)
+// ---------------------------------------------------------------------------
+
+type CommitHook = Box<dyn FnMut(&Path) + Send>;
+
+/// The real file system, plus a hook that runs where the registry is about to
+/// commit a write.
+struct HookFs {
+    inner: RealBoardFs,
+    hook: Mutex<CommitHook>,
+}
+
+impl HookFs {
+    fn new() -> Arc<HookFs> {
+        Arc::new(HookFs { inner: RealBoardFs, hook: Mutex::new(Box::new(|_| {})) })
+    }
+    fn set(&self, hook: impl FnMut(&Path) + Send + 'static) {
+        *self.hook.lock().unwrap() = Box::new(hook);
+    }
+}
+
+impl BoardFs for HookFs {
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        self.inner.read(path)
+    }
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        self.inner.write_atomic(path, bytes)
+    }
+    fn signature(&self, path: &Path) -> Option<FileSignature> {
+        self.inner.signature(path)
+    }
+    fn create_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(dir)
+    }
+    fn before_commit(&self, path: &Path) {
+        (self.hook.lock().unwrap())(path);
+    }
+    fn remove_stale_temps(&self, dir: &Path) {
+        self.inner.remove_stale_temps(dir);
+    }
+}
+
+/// Flips the checkbox of item `first-1` in the file, as a user saving would.
+fn user_flips_first(path: &Path) -> Vec<u8> {
+    let text = std::fs::read_to_string(path).unwrap();
+    let flipped: Vec<String> = text
+        .split('\n')
+        .map(|l| {
+            if !l.contains("#first-1") {
+                l.to_string()
+            } else if l.starts_with("- [ ]") {
+                l.replacen("- [ ]", "- [x]", 1)
+            } else {
+                l.replacen("- [x]", "- [ ]", 1)
+            }
+        })
+        .collect();
+    let bytes = flipped.join("\n").into_bytes();
+    std::fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn f3_a_user_save_between_read_and_rename_is_not_lost() {
+    let hooks = HookFs::new();
+    let fx = Fx::with_fs(hooks.clone());
+    fx.seat(TAG_A, "sess-a");
+    fx.seat(TAG_B, "sess-b");
+    fx.open(TAG_A, "f3").await;
+    fx.add_item(TAG_A, "first-1", "now", "First thing").await;
+    fx.open(TAG_B, "f3").await;
+    fx.call(TAG_B, json!({"op": "read"})).await;
+
+    let mut fired = false;
+    hooks.set(move |path| {
+        if !std::mem::replace(&mut fired, true) {
+            user_flips_first(path);
+        }
+    });
+    let res = fx
+        .call(TAG_A, json!({"op": "upsert", "id": "agent-1", "section": "next", "text": "Agent thing"}))
+        .await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+
+    let text = fx.file_str("f3");
+    let first = text.lines().find(|l| l.contains("#first-1")).expect("first-1");
+    assert!(first.starts_with("- [x]"), "the user's save was lost:\n{text}");
+    assert!(text.contains("Agent thing"), "the agent's change is missing:\n{text}");
+
+    let other = fx.call(TAG_B, json!({"op": "read"})).await;
+    let changes = other["changes"].as_array().unwrap_or_else(|| panic!("a delta: {other}"));
+    let user = changes
+        .iter()
+        .find(|c| c["id"] == json!("first-1"))
+        .unwrap_or_else(|| panic!("the user's change is reported: {other}"));
+    assert!(user["by"].as_str().is_some_and(|b| b.starts_with("file")), "attributed to the file: {other}");
+    assert_eq!(user["status"][1], json!("done"), "{other}");
+}
+
+#[tokio::test]
+async fn f3_a_file_that_keeps_changing_ends_in_io_error_concurrent_edit() {
+    let hooks = HookFs::new();
+    let fx = Fx::with_fs(hooks.clone());
+    fx.seat(TAG_A, "sess-a");
+    fx.open(TAG_A, "f3b").await;
+    fx.add_item(TAG_A, "first-1", "now", "First thing").await;
+
+    let latest: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = latest.clone();
+    hooks.set(move |path| *sink.lock().unwrap() = user_flips_first(path));
+    let res = fx
+        .call(TAG_A, json!({"op": "upsert", "id": "agent-1", "section": "next", "text": "Agent thing"}))
+        .await;
+    is_err(&res, "io_error");
+    assert_eq!(res["reason"], json!("concurrent_edit"), "{res}");
+
+    let bytes = latest.lock().unwrap().clone();
+    assert!(!bytes.is_empty(), "the hook ran");
+    assert_eq!(fx.file("f3b"), bytes, "the file holds the user's latest save");
+    assert!(!fx.file_str("f3b").contains("Agent thing"));
+    let strays: Vec<_> = std::fs::read_dir(fx.board_path("f3b").parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "index.md")
+        .collect();
+    assert!(strays.is_empty(), "stray files left behind: {strays:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Review fix-ups: a board directory swapped for a symlink (F4)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn f4_board_directory_swapped_for_a_symlink_after_open_is_refused_on_write() {
+    let fx = Fx::new();
+    fx.seat(TAG_A, "sess-a");
+    fx.open(TAG_A, "f4").await;
+    let outside = fx.base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("index.md"), PARSEABLE).unwrap();
+
+    let dir = fx.board_path("f4").parent().unwrap().to_path_buf();
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink(&outside, &dir).unwrap();
+
+    let res = fx
+        .call(TAG_A, json!({"op": "upsert", "id": "x-1", "section": "now", "text": "Sneaky"}))
+        .await;
+    is_err(&res, "path_not_allowed");
+    let res = fx.call(TAG_A, json!({"op": "read"})).await;
+    is_err(&res, "path_not_allowed");
+    assert_eq!(std::fs::read(outside.join("index.md")).unwrap(), PARSEABLE.as_bytes());
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1, "nothing new outside");
+}
+
+// ---------------------------------------------------------------------------
+// Review fix-ups: stale temp files (F5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn f5_stale_tracker_temp_files_are_cleaned_on_the_next_ingest() {
+    let fx = Fx::new();
+    fx.seat(TAG_A, "sess-a");
+    fx.open(TAG_A, "f5").await;
+    let dir = fx.board_path("f5").parent().unwrap().to_path_buf();
+
+    for name in [".tracker-abc123.tmp", ".tracker-fresh.tmp", "notes.tmp", ".tracker-x.txt"] {
+        std::fs::write(dir.join(name), "x").unwrap();
+    }
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    // Old enough for every file but the fresh one; `notes.tmp` and the `.txt`
+    // are old too, so only the name keeps them.
+    for name in [".tracker-abc123.tmp", "notes.tmp", ".tracker-x.txt"] {
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(name))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+
+    fx.registry.ingest_file_change(&fx.board_path("f5"));
+
+    assert!(!dir.join(".tracker-abc123.tmp").exists(), "the stale temp file is removed");
+    for name in [".tracker-fresh.tmp", "notes.tmp", ".tracker-x.txt", "index.md"] {
+        assert!(dir.join(name).exists(), "{name} must stay");
+    }
 }

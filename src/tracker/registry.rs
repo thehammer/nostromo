@@ -33,7 +33,7 @@ use super::format::{parse, template, Malformed, ParsedBoard};
 use super::model::{fnv1a64, slug, Author, Board, Counts, Kind, Stamp, Status};
 use super::ops::{apply_to_file, Op, OpError, WriteError};
 use super::paths::{
-    default_path, is_valid_topic, probe_committable, repo_root, resolve_board_path,
+    default_path, find_repo_root, is_valid_topic, probe_committable, resolve_board_path, RepoRoot,
 };
 use super::render::{compact_full, delta_entries};
 use super::view::{self, Banner, Committable, TrackerBoardView, ViewFacts};
@@ -118,8 +118,9 @@ pub enum TrackerError {
     BoardTooLarge { bytes: usize, items: usize },
     #[error("path not allowed")]
     PathNotAllowed,
-    /// An agent tried to mark a command item done ("Ran it" is the user's).
-    #[error("only the user can mark command {id} done")]
+    /// An agent tried to mark a command item done, or to change the command
+    /// of one that is done ("Ran it" is the user's, and is about that text).
+    #[error("only the user can mark command {id} done or change it once done")]
     NotPermitted { id: String },
     #[error("i/o error: {0}")]
     Io(String),
@@ -221,6 +222,9 @@ impl RegistryParts {
 /// One board's in-memory state.
 struct BoardEntry {
     topic: String,
+    /// The root the board was allowed under; every write checks the path
+    /// against it again.
+    root: RepoRoot,
     /// The last cleanly parsed board (what the pane shows under a banner).
     parsed: Option<ParsedBoard>,
     /// The bytes `parsed` came from.
@@ -234,9 +238,10 @@ struct BoardEntry {
 }
 
 impl BoardEntry {
-    fn new(topic: &str) -> BoardEntry {
+    fn new(topic: &str, root: RepoRoot) -> BoardEntry {
         BoardEntry {
             topic: topic.to_string(),
+            root,
             parsed: None,
             last_ingested: None,
             own_bytes: None,
@@ -300,6 +305,12 @@ struct PersistedState {
 #[derive(Serialize, Deserialize)]
 struct PersistedBoard {
     topic: String,
+    /// The root the board was allowed under; absent in state written before
+    /// it was recorded (then it is derived from the board's path).
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    git: bool,
     log: ChangeLog,
     #[serde(default)]
     last_good_at: Option<DateTime<Utc>>,
@@ -331,14 +342,15 @@ impl TrackerRegistry {
     /// Idempotent: opening a board that is already bound changes no bytes.
     pub fn open(&self, tag: &str, session: &str, args: &OpenArgs) -> Result<OpenOutcome, TrackerError> {
         let (root, topic, path) = self.resolve_open(args)?;
-        let committable = probe_committable(&root, &path);
+        let committable = probe_committable(&root.dir, &path);
 
         let mut inner = self.lock();
         let known = inner.boards.contains_key(&path);
         let mut entry = inner
             .boards
             .remove(&path)
-            .unwrap_or_else(|| BoardEntry::new(&topic));
+            .unwrap_or_else(|| BoardEntry::new(&topic, root.clone()));
+        entry.root = root;
         let opened = self.open_board(&mut entry, &path, args, &topic, known);
         let (created, recreated) = match opened {
             Ok(flags) => flags,
@@ -415,6 +427,7 @@ impl TrackerRegistry {
         let path = inner.bindings.get(tag).cloned().ok_or(TrackerError::NoTracker)?;
         let key = key_of(&path);
         let entry = inner.boards.get_mut(&path).ok_or(TrackerError::NoTracker)?;
+        self.recheck_path(entry, &path)?;
         // Serve what the file says now, even if the watcher hasn't fired.
         let ingested = self.ingest_from_disk(entry, &path);
         let version = entry.log.seq;
@@ -453,6 +466,9 @@ impl TrackerRegistry {
         let Some(entry) = inner.boards.get_mut(&key) else {
             return false;
         };
+        if let Some(dir) = key.parent() {
+            self.fs.remove_stale_temps(dir);
+        }
         let changed = self.ingest_from_disk(entry, &key);
         if changed {
             inner.dirty.insert(key);
@@ -640,7 +656,7 @@ impl TrackerRegistry {
     // ── open ─────────────────────────────────────────────────────────────────
 
     /// The repo root, topic and canonical board path an `open` names.
-    fn resolve_open(&self, args: &OpenArgs) -> Result<(PathBuf, String, PathBuf), TrackerError> {
+    fn resolve_open(&self, args: &OpenArgs) -> Result<(RepoRoot, String, PathBuf), TrackerError> {
         let invalid = |reason: &str| TrackerError::InvalidArgs {
             index: None,
             reason: reason.to_string(),
@@ -650,15 +666,18 @@ impl TrackerRegistry {
                 return Err(invalid("topic must match ^[a-z0-9][a-z0-9-]{0,47}$"));
             }
         }
-        let root = std::fs::canonicalize(repo_root(&args.cwd))
-            .map_err(|e| TrackerError::Io(e.kind().to_string()))?;
-        let home_wip = self.home.as_ref().map(|h| h.join(".claude").join("wip"));
+        let found = find_repo_root(&args.cwd);
+        let root = RepoRoot {
+            dir: std::fs::canonicalize(&found.dir)
+                .map_err(|e| TrackerError::Io(e.kind().to_string()))?,
+            git: found.git,
+        };
         let requested = match (&args.path, &args.topic) {
             (Some(path), _) => PathBuf::from(path),
-            (None, Some(topic)) => default_path(&root, topic),
+            (None, Some(topic)) => default_path(&root.dir, topic),
             (None, None) => return Err(invalid("open needs a topic or a path")),
         };
-        let path = resolve_board_path(&root, home_wip.as_deref(), &requested)
+        let path = resolve_board_path(&root, self.home.as_deref(), &requested)
             .map_err(|_| TrackerError::PathNotAllowed)?;
         let topic = args
             .topic
@@ -678,6 +697,9 @@ impl TrackerRegistry {
         topic: &str,
         known: bool,
     ) -> Result<(bool, bool), TrackerError> {
+        if let Some(dir) = path.parent() {
+            self.fs.remove_stale_temps(dir);
+        }
         match self.fs.read(path) {
             Ok(bytes) => {
                 if known {
@@ -738,19 +760,37 @@ impl TrackerRegistry {
         ops: &[Op],
         author: &Author,
     ) -> Result<(), TrackerError> {
-        let bytes = self.current_bytes(entry, path)?;
-        let now = self.clock.now();
-        let stamp = Stamp::new(now, self.offset_at(now));
-        let applied = apply_to_file(&bytes, ops, author, stamp)?;
-        if matches!(author, Author::Agent { .. }) {
-            if let Some(old) = entry.parsed.as_ref().map(|p| &p.board) {
-                refuse_agent_ran_it(old, &applied.board)?;
+        // The board may have been moved or swapped for a symlink since it was
+        // opened: the path is checked again before anything is written.
+        self.recheck_path(entry, path)?;
+        let mut attempts = 0;
+        let (applied, now) = loop {
+            let bytes = self.current_bytes(entry, path)?;
+            let now = self.clock.now();
+            let stamp = Stamp::new(now, self.offset_at(now));
+            let applied = apply_to_file(&bytes, ops, author, stamp)?;
+            if matches!(author, Author::Agent { .. }) {
+                if let Some(old) = entry.parsed.as_ref().map(|p| &p.board) {
+                    refuse_agent_ran_it(old, &applied.board)?;
+                }
             }
-        }
-        if applied.bytes != bytes {
-            self.fs.write_atomic(path, &applied.bytes).map_err(io_err)?;
-            self.store_last_good(path, &applied.bytes);
-        }
+            if applied.bytes == bytes {
+                break (applied, now);
+            }
+            // The user may have saved while the ops were applied; replacing
+            // the file now would lose that save. Look again: on a change, the
+            // next pass ingests the edit and applies the ops on top of it.
+            self.fs.before_commit(path);
+            if self.fs.read(path).ok().as_deref() == Some(bytes.as_slice()) {
+                self.fs.write_atomic(path, &applied.bytes).map_err(io_err)?;
+                self.store_last_good(path, &applied.bytes);
+                break (applied, now);
+            }
+            attempts += 1;
+            if attempts >= 2 {
+                return Err(TrackerError::Io(CONCURRENT_EDIT.to_string()));
+            }
+        };
         entry.own_bytes = Some(applied.bytes.clone());
         entry.last_ingested = Some(applied.bytes);
         entry.parsed = Some(applied.parsed);
@@ -758,6 +798,15 @@ impl TrackerRegistry {
         entry.last_good_at = Some(now);
         entry.log.append(applied.changes);
         Ok(())
+    }
+
+    /// The board's path still resolves to itself under the policy it was
+    /// opened with: no symlink swapped in, nothing moved out of the root.
+    fn recheck_path(&self, entry: &BoardEntry, path: &Path) -> Result<(), TrackerError> {
+        match resolve_board_path(&entry.root, self.home.as_deref(), path) {
+            Ok(resolved) if resolved == path => Ok(()),
+            _ => Err(TrackerError::PathNotAllowed),
+        }
     }
 
     /// The file's bytes now, with any external edit ingested first. Fails when
@@ -875,6 +924,8 @@ impl TrackerRegistry {
                         key_of(path),
                         PersistedBoard {
                             topic: entry.topic.clone(),
+                            root: Some(key_of(&entry.root.dir)),
+                            git: entry.root.git,
                             log: entry.log.clone(),
                             last_good_at: entry.last_good_at,
                             committable: entry.committable.clone(),
@@ -913,7 +964,14 @@ impl TrackerRegistry {
         let mut inner = self.lock();
         for (key, persisted) in state.boards {
             let path = PathBuf::from(&key);
-            let mut entry = BoardEntry::new(&persisted.topic);
+            let root = match persisted.root {
+                Some(dir) => RepoRoot {
+                    dir: PathBuf::from(dir),
+                    git: persisted.git,
+                },
+                None => find_repo_root(path.parent().unwrap_or(&path)),
+            };
+            let mut entry = BoardEntry::new(&persisted.topic, root);
             entry.log = persisted.log;
             entry.last_good_at = persisted.last_good_at;
             entry.committable = persisted.committable;
@@ -992,6 +1050,10 @@ fn io_err(e: io::Error) -> TrackerError {
     TrackerError::Io(e.kind().to_string())
 }
 
+/// The `reason` of the `io_error` a write ends with when the file kept
+/// changing under it; the agent may simply retry.
+pub const CONCURRENT_EDIT: &str = "concurrent_edit";
+
 /// The error a board under `banner` refuses writes with; `None` without one.
 fn banner_failure(banner: &Option<Banner>) -> Option<TrackerError> {
     match banner {
@@ -1029,18 +1091,20 @@ fn user_changes_of(entry: &BoardEntry, cursor: Option<u64>, session: &str) -> u3
     }
 }
 
-/// "Ran it" is the user's: an agent op that leaves a command item `done`
-/// (newly) is refused.
+/// "Ran it" is the user's, and it is about one command text: an agent op that
+/// leaves a command item `done` is refused unless the item was already done
+/// with that same command. (To change a command the user ran, an agent first
+/// reopens the item.)
 fn refuse_agent_ran_it(old: &Board, new: &Board) -> Result<(), TrackerError> {
     for item in new
         .items
         .iter()
         .filter(|i| i.kind == Kind::Command && i.status == Status::Done)
     {
-        let was_done = old
-            .item(&item.id)
-            .is_some_and(|o| o.kind == Kind::Command && o.status == Status::Done);
-        if !was_done {
+        let unchanged = old.item(&item.id).is_some_and(|o| {
+            o.kind == Kind::Command && o.status == Status::Done && o.command == item.command
+        });
+        if !unchanged {
             return Err(TrackerError::NotPermitted { id: item.id.clone() });
         }
     }
