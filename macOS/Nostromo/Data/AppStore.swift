@@ -141,6 +141,10 @@ class AppStore: ObservableObject {
     // session, or a second connected client).
     let decisionRequests = PassthroughSubject<PendingDecision, Never>()
     let decisionResolutions = PassthroughSubject<ResolvedDecision, Never>()
+    /// Permission requests (AP2a): one event per `approval_request`, `approvals_snapshot`,
+    /// `approval_resolved` and `approval_answer_refused` frame. Deliberately not `@Published`,
+    /// like decisions: a request is an event, and `ApprovalStore` owns what it means.
+    let approvalEvents = PassthroughSubject<ApprovalEvent, Never>()
     /// A daemon-announced focus that this client asked to have selected
     /// (`select_for_client`). Each window's `MainLayout` switches to it only if
     /// it is the key window.
@@ -346,6 +350,16 @@ class AppStore: ObservableObject {
     /// tracking lives entirely in `DecisionStore`/`DecisionPresenter` now.
     func answerDecision(requestId: String, choiceId: String?) {
         client.decisionAnswer(requestId: requestId, choiceId: choiceId)
+    }
+
+    /// Send the human's answer to a held permission request (`ApprovalStore.answer`).
+    func answerApproval(requestId: String, decision: ApprovalDecisionWire, windowID: String) {
+        client.approvalAnswer(requestId: requestId, decision: decision, windowId: windowID)
+    }
+
+    /// Report an input that was refused at an approval control (`ApprovalStore.reportRefusal`).
+    func reportApprovalRefusal(requestId: String?, control: String, channel: ApprovalRefusalChannel) {
+        client.approvalRefusalReport(requestId: requestId, control: control, channel: channel)
     }
 
     // MARK: - Ambient activity (activity-path wedge)
@@ -1335,11 +1349,17 @@ class AppStore: ObservableObject {
         case .trackerBoard, .trackerSummary:
             break   // T1 routes these to TrackerStore
 
-        // Permission approvals (AP0b): decoded, shown by nothing until AP2a. This app
-        // does not yet subscribe with `renders_approvals`, so the daemon sends none of
-        // these but the count.
-        case .approvalRequest, .approvalsSnapshot, .approvalResolved, .approvalPending,
-             .approvalGuardBlocked, .approvalAnswerRefused:
+        // Permission approvals (AP2a): `ApprovalStore` keeps them, the card shows them. The
+        // count-only `approval_pending` and the guard's bar are later slices (AP3, AP2b).
+        case .approvalRequest(_, let request):
+            approvalEvents.send(.request(request))
+        case .approvalsSnapshot(let requests):
+            approvalEvents.send(.snapshot(requests))
+        case .approvalResolved(let frame):
+            approvalEvents.send(.resolved(frame))
+        case .approvalAnswerRefused(let frame):
+            approvalEvents.send(.answerRefused(frame))
+        case .approvalPending, .approvalGuardBlocked:
             break
 
         case .pong, .unknown:
@@ -1403,4 +1423,19 @@ extension AppStore: MotherJobDetailHost {
     /// A non-default broker (`MOTHER_BROKER_SOCK`, the QA fake) is not the Mother the CLI talks to.
     var usesDefaultBroker: Bool { ProcessInfo.processInfo.environment["MOTHER_BROKER_SOCK"] == nil }
     func motherBinary() -> URL? { AppStore.findBinary("mother") }
+}
+
+// MARK: - Approvals wiring
+
+extension ApprovalStore {
+    /// The app's one store of permission requests, fed by `AppStore.approvalEvents` and
+    /// answering through the daemon connection. Every pane's card shows from it.
+    static let shared: ApprovalStore = {
+        let store = ApprovalStore(
+            send: { AppStore.shared.answerApproval(requestId: $0, decision: $1, windowID: $2) },
+            report: { AppStore.shared.reportApprovalRefusal(requestId: $0, control: $1, channel: $2) },
+            canSend: { AppStore.shared.client.hasConnection })
+        store.attach(to: AppStore.shared.approvalEvents)
+        return store
+    }()
 }

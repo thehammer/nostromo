@@ -79,6 +79,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
 
         setupMenu()
+        // The approval store listens from before the daemon connects: a permission request
+        // is an event, and one that arrives with no listener is gone until the next snapshot.
+        _ = ApprovalStore.shared
         AppStore.shared.start()
         AppStore.shared.startMemoryWatchdog()
         // The single app-wide owner of decision-modal presentation — started

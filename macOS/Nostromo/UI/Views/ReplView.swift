@@ -85,6 +85,8 @@ class ReplView: NSView {
 
     /// "Jump to latest" pill, shown while the pane is not following the tail.
     private let jumpOverlay = JumpToLatestOverlay()
+    /// The approval card for this focus, floated over the bottom of the transcript (AP2a).
+    private let approvalHost: ApprovalOverlayHost
     /// Whether the transcript auto-scrolls to the newest content, and everything
     /// that decides it (bounds observer, overlay, scroller, catch-up). Cleared
     /// only by the operator scrolling away from the bottom, so a background
@@ -108,6 +110,7 @@ class ReplView: NSView {
         // Use the shared registry so multiple windows showing the same tag
         // observe the same session and stay in sync (mirrored).
         session = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
+        approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared)
         super.init(frame: .zero)
         setup()
         TranscriptDiagnostics.register(self)
@@ -264,6 +267,11 @@ class ReplView: NSView {
         // takes clicks.
         jumpOverlay.translatesAutoresizingMaskIntoConstraints = false
         addSubview(jumpOverlay, positioned: .above, relativeTo: scrollView)
+        // The approval card floats over the same area, above the pill (the card's own Allow
+        // and Deny sit where the pill would be). Like the pill's overlay it hit-tests only
+        // its card, and it never touches the scroll view's or the input bar's frames.
+        approvalHost.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(approvalHost, positioned: .above, relativeTo: jumpOverlay)
         // The whole pane (transcript included) accepts image drops.
         registerForDraggedTypes(ImagePasteboard.draggedTypes)
 
@@ -306,6 +314,11 @@ class ReplView: NSView {
             jumpOverlay.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             jumpOverlay.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
             jumpOverlay.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+
+            approvalHost.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            approvalHost.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            approvalHost.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            approvalHost.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
         ]
 
         if let strip = quickActionStrip {

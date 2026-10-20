@@ -978,7 +978,7 @@ final class DecisionCoordinatorTests: XCTestCase {
 
     // MARK: Source guards
 
-    private static let forbiddenForegroundAndFocusCalls = [
+    static let forbiddenForegroundAndFocusCalls = [
         "NSApp.activate",
         ".activate(",
         "makeKeyAndOrderFront",
@@ -1006,7 +1006,7 @@ final class DecisionCoordinatorTests: XCTestCase {
     }
 
     /// Source lines of `Nostromo/<relativePath>` with full-line `//` comments dropped.
-    private static func codeLines(ofSourceAt relativePath: String) throws -> [String] {
+    static func codeLines(ofSourceAt relativePath: String) throws -> [String] {
         let root = URL(fileURLWithPath: #filePath)   // …/macOS/NostromoTests/DecisionCoordinatorTests.swift
             .deletingLastPathComponent()              // …/macOS/NostromoTests
             .deletingLastPathComponent()              // …/macOS
