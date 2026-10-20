@@ -27,10 +27,11 @@ private struct ClientSubscribe: Encodable {
     let type_  = "subscribe"
     let topics: [String]
     /// Whether this app shows permission-approval requests. The daemon holds a
-    /// request for a human only while a verified app that says so is connected,
-    /// so claiming it before the approval card exists would leave requests
-    /// waiting for a screen that is not there. See `NostromodClient.rendersApprovals`.
-    let rendersApprovals = NostromodClient.rendersApprovals
+    /// request for a human only while a verified app that says so is connected, so
+    /// the claim is made only on a connection whose `welcome` advertised
+    /// `approvals_v1` (see `NostromodClient.claimsRendersApprovals`): the first
+    /// subscribe, sent before any welcome, never makes it.
+    var rendersApprovals = false
     enum CodingKeys: String, CodingKey {
         case type_  = "type"
         case topics
@@ -761,11 +762,16 @@ class NostromodClient {
         send(ClientSubscribe(topics: NostromodClient.baseTopics), type: "subscribe")
     }
 
-    /// Does this app claim to render permission-approval requests? **Not yet**: the
-    /// approval card arrives with AP2a, which flips this (and the test that pins it,
-    /// `testMacDoesNotClaimRendersApprovalsYet`) deliberately. While it is false the
-    /// daemon never holds a request for this app: every one is denied at once, as before.
-    static let rendersApprovals = false
+    /// The `welcome.features` entry that says the daemon holds permission requests for a human.
+    static let approvalsFeature = "approvals_v1"
+
+    /// Does this app claim to render permission-approval requests on a connection whose
+    /// daemon advertised `features`? Only if that daemon advertised `approvals_v1`: an older
+    /// daemon never hears the claim, and the first subscribe (before any welcome) never makes it.
+    /// The approval card exists (AP2a), so the claim is true whenever it is made.
+    static func claimsRendersApprovals(features: [String]?) -> Bool {
+        features?.contains(approvalsFeature) == true
+    }
 
     /// Topics every daemon this app can talk to understands.
     static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
@@ -785,8 +791,9 @@ class NostromodClient {
     /// its own `welcome`); a daemon with no `features` gets nothing extra.
     private func subscribeToAdvertisedFeatures(_ features: [String]) {
         let extra = features.compactMap { NostromodClient.featureTopics[$0] }
-        guard !extra.isEmpty else { return }
-        send(ClientSubscribe(topics: NostromodClient.baseTopics + extra), type: "subscribe")
+        let approvals = NostromodClient.claimsRendersApprovals(features: features)
+        guard !extra.isEmpty || approvals else { return }
+        send(ClientSubscribe(topics: NostromodClient.baseTopics + extra, rendersApprovals: approvals), type: "subscribe")
     }
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
@@ -901,6 +908,39 @@ class NostromodClient {
                                                                  operatorNonce: nonce))
         else { return }
         writeFrameLocked(body, to: curFd, type: "decision_answer", tag: nil)
+    }
+
+    // MARK: - Permission approvals (AP2a)
+
+    /// Whether there is a daemon connection to write to right now.
+    var hasConnection: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return fd >= 0
+    }
+
+    /// Send the human's answer to a held permission request. Like `decisionAnswer`, the
+    /// frame carries the `operator_nonce` of the connection it is written to, read under
+    /// the same lock as the write. `note` is a deny note the agent will read.
+    func approvalAnswer(requestId: String, decision: ApprovalDecisionWire, windowId: String) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("approval_answer dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientApprovalAnswer(requestId: requestId, decision: decision,
+                                                                   windowId: windowId, operatorNonce: nonce))
+        else { return }
+        writeFrameLocked(body, to: curFd, type: "approval_answer", tag: nil)
+    }
+
+    /// Tell the daemon an input that was not a person's was refused at an approval control.
+    func approvalRefusalReport(requestId: String?, control: String, channel: ApprovalRefusalChannel) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { return }
+        guard let body = try? encoder.encode(ClientApprovalRefusalReport(requestId: requestId, control: control,
+                                                                          channel: channel))
+        else { return }
+        writeFrameLocked(body, to: curFd, type: "approval_refusal_report", tag: nil)
     }
 
     /// Record (or clear) the operator nonce from the `welcome` on `sock`.

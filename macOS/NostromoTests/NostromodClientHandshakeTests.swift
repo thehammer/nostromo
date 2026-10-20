@@ -416,21 +416,87 @@ final class NostromodClientHandshakeTests: XCTestCase {
         XCTAssertEqual(daemon.frames(connection: 0, ofType: "hello").first?.clientKind, "mac_app")
     }
 
-    // The ordering rule (AP0b): the daemon holds a permission request for a human only while a
-    // verified app that SAYS it renders approvals is connected, so this app must not say so until
-    // the approval card exists. AP2a flips `NostromodClient.rendersApprovals` and inverts this
-    // test on purpose; until then every request is denied at once, exactly as before.
-    func testMacDoesNotClaimRendersApprovalsYet() throws {
-        XCTAssertFalse(NostromodClient.rendersApprovals, "no approval card exists yet")
-        // A daemon that advertises approvals and work: two subscribes, and neither claims it.
-        _ = try connectClient(to: [.init(features: ["approvals_v1", "work"])])
+    // The ordering rule (AP0b): the daemon holds a permission request for a human only while a verified
+    // app that SAYS it renders approvals is connected. The approval card exists now (AP2a), so this app
+    // says so, but only on a connection whose Welcome advertised `approvals_v1`: the first subscribe
+    // (sent before any welcome) never makes the claim, and a daemon that does not list the feature
+    // never hears it. Every subscribe carries the key explicitly.
 
-        XCTAssertTrue(waitUntil(5) { self.daemon.subscribes(connection: 0).count >= 2 },
-                      "the client never sent its subscribes")
-        for sub in daemon.subscribes(connection: 0) {
-            XCTAssertEqual(sub.json["renders_approvals"] as? Bool, false,
-                           "every subscribe says, explicitly, that this app does not render approvals: \(sub.json)")
+    /// Connect a fresh client to a daemon with `script` and return what it subscribed to once it has sent `count`
+    /// subscribes and reports itself connected.
+    private func subscribes(connectingTo script: FakeDaemon.Script, expecting count: Int,
+                            file: StaticString = #filePath, line: UInt = #line) throws -> [FakeDaemon.Frame] {
+        client = nil
+        daemon?.stop()
+        let c = try connectClient(to: [script])
+        XCTAssertTrue(pumpUntil(5) { self.daemon.subscribes(connection: 0).count >= count && c.connected.value },
+                      "the client never finished its handshake (subscribes: \(daemon.subscribes(connection: 0).map(\.topics)))",
+                      file: file, line: line)
+        // Let a subscribe that should NOT be sent show up if it is going to (a bounded pump, not a wait on a condition).
+        _ = pumpUntil(0.3) { false }
+        return daemon.subscribes(connection: 0)
+    }
+
+    func testMacClaimsRendersApprovalsOnlyWithFeature() throws {
+        let subs = try subscribes(connectingTo: .init(features: ["approvals_v1", "work"]), expecting: 2)
+        guard subs.count >= 2 else { return XCTFail("expected a first subscribe and a follow-up, got \(subs.map(\.topics))") }
+
+        let first = subs[0], later = subs[1]
+        XCTAssertNotNil(first.json["renders_approvals"], "the key is present on the first subscribe, not omitted: \(first.json)")
+        XCTAssertEqual(first.json["renders_approvals"] as? Bool, false,
+                       "the first subscribe is sent before any welcome and must not claim approvals: \(first.json)")
+        XCTAssertEqual(later.json["renders_approvals"] as? Bool, true,
+                       "the welcome advertised approvals_v1, so the follow-up subscribe claims it: \(later.json)")
+        XCTAssertTrue(Set(NostromodClient.baseTopics).isSubset(of: Set(later.topics)),
+                      "the follow-up replaces the first subscribe, so it keeps the base topics: \(later.topics)")
+        XCTAssertTrue(later.topics.contains("work"), "and still adds what else the welcome advertised: \(later.topics)")
+        XCTAssertEqual(subs.count, 2, "exactly one follow-up subscribe")
+    }
+
+    func testAnApprovalsOnlyWelcomeStillGetsTheClaimWithTheBaseTopics() throws {
+        let subs = try subscribes(connectingTo: .init(features: ["approvals_v1"]), expecting: 2)
+        guard subs.count >= 2 else { return XCTFail("the claim needs its own subscribe: \(subs.map(\.topics))") }
+        XCTAssertEqual(subs[0].json["renders_approvals"] as? Bool, false)
+        XCTAssertEqual(subs[1].json["renders_approvals"] as? Bool, true)
+        XCTAssertTrue(Set(NostromodClient.baseTopics).isSubset(of: Set(subs[1].topics)), "\(subs[1].topics)")
+    }
+
+    func testMacNeverClaimsRendersApprovalsToADaemonThatDoesNotAdvertiseIt() throws {
+        let scripts: [(String, FakeDaemon.Script, Int)] = [
+            ("no features key (an old daemon)", .init(features: nil), 1),
+            ("other features only", .init(features: ["some_future_feature"]), 1),
+            ("work but not approvals", .init(features: ["work"]), 2),
+            ("an empty list", .init(features: []), 1),
+        ]
+        for (name, script, count) in scripts {
+            let subs = try subscribes(connectingTo: script, expecting: count)
+            XCTAssertFalse(subs.isEmpty, "\(name): the client never subscribed")
+            for sub in subs {
+                XCTAssertEqual(sub.json["renders_approvals"] as? Bool, false,
+                               "\(name): every subscribe says, explicitly, that this app does not render approvals: \(sub.json)")
+            }
         }
+    }
+
+    func testAClientThatNeverConnectedHasNoConnectionToAnswerOn() {
+        let c = NostromodClient(socketPath: "/tmp/nsfd-none-\(getpid())-\(UUID().uuidString.prefix(8)).sock")
+        XCTAssertFalse(c.hasConnection)
+    }
+
+    func testAConnectedClientHasAConnection() throws {
+        let c = try connectClient(to: [.init(features: nil)])
+        XCTAssertTrue(pumpUntil(5) { c.connected.value && c.hasConnection }, "the client never connected")
+    }
+
+    func testTheClaimIsTrueOnlyWhenTheFeatureListContainsApprovalsV1() {
+        XCTAssertTrue(NostromodClient.claimsRendersApprovals(features: ["approvals_v1"]))
+        XCTAssertTrue(NostromodClient.claimsRendersApprovals(features: ["work", "approvals_v1", "model"]))
+        XCTAssertFalse(NostromodClient.claimsRendersApprovals(features: nil))
+        XCTAssertFalse(NostromodClient.claimsRendersApprovals(features: []))
+        XCTAssertFalse(NostromodClient.claimsRendersApprovals(features: ["work", "model"]))
+        XCTAssertFalse(NostromodClient.claimsRendersApprovals(features: ["approvals_v2"]))
+        XCTAssertFalse(NostromodClient.claimsRendersApprovals(features: ["approvals"]))
+        XCTAssertFalse(NostromodClient.claimsRendersApprovals(features: ["Approvals_V1"]))
     }
 
     func testAWelcomeThatAdvertisesOtherFeaturesButNotWorkDoesNotGetWork() throws {
