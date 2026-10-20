@@ -61,6 +61,7 @@ private enum InkCounter {
     /// cannot be inflated by a fill alone. Ink is text on a fill or on the background: command text
     /// is Theme.fg (luma 220), the dimmest token colour is well above 100.
     static let threshold = 60.0
+    nonisolated(unsafe) static var lastGutterDiag = ""  // TMP
 
     /// Two ink runs in the gutter closer than this (points) are one number (a digit has thin strokes).
     static let bandMergeGap: CGFloat = 3
@@ -140,6 +141,9 @@ private enum InkCounter {
         }
 
         var total = 0, band = 0, gutterInk = 0
+        var gMax = 0.0, gMin = 255.0  // TMP
+        for yy in y0 ..< y1 { for xx in gx0 ..< max(gx0, gx1) { if direct, let raw { let p = raw + yy * rep.bytesPerRow + xx * bytesPerPixel + colourOffset; let v = luma(r: Double(p[0]), g: Double(p[1]), b: Double(p[2])); gMax = max(gMax, v); gMin = min(gMin, v) } } }  // TMP
+        lastGutterDiag = "gx=\(gx0)..<\(gx1) y=\(y0)..<\(y1) direct=\(direct) bpp=\(bytesPerPixel) off=\(colourOffset) gMax=\(gMax) gMin=\(gMin) bg=\(background)"  // TMP
         var gutterRows: [Int] = []
         for y in y0 ..< y1 {
             var rowHasGutterInk = false
@@ -307,7 +311,7 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " inWindow=\(view.window != nil) windowVisible=\(view.window?.isVisible ?? false)"
             + " requestedScale=\(requested.map { String(describing: $0) } ?? "native")"
             + " scale=\(ink.scale) rendered=\(rendered != nil) inkTotal=\(ink.total) inkFirstLine=\(ink.firstLineBand)"
-            + " gutterInk=\(ink.gutterInk) gutterBands=\(ink.gutterBands)"
+            + " gutterInk=\(ink.gutterInk) gutterBands=\(ink.gutterBands) GD{\(InkCounter.lastGutterDiag)}"
             + " gutterDiag=[\(view.gutterDiag)]"
             + " areaPx=\(ink.width)x\(ink.height)"
         print(diag)
