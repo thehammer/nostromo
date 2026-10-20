@@ -47,6 +47,7 @@
 		AP0000000000000000002301 /* ApprovalCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002300 /* ApprovalCardTests.swift */; };
 		AP0000000000000000002311 /* ApprovalScrollSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002310 /* ApprovalScrollSafetyTests.swift */; };
 		ATD000000000000000000011 /* ApprovalCardRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ATD000000000000000000010 /* ApprovalCardRenderTests.swift */; };
+		ATD000000000000000000021 /* ApprovalCardVariantsTmpTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ATD000000000000000000020 /* ApprovalCardVariantsTmpTests.swift */; };
 		AP0000000000000000002321 /* ApprovalRowStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002320 /* ApprovalRowStatusTests.swift */; };
 		AP0000000000000000002331 /* ApprovalBadgesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002330 /* ApprovalBadgesTests.swift */; };
 		AP0000000000000000002341 /* SessionRulesChipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002340 /* SessionRulesChipTests.swift */; };
@@ -484,6 +485,7 @@
 		AP0000000000000000002300 /* ApprovalCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalCardTests.swift; sourceTree = "<group>"; };
 		AP0000000000000000002310 /* ApprovalScrollSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalScrollSafetyTests.swift; sourceTree = "<group>"; };
 		ATD000000000000000000010 /* ApprovalCardRenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalCardRenderTests.swift; sourceTree = "<group>"; };
+		ATD000000000000000000020 /* ApprovalCardVariantsTmpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalCardVariantsTmpTests.swift; sourceTree = "<group>"; };
 		AP0000000000000000002320 /* ApprovalRowStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalRowStatusTests.swift; sourceTree = "<group>"; };
 		AP0000000000000000002330 /* ApprovalBadgesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalBadgesTests.swift; sourceTree = "<group>"; };
 		AP0000000000000000002340 /* SessionRulesChipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRulesChipTests.swift; sourceTree = "<group>"; };
@@ -1103,6 +1105,7 @@
 				AP0000000000000000002300 /* ApprovalCardTests.swift */,
 				AP0000000000000000002310 /* ApprovalScrollSafetyTests.swift */,
 				ATD000000000000000000010 /* ApprovalCardRenderTests.swift */,
+				ATD000000000000000000020 /* ApprovalCardVariantsTmpTests.swift */,
 				AP0000000000000000002320 /* ApprovalRowStatusTests.swift */,
 				AP0000000000000000002330 /* ApprovalBadgesTests.swift */,
 				AP0000000000000000002340 /* SessionRulesChipTests.swift */,
@@ -1575,6 +1578,7 @@
 				AP0000000000000000002301 /* ApprovalCardTests.swift in Sources */,
 				AP0000000000000000002311 /* ApprovalScrollSafetyTests.swift in Sources */,
 				ATD000000000000000000011 /* ApprovalCardRenderTests.swift in Sources */,
+				ATD000000000000000000021 /* ApprovalCardVariantsTmpTests.swift in Sources */,
 				AP0000000000000000002321 /* ApprovalRowStatusTests.swift in Sources */,
 				AP0000000000000000002331 /* ApprovalBadgesTests.swift in Sources */,
 				AP0000000000000000002341 /* SessionRulesChipTests.swift in Sources */,
