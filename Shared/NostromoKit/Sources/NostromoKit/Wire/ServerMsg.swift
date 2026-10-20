@@ -131,6 +131,15 @@ public enum ServerMsg {
     /// clients only: the daemon never sends it to a network peer.
     case sessionTaskDetail(SessionTaskDetailWire)
 
+    // ── agent tracker ─────────────────────────────────────────────────────────
+
+    /// The whole board the tracker pane shows for a focus (REPLACE snapshot);
+    /// `board` is `nil` when the focus has no tracker. Local clients only.
+    case trackerBoard(TrackerBoardFrameWire)
+    /// Whether a focus has a tracker and its per-status counts. The only
+    /// tracker frame a network peer receives (non-sensitive focuses).
+    case trackerSummary(TrackerSummaryFrameWire)
+
     case unknown
 }
 
@@ -767,6 +776,16 @@ extension ServerMsg {
         case "session_task_detail":
             if let m = try? dec.decode(SessionTaskDetailWire.self, from: data) {
                 return .sessionTaskDetail(m)
+            }
+
+        case "tracker_board":
+            if let m = try? dec.decode(TrackerBoardFrameWire.self, from: data) {
+                return .trackerBoard(m)
+            }
+
+        case "tracker_summary":
+            if let m = try? dec.decode(TrackerSummaryFrameWire.self, from: data) {
+                return .trackerSummary(m)
             }
 
         default:

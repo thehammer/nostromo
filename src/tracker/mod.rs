@@ -20,8 +20,11 @@ pub mod diff;
 pub mod format;
 pub mod model;
 pub mod ops;
+pub mod paths;
+pub mod registry;
 pub mod render;
 pub mod view;
+pub mod watch;
 
 pub use changelog::{ChangeLog, ChangeLogError, Cursors, Since};
 pub use clock::{Clock, FakeClock, SystemClock};
@@ -37,3 +40,7 @@ pub use model::{
 pub use ops::{apply_batch, apply_to_file, Applied, Op, OpError, Upsert, WriteError};
 pub use render::{compact_full, delta_entries, quote_untrusted};
 pub use view::{TrackerBoardView, ViewFacts};
+pub use registry::{
+    CallerFacts, CONCURRENT_EDIT, OpenArgs, OpenOutcome, ReadOutcome, RegistryParts, TrackerError, TrackerRegistry,
+    TrackerSummary, WriteOutcome,
+};

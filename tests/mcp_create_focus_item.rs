@@ -248,6 +248,7 @@ impl Env {
             perri: PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
+            tracker: Default::default(),
         });
         let ledger = Arc::new(SentLedger::new(dir.path().join("teri").join("sent.json")));
         install_ledger(Arc::clone(&ledger));
@@ -2669,6 +2670,7 @@ async fn the_marker_a_reused_tag_superseded_is_gone_from_disk_so_a_restart_does_
         perri: PerriDaemonState::default(),
         decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
         tickets: Default::default(),
+        tracker: Default::default(),
     });
     install_ledger(Arc::new(on_disk));
 

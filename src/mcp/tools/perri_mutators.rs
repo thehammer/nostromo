@@ -840,6 +840,7 @@ mod tests {
             },
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
+            tracker: Default::default(),
         };
         (McpSharedState::for_daemon(backend), broadcast_tx)
     }
@@ -1257,6 +1258,7 @@ mod tests {
             perri: PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
+            tracker: Default::default(),
         };
         let state = McpSharedState::for_daemon(backend);
 
@@ -2063,6 +2065,7 @@ mod tests {
             perri: PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
+            tracker: Default::default(),
         };
         let state = McpSharedState::for_daemon(backend);
 

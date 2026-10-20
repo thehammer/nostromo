@@ -42,6 +42,7 @@ fn make_daemon_state() -> Harness {
         perri: nostromo::mcp::PerriDaemonState::default(),
         decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),

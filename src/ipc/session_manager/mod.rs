@@ -53,7 +53,9 @@ use crate::approvals::broker::{
 
 use super::decisions::DecisionRegistry;
 use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
-use super::pane_registry::{PaneContentProvider, PaneRegistry, PerriStateProvider};
+use super::pane_registry::{
+    PaneContentProvider, PaneRegistry, PerriStateProvider, TrackerFrameProvider,
+};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
 use super::stream_json::{
     load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript, TurnDelta,
@@ -417,6 +419,8 @@ pub struct SessionManager {
     /// daemon via [`SessionManager::configure_pane_content_provider`]; `None`
     /// in tests / non-daemon use.
     pane_content_provider: Option<Arc<dyn PaneContentProvider>>,
+    /// The tracker's attach-replay hook; `None` until the daemon wires it.
+    tracker_frame_provider: Option<Arc<dyn TrackerFrameProvider>>,
     /// Supplies the current Perri queue + current-PR snapshot for attach
     /// replay (f1). Set by the daemon via
     /// [`SessionManager::configure_perri_state_provider`]; `None` in tests /
@@ -509,6 +513,7 @@ impl SessionManager {
             mcp_socket: None,
             mcp_config: None,
             pane_content_provider: None,
+            tracker_frame_provider: None,
             perri_state_provider: None,
             decisions: None,
             session_reverse: HashMap::new(),
@@ -602,6 +607,17 @@ impl SessionManager {
     /// newly (re)connected client (D8).
     pub fn configure_pane_content_provider(&mut self, provider: Arc<dyn PaneContentProvider>) {
         self.pane_content_provider = Some(provider);
+    }
+
+    /// Wire the [`TrackerFrameProvider`] so `server.rs` can replay each bound
+    /// focus's tracker frames to a newly (re)connected client.
+    pub fn configure_tracker_frame_provider(&mut self, provider: Arc<dyn TrackerFrameProvider>) {
+        self.tracker_frame_provider = Some(provider);
+    }
+
+    /// Access the tracker frame provider (if wired up).
+    pub fn tracker_frame_provider(&self) -> Option<Arc<dyn TrackerFrameProvider>> {
+        self.tracker_frame_provider.clone()
     }
 
     /// Wire the shared decision-modal registry so a session going
@@ -1892,6 +1908,16 @@ impl SessionManager {
     /// what makes `path_escapes_root` enforceable.
     pub fn cwd_for(&self, tag: &str) -> Option<PathBuf> {
         self.sessions.get(tag).and_then(|s| s.cwd.clone())
+    }
+
+    /// The Claude session id `tag` is running (or will `--resume`): the live
+    /// session's id, else the daemon's persisted `tag -> session_id` record.
+    /// `None` for a tag the daemon has never spawned.
+    pub fn current_session_id(&self, tag: &str) -> Option<String> {
+        self.sessions
+            .get(tag)
+            .and_then(|s| s.session_id.clone())
+            .or_else(|| load_id_store(&self.store_path).remove(tag))
     }
 
     pub fn has_live_session(&self, tag: &str) -> bool {

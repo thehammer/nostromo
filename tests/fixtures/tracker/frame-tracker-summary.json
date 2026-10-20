@@ -1,0 +1,12 @@
+{
+  "type": "tracker_summary",
+  "tag": "cody-fixture",
+  "has_tracker": true,
+  "counts": {
+    "todo": 25,
+    "in_progress": 6,
+    "blocked": 2,
+    "needs_you": 10,
+    "done": 17
+  }
+}

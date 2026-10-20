@@ -77,6 +77,7 @@ async fn make_harness() -> Harness {
         perri: nostromo::mcp::PerriDaemonState::default(),
         decisions,
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     let mcp_server = McpServer::bind(mcp_socket_path.clone(), McpSharedState::for_daemon(backend))
         .await

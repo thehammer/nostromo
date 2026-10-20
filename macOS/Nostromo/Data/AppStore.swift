@@ -1346,6 +1346,9 @@ class AppStore: ObservableObject {
         case .sessionTasks, .sessionTaskDetail:
             break   // BA3 routes these to BackgroundTaskStore
 
+        case .trackerBoard, .trackerSummary:
+            break   // T1 routes these to TrackerStore
+
         // Permission approvals (AP2a): `ApprovalStore` keeps them, the card shows them. The
         // count-only `approval_pending` and the guard's bar are later slices (AP3, AP2b).
         case .approvalRequest(_, let request):

@@ -119,6 +119,7 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         perri: PerriDaemonState::default(),
         decisions,
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     let state = McpSharedState::for_daemon(backend);
 
@@ -244,6 +245,7 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         perri: PerriDaemonState::default(),
         decisions,
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     let state = McpSharedState::for_daemon(backend);
 
@@ -345,6 +347,7 @@ async fn fresh_registry_after_simulated_restart_has_bound_pane_content_ready_wit
         perri: PerriDaemonState::default(),
         decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     let state = McpSharedState::for_daemon(backend);
 

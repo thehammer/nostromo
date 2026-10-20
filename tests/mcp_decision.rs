@@ -54,6 +54,7 @@ fn make_daemon_state() -> Harness {
         perri: nostromo::mcp::PerriDaemonState::default(),
         decisions: decisions.clone(),
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),
@@ -777,6 +778,7 @@ async fn make_combined_harness() -> CombinedHarness {
         perri: nostromo::mcp::PerriDaemonState::default(),
         decisions: decisions.clone(),
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     let mcp_server = McpServer::bind(mcp_socket_path.clone(), McpSharedState::for_daemon(backend))
         .await

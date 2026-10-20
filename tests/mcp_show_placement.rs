@@ -121,6 +121,7 @@ fn make_daemon_state() -> Harness {
             nostromo::ipc::decisions::DecisionRegistry::default(),
         )),
         tickets: TicketRegistryState::default(),
+        tracker: Default::default(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),

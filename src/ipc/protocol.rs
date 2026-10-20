@@ -17,6 +17,10 @@ use crate::{
     mother::{MotherJob, MotherStatus},
 };
 
+/// Per-status item counts of a board (`TrackerSummary.counts`): exactly the
+/// five status keys.
+pub use crate::tracker::Counts as TrackerCounts;
+
 /// Environment variable that overrides the default socket path.
 pub const SOCKET_PATH_ENV: &str = "NOSTROMOD_SOCKET";
 
@@ -2016,6 +2020,24 @@ pub enum ServerMsg {
         completion_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+    },
+
+    // ── agent tracker ─────────────────────────────────────────────────────────
+    /// What the tracker pane shows for a focus: the whole board, as a REPLACE
+    /// snapshot (`None`: the focus has no tracker). Carries titles, item text,
+    /// notes, owners, links, commands and the file path, so it is `LocalOnly`:
+    /// never sent to a network peer, whatever the focus.
+    TrackerBoard {
+        tag: String,
+        board: Option<crate::tracker::TrackerBoardView>,
+    },
+    /// That a focus has a tracker and how many items it holds per status, and
+    /// nothing else: the only tracker frame a network peer may receive (for a
+    /// non-sensitive focus). The key set is pinned by a test in `peer.rs`.
+    TrackerSummary {
+        tag: String,
+        has_tracker: bool,
+        counts: TrackerCounts,
     },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.
@@ -4794,6 +4816,97 @@ mod work_wire_tests {
             prompt: None,
         };
         assert_eq!(serde_json::to_value(&detail).unwrap()["type"], "session_task_detail");
+    }
+
+    // ── agent tracker frames (T0b) ────────────────────────────────────────────
+
+    fn tracker_view() -> crate::tracker::TrackerBoardView {
+        let source = "# Sentry triage\n\n## Now\n- [ ] Check the thing — in progress · cody · 10:42 <!-- #check-1 1760540000 -->\n";
+        let parsed = crate::tracker::parse(source.as_bytes()).expect("a readable board");
+        crate::tracker::view::build(
+            &parsed,
+            &crate::tracker::ViewFacts {
+                path: "/repo/.claude/wip/sentry-triage/index.md".into(),
+                topic: "sentry-triage".into(),
+                version: 7,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn tracker_board_round_trips_with_a_board_and_with_none() {
+        let json = round_trip_server(ServerMsg::TrackerBoard {
+            tag: "cody-x".into(),
+            board: Some(tracker_view()),
+        });
+        assert!(json.contains("Sentry triage") && json.contains("check-1"), "{json}");
+
+        let none = ServerMsg::TrackerBoard { tag: "cody-x".into(), board: None };
+        let json = round_trip_server(none.clone());
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.as_object().unwrap().contains_key("board") && value["board"].is_null(),
+            "a focus with no tracker sends an explicit `board: null`: {json}"
+        );
+        assert!(matches!(
+            serde_json::from_str::<ServerMsg>(&json).unwrap(),
+            ServerMsg::TrackerBoard { board: None, .. }
+        ));
+    }
+
+    #[test]
+    fn tracker_summary_round_trips_and_carries_exactly_its_five_counts() {
+        let counts = TrackerCounts { todo: 1, in_progress: 2, blocked: 3, needs_you: 4, done: 5 };
+        let json = round_trip_server(ServerMsg::TrackerSummary {
+            tag: "cody-x".into(),
+            has_tracker: true,
+            counts,
+        });
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["counts"],
+            serde_json::json!({"todo": 1, "in_progress": 2, "blocked": 3, "needs_you": 4, "done": 5})
+        );
+        assert_eq!(value["has_tracker"], true);
+        match serde_json::from_str::<ServerMsg>(&json).unwrap() {
+            ServerMsg::TrackerSummary { tag, has_tracker, counts: back } => {
+                assert_eq!((tag.as_str(), has_tracker, back), ("cody-x", true, counts));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_tracker_frames_use_the_type_names_the_clients_decode() {
+        let board = ServerMsg::TrackerBoard { tag: "t".into(), board: None };
+        assert_eq!(serde_json::to_value(&board).unwrap()["type"], "tracker_board");
+        let summary = ServerMsg::TrackerSummary {
+            tag: "t".into(),
+            has_tracker: false,
+            counts: TrackerCounts::default(),
+        };
+        assert_eq!(serde_json::to_value(&summary).unwrap()["type"], "tracker_summary");
+    }
+
+    #[test]
+    fn the_tracker_frames_decode_from_the_documented_wire_shape() {
+        let board: ServerMsg = serde_json::from_str(r#"{"type":"tracker_board","tag":"t","board":null}"#).unwrap();
+        assert!(matches!(board, ServerMsg::TrackerBoard { ref tag, board: None } if tag == "t"));
+
+        let summary: ServerMsg = serde_json::from_str(
+            r#"{"type":"tracker_summary","tag":"t","has_tracker":true,
+                "counts":{"todo":0,"in_progress":1,"blocked":0,"needs_you":2,"done":3}}"#,
+        )
+        .unwrap();
+        match summary {
+            ServerMsg::TrackerSummary { tag, has_tracker, counts } => {
+                assert_eq!(tag, "t");
+                assert!(has_tracker);
+                assert_eq!((counts.in_progress, counts.needs_you, counts.done), (1, 2, 3));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

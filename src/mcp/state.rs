@@ -138,6 +138,9 @@ pub struct DaemonMcpBackend {
     /// The `ticket` view's provider registry + TTL cache (W4 —
     /// curated-agent-views).
     pub tickets: TicketRegistryState,
+    /// The agent tracker: boards, bindings, cursors, change logs
+    /// (`nostromo.tracker`).
+    pub tracker: Arc<crate::tracker::TrackerRegistry>,
 }
 
 // ── shared state ───────────────────────────────────────────────────────────────
