@@ -3,8 +3,10 @@ import NostromoKit
 
 // AP2a: the exact input of a permission request, as the card shows it.
 //
-// A non-editable, selectable, monospaced text view in its own scroll view, with a
-// line-number gutter. It shows what `ApprovalDisplayModel` hands it and nothing
+// A non-editable, selectable, monospaced text view in its own scroll view. The line
+// numbers are painted by the text view itself, in a gutter that is part of its own
+// left inset (no NSRulerView: a ruler is a sibling of the clip view and can paint over
+// the text; nothing here can overlap the text). It shows what `ApprovalDisplayModel` hands it and nothing
 // else: every line, never elided, never markdown, never a link. Separators are
 // highlighted; invisible characters are shown as tokens in the warning colour;
 // non-ASCII characters are tinted and carry a tooltip with their code point and
@@ -15,6 +17,14 @@ import NostromoKit
 // showing (it stays true). The card keeps Allow disabled until then: a person must
 // never approve text they were not shown. Jumping to the end shows the end only, so
 // it does not count for the lines in between; scrolling through them does.
+//
+// Fail closed, twice. (1) A sized, on-screen layout of a model that has text must have
+// glyphs (`displayFailed`, sticky). (2) A line fragment only counts as shown once it has
+// been rendered (`cacheDisplay` of the scroll view, so anything painted over the text
+// counts too) and the render holds glyph ink: pixels whose luma differs from the area's
+// modal background by more than `ApprovalInkProbe.deltaThreshold`. A fragment that fails
+// is not covered; after `maxInkFailures` failed evaluations in a row the card latches
+// `displayFailed`.
 
 /// The card's colours. Explicit, because the whole app is pinned to Dark Aqua and a
 /// colour that follows the system could flip in a non-key window.
@@ -42,8 +52,17 @@ enum ApprovalPalette {
 }
 
 /// The text view. Its accessibility value is set to the input spoken line by line, with
-/// every invisible character read by name (`ApprovalInputView.render`).
-final class ApprovalTextView: NSTextView {}
+/// every invisible character read by name (`ApprovalInputView.render`). It paints the line
+/// numbers in the left part of its own inset, so they scroll with the text and can't overlap it.
+final class ApprovalTextView: NSTextView {
+
+    weak var gutterOwner: ApprovalInputView?
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        gutterOwner?.drawGutter(in: dirtyRect)
+    }
+}
 
 final class ApprovalInputView: NSScrollView {
 
@@ -52,14 +71,24 @@ final class ApprovalInputView: NSScrollView {
     private(set) var hasShownEveryLine = false
     /// Called once, when `hasShownEveryLine` becomes true.
     var onShownEveryLine: (() -> Void)?
-    /// True once the text, though the model has some, could not be laid out (no glyphs, or an empty
-    /// used rect, in a view that has a size): what is on screen can't be trusted to be the input, so
-    /// the card must not offer Allow once. Never goes back to false.
+    /// True once the text, though the model has some, could not be laid out or drawn: no glyphs or an
+    /// empty used rect in a sized, on-screen layout, or `maxInkFailures` failed ink checks in a row.
+    /// What is on screen can't be trusted to be the input, so the card must not offer Allow once.
+    /// Never goes back to false, and is never set from a layout that has no size or isn't on screen.
     private(set) var displayFailed = false
     /// Called once, when `displayFailed` becomes true.
     var onDisplayFailed: (() -> Void)?
+    #if DEBUG
     /// Tests only: treat the text layout as empty, as if no glyph had been laid out.
     var forceNoGlyphsForTesting = false
+    #endif
+    /// How many times the ink check has rendered the text area (once per coverage change).
+    private(set) var inkCheckCount = 0
+    /// Failed ink evaluations in a row; `maxInkFailures` of them latch `displayFailed`.
+    private(set) var inkFailures = 0
+    static let maxInkFailures = 3
+    /// The width of the line-number gutter (the left part of the text view's inset).
+    let gutterWidth: CGFloat
     private let modelHasText: Bool
 
     /// One entry per display line: its number and where it starts in `textView.string` (UTF-16).
@@ -78,10 +107,14 @@ final class ApprovalInputView: NSScrollView {
     /// Replaces the window half of "is this on screen?" (a visible, not occluded window). The
     /// rest (in a window, not hidden, not zero-sized) always applies. Tests set it.
     var isWindowShowing: (() -> Bool)?
+    /// Fragments that became covered during this evaluation, to be checked for ink (text-view coordinates).
+    private var newlyCovered: [(chars: NSRange, top: CGFloat, bottom: CGFloat)] = []
+    private var inkRecheckScheduled = false
+    private var isUpdatingProgress = false
     private var lastClipOriginY: CGFloat = 0
-    private let ruler = ApprovalLineNumberRuler()
     private let font = Theme.codeFont(size: 12)
     private static let textInset = NSSize(width: 6, height: 6)
+    private static let gutterFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
     /// A clip-origin change smaller than this (points) is layout settling, not a scroll.
     private static let scrollNoise: CGFloat = 2
     /// Spans of a line fragment that meet within this (points) count as one: scroll positions are pixel-snapped.
@@ -91,6 +124,7 @@ final class ApprovalInputView: NSScrollView {
 
     init(model: ApprovalDisplayModel) {
         modelHasText = model.allLines.contains { line in line.runs.contains { !$0.text.isEmpty } }
+        gutterWidth = Self.gutterWidth(forLineCount: max(1, model.allLines.count))
         textView = ApprovalTextView(frame: .zero)
         super.init(frame: .zero)
 
@@ -115,7 +149,9 @@ final class ApprovalInputView: NSScrollView {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.drawsBackground = true
         textView.backgroundColor = ApprovalPalette.inputBackground
-        textView.textContainerInset = Self.textInset
+        // The gutter is the left part of the inset: the text starts after it, so nothing can overlap it.
+        textView.textContainerInset = NSSize(width: gutterWidth + Self.textInset.width, height: Self.textInset.height)
+        textView.gutterOwner = self
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -125,11 +161,6 @@ final class ApprovalInputView: NSScrollView {
         let lineTotal = model.allLines.count
         textView.setAccessibilityLabel("Requested input, \(lineTotal) line\(lineTotal == 1 ? "" : "s")")
         documentView = textView
-
-        ruler.owner = self
-        verticalRulerView = ruler
-        hasVerticalRuler = true
-        rulersVisible = true
 
         render(model)
 
@@ -145,6 +176,11 @@ final class ApprovalInputView: NSScrollView {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// The gutter's width for a model of `count` lines: room for the digits.
+    static func gutterWidth(forLineCount count: Int) -> CGFloat {
+        CGFloat(String(count).count) * 7 + 14
+    }
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
@@ -216,7 +252,7 @@ final class ApprovalInputView: NSScrollView {
     func contentHeight(forWidth width: CGFloat) -> CGFloat {
         guard let source = textView.textStorage else { return 0 }
         let scroller = hasVerticalScroller ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle) : 0
-        let textWidth = max(40, width - ruler.ruleThickness - scroller - 2 * Self.textInset.width)
+        let textWidth = max(40, width - scroller - 2 * textView.textContainerInset.width)
         let storage = NSTextStorage(attributedString: source)
         let layout = NSLayoutManager()
         let container = NSTextContainer(size: NSSize(width: textWidth, height: .greatestFiniteMagnitude))
@@ -244,14 +280,22 @@ final class ApprovalInputView: NSScrollView {
     /// Re-check which lines are on screen and add them to what has been shown. Called after
     /// layout, on every clip movement and when the window's visibility changes.
     func updateScrollProgress() {
-        ruler.needsDisplay = true
-        checkDisplay()
+        // Nothing is judged, or earned, until the card can really be seen at a size.
+        guard !displayFailed, isShowingOnScreen, !isUpdatingProgress else { return }
+        // `fitTextView` can resize the text view, which posts a frame change that lands back here:
+        // that nested pass must not count a second evaluation (or a second failure).
+        isUpdatingProgress = true
+        defer { isUpdatingProgress = false }
+        checkLayout()
         guard !displayFailed, !hasShownEveryLine, !ignoreProgressUntilPersonScrolls else { return }
-        guard isShowingOnScreen else { return }
         if textView.string.isEmpty { return markShownEveryLine() }
         guard contentView.bounds.height > 0, textView.frame.width > 0 else { return }
         fitTextView()
+        newlyCovered.removeAll()
         coverVisibleFragments()
+        verifyInk(ofNewlyCovered: newlyCovered)
+        newlyCovered.removeAll()
+        guard !displayFailed else { return }
         if coveredCharacters.contains(integersIn: 0 ..< coverageTotal) { markShownEveryLine() }
     }
 
@@ -260,11 +304,22 @@ final class ApprovalInputView: NSScrollView {
         updateScrollProgress()
     }
 
-    /// Fail closed: a view that has a size and whose model has text must have laid out glyphs with a
-    /// non-empty extent. If not, what a person would be asked to approve may not be on screen.
-    private func checkDisplay() {
-        guard !displayFailed, modelHasText, bounds.width > 0, bounds.height > 0 else { return }
-        var laidOut = !forceNoGlyphsForTesting
+    // MARK: Fail closed
+
+    /// A layout that can be judged: the view is on screen (the caller checked), the text view and
+    /// its container have a width. A zero-width first layout is not a verdict.
+    private var hasSizedLayout: Bool {
+        textView.frame.width > 0 && (textView.textContainer?.containerSize.width ?? 0) > 0
+    }
+
+    /// A sized layout of a model that has text must have glyphs with a non-empty extent. If not,
+    /// what a person would be asked to approve may not be on screen.
+    private func checkLayout() {
+        guard modelHasText, hasSizedLayout else { return }
+        var laidOut = true
+        #if DEBUG
+        if forceNoGlyphsForTesting { laidOut = false }
+        #endif
         if laidOut {
             if let layout = textView.layoutManager, let container = textView.textContainer {
                 layout.ensureLayout(for: container)
@@ -273,9 +328,68 @@ final class ApprovalInputView: NSScrollView {
                 laidOut = false
             }
         }
-        guard !laidOut else { return }
+        if !laidOut { latchDisplayFailed() }
+    }
+
+    private func latchDisplayFailed() {
+        guard !displayFailed else { return }
         displayFailed = true
         onDisplayFailed?()
+    }
+
+    /// The fragments that just became covered must show glyph ink in a render of the whole input
+    /// view (so a sibling painting over the text is seen). One render per coverage change. A
+    /// fragment that fails is un-covered (it will be judged again on the next evaluation) and
+    /// `maxInkFailures` failures in a row latch `displayFailed`.
+    private func verifyInk(ofNewlyCovered fragments: [(chars: NSRange, top: CGFloat, bottom: CGFloat)]) {
+        guard !fragments.isEmpty else { return }
+        let text = (textView.textStorage?.string ?? "") as NSString
+        let expected = fragments.reduce(0) { $0 + ApprovalInkProbe.visibleCharacterCount(in: text, range: $1.chars) }
+        // Nothing but whitespace to see: nothing to demand.
+        guard expected > 0 else {
+            inkFailures = 0
+            return
+        }
+        let top = fragments.map(\.top).min() ?? 0, bottom = fragments.map(\.bottom).max() ?? 0
+        inkCheckCount += 1
+        if inkAreaShowsText(top: top, bottom: bottom, expected: expected) {
+            inkFailures = 0
+            return
+        }
+        for fragment in fragments {
+            coveredCharacters.remove(integersIn: fragment.chars.location ..< NSMaxRange(fragment.chars))
+        }
+        inkFailures += 1
+        if inkFailures >= Self.maxInkFailures {
+            latchDisplayFailed()
+        } else {
+            scheduleInkRecheck()
+        }
+    }
+
+    /// Render the text area (right of the gutter) of the rows `top ..< bottom` (text-view coordinates)
+    /// and look for ink. The render is of this view, so everything painted over the text counts.
+    private func inkAreaShowsText(top: CGFloat, bottom: CGFloat, expected: Int) -> Bool {
+        let visible = textView.visibleRect
+        let area = NSRect(x: gutterWidth, y: top, width: visible.maxX - gutterWidth, height: bottom - top).intersection(visible)
+        guard !area.isNull else { return false }
+        let rect = convert(area, from: textView).integral.intersection(bounds)
+        guard !rect.isNull, rect.width >= 1, rect.height >= 1,
+              let rep = bitmapImageRepForCachingDisplay(in: rect) else { return false }
+        cacheDisplay(in: rect, to: rep)
+        return ApprovalInkProbe.hasInk(in: rep, atLeast: min(ApprovalInkProbe.inkCeiling, expected))
+    }
+
+    /// A failed evaluation may be a layout that hasn't settled: look again on the next turn of the
+    /// run loop (once at a time). The failure count bounds this.
+    private func scheduleInkRecheck() {
+        guard !inkRecheckScheduled else { return }
+        inkRecheckScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.inkRecheckScheduled = false
+            self.updateScrollProgress()
+        }
     }
 
     /// Size the text view to its laid-out text (never smaller than the clip), so what is on
@@ -343,6 +457,7 @@ final class ApprovalInputView: NSScrollView {
         if merged.count == 1, merged[0].lowerBound <= top + Self.coverageTolerance,
            merged[0].upperBound >= bottom - Self.coverageTolerance {
             coveredCharacters.insert(integersIn: range)
+            newlyCovered.append((chars: chars, top: top, bottom: bottom))
             partlySeen[chars] = nil
         } else {
             partlySeen[chars] = merged
@@ -351,8 +466,28 @@ final class ApprovalInputView: NSScrollView {
 
     // MARK: Drawing support (the gutter)
 
+    /// Paint the line numbers in the gutter strip of the text view (called from its `draw`, in its
+    /// coordinates). Only the strip is touched: the fill and the digits are clipped to it.
+    fileprivate func drawGutter(in dirty: NSRect) {
+        let strip = NSRect(x: 0, y: dirty.minY, width: gutterWidth, height: dirty.height)
+        guard dirty.minX < gutterWidth, strip.height > 0 else { return }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        strip.clip()
+        ApprovalPalette.inputBackground.setFill()
+        strip.fill()
+        let attrs: [NSAttributedString.Key: Any] = [.font: Self.gutterFont, .foregroundColor: ApprovalPalette.gutterText]
+        for index in lineNumbers.indices {
+            guard let top = lineTop(at: index) else { continue }
+            if top > dirty.maxY { break }
+            if top + 16 < dirty.minY { continue }
+            let label = NSAttributedString(string: String(lineNumbers[index]), attributes: attrs)
+            label.draw(at: NSPoint(x: gutterWidth - label.size().width - 6, y: top + 2))
+        }
+    }
+
     /// The top of display line `index` in text-view coordinates, or nil before layout.
-    fileprivate func lineTop(at index: Int) -> CGFloat? {
+    private func lineTop(at index: Int) -> CGFloat? {
         guard lineStarts.indices.contains(index), let layout = textView.layoutManager,
               layout.numberOfGlyphs > 0 else { return nil }
         if lineStarts[index] >= textView.string.utf16.count {
@@ -364,8 +499,6 @@ final class ApprovalInputView: NSScrollView {
         let rect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
         return rect.minY + textView.textContainerOrigin.y
     }
-
-    fileprivate var lineCount: Int { lineNumbers.count }
 
     // MARK: Building the text
 
@@ -383,7 +516,6 @@ final class ApprovalInputView: NSScrollView {
         }
         textView.textStorage?.setAttributedString(text)
         textView.setAccessibilityValue(spoken.joined(separator: "\n"))
-        ruler.ruleThickness = ApprovalLineNumberRuler.thickness(forLineCount: max(1, model.allLines.count))
     }
 
     private func baseAttributes(for kind: ApprovalLineKind) -> [NSAttributedString.Key: Any] {
@@ -487,47 +619,66 @@ final class ApprovalInputView: NSScrollView {
     }
 }
 
-// MARK: - The gutter
+// MARK: - Ink probe
 
-/// Line numbers, drawn at the first visual line of each display line (a long line that
-/// wraps shows its number once).
-final class ApprovalLineNumberRuler: NSRulerView {
+/// Looking for glyph ink in a rendering of the text area. Ink is a pixel whose luma differs from the
+/// area's modal background by more than `deltaThreshold` (of 255): a luma DELTA, not an absolute colour,
+/// so muted tokens count and a here-doc's fill (luma about 23 from the input background) does not.
+enum ApprovalInkProbe {
 
-    weak var owner: ApprovalInputView?
+    static let deltaThreshold = 60.0
+    /// The most ink ever demanded: enough that a rendering of real text can't miss it, few enough that
+    /// one short token passes.
+    static let inkCeiling = 40
 
-    private static let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-
-    static func thickness(forLineCount count: Int) -> CGFloat {
-        CGFloat(String(count).count) * 7 + 14
-    }
-
-    init() {
-        super.init(scrollView: nil, orientation: .verticalRuler)
-        clientView = nil
-        // Since macOS 14 a view's drawing is not clipped to its bounds by default. With the gutter
-        // unclipped, the text area to its right (the clip view reaches under the gutter, its bounds
-        // start at minus the gutter's width) rendered blank: the command text was laid out but not
-        // visible. The gutter paints only its own strip.
-        clipsToBounds = true
-    }
-
-    required init(coder: NSCoder) { fatalError("not used") }
-
-    override var isFlipped: Bool { true }
-
-    override func drawHashMarksAndLabels(in rect: NSRect) {
-        ApprovalPalette.inputBackground.setFill()
-        rect.fill()
-        guard let owner, let textView = scrollView?.documentView as? NSTextView else { return }
-        let attrs: [NSAttributedString.Key: Any] = [.font: Self.font, .foregroundColor: ApprovalPalette.gutterText]
-        for index in 0 ..< owner.lineCount {
-            guard let top = owner.lineTop(at: index) else { continue }
-            let y = convert(NSPoint(x: 0, y: top), from: textView).y
-            if y > rect.maxY { break }
-            if y + 16 < rect.minY { continue }
-            let label = NSAttributedString(string: String(owner.lineNumbers[index]), attributes: attrs)
-            let size = label.size()
-            label.draw(at: NSPoint(x: ruleThickness - size.width - 6, y: y + 2))
+    /// How many characters in `range` of `text` are meant to draw a mark (not whitespace, control or format).
+    static func visibleCharacterCount(in text: NSString, range: NSRange) -> Int {
+        let r = NSIntersectionRange(range, NSRange(location: 0, length: text.length))
+        guard r.length > 0 else { return 0 }
+        let invisible: Set<Unicode.GeneralCategory> = [.spaceSeparator, .lineSeparator, .paragraphSeparator, .control, .format,
+                                                       .nonspacingMark, .enclosingMark]
+        return text.substring(with: r).unicodeScalars.reduce(0) { count, scalar in
+            invisible.contains(scalar.properties.generalCategory) ? count : count + 1
         }
+    }
+
+    /// True when `rep` holds at least `minimum` ink pixels. The modal background is taken from a sparse
+    /// sample, then the pixels are scanned until enough ink is found (a normal rendering stops early).
+    static func hasInk(in rep: NSBitmapImageRep, atLeast minimum: Int) -> Bool {
+        let width = rep.pixelsWide, height = rep.pixelsHigh
+        guard minimum > 0, width > 0, height > 0 else { return false }
+        let direct = rep.bitmapData != nil && !rep.isPlanar && rep.bitsPerSample == 8 && rep.samplesPerPixel >= 3
+            && !rep.bitmapFormat.contains(.floatingPointSamples)
+        let bytesPerPixel = rep.bitsPerPixel / 8
+        let colourOffset = rep.hasAlpha && rep.bitmapFormat.contains(.alphaFirst) ? 1 : 0
+        let raw = rep.bitmapData
+
+        func luma(_ x: Int, _ y: Int) -> Double? {
+            if direct, let raw {
+                let p = raw + y * rep.bytesPerRow + x * bytesPerPixel + colourOffset
+                return 0.2126 * Double(p[0]) + 0.7152 * Double(p[1]) + 0.0722 * Double(p[2])
+            }
+            guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return nil }
+            return 255 * (0.2126 * Double(c.redComponent) + 0.7152 * Double(c.greenComponent) + 0.0722 * Double(c.blueComponent))
+        }
+
+        var histogram = [Int](repeating: 0, count: 256)
+        for y in stride(from: 0, to: height, by: 3) {
+            for x in stride(from: 0, to: width, by: 3) {
+                if let value = luma(x, y) { histogram[min(255, max(0, Int(value.rounded())))] += 1 }
+            }
+        }
+        guard let modal = histogram.indices.max(by: { histogram[$0] < histogram[$1] }), histogram[modal] > 0 else { return false }
+        let background = Double(modal)
+
+        var ink = 0
+        for y in 0 ..< height {
+            for x in 0 ..< width {
+                guard let value = luma(x, y), abs(value - background) > deltaThreshold else { continue }
+                ink += 1
+                if ink >= minimum { return true }
+            }
+        }
+        return false
     }
 }

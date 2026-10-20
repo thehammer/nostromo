@@ -525,7 +525,11 @@ final class ApprovalCardView: NSView {
 
     /// The input could not be laid out: say so, keep Allow once off (`canAllow`), keep every Deny.
     private func showDisplayFailed() {
-        bannerLabel.stringValue = Self.displayFailedBanner
+        // Say it first, and keep every warning the card already had (invisible characters, non-ASCII,
+        // unverified input): the failure line is added to the banner, never put in its place.
+        let existing = model.banner(toolKind: request.toolKind)
+        bannerLabel.stringValue = [Self.displayFailedBanner, existing].compactMap { $0 }.joined(separator: "\n")
+        bannerLabel.maximumNumberOfLines = 6
         bannerLabel.isHidden = false
         refresh()
         needsLayout = true
