@@ -289,10 +289,12 @@ final class ApprovalInputView: NSScrollView {
     // MARK: Private
 
     /// Whether `event` is a person scrolling or pressing a key (not nil, not a mouse move, not
-    /// app-control's). After a scroll the app-control socket made, only such an event lets the
+    /// app-control's, and fresh: AppKit leaves `NSApp.currentEvent` on the last event it
+    /// dispatched, long after it happened). After a scroll the app-control socket made, only such an event lets the
     /// next movement of the input count as a person looking at it. A test replaces it.
     var isPersonEvent: (NSEvent?) -> Bool = { event in
-        guard let event, !SyntheticInputGate.isSynthetic(event) else { return false }
+        guard let event, !SyntheticInputGate.isSynthetic(event),
+              ProcessInfo.processInfo.systemUptime - event.timestamp <= HumanGesture.maxEventAge else { return false }
         return [.scrollWheel, .leftMouseDragged, .leftMouseDown, .leftMouseUp, .keyDown].contains(event.type)
     }
 
