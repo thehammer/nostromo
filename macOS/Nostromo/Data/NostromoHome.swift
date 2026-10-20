@@ -25,6 +25,20 @@ enum NostromoHome {
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
+    /// True only for the QA clone's bundle id (exactly). The QA instance must never start Mother.
+    static func isQAInstance(bundleID: String?) -> Bool {
+        bundleID == qaBundleID
+    }
+
+    static var isQAInstance: Bool {
+        isQAInstance(bundleID: Bundle.main.bundleIdentifier)
+    }
+
+    /// Whether an offline broker should trigger `mother daemon start`: never for the QA clone.
+    static func shouldAttemptMotherDaemonStart(brokerConnected: Bool, isQA: Bool) -> Bool {
+        !brokerConnected && !isQA
+    }
+
     static var current: URL {
         url(env: ProcessInfo.processInfo.environment,
             bundleID: Bundle.main.bundleIdentifier,

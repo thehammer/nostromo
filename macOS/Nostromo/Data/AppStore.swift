@@ -19,6 +19,7 @@ private let panesLog = Logger(subsystem: "com.hammer.nostromo", category: "panes
 ///   - MotherBrokerClient (broker socket) → Mother job events + mutations
 ///   - FileWatchers (flat files) → rate limits, posture, perri queue
 class AppStore: ObservableObject {
+    private static var loggedQANoMother = false
     static let shared = AppStore()
 
     // MARK: - Published state
@@ -424,6 +425,15 @@ class AppStore: ObservableObject {
             .sink { [weak self] connected in
                 self?.brokerConnected = connected
                 if !connected {
+                    if !NostromoHome.shouldAttemptMotherDaemonStart(brokerConnected: connected, isQA: NostromoHome.isQAInstance) {
+                        // The QA clone points the broker at a dead path on purpose; starting Mother
+                        // here would leave a real supervisor running in the QA dir.
+                        if !AppStore.loggedQANoMother {
+                            AppStore.loggedQANoMother = true
+                            log.info("QA instance: broker offline, never starting Mother")
+                        }
+                        return
+                    }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
                         guard let self, !self.brokerConnected else { return }
                         log.warning("broker offline — attempting 'mother daemon start'")
