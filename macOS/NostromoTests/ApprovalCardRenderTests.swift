@@ -143,7 +143,10 @@ private enum InkCounter {
         var total = 0, band = 0, gutterInk = 0
         var gMax = 0.0, gMin = 255.0  // TMP
         for yy in y0 ..< y1 { for xx in gx0 ..< max(gx0, gx1) { if direct, let raw { let p = raw + yy * rep.bytesPerRow + xx * bytesPerPixel + colourOffset; let v = luma(r: Double(p[0]), g: Double(p[1]), b: Double(p[2])); gMax = max(gMax, v); gMin = min(gMin, v) } } }  // TMP
-        lastGutterDiag = "gx=\(gx0)..<\(gx1) y=\(y0)..<\(y1) direct=\(direct) bpp=\(bytesPerPixel) off=\(colourOffset) gMax=\(gMax) gMin=\(gMin) bg=\(background)"  // TMP
+        func regionMax(_ xs: Range<Int>, _ ys: Range<Int>) -> Double { var m = 0.0; for yy in ys where yy < y1 { for xx in xs where xx < gx1 { if direct, let raw { let p = raw + yy * rep.bytesPerRow + xx * bytesPerPixel + colourOffset; m = max(m, luma(r: Double(p[0]), g: Double(p[1]), b: Double(p[2]))) } } }; return m }  // TMP
+        let sc = Int(scale)
+        let r1 = regionMax(0 ..< 4 * sc, 0 ..< 4 * sc), r2 = regionMax(5 * sc ..< 20 * sc, 4 * sc ..< 24 * sc), r3 = regionMax(0 ..< 4 * sc, 26 * sc ..< 30 * sc)  // TMP
+        lastGutterDiag = "E1=\(r1) E2=\(r2) E4=\(r3) gx=\(gx0)..<\(gx1) y=\(y0)..<\(y1) direct=\(direct) bpp=\(bytesPerPixel) off=\(colourOffset) gMax=\(gMax) gMin=\(gMin) bg=\(background)"  // TMP
         var gutterRows: [Int] = []
         for y in y0 ..< y1 {
             var rowHasGutterInk = false

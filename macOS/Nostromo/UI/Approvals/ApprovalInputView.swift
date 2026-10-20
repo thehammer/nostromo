@@ -58,9 +58,17 @@ final class ApprovalTextView: NSTextView {
 
     weak var gutterOwner: ApprovalInputView?
 
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        NSColor.white.setFill(); NSRect(x: 0, y: 26, width: 4, height: 4).fill()  // TMP E4
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         gutterOwner?.gutterDiag += " draw(dirty=\(dirtyRect) owner=\(gutterOwner != nil))"  // TMP
+        // TMP experiments: E1 bright rect unclipped; E2 white digit unclipped
+        NSColor.white.setFill(); NSRect(x: 0, y: 0, width: 4, height: 4).fill()
+        NSString("8").draw(at: NSPoint(x: 9, y: 8), withAttributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.white])
         gutterOwner?.drawGutter(in: dirtyRect)
     }
 }
@@ -283,6 +291,12 @@ final class ApprovalInputView: NSScrollView {
     /// layout, on every clip movement and when the window's visibility changes.
     func updateScrollProgress() {
         // Nothing is judged, or earned, until the card can really be seen at a size.
+        // Lay the text out even when nobody can see it yet: the text view takes its height from that,
+        // and the scroll range (and what is on screen once shown) depends on it. No verdict is drawn here.
+        if !displayFailed, modelHasText, bounds.width > 0, bounds.height > 0,
+           let layout = textView.layoutManager, let container = textView.textContainer {
+            layout.ensureLayout(for: container)
+        }
         guard !displayFailed, isShowingOnScreen, !isUpdatingProgress else { return }
         // `fitTextView` can resize the text view, which posts a frame change that lands back here:
         // that nested pass must not count a second evaluation (or a second failure).
