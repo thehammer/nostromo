@@ -58,17 +58,29 @@ class QAMotherProcessTests(unittest.TestCase):
     def test_only_same_user_mother_processes_with_home_under_the_root_match(self):
         self.assertEqual(qa.find_qa_mother_pids(self.PS, self.ROOT, 502), [117, 75097])
 
-    def test_stop_kills_exactly_those_pids_and_reports_them(self):
-        killed = []
-        problems = qa.stop_qa_mother(self.ROOT, ps_text=self.PS, kill=killed.append, uid=502)
-        self.assertEqual(killed, [117, 75097])
+    def test_the_report_names_exactly_those_pids_and_kills_nothing(self):
+        problems = qa.report_qa_mother(self.ROOT, ps_text=self.PS, uid=502)
         self.assertEqual(len(problems), 2)
+        self.assertIn("pid 117", problems[0])
+        self.assertIn("pid 75097", problems[1])
+        self.assertFalse(hasattr(qa, "stop_qa_mother"), "detection only: nothing in the harness kills Mother processes")
 
-    def test_the_real_runner_alone_is_never_touched(self):
+    def test_the_real_runner_alone_reports_nothing(self):
         ps = "  111   502 /opt/homebrew/bin/mother-runner supervise HOME=/Users/x\n"
-        killed = []
-        self.assertEqual(qa.stop_qa_mother(self.ROOT, ps_text=ps, kill=killed.append, uid=502), [])
-        self.assertEqual(killed, [])
+        self.assertEqual(qa.report_qa_mother(self.ROOT, ps_text=ps, uid=502), [])
+
+    def test_dotdot_and_unnormalised_homes_do_not_match_outside_the_root(self):
+        ps = "\n".join([
+            "  201   502 /opt/homebrew/bin/mother-runner x HOME=/var/folders/xx/nostromo-qa-abc/../elsewhere",
+            "  202   502 /opt/homebrew/bin/mother-runner x HOME=/var/folders/xx/nostromo-qa-abc/home/../../other",
+            "  203   502 /opt/homebrew/bin/mother-runner x HOME=/var/folders/xx/nostromo-qa-abc//home",
+        ])
+        self.assertEqual(qa.find_qa_mother_pids(ps, self.ROOT, 502), [203])
+
+    def test_no_kill_call_remains_for_mother_processes(self):
+        src = read("scripts", "qa", "lib", "qa_instance.py")
+        body = src[src.index("def report_qa_mother"):src.index("def cmd_start")]
+        self.assertNotIn("kill(", body.replace("kill {pid}", ""))
 
 
 class CloneBuildTests(unittest.TestCase):
