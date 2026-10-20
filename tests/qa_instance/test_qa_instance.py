@@ -40,6 +40,15 @@ class TeardownPidReuseTests(unittest.TestCase):
         self.assertEqual(killed, [])
 
 
+class CloneBuildTests(unittest.TestCase):
+    def test_the_clone_is_built_and_cloned_from_the_release_app_not_the_debug_split_dylib_build(self):
+        src = read("scripts", "qa", "lib", "qa_instance.py")
+        self.assertIn('["make", "mac-release"]', src)
+        self.assertNotIn('["make", "mac"]', src)
+        self.assertIn('"Products", "Release", "Nostromo.app"', src)
+        self.assertNotIn('"Products", "Debug"', src)
+
+
 class PlistTests(unittest.TestCase):
     def test_clone_gets_the_qa_bundle_id_and_keeps_everything_else(self):
         info = {"CFBundleIdentifier": "com.hammer.nostromo", "CFBundleName": "Nostromo", "LSUIElement": True}
