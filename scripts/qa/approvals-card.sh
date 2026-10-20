@@ -43,9 +43,21 @@ ctl() { "$app" --socket "$sock" "$@"; }
 verdict=PASS
 fail() { verdict=FAIL; echo "FAIL: $*"; }
 
+# The control socket answers before the app has placed its windows (they start at alpha 0 and are
+# revealed once placement finishes, one per display, each on its own Space). Wait up to 45 s for all of
+# them to be visible before calling the run inconclusive, and print what was seen when it is.
+windows_hidden() { grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$1"; }
 windows="$(ctl windows)"
-if grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows"; then
-  echo "INCONCLUSIVE: window not visible (display locked or asleep)"
+for _ in $(seq 1 90); do
+  windows_hidden "$windows" || break
+  sleep 0.5
+  windows="$(ctl windows)"
+done
+if windows_hidden "$windows"; then
+  echo "INCONCLUSIVE: window not visible after 45 s (display locked or asleep, or the QA app never revealed its windows)"
+  echo "--- windows ---"; echo "$windows"
+  log="$root/home/.nostromo/logs/window-placement.log"
+  echo "--- window-placement.log (tail) ---"; tail -n 25 "$log" 2>/dev/null || echo "(no placement log at $log)"
   stopped=1; "$instance" stop "$root" || true
   exit 3
 fi
