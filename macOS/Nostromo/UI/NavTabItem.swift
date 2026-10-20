@@ -57,6 +57,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     /// Keeps the title out from under the pill; active only while the pill shows.
     private var labelClearsPill: NSLayoutConstraint?
     private let displayOverride: String
+    /// Top-level rows (not nested under a repo header) use the repo-header look.
+    private let isTopLevel: Bool
     private let baseSecondary: String?
     private let secondaryLabel: NSTextField?
 
@@ -64,6 +66,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         self.focus           = focus
         self.displayOverride = displayLabel
         self.baseSecondary   = secondary
+        self.isTopLevel      = !indented
         self.secondaryLabel  = secondary.map { text in
             let tf = NSTextField(labelWithString: text)
             tf.font           = Theme.navSubFont
@@ -93,8 +96,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
         // Primary label — left-aligned
         label.stringValue    = displayLabel
-        label.font           = Theme.tabFont
-        label.textColor      = Theme.fgMuted
+        label.font           = indented ? Theme.tabFont : Theme.navRepoFont
+        label.textColor      = indented ? Theme.fgMuted : Theme.navRepoColor
         label.alignment      = .left
         label.lineBreakMode  = .byTruncatingTail
         label.isEditable     = false
@@ -244,13 +247,13 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         para.lineBreakMode = .byTruncatingTail
         if isActive {
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: Theme.tabFontBold, .foregroundColor: NSColor.white, .paragraphStyle: para,
+                .font: isTopLevel ? Theme.navRepoFont : Theme.tabFontBold, .foregroundColor: NSColor.white, .paragraphStyle: para,
             ]
             label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
         } else {
-            let color = sweaterColor ?? Theme.fgMuted
+            let color = sweaterColor ?? (isTopLevel ? Theme.navRepoColor : Theme.fgMuted)
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: Theme.tabFont, .foregroundColor: color, .paragraphStyle: para,
+                .font: isTopLevel ? Theme.navRepoFont : Theme.tabFont, .foregroundColor: color, .paragraphStyle: para,
             ]
             label.attributedStringValue = NSAttributedString(string: displayOverride, attributes: attrs)
         }

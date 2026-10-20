@@ -222,7 +222,7 @@ enum Theme {
     /// Height of an org-section header row (e.g. "CAREFEED").
     static let navOrgHeaderHeight:  CGFloat = 28
     /// Height of a repo-group header row (non-clickable; sits above indented agent rows).
-    static var navRepoHeaderHeight: CGFloat { RepoHeaderStyle.current.height }
+    static let navRepoHeaderHeight: CGFloat = 32
     /// Height of a clickable focus item row.
     static let navItemHeight:       CGFloat = 40
     /// Height of a clickable focus item row that carries a secondary subtitle label.
@@ -231,8 +231,12 @@ enum Theme {
     static let navChildIndent:      CGFloat = 12
     /// Font for org section labels (uppercase, small, muted).
     static let navOrgFont  = NSFont.systemFont(ofSize: 10, weight: .semibold)
-    /// Font for repo-group header labels.
-    static var navRepoFont: NSFont { RepoHeaderStyle.current.font }
+    /// Font for repo-group header labels and for the top-level (non-indented) focus rows.
+    static let navRepoFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    /// Colour for repo-group header labels and inactive top-level focus rows (a step brighter than `fgMuted`).
+    static let navRepoColor = NSColor(white: 175/255, alpha: 1)
+    /// Leading inset of a repo-group header label (agent rows nested under it sit at `6 + navChildIndent`).
+    static let navRepoHeaderLeading: CGFloat = 6
     /// Font for optional secondary disambiguation line on agent rows.
     static let navSubFont  = NSFont.systemFont(ofSize: 10, weight: .regular)
 
@@ -311,34 +315,4 @@ enum Theme {
         if secs >= 3600 { return "\(Int(secs / 3600))h" }
         return "\(max(1, Int(secs / 60)))m"
     }
-}
-
-/// Look of the repo-group headers in the sidebar ("Admin Portal", "Referral Monitor").
-///
-/// TRY-OUT KNOB: while we pick a look, `defaults write com.hammer.nostromo nostromo.sidebar.repoHeaderStyle -string b`
-/// (a, b or c; `defaults delete ...` returns to `a`) changes it; the sidebar picks it up the next time it
-/// rebuilds (switch to another tab and back, or add/rename an agent). Remove the knob once a style is chosen.
-struct RepoHeaderStyle {
-    let font: NSFont
-    let color: NSColor
-    /// Leading inset of the header label (agent rows nested under it sit at 6 + `Theme.navChildIndent`).
-    let leading: CGFloat
-    let height: CGFloat
-
-    static let defaultsKey = "nostromo.sidebar.repoHeaderStyle"
-
-    static var current: RepoHeaderStyle {
-        switch UserDefaults.standard.string(forKey: defaultsKey)?.lowercased() {
-        case "b": return .b
-        case "c": return .c
-        default: return .a
-        }
-    }
-
-    /// A: flush left with the agent rows' edge, 13pt semibold, bright.
-    static let a = RepoHeaderStyle(font: .systemFont(ofSize: 13, weight: .semibold), color: Theme.fg, leading: 6, height: 32)
-    /// B: flush left, 14pt bold, bright, a little more air above.
-    static let b = RepoHeaderStyle(font: .systemFont(ofSize: 14, weight: .bold), color: Theme.fg, leading: 6, height: 36)
-    /// C: like A at 13pt semibold but muted, so the agent rows stay the louder thing.
-    static let c = RepoHeaderStyle(font: .systemFont(ofSize: 13, weight: .semibold), color: NSColor(white: 175/255, alpha: 1), leading: 6, height: 32)
 }
