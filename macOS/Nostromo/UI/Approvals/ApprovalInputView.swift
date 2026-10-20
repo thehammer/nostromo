@@ -346,27 +346,38 @@ final class ApprovalInputView: NSScrollView {
         onDisplayFailed?()
     }
 
-    /// The fragments that just became covered must show glyph ink in a render of the whole input
-    /// view (so a sibling painting over the text is seen). One render per coverage change. A
-    /// fragment that fails is un-covered (it will be judged again on the next evaluation) and
-    /// `maxInkFailures` failures in a row latch `displayFailed`.
+    /// Each fragment that just became covered must show glyph ink, judged on its own row band in one
+    /// render of the whole input view (so a sibling painting over the text is seen, and ink in one row
+    /// can't vouch for a blank one). One render per coverage change. A fragment that fails is un-covered
+    /// (it is judged again on the next evaluation) and `maxInkFailures` failing evaluations in a row
+    /// latch `displayFailed`. Only a fragment that is whole on screen now is judged; a fragment that
+    /// completed its coverage from two partial views at different scroll positions is not (the rows
+    /// around it were, and a view that blanks only such seams is not a blank card).
     private func verifyInk(ofNewlyCovered fragments: [(chars: NSRange, top: CGFloat, bottom: CGFloat)]) {
-        guard !fragments.isEmpty else { return }
         let text = (textView.textStorage?.string ?? "") as NSString
-        let expected = fragments.reduce(0) { $0 + ApprovalInkProbe.visibleCharacterCount(in: text, range: $1.chars) }
-        // Nothing but whitespace to see: nothing to demand.
-        guard expected > 0 else {
+        let visible = textView.visibleRect
+        let judged = fragments.compactMap { fragment -> (fragment: (chars: NSRange, top: CGFloat, bottom: CGFloat), expected: Int)? in
+            guard fragment.top >= visible.minY - 0.5, fragment.bottom <= visible.maxY + 0.5 else { return nil }
+            let expected = ApprovalInkProbe.visibleCharacterCount(in: text, range: fragment.chars)
+            return expected > 0 ? (fragment, expected) : nil   // nothing but whitespace: nothing to demand
+        }
+        guard !judged.isEmpty else {
             inkFailures = 0
             return
         }
-        let top = fragments.map(\.top).min() ?? 0, bottom = fragments.map(\.bottom).max() ?? 0
         inkCheckCount += 1
-        if inkAreaShowsText(top: top, bottom: bottom, expected: expected) {
+        let union = judged.reduce(into: (top: CGFloat.greatestFiniteMagnitude, bottom: -CGFloat.greatestFiniteMagnitude)) {
+            $0.top = min($0.top, $1.fragment.top)
+            $0.bottom = max($0.bottom, $1.fragment.bottom)
+        }
+        let render = renderInkArea(top: union.top, bottom: union.bottom)
+        let failed = judged.filter { !inkShows(in: $0.fragment, of: render, expected: $0.expected) }
+        guard !failed.isEmpty else {
             inkFailures = 0
             return
         }
-        for fragment in fragments {
-            coveredCharacters.remove(integersIn: fragment.chars.location ..< NSMaxRange(fragment.chars))
+        for item in failed {
+            coveredCharacters.remove(integersIn: item.fragment.chars.location ..< NSMaxRange(item.fragment.chars))
         }
         inkFailures += 1
         if inkFailures >= Self.maxInkFailures {
@@ -376,25 +387,44 @@ final class ApprovalInputView: NSScrollView {
         }
     }
 
-    /// Render the text area (right of the gutter) of the rows `top ..< bottom` (text-view coordinates)
-    /// and look for ink. The render is of this view, so everything painted over the text counts.
-    private func inkAreaShowsText(top: CGFloat, bottom: CGFloat, expected: Int) -> Bool {
+    /// The text area (right of the gutter) of the rows `top ..< bottom` (text-view coordinates), in this view's coordinates.
+    private func textArea(top: CGFloat, bottom: CGFloat) -> NSRect {
         let visible = textView.visibleRect
         let area = NSRect(x: gutterWidth, y: top, width: visible.maxX - gutterWidth, height: bottom - top).intersection(visible)
-        guard !area.isNull else { return false }
-        let rect = convert(area, from: textView).integral.intersection(bounds)
-        guard !rect.isNull, rect.width >= 1, rect.height >= 1,
-              let rep = bitmapImageRepForCachingDisplay(in: rect) else { return false }
+        return area.isNull ? .null : convert(area, from: textView)
+    }
+
+    /// One render of this view over the text area of the rows `top ..< bottom` (nil if it can't be made).
+    private func renderInkArea(top: CGFloat, bottom: CGFloat) -> (rep: NSBitmapImageRep, rect: NSRect)? {
+        let area = textArea(top: top, bottom: bottom)
+        guard !area.isNull else { return nil }
+        let rect = area.integral.intersection(bounds)
+        guard !rect.isNull, rect.width >= 1, rect.height >= 1, let rep = bitmapImageRepForCachingDisplay(in: rect) else { return nil }
         cacheDisplay(in: rect, to: rep)
-        return ApprovalInkProbe.hasInk(in: rep, atLeast: min(ApprovalInkProbe.inkCeiling, expected))
+        return (rep, rect)
+    }
+
+    /// Does `render` hold ink in this fragment's own row band? No render means no.
+    private func inkShows(in fragment: (chars: NSRange, top: CGFloat, bottom: CGFloat),
+                          of render: (rep: NSBitmapImageRep, rect: NSRect)?, expected: Int) -> Bool {
+        guard let render else { return false }
+        let band = textArea(top: fragment.top, bottom: fragment.bottom)
+        guard !band.isNull, render.rect.height > 0 else { return false }
+        let scale = CGFloat(render.rep.pixelsHigh) / render.rect.height
+        let offset = isFlipped ? band.minY - render.rect.minY : render.rect.maxY - band.maxY
+        let first = max(0, Int((offset * scale).rounded(.down)))
+        let last = min(render.rep.pixelsHigh, Int(((offset + band.height) * scale).rounded(.up)))
+        guard last > first else { return false }
+        return ApprovalInkProbe.hasInk(in: render.rep, rows: first ..< last, atLeast: min(ApprovalInkProbe.inkCeiling, expected))
     }
 
     /// A failed evaluation may be a layout that hasn't settled: look again on the next turn of the
-    /// run loop (once at a time). The failure count bounds this.
+    /// run loop, 0.1 s on (once at a time). The failure count bounds this.
     private func scheduleInkRecheck() {
         guard !inkRecheckScheduled else { return }
         inkRecheckScheduled = true
-        DispatchQueue.main.async { [weak self] in
+        // Spaced out, so the failures that latch the card are not three turns of one unsettled layout.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self else { return }
             self.inkRecheckScheduled = false
             self.updateScrollProgress()
@@ -648,9 +678,10 @@ enum ApprovalInkProbe {
 
     /// True when `rep` holds at least `minimum` ink pixels. The modal background is taken from a sparse
     /// sample, then the pixels are scanned until enough ink is found (a normal rendering stops early).
-    static func hasInk(in rep: NSBitmapImageRep, atLeast minimum: Int) -> Bool {
-        let width = rep.pixelsWide, height = rep.pixelsHigh
-        guard minimum > 0, width > 0, height > 0 else { return false }
+    static func hasInk(in rep: NSBitmapImageRep, rows: Range<Int>? = nil, atLeast minimum: Int) -> Bool {
+        let width = rep.pixelsWide
+        let rows = rows.map { max(0, $0.lowerBound) ..< min(rep.pixelsHigh, $0.upperBound) } ?? 0 ..< rep.pixelsHigh
+        guard minimum > 0, width > 0, !rows.isEmpty else { return false }
         let direct = rep.bitmapData != nil && !rep.isPlanar && rep.bitsPerSample == 8 && rep.samplesPerPixel >= 3
             && !rep.bitmapFormat.contains(.floatingPointSamples)
         let bytesPerPixel = rep.bitsPerPixel / 8
@@ -667,7 +698,7 @@ enum ApprovalInkProbe {
         }
 
         var histogram = [Int](repeating: 0, count: 256)
-        for y in stride(from: 0, to: height, by: 3) {
+        for y in stride(from: rows.lowerBound, to: rows.upperBound, by: 3) {
             for x in stride(from: 0, to: width, by: 3) {
                 if let value = luma(x, y) { histogram[min(255, max(0, Int(value.rounded())))] += 1 }
             }
@@ -676,7 +707,7 @@ enum ApprovalInkProbe {
         let background = Double(modal)
 
         var ink = 0
-        for y in 0 ..< height {
+        for y in rows {
             for x in 0 ..< width {
                 guard let value = luma(x, y), abs(value - background) > deltaThreshold else { continue }
                 ink += 1

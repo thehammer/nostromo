@@ -914,12 +914,18 @@ private final class OverpaintRig {
     }
 
     /// Put a view over the text area (right of the gutter), above the clip view, as a sibling of it.
-    func paintOver(with fill: NSColor = ApprovalPalette.inputBackground) {
+    /// With `fromTextY` the overpaint covers only the rows from that text-view y down (the rows above stay drawn).
+    func paintOver(with fill: NSColor = ApprovalPalette.inputBackground, fromTextY: CGFloat? = nil) {
         removeOverpaint()
         let clip = view.contentView.frame
         let gutter = view.gutterWidth
-        let overlay = OverpaintView(frame: NSRect(x: clip.minX + gutter, y: clip.minY, width: clip.width - gutter, height: clip.height),
-                                    fill: fill)
+        var frame = NSRect(x: clip.minX + gutter, y: clip.minY, width: clip.width - gutter, height: clip.height)
+        if let fromTextY {
+            let visible = view.textView.visibleRect
+            let part = NSRect(x: gutter, y: fromTextY, width: visible.maxX - gutter, height: visible.maxY - fromTextY)
+            frame = view.convert(part, from: view.textView)
+        }
+        let overlay = OverpaintView(frame: frame, fill: fill)
         view.addSubview(overlay)
         self.overlay = overlay
     }
@@ -975,6 +981,22 @@ final class ApprovalInkCheckTests: XCTestCase {
     }
 
     // MARK: Text that is covered does not pass
+
+    /// Ink in the first rows must not vouch for blank rows in the same batch.
+    func testInkInSomeRowsDoesNotVouchForRowsThatAreOverpainted() throws {
+        let rig = OverpaintRig(self, request: try ApprovalTestRequests.shortLines(12), maxHeight: 520)
+        rig.paintOver(fromTextY: 60)
+        rig.show()
+
+        rig.evaluate(1)
+        XCTAssertFalse(rig.view.hasShownEveryLine, "rows 4 to 12 are painted over: they were not shown")
+        assertDenyOnly(rig.card, "12 lines, the lower rows overpainted")
+        XCTAssertFalse(rig.view.linesNotYetShown.isEmpty)
+
+        rig.evaluate(maxFailures)
+        XCTAssertTrue(rig.view.displayFailed, "repeated failures latch")
+        assertDenyOnly(rig.card, "12 lines, the lower rows overpainted, latched")
+    }
 
     func testAnOverpaintedTextAreaIsNeverCountedAsShownAndEndsAsADisplayFailure() throws {
         let fills: [(String, NSColor)] = [
