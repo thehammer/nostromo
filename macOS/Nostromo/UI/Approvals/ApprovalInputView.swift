@@ -102,6 +102,9 @@ final class ApprovalInputView: NSScrollView {
         render(model)
 
         contentView.postsBoundsChangedNotifications = true
+        textView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(textViewFrameChanged),
+                                               name: NSView.frameDidChangeNotification, object: textView)
         NotificationCenter.default.addObserver(self, selector: #selector(clipBoundsChanged),
                                                name: NSView.boundsDidChangeNotification, object: contentView)
         setAccessibilityElement(true)
@@ -132,11 +135,19 @@ final class ApprovalInputView: NSScrollView {
         return Array(lineNumbers[first ... last])
     }
 
-    /// The height of all the text at `width` (the whole view's width, gutter included).
+    /// The height of all the text at `width` (the whole view's width, gutter and scroller included).
+    /// Measured on a scratch layout, so it doesn't depend on the live text view's size, which
+    /// isn't known until the card has been laid out.
     func contentHeight(forWidth width: CGFloat) -> CGFloat {
-        guard let layout = textView.layoutManager, let container = textView.textContainer else { return 0 }
-        let textWidth = max(40, width - ruler.ruleThickness - (hasVerticalScroller ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0))
-        container.containerSize = NSSize(width: textWidth, height: .greatestFiniteMagnitude)
+        guard let source = textView.textStorage else { return 0 }
+        let scroller = hasVerticalScroller ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
+        let textWidth = max(40, width - ruler.ruleThickness - scroller - 2 * Self.textInset.width)
+        let storage = NSTextStorage(attributedString: source)
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: textWidth, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = textView.textContainer?.lineFragmentPadding ?? 2
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
         layout.ensureLayout(for: container)
         return ceil(layout.usedRect(for: container).height + 2 * Self.textInset.height)
     }
@@ -145,6 +156,7 @@ final class ApprovalInputView: NSScrollView {
 
     /// Scroll so the last line is on screen. (What a person does with the scroll wheel, for tests and scripts.)
     func scrollToEnd() {
+        fitTextView()
         textView.scrollRangeToVisible(NSRange(location: (textView.string as NSString).length, length: 0))
         updateScrollProgress()
     }
@@ -159,18 +171,30 @@ final class ApprovalInputView: NSScrollView {
         guard !hasShownEveryLine, !ignoreProgressUntilPersonScrolls else { return }
         guard let layout = textView.layoutManager, let container = textView.textContainer else { return }
         if textView.string.isEmpty { return markShownEveryLine() }
-        guard contentView.bounds.height > 0, bounds.width > 0 else { return }
-        layout.ensureLayout(for: container)
+        guard contentView.bounds.height > 0, bounds.width > 0, textView.frame.width > 0 else { return }
+        fitTextView()
         let lastGlyph = layout.numberOfGlyphs - 1
         guard lastGlyph >= 0 else { return markShownEveryLine() }
         let lastLine = layout.lineFragmentUsedRect(forGlyphAt: lastGlyph, effectiveRange: nil)
         let bottom = lastLine.maxY + textView.textContainerOrigin.y
-        if bottom <= documentVisibleRect.maxY + 1 { markShownEveryLine() }
+        if bottom <= contentView.bounds.maxY + 1 { markShownEveryLine() }
     }
 
     override func layout() {
         super.layout()
         updateScrollProgress()
+    }
+
+    /// Size the text view to its laid-out text (never smaller than the clip), so what is on
+    /// screen can be read from the clip's bounds without waiting for AppKit to resize it.
+    private func fitTextView() {
+        guard let layout = textView.layoutManager, let container = textView.textContainer else { return }
+        layout.ensureLayout(for: container)
+        let used = ceil(layout.usedRect(for: container).height + 2 * Self.textInset.height)
+        let height = max(used, contentView.bounds.height)
+        if abs(textView.frame.height - height) > 0.5 {
+            textView.setFrameSize(NSSize(width: textView.frame.width, height: height))
+        }
     }
 
     // MARK: Drawing support (the gutter)
@@ -260,6 +284,10 @@ final class ApprovalInputView: NSScrollView {
             return
         }
         ignoreProgressUntilPersonScrolls = false
+        updateScrollProgress()
+    }
+
+    @objc private func textViewFrameChanged(_ note: Notification) {
         updateScrollProgress()
     }
 

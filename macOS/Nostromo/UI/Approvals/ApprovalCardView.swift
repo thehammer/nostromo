@@ -142,6 +142,8 @@ final class ApprovalCardView: NSView {
     private var state: ApprovalAnswerState
     /// False for a moment after the card appears: Allow once can't be pressed yet.
     private(set) var isArmed = true
+    private var armDelay: TimeInterval = 0
+    private var armGeneration = 0
     private var inputHeight: CGFloat = 0
 
     // Layout is top-down.
@@ -171,13 +173,8 @@ final class ApprovalCardView: NSView {
         focusRingType = .none
 
         buildContent()
-        if armDelay > 0 {
-            isArmed = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + armDelay) { [weak self] in
-                self?.isArmed = true
-                self?.refresh()
-            }
-        }
+        self.armDelay = armDelay
+        isArmed = armDelay <= 0
         refresh()
 
         setAccessibilityElement(true)
@@ -289,6 +286,23 @@ final class ApprovalCardView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil { countdown.stop() } else { countdown.start() }
+        startArming()
+    }
+
+    /// The delay runs from the moment the card is on screen, not from when it was built; leaving
+    /// the window disarms it again.
+    private func startArming() {
+        guard armDelay > 0 else { return }
+        armGeneration += 1
+        let generation = armGeneration
+        isArmed = false
+        refresh()
+        guard window != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + armDelay) { [weak self] in
+            guard let self, self.armGeneration == generation, self.window != nil else { return }
+            self.isArmed = true
+            self.refresh()
+        }
     }
 
     // MARK: Actions
