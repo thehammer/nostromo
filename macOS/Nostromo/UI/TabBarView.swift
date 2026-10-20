@@ -484,8 +484,9 @@ private class RepoGroupView: NSView {
         wantsLayer = true
 
         let label = NSTextField(labelWithString: name)
-        label.font          = Theme.navRepoFont
-        label.textColor     = Theme.fgMuted
+        let style = RepoHeaderStyle.current
+        label.font          = style.font
+        label.textColor     = style.color
         label.alignment     = .left
         label.isEditable    = false
         label.isBordered    = false
@@ -493,7 +494,7 @@ private class RepoGroupView: NSView {
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10 + Theme.navChildIndent),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: style.leading),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
         ])
