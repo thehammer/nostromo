@@ -286,5 +286,328 @@ class ResolveRootTests(unittest.TestCase):
             self.assertEqual(qa.resolve_root(d), os.path.realpath(d))
 
 
+import hashlib, socket, threading  # noqa: E402
+
+
+class ApprovalsAuditIsolationTests(unittest.TestCase):
+    SECRET = "SECRET-PAYLOAD-xyzzy-7731"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = self.tmp.name
+        self.ns = os.path.join(self.home, ".nostromo")
+        self.appr = os.path.join(self.ns, "approvals")
+        os.makedirs(self.appr)
+        for n in qa.WATCHED_FILES:
+            self.write(n, "original " + n)
+        self.write("approvals/a.json", "{}")
+        self.qa_root = "/tmp/qa-root-does-not-matter/instance-1"
+        self.audit = "approvals/audit-2026-10-19.jsonl"
+        self.write(self.audit, '{"n":1,"note":"%s"}\n{"n":2}\n' % self.SECRET)
+        self.ps = "  1 /bin/nostromd\n  2 /A/Nostromo.app/Contents/MacOS/Nostromo\n"
+        self.defaults = "{ key = value; }"
+        self.before = self.snap()
+
+    def write(self, rel, text, mode="w"):
+        with open(os.path.join(self.ns, rel), mode) as f:
+            f.write(text)
+
+    def snap(self):
+        return qa.take_snapshot(self.home, self.ps, self.defaults, self.qa_root)
+
+    def problems(self):
+        return qa.compare_snapshots(self.before, self.snap(), approvals_dir=self.appr, qa_root=self.qa_root)
+
+    def test_snapshot_records_audit_length_and_sha256_never_contents(self):
+        data = open(os.path.join(self.ns, self.audit), "rb").read()
+        entry = self.before["approvals_audit"]["audit-2026-10-19.jsonl"]
+        self.assertEqual(entry["len"], len(data))
+        self.assertEqual(entry["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertNotIn(self.SECRET, json.dumps(self.before))
+
+    def test_audit_files_are_not_in_the_plain_approvals_listing(self):
+        self.assertNotIn("audit-2026-10-19.jsonl", json.dumps(self.before["approvals"]))
+
+    def test_append_only_audit_growth_is_not_a_problem(self):
+        self.write(self.audit, '{"n":3,"note":"real user approval elsewhere"}\n', "a")
+        self.assertEqual(self.problems(), [])
+
+    def test_unchanged_audit_is_not_a_problem(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_a_marker_split_across_the_snapshot_boundary_is_found(self):
+        self.write(self.audit, '{"n":3,"cmd":"FIXT', "a")  # the daemon was mid-line when the snapshot was taken
+        self.before = self.snap()
+        self.write(self.audit, 'URE:simple_rm"}\n', "a")
+        self.assertTrue(any("FIXTURE" in p for p in self.problems()))
+
+    def test_rewriting_the_old_prefix_and_appending_is_a_problem(self):
+        p = os.path.join(self.ns, self.audit)
+        data = open(p, "rb").read()
+        with open(p, "wb") as f:
+            f.write(b"X" + data[1:] + b'{"n":3}\n')
+        self.assertTrue(self.problems())
+
+    def test_rewriting_the_old_prefix_at_same_length_is_a_problem(self):
+        p = os.path.join(self.ns, self.audit)
+        data = open(p, "rb").read()
+        with open(p, "wb") as f:
+            f.write(b"X" + data[1:])
+        self.assertTrue(self.problems())
+
+    def test_shrunk_audit_file_is_a_problem(self):
+        p = os.path.join(self.ns, self.audit)
+        data = open(p, "rb").read()
+        with open(p, "wb") as f:
+            f.write(data[:10])
+        self.assertTrue(self.problems())
+
+    def test_deleted_audit_file_is_a_problem(self):
+        os.remove(os.path.join(self.ns, self.audit))
+        self.assertTrue(self.problems())
+
+    def test_appended_line_carrying_a_qa_marker_is_a_problem_that_does_not_echo_the_line(self):
+        markers = [self.qa_root + "/home/x", "FIXTURE:simple_rm", "com.hammer.nostromo.qa"]
+        for m in markers:
+            with self.subTest(marker=m):
+                self.setUp()
+                line = '{"n":3,"cmd":"%s","leak":"UNIQUE-LINE-BODY-4242"}\n' % m
+                self.write(self.audit, line, "a")
+                probs = self.problems()
+                self.assertTrue(probs)
+                blob = "\n".join(probs)
+                self.assertNotIn("UNIQUE-LINE-BODY-4242", blob)
+                self.assertNotIn(line.strip(), blob)
+                self.assertNotIn(self.SECRET, blob)
+
+    def test_new_non_audit_approvals_file_is_a_problem(self):
+        self.write("approvals/b.json", "{}")
+        self.assertTrue(self.problems())
+
+    def test_new_dated_audit_file_without_qa_marker_is_not_a_problem(self):
+        self.write("approvals/audit-2026-10-20.jsonl", '{"n":1,"cmd":"ls"}\n')
+        self.assertEqual(self.problems(), [])
+
+    def test_new_dated_audit_file_with_qa_marker_is_a_problem(self):
+        for m in [self.qa_root, "FIXTURE:simple_rm", "com.hammer.nostromo.qa"]:
+            with self.subTest(marker=m):
+                self.setUp()
+                self.write("approvals/audit-2026-10-20.jsonl", '{"cmd":"%s"}\n' % m)
+                self.assertTrue(self.problems())
+
+    def test_other_guard_rules_still_apply_with_audit_present(self):
+        self.write("focuses.json", "tampered")
+        self.assertTrue(self.problems())
+
+
+def _mk_qa_root(marker=True):
+    d = tempfile.mkdtemp(dir="/tmp", prefix="qh")
+    if marker:
+        open(os.path.join(d, ".nostromo-qa-root"), "w").close()
+    return d
+
+
+class SocketPathGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.root = _mk_qa_root()
+        self.outside = tempfile.mkdtemp(dir="/tmp", prefix="qo")
+        import shutil
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.outside, True)
+
+    def test_path_inside_a_marked_root_returns_its_realpath(self):
+        p = os.path.join(self.root, "mcp.sock")
+        self.assertEqual(qa.guard_socket_path(self.root, p), os.path.realpath(p))
+
+    def test_path_outside_the_root_is_refused(self):
+        with self.assertRaises(ValueError):
+            qa.guard_socket_path(self.root, os.path.join(self.outside, "mcp.sock"))
+
+    def test_dotdot_escape_is_refused(self):
+        with self.assertRaises(ValueError):
+            qa.guard_socket_path(self.root, os.path.join(self.root, "..", os.path.basename(self.outside), "mcp.sock"))
+
+    def test_symlink_inside_the_root_pointing_outside_is_refused(self):
+        link = os.path.join(self.root, "mcp.sock")
+        os.symlink(os.path.join(self.outside, "mcp.sock"), link)
+        with self.assertRaises(ValueError):
+            qa.guard_socket_path(self.root, link)
+
+    def test_root_without_the_marker_is_refused(self):
+        bare = _mk_qa_root(marker=False)
+        self.addCleanup(__import__("shutil").rmtree, bare, True)
+        with self.assertRaises(ValueError):
+            qa.guard_socket_path(bare, os.path.join(bare, "mcp.sock"))
+
+    def test_path_under_the_users_real_nostromo_dir_is_refused(self):
+        with self.assertRaises(ValueError):
+            qa.guard_socket_path(self.root, os.path.expanduser("~/.nostromo/mcp.sock"))
+
+
+class FakeMcpServer:
+    """AF_UNIX listener speaking the daemon's newline-delimited JSON protocol."""
+
+    def __init__(self, path, outcome):
+        self.path, self.outcome = path, outcome
+        self.lines, self.accepted = [], 0
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.bind(path)
+        self.sock.listen(4)
+        self.sock.settimeout(10)
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except (OSError, socket.timeout):
+                return
+            self.accepted += 1
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn):
+        conn.settimeout(10)
+        buf = b""
+        try:
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    if not raw.strip():
+                        continue
+                    msg = json.loads(raw)
+                    self.lines.append(msg)
+                    self._reply(conn, msg)
+        except (OSError, socket.timeout, ValueError):
+            return
+        finally:
+            conn.close()
+
+    def _reply(self, conn, msg):
+        if not isinstance(msg, dict) or "id" not in msg:
+            return
+        if msg.get("method") == "initialize":
+            result = {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "fake", "version": "0"}}
+        else:
+            result = {"content": [{"type": "text", "text": json.dumps(self.outcome)}]}
+        conn.sendall((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n").encode())
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class McpCreateFocusTests(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        self.root = _mk_qa_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.servers = []
+        self.dirs = []
+
+    def tearDown(self):
+        import shutil
+        for s in self.servers:
+            s.close()
+        for d in self.dirs:
+            shutil.rmtree(d, True)
+
+    def serve(self, path, outcome):
+        s = FakeMcpServer(path, outcome)
+        self.servers.append(s)
+        return s
+
+    def test_creates_a_focus_over_the_qa_roots_mcp_socket_and_returns_the_outcome(self):
+        outcome = {"kind": "created", "focus_id": "cody-qa-approvals", "label": "QA approvals"}
+        srv = self.serve(os.path.join(self.root, "mcp.sock"), outcome)
+        got = qa.mcp_create_focus(self.root, "/tmp/some-cwd", timeout=10)
+        self.assertEqual(got, outcome)
+        self.assertEqual(srv.lines[0], {"type": "hello"})
+        methods = [m.get("method") for m in srv.lines[1:]]
+        self.assertEqual(methods[0], "initialize")
+        self.assertIn("tools/call", methods)
+        self.assertLess(methods.index("initialize"), methods.index("tools/call"))
+        call = next(m for m in srv.lines if m.get("method") == "tools/call")
+        self.assertEqual(call["params"]["name"], "nostromo.create_focus")
+        args = call["params"]["arguments"]
+        self.assertEqual(args["agent"], "cody")
+        self.assertEqual(args["title"], "qa-approvals")
+        self.assertEqual(args["label"], "QA approvals")
+        self.assertEqual(args["working_directory"], "/tmp/some-cwd")
+
+    def test_passes_custom_label_title_and_agent_through(self):
+        srv = self.serve(os.path.join(self.root, "mcp.sock"), {"kind": "created", "focus_id": "x"})
+        qa.mcp_create_focus(self.root, "/w", label="L", title="t", agent="marty", timeout=10)
+        args = next(m for m in srv.lines if m.get("method") == "tools/call")["params"]["arguments"]
+        self.assertEqual((args["label"], args["title"], args["agent"]), ("L", "t", "marty"))
+
+    def test_an_error_payload_raises_runtime_error(self):
+        self.serve(os.path.join(self.root, "mcp.sock"), {"error": "spawn_failed", "detail": "x"})
+        with self.assertRaises(RuntimeError):
+            qa.mcp_create_focus(self.root, "/w", timeout=10)
+
+    def test_never_connects_to_a_socket_outside_the_qa_root_even_via_symlink(self):
+        outside = tempfile.mkdtemp(dir="/tmp", prefix="qo")
+        self.dirs.append(outside)
+        srv = self.serve(os.path.join(outside, "mcp.sock"), {"kind": "created", "focus_id": "x"})
+        os.symlink(os.path.join(outside, "mcp.sock"), os.path.join(self.root, "mcp.sock"))
+        with self.assertRaises(ValueError):
+            qa.mcp_create_focus(self.root, "/w", timeout=3)
+        threading.Event().wait(0.3)
+        self.assertEqual(srv.accepted, 0)
+        self.assertEqual(srv.lines, [])
+
+    def test_a_root_without_the_marker_raises_and_connects_nowhere(self):
+        bare = _mk_qa_root(marker=False)
+        self.dirs.append(bare)
+        srv = self.serve(os.path.join(bare, "mcp.sock"), {"kind": "created", "focus_id": "x"})
+        with self.assertRaises(ValueError):
+            qa.mcp_create_focus(bare, "/w", timeout=3)
+        threading.Event().wait(0.3)
+        self.assertEqual(srv.accepted, 0)
+
+
+class ApprovalsCardScriptShapeTests(unittest.TestCase):
+    def setUp(self):
+        self.sh = read("scripts", "qa", "approvals-card.sh")
+
+    def test_a_focus_is_created_before_the_first_cue_is_sent(self):
+        self.assertIn('"$instance" focus', self.sh)
+        self.assertLess(self.sh.index('"$instance" focus'), self.sh.index('send_cue "$fixture"'))
+
+    def test_the_message_box_is_awaited_before_the_cue_is_sent(self):
+        self.assertIn('wait "Message', self.sh)
+        self.assertLess(self.sh.index('wait "Message'), self.sh.index('send_cue "$fixture"'))
+
+    def test_a_debug_evidence_dump_exists_and_covers_the_key_sources(self):
+        for needle in ["windows", "tree --depth 3", "window-placement.log", "nostromd.log", "approvals"]:
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.sh)
+
+    def test_the_debug_evidence_function_is_invoked_on_fail_paths(self):
+        m = re.search(r"^\s*(?:function\s+)?(\w*(?:debug|evidence|dump)\w*)\s*\(\)", self.sh, re.M | re.I)
+        self.assertIsNotNone(m, "no debug/evidence function defined")
+        name = m.group(1)
+        calls = [l for l in self.sh.splitlines() if re.search(r"\b%s\b" % name, l) and "()" not in l]
+        self.assertTrue(calls, "evidence function is never invoked")
+        fails = [i for i, l in enumerate(self.sh.splitlines()) if "FAIL" in l]
+        self.assertTrue(fails)
+        lines = self.sh.splitlines()
+        near = any(re.search(r"\b%s\b" % name, "\n".join(lines[max(0, i - 4):i + 5])) for i in fails)
+        self.assertTrue(near, "evidence function is not called near a FAIL path")
+
+    def test_the_readme_documents_keeping_the_session_for_inspection(self):
+        readme = read("scripts", "qa", "README.md")
+        self.assertIn("KEEP=1", readme)
+        self.assertIn("session", readme.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

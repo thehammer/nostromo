@@ -9,8 +9,34 @@ runs one and reads the PASS/FAIL lines.
 | `teri-fred-smoke.sh` | Teri tabs, legibility, list → detail, the Send to agent sheet (cancel path), Fred panes, sidebar badges | UI only: tab clicks (never Picks, never Sentry unless asked), row selection, opening and cancelling one sheet; switches to Teri only when told to |
 | `window-placement-check.sh` | one fullscreen window per display, none sharing a display, the last launch's placement log | nothing (reads `windows`, the log, and `system_profiler SPDisplaysDataType -json`) |
 | `mother-crew.sh` | the Mother panel's crew view: a crew job's progress line, gate rows (with exit code on a failed gate) and lens wave (skipped lens in words, citations found) update live from a replayed fixture, and no ambiguous layout in the pane; reads VoiceOver text, not glyphs | needs the fake broker (`--scenario crew_gates`) and a QA build on it; clicks the Mother entry and two jobs; takes keyboard focus for the run and gives it back; resets and replays the fake broker's jobs (sends the real Mother nothing) |
-| `approvals-card.sh [--no-synthetic] [FIXTURE ...]` | the approval card (AP2a) in the **isolated QA instance only** (`qa-instance.sh`; never the user's app, daemon or sessions): per fixture (`simple_rm`, `heredoc_300`, `bidi` by default) types `FIXTURE:<name>`, lists the card with `approvals list`, checks `transcript-anchor` before/after (≤ 1 pt, bottom offset 0 while following), and with synthetic input ON clicks "Allow once" and reads the fake CLI's log (`allow`, input unchanged); with `--no-synthetic` checks that click/Return/Space at the card are refused, the card stays and the QA approvals dir has a `refusal` entry (`app_control`). Exits 3 (INCONCLUSIVE) when the display is locked | the QA clone's own window only: a click in its composer, typed text, Return, a click on Allow/Deny; needs a logged-in awake display |
+| `approvals-card.sh [--no-synthetic] [FIXTURE ...]` | the approval card (AP2a) in the **isolated QA instance only** (`qa-instance.sh`; never the user's app, daemon or sessions): per fixture (`simple_rm`, `heredoc_300`, `bidi` by default) types `FIXTURE:<name>`, lists the card with `approvals list`, checks `transcript-anchor` before/after (≤ 1 pt, bottom offset 0 while following), and with synthetic input ON clicks "Allow once" and reads the fake CLI's log (`allow`, input unchanged); with `--no-synthetic` checks that click/Return/Space at the card are refused, the card stays and the QA approvals dir has a `refusal` entry (`app_control`). Exits 3 (INCONCLUSIVE) when the display is locked | the QA clone's own window only: creates one QA agent session in the QA daemon (a focus on the fake CLI), clicks its sidebar row, then a click in its composer, typed text, Return, a click on Allow/Deny; needs a logged-in awake display |
 | `attach-chip.sh`, `mother-tabs.sh`, `mother-queue.sh` | older scenarios; `mother-*` need the fake Mother broker (see their headers) | UI clicks / drops |
+
+### `approvals-card.sh`: the QA session, evidence and env knobs
+
+The QA app has only the built-in foci (Fred, Mother, Perri, Teri); the composer exists only inside an agent
+session. After `start` (and once the windows are visible) the script runs `qa-instance.sh focus`: it asks the QA
+daemon, over `<QA_ROOT>/mcp.sock`, to `nostromo.create_focus` a session titled "QA approvals" whose CLI is
+the fake claude (`NOSTROMO_CLAUDE_BIN`). The daemon announces the focus to the app, the script waits for the
+sidebar row, clicks it and waits for the composer (`Message…`) before the first cue. The helper
+(`qa_instance.py`, `guard_socket_path`) refuses any socket that does not resolve to a path inside the
+QA root (also through `..` or a symlink), so it cannot reach the user's daemon.
+
+| env | effect |
+|---|---|
+| `KEEP=1` | keep the QA root after the run (`stop` deletes it otherwise), so the logs under it survive. An isolation failure keeps it too: delete it by hand afterwards |
+
+On any FAIL (and on an INCONCLUSIVE) the script first prints: `ctl windows`, `ctl tree --depth 3` (first 120 lines),
+the last 40 lines of `nostromd.log` and of `home/.nostromo/logs/window-placement.log`, and a listing of the QA
+approvals dir. If only the isolation guard failed, the app is already gone, so you get the logs and the listing.
+
+**The isolation guard and the user's audit log.** The user's real daemon appends to its own
+`~/.nostromo/approvals/audit-YYYY-MM-DD.jsonl` whenever real agent traffic asks for an approval during a run.
+Append-only growth of such a file (and a new dated `audit-*.jsonl`) does not fail the guard. Any other change in
+`~/.nostromo/approvals/` does (a changed prefix, a shrink, a deleted audit file, any other new or changed file), and so
+does an appended line that mentions the QA root path, `FIXTURE:` or the bundle id `com.hammer.nostromo.qa`.
+The snapshot keeps only each file's length and a SHA-256 of its bytes, never its content, and a failure names the
+file and the kind of marker, never the line.
 
 ## Running them
 
