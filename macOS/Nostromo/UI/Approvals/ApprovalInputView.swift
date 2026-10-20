@@ -58,17 +58,8 @@ final class ApprovalTextView: NSTextView {
 
     weak var gutterOwner: ApprovalInputView?
 
-    override func drawBackground(in rect: NSRect) {
-        super.drawBackground(in: rect)
-        NSColor.white.setFill(); NSRect(x: 0, y: 26, width: 4, height: 4).fill()  // TMP E4
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        gutterOwner?.gutterDiag += " draw(dirty=\(dirtyRect) owner=\(gutterOwner != nil))"  // TMP
-        // TMP experiments: E1 bright rect unclipped; E2 white digit unclipped
-        NSColor.white.setFill(); NSRect(x: 0, y: 0, width: 4, height: 4).fill()
-        NSString("8").draw(at: NSPoint(x: 9, y: 8), withAttributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.white])
         gutterOwner?.drawGutter(in: dirtyRect)
     }
 }
@@ -120,7 +111,6 @@ final class ApprovalInputView: NSScrollView {
     private var newlyCovered: [(chars: NSRange, top: CGFloat, bottom: CGFloat)] = []
     private var inkRecheckScheduled = false
     private var isUpdatingProgress = false
-    var gutterDiag = ""  // TMP
     private var lastClipOriginY: CGFloat = 0
     private let font = Theme.codeFont(size: 12)
     private static let textInset = NSSize(width: 6, height: 6)
@@ -483,16 +473,11 @@ final class ApprovalInputView: NSScrollView {
     // MARK: Drawing support (the gutter)
 
     /// Paint the line numbers in the gutter strip of the text view (called from its `draw`, in its
-    /// coordinates). Only the strip is touched: the fill and the digits are clipped to it.
+    /// coordinates, after the text view has painted its background). The numbers are right-aligned in
+    /// the strip, which is part of the inset: they can't reach the text. (No clip here: clipping the
+    /// graphics context to the strip drew nothing at all on CI, the plain draw does.)
     fileprivate func drawGutter(in dirty: NSRect) {
-        let strip = NSRect(x: 0, y: dirty.minY, width: gutterWidth, height: dirty.height)
-        gutterDiag += " drawGutter(lines=\(lineNumbers.count) top0=\(String(describing: lineTop(at: 0))) gutter=\(gutterWidth))"  // TMP
-        guard dirty.minX < gutterWidth, strip.height > 0 else { return }
-        NSGraphicsContext.saveGraphicsState()
-        defer { NSGraphicsContext.restoreGraphicsState() }
-        strip.clip()
-        ApprovalPalette.inputBackground.setFill()
-        strip.fill()
+        guard dirty.minX < gutterWidth, dirty.height > 0 else { return }
         let attrs: [NSAttributedString.Key: Any] = [.font: Self.gutterFont, .foregroundColor: ApprovalPalette.gutterText]
         for index in lineNumbers.indices {
             guard let top = lineTop(at: index) else { continue }

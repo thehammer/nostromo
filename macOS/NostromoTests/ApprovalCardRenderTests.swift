@@ -61,7 +61,6 @@ private enum InkCounter {
     /// cannot be inflated by a fill alone. Ink is text on a fill or on the background: command text
     /// is Theme.fg (luma 220), the dimmest token colour is well above 100.
     static let threshold = 60.0
-    nonisolated(unsafe) static var lastGutterDiag = ""  // TMP
 
     /// Two ink runs in the gutter closer than this (points) are one number (a digit has thin strokes).
     static let bandMergeGap: CGFloat = 3
@@ -141,12 +140,6 @@ private enum InkCounter {
         }
 
         var total = 0, band = 0, gutterInk = 0
-        var gMax = 0.0, gMin = 255.0  // TMP
-        for yy in y0 ..< y1 { for xx in gx0 ..< max(gx0, gx1) { if direct, let raw { let p = raw + yy * rep.bytesPerRow + xx * bytesPerPixel + colourOffset; let v = luma(r: Double(p[0]), g: Double(p[1]), b: Double(p[2])); gMax = max(gMax, v); gMin = min(gMin, v) } } }  // TMP
-        func regionMax(_ xs: Range<Int>, _ ys: Range<Int>) -> Double { var m = 0.0; for yy in ys where yy < y1 { for xx in xs where xx < gx1 { if direct, let raw { let p = raw + yy * rep.bytesPerRow + xx * bytesPerPixel + colourOffset; m = max(m, luma(r: Double(p[0]), g: Double(p[1]), b: Double(p[2]))) } } }; return m }  // TMP
-        let sc = Int(scale)
-        let r1 = regionMax(0 ..< 4 * sc, 0 ..< 4 * sc), r2 = regionMax(5 * sc ..< 20 * sc, 4 * sc ..< 24 * sc), r3 = regionMax(0 ..< 4 * sc, 26 * sc ..< 30 * sc)  // TMP
-        lastGutterDiag = "E1=\(r1) E2=\(r2) E4=\(r3) gx=\(gx0)..<\(gx1) y=\(y0)..<\(y1) direct=\(direct) bpp=\(bytesPerPixel) off=\(colourOffset) gMax=\(gMax) gMin=\(gMin) bg=\(background)"  // TMP
         var gutterRows: [Int] = []
         for y in y0 ..< y1 {
             var rowHasGutterInk = false
@@ -314,8 +307,7 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " inWindow=\(view.window != nil) windowVisible=\(view.window?.isVisible ?? false)"
             + " requestedScale=\(requested.map { String(describing: $0) } ?? "native")"
             + " scale=\(ink.scale) rendered=\(rendered != nil) inkTotal=\(ink.total) inkFirstLine=\(ink.firstLineBand)"
-            + " gutterInk=\(ink.gutterInk) gutterBands=\(ink.gutterBands) GD{\(InkCounter.lastGutterDiag)}"
-            + " gutterDiag=[\(view.gutterDiag)]"
+            + " gutterInk=\(ink.gutterInk) gutterBands=\(ink.gutterBands)"
             + " areaPx=\(ink.width)x\(ink.height)"
         print(diag)
         return Measurement(fixture: fixture, ink: ink, diag: diag)
