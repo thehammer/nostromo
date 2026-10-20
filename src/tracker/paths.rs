@@ -142,12 +142,18 @@ struct GitRun {
 }
 
 fn run_git(repo: &Path, command: &GitCommand) -> Option<GitRun> {
+    // The repo's own config is not trusted: no filesystem monitor (a command
+    // the config names), and no repository or work tree from the environment.
     let output = Command::new("git")
         .arg("--no-optional-locks")
+        .args(["-c", "core.fsmonitor=false"])
         .arg("-C")
         .arg(repo)
         .args(command.args())
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()

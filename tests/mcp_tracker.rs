@@ -1480,6 +1480,23 @@ async fn a_call_with_no_pty_id_is_an_unidentified_caller() {
 }
 
 #[tokio::test]
+async fn an_open_from_a_focus_with_no_known_working_directory_is_refused_and_creates_nothing() {
+    // The repo root, and so every path a board may live at, comes from the
+    // focus's working directory: never from the daemon's own.
+    let fx = Fx::new();
+    fx.registry.set_caller_facts(
+        TAG_A,
+        CallerFacts {
+            cwd: None,
+            session_id: Some("sess-a".to_string()),
+        },
+    );
+    let res = fx.call(TAG_A, json!({"op": "open", "topic": "nocwd"})).await;
+    is_err(&res, "unidentified_caller");
+    assert!(!fx.repo.join(".claude").exists());
+}
+
+#[tokio::test]
 async fn a_tui_hosted_server_without_the_daemon_answers_not_supported() {
     let state = McpSharedState::for_test();
     assert!(state.daemon.is_none());

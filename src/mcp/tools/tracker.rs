@@ -102,7 +102,10 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
 struct Caller {
     tag: String,
     session_id: String,
-    cwd: PathBuf,
+    /// Where the daemon spawned the focus's session; `None` when it doesn't
+    /// know. Never guessed from the daemon's own directory: the repo root
+    /// (and so every path a board may live at) is derived from it.
+    cwd: Option<PathBuf>,
 }
 
 impl Caller {
@@ -117,11 +120,7 @@ impl Caller {
                 .session_id
                 .or_else(|| mgr.current_session_id(tag))
                 .unwrap_or_else(|| tag.to_string()),
-            cwd: facts
-                .cwd
-                .or_else(|| mgr.cwd_for(tag))
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| ".".into()),
+            cwd: facts.cwd.or_else(|| mgr.cwd_for(tag)),
         }
     }
 
@@ -139,6 +138,8 @@ impl Caller {
 enum Failure {
     Tracker(TrackerError),
     InvalidCommandText { index: Option<usize>, reason: String },
+    /// The daemon can't tie the caller to a working directory.
+    NoWorkingDirectory,
     Sensitive { index: Option<usize>, field: &'static str, class: &'static str },
 }
 
@@ -190,6 +191,10 @@ impl Failure {
                     | TrackerError::BoardMissing
                     | TrackerError::PathNotAllowed => {}
                 }
+            }
+            Failure::NoWorkingDirectory => {
+                put("error", json!("unidentified_caller"));
+                put("reason", json!("the daemon has no working directory for this focus"));
             }
             Failure::InvalidCommandText { index, reason } => {
                 put("error", json!("invalid_command_text"));
@@ -249,7 +254,7 @@ fn open(registry: &TrackerRegistry, caller: &Caller, args: &Value) -> Result<Val
         sections,
         path: string("path"),
         show: args.get("show").and_then(Value::as_bool).unwrap_or(false),
-        cwd: caller.cwd.clone(),
+        cwd: caller.cwd.clone().ok_or(Failure::NoWorkingDirectory)?,
     };
     for (field, text) in [
         ("topic", open_args.topic.as_deref()),
