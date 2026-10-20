@@ -52,6 +52,15 @@ final class ApprovalInputView: NSScrollView {
     private(set) var hasShownEveryLine = false
     /// Called once, when `hasShownEveryLine` becomes true.
     var onShownEveryLine: (() -> Void)?
+    /// True once the text, though the model has some, could not be laid out (no glyphs, or an empty
+    /// used rect, in a view that has a size): what is on screen can't be trusted to be the input, so
+    /// the card must not offer Allow once. Never goes back to false.
+    private(set) var displayFailed = false
+    /// Called once, when `displayFailed` becomes true.
+    var onDisplayFailed: (() -> Void)?
+    /// Tests only: treat the text layout as empty, as if no glyph had been laid out.
+    var forceNoGlyphsForTesting = false
+    private let modelHasText: Bool
 
     /// One entry per display line: its number and where it starts in `textView.string` (UTF-16).
     private(set) var lineNumbers: [Int] = []
@@ -81,6 +90,7 @@ final class ApprovalInputView: NSScrollView {
     private static let minimumCoveringHeight: CGFloat = 16
 
     init(model: ApprovalDisplayModel) {
+        modelHasText = model.allLines.contains { line in line.runs.contains { !$0.text.isEmpty } }
         textView = ApprovalTextView(frame: .zero)
         super.init(frame: .zero)
 
@@ -235,7 +245,8 @@ final class ApprovalInputView: NSScrollView {
     /// layout, on every clip movement and when the window's visibility changes.
     func updateScrollProgress() {
         ruler.needsDisplay = true
-        guard !hasShownEveryLine, !ignoreProgressUntilPersonScrolls else { return }
+        checkDisplay()
+        guard !displayFailed, !hasShownEveryLine, !ignoreProgressUntilPersonScrolls else { return }
         guard isShowingOnScreen else { return }
         if textView.string.isEmpty { return markShownEveryLine() }
         guard contentView.bounds.height > 0, textView.frame.width > 0 else { return }
@@ -247,6 +258,24 @@ final class ApprovalInputView: NSScrollView {
     override func layout() {
         super.layout()
         updateScrollProgress()
+    }
+
+    /// Fail closed: a view that has a size and whose model has text must have laid out glyphs with a
+    /// non-empty extent. If not, what a person would be asked to approve may not be on screen.
+    private func checkDisplay() {
+        guard !displayFailed, modelHasText, bounds.width > 0, bounds.height > 0 else { return }
+        var laidOut = !forceNoGlyphsForTesting
+        if laidOut {
+            if let layout = textView.layoutManager, let container = textView.textContainer {
+                layout.ensureLayout(for: container)
+                laidOut = layout.numberOfGlyphs > 0 && !layout.usedRect(for: container).isEmpty
+            } else {
+                laidOut = false
+            }
+        }
+        guard !laidOut else { return }
+        displayFailed = true
+        onDisplayFailed?()
     }
 
     /// Size the text view to its laid-out text (never smaller than the clip), so what is on
