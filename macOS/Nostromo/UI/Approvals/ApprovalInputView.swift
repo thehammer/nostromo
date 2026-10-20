@@ -59,6 +59,8 @@ final class ApprovalInputView: NSScrollView {
     private let ruler = ApprovalLineNumberRuler()
     private let font = Theme.codeFont(size: 12)
     private static let textInset = NSSize(width: 6, height: 6)
+    /// A clip-origin change smaller than this (points) is layout settling, not a scroll.
+    private static let scrollNoise: CGFloat = 2
 
     init(model: ApprovalDisplayModel) {
         textView = ApprovalTextView(frame: .zero)
@@ -290,7 +292,7 @@ final class ApprovalInputView: NSScrollView {
         // Only a scroll (the clip's origin moved) says anything about what was looked at; a
         // resize or a layout pass is neither a person nor the app-control socket.
         let origin = contentView.bounds.origin.y
-        guard abs(origin - lastClipOriginY) > 0.01 else { return updateScrollProgress() }
+        guard abs(origin - lastClipOriginY) > Self.scrollNoise else { return updateScrollProgress() }
         lastClipOriginY = origin
         // A scroll the app-control socket made is not a person looking at the text: it
         // doesn't count towards "every line has been shown" until a person scrolls.
