@@ -106,6 +106,7 @@ fn mcp_state(env: &Env) -> McpSharedState {
         perri: PerriDaemonState::default(),
         decisions: Arc::clone(&env.decisions),
         tickets: Default::default(),
+        tracker: Default::default(),
     })
 }
 

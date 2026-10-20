@@ -76,6 +76,7 @@ async fn harness_with_feed(feed: JobsFeed) -> Harness {
             nostromo::ipc::decisions::DecisionRegistry::default(),
         )),
         tickets: Default::default(),
+        tracker: Default::default(),
     };
     let (queue_tx, queue_rx) = watch::channel(None);
     let (_pr_tx, pr_rx) = watch::channel(nostromo::data::perri_pr::no_prs());

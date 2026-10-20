@@ -23,6 +23,7 @@ pub mod render_state;
 pub mod set_pane;
 pub mod show;
 pub mod teri;
+pub mod tracker;
 
 use serde_json::{json, Value};
 
@@ -511,6 +512,8 @@ pub fn tool_descriptors() -> Vec<Value> {
             "description": "Returns an on-demand latency snapshot for the daemon's MCP tool surface: per-tool call counts and p50/p95/max wall-clock durations in ms, plus process uptime and total call count. In-memory and bounded (last 256 samples per tool); resets on daemon restart. p50/p95 are over the retained window; calls and max are all-time.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
+        // ── agent tracker ─────────────────────────────────────────────────
+        tracker::descriptor(),
     ]
 }
 
@@ -605,7 +608,7 @@ fn is_denied_to_network_driven(
     tags: &SensitiveTags,
     pty_id: Option<&str>,
 ) -> bool {
-    if is_network_withheld_tool(name) {
+    if is_network_withheld_tool(name) || name == "nostromo.tracker" {
         return true;
     }
     let null = Value::Null;
@@ -713,6 +716,11 @@ async fn dispatch_inner(
         .as_ref()
         .is_some_and(|tags| is_denied_to_network_driven(name, arguments, tags, pty_id))
     {
+        // The tracker answers in its own error shape (and changes nothing).
+        if name == "nostromo.tracker" {
+            let refusal = json!({ "ok": false, "error": "requires_secure_connection" });
+            return ToolResult::Ok(vec![json!({"type": "text", "text": refusal.to_string()})]);
+        }
         return ToolResult::Forbidden(name.to_string());
     }
 
@@ -887,6 +895,12 @@ async fn dispatch_inner(
         "nostromo.show" => {
             let args = arguments.cloned().unwrap_or_default();
             show::show(state, &args, pty_id).await
+        }
+
+        // ── agent tracker ─────────────────────────────────────────────────────
+        "nostromo.tracker" => {
+            let args = arguments.cloned().unwrap_or_default();
+            tracker::handle(state, &args, pty_id).await
         }
 
         // ── render-state visibility (W1) ──────────────────────────────────────

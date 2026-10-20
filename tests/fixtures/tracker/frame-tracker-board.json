@@ -1,0 +1,1624 @@
+{
+  "type": "tracker_board",
+  "tag": "cody-fixture",
+  "board": {
+    "title": "Synthetic release triage",
+    "path": "/repo/.claude/wip/sentry-triage/index.md",
+    "version": 7,
+    "updated_at": "2025-10-15T17:02:09Z",
+    "nodes": [
+      {
+        "type": "title",
+        "text": "Synthetic release triage",
+        "source": "# Synthetic release triage\n\n"
+      },
+      {
+        "type": "prose",
+        "key": "6b9cd2405a57a890-0",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Synthetic board used by the tracker engine tests. Every name, id and number in it is invented."
+              }
+            ]
+          }
+        ],
+        "source": "Synthetic board used by the tracker engine tests. Every name, id and number in it is invented.\n\n"
+      },
+      {
+        "type": "section",
+        "id": "now",
+        "title": "Now",
+        "source": "## Now\n"
+      },
+      {
+        "type": "item",
+        "id": "check-1000",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Check referral 4411 duplicate"
+          }
+        ],
+        "status": "in-progress",
+        "updated_at": "2025-10-15T14:53:20Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Seen on host 14, see the log for detail"
+              }
+            ]
+          }
+        ],
+        "links": [
+          {
+            "text": "PR #253",
+            "url": "https://github.com/example/repo/pull/253",
+            "kind": "pr"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Check referral 4411 duplicate — in progress · 14:53 <!-- #check-1000 1760540000 -->\n  Seen on host 14, see the log for detail\n  Links: [PR #253](https://github.com/example/repo/pull/253)\n"
+      },
+      {
+        "type": "item",
+        "id": "verif-1037",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Verify webhook retries"
+          }
+        ],
+        "status": "in-progress",
+        "owner": "cody",
+        "updated_at": "2025-10-15T14:55:31Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Verify webhook retries — in progress · cody · 14:55 <!-- #verif-1037 1760540131 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "retry-1074",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Retry retry backoff"
+          }
+        ],
+        "status": "blocked",
+        "owner": "me",
+        "updated_at": "2025-10-15T14:57:42Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "command",
+        "command": "php artisan queue:retry 8812",
+        "env": "prod",
+        "ran": false,
+        "source": "- [ ] Retry retry backoff — blocked · me · PROD · 14:57 <!-- #retry-1074 1760540262 cmd -->\n  ```sh\n  php artisan queue:retry 8812\n  ```\n"
+      },
+      {
+        "type": "item",
+        "id": "revie-1111",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Review queue job 8812"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T14:59:53Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Review queue job 8812 — todo · 14:59 <!-- #revie-1111 1760540393 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "draft-1148",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Draft search index"
+          }
+        ],
+        "status": "in-progress",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T15:02:04Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Only happens after midnight UTC"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Draft search index — in progress · claudia · 15:02 <!-- #draft-1148 1760540524 -->\n  Only happens after midnight UTC\n"
+      },
+      {
+        "type": "item",
+        "id": "close-1185",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Close feature flag drift"
+          }
+        ],
+        "status": "in-progress",
+        "owner": "redd",
+        "updated_at": "2025-10-15T15:04:15Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "CORE-2841",
+            "kind": "jira"
+          },
+          {
+            "text": "Sentry PORTAL-1F2",
+            "kind": "sentry"
+          }
+        ],
+        "kind": "item",
+        "env": "local",
+        "ran": false,
+        "source": "- [ ] Close feature flag drift — in progress · redd · LOCAL · 15:04 <!-- #close-1185 1760540655 -->\n  Links: CORE-2841 · Sentry PORTAL-1F2\n"
+      },
+      {
+        "type": "item",
+        "id": "repro-1222",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Reproduce staging deploy"
+          }
+        ],
+        "status": "blocked",
+        "updated_at": "2025-10-15T15:06:26Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Reproduce staging deploy — blocked · 15:06 <!-- #repro-1222 1760540786 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "triag-1259",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Triage nightly import"
+          }
+        ],
+        "status": "todo",
+        "owner": "cody",
+        "updated_at": "2025-10-15T15:08:37Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Triage nightly import — todo · cody · 15:08 <!-- #triag-1259 1760540917 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "docum-1296",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Document tenant migration"
+          }
+        ],
+        "status": "in-progress",
+        "owner": "me",
+        "updated_at": "2025-10-15T15:10:48Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Waiting for the vendor to reply"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Document tenant migration — in progress · me · 15:10 <!-- #docum-1296 1760541048 -->\n  Waiting for the vendor to reply\n"
+      },
+      {
+        "type": "item",
+        "id": "backf-1333",
+        "section": "now",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Backfill login timeout"
+          }
+        ],
+        "status": "in-progress",
+        "updated_at": "2025-10-15T15:12:59Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Backfill login timeout — in progress · 15:12 <!-- #backf-1333 1760541179 -->\n\n"
+      },
+      {
+        "type": "section",
+        "id": "next",
+        "title": "Next",
+        "source": "## Next\n"
+      },
+      {
+        "type": "item",
+        "id": "rotat-1370",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Rotate user avatar sync"
+          }
+        ],
+        "status": "todo",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T15:15:10Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "Sentry PORTAL-1F2",
+            "kind": "sentry"
+          },
+          {
+            "text": "run 9912",
+            "kind": "run"
+          },
+          {
+            "text": "index.md:42",
+            "kind": "file"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Rotate user avatar sync — todo · claudia · 15:15 <!-- #rotat-1370 1760541310 -->\n  Links: Sentry PORTAL-1F2 · run 9912 · index.md:42\n"
+      },
+      {
+        "type": "item",
+        "id": "audit-1407",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Audit slow query 77"
+          }
+        ],
+        "status": "todo",
+        "owner": "redd",
+        "updated_at": "2025-10-15T15:17:21Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Audit slow query 77 — todo · redd · 15:17 <!-- #audit-1407 1760541441 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "check-1444",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Check report export"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T15:19:32Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Seen on host 14, see the log for detail"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Check report export — todo · 15:19 <!-- #check-1444 1760541572 -->\n  Seen on host 14, see the log for detail\n"
+      },
+      {
+        "type": "item",
+        "id": "verif-1481",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Verify email digest"
+          }
+        ],
+        "status": "todo",
+        "owner": "cody",
+        "updated_at": "2025-10-15T15:21:43Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "command",
+        "command": "kubectl rollout restart deploy/web",
+        "env": "canada",
+        "ran": false,
+        "source": "- [ ] Verify email digest — todo · cody · CANADA · 15:21 <!-- #verif-1481 1760541703 cmd -->\n  ```sh\n  kubectl rollout restart deploy/web\n  ```\n"
+      },
+      {
+        "type": "item",
+        "id": "retry-1518",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Retry health probe"
+          }
+        ],
+        "status": "todo",
+        "owner": "me",
+        "updated_at": "2025-10-15T15:23:54Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Retry health probe — todo · me · 15:23 <!-- #retry-1518 1760541834 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "revie-1555",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Review invoice batch"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T15:26:05Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "run 9912",
+            "kind": "run"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Review invoice batch — todo · 15:26 <!-- #revie-1555 1760541965 -->\n  Links: run 9912\n"
+      },
+      {
+        "type": "item",
+        "id": "draft-1592",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Draft audit trail gap"
+          }
+        ],
+        "status": "todo",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T15:28:16Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Only happens after midnight UTC"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Draft audit trail gap — todo · claudia · 15:28 <!-- #draft-1592 1760542096 -->\n  Only happens after midnight UTC\n"
+      },
+      {
+        "type": "item",
+        "id": "close-1629",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Close config reload"
+          }
+        ],
+        "status": "todo",
+        "owner": "redd",
+        "updated_at": "2025-10-15T15:30:27Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "env": "prod",
+        "ran": false,
+        "source": "- [ ] Close config reload — todo · redd · PROD · 15:30 <!-- #close-1629 1760542227 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "repro-1666",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Reproduce cache warmup"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T15:32:38Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Reproduce cache warmup — todo · 15:32 <!-- #repro-1666 1760542358 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "triag-1703",
+        "section": "next",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Triage pdf renderer"
+          }
+        ],
+        "status": "todo",
+        "owner": "cody",
+        "updated_at": "2025-10-15T15:34:49Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Triage pdf renderer — todo · cody · 15:34 <!-- #triag-1703 1760542489 -->\n"
+      },
+      {
+        "type": "prose",
+        "key": "b7a086995f3f3e13-0",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Note to self: everything under Next is unprioritised."
+              }
+            ]
+          }
+        ],
+        "source": "Note to self: everything under Next is unprioritised.\n\n"
+      },
+      {
+        "type": "section",
+        "id": "waiting-on-you",
+        "title": "Waiting on you",
+        "source": "## Waiting on you\n"
+      },
+      {
+        "type": "item",
+        "id": "docum-1740",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Document referral 4411 duplicate"
+          }
+        ],
+        "status": "needs-you",
+        "owner": "me",
+        "updated_at": "2025-10-15T15:37:00Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Waiting for the vendor to reply"
+              }
+            ]
+          }
+        ],
+        "links": [
+          {
+            "text": "index.md:42",
+            "kind": "file"
+          },
+          {
+            "text": "PR #253",
+            "url": "https://github.com/example/repo/pull/253",
+            "kind": "pr"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Document referral 4411 duplicate — needs you · me · 15:37 <!-- #docum-1740 1760542620 -->\n  Waiting for the vendor to reply\n  Links: index.md:42 · [PR #253](https://github.com/example/repo/pull/253)\n"
+      },
+      {
+        "type": "item",
+        "id": "backf-1777",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Backfill webhook retries"
+          }
+        ],
+        "status": "needs-you",
+        "updated_at": "2025-10-15T15:39:11Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Backfill webhook retries — needs you · 15:39 <!-- #backf-1777 1760542751 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "rotat-1814",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Rotate retry backoff"
+          }
+        ],
+        "status": "needs-you",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T15:41:22Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Rotate retry backoff — needs you · claudia · 15:41 <!-- #rotat-1814 1760542882 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "audit-1851",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Audit queue job 8812"
+          }
+        ],
+        "status": "needs-you",
+        "owner": "redd",
+        "updated_at": "2025-10-15T15:43:33Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Audit queue job 8812 — needs you · redd · 15:43 <!-- #audit-1851 1760543013 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "check-1888",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Check search index"
+          }
+        ],
+        "status": "needs-you",
+        "updated_at": "2025-10-15T15:45:44Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Seen on host 14, see the log for detail"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "command",
+        "command": "./scripts/reindex.sh --dry-run",
+        "env": "demo",
+        "ran": false,
+        "source": "- [ ] Check search index — needs you · DEMO · 15:45 <!-- #check-1888 1760543144 cmd -->\n  ```sh\n  ./scripts/reindex.sh --dry-run\n  ```\n  Seen on host 14, see the log for detail\n"
+      },
+      {
+        "type": "item",
+        "id": "verif-1925",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Verify feature flag drift"
+          }
+        ],
+        "status": "needs-you",
+        "owner": "cody",
+        "updated_at": "2025-10-15T15:47:55Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "PR #253",
+            "url": "https://github.com/example/repo/pull/253",
+            "kind": "pr"
+          },
+          {
+            "text": "CORE-2841",
+            "kind": "jira"
+          },
+          {
+            "text": "Sentry PORTAL-1F2",
+            "kind": "sentry"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Verify feature flag drift — needs you · cody · 15:47 <!-- #verif-1925 1760543275 -->\n  Links: [PR #253](https://github.com/example/repo/pull/253) · CORE-2841 · Sentry PORTAL-1F2\n"
+      },
+      {
+        "type": "item",
+        "id": "retry-1962",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Retry staging deploy"
+          }
+        ],
+        "status": "needs-you",
+        "owner": "me",
+        "updated_at": "2025-10-15T15:50:06Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Retry staging deploy — needs you · me · 15:50 <!-- #retry-1962 1760543406 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "revie-1999",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Review nightly import"
+          }
+        ],
+        "status": "needs-you",
+        "updated_at": "2025-10-15T15:52:17Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Review nightly import — needs you · 15:52 <!-- #revie-1999 1760543537 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "draft-2036",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Draft tenant migration"
+          }
+        ],
+        "status": "needs-you",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T15:54:28Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Only happens after midnight UTC"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Draft tenant migration — needs you · claudia · 15:54 <!-- #draft-2036 1760543668 -->\n  Only happens after midnight UTC\n"
+      },
+      {
+        "type": "item",
+        "id": "close-2073",
+        "section": "waiting-on-you",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Close login timeout"
+          }
+        ],
+        "status": "needs-you",
+        "owner": "redd",
+        "updated_at": "2025-10-15T15:56:39Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Close login timeout — needs you · redd · 15:56 <!-- #close-2073 1760543799 -->\n\n"
+      },
+      {
+        "type": "section",
+        "id": "done",
+        "title": "Done",
+        "source": "## Done\n"
+      },
+      {
+        "type": "item",
+        "id": "repro-2110",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Reproduce user avatar sync"
+          }
+        ],
+        "status": "done",
+        "updated_at": "2025-10-15T15:58:50Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "CORE-2841",
+            "kind": "jira"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Reproduce user avatar sync — done · 15:58 <!-- #repro-2110 1760543930 -->\n  Links: CORE-2841\n"
+      },
+      {
+        "type": "item",
+        "id": "triag-2147",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Triage slow query 77"
+          }
+        ],
+        "status": "done",
+        "owner": "cody",
+        "updated_at": "2025-10-15T16:01:01Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Triage slow query 77 — done · cody · 16:01 <!-- #triag-2147 1760544061 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "docum-2184",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Document report export"
+          }
+        ],
+        "status": "done",
+        "owner": "me",
+        "updated_at": "2025-10-15T16:03:12Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Waiting for the vendor to reply"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Document report export — done · me · 16:03 <!-- #docum-2184 1760544192 -->\n  Waiting for the vendor to reply\n"
+      },
+      {
+        "type": "item",
+        "id": "backf-2221",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Backfill email digest"
+          }
+        ],
+        "status": "done",
+        "updated_at": "2025-10-15T16:05:23Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Backfill email digest — done · 16:05 <!-- #backf-2221 1760544323 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "rotat-2258",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Rotate health probe"
+          }
+        ],
+        "status": "done",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T16:07:34Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Rotate health probe — done · claudia · 16:07 <!-- #rotat-2258 1760544454 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "audit-2295",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Audit invoice batch"
+          }
+        ],
+        "status": "done",
+        "owner": "redd",
+        "updated_at": "2025-10-15T16:09:45Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "Sentry PORTAL-1F2",
+            "kind": "sentry"
+          },
+          {
+            "text": "run 9912",
+            "kind": "run"
+          }
+        ],
+        "kind": "command",
+        "command": "make seed",
+        "env": "staging",
+        "ran": false,
+        "source": "- [x] Audit invoice batch — done · redd · STAGING · 16:09 <!-- #audit-2295 1760544585 cmd -->\n  ```sh\n  make seed\n  ```\n  Links: Sentry PORTAL-1F2 · run 9912\n"
+      },
+      {
+        "type": "item",
+        "id": "check-2332",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Check audit trail gap"
+          }
+        ],
+        "status": "done",
+        "updated_at": "2025-10-15T16:11:56Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Seen on host 14, see the log for detail"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Check audit trail gap — done · 16:11 <!-- #check-2332 1760544716 -->\n  Seen on host 14, see the log for detail\n"
+      },
+      {
+        "type": "item",
+        "id": "verif-2369",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Verify config reload"
+          }
+        ],
+        "status": "done",
+        "owner": "cody",
+        "updated_at": "2025-10-15T16:14:07Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Verify config reload — done · cody · 16:14 <!-- #verif-2369 1760544847 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "retry-2406",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Retry cache warmup"
+          }
+        ],
+        "status": "done",
+        "owner": "me",
+        "updated_at": "2025-10-15T16:16:18Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Retry cache warmup — done · me · 16:16 <!-- #retry-2406 1760544978 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "revie-2443",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Review pdf renderer"
+          }
+        ],
+        "status": "done",
+        "updated_at": "2025-10-15T16:18:29Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Review pdf renderer — done · 16:18 <!-- #revie-2443 1760545109 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "draft-2480",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Draft referral 4411 duplicate"
+          }
+        ],
+        "status": "done",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T16:20:40Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Only happens after midnight UTC"
+              }
+            ]
+          }
+        ],
+        "links": [
+          {
+            "text": "run 9912",
+            "kind": "run"
+          },
+          {
+            "text": "index.md:42",
+            "kind": "file"
+          },
+          {
+            "text": "PR #253",
+            "url": "https://github.com/example/repo/pull/253",
+            "kind": "pr"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Draft referral 4411 duplicate — done · claudia · 16:20 <!-- #draft-2480 1760545240 -->\n  Only happens after midnight UTC\n  Links: run 9912 · index.md:42 · [PR #253](https://github.com/example/repo/pull/253)\n"
+      },
+      {
+        "type": "item",
+        "id": "close-2517",
+        "section": "done",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Close webhook retries"
+          }
+        ],
+        "status": "done",
+        "owner": "redd",
+        "updated_at": "2025-10-15T16:22:51Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Close webhook retries — done · redd · 16:22 <!-- #close-2517 1760545371 -->\n\n"
+      },
+      {
+        "type": "section",
+        "id": "findings",
+        "title": "Findings",
+        "source": "## Findings\n"
+      },
+      {
+        "type": "item",
+        "id": "repro-2554",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Reproduce retry backoff"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T16:25:02Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Reproduce retry backoff — todo · 16:25 <!-- #repro-2554 1760545502 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "triag-2591",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Triage queue job 8812"
+          }
+        ],
+        "status": "done",
+        "owner": "cody",
+        "updated_at": "2025-10-15T16:27:13Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Triage queue job 8812 — done · cody · 16:27 <!-- #triag-2591 1760545633 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "docum-2628",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Document search index"
+          }
+        ],
+        "status": "todo",
+        "owner": "me",
+        "updated_at": "2025-10-15T16:29:24Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Waiting for the vendor to reply"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Document search index — todo · me · 16:29 <!-- #docum-2628 1760545764 -->\n  Waiting for the vendor to reply\n"
+      },
+      {
+        "type": "item",
+        "id": "backf-2665",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Backfill feature flag drift"
+          }
+        ],
+        "status": "done",
+        "updated_at": "2025-10-15T16:31:35Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "index.md:42",
+            "kind": "file"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Backfill feature flag drift — done · 16:31 <!-- #backf-2665 1760545895 -->\n  Links: index.md:42\n"
+      },
+      {
+        "type": "item",
+        "id": "rotat-2702",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Rotate staging deploy"
+          }
+        ],
+        "status": "todo",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T16:33:46Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "command",
+        "command": "cargo test -p core",
+        "env": "unset",
+        "ran": false,
+        "source": "- [ ] Rotate staging deploy — todo · claudia · ENV? · 16:33 <!-- #rotat-2702 1760546026 cmd -->\n  ```sh\n  cargo test -p core\n  ```\n"
+      },
+      {
+        "type": "item",
+        "id": "audit-2739",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Audit nightly import"
+          }
+        ],
+        "status": "done",
+        "owner": "redd",
+        "updated_at": "2025-10-15T16:35:57Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Audit nightly import — done · redd · 16:35 <!-- #audit-2739 1760546157 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "check-2776",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Check tenant migration"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T16:38:08Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Seen on host 14, see the log for detail"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Check tenant migration — todo · 16:38 <!-- #check-2776 1760546288 -->\n  Seen on host 14, see the log for detail\n"
+      },
+      {
+        "type": "item",
+        "id": "verif-2813",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Verify login timeout"
+          }
+        ],
+        "status": "done",
+        "owner": "cody",
+        "updated_at": "2025-10-15T16:40:19Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Verify login timeout — done · cody · 16:40 <!-- #verif-2813 1760546419 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "retry-2850",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Retry user avatar sync"
+          }
+        ],
+        "status": "todo",
+        "owner": "me",
+        "updated_at": "2025-10-15T16:42:30Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "PR #253",
+            "url": "https://github.com/example/repo/pull/253",
+            "kind": "pr"
+          },
+          {
+            "text": "CORE-2841",
+            "kind": "jira"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Retry user avatar sync — todo · me · 16:42 <!-- #retry-2850 1760546550 -->\n  Links: [PR #253](https://github.com/example/repo/pull/253) · CORE-2841\n"
+      },
+      {
+        "type": "item",
+        "id": "revie-2887",
+        "section": "findings",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Review slow query 77"
+          }
+        ],
+        "status": "done",
+        "updated_at": "2025-10-15T16:44:41Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [x] Review slow query 77 — done · 16:44 <!-- #revie-2887 1760546681 -->\n\n"
+      },
+      {
+        "type": "section",
+        "id": "loose-ends",
+        "title": "Loose ends",
+        "source": "## Loose ends\n"
+      },
+      {
+        "type": "prose",
+        "key": "893d578a815a55ee-0",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Anything here has no owner yet and may be dropped."
+              }
+            ]
+          }
+        ],
+        "source": "Anything here has no owner yet and may be dropped.\n\n"
+      },
+      {
+        "type": "item",
+        "id": "draft-2924",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Draft report export"
+          }
+        ],
+        "status": "todo",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T16:46:52Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Only happens after midnight UTC"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Draft report export — todo · claudia · 16:46 <!-- #draft-2924 1760546812 -->\n  Only happens after midnight UTC\n"
+      },
+      {
+        "type": "item",
+        "id": "close-2961",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Close email digest"
+          }
+        ],
+        "status": "todo",
+        "owner": "redd",
+        "updated_at": "2025-10-15T16:49:03Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Close email digest — todo · redd · 16:49 <!-- #close-2961 1760546943 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "repro-2998",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Reproduce health probe"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T16:51:14Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Reproduce health probe — todo · 16:51 <!-- #repro-2998 1760547074 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "triag-3035",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Triage invoice batch"
+          }
+        ],
+        "status": "todo",
+        "owner": "cody",
+        "updated_at": "2025-10-15T16:53:25Z",
+        "note_blocks": [],
+        "links": [
+          {
+            "text": "CORE-2841",
+            "kind": "jira"
+          },
+          {
+            "text": "Sentry PORTAL-1F2",
+            "kind": "sentry"
+          },
+          {
+            "text": "run 9912",
+            "kind": "run"
+          }
+        ],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Triage invoice batch — todo · cody · 16:53 <!-- #triag-3035 1760547205 -->\n  Links: CORE-2841 · Sentry PORTAL-1F2 · run 9912\n"
+      },
+      {
+        "type": "item",
+        "id": "docum-3072",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Document audit trail gap"
+          }
+        ],
+        "status": "todo",
+        "owner": "me",
+        "updated_at": "2025-10-15T16:55:36Z",
+        "note_blocks": [
+          {
+            "kind": "paragraph",
+            "spans": [
+              {
+                "kind": "text",
+                "text": "Waiting for the vendor to reply"
+              }
+            ]
+          }
+        ],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Document audit trail gap — todo · me · 16:55 <!-- #docum-3072 1760547336 -->\n  Waiting for the vendor to reply\n"
+      },
+      {
+        "type": "item",
+        "id": "backf-3109",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Backfill config reload"
+          }
+        ],
+        "status": "todo",
+        "updated_at": "2025-10-15T16:57:47Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Backfill config reload — todo · 16:57 <!-- #backf-3109 1760547467 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "rotat-3146",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Rotate cache warmup"
+          }
+        ],
+        "status": "todo",
+        "owner": "claudia",
+        "updated_at": "2025-10-15T16:59:58Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Rotate cache warmup — todo · claudia · 16:59 <!-- #rotat-3146 1760547598 -->\n"
+      },
+      {
+        "type": "item",
+        "id": "audit-3183",
+        "section": "loose-ends",
+        "text_spans": [
+          {
+            "kind": "text",
+            "text": "Audit pdf renderer"
+          }
+        ],
+        "status": "todo",
+        "owner": "redd",
+        "updated_at": "2025-10-15T17:02:09Z",
+        "note_blocks": [],
+        "links": [],
+        "kind": "item",
+        "ran": false,
+        "source": "- [ ] Audit pdf renderer — todo · redd · 17:02 <!-- #audit-3183 1760547729 -->\n\n"
+      },
+      {
+        "type": "log_heading",
+        "title": "Log",
+        "source": "## Log\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:01",
+        "text": "Claudia: logged event 01",
+        "source": "- 09:01 Claudia: logged event 01\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:02",
+        "text": "Claudia: logged event 02",
+        "source": "- 09:02 Claudia: logged event 02\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:03",
+        "text": "Claudia: logged event 03",
+        "source": "- 09:03 Claudia: logged event 03\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:04",
+        "text": "Claudia: logged event 04",
+        "source": "- 09:04 Claudia: logged event 04\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:05",
+        "text": "Claudia: logged event 05",
+        "source": "- 09:05 Claudia: logged event 05\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:06",
+        "text": "Claudia: logged event 06",
+        "source": "- 09:06 Claudia: logged event 06\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:07",
+        "text": "Claudia: logged event 07",
+        "source": "- 09:07 Claudia: logged event 07\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:08",
+        "text": "Claudia: logged event 08",
+        "source": "- 09:08 Claudia: logged event 08\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:09",
+        "text": "Claudia: logged event 09",
+        "source": "- 09:09 Claudia: logged event 09\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:10",
+        "text": "Claudia: logged event 10",
+        "source": "- 09:10 Claudia: logged event 10\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:11",
+        "text": "Claudia: logged event 11",
+        "source": "- 09:11 Claudia: logged event 11\n"
+      },
+      {
+        "type": "log_line",
+        "time": "09:12",
+        "text": "Claudia: logged event 12",
+        "source": "- 09:12 Claudia: logged event 12\n"
+      }
+    ],
+    "log": [
+      {
+        "time": "09:01",
+        "text": "Claudia: logged event 01"
+      },
+      {
+        "time": "09:02",
+        "text": "Claudia: logged event 02"
+      },
+      {
+        "time": "09:03",
+        "text": "Claudia: logged event 03"
+      },
+      {
+        "time": "09:04",
+        "text": "Claudia: logged event 04"
+      },
+      {
+        "time": "09:05",
+        "text": "Claudia: logged event 05"
+      },
+      {
+        "time": "09:06",
+        "text": "Claudia: logged event 06"
+      },
+      {
+        "time": "09:07",
+        "text": "Claudia: logged event 07"
+      },
+      {
+        "time": "09:08",
+        "text": "Claudia: logged event 08"
+      },
+      {
+        "time": "09:09",
+        "text": "Claudia: logged event 09"
+      },
+      {
+        "time": "09:10",
+        "text": "Claudia: logged event 10"
+      },
+      {
+        "time": "09:11",
+        "text": "Claudia: logged event 11"
+      },
+      {
+        "time": "09:12",
+        "text": "Claudia: logged event 12"
+      }
+    ],
+    "hidden_by_user": false
+  }
+}

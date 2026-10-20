@@ -629,6 +629,25 @@ where
         .await;
     }
 
+    // ── Tracker replay — each bound focus's board and summary ─────────────────
+    // Not behind a topic (like the task frames): a client that never heard of
+    // trackers ignores the type. A network peer is replayed only the summary
+    // of a non-sensitive focus; the board frame is `LocalOnly`.
+    {
+        // Clone the handle and drop the manager lock before calling into it.
+        let provider = session_mgr.lock().unwrap().tracker_frame_provider();
+        if let Some(provider) = provider {
+            replay_messages(
+                &mut writer,
+                provider
+                    .tracker_frames()
+                    .into_iter()
+                    .filter_map(|m| outbound(trust, m, &sensitive)),
+            )
+            .await;
+        }
+    }
+
     // ── Activity replay — snapshot + health on (re)connect ────────────────────
     // A reconnecting client must never be left presenting a stale last-known
     // event as if it were current, and it must be able to tell a genuinely

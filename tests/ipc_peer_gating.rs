@@ -59,6 +59,7 @@ use nostromo::ipc::peer_verify::{testing::FakePeerVerifier, MAC_APP_CLIENT_KIND}
 use nostromo::mcp::tools::create_focus::create_focus;
 use nostromo::mcp::tools::{ask_decision, dispatch, tool_descriptors_for, ToolResult};
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
+use nostromo::tracker::{CallerFacts, FakeClock, RegistryParts, TrackerRegistry};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -1266,6 +1267,7 @@ fn mcp_state(h: &Harness) -> McpSharedState {
         perri: PerriDaemonState::default(),
         decisions: Arc::clone(&h.decisions),
         tickets: Default::default(),
+        tracker: Default::default(),
     })
 }
 
@@ -5933,4 +5935,266 @@ async fn a_tcp_peer_receives_a_non_sensitive_job_s_crew_fields_unchanged() {
         .expect("the TCP peer is also told about the awaiting job");
     assert_eq!(awaiting["decision"]["id"], "d-0001", "{awaiting}");
     assert_eq!(awaiting["activity"], "gate_hold", "{awaiting}");
+}
+
+// ── agent tracker: a board's text never reaches a network peer (T0b, PRD 31/32) ──
+//
+// The pane's content goes in `tracker_board` (LocalOnly); a TCP peer learns only
+// `tracker_summary {tag, has_tracker, counts}` of a NON-sensitive focus. Boards
+// are opened through the real `nostromo.tracker` tool, with a `SECRET-TRACKER-<n>`
+// sentinel in every text a board can hold, so a field that leaks is a field this
+// test sees. (A topic is lowercase by rule, so the sentinels are compared
+// case-insensitively.)
+
+/// An ordinary focus (sentinels 1-10) and a sensitive, work-derived one (11-20).
+const TRACKER_ORDINARY: &str = "cody-tracker-open";
+
+struct TrackerWorld {
+    _tmp: TempDir,
+    repo: PathBuf,
+    registry: Arc<TrackerRegistry>,
+    state: McpSharedState,
+}
+
+/// A tracker registry over temp dirs, wired as the daemon wires it: into the MCP
+/// state (so `nostromo.tracker` writes to it and broadcasts on the server's
+/// channel) and as the attach-replay provider.
+fn tracker_world(h: &Harness) -> TrackerWorld {
+    let tmp = TempDir::new().expect("tempdir");
+    let base = tmp.path().canonicalize().expect("canonical temp dir");
+    let repo = base.join("repo");
+    let home = base.join("home");
+    for dir in [&repo, &home] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    let registry = Arc::new(TrackerRegistry::new(RegistryParts::hermetic(
+        base.join("tracker-state"),
+        home,
+        Arc::new(FakeClock::at_secs(1_760_540_000)),
+    )));
+    h.session_mgr.lock().unwrap().configure_tracker_frame_provider(registry.clone());
+    let state = McpSharedState::for_daemon(DaemonMcpBackend {
+        pane_registry: Arc::new(Mutex::new(PaneRegistry::in_memory())),
+        session_mgr: Arc::clone(&h.session_mgr),
+        broadcast_tx: h.server.tx.clone(),
+        perri: PerriDaemonState::default(),
+        decisions: Arc::clone(&h.decisions),
+        tickets: Default::default(),
+        tracker: Arc::clone(&registry),
+    });
+    TrackerWorld { _tmp: tmp, repo, registry, state }
+}
+
+impl TrackerWorld {
+    /// Calls `nostromo.tracker` as the focus `tag`; the call must succeed.
+    async fn call(&self, tag: &str, args: Value) -> Value {
+        self.registry.set_caller_facts(
+            tag,
+            CallerFacts { cwd: Some(self.repo.clone()), session_id: Some(format!("sess-{tag}")) },
+        );
+        match dispatch("nostromo.tracker", Some(&args), &self.state, Some(tag)).await {
+            ToolResult::Ok(content) => {
+                let text = content[0]["text"].as_str().expect("text content").to_string();
+                let res: Value = serde_json::from_str(&text).expect("JSON tool text");
+                assert_eq!(res["ok"], json!(true), "{tag}: {args} => {res}");
+                res
+            }
+            _ => panic!("nostromo.tracker is not available to {tag}"),
+        }
+    }
+
+    /// Opens a board for `tag` whose title, topic, path, section, item text, owner,
+    /// note, link, command and Log line carry sentinels `n` to `n + 9`.
+    async fn open_sentinel_board(&self, tag: &str, n: u32) {
+        let s = |k: u32| format!("SECRET-TRACKER-{}", n + k);
+        self.call(
+            tag,
+            json!({
+                "op": "open",
+                "title": format!("{} title", s(0)),
+                "topic": format!("secret-tracker-{}", n + 1),
+                "path": format!("docs/{}/board.md", s(2)),
+                "sections": [format!("{} section", s(3))],
+            }),
+        )
+        .await;
+        self.call(
+            tag,
+            json!({"ops": [
+                {"op": "upsert", "id": "item-a", "text": format!("{} item", s(4)), "owner": s(5),
+                 "note": format!("{} note", s(6)), "links": [format!("{} link", s(7))]},
+                {"op": "upsert", "id": "cmd-a", "text": "Run the staged command", "kind": "command",
+                 "command": format!("echo {}", s(8))},
+                {"op": "log", "text": format!("{} log line", s(9))},
+            ]}),
+        )
+        .await;
+    }
+}
+
+fn subscribe_everything() -> Value {
+    json!({"type": "subscribe", "topics": [], "renders_decisions": false})
+}
+
+fn mentions_a_tracker_sentinel(frames: &[Value]) -> bool {
+    frames.iter().any(|f| f.to_string().to_lowercase().contains("secret-tracker"))
+}
+
+fn frames_of<'a>(frames: &'a [Value], kind: &str, tag: &str) -> Vec<&'a Value> {
+    frames.iter().filter(|f| f["type"] == kind && f["tag"] == tag).collect()
+}
+
+/// A `tracker_summary` has exactly `type`, `tag`, `has_tracker` and `counts`,
+/// and `counts` has exactly the five status keys.
+fn assert_summary_shape(frame: &Value) {
+    let keys: BTreeSet<&str> = frame.as_object().expect("object").keys().map(String::as_str).collect();
+    assert_eq!(keys, BTreeSet::from(["counts", "has_tracker", "tag", "type"]), "{frame}");
+    let counts: BTreeSet<&str> =
+        frame["counts"].as_object().expect("counts").keys().map(String::as_str).collect();
+    assert_eq!(counts, BTreeSet::from(["blocked", "done", "in_progress", "needs_you", "todo"]), "{frame}");
+}
+
+#[tokio::test]
+async fn a_tcp_peer_subscribed_to_everything_gets_a_summary_for_the_ordinary_focus_only_and_no_board_text() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    derive_focus(&mut unix, W).await;
+    let mut tcp = raw_tcp(&h).await;
+    raw_handshake(&mut tcp, subscribe_everything()).await.expect("tcp handshake");
+    let mut local = raw_unix(&h).await;
+    raw_handshake(&mut local, subscribe_everything()).await.expect("local handshake");
+
+    let world = tracker_world(&h);
+    world.open_sentinel_board(TRACKER_ORDINARY, 1).await;
+    world.open_sentinel_board(W, 11).await;
+    // Later changes travel the same way: a status change in each focus.
+    world.call(TRACKER_ORDINARY, json!({"op": "status", "id": "item-a", "status": "done"})).await;
+    world.call(W, json!({"op": "status", "id": "item-a", "status": "blocked"})).await;
+
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+    let local_frames = raw_sync_via_broadcast(&h, &mut local).await;
+
+    // Control: a local client was sent the boards, sentinels and all, for both
+    // focuses, so the TCP result below cannot come from nothing being sent.
+    for (tag, sentinel) in [(TRACKER_ORDINARY, "secret-tracker-5"), (W, "secret-tracker-15")] {
+        let boards = frames_of(&local_frames, "tracker_board", tag);
+        assert!(!boards.is_empty(), "control: the local client gets {tag}'s tracker_board: {local_frames:?}");
+        assert!(
+            boards.iter().any(|b| b.to_string().to_lowercase().contains(sentinel)),
+            "control: the board carries its item text ({sentinel})"
+        );
+    }
+
+    // The network peer: no tracker_board at all, no sentinel in any frame.
+    assert!(
+        !types(&tcp_frames).iter().any(|t| t == "tracker_board"),
+        "a tracker_board reached a TCP peer: {tcp_frames:?}"
+    );
+    assert!(
+        !mentions_a_tracker_sentinel(&tcp_frames),
+        "tracker text reached a TCP peer: {tcp_frames:?}"
+    );
+
+    // It is told the ordinary focus has a tracker, with counts and nothing else...
+    let summaries = frames_of(&tcp_frames, "tracker_summary", TRACKER_ORDINARY);
+    assert!(summaries.len() >= 2, "a summary per change: {tcp_frames:?}");
+    for summary in &summaries {
+        assert_summary_shape(summary);
+        assert_eq!(summary["has_tracker"], json!(true));
+    }
+    let last = summaries.last().unwrap();
+    assert_eq!(
+        last["counts"],
+        json!({"todo": 1, "in_progress": 0, "blocked": 0, "needs_you": 0, "done": 1}),
+        "{last}"
+    );
+    // ...and nothing at all about the sensitive one.
+    assert!(
+        !tcp_frames.iter().any(|f| f["type"].as_str().is_some_and(|t| t.starts_with("tracker")) && f["tag"] == W),
+        "a tracker frame for a sensitive focus reached a TCP peer: {tcp_frames:?}"
+    );
+    assert!(!tcp_frames.iter().any(|f| f.to_string().contains(W)), "the sensitive tag leaked: {tcp_frames:?}");
+
+    // The local client also gets the summaries (they are not network-only frames).
+    assert!(!frames_of(&local_frames, "tracker_summary", TRACKER_ORDINARY).is_empty());
+    assert!(!frames_of(&local_frames, "tracker_summary", W).is_empty());
+}
+
+#[tokio::test]
+async fn a_tcp_peer_that_connects_after_the_trackers_exist_is_replayed_the_ordinary_summary_and_no_board_text() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    derive_focus(&mut unix, W).await;
+    let world = tracker_world(&h);
+    world.open_sentinel_board(TRACKER_ORDINARY, 1).await;
+    world.open_sentinel_board(W, 11).await;
+
+    for topics in [json!([]), json!(["layout"]), json!(["focuses", "activity"])] {
+        let mut tcp = raw_tcp(&h).await;
+        let (welcome, replay) = raw_handshake(
+            &mut tcp,
+            json!({"type": "subscribe", "topics": topics.clone(), "renders_decisions": false}),
+        )
+        .await
+        .expect("tcp handshake");
+
+        let mut everything = replay.clone();
+        everything.push(welcome);
+        assert!(
+            !mentions_a_tracker_sentinel(&everything),
+            "topics {topics}: tracker text reached a TCP peer on attach: {replay:?}"
+        );
+        assert!(
+            !types(&replay).iter().any(|t| t == "tracker_board"),
+            "topics {topics}: a tracker_board was replayed to a TCP peer: {replay:?}"
+        );
+        let summaries = frames_of(&replay, "tracker_summary", TRACKER_ORDINARY);
+        assert_eq!(summaries.len(), 1, "topics {topics}: exactly one summary of the ordinary focus: {replay:?}");
+        assert_summary_shape(summaries[0]);
+        assert_eq!(summaries[0]["has_tracker"], json!(true));
+        assert_eq!(
+            summaries[0]["counts"],
+            json!({"todo": 2, "in_progress": 0, "blocked": 0, "needs_you": 0, "done": 0})
+        );
+        assert!(
+            !replay.iter().any(|f| f.to_string().contains(W)),
+            "topics {topics}: the sensitive focus left a trace in the replay: {replay:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_local_client_receives_the_tracker_board_live_and_on_attach_for_every_focus() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    derive_focus(&mut unix, W).await;
+    let mut early = raw_unix(&h).await;
+    raw_handshake(&mut early, subscribe_everything()).await.expect("handshake");
+    let world = tracker_world(&h);
+
+    world.open_sentinel_board(TRACKER_ORDINARY, 1).await;
+    world.open_sentinel_board(W, 11).await;
+
+    // Live.
+    let live = raw_sync_via_broadcast(&h, &mut early).await;
+    for (tag, sentinel) in [(TRACKER_ORDINARY, "secret-tracker-5"), (W, "secret-tracker-15")] {
+        let boards = frames_of(&live, "tracker_board", tag);
+        assert!(
+            boards.iter().any(|b| b.to_string().to_lowercase().contains(sentinel)),
+            "the local client gets {tag}'s board live: {live:?}"
+        );
+    }
+
+    // On attach, for a client that connects after the trackers exist.
+    let mut late = raw_unix(&h).await;
+    let (_welcome, replay) = raw_handshake(&mut late, subscribe_everything()).await.expect("handshake");
+    for (tag, sentinel) in [(TRACKER_ORDINARY, "secret-tracker-5"), (W, "secret-tracker-15")] {
+        let boards = frames_of(&replay, "tracker_board", tag);
+        assert_eq!(boards.len(), 1, "one board per bound focus on attach: {replay:?}");
+        assert!(boards[0].to_string().to_lowercase().contains(sentinel), "{tag}: {}", boards[0]);
+        assert_eq!(frames_of(&replay, "tracker_summary", tag).len(), 1, "{tag}");
+    }
 }

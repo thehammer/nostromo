@@ -683,6 +683,12 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::SessionTasks { tag, .. } => ServerClass::Focus(tag),
         ServerMsg::SessionTaskDetail { .. } => ServerClass::LocalOnly,
 
+        // The tracker pane's content (title, item text, notes, owners, links,
+        // commands, the file path) goes to local clients only. A network peer
+        // learns only that a non-sensitive focus has a tracker, and its counts.
+        ServerMsg::TrackerBoard { .. } => ServerClass::LocalOnly,
+        ServerMsg::TrackerSummary { tag, .. } => ServerClass::Focus(tag),
+
         ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
 
         // Scoped to one Mother job. A job started from a work item carries
@@ -997,6 +1003,8 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
         // A task list passes unchanged: it has no sensitive field by
         // construction (see `TaskMeta`, and the key-set test below).
         ServerMsg::SessionTasks { .. } => msg,
+        // A tracker summary is a tag, a flag and five counts: nothing to trim.
+        ServerMsg::TrackerSummary { .. } => msg,
         // The approval count carries a tag and a number, nothing to trim (only a
         // non-sensitive focus's reaches here; see `classify_server_msg`).
         ServerMsg::ApprovalPending { .. } => msg,
@@ -2330,6 +2338,133 @@ mod tests {
             for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
                 assert!(may_receive(trust, &session_tasks_msg(tag), &tags), "{trust:?} {tag}");
             }
+        }
+    }
+
+    // ── agent tracker frames (T0b) ────────────────────────────────────────────
+
+    use crate::ipc::protocol::TrackerCounts;
+
+    fn tracker_board_msg(tag: &str) -> ServerMsg {
+        let source = "# SECRET-TRACKER-1 title\n\n## SECRET-TRACKER-2 section\n- [ ] SECRET-TRACKER-3 item — todo · SECRET-TRACKER-4 <!-- #item-1 1760540000 -->\n  SECRET-TRACKER-5 note\n  Links: SECRET-TRACKER-6\n";
+        let parsed = crate::tracker::parse(source.as_bytes()).expect("a readable board");
+        ServerMsg::TrackerBoard {
+            tag: tag.into(),
+            board: Some(crate::tracker::view::build(
+                &parsed,
+                &crate::tracker::ViewFacts {
+                    path: "/repo/SECRET-TRACKER-7/index.md".into(),
+                    topic: "secret-tracker-8".into(),
+                    version: 3,
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    fn tracker_summary_msg(tag: &str) -> ServerMsg {
+        ServerMsg::TrackerSummary {
+            tag: tag.into(),
+            has_tracker: true,
+            counts: TrackerCounts { todo: 1, in_progress: 2, blocked: 3, needs_you: 4, done: 5 },
+        }
+    }
+
+    #[test]
+    fn the_tracker_board_is_local_only_and_the_tracker_summary_is_classified_with_its_focus() {
+        for tag in ["cody-x", "fred", "teri"] {
+            assert_eq!(classify_server_msg(&tracker_board_msg(tag)), ServerClass::LocalOnly, "{tag}");
+        }
+        assert_eq!(
+            classify_server_msg(&ServerMsg::TrackerBoard { tag: "cody-x".into(), board: None }),
+            ServerClass::LocalOnly,
+            "an empty board frame is as local as a full one"
+        );
+        assert_eq!(classify_server_msg(&tracker_summary_msg("cody-x")), ServerClass::Focus("cody-x"));
+        assert_eq!(classify_server_msg(&tracker_summary_msg("fred")), ServerClass::Focus("fred"));
+    }
+
+    #[test]
+    fn a_network_peer_never_receives_a_tracker_board_whatever_the_focus() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive", "fred", "teri"] {
+            let msg = tracker_board_msg(tag);
+            assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{tag}");
+            assert!(outbound(PeerTrust::Tcp, msg, &tags).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_network_peer_receives_the_tracker_summary_of_an_ordinary_focus_only_and_unchanged() {
+        let tags = tags_with("cody-sensitive");
+        let msg = tracker_summary_msg("cody-ordinary");
+
+        assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
+        let sent = outbound(PeerTrust::Tcp, msg.clone(), &tags).expect("delivered");
+        assert_eq!(wire(&sent), wire(&msg));
+        assert_eq!(wire(&redact_for_network(msg.clone(), &tags)), wire(&msg), "redaction leaves it as it is");
+
+        for tag in ["cody-sensitive", "fred", "teri", "FRED"] {
+            let msg = tracker_summary_msg(tag);
+            assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{tag}");
+            assert!(outbound(PeerTrust::Tcp, msg, &tags).is_none(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_local_peer_receives_the_tracker_board_and_summary_of_every_focus_exactly_as_they_are() {
+        let tags = tags_with("cody-sensitive");
+        for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
+            for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+                for msg in [tracker_board_msg(tag), tracker_summary_msg(tag)] {
+                    assert!(may_receive(trust, &msg, &tags), "{trust:?} {tag}");
+                    let sent = outbound(trust, msg.clone(), &tags).expect("delivered");
+                    assert_eq!(wire(&sent), wire(&msg), "{trust:?} {tag}");
+                }
+            }
+        }
+    }
+
+    /// The keys of a `tracker_summary` frame. Written out here, not derived: a
+    /// new field fails this test until someone has decided it is safe for a
+    /// network peer (no title, text, owner, link, command or path).
+    #[test]
+    fn a_tracker_summary_carries_only_the_tag_a_flag_and_five_counts() {
+        let value = serde_json::to_value(tracker_summary_msg("cody-ordinary")).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["counts", "has_tracker", "tag", "type"]);
+
+        let mut count_keys: Vec<&str> =
+            value["counts"].as_object().unwrap().keys().map(String::as_str).collect();
+        count_keys.sort_unstable();
+        assert_eq!(count_keys, ["blocked", "done", "in_progress", "needs_you", "todo"]);
+        for (key, n) in [("todo", 1), ("in_progress", 2), ("blocked", 3), ("needs_you", 4), ("done", 5)] {
+            assert_eq!(value["counts"][key], n, "{key}");
+        }
+    }
+
+    #[test]
+    fn nothing_a_network_peer_can_receive_of_a_tracker_carries_board_text() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+            // Control: the board frame really holds the sentinels.
+            let board_wire = wire(&tracker_board_msg(tag));
+            for n in 1..=7 {
+                assert!(
+                    board_wire.to_lowercase().contains(&format!("secret-tracker-{n}")),
+                    "control: sentinel {n} is in the board frame: {board_wire}"
+                );
+            }
+            let mut received = vec![];
+            for frame in [tracker_board_msg(tag), tracker_summary_msg(tag)] {
+                if let Some(sent) = outbound(PeerTrust::Tcp, frame, &tags) {
+                    received.push(wire(&sent));
+                }
+            }
+            let json = received.join("\n").to_lowercase();
+            assert!(!json.contains("secret-tracker"), "{tag}: {json}");
+            assert_eq!(received.len(), usize::from(tag == "cody-ordinary"), "{tag}: {received:?}");
         }
     }
 

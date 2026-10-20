@@ -361,6 +361,28 @@ async fn main() -> Result<()> {
     });
     nostromo::data::work::install_work_service(work_hub.clone());
 
+    // ── agent tracker ─────────────────────────────────────────────────────────
+    // State lives beside the daemon's socket (`~/.nostromo`; a QA instance's own
+    // directory), so an isolated daemon never shares boards or cursors with the
+    // user's. Loading re-reads every bound board; the attach replay sends each
+    // bound focus's board, and watchers broadcast edits made outside the daemon.
+    let tracker = {
+        let state_root = socket_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let registry = Arc::new(nostromo::tracker::TrackerRegistry::new(
+            nostromo::tracker::RegistryParts::production(state_root, dirs_next::home_dir()),
+        ));
+        session_mgr
+            .lock()
+            .unwrap()
+            .configure_tracker_frame_provider(registry.clone());
+        registry.start_watching(broadcast_tx.clone());
+        registry.flush(&broadcast_tx);
+        registry
+    };
+
     // Hosts the layout/introspection/focus tool surface inside nostromd so that
     // daemon-hosted agent sessions can assemble their own pane workspaces. Pane
     // mutations are applied to `pane_registry` and broadcast as `FocusLayout` /
@@ -405,6 +427,7 @@ async fn main() -> Result<()> {
                 },
                 decisions: Arc::clone(&decisions),
                 tickets,
+                tracker: Arc::clone(&tracker),
             };
             let state = McpSharedState::for_daemon_with_sources(
                 backend,

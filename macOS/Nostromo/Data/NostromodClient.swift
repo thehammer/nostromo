@@ -258,6 +258,12 @@ enum ServerMsg {
     /// Output- or conversation-derived text of one task. Local clients only.
     case sessionTaskDetail(SessionTaskDetailWire)
 
+    // ── agent tracker ─────────────────────────────────────────────────────────
+    /// The whole board of one focus (full snapshot). Local clients only.
+    case trackerBoard(TrackerBoardFrameWire)
+    /// Whether a focus has a tracker, and its counts.
+    case trackerSummary(TrackerSummaryFrameWire)
+
     case unknown
 }
 
@@ -1398,6 +1404,20 @@ class NostromodClient {
         case "session_task_detail":
             if let m = try? decoder.decode(SessionTaskDetailWire.self, from: raw) {
                 return .sessionTaskDetail(m)
+            }
+
+        case "tracker_board":
+            if let m = try? decoder.decode(TrackerBoardFrameWire.self, from: raw) {
+                return .trackerBoard(m)
+            } else {
+                log.error("failed to decode tracker_board")
+            }
+
+        case "tracker_summary":
+            if let m = try? decoder.decode(TrackerSummaryFrameWire.self, from: raw) {
+                return .trackerSummary(m)
+            } else {
+                log.error("failed to decode tracker_summary")
             }
 
         default:

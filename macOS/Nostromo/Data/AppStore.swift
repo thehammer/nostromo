@@ -1332,6 +1332,9 @@ class AppStore: ObservableObject {
         case .sessionTasks, .sessionTaskDetail:
             break   // BA3 routes these to BackgroundTaskStore
 
+        case .trackerBoard, .trackerSummary:
+            break   // T1 routes these to TrackerStore
+
         // Permission approvals (AP0b): decoded, shown by nothing until AP2a. This app
         // does not yet subscribe with `renders_approvals`, so the daemon sends none of
         // these but the count.

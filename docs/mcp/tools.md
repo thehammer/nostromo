@@ -1332,3 +1332,13 @@ returned, whether or not this policy is armed for Perri.
 
 Source: `src/mcp/tool_policy.rs`, `src/mcp/server.rs` (`TOOL_FORBIDDEN_CODE`),
 `src/mcp/tools/mod.rs` (`tool_descriptors_for`, the `dispatch_inner` gate).
+
+---
+
+## Agent tracker
+
+| Tool | Purpose | Reference |
+|---|---|---|
+| `nostromo.tracker` | Open a markdown task board and change it item by item (`open`, `upsert`, `status`, `remove`, `move`, `log`, `read`); edits made in an editor are picked up and attributed; deltas per session. | [`tracker.md`](tracker.md) |
+
+Source: `src/mcp/tools/tracker.rs`, `src/tracker/`

@@ -999,6 +999,7 @@ mod tests {
             perri: PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: TicketRegistryState::default(),
+            tracker: Default::default(),
         };
         (McpSharedState::for_daemon(backend), rx)
     }

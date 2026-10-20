@@ -52,6 +52,15 @@ pub trait PaneContentProvider: Send + Sync {
     fn bound_pane_contents(&self) -> Vec<ServerMsg>;
 }
 
+/// Supplies the tracker frames (`TrackerBoard`, `TrackerSummary`) of every
+/// bound focus for attach replay, so a (re)connecting client or a restarted
+/// daemon never leaves the tracker pane empty. Implemented by
+/// `crate::tracker::TrackerRegistry`.
+pub trait TrackerFrameProvider: Send + Sync {
+    /// One `TrackerBoard` and one `TrackerSummary` per focus with a bound board.
+    fn tracker_frames(&self) -> Vec<ServerMsg>;
+}
+
 /// Supplies the current Perri queue + per-focus PR snapshots for attach
 /// replay. `ServerMsg::PerriState` is otherwise only broadcast on watch
 /// change, so a client attaching to an already-running daemon would wait up

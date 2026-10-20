@@ -82,6 +82,7 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         perri: PerriDaemonState::default(),
         decisions,
         tickets: Default::default(),
+        tracker: Default::default(),
     });
     Daemon { socket_path, tcp_port, registry, state, _server: server, _tmp: tmp }
 }

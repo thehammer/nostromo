@@ -198,6 +198,7 @@ mod tests {
                 crate::ipc::decisions::DecisionRegistry::default(),
             )),
             tickets: Default::default(),
+            tracker: Default::default(),
         })
     }
 
@@ -307,6 +308,7 @@ mod tests {
             perri: crate::mcp::PerriDaemonState::default(),
             decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
             tickets: Default::default(),
+            tracker: Default::default(),
         };
         McpSharedState::for_daemon(backend)
     }

@@ -76,6 +76,7 @@ fn make_daemon_state(dir: &TempDir) -> McpSharedState {
         perri: PerriDaemonState::default(),
         decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
         tickets: TicketRegistryState::default(),
+        tracker: Default::default(),
     })
 }
 
