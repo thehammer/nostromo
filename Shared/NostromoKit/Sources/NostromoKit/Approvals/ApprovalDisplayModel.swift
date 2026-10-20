@@ -236,7 +236,7 @@ public struct ApprovalDisplayModel: Equatable {
                     }
                 case .nonAscii:
                     guard let cp = run.codePoint, let scalar = Unicode.Scalar(cp),
-                          bytesEqual(run.text, String(Character(scalar))), !scalar.isASCII
+                          bytesEqual(run.text, String(Character(scalar))), !scalar.isASCII, !isHidden(scalar)
                     else { return .mismatch("line \(line.number) shows a non-ASCII character as something else") }
                 case .plain, .separator:
                     if run.text.unicodeScalars.contains(where: isHidden) {
