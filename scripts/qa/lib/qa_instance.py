@@ -250,9 +250,13 @@ def clone_app(source, dest):
 
 
 def build():
+    # Release, not Debug: a Debug build splits the code into `Nostromo.debug.dylib` (and
+    # `__preview.dylib`) beside the executable. The clone is re-signed ad-hoc with the hardened
+    # runtime, which makes dyld refuse those dylibs ("different Team IDs") and the app dies at launch
+    # (found live 2026-10-20). The Release app is one executable, the same shape `make mac-install` signs.
     for cmd in (
         ["cargo", "build", "--bin", "nostromd", "--bin", "nostromo-mcp-bridge", "--bin", "nostromo-guard"],
-        ["make", "mac"],
+        ["make", "mac-release"],
     ):
         r = run(cmd, cwd=REPO)
         if r.returncode != 0:
@@ -322,7 +326,7 @@ def cmd_start(args):
         save_state(qa_root, state)
         wait_for(lambda: os.path.exists(sock) and d.poll() is None, 30, "the QA daemon socket")
 
-        source = os.path.join(REPO, "macOS", "build", "Build", "Products", "Debug", "Nostromo.app")
+        source = os.path.join(REPO, "macOS", "build", "Build", "Products", "Release", "Nostromo.app")
         clone = os.path.join(qa_root, "Nostromo.app")
         clone_app(source, clone)
         pin = run([os.path.join(REPO, "scripts", "write-operator-pin.sh"), clone, os.path.join(qa_root, "operator-app.pin")])
