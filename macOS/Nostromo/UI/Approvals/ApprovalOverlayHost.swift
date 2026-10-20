@@ -97,7 +97,8 @@ final class ApprovalOverlayHost: NSView {
         guard let card else { return }
         let width = max(0, bounds.width - Self.leadingInset - Self.trailingInset)
         guard width > 0 else { return }
-        let height = card.preferredHeight(forWidth: width, maxHeight: bounds.height * Self.maxHeightFraction)
+        let height = card.preferredHeight(forWidth: width, maxHeight: bounds.height * Self.maxHeightFraction,
+                                          hardMaxHeight: bounds.height - 2 * Self.bottomInset)
         let frame = NSRect(x: Self.leadingInset, y: Self.bottomInset, width: width, height: height)
         if card.frame != frame { card.frame = frame }
     }

@@ -912,6 +912,12 @@ class NostromodClient {
 
     // MARK: - Permission approvals (AP2a)
 
+    /// Whether there is a daemon connection to write to right now.
+    var hasConnection: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return fd >= 0
+    }
+
     /// Send the human's answer to a held permission request. Like `decisionAnswer`, the
     /// frame carries the `operator_nonce` of the connection it is written to, read under
     /// the same lock as the write. `note` is a deny note the agent will read.

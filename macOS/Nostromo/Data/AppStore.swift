@@ -1430,7 +1430,8 @@ extension ApprovalStore {
     static let shared: ApprovalStore = {
         let store = ApprovalStore(
             send: { AppStore.shared.answerApproval(requestId: $0, decision: $1, windowID: $2) },
-            report: { AppStore.shared.reportApprovalRefusal(requestId: $0, control: $1, channel: $2) })
+            report: { AppStore.shared.reportApprovalRefusal(requestId: $0, control: $1, channel: $2) },
+            canSend: { AppStore.shared.client.hasConnection })
         store.attach(to: AppStore.shared.approvalEvents)
         return store
     }()

@@ -105,6 +105,7 @@ final class ApprovalCardView: NSView {
     static let rowGap: CGFloat = 6
     static let buttonHeight: CGFloat = 26
     static let allowButtonWidth: CGFloat = 196
+    static let minimumInputHeight: CGFloat = 44
 
     let request: ApprovalRequestWire
     let model: ApprovalDisplayModel
@@ -233,11 +234,14 @@ final class ApprovalCardView: NSView {
 
     /// The card's height at `width`, and the height it gives the input (up to 60% of the pane,
     /// via `maxHeight`). Sets what `layout()` will use.
-    func preferredHeight(forWidth width: CGFloat, maxHeight: CGFloat) -> CGFloat {
+    func preferredHeight(forWidth width: CGFloat, maxHeight: CGFloat, hardMaxHeight: CGFloat = .infinity) -> CGFloat {
         let inner = max(40, width - 2 * Self.padding)
         let chrome = rows(width: width, inputHeight: 0)
         let natural = inputView.contentHeight(forWidth: inner)
-        inputHeight = min(natural, max(44, maxHeight - chrome))
+        // The input keeps at least a few lines unless the pane itself is too short for that:
+        // then it gives way before any other row is pushed out of the pane.
+        let floorHeight = min(Self.minimumInputHeight, max(0, hardMaxHeight - chrome))
+        inputHeight = min(natural, max(floorHeight, maxHeight - chrome))
         return rows(width: width, inputHeight: inputHeight)
     }
 
@@ -250,7 +254,7 @@ final class ApprovalCardView: NSView {
 
     var listing: ApprovalCardListing {
         let texts = inputView.displayedLines
-        let lines = model.lines.enumerated().map { i, line in
+        let lines = model.allLines.enumerated().map { i, line in
             ApprovalCardListing.Line(number: line.number,
                                      text: texts.indices.contains(i) ? texts[i] : "",
                                      kind: line.kind.rawValue,
@@ -272,13 +276,24 @@ final class ApprovalCardView: NSView {
         return ApprovalCardListing(
             requestID: request.id, focus: request.tag, agent: ApprovalKinds.asker(for: request),
             tool: request.toolName, headline: headlineLabel.stringValue,
-            input: texts.isEmpty ? "" : model.shownText, lines: lines,
+            input: shownInput(from: texts), lines: lines,
             commandCount: model.commandCount, invisibleCount: model.invisibleCount,
             nonAsciiCount: model.nonAsciiCount,
             banner: bannerLabel.isHidden ? nil : bannerLabel.stringValue,
             reasonLine: request.reason.text, options: options,
             defaultToNoKind: self.options.defaultsToDeny,
             secondsLeft: countdown.secondsLeft, state: stateDescription)
+    }
+
+    /// The input as the views hold it: the display lines' text from the text view, joined as in
+    /// the original (no newline at a separator cut). Extra fields are not part of it.
+    private func shownInput(from texts: [String]) -> String {
+        var out = ""
+        for (i, line) in model.lines.enumerated() where texts.indices.contains(i) {
+            if i > 0 && !line.cont { out += "\n" }
+            out += texts[i]
+        }
+        return out
     }
 
     // MARK: Window

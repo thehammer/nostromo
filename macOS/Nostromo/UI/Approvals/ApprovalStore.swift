@@ -62,6 +62,9 @@ final class ApprovalStore {
     /// A refused gesture, reported so the daemon can log it. `(requestId, control, channel)`.
     private let report: (String?, String, ApprovalRefusalChannel) -> Void
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    /// False while there is no daemon connection to write to: an answer is then not sent and
+    /// not counted, so the person can press again once the connection is back.
+    private let canSend: () -> Bool
 
     private var entries: [String: ApprovalEntry] = [:]
     /// Arrival order per focus (oldest first).
@@ -76,10 +79,12 @@ final class ApprovalStore {
          report: @escaping (String?, String, ApprovalRefusalChannel) -> Void,
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-         }) {
+         },
+         canSend: @escaping () -> Bool = { true }) {
         self.send = send
         self.report = report
         self.schedule = schedule
+        self.canSend = canSend
     }
 
     // MARK: Feeding
@@ -130,10 +135,10 @@ final class ApprovalStore {
     // MARK: Answering
 
     /// Send the human's answer for `id`. Returns false, and sends nothing, if the
-    /// request is unknown, not waiting, or this process has already answered it.
+    /// request is unknown, not waiting, this process has already answered it, or there is no connection.
     @discardableResult
     func answer(_ id: String, _ decision: ApprovalDecisionWire, windowID: String) -> Bool {
-        guard var entry = entries[id], entry.state == .pending, !answered.contains(id) else { return false }
+        guard var entry = entries[id], entry.state == .pending, !answered.contains(id), canSend() else { return false }
         answered.insert(id)
         entry.state = .inFlight(decision.kind)
         entries[id] = entry

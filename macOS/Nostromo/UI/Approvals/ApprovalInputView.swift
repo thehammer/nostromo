@@ -55,6 +55,7 @@ final class ApprovalInputView: NSScrollView {
     private(set) var lineNumbers: [Int] = []
     private var lineStarts: [Int] = []
     private var ignoreProgressUntilPersonScrolls = false
+    private var lastClipOriginY: CGFloat = 0
     private let ruler = ApprovalLineNumberRuler()
     private let font = Theme.codeFont(size: 12)
     private static let textInset = NSSize(width: 6, height: 6)
@@ -91,7 +92,8 @@ final class ApprovalInputView: NSScrollView {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.lineFragmentPadding = 2
         textView.selectedTextAttributes = Theme.selectionAttributes
-        textView.setAccessibilityLabel("Requested input, \(model.lines.count) line\(model.lines.count == 1 ? "" : "s")")
+        let lineTotal = model.allLines.count
+        textView.setAccessibilityLabel("Requested input, \(lineTotal) line\(lineTotal == 1 ? "" : "s")")
         documentView = textView
 
         ruler.owner = self
@@ -203,6 +205,11 @@ final class ApprovalInputView: NSScrollView {
     fileprivate func lineTop(at index: Int) -> CGFloat? {
         guard lineStarts.indices.contains(index), let layout = textView.layoutManager,
               layout.numberOfGlyphs > 0 else { return nil }
+        if lineStarts[index] >= textView.string.utf16.count {
+            // A last line with no text (the command ended in a newline) sits in the extra fragment.
+            let extra = layout.extraLineFragmentRect
+            return extra.isEmpty ? nil : extra.minY + textView.textContainerOrigin.y
+        }
         let glyph = layout.glyphIndexForCharacter(at: min(lineStarts[index], max(0, textView.string.utf16.count - 1)))
         let rect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
         return rect.minY + textView.textContainerOrigin.y
@@ -217,7 +224,7 @@ final class ApprovalInputView: NSScrollView {
         var spoken: [String] = []
         lineNumbers = []
         lineStarts = []
-        for (i, line) in model.lines.enumerated() {
+        for (i, line) in model.allLines.enumerated() {
             if i > 0 { text.append(NSAttributedString(string: "\n", attributes: baseAttributes(for: line.kind))) }
             lineNumbers.append(line.number)
             lineStarts.append(text.length)
@@ -226,13 +233,15 @@ final class ApprovalInputView: NSScrollView {
         }
         textView.textStorage?.setAttributedString(text)
         textView.setAccessibilityValue(spoken.joined(separator: "\n"))
-        ruler.ruleThickness = ApprovalLineNumberRuler.thickness(forLineCount: max(1, model.lines.count))
+        ruler.ruleThickness = ApprovalLineNumberRuler.thickness(forLineCount: max(1, model.allLines.count))
     }
 
     private func baseAttributes(for kind: ApprovalLineKind) -> [NSAttributedString.Key: Any] {
         var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ApprovalPalette.commandText]
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byCharWrapping   // wrapped, never elided: a long token breaks anywhere
+        // Left to right, always: right-to-left letters must not reorder a command on screen.
+        style.baseWritingDirection = .leftToRight
         switch kind {
         case .heredocBody, .heredocEnd:
             style.firstLineHeadIndent = 14
@@ -271,12 +280,18 @@ final class ApprovalInputView: NSScrollView {
             attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
             if let tip = run.tooltip { attrs[.toolTip] = tip }
         }
+        attrs[.writingDirection] = [NSWritingDirection.leftToRight.rawValue | NSWritingDirectionFormatType.override.rawValue]
         return NSAttributedString(string: run.text, attributes: attrs)
     }
 
     // MARK: Private
 
     @objc private func clipBoundsChanged(_ note: Notification) {
+        // Only a scroll (the clip's origin moved) says anything about what was looked at; a
+        // resize or a layout pass is neither a person nor the app-control socket.
+        let origin = contentView.bounds.origin.y
+        guard abs(origin - lastClipOriginY) > 0.01 else { return updateScrollProgress() }
+        lastClipOriginY = origin
         // A scroll the app-control socket made is not a person looking at the text: it
         // doesn't count towards "every line has been shown" until a person scrolls.
         if SyntheticInputGate.isSynthetic(NSApp.currentEvent) && !SyntheticInputGate.allowsSynthetic {

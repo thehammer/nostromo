@@ -106,7 +106,12 @@ public struct ApprovalDisplayModel: Equatable {
     /// What Allow says while the round-trip check fails.
     public static let roundTripFailureLabel = "Nostromo couldn't verify this text matches the request"
 
+    /// The daemon's display lines: what the round-trip check covers.
     public let lines: [ApprovalRenderLine]
+    /// Bash only: every field of the input other than `command` (and a `description` that is
+    /// the agent's claim shown separately), as JSON lines built here from the input itself,
+    /// so a flag like `dangerouslyDisableSandbox` is never approved unseen. Numbered after `lines`.
+    public let extraLines: [ApprovalRenderLine]
     public let commandCount: Int?
     /// Counted from the segments themselves, never trusted from the frame.
     public let invisibleCount: Int
@@ -115,6 +120,9 @@ public struct ApprovalDisplayModel: Equatable {
     public let roundTrip: ApprovalRoundTrip
 
     public var isVerified: Bool { roundTrip == .verified }
+
+    /// Everything the card shows as input: the display lines, then any extra fields.
+    public var allLines: [ApprovalRenderLine] { lines + extraLines }
 
     public init(request: ApprovalRequestWire) {
         let display = request.display
@@ -139,7 +147,12 @@ public struct ApprovalDisplayModel: Equatable {
             }
             lines.append(ApprovalRenderLine(number: line.number, kind: line.kind, cont: line.cont, runs: runs))
         }
+        let extras = Self.extraLines(for: request, startingAt: lines.count + 1)
+        for run in extras.flatMap(\.runs) {
+            if run.kind == .invisible { invisible += 1 } else if run.kind == .nonAscii { nonAscii += 1 }
+        }
         self.lines = lines
+        self.extraLines = extras
         self.commandCount = display.commandCount
         self.invisibleCount = invisible
         self.nonAsciiCount = nonAscii
@@ -180,6 +193,56 @@ public struct ApprovalDisplayModel: Equatable {
         let what = invisibleCount == 1 ? "1 invisible or direction-changing character"
                                        : "\(invisibleCount) invisible or direction-changing characters"
         return "This \(noun) contains \(what)."
+    }
+
+    // MARK: Extra fields of a Bash input
+
+    private static func extraLines(for request: ApprovalRequestWire, startingAt first: Int) -> [ApprovalRenderLine] {
+        guard request.toolKind == .bash, case .object(var fields) = request.input,
+              case .string? = fields["command"] else { return [] }
+        fields["command"] = nil
+        if case .string(let text)? = fields["description"], let claim = request.description,
+           bytesEqual(text, claim) {
+            fields["description"] = nil
+        }
+        guard !fields.isEmpty else { return [] }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(ApprovalJSON.object(fields)),
+              let pretty = String(data: data, encoding: .utf8) else {
+            return [ApprovalRenderLine(number: first, kind: .unknown, cont: false,
+                                       runs: [ApprovalRenderRun(text: "(other fields of this input could not be shown)",
+                                                                kind: .plain, codePoint: nil)])]
+        }
+        var texts = ["Other fields sent with this command:"]
+        texts += pretty.components(separatedBy: "\n")
+        return texts.enumerated().map { i, text in
+            ApprovalRenderLine(number: first + i, kind: i == 0 ? .unknown : .json, cont: false, runs: runs(for: text))
+        }
+    }
+
+    /// `text` as runs, the way the daemon segments it: hidden characters become invisible
+    /// runs (shown as tokens), other non-ASCII characters their own runs, the rest plain.
+    private static func runs(for text: String) -> [ApprovalRenderRun] {
+        var runs: [ApprovalRenderRun] = []
+        var plain = ""
+        func flush() {
+            if !plain.isEmpty { runs.append(ApprovalRenderRun(text: plain, kind: .plain, codePoint: nil)); plain = "" }
+        }
+        for scalar in text.unicodeScalars {
+            if isHidden(scalar) || scalar.value == 0x09 || scalar.value == 0x0D {
+                flush()
+                runs.append(ApprovalRenderRun(text: canonicalToken(forCodePoint: scalar.value), kind: .invisible,
+                                              codePoint: scalar.value))
+            } else if !scalar.isASCII {
+                flush()
+                runs.append(ApprovalRenderRun(text: String(Character(scalar)), kind: .nonAscii, codePoint: scalar.value))
+            } else {
+                plain.unicodeScalars.append(scalar)
+            }
+        }
+        flush()
+        return runs
     }
 
     // MARK: Unicode names
@@ -241,6 +304,10 @@ public struct ApprovalDisplayModel: Equatable {
                 case .plain, .separator:
                     if run.text.unicodeScalars.contains(where: isHidden) {
                         return .mismatch("line \(line.number) hides a character that is not marked")
+                    }
+                    // A non-ASCII look-alike must arrive as its own (tinted) run, never inside plain text.
+                    if run.text.unicodeScalars.contains(where: { !$0.isASCII }) {
+                        return .mismatch("line \(line.number) has a non-ASCII character that is not marked")
                     }
                 }
             }
@@ -324,7 +391,7 @@ public struct ApprovalDisplayModel: Equatable {
         // A dictionary keeps one value per key, so a repeated key would hide the first one.
         var scanner = JSONKeyScanner(bytes: Array(text.utf8))
         if scanner.hasDuplicateKey() { return .mismatch("the shown JSON repeats a key") }
-        return parsed == expected ? .verified : .mismatch("the shown JSON differs from the request's input")
+        return parsed.exactlyEquals(expected) ? .verified : .mismatch("the shown JSON differs from the request's input")
     }
 
     /// The text of the lines whose kind passes `keeping`: each line's original text
@@ -369,6 +436,26 @@ public struct ApprovalDisplayModel: Equatable {
 }
 
 private extension ApprovalJSON {
+    /// Equal, comparing every string and every key byte for byte (Swift's `==` on `String`
+    /// treats canonically equivalent text, like `é` as one scalar or two, as equal).
+    func exactlyEquals(_ other: ApprovalJSON) -> Bool {
+        switch (self, other) {
+        case (.null, .null): return true
+        case (.bool(let a), .bool(let b)): return a == b
+        case (.int(let a), .int(let b)): return a == b
+        case (.double(let a), .double(let b)): return a == b
+        case (.string(let a), .string(let b)): return a.utf8.elementsEqual(b.utf8)
+        case (.array(let a), .array(let b)):
+            return a.count == b.count && zip(a, b).allSatisfy { $0.exactlyEquals($1) }
+        case (.object(let a), .object(let b)):
+            guard a.count == b.count else { return false }
+            return a.allSatisfy { key, value in
+                b.first { $0.key.utf8.elementsEqual(key.utf8) }.map { value.exactlyEquals($0.value) } ?? false
+            }
+        default: return false
+        }
+    }
+
     var objectFields: [String: ApprovalJSON]? {
         if case .object(let fields) = self { return fields }
         return nil

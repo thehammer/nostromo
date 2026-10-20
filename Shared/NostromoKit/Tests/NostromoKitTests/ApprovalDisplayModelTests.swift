@@ -937,7 +937,233 @@ final class ApprovalDisplayModelTests: XCTestCase {
                        "repeated at the top")
     }
 
+    // MARK: - Other fields of a Bash input are shown too
+
+    func testOtherBashFieldsAreShownAsJsonLinesNumberedAfterTheDisplayLines() throws {
+        let request = try bashWithFields(["dangerouslyDisableSandbox": true, "run_in_background": true])
+        let model = ApprovalDisplayModel(request: request)
+        XCTAssertFalse(model.extraLines.isEmpty)
+        let text = model.extraLines.map(\.text).joined(separator: "\n")
+        XCTAssertTrue(text.contains("dangerouslyDisableSandbox"), text)
+        XCTAssertTrue(text.contains("run_in_background"), text)
+        XCTAssertTrue(text.contains("true"), text)
+        let first = model.lines.count + 1
+        XCTAssertEqual(model.extraLines.map(\.number), Array(first...(first + model.extraLines.count - 1)))
+        XCTAssertEqual(model.extraLines.first?.kind, .unknown)
+        XCTAssertEqual(model.extraLines.first?.text, "Other fields sent with this command:")
+        XCTAssertTrue(model.extraLines.dropFirst().allSatisfy { $0.kind == .json })
+    }
+
+    func testExtraFieldsDoNotChangeTheDisplayLinesTheShownTextOrTheVerdict() throws {
+        let model = ApprovalDisplayModel(request: try bashWithFields(["dangerouslyDisableSandbox": true]))
+        XCTAssertEqual(model.lines.count, 1)
+        XCTAssertEqual(model.lines[0].text, "rm -rf build/")
+        XCTAssertEqual(model.shownText, "rm -rf build/")
+        XCTAssertEqual(model.roundTrip, .verified)
+    }
+
+    func testExtraFieldsDoNotRescueADisplayThatIsNotTheCommand() throws {
+        let request = try bashWithFields(["dangerouslyDisableSandbox": true],
+                                         lines: [Fx.line(1, "command", [Fx.plain("rm -rf build")])])
+        assertMismatch(request)
+    }
+
+    func testAllLinesAreTheDisplayLinesFollowedByTheExtraLines() throws {
+        let withExtras = ApprovalDisplayModel(request: try bashWithFields(["run_in_background": true]))
+        XCTAssertFalse(withExtras.extraLines.isEmpty)
+        XCTAssertEqual(withExtras.allLines, withExtras.lines + withExtras.extraLines)
+        let without = ApprovalDisplayModel(request: try bashWithFields([:]))
+        XCTAssertEqual(without.allLines, without.lines)
+    }
+
+    func testABashInputWithOnlyACommandHasNoExtraLines() throws {
+        let model = ApprovalDisplayModel(request: try bashWithFields([:]))
+        XCTAssertTrue(model.extraLines.isEmpty)
+    }
+
+    func testADescriptionEqualToTheRequestsDescriptionIsNotAnExtraField() throws {
+        let request = try bashWithFields(["description": "remove build"], description: "remove build")
+        XCTAssertTrue(ApprovalDisplayModel(request: request).extraLines.isEmpty)
+    }
+
+    func testADescriptionIsAnExtraFieldWhenTheRequestHasNoDescription() throws {
+        let model = ApprovalDisplayModel(request: try bashWithFields(["description": "remove build"]))
+        let text = model.extraLines.map(\.text).joined(separator: "\n")
+        XCTAssertTrue(text.contains("description"), text)
+        XCTAssertTrue(text.contains("remove build"), text)
+    }
+
+    func testADescriptionThatDiffersFromTheRequestsDescriptionIsAnExtraField() throws {
+        let request = try bashWithFields(["description": "delete everything"], description: "remove build")
+        let text = ApprovalDisplayModel(request: request).extraLines.map(\.text).joined(separator: "\n")
+        XCTAssertTrue(text.contains("delete everything"), text)
+    }
+
+    func testADescriptionThatIsOnlyCanonicallyEquivalentToTheRequestsDescriptionIsStillShown() throws {
+        let request = try bashWithFields(["description": "cafe\u{0301}"], description: "caf\u{00E9}")
+        XCTAssertFalse(ApprovalDisplayModel(request: request).extraLines.isEmpty)
+    }
+
+    func testOnlyBashShowsExtraLines() throws {
+        var requests: [(String, ApprovalRequestWire)] = []
+        requests.append(("edit", try Fx.editRequest(replaceAll: true)))
+        requests.append(("write", try Fx.writeRequest()))
+        requests.append(("notebook", try Fx.notebookEditRequest()))
+        requests.append(("mcp", try Fx.mcpRequest()))
+        requests.append(("other", try Fx.otherToolRequest()))
+        for (name, request) in requests {
+            let model = ApprovalDisplayModel(request: request)
+            XCTAssertTrue(model.extraLines.isEmpty, name)
+            XCTAssertEqual(model.allLines, model.lines, name)
+        }
+    }
+
+    func testAnInvisibleCharacterInAnExtraFieldIsAnInvisibleRunAndIsCounted() throws {
+        let model = ApprovalDisplayModel(request: try bashWithFields(["note": "pay\u{202E}x"]))
+        let runs = model.extraLines.flatMap(\.runs).filter { $0.kind == .invisible }
+        XCTAssertEqual(runs.map(\.text), ["⟨U+202E RLO⟩"])
+        XCTAssertEqual(runs.map(\.codePoint), [0x202E])
+        XCTAssertEqual(model.invisibleCount, 1)
+        XCTAssertEqual(model.banner(toolKind: .bash),
+                       "This command contains 1 invisible or direction-changing character.")
+        XCTAssertFalse(model.extraLines.map(\.text).joined().unicodeScalars.contains("\u{202E}"),
+                       "the extra lines show the token, never the raw character")
+    }
+
+    func testInvisibleCharactersInTheCommandAndInAnExtraFieldAreCountedTogether() throws {
+        let command = "echo \u{202E}x"
+        let request = try bashWithFields(["note": "a\u{200B}b"], command: command)
+        let model = ApprovalDisplayModel(request: request)
+        XCTAssertEqual(model.invisibleCount, 2)
+        XCTAssertEqual(model.banner(toolKind: .bash),
+                       "This command contains 2 invisible or direction-changing characters.")
+        XCTAssertTrue(model.isVerified)
+    }
+
+    func testANonAsciiExtraValueIsANonAsciiRunWithATooltipAndIsCounted() throws {
+        let model = ApprovalDisplayModel(request: try bashWithFields(["note": "r\u{043C}"]))
+        let runs = model.extraLines.flatMap(\.runs).filter { $0.kind == .nonAscii }
+        XCTAssertEqual(runs.map(\.text), ["\u{043C}"])
+        let tooltip = try XCTUnwrap(runs.first?.tooltip)
+        XCTAssertTrue(tooltip.contains("U+043C"), tooltip)
+        XCTAssertTrue(tooltip.contains("CYRILLIC SMALL LETTER EM"), tooltip)
+        XCTAssertEqual(model.nonAsciiCount, 1)
+    }
+
+    func testExtraFieldsKeepTheCommandsOwnCounts() throws {
+        let model = ApprovalDisplayModel(request: try bashWithFields(["run_in_background": true]))
+        XCTAssertEqual(model.invisibleCount, 0)
+        XCTAssertEqual(model.nonAsciiCount, 0)
+        XCTAssertNil(model.banner(toolKind: .bash))
+    }
+
+    // MARK: - Shown JSON is compared byte for byte
+
+    func testShownJsonThatIsCanonicallyEquivalentButNotTheSameBytesIsAMismatch() throws {
+        let precomposed = "caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        XCTAssertEqual(precomposed, decomposed, "precondition: Swift's == calls these equal")
+        let directions = [(input: precomposed, shown: decomposed), (input: decomposed, shown: precomposed)]
+        for toolKind in ["mcp", "other"] {
+            for d in directions {
+                let pretty = "{\n  \"text\": \"\(d.shown)\"\n}"
+                let request = try jsonToolRequest(toolKind: toolKind, input: ["text": d.input],
+                                                  lines: Fx.jsonDisplayLines(pretty))
+                assertMismatch(request, "\(toolKind): value shown as \(d.shown.unicodeScalars.map(\.value))")
+            }
+        }
+    }
+
+    func testShownJsonWhoseKeyIsCanonicallyEquivalentButNotTheSameBytesIsAMismatch() throws {
+        let precomposed = "caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        let directions = [(input: precomposed, shown: decomposed), (input: decomposed, shown: precomposed)]
+        for d in directions {
+            let pretty = "{\n  \"\(d.shown)\": 1\n}"
+            let request = try jsonToolRequest(toolKind: "mcp", input: [d.input: 1], lines: Fx.jsonDisplayLines(pretty))
+            assertMismatch(request, "key shown as \(d.shown.unicodeScalars.map(\.value))")
+        }
+    }
+
+    func testShownJsonWithIdenticalBytesIsVerifiedInEitherSpelling() throws {
+        for text in ["caf\u{00E9}", "cafe\u{0301}"] {
+            let pretty = "{\n  \"\(text)\": \"\(text)\"\n}"
+            for toolKind in ["mcp", "other"] {
+                let request = try jsonToolRequest(toolKind: toolKind, input: [text: text],
+                                                  lines: Fx.jsonDisplayLines(pretty))
+                XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified,
+                              "\(toolKind) \(text.unicodeScalars.map(\.value))")
+            }
+        }
+    }
+
+    func testAnEditOrWritesExtraFieldShownWithADifferentSpellingIsAMismatch() throws {
+        let precomposed = "caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        for name in ["edit", "write"] {
+            XCTAssertTrue(ApprovalDisplayModel(request: try fileWithNote(name, value: "plain", shown: "plain")).isVerified,
+                          "control \(name)")
+            for d in [(input: precomposed, shown: decomposed), (input: decomposed, shown: precomposed)] {
+                assertMismatch(try fileWithNote(name, value: d.input, shown: d.shown), "\(name)")
+            }
+            for text in [precomposed, decomposed] {
+                XCTAssertTrue(ApprovalDisplayModel(request: try fileWithNote(name, value: text, shown: text)).isVerified,
+                              "\(name) identical bytes")
+            }
+        }
+    }
+
+    // MARK: - Plain and separator runs are ASCII
+
+    func testAPlainRunWithACyrillicLetterThatIsNotANonAsciiRunIsAMismatch() throws {
+        let command = "r\u{043C}x"
+        let request = try Fx.bashRequest(command, lines: [Fx.line(1, "command", [Fx.plain(command)])])
+        assertMismatch(request, "the text equals the command, but the look-alike is not marked")
+    }
+
+    func testAPlainRunWithAnAccentedLetterIsAMismatchEvenWhenTheBytesMatch() throws {
+        for command in ["caf\u{00E9}", "cafe\u{0301}"] {
+            let request = try Fx.bashRequest(command, lines: [Fx.line(1, "command", [Fx.plain(command)])])
+            assertMismatch(request, "\(command.unicodeScalars.map(\.value))")
+        }
+    }
+
+    func testASeparatorRunWithANonAsciiCharacterIsAMismatch() throws {
+        let request = try Fx.bashRequest("a \u{043C} b", lines: [
+            Fx.line(1, "command", [Fx.plain("a "), Fx.separator("\u{043C}")]),
+            Fx.line(2, "command", cont: true, [Fx.plain(" b")]),
+        ], commandCount: 2)
+        assertMismatch(request)
+    }
+
+    func testTheSameNonAsciiCharacterAsItsOwnRunIsVerified() throws {
+        let request = try Fx.bashRequest("r\u{043C}x", lines: Fx.plainBashLines("r\u{043C}x"))
+        XCTAssertTrue(ApprovalDisplayModel(request: request).isVerified)
+    }
+
     // MARK: - Helpers
+
+    /// A Bash request for `command` whose input also has the `extra` fields.
+    private func bashWithFields(_ extra: Fx.Obj, command: String = "rm -rf build/", description: String? = nil,
+                                lines: [Fx.Obj]? = nil) throws -> ApprovalRequestWire {
+        var input: Fx.Obj = ["command": command]
+        for (key, value) in extra { input[key] = value }
+        return try Fx.request(input: input,
+                              display: Fx.display(lines: lines ?? Fx.plainBashLines(command), commandCount: 1),
+                              description: description)
+    }
+
+    /// An Edit or Write whose input also has `note: value`; the display shows `note: shown` as JSON.
+    private func fileWithNote(_ name: String, value: String, shown: String) throws -> ApprovalRequestWire {
+        let tool = fileTool(name)
+        var input = tool.input
+        input["note"] = value
+        let extra = "{\n  \"note\": \"\(shown)\"\n}"
+        return try Fx.request(toolKind: tool.toolKind, toolName: tool.toolName, displayName: tool.toolName,
+                              input: input,
+                              display: Fx.display(lines: Fx.fileDisplayLines(header: tool.header, body: tool.body,
+                                                                             extraJSON: extra)))
+    }
 
     private func requestWithInvisibleRun(scalar: UInt32, token: String, cp: Int?) throws -> ApprovalRequestWire {
         let character = try XCTUnwrap(Unicode.Scalar(scalar))

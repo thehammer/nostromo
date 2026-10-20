@@ -478,6 +478,16 @@ final class NostromodClientHandshakeTests: XCTestCase {
         }
     }
 
+    func testAClientThatNeverConnectedHasNoConnectionToAnswerOn() {
+        let c = NostromodClient(socketPath: "/tmp/nsfd-none-\(getpid())-\(UUID().uuidString.prefix(8)).sock")
+        XCTAssertFalse(c.hasConnection)
+    }
+
+    func testAConnectedClientHasAConnection() throws {
+        let c = try connectClient(to: [.init(features: nil)])
+        XCTAssertTrue(pumpUntil(5) { c.connected.value && c.hasConnection }, "the client never connected")
+    }
+
     func testTheClaimIsTrueOnlyWhenTheFeatureListContainsApprovalsV1() {
         XCTAssertTrue(NostromodClient.claimsRendersApprovals(features: ["approvals_v1"]))
         XCTAssertTrue(NostromodClient.claimsRendersApprovals(features: ["work", "approvals_v1", "model"]))
