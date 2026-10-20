@@ -10,8 +10,13 @@
 # --no-synthetic: the same arrival, then `click --text "Allow once"`, `key Return` and `key " "` must be
 #   refused: the card stays and the QA approvals dir has a `refusal` entry with channel app_control.
 #
-# Everything it sees is printed so it can be pasted into the PR. Exits 0 PASS, 1 FAIL, 3 INCONCLUSIVE
-# (display locked or asleep: the window is not visible).
+# Before the first cue it creates a QA agent session in the QA daemon (`qa-instance.sh focus`: a focus
+# whose CLI is the fake claude), selects its sidebar row and waits for the composer ("Message…").
+#
+# Everything it sees is printed so it can be pasted into the PR. On a FAIL it first prints what there is
+# to debug with (windows, a truncated tree, the daemon and placement log tails, the QA approvals dir).
+# KEEP=1 keeps the QA root after the run. Exits 0 PASS, 1 FAIL, 3 INCONCLUSIVE (display locked or
+# asleep: the window is not visible).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -35,13 +40,41 @@ echo "$out"
 root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
 [ -n "$root" ] || { echo "FAIL: no QA_ROOT printed"; exit 1; }
 stopped=0
-# shellcheck disable=SC2329  # invoked by the EXIT trap
-cleanup() { [ "$stopped" = 1 ] || KEEP="${KEEP:-}" "$instance" stop "$root" || true; }
-trap cleanup EXIT
 sock="$root/app-control.sock"
 ctl() { "$app" --socket "$sock" "$@"; }
 verdict=PASS
+
+# What there is to debug with, printed before the QA root goes away. `live`: the app is still up (windows,
+# tree); `files`: only what is on disk (after stop, when the isolation guard failed).
+debug_evidence() {
+  echo
+  echo "=== DEBUG EVIDENCE (the QA root is deleted at stop; KEEP=1 keeps it) ==="
+  if [ "${1:-live}" = live ]; then
+    echo "--- ctl windows"; ctl windows 2>&1 || true
+    echo "--- ctl tree --depth 3 (first 120 lines)"; { ctl tree --depth 3 2>&1 | head -n 120; } || true
+  fi
+  echo "--- nostromd.log (last 40 lines)"; tail -n 40 "$root/nostromd.log" 2>/dev/null || echo "(no daemon log)"
+  echo "--- window-placement.log (last 40 lines)"
+  tail -n 40 "$root/home/.nostromo/logs/window-placement.log" 2>/dev/null || echo "(no placement log)"
+  echo "--- QA approvals dir ($root/home/.nostromo/approvals)"
+  ls -la "$root/home/.nostromo/approvals" 2>&1 || true
+}
+# shellcheck disable=SC2329  # invoked by the EXIT trap
+cleanup() {
+  local rc=$?
+  [ "$stopped" = 1 ] && return
+  [ "$rc" = 0 ] || debug_evidence live
+  KEEP="${KEEP:-}" "$instance" stop "$root" || true
+}
+trap cleanup EXIT
 fail() { verdict=FAIL; echo "FAIL: $*"; }
+# A failure the run cannot continue past: evidence, stop, exit 1.
+abort_fail() {
+  fail "$*"
+  debug_evidence live
+  stopped=1; KEEP="${KEEP:-}" "$instance" stop "$root" || echo "FAIL: isolation guard"
+  exit 1
+}
 
 # The control socket answers before the app has placed its windows (they start at alpha 0 and are
 # revealed once placement finishes, one per display, each on its own Space). Wait up to 45 s for all of
@@ -55,12 +88,25 @@ for _ in $(seq 1 90); do
 done
 if windows_hidden "$windows"; then
   echo "INCONCLUSIVE: window not visible after 45 s (display locked or asleep, or the QA app never revealed its windows)"
-  echo "--- windows ---"; echo "$windows"
-  log="$root/home/.nostromo/logs/window-placement.log"
-  echo "--- window-placement.log (tail) ---"; tail -n 25 "$log" 2>/dev/null || echo "(no placement log at $log)"
-  stopped=1; "$instance" stop "$root" || true
+  debug_evidence live
+  stopped=1; KEEP="${KEEP:-}" "$instance" stop "$root" || exit 1   # an isolation breach outranks "inconclusive"
   exit 3
 fi
+
+# The QA app only has the built-in foci (Fred, Mother, Perri, Teri); the composer lives in an agent
+# session view. Have the QA daemon create a session whose CLI is the fake claude (it announces the
+# focus to the app), select its sidebar row, and wait for the composer.
+echo "--- QA agent session"
+if ! focus_out="$("$instance" focus "$root" 2>&1)"; then
+  echo "$focus_out"
+  abort_fail "could not create the QA agent session in the QA daemon"
+fi
+echo "$focus_out"
+label="$(sed -n 's/^QA_FOCUS_LABEL=//p' <<<"$focus_out")"
+[ -n "$label" ] || abort_fail "no QA_FOCUS_LABEL printed by the focus step"
+ctl wait "$label" --timeout 30 || abort_fail "the QA session's sidebar row '$label' did not appear within 30 s"
+ctl click --text "$label" >/dev/null || abort_fail "could not select the QA session's sidebar row '$label'"
+ctl wait "Message…" --timeout 15 || abort_fail "no composer ('Message…') within 15 s of selecting the QA session '$label'"
 
 # Poll up to $2 s until the card count is above zero ("present") or zero ("gone").
 wait_cards() {
@@ -140,7 +186,11 @@ PY
   fi
 done
 
+[ "$verdict" = PASS ] || debug_evidence live
 stopped=1
-if "$instance" stop "$root"; then :; else fail "isolation guard"; fi
+if KEEP="${KEEP:-}" "$instance" stop "$root"; then :; else
+  fail "isolation guard"
+  debug_evidence files
+fi
 echo "RESULT: $verdict (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF))"
 case "$verdict" in PASS) exit 0 ;; *) exit 1 ;; esac

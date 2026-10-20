@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Isolated QA instance: a worktree `nostromd` plus a cloned `com.hammer.nostromo.qa` app.
 
-    scripts/qa/qa-instance.sh [start [--no-synthetic]] | env | status | stop   (see that script)
+    scripts/qa/qa-instance.sh [start [--no-synthetic]] | env | status | focus | stop   (see that script)
 
 Never touches the user's running Nostromo, `nostromd`, sockets or `~/.nostromo`. Everything the
 instance owns lives under a fresh temp directory (QA_ROOT) with its own HOME. Before `start` and
@@ -12,8 +12,10 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -29,6 +31,14 @@ ROOT_MARKER = ".nostromo-qa-root"
 WATCHED_FILES = ("focuses.json", "daemon-panes.json", "daemon-sessions.json", "daemon-terminals.json")
 APPROVALS_DIR = "approvals"
 CONTROL_SOCKET = "app-control.sock"
+# The user's daemon appends to its own `audit-YYYY-MM-DD.jsonl` whenever real agent traffic asks for
+# an approval. That is not the QA run's doing: append-only growth is allowed (see `audit_problems`).
+AUDIT_FILE = re.compile(r"^audit-\d{4}-\d{2}-\d{2}\.jsonl$")
+MCP_SOCKET = "mcp.sock"
+# The session the harness drives: a daemon-created focus running the fake CLI, shown in the sidebar by its label.
+QA_FOCUS_LABEL = "QA approvals"
+QA_FOCUS_TITLE = "qa-approvals"
+QA_FOCUS_AGENT = "cody"
 # Process names that must not be started by a QA run (the user's own stay as they were).
 MONITORED = ("nostromd", "claude")
 
@@ -104,18 +114,83 @@ def process_view(procs):
     return {k: sorted(v) for k, v in view.items()}
 
 
-def compare_snapshots(before, after):
+def audit_files(approvals_path):
+    """{name: {"len": n, "sha256": hash of those n bytes}} for the top-level `audit-*.jsonl` files.
+
+    Lengths and hashes only: the user's audit content never enters a snapshot or any output."""
+    out = {}
+    if not os.path.isdir(approvals_path):
+        return out
+    for name in sorted(os.listdir(approvals_path)):
+        if not AUDIT_FILE.match(name):
+            continue
+        try:
+            with open(os.path.join(approvals_path, name), "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        out[name] = {"len": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    return out
+
+
+def qa_markers(qa_root=None):
+    """Byte strings that no line of the user's own audit log may carry: only a QA run writes them."""
+    markers = {"`FIXTURE:`": b"FIXTURE:", "the QA bundle id": QA_BUNDLE_ID.encode()}
+    if qa_root:
+        markers["the QA root path"] = qa_root.encode()
+    return markers
+
+
+def audit_problems(name, old, approvals_dir, qa_root=None):
+    """Problems with one audit file between its snapshot (`old` is None for a file that is new) and now.
+
+    Allowed: append-only growth (the old bytes are an unchanged prefix) and a new dated file, as long
+    as no new bytes mention a QA marker. Reads the file; reports names and marker kinds, never content."""
+    label = f"~/.nostromo/approvals/{name}"
+    try:
+        with open(os.path.join(approvals_dir, name), "rb") as f:
+            data = f.read()
+    except OSError:
+        return [f"{label} was deleted or became unreadable"]
+    start = 0
+    if old is not None:
+        if len(data) < old["len"]:
+            return [f"{label} shrank"]
+        if hashlib.sha256(data[:old["len"]]).hexdigest() != old["sha256"]:
+            return [f"{label} changed (the bytes already in it are not an unchanged prefix)"]
+        start = old["len"]
+        if start and data[start - 1:start] != b"\n":  # the snapshot cut a line in half: scan that line whole
+            start = data.rfind(b"\n", 0, start) + 1
+    appended = data[start:]
+    return [f"{label}: an appended line mentions {kind} (the QA run wrote into the user's audit log)"
+            for kind, marker in qa_markers(qa_root).items() if marker in appended]
+
+
+def compare_snapshots(before, after, approvals_dir=None, qa_root=None):
     """Problems between two guard snapshots (see `take_snapshot`); empty means isolated.
 
-    Files, the approvals listing, the control-socket inode and `defaults` must be identical.
-    The user's own nostromd/Nostromo pids must survive; no new `claude` (or other monitored)
-    process may appear."""
+    Files, the control-socket inode and `defaults` must be identical, and so must the approvals
+    listing apart from the daemon's audit logs: the user's real daemon appends to its dated
+    `audit-*.jsonl` during a run, which is allowed when it is append-only and carries no QA marker
+    (needs `approvals_dir`, the user's real approvals directory, to inspect; without it any audit
+    growth is reported). The user's own nostromd/Nostromo pids must survive; no new `claude` (or
+    other monitored) process may appear."""
     problems = []
     for name, b in before["files"].items():
         if b != after["files"].get(name):
             problems.append(f"~/.nostromo/{name} changed")
     if before["approvals"] != after["approvals"]:
         problems.append("~/.nostromo/approvals/ changed (file list or sizes)")
+    b_audit, a_audit = before.get("approvals_audit", {}), after.get("approvals_audit", {})
+    for name in sorted(set(b_audit) | set(a_audit)):
+        if name in b_audit and name not in a_audit:
+            problems.append(f"~/.nostromo/approvals/{name} was deleted")
+        elif b_audit.get(name) == a_audit.get(name):
+            continue
+        elif approvals_dir is None:
+            problems.append(f"~/.nostromo/approvals/{name} changed (not inspected: no approvals dir given)")
+        else:
+            problems.extend(audit_problems(name, b_audit.get(name), approvals_dir, qa_root))
     if before["control_socket_inode"] != after["control_socket_inode"]:
         problems.append("~/.nostromo/app-control.sock inode changed (the user's socket was replaced)")
     if before["defaults"] != after["defaults"]:
@@ -134,9 +209,14 @@ def compare_snapshots(before, after):
 
 def take_snapshot(user_home, ps_text, defaults_text, qa_root=None):
     nostromo = os.path.join(user_home, ".nostromo")
+    approvals = os.path.join(nostromo, APPROVALS_DIR)
+    listing = dir_listing(approvals)
+    if listing is not None:  # the audit logs are tracked by `approvals_audit`, not by size
+        listing = {k: v for k, v in listing.items() if not AUDIT_FILE.match(k)}
     return {
         "files": {n: file_sha256(os.path.join(nostromo, n)) for n in WATCHED_FILES},
-        "approvals": dir_listing(os.path.join(nostromo, APPROVALS_DIR)),
+        "approvals": listing,
+        "approvals_audit": audit_files(approvals),
         "control_socket_inode": socket_inode(os.path.join(nostromo, CONTROL_SOCKET)),
         "defaults": hashlib.sha256(defaults_text.encode()).hexdigest() if defaults_text else None,
         "processes": process_view(parse_processes(ps_text, qa_root)),
@@ -180,6 +260,64 @@ def app_env(qa_root, base_env, synthetic=True):
     return env
 
 
+def guard_socket_path(qa_root, path):
+    """The real path of `path`, only if it lies inside the QA instance root.
+
+    The harness talks to the QA daemon and nobody else: a path outside `qa_root` (also through `..`
+    or a symlink), a root without the QA marker, or anything under the user's own `~/.nostromo`
+    raises ValueError."""
+    root = os.path.realpath(qa_root)
+    if not os.path.exists(os.path.join(root, ROOT_MARKER)):
+        raise ValueError(f"{root} is not a QA instance root (no {ROOT_MARKER})")
+    real = os.path.realpath(path)
+    if os.path.commonpath([root, real]) != root:
+        raise ValueError(f"refusing socket {real}: not under the QA root {root}")
+    users = os.path.realpath(os.path.expanduser("~/.nostromo"))
+    if os.path.commonpath([users, real]) == users:
+        raise ValueError(f"refusing socket {real}: it is under the user's ~/.nostromo")
+    return real
+
+
+def mcp_create_focus(qa_root, cwd, label=QA_FOCUS_LABEL, title=QA_FOCUS_TITLE, agent=QA_FOCUS_AGENT, timeout=30):
+    """Ask the QA daemon (its MCP socket, `<qa_root>/mcp.sock`) to create a focus running the fake CLI.
+
+    `nostromo.create_focus` spawns the session (NOSTROMO_CLAUDE_BIN, set in the daemon's env, is the fake
+    claude) and broadcasts `FocusCreated`, which is how the app adds the sidebar row. A plain
+    `SessionSpawn` on the main socket makes a session but registers no focus, so the app never shows it.
+    The session is owned by the daemon and outlives this connection. Returns the tool's outcome dict."""
+    path = guard_socket_path(qa_root, os.path.join(qa_root, MCP_SOCKET))
+    args = {"agent": agent, "title": title, "label": label, "org": "Carefeed", "working_directory": cwd}
+    frames = [
+        {"type": "hello"},
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "qa-harness", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "nostromo.create_focus", "arguments": args}},
+    ]
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        sock.connect(path)
+        reader = sock.makefile("rb")
+        responses = {}
+        for frame in frames:
+            sock.sendall(json.dumps(frame).encode() + b"\n")
+            if "id" in frame:
+                line = reader.readline()
+                if not line:
+                    raise RuntimeError("the QA daemon's MCP socket closed without answering")
+                responses[frame["id"]] = json.loads(line)
+    reply = responses[2]
+    if "error" in reply:
+        raise RuntimeError(f"create_focus: JSON-RPC error {reply['error']}")
+    try:
+        outcome = json.loads(reply["result"]["content"][0]["text"])
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise RuntimeError(f"create_focus: unreadable reply {reply!r}: {e}")
+    if "error" in outcome:
+        raise RuntimeError(f"create_focus: {outcome['error']}: {outcome.get('detail', '')}")
+    return outcome
+
+
 # ── side-effecting parts ─────────────────────────────────────────────────────
 
 
@@ -196,6 +334,10 @@ def user_snapshot(qa_root=None):
     ps = run(["/bin/ps", "-axo", "pid,command"]).stdout
     d = run(["/usr/bin/defaults", "export", USER_BUNDLE_ID, "-"])
     return take_snapshot(os.path.expanduser("~"), ps, d.stdout if d.returncode == 0 else "", qa_root)
+
+
+def user_approvals_dir():
+    return os.path.join(os.path.expanduser("~"), ".nostromo", APPROVALS_DIR)
 
 
 def state_path(qa_root):
@@ -343,7 +485,7 @@ def cmd_start(args):
                  60, "the QA app's control socket")
     except BaseException as e:
         teardown(qa_root, state)
-        problems = compare_snapshots(before, user_snapshot(qa_root))
+        problems = compare_snapshots(before, user_snapshot(qa_root), user_approvals_dir(), qa_root)
         print(f"start failed: {e}", file=sys.stderr)
         for p in problems:
             print(f"ISOLATION FAILURE: {p}", file=sys.stderr)
@@ -375,16 +517,32 @@ def cmd_status(args):
     print(f"synthetic={state.get('synthetic')}")
 
 
+def cmd_focus(args):
+    """Create the QA agent session (a focus on the fake CLI) in the QA daemon; print its sidebar label."""
+    qa_root = resolve_root(args[0] if args else None)
+    cwd = os.path.join(qa_root, "session-cwd")
+    os.makedirs(cwd, exist_ok=True)
+    try:
+        outcome = mcp_create_focus(qa_root, cwd)
+    except (ValueError, RuntimeError, OSError) as e:
+        die(f"could not create the QA session: {e}")
+    print(f"QA_FOCUS_TAG={outcome.get('focus_id', '')}")
+    print(f"QA_FOCUS_LABEL={QA_FOCUS_LABEL}")
+
+
 def cmd_stop(args):
     qa_root = resolve_root(args[0] if args else None)
     state = load_state(qa_root)
     teardown(qa_root, state)
-    problems = compare_snapshots(state["before"], user_snapshot(qa_root))
-    if os.environ.get("KEEP") != "1":
+    problems = compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root)
+    # An isolation failure keeps the root: its logs are the evidence (the caller prints them).
+    keep = os.environ.get("KEEP") == "1" or bool(problems)
+    if not keep:
         shutil.rmtree(qa_root, ignore_errors=True)
     if problems:
         for p in problems:
             print(f"ISOLATION FAILURE: {p}", file=sys.stderr)
+        print(f"QA root kept for debugging: {qa_root} (delete it when done)", file=sys.stderr)
         sys.exit(1)
     print("isolation guard: PASS (user's files, approvals dir, control socket, defaults and processes unchanged)")
 
@@ -392,9 +550,9 @@ def cmd_stop(args):
 def main(argv):
     cmd = argv[0] if argv else "start"
     rest = argv[1:]
-    handlers = {"start": cmd_start, "env": cmd_env, "status": cmd_status, "stop": cmd_stop}
+    handlers = {"start": cmd_start, "env": cmd_env, "status": cmd_status, "focus": cmd_focus, "stop": cmd_stop}
     if cmd not in handlers:
-        die(f"usage: qa-instance.sh [start [--no-synthetic]] | env | status | stop [ROOT]", 2)
+        die(f"usage: qa-instance.sh [start [--no-synthetic]] | env | status | focus | stop [ROOT]", 2)
     handlers[cmd](rest)
 
 

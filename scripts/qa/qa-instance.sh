@@ -5,7 +5,8 @@
 #   scripts/qa/qa-instance.sh start [--no-synthetic]   build, launch, print QA_ROOT and the socket export
 #   scripts/qa/qa-instance.sh env [ROOT]               print only the NOSTROMO_APP_CONTROL_SOCKET export
 #   scripts/qa/qa-instance.sh status [ROOT]
-#   scripts/qa/qa-instance.sh stop [ROOT]              kill only our pids, run the isolation guard, rm ROOT (KEEP=1 keeps it)
+#   scripts/qa/qa-instance.sh focus [ROOT]            create the QA agent session (fake CLI) in the QA daemon; prints QA_FOCUS_LABEL
+#   scripts/qa/qa-instance.sh stop [ROOT]              kill only our pids, run the isolation guard, rm ROOT (KEEP=1 keeps it; so does an isolation failure)
 #
 # ROOT defaults to $NOSTROMO_QA_ROOT. Needs a logged-in, awake display (not headless, not CI).
 set -euo pipefail
