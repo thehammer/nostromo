@@ -3,7 +3,7 @@
 Run with:  python3 -m unittest discover -s tests/qa_instance -v
 Never starts an app, a daemon or any real instance.
 """
-import ast, hashlib, importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile, unittest
+import ast, hashlib, importlib.machinery, importlib.util, json, os, re, struct, subprocess, sys, tempfile, unittest, zlib
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts", "qa", "lib"))
@@ -646,10 +646,246 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
         near = any(re.search(r"\b%s\b" % name, "\n".join(lines[max(0, i - 4):i + 5])) for i in fails)
         self.assertTrue(near, "evidence function is not called near a FAIL path")
 
+    def test_cards_are_matched_by_content_and_stale_cards_cleared_before_the_cue(self):
+        self.assertIn("wait_card_for", self.sh)
+        self.assertLess(self.sh.index("clear_cards"), self.sh.index('send_cue "$fixture"'))
+
+    def test_a_failed_clear_skips_the_fixture_before_the_cue_and_any_click(self):
+        m = re.search(r'if ! clear_cards; then\n(.*?)\n\s*fi', self.sh, re.S)
+        self.assertIsNotNone(m, "the synthetic branch must test clear_cards' status")
+        self.assertIn("continue", m.group(1))
+        self.assertLess(m.start(), self.sh.index('send_cue "$fixture"'))
+
+    def test_allow_is_clicked_only_after_waiting_for_enabled(self):
+        self.assertLess(self.sh.index('wait_allow "$rid"'), self.sh.index('click_card_button "$rid" "Allow once"'))
+
+    def test_deny_and_allow_are_never_clicked_by_a_substring_text_match(self):
+        # `ctl click --text` is a case-insensitive substring match: it could hit "Deny & stop". The only
+        # --text "Allow once" left is the --no-synthetic refusal probe, which clicks nothing but that text.
+        code = "\n".join(l for l in self.sh.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotRegex(code, r'click --text "Deny')
+        self.assertEqual(code.count('click --text "Allow once"'), 1)
+        self.assertIn('"Deny"', code)
+
+    def test_the_text_drawn_proof_is_pixels_and_screenshots_live_in_a_private_dir(self):
+        self.assertIn("text not drawn", read("scripts", "qa", "lib", "card_checks.py"))
+        self.assertIn("mktemp -d", self.sh)
+        self.assertNotIn("/tmp/qa-card-", self.sh)
+        self.assertIn('prove_drawn "$rid" "$fixture"', self.sh)
+        self.assertIn('"$checks" prove', self.sh)
+
+    def test_the_card_text_view_is_focused_and_the_key_target_recorded_before_the_end_key(self):
+        i_focus = self.sh.index('focus_card_text "$rid"')
+        i_key = self.sh.index('key "$(printf')
+        self.assertLess(i_focus, i_key)
+        self.assertIn("key target", self.sh)
+
     def test_the_readme_documents_keeping_the_session_for_inspection(self):
         readme = read("scripts", "qa", "README.md")
         self.assertIn("KEEP=1", readme)
         self.assertIn("session", readme.lower())
+
+    def test_the_readme_describes_the_pixel_proof_not_the_old_find_proof(self):
+        readme = read("scripts", "qa", "README.md")
+        self.assertIn("glyph", readme)
+        self.assertIn("text in view tree", readme)
+        self.assertNotIn("Known limit: `approvals list` has no card frame", readme)
+
+    def run_script(self, *args):
+        with tempfile.TemporaryDirectory() as home:
+            env = {"HOME": home, "PATH": os.environ.get("PATH", "")}
+            return subprocess.run(["bash", os.path.join(ROOT, "scripts", "qa", "approvals-card.sh"), *args],
+                                  env=env, capture_output=True, text=True, timeout=60)
+
+    def test_fixture_names_outside_the_safe_pattern_exit_2_before_anything_starts(self):
+        for bad in ("../x", "a/b", "Simple", "a b", "x;y", ""):
+            with self.subTest(name=bad):
+                r = self.run_script(bad)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertNotIn("QA_ROOT=", r.stdout)
+
+    def test_an_unknown_fixture_exits_2(self):
+        r = self.run_script("no_such_fixture")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no_such_fixture", r.stderr)
+
+
+def _png(width, height, pixel):
+    """A tiny RGB PNG (filter 0), `pixel(x, y)` -> (r, g, b)."""
+    raw = b"".join(b"\0" + b"".join(bytes(pixel(x, y)) for x in range(width)) for y in range(height))
+
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _node(cls, x, y, w, h, text=None, children=None):
+    n = {"class": cls, "frame": {"x": x, "y": y, "w": w, "h": h}}
+    if text:
+        n["text"] = text
+    if children:
+        n["children"] = children
+    return n
+
+
+CARD_TREE = _node("NSView", 0, 0, 200, 150, children=[_node("ApprovalCardView", 10, 10, 180, 120, children=[
+    _node("ApprovalInputView", 10, 20, 180, 60, children=[
+        _node("NSClipView", 30, 20, 160, 60, children=[_node("ApprovalTextView", 30, 20, 160, 400, "rm -rf /tmp/x/a")])]),
+    _node("NSView", 10, 100, 180, 26, children=[
+        _node("ApprovalButton", 10, 100, 50, 26, "Deny"),
+        _node("ApprovalButton", 70, 100, 40, 26, "Deny & stop"),
+        _node("ApprovalButton", 120, 100, 60, 26, "Allow once")])])])
+
+
+def _card(rid, text):
+    return {"request_id": rid, "input": text, "lines": [{"number": 1, "text": text}], "windows": [0],
+            "options": [{"id": "allow_once", "enabled": True, "label": "Allow once"}]}
+
+
+class ApprovalsCardShellFunctionTests(unittest.TestCase):
+    """Runs the script's own helper functions against a stubbed `ctl` (canned JSON; clicks are logged)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = self.tmp.name
+
+    def put(self, name, data):
+        mode = "wb" if isinstance(data, bytes) else "w"
+        with open(os.path.join(self.d, name), mode) as f:
+            f.write(data if isinstance(data, bytes) else json.dumps(data))
+
+    def run_fn(self, call, listing, png=None, label_hits=None, tree=CARD_TREE, find_hits=None, after=None):
+        if after is not None:
+            self.put("listing.after.json", {"approvals": after})
+        self.put("tree.json", tree)
+        self.put("listing.json", {"approvals": listing})
+        self.put("find.json", find_hits if find_hits is not None else [{"class": "ApprovalTextView",
+                                                                         "frame": {"x": 30, "y": 20, "w": 160, "h": 400}}])
+        self.put("label.json", label_hits if label_hits is not None else [{"class": "NSTableRowView"}])
+        if png is not None:
+            self.put("shot.png", png)
+        script = r'''
+set -euo pipefail
+repo=%(root)s; D=%(d)s; checks="$repo/scripts/qa/lib/card_checks.py"
+work="$D/work"; mkdir -p "$work"; label=QA; fixture=t; verdict=PASS
+fail() { verdict=FAIL; echo "FAIL: $*"; }
+ctl() {
+  echo "ctl $*" >>"$D/calls.log"
+  while [ "${1:-}" = -w ]; do shift 2; done
+  case "$1" in
+    tree) cat "$D/tree.json" ;;
+    find) if [ "$2" = QA ]; then cat "$D/label.json"; else cat "$D/find.json"; fi ;;
+    screenshot) if [ -f "$D/shot.png" ]; then cp "$D/shot.png" "$2"; else echo no >&2; return 1; fi ;;
+    approvals) if [ -f "$D/clicked" ] && [ -f "$D/listing.after.json" ]; then cat "$D/listing.after.json"; else cat "$D/listing.json"; fi ;;
+    click) touch "$D/clicked"; echo '{}' ;;
+    *) echo '{}' ;;
+  esac
+}
+listing_json() { ctl approvals list; }
+wait_cards() { return 0; }
+eval "$(sed -n '/^fixture_command() {/,/^for fixture in/p' "$repo/scripts/qa/approvals-card.sh" | sed '$d')"
+%(call)s
+''' % {"root": json.dumps(ROOT), "d": json.dumps(self.d), "call": call}
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+
+    def clicks(self):
+        try:
+            with open(os.path.join(self.d, "calls.log")) as f:
+                return [l.strip() for l in f if " click " in l]
+        except FileNotFoundError:
+            return []
+
+    def test_deny_clicks_the_exact_deny_button_never_deny_and_stop(self):
+        r = self.run_fn('click_card_button r1 Deny', [_card("r1", "rm -rf /tmp/x/a")])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.clicks(), ["ctl -w 0 click 35 113"])   # Deny's centre (10+50/2, 100+26/2)
+
+    def test_a_missing_button_clicks_nothing_and_fails(self):
+        r = self.run_fn('click_card_button r1 "Nope"', [_card("r1", "rm -rf /tmp/x/a")])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.clicks(), [])
+        self.assertIn("no button titled", r.stdout)
+
+    def test_a_card_not_visible_in_the_tree_is_never_clicked(self):
+        r = self.run_fn('click_card_button r2 Deny', [_card("r1", "rm -rf /tmp/x/a"), _card("r2", "ls -la /elsewhere")])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.clicks(), [])
+
+    def test_the_session_surviving_a_deny_is_checked_on_its_sidebar_row(self):
+        ok = self.run_fn('session_survives', [_card("r1", "x")])
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        gone = self.run_fn('session_survives', [_card("r1", "x")], label_hits=[])
+        self.assertNotEqual(gone.returncode, 0)
+
+    def test_deny_and_assert_passes_when_the_request_goes_and_the_session_row_stays(self):
+        r = self.run_fn('deny_and_assert r1 || true; echo "verdict=$verdict"', [_card("r1", "rm -rf /tmp/x/a")], after=[])
+        self.assertIn("verdict=PASS", r.stdout, r.stdout + r.stderr)
+        self.assertIn("survived", r.stdout)
+
+    def test_deny_and_assert_fails_loudly_when_the_session_disappears(self):
+        r = self.run_fn('deny_and_assert r1 || true; echo "verdict=$verdict"', [_card("r1", "rm -rf /tmp/x/a")], after=[],
+                        label_hits=[])
+        self.assertIn("verdict=FAIL", r.stdout, r.stdout + r.stderr)
+        self.assertIn("SESSION DISAPPEARED", r.stdout)
+
+    def test_deny_and_assert_fails_when_the_request_is_still_listed(self):
+        r = self.run_fn('deny_and_assert r1 || true; echo "verdict=$verdict"', [_card("r1", "rm -rf /tmp/x/a")])
+        self.assertIn("verdict=FAIL", r.stdout, r.stdout + r.stderr)
+        self.assertIn("still listed", r.stdout)
+
+    def test_two_matching_cards_are_ambiguous_and_never_picked_by_position(self):
+        r = self.run_fn('rc=0; out="$(wait_card_for "echo ")" || rc=$?; echo "rc=$rc $out"',
+                        [_card("a", "echo one"), _card("b", "echo two")])
+        self.assertIn("rc=4", r.stdout)
+        self.assertIn("ambiguous card selection", r.stdout)
+
+    def test_prove_drawn_fails_on_a_blank_screenshot(self):
+        r = self.run_fn('prove_drawn r1 t && echo PASSED || echo "FAILED: $drawn_why"', [_card("r1", "rm -rf /tmp/x/a")],
+                        png=_png(400, 300, lambda x, y: (20, 20, 20)))
+        self.assertIn("FAILED", r.stdout)
+        self.assertIn("text area is blank", r.stdout)
+        self.assertNotIn("PASSED", r.stdout)
+
+    def test_prove_drawn_passes_with_glyph_pixels_in_the_text_area(self):
+        light = lambda x, y: (230, 230, 230) if 60 <= x < 200 and 60 <= y < 80 else (20, 20, 20)  # noqa: E731
+        r = self.run_fn('prove_drawn r1 t && echo PASSED || echo "FAILED: $drawn_why"', [_card("r1", "rm -rf /tmp/x/a")],
+                        png=_png(400, 300, light))
+        self.assertIn("PASSED", r.stdout, r.stdout + r.stderr)
+        self.assertIn("text drawn", r.stdout)
+
+    def test_prove_drawn_fails_closed_on_a_corrupt_or_missing_screenshot(self):
+        good = _png(400, 300, lambda x, y: (230, 230, 230) if 60 <= x < 200 and 60 <= y < 80 else (20, 20, 20))
+        for name, png in (("truncated", good[:70]), ("garbage", b"not a png at all" * 8), ("missing", None)):
+            with self.subTest(png=name):
+                r = self.run_fn('prove_drawn r1 t && echo PASSED || echo "FAILED: $drawn_why"', [_card("r1", "rm -rf /tmp/x/a")],
+                                png=png)
+                self.assertNotIn("PASSED", r.stdout)
+                self.assertIn("could not read screenshot", r.stdout)
+            try:
+                os.remove(os.path.join(self.d, "shot.png"))
+            except FileNotFoundError:
+                pass
+
+    def test_prove_drawn_fails_when_the_card_text_area_cannot_be_located(self):
+        r = self.run_fn('prove_drawn r1 t && echo PASSED || echo "FAILED: $drawn_why"', [_card("r1", "rm -rf /tmp/x/a")],
+                        png=_png(400, 300, lambda x, y: (230, 230, 230) if 60 <= x < 200 and 60 <= y < 80 else (20, 20, 20)),
+                        tree=_node("NSView", 0, 0, 200, 150, children=[_node("ApprovalOverlayHost", 0, 0, 200, 150)]))
+        self.assertNotIn("PASSED", r.stdout)
+        self.assertIn("cannot locate the card text area", r.stdout)
+        self.assertIn("tree excerpt", r.stdout)
+        self.assertIn("ApprovalOverlayHost", r.stdout)
+
+    def test_prove_drawn_keeps_its_files_in_the_work_directory(self):
+        self.run_fn('prove_drawn r1 t || true', [_card("r1", "rm -rf /tmp/x/a")],
+                    png=_png(400, 300, lambda x, y: (20, 20, 20)))
+        self.assertTrue(os.path.exists(os.path.join(self.d, "work", "t.png")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, "work", "t.tree.json")))
+        with open(os.path.join(self.d, "calls.log")) as f:
+            calls = f.read()
+        self.assertNotIn("/tmp/qa-card", calls)
+        self.assertIn(os.path.join(self.d, "work", "t.png"), calls)
 
 
 # ---- QHI: the QA app must never write into the user's real ~/.nostromo ----

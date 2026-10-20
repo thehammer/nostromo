@@ -14,6 +14,33 @@ runs one and reads the PASS/FAIL lines.
 
 ### `approvals-card.sh`: the QA session, evidence and env knobs
 
+Robustness (QSR): pending cards are denied before each fixture and at the end, each with the card's own exact "Deny"
+button (located in `ctl tree` inside the card and clicked by coordinates, never a `--text "Deny"` substring that could
+hit "Deny & stop"); after every Deny the request must be gone and the QA session's sidebar row must survive (if it
+vanished the run FAILs loudly). A fixture whose stale cards could not be cleared is skipped: no cue, no Allow click.
+Each fixture waits for the card whose `input` starts with the fixture's first command line cut at its first non-ASCII
+character (from `tests/fixtures/approvals/<name>.json`); a prefix shorter than 4 characters selects by exact full
+input instead; two matching cards are "ambiguous card selection" (FAIL), never picked by position. "Allow once" is
+clicked only once `enabled:true` (up to 20 s; a timeout FAILs naming the label seen). `heredoc_300` must stay gated
+("Scroll to the end to allow") after a synthetic End key; the script first clicks into the card's text view, reads
+the first responder with the read-only `hittest` and prints it ("key target: ..."), and sends End only if the card
+text view would receive it (otherwise FAIL: "stays gated" would prove nothing).
+
+Text-drawn proof (pixels): the card's text viewport (the `NSClipView` inside the card's `ApprovalInputView`, from
+`ctl tree --depth 40`, matched to the card by its first line; it excludes the line-number gutter) is cropped out of
+`ctl screenshot` (PNG decoded with `zlib`/`struct` only; points scaled to pixels by PNG width / window content
+width) and must hold at least 40 pixels whose luminance differs by more than 60/255 from the viewport's modal
+background, in the whole viewport and in the first line's band. A blank text area FAILs "text not drawn: the card's
+text area is blank (model has N lines)"; an unreadable or corrupt PNG FAILs "could not read screenshot"; a card text
+view that cannot be located FAILs "cannot locate the card text area" and prints a tree excerpt. Nothing passes by
+fallback. `ctl find` for the first 12 ASCII characters of the card's rendered first line (cut at the first
+non-ASCII/invisible character, so the bidi fixture's probe is `echo `) is a secondary "text in view tree" check,
+required to hit a view overlapping the card; it matches model text, not glyphs, which is why the pixels decide.
+Screenshots, trees and listings go to a private `mktemp -d` directory (mode 0700, printed at the start, removed at
+the end unless `KEEP=1`); fixture names must match `[a-z0-9_]+` (exit 2 otherwise). With `--no-synthetic` a stale
+card cannot be Denied, so it is noted (not a FAIL) and ignored by input matching. One `SUMMARY` line per fixture.
+Pure checks live in `lib/card_checks.py` (tests: `tests/qa_instance/test_card_checks.py`).
+
 The QA app has only the built-in foci (Fred, Mother, Perri, Teri); the composer exists only inside an agent
 session. After `start` (and once the windows are visible) the script runs `qa-instance.sh focus`: it asks the QA
 daemon, over `<QA_ROOT>/mcp.sock`, to `nostromo.create_focus` a session titled "QA approvals" whose CLI is
