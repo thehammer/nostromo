@@ -13,6 +13,13 @@
 # Before the first cue it creates a QA agent session in the QA daemon (`qa-instance.sh focus`: a focus
 # whose CLI is the fake claude), selects its sidebar row and waits for the composer ("Message…").
 #
+# Cards are matched by content: each fixture waits for the card whose `input` starts with that fixture's
+# first command line (from tests/fixtures/approvals/<name>.json) and uses that card's request_id throughout;
+# pending cards are denied before each fixture and at the end. Allow once is clicked only once its option is
+# `enabled:true` (up to 20 s). Text-drawn proof (scripts/qa/lib/card_checks.py): `ctl find` for the first 12
+# chars of the card's first line must hit a visible view (non-empty frame), plus a screenshot at
+# /tmp/qa-card-<fixture>.png (QA content only). One SUMMARY line per fixture.
+#
 # Everything it sees is printed so it can be pasted into the PR. On a FAIL it first prints what there is
 # to debug with (windows, a truncated tree, the daemon and placement log tails, the QA approvals dir).
 # KEEP=1 keeps the QA root after the run. Exits 0 PASS, 1 FAIL, 3 INCONCLUSIVE (display locked or
@@ -137,17 +144,82 @@ send_cue() {
   ctl key $'\r' --key-code 36 >/dev/null
 }
 
+checks="$here/lib/card_checks.py"
+listing_json() { ctl approvals list; }
+
+# The expected first line of a fixture's command, read from tests/fixtures/approvals/<name>.json and cut
+# at the first non-ASCII character (the card shows those as tokens).
+expected_first_line() {
+  python3 - "$repo/tests/fixtures/approvals/$1.json" <<'PY'
+import json, sys
+cmd = json.load(open(sys.argv[1]))["tool_uses"][0]["input"]["command"].split("\n", 1)[0]
+out = ""
+for ch in cmd:
+    if ord(ch) > 126 or ord(ch) < 32:
+        break
+    out += ch
+print(out)
+PY
+}
+
+# Deny every card still pending (poll until gone, up to 10 s). QSR-4: no card leaks across fixtures.
+clear_cards() {
+  local ids
+  ids="$(listing_json | python3 "$checks" stale)"
+  [ -n "$ids" ] || return 0
+  echo "(clearing stale card(s): $(tr '\n' ' ' <<<"$ids"))"
+  ctl click --text "Deny" >/dev/null 2>&1 || true
+  wait_cards gone 10 && return 0
+  echo "note: stale card(s) still showing after Deny"; return 1
+}
+
+# Wait up to 15 s for the card whose input starts with $1; prints its request_id.
+wait_card_for() {
+  local rid
+  for _ in $(seq 1 60); do
+    rid="$(listing_json | python3 "$checks" pick "$1" || true)"
+    [ -z "$rid" ] || { echo "$rid"; return 0; }
+    sleep 0.25
+  done
+  return 1
+}
+
+# Poll up to 20 s until the card's Allow once is enabled or gated. Prints "<state> <secs>" or "waiting:<label>".
+wait_allow() {
+  local st t0=$SECONDS
+  for _ in $(seq 1 80); do
+    st="$(listing_json | python3 "$checks" state "$1")"
+    case "$st" in ready|gated) echo "$st $((SECONDS - t0))"; return 0 ;; esac
+    sleep 0.25
+  done
+  echo "$st"; return 1
+}
+
+# Text-drawn proof: find the first 12 chars of the card's first line among the drawn views (NSTextView text is
+# searched by `find`; hidden views are already omitted), and screenshot the window. Prints the verdict line.
+prove_drawn() {
+  local rid="$1" fixture="$2" cur probe hits png="/tmp/qa-card-$2.png" msg
+  cur="$(listing_json)"
+  probe="$(python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); import card_checks as c; print(c.probe_text(c.card_by_id(json.loads(sys.argv[2]),sys.argv[3]) or {}))' "$here/lib" "$cur" "$rid")"
+  hits="$(ctl find "$probe" 2>/dev/null || echo '[]')"
+  ctl screenshot "$png" >/dev/null 2>&1 && echo "screenshot: $png" || echo "screenshot: FAILED ($png)"
+  msg="$(python3 -c 'import json,sys; print(json.dumps({"approvals": json.loads(sys.argv[1]), "find": json.loads(sys.argv[2])}))' "$cur" "$hits" | python3 "$checks" drawn "$rid")" || { echo "$msg"; return 1; }
+  echo "$msg"
+}
+
 for fixture in "${fixtures[@]}"; do
   echo
   echo "=== FIXTURE:$fixture (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF)) ==="
+  clear_cards || fail "$fixture: could not clear stale card(s) before the cue"
+  expected="$(expected_first_line "$fixture")"
   echo "--- transcript-anchor before"
   before="$(ctl transcript-anchor)"; echo "$before"
   send_cue "$fixture"
-  if wait_cards present 15; then
-    echo "--- approvals list"
-    listing="$(ctl approvals list)"; echo "$listing"
+  if rid="$(wait_card_for "$expected")"; then
+    echo "--- approvals list (card $rid, input starts with: $expected)"
+    listing="$(listing_json)"; echo "$listing"
   else
-    fail "$fixture: no card within 15 s"; continue
+    fail "$fixture: no card whose input starts with '$expected' within 15 s"; continue
   fi
   echo "--- transcript-anchor after (card showing)"
   after="$(ctl transcript-anchor)"; echo "$after"
@@ -159,21 +231,47 @@ print(f"first-visible drift: {db:.2f} pt; following {b['following']} -> {a['foll
 sys.exit(0 if db <= 1 and (not b["following"] or a["bottomOffsetPt"] == 0) else 1)
 PY
 
+  echo "--- text drawn?"
+  drawn=drawn
+  prove_drawn "$rid" "$fixture" || { drawn="NOT drawn"; fail "$fixture: text not drawn: the card's command text was not found in the view tree"; }
+  [ "$drawn" = drawn ] && drawn="text drawn"
+  summary="$fixture: card ok, $drawn"
+
   if [ "$synthetic" = 1 ]; then
-    if [ "$fixture" = "simple_rm" ]; then
-      echo "--- click Allow once"
-      ctl click --text "Allow once" >/dev/null || fail "$fixture: click failed"
-      wait_cards gone 8 || fail "$fixture: the card did not go away after Allow once"
-      log="$(find "$root" -name responses.jsonl -print 2>/dev/null | head -1)"
-      echo "--- fake CLI log ($log)"
-      if [ -n "$log" ]; then tail -n 3 "$log"; else fail "no fake CLI log found under the QA root"; fi
-      grep -q '"behavior": *"allow"' "$log" 2>/dev/null || fail "$fixture: the fake CLI did not get an allow"
+    echo "--- waiting for Allow once (up to 20 s)"
+    if allow="$(wait_allow "$rid")"; then
+      allow_state="${allow% *}"; allow_secs="${allow#* }"
     else
-      state="$(python3 -c 'import json,sys; c=json.loads(sys.argv[1])["approvals"][0]; print([o for o in c["options"] if o["id"]=="allow_once"][0]["label"])' "$listing")"
-      echo "Allow once label before scrolling: $state"
-      case "$fixture" in
-        heredoc_300) [ "$state" = "Scroll to the end to allow" ] || fail "$fixture: Allow was not gated on scrolling" ;;
-      esac
+      allow_state="timeout"; allow_secs=20
+    fi
+    if [ "$fixture" = "simple_rm" ]; then
+      if [ "$allow_state" = ready ]; then
+        echo "--- click Allow once (enabled after ${allow_secs} s)"
+        ctl click --text "Allow once" >/dev/null || fail "$fixture: click failed"
+        if wait_cards gone 8; then
+          log="$(find "$root" -name responses.jsonl -print 2>/dev/null | head -1)"
+          echo "--- fake CLI log ($log)"
+          if [ -n "$log" ]; then tail -n 3 "$log"; else fail "no fake CLI log found under the QA root"; fi
+          grep -q '"behavior": *"allow"' "$log" 2>/dev/null || fail "$fixture: the fake CLI did not get an allow"
+          summary="$summary, Allow enabled after ${allow_secs} s, allowed"
+        else
+          fail "$fixture: the card did not go away after Allow once"
+        fi
+      else
+        fail "$fixture: Allow once never became enabled within 20 s (last seen: ${allow#waiting:})"
+      fi
+    else
+      lbl="$(python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); import card_checks as c; print(c.allow_state(c.card_by_id(json.loads(sys.argv[2]),sys.argv[3]))[1])' "$here/lib" "$(listing_json)" "$rid")"
+      echo "Allow once label before scrolling: $lbl"
+      if [ "$fixture" = heredoc_300 ]; then
+        # A synthetic End key is not a human scroll: the gate must stay closed.
+        ctl key End --key-code 119 >/dev/null 2>&1 || true
+        sleep 1
+        lbl="$(python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); import card_checks as c; print(c.allow_state(c.card_by_id(json.loads(sys.argv[2]),sys.argv[3]))[1])' "$here/lib" "$(listing_json)" "$rid")"
+        echo "Allow once label after a synthetic End key: $lbl"
+        [ "$lbl" = "Scroll to the end to allow" ] || fail "$fixture: Allow was not gated on scrolling (label: $lbl)"
+        summary="$summary, Allow stays gated (synthetic scroll)"
+      fi
       echo "(denying to clear the card)"
       ctl click --text "Deny" >/dev/null || true
       wait_cards gone 8 || echo "note: card still showing (deny click refused or not found)"
@@ -185,7 +283,7 @@ PY
     ctl key " " --key-code 49 >/dev/null || true
     sleep 1
     wait_cards present 2 || fail "$fixture: the card is gone: a synthetic press answered it"
-    ctl approvals list
+    listing_json
     log="$(find "$root" -path '*approvals*' -name 'audit-*.jsonl' -print 2>/dev/null | head -1)"
     echo "--- QA approvals audit ($log)"
     if [ -n "$log" ] && grep -q '"event": *"refusal"' "$log" && grep -q 'app_control' "$log"; then
@@ -193,8 +291,14 @@ PY
     else
       fail "$fixture: no refusal entry with channel app_control in the QA approvals dir"
     fi
+    summary="$summary, synthetic answers refused"
   fi
+  echo "SUMMARY $summary"
 done
+
+# QSR-4: leave no card behind. With synthetic input off the Deny click is refused; the QA root is deleted at stop.
+echo "--- clearing remaining cards"
+clear_cards || echo "note: card(s) remain (expected with --no-synthetic; the QA root is deleted at stop)"
 
 [ "$verdict" = PASS ] || debug_evidence live
 stopped=1

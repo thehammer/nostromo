@@ -603,6 +603,20 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
         near = any(re.search(r"\b%s\b" % name, "\n".join(lines[max(0, i - 4):i + 5])) for i in fails)
         self.assertTrue(near, "evidence function is not called near a FAIL path")
 
+    def test_cards_are_matched_by_content_and_stale_cards_cleared(self):
+        self.assertIn("wait_card_for", self.sh)
+        self.assertIn("clear_cards", self.sh)
+        self.assertLess(self.sh.index("clear_cards ||"), self.sh.index('send_cue "$fixture"'))
+        self.assertNotIn('["approvals"][0]', self.sh)
+
+    def test_allow_is_clicked_only_after_waiting_for_enabled(self):
+        self.assertLess(self.sh.index('wait_allow "$rid"'), self.sh.index('ctl click --text "Allow once"'))
+
+    def test_text_drawn_proof_and_screenshot_per_card(self):
+        self.assertIn("text not drawn", self.sh)
+        self.assertIn("/tmp/qa-card-", self.sh)
+        self.assertIn('ctl find "$probe"', self.sh)
+
     def test_the_readme_documents_keeping_the_session_for_inspection(self):
         readme = read("scripts", "qa", "README.md")
         self.assertIn("KEEP=1", readme)

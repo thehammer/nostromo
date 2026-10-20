@@ -14,6 +14,15 @@ runs one and reads the PASS/FAIL lines.
 
 ### `approvals-card.sh`: the QA session, evidence and env knobs
 
+Robustness (QSR): pending cards are denied before each fixture and at the end; each fixture waits for the card whose
+`input` starts with its expected first line (from `tests/fixtures/approvals/<name>.json`) and uses that request_id
+throughout; "Allow once" is clicked only once `enabled:true` (up to 20 s; a timeout FAILs naming the label seen);
+`heredoc_300` must stay gated ("Scroll to the end to allow") after a synthetic End key. Text-drawn probe: `ctl find`
+for the first 12 characters of the card's first line must return a view with a non-empty frame (`find` already omits
+hidden views and reports no alpha; `hidden`/`alpha` are enforced when present), else FAIL "text not drawn (model has N
+lines)". Every card is screenshotted to `/tmp/qa-card-<fixture>.png` (QA content only). One `SUMMARY` line per fixture.
+Pure checks live in `lib/card_checks.py` (tests: `tests/qa_instance/test_card_checks.py`).
+
 The QA app has only the built-in foci (Fred, Mother, Perri, Teri); the composer exists only inside an agent
 session. After `start` (and once the windows are visible) the script runs `qa-instance.sh focus`: it asks the QA
 daemon, over `<QA_ROOT>/mcp.sock`, to `nostromo.create_focus` a session titled "QA approvals" whose CLI is
