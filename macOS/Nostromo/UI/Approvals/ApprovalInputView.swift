@@ -288,19 +288,32 @@ final class ApprovalInputView: NSScrollView {
 
     // MARK: Private
 
+    /// Whether `event` is a person scrolling or pressing a key (not nil, not a mouse move, not
+    /// app-control's). After a scroll the app-control socket made, only such an event lets the
+    /// next movement of the input count as a person looking at it. A test replaces it.
+    var isPersonEvent: (NSEvent?) -> Bool = { event in
+        guard let event, !SyntheticInputGate.isSynthetic(event) else { return false }
+        return [.scrollWheel, .leftMouseDragged, .leftMouseDown, .leftMouseUp, .keyDown].contains(event.type)
+    }
+
     @objc private func clipBoundsChanged(_ note: Notification) {
         // Only a scroll (the clip's origin moved) says anything about what was looked at; a
         // resize or a layout pass is neither a person nor the app-control socket.
         let origin = contentView.bounds.origin.y
         guard abs(origin - lastClipOriginY) > Self.scrollNoise else { return updateScrollProgress() }
         lastClipOriginY = origin
+        let event = NSApp.currentEvent
         // A scroll the app-control socket made is not a person looking at the text: it
         // doesn't count towards "every line has been shown" until a person scrolls.
-        if SyntheticInputGate.isSynthetic(NSApp.currentEvent) && !SyntheticInputGate.allowsSynthetic {
+        if SyntheticInputGate.isSynthetic(event) && !SyntheticInputGate.allowsSynthetic {
             ignoreProgressUntilPersonScrolls = true
             return
         }
-        ignoreProgressUntilPersonScrolls = false
+        if ignoreProgressUntilPersonScrolls {
+            // Layout can move the clip too (a clamp after a resize): it takes a person's event to count.
+            guard isPersonEvent(event) else { return }
+            ignoreProgressUntilPersonScrolls = false
+        }
         updateScrollProgress()
     }
 

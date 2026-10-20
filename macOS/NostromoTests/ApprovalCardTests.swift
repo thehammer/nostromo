@@ -1333,6 +1333,7 @@ final class ApprovalCardTests: XCTestCase {
     func testAPersonsScrollToTheEndCountsAfterASyntheticOneDidNot() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
         let view = h.card.inputView
+        view.isPersonEvent = { _ in true }   // the scrolls below stand for a person's wheel
 
         SyntheticInputGate.begin()
         scrollClip(of: view, toBottom: true)
@@ -2280,9 +2281,56 @@ final class ApprovalCardTests: XCTestCase {
         XCTAssertEqual(h.card.allowButton?.isEnabled, false)
     }
 
+    func testALayoutDrivenClipMoveAfterASyntheticScrollDoesNotCountWhenNoPersonEventIsCurrent() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+        view.isPersonEvent = { _ in false }
+
+        SyntheticInputGate.begin()
+        scrollClip(of: view, toBottom: true)
+        SyntheticInputGate.end()
+        XCTAssertFalse(view.hasShownEveryLine, "precondition")
+
+        // A clamp after a layout pass moves the clip outside any person's event.
+        scrollClip(of: view, toBottom: false)
+        scrollClip(of: view, toBottom: true)
+        view.setFrameSize(NSSize(width: view.frame.width - 24, height: view.frame.height))
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(view.hasShownEveryLine, "only a person's event lets the clip count again")
+        XCTAssertEqual(h.card.allowButton?.isEnabled, false)
+    }
+
+    // MARK: What counts as a person's event (the default)
+
+    func testTheDefaultPersonEventRuleRefusesNoEventAMovedPointerAndSyntheticEvents() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+
+        XCTAssertFalse(view.isPersonEvent(nil), "no event: a layout pass")
+        XCTAssertFalse(view.isPersonEvent(try GestureFixtures.marked(GestureFixtures.key(.keyDown, in: h.window))),
+                       "a key event app-control stamped")
+        XCTAssertFalse(view.isPersonEvent(try GestureFixtures.marked(GestureFixtures.mouse(.leftMouseDown, in: h.window))),
+                       "a click app-control stamped")
+        XCTAssertFalse(view.isPersonEvent(GestureFixtures.mouse(.mouseMoved, in: h.window)), "the pointer moving is not looking")
+        SyntheticInputGate.begin()
+        defer { SyntheticInputGate.end() }
+        XCTAssertFalse(view.isPersonEvent(GestureFixtures.key(.keyDown, in: h.window)), "anything while app-control runs a request")
+    }
+
+    func testTheDefaultPersonEventRuleAcceptsAKeyPressAndAClick() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = h.card.inputView
+
+        XCTAssertTrue(view.isPersonEvent(GestureFixtures.key(.keyDown, in: h.window, characters: " ", keyCode: 49)))
+        XCTAssertTrue(view.isPersonEvent(GestureFixtures.mouse(.leftMouseDown, in: h.window)))
+        XCTAssertTrue(view.isPersonEvent(GestureFixtures.mouse(.leftMouseUp, in: h.window)))
+    }
+
     func testAPersonsScrollThatShowsTheEndCountsAfterALayoutOnlyChange() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
         let view = h.card.inputView
+        view.isPersonEvent = { _ in true }   // the scrolls below stand for a person's wheel
 
         SyntheticInputGate.begin()
         scrollClip(of: view, toBottom: true)
