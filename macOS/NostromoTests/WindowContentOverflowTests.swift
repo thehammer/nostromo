@@ -294,7 +294,7 @@ final class WindowContentOverflowTests: XCTestCase {
             ("transcript with 5000-char unbreakable lines, table, tool call and result", {
                 AppStore.shared.applyForTesting(.sessionTurns(tag: tag, turns: try self.decodeTurns(turnsJSON))) }),
             ("pane: error text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .error(wide), freshness: nil, address: nil)) }),
-            ("pane: json snapshot", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .jsonSnapshot(["k": wide, "list": [wide, wide]]), freshness: nil, address: nil)) }),
+            ("pane: json snapshot", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .jsonSnapshot(.object(["k": .string(wide), "list": .array([.string(wide), .string(wide)])])), freshness: nil, address: nil)) }),
             ("pane: loading", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .loading, freshness: nil, address: nil)) }),
             ("pane: long text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text(Self.longLines), freshness: nil, address: nil)) }),
             ("pane: short text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text("x"), freshness: nil, address: nil)) }),
