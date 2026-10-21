@@ -479,7 +479,20 @@ def clone_app(source, dest):
         raise RuntimeError(f"sign-operator-app.sh failed: {sign.stderr.strip()}")
 
 
+def build_can_be_skipped(env, paths_exist):
+    """True only when the caller (approvals-card.sh, for its second and later instances) asked for it with
+    NOSTROMO_QA_SKIP_BUILD=1 AND every artifact the instance needs already exists."""
+    return env.get("NOSTROMO_QA_SKIP_BUILD") == "1" and bool(paths_exist) and all(paths_exist)
+
+
+def _build_outputs_exist():
+    return [os.path.exists(os.path.join(REPO, "target", "debug", b)) for b in ("nostromd", "nostromo-mcp-bridge", "nostromo-guard")] + [
+        os.path.isdir(os.path.join(REPO, "macOS", "build", "Build", "Products", "Release", "Nostromo.app"))]
+
+
 def build():
+    if build_can_be_skipped(os.environ, _build_outputs_exist()):
+        return
     # Release, not Debug: a Debug build splits the code into `Nostromo.debug.dylib` (and
     # `__preview.dylib`) beside the executable. The clone is re-signed ad-hoc with the hardened
     # runtime, which makes dyld refuse those dylibs ("different Team IDs") and the app dies at launch
