@@ -10,11 +10,12 @@ import NostromoKit
 // so the right side and the top of the content were cut off, while the 1710-wide
 // built-in window was fine.
 //
-// A full-screen window's frame is fixed by the system. Auto Layout still lets any
-// constraint above the window's "stay put" priority (500) grow the content view past
-// it, so a window pinned at min == max size is the faithful offscreen model: whatever
-// the content demands beyond the window shows up as `MainLayout.frame` exceeding the
-// window's content rect.
+// A full-screen window's frame is fixed by the system, so a content view that demands
+// more than the window offers (any constraint above the window's "stay put" priority,
+// 500) overflows it. Off screen, the same demand makes AppKit GROW an ordinary window
+// instead, so the faithful check is the demand itself: `MainLayout.fittingSize` (the
+// minimum its constraints ask for) must fit the window, and the window must keep the
+// size it was given. (`testPositiveControl...` proves the rig sees such a demand.)
 final class WindowContentOverflowTests: XCTestCase {
 
     // MARK: - Fixtures
@@ -65,9 +66,17 @@ final class WindowContentOverflowTests: XCTestCase {
     private struct Rig {
         let window: NSWindow
         let layout: MainLayout
+        let requested: NSSize
     }
 
-    private func makeRig(_ scenario: Scenario, size: NSSize, index: Int, pinned: Bool = true) -> Rig {
+    /// The window frame size the rig asked for. A content view that demands more than the
+    /// window offers makes AppKit grow the window (and, in full screen, where the window
+    /// cannot grow, overflow it), so a window that no longer has this size is the same bug.
+    private func requestedFrameSize(_ rig: Rig) -> NSSize {
+        rig.window.frameRect(forContentRect: NSRect(origin: .zero, size: rig.requested)).size
+    }
+
+    private func makeRig(_ scenario: Scenario, size: NSSize, index: Int, pinned: Bool = false) -> Rig {
         let displayUUID = "wco-\(UUID().uuidString)"
         let focus = Focus.builtIns.first { $0.id == scenario.focusId }!
         UserDefaults.standard.set(scenario.focusId, forKey: DisplayFocusKeys.activeTabKey(displayUUID: displayUUID))
@@ -96,7 +105,7 @@ final class WindowContentOverflowTests: XCTestCase {
         window.orderFront(nil)
         addTeardownBlock { window.orderOut(nil); window.contentView = nil }
         settle(window)
-        return Rig(window: window, layout: layout)
+        return Rig(window: window, layout: layout, requested: size)
     }
 
     /// Lets Combine sinks (`receive(on: main)`) and the layout passes they schedule run.
@@ -175,8 +184,12 @@ final class WindowContentOverflowTests: XCTestCase {
         let content = contentSize(of: rig.window)
         let layoutSize = rig.layout.frame.size
         let escaping = escapingViews(in: rig)
-        if layoutSize != content || !escaping.isEmpty {
-            XCTFail("\(label): MainLayout \(layoutSize) vs window content \(content); \(escaping.count) view(s) escape ¦ \(report(rig))",
+        let demand = rig.layout.fittingSize
+        if layoutSize != content || !escaping.isEmpty || rig.window.frame.size != requestedFrameSize(rig)
+            || demand.width > content.width + 1 || demand.height > content.height + 1 {
+            XCTFail("\(label): MainLayout \(layoutSize) vs window content \(content), window \(rig.window.frame.size) "
+                    + "(asked \(requestedFrameSize(rig))), min demanded by the content \(demand); "
+                    + "\(escaping.count) view(s) escape ¦ \(report(rig))",
                     file: file, line: line)
         }
     }
@@ -215,7 +228,8 @@ final class WindowContentOverflowTests: XCTestCase {
                     rig.window.setFrame(frame, display: true)
                     settle(rig.window)
                     let content = contentSize(of: rig.window)
-                    if content != step || rig.layout.frame.size != step || !escapingViews(in: rig).isEmpty {
+                    if content != step || rig.layout.frame.size != step || !escapingViews(in: rig).isEmpty
+                        || rig.layout.fittingSize.width > step.width + 1 || rig.layout.fittingSize.height > step.height + 1 {
                         failures.append("[\(scenario.name) \(sequence.map { "\(Int($0.width))x\(Int($0.height))" }.joined(separator: "→"))] "
                                         + "asked \(step) ¦ \(report(rig))")
                     }
@@ -243,9 +257,10 @@ final class WindowContentOverflowTests: XCTestCase {
     /// Positive control for the rig itself: a descendant demanding more than the window offers
     /// at each priority. Records which priorities push the content view past a window that
     /// cannot grow, so the rest of this file's verdicts can be read against it.
-    func testPositiveControlWhichPrioritiesPushTheContentPastAFixedWindow() {
+    func testPositiveControlADescendantDemandingMoreThanTheWindowGrowsIt() {
         var lines: [String] = []
-        for (name, priority) in [("750 (default compression)", NSLayoutConstraint.Priority(750)),
+        var grew: [String: Bool] = [:]
+        for (name, priority) in [("750", NSLayoutConstraint.Priority(750)),
                                  ("600", NSLayoutConstraint.Priority(600)),
                                  ("501", NSLayoutConstraint.Priority(501)),
                                  ("499", NSLayoutConstraint.Priority(499)),
@@ -259,10 +274,13 @@ final class WindowContentOverflowTests: XCTestCase {
                 probe.topAnchor.constraint(equalTo: rig.layout.topAnchor),
             ])
             settle(rig.window)
-            lines.append("\(name): layout=\(Int(rig.layout.frame.width))x\(Int(rig.layout.frame.height)) "
-                         + "window=\(Int(rig.window.frame.width))x\(Int(rig.window.frame.height))")
+            grew[name] = rig.window.frame.width > 1920 || rig.layout.frame.width > 1920
+            lines.append("\(name): layout=\(Int(rig.layout.frame.width)) window=\(Int(rig.window.frame.width)) fitting=\(Int(rig.layout.fittingSize.width))")
         }
-        XCTFail("CONTROL ¦ " + lines.joined(separator: " ¦ "))   // TEMPORARY: prints the numbers
+        XCTAssertTrue(grew["750"] == true, "the rig must see a default-priority demand ¦ " + lines.joined(separator: " ¦ "))
+        XCTAssertTrue(grew["501"] == true, "the rig must see a 501 demand ¦ " + lines.joined(separator: " ¦ "))
+        XCTAssertFalse(grew["499"] == true, "a demand below the stay-put priority must not move the window ¦ " + lines.joined(separator: " ¦ "))
+        XCTFail("CONTROL (informational) ¦ " + lines.joined(separator: " ¦ "))   // TEMPORARY
     }
 
     private func decodeTurns(_ json: String) throws -> [DaemonTurn] {
@@ -300,15 +318,16 @@ final class WindowContentOverflowTests: XCTestCase {
             ("pane: short text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text("x"), freshness: nil, address: nil)) }),
         ]
         var failures: [String] = []
-        var first = true
         for (name, apply) in steps {
             try apply()
             settle(rig.window)
             let content = contentSize(of: rig.window)
-            let escaping = escapingViews(in: rig)
-            if rig.layout.frame.size != content || !escaping.isEmpty {
-                failures.append("after [\(name)]: MainLayout \(rig.layout.frame.size) vs \(content) ¦ \(report(rig))")
-                if first { first = false }
+            let demand = rig.layout.fittingSize
+            if rig.layout.frame.size != content || rig.window.frame.size != requestedFrameSize(rig)
+                || demand.width > content.width + 1 || demand.height > content.height + 1
+                || !escapingViews(in: rig).isEmpty {
+                failures.append("after [\(name)]: MainLayout \(rig.layout.frame.size) vs \(content), window \(rig.window.frame.size), "
+                                + "min demanded \(demand) ¦ \(report(rig))")
             }
         }
         XCTAssertTrue(failures.isEmpty, "\(failures.count) step(s) overflowed ¦ " + failures.joined(separator: " ¦¦ "))
