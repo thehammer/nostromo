@@ -146,9 +146,16 @@ stop_instance() {
   [ "$instance_up" = 1 ] || return 0
   if [ "$force_evidence" = 1 ] || [ "$fail_count" != "$inst_fail_base" ]; then debug_evidence live; fi
   instance_up=0
-  if ! KEEP="${KEEP:-}" "$instance" stop "$root"; then
+  # Forget this instance's root before anything else can run (a Ctrl-C or the next start must never re-adopt
+  # a root that is already deleted), but keep it for the stop call and the evidence of a guard failure.
+  local stopped_root="$root"
+  root=""
+  : >"$work/start.out"
+  if ! KEEP="${KEEP:-}" "$instance" stop "$stopped_root"; then
     fail "isolation guard"
+    root="$stopped_root"
     debug_evidence files
+    root=""
     return 1
   fi
 }
@@ -224,6 +231,7 @@ start_instance() {
   "$instance" start "${start_args[@]+"${start_args[@]}"}" >"$work/start.out" || { cat "$work/start.out"; adopt_root; abort_reason="the QA instance failed to start"; fail "$abort_reason"; finish 1; }
   out="$(cat "$work/start.out")"
   echo "$out"
+  export NOSTROMO_QA_SKIP_BUILD=1   # the binaries and the Release app were just built: later instances reuse them
   adopt_root
   [ -n "$root" ] || { abort_reason="no QA_ROOT printed"; fail "$abort_reason"; finish 1; }
 
@@ -556,7 +564,9 @@ PY
       [ "$lbl" = "Scroll to the end to allow" ] || fail "$fixture: Allow was not gated on scrolling (label: $lbl)"
       summary="$summary, Allow label gated"
     fi
-    if [ "$(listing_json | python3 "$checks" state "$rid")" = gated ]; then
+    # Any card whose Allow once is not ready (gated or still waiting) makes no answer attempt when clicked, so
+    # the refusal evidence comes from the exact Deny button; only a ready Allow once is clicked directly.
+    if [ "$(listing_json | python3 "$checks" state "$rid")" != ready ]; then
       # A gated Allow once makes no answer attempt when clicked or keyed, hence no audit entry. The refusal
       # evidence comes from the card's exact Deny button and Return/Space with the card text view focused.
       echo "--- gated card: the card's exact Deny button / key Return / key Space must be refused"

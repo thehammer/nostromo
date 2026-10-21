@@ -83,6 +83,15 @@ class QAMotherProcessTests(unittest.TestCase):
         self.assertNotIn("kill(", body.replace("kill {pid}", ""))
 
 
+class BuildSkipTests(unittest.TestCase):
+    def test_the_build_is_skipped_only_when_asked_and_everything_exists(self):
+        self.assertTrue(qa.build_can_be_skipped({"NOSTROMO_QA_SKIP_BUILD": "1"}, [True, True, True, True]))
+        self.assertFalse(qa.build_can_be_skipped({}, [True, True, True, True]))
+        self.assertFalse(qa.build_can_be_skipped({"NOSTROMO_QA_SKIP_BUILD": "0"}, [True, True, True, True]))
+        self.assertFalse(qa.build_can_be_skipped({"NOSTROMO_QA_SKIP_BUILD": "1"}, [True, False, True, True]))
+        self.assertFalse(qa.build_can_be_skipped({"NOSTROMO_QA_SKIP_BUILD": "1"}, []))
+
+
 class CloneBuildTests(unittest.TestCase):
     def test_the_clone_is_built_and_cloned_from_the_release_app_not_the_debug_split_dylib_build(self):
         src = read("scripts", "qa", "lib", "qa_instance.py")
