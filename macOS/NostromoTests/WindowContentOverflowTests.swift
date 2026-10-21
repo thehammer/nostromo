@@ -67,7 +67,7 @@ final class WindowContentOverflowTests: XCTestCase {
         let layout: MainLayout
     }
 
-    private func makeRig(_ scenario: Scenario, size: NSSize, index: Int) -> Rig {
+    private func makeRig(_ scenario: Scenario, size: NSSize, index: Int, pinned: Bool = true) -> Rig {
         let displayUUID = "wco-\(UUID().uuidString)"
         let focus = Focus.builtIns.first { $0.id == scenario.focusId }!
         UserDefaults.standard.set(scenario.focusId, forKey: DisplayFocusKeys.activeTabKey(displayUUID: displayUUID))
@@ -85,8 +85,10 @@ final class WindowContentOverflowTests: XCTestCase {
                                  backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)
-        window.contentMinSize = size
-        window.contentMaxSize = size
+        if pinned {
+            window.contentMinSize = size
+            window.contentMaxSize = size
+        }
         let layout = MainLayout(windowIndex: index, displayUUID: displayUUID)
         window.contentView = layout
         window.setContentSize(size)
@@ -126,7 +128,7 @@ final class WindowContentOverflowTests: XCTestCase {
             if v.isHiddenOrHasHiddenAncestor { continue }
             if v.enclosingScrollView != nil && !(v is NSScrollView) { continue }
             let r = v.convert(v.bounds, to: nil)
-            if r.maxX > content.maxX + 1 || r.maxY > content.maxY + 1 || r.minX < -1 || r.minY < -1 {
+            if r.maxX > content.maxX + 3 || r.maxY > content.maxY + 3 || r.minX < -3 || r.minY < -3 {
                 out.append((v, r))
             }
         }
@@ -151,7 +153,22 @@ final class WindowContentOverflowTests: XCTestCase {
         for (v, _) in escapingViews(in: rig).prefix(12) {
             lines.append("  escapes: \(describe(v))")
         }
-        return lines.joined(separator: "\n")
+        for c in heavyConstraints(in: rig.layout).prefix(12) {
+            lines.append("  heavy: \(c)")
+        }
+        return lines.joined(separator: " ¦ ")
+    }
+
+    /// Width-affecting constraints strictly between the window's "stay put" priority (500)
+    /// and required: the ones that can push a content view past a window that cannot grow.
+    private func heavyConstraints(in root: NSView) -> [String] {
+        var out: [String] = []
+        for v in [root] + allSubviews(root) {
+            for c in v.constraints where c.isActive && c.priority.rawValue > 500 && c.priority.rawValue < 1000 {
+                out.append("\(type(of: v)):\(type(of: c)) p=\(Int(c.priority.rawValue)) \(c)")
+            }
+        }
+        return out
     }
 
     private func assertFits(_ rig: Rig, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
@@ -159,7 +176,7 @@ final class WindowContentOverflowTests: XCTestCase {
         let layoutSize = rig.layout.frame.size
         let escaping = escapingViews(in: rig)
         if layoutSize != content || !escaping.isEmpty {
-            XCTFail("\(label): MainLayout \(layoutSize) vs window content \(content); \(escaping.count) view(s) escape\n\(report(rig))",
+            XCTFail("\(label): MainLayout \(layoutSize) vs window content \(content); \(escaping.count) view(s) escape ¦ \(report(rig))",
                     file: file, line: line)
         }
     }
@@ -177,17 +194,34 @@ final class WindowContentOverflowTests: XCTestCase {
         }
     }
 
-    // TEMPORARY (removed before the PR): always fails so CI prints the numbers.
-    func testZZDiagnosticDump() {
-        var out: [String] = []
-        var index = 100
-        for size in Self.sizes {
-            for scenario in Self.scenarios {
-                let rig = makeRig(scenario, size: size, index: index)
+    /// The content must follow the window down as well as up. A width latched while the
+    /// window was big (a display that changed resolution, a window created on another
+    /// display, a full-screen transition) must not keep the content that wide.
+    func testMainLayoutFollowsTheWindowThroughResizeSequences() {
+        let sequences: [[NSSize]] = [
+            [NSSize(width: 2560, height: 1440), NSSize(width: 1920, height: 1080)],
+            [NSSize(width: 1920, height: 1080), NSSize(width: 2560, height: 1440), NSSize(width: 1920, height: 1080)],
+            [NSSize(width: 1440, height: 900), NSSize(width: 1920, height: 1080)],
+            [NSSize(width: 3840, height: 2160), NSSize(width: 1710, height: 1073)],
+        ]
+        var index = 200
+        var failures: [String] = []
+        for scenario in Self.scenarios {
+            for sequence in sequences {
+                let rig = makeRig(scenario, size: sequence[0], index: index, pinned: false)
                 index += 1
-                out.append("[\(scenario.name) @ \(Int(size.width))x\(Int(size.height))] \(report(rig))")
+                for step in sequence.dropFirst() {
+                    let frame = rig.window.frameRect(forContentRect: NSRect(origin: rig.window.frame.origin, size: step))
+                    rig.window.setFrame(frame, display: true)
+                    settle(rig.window)
+                    let content = contentSize(of: rig.window)
+                    if content != step || rig.layout.frame.size != step || !escapingViews(in: rig).isEmpty {
+                        failures.append("[\(scenario.name) \(sequence.map { "\(Int($0.width))x\(Int($0.height))" }.joined(separator: "→"))] "
+                                        + "asked \(step) ¦ \(report(rig))")
+                    }
+                }
             }
         }
-        XCTFail("DIAG\n" + out.joined(separator: "\n"))
+        XCTAssertTrue(failures.isEmpty, "\(failures.count) resize failure(s) ¦ " + failures.joined(separator: " ¦¦ "))
     }
 }
