@@ -62,6 +62,24 @@ class GateScriptTests(unittest.TestCase):
 
     # shellcheck gate
 
+    def test_files_are_passed_after_a_double_dash_so_a_dash_name_is_not_an_option(self):
+        self.fake("shellcheck")
+        self.write("-x.sh", "#!/bin/bash\n")
+        r = self.run_gate(SHELLCHECK_GATE, "-x.sh\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        args = self.passed_args()
+        self.assertEqual(args, ["-x", "--", "-x.sh"])
+
+    def test_a_git_quoted_path_is_reported_and_fails_instead_of_passing_silently(self):
+        self.fake("shellcheck")
+        self.write("ok.sh", "#!/bin/bash\n")
+        r = self.run_gate(SHELLCHECK_GATE, 'ok.sh\n"caf\\303\\251.sh"\n')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("could not be checked", r.stderr)
+        # only a quoted path: still not a silent pass
+        r = self.run_gate(SHELLCHECK_GATE, '"caf\\303\\251.sh"\n')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
     def test_no_changed_files_exits_zero_without_running_tool(self):
         self.fake("shellcheck")
         r = self.run_gate(SHELLCHECK_GATE, "")
@@ -77,7 +95,7 @@ class GateScriptTests(unittest.TestCase):
         self.write("README.md", "hi\n")
         r = self.run_gate(SHELLCHECK_GATE, "a.sh\nbin/tool\nbin/posix\nbin/pytool\nREADME.md\n")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.passed_args(), ["-x", "a.sh", "bin/tool", "bin/posix"])
+        self.assertEqual(self.passed_args(), ["-x", "--", "a.sh", "bin/tool", "bin/posix"])
         self.assertIn("a.sh", r.stdout)
 
     def test_deleted_files_are_skipped(self):
@@ -85,7 +103,7 @@ class GateScriptTests(unittest.TestCase):
         self.write("keep.sh", "echo hi\n")
         r = self.run_gate(SHELLCHECK_GATE, "gone.sh\nkeep.sh\n")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.passed_args(), ["-x", "keep.sh"])
+        self.assertEqual(self.passed_args(), ["-x", "--", "keep.sh"])
 
     def test_only_deleted_files_exits_zero(self):
         self.fake("shellcheck")

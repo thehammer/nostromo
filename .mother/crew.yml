@@ -20,14 +20,14 @@ gates:
     - name: python-test
       run: "make python-test"
       where: sandbox
-      when: { paths: ["tests/**", "scripts/**", "bin/**", "Makefile", "*.py", "**/*.py"] }
+      when: { paths: ["tests/**", "scripts/**", "bin/**", "Makefile", "*.py", "**/*.py", "macOS/**", "iOS/**", "Shared/**", ".github/**", "src/mother/**"] }
       timeout_s: 900
       hint: "Run `make python-test` (or the failing suite with python3 -m unittest discover -s <dir>) and fix."
     - name: swift-ci
       run: "make ci-remote ONLY=swift"
       where: any
       when: { paths: ["macOS/**", "iOS/**", "Shared/**"] }
-      timeout_s: 2700
+      timeout_s: 1800
       hint: "Read the FAILED lines printed by make ci-remote; reproduce with `make ci-remote ONLY=mac|kit|ios` after pushing."
     - name: shellcheck
       run: "scripts/gates/shellcheck-changed.sh"
@@ -55,6 +55,6 @@ lenses:
   mandatory: []
   scopes:
     ops-infra: [".github/**", ".rwx/**", "Makefile", "scripts/**", "bin/**", "dist/**", "infra/**", "template.yaml", "macOS/Nostromo.xcodeproj/**", "iOS/Nostromo.xcodeproj/**"]
-    phi-security: ["src/ipc/**", "src/mother/**", "src/data/work/**", "src/mcp/**", "src/approvals/**", "src/tracker/**", "src/push/**", "infra/**", "template.yaml", "Shared/NostromoKit/Sources/NostromoKit/Wire/**", "Shared/NostromoKit/Sources/NostromoKit/Transport/**", "Shared/NostromoKit/Sources/NostromoKit/Push/**", "macOS/Nostromo/Security/**", "macOS/Nostromo/AppControl/**", "macOS/Nostromo/UI/Approvals/**", "iOS/NostromoNotificationService/**"]
+    phi-security: ["src/ipc/**", "src/mother/**", "src/data/work/**", "src/mcp/**", "src/approvals/**", "src/tracker/**", "src/sensitive_text.rs", "src/bin/nostromo_guard.rs", "src/bin/sensitive_text_scan.rs", "src/push/**", "infra/**", "template.yaml", "Shared/NostromoKit/Sources/NostromoKit/Wire/**", "Shared/NostromoKit/Sources/NostromoKit/Approvals/**", "Shared/NostromoKit/Sources/NostromoKit/Transport/**", "Shared/NostromoKit/Sources/NostromoKit/Push/**", "macOS/Nostromo/Security/**", "macOS/Nostromo/AppControl/**", "macOS/Nostromo/UI/Approvals/**", "iOS/NostromoNotificationService/**"]
   budget_usd: 3.00
   cycle_cap: 2

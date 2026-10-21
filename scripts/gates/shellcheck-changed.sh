@@ -19,8 +19,15 @@ if [ -z "$tool" ]; then
 fi
 
 files=()
+unchecked=0
 while IFS= read -r f; do
-  [ -n "$f" ] && [ -f "$f" ] || continue
+  [ -n "$f" ] || continue
+  # `git diff --name-only` quotes odd paths (non-ASCII, quotes, tabs) as "...": such a name can never be
+  # opened with -f, so it would silently pass. Count it and fail loudly at the end instead.
+  case "$f" in
+    \"*\") unchecked=$((unchecked + 1)); continue ;;
+  esac
+  [ -f "$f" ] || continue
   case "$f" in
     *.sh) files+=("$f"); continue ;;
   esac
@@ -31,11 +38,20 @@ while IFS= read -r f; do
   esac
 done <<< "${MOTHER_GATE_CHANGED_FILES:-}"
 
+if [ "$unchecked" -gt 0 ]; then
+  echo "$unchecked changed path(s) have a name git prints quoted and could not be checked; rename them or run shellcheck by hand" >&2
+fi
+
 if [ "${#files[@]}" -eq 0 ]; then
   echo "no shell files changed"
+  [ "$unchecked" -eq 0 ] || exit 1
   exit 0
 fi
 
 echo "shellcheck -x on:"
 printf '  %s\n' "${files[@]}"
-exec "$tool" -x "${files[@]}"
+# `--` so a changed file named -x.sh is a file, not an option.
+"$tool" -x -- "${files[@]}"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$unchecked" -gt 0 ]; then exit 1; fi
+exit "$rc"

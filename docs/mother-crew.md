@@ -53,3 +53,9 @@ In the plan's yaml block next to `suggested_config`:
 gates: {max_attempts: 3}
 lenses: {add: [tests], remove: [ops-infra]}
 ```
+
+## Costs and limits to know
+
+- `swift-ci` dispatches the whole macOS GitHub workflow for each gate attempt (up to two attempts), so it duplicates the PR's own CI run and uses Actions minutes. Its `timeout_s` is 1800, below the 45-minute `budget_minutes`, so a hung dispatch fails on its own instead of marking every gate `unavailable` through the total watchdog.
+- `python-test` runs in the Linux sandbox and its `when` paths cover the trees the Python policy suites scan (`macOS/`, `iOS/`, `Shared/`, `.github/`, `src/mother/`). CI's Python job runs on macOS on purpose (BSD `ps`); if the first observe results show a sandbox-only failure for `python-test`, set `blocking: false` for it before judging agreement with CI.
+- `shellcheck-changed.sh` cannot check a changed file whose name git prints quoted (non-ASCII, quotes, tabs): it says so on stderr and fails rather than passing silently.

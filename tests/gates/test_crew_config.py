@@ -31,7 +31,7 @@ RUST_PATHS = {
     "src/**", "tests/*.rs", "tests/**/*.rs", "tests/fixtures/**",
     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".rwx/**",
 }
-PYTHON_PATHS = {"tests/**", "scripts/**", "bin/**", "Makefile", "*.py", "**/*.py"}
+PYTHON_PATHS = {"tests/**", "scripts/**", "bin/**", "Makefile", "*.py", "**/*.py", "macOS/**", "iOS/**", "Shared/**", ".github/**", "src/mother/**"}
 
 
 RUBY = "/usr/bin/ruby"
@@ -110,6 +110,18 @@ class CrewConfigTests(unittest.TestCase):
 
     def test_budget_and_hints(self):
         self.assertEqual(self.doc["gates"]["budget_minutes"], 45)
+        self.assertEqual(self.doc["gates"]["max_attempts"], 2)
+        lenses = self.doc["lenses"]
+        self.assertEqual(lenses["mandatory"], [])
+        self.assertEqual(lenses["budget_usd"], 3)
+        self.assertEqual(lenses["cycle_cap"], 2)
+        for must in ("src/ipc/**", "src/approvals/**", "src/sensitive_text.rs", "src/bin/nostromo_guard.rs",
+                     "Shared/NostromoKit/Sources/NostromoKit/Approvals/**", "macOS/Nostromo/UI/Approvals/**"):
+            self.assertIn(must, lenses["scopes"]["phi-security"], must)
+        # no gate may time out later than the whole run is allowed to take
+        by_name = {c["name"]: c for c in self.checks}
+        self.assertLess(by_name["swift-ci"]["timeout_s"], self.doc["gates"]["budget_minutes"] * 60)
+        self.assertTrue({"macOS/**", "iOS/**", "Shared/**", ".github/**"} <= set(by_name["python-test"]["when"]["paths"]))
         for c in self.checks:
             self.assertLessEqual(len(c.get("hint", "")), 500)
             self.assertTrue(1 <= c.get("timeout_s", 900) <= 3600)
