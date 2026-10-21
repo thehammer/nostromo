@@ -1006,6 +1006,36 @@ class FakeCliLogTests(TmpCase):
         self.proc("2", [{"t": "FIXTURE:heredoc_300"}], [{"behavior": "deny"}], mtime=2000)
         self.assertEqual(cc.fake_cli_responses(self.tmp, "simple_rm")[0], mine)
 
+    def test_an_allow_followed_by_a_deny_fails(self):
+        self.proc("43012", [{"t": "FIXTURE:simple_rm"}], [self.ALLOW, {"behavior": "deny", "message": "no"}])
+        ok, msg = cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")
+        self.assertFalse(ok)
+        self.assertIn("deny", msg)
+
+    def test_a_deny_followed_by_an_allow_passes(self):
+        self.proc("43012", [{"t": "FIXTURE:simple_rm"}], [{"behavior": "deny"}, self.ALLOW])
+        self.assertTrue(cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")[0])
+
+    def test_a_cue_must_match_on_a_boundary(self):
+        longer = self.proc("1", [{"t": "FIXTURE:simple_rm2"}], [self.ALLOW], mtime=2000)
+        mine = self.proc("2", [{"t": "FIXTURE:simple_rm"}], [self.ALLOW], mtime=1000)
+        self.assertEqual(cc.fake_cli_responses(self.tmp, "simple_rm")[0], mine)
+        self.assertEqual(cc.fake_cli_responses(self.tmp, "simple_rm2")[0], longer)
+        self.assertTrue(cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")[0])
+
+    def test_a_cue_followed_by_a_word_character_only_is_the_fallback_and_fails(self):
+        self.proc("1", [{"t": "FIXTURE:simple_rm2"}], [self.ALLOW])
+        self.assertTrue(cc.fake_cli_select(self.tmp, "simple_rm")[2])
+        ok, msg = cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")
+        self.assertFalse(ok)
+        self.assertIn("fallback log used", msg)
+
+    def test_the_fallback_log_is_never_a_pass_even_with_an_allow(self):
+        self.proc("1", [], [self.ALLOW])
+        ok, msg = cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")
+        self.assertFalse(ok)
+        self.assertIn("fallback log used", msg)
+
     def test_the_cli_exits_zero_for_an_allow_and_one_otherwise(self):
         self.session_tree(self.ALLOW)
         p = subprocess.run([sys.executable, SCRIPT, "fakelog", self.tmp, "simple_rm", "rm -rf /tmp/x/a"],

@@ -29,6 +29,7 @@ a secondary "text in view tree" check, scoped to the card's frame (a hit must ov
 """
 import json
 import os
+import re
 import struct
 import sys
 import zlib
@@ -184,36 +185,46 @@ def _mtime(path):
         return 0.0
 
 
+def _cue_in(text, fixture):
+    """The cue `FIXTURE:<fixture>` as a whole word: `FIXTURE:simple_rm` never matches `FIXTURE:simple_rm2`."""
+    return re.search(r"FIXTURE:%s(?![A-Za-z0-9_])" % re.escape(fixture), text) is not None
+
+
 def fake_cli_responses(root, fixture):
-    """(directory, responses) of the fake CLI process that served `fixture`.
+    """(directory, responses) of `fake_cli_select`, without the fallback flag."""
+    d, responses, _ = fake_cli_select(root, fixture)
+    return d, responses
+
+
+def fake_cli_select(root, fixture):
+    """(directory, responses, fallback) of the fake CLI process that served `fixture`.
 
     The daemon starts the fake CLI several times (a catalog probe, then the session), each in its own
     `fake-claude/<pid>/` directory, so the first `responses.jsonl` on disk may be the probe's empty one. Pick by
     content: the directory whose `stdin.jsonl` carries the cue `FIXTURE:<fixture>` (the newest such directory
-    when several do); else the newest non-empty `responses.jsonl`; else (None, [])."""
+    when several do); else the newest non-empty `responses.jsonl` (fallback=True); else (None, [], False)."""
     dirs = []
     for base, _, names in os.walk(root):
         if os.path.basename(os.path.dirname(base)) == "fake-claude" and (
                 "stdin.jsonl" in names or "responses.jsonl" in names):
             dirs.append(base)
-    cue = "FIXTURE:%s" % fixture
     cued = []
     for d in dirs:
         try:
             with open(os.path.join(d, "stdin.jsonl"), encoding="utf-8", errors="replace") as f:
-                if cue in f.read():
+                if _cue_in(f.read(), fixture):
                     cued.append(d)
         except OSError:
             pass
     newest = lambda ds: max(ds, key=lambda d: (_mtime(os.path.join(d, "responses.jsonl")), d))  # noqa: E731
     if cued:
         d = newest(cued)
-        return d, _read_jsonl(os.path.join(d, "responses.jsonl"))
+        return d, _read_jsonl(os.path.join(d, "responses.jsonl")), False
     filled = [d for d in dirs if _read_jsonl(os.path.join(d, "responses.jsonl"))]
     if filled:
         d = newest(filled)
-        return d, _read_jsonl(os.path.join(d, "responses.jsonl"))
-    return None, []
+        return d, _read_jsonl(os.path.join(d, "responses.jsonl")), True
+    return None, [], False
 
 
 def _behaviors(responses):
@@ -236,19 +247,21 @@ def _behaviors(responses):
 def check_allow(root, fixture, command=None):
     """(ok, message): the fixture's fake CLI got `behavior: allow` and, when `command` is given, its
     `updatedInput.command` equals it (the card's input, unchanged)."""
-    d, responses = fake_cli_responses(root, fixture)
+    d, responses, fallback = fake_cli_select(root, fixture)
     if d is None:
         return False, "no fake CLI responses found under %s" % root
+    if fallback:
+        return False, ("fallback log used: no fake CLI stdin holds the cue FIXTURE:%s, so the newest non-empty log "
+                       "(%s) cannot be tied to this fixture" % (fixture, d))
     answers = _behaviors(responses)
     if not answers:
         return False, "the fake CLI log %s has no permission answer" % d
-    allows = [a for a in answers if a.get("behavior") == "allow"]
-    if not allows:
-        return False, "the fake CLI got %s, not allow (%s)" % (
-            ", ".join(sorted({str(a.get("behavior")) for a in answers})), d)
+    if answers[-1].get("behavior") != "allow":
+        return False, "the LAST answer after the cue is %s, not allow (%s)" % (answers[-1].get("behavior"), d)
+    allows = [answers[-1]]
     if command is None:
         return True, "allow (%s)" % d
-    for a in allows:
+    for a in allows:   # only the last answer counts
         got = (a.get("updatedInput") or {}).get("command")
         if got is not None and got.rstrip("\n") == command.rstrip("\n"):
             return True, "allow with the input unchanged (%s)" % d

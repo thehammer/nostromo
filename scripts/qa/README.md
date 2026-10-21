@@ -9,7 +9,7 @@ runs one and reads the PASS/FAIL lines.
 | `teri-fred-smoke.sh` | Teri tabs, legibility, list → detail, the Send to agent sheet (cancel path), Fred panes, sidebar badges | UI only: tab clicks (never Picks, never Sentry unless asked), row selection, opening and cancelling one sheet; switches to Teri only when told to |
 | `window-placement-check.sh` | one fullscreen window per display, none sharing a display, the last launch's placement log | nothing (reads `windows`, the log, and `system_profiler SPDisplaysDataType -json`) |
 | `mother-crew.sh` | the Mother panel's crew view: a crew job's progress line, gate rows (with exit code on a failed gate) and lens wave (skipped lens in words, citations found) update live from a replayed fixture, and no ambiguous layout in the pane; reads VoiceOver text, not glyphs | needs the fake broker (`--scenario crew_gates`) and a QA build on it; clicks the Mother entry and two jobs; takes keyboard focus for the run and gives it back; resets and replays the fake broker's jobs (sends the real Mother nothing) |
-| `approvals-card.sh [--no-synthetic] [FIXTURE ...]` | the approval card (AP2a) in the **isolated QA instance only** (`qa-instance.sh`; never the user's app, daemon or sessions): per fixture (`simple_rm`, `heredoc_300`, `bidi` by default) types `FIXTURE:<name>`, lists the card with `approvals list`, checks `transcript-anchor` before/after (≤ 1 pt, bottom offset 0 while following), and with synthetic input ON clicks "Allow once" and reads the fake CLI's log (`allow`, input unchanged); with `--no-synthetic` checks that click/Return/Space at the card are refused, the card stays and the QA approvals dir has a `refusal` entry (`app_control`). Exits 3 (INCONCLUSIVE) when the display is locked | the QA clone's own window only: creates one QA agent session in the QA daemon (a focus on the fake CLI), clicks its sidebar row, then a click in its composer, typed text, Return, a click on Allow/Deny; needs a logged-in awake display |
+| `approvals-card.sh [--no-synthetic] [FIXTURE ...]` | the approval card (AP2a) in the **isolated QA instance only** (`qa-instance.sh`; never the user's app, daemon or sessions): per fixture (`simple_rm`, `heredoc_300`, `bidi` by default) types `FIXTURE:<name>`, lists the card with `approvals list`, checks `transcript-anchor` before/after (≤ 1 pt, bottom offset 0 while following), and with synthetic input ON clicks "Allow once" and reads the fake CLI's log (`allow`, input unchanged); with `--no-synthetic` checks that click/Return/Space (for a gated card: the exact Deny button and Return/Space) are refused, the card stays and the QA approvals dir has a `refusal` entry (`app_control`). Exits 3 (INCONCLUSIVE) when the display is locked | the QA clone's own window only: creates one QA agent session in the QA daemon (a focus on the fake CLI), clicks its sidebar row, then a click in its composer, typed text, Return, a click on Allow/Deny; needs a logged-in awake display |
 | `attach-chip.sh`, `mother-tabs.sh`, `mother-queue.sh` | older scenarios; `mother-*` need the fake Mother broker (see their headers) | UI clicks / drops |
 
 ### `approvals-card.sh`: the QA session, evidence and env knobs
@@ -49,13 +49,20 @@ Round 3 behaviour:
 * **Composer focus.** Before every cue the script waits for no pending card, clicks the "Message…" field and polls
   `hittest` until the first responder is the chat composer (`ChatTextView`): up to 3 clicks in 10 s. If it never is,
   that fixture FAILs and the message names the first responder it saw (e.g. `NostromoWindow`). It never uses `activate`.
-* **`--no-synthetic` runs one QA instance per fixture.** A pending card blocks the composer and cannot be Denied
-  without a click, so each fixture starts a fresh instance and stops it (isolation guard run) before the next; the
-  verdict is aggregated. Per fixture it checks: the card appears, its text is drawn (pixel proof), click / Return /
-  Space are refused with a `refusal` audit entry (channel `app_control`); `heredoc_300` also reports "Allow label
-  gated". Synthetic mode keeps one instance for the whole run.
+* **Every fixture runs in its own QA instance, in both modes.** Composer state and pending cards never leak
+  across fixtures (after `heredoc_300` was Denied the composer once never regained focus for `bidi`): each fixture
+  starts a fresh instance and stops it (isolation guard run) before the next; the verdict is aggregated. With
+  `--no-synthetic` it checks per fixture: the card appears, its text is drawn (pixel proof), and synthetic answers
+  are refused with a `refusal` audit entry (channel `app_control`). For an enabled Allow once those are a click on
+  "Allow once", Return and Space. A GATED card (Allow once disabled, "Scroll to the end to allow", e.g. `heredoc_300`,
+  which also reports "Allow label gated") makes no answer attempt on those presses, so the refusal evidence comes
+  from the card's exact **Deny** button (`click_card_button`) plus Return/Space with the card text view focused; the
+  card must still be pending afterwards.
+* **Allow check details.** The cue matches as a whole word (`FIXTURE:simple_rm` never matches `FIXTURE:simple_rm2`);
+  the LAST `behavior` must be `allow` (an allow followed by a deny FAILs); if no `stdin.jsonl` holds the cue the
+  newest non-empty log is used, "fallback log used" is printed and the allow check FAILs.
 * **Output.** Every exit path (a failed fixture, an aborted instance, an inconclusive display, an unexpected script
-  error) prints one `SUMMARY <fixture>: ...` per fixture (`ABORTED: <reason>` for those that did not run) and a final
+  error) prints one `SUMMARY <fixture>: ...` per fixture (`FAILED` for a fixture that ran and failed, `ABORTED: <reason>` for those that did not run) and a final
   `RESULT: PASS|FAIL|INCONCLUSIVE (synthetic input on|OFF)`, then the DEBUG EVIDENCE collected along the way. Exit
   codes: 0 PASS, 1 FAIL, 2 usage, 3 INCONCLUSIVE.
 

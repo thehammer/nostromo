@@ -646,15 +646,8 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
         near = any(re.search(r"\b%s\b" % name, "\n".join(lines[max(0, i - 4):i + 5])) for i in fails)
         self.assertTrue(near, "evidence function is not called near a FAIL path")
 
-    def test_cards_are_matched_by_content_and_stale_cards_cleared_before_the_cue(self):
+    def test_cards_are_matched_by_content(self):
         self.assertIn("wait_card_for", self.sh)
-        self.assertLess(self.sh.index("clear_cards"), self.sh.index('send_cue "$fixture"'))
-
-    def test_a_failed_clear_skips_the_fixture_before_the_cue_and_any_click(self):
-        m = re.search(r'if ! clear_cards; then\n(.*?)\n\s*fi', self.sh, re.S)
-        self.assertIsNotNone(m, "the synthetic branch must test clear_cards' status")
-        self.assertRegex(m.group(1), r"\b(continue|return)\b")
-        self.assertLess(m.start(), self.sh.index('send_cue "$fixture"'))
 
     def test_allow_is_clicked_only_after_waiting_for_enabled(self):
         self.assertLess(self.sh.index('wait_allow "$rid"'), self.sh.index('click_card_button "$rid" "Allow once"'))
@@ -705,16 +698,38 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
         self.assertNotIn("activate", fc)
         self.assertIn("last seen: $composer_seen", code)
 
-    def test_no_synthetic_starts_and_stops_one_instance_per_fixture_and_never_clicks_to_clear(self):
+    def test_every_fixture_gets_its_own_instance_in_both_modes(self):
         code = self.code()
         loop = code[code.index('for fixture in "${fixtures[@]}"; do'):]
-        self.assertIn("start_instance", loop)
-        self.assertIn('[ "$synthetic" != 1 ]', loop)
-        self.assertIn("stop_instance", loop)
+        self.assertLess(loop.index("start_instance"), loop.index('run_fixture "$fixture"'))
+        self.assertLess(loop.index('run_fixture "$fixture"'), loop.index("stop_instance"))
+        self.assertNotIn('"$synthetic"', loop)          # no mode switch: one instance per fixture either way
+        self.assertNotIn("if [ \"$instance_up\" = 0 ]", loop)
+        self.assertNotIn("clear_cards", code)           # no cross-fixture clearing is needed any more
+
+    def test_a_gated_card_is_refused_via_the_exact_deny_button_and_stays_pending(self):
+        code = self.code()
+        run = code[code.index("run_fixture() {"):]
+        gated = run[run.index('= gated ]'):run.index("synthetic answers refused")]
+        self.assertIn('click_card_button "$rid" "Deny"', gated)
+        self.assertIn('focus_card_text "$rid"', gated)
+        self.assertIn("--key-code 36", gated)
+        self.assertIn("--key-code 49", gated)
+        self.assertIn("wait_cards present", run)
+        self.assertIn("card still pending", gated)
+
+    def test_failed_fixtures_are_failed_and_aborted_is_only_for_fixtures_that_did_not_run(self):
+        code = self.code()
         run = code[code.index("run_fixture() {"):code.index('for fixture in "${fixtures[@]}"; do')]
-        i_syn = run.index('if [ "$synthetic" = 1 ]; then')
-        self.assertIn("clear_cards", run[i_syn:run.index("fi", i_syn)])
-        self.assertEqual(run.count("clear_cards"), 1)   # only in the synthetic branch: no clear without clicks
+        self.assertNotIn("ABORTED", run)
+        self.assertIn("-- FAILED:", code)
+        self.assertEqual(code.count("ABORTED"), 1)      # report() only
+
+    def test_start_adopts_the_root_early_and_on_exit_tolerates_a_missing_rc(self):
+        code = self.code()
+        self.assertIn("adopt_root", code[code.index("on_exit() {"):])
+        self.assertIn('|| rc=1', code[code.index("on_exit() {"):])
+        self.assertIn('>"$work/start.out"', code)
 
     def test_the_default_fixtures_include_bidi(self):
         self.assertIn("fixtures=(simple_rm heredoc_300 bidi)", self.sh)
@@ -772,6 +787,56 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
         r = self.run_script("no_such_fixture")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("no_such_fixture", r.stderr)
+
+
+class ApprovalsCardReportTests(unittest.TestCase):
+    """report/on_exit/finish from the script, with stubbed stop_instance and a scratch work dir."""
+
+    def run_fns(self, body, work_rc=True):
+        with tempfile.TemporaryDirectory() as d:
+            script = r'''
+set -uo pipefail
+repo=%(root)s; work=%(d)s; synthetic=0
+root=/nowhere; instance_up=1; verdict=PASS; fail_count=0; inst_fail_base=0; abort_reason=""; reported=0
+fixtures_done=0; force_evidence=0; evidence_file="$work/ev"; : >"$evidence_file"
+fixtures=(a b c)
+eval "$(sed -n '/^report() {/,/^trap on_exit EXIT/p' "$repo/scripts/qa/approvals-card.sh" | sed '$d')"
+remove_work() { :; }
+adopt_root() { :; }
+stop_instance() { echo "stopped"; instance_up=0; }
+trap on_exit EXIT
+%(body)s
+''' % {"root": json.dumps(ROOT), "d": json.dumps(d), "body": body}
+            return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+
+    def test_a_fixture_that_did_not_run_is_aborted_with_the_reason(self):
+        r = self.run_fns('fixtures_done=1; abort_reason="boom"; verdict=FAIL; finish 1')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("SUMMARY a:", r.stdout)
+        self.assertIn("SUMMARY b: ABORTED: boom", r.stdout)
+        self.assertIn("SUMMARY c: ABORTED: boom", r.stdout)
+        self.assertIn("RESULT: FAIL", r.stdout)
+        self.assertIn("stopped", r.stdout)
+
+    def test_an_unexpected_death_still_tears_down_and_prints_a_result(self):
+        r = self.run_fns('false; exit 7')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("stopped", r.stdout)
+        self.assertIn("RESULT: FAIL", r.stdout)
+        self.assertIn("ABORTED: script error (exit 7)", r.stdout)
+
+    def test_a_missing_rc_file_does_not_break_on_exit_or_finish(self):
+        r = self.run_fns('reported=1; exit 5')          # on_exit with nothing reported keeps the exit code
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        r = self.run_fns('report() { reported=1; }; abort_reason=x; finish 0')   # report never wrote $work/rc
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_inconclusive_is_exit_3_and_a_fail_outranks_it(self):
+        r = self.run_fns('finish 3')
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("RESULT: INCONCLUSIVE", r.stdout)
+        r = self.run_fns('verdict=FAIL; finish 3')
+        self.assertEqual(r.returncode, 1)
 
 
 def _png(width, height, pixel):

@@ -7,8 +7,12 @@
 # Synthetic input ON (default): types `FIXTURE:<name>` and Return into the composer, lists the card
 #   (`approvals list`), takes `transcript-anchor` before and after, and (simple_rm) clicks "Allow once":
 #   the fake CLI's log must show `allow` with the input unchanged.
-# --no-synthetic: the same arrival, then `click --text "Allow once"`, `key Return` and `key " "` must be
-#   refused: the card stays and the QA approvals dir has a `refusal` entry with channel app_control.
+# --no-synthetic: the same arrival, then synthetic answers must be refused: the card stays and the QA approvals
+#   dir has a `refusal` entry with channel app_control. With an enabled Allow once the probe is `click --text
+#   "Allow once"`, `key Return`, `key " "`. With a GATED card (Allow once disabled, "Scroll to the end to allow",
+#   e.g. heredoc_300) those presses make no answer attempt and so leave no audit entry; the evidence then comes
+#   from the card's exact Deny button (click_card_button) and Return/Space with the card text view focused, and
+#   the card must still be pending afterwards.
 #
 # Before the first cue it creates a QA agent session in the QA daemon (`qa-instance.sh focus`: a focus
 # whose CLI is the fake claude), selects its sidebar row and waits for the composer ("Message…"). Before EVERY
@@ -16,25 +20,27 @@
 # first responder is the chat composer (ChatTextView): up to 3 clicks in 10 s, else the fixture FAILs naming the
 # first responder it saw.
 #
-# --no-synthetic runs ONE QA INSTANCE PER FIXTURE (a pending card cannot be cleared without a click): start,
-# fixture, stop (guard run), next. Its per-fixture checks: card appears, text drawn, click/Return/Space
-# refused with a refusal audit entry; heredoc_300 also reports its Allow label as gated.
+# EVERY FIXTURE RUNS IN ITS OWN QA INSTANCE, in both modes (composer state and pending cards never leak across
+# fixtures): start, fixture, stop (guard run), next. --no-synthetic per-fixture checks: card appears, text drawn,
+# synthetic answers refused with a refusal audit entry (see above); heredoc_300 also reports its Allow label as gated.
 #
 # The fake CLI is started several times by the daemon (catalog probe, session): the allow check reads the
-# responses.jsonl of the fake-claude process dir whose stdin.jsonl holds the fixture's cue (newest non-empty
-# log as a fallback), polled up to 5 s, and needs behavior allow with updatedInput.command unchanged.
+# responses.jsonl of the fake-claude process dir whose stdin.jsonl holds the fixture's cue as a whole word
+# (`simple_rm` never matches `simple_rm2`), polled up to 5 s; the LAST behavior must be allow with
+# updatedInput.command unchanged. When no stdin holds the cue the newest non-empty log is used ("fallback log
+# used") and the allow check FAILs.
 #
-# Every exit path prints one `SUMMARY` per fixture (`ABORTED: <reason>` for those that did not run) and a final
+# Every exit path prints one `SUMMARY` per fixture (`FAILED` for a fixture that ran and failed, `ABORTED: <reason>`
+# for those that did not run) and a final
 # `RESULT: PASS|FAIL|INCONCLUSIVE` line, then the DEBUG EVIDENCE block.
 #
 # Cards are matched by content: each fixture waits for the card whose `input` starts with that fixture's
 # first command line, cut at its first non-ASCII character (from tests/fixtures/approvals/<name>.json; a
 # prefix shorter than 4 characters selects by the exact full input instead), and uses that card's request_id
-# throughout. Two matching cards are "ambiguous card selection", never a pick by position. Pending cards are
-# denied before each fixture and at the end, with the card's own exact "Deny" button (found in `ctl tree`
+# throughout. Two matching cards are "ambiguous card selection", never a pick by position. Cards are
+# denied with the card's own exact "Deny" button (found in `ctl tree`
 # inside the card, clicked by coordinates; never a text search that could hit "Deny & stop"), and after each
-# Deny the request must be gone while the QA session's sidebar row survives. A fixture whose stale cards
-# could not be cleared is skipped (no cue, no Allow click). Allow once is clicked only once its option is
+# Deny the request must be gone while the QA session's sidebar row survives. Allow once is clicked only once its option is
 # `enabled:true` (up to 20 s).
 #
 # Text-drawn proof (scripts/qa/lib/card_checks.py): the card's text viewport (the NSClipView in its
@@ -166,7 +172,7 @@ report() {
 }
 finish() {
   report "$1"
-  exit "$(cat "$work/rc")"
+  exit "$(cat "$work/rc" 2>/dev/null || echo 1)"
 }
 # A failure the run cannot continue past: evidence, stop, RESULT, exit 1.
 abort_fail() {
@@ -178,11 +184,12 @@ abort_fail() {
 on_exit() {
   local rc=$?
   if [ "$reported" != 1 ]; then
-    # set -e or an unexpected error: still end with SUMMARY lines and a RESULT.
+    # set -e, Ctrl-C or an unexpected error: still tear down, end with SUMMARY lines and a RESULT.
+    adopt_root
     abort_reason="${abort_reason:-script error (exit $rc)}"
     verdict=FAIL
     report 1
-    rc="$(cat "$work/rc")"
+    rc="$(cat "$work/rc")" || rc=1
   fi
   remove_work
   exit "$rc"
@@ -194,18 +201,31 @@ trap on_exit EXIT
 # them to be visible before calling the run inconclusive.
 windows_hidden() { grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$1"; }
 
+# Take QA_ROOT from what `start` has printed so far; from then on the instance counts as up (stop_instance).
+adopt_root() {
+  local r
+  [ "$instance_up" = 0 ] || return 0
+  r="$(sed -n 's/^QA_ROOT=//p' "$work/start.out" 2>/dev/null | head -n 1)" || r=""
+  [ -n "$r" ] || return 0
+  root="$r"
+  sock="$root/app-control.sock"
+  instance_up=1
+}
+
 # Start one QA instance and get it to a focused-able composer: windows visible, a QA agent session created in
 # the QA daemon (a focus whose CLI is the fake claude), its sidebar row selected, the composer ("Message…")
 # present. Sets root/sock. Aborts the run (finish) on any failure; INCONCLUSIVE when the display is locked.
 start_instance() {
   local out windows focus_out
-  out="$("$instance" start "${start_args[@]+"${start_args[@]}"}")" || { echo "$out"; abort_reason="the QA instance failed to start"; fail "$abort_reason"; finish 1; }
-  echo "$out"
-  root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
-  [ -n "$root" ] || { abort_reason="no QA_ROOT printed"; fail "$abort_reason"; finish 1; }
-  sock="$root/app-control.sock"
-  instance_up=1
   inst_fail_base=$fail_count
+  # root/instance_up are set as soon as QA_ROOT is on disk (adopt_root), also by on_exit, so a Ctrl-C during
+  # `start` still tears the instance down.
+  : >"$work/start.out"
+  "$instance" start "${start_args[@]+"${start_args[@]}"}" >"$work/start.out" || { cat "$work/start.out"; adopt_root; abort_reason="the QA instance failed to start"; fail "$abort_reason"; finish 1; }
+  out="$(cat "$work/start.out")"
+  echo "$out"
+  adopt_root
+  [ -n "$root" ] || { abort_reason="no QA_ROOT printed"; fail "$abort_reason"; finish 1; }
 
   windows="$(ctl windows)"
   for _ in $(seq 1 90); do
@@ -319,23 +339,6 @@ click_card_button() {
   fi
   read -r x y <<<"$xy"
   ctl -w "$win" click "$x" "$y" >/dev/null
-}
-
-# Deny every card still pending (poll until gone, up to 10 s). QSR-4: no card leaks across fixtures.
-clear_cards() {
-  local ids rid _n
-  ids="$(listing_json | python3 "$checks" stale)"
-  [ -n "$ids" ] || return 0
-  echo "(clearing stale card(s): $(tr '\n' ' ' <<<"$ids"))"
-  # One exact Deny click per stale card (each answered card makes the next one the visible one).
-  for _n in $ids; do
-    for rid in $(listing_json | python3 "$checks" stale); do
-      click_card_button "$rid" "Deny" quiet && break
-    done
-    sleep 0.5
-  done
-  wait_cards gone 10 && return 0
-  echo "note: stale card(s) still showing after Deny"; return 1
 }
 
 # Poll up to $2 s until request $1 is no longer listed.
@@ -453,18 +456,11 @@ focus_card_text() {
 # One fixture against the current instance. Sets `summary`; returns early (after a fail) when it cannot go on.
 summary=""
 run_fixture() {
-  local fixture="$1" rc rid listing before after expected fixture_cmd drawn allow allow_state allow_secs lbl log after_hit
-  summary="$fixture: ABORTED: see the FAIL above"
+  local fixture="$1" rc rid listing before after expected fixture_cmd drawn allow allow_state allow_secs lbl log after_hit probe_note
+  summary="$fixture: ran, stopped early"
   echo
   echo "=== FIXTURE:$fixture (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF)) ==="
-  if [ "$synthetic" = 1 ]; then
-    # A failed clear means a stale card may still be showing: no cue and no Allow click for this fixture.
-    if ! clear_cards; then
-      fail "$fixture: could not clear stale card(s) before the cue; skipping this fixture (no cue, no clicks)"
-      return
-    fi
-  fi
-  # (--no-synthetic: every fixture has its own fresh instance, so no card is pending and none needs a click.)
+  # (Every fixture has its own fresh instance, so no card is pending and none needs a click.)
   fixture_cmd="$(fixture_command "$fixture")"
   expected="$(python3 "$checks" expected "$fixture_cmd")"
   echo "--- transcript-anchor before"
@@ -560,42 +556,47 @@ PY
       [ "$lbl" = "Scroll to the end to allow" ] || fail "$fixture: Allow was not gated on scrolling (label: $lbl)"
       summary="$summary, Allow label gated"
     fi
-    echo "--- click Allow once / key Return / key Space must be refused"
-    ctl click --text "Allow once" >/dev/null || true
-    ctl key $'\r' --key-code 36 >/dev/null || true
-    ctl key " " --key-code 49 >/dev/null || true
+    if [ "$(listing_json | python3 "$checks" state "$rid")" = gated ]; then
+      # A gated Allow once makes no answer attempt when clicked or keyed, hence no audit entry. The refusal
+      # evidence comes from the card's exact Deny button and Return/Space with the card text view focused.
+      echo "--- gated card: the card's exact Deny button / key Return / key Space must be refused"
+      click_card_button "$rid" "Deny" || fail "$fixture: could not click the card's Deny button"
+      if focus_card_text "$rid" "$fixture"; then
+        ctl -w "$card_win" key $'\r' --key-code 36 >/dev/null || true
+        ctl -w "$card_win" key " " --key-code 49 >/dev/null || true
+      else
+        fail "$fixture: Return/Space would not reach the card's text view (see the key target above)"
+      fi
+      probe_note="gated: Deny/Return/Space refused (audit entry via the exact Deny button), card still pending"
+    else
+      echo "--- click Allow once / key Return / key Space must be refused"
+      ctl click --text "Allow once" >/dev/null || true
+      ctl key $'\r' --key-code 36 >/dev/null || true
+      ctl key " " --key-code 49 >/dev/null || true
+      probe_note="synthetic answers refused"
+    fi
     sleep 1
     wait_cards present 2 || fail "$fixture: the card is gone: a synthetic press answered it"
     listing_json
     log="$(find "$root" -path '*approvals*' -name 'audit-*.jsonl' -print 2>/dev/null | head -1)"
     echo "--- QA approvals audit ($log)"
-    if [ -n "$log" ] && grep -q '"event": *"refusal"' "$log" && grep -q 'app_control' "$log"; then
+    if [ -n "$log" ] && grep '"event": *"refusal"' "$log" | grep -q 'app_control'; then
       grep '"event": *"refusal"' "$log" | tail -n 2
     else
       fail "$fixture: no refusal entry with channel app_control in the QA approvals dir"
     fi
-    summary="$summary, synthetic answers refused"
+    summary="$summary, $probe_note"
   fi
 }
 
-# Main loop. One QA instance for the whole run with synthetic input (cards are Denied by click between fixtures); with
-# --no-synthetic a pending card cannot be cleared without a click, so each fixture gets its own instance,
-# stopped (isolation guard run) before the next starts.
+# Main loop. One QA instance per fixture in both modes: start, fixture, stop (isolation guard run), next.
 for fixture in "${fixtures[@]}"; do
-  if [ "$instance_up" = 0 ]; then start_instance; fi
+  start_instance
   before_fails=$fail_count
   run_fixture "$fixture"
   [ "$fail_count" = "$before_fails" ] || summary="$summary -- FAILED: $last_fail"
   echo "SUMMARY $summary"
   fixtures_done=$((fixtures_done + 1))
-  if [ "$synthetic" != 1 ]; then
-    stop_instance || abort_fail "isolation guard failed after $fixture; not starting another instance"
-  fi
+  stop_instance || abort_fail "isolation guard failed after $fixture; not starting another instance"
 done
-
-# QSR-4: leave no card behind (synthetic mode; the QA root is deleted at stop anyway).
-if [ "$synthetic" = 1 ]; then
-  echo "--- clearing remaining cards"
-  clear_cards || echo "note: card(s) remain (the QA root is deleted at stop)"
-fi
 finish 0
