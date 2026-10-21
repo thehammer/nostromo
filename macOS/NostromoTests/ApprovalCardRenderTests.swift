@@ -917,6 +917,7 @@ private final class OverpaintView: NSView {
     init(frame: NSRect, fill: NSColor) {
         self.fill = fill
         super.init(frame: frame)
+        clipsToBounds = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -925,8 +926,12 @@ private final class OverpaintView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
+        // On macOS 14+ a view does not clip to its bounds and the dirty rect can be larger than they are:
+        // paint only the overpaint's own area.
+        let area = dirtyRect.intersection(bounds)
+        guard !area.isNull else { return }
         fill.setFill()
-        dirtyRect.fill()
+        area.fill()
     }
 }
 
@@ -993,8 +998,6 @@ private final class OverpaintRig {
         overlay?.removeFromSuperview()
         overlay = nil
     }
-
-    var overlayFrameForDiagnostics: String { overlay.map { NSStringFromRect($0.frame) } ?? "none" }
 
     /// The window is showing now.
     func show() { box.showing = true }
@@ -1515,12 +1518,7 @@ final class ApprovalInkChunkTests: XCTestCase {
 
         rig.evaluate(1)
         let ink = try XCTUnwrap(InkCounter.count(in: view))
-        XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws. total \(ink.total), scale \(ink.scale), "
-            + "area \(ink.width)x\(ink.height), fragments \(fragments.map { NSStringFromRect($0.rect) }), clip \(NSStringFromRect(view.contentView.frame)), "
-            + "textView \(NSStringFromRect(view.textView.frame)), clipBounds \(NSStringFromRect(view.contentView.bounds)), gutter \(view.gutterWidth), "
-            + "lines \(view.displayedLines.map { $0.count }), glyphs \(view.textView.layoutManager?.numberOfGlyphs ?? -1), "
-            + "subviews \(view.subviews.map { NSStringFromRect($0.frame) }), checks \(view.inkCheckCount), failures \(view.inkFailures)"
-            + ", overlay \(rig.overlayFrameForDiagnostics)")
+        XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws")
         XCTAssertFalse(view.hasShownEveryLine, "the continuation of the line is hidden: the line was not shown")
         XCTAssertTrue(view.linesNotYetShown.contains(1), "line 1 is not shown: \(view.linesNotYetShown)")
         XCTAssertFalse(view.displayFailed)
