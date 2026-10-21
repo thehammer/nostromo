@@ -83,6 +83,16 @@ class QAMotherProcessTests(unittest.TestCase):
         self.assertNotIn("kill(", body.replace("kill {pid}", ""))
 
 
+class StopInstanceForgetsRootShapeTests(unittest.TestCase):
+    def test_stop_instance_clears_the_root_and_start_out_before_calling_stop(self):
+        src = read("scripts", "qa", "approvals-card.sh")
+        start = src.index("stop_instance() {")
+        body = src[start:src.index("\n}\n", start)]
+        self.assertLess(body.index('root=""'), body.index('"$instance" stop "$stopped_root"'))
+        self.assertIn(': >"$work/start.out"', body)
+        self.assertIn("NOSTROMO_QA_SKIP_BUILD=1", src)
+
+
 class BuildSkipTests(unittest.TestCase):
     def test_the_build_is_skipped_only_when_asked_and_everything_exists(self):
         self.assertTrue(qa.build_can_be_skipped({"NOSTROMO_QA_SKIP_BUILD": "1"}, [True, True, True, True]))
@@ -719,7 +729,7 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
     def test_a_gated_card_is_refused_via_the_exact_deny_button_and_stays_pending(self):
         code = self.code()
         run = code[code.index("run_fixture() {"):]
-        gated = run[run.index('= gated ]'):run.index("synthetic answers refused")]
+        gated = run[run.index('!= ready ]'):run.index("synthetic answers refused")]
         self.assertIn('click_card_button "$rid" "Deny"', gated)
         self.assertIn('focus_card_text "$rid"', gated)
         self.assertIn("--key-code 36", gated)
