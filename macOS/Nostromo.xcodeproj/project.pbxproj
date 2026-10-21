@@ -482,6 +482,7 @@
 		WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
 		WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
 		WCO000000000000000000102 /* WindowContentOverflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WCO000000000000000000101 /* WindowContentOverflowTests.swift */; };
+		WCO000000000000000000023 /* TranscriptLoadHarness.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000060 /* TranscriptLoadHarness.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -1790,6 +1791,7 @@
 				WCO000000000000000000020 /* TranscriptDiagnostics.swift in TestSources */,
 				WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */,
 				WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */,
+				WCO000000000000000000023 /* TranscriptLoadHarness.swift in TestSources */,
 				ZZ0000000000000000BA2201 /* TranscriptAnchorProbeTests.swift in Sources */,
 				ZZ0000000000000000BA2301 /* BackgroundTaskWireDecodeTests.swift in Sources */,
 				ZZ0000000000000000BA2401 /* BackgroundTaskStoreTests.swift in Sources */,
