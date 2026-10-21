@@ -653,7 +653,7 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
     def test_a_failed_clear_skips_the_fixture_before_the_cue_and_any_click(self):
         m = re.search(r'if ! clear_cards; then\n(.*?)\n\s*fi', self.sh, re.S)
         self.assertIsNotNone(m, "the synthetic branch must test clear_cards' status")
-        self.assertIn("continue", m.group(1))
+        self.assertRegex(m.group(1), r"\b(continue|return)\b")
         self.assertLess(m.start(), self.sh.index('send_cue "$fixture"'))
 
     def test_allow_is_clicked_only_after_waiting_for_enabled(self):
@@ -679,6 +679,70 @@ class ApprovalsCardScriptShapeTests(unittest.TestCase):
         i_key = self.sh.index('key "$(printf')
         self.assertLess(i_focus, i_key)
         self.assertIn("key target", self.sh)
+
+    # ---- round 3
+
+    def code(self):
+        return "\n".join(l for l in self.sh.splitlines() if not l.lstrip().startswith("#"))
+
+    def test_the_allow_check_reads_the_log_chosen_by_content_not_the_first_responses_file(self):
+        code = self.code()
+        self.assertNotIn("find \"$root\" -name responses.jsonl", code)
+        self.assertNotIn("head -1)\"\n          echo \"--- fake CLI log", code)
+        self.assertIn('"$checks" fakelog "$root"', code)
+        self.assertIn("seq 1 20", code[code.index("fake_cli_allowed() {"):])   # polls 20 x 0.25 s = 5 s
+
+    def test_the_composer_is_refocused_before_every_cue(self):
+        code = self.code()
+        body = code[code.index("send_cue() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("focus_composer", body)
+        self.assertLess(body.index("focus_composer"), body.index("ctl type"))
+        fc = code[code.index("focus_composer() {"):code.index("send_cue() {")]
+        for needle in ("wait_cards gone", 'click --text "Message', "hittest", '"$checks" composer', "1 2 3", "10"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, fc)
+        self.assertNotIn("activate", fc)
+        self.assertIn("last seen: $composer_seen", code)
+
+    def test_no_synthetic_starts_and_stops_one_instance_per_fixture_and_never_clicks_to_clear(self):
+        code = self.code()
+        loop = code[code.index('for fixture in "${fixtures[@]}"; do'):]
+        self.assertIn("start_instance", loop)
+        self.assertIn('[ "$synthetic" != 1 ]', loop)
+        self.assertIn("stop_instance", loop)
+        run = code[code.index("run_fixture() {"):code.index('for fixture in "${fixtures[@]}"; do')]
+        i_syn = run.index('if [ "$synthetic" = 1 ]; then')
+        self.assertIn("clear_cards", run[i_syn:run.index("fi", i_syn)])
+        self.assertEqual(run.count("clear_cards"), 1)   # only in the synthetic branch: no clear without clicks
+
+    def test_the_default_fixtures_include_bidi(self):
+        self.assertIn("fixtures=(simple_rm heredoc_300 bidi)", self.sh)
+
+    def test_no_synthetic_reports_the_gated_allow_label_for_heredoc_300(self):
+        run = self.code()
+        run = run[run.index("run_fixture() {"):]
+        tail = run[run.index("synthetic answers refused") - 1500:run.index("synthetic answers refused")]
+        self.assertIn("Allow label gated", run)
+        self.assertIn("Scroll to the end to allow", tail + run[run.index("Allow label gated") - 400:])
+
+    def test_every_exit_path_prints_summaries_and_a_result_line_before_the_evidence(self):
+        code = self.code()
+        rep = code[code.index("report() {"):code.index("finish() {")]
+        self.assertIn("ABORTED:", rep)
+        self.assertLess(rep.index("RESULT:"), rep.index("evidence_file"))
+        self.assertIn("INCONCLUSIVE", rep)
+        for call in ("finish 3", "finish 0", "finish 1"):
+            self.assertIn(call, code)
+        exit_fn = code[code.index("on_exit() {"):]
+        self.assertIn("report 1", exit_fn)      # an unexpected set -e death still gets a RESULT
+        self.assertIn("trap on_exit EXIT", code)
+
+    def test_the_readme_documents_round_3_behaviour(self):
+        readme = read("scripts", "qa", "README.md")
+        for needle in ("one QA instance per fixture", "stdin.jsonl", "RESULT:", "ChatTextView"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, readme)
 
     def test_the_readme_documents_keeping_the_session_for_inspection(self):
         readme = read("scripts", "qa", "README.md")

@@ -15,6 +15,9 @@ CLI (used by the script; JSON on stdin or in files, results on stdout):
   card_checks.py prove REQUEST_ID LISTING TREE FIND PNG    -> verdict lines; exit 1 if the text is not drawn
   card_checks.py excerpt TREE                              -> the Approval* part of a tree, for a FAIL message
   card_checks.py responder < hittest.json                  -> class of the first responder
+  card_checks.py composer < hittest.json                   -> exit 0 if the first responder is the chat composer (ChatTextView)
+  card_checks.py fakelog ROOT FIXTURE [COMMAND]            -> the fake CLI's answer for the fixture; exit 0 allow
+                                                              (input unchanged when COMMAND is given), 1 not (reason)
   card_checks.py survives < find.json                      -> exit 0 if the `find` result is non-empty (session row still there)
 
 Why pixels: `find` matches NSTextView.string (the model text), accessibility labels, tooltips and class names,
@@ -146,6 +149,111 @@ def probe_text(card):
 def card_windows(card):
     w = [i for i in (card or {}).get("windows") or [] if isinstance(i, int)]
     return w or [0]
+
+
+COMPOSER_CLASS = "ChatTextView"     # the chat composer's NSTextView subclass (ReplInputBar.swift)
+
+
+def is_composer(responder):
+    return responder == COMPOSER_CLASS
+
+
+# ---- the fake CLI's logs ----
+
+def _read_jsonl(path):
+    out = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def fake_cli_responses(root, fixture):
+    """(directory, responses) of the fake CLI process that served `fixture`.
+
+    The daemon starts the fake CLI several times (a catalog probe, then the session), each in its own
+    `fake-claude/<pid>/` directory, so the first `responses.jsonl` on disk may be the probe's empty one. Pick by
+    content: the directory whose `stdin.jsonl` carries the cue `FIXTURE:<fixture>` (the newest such directory
+    when several do); else the newest non-empty `responses.jsonl`; else (None, [])."""
+    dirs = []
+    for base, _, names in os.walk(root):
+        if os.path.basename(os.path.dirname(base)) == "fake-claude" and (
+                "stdin.jsonl" in names or "responses.jsonl" in names):
+            dirs.append(base)
+    cue = "FIXTURE:%s" % fixture
+    cued = []
+    for d in dirs:
+        try:
+            with open(os.path.join(d, "stdin.jsonl"), encoding="utf-8", errors="replace") as f:
+                if cue in f.read():
+                    cued.append(d)
+        except OSError:
+            pass
+    newest = lambda ds: max(ds, key=lambda d: (_mtime(os.path.join(d, "responses.jsonl")), d))  # noqa: E731
+    if cued:
+        d = newest(cued)
+        return d, _read_jsonl(os.path.join(d, "responses.jsonl"))
+    filled = [d for d in dirs if _read_jsonl(os.path.join(d, "responses.jsonl"))]
+    if filled:
+        d = newest(filled)
+        return d, _read_jsonl(os.path.join(d, "responses.jsonl"))
+    return None, []
+
+
+def _behaviors(responses):
+    """Every permission answer in the log, wrapped or bare: dicts that carry a `behavior`."""
+    out = []
+
+    def visit(node):
+        if isinstance(node, dict):
+            if "behavior" in node:
+                out.append(node)
+            for v in node.values():
+                visit(v)
+        elif isinstance(node, list):
+            for v in node:
+                visit(v)
+    visit(responses)
+    return out
+
+
+def check_allow(root, fixture, command=None):
+    """(ok, message): the fixture's fake CLI got `behavior: allow` and, when `command` is given, its
+    `updatedInput.command` equals it (the card's input, unchanged)."""
+    d, responses = fake_cli_responses(root, fixture)
+    if d is None:
+        return False, "no fake CLI responses found under %s" % root
+    answers = _behaviors(responses)
+    if not answers:
+        return False, "the fake CLI log %s has no permission answer" % d
+    allows = [a for a in answers if a.get("behavior") == "allow"]
+    if not allows:
+        return False, "the fake CLI got %s, not allow (%s)" % (
+            ", ".join(sorted({str(a.get("behavior")) for a in answers})), d)
+    if command is None:
+        return True, "allow (%s)" % d
+    for a in allows:
+        got = (a.get("updatedInput") or {}).get("command")
+        if got is not None and got.rstrip("\n") == command.rstrip("\n"):
+            return True, "allow with the input unchanged (%s)" % d
+    return False, "allow, but updatedInput.command is not the card's input (%s): %r" % (
+        d, [(a.get("updatedInput") or {}).get("command") for a in allows])
 
 
 # ---- view tree ----
@@ -350,7 +458,8 @@ def _load(path):
         return json.load(f)
 
 
-_STDIN_COMMANDS = ("pick", "state", "label", "stale", "probe", "window", "present", "responder", "survives")
+_STDIN_COMMANDS = ("pick", "state", "label", "stale", "probe", "window", "present", "responder", "survives",
+                   "composer")
 
 
 def _main(argv):
@@ -358,6 +467,10 @@ def _main(argv):
     if cmd == "expected":
         print(expected_first_line(argv[2]))
         return 0
+    if cmd == "fakelog":
+        ok, msg = check_allow(argv[2], argv[3], argv[4] if len(argv) > 4 else None)
+        print(msg)
+        return 0 if ok else 1
     if cmd == "excerpt":
         print("\n".join(tree_excerpt(_load(argv[2]))))
         return 0
@@ -424,6 +537,8 @@ def _main(argv):
     if cmd == "responder":
         print((data.get("window") or {}).get("firstResponder") or "none")
         return 0
+    if cmd == "composer":
+        return 0 if is_composer((data.get("window") or {}).get("firstResponder")) else 1
     if cmd == "survives":
         return 0 if isinstance(data, list) and data else 1
     return 2

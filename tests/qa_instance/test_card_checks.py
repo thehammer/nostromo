@@ -941,6 +941,105 @@ class StaleTests(unittest.TestCase):
 
 # ================================================================ 6. the CLI end to end
 
+class FakeCliLogTests(TmpCase):
+    """The fake CLI runs several times (catalog probe, session), each in fake-claude/<pid>/."""
+
+    def proc(self, pid, stdin_lines, responses, mtime=None):
+        d = os.path.join(self.tmp, "home", ".nostromo", "fake-claude", pid)
+        os.makedirs(d)
+        with open(os.path.join(d, "stdin.jsonl"), "w") as f:
+            f.write("".join(json.dumps(x) + "\n" for x in stdin_lines))
+        rp = os.path.join(d, "responses.jsonl")
+        with open(rp, "w") as f:
+            f.write("".join(json.dumps(x) + "\n" for x in responses))
+        if mtime is not None:
+            os.utime(rp, (mtime, mtime))
+        return d
+
+    ALLOW = {"behavior": "allow", "updatedInput": {"command": "rm -rf /tmp/x/a", "description": "d"}}
+
+    def session_tree(self, answer):
+        self.proc("42432", [{"type": "initialize"}], [])                       # probe: empty, sorts first
+        return self.proc("43012", [{"type": "initialize"}, {"text": "FIXTURE:simple_rm"}], [answer])
+
+    def test_the_session_dir_is_chosen_over_the_empty_probe_dir(self):
+        d = self.session_tree(self.ALLOW)
+        got, responses = cc.fake_cli_responses(self.tmp, "simple_rm")
+        self.assertEqual(got, d)
+        self.assertEqual(responses, [self.ALLOW])
+        ok, msg = cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a\n")
+        self.assertTrue(ok, msg)
+
+    def test_wrapped_control_responses_are_found(self):
+        self.session_tree({"type": "control_response", "response": {"response": self.ALLOW}})
+        self.assertTrue(cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")[0])
+
+    def test_a_deny_is_not_an_allow(self):
+        self.session_tree({"behavior": "deny", "message": "no"})
+        ok, msg = cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")
+        self.assertFalse(ok)
+        self.assertIn("deny", msg)
+
+    def test_an_allow_with_a_changed_command_fails(self):
+        self.session_tree({"behavior": "allow", "updatedInput": {"command": "rm -rf /"}})
+        ok, msg = cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")
+        self.assertFalse(ok)
+        self.assertIn("not the card's input", msg)
+
+    def test_no_fake_cli_dir_at_all_fails(self):
+        ok, msg = cc.check_allow(self.tmp, "simple_rm", "rm -rf /tmp/x/a")
+        self.assertFalse(ok)
+        self.assertIn("no fake CLI", msg)
+
+    def test_only_a_probe_dir_with_no_answers_fails(self):
+        self.proc("42432", [{"type": "initialize"}], [])
+        self.assertFalse(cc.check_allow(self.tmp, "simple_rm", "x")[0])
+
+    def test_without_the_cue_the_newest_non_empty_log_is_the_fallback(self):
+        self.proc("1", [], [self.ALLOW], mtime=1000)
+        newer = self.proc("2", [], [self.ALLOW], mtime=2000)
+        self.proc("3", [], [], mtime=3000)
+        self.assertEqual(cc.fake_cli_responses(self.tmp, "simple_rm")[0], newer)
+
+    def test_the_dir_with_the_fixtures_own_cue_wins_over_a_newer_other_dir(self):
+        mine = self.proc("1", [{"t": "FIXTURE:simple_rm"}], [self.ALLOW], mtime=1000)
+        self.proc("2", [{"t": "FIXTURE:heredoc_300"}], [{"behavior": "deny"}], mtime=2000)
+        self.assertEqual(cc.fake_cli_responses(self.tmp, "simple_rm")[0], mine)
+
+    def test_the_cli_exits_zero_for_an_allow_and_one_otherwise(self):
+        self.session_tree(self.ALLOW)
+        p = subprocess.run([sys.executable, SCRIPT, "fakelog", self.tmp, "simple_rm", "rm -rf /tmp/x/a"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        p = subprocess.run([sys.executable, SCRIPT, "fakelog", self.tmp, "simple_rm", "other"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 1)
+
+
+class ComposerFocusTests(unittest.TestCase):
+    def hit(self, resp):
+        return {"window": {"firstResponder": resp}}
+
+    def run_cli(self, payload):
+        return subprocess.run([sys.executable, SCRIPT, "composer"], input=json.dumps(payload),
+                              capture_output=True, text=True).returncode
+
+    def test_only_the_chat_composer_counts(self):
+        self.assertEqual(self.run_cli(self.hit("ChatTextView")), 0)
+        for other in ("NostromoWindow", "ApprovalTextView", "NSTextView", None):
+            with self.subTest(responder=other):
+                self.assertEqual(self.run_cli(self.hit(other)), 1)
+        self.assertEqual(self.run_cli({}), 1)
+
+
+class Bidi(unittest.TestCase):
+    def test_the_bidi_fixtures_expected_first_line_is_its_ascii_prefix(self):
+        path = os.path.join(HERE, "..", "fixtures", "approvals", "bidi.json")
+        with open(path) as f:
+            command = json.load(f)["tool_uses"][0]["input"]["command"]
+        self.assertEqual(cc.expected_first_line(command), "echo ")
+
+
 class CliTests(TmpCase):
     """Each stdin command is run both in a subprocess (python3 card_checks.py ...) and by calling _main with a
     patched stdin; the two must agree."""
