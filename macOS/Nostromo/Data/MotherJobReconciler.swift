@@ -11,16 +11,27 @@ enum MotherJobReconciler {
         var removed: [String]
     }
 
+    /// Whether a discovery `query.get` result may be inserted: unknown and not just archived.
+    static func shouldInsertDiscovered(id: String, jobMap: [String: MotherJob],
+                                       recentlyArchived: Set<String>) -> Bool {
+        jobMap[id] == nil && !recentlyArchived.contains(id)
+    }
+
     /// `listed` must come from a successful reply; never call this for a failed one.
-    /// A job absent from `listed` is removed only after two consecutive absences.
+    /// A job absent from `listed` is removed only after two consecutive clean absences.
+    /// A `partial` list (some entries unreadable) adds and updates but never removes, and
+    /// resets the absence count so removal still needs two consecutive clean lists.
+    /// `unreadableIds` are ids the broker listed but the app could not decode: they count as present.
     static func reconcile(current: [String: MotherJob],
                           listed: [MotherJob],
                           missingOnce: Set<String>,
-                          recentlyArchived: Set<String>) -> Result {
+                          recentlyArchived: Set<String>,
+                          partial: Bool = false,
+                          unreadableIds: Set<String> = []) -> Result {
         var jobs = current
         var added: [String] = []
         var removed: [String] = []
-        var listedIds = Set<String>()
+        var listedIds = unreadableIds
 
         for job in listed {
             listedIds.insert(job.id)
@@ -30,6 +41,10 @@ enum MotherJobReconciler {
                 jobs[job.id] = job
                 added.append(job.id)
             }
+        }
+
+        if partial {
+            return Result(jobs: jobs, missingOnce: [], added: added.sorted(), removed: [])
         }
 
         var nextMissing = Set<String>()

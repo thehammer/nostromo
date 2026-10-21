@@ -223,7 +223,7 @@ class MotherBrokerClient {
 
     /// Read the whole queue (`query.list`, no filter). Tolerant like the snapshot: one unreadable
     /// job never loses the others.
-    func queryList(completion: @escaping (Result<[MotherJob], BrokerError>) -> Void) {
+    func queryList(completion: @escaping (Result<MotherJobListing, BrokerError>) -> Void) {
         sendRaw(type: "query.list", jobId: "", extra: [:]) { [weak self] result in
             switch result {
             case .failure(let error):
@@ -233,9 +233,29 @@ class MotherBrokerClient {
                     completion(.failure(.code(.internal, message: "query.list returned no job list")))
                     return
                 }
-                completion(.success(self.decodeJobList(raw)))
+                completion(.success(self.decodeJobListing(raw)))
             }
         }
+    }
+
+    /// Like `decodeJobList`, but reports partial reads and the ids of unreadable entries
+    /// (when the id itself is readable) so a resync never treats them as gone.
+    func decodeJobListing(_ raw: [[String: Any]]) -> MotherJobListing {
+        var jobs: [MotherJob] = []
+        var unreadable = Set<String>()
+        var partial = false
+        for entry in raw {
+            if let job = decodeJob(entry) {
+                jobs.append(job)
+            } else {
+                partial = true
+                if let id = entry["id"] as? String, !id.isEmpty { unreadable.insert(id) }
+            }
+        }
+        if partial {
+            log.info("broker job list: \(raw.count - jobs.count, privacy: .public) of \(raw.count, privacy: .public) jobs unreadable")
+        }
+        return MotherJobListing(jobs: jobs, partial: partial, unreadableIds: unreadable)
     }
 
     /// Decode each job on its own; unreadable ones are skipped and counted (content-free log).

@@ -682,7 +682,8 @@ class AppStore: ObservableObject {
 
     /// A discovery `query.get` result: inserted only if still unknown and not just archived.
     private func insertDiscoveredJob(_ found: MotherJob) {
-        guard jobMap[found.id] == nil, !recentlyArchived.ids().contains(found.id) else { return }
+        guard MotherJobReconciler.shouldInsertDiscovered(
+            id: found.id, jobMap: jobMap, recentlyArchived: recentlyArchived.ids()) else { return }
         jobMap[found.id] = found
         log.info("broker discovered job \(found.id.prefix(8), privacy: .public) via query.get")
         publishJobsAndStatus()
@@ -700,10 +701,11 @@ class AppStore: ObservableObject {
         }
     }
 
-    private func applyListedJobs(_ listed: [MotherJob]) {
+    private func applyListedJobs(_ listing: MotherJobListing) {
         let outcome = MotherJobReconciler.reconcile(
-            current: jobMap, listed: listed,
-            missingOnce: missingOnce, recentlyArchived: recentlyArchived.ids())
+            current: jobMap, listed: listing.jobs,
+            missingOnce: missingOnce, recentlyArchived: recentlyArchived.ids(),
+            partial: listing.partial, unreadableIds: listing.unreadableIds)
         missingOnce = outcome.missingOnce
         outcome.removed.forEach { recentlyArchived.insert($0) }
         guard outcome.jobs != jobMap else { return }
