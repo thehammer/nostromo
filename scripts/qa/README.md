@@ -37,8 +37,28 @@ fallback. `ctl find` for the first 12 ASCII characters of the card's rendered fi
 non-ASCII/invisible character, so the bidi fixture's probe is `echo `) is a secondary "text in view tree" check,
 required to hit a view overlapping the card; it matches model text, not glyphs, which is why the pixels decide.
 Screenshots, trees and listings go to a private `mktemp -d` directory (mode 0700, printed at the start, removed at
-the end unless `KEEP=1`); fixture names must match `[a-z0-9_]+` (exit 2 otherwise). With `--no-synthetic` a stale
-card cannot be Denied, so it is noted (not a FAIL) and ignored by input matching. One `SUMMARY` line per fixture.
+the end unless `KEEP=1`); fixture names must match `[a-z0-9_]+` (exit 2 otherwise). One `SUMMARY` line per fixture.
+
+Round 3 behaviour:
+
+* **Which fake-CLI log.** The daemon starts the fake CLI several times (a catalog probe, then the session), each in
+  its own `home/.nostromo/fake-claude/<pid>/`. The allow check scans every `fake-claude/*/stdin.jsonl` under the QA
+  root for the fixture's cue (`FIXTURE:<name>`) and reads that directory's `responses.jsonl` (the newest such
+  directory; the newest non-empty log if no stdin has the cue), polling up to 5 s. For `simple_rm` it needs
+  `behavior: allow` and `updatedInput.command` equal to the card's input. (`card_checks.py fakelog`.)
+* **Composer focus.** Before every cue the script waits for no pending card, clicks the "Message…" field and polls
+  `hittest` until the first responder is the chat composer (`ChatTextView`): up to 3 clicks in 10 s. If it never is,
+  that fixture FAILs and the message names the first responder it saw (e.g. `NostromoWindow`). It never uses `activate`.
+* **`--no-synthetic` runs one QA instance per fixture.** A pending card blocks the composer and cannot be Denied
+  without a click, so each fixture starts a fresh instance and stops it (isolation guard run) before the next; the
+  verdict is aggregated. Per fixture it checks: the card appears, its text is drawn (pixel proof), click / Return /
+  Space are refused with a `refusal` audit entry (channel `app_control`); `heredoc_300` also reports "Allow label
+  gated". Synthetic mode keeps one instance for the whole run.
+* **Output.** Every exit path (a failed fixture, an aborted instance, an inconclusive display, an unexpected script
+  error) prints one `SUMMARY <fixture>: ...` per fixture (`ABORTED: <reason>` for those that did not run) and a final
+  `RESULT: PASS|FAIL|INCONCLUSIVE (synthetic input on|OFF)`, then the DEBUG EVIDENCE collected along the way. Exit
+  codes: 0 PASS, 1 FAIL, 2 usage, 3 INCONCLUSIVE.
+
 Pure checks live in `lib/card_checks.py` (tests: `tests/qa_instance/test_card_checks.py`).
 
 The QA app has only the built-in foci (Fred, Mother, Perri, Teri); the composer exists only inside an agent
@@ -53,7 +73,7 @@ QA root (also through `..` or a symlink), so it cannot reach the user's daemon.
 |---|---|
 | `KEEP=1` | keep the QA root after the run (`stop` deletes it otherwise), so the logs under it survive. An isolation failure keeps it too: delete it by hand afterwards |
 
-On any FAIL (and on an INCONCLUSIVE) the script first prints: `ctl windows`, `ctl tree --depth 3` (first 120 lines),
+On any FAIL (and on an INCONCLUSIVE) the script prints, after the RESULT line: `ctl windows`, `ctl tree --depth 3` (first 120 lines),
 the last 40 lines of `nostromd.log` and of `home/.nostromo/logs/window-placement.log`, and a listing of the QA
 approvals dir. If only the isolation guard failed, the app is already gone, so you get the logs and the listing.
 

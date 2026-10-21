@@ -11,7 +11,21 @@
 #   refused: the card stays and the QA approvals dir has a `refusal` entry with channel app_control.
 #
 # Before the first cue it creates a QA agent session in the QA daemon (`qa-instance.sh focus`: a focus
-# whose CLI is the fake claude), selects its sidebar row and waits for the composer ("Message…").
+# whose CLI is the fake claude), selects its sidebar row and waits for the composer ("Message…"). Before EVERY
+# cue it waits for no pending card, clicks the "Message…" field and polls the read-only `hittest` until the
+# first responder is the chat composer (ChatTextView): up to 3 clicks in 10 s, else the fixture FAILs naming the
+# first responder it saw.
+#
+# --no-synthetic runs ONE QA INSTANCE PER FIXTURE (a pending card cannot be cleared without a click): start,
+# fixture, stop (guard run), next. Its per-fixture checks: card appears, text drawn, click/Return/Space
+# refused with a refusal audit entry; heredoc_300 also reports its Allow label as gated.
+#
+# The fake CLI is started several times by the daemon (catalog probe, session): the allow check reads the
+# responses.jsonl of the fake-claude process dir whose stdin.jsonl holds the fixture's cue (newest non-empty
+# log as a fallback), polled up to 5 s, and needs behavior allow with updatedInput.command unchanged.
+#
+# Every exit path prints one `SUMMARY` per fixture (`ABORTED: <reason>` for those that did not run) and a final
+# `RESULT: PASS|FAIL|INCONCLUSIVE` line, then the DEBUG EVIDENCE block.
 #
 # Cards are matched by content: each fixture waits for the card whose `input` starts with that fixture's
 # first command line, cut at its first non-ASCII character (from tests/fixtures/approvals/<name>.json; a
@@ -81,82 +95,144 @@ remove_work() {
   [ -z "${KEEP:-}" ] || return 0
   case "$work" in */qa-card.*) rm -rf -- "$work" ;; esac
 }
-trap remove_work EXIT
 echo "scratch directory (screenshots, trees): $work"
 
-out="$("$instance" start "${start_args[@]+"${start_args[@]}"}")"
-echo "$out"
-root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
-[ -n "$root" ] || { echo "FAIL: no QA_ROOT printed"; exit 1; }
-stopped=0
-sock="$root/app-control.sock"
-ctl() { "$app" --socket "$sock" "$@"; }
+root=""
+label=""
+sock=""
+instance_up=0
 verdict=PASS
+fail_count=0
+inst_fail_base=0
+abort_reason=""
+reported=0
+fixtures_done=0
+force_evidence=0
+evidence_file="$work/debug-evidence.txt"
+: >"$evidence_file"
+ctl() { "$app" --socket "$sock" "$@"; }
 
-# What there is to debug with, printed before the QA root goes away. `live`: the app is still up (windows,
-# tree); `files`: only what is on disk (after stop, when the isolation guard failed).
+# What there is to debug with, collected into a file (printed after the RESULT line, before the QA root goes
+# away). `live`: the app is still up (windows, tree); `files`: only what is on disk (after stop, when the
+# isolation guard failed).
 debug_evidence() {
-  echo
-  echo "=== DEBUG EVIDENCE (the QA root is deleted at stop; KEEP=1 keeps it) ==="
-  if [ "${1:-live}" = live ]; then
-    echo "--- ctl windows"; ctl windows 2>&1 || true
-    echo "--- ctl tree --depth 3 (first 120 lines)"; { ctl tree --depth 3 2>&1 | head -n 120; } || true
+  {
+    echo
+    echo "=== DEBUG EVIDENCE (instance $root; the QA root is deleted at stop; KEEP=1 keeps it) ==="
+    if [ "${1:-live}" = live ]; then
+      echo "--- ctl windows"; ctl windows 2>&1 || true
+      echo "--- ctl tree --depth 3 (first 120 lines)"; { ctl tree --depth 3 2>&1 | head -n 120; } || true
+    fi
+    echo "--- nostromd.log (last 40 lines)"; tail -n 40 "$root/nostromd.log" 2>/dev/null || echo "(no daemon log)"
+    echo "--- window-placement.log (last 40 lines)"
+    tail -n 40 "$root/home/.nostromo/logs/window-placement.log" 2>/dev/null || echo "(no placement log)"
+    echo "--- QA approvals dir ($root/home/.nostromo/approvals)"
+    ls -la "$root/home/.nostromo/approvals" 2>&1 || true
+  } >>"$evidence_file" 2>&1
+}
+
+fail() { verdict=FAIL; fail_count=$((fail_count + 1)); last_fail="$*"; echo "FAIL: $*"; }
+last_fail=""
+
+# Stop the current QA instance (isolation guard run). Collects the debug evidence first when anything failed
+# since it started (or the run is aborting). A guard failure is a FAIL.
+stop_instance() {
+  [ "$instance_up" = 1 ] || return 0
+  if [ "$force_evidence" = 1 ] || [ "$fail_count" != "$inst_fail_base" ]; then debug_evidence live; fi
+  instance_up=0
+  if ! KEEP="${KEEP:-}" "$instance" stop "$root"; then
+    fail "isolation guard"
+    debug_evidence files
+    return 1
   fi
-  echo "--- nostromd.log (last 40 lines)"; tail -n 40 "$root/nostromd.log" 2>/dev/null || echo "(no daemon log)"
-  echo "--- window-placement.log (last 40 lines)"
-  tail -n 40 "$root/home/.nostromo/logs/window-placement.log" 2>/dev/null || echo "(no placement log)"
-  echo "--- QA approvals dir ($root/home/.nostromo/approvals)"
-  ls -la "$root/home/.nostromo/approvals" 2>&1 || true
+}
+
+# Every exit path: stop the instance, print one SUMMARY per fixture that did not get one (ABORTED: reason),
+# the RESULT line, then the collected DEBUG EVIDENCE. Prints the final exit code (0 PASS, 1 FAIL, 3 INCONCLUSIVE;
+# an isolation breach or any FAIL outranks inconclusive).
+report() {
+  local rc="$1" label i
+  reported=1
+  [ "$rc" = 0 ] || force_evidence=1
+  stop_instance || true
+  [ "$verdict" = PASS ] || rc=1
+  for ((i = fixtures_done; i < ${#fixtures[@]}; i++)); do
+    echo "SUMMARY ${fixtures[$i]}: ABORTED: ${abort_reason:-not run}"
+  done
+  case "$rc" in 0) label=PASS ;; 3) label=INCONCLUSIVE ;; *) label=FAIL ;; esac
+  echo "RESULT: $label (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF))"
+  if [ -s "$evidence_file" ]; then cat "$evidence_file"; fi
+  echo "$rc" >"$work/rc"
+}
+finish() {
+  report "$1"
+  exit "$(cat "$work/rc")"
+}
+# A failure the run cannot continue past: evidence, stop, RESULT, exit 1.
+abort_fail() {
+  abort_reason="$*"
+  fail "$*"
+  finish 1
 }
 # shellcheck disable=SC2329  # invoked by the EXIT trap
-cleanup() {
+on_exit() {
   local rc=$?
+  if [ "$reported" != 1 ]; then
+    # set -e or an unexpected error: still end with SUMMARY lines and a RESULT.
+    abort_reason="${abort_reason:-script error (exit $rc)}"
+    verdict=FAIL
+    report 1
+    rc="$(cat "$work/rc")"
+  fi
   remove_work
-  [ "$stopped" = 1 ] && return
-  [ "$rc" = 0 ] || debug_evidence live
-  KEEP="${KEEP:-}" "$instance" stop "$root" || true
+  exit "$rc"
 }
-trap cleanup EXIT
-fail() { verdict=FAIL; echo "FAIL: $*"; }
-# A failure the run cannot continue past: evidence, stop, exit 1.
-abort_fail() {
-  fail "$*"
-  debug_evidence live
-  stopped=1; KEEP="${KEEP:-}" "$instance" stop "$root" || echo "FAIL: isolation guard"
-  exit 1
-}
+trap on_exit EXIT
 
 # The control socket answers before the app has placed its windows (they start at alpha 0 and are
 # revealed once placement finishes, one per display, each on its own Space). Wait up to 45 s for all of
-# them to be visible before calling the run inconclusive, and print what was seen when it is.
+# them to be visible before calling the run inconclusive.
 windows_hidden() { grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$1"; }
-windows="$(ctl windows)"
-for _ in $(seq 1 90); do
-  windows_hidden "$windows" || break
-  sleep 0.5
-  windows="$(ctl windows)"
-done
-if windows_hidden "$windows"; then
-  echo "INCONCLUSIVE: window not visible after 45 s (display locked or asleep, or the QA app never revealed its windows)"
-  debug_evidence live
-  stopped=1; KEEP="${KEEP:-}" "$instance" stop "$root" || exit 1   # an isolation breach outranks "inconclusive"
-  exit 3
-fi
 
-# The QA app only has the built-in foci (Fred, Mother, Perri, Teri); the composer lives in an agent
-# session view. Have the QA daemon create a session whose CLI is the fake claude (it announces the
-# focus to the app), select its sidebar row, and wait for the composer.
-echo "--- QA agent session"
-if ! focus_out="$("$instance" focus "$root" 2>&1)"; then
+# Start one QA instance and get it to a focused-able composer: windows visible, a QA agent session created in
+# the QA daemon (a focus whose CLI is the fake claude), its sidebar row selected, the composer ("Message…")
+# present. Sets root/sock. Aborts the run (finish) on any failure; INCONCLUSIVE when the display is locked.
+start_instance() {
+  local out windows focus_out
+  out="$("$instance" start "${start_args[@]+"${start_args[@]}"}")" || { echo "$out"; abort_reason="the QA instance failed to start"; fail "$abort_reason"; finish 1; }
+  echo "$out"
+  root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
+  [ -n "$root" ] || { abort_reason="no QA_ROOT printed"; fail "$abort_reason"; finish 1; }
+  sock="$root/app-control.sock"
+  instance_up=1
+  inst_fail_base=$fail_count
+
+  windows="$(ctl windows)"
+  for _ in $(seq 1 90); do
+    windows_hidden "$windows" || break
+    sleep 0.5
+    windows="$(ctl windows)"
+  done
+  if windows_hidden "$windows"; then
+    abort_reason="window not visible after 45 s (display locked or asleep, or the QA app never revealed its windows)"
+    echo "INCONCLUSIVE: $abort_reason"
+    finish 3
+  fi
+
+  # The QA app only has the built-in foci (Fred, Mother, Perri, Teri); the composer lives in an agent
+  # session view.
+  echo "--- QA agent session"
+  if ! focus_out="$("$instance" focus "$root" 2>&1)"; then
+    echo "$focus_out"
+    abort_fail "could not create the QA agent session in the QA daemon"
+  fi
   echo "$focus_out"
-  abort_fail "could not create the QA agent session in the QA daemon"
-fi
-echo "$focus_out"
-label="$(sed -n 's/^QA_FOCUS_LABEL=//p' <<<"$focus_out")"
-[ -n "$label" ] || abort_fail "no QA_FOCUS_LABEL printed by the focus step"
-ctl wait "$label" --timeout 30 || abort_fail "the QA session's sidebar row '$label' did not appear within 30 s"
-ctl click --text "$label" >/dev/null || abort_fail "could not select the QA session's sidebar row '$label'"
-ctl wait "Message…" --timeout 15 || abort_fail "no composer ('Message…') within 15 s of selecting the QA session '$label'"
+  label="$(sed -n 's/^QA_FOCUS_LABEL=//p' <<<"$focus_out")"
+  [ -n "$label" ] || abort_fail "no QA_FOCUS_LABEL printed by the focus step"
+  ctl wait "$label" --timeout 30 || abort_fail "the QA session's sidebar row '$label' did not appear within 30 s"
+  ctl click --text "$label" >/dev/null || abort_fail "could not select the QA session's sidebar row '$label'"
+  ctl wait "Message…" --timeout 15 || abort_fail "no composer ('Message…') within 15 s of selecting the QA session '$label'"
+}
 
 # Poll up to $2 s until the card count is above zero ("present") or zero ("gone").
 wait_cards() {
@@ -170,11 +246,52 @@ wait_cards() {
   return 1
 }
 
-# The composer takes the click, then the cue. (Synthetic keys and clicks are not answers.)
+# The composer takes the click, then the cue. (Synthetic keys and clicks are not answers.) Before every cue:
+# wait until no card is pending (a card blocks the composer), click the "Message…" field and poll the
+# read-only hittest until the first responder is the chat composer (ChatTextView); up to 3 clicks, 10 s in all.
+# On failure composer_seen is the last first responder observed and composer_why the reason.
+composer_seen="none"
+composer_why=""
+focus_composer() {
+  local attempt t0=$SECONDS hit resp
+  composer_seen="none"; composer_why=""
+  if ! wait_cards gone 10; then composer_why="a card is still pending"; return 1; fi
+  for attempt in 1 2 3; do
+    ctl click --text "Message…" >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      hit="$(ctl hittest 1 1 2>/dev/null)" || hit="{}"
+      resp="$(python3 "$checks" responder <<<"$hit" 2>/dev/null || echo none)"
+      composer_seen="$resp"
+      if python3 "$checks" composer <<<"$hit" 2>/dev/null; then
+        echo "composer focused (first responder = $resp, click $attempt)"
+        return 0
+      fi
+      [ $((SECONDS - t0)) -lt 10 ] || break 2
+      sleep 0.25
+    done
+    echo "(composer click $attempt: first responder = $resp; retrying)"
+  done
+  composer_why="first responder stayed '$composer_seen' after $attempt click(s) in $((SECONDS - t0)) s"
+  return 1
+}
 send_cue() {
-  ctl click --text "Message…" >/dev/null
+  focus_composer || return 1
   ctl type "FIXTURE:$1" >/dev/null
   ctl key $'\r' --key-code 36 >/dev/null
+}
+
+# Poll up to 5 s for the fake CLI's answer for fixture $1 (command $2): the responses.jsonl of the fake-claude
+# process dir whose stdin has the fixture's cue (see card_checks.py fakelog). Prints the log tail; sets fake_msg.
+fake_msg=""
+fake_cli_allowed() {
+  local rc
+  for _ in $(seq 1 20); do
+    rc=0; fake_msg="$(python3 "$checks" fakelog "$root" "$1" "$2")" || rc=$?
+    [ "$rc" = 0 ] && break
+    sleep 0.25
+  done
+  echo "--- fake CLI log: $fake_msg"
+  return "$rc"
 }
 
 checks="$here/lib/card_checks.py"
@@ -333,24 +450,29 @@ focus_card_text() {
   [ "$resp" = ApprovalTextView ]
 }
 
-for fixture in "${fixtures[@]}"; do
+# One fixture against the current instance. Sets `summary`; returns early (after a fail) when it cannot go on.
+summary=""
+run_fixture() {
+  local fixture="$1" rc rid listing before after expected fixture_cmd drawn allow allow_state allow_secs lbl log after_hit
+  summary="$fixture: ABORTED: see the FAIL above"
   echo
   echo "=== FIXTURE:$fixture (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF)) ==="
   if [ "$synthetic" = 1 ]; then
     # A failed clear means a stale card may still be showing: no cue and no Allow click for this fixture.
     if ! clear_cards; then
       fail "$fixture: could not clear stale card(s) before the cue; skipping this fixture (no cue, no clicks)"
-      continue
+      return
     fi
-  else
-    # Deny clicks are refused with synthetic input off; matching by input ignores a leftover card.
-    clear_cards >/dev/null || echo "note: a card from an earlier fixture remains (expected with --no-synthetic); matching by input"
   fi
+  # (--no-synthetic: every fixture has its own fresh instance, so no card is pending and none needs a click.)
   fixture_cmd="$(fixture_command "$fixture")"
   expected="$(python3 "$checks" expected "$fixture_cmd")"
   echo "--- transcript-anchor before"
   before="$(ctl transcript-anchor)"; echo "$before"
-  send_cue "$fixture"
+  if ! send_cue "$fixture"; then
+    fail "$fixture: the composer never became the first responder (last seen: $composer_seen); no cue sent: $composer_why"
+    return
+  fi
   rc=0; rid="$(wait_card_for "$fixture_cmd")" || rc=$?
   case "$rc" in
     0)
@@ -358,9 +480,9 @@ for fixture in "${fixtures[@]}"; do
       listing="$(listing_json)"; echo "$listing" ;;
     4)
       echo "$rid"
-      fail "$fixture: ambiguous card selection (more than one card starts with '$expected'); not picking one by position"; continue ;;
+      fail "$fixture: ambiguous card selection (more than one card starts with '$expected'); not picking one by position"; return ;;
     *)
-      fail "$fixture: no card whose input starts with '$expected' (or equals the fixture's input when that prefix is under 4 characters) within 15 s"; continue ;;
+      fail "$fixture: no card whose input starts with '$expected' (or equals the fixture's input when that prefix is under 4 characters) within 15 s"; return ;;
   esac
   echo "--- transcript-anchor after (card showing)"
   after="$(ctl transcript-anchor)"; echo "$after"
@@ -393,11 +515,13 @@ PY
         echo "--- click Allow once (enabled after ${allow_secs} s)"
         click_card_button "$rid" "Allow once" || fail "$fixture: could not click the card's Allow once button"
         if wait_cards gone 8; then
-          log="$(find "$root" -name responses.jsonl -print 2>/dev/null | head -1)"
-          echo "--- fake CLI log ($log)"
-          if [ -n "$log" ]; then tail -n 3 "$log"; else fail "no fake CLI log found under the QA root"; fi
-          grep -q '"behavior": *"allow"' "$log" 2>/dev/null || fail "$fixture: the fake CLI did not get an allow"
-          summary="$summary, Allow enabled after ${allow_secs} s, allowed"
+          # The daemon starts the fake CLI several times (catalog probe, session): the log is chosen by content
+          # (the process dir whose stdin has this fixture's cue), polled up to 5 s (written just after the card goes).
+          if fake_cli_allowed "$fixture" "$fixture_cmd"; then
+            summary="$summary, Allow enabled after ${allow_secs} s, allowed (input unchanged)"
+          else
+            fail "$fixture: the fake CLI did not get an allow with the input unchanged: $fake_msg"
+          fi
         else
           fail "$fixture: the card did not go away after Allow once"
         fi
@@ -430,6 +554,12 @@ PY
       deny_and_assert "$rid" || true
     fi
   else
+    if [ "$fixture" = heredoc_300 ]; then
+      lbl="$(listing_json | python3 "$checks" label "$rid")"
+      echo "Allow once label: $lbl"
+      [ "$lbl" = "Scroll to the end to allow" ] || fail "$fixture: Allow was not gated on scrolling (label: $lbl)"
+      summary="$summary, Allow label gated"
+    fi
     echo "--- click Allow once / key Return / key Space must be refused"
     ctl click --text "Allow once" >/dev/null || true
     ctl key $'\r' --key-code 36 >/dev/null || true
@@ -446,18 +576,26 @@ PY
     fi
     summary="$summary, synthetic answers refused"
   fi
+}
+
+# Main loop. One QA instance for the whole run with synthetic input (cards are Denied by click between fixtures); with
+# --no-synthetic a pending card cannot be cleared without a click, so each fixture gets its own instance,
+# stopped (isolation guard run) before the next starts.
+for fixture in "${fixtures[@]}"; do
+  if [ "$instance_up" = 0 ]; then start_instance; fi
+  before_fails=$fail_count
+  run_fixture "$fixture"
+  [ "$fail_count" = "$before_fails" ] || summary="$summary -- FAILED: $last_fail"
   echo "SUMMARY $summary"
+  fixtures_done=$((fixtures_done + 1))
+  if [ "$synthetic" != 1 ]; then
+    stop_instance || abort_fail "isolation guard failed after $fixture; not starting another instance"
+  fi
 done
 
-# QSR-4: leave no card behind. With synthetic input off the Deny click is refused; the QA root is deleted at stop.
-echo "--- clearing remaining cards"
-clear_cards || echo "note: card(s) remain (expected with --no-synthetic; the QA root is deleted at stop)"
-
-[ "$verdict" = PASS ] || debug_evidence live
-stopped=1
-if KEEP="${KEEP:-}" "$instance" stop "$root"; then :; else
-  fail "isolation guard"
-  debug_evidence files
+# QSR-4: leave no card behind (synthetic mode; the QA root is deleted at stop anyway).
+if [ "$synthetic" = 1 ]; then
+  echo "--- clearing remaining cards"
+  clear_cards || echo "note: card(s) remain (the QA root is deleted at stop)"
 fi
-echo "RESULT: $verdict (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF))"
-case "$verdict" in PASS) exit 0 ;; *) exit 1 ;; esac
+finish 0
