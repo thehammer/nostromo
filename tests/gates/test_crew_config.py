@@ -102,9 +102,9 @@ class CrewConfigTests(unittest.TestCase):
         by = {c["name"]: c for c in self.checks}
         self.assertEqual(set(by["swift-ci"]["when"]["paths"]), {"macOS/**", "iOS/**", "Shared/**"})
         self.assertEqual(by["swift-ci"]["where"], "any")
-        # Python goes through the RWX sandbox like Rust: a change to `where: any` would silently drop
-        # python-test out of the sandbox-gate loop above, so pin it explicitly.
-        self.assertEqual(by["python-test"]["where"], "sandbox")
+        # Python runs on the HOST (macOS), not in the Linux sandbox: tests/operator_pin needs codesign/lipo and
+        # refuses to skip, so a sandbox python-test gate fails every time (seen in the first live gate run).
+        self.assertEqual(by["python-test"]["where"], "any")
         self.assertIs(by["actionlint"]["blocking"], False)
         self.assertIs(by["mother-contract"]["blocking"], False)
 

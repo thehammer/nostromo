@@ -8,7 +8,7 @@ Mother reads `.mother/crew.yml` from a job's **base ref** when the job is added,
 |---|---|---|---|---|
 | `rust-clippy` | sandbox | `src/**`, Rust tests, `Cargo.*`, toolchain, `.rwx/**` | ~30 s (+ ~75 s sandbox start) | yes |
 | `rust-test` | sandbox | same as clippy | ~3 min 18 s from a fresh sandbox | yes |
-| `python-test` | sandbox | `tests/**`, `scripts/**`, `bin/**`, `Makefile`, `*.py` | ~45 s | yes |
+| `python-test` | any (host Mac) | `tests/**`, `scripts/**`, `bin/**`, `Makefile`, `*.py` | ~45 s | yes |
 | `swift-ci` | host (`make ci-remote ONLY=swift`) | `macOS/**`, `iOS/**`, `Shared/**` | ~7.5 min | yes |
 | `shellcheck` | host | `*.sh`, `bin/**`, `scripts/**` | seconds | yes |
 | `actionlint` | host | `.github/workflows/**` | seconds | advisory |
@@ -57,5 +57,5 @@ lenses: {add: [tests], remove: [ops-infra]}
 ## Costs and limits to know
 
 - `swift-ci` dispatches the whole macOS GitHub workflow for each gate attempt (up to two attempts), so it duplicates the PR's own CI run and uses Actions minutes. Its `timeout_s` is 1800, below the 45-minute `budget_minutes`, so a hung dispatch fails on its own instead of marking every gate `unavailable` through the total watchdog.
-- `python-test` runs in the Linux sandbox and its `when` paths cover the trees the Python policy suites scan (`macOS/`, `iOS/`, `Shared/`, `.github/`, `src/mother/`). CI's Python job runs on macOS on purpose (BSD `ps`); if the first observe results show a sandbox-only failure for `python-test`, set `blocking: false` for it before judging agreement with CI.
+- `python-test` runs on the HOST Mac (`where: any`), not in the Linux sandbox: `tests/operator_pin` needs `codesign`/`lipo` and refuses to skip without them, so a sandbox gate fails every time (seen in the first live gate run on 2026-10-21, exit 2 after 81 s). Its `when` paths cover the trees the Python policy suites scan (`macOS/`, `iOS/`, `Shared/`, `.github/`, `src/mother/`). CI's Python job runs on macOS for the same reason.
 - `shellcheck-changed.sh` cannot check a changed file whose name git prints quoted (non-ASCII, quotes, tabs): it says so on stderr and fails rather than passing silently.
