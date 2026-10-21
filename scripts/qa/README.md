@@ -14,10 +14,10 @@ runs one and reads the PASS/FAIL lines.
 
 ### `approvals-card.sh`: the QA session, evidence and env knobs
 
-Robustness (QSR): pending cards are denied before each fixture and at the end, each with the card's own exact "Deny"
+Robustness (QSR): cards are denied with the card's own exact "Deny"
 button (located in `ctl tree` inside the card and clicked by coordinates, never a `--text "Deny"` substring that could
 hit "Deny & stop"); after every Deny the request must be gone and the QA session's sidebar row must survive (if it
-vanished the run FAILs loudly). A fixture whose stale cards could not be cleared is skipped: no cue, no Allow click.
+vanished the run FAILs loudly).
 Each fixture waits for the card whose `input` starts with the fixture's first command line cut at its first non-ASCII
 character (from `tests/fixtures/approvals/<name>.json`); a prefix shorter than 4 characters selects by exact full
 input instead; two matching cards are "ambiguous card selection" (FAIL), never picked by position. "Allow once" is
@@ -49,7 +49,7 @@ Round 3 behaviour:
 * **Composer focus.** Before every cue the script waits for no pending card, clicks the "Message…" field and polls
   `hittest` until the first responder is the chat composer (`ChatTextView`): up to 3 clicks in 10 s. If it never is,
   that fixture FAILs and the message names the first responder it saw (e.g. `NostromoWindow`). It never uses `activate`.
-* **Every fixture runs in its own QA instance, in both modes.** Composer state and pending cards never leak
+* **Every fixture runs in its own QA instance (one QA instance per fixture), in both modes.** Composer state and pending cards never leak
   across fixtures (after `heredoc_300` was Denied the composer once never regained focus for `bidi`): each fixture
   starts a fresh instance and stops it (isolation guard run) before the next; the verdict is aggregated. With
   `--no-synthetic` it checks per fixture: the card appears, its text is drawn (pixel proof), and synthetic answers
