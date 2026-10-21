@@ -315,6 +315,18 @@ final class WindowContentOverflowTests: XCTestCase {
             ("pane: json snapshot", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .jsonSnapshot(.object(["k": .string(wide), "list": .array([.string(wide), .string(wide)])])), freshness: nil, address: nil)) }),
             ("pane: loading", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .loading, freshness: nil, address: nil)) }),
             ("pane: long text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text(Self.longLines), freshness: nil, address: nil)) }),
+            ("pane: 200-line text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text(Array(repeating: "a line of text in the plans pane", count: 200).joined(separator: "\n")), freshness: nil, address: nil)) }),
+            ("pane: code, 3000 lines with a 5000-char line", {
+                let code = CodePayload(path: "a.rs", revision: "working", firstLine: 1,
+                                       text: wide + "\n" + Array(repeating: "let x = 1;", count: 3000).joined(separator: "\n"))
+                AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .code(code), freshness: nil, address: nil)) }),
+            ("pane: pr list with 60 long titles", {
+                let items = (0..<60).map { n in
+                    PrListItemModel(repo: "owner/" + String(repeating: "repo", count: 40), number: n, title: wide, author: wide,
+                                    bucket: ["requested", "needs_review", "changes_req", "dependabot"][n % 4],
+                                    ciState: .success, newActivity: true, url: "https://example.com/\(n)", headSha: "abc")
+                }
+                AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .prList(items), freshness: nil, address: nil)) }),
             ("pane: short text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text("x"), freshness: nil, address: nil)) }),
         ]
         var failures: [String] = []
@@ -350,5 +362,23 @@ final class WindowContentOverflowTests: XCTestCase {
     func testAWindowWhoseLayoutFitsReportsNoOverflow() {
         let rig = makeRig(Self.scenarios[1], size: NSSize(width: 1920, height: 1080), index: 500)
         XCTAssertEqual(rig.layout.contentOverflow, .zero)
+    }
+
+    /// The Mother focus (job list above the REPL) with real-looking, long job rows.
+    func testMotherFocusKeepsFittingWithLongJobRows() throws {
+        let rig = makeRig(Self.scenarios[4], size: NSSize(width: 1920, height: 1080), index: 600)
+        let wide = String(repeating: "wide title ", count: 80)
+        let jobs = (0..<40).map { n in
+            MotherJob(id: "job-\(n)", state: n % 2 == 0 ? "running" : "awaiting", repo: "owner/" + String(repeating: "repo", count: 30),
+                      isolation: "worktree", title: wide, createdAt: Date(), startedAt: Date(), finishedAt: nil, planPath: nil,
+                      question: n % 2 == 0 ? nil : wide, pausedReason: nil, adherenceStatus: nil, currentTier: nil)
+        }
+        AppStore.shared.applyBrokerEventForTesting(.snapshot(jobs))
+        settle(rig.window)
+        let content = contentSize(of: rig.window)
+        let demand = rig.layout.fittingSize
+        XCTAssertTrue(rig.layout.frame.size == content && rig.window.frame.size == requestedFrameSize(rig)
+                      && demand.width <= content.width + 1 && demand.height <= content.height + 1 && escapingViews(in: rig).isEmpty,
+                      "Mother list with 40 long rows: MainLayout \(rig.layout.frame.size) vs \(content), min demanded \(demand) ¦ \(report(rig))")
     }
 }

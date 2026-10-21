@@ -1091,6 +1091,9 @@ class AppStore: ObservableObject {
     /// starts the file watchers under the real home directory).
     func applyForTesting(_ msg: ServerMsg) { handle(msg) }
 
+    /// Test seam: the same for a Mother broker event (the job list the Mother pane shows).
+    func applyBrokerEventForTesting(_ event: BrokerEvent) { applyBrokerEvent(event) }
+
     private func handle(_ msg: ServerMsg) {
         switch msg {
         case .welcome(let version, let pid):
