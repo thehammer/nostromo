@@ -994,6 +994,8 @@ private final class OverpaintRig {
         overlay = nil
     }
 
+    var overlayFrameForDiagnostics: String { overlay.map { NSStringFromRect($0.frame) } ?? "none" }
+
     /// The window is showing now.
     func show() { box.showing = true }
 
@@ -1518,7 +1520,7 @@ final class ApprovalInkChunkTests: XCTestCase {
             + "textView \(NSStringFromRect(view.textView.frame)), clipBounds \(NSStringFromRect(view.contentView.bounds)), gutter \(view.gutterWidth), "
             + "lines \(view.displayedLines.map { $0.count }), glyphs \(view.textView.layoutManager?.numberOfGlyphs ?? -1), "
             + "subviews \(view.subviews.map { NSStringFromRect($0.frame) }), checks \(view.inkCheckCount), failures \(view.inkFailures)"
-            + ", withoutOverlay \({ rig.removeOverpaint(); return InkCounter.count(in: view).map { \"\($0.total)/\($0.firstLineBand)\" } ?? \"nil\" }())")
+            + ", overlay \(rig.overlayFrameForDiagnostics)")
         XCTAssertFalse(view.hasShownEveryLine, "the continuation of the line is hidden: the line was not shown")
         XCTAssertTrue(view.linesNotYetShown.contains(1), "line 1 is not shown: \(view.linesNotYetShown)")
         XCTAssertFalse(view.displayFailed)
