@@ -459,6 +459,29 @@
 		ZZ0000000000000000BA3301 /* TaskStopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3300 /* TaskStopTests.swift */; };
 		ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */; };
 		ZZ0000000000000000BA3501 /* WakeMarkerAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */; };
+		WCO000000000000000000001 /* ActivityTickerView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000004 /* ActivityTickerView.swift */; };
+		WCO000000000000000000002 /* AppStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004 /* AppStore.swift */; };
+		WCO000000000000000000003 /* CodeContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000005 /* CodeContentView.swift */; };
+		WCO000000000000000000004 /* ConversationContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000002 /* ConversationContentView.swift */; };
+		WCO000000000000000000005 /* DynamicFocusView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000D0 /* DynamicFocusView.swift */; };
+		WCO000000000000000000006 /* FileWatchers.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000003 /* FileWatchers.swift */; };
+		WCO000000000000000000007 /* FredBindings.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000057 /* FredBindings.swift */; };
+		WCO000000000000000000008 /* MainLayout.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000009 /* MainLayout.swift */; };
+		WCO000000000000000000009 /* MotherView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
+		WCO000000000000000000010 /* PaceBarsView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000008 /* PaceBarsView.swift */; };
+		WCO000000000000000000011 /* PaneContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000E0 /* PaneContentView.swift */; };
+		WCO000000000000000000012 /* PerriView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000022 /* PerriView.swift */; };
+		WCO000000000000000000013 /* QuickActionStripView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000A0 /* QuickActionStripView.swift */; };
+		WCO000000000000000000014 /* ReplView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000023 /* ReplView.swift */; };
+		WCO000000000000000000015 /* SessionHealthStatusView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000041 /* SessionHealthStatusView.swift */; };
+		WCO000000000000000000016 /* StatusBarView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000007 /* StatusBarView.swift */; };
+		WCO000000000000000000017 /* TabBarView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000006 /* TabBarView.swift */; };
+		WCO000000000000000000018 /* TeriBindings.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000055 /* TeriBindings.swift */; };
+		WCO000000000000000000019 /* TicketContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000002 /* TicketContentView.swift */; };
+		WCO000000000000000000020 /* TranscriptDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000050 /* TranscriptDiagnostics.swift */; };
+		WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
+		WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
+		WCO000000000000000000102 /* WindowContentOverflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WCO000000000000000000101 /* WindowContentOverflowTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -778,6 +801,7 @@
 		ZZ0000000000000000BA3300 /* TaskStopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskStopTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerAppearanceTests.swift; sourceTree = "<group>"; };
+		WCO000000000000000000101 /* WindowContentOverflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowContentOverflowTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1164,6 +1188,7 @@
 				WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */,
 				XX0000000000000000000001 /* NotificationDecodeTests.swift */,
 				XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */,
+				WCO000000000000000000101 /* WindowContentOverflowTests.swift */,
 				ZP0000000000000000000031 /* DisplayIdentityTests.swift */,
 				ZP0000000000000000000036 /* DisplayTopologyTests.swift */,
 				ZP0000000000000000000037 /* NostromoWindowPendingRemovalTests.swift */,
@@ -1724,6 +1749,7 @@
 				WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */,
 				XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */,
 				XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */,
+				WCO000000000000000000102 /* WindowContentOverflowTests.swift in Sources */,
 				YY0000000000000000000002 /* PaneContentViewForEachIdentityTests.swift in Sources */,
 				YZ0000000000000000000011 /* FocusTagRoundTripTests.swift in Sources */,
 
@@ -1742,6 +1768,28 @@
 				ZZ0000000000000000BA1302 /* AppControlTasks.swift in TestSources */,
 				ZZ0000000000000000BA1402 /* TranscriptAnchorProbe.swift in TestSources */,
 				ZZ0000000000000000BA2101 /* ScrollSafetyGate.swift in Sources */,
+				WCO000000000000000000001 /* ActivityTickerView.swift in TestSources */,
+				WCO000000000000000000002 /* AppStore.swift in TestSources */,
+				WCO000000000000000000003 /* CodeContentView.swift in TestSources */,
+				WCO000000000000000000004 /* ConversationContentView.swift in TestSources */,
+				WCO000000000000000000005 /* DynamicFocusView.swift in TestSources */,
+				WCO000000000000000000006 /* FileWatchers.swift in TestSources */,
+				WCO000000000000000000007 /* FredBindings.swift in TestSources */,
+				WCO000000000000000000008 /* MainLayout.swift in TestSources */,
+				WCO000000000000000000009 /* MotherView.swift in TestSources */,
+				WCO000000000000000000010 /* PaceBarsView.swift in TestSources */,
+				WCO000000000000000000011 /* PaneContentView.swift in TestSources */,
+				WCO000000000000000000012 /* PerriView.swift in TestSources */,
+				WCO000000000000000000013 /* QuickActionStripView.swift in TestSources */,
+				WCO000000000000000000014 /* ReplView.swift in TestSources */,
+				WCO000000000000000000015 /* SessionHealthStatusView.swift in TestSources */,
+				WCO000000000000000000016 /* StatusBarView.swift in TestSources */,
+				WCO000000000000000000017 /* TabBarView.swift in TestSources */,
+				WCO000000000000000000018 /* TeriBindings.swift in TestSources */,
+				WCO000000000000000000019 /* TicketContentView.swift in TestSources */,
+				WCO000000000000000000020 /* TranscriptDiagnostics.swift in TestSources */,
+				WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */,
+				WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */,
 				ZZ0000000000000000BA2201 /* TranscriptAnchorProbeTests.swift in Sources */,
 				ZZ0000000000000000BA2301 /* BackgroundTaskWireDecodeTests.swift in Sources */,
 				ZZ0000000000000000BA2401 /* BackgroundTaskStoreTests.swift in Sources */,
