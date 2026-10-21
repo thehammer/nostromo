@@ -39,6 +39,7 @@ python-test:
 	python3 -m unittest discover -s tests/ci_remote -v
 	python3 -m unittest discover -s scripts/qa/tests -v
 	python3 -m unittest discover -s scripts/tracker/tests -v
+	python3 -m unittest discover -s tests/gates -v
 
 ## Self-test of the read-only QA scripts (scripts/qa) against a fake app-control CLI.
 ## Hermetic: never touches the running app. Also part of `make python-test` (so CI).
