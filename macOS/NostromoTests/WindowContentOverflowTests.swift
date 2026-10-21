@@ -136,12 +136,22 @@ final class WindowContentOverflowTests: XCTestCase {
         for v in allSubviews(rig.layout) {
             if v.isHiddenOrHasHiddenAncestor { continue }
             if v.enclosingScrollView != nil && !(v is NSScrollView) { continue }
+            if isInsideRuler(v) { continue }   // a line-number gutter is as tall as the whole document
             let r = v.convert(v.bounds, to: nil)
             if r.maxX > content.maxX + 3 || r.maxY > content.maxY + 3 || r.minX < -3 || r.minY < -3 {
                 out.append((v, r))
             }
         }
         return out
+    }
+
+    private func isInsideRuler(_ view: NSView) -> Bool {
+        var current: NSView? = view
+        while let v = current {
+            if v is NSRulerView { return true }
+            current = v.superview
+        }
+        return false
     }
 
     private func describe(_ v: NSView) -> String {

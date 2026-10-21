@@ -30,7 +30,7 @@ screenshot or the `tree` dump can be passed straight to `click`.
 
 | cmd | what it does |
 |---|---|
-| `windows` | index, title, frame, fullscreen, key, first responder |
+| `windows` | index, title, frame, fullscreen, key, first responder, `contentOverflow` (`{w, h}`: how far the window's content view pokes past the window, in points; both are `0` when it fits. A QA script asserts both are 0 on every window. The app also logs `content overflow window=… layout=… content=… focus=… widest=<view class>` once per window per minute, category `layout`, content-free) |
 | `tree` | nested view dump: class, frame, text, tooltip, label |
 | `find TEXT` | views whose text/tooltip/label/class contains TEXT, with centre points |
 | `click` | by `X Y` or `--text`; the reply says which view class was hit |
