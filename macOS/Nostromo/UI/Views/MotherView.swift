@@ -446,6 +446,10 @@ private class MotherJobList: NSView {
         super.init(frame: frame)
         let swiftUIView = MotherJobListSwiftUI(vm: viewModel)
         hostingView = NSHostingView(rootView: swiftUIView)
+        // Sized by the four edge pins below, never by the job rows' own ideal/min size (see
+        // `PaneContentNSView.init`: a SwiftUI hosting view's default sizing options can make
+        // the whole window content larger than a full-screen window).
+        hostingView.sizingOptions = []
         hostingView.appearance = NSAppearance(named: .darkAqua)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hostingView)

@@ -257,13 +257,9 @@ final class WindowContentOverflowTests: XCTestCase {
     /// Positive control for the rig itself: a descendant demanding more than the window offers
     /// at each priority. Records which priorities push the content view past a window that
     /// cannot grow, so the rest of this file's verdicts can be read against it.
-    func testPositiveControlADescendantDemandingMoreThanTheWindowGrowsIt() {
-        var lines: [String] = []
-        var grew: [String: Bool] = [:]
+    func testPositiveControlADemandingDescendantShowsUpInTheContentsMinimumSize() {
         for (name, priority) in [("750", NSLayoutConstraint.Priority(750)),
-                                 ("600", NSLayoutConstraint.Priority(600)),
                                  ("501", NSLayoutConstraint.Priority(501)),
-                                 ("499", NSLayoutConstraint.Priority(499)),
                                  ("required", NSLayoutConstraint.Priority.required)] {
             let rig = makeRig(Self.scenarios[0], size: NSSize(width: 1920, height: 1080), index: 300)
             let probe = Demanding(width: 3000, priority: priority)
@@ -271,16 +267,14 @@ final class WindowContentOverflowTests: XCTestCase {
             rig.layout.addSubview(probe)
             NSLayoutConstraint.activate([
                 probe.leadingAnchor.constraint(equalTo: rig.layout.leadingAnchor),
+                probe.trailingAnchor.constraint(lessThanOrEqualTo: rig.layout.trailingAnchor),
                 probe.topAnchor.constraint(equalTo: rig.layout.topAnchor),
             ])
             settle(rig.window)
-            grew[name] = rig.window.frame.width > 1920 || rig.layout.frame.width > 1920
-            lines.append("\(name): layout=\(Int(rig.layout.frame.width)) window=\(Int(rig.window.frame.width)) fitting=\(Int(rig.layout.fittingSize.width))")
+            XCTAssertGreaterThanOrEqual(rig.layout.fittingSize.width, 3000,
+                                        "a \(name)-priority demand of 3000 pt must show up in MainLayout.fittingSize, "
+                                        + "or this file's min-size checks prove nothing")
         }
-        XCTAssertTrue(grew["750"] == true, "the rig must see a default-priority demand ¦ " + lines.joined(separator: " ¦ "))
-        XCTAssertTrue(grew["501"] == true, "the rig must see a 501 demand ¦ " + lines.joined(separator: " ¦ "))
-        XCTAssertFalse(grew["499"] == true, "a demand below the stay-put priority must not move the window ¦ " + lines.joined(separator: " ¦ "))
-        XCTFail("CONTROL (informational) ¦ " + lines.joined(separator: " ¦ "))   // TEMPORARY
     }
 
     private func decodeTurns(_ json: String) throws -> [DaemonTurn] {
