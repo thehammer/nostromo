@@ -224,4 +224,112 @@ final class WindowContentOverflowTests: XCTestCase {
         }
         XCTAssertTrue(failures.isEmpty, "\(failures.count) resize failure(s) ¦ " + failures.joined(separator: " ¦¦ "))
     }
+
+    // MARK: - Runtime state battery
+
+    /// A view that asks for `width` through its intrinsic size, at a chosen compression priority.
+    private final class Demanding: NSView {
+        let demand: CGFloat
+        init(width: CGFloat, priority: NSLayoutConstraint.Priority) {
+            demand = width
+            super.init(frame: .zero)
+            setContentCompressionResistancePriority(priority, for: .horizontal)
+            setContentHuggingPriority(.defaultLow, for: .horizontal)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+        override var intrinsicContentSize: NSSize { NSSize(width: demand, height: 10) }
+    }
+
+    /// Positive control for the rig itself: a descendant demanding more than the window offers
+    /// at each priority. Records which priorities push the content view past a window that
+    /// cannot grow, so the rest of this file's verdicts can be read against it.
+    func testPositiveControlWhichPrioritiesPushTheContentPastAFixedWindow() {
+        var lines: [String] = []
+        for (name, priority) in [("750 (default compression)", NSLayoutConstraint.Priority(750)),
+                                 ("600", NSLayoutConstraint.Priority(600)),
+                                 ("501", NSLayoutConstraint.Priority(501)),
+                                 ("499", NSLayoutConstraint.Priority(499)),
+                                 ("required", NSLayoutConstraint.Priority.required)] {
+            let rig = makeRig(Self.scenarios[0], size: NSSize(width: 1920, height: 1080), index: 300)
+            let probe = Demanding(width: 3000, priority: priority)
+            probe.translatesAutoresizingMaskIntoConstraints = false
+            rig.layout.addSubview(probe)
+            NSLayoutConstraint.activate([
+                probe.leadingAnchor.constraint(equalTo: rig.layout.leadingAnchor),
+                probe.topAnchor.constraint(equalTo: rig.layout.topAnchor),
+            ])
+            settle(rig.window)
+            lines.append("\(name): layout=\(Int(rig.layout.frame.width))x\(Int(rig.layout.frame.height)) "
+                         + "window=\(Int(rig.window.frame.width))x\(Int(rig.window.frame.height))")
+        }
+        XCTFail("CONTROL ¦ " + lines.joined(separator: " ¦ "))   // TEMPORARY: prints the numbers
+    }
+
+    private func decodeTurns(_ json: String) throws -> [DaemonTurn] {
+        try JSONDecoder().decode([DaemonTurn].self, from: Data(json.utf8))
+    }
+
+    /// State that only exists at runtime, applied one step at a time to ONE live window so a
+    /// step that makes the content outgrow the window (and stay grown) names itself.
+    func testMainLayoutKeepsFittingAsRuntimeStateArrives() throws {
+        let size = NSSize(width: 1920, height: 1080)
+        let scenario = Self.scenarios[1]    // repl + text pane on the "perri" focus
+        let rig = makeRig(scenario, size: size, index: 400)
+        let tag = "perri"
+        let wide = String(repeating: "w", count: 5000)
+        let turnsJSON = """
+            [{"id":"t1","user_input":"\(wide)","timestamp":null,"is_complete":true,"blocks":[
+              {"kind":"text","text":"| a | b |\\n|---|---|\\n| \(wide) | \(wide) |\\n\\n```\\n\(wide)\\n```\\n\\n\(wide)"},
+              {"kind":"tool_call","tool_name":"Bash","input_summary":"\(wide)","input_full":"\(wide)"},
+              {"kind":"tool_result","content":"\(wide)","is_error":false},
+              {"kind":"result_summary","duration_ms":1000,"cost_usd":0.1,"is_error":false}]}]
+            """
+        let steps: [(String, () throws -> Void)] = [
+            ("toast, 3000 chars", { rig.layout.showBanner(message: String(repeating: "toast ", count: 500), severity: .warning) }),
+            ("many toasts", { for n in 0..<8 { rig.layout.showBanner(message: "toast number \(n)", severity: .alert) } }),
+            ("mother status, huge counts", {
+                AppStore.shared.applyForTesting(.motherStatusline(MotherStatus(running: 123_456, queued: 123_456, failed: 99_999, awaiting: 99_999))) }),
+            ("session crashed", { AppStore.shared.applyForTesting(.sessionState(tag: tag, state: .crashed)) }),
+            ("session down", { AppStore.shared.applyForTesting(.sessionDown(tag: tag, reason: .crashLoopGuard)) }),
+            ("transcript with 5000-char unbreakable lines, table, tool call and result", {
+                AppStore.shared.applyForTesting(.sessionTurns(tag: tag, turns: try self.decodeTurns(turnsJSON))) }),
+            ("pane: error text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .error(wide), freshness: nil, address: nil)) }),
+            ("pane: json snapshot", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .jsonSnapshot(["k": wide, "list": [wide, wide]]), freshness: nil, address: nil)) }),
+            ("pane: loading", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .loading, freshness: nil, address: nil)) }),
+            ("pane: long text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text(Self.longLines), freshness: nil, address: nil)) }),
+            ("pane: short text", { AppStore.shared.applyForTesting(.paneContent(tag: tag, paneId: "plans", content: .text("x"), freshness: nil, address: nil)) }),
+        ]
+        var failures: [String] = []
+        var first = true
+        for (name, apply) in steps {
+            try apply()
+            settle(rig.window)
+            let content = contentSize(of: rig.window)
+            let escaping = escapingViews(in: rig)
+            if rig.layout.frame.size != content || !escaping.isEmpty {
+                failures.append("after [\(name)]: MainLayout \(rig.layout.frame.size) vs \(content) ¦ \(report(rig))")
+                if first { first = false }
+            }
+        }
+        XCTAssertTrue(failures.isEmpty, "\(failures.count) step(s) overflowed ¦ " + failures.joined(separator: " ¦¦ "))
+    }
+
+    // MARK: - Tripwire arithmetic
+
+    func testOverflowIsTheExcessPerAxisAndIgnoresRoundingSlack() {
+        // The 2026-10-21 LG window: 2714 x 1082 of content in a 1920 x 1080 window.
+        let lg = MainLayout.overflow(layoutSize: NSSize(width: 2714, height: 1082), contentSize: NSSize(width: 1920, height: 1080))
+        XCTAssertEqual(lg.width, 794)
+        XCTAssertEqual(lg.height, 0, "2 pt is within the tolerance")
+        let dell = MainLayout.overflow(layoutSize: NSSize(width: 2715, height: 1150), contentSize: NSSize(width: 1920, height: 1080))
+        XCTAssertEqual(dell, CGSize(width: 795, height: 70))
+        XCTAssertEqual(MainLayout.overflow(layoutSize: NSSize(width: 1710, height: 1073), contentSize: NSSize(width: 1710, height: 1073)), .zero)
+        XCTAssertEqual(MainLayout.overflow(layoutSize: NSSize(width: 800, height: 600), contentSize: NSSize(width: 1920, height: 1080)), .zero,
+                       "a layout smaller than its window is not an overflow")
+    }
+
+    func testAWindowWhoseLayoutFitsReportsNoOverflow() {
+        let rig = makeRig(Self.scenarios[1], size: NSSize(width: 1920, height: 1080), index: 500)
+        XCTAssertEqual(rig.layout.contentOverflow, .zero)
+    }
 }
