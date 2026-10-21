@@ -243,7 +243,7 @@ final class MotherCrewWireTests: XCTestCase {
                             "option": "resume_with_guidance", "at": "2026-10-17T11:00:00.000Z"]
         // Same single reason as the plain `attention`, so the merged `attention`
         // reads the same whichever of the two keys is the broken one.
-        j["attention_reasons"] = [["reason": "decision_awaiting", "since": "2026-10-17T12:00:02.000Z", "acked": false]]
+        j["attention_reasons"] = [["reason": "decision_awaiting", "since": "2026-10-18T11:10:00.000Z", "acked": false]]
         j["criteria_source"] = "checklist"
         return j
     }

@@ -60,11 +60,14 @@ HOLD_ACTIVITIES = ("gate_hold", "review_hold")
 # The text of the four decision options, as Mother templates them (copied from the gate_hold fixture).
 DECISION_OPTIONS = {
     "resume_with_guidance": {"id": "resume_with_guidance", "label": "Resume with guidance",
-                             "consequence": "Worker resumes in the same session with your note; gates re-run.", "takes_text": True},
-    "escalate": {"id": "escalate", "label": "Escalate", "consequence": "Re-run one tier up.", "takes_text": False},
-    "override_open": {"id": "override_open", "label": "Override and open",
-                      "consequence": "Mark the PR ready with red gates recorded as overridden.", "takes_text": False},
-    "cancel": {"id": "cancel", "label": "Cancel", "consequence": "Stop the job.", "takes_text": False},
+                             "consequence": "Resumes the worker with your written guidance as its next instruction.", "takes_text": True},
+    "escalate": {"id": "escalate", "label": "Escalate",
+                 "consequence": "Re-runs the work one model tier higher than the attempt that just failed.", "takes_text": False},
+    "override_open": {"id": "override_open", "label": "Open anyway",
+                      "consequence": "Opens the PR for review even though these gates are red; the override is recorded on the PR.",
+                      "takes_text": False},
+    "cancel": {"id": "cancel", "label": "Cancel",
+               "consequence": "Cancels the job; the branch and any commits already made are left in place.", "takes_text": False},
 }
 
 

@@ -102,7 +102,7 @@ final class MotherCrewPanelModelTests: XCTestCase {
 
         XCTAssertEqual(rows.map(\.id), ["gates:header", "gate:lint", "gate:unit"])
         XCTAssertEqual(rows[0].title, "gates 1/3")
-        XCTAssertEqual(rows[0].detail, "running")
+        XCTAssertEqual(rows[0].detail, "failed", "the recorded gate run's status")
         XCTAssertTrue(rows[1].detail.contains("passed"), rows[1].detail)
         XCTAssertTrue(rows[2].detail.contains("failed"), rows[2].detail)
         XCTAssertTrue(rows[2].detail.contains("exit 1"), rows[2].detail)
@@ -154,7 +154,7 @@ final class MotherCrewPanelModelTests: XCTestCase {
         let hold = try XCTUnwrap(model.hold)
         XCTAssertEqual(hold.kind, "Gates exhausted")
         XCTAssertEqual(hold.options.map(\.id), [.resumeWithGuidance, .escalate, .overrideOpen, .cancel])
-        XCTAssertEqual(hold.options.map(\.label), ["Resume with guidance", "Escalate", "Override and open", "Cancel"])
+        XCTAssertEqual(hold.options.map(\.label), ["Resume with guidance", "Escalate", "Open anyway", "Cancel"])
         XCTAssertEqual(hold.options.count, 4)
         for option in hold.options {
             XCTAssertFalse(option.consequence.isEmpty, option.label)
