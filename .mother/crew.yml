@@ -19,7 +19,7 @@ gates:
       hint: "Run `rwx sandbox exec -- cargo test --test <name>` or `--lib <path>` for the failing test, fix, commit, push."
     - name: python-test
       run: "make python-test"
-      where: sandbox
+      where: any
       when: { paths: ["tests/**", "scripts/**", "bin/**", "Makefile", "*.py", "**/*.py", "macOS/**", "iOS/**", "Shared/**", ".github/**", "src/mother/**"] }
       timeout_s: 900
       hint: "Run `make python-test` (or the failing suite with python3 -m unittest discover -s <dir>) and fix."
