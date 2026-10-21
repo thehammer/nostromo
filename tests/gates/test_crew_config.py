@@ -102,11 +102,14 @@ class CrewConfigTests(unittest.TestCase):
         by = {c["name"]: c for c in self.checks}
         self.assertEqual(set(by["swift-ci"]["when"]["paths"]), {"macOS/**", "iOS/**", "Shared/**"})
         self.assertEqual(by["swift-ci"]["where"], "any")
+        # Python goes through the RWX sandbox like Rust: a change to `where: any` would silently drop
+        # python-test out of the sandbox-gate loop above, so pin it explicitly.
+        self.assertEqual(by["python-test"]["where"], "sandbox")
         self.assertIs(by["actionlint"]["blocking"], False)
         self.assertIs(by["mother-contract"]["blocking"], False)
 
     def test_budget_and_hints(self):
-        self.assertGreaterEqual(self.doc["gates"]["budget_minutes"], 45)
+        self.assertEqual(self.doc["gates"]["budget_minutes"], 45)
         for c in self.checks:
             self.assertLessEqual(len(c.get("hint", "")), 500)
             self.assertTrue(1 <= c.get("timeout_s", 900) <= 3600)
