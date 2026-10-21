@@ -780,12 +780,12 @@ final class TurnPayloadStoreTests: XCTestCase {
 /// per-turn, so repetition *across* turns cannot flatter the measurement.
 private final class SyntheticCorpus {
 
-    private var rng: SeededRNG
+    private var rng: PayloadStoreTestRNG
     private let prose: [UInt8]
     private let diff:  [UInt8]
 
     init(seed: UInt64) {
-        var generator = SeededRNG(seed: seed)
+        var generator = PayloadStoreTestRNG(seed: seed)
         prose = SyntheticCorpus.buildProse(bytes: 4 << 20, rng: &generator)
         diff  = SyntheticCorpus.buildDiff(bytes: 2 << 20, rng: &generator)
         rng = generator
@@ -839,7 +839,7 @@ private final class SyntheticCorpus {
     virtualizer transcript daemon session snapshot reconcile estimate measured
     """.split(separator: " ").map { Array($0.utf8) }
 
-    private static func buildProse(bytes: Int, rng: inout SeededRNG) -> [UInt8] {
+    private static func buildProse(bytes: Int, rng: inout PayloadStoreTestRNG) -> [UInt8] {
         var out = [UInt8]()
         out.reserveCapacity(bytes + 64)
         var sinceBreak = 0
@@ -859,7 +859,7 @@ private final class SyntheticCorpus {
     /// Diff-like output: hunk headers and +/- prefixed lines. Genuinely more
     /// repetitive than prose, which is exactly why a 256 KB diff is the shape
     /// the profile calls for.
-    private static func buildDiff(bytes: Int, rng: inout SeededRNG) -> [UInt8] {
+    private static func buildDiff(bytes: Int, rng: inout PayloadStoreTestRNG) -> [UInt8] {
         var out = [UInt8]()
         out.reserveCapacity(bytes + 256)
         var line = 0
@@ -882,7 +882,7 @@ private final class SyntheticCorpus {
 }
 
 /// xorshift64. Seeded so the slope number in the test output is reproducible.
-private struct SeededRNG: RandomNumberGenerator {
+private struct PayloadStoreTestRNG: RandomNumberGenerator {
     private var state: UInt64
 
     init(seed: UInt64) {
