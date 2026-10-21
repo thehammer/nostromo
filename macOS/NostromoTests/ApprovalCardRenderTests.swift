@@ -1513,7 +1513,9 @@ final class ApprovalInkChunkTests: XCTestCase {
 
         rig.evaluate(1)
         let ink = try XCTUnwrap(InkCounter.count(in: view))
-        XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws")
+        XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws. total \(ink.total), scale \(ink.scale), "
+            + "area \(ink.width)x\(ink.height), fragments \(fragments.map { NSStringFromRect($0.rect) }), clip \(NSStringFromRect(view.contentView.frame)), "
+            + "textView \(NSStringFromRect(view.textView.frame)), clipBounds \(NSStringFromRect(view.contentView.bounds)), gutter \(view.gutterWidth)")
         XCTAssertFalse(view.hasShownEveryLine, "the continuation of the line is hidden: the line was not shown")
         XCTAssertTrue(view.linesNotYetShown.contains(1), "line 1 is not shown: \(view.linesNotYetShown)")
         XCTAssertFalse(view.displayFailed)
