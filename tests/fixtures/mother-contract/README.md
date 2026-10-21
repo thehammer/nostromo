@@ -5,8 +5,24 @@ in `thehammer/mother`, at the commit recorded in `MANIFEST.json`. They are the s
 Rust tests (`tests/mother_contract_fixtures.rs`), the Kit tests (`MotherCrewWireTests`) and the fake
 broker read. The contract itself is Mother's `docs/design.md`, "Headless crew contract (Phase 1)".
 
-**Provisional.** The fixtures are hand-written today. Mother's HC-16 re-records them from real runs at
-the same paths; re-vendor then and the tests show what changed.
+**Recordings.** Since Mother's HC-16 (#76) these are recordings of real runs
+(`scripts/record-contract-fixtures.sh`: timestamps monotonic, `updated_at` increasing, real `crew` shape),
+not hand-written. Pinned to Mother `15513946b0e5` (see `MANIFEST.json`). What changed from `0ca8b700`:
+
+- each recording opens with an empty `snapshot`; the job arrives as a `queued` event carrying the full job
+  (with the `crew` blob), and later `snapshot`s show it at later stages (so a fixture has several snapshot jobs
+  with the same id);
+- `progress.signals.cost` is an object `{usd, of_usd, basis, fraction}` (was a number); `signals` also gains
+  `stage_share`, `stage_frac`, `checklist`, `pct_moved_at_active_s`, and `gates` gains `attempt`/`max_attempts`;
+- `progress.eta` gains `n`; basis is `none` with label `?` until there is history;
+- `gates` gains `effective_mode`, `posture`, `started_at`, `finished_at`; results gain `skip_reason`; the
+  `override` key is absent unless overridden; an exhausted run keeps `status: "failed"`;
+- `review_wave` lenses no longer list `archie:adherence` (it is under `adherence`); lens gains `refuted`,
+  `examined_files`, `budget_usd`; the wave gains `cycles`, `decision`, `over_budget`, `pending_reviewers`;
+- decision options of a `review_hold` are `resume_with_guidance`, `override_open`, `cancel` (no `escalate`);
+  a resolution carries `session` and `agent` (empty strings) and no `at`;
+- `hello` lists `subscribe`, `unsubscribe`, `query.list`, `query.get`, `answer`, `cancel`, `retry`,
+  `force-start`, `output`, `ack`, `answer.option` and `progress`.
 
 | File | Shows |
 |---|---|

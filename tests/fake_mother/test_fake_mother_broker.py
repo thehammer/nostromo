@@ -156,7 +156,8 @@ def fixture_events(name):
 
 
 def first_snapshot_jobs(name):
-    return next(m for m in fixture(name) if m["t"] == "snapshot")["data"]["jobs"]
+    """The jobs of the first snapshot that has any (the recordings open with an empty one)."""
+    return next(m for m in fixture(name) if m["t"] == "snapshot" and m["data"]["jobs"])["data"]["jobs"]
 
 
 class RawConn:
@@ -325,9 +326,9 @@ class QueryGetTest(MC2Base):
         data = self.query_get(c, "j-gates1")
         self.assertTrue(data["ok"])
         job = data["job"]
-        self.assertEqual(job["gates"]["status"], "running")
+        self.assertEqual(job["gates"]["status"], "failed")
         self.assertEqual((job["gates"]["attempt"], job["gates"]["max_attempts"]), (1, 3))
-        self.assertEqual((job["progress"]["pct"], job["progress"]["stage"]), (55, "implement"))
+        self.assertEqual((job["progress"]["pct"], job["progress"]["stage"]), (80, "rework"))
 
     def test_query_get_for_an_unknown_job_is_a_coded_error(self):
         c = self.client()
@@ -428,14 +429,15 @@ class ReplayTest(MC2Base):
         c = self.client()
         self.replay("gates_fix_pass.ndjson")
         progress = [m["data"] for m in c.read_all() if m["t"] == "progress_updated"]
-        self.assertEqual([p["pct"] for p in progress], [70, 62, 90, 95])
+        self.assertEqual([p["pct"] for p in progress], [5, 80, 100])
         stamps = [p["updated_at"] for p in progress]
         self.assertEqual(stamps, sorted(set(stamps)), "updated_at must be strictly increasing")
         self.assertTrue(all(p["category"] == "progress" for p in progress))
         job = self.query_get(c, "j-gates1")["job"]
-        self.assertEqual(job["progress"]["pct"], 95)
+        self.assertEqual(job["progress"]["pct"], 100)
         self.assertEqual(job["progress"]["updated_at"], stamps[-1])
-        self.assertEqual(job["progress"]["signals"]["gates"], {"passed": 3, "failed": 0, "total": 3})
+        self.assertEqual(job["progress"]["signals"]["gates"],
+                         {"passed": 5, "failed": 0, "total": 5, "attempt": 2, "max_attempts": 3})
 
     def test_after_the_replay_query_get_shows_the_passed_second_attempt(self):
         c = self.client()
@@ -444,9 +446,10 @@ class ReplayTest(MC2Base):
         job = self.query_get(c, "j-gates1")["job"]
         gates = job["gates"]
         self.assertEqual((gates["status"], gates["attempt"]), ("passed", 2))
-        self.assertEqual({r["name"]: r["result"] for r in gates["results"]}, {"lint": "passed", "unit": "passed", "static": "passed"})
-        self.assertEqual(len(gates["results"]), 3)
-        self.assertEqual(job["progress"]["pct"], 95)
+        self.assertEqual({r["name"]: r["result"] for r in gates["results"]},
+                         {"clean_tree": "passed", "pushed": "passed", "lint": "passed", "unit": "passed", "static": "passed"})
+        self.assertEqual(len(gates["results"]), 5)
+        self.assertEqual(job["progress"]["pct"], 100)
 
     def test_a_replay_cut_after_the_first_attempt_leaves_the_failed_unit_gate_in_the_job(self):
         # attempt 1 ended red, attempt 2 reset the rows: a client that re-reads the job after the
@@ -461,7 +464,8 @@ class ReplayTest(MC2Base):
         c.read_all()
         gates = self.query_get(c, "j-gates1")["job"]["gates"]
         self.assertEqual((gates["status"], gates["attempt"]), ("failed", 1))
-        self.assertEqual({r["name"]: r["result"] for r in gates["results"]}, {"lint": "passed", "unit": "failed", "static": "passed"})
+        self.assertEqual({r["name"]: r["result"] for r in gates["results"]},
+                         {"clean_tree": "passed", "pushed": "passed", "lint": "passed", "unit": "failed", "static": "passed"})
         unit = next(r for r in gates["results"] if r["name"] == "unit")
         self.assertEqual((unit["exit_code"], unit["blocking"]), (1, True))
 
@@ -471,22 +475,24 @@ class ReplayTest(MC2Base):
         got = c.read_all()
         self.assertEqual(got[0]["t"], "queued")
         self.assertEqual(got[0]["data"]["id"], "j-wave1")
-        self.assertEqual(got[0]["data"]["title"], "Rework consent form validation")
-        self.assertEqual(len(got[0]["data"]["review_wave"]["lenses"]), 4)
-        self.assertEqual([m["t"] for m in got[1:]], [m["t"] for m in fixture_events("lens_wave.ndjson") if m["t"] != "snapshot"])
+        self.assertEqual(got[0]["data"]["title"], next(m for m in fixture_events("lens_wave.ndjson") if m["t"] == "queued")["data"]["title"])
+        self.assertIn("crew", got[0]["data"], "the announcement carries the job's full payload")
+        self.assertEqual([m["t"] for m in got[1:]], [m["t"] for m in fixture_events("lens_wave.ndjson") if m["t"] not in ("snapshot", "queued")])
         job = self.query_get(c, "j-wave1")["job"]
         lenses = {x["reviewer"]: x for x in job["review_wave"]["lenses"]}
         self.assertEqual(lenses["perri:ops-infra"]["state"], "skipped")
         self.assertEqual(lenses["perri:ops-infra"]["skip_reason"], "path_scope")
         self.assertEqual(lenses["perri:correctness"]["state"], "done")
-        self.assertEqual(lenses["perri:correctness"]["findings"]["blocking"], 2)
+        self.assertEqual(lenses["perri:correctness"]["findings"]["blocking"], 1)
         self.assertEqual(lenses["perri:phi-security"]["state"], "done")
-        self.assertEqual(lenses["archie:adherence"]["state"], "done")
+        self.assertEqual(job["review_wave"]["adherence"]["state"], "done")   # adherence is its own key now, not a lens
         claims = job["review_wave"]["claims"]
-        self.assertEqual((claims["verified"], claims["refuted"], claims["unverified"]), (2, 0, 0))
-        self.assertEqual(job["review_wave"]["status"], "clean")
+        self.assertEqual((claims["verified"], claims["refuted"], claims["unverified"]), (1, 1, 0))
+        self.assertEqual(job["review_wave"]["status"], "held")
+        self.assertEqual(job["state"], "awaiting")
+        self.assertEqual(job["activity"], "review_hold")
         # the job the scenario started with is untouched
-        self.assertEqual(self.query_get(c, "j-gates1")["job"]["gates"]["status"], "running")
+        self.assertEqual(self.query_get(c, "j-gates1")["job"]["gates"]["status"], "failed")
 
     def test_replaying_gate_hold_answered_on_crew_hold_ends_ready_with_the_decision_resolved(self):
         self.restart_broker("crew_hold")
@@ -543,7 +549,7 @@ class ReplayTest(MC2Base):
     def test_replay_by_basename_counts_the_events_a_waiting_replay_sent(self):
         r = self.replay("lens_wave.ndjson")
         self.assertTrue(r["ok"], r)
-        # one snapshot (the new job) plus every other event, and never the hello
+        # every event of the recording (snapshots and the new job's `queued` included), and never the hello
         self.assertEqual(r["result"], len(fixture_events("lens_wave.ndjson")))
 
     def test_an_unknown_replay_file_is_an_error(self):

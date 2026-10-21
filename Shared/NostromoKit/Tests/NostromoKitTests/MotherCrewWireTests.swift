@@ -86,24 +86,31 @@ final class MotherCrewWireTests: XCTestCase {
     private func assertGatesJob(_ jobs: [MotherJob], file: StaticString = #filePath, line: UInt = #line) throws {
         let j = try job("j-gates1", in: jobs, file: file, line: line)
         XCTAssertEqual(j.state, "running", file: file, line: line)
-        XCTAssertEqual(j.crew.activity, "gating", file: file, line: line)
+        XCTAssertEqual(j.crew.activity, "gate_fix", file: file, line: line)
         XCTAssertTrue(j.crew.optedIn, file: file, line: line)
-        XCTAssertEqual(j.crew.prUrl, "https://github.com/Carefeed/admin-portal/pull/4321", file: file, line: line)
+        XCTAssertEqual(j.crew.prUrl, "https://github.com/Carefeed/admin-portal/pull/42", file: file, line: line)
         let gates = try XCTUnwrap(j.crew.gates, file: file, line: line)
         XCTAssertEqual(gates.attempt, 1, file: file, line: line)
         XCTAssertEqual(gates.maxAttempts, 3, file: file, line: line)
-        XCTAssertEqual(gates.status, "running", file: file, line: line)
+        XCTAssertEqual(gates.status, "failed", file: file, line: line)
         XCTAssertEqual(gates.mode, "enforce", file: file, line: line)
-        XCTAssertTrue(gates.results.isEmpty, file: file, line: line)
-        XCTAssertFalse(gates.overridden, file: file, line: line)
+        XCTAssertEqual(
+            gates.results.map(\.name),
+            ["clean_tree", "pushed", "lint", "unit", "static"],
+            file: file, line: line
+        )
+        XCTAssertFalse(gates.overridden, "a recording without an `override` key is not an override", file: file, line: line)
         let progress = try XCTUnwrap(j.crew.progress, file: file, line: line)
-        XCTAssertEqual(progress.pct, 55, file: file, line: line)
-        XCTAssertEqual(progress.label, "Implementing", file: file, line: line)
+        XCTAssertEqual(progress.pct, 80, file: file, line: line)
+        XCTAssertEqual(progress.label, "\u{2248}80% \u{b7} gates \u{2717} attempt 1/3 \u{b7} ETA ?", file: file, line: line)
+        XCTAssertEqual(progress.stage, "rework", file: file, line: line)
         XCTAssertFalse(progress.paused, file: file, line: line)
-        XCTAssertEqual(progress.eta?.basis, "fleet", file: file, line: line)
-        XCTAssertEqual(progress.eta?.label, "5-15 min", file: file, line: line)
-        XCTAssertEqual(progress.eta?.loS, 300, file: file, line: line)
-        XCTAssertEqual(progress.eta?.hiS, 900, file: file, line: line)
+        XCTAssertEqual(progress.eta?.basis, "none", file: file, line: line)
+        XCTAssertEqual(progress.eta?.label, "?", file: file, line: line)
+        XCTAssertNil(progress.eta?.loS, file: file, line: line)
+        XCTAssertNil(progress.eta?.hiS, file: file, line: line)
+        XCTAssertEqual(progress.signals?.elapsedActiveS, 120, file: file, line: line)
+        XCTAssertEqual(progress.signals?.cost, 0, "`signals.cost` is an object now; its `usd` is read", file: file, line: line)
         XCTAssertNil(j.crew.reviewWave, file: file, line: line)
         XCTAssertNil(j.crew.decision, file: file, line: line)
         XCTAssertEqual(j.crew.decodeIssues, [], file: file, line: line)
@@ -119,15 +126,15 @@ final class MotherCrewWireTests: XCTestCase {
         XCTAssertEqual(wave.lenses.count, 4, file: file, line: line)
         XCTAssertEqual(
             wave.lenses.map(\.reviewer),
-            ["archie:adherence", "perri:correctness", "perri:phi-security", "perri:ops-infra"],
+            ["perri:correctness", "perri:phi-security", "perri:tests", "perri:ops-infra"],
             file: file, line: line
         )
         let ops = try XCTUnwrap(wave.lenses.first { $0.reviewer == "perri:ops-infra" }, file: file, line: line)
         XCTAssertEqual(ops.state, .skipped, file: file, line: line)
         XCTAssertEqual(ops.skipReason, "path_scope", file: file, line: line)
-        let adherence = try XCTUnwrap(wave.lenses.first { $0.reviewer == "archie:adherence" }, file: file, line: line)
-        XCTAssertEqual(adherence.lens, "adherence", file: file, line: line)
-        XCTAssertEqual(adherence.state, .pending, file: file, line: line)
+        let correctness = try XCTUnwrap(wave.lenses.first { $0.reviewer == "perri:correctness" }, file: file, line: line)
+        XCTAssertEqual(correctness.lens, "correctness", file: file, line: line)
+        XCTAssertEqual(correctness.state, .running, file: file, line: line)
         XCTAssertEqual(wave.claims, MotherClaims(verified: 0, refuted: 0, unverified: 0), file: file, line: line)
         XCTAssertEqual(j.crew.decodeIssues, [], file: file, line: line)
     }
@@ -154,14 +161,14 @@ final class MotherCrewWireTests: XCTestCase {
         XCTAssertEqual(j.crew.attention.map(\.reason), [.decisionAwaiting], file: file, line: line)
         XCTAssertEqual(j.crew.attention.map(\.acked), [false], file: file, line: line)
         let gates = try XCTUnwrap(j.crew.gates, file: file, line: line)
-        XCTAssertEqual(gates.status, "exhausted", file: file, line: line)
-        XCTAssertEqual(gates.attempt, 3, file: file, line: line)
-        XCTAssertEqual(gates.results.count, 1, file: file, line: line)
-        XCTAssertEqual(gates.results.first?.name, "unit", file: file, line: line)
-        XCTAssertEqual(gates.results.first?.result, .failed, file: file, line: line)
-        XCTAssertEqual(gates.results.first?.blocking, true, file: file, line: line)
-        XCTAssertEqual(gates.results.first?.durationS, 201, file: file, line: line)
-        XCTAssertEqual(gates.results.first?.exitCode, 1, file: file, line: line)
+        XCTAssertEqual(gates.status, "failed", file: file, line: line)
+        XCTAssertEqual(gates.attempt, 2, file: file, line: line)
+        XCTAssertEqual(gates.results.count, 3, file: file, line: line)
+        let unit = try XCTUnwrap(gates.results.first { $0.name == "unit" }, file: file, line: line)
+        XCTAssertEqual(unit.result, .failed, file: file, line: line)
+        XCTAssertEqual(unit.blocking, true, file: file, line: line)
+        XCTAssertEqual(unit.durationS, 1, file: file, line: line)
+        XCTAssertEqual(unit.exitCode, 1, file: file, line: line)
         XCTAssertEqual(j.crew.decodeIssues, [], file: file, line: line)
     }
 
@@ -192,17 +199,37 @@ final class MotherCrewWireTests: XCTestCase {
                 seen += 1
             }
         }
-        XCTAssertEqual(seen, 4)
+        XCTAssertEqual(seen, 8, "the three recordings carry 3 + 3 + 2 progress_updated events")
     }
 
     func testGatesFixPassProgressEventsCarryTheDocumentedPercentagesAndGateSignal() throws {
         let progress = try events("gates_fix_pass")
             .filter { $0["t"] as? String == "progress_updated" }
             .map { try JSONDecoder().decode(MotherProgress.self, from: JSONSerialization.data(withJSONObject: $0["data"] as Any)) }
-        XCTAssertEqual(progress.map(\.pct), [70, 62, 90, 95])
-        XCTAssertEqual(progress[0].signals?.gates, MotherGateSignal(passed: 1, failed: 1, total: 3))
-        XCTAssertEqual(progress[0].label, "Checking")
-        XCTAssertEqual(progress[3].eta?.label, "under 2 min")
+        XCTAssertEqual(progress.map(\.pct), [5, 80, 100])
+        XCTAssertNil(progress[0].signals?.gates, "no gate signal before the gates have run")
+        XCTAssertEqual(progress[1].signals?.gates, MotherGateSignal(passed: 4, failed: 1, total: 5))
+        XCTAssertEqual(progress[0].label, "\u{2248}5% \u{b7} ETA ?")
+        XCTAssertEqual(progress[2].eta?.label, "")
+        let stamps = progress.compactMap(\.updatedAt)
+        XCTAssertEqual(stamps.count, 3)
+        XCTAssertEqual(stamps, stamps.sorted(), "updated_at increases across recorded progress events")
+        XCTAssertEqual(Set(stamps).count, stamps.count)
+    }
+
+    func testProgressSignalsCostReadsAsUsdFromAnObjectABareNumberOrNothing() throws {
+        let original = try jobObject("gates_fix_pass", "j-gates1")
+        func cost(_ value: Any) throws -> Double? {
+            let job = try decodeJob(mutated(original, ["progress", "signals", "cost"], to: value))
+            XCTAssertEqual(job.crew.decodeIssues, [], "a cost shape is never an issue")
+            XCTAssertEqual(job.crew.progress?.pct, 80)
+            return job.crew.progress?.signals?.cost
+        }
+        XCTAssertEqual(try cost(["usd": 1.25, "of_usd": 3.0, "basis": "plan", "fraction": 0.4] as [String: Any]), 1.25)
+        XCTAssertNil(try cost(["usd": NSNull(), "basis": "none"] as [String: Any]))
+        XCTAssertEqual(try cost(1.12), 1.12)
+        XCTAssertNil(try cost("SECRET-COST"))
+        XCTAssertNil(try cost(NSNull()))
     }
 
     // MARK: - Per-key leniency
@@ -309,11 +336,11 @@ final class MotherCrewWireTests: XCTestCase {
     func testAnUnknownGateResultValueSurvivesAsUnknownWithoutAnIssue() throws {
         let original = try jobObject("gate_hold_answered", "j-hold1")
         let before = try decodeJob(original)
-        let after = try decodeJob(mutated(original, ["gates", "results", 0, "result"], to: "flaky"))
+        let after = try decodeJob(mutated(original, ["gates", "results", 2, "result"], to: "flaky"))
 
-        XCTAssertEqual(after.crew.gates?.results.first?.result, .unknown("flaky"))
-        XCTAssertEqual(after.crew.gates?.results.first?.result.raw, "flaky")
-        XCTAssertEqual(after.crew.gates?.results.first?.name, "unit")
+        XCTAssertEqual(after.crew.gates?.results[2].result, .unknown("flaky"))
+        XCTAssertEqual(after.crew.gates?.results[2].result.raw, "flaky")
+        XCTAssertEqual(after.crew.gates?.results[2].name, "unit")
         XCTAssertEqual(after.crew.decodeIssues, [])
         assertOtherKeysIntact(before, after, brokenField: "gates")
     }
@@ -339,7 +366,7 @@ final class MotherCrewWireTests: XCTestCase {
         XCTAssertEqual(after.crew.decodeIssues, [])
         let progress = try XCTUnwrap(after.crew.progress)
         XCTAssertEqual(progress.flags, [MotherProgressFlag(reason: "burn_ahead", since: "2026-10-17T12:00:00.000Z")])
-        XCTAssertEqual(progress.pct, 55)
+        XCTAssertEqual(progress.pct, 80)
         assertOtherKeysIntact(try decodeJob(original), after, brokenField: "progress")
     }
 
@@ -350,7 +377,7 @@ final class MotherCrewWireTests: XCTestCase {
         XCTAssertEqual(after.crew.decodeIssues, [])
         let progress = try XCTUnwrap(after.crew.progress)
         XCTAssertEqual(progress.flags, [MotherProgressFlag(reason: "stalled", since: nil)])
-        XCTAssertEqual(progress.pct, 55)
+        XCTAssertEqual(progress.pct, 80)
         assertOtherKeysIntact(try decodeJob(original), after, brokenField: "progress")
     }
 
@@ -421,7 +448,7 @@ final class MotherCrewWireTests: XCTestCase {
     func testUnknownEnumLikeValuesSurviveAsUnknownWithoutIssues() throws {
         var j = try kitchenSink()
         j = mutated(j, ["review_wave", "lenses", 0, "state"], to: "teleporting")
-        j = mutated(j, ["gates", "results", 0, "result"], to: "flaky")
+        j = mutated(j, ["gates", "results", 2, "result"], to: "flaky")
         j["attention"] = [["reason": "future_reason", "since": "2026-10-17T12:00:02.000Z"]]
         j["attention_reasons"] = [Any]()
         j["activity"] = "future_activity"
@@ -431,7 +458,7 @@ final class MotherCrewWireTests: XCTestCase {
         XCTAssertEqual(job.crew.activity, "future_activity")
         XCTAssertEqual(job.crew.reviewWave?.lenses.first?.state, .unknown("teleporting"))
         XCTAssertEqual(job.crew.reviewWave?.lenses.first?.state.raw, "teleporting")
-        XCTAssertEqual(job.crew.gates?.results.first?.result, .unknown("flaky"))
+        XCTAssertEqual(job.crew.gates?.results[2].result, .unknown("flaky"))
         XCTAssertEqual(job.crew.attention.map(\.reason), [.unknown("future_reason")])
         XCTAssertEqual(job.crew.attention.first?.reason.raw, "future_reason")
     }
@@ -552,8 +579,9 @@ final class MotherCrewWireTests: XCTestCase {
     }
 
     func testTheGoldenAgreesWithTheVendoredFixtureJobsOnEveryCrewKey() throws {
+        // The golden holds the first snapshot job of each recording (later snapshots repeat the job at a later stage).
         var fromFixtures: [MotherJob] = []
-        for name in Self.fixtureNames { fromFixtures += try snapshotJobs(name) }
+        for name in Self.fixtureNames { fromFixtures += Array(try snapshotJobs(name).prefix(1)) }
         let fromGolden = try jobsOfFrame("ipc_mother_jobs.golden.json")
         // Only the crew state is compared: the daemon re-renders the job-level
         // timestamps (`...00.000Z` becomes `...00Z`), which is not crew data.

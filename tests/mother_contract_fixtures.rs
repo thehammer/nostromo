@@ -227,30 +227,36 @@ fn gates_fix_pass_snapshot_decodes_with_the_contract_values() {
     let jobs = snapshot_jobs("gates_fix_pass");
     let job = find(&jobs, "j-gates1");
     assert_eq!(job.state, "running");
-    assert_eq!(job.activity.as_deref(), Some("gating"));
+    assert_eq!(job.activity.as_deref(), Some("gate_fix"));
     assert!(job.crew_opt_in, "the fixture job carries a `crew` key");
-    assert_eq!(job.pr_url.as_deref(), Some("https://github.com/Carefeed/admin-portal/pull/4321"));
+    assert_eq!(job.pr_url.as_deref(), Some("https://github.com/Carefeed/admin-portal/pull/42"));
 
     let gates = job.gates.as_ref().expect("gates");
     assert_eq!(gates.attempt, Some(1));
     assert_eq!(gates.max_attempts, Some(3));
     assert_eq!(gates.mode.as_deref(), Some("enforce"));
-    assert_eq!(gates.status.as_deref(), Some("running"));
-    assert_eq!(gates.head_sha.as_deref(), Some("9d1c4e7"));
-    assert!(gates.results.is_empty() && gates.not_run.is_empty());
-    assert!(!gates.overridden, "`override: null` is not an override");
+    assert_eq!(gates.status.as_deref(), Some("failed"));
+    assert_eq!(gates.head_sha.as_deref(), Some("0000000000000000000000000000000000000002"));
+    assert_eq!(
+        gates.results.iter().map(|g| (g.name.as_str(), g.result.as_str())).collect::<Vec<_>>(),
+        [("clean_tree", "passed"), ("pushed", "passed"), ("lint", "passed"), ("unit", "failed"), ("static", "passed")]
+    );
+    assert!(gates.not_run.is_empty());
+    assert!(!gates.overridden, "a recording without an `override` key is not an override");
 
     let progress = job.progress.as_ref().expect("progress");
-    assert_eq!(progress.pct, Some(55));
-    assert_eq!(progress.label.as_deref(), Some("Implementing"));
-    assert_eq!(progress.stage.as_deref(), Some("implement"));
+    assert_eq!(progress.pct, Some(80));
+    assert_eq!(progress.label.as_deref(), Some("\u{2248}80% \u{b7} gates \u{2717} attempt 1/3 \u{b7} ETA ?"));
+    assert_eq!(progress.stage.as_deref(), Some("rework"));
     assert!(!progress.paused);
     assert!(progress.flags.is_empty());
     let eta = progress.eta.as_ref().expect("eta");
-    assert_eq!(eta.basis.as_deref(), Some("fleet"));
-    assert_eq!(eta.label.as_deref(), Some("5-15 min"));
-    assert_eq!((eta.lo_s, eta.hi_s), (Some(300), Some(900)));
-    assert_eq!(progress.signals.as_ref().and_then(|s| s.elapsed_active_s), Some(420));
+    assert_eq!(eta.basis.as_deref(), Some("none"));
+    assert_eq!(eta.label.as_deref(), Some("?"));
+    assert_eq!((eta.lo_s, eta.hi_s), (None, None));
+    let signals = progress.signals.as_ref().expect("signals");
+    assert_eq!(signals.elapsed_active_s, Some(120));
+    assert_eq!(signals.cost, Some(0.0), "`signals.cost` is an object now; its `usd` is read");
 
     assert!(job.review_wave.is_none() && job.decision.is_none());
     assert!(job.attention.is_empty() && job.attention_reasons.is_empty());
@@ -271,17 +277,17 @@ fn lens_wave_snapshot_decodes_with_the_contract_values() {
     assert_eq!(wave.lenses.len(), 4);
     assert_eq!(
         wave.lenses.iter().map(|l| l.reviewer.as_str()).collect::<Vec<_>>(),
-        ["archie:adherence", "perri:correctness", "perri:phi-security", "perri:ops-infra"],
-        "lenses keep Mother's order"
+        ["perri:correctness", "perri:phi-security", "perri:tests", "perri:ops-infra"],
+        "lenses keep Mother's order; the adherence reviewer is reported under `adherence`, not in `lenses`"
     );
-    let adherence = wave.lenses.iter().find(|l| l.reviewer == "archie:adherence").expect("adherence lens");
-    assert_eq!((adherence.lens.as_str(), adherence.state.as_str()), ("adherence", "pending"));
+    let correctness = wave.lenses.iter().find(|l| l.reviewer == "perri:correctness").expect("correctness lens");
+    assert_eq!((correctness.lens.as_str(), correctness.state.as_str()), ("correctness", "running"));
     let ops = wave.lenses.iter().find(|l| l.reviewer == "perri:ops-infra").expect("ops-infra lens");
     assert_eq!(ops.lens, "ops-infra");
     assert_eq!(ops.state, "skipped");
     assert_eq!(ops.skip_reason.as_deref(), Some("path_scope"));
     assert_eq!(ops.findings, LensFindings { blocking: 0, advisory: 0 });
-    assert_eq!(wave.adherence.as_ref().and_then(|a| a.state.as_deref()), Some("pending"));
+    assert_eq!(wave.adherence.as_ref().and_then(|a| a.state.as_deref()), Some("running"));
     assert_eq!(wave.coverage_gaps, Some(0));
     assert_eq!(wave.claims, Some(ClaimCounts { verified: 0, refuted: 0, unverified: 0 }));
 }
@@ -316,13 +322,13 @@ fn gate_hold_snapshot_decodes_with_the_contract_values() {
     assert_eq!(unacked, ["decision_awaiting"]);
 
     let gates = job.gates.as_ref().expect("gates");
-    assert_eq!(gates.status.as_deref(), Some("exhausted"));
-    assert_eq!((gates.attempt, gates.max_attempts), (Some(3), Some(3)));
-    assert_eq!(gates.results.len(), 1);
-    let unit = &gates.results[0];
+    assert_eq!(gates.status.as_deref(), Some("failed"));
+    assert_eq!((gates.attempt, gates.max_attempts), (Some(2), Some(2)));
+    assert_eq!(gates.results.len(), 3);
+    let unit = gates.results.iter().find(|g| g.name == "unit").expect("unit result");
     assert_eq!((unit.name.as_str(), unit.result.as_str()), ("unit", "failed"));
     assert!(unit.blocking);
-    assert_eq!((unit.duration_s, unit.exit_code), (Some(201), Some(1)));
+    assert_eq!((unit.duration_s, unit.exit_code), (Some(1), Some(1)));
     assert_eq!(unit.unavailable_reason, None);
 }
 
@@ -340,7 +346,7 @@ fn every_progress_updated_event_decodes_as_a_progress_overlay() {
             seen += 1;
         }
     }
-    assert_eq!(seen, 4, "gates_fix_pass carries four progress_updated events");
+    assert_eq!(seen, 8, "the three recordings carry 3 + 3 + 2 progress_updated events");
 }
 
 #[test]
@@ -355,11 +361,15 @@ fn gates_fix_pass_progress_events_carry_the_documented_percentages_and_gate_sign
             serde_json::from_value(d).expect("progress decodes")
         })
         .collect();
-    assert_eq!(progress.iter().map(|p| p.pct).collect::<Vec<_>>(), [Some(70), Some(62), Some(90), Some(95)]);
+    assert_eq!(progress.iter().map(|p| p.pct).collect::<Vec<_>>(), [Some(5), Some(80), Some(100)]);
     let first = progress[0].signals.as_ref().and_then(|s| s.gates.clone());
-    assert_eq!(first, Some(GateSignal { passed: 1, failed: 1, total: 3 }));
-    assert_eq!(progress[0].label.as_deref(), Some("Checking"));
-    assert_eq!(progress[3].eta.as_ref().and_then(|e| e.label.as_deref()), Some("under 2 min"));
+    assert_eq!(first, None, "no gate signal before the gates have run");
+    let second = progress[1].signals.as_ref().and_then(|s| s.gates.clone());
+    assert_eq!(second, Some(GateSignal { passed: 4, failed: 1, total: 5 }));
+    assert_eq!(progress[0].label.as_deref(), Some("\u{2248}5% \u{b7} ETA ?"));
+    assert_eq!(progress[2].eta.as_ref().and_then(|e| e.label.as_deref()), Some(""));
+    let stamps: Vec<_> = progress.iter().map(|p| p.updated_at.clone().expect("updated_at")).collect();
+    assert!(stamps.windows(2).all(|w| w[0] < w[1]), "updated_at increases across recorded progress events: {stamps:?}");
 }
 
 // ── per-key leniency (B2): mutation cases built from fixture jobs ────────────
@@ -384,7 +394,7 @@ fn review_wave_lenses_that_are_a_number_cost_only_the_review_wave_key() {
     });
     assert!(job.review_wave.is_none());
     assert_eq!(job.activity.as_deref(), Some("review_wave"));
-    assert_eq!(job.pr_url.as_deref(), Some("https://github.com/Carefeed/admin-portal/pull/4388"));
+    assert_eq!(job.pr_url.as_deref(), Some("https://github.com/Carefeed/admin-portal/pull/42"));
 }
 
 #[test]
@@ -396,7 +406,7 @@ fn progress_eta_that_is_an_empty_array_costs_only_the_progress_key() {
     });
     assert!(job.progress.is_none());
     assert_eq!(job.gates.as_ref().and_then(|g| g.attempt), Some(1), "gates survive a broken progress overlay");
-    assert_eq!(job.activity.as_deref(), Some("gating"));
+    assert_eq!(job.activity.as_deref(), Some("gate_fix"));
 }
 
 #[test]
@@ -404,12 +414,12 @@ fn an_unknown_gate_result_value_is_not_an_error_and_survives_verbatim() {
     let original = fixture_job_json("gate_hold_answered", "j-hold1");
     let mut mutated = original.clone();
     mutated["id"] = json!("mut-gate-result-flaky");
-    set(&mut mutated, "/gates/results/0/result", json!("flaky"));
+    set(&mut mutated, "/gates/results/2/result", json!("flaky"));
 
     let (jobs, skipped, log) = decode_one(mutated);
     assert_eq!(skipped, 0);
     let job = &jobs[0];
-    assert_eq!(job.gates.as_ref().unwrap().results[0].result, "flaky");
+    assert_eq!(job.gates.as_ref().unwrap().results[2].result, "flaky");
     assert!(warn_lines(&log).is_empty(), "an unknown value is not worth a warning: {log}");
 
     let (baseline, _, _) = decode_one(original);
@@ -417,7 +427,7 @@ fn an_unknown_gate_result_value_is_not_an_error_and_survives_verbatim() {
     for key in NEW_KEYS.iter().filter(|k| **k != "gates") {
         assert_eq!(a[key], b[key], "`{key}`");
     }
-    assert_eq!(job.gates.as_ref().unwrap().results[0].name, "unit", "the rest of the gate entry is intact");
+    assert_eq!(job.gates.as_ref().unwrap().results[0].name, "clean_tree", "the rest of the gate entry is intact");
 }
 
 #[test]
@@ -455,7 +465,7 @@ fn progress_flags_decode_from_objects_and_ignore_their_extra_detail() {
         progress.flags,
         vec![ProgressFlag { reason: "burn_ahead".into(), since: Some("2026-10-17T12:00:00.000Z".into()) }]
     );
-    assert_eq!(progress.pct, Some(55));
+    assert_eq!(progress.pct, Some(80));
     assert!(warn_lines(&log).is_empty(), "{log}");
 }
 
@@ -469,8 +479,28 @@ fn progress_flags_decode_from_plain_strings() {
     assert_eq!(skipped, 0);
     let progress = jobs[0].progress.as_ref().expect("progress survives string flags");
     assert_eq!(progress.flags, vec![ProgressFlag { reason: "stalled".into(), since: None }]);
-    assert_eq!(progress.pct, Some(55));
+    assert_eq!(progress.pct, Some(80));
     assert!(warn_lines(&log).is_empty(), "{log}");
+}
+
+#[test]
+fn progress_signals_cost_reads_as_usd_from_an_object_a_bare_number_or_nothing() {
+    let cost = |v: Value| {
+        let mut j = fixture_job_json("gates_fix_pass", "j-gates1");
+        j["id"] = json!("cost-shape");
+        set(&mut j, "/progress/signals/cost", v);
+        let (jobs, skipped, log) = decode_one(j);
+        assert_eq!(skipped, 0);
+        assert!(warn_lines(&log).is_empty(), "a cost shape is never worth a warning: {log}");
+        let progress = jobs[0].progress.clone().expect("progress survives any cost shape");
+        assert_eq!(progress.pct, Some(80));
+        progress.signals.expect("signals").cost
+    };
+    assert_eq!(cost(json!({"usd": 1.25, "of_usd": 3.0, "basis": "plan", "fraction": 0.4})), Some(1.25));
+    assert_eq!(cost(json!({"usd": null, "of_usd": null, "basis": "none", "fraction": null})), None);
+    assert_eq!(cost(json!(1.12)), Some(1.12));
+    assert_eq!(cost(json!("SECRET-COST")), None);
+    assert_eq!(cost(Value::Null), None);
 }
 
 #[test]
@@ -567,7 +597,8 @@ fn a_decision_resolution_decodes_from_a_plain_string_or_an_object() {
 fn an_overridden_gate_run_is_reported_and_survives_a_round_trip() {
     let mut j = fixture_job_json("gate_hold_answered", "j-hold1");
     j["id"] = json!("override-1");
-    set(&mut j, "/gates/override", json!({"by": "nostromo_app", "at": "2026-10-17T12:05:00.000Z"}));
+    // The recordings carry no `override` key at all; Mother adds it when a gate run is overridden.
+    j["gates"]["override"] = json!({"by": "nostromo_app", "at": "2026-10-17T12:05:00.000Z"});
     let job = job_from(j);
     assert!(job.gates.as_ref().unwrap().overridden, "a non-null `override` means overridden");
 
@@ -724,8 +755,9 @@ fn is_held_for_operator_follows_state_activity_and_open_decision() {
 #[test]
 fn the_mother_jobs_frame_for_the_fixture_snapshots_matches_the_golden() {
     let mut jobs = vec![];
+    // The first snapshot of each recording: later snapshots repeat the same job at a later stage.
     for name in FIXTURES {
-        jobs.extend(snapshot_jobs(name));
+        jobs.extend(snapshot_jobs(name).into_iter().take(1));
     }
     assert_eq!(jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["j-gates1", "j-wave1", "j-hold1"]);
 
@@ -768,6 +800,6 @@ fn null_members_inside_a_key_are_read_as_missing_not_as_a_type_error() {
     assert!(j.review_wave.as_ref().expect("review_wave survives").lenses.is_empty());
     let progress = j.progress.as_ref().expect("progress survives");
     assert!(progress.flags.is_empty() && !progress.paused);
-    assert_eq!(progress.pct, Some(55));
+    assert_eq!(progress.pct, Some(80));
     assert!(!j.decision.as_ref().expect("decision survives").options[0].takes_text);
 }
