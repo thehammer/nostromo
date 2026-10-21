@@ -330,6 +330,9 @@ def text_drawn_in_png(png_path, content_size, area, line_count):
 
 def prove(card, tree, hits, png_path):
     """(ok, lines): the secondary find check and the pixel proof for one card."""
+    if card.get("display_failed"):
+        return False, ["display failed: the card reports display_failed (its text could not be laid out); "
+                       "Allow once is withheld"]
     info, why = locate_card(tree, card)
     if info is None:
         return False, ["cannot locate the card text area: " + why]

@@ -80,6 +80,8 @@ struct ApprovalCardListing: Equatable {
     let defaultToNoKind: Bool
     let secondsLeft: Int
     let state: String
+    /// The input's text could not be laid out, so Allow once is withheld (additive: `display_failed`).
+    let displayFailed: Bool
 
     var jsonObject: [String: Any] {
         var json: [String: Any] = [
@@ -97,6 +99,7 @@ struct ApprovalCardListing: Equatable {
             "default_to_no_kind": defaultToNoKind,
             "seconds_left": secondsLeft,
             "state": state,
+            "display_failed": displayFailed,
         ]
         json["command_count"] = commandCount ?? NSNull()
         json["banner"] = banner ?? NSNull()
@@ -161,7 +164,7 @@ final class ApprovalCardView: NSView {
     /// - Parameter armDelay: how long after it appears Allow once stays disabled (see
     ///   `ApprovalOverlayHost.armDelay`). Zero arms it at once.
     /// - Parameter isOnScreen: replaces "the window is visible and not occluded" for the input's
-    ///   coverage (a test's window is never ordered in). Nil asks the window.
+    ///   coverage (a test's window is never ordered in). Nil asks the window. Ignored in release builds.
     init(entry: ApprovalEntry, store: ApprovalStore, windowID: @escaping () -> String,
          permit: GesturePermit? = nil, armDelay: TimeInterval = 0, isOnScreen: (() -> Bool)? = nil) {
         request = entry.request
@@ -169,7 +172,9 @@ final class ApprovalCardView: NSView {
         model = ApprovalDisplayModel(request: entry.request)
         options = ApprovalCardOptions(request: entry.request)
         inputView = ApprovalInputView(model: model)
+        #if DEBUG
         inputView.isWindowShowing = isOnScreen
+        #endif
         countdown = ApprovalCountdownLabel(deadlineAtMs: entry.request.deadlineAtMs)
         self.store = store
         self.windowID = windowID
@@ -231,12 +236,13 @@ final class ApprovalCardView: NSView {
     }
 
     var canAllow: Bool {
-        isArmed && options.offersAllowOnce && model.isVerified && inputView.hasShownEveryLine
+        isArmed && options.offersAllowOnce && model.isVerified && !inputView.displayFailed && inputView.hasShownEveryLine
     }
 
     /// What Allow once says: the reason it can't be pressed yet, or `Allow once`.
     var allowLabel: String {
         if !model.isVerified { return ApprovalDisplayModel.roundTripFailureLabel }
+        if inputView.displayFailed { return "Can't display this input" }
         if !inputView.hasShownEveryLine { return "Scroll to the end to allow" }
         return "Allow once"
     }
@@ -294,7 +300,8 @@ final class ApprovalCardView: NSView {
             banner: bannerLabel.isHidden ? nil : bannerLabel.stringValue,
             reasonLine: ApprovalDisplayModel.contextText(request.reason.text), options: options,
             defaultToNoKind: self.options.defaultsToDeny,
-            secondsLeft: countdown.secondsLeft, state: stateDescription)
+            secondsLeft: countdown.secondsLeft, state: stateDescription,
+            displayFailed: inputView.displayFailed)
     }
 
     /// The input as the views hold it: the display lines' text from the text view, joined as in
@@ -433,7 +440,10 @@ final class ApprovalCardView: NSView {
             inLabel.isHidden = true
         }
 
-        configureWrapping(bannerLabel, lines: 2)
+        // Never cut, however many warnings are stacked: a warning is the point of the banner. It wraps and grows.
+        configureWrapping(bannerLabel, lines: 0)
+        bannerLabel.lineBreakMode = .byWordWrapping
+        bannerLabel.cell?.truncatesLastVisibleLine = false
         bannerLabel.textColor = ApprovalPalette.warning
         bannerLabel.font = .systemFont(ofSize: 11, weight: .semibold)
         if let banner = model.banner(toolKind: request.toolKind) {
@@ -513,6 +523,22 @@ final class ApprovalCardView: NSView {
             addSubview(v)
         }
         inputView.onShownEveryLine = { [weak self] in self?.refresh() }
+        inputView.onDisplayFailed = { [weak self] in self?.showDisplayFailed() }
+    }
+
+    static let displayFailedBanner = "Can't display this input safely. Deny it."
+
+    /// The input could not be laid out: say so, keep Allow once off (`canAllow`), keep every Deny.
+    private func showDisplayFailed() {
+        // Say it first, and keep every warning the card already had (invisible characters, non-ASCII,
+        // unverified input): the failure line is added to the banner, never put in its place.
+        let existing = model.banner(toolKind: request.toolKind)
+        bannerLabel.stringValue = [Self.displayFailedBanner, existing].compactMap { $0 }.joined(separator: "\n")
+        bannerLabel.maximumNumberOfLines = 0   // grows with the stacked warnings; `preferredHeight` re-measures
+        bannerLabel.isHidden = false
+        refresh()
+        needsLayout = true
+        onNeedsLayout?()
     }
 
     private func makeButton(title: String, control: ApprovalControl, label: String, tip: String) -> ApprovalButton {
@@ -590,7 +616,9 @@ final class ApprovalCardView: NSView {
         if let allow = allowButton {
             allow.title = allowLabel
             allow.isEnabled = pending && canAllow
-            allow.setAccessibilityHelp(canAllow ? nil : "Scroll the input to its end before allowing")
+            allow.setAccessibilityHelp(canAllow ? nil : inputView.displayFailed
+                ? "This input can't be displayed safely. Deny it."
+                : "Scroll the input to its end before allowing")
         }
         switch state {
         case .pending:
