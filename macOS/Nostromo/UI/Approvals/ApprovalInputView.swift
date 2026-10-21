@@ -457,7 +457,9 @@ final class ApprovalInputView: NSScrollView {
 
     /// The text area (right of the gutter) of the rows `top ..< bottom` (text-view coordinates), in this view's coordinates.
     private func textArea(top: CGFloat, bottom: CGFloat) -> NSRect {
-        let visible = textView.visibleRect
+        // The clip's bounds, as coverage reads them (not `visibleRect`, which an enclosing view can narrow).
+        let visible = textView.convert(contentView.bounds, from: contentView).intersection(textView.bounds)
+        guard !visible.isNull else { return .null }
         let area = NSRect(x: gutterWidth, y: top, width: visible.maxX - gutterWidth, height: bottom - top).intersection(visible)
         return area.isNull ? .null : convert(area, from: textView)
     }

@@ -977,7 +977,9 @@ private final class OverpaintRig {
         let gutter = view.gutterWidth
         var frame = NSRect(x: clip.minX + gutter, y: clip.minY, width: clip.width - gutter, height: clip.height)
         if fromTextX != nil || toTextX != nil || fromTextY != nil || toTextY != nil {
-            let visible = view.textView.visibleRect
+            // The clip's own bounds (the same coordinates as the text view's): set whether or not the text view has
+            // been sized yet, which `visibleRect` is not before the view is shown.
+            let visible = view.contentView.bounds
             let x0 = fromTextX ?? gutter, x1 = toTextX ?? visible.maxX
             let y0 = fromTextY ?? visible.minY, y1 = toTextY ?? visible.maxY
             frame = view.convert(NSRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0), from: view.textView)
@@ -1507,11 +1509,11 @@ final class ApprovalInkChunkTests: XCTestCase {
 
         // Everything from the second fragment down is hidden; the first fragment is drawn.
         rig.paintOver(fromTextY: fragments[1].rect.minY)
-        let ink = try XCTUnwrap(InkCounter.count(in: view))
-        XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws")
         rig.show()
 
         rig.evaluate(1)
+        let ink = try XCTUnwrap(InkCounter.count(in: view))
+        XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws")
         XCTAssertFalse(view.hasShownEveryLine, "the continuation of the line is hidden: the line was not shown")
         XCTAssertTrue(view.linesNotYetShown.contains(1), "line 1 is not shown: \(view.linesNotYetShown)")
         XCTAssertFalse(view.displayFailed)
