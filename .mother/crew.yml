@@ -1,0 +1,60 @@
+version: 1
+phi_sensitive: false
+gates:
+  mode: observe
+  max_attempts: 2
+  budget_minutes: 45
+  checks:
+    - name: rust-clippy
+      run: "cargo clippy --all-targets -- -D warnings"
+      where: sandbox
+      when: { paths: ["src/**", "tests/*.rs", "tests/**/*.rs", "tests/fixtures/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".rwx/**"] }
+      timeout_s: 1200
+      hint: "Run `rwx sandbox exec -- cargo clippy --all-targets -- -D warnings` and fix every warning; never run cargo locally (docs/rwx-sandbox.md)."
+    - name: rust-test
+      run: "cargo test"
+      where: sandbox
+      when: { paths: ["src/**", "tests/*.rs", "tests/**/*.rs", "tests/fixtures/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".rwx/**"] }
+      timeout_s: 1800
+      hint: "Run `rwx sandbox exec -- cargo test --test <name>` or `--lib <path>` for the failing test, fix, commit, push."
+    - name: python-test
+      run: "make python-test"
+      where: sandbox
+      when: { paths: ["tests/**", "scripts/**", "bin/**", "Makefile", "*.py", "**/*.py", "macOS/**", "iOS/**", "Shared/**", ".github/**", "src/mother/**"] }
+      timeout_s: 900
+      hint: "Run `make python-test` (or the failing suite with python3 -m unittest discover -s <dir>) and fix."
+    - name: swift-ci
+      run: "make ci-remote ONLY=swift"
+      where: any
+      when: { paths: ["macOS/**", "iOS/**", "Shared/**"] }
+      timeout_s: 1800
+      hint: "Read the FAILED lines printed by make ci-remote; reproduce with `make ci-remote ONLY=mac|kit|ios` after pushing."
+    - name: shellcheck
+      run: "scripts/gates/shellcheck-changed.sh"
+      where: any
+      when: { paths: ["**/*.sh", "bin/**", "scripts/**"] }
+      timeout_s: 300
+      hint: "Run shellcheck -x on the listed files and fix or annotate with a reasoned disable."
+    - name: actionlint
+      run: "scripts/gates/actionlint.sh"
+      where: any
+      blocking: false
+      when: { paths: [".github/workflows/**"] }
+      timeout_s: 300
+      hint: "Run actionlint and fix the workflow."
+    - name: mother-contract
+      run: "python3 scripts/mother-contract.py check --online"
+      where: any
+      blocking: false
+      when: { paths: ["tests/fixtures/mother-contract/**", "src/mother/**", "Shared/NostromoKit/Sources/NostromoKit/Mother/**", "macOS/Nostromo/Data/MotherBrokerClient.swift"] }
+      timeout_s: 120
+      hint: "Mother's contract fixtures moved: run `python3 scripts/mother-contract.py vendor` and update tests (index plan mother-crew-client.md)."
+lenses:
+  mode: observe
+  default: [correctness, tests, ops-infra, phi-security]
+  mandatory: []
+  scopes:
+    ops-infra: [".github/**", ".rwx/**", "Makefile", "scripts/**", "bin/**", "dist/**", "infra/**", "template.yaml", "macOS/Nostromo.xcodeproj/**", "iOS/Nostromo.xcodeproj/**"]
+    phi-security: ["src/ipc/**", "src/mother/**", "src/data/work/**", "src/mcp/**", "src/approvals/**", "src/tracker/**", "src/sensitive_text.rs", "src/bin/nostromo_guard.rs", "src/bin/sensitive_text_scan.rs", "src/push/**", "infra/**", "template.yaml", "Shared/NostromoKit/Sources/NostromoKit/Wire/**", "Shared/NostromoKit/Sources/NostromoKit/Approvals/**", "Shared/NostromoKit/Sources/NostromoKit/Transport/**", "Shared/NostromoKit/Sources/NostromoKit/Push/**", "macOS/Nostromo/Security/**", "macOS/Nostromo/AppControl/**", "macOS/Nostromo/UI/Approvals/**", "iOS/NostromoNotificationService/**"]
+  budget_usd: 3.00
+  cycle_cap: 2
