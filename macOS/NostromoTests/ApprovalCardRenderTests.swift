@@ -1515,7 +1515,10 @@ final class ApprovalInkChunkTests: XCTestCase {
         let ink = try XCTUnwrap(InkCounter.count(in: view))
         XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws. total \(ink.total), scale \(ink.scale), "
             + "area \(ink.width)x\(ink.height), fragments \(fragments.map { NSStringFromRect($0.rect) }), clip \(NSStringFromRect(view.contentView.frame)), "
-            + "textView \(NSStringFromRect(view.textView.frame)), clipBounds \(NSStringFromRect(view.contentView.bounds)), gutter \(view.gutterWidth)")
+            + "textView \(NSStringFromRect(view.textView.frame)), clipBounds \(NSStringFromRect(view.contentView.bounds)), gutter \(view.gutterWidth), "
+            + "lines \(view.displayedLines.map { $0.count }), glyphs \(view.textView.layoutManager?.numberOfGlyphs ?? -1), "
+            + "subviews \(view.subviews.map { NSStringFromRect($0.frame) }), checks \(view.inkCheckCount), failures \(view.inkFailures)"
+            + ", withoutOverlay \({ rig.removeOverpaint(); return InkCounter.count(in: view).map { \"\($0.total)/\($0.firstLineBand)\" } ?? \"nil\" }())")
         XCTAssertFalse(view.hasShownEveryLine, "the continuation of the line is hidden: the line was not shown")
         XCTAssertTrue(view.linesNotYetShown.contains(1), "line 1 is not shown: \(view.linesNotYetShown)")
         XCTAssertFalse(view.displayFailed)
