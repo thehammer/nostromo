@@ -164,7 +164,7 @@ final class ApprovalCardView: NSView {
     /// - Parameter armDelay: how long after it appears Allow once stays disabled (see
     ///   `ApprovalOverlayHost.armDelay`). Zero arms it at once.
     /// - Parameter isOnScreen: replaces "the window is visible and not occluded" for the input's
-    ///   coverage (a test's window is never ordered in). Nil asks the window.
+    ///   coverage (a test's window is never ordered in). Nil asks the window. Ignored in release builds.
     init(entry: ApprovalEntry, store: ApprovalStore, windowID: @escaping () -> String,
          permit: GesturePermit? = nil, armDelay: TimeInterval = 0, isOnScreen: (() -> Bool)? = nil) {
         request = entry.request
@@ -172,7 +172,9 @@ final class ApprovalCardView: NSView {
         model = ApprovalDisplayModel(request: entry.request)
         options = ApprovalCardOptions(request: entry.request)
         inputView = ApprovalInputView(model: model)
+        #if DEBUG
         inputView.isWindowShowing = isOnScreen
+        #endif
         countdown = ApprovalCountdownLabel(deadlineAtMs: entry.request.deadlineAtMs)
         self.store = store
         self.windowID = windowID
@@ -438,7 +440,10 @@ final class ApprovalCardView: NSView {
             inLabel.isHidden = true
         }
 
-        configureWrapping(bannerLabel, lines: 2)
+        // Never cut, however many warnings are stacked: a warning is the point of the banner. It wraps and grows.
+        configureWrapping(bannerLabel, lines: 0)
+        bannerLabel.lineBreakMode = .byWordWrapping
+        bannerLabel.cell?.truncatesLastVisibleLine = false
         bannerLabel.textColor = ApprovalPalette.warning
         bannerLabel.font = .systemFont(ofSize: 11, weight: .semibold)
         if let banner = model.banner(toolKind: request.toolKind) {
@@ -529,7 +534,7 @@ final class ApprovalCardView: NSView {
         // unverified input): the failure line is added to the banner, never put in its place.
         let existing = model.banner(toolKind: request.toolKind)
         bannerLabel.stringValue = [Self.displayFailedBanner, existing].compactMap { $0 }.joined(separator: "\n")
-        bannerLabel.maximumNumberOfLines = 6
+        bannerLabel.maximumNumberOfLines = 0   // grows with the stacked warnings; `preferredHeight` re-measures
         bannerLabel.isHidden = false
         refresh()
         needsLayout = true

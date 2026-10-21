@@ -15,9 +15,7 @@ import NostromoKit
 //     and count pixels that are clearly not the modal background: in the text area, and in the
 //     line-number gutter (painted by the text view itself, there is no ruler view). Every fixture
 //     must draw ink, in the full card (at the app's width) and in a bare input view, scrolled to the
-//     top, middle and end, and after a resize. Each run prints ONE content-free line per fixture,
-//     prefixed `ATD-DIAG`, so the cause can be read from a CI log:
-//         grep ATD-DIAG <log>
+//     top, middle and end, and after a resize.
 //   * `ApprovalCardFailClosedTests`: a card whose input has text but whose layout has no glyphs
 //     (`ApprovalInputView.displayFailed`) can only be denied, and says so in its banner without
 //     losing the warnings it had. The seam `ApprovalInputView.forceNoGlyphsForTesting` makes the
@@ -28,6 +26,14 @@ import NostromoKit
 //     covered by something else (an overpaint) is never counted, repeated failures latch
 //     `displayFailed`, one transient failure does not, blank rows demand no ink, and the check
 //     renders once per coverage change, not once per look.
+//   * `ApprovalInkFailureCountingTests`: failures are counted once per settle window of an injected
+//     clock, so a burst of failing passes in one turn of the run loop is one failure, not three.
+//   * `ApprovalInkChunkTests`: a long single line is judged in horizontal chunks: hiding only its
+//     head, middle or tail keeps Allow off, a run of spaces is not a false failure, and a wrapped
+//     line's continuation is judged too.
+//   * `ApprovalPartialViewCoverageTests`: a line that can only be completed from partial views (a
+//     clip shorter than two lines, awkward steps) is judged on the ink of those views: a blank text
+//     area cannot be walked past with such steps.
 //
 // No wall clock, no pasteboard, no network, no ~/.nostromo.
 
@@ -213,11 +219,11 @@ private enum RenderMode: String {
     case bareOnScreen = "bare_on_screen"
 }
 
-/// What one fixture rendered as, with the one-line diagnostic.
+/// What one fixture rendered as, with a one-line description for assertion messages.
 private struct Measurement {
     let fixture: RenderFixture
     let ink: InkCount
-    let diag: String
+    let detail: String
 }
 
 // MARK: - Pixels
@@ -299,7 +305,7 @@ final class ApprovalCardRenderTests: XCTestCase {
         let used = textView.textContainer.flatMap { layout?.usedRect(for: $0) } ?? .zero
         let container = textView.textContainer?.containerSize ?? .zero
         let ink = rendered ?? InkCount(total: -1, firstLineBand: -1, scale: 0, width: 0, height: 0, gutterInk: -1, gutterBands: -1)
-        let diag = "ATD-DIAG mode=\(mode.rawValue) fixture=\(fixture.name)"
+        let detail = "mode=\(mode.rawValue) fixture=\(fixture.name)"
             + " tk2BeforeRender=\(tk2BeforeRender) tk2AfterRender=\(tk2AfterRender)"
             + " glyphs=\(glyphs) usedRect=\(NSStringFromRect(used)) containerSize=\(NSStringFromSize(container))"
             + " textViewFrame=\(NSStringFromRect(textView.frame)) clipFrame=\(NSStringFromRect(view.contentView.frame))"
@@ -309,8 +315,7 @@ final class ApprovalCardRenderTests: XCTestCase {
             + " scale=\(ink.scale) rendered=\(rendered != nil) inkTotal=\(ink.total) inkFirstLine=\(ink.firstLineBand)"
             + " gutterInk=\(ink.gutterInk) gutterBands=\(ink.gutterBands)"
             + " areaPx=\(ink.width)x\(ink.height)"
-        print(diag)
-        return Measurement(fixture: fixture, ink: ink, diag: diag)
+        return Measurement(fixture: fixture, ink: ink, detail: detail)
     }
 
     /// Every fixture draws text in its first line AND numbers in the gutter, and more text draws more ink.
@@ -321,19 +326,19 @@ final class ApprovalCardRenderTests: XCTestCase {
             let m = try measure(fixture, in: mode, scale: scale)
             byFixture[fixture.name] = m
             XCTAssertGreaterThanOrEqual(m.ink.firstLineBand, 40,
-                                        "\(mode.rawValue)/\(fixture.name)\(at): the first line has no drawn text. \(m.diag)",
+                                        "\(mode.rawValue)/\(fixture.name)\(at): the first line has no drawn text. \(m.detail)",
                                         file: file, line: line)
             XCTAssertGreaterThan(m.ink.gutterInk, 0,
-                                 "\(mode.rawValue)/\(fixture.name)\(at): the gutter drew no line number. \(m.diag)",
+                                 "\(mode.rawValue)/\(fixture.name)\(at): the gutter drew no line number. \(m.detail)",
                                  file: file, line: line)
         }
         let one = try XCTUnwrap(byFixture[RenderFixture.singleLine.name])
         let twelve = try XCTUnwrap(byFixture[RenderFixture.twelveLines.name])
         let heredoc = try XCTUnwrap(byFixture[RenderFixture.heredoc300.name])
         XCTAssertGreaterThan(twelve.ink.total, one.ink.total,
-                             "\(mode.rawValue)\(at): twelve lines draw more ink than one. \(twelve.diag) | \(one.diag)", file: file, line: line)
+                             "\(mode.rawValue)\(at): twelve lines draw more ink than one. \(twelve.detail) | \(one.detail)", file: file, line: line)
         XCTAssertGreaterThan(heredoc.ink.total, one.ink.total,
-                             "\(mode.rawValue)\(at): the visible part of 300 lines draws more ink than one line. \(heredoc.diag) | \(one.diag)",
+                             "\(mode.rawValue)\(at): the visible part of 300 lines draws more ink than one line. \(heredoc.detail) | \(one.detail)",
                              file: file, line: line)
     }
 
@@ -710,6 +715,35 @@ final class ApprovalCardFailClosedTests: XCTestCase {
         XCTAssertLessThanOrEqual(label.frame.maxY, card.bounds.height, "the banner is inside the card, not clipped by its edge")
     }
 
+    // MARK: The banner has room for everything it says
+
+    func testTheBannerWithEveryWarningStackedAndTheFailureLineIsNeverTruncatedAndTheCardGrowsToHoldIt() throws {
+        // Invisible characters in the command and in another field of the request, and the failure line.
+        let request = try ApprovalTestRequests.bash(ApprovalTestRequests.bidiCommand, cwd: "/tmp/a\u{202E}b")
+        let normal = ForcedCardRig(self, request: request, forceNoGlyphs: false, width: 280)
+        let original = try XCTUnwrap(normal.card.listing.banner, "precondition: the card has a warning of its own")
+        let normalHeight = normal.remeasure()
+
+        let rig = ForcedCardRig(self, request: request, forceNoGlyphs: true, width: 280)
+        let height = rig.remeasure()
+        let label = try XCTUnwrap(ApprovalTestViews.label(startingWith: Self.failureBanner, in: rig.card),
+                                  "labels: \(ApprovalTestViews.labelTexts(in: rig.card))")
+
+        XCTAssertEqual(label.maximumNumberOfLines, 0, "the banner grows to what it says: no cap on its lines")
+        XCTAssertTrue(label.stringValue.hasPrefix(Self.failureBanner), "the failure comes first: \(label.stringValue)")
+        XCTAssertTrue(label.stringValue.contains(original), "every warning the card had is still in full: \(label.stringValue)")
+        XCTAssertEqual(rig.card.listing.banner, label.stringValue, "and the listing says the same")
+
+        let cell = try XCTUnwrap(label.cell)
+        let needed = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.frame.width, height: 10_000)).height
+        XCTAssertGreaterThan(needed, 2.5 * label.font!.pointSize + 10, "precondition: at this width the banner needs more than two lines")
+        XCTAssertGreaterThanOrEqual(label.frame.height + 0.5, needed,
+                                    "the label is \(label.frame.height) pt tall, its text needs \(needed): the banner is cut off")
+        XCTAssertGreaterThanOrEqual(label.frame.minY, 0, "the banner is inside the card")
+        XCTAssertLessThanOrEqual(label.frame.maxY, rig.card.bounds.height, "the banner is inside the card, not clipped by its edge")
+        XCTAssertGreaterThan(height, normalHeight, "the card is taller than without the failure: the longer banner has room")
+    }
+
     // MARK: A normal card is unaffected
 
     func testANormalCardHasNotFailedToDisplayAndCanBeAllowedOnceReadThrough() throws {
@@ -896,34 +930,57 @@ private final class OverpaintView: NSView {
     }
 }
 
+/// The time an input view's failures are spaced by, in a test's hands.
+private final class RigClock {
+    var now: TimeInterval = 1000
+}
+
+/// A line fragment of the input's layout, in text-view coordinates.
+private struct RigFragment {
+    /// The whole fragment: its row band.
+    let rect: NSRect
+    /// The part of it that holds text.
+    let used: NSRect
+}
+
 /// A card in a rig window that is NOT showing until the test says so, so that the first coverage it
 /// earns (and the first ink check) happens after the test has set the scene (an overpaint).
+/// The input's clock is the rig's: it moves only when the test moves it.
 private final class OverpaintRig {
     let harness: ApprovalCardHarness
     let box: ShowingBox
+    private let clockBox = RigClock()
     private var overlay: OverpaintView?
 
     var card: ApprovalCardView { harness.card }
     var view: ApprovalInputView { harness.card.inputView }
+    /// The input's clock now.
+    var now: TimeInterval { clockBox.now }
 
     init(_ testCase: XCTestCase, request: ApprovalRequestWire, width: CGFloat = 560, maxHeight: CGFloat = 520) {
         let box = ShowingBox(false)
         harness = ApprovalCardHarness(testCase, request: request, width: width, maxHeight: maxHeight,
                                       isOnScreen: { box.showing })
         self.box = box
+        let clockBox = self.clockBox
+        harness.card.inputView.clock = { clockBox.now }
     }
 
     /// Put a view over the text area (right of the gutter), above the clip view, as a sibling of it.
-    /// With `fromTextY` the overpaint covers only the rows from that text-view y down (the rows above stay drawn).
-    func paintOver(with fill: NSColor = ApprovalPalette.inputBackground, fromTextY: CGFloat? = nil) {
+    /// With no span given it covers the whole text area; the rows and columns it covers can be limited,
+    /// in text-view coordinates (a span not given runs to the edge of the text area).
+    func paintOver(with fill: NSColor = ApprovalPalette.inputBackground,
+                   fromTextX: CGFloat? = nil, toTextX: CGFloat? = nil,
+                   fromTextY: CGFloat? = nil, toTextY: CGFloat? = nil) {
         removeOverpaint()
         let clip = view.contentView.frame
         let gutter = view.gutterWidth
         var frame = NSRect(x: clip.minX + gutter, y: clip.minY, width: clip.width - gutter, height: clip.height)
-        if let fromTextY {
+        if fromTextX != nil || toTextX != nil || fromTextY != nil || toTextY != nil {
             let visible = view.textView.visibleRect
-            let part = NSRect(x: gutter, y: fromTextY, width: visible.maxX - gutter, height: visible.maxY - fromTextY)
-            frame = view.convert(part, from: view.textView)
+            let x0 = fromTextX ?? gutter, x1 = toTextX ?? visible.maxX
+            let y0 = fromTextY ?? visible.minY, y1 = toTextY ?? visible.maxY
+            frame = view.convert(NSRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0), from: view.textView)
         }
         let overlay = OverpaintView(frame: frame, fill: fill)
         view.addSubview(overlay)
@@ -938,10 +995,48 @@ private final class OverpaintRig {
     /// The window is showing now.
     func show() { box.showing = true }
 
-    /// Look at the input `times` times, without scrolling it and without waiting for the run loop.
+    /// Move the input's clock on.
+    func advance(by seconds: TimeInterval) { clockBox.now += seconds }
+
+    /// Look at the input `times` times, without scrolling it and without waiting for the run loop, each
+    /// look a full settle window (and a little more) after the one before: every failed look is counted.
     func evaluate(_ times: Int) {
+        for _ in 0 ..< times {
+            advance(by: ApprovalInputView.failureSettleWindow + 0.05)
+            view.updateScrollProgress()
+        }
+    }
+
+    /// Look at the input `times` times in a row with no time passing: a resize storm in one turn of the run loop.
+    func evaluateBurst(_ times: Int) {
         for _ in 0 ..< times { view.updateScrollProgress() }
     }
+
+    /// The input's line fragments, top to bottom, as the layout has them (text-view coordinates).
+    var fragments: [RigFragment] {
+        guard let layout = view.textView.layoutManager, let container = view.textView.textContainer else { return [] }
+        layout.ensureLayout(for: container)
+        let origin = view.textView.textContainerOrigin
+        var out: [RigFragment] = []
+        layout.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layout.numberOfGlyphs)) { rect, used, _, _, _ in
+            out.append(RigFragment(rect: rect.offsetBy(dx: origin.x, dy: origin.y), used: used.offsetBy(dx: origin.x, dy: origin.y)))
+        }
+        return out
+    }
+}
+
+/// Allow once is off: the card cannot be allowed and its button is disabled.
+private func assertAllowIsOff(_ card: ApprovalCardView, _ name: String, file: StaticString = #filePath, line: UInt = #line) {
+    XCTAssertFalse(card.canAllow, name, file: file, line: line)
+    XCTAssertEqual(card.allowButton?.isEnabled, false, "\(name): Allow once is disabled", file: file, line: line)
+}
+
+/// Commands for the tests of a long line in a wide card.
+private enum ApprovalLongLine {
+    /// 85 characters: one line fragment in a card about 900 pt wide.
+    static let command = "git commit -m 'update the build script for the release pipeline now' && rm -rf /tmp/x"
+    /// 53 characters, 40 of them spaces in the middle.
+    static let spaced = "echo start" + String(repeating: " ", count: 40) + "end"
 }
 
 final class ApprovalInkCheckTests: XCTestCase {
@@ -956,16 +1051,19 @@ final class ApprovalInkCheckTests: XCTestCase {
     // MARK: Text that draws passes
 
     func testTextThatReallyDrawsPassesTheInkCheckAndAllowOpensAfterTheReadThrough() throws {
-        let cases: [(String, ApprovalRequestWire, CGFloat)] = [
-            ("one line", try ApprovalTestRequests.simpleRm(), 520),
-            ("12 lines in a short card", try ApprovalTestRequests.shortLines(12), 150),
-            ("300 lines (a here-doc's fill is not ink, its text is)", try ApprovalTestRequests.heredoc300(), 300),
-            ("an edit: muted diff context, additions, deletions", try ApprovalTestRequests.edit(), 100),
-            ("a write: all additions", try ApprovalTestRequests.write(), 100),
-            ("invisible-character tokens and direction marks", try ApprovalTestRequests.bidi(), 520),
+        let spaced = "echo start" + String(repeating: " ", count: 40) + "end"
+        let cases: [(String, ApprovalRequestWire, CGFloat, CGFloat)] = [
+            ("one line", try ApprovalTestRequests.simpleRm(), 520, 560),
+            ("12 lines in a short card", try ApprovalTestRequests.shortLines(12), 150, 560),
+            ("300 lines (a here-doc's fill is not ink, its text is)", try ApprovalTestRequests.heredoc300(), 300, 560),
+            ("an edit: muted diff context, additions, deletions", try ApprovalTestRequests.edit(), 100, 560),
+            ("a write: all additions", try ApprovalTestRequests.write(), 100, 560),
+            ("invisible-character tokens and direction marks", try ApprovalTestRequests.bidi(), 520, 560),
+            ("an 85-character command on one line of a wide card", try ApprovalTestRequests.bash(ApprovalLongLine.command), 300, 960),
+            ("a command with a run of 40 spaces in the middle", try ApprovalTestRequests.bash(spaced), 300, 560),
         ]
-        for (name, request, maxHeight) in cases {
-            let h = ApprovalCardHarness(self, request: request, maxHeight: maxHeight)
+        for (name, request, maxHeight, width) in cases {
+            let h = ApprovalCardHarness(self, request: request, width: width, maxHeight: maxHeight)
             let view = h.card.inputView
             ApprovalTestViews.readThrough(view)
 
@@ -1189,5 +1287,477 @@ final class ApprovalInkCheckTests: XCTestCase {
         XCTAssertTrue(view.hasShownEveryLine, "precondition: it was read through")
         XCTAssertLessThanOrEqual(view.inkCheckCount - start, steps, "never more renders than steps")
         XCTAssertLessThan(view.inkCheckCount * 2, asked, "renders: \(view.inkCheckCount), evaluations asked for: \(asked)")
+    }
+}
+
+// MARK: - Failures are counted once per settle window (ATG-1)
+
+/// `maxInkFailures` failed evaluations latch `displayFailed`, but a failure only counts if no failure was
+/// counted within `ApprovalInputView.failureSettleWindow` before it (on the input's own clock): a storm of
+/// failing passes in one turn of the run loop (a resize, a card re-parented mid-animation) is one unsettled
+/// layout, not three verdicts. Allow stays off the whole time.
+final class ApprovalInkFailureCountingTests: XCTestCase {
+
+    private let maxFailures = ApprovalInputView.maxInkFailures
+    private let window = ApprovalInputView.failureSettleWindow
+
+    /// A 12-line card whose text area is overpainted, showing.
+    private func coveredRig() throws -> OverpaintRig {
+        let rig = OverpaintRig(self, request: try ApprovalTestRequests.shortLines(12))
+        rig.paintOver()
+        rig.show()
+        return rig
+    }
+
+    private func assertStillBlocked(_ rig: OverpaintRig, _ name: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(rig.view.hasShownEveryLine, "\(name): lines never shown: \(rig.view.linesNotYetShown)", file: file, line: line)
+        assertAllowIsOff(rig.card, name, file: file, line: line)
+    }
+
+    func testAStormOfFailingPassesInOneTurnCountsAsOneFailureAndDoesNotLatch() throws {
+        let rig = try coveredRig()
+
+        rig.evaluateBurst(10)
+
+        XCTAssertEqual(rig.view.inkFailures, 1, "ten failing passes with no time between them are one failure")
+        XCTAssertFalse(rig.view.displayFailed, "a storm is not a verdict")
+        assertStillBlocked(rig, "after a storm of failing passes")
+
+        rig.evaluateBurst(10)
+        XCTAssertEqual(rig.view.inkFailures, 1, "and a second storm in the same turn adds nothing")
+        XCTAssertFalse(rig.view.displayFailed)
+        assertStillBlocked(rig, "after two storms")
+    }
+
+    func testThreeFailuresSpacedPastTheWindowLatchTheDisplayFailureAndTheBannerSaysSo() throws {
+        let rig = try coveredRig()
+
+        rig.evaluate(1)
+        XCTAssertEqual(rig.view.inkFailures, 1)
+        XCTAssertFalse(rig.view.displayFailed)
+        rig.evaluate(1)
+        XCTAssertEqual(rig.view.inkFailures, 2)
+        XCTAssertFalse(rig.view.displayFailed, "two failures are not enough")
+        assertStillBlocked(rig, "after two spaced failures")
+
+        rig.evaluate(1)
+        XCTAssertTrue(rig.view.displayFailed, "the third failure, spaced like the others, latches")
+        assertStillBlocked(rig, "latched")
+        XCTAssertNotNil(ApprovalTestViews.label(startingWith: displayFailedText, in: rig.card), "the banner says so")
+        XCTAssertTrue(rig.card.denyButton.isEnabled, "Deny stays enabled")
+    }
+
+    func testAStormBetweenSpacedFailuresAddsNothingToTheCount() throws {
+        let rig = try coveredRig()
+
+        rig.evaluate(1)
+        rig.evaluateBurst(10)
+        XCTAssertEqual(rig.view.inkFailures, 1, "the storm after the first failure adds nothing")
+
+        rig.evaluate(1)
+        XCTAssertEqual(rig.view.inkFailures, 2, "a failure after the window counts")
+        rig.evaluateBurst(10)
+        XCTAssertEqual(rig.view.inkFailures, 2, "the storm after the second failure adds nothing")
+        XCTAssertFalse(rig.view.displayFailed, "two counted failures, however many passes there were")
+        assertStillBlocked(rig, "after storms between two failures")
+
+        rig.evaluate(1)
+        XCTAssertTrue(rig.view.displayFailed, "the third counted failure latches")
+        assertStillBlocked(rig, "latched")
+    }
+
+    func testAGoodLookForgetsTheFailuresSoTheNextOnesStartCountingFromOne() throws {
+        // 300 lines: one good look at the first screen does not finish the read-through.
+        let rig = OverpaintRig(self, request: try ApprovalTestRequests.heredoc300(), maxHeight: 300)
+        let view = rig.view
+        rig.paintOver()
+        rig.show()
+
+        rig.evaluate(2)
+        XCTAssertEqual(view.inkFailures, 2, "precondition: two counted failures")
+        XCTAssertFalse(view.displayFailed)
+
+        rig.removeOverpaint()
+        rig.evaluate(1)
+        XCTAssertEqual(view.inkFailures, 0, "a good look resets the count")
+        XCTAssertFalse(view.hasShownEveryLine, "precondition: there is much more to read")
+        XCTAssertFalse(view.displayFailed)
+
+        // Covered again, on the next screen: one failure, however many passes it takes to look at it.
+        rig.paintOver()
+        rig.advance(by: window + 0.05)
+        ApprovalTestViews.moveClip(of: view, toY: view.contentView.bounds.height)
+        rig.evaluateBurst(1)
+        XCTAssertEqual(view.inkFailures, 1, "the count starts again from one, not from three")
+        XCTAssertFalse(view.displayFailed, "the failures before the good look are forgotten")
+        assertStillBlocked(rig, "covered again after a good look")
+    }
+
+    func testAFailureInsideTheWindowIsNotCountedAndOneAfterItIs() throws {
+        let rig = try coveredRig()
+
+        rig.evaluate(1)
+        XCTAssertEqual(rig.view.inkFailures, 1, "precondition: the first failure counts")
+
+        rig.advance(by: window * 0.5)
+        rig.evaluateBurst(1)
+        XCTAssertEqual(rig.view.inkFailures, 1, "a failure half a window after the counted one is not counted")
+
+        // The window runs from the last COUNTED failure, not from the last one seen.
+        rig.advance(by: window * 0.7)
+        rig.evaluateBurst(1)
+        XCTAssertEqual(rig.view.inkFailures, 2, "a failure 1.2 windows after the counted one is")
+        XCTAssertFalse(rig.view.displayFailed)
+        assertStillBlocked(rig, "after a counted and an uncounted failure")
+    }
+}
+
+// MARK: - A long line is judged in chunks (ATG-2)
+
+/// A line fragment is judged in horizontal chunks of about eight characters: every chunk that has text needs
+/// ink, a chunk of spaces needs none. Hiding only one end or the middle of a long line must not pass because the
+/// rest of the line draws.
+final class ApprovalInkChunkTests: XCTestCase {
+
+    private let maxFailures = ApprovalInputView.maxInkFailures
+
+    /// A wide card and the one line fragment of `command` in it.
+    private func wideRig(_ command: String, minimumWidth: CGFloat) throws -> (rig: OverpaintRig, fragment: RigFragment) {
+        let rig = OverpaintRig(self, request: try ApprovalTestRequests.bash(command), width: 960, maxHeight: 300)
+        let fragments = rig.fragments
+        XCTAssertEqual(fragments.count, 1, "precondition: the command is ONE line fragment in a card this wide")
+        let fragment = try XCTUnwrap(fragments.first)
+        XCTAssertGreaterThan(fragment.used.width, minimumWidth, "precondition: the text is wide enough to hide a part of it")
+        return (rig, fragment)
+    }
+
+    /// Hide the part of the long command between `from` and `to` (fractions of its laid-out width; nil is its end)
+    /// and check that Allow stays off, and that the card ends as a display failure with its banner.
+    private func assertHidingBlocksAllow(_ name: String, from: CGFloat?, to: CGFloat?,
+                                         file: StaticString = #filePath, line: UInt = #line) throws {
+        let (rig, fragment) = try wideRig(ApprovalLongLine.command, minimumWidth: 400)
+        let view = rig.view
+        let x0 = from.map { fragment.used.minX + fragment.used.width * $0 }
+        let x1 = to.map { fragment.used.minX + fragment.used.width * $0 }
+        let covered = (x1 ?? view.textView.visibleRect.maxX) - (x0 ?? view.gutterWidth)
+        XCTAssertGreaterThanOrEqual(covered, 100, "\(name): precondition, the overlay is wide enough to hold whole chunks", file: file, line: line)
+        rig.paintOver(fromTextX: x0, toTextX: x1)
+        rig.show()
+
+        rig.evaluate(1)
+        XCTAssertFalse(view.hasShownEveryLine, "\(name): the line was shown though part of it is hidden", file: file, line: line)
+        XCTAssertFalse(view.displayFailed, "\(name): one failed look is not a verdict", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(view.inkFailures, 1, "\(name): the hidden part is a failure", file: file, line: line)
+        assertAllowIsOff(rig.card, name, file: file, line: line)
+
+        rig.evaluate(maxFailures)
+        XCTAssertTrue(view.displayFailed, "\(name): repeated failures latch", file: file, line: line)
+        XCTAssertFalse(view.hasShownEveryLine, "\(name): lines never shown: \(view.linesNotYetShown)", file: file, line: line)
+        assertAllowIsOff(rig.card, "\(name), latched", file: file, line: line)
+        XCTAssertNotNil(ApprovalTestViews.label(startingWith: displayFailedText, in: rig.card), "\(name): the banner says so",
+                        file: file, line: line)
+    }
+
+    func testALongLineThatDrawsAllTheWayAcrossCanBeAllowed() throws {
+        let (rig, _) = try wideRig(ApprovalLongLine.command, minimumWidth: 400)
+        rig.show()
+        rig.evaluate(1)
+        ApprovalTestViews.readThrough(rig.view)
+
+        XCTAssertFalse(rig.view.displayFailed)
+        XCTAssertEqual(rig.view.inkFailures, 0)
+        XCTAssertTrue(rig.view.hasShownEveryLine, "lines never shown: \(rig.view.linesNotYetShown)")
+        XCTAssertTrue(rig.card.canAllow)
+        XCTAssertEqual(rig.card.allowButton?.isEnabled, true)
+    }
+
+    func testAnOverpaintHidingOnlyTheTailOfALongLineKeepsAllowOff() throws {
+        try assertHidingBlocksAllow("the last 45% of the line", from: 0.55, to: nil)
+    }
+
+    func testAnOverpaintHidingOnlyTheMiddleOfALongLineKeepsAllowOff() throws {
+        try assertHidingBlocksAllow("the middle (30% to 60%) of the line", from: 0.30, to: 0.60)
+    }
+
+    func testAnOverpaintHidingOnlyTheHeadOfALongLineKeepsAllowOff() throws {
+        try assertHidingBlocksAllow("the first quarter of the line", from: nil, to: 0.25)
+    }
+
+    func testARunOfSpacesInTheMiddleOfALineIsNotAFalseFailure() throws {
+        let (rig, fragment) = try wideRig(ApprovalLongLine.spaced, minimumWidth: 200)
+        XCTAssertLessThan(fragment.used.width, 960, "precondition: fits")
+        rig.show()
+        rig.evaluate(1)
+        ApprovalTestViews.readThrough(rig.view)
+
+        XCTAssertFalse(rig.view.displayFailed, "chunks of nothing but spaces demand no ink")
+        XCTAssertEqual(rig.view.inkFailures, 0)
+        XCTAssertTrue(rig.view.hasShownEveryLine, "lines never shown: \(rig.view.linesNotYetShown)")
+        XCTAssertTrue(rig.card.canAllow)
+        XCTAssertEqual(rig.card.allowButton?.isEnabled, true)
+    }
+
+    func testAWrappedLongLineWhoseContinuationIsOverpaintedIsNotShown() throws {
+        let token = String(repeating: "0123456789", count: 20)   // 200 characters, no break: it wraps anywhere
+        let rig = OverpaintRig(self, request: try ApprovalTestRequests.bash(token), width: 400, maxHeight: 300)
+        let view = rig.view
+        let fragments = rig.fragments
+        XCTAssertGreaterThanOrEqual(fragments.count, 3, "precondition: the token wraps into three or more fragments")
+        guard fragments.count >= 2 else { return }
+
+        // Everything from the second fragment down is hidden; the first fragment is drawn.
+        rig.paintOver(fromTextY: fragments[1].rect.minY)
+        let ink = try XCTUnwrap(InkCounter.count(in: view))
+        XCTAssertGreaterThanOrEqual(ink.firstLineBand, 40, "precondition: the first fragment draws")
+        rig.show()
+
+        rig.evaluate(1)
+        XCTAssertFalse(view.hasShownEveryLine, "the continuation of the line is hidden: the line was not shown")
+        XCTAssertTrue(view.linesNotYetShown.contains(1), "line 1 is not shown: \(view.linesNotYetShown)")
+        XCTAssertFalse(view.displayFailed)
+        XCTAssertGreaterThanOrEqual(view.inkFailures, 1, "the hidden continuation is a failure")
+        assertAllowIsOff(rig.card, "first fragment drawn, the rest hidden")
+
+        rig.evaluate(maxFailures)
+        XCTAssertTrue(view.displayFailed, "repeated failures latch")
+        assertAllowIsOff(rig.card, "latched")
+        XCTAssertNotNil(ApprovalTestViews.label(startingWith: displayFailedText, in: rig.card), "the banner says so")
+    }
+}
+
+// MARK: - A line completed from partial views is judged too (ATG-3)
+
+/// A bare input view in a rig window, a clip view only a line or so tall, with a clock and an overpaint the test controls.
+private final class PartialViewRig {
+    let window: NSWindow
+    let view: ApprovalInputView
+    let box: ShowingBox
+    private let clockBox: RigClock
+    private let width: CGFloat
+    private var overlay: OverpaintView?
+
+    init(_ testCase: XCTestCase, request: ApprovalRequestWire, clipHeight: CGFloat, width: CGFloat = 500) {
+        let box = ShowingBox(false)
+        let clockBox = RigClock()
+        let window = makeRigWindow(testCase, size: NSSize(width: width + 40, height: 400), appearance: NSAppearance(named: .darkAqua))
+        let view = ApprovalInputView(model: ApprovalDisplayModel(request: request))
+        view.isWindowShowing = { box.showing }
+        view.clock = { clockBox.now }
+        view.frame = NSRect(x: 0, y: 0, width: width, height: clipHeight)
+        window.contentView!.addSubview(view)
+        window.contentView!.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        self.box = box
+        self.clockBox = clockBox
+        self.window = window
+        self.view = view
+        self.width = width
+    }
+
+    /// Make the input view this tall (so its clip view is) and lay it out.
+    func setClipHeight(_ height: CGFloat) {
+        view.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        window.contentView!.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+    }
+
+    func show() { box.showing = true }
+
+    /// Move the input's clock a settle window (and a little more) on.
+    func tick() { clockBox.now += ApprovalInputView.failureSettleWindow + 0.05 }
+
+    /// Cover the whole text area.
+    func paintOver() {
+        overlay?.removeFromSuperview()
+        let clip = view.contentView.frame
+        let gutter = view.gutterWidth
+        let overlay = OverpaintView(frame: NSRect(x: clip.minX + gutter, y: clip.minY, width: clip.width - gutter, height: clip.height),
+                                    fill: ApprovalPalette.inputBackground)
+        view.addSubview(overlay)
+        self.overlay = overlay
+    }
+
+    /// The vertical extent of every line fragment, in text-view coordinates.
+    func fragmentSpans() -> [ClosedRange<CGFloat>] {
+        guard let layout = view.textView.layoutManager, let container = view.textView.textContainer else { return [] }
+        layout.ensureLayout(for: container)
+        let origin = view.textView.textContainerOrigin
+        var spans: [ClosedRange<CGFloat>] = []
+        layout.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layout.numberOfGlyphs)) { rect, _, _, _, _ in
+            spans.append((rect.minY + origin.y) ... (rect.maxY + origin.y))
+        }
+        return spans
+    }
+
+    /// The clip origins of a read-through in steps of `step`: from the top, then the end.
+    func clipPositions(step: CGFloat) -> [CGFloat] {
+        let clip = view.contentView.bounds.height
+        let end = max(0, view.contentHeight(forWidth: view.bounds.width) - clip)
+        var positions: [CGFloat] = []
+        var y: CGFloat = 0
+        while y < end {
+            positions.append(y)
+            y += step
+        }
+        positions.append(end)
+        return positions
+    }
+
+    /// Move the clip view to each of `positions`, in order (the clock a settle window on before each, if `spaced`).
+    func walk(_ positions: [CGFloat], spaced: Bool) {
+        for y in positions {
+            if spaced { tick() }
+            ApprovalTestViews.moveClip(of: view, toY: y)
+        }
+    }
+
+    /// Step through the input in steps of `step` and report whether no fragment was ever wholly in the clip
+    /// (within 1 pt, the card's own tolerance) while the views of each fragment still add up to all of it.
+    /// Meant for a view that is not showing (it earns nothing).
+    func scan(step: CGFloat) -> (noWholeFragment: Bool, everyFragmentCompletes: Bool) {
+        // A showing view sizes its text view to its text (that is what sets how far it scrolls); this one is not showing.
+        let height = max(view.contentHeight(forWidth: view.bounds.width), view.contentView.bounds.height)
+        if abs(view.textView.frame.height - height) > 0.5 {
+            view.textView.setFrameSize(NSSize(width: view.textView.frame.width, height: height))
+        }
+        let spans = fragmentSpans()
+        guard !spans.isEmpty else { return (false, false) }
+        var seen = [[ClosedRange<CGFloat>]](repeating: [], count: spans.count)
+        var noWhole = true
+        for y in clipPositions(step: step) {
+            ApprovalTestViews.moveClip(of: view, toY: y)
+            let clip = view.contentView.bounds
+            if clip.height < 16 { return (false, false) }
+            for (i, span) in spans.enumerated() {
+                if span.lowerBound >= clip.minY - 1, span.upperBound <= clip.maxY + 1 { noWhole = false }
+                let low = max(span.lowerBound, clip.minY), high = min(span.upperBound, clip.maxY)
+                if high > low { seen[i].append(low ... high) }
+            }
+        }
+        ApprovalTestViews.moveClip(of: view, toY: 0)
+        var completes = true
+        for (i, span) in spans.enumerated() {
+            var merged: [ClosedRange<CGFloat>] = []
+            for part in seen[i].sorted(by: { $0.lowerBound < $1.lowerBound }) {
+                if let last = merged.last, part.lowerBound <= last.upperBound + 1 {
+                    merged[merged.count - 1] = last.lowerBound ... max(last.upperBound, part.upperBound)
+                } else {
+                    merged.append(part)
+                }
+            }
+            if merged.count != 1 || merged[0].lowerBound > span.lowerBound + 1 || merged[0].upperBound < span.upperBound - 1 {
+                completes = false
+            }
+        }
+        return (noWhole, completes)
+    }
+}
+
+/// A clip view a line or so tall, moved in steps that never show a whole line: every line can only be completed
+/// from two or more partial views. What those views show is what is judged.
+final class ApprovalPartialViewCoverageTests: XCTestCase {
+
+    private let maxFailures = ApprovalInputView.maxInkFailures
+
+    /// A clip height (16 to 20 pt: tall enough to count, shorter than two lines) and a step for which no line is ever
+    /// wholly in the clip at any position of the read-through, though every line is completed by the views taken together.
+    private func findAwkwardStepping(_ request: ApprovalRequestWire) -> (clip: CGFloat, step: CGFloat)? {
+        let probe = PartialViewRig(self, request: request, clipHeight: 16)
+        for clip in stride(from: 16.0, through: 20.0, by: 0.5) {
+            probe.setClipHeight(CGFloat(clip))
+            for step in stride(from: 14.5, through: 3.0, by: -0.5) {
+                let result = probe.scan(step: CGFloat(step))
+                if result.noWholeFragment && result.everyFragmentCompletes { return (CGFloat(clip), CGFloat(step)) }
+            }
+        }
+        return nil
+    }
+
+    private struct Stepping {
+        let rig: PartialViewRig
+        let positions: [CGFloat]
+    }
+
+    /// A rig of the 20-line request at the found clip height, not yet showing, and the positions to visit.
+    private func steppedRig(_ request: ApprovalRequestWire, _ plan: (clip: CGFloat, step: CGFloat)) -> Stepping {
+        let rig = PartialViewRig(self, request: request, clipHeight: plan.clip)
+        XCTAssertEqual(rig.view.contentView.bounds.height, plan.clip, accuracy: 0.01, "precondition: the clip is as tall as planned")
+        return Stepping(rig: rig, positions: rig.clipPositions(step: plan.step))
+    }
+
+    func testABlankTextAreaCannotBeWalkedPastInStepsThatNeverShowAWholeLine() throws {
+        let request = try ApprovalTestRequests.shortLines(20)
+        let plan = try XCTUnwrap(findAwkwardStepping(request),
+                                 "no clip height (16 to 20 pt) and step (3 to 14.5 pt) shows no line whole at every position")
+        let stepping = steppedRig(request, plan)
+        let rig = stepping.rig, view = rig.view
+        rig.paintOver()
+        rig.show()
+        view.updateScrollProgress()
+
+        rig.walk(stepping.positions, spaced: false)
+        XCTAssertFalse(view.hasShownEveryLine, "every line was completed from partial views of a blank area: lines never shown: \(view.linesNotYetShown)")
+        XCTAssertFalse(view.linesNotYetShown.isEmpty)
+        XCTAssertGreaterThanOrEqual(view.inkCheckCount, 1, "the lines that were completed from partial views were checked for ink")
+        XCTAssertFalse(view.displayFailed, "one walk in one turn of the run loop is not a verdict")
+
+        // And again, a settle window between the steps: still nothing earned.
+        rig.walk(stepping.positions, spaced: true)
+        XCTAssertFalse(view.hasShownEveryLine, "lines never shown: \(view.linesNotYetShown)")
+        XCTAssertFalse(view.linesNotYetShown.isEmpty)
+
+        // Looked at in a taller view (the blank area still blank), the failures are counted and latch.
+        rig.box.showing = false
+        rig.setClipHeight(150)
+        rig.paintOver()
+        rig.box.showing = true
+        var looks = 0
+        while !view.displayFailed && looks < 2 * maxFailures {
+            rig.tick()
+            view.updateScrollProgress()
+            looks += 1
+        }
+        XCTAssertTrue(view.displayFailed, "repeated, spaced failures latch")
+        XCTAssertFalse(view.hasShownEveryLine, "lines never shown: \(view.linesNotYetShown)")
+    }
+
+    func testRealTextCompletedFromPartialViewsIsStillShownAndNeverFails() throws {
+        let request = try ApprovalTestRequests.shortLines(20)
+        let plan = try XCTUnwrap(findAwkwardStepping(request),
+                                 "no clip height (16 to 20 pt) and step (3 to 14.5 pt) shows no line whole at every position")
+        let stepping = steppedRig(request, plan)
+        let rig = stepping.rig, view = rig.view
+        rig.show()
+        view.updateScrollProgress()
+
+        rig.walk(stepping.positions, spaced: false)
+
+        XCTAssertFalse(view.displayFailed, "real text must not fail the ink check")
+        XCTAssertEqual(view.inkFailures, 0)
+        XCTAssertTrue(view.hasShownEveryLine, "lines never shown: \(view.linesNotYetShown)")
+        XCTAssertGreaterThanOrEqual(view.inkCheckCount, 1, "the lines completed from partial views were checked")
+    }
+
+    func testAnOverpaintPutOverTheTextAfterTheFirstHalfWasReadStillBlocksTheRest() throws {
+        let request = try ApprovalTestRequests.shortLines(20)
+        let plan = try XCTUnwrap(findAwkwardStepping(request),
+                                 "no clip height (16 to 20 pt) and step (3 to 14.5 pt) shows no line whole at every position")
+        let stepping = steppedRig(request, plan)
+        let rig = stepping.rig, view = rig.view
+        rig.show()
+        view.updateScrollProgress()
+
+        let half = stepping.positions.count / 2
+        rig.walk(Array(stepping.positions[..<half]), spaced: false)
+        XCTAssertFalse(view.linesNotYetShown.contains(1), "precondition: the first lines were read: \(view.linesNotYetShown)")
+        XCTAssertFalse(view.hasShownEveryLine, "precondition: the second half is still to read")
+
+        rig.paintOver()
+        rig.walk(Array(stepping.positions[half...]), spaced: false)
+
+        XCTAssertFalse(view.hasShownEveryLine, "the second half was read under an overpaint: lines never shown: \(view.linesNotYetShown)")
+        XCTAssertTrue(view.linesNotYetShown.contains(20), "the last line was not shown: \(view.linesNotYetShown)")
+        XCTAssertFalse(view.linesNotYetShown.contains(1), "what was shown before the overpaint stays shown")
+        XCTAssertFalse(view.displayFailed, "one pass in one turn of the run loop is not a verdict")
     }
 }
