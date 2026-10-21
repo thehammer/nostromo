@@ -161,6 +161,9 @@
 		BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
 		BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000B1 /* MotherBrokerClientTests.swift */; };
 		BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
+		SH00000000000000000000A2 /* MotherJobReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = SH00000000000000000000A1 /* MotherJobReconciler.swift */; };
+		SH00000000000000000000A3 /* MotherJobReconciler.swift in TestSources */ = {isa = PBXBuildFile; fileRef = SH00000000000000000000A1 /* MotherJobReconciler.swift */; };
+		SH00000000000000000000B2 /* MotherJobReconcilerTests.swift in TestSources */ = {isa = PBXBuildFile; fileRef = SH00000000000000000000B1 /* MotherJobReconcilerTests.swift */; };
 		GG00000000000000000000A2 /* ProcessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = GG00000000000000000000A1 /* ProcessRunner.swift */; };
 		RO00000000000000000000A2 /* RepoOrg.swift in Sources */ = {isa = PBXBuildFile; fileRef = RO00000000000000000000A1 /* RepoOrg.swift */; };
 		RO00000000000000000000A6 /* CreateFocusSheet.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000024 /* CreateFocusSheet.swift */; };
@@ -570,6 +573,8 @@
 		AA0000020000000000000032 /* FocusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusStore.swift; sourceTree = "<group>"; };
 		AA0000020000000000000024 /* CreateFocusSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateFocusSheet.swift; sourceTree = "<group>"; };
 		BB00000000000000000000A1 /* MotherBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClient.swift; sourceTree = "<group>"; };
+		SH00000000000000000000A1 /* MotherJobReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobReconciler.swift; sourceTree = "<group>"; };
+		SH00000000000000000000B1 /* MotherJobReconcilerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobReconcilerTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000B1 /* MotherBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClientTests.swift; sourceTree = "<group>"; };
 		GG00000000000000000000A1 /* ProcessRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessRunner.swift; sourceTree = "<group>"; };
 		RO00000000000000000000A1 /* RepoOrg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepoOrg.swift; sourceTree = "<group>"; };
@@ -866,6 +871,7 @@
 				RR0000000000000000000001 /* PRDetailCache.swift */,
 				WW0000000000000000000004 /* DiffPaneSummaryPolicy.swift */,
 				BB00000000000000000000A1 /* MotherBrokerClient.swift */,
+				SH00000000000000000000A1 /* MotherJobReconciler.swift */,
 				GG00000000000000000000A1 /* ProcessRunner.swift */,
 				RO00000000000000000000A1 /* RepoOrg.swift */,
 				ML0000000000000000000001 /* BranchProvider.swift */,
@@ -1144,6 +1150,7 @@
 				DP0000000000000000000016 /* SidenavAttentionTests.swift */,
 				MD0000000000000000000B0 /* MotherDaemonStatusTests.swift */,
 				MG0000000000000000000B0 /* MotherJobGroupingTests.swift */,
+				SH00000000000000000000B1 /* MotherJobReconcilerTests.swift */,
 				OO0000000000000000001C0 /* OverlayHitTestTests.swift */,
 				FT0000000000000000000003 /* FollowTailPolicyTests.swift */,
 				FT0000000000000000000004 /* JumpToLatestOverlayTests.swift */,
@@ -1397,6 +1404,7 @@
 				AA0000020000000000000132 /* FocusStore.swift in Sources */,
 				AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */,
 				BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */,
+				SH00000000000000000000A2 /* MotherJobReconciler.swift in Sources */,
 				CC00000000000000000000A5 /* DiffColoring.swift in Sources */,
 				LL0000000000000000000101 /* CodeDocument.swift in Sources */,
 				LL0000000000000000000102 /* DiffDocument.swift in Sources */,
@@ -1585,6 +1593,7 @@
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,
 				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
+				SH00000000000000000000A3 /* MotherJobReconciler.swift in TestSources */,
 				MC0000000000000000000003 /* MotherJobDetail.swift in TestSources */,
 				BB00000000000000000000B4 /* Models.swift in TestSources */,
 				HH0000000000000000000A2 /* ImagePasteboard.swift in TestSources */,
@@ -1699,6 +1708,7 @@
 				NT0000000000000000000003 /* NavTabItem.swift in TestSources */,
 				MD0000000000000000000B1 /* MotherDaemonStatusTests.swift in Sources */,
 				MG0000000000000000000B1 /* MotherJobGroupingTests.swift in Sources */,
+				SH00000000000000000000B2 /* MotherJobReconcilerTests.swift in TestSources */,
 				KK0000000000000000001B2 /* ImagePasteboardTests.swift in Sources */,
 				KK0000000000000000001C2 /* OverlayHitTestTests.swift in Sources */,
 				FT0000000000000000000015 /* FollowTailPolicyTests.swift in Sources */,

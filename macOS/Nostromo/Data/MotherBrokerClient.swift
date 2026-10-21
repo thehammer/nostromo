@@ -221,6 +221,32 @@ class MotherBrokerClient {
         }
     }
 
+    /// Read the whole queue (`query.list`, no filter). Tolerant like the snapshot: one unreadable
+    /// job never loses the others.
+    func queryList(completion: @escaping (Result<[MotherJob], BrokerError>) -> Void) {
+        sendRaw(type: "query.list", jobId: "", extra: [:]) { [weak self] result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let data):
+                guard let self, let raw = data["jobs"] as? [[String: Any]] else {
+                    completion(.failure(.code(.internal, message: "query.list returned no job list")))
+                    return
+                }
+                completion(.success(self.decodeJobList(raw)))
+            }
+        }
+    }
+
+    /// Decode each job on its own; unreadable ones are skipped and counted (content-free log).
+    func decodeJobList(_ raw: [[String: Any]]) -> [MotherJob] {
+        let jobs = raw.compactMap { decodeJob($0) }
+        if jobs.count != raw.count {
+            log.info("broker job list: \(raw.count - jobs.count, privacy: .public) of \(raw.count, privacy: .public) jobs unreadable")
+        }
+        return jobs
+    }
+
     // MARK: - Crew events
 
     /// The event kinds that change a job's gates, review wave, decision or attention
@@ -380,7 +406,7 @@ class MotherBrokerClient {
     private func sendRaw(type: String, jobId: String, extra: [String: Any],
                          completion: @escaping (Result<[String: Any], BrokerError>) -> Void) {
         let id = UUID().uuidString
-        var data: [String: Any] = ["job": jobId]
+        var data: [String: Any] = jobId.isEmpty ? [:] : ["job": jobId]
         extra.forEach { data[$0.key] = $0.value }
 
         let envelope: [String: Any] = [
@@ -554,7 +580,7 @@ class MotherBrokerClient {
 
         case "snapshot":
             let jobsRaw = dataDict["jobs"] as? [[String: Any]] ?? []
-            let jobs = jobsRaw.compactMap { decodeJob($0) }
+            let jobs = decodeJobList(jobsRaw)
             log.debug("broker snapshot: \(jobs.count, privacy: .public) jobs")
             DispatchQueue.main.async { [weak self] in
                 self?.events.send(.snapshot(jobs))
