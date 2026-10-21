@@ -1,4 +1,5 @@
 import XCTest
+import NostromoKit
 // MotherJobReconciler, MotherRecentlyArchived, MotherResyncScheduler, MotherJobRefresher,
 // MotherBrokerClient and MotherJob are compiled into this test target directly (logic test).
 
