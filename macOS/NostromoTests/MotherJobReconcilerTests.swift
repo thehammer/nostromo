@@ -96,6 +96,57 @@ final class MotherJobReconcilerTests: XCTestCase {
         XCTAssertFalse(r.added.contains("gone"))
     }
 
+    func testAPartialListRemovesNothingAndDoesNotAdvanceMissing() {
+        let current = [shJob(id: "a"), shJob(id: "b")]
+        let seeded = reconcile(current: current, listed: [shJob(id: "a")])
+        XCTAssertEqual(seeded.missingOnce, ["b"])
+        let r = MotherJobReconciler.reconcile(current: seeded.jobs, listed: [shJob(id: "a")],
+                                              missingOnce: seeded.missingOnce, recentlyArchived: [],
+                                              partial: true)
+        XCTAssertNotNil(r.jobs["b"])
+        XCTAssertTrue(r.removed.isEmpty)
+        XCTAssertTrue(r.missingOnce.isEmpty)
+    }
+
+    func testAPartialListStillAddsAndUpdates() {
+        let r = MotherJobReconciler.reconcile(
+            current: shMap([shJob(id: "a", state: "running")]),
+            listed: [shJob(id: "a", state: "awaiting"), shJob(id: "n")],
+            missingOnce: [], recentlyArchived: [], partial: true)
+        XCTAssertEqual(r.jobs["a"]?.state, "awaiting")
+        XCTAssertEqual(r.added, ["n"])
+    }
+
+    func testAListedButUnreadableIdIsNotCountedMissing() {
+        let r = MotherJobReconciler.reconcile(
+            current: shMap([shJob(id: "a"), shJob(id: "b")]), listed: [shJob(id: "a")],
+            missingOnce: [], recentlyArchived: [], partial: true, unreadableIds: ["b"])
+        XCTAssertTrue(r.missingOnce.isEmpty)
+        XCTAssertNotNil(r.jobs["b"])
+    }
+
+    func testACleanListAfterAPartialOneStillNeedsTwoCleanMisses() {
+        let current = [shJob(id: "a"), shJob(id: "b")]
+        let clean1 = reconcile(current: current, listed: [shJob(id: "a")])
+        let partial = MotherJobReconciler.reconcile(current: clean1.jobs, listed: [shJob(id: "a")],
+                                                    missingOnce: clean1.missingOnce, recentlyArchived: [],
+                                                    partial: true)
+        let clean2 = MotherJobReconciler.reconcile(current: partial.jobs, listed: [shJob(id: "a")],
+                                                   missingOnce: partial.missingOnce, recentlyArchived: [])
+        XCTAssertNotNil(clean2.jobs["b"])
+        let clean3 = MotherJobReconciler.reconcile(current: clean2.jobs, listed: [shJob(id: "a")],
+                                                   missingOnce: clean2.missingOnce, recentlyArchived: [])
+        XCTAssertNil(clean3.jobs["b"])
+        XCTAssertEqual(clean3.removed, ["b"])
+    }
+
+    func testShouldInsertDiscovered() {
+        let map = shMap([shJob(id: "known")])
+        XCTAssertTrue(MotherJobReconciler.shouldInsertDiscovered(id: "new", jobMap: map, recentlyArchived: []))
+        XCTAssertFalse(MotherJobReconciler.shouldInsertDiscovered(id: "new", jobMap: map, recentlyArchived: ["new"]))
+        XCTAssertFalse(MotherJobReconciler.shouldInsertDiscovered(id: "known", jobMap: map, recentlyArchived: []))
+    }
+
     func testAnIdenticalListChangesNothing() {
         let current = [shJob(id: "a"), shJob(id: "b", progressPct: 30)]
         let r = reconcile(current: current, listed: current)
@@ -178,6 +229,16 @@ final class MotherBrokerListDecodeTests: XCTestCase {
         let bad: [String: Any] = ["id": "bad", "title": "no state, repo or isolation"]
         let jobs = client.decodeJobList([raw(id: "a"), bad, raw(id: "b")])
         XCTAssertEqual(jobs.map(\.id), ["a", "b"])
+    }
+
+    func testListingReportsPartialReadsAndReadableIds() {
+        let client = MotherBrokerClient(socketPath: "/nonexistent")
+        let bad: [String: Any] = ["id": "bad", "title": "no state"]
+        let listing = client.decodeJobListing([raw(id: "a"), bad, ["x": 1]])
+        XCTAssertEqual(listing.jobs.map(\.id), ["a"])
+        XCTAssertTrue(listing.partial)
+        XCTAssertEqual(listing.unreadableIds, ["bad"])
+        XCTAssertFalse(client.decodeJobListing([raw(id: "a")]).partial)
     }
 
     func testAnEmptyListDecodesToNoJobs() {

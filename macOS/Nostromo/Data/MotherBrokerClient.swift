@@ -56,6 +56,13 @@ enum BrokerError: Error {
     }
 }
 
+/// A decoded `query.list` reply. `partial` is true when any entry could not be read.
+struct MotherJobListing: Equatable {
+    var jobs: [MotherJob]
+    var partial: Bool
+    var unreadableIds: Set<String>
+}
+
 // MARK: - BrokerEvent (published on the main queue to AppStore)
 
 enum BrokerEvent {
