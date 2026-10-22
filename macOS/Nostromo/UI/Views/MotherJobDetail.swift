@@ -83,6 +83,20 @@ final class GuidanceTextView: NSTextView {
 ///
 /// Hidden (zero height) when the job has no phase data — non-pipeline and
 /// pre-Wedge-C jobs are unaffected.
+extension NSTextField {
+    /// A label whose text comes from data: it wraps (or truncates) instead of reporting the
+    /// text's full single-line width, and yields horizontally so it can never widen its pane.
+    static func boundedLabel(_ text: String, maxLines: Int = 3, truncating: Bool = false) -> NSTextField {
+        let f = NSTextField(wrappingLabelWithString: text)
+        f.maximumNumberOfLines = maxLines
+        f.lineBreakMode = truncating ? .byTruncatingTail : .byWordWrapping
+        f.isSelectable = false
+        f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        f.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return f
+    }
+}
+
 private class PhaseRibbonView: NSView {
 
     private let stack = NSStackView()
@@ -108,7 +122,7 @@ private class PhaseRibbonView: NSView {
         guard let model else { return }
 
         for token in model.tokens {
-            let lbl = NSTextField(labelWithString: token.text)
+            let lbl = NSTextField.boundedLabel(token.text, maxLines: 1, truncating: true)
             lbl.font      = .systemFont(ofSize: 11)
             lbl.textColor = tokenColor(token.state)
             stack.addArrangedSubview(lbl)
@@ -120,7 +134,7 @@ private class PhaseRibbonView: NSView {
             sep.textColor = Theme.fgMuted
             stack.addArrangedSubview(sep)
 
-            let cLbl = NSTextField(labelWithString: cycleLabel)
+            let cLbl = NSTextField.boundedLabel(cycleLabel, maxLines: 1, truncating: true)
             cLbl.font      = .systemFont(ofSize: 10)
             cLbl.textColor = Theme.fgMuted
             stack.addArrangedSubview(cLbl)
@@ -158,8 +172,8 @@ final class MotherJobDetail: NSView {
     private let emptyLabel = NSTextField(labelWithString: "Select a job")
 
     // Content fields
-    private let titleLabel      = NSTextField(labelWithString: "")
-    private let stateLabel      = NSTextField(labelWithString: "")
+    private let titleLabel      = NSTextField.boundedLabel("")
+    private let stateLabel      = NSTextField.boundedLabel("", maxLines: 1, truncating: true)
     private let phaseRibbonView = PhaseRibbonView()
     private var ribbonHeight:   NSLayoutConstraint!
     /// Gates, lens rows, progress and the hold banner (hidden at zero height without crew data).
@@ -188,7 +202,7 @@ final class MotherJobDetail: NSView {
     private let archiveButton    = NSButton(title: "Archive",     target: nil, action: nil)
     private let escalateButton   = NSButton(title: "Escalate",    target: nil, action: nil)
     private let viewPlanButton   = NSButton(title: "View Plan",   target: nil, action: nil)
-    private let actionErrorLabel = NSTextField(labelWithString: "")
+    private let actionErrorLabel = NSTextField.boundedLabel("", maxLines: 4)
     /// Shown under the guidance box when it is too long to send.
     private let guidanceHintLabel = NSTextField(labelWithString: "Guidance is longer than 4,000 characters.")
     /// The hold's option buttons by Mother's option id, while the detail is in option mode.
@@ -252,6 +266,12 @@ final class MotherJobDetail: NSView {
         titleLabel.textColor          = Theme.fg
         titleLabel.lineBreakMode      = .byWordWrapping
         titleLabel.maximumNumberOfLines = 3
+
+        // Safety net: nothing inside the detail may demand more width than the pane gives it.
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for v in [todoStack, metaStack, planChecklistView, actionsContainer, phaseRibbonView, crewSection] as [NSView] {
+            v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
 
         stateLabel.font      = .systemFont(ofSize: 10, weight: .semibold)
         stateLabel.textColor = Theme.fgMuted
@@ -667,7 +687,9 @@ final class MotherJobDetail: NSView {
         }
 
         for todo in todos {
-            todoStack.addArrangedSubview(todoRow(todo))
+            let row = todoRow(todo)
+            todoStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(lessThanOrEqualTo: todoStack.widthAnchor).isActive = true
         }
 
         // Let Auto Layout size the stack by its content.
@@ -680,7 +702,7 @@ final class MotherJobDetail: NSView {
         icon.textColor = todoIconColor(todo.status)
         icon.setContentHuggingPriority(.required, for: .horizontal)
 
-        let lbl = NSTextField(labelWithString: todo.content)
+        let lbl = NSTextField.boundedLabel(todo.content)
         lbl.font          = .systemFont(ofSize: 11)
         lbl.lineBreakMode = .byWordWrapping
         lbl.maximumNumberOfLines = 3
@@ -869,7 +891,7 @@ final class MotherJobDetail: NSView {
         if case .sent(let sent) = state {
             replyTextView.string = ""
             let label = decision.options.first { $0.id == sent }?.label ?? sent.raw
-            let line = NSTextField(labelWithString: "Sent: \(label)")
+            let line = NSTextField.boundedLabel("Sent: \(label)", maxLines: 2)
             line.font = .systemFont(ofSize: 11, weight: .medium)
             line.textColor = Theme.sage
             return ([line], nil)
@@ -1440,7 +1462,9 @@ private class PlanChecklistView: NSView {
             return
         }
         for item in items {
-            stack.addArrangedSubview(checklistRow(item))
+            let row = checklistRow(item)
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor).isActive = true
         }
         heightConstraint.isActive = false
         onItemsChanged?(true)
@@ -1452,7 +1476,7 @@ private class PlanChecklistView: NSView {
         icon.textColor = item.done ? Theme.sage : Theme.fgMuted
         icon.setContentHuggingPriority(.required, for: .horizontal)
 
-        let lbl = NSTextField(labelWithString: item.text)
+        let lbl = NSTextField.boundedLabel(item.text)
         lbl.font                 = .systemFont(ofSize: 11)
         lbl.lineBreakMode        = .byWordWrapping
         lbl.maximumNumberOfLines = 3

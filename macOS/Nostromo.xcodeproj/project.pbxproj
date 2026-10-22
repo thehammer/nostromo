@@ -487,6 +487,7 @@
 		WCO000000000000000000020 /* TranscriptDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000050 /* TranscriptDiagnostics.swift */; };
 		WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
 		WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
+		MDW000000000000000000002 /* MotherDetailLabelWidthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MDW000000000000000000001 /* MotherDetailLabelWidthTests.swift */; };
 		WCO000000000000000000102 /* WindowContentOverflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WCO000000000000000000101 /* WindowContentOverflowTests.swift */; };
 		OVC000000000000000000012 /* OverflowCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OVC000000000000000000011 /* OverflowCaptureTests.swift */; };
 		OVC000000000000000000022 /* WindowOverflowReproTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OVC000000000000000000021 /* WindowOverflowReproTests.swift */; };
@@ -814,6 +815,7 @@
 		ZZ0000000000000000BA3300 /* TaskStopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskStopTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerAppearanceTests.swift; sourceTree = "<group>"; };
+		MDW000000000000000000001 /* MotherDetailLabelWidthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDetailLabelWidthTests.swift; sourceTree = "<group>"; };
 		WCO000000000000000000101 /* WindowContentOverflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowContentOverflowTests.swift; sourceTree = "<group>"; };
 		OVC000000000000000000011 /* OverflowCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverflowCaptureTests.swift; sourceTree = "<group>"; };
 		OVC000000000000000000021 /* WindowOverflowReproTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowOverflowReproTests.swift; sourceTree = "<group>"; };
@@ -1207,6 +1209,7 @@
 				WW0000000000000000000002 /* DiffPaneSummaryWiringTests.swift */,
 				XX0000000000000000000001 /* NotificationDecodeTests.swift */,
 				XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */,
+				MDW000000000000000000001 /* MotherDetailLabelWidthTests.swift */,
 				WCO000000000000000000101 /* WindowContentOverflowTests.swift */,
 				OVC000000000000000000011 /* OverflowCaptureTests.swift */,
 				OVC000000000000000000021 /* WindowOverflowReproTests.swift */,
@@ -1775,6 +1778,7 @@
 				WW0000000000000000000003 /* DiffPaneSummaryWiringTests.swift in Sources */,
 				XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */,
 				XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */,
+				MDW000000000000000000002 /* MotherDetailLabelWidthTests.swift in Sources */,
 				WCO000000000000000000102 /* WindowContentOverflowTests.swift in Sources */,
 				OVC000000000000000000012 /* OverflowCaptureTests.swift in Sources */,
 				OVC000000000000000000022 /* WindowOverflowReproTests.swift in Sources */,
