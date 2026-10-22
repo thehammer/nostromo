@@ -27,6 +27,19 @@ protocol MotherJobDetailHost: AnyObject {
     func motherBinary() -> URL?
 
     func answerJob(_ id: String, text: String)
+
+    /// The broker advertised `answer.option` (answers by option id, with a `source`).
+    var supportsAnswerOption: Bool { get }
+    /// The broker advertised `ack`.
+    var supportsAck: Bool { get }
+    /// Fires, on the main thread, when a decision's send state or a capability changes.
+    var motherDecisionChangesPublisher: AnyPublisher<Void, Never> { get }
+    func motherDecisionState(jobId: String, decisionId: String) -> MotherDecisionSendState
+    func beginMotherDecisionConfirm(jobId: String, decisionId: String, option: MotherDecisionOptionID)
+    func cancelMotherDecisionConfirm(jobId: String, decisionId: String)
+    func answerMotherDecision(jobId: String, decisionId: String, option: MotherDecisionOption, text: String)
+    func ackMotherAttention(jobId: String, reason: MotherAttentionReason)
+
     func cancelJob(_ id: String)
     func retryJob(_ id: String)
     func forceStartJob(_ id: String)
@@ -34,6 +47,34 @@ protocol MotherJobDetailHost: AnyObject {
     func archiveJob(_ id: String)
     func openPlan(path: String)
     func clearMotherActionError()
+}
+
+// MARK: - MotherGestureInputs
+
+/// Where the human-gesture check reads its inputs. The defaults are the real ones; a test
+/// replaces them to play a person, a VoiceOver press, app-control or a QA run.
+struct MotherGestureInputs {
+    var currentEvent: () -> NSEvent? = { NSApp?.currentEvent }
+    var voiceOverEnabled: () -> Bool = { NSWorkspace.shared.isVoiceOverEnabled }
+    var allowsSynthetic: () -> Bool = { SyntheticInputGate.allowsSynthetic }
+}
+
+// MARK: - GuidanceTextView
+
+/// The reply box, with a placeholder while it is empty (an NSTextView has none of its own).
+final class GuidanceTextView: NSTextView {
+    var placeholder: String? { didSet { needsDisplay = true } }
+    override var string: String { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, let placeholder else { return }
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        placeholder.draw(at: NSPoint(x: textContainerInset.width + padding, y: textContainerInset.height),
+                         withAttributes: [.font: Theme.monoFont, .foregroundColor: Theme.fgMuted])
+    }
+
+    override func accessibilityPlaceholderValue() -> String? { placeholder }
 }
 
 // MARK: - PhaseRibbonView
@@ -139,7 +180,7 @@ final class MotherJobDetail: NSView {
     // Action widgets (created once, shown/hidden as needed)
     private let brokerBanner     = NSTextField(labelWithString: "⚠ Mother broker offline")
     private let replyScrollView  = NSScrollView()
-    let replyTextView            = NSTextView()
+    let replyTextView            = GuidanceTextView()
     private let answerButton     = NSButton(title: "Answer",      target: nil, action: nil)
     private let cancelButton     = NSButton(title: "Cancel job",  target: nil, action: nil)
     private let retryButton      = NSButton(title: "Retry",       target: nil, action: nil)
@@ -148,6 +189,15 @@ final class MotherJobDetail: NSView {
     private let escalateButton   = NSButton(title: "Escalate",    target: nil, action: nil)
     private let viewPlanButton   = NSButton(title: "View Plan",   target: nil, action: nil)
     private let actionErrorLabel = NSTextField(labelWithString: "")
+    /// Shown under the guidance box when it is too long to send.
+    private let guidanceHintLabel = NSTextField(labelWithString: "Guidance is longer than 4,000 characters.")
+    /// The hold's option buttons by Mother's option id, while the detail is in option mode.
+    private var optionButtons: [String: NSButton] = [:]
+    private var optionConfirmButton: NSButton?
+    /// Views in the action stack that must wrap at the stack's width (consequence lines).
+    private var widthBoundViews: [NSView] = []
+    /// Replace to play a person, a VoiceOver press, app-control or a QA run (tests).
+    var gestureInputs = MotherGestureInputs()
     private let planSectionLabel  = NSTextField(labelWithString: "PLAN")
     private let planChecklistView = PlanChecklistView()
 
@@ -166,9 +216,15 @@ final class MotherJobDetail: NSView {
         var decisionId: String?
         var holdKind: String?
         var hasPlan: Bool
+        /// Mother's options are buttons (the broker answers by option id).
+        var optionMode: Bool
+        /// The open decision's send state: a send, a confirm or a failure changes the buttons.
+        var sendState: MotherDecisionSendState
 
-        init(job: MotherJob, brokerConnected: Bool) {
+        init(job: MotherJob, brokerConnected: Bool, optionMode: Bool = false, sendState: MotherDecisionSendState = .idle) {
             state = job.state
+            self.optionMode = optionMode
+            self.sendState = sendState
             self.brokerConnected = brokerConnected
             decisionId = job.crew.decision.flatMap { $0.isOpen ? $0.id : nil }
             holdKind = job.holdSummary?.kind
@@ -251,6 +307,7 @@ final class MotherJobDetail: NSView {
         crewTopGap = crewSection.topAnchor.constraint(equalTo: phaseRibbonView.bottomAnchor, constant: 0)
         crewTopGap.isActive = true
         crewSection.onDetails = { [weak self] in self?.showDetails() }
+        crewSection.onAcknowledge = { [weak self] reason in self?.acknowledge(reason: reason) }
 
         // Todo stack height: 0 when empty, constrained by content otherwise
         todoHeight = todoStack.heightAnchor.constraint(equalToConstant: 0)
@@ -331,6 +388,17 @@ final class MotherJobDetail: NSView {
             .sink { [weak self] connected in self?.updateBrokerBanner(connected) }
             .store(in: &cancellables)
 
+        // A send state or a capability changed (hello after the pane was built, a click, an answer).
+        // Delivered on the main thread, so no hop: the buttons follow the change at once.
+        host.motherDecisionChangesPublisher
+            .sink { [weak self] _ in self?.hostDecisionStateChanged() }
+            .store(in: &cancellables)
+
+        // Typing in the guidance box enables or disables the option buttons.
+        NotificationCenter.default.publisher(for: NSText.didChangeNotification, object: replyTextView)
+            .sink { [weak self] _ in self?.updateOptionButtonStates() }
+            .store(in: &cancellables)
+
         // Observe action errors from AppStore
         host.motherActionErrorPublisher
             .receive(on: DispatchQueue.main)
@@ -371,6 +439,13 @@ final class MotherJobDetail: NSView {
         replyScrollView.layer?.cornerRadius   = 4
         replyScrollView.layer?.borderColor    = Theme.borderInactive.cgColor
         replyScrollView.layer?.borderWidth    = 1
+        // The standard document-view setup, so the box fills the scroll view (a click anywhere in it
+        // lands in the text) and wraps at its width.
+        replyTextView.minSize                 = NSSize(width: 0, height: 52)
+        replyTextView.isVerticallyResizable   = true
+        replyTextView.isHorizontallyResizable = false
+        replyTextView.autoresizingMask        = [.width]
+        replyTextView.textContainer?.widthTracksTextView = true
         replyScrollView.documentView          = replyTextView
 
         // Buttons
@@ -381,7 +456,7 @@ final class MotherJobDetail: NSView {
             btn.font        = .systemFont(ofSize: 11)
         }
         answerButton.target     = self
-        answerButton.action     = #selector(didTapAnswer)
+        answerButton.action     = #selector(didTapAnswer(_:))
         cancelButton.target     = self
         cancelButton.action     = #selector(didTapCancel)
         retryButton.target      = self
@@ -404,6 +479,10 @@ final class MotherJobDetail: NSView {
         viewPlanButton.contentTintColor   = Theme.fgMuted
         answerButton.contentTintColor     = Theme.sage
 
+        guidanceHintLabel.font      = .systemFont(ofSize: 10)
+        guidanceHintLabel.textColor = Theme.amber
+        guidanceHintLabel.isHidden  = true
+
         // Error label (shown inline below buttons, auto-clears)
         actionErrorLabel.font      = .systemFont(ofSize: 10)
         actionErrorLabel.textColor = Theme.redSweater
@@ -417,6 +496,11 @@ final class MotherJobDetail: NSView {
     /// Show `job` as the pane's subject: a different job than the one shown, or none (nil).
     /// Starts from a clean slate: the reply draft is cleared and everything is rebuilt.
     func select(_ job: MotherJob?) {
+        // An override confirmation left armed from an earlier visit does not wait for the next click.
+        if let job, let decision = job.crew.decision, decision.isOpen,
+           case .confirming = host.motherDecisionState(jobId: job.id, decisionId: decision.id) {
+            host.cancelMotherDecisionConfirm(jobId: job.id, decisionId: decision.id)
+        }
         logTimer?.invalidate(); logTimer = nil
         currentJob   = job
         currentJobId = job?.id
@@ -474,6 +558,10 @@ final class MotherJobDetail: NSView {
         if job.phases != previous.phases || job.cycles != previous.cycles {
             updateRibbon(job)
         }
+        // Guidance written for one hold must not ride along to the next one.
+        if let oldDecision = previous.crew.decision, oldDecision.isOpen, oldDecision.id != job.crew.decision?.id {
+            replyTextView.string = ""
+        }
         updateCrewSection(job)
 
         let pairs = metaPairs(for: job)
@@ -482,8 +570,7 @@ final class MotherJobDetail: NSView {
             rebuildMeta(pairs)
         }
 
-        let identity = ActionIdentity(job: job, brokerConnected: host.brokerConnected)
-        if identity != actionIdentity { rebuildActions(job) }
+        if makeActionIdentity(for: job) != actionIdentity { rebuildActions(job) }
 
         if job.planPath != previous.planPath { planChecklistView.load(planPath: job.planPath) }
 
@@ -535,9 +622,34 @@ final class MotherJobDetail: NSView {
     /// Push the job's crew data into the section. Its height changes only when the row
     /// structure does; a value changing in place keeps its frame.
     private func updateCrewSection(_ job: MotherJob) {
-        let model = MotherCrewPanelModel.make(job: job.kitJob)
-        crewSection.update(model: model, detailsAvailable: model.hasDetails && host.usesDefaultBroker)
+        // In option mode the options are buttons below, so the panel keeps only the hold's header.
+        let model = MotherCrewPanelModel.make(job: job.kitJob, showsHoldOptions: optionDecision(for: job) == nil)
+        crewSection.update(model: model, detailsAvailable: model.hasDetails && host.usesDefaultBroker,
+                           acknowledgeAvailable: host.supportsAck)
         crewTopGap.constant = model.isEmpty ? 0 : 8
+    }
+
+    /// The open decision whose options are offered as buttons: the broker answers by option id
+    /// and the job is held with options to choose from. Nil otherwise (the text answer stands).
+    private func optionDecision(for job: MotherJob) -> MotherDecision? {
+        guard host.supportsAnswerOption, job.state == "awaiting",
+              let decision = job.crew.decision, decision.isOpen, !decision.options.isEmpty
+        else { return nil }
+        return decision
+    }
+
+    private func makeActionIdentity(for job: MotherJob) -> ActionIdentity {
+        let decision = optionDecision(for: job)
+        let sendState = decision.map { host.motherDecisionState(jobId: job.id, decisionId: $0.id) } ?? .idle
+        return ActionIdentity(job: job, brokerConnected: host.brokerConnected,
+                              optionMode: decision != nil, sendState: sendState)
+    }
+
+    /// The host's send state or capabilities changed: bring the panel and the buttons along.
+    private func hostDecisionStateChanged() {
+        guard let job = currentJob else { return }
+        updateCrewSection(job)
+        if makeActionIdentity(for: job) != actionIdentity { rebuildActions(job) }
     }
 
     /// Rebuild the todo list rows from the latest peek payload.
@@ -610,8 +722,14 @@ final class MotherJobDetail: NSView {
 
     private func rebuildActions(_ job: MotherJob) {
         let connected = host.brokerConnected
-        actionIdentity = ActionIdentity(job: job, brokerConnected: connected)
+        actionIdentity = makeActionIdentity(for: job)
         actionStack = nil
+        optionButtons = [:]
+        optionConfirmButton = nil
+        widthBoundViews = []
+        replyTextView.placeholder = nil
+        replyTextView.setAccessibilityLabel(nil)
+        var confirmRow: NSView?
 
         // The reply box is re-parented by a rebuild; the draft and its selection live in the
         // text view and survive, but focus does not unless it is put back.
@@ -635,14 +753,20 @@ final class MotherJobDetail: NSView {
 
         switch job.state {
         case "awaiting":
-            replyScrollView.translatesAutoresizingMaskIntoConstraints = false
-            widgets.append(replyScrollView)
+            if let decision = optionDecision(for: job) {
+                let built = optionWidgets(job: job, decision: decision)
+                widgets.append(contentsOf: built.widgets)
+                confirmRow = built.confirmRow
+            } else {
+                replyScrollView.translatesAutoresizingMaskIntoConstraints = false
+                widgets.append(replyScrollView)
 
-            let btnRow = NSStackView(views: [answerButton, cancelButton])
-            btnRow.orientation = .horizontal
-            btnRow.spacing     = 8
-            btnRow.translatesAutoresizingMaskIntoConstraints = false
-            widgets.append(btnRow)
+                let btnRow = NSStackView(views: [answerButton, cancelButton])
+                btnRow.orientation = .horizontal
+                btnRow.spacing     = 8
+                btnRow.translatesAutoresizingMaskIntoConstraints = false
+                widgets.append(btnRow)
+            }
 
         case "running", "queued", "ready":
             let btnRow = NSStackView(views: [cancelButton, forceStartButton])
@@ -703,12 +827,21 @@ final class MotherJobDetail: NSView {
             stack.bottomAnchor.constraint(equalTo: actionsContainer.bottomAnchor),
         ])
 
-        // Fix the reply scroll view height (~3 lines)
-        if job.state == "awaiting" {
+        // Fix the reply scroll view height (~3 lines) when it is in the stack
+        if replyScrollView.superview === stack {
             replyScrollView.translatesAutoresizingMaskIntoConstraints = false
             replyScrollView.heightAnchor.constraint(equalToConstant: 60).isActive = true
             replyScrollView.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
             replyScrollView.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+        }
+        // Consequence lines wrap at the stack's width instead of growing past it.
+        for view in widthBoundViews {
+            view.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor).isActive = true
+        }
+        updateOptionButtonStates()
+        if let confirmRow {
+            // A screen reader hears the confirm question the moment it appears.
+            DispatchQueue.main.async { NSAccessibility.post(element: confirmRow, notification: .layoutChanged) }
         }
 
         // Separator line above actions (added before stack so it renders behind it)
@@ -725,12 +858,159 @@ final class MotherJobDetail: NSView {
         ])
     }
 
+    // MARK: Hold options
+
+    /// The widgets of a held job's decision: the guidance box (when an option takes text), then
+    /// one button per option in Mother's order, each with its consequence visible under it.
+    /// After a send, one line says what was sent. Nothing here has a key equivalent.
+    private func optionWidgets(job: MotherJob, decision: MotherDecision) -> (widgets: [NSView], confirmRow: NSView?) {
+        let state = host.motherDecisionState(jobId: job.id, decisionId: decision.id)
+
+        if case .sent(let sent) = state {
+            replyTextView.string = ""
+            let label = decision.options.first { $0.id == sent }?.label ?? sent.raw
+            let line = NSTextField(labelWithString: "Sent: \(label)")
+            line.font = .systemFont(ofSize: 11, weight: .medium)
+            line.textColor = Theme.sage
+            return ([line], nil)
+        }
+
+        var widgets: [NSView] = []
+        var confirmRow: NSView?
+
+        if decision.options.contains(where: \.takesText) {
+            replyTextView.placeholder = "Guidance for the worker (required)"
+            replyTextView.setAccessibilityLabel("Guidance for the worker")
+            replyScrollView.translatesAutoresizingMaskIntoConstraints = false
+            widgets.append(replyScrollView)
+            widgets.append(guidanceHintLabel)
+        }
+
+        for option in decision.options {
+            let button = NSButton(title: option.label, target: self, action: #selector(didTapOption(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier(Self.optionIdentifierPrefix + option.id.raw)
+            button.bezelStyle = .rounded
+            button.font = .systemFont(ofSize: 11)
+            button.contentTintColor = Self.tint(for: option.id)
+            button.setAccessibilityLabel(option.consequence.isEmpty ? option.label : "\(option.label). \(option.consequence)")
+            optionButtons[option.id.raw] = button
+
+            var top: [NSView] = [button]
+            if case .sending(let chosen) = state, chosen == option.id {
+                let spinner = NSProgressIndicator()
+                spinner.style = .spinning
+                spinner.controlSize = .small
+                spinner.isIndeterminate = true
+                spinner.setAccessibilityLabel("Sending")
+                spinner.startAnimation(nil)
+                top.append(spinner)
+            }
+            let buttonRow = NSStackView(views: top)
+            buttonRow.orientation = .horizontal
+            buttonRow.spacing = 6
+            buttonRow.alignment = .centerY
+
+            var rowViews: [NSView] = [buttonRow]
+            if !option.consequence.isEmpty {
+                let consequence = NSTextField(wrappingLabelWithString: option.consequence)
+                consequence.font = .systemFont(ofSize: 10)
+                consequence.textColor = Theme.fgMuted
+                consequence.lineBreakMode = .byWordWrapping
+                consequence.maximumNumberOfLines = 0
+                consequence.isSelectable = true
+                consequence.setAccessibilityElement(false)   // the button's label already says it
+                consequence.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                widthBoundViews.append(consequence)
+                rowViews.append(consequence)
+            }
+            let row = NSStackView(views: rowViews)
+            row.orientation = .vertical
+            row.spacing = 2
+            row.alignment = .leading
+            widgets.append(row)
+
+            if option.id == .overrideOpen, case .confirming(.overrideOpen) = state {
+                let confirm = overrideConfirmRow()
+                widgets.append(confirm)
+                confirmRow = confirm
+            }
+        }
+        return (widgets, confirmRow)
+    }
+
+    /// The second step of "open anyway": a question and two buttons, inline.
+    private func overrideConfirmRow() -> NSView {
+        let question = NSTextField(wrappingLabelWithString: "Open the PR for review with red gates recorded as overridden?")
+        question.font = .systemFont(ofSize: 11, weight: .medium)
+        question.textColor = Theme.amber
+        question.maximumNumberOfLines = 0
+        question.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        widthBoundViews.append(question)
+
+        let confirm = NSButton(title: "Open PR anyway", target: self, action: #selector(didConfirmOverride(_:)))
+        confirm.identifier = NSUserInterfaceItemIdentifier(Self.optionIdentifierPrefix + "confirm")
+        confirm.bezelStyle = .rounded
+        confirm.font = .systemFont(ofSize: 11)
+        confirm.contentTintColor = Theme.redSweater
+        let back = NSButton(title: "Back", target: self, action: #selector(didBackFromConfirm(_:)))
+        back.identifier = NSUserInterfaceItemIdentifier(Self.optionIdentifierPrefix + "back")
+        back.bezelStyle = .rounded
+        back.font = .systemFont(ofSize: 11)
+        optionConfirmButton = confirm
+
+        let buttons = NSStackView(views: [confirm, back])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        let row = NSStackView(views: [question, buttons])
+        row.orientation = .vertical
+        row.spacing = 6
+        row.alignment = .leading
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 0)
+        row.setAccessibilityElement(true)
+        row.setAccessibilityRole(.group)
+        row.setAccessibilityLabel("Confirm: open the PR for review with red gates recorded as overridden")
+        return row
+    }
+
+    private static let optionIdentifierPrefix = "mother.option."
+
+    private static func tint(for option: MotherDecisionOptionID) -> NSColor {
+        switch option {
+        case .resumeWithGuidance: return Theme.sage
+        case .escalate:           return Theme.amber
+        case .overrideOpen:       return Theme.redSweater
+        case .cancel, .unknown:   return Theme.fgMuted
+        }
+    }
+
+    /// Enable each option button for what can be sent now: the broker is there, no send is
+    /// under way or done, and guidance (for an option that takes it) is present and not too long.
+    private func updateOptionButtonStates() {
+        guard let job = currentJob, let decision = optionDecision(for: job) else { return }
+        let state = host.motherDecisionState(jobId: job.id, decisionId: decision.id)
+        let idle: Bool
+        switch state {
+        case .sending, .sent: idle = false
+        default:              idle = true
+        }
+        let ready = host.brokerConnected && idle
+        let text = replyTextView.string
+        for option in decision.options {
+            guard let button = optionButtons[option.id.raw] else { continue }
+            button.isEnabled = ready && (!option.takesText || MotherDecisionStore.textIsSendable(text))
+        }
+        optionConfirmButton?.isEnabled = ready
+        let tooLong = text.trimmingCharacters(in: .whitespacesAndNewlines).count > MotherDecisionStore.maxTextLength
+        guidanceHintLabel.isHidden = !tooLong
+    }
+
     private func updateBrokerBanner(_ connected: Bool) {
         guard currentJob != nil else { return }
         brokerBanner.isHidden = connected
         for btn in [answerButton, cancelButton, retryButton, forceStartButton] {
             btn.isEnabled = connected
         }
+        updateOptionButtonStates()
         // Archive and View Plan don't use the broker — always enabled
         archiveButton.isEnabled  = true
         viewPlanButton.isEnabled = true
@@ -749,12 +1029,78 @@ final class MotherJobDetail: NSView {
 
     // MARK: - Button actions
 
-    @objc private func didTapAnswer() {
+    // Nothing that answers Mother or acknowledges a flag runs unless a person did it:
+    // app-control, synthetic and stale input, and an Accessibility press without VoiceOver,
+    // are refused (`HumanGesture.permit`, called first in each action below).
+
+    /// Log a refused gesture by its reason only; the refusal shows nothing to the user.
+    private func logRefused(_ verdict: HumanGestureVerdict, _ what: String) {
+        if case .refused(let reason) = verdict {
+            log.info("\(what, privacy: .public) refused: \(reason.rawValue, privacy: .public)")
+        }
+    }
+
+    @objc private func didTapAnswer(_ sender: NSButton) {
+        let verdict = HumanGesture.permit(gestureInputs.currentEvent(), control: sender,
+                                          voiceOverEnabled: gestureInputs.voiceOverEnabled,
+                                          allowsSynthetic: gestureInputs.allowsSynthetic)
+        guard case .human = verdict else { logRefused(verdict, "answer"); return }
         guard let job = currentJob else { return }
         let text = replyTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         host.answerJob(job.id, text: text)
         replyTextView.string = ""
+    }
+
+    /// One of Mother's options. `override_open` only asks for its confirmation here.
+    @objc private func didTapOption(_ sender: NSButton) {
+        let verdict = HumanGesture.permit(gestureInputs.currentEvent(), control: sender,
+                                          voiceOverEnabled: gestureInputs.voiceOverEnabled,
+                                          allowsSynthetic: gestureInputs.allowsSynthetic)
+        guard case .human = verdict else { logRefused(verdict, "option"); return }
+        guard let job = currentJob, let decision = optionDecision(for: job),
+              let option = decision.options.first(where: { Self.optionIdentifierPrefix + $0.id.raw == sender.identifier?.rawValue })
+        else { return }
+        if option.id == .overrideOpen {
+            host.beginMotherDecisionConfirm(jobId: job.id, decisionId: decision.id, option: option.id)
+            return
+        }
+        host.answerMotherDecision(jobId: job.id, decisionId: decision.id, option: option,
+                                  text: option.takesText ? replyTextView.string : "")
+    }
+
+    /// The second click of `override_open`.
+    @objc private func didConfirmOverride(_ sender: NSButton) {
+        let verdict = HumanGesture.permit(gestureInputs.currentEvent(), control: sender,
+                                          voiceOverEnabled: gestureInputs.voiceOverEnabled,
+                                          allowsSynthetic: gestureInputs.allowsSynthetic)
+        guard case .human = verdict else { logRefused(verdict, "override confirm"); return }
+        guard let job = currentJob, let decision = optionDecision(for: job),
+              let option = decision.options.first(where: { $0.id == .overrideOpen })
+        else { return }
+        host.answerMotherDecision(jobId: job.id, decisionId: decision.id, option: option, text: "")
+    }
+
+    /// Back out of the confirmation. It sends nothing, but it is part of the confirmation a person
+    /// is making, so synthetic input does not get to move it either.
+    @objc private func didBackFromConfirm(_ sender: NSButton) {
+        let verdict = HumanGesture.permit(gestureInputs.currentEvent(), control: sender,
+                                          voiceOverEnabled: gestureInputs.voiceOverEnabled,
+                                          allowsSynthetic: gestureInputs.allowsSynthetic)
+        guard case .human = verdict else { logRefused(verdict, "override back"); return }
+        guard let job = currentJob, let decision = optionDecision(for: job) else { return }
+        host.cancelMotherDecisionConfirm(jobId: job.id, decisionId: decision.id)
+    }
+
+    /// Acknowledge a raised flag. The crew panel's SwiftUI button calls this, so the control
+    /// the gesture is checked against is the crew section that hosts it.
+    func acknowledge(reason: MotherAttentionReason) {
+        let verdict = HumanGesture.permit(gestureInputs.currentEvent(), control: crewSection,
+                                          voiceOverEnabled: gestureInputs.voiceOverEnabled,
+                                          allowsSynthetic: gestureInputs.allowsSynthetic)
+        guard case .human = verdict else { logRefused(verdict, "acknowledge"); return }
+        guard let job = currentJob else { return }
+        host.ackMotherAttention(jobId: job.id, reason: reason)
     }
 
     @objc private func didTapCancel() {
@@ -1151,7 +1497,9 @@ final class MotherCrewSectionView: NSView {
     private(set) var model = MotherCrewPanelModel()
     private(set) var breakdownExpanded = false
     private var detailsAvailable = false
+    private var acknowledgeAvailable = false
     var onDetails: (() -> Void)?
+    var onAcknowledge: ((MotherAttentionReason) -> Void)?
 
     override init(frame: NSRect) {
         hosting = NSHostingView(rootView: MotherCrewPanel(model: MotherCrewPanelModel(), colors: MotherJobDetail.crewColors))
@@ -1176,10 +1524,12 @@ final class MotherCrewSectionView: NSView {
     /// The height the section should have right now.
     var expectedHeight: CGFloat { model.height(breakdownExpanded: breakdownExpanded) }
 
-    func update(model newModel: MotherCrewPanelModel, detailsAvailable newDetails: Bool) {
-        guard newModel != model || newDetails != detailsAvailable else { return }
+    func update(model newModel: MotherCrewPanelModel, detailsAvailable newDetails: Bool,
+                acknowledgeAvailable newAcknowledge: Bool = false) {
+        guard newModel != model || newDetails != detailsAvailable || newAcknowledge != acknowledgeAvailable else { return }
         model = newModel
         detailsAvailable = newDetails
+        acknowledgeAvailable = newAcknowledge
         render()
     }
 
@@ -1199,7 +1549,8 @@ final class MotherCrewSectionView: NSView {
             model: model, colors: MotherJobDetail.crewColors,
             breakdownExpanded: breakdownExpanded,
             onToggleBreakdown: { [weak self] in self?.toggleBreakdown() },
-            onDetails: detailsAvailable ? { [weak self] in self?.onDetails?() } : nil
+            onDetails: detailsAvailable ? { [weak self] in self?.onDetails?() } : nil,
+            onAcknowledge: acknowledgeAvailable ? { [weak self] reason in self?.onAcknowledge?(reason) } : nil
         )
         let height = expectedHeight
         if heightConstraint.constant != height { heightConstraint.constant = height }

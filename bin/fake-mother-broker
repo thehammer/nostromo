@@ -22,6 +22,11 @@ the app is watching:
     {"op":"commands"}                          commands received so far
     {"op":"jobs"}                              current job table
 
+Commands. `answer {job, text}` resumes an awaiting job. `answer {job, option, source?, text?}` answers the job's open
+decision by option id (`invalid_state` unless that decision is open and offers the option): it emits decision_resolved,
+resumed and ready (cancelled for the `cancel` option), as gate_hold_answered.ndjson records. `ack {job, reason}`
+acknowledges a raised attention reason (`invalid_state` if it is not raised) and emits attention_acked.
+
 Subscribe categories are honoured: a client only receives the events whose `category` it
 subscribed to (the snapshot and pings always go out). `query.get {job}` is answered with
 `{ok, job}`, the raw job from the table.
@@ -359,12 +364,37 @@ class Broker:
                 if s not in ("queued", "ready"):
                     return ("invalid_state", f"cannot force-start a {s} job")
                 self.fold(jid, "running")
+            elif ctype == "answer" and "option" in data:
+                return self.answer_option(j, data)
             elif ctype == "answer":
                 if s != "awaiting":
                     return ("invalid_state", f"job is {s}, not awaiting")
                 self.fold(jid, "running")
+            elif ctype == "ack":
+                reason = data.get("reason")
+                if not any(r["reason"] == reason for r in j.get("attention_reasons", [])):
+                    return ("invalid_state", f"{reason} is not raised on {jid}")
+                self.fold_crew(jid, "attention_acked", {"reason": reason})
+                self.broadcast("attention_acked", {"job": jid, "reason": reason, "source": data.get("source") or "broker_client"})
             else:
                 return ("malformed", f"unknown command {ctype}")
+        return None
+
+    def answer_option(self, j, data):
+        """`answer {job, option, source?, text?}` against the job's open decision. Returns None or (code, message).
+        Mirrors gate_hold_answered.ndjson: decision_resolved, then resumed and ready (or cancelled)."""
+        jid, option = j["id"], data["option"]
+        decision = j.get("decision")
+        if not decision or decision.get("resolved_at") or option not in [o["id"] for o in decision.get("options", [])]:
+            return ("invalid_state", f"no open decision on {jid} takes option {option!r}")
+        source = data.get("source") or "broker_client"
+        self.fold_crew(jid, "decision_resolved", {"decision_id": decision["id"], "option": option, "source": source})
+        self.broadcast("decision_resolved", {"job": jid, "decision_id": decision["id"], "option": option, "source": source})
+        if option == "cancel":
+            self.fold(jid, "cancelled")
+        else:
+            self.fold(jid, "resumed", option=option, source=source)
+            self.fold(jid, "ready")
         return None
 
     def snapshot(self):

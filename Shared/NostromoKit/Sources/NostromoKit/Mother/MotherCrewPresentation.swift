@@ -284,6 +284,18 @@ public struct MotherAttentionBadge: Equatable {
     public let label: String
     public let acked: Bool
     public let accessibility: String
+
+    /// The operator can acknowledge this flag. A pending decision is answered, not acknowledged,
+    /// and a reason this client does not know is left alone.
+    public var canAcknowledge: Bool {
+        guard !acked else { return false }
+        switch reason {
+        case .progressStalled, .burnAhead, .gatesIncomplete: return true
+        case .decisionAwaiting, .unknown: return false
+        }
+    }
+
+    public var acknowledgeAccessibility: String { "Acknowledge \(label)" }
 }
 
 public enum MotherAttentionBadges {
@@ -343,6 +355,11 @@ public struct MotherHoldSummary: Equatable {
     public let question: String?
     public let options: [Option]
     public let accessibility: String
+
+    /// The same hold without its option list, for a host that draws the options itself.
+    func withoutOptions() -> MotherHoldSummary {
+        MotherHoldSummary(kind: kind, question: question, options: [], accessibility: accessibility)
+    }
 
     /// Nil unless the job is waiting on the operator: awaiting with a gate or review
     /// hold activity, or an open decision.

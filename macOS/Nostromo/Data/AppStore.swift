@@ -205,6 +205,12 @@ class AppStore: ObservableObject {
 
     /// In-memory job map keyed by id — folded from broker snapshot + events.
     private var jobMap: [String: MotherJob] = [:]
+    /// Each held job's decision send state (a decision is answered at most once). Main thread only.
+    private var decisionStores: [String: MotherDecisionStore] = [:]
+    /// Fires when a decision's send state or the broker's capabilities change.
+    private let motherDecisionChanges = PassthroughSubject<Void, Never>()
+    /// Acknowledgements sent and not yet answered, by job and reason.
+    private var acksInFlight = Set<String>()
 
     /// Shared ChatSession instances keyed by agent tag. Like `focusLayouts`,
     /// an entry's lifetime now exactly matches its focus's — see
@@ -610,7 +616,8 @@ class AppStore: ObservableObject {
     private func applyBrokerEvent(_ event: BrokerEvent) {
         switch event {
         case .hello:
-            break   // connection state already set via broker.connected
+            // Connection state is already set via broker.connected; the capabilities are new.
+            motherDecisionChanges.send()
 
         case .snapshot(let jobs):
             jobMap = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
@@ -768,8 +775,21 @@ class AppStore: ObservableObject {
         // Only a real change wakes the views: an equal re-publish (a crew event whose
         // refreshed job is identical, a state event that folds to the same job) is dropped.
         let status = MotherStatus.from(jobs: jobs)
+        // A decision that resolved (or was replaced) takes its send state with it.
+        var storesChanged = false
+        for (id, var store) in decisionStores {
+            // A send in flight keeps its state through a moment with no decision (a reconnect, an
+            // unreadable refresh): its result is still coming, and the buttons must not re-enable.
+            if case .sending = store.state, jobMap[id]?.crew.decision == nil { continue }
+            let before = store
+            store.sync(decision: jobMap[id]?.crew.decision)
+            guard store != before else { continue }
+            storesChanged = true
+            if store.decisionId == nil { decisionStores.removeValue(forKey: id) } else { decisionStores[id] = store }
+        }
         if jobs != motherJobs { motherJobs = jobs }
         if status != motherStatus { motherStatus = status }
+        if storesChanged { motherDecisionChanges.send() }
     }
 
     // MARK: - Mother action methods (called from MotherView)
@@ -778,6 +798,92 @@ class AppStore: ObservableObject {
         broker.answer(job: id, text: text) { [weak self] result in
             self?.handleActionResult(result, verb: "answer")
         }
+    }
+
+    // MARK: Hold decisions and acknowledgements
+    //
+    // Every caller has already checked for a human gesture (`MotherJobDetail`, each control
+    // before it calls these). That is why only these paths send `source: "nostromo_app"`.
+
+    /// Answer a hold by option. Sends at most once per decision id unless the send failed;
+    /// nothing is retried here and nothing picks an option for the operator.
+    func answerMotherDecision(jobId: String, decisionId: String, option: MotherDecisionOption, text: String) {
+        var store = decisionStores[jobId] ?? MotherDecisionStore()
+        store.sync(decision: jobMap[jobId]?.crew.decision)
+        guard store.decisionId == decisionId, let command = store.request(option: option, text: text) else {
+            return
+        }
+        decisionStores[jobId] = store
+        motherDecisionChanges.send()
+        broker.answer(job: jobId, option: command.option, text: command.text) { [weak self] result in
+            self?.finishDecisionAnswer(jobId: jobId, decisionId: command.decisionId, result: result)
+        }
+    }
+
+    /// The first click of `override_open`.
+    func beginMotherDecisionConfirm(jobId: String, decisionId: String, option: MotherDecisionOptionID) {
+        var store = decisionStores[jobId] ?? MotherDecisionStore()
+        store.sync(decision: jobMap[jobId]?.crew.decision)
+        guard store.decisionId == decisionId, store.beginConfirm(option: option) else { return }
+        decisionStores[jobId] = store
+        motherDecisionChanges.send()
+    }
+
+    func cancelMotherDecisionConfirm(jobId: String, decisionId: String) {
+        guard var store = decisionStores[jobId], store.decisionId == decisionId else { return }
+        store.cancelConfirm()
+        decisionStores[jobId] = store
+        motherDecisionChanges.send()
+    }
+
+    func motherDecisionState(jobId: String, decisionId: String) -> MotherDecisionSendState {
+        guard let store = decisionStores[jobId], store.decisionId == decisionId else { return .idle }
+        return store.state
+    }
+
+    /// Acknowledge a raised attention flag. The refresh shows it as acknowledged.
+    func ackMotherAttention(jobId: String, reason: MotherAttentionReason) {
+        let key = jobId + "\u{0}" + reason.raw
+        guard acksInFlight.insert(key).inserted else { return }   // a double click is one ack
+        broker.ack(job: jobId, reason: reason.raw) { [weak self] result in
+            guard let self else { return }
+            self.acksInFlight.remove(key)
+            switch result {
+            case .success:
+                log.info("broker ack succeeded")
+                self.jobRefresher.request(job: jobId)
+            case .failure(let err):
+                log.warning("broker ack failed: \(err.kind.logName, privacy: .public)")
+                self.motherActionError = err.kind == .invalidState
+                    ? "That flag was already cleared or changed. Refreshed."
+                    : err.decisionMessage
+                if err.kind == .invalidState { self.jobRefresher.request(job: jobId) }
+            }
+        }
+    }
+
+    private func finishDecisionAnswer(jobId: String, decisionId: String, result: Result<Void, BrokerError>) {
+        if var store = decisionStores[jobId] {
+            switch result {
+            case .success:
+                store.succeeded(decisionId: decisionId)
+            case .failure(let err):
+                store.failed(decisionId: decisionId, kind: err.kind)
+            }
+            decisionStores[jobId] = store
+        }
+        switch result {
+        case .success:
+            log.info("broker decision answer succeeded")
+            jobRefresher.request(job: jobId)
+        case .failure(let err):
+            // Mother's own message text is never shown or logged: only its class.
+            log.warning("broker decision answer failed: \(err.kind.logName, privacy: .public)")
+            motherActionError = err.decisionMessage
+            // After a timeout Mother may still have applied the answer: read the job before anyone resends.
+            if err.kind == .invalidState || err.kind == .timeout { jobRefresher.request(job: jobId) }
+        }
+        motherDecisionChanges.send()
     }
 
     func cancelJob(_ id: String) {
@@ -1520,6 +1626,10 @@ extension AppStore: MotherJobDetailHost {
     var motherActionErrorPublisher: AnyPublisher<String?, Never> { $motherActionError.eraseToAnyPublisher() }
     var motherPeeksPublisher: AnyPublisher<[String: MotherPeekPayload], Never> { $motherPeeks.eraseToAnyPublisher() }
     func peek(for jobId: String) -> MotherPeekPayload? { motherPeeks[jobId] }
+
+    var supportsAnswerOption: Bool { broker.supportsAnswerOption }
+    var supportsAck: Bool { broker.supportsAck }
+    var motherDecisionChangesPublisher: AnyPublisher<Void, Never> { motherDecisionChanges.eraseToAnyPublisher() }
 
     /// A non-default broker (`MOTHER_BROKER_SOCK`, the QA fake) is not the Mother the CLI talks to.
     var usesDefaultBroker: Bool { ProcessInfo.processInfo.environment["MOTHER_BROKER_SOCK"] == nil }

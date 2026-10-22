@@ -341,6 +341,85 @@ final class MotherCrewPanelModelTests: XCTestCase {
         }
     }
 
+    // MARK: - Acknowledge (MC3)
+
+    private func badge(_ reason: MotherAttentionReason, acked: Bool = false) -> MotherAttentionBadge {
+        MotherAttentionBadges.make([MotherAttention(reason: reason, acked: acked)])[0]
+    }
+
+    func testAnUnacknowledgedStalledBurnOrGatesBadgeCanBeAcknowledged() {
+        for reason in [MotherAttentionReason.progressStalled, .burnAhead, .gatesIncomplete] {
+            XCTAssertTrue(badge(reason).canAcknowledge, reason.raw)
+        }
+    }
+
+    func testAnAcknowledgedBadgeCannotBeAcknowledgedAgain() {
+        for reason in [MotherAttentionReason.progressStalled, .burnAhead, .gatesIncomplete] {
+            XCTAssertFalse(badge(reason, acked: true).canAcknowledge, reason.raw)
+        }
+    }
+
+    func testTheDecisionBadgeAndUnknownReasonsCannotBeAcknowledged() {
+        XCTAssertFalse(badge(.decisionAwaiting).canAcknowledge, "a decision is answered, not acknowledged")
+        XCTAssertFalse(badge(.unknown("future_reason")).canAcknowledge)
+        XCTAssertFalse(badge(.unknown("future_reason"), acked: true).canAcknowledge)
+    }
+
+    func testTheAcknowledgeAccessibilityTextNamesTheBadge() {
+        XCTAssertEqual(badge(.progressStalled).acknowledgeAccessibility, "Acknowledge Stalled")
+        XCTAssertEqual(badge(.burnAhead).acknowledgeAccessibility, "Acknowledge Burning ahead")
+        XCTAssertEqual(badge(.gatesIncomplete).acknowledgeAccessibility, "Acknowledge Gates incomplete")
+    }
+
+    // MARK: - Hold options drawn by the host (MC3)
+
+    func testAskingForNoHoldOptionsKeepsTheHoldHeaderAndDropsTheOptions() throws {
+        let job = try holdJob()
+        let full = try XCTUnwrap(MotherCrewPanelModel.make(job: job).hold)
+        let bare = try XCTUnwrap(MotherCrewPanelModel.make(job: job, showsHoldOptions: false).hold)
+
+        XCTAssertEqual(bare.kind, full.kind)
+        XCTAssertEqual(bare.question, full.question)
+        XCTAssertEqual(bare.accessibility, full.accessibility)
+        XCTAssertTrue(bare.options.isEmpty)
+    }
+
+    func testTheDefaultStillShowsTheHoldOptions() throws {
+        let job = try holdJob()
+        XCTAssertEqual(MotherCrewPanelModel.make(job: job, showsHoldOptions: true),
+                       MotherCrewPanelModel.make(job: job))
+        XCTAssertEqual(try XCTUnwrap(MotherCrewPanelModel.make(job: job).hold).options.count, 4)
+    }
+
+    func testWithoutHoldOptionsTheHoldShrinksToItsHeaderRow() throws {
+        let job = try holdJob()
+        let full = MotherCrewPanelModel.make(job: job)
+        let bare = MotherCrewPanelModel.make(job: job, showsHoldOptions: false)
+        let hold = try XCTUnwrap(full.hold)
+
+        let optionsHeight = MotherCrewPanelMetrics.row * CGFloat(hold.options.count)
+            + MotherCrewPanelMetrics.consequence * CGFloat(hold.options.filter { !$0.consequence.isEmpty }.count)
+        XCTAssertGreaterThan(optionsHeight, 0)
+        XCTAssertEqual(full.height(breakdownExpanded: false) - bare.height(breakdownExpanded: false), optionsHeight)
+
+        // On its own the optionless hold is exactly one header row.
+        let alone = MotherCrewPanelModel(hold: bare.hold)
+        XCTAssertEqual(alone.height(breakdownExpanded: false), MotherCrewPanelMetrics.row)
+    }
+
+    func testHidingHoldOptionsChangesNothingElseInTheModel() throws {
+        let job = try holdJob()
+        var full = MotherCrewPanelModel.make(job: job)
+        let bare = MotherCrewPanelModel.make(job: job, showsHoldOptions: false)
+        full.hold = bare.hold
+        XCTAssertEqual(full, bare)
+    }
+
+    func testHidingHoldOptionsOnAJobWithoutAHoldChangesNothing() throws {
+        let job = try gatesJob()
+        XCTAssertEqual(MotherCrewPanelModel.make(job: job, showsHoldOptions: false), MotherCrewPanelModel.make(job: job))
+    }
+
     // MARK: - Job row (MC2-6)
 
     func testARowReservesItsProgressLineOnlyWhenTheHostDrawsItAndTheJobIsActive() {
