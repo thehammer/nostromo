@@ -7,8 +7,18 @@ enum MotherJobReconciler {
     struct Result: Equatable {
         var jobs: [String: MotherJob]
         var missingOnce: Set<String>
+        /// Known jobs whose listed state (state, question, pause reason) differs from the app's
+        /// event-folded one, with the listed signature: confirmed (applied) only when the SAME
+        /// difference shows on two consecutive lists, because `query.list` lags the broker's events
+        /// (its store is a file mirror) and a single stale reply must not undo a newer state.
+        var stateMismatch: [String: String] = [:]
         var added: [String]
         var removed: [String]
+    }
+
+    /// state, question and pause reason as one comparable string.
+    static func eventSignature(_ job: MotherJob) -> String {
+        "\(job.state)|\(job.question ?? "")|\(job.pausedReason ?? "")"
     }
 
     /// Whether a discovery `query.get` result may be inserted: unknown and not just archived.
@@ -27,8 +37,10 @@ enum MotherJobReconciler {
                           missingOnce: Set<String>,
                           recentlyArchived: Set<String>,
                           partial: Bool = false,
-                          unreadableIds: Set<String> = []) -> Result {
+                          unreadableIds: Set<String> = [],
+                          stateMismatch: [String: String] = [:]) -> Result {
         var jobs = current
+        var nextMismatch: [String: String] = [:]
         var added: [String] = []
         var removed: [String] = []
         var listedIds = unreadableIds
@@ -36,7 +48,14 @@ enum MotherJobReconciler {
         for job in listed {
             listedIds.insert(job.id)
             if let mine = current[job.id] {
-                jobs[job.id] = mine.replacing(with: job)
+                let merged = mine.replacing(with: job)
+                let listedSig = eventSignature(job)
+                if eventSignature(mine) == listedSig || stateMismatch[job.id] == listedSig {
+                    jobs[job.id] = merged   // same state, or the same difference on two lists in a row
+                } else {
+                    jobs[job.id] = merged.keepingEventState(of: mine)
+                    nextMismatch[job.id] = listedSig
+                }
             } else if !recentlyArchived.contains(job.id) {
                 jobs[job.id] = job
                 added.append(job.id)
@@ -44,7 +63,7 @@ enum MotherJobReconciler {
         }
 
         if partial {
-            return Result(jobs: jobs, missingOnce: [], added: added.sorted(), removed: [])
+            return Result(jobs: jobs, missingOnce: [], stateMismatch: nextMismatch, added: added.sorted(), removed: [])
         }
 
         var nextMissing = Set<String>()
@@ -56,7 +75,19 @@ enum MotherJobReconciler {
                 nextMissing.insert(id)
             }
         }
-        return Result(jobs: jobs, missingOnce: nextMissing, added: added.sorted(), removed: removed.sorted())
+        return Result(jobs: jobs, missingOnce: nextMissing, stateMismatch: nextMismatch,
+                      added: added.sorted(), removed: removed.sorted())
+    }
+}
+
+extension MotherJob {
+    /// This job with `held`'s event-derived fields (state, question, pause reason, finish time).
+    func keepingEventState(of held: MotherJob) -> MotherJob {
+        MotherJob(id: id, state: held.state, repo: repo, isolation: isolation, title: title,
+                  createdAt: createdAt, startedAt: startedAt, finishedAt: held.finishedAt,
+                  planPath: planPath, question: held.question, pausedReason: held.pausedReason,
+                  adherenceStatus: adherenceStatus, currentTier: currentTier,
+                  kind: kind, phases: phases, cycles: cycles, crew: crew)
     }
 }
 
@@ -102,7 +133,13 @@ final class MotherResyncScheduler {
     var isRunning: Bool { cancelRepeating != nil }
 
     func setConnected(_ value: Bool) { connected = value; refresh() }
-    func setActive(_ value: Bool) { active = value; refresh() }
+    func setActive(_ value: Bool) {
+        let becameActive = value && !active
+        active = value
+        refresh()
+        // Back from a long absence is exactly when the pane may be stale: resync soon, not in 60 s.
+        if becameActive, connected { snapshotReceived() }
+    }
 
     /// A (re)connect snapshot arrived: resync once soon.
     func snapshotReceived() {

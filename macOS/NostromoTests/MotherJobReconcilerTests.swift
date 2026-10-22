@@ -6,6 +6,7 @@ import NostromoKit
 // MARK: - Builders
 
 private func shJob(id: String, state: String = "running", title: String = "A job",
+                   question: String? = nil, pausedReason: String? = nil,
                    progressPct: Int? = nil, progressAt: String = "2026-10-17T12:00:00.000Z") -> MotherJob {
     var crew = MotherCrewState()
     if let pct = progressPct {
@@ -16,8 +17,8 @@ private func shJob(id: String, state: String = "running", title: String = "A job
             paused: false, flags: [], updatedAt: progressAt)
     }
     return MotherJob(id: id, state: state, repo: "Carefeed/payments", isolation: "worktree", title: title,
-                     createdAt: nil, startedAt: nil, finishedAt: nil, planPath: nil, question: nil,
-                     pausedReason: nil, adherenceStatus: nil, currentTier: nil, crew: crew)
+                     createdAt: nil, startedAt: nil, finishedAt: nil, planPath: nil, question: question,
+                     pausedReason: pausedReason, adherenceStatus: nil, currentTier: nil, crew: crew)
 }
 
 private func shMap(_ jobs: [MotherJob]) -> [String: MotherJob] {
@@ -309,7 +310,9 @@ final class MotherResyncSchedulerTests: XCTestCase {
         XCTAssertEqual(fake.cancelled, [0])
         XCTAssertFalse(s.isRunning)
         s.setActive(true)
-        XCTAssertEqual(fake.calls.count, 2)
+        // the repeating tick again, plus a resync soon (returning from an absence is when the pane is stale)
+        XCTAssertEqual(fake.calls.count, 3)
+        XCTAssertEqual(fake.calls.last, Fake.Call(after: 2, repeating: nil))
         XCTAssertTrue(s.isRunning)
     }
 
@@ -346,5 +349,70 @@ final class MotherResyncSchedulerTests: XCTestCase {
         s.setConnected(true)
         XCTAssertEqual(fake.calls.count, 1)
         XCTAssertTrue(fake.cancelled.isEmpty)
+    }
+}
+
+
+// MARK: - A stale `query.list` must not undo newer event-folded state
+
+final class MotherJobReconcilerStaleListTests: XCTestCase {
+
+    private func reconcile(current: [MotherJob], listed: [MotherJob],
+                           mismatch: [String: String] = [:]) -> MotherJobReconciler.Result {
+        MotherJobReconciler.reconcile(current: shMap(current), listed: listed, missingOnce: [],
+                                      recentlyArchived: [], stateMismatch: mismatch)
+    }
+
+    func testAStaleListDoesNotFlipASucceededJobBackToRunning() {
+        let r = reconcile(current: [shJob(id: "a", state: "succeeded")], listed: [shJob(id: "a", state: "running")])
+        XCTAssertEqual(r.jobs["a"]?.state, "succeeded")
+        XCTAssertEqual(r.stateMismatch["a"], "running||")
+    }
+
+    func testAStaleListDoesNotDropAPendingQuestion() {
+        let mine = shJob(id: "a", state: "awaiting", question: "Which branch?")
+        let r = reconcile(current: [mine], listed: [shJob(id: "a", state: "running")])
+        XCTAssertEqual(r.jobs["a"]?.state, "awaiting")
+        XCTAssertEqual(r.jobs["a"]?.question, "Which branch?")
+    }
+
+    func testTheSameDifferenceOnTwoConsecutiveListsIsApplied() {
+        let first = reconcile(current: [shJob(id: "a", state: "running")], listed: [shJob(id: "a", state: "failed")])
+        XCTAssertEqual(first.jobs["a"]?.state, "running", "one list is not enough")
+        let second = reconcile(current: Array(first.jobs.values), listed: [shJob(id: "a", state: "failed")],
+                               mismatch: first.stateMismatch)
+        XCTAssertEqual(second.jobs["a"]?.state, "failed", "a missed event heals on the second list")
+        XCTAssertTrue(second.stateMismatch.isEmpty)
+    }
+
+    func testADifferentDifferenceOnTheSecondListStartsOver() {
+        let first = reconcile(current: [shJob(id: "a", state: "running")], listed: [shJob(id: "a", state: "failed")])
+        let second = reconcile(current: Array(first.jobs.values), listed: [shJob(id: "a", state: "succeeded")],
+                               mismatch: first.stateMismatch)
+        XCTAssertEqual(second.jobs["a"]?.state, "running")
+        XCTAssertEqual(second.stateMismatch["a"], "succeeded||")
+    }
+
+    func testAMatchingListClearsTheRecordedMismatch() {
+        let first = reconcile(current: [shJob(id: "a", state: "succeeded")], listed: [shJob(id: "a", state: "running")])
+        let second = reconcile(current: Array(first.jobs.values), listed: [shJob(id: "a", state: "succeeded")],
+                               mismatch: first.stateMismatch)
+        XCTAssertTrue(second.stateMismatch.isEmpty)
+    }
+
+    func testOtherFieldsStillUpdateWhileTheStateIsHeldAndTheNewerProgressIsKept() {
+        let mine = shJob(id: "a", state: "succeeded", title: "Old title", progressPct: 90, progressAt: "2026-10-17T12:05:00.000Z")
+        let listed = shJob(id: "a", state: "running", title: "New title", progressPct: 40, progressAt: "2026-10-17T12:01:00.000Z")
+        let r = reconcile(current: [mine], listed: [listed])
+        XCTAssertEqual(r.jobs["a"]?.state, "succeeded")
+        XCTAssertEqual(r.jobs["a"]?.title, "New title")
+        XCTAssertEqual(r.jobs["a"]?.crew.progress?.pct, 90)
+    }
+
+    func testAnIdenticalListChangesNothingAndRecordsNoMismatch() {
+        let jobs = [shJob(id: "a", state: "awaiting", question: "Q?"), shJob(id: "b")]
+        let r = reconcile(current: jobs, listed: jobs)
+        XCTAssertEqual(r.jobs, shMap(jobs))
+        XCTAssertTrue(r.stateMismatch.isEmpty)
     }
 }

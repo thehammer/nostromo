@@ -183,6 +183,7 @@ class AppStore: ObservableObject {
     private var recentlyArchived = MotherRecentlyArchived()
     /// Jobs absent from the previous successful `query.list`.
     private var missingOnce = Set<String>()
+    private var stateMismatch: [String: String] = [:]
     private var resyncInFlight = false
     private lazy var resyncScheduler = MotherResyncScheduler(
         schedule: { after, repeating, fire in
@@ -614,6 +615,7 @@ class AppStore: ObservableObject {
         case .snapshot(let jobs):
             jobMap = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
             missingOnce.removeAll()
+            stateMismatch.removeAll()
             publishJobsAndStatus()
             resyncScheduler.snapshotReceived()
 
@@ -664,6 +666,7 @@ class AppStore: ObservableObject {
             jobRefresher.cancelAll()
             discoveryRefresher.cancelAll()
             missingOnce.removeAll()
+            stateMismatch.removeAll()
             jobMap.removeAll()
             motherPeeks.removeAll()
             publishJobsAndStatus()
@@ -705,8 +708,10 @@ class AppStore: ObservableObject {
         let outcome = MotherJobReconciler.reconcile(
             current: jobMap, listed: listing.jobs,
             missingOnce: missingOnce, recentlyArchived: recentlyArchived.ids(),
-            partial: listing.partial, unreadableIds: listing.unreadableIds)
+            partial: listing.partial, unreadableIds: listing.unreadableIds,
+            stateMismatch: stateMismatch)
         missingOnce = outcome.missingOnce
+        stateMismatch = outcome.stateMismatch
         outcome.removed.forEach { recentlyArchived.insert($0) }
         guard outcome.jobs != jobMap else { return }
         if !outcome.added.isEmpty || !outcome.removed.isEmpty {
