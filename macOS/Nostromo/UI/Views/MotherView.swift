@@ -230,7 +230,7 @@ private class MotherOverviewView: NSView {
 private class MotherCountsStrip: NSView {
 
     private let chips = MotherCountsChips()
-    private let daemonLabel = NSTextField(labelWithString: "")
+    private let daemonLabel = NSTextField.boundedLabel("", maxLines: 1, truncating: true)
     private let startButton = NSButton()
     private var cancellables = Set<AnyCancellable>()
 
