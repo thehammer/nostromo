@@ -89,7 +89,7 @@ final class NeedsYouNotifierTests: XCTestCase {
         NeedsYouItem(id: "mother:\(job):\(reason.raw)", source: .motherJob(job), reason: .motherAttention(reason))
     }
 
-    private func snapshot(_ producer: String = "mother", _ items: [NeedsYouItem]) -> NeedsYouSnapshot {
+    private func snapshot(_ items: [NeedsYouItem], producer: String = "mother") -> NeedsYouSnapshot {
         var agg = NeedsYouAggregator()
         return agg.set(producer: producer, items: items)
     }
@@ -123,9 +123,9 @@ final class NeedsYouNotifierTests: XCTestCase {
             (awaitingItem(reason: .motherHold(.reviewHold)), "Review hold"),
             (awaitingItem(reason: .motherHold(.decision)), "Waiting for your answer"),
             (awaitingItem(reason: .motherAwaiting), "Waiting for your answer"),
-            (attentionItem(.progressStalled), "Stalled"),
-            (attentionItem(.burnAhead), "Burning ahead of progress"),
-            (attentionItem(.gatesIncomplete), "Gates incomplete"),
+            (attentionItem("j1", .progressStalled), "Stalled"),
+            (attentionItem("j1", .burnAhead), "Burning ahead of progress"),
+            (attentionItem("j1", .gatesIncomplete), "Gates incomplete"),
         ]
         for (item, label) in cases {
             let center = FakeNotificationCenter()
@@ -448,7 +448,7 @@ final class NeedsYouNotifierTests: XCTestCase {
     func testASnapshotOfOnlyUnbuiltItemsDoesNotAskForAuthorization() {
         let center = FakeNotificationCenter(status: .notDetermined)
         let notifier = makeNotifier(center)
-        notifier.apply(snapshot("decisions", [NeedsYouItem(id: "decisions:tag", source: .focus("tag"), reason: .decisionOpen)]))
+        notifier.apply(snapshot([NeedsYouItem(id: "decisions:tag", source: .focus("tag"), reason: .decisionOpen)], producer: "decisions"))
 
         XCTAssertEqual(center.authorizationRequests, 0)
         XCTAssertTrue(center.added.isEmpty)
