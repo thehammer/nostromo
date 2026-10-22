@@ -166,6 +166,33 @@ class AppStore: ObservableObject {
         },
         apply: { [weak self] refreshed in self?.applyRefreshedJob(refreshed) }
     )
+    /// Looks up a job the app has never heard of (a `stateChange` for an unknown id) and inserts it.
+    private lazy var discoveryRefresher = MotherJobRefresher(
+        fetch: { [weak self] id, done in
+            guard let self else { done(.failure(.disconnected)); return }
+            self.broker.queryGet(job: id) { result in
+                if case .failure = result {
+                    log.info("broker discovery of job \(id.prefix(8), privacy: .public) failed or not found")
+                }
+                done(result)
+            }
+        },
+        apply: { [weak self] found in self?.insertDiscoveredJob(found) }
+    )
+    /// Ids archived (or reconciled away) in the last 2 minutes; a late discovery or list must not revive them.
+    private var recentlyArchived = MotherRecentlyArchived()
+    /// Jobs absent from the previous successful `query.list`.
+    private var missingOnce = Set<String>()
+    private var stateMismatch: [String: String] = [:]
+    private var resyncInFlight = false
+    private lazy var resyncScheduler = MotherResyncScheduler(
+        schedule: { after, repeating, fire in
+            let timer = Timer(timeInterval: after, repeats: repeating != nil) { _ in fire() }
+            RunLoop.main.add(timer, forMode: .common)
+            return { timer.invalidate() }
+        },
+        tick: { [weak self] in self?.resyncJobs() }
+    )
     private var cancellables     = Set<AnyCancellable>()
     /// Per-PR detail cache keyed by "{repo-with-dashes}-{number}", bounded by
     /// an LRU eviction policy budgeted primarily in bytes
@@ -424,6 +451,7 @@ class AppStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] connected in
                 self?.brokerConnected = connected
+                self?.resyncScheduler.setConnected(connected)
                 if !connected {
                     if !NostromoHome.shouldAttemptMotherDaemonStart(brokerConnected: connected, isQA: NostromoHome.isQAInstance) {
                         // The QA clone points the broker at a dead path on purpose; starting Mother
@@ -452,6 +480,14 @@ class AppStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.applyBrokerEvent($0) }
             .store(in: &cancellables)
+
+        for (name, active) in [(NSApplication.didBecomeActiveNotification, true),
+                               (NSApplication.didResignActiveNotification, false)] {
+            NotificationCenter.default.publisher(for: name)
+                .sink { [weak self] _ in self?.resyncScheduler.setActive(active) }
+                .store(in: &cancellables)
+        }
+        resyncScheduler.setActive(NSApp?.isActive ?? true)
 
         FileWatchers.shared.start()
         // Under the load harness the daemon connection is suppressed entirely, so
@@ -577,8 +613,11 @@ class AppStore: ObservableObject {
             break   // connection state already set via broker.connected
 
         case .snapshot(let jobs):
-            jobMap = Dictionary(uniqueKeysWithValues: jobs.map { ($0.id, $0) })
+            jobMap = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+            missingOnce.removeAll()
+            stateMismatch.removeAll()
             publishJobsAndStatus()
+            resyncScheduler.snapshotReceived()
 
         case .newJob(let job):
             // A job that was queued after the initial snapshot arrived.
@@ -588,8 +627,10 @@ class AppStore: ObservableObject {
             publishJobsAndStatus()
 
         case .stateChange(let jobId, let eventKind, let question, let pausedReason, let toState):
+            if eventKind == "archived" { recentlyArchived.insert(jobId) }
             guard jobMap[jobId] != nil else {
-                log.debug("broker stateChange for unknown job \(jobId.prefix(8), privacy: .public) — ignoring")
+                // Never heard of it (its `queued` event was missed): read it from the broker.
+                if eventKind != "archived" { discoveryRefresher.request(job: jobId) }
                 return
             }
             if eventKind == "archived" {
@@ -623,6 +664,9 @@ class AppStore: ObservableObject {
         case .reconnected:
             // Clear stale state; next snapshot will repopulate
             jobRefresher.cancelAll()
+            discoveryRefresher.cancelAll()
+            missingOnce.removeAll()
+            stateMismatch.removeAll()
             jobMap.removeAll()
             motherPeeks.removeAll()
             publishJobsAndStatus()
@@ -636,6 +680,45 @@ class AppStore: ObservableObject {
         let merged = current.replacing(with: refreshed)
         guard merged != current else { return }
         jobMap[refreshed.id] = merged
+        publishJobsAndStatus()
+    }
+
+    /// A discovery `query.get` result: inserted only if still unknown and not just archived.
+    private func insertDiscoveredJob(_ found: MotherJob) {
+        guard MotherJobReconciler.shouldInsertDiscovered(
+            id: found.id, jobMap: jobMap, recentlyArchived: recentlyArchived.ids()) else { return }
+        jobMap[found.id] = found
+        log.info("broker discovered job \(found.id.prefix(8), privacy: .public) via query.get")
+        publishJobsAndStatus()
+    }
+
+    /// Periodic `query.list` resync. A failed list changes nothing.
+    private func resyncJobs() {
+        guard brokerConnected, !resyncInFlight else { return }
+        resyncInFlight = true
+        broker.queryList { [weak self] result in
+            guard let self else { return }
+            self.resyncInFlight = false
+            guard case .success(let listed) = result, self.brokerConnected else { return }
+            self.applyListedJobs(listed)
+        }
+    }
+
+    private func applyListedJobs(_ listing: MotherJobListing) {
+        let outcome = MotherJobReconciler.reconcile(
+            current: jobMap, listed: listing.jobs,
+            missingOnce: missingOnce, recentlyArchived: recentlyArchived.ids(),
+            partial: listing.partial, unreadableIds: listing.unreadableIds,
+            stateMismatch: stateMismatch)
+        missingOnce = outcome.missingOnce
+        stateMismatch = outcome.stateMismatch
+        outcome.removed.forEach { recentlyArchived.insert($0) }
+        guard outcome.jobs != jobMap else { return }
+        if !outcome.added.isEmpty || !outcome.removed.isEmpty {
+            log.info("broker resync: +\(outcome.added.count, privacy: .public) -\(outcome.removed.count, privacy: .public)")
+        }
+        outcome.removed.forEach { motherPeeks.removeValue(forKey: $0) }
+        jobMap = outcome.jobs
         publishJobsAndStatus()
     }
 
