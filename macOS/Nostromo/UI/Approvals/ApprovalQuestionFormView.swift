@@ -239,6 +239,8 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
         let field = NSTextField()
         field.identifier = NSUserInterfaceItemIdentifier("q\(index)_other_field")
         field.placeholderString = "Other…"
+        // Longer text is not an answer (Submit stays off); the form never cuts what was typed.
+        field.toolTip = "At most \(ApprovalQuestions.maxOtherCharacters) characters"
         field.font = .systemFont(ofSize: 12)
         field.lineBreakMode = .byTruncatingTail
         field.usesSingleLineMode = true
@@ -270,6 +272,8 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
     private func choiceButton(multi: Bool, id: String, action: Selector) -> ApprovalChoiceButton {
         let button = ApprovalChoiceButton()
         button.setButtonType(multi ? .switch : .radio)
+        // Said outright: a titleless button would otherwise report an unknown role.
+        button.setAccessibilityRole(multi ? .checkBox : .radioButton)
         button.title = ""
         button.identifier = NSUserInterfaceItemIdentifier(id)
         button.target = self
@@ -317,11 +321,6 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
     func controlTextDidChange(_ notification: Notification) {
         guard isEnabled, let field = notification.object as? NSTextField,
               let q = sections.firstIndex(where: { $0.otherField === field }) else { return }
-        if field.stringValue.unicodeScalars.count > ApprovalQuestions.maxOtherCharacters {
-            var scalars = String.UnicodeScalarView()
-            scalars.append(contentsOf: field.stringValue.unicodeScalars.prefix(ApprovalQuestions.maxOtherCharacters))
-            field.stringValue = String(scalars)
-        }
         selections[q].setOtherText(field.stringValue, in: questions[q])
         syncControls()
         onChange?()
