@@ -343,6 +343,10 @@ final class MotherJobDetail: NSView {
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
+            // A fitting-size pass would otherwise take the label's full text width for the pane's.
+            titleLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
+            stateLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
+
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
             stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
