@@ -1086,6 +1086,14 @@ class AppStore: ObservableObject {
 
     // MARK: - IPC handling (nostromd session/activity events)
 
+    /// Test seam: feeds one daemon message through the same `handle` the live
+    /// IPC stream uses, without `start()` (which connects to the daemon and
+    /// starts the file watchers under the real home directory).
+    func applyForTesting(_ msg: ServerMsg) { handle(msg) }
+
+    /// Test seam: the same for a Mother broker event (the job list the Mother pane shows).
+    func applyBrokerEventForTesting(_ event: BrokerEvent) { applyBrokerEvent(event) }
+
     private func handle(_ msg: ServerMsg) {
         switch msg {
         case .welcome(let version, let pid):

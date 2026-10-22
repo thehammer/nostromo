@@ -1,7 +1,10 @@
 import AppKit
 import Combine
 import NostromoKit
+import os
 import SwiftUI
+
+private let layoutLog = Logger(subsystem: "com.hammer.nostromo", category: "layout")
 
 /// Root content view — vertical nav sidebar (left), content area (right of sidebar),
 /// pace bars (just above status bar), status bar (bottom of content area).
@@ -39,6 +42,79 @@ class MainLayout: NSView {
     private var cancellables = Set<AnyCancellable>()
     private var presentedSheet: CreateFocusSheet?  // retained for sheet lifetime
     private var presentedRenameSheet: RenameFocusSheet?
+
+    // MARK: - Content overflow (tripwire)
+
+    /// How far this layout's frame exceeds the content rect of the window it is the content
+    /// view of, in points (zero on an axis that fits, within `overflowTolerance`). Read by
+    /// `nostromo-app windows` as `contentOverflow`.
+    ///
+    /// A full-screen window's frame is fixed by the system, but Auto Layout lets any
+    /// constraint above the window's "stay put" priority (500) make the content view bigger
+    /// than it (2026-10-21: 2714 pt of content in a 1920 pt window, the right side and the
+    /// top cut off). This is how that shows up without a screenshot.
+    var contentOverflow: CGSize {
+        guard let window else { return .zero }
+        return Self.overflow(layoutSize: frame.size,
+                             contentSize: window.contentRect(forFrameRect: window.frame).size)
+    }
+
+    /// Slack for rounding and the half-point frames of scaled displays.
+    static let overflowTolerance: CGFloat = 2
+
+    /// The part of `layoutSize` beyond `contentSize`, per axis, ignoring anything within
+    /// `overflowTolerance`. Never negative.
+    static func overflow(layoutSize: CGSize, contentSize: CGSize) -> CGSize {
+        func excess(_ layout: CGFloat, _ content: CGFloat) -> CGFloat {
+            layout - content > overflowTolerance ? layout - content : 0
+        }
+        return CGSize(width: excess(layoutSize.width, contentSize.width),
+                      height: excess(layoutSize.height, contentSize.height))
+    }
+
+    /// At most one log line per window per minute.
+    private static let overflowLogInterval: TimeInterval = 60
+    private var lastOverflowLogAt: Date?
+
+    override func layout() {
+        super.layout()
+        reportOverflowIfNeeded()
+    }
+
+    /// Never crashes, never alters layout: it only reports. Content-free: the window index,
+    /// the two sizes, the focus kind (built-in id, or "custom") and the class of the widest
+    /// visible descendant, which names the view demanding the extra room.
+    private func reportOverflowIfNeeded(now: Date = Date()) {
+        let over = contentOverflow
+        guard over != .zero else { return }
+        if let last = lastOverflowLogAt, now.timeIntervalSince(last) < Self.overflowLogInterval { return }
+        lastOverflowLogAt = now
+        let content = window.map { $0.contentRect(forFrameRect: $0.frame).size } ?? .zero
+        let widest = widestVisibleDescendant().map { String(describing: type(of: $0)) } ?? "none"
+        let focusKind = activeFocus.isBuiltIn ? activeFocus.id : "custom"
+        layoutLog.info("""
+            content overflow window=\(self.windowIndex, privacy: .public) \
+            layout=\(Int(self.frame.width), privacy: .public)x\(Int(self.frame.height), privacy: .public) \
+            content=\(Int(content.width), privacy: .public)x\(Int(content.height), privacy: .public) \
+            focus=\(focusKind, privacy: .public) widest=\(widest, privacy: .public)
+            """)
+    }
+
+    /// The widest visible view below this one, ignoring scrolled document content (which
+    /// is meant to be wider than what shows).
+    private func widestVisibleDescendant() -> NSView? {
+        var widest: NSView?
+        func walk(_ view: NSView) {
+            for sub in view.subviews where !sub.isHidden {
+                if sub.enclosingScrollView == nil || sub is NSScrollView {
+                    if sub.frame.width > (widest?.frame.width ?? 0) { widest = sub }
+                    walk(sub)
+                }
+            }
+        }
+        walk(self)
+        return widest
+    }
 
     // MARK: - Init
 

@@ -187,7 +187,8 @@ final class AppControlServer {
 
     private func windowsInfo() -> [[String: Any]] {
         (appDelegate?.windows ?? []).enumerated().map { i, w in
-            ["index": i, "title": w.title,
+            let overflow = (w.contentView as? MainLayout)?.contentOverflow ?? .zero
+            return ["index": i, "title": w.title,
              "frame": ["x": w.frame.minX, "y": w.frame.minY, "w": w.frame.width, "h": w.frame.height],
              "fullscreen": w.styleMask.contains(.fullScreen),
              "key": w.isKeyWindow,
@@ -196,7 +197,10 @@ final class AppControlServer {
              "visible": w.occlusionState.contains(.visible),
              "windowNumber": w.windowNumber,
              "sheet": w.attachedSheet.map { $0.title.isEmpty ? String(describing: type(of: $0)) : $0.title } as Any,
-             "firstResponder": w.firstResponder.map { String(describing: type(of: $0)) } ?? "none"]
+             "firstResponder": w.firstResponder.map { String(describing: type(of: $0)) } ?? "none",
+             // How far the content view pokes past the window, in points; 0 on an axis that
+             // fits. A QA script asserts both are 0 (the 2026-10-21 overflow was 795 x 70).
+             "contentOverflow": ["w": overflow.width, "h": overflow.height]]
         }
     }
 

@@ -9,7 +9,7 @@ The socket is opt-in (it can click anything in the app). Enable it with
 window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
 
     nostromo-app [--socket PATH] ping       (--socket / $NOSTROMO_APP_CONTROL_SOCKET: an isolated QA instance)
-    nostromo-app windows
+    nostromo-app windows                  per window: frame, screen, ..., contentOverflow {w, h} (0, 0 when the content fits the window)
     nostromo-app layout-issues [-w N]     ambiguous / zero-sized Auto Layout views
     nostromo-app ax     [CLASS-SUBSTRING]   raw accessibility tree of a (SwiftUI hosting) view
     nostromo-app activate               make the app active + window key (TAKES keyboard focus; first clicks on a non-key window are otherwise ignored)

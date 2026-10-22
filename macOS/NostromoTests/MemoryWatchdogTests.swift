@@ -1,8 +1,9 @@
 import XCTest
 
 // MemoryWatchdog is compiled into this target directly (logic test — no host
-// app). Its one outside dependency, `TranscriptDiagnostics.physicalFootprint()`,
-// cannot be: see the note at the bottom of this file.
+// app), together with the real `TranscriptDiagnostics` (the layout-overflow tests
+// host the whole `MainLayout`, so the bundle now compiles the view layer). Every
+// test here injects `footprint`; none may read the test runner's own memory.
 
 /// Behavioural tests for `MemoryWatchdog.shed(reason:)`.
 ///
@@ -306,28 +307,6 @@ final class MemoryWatchdogTests: XCTestCase {
         XCTAssertEqual(reliefCount, 1)
         XCTAssertEqual(titles, ["Shed retained content"],
                        "a shed with nobody listening still reports what it measured")
-    }
-}
-
-// MARK: - Logic-target seam
-
-/// The logic test bundle cannot compile `TranscriptDiagnostics.swift`: its
-/// `snapshot()` reaches `TranscriptLoadHarness.shared`, which reaches
-/// `AppStore.shared` and the entire view layer behind it — the same reason
-/// `LoadHarnessTargeting` exists as a separate, dependency-free file. But
-/// `MemoryWatchdog`'s default `footprint` seam names
-/// `TranscriptDiagnostics.physicalFootprint()`, so the bundle needs that symbol
-/// to link. This supplies it, and nothing else.
-///
-/// It traps rather than returning a number. Every test above injects `footprint`,
-/// and a watchdog test that forgot to must fail loudly here rather than quietly
-/// grading the test runner's own resident memory — a shed measured against a real
-/// process that nothing in the test freed would report before == after and pass
-/// or fail for reasons unrelated to the code under test.
-enum TranscriptDiagnostics {
-    static func physicalFootprint() -> Int {
-        preconditionFailure(
-            "the logic test bundle has no real footprint source — inject MemoryWatchdog.footprint")
     }
 }
 

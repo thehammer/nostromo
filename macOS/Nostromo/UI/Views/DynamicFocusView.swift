@@ -1261,6 +1261,15 @@ final class PaneContentNSView: NSView {
         layer?.backgroundColor = NSColor.black.cgColor
 
         let hosting = NSHostingView(rootView: PaneContentHost(model: model))
+        // The pane is sized by the split that holds it, never by its content. With SwiftUI's
+        // default sizing options the hosting view turns the content's ideal size (a text pane's
+        // longest line, a 200-line list's height) and minimum size into Auto Layout demands
+        // above the window's "stay put" priority (500). A full-screen window cannot grow, so
+        // the whole content view grew past it instead (measured 2026-10-21: 2714 pt of content
+        // in a 1920 pt window, the right side and the top cut off). `[]` removes every
+        // SwiftUI-derived min/ideal/max constraint; the four edge pins below size it, and the
+        // content scrolls inside its own ScrollView as it always did.
+        hosting.sizingOptions = []
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hosting.appearance = NSAppearance(named: .darkAqua)
         addSubview(hosting)
