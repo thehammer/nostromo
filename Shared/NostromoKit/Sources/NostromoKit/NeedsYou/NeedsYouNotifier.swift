@@ -146,12 +146,11 @@ public final class NeedsYouNotifier {
     private var current = NeedsYouSnapshot.empty
     /// Ids posted and not yet resolved.
     private var posted = Set<String>()
-    /// The first snapshot with anything notifiable is the baseline: those items were already
-    /// waiting at launch (or when the operator granted permission), so they count as seen
-    /// and never alert. Only items that arrive afterwards do. A delivered notification from a
-    /// previous run is cleared when its item resolves, because the baseline sits in `posted`.
-    /// Limit: an item that is the first one ever seen after launch is baselined too.
-    private var baselined = false
+    /// A producer's first snapshot after launch is its baseline (see `apply(_:baselining:)`),
+    /// even when empty. A permission grant re-baselines whatever is waiting then. Baselined
+    /// items count as seen and never alert; they sit in `posted`, so a delivered notification
+    /// from a previous run is cleared when its item resolves.
+    private var baselinedProducers = Set<String>()
     private let baselineExisting: Bool
     private var authorizationInFlight = false
 
@@ -180,8 +179,19 @@ public final class NeedsYouNotifier {
         }
     }
 
-    public func apply(_ snapshot: NeedsYouSnapshot) {
+    /// True once `producer`'s baseline has been taken.
+    public func hasBaselined(_ producer: String) -> Bool { baselinedProducers.contains(producer) }
+
+    /// `baselining`: this is `producer`'s first real snapshot after launch. With
+    /// `baselineExisting`, everything of that producer's already in it counts as seen, so only
+    /// items arriving afterwards alert. An empty first snapshot still takes the baseline: the
+    /// first real arrival after it alerts. Ignored once the producer has a baseline.
+    public func apply(_ snapshot: NeedsYouSnapshot, baselining producer: String? = nil) {
         current = snapshot
+        if baselineExisting, let producer, !baselinedProducers.contains(producer) {
+            baselinedProducers.insert(producer)
+            seed(producer: producer)
+        }
         reconcile()
     }
 
@@ -195,15 +205,6 @@ public final class NeedsYouNotifier {
             center.removeDelivered(ids: ids)
             center.removePending(ids: ids)
             posted.subtract(resolved)
-        }
-
-        if baselineExisting, !baselined {
-            let notifiable = current.items.filter { builders[$0.producer] != nil }
-            if !notifiable.isEmpty {
-                posted.formUnion(notifiable.map(\.id))
-                baselined = true
-                return
-            }
         }
 
         let waiting = current.items.filter { !posted.contains($0.id) && builders[$0.producer] != nil }
@@ -227,20 +228,36 @@ public final class NeedsYouNotifier {
             guard let self else { return }
             guard status == .notDetermined else {
                 self.authorizationInFlight = false
-                self.setAuthorization(status)
+                self.setAuthorization(status, fromOwnPrompt: true)
                 return
             }
             self.center.requestAuthorization { [weak self] granted in
                 guard let self else { return }
                 self.authorizationInFlight = false
-                self.setAuthorization(granted ? .authorized : .denied)
+                self.setAuthorization(granted ? .authorized : .denied, fromOwnPrompt: true)
             }
         }
     }
 
-    private func setAuthorization(_ status: NeedsYouAuthorization) {
+    /// Mark what `producer` has waiting right now as seen.
+    private func seed(producer: String? = nil) {
+        for item in current.items where builders[item.producer] != nil && (producer == nil || item.producer == producer) {
+            posted.insert(item.id)
+        }
+    }
+
+    /// `fromOwnPrompt`: the answer to the request this notifier made for an item that arrived
+    /// after the baseline; that item still alerts. Any other move to authorized from a known
+    /// denied or undecided state is a grant the operator made elsewhere: what is waiting then is
+    /// the baseline, not a burst.
+    private func setAuthorization(_ status: NeedsYouAuthorization, fromOwnPrompt: Bool = false) {
         let wasAvailable = isSurfaceAvailable
+        let previous = authorization
         authorization = status
+        if baselineExisting, status == .authorized, !fromOwnPrompt,
+           previous == .denied || previous == .notDetermined {
+            seed()
+        }
         if isSurfaceAvailable != wasAvailable { onSurfaceAvailabilityChange?(isSurfaceAvailable) }
         if status == .authorized { reconcile() }
     }

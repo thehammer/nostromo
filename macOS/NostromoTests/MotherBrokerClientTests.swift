@@ -3554,3 +3554,127 @@ final class MC4NeedsYouRoutingTests: XCTestCase {
         XCTAssertEqual(opened, 0)
     }
 }
+
+// MARK: - MC4: relaunch baseline and the reconnect guard
+
+final class MC4ResnapshotGuardTests: XCTestCase {
+    private let t0 = Date(timeIntervalSince1970: 1_000)
+
+    func testHoldingStartsAtDisconnectAndASnapshotClearsIt() {
+        var guardState = MotherResnapshotGuard()
+        XCTAssertFalse(guardState.isHolding)
+        guardState.disconnected(now: t0)
+        XCTAssertTrue(guardState.isHolding)
+        guardState.snapshotReceived()
+        XCTAssertFalse(guardState.isHolding)
+    }
+
+    func testAPollAtOrUnderSixtySecondsDoesNotRelease() {
+        var guardState = MotherResnapshotGuard()
+        guardState.disconnected(now: t0)
+        XCTAssertFalse(guardState.pollSucceeded(now: t0.addingTimeInterval(30)))
+        XCTAssertFalse(guardState.pollSucceeded(now: t0.addingTimeInterval(60)))
+        XCTAssertTrue(guardState.isHolding)
+    }
+
+    func testAPollOverSixtySecondsReleasesAndReturnsTrueOnce() {
+        var guardState = MotherResnapshotGuard()
+        guardState.disconnected(now: t0)
+        XCTAssertTrue(guardState.pollSucceeded(now: t0.addingTimeInterval(61)))
+        XCTAssertFalse(guardState.isHolding)
+        XCTAssertFalse(guardState.pollSucceeded(now: t0.addingTimeInterval(90)))
+    }
+
+    func testASecondDisconnectDoesNotRestartTheClock() {
+        var guardState = MotherResnapshotGuard()
+        guardState.disconnected(now: t0)
+        guardState.disconnected(now: t0.addingTimeInterval(50))
+        XCTAssertTrue(guardState.pollSucceeded(now: t0.addingTimeInterval(61)))
+    }
+
+    func testPollWithoutAHoldIsANoOp() {
+        var guardState = MotherResnapshotGuard()
+        XCTAssertFalse(guardState.pollSucceeded(now: t0.addingTimeInterval(500)))
+    }
+}
+
+final class MC4RelaunchBaselineTests: XCTestCase {
+
+    func testLaunchWithThreeWaitingAlertsNothingAndTheBadgeStillShowsThree() {
+        let center = MC4FakeCenter()
+        var badges: [String?] = []
+        let coordinator = mc4Coordinator(center: center, badges: { badges.append($0) })
+
+        coordinator.setMotherJobs([mc4AwaitingJob("j1"), mc4AwaitingJob("j2"), mc4AwaitingJob("j3")])
+
+        XCTAssertTrue(center.added.isEmpty)
+        XCTAssertEqual(badges.last ?? nil, "3")
+    }
+
+    func testLaunchEmptyThenOneArrivalAlertsExactlyOnce() {
+        let center = MC4FakeCenter()
+        let coordinator = mc4Coordinator(center: center)
+
+        coordinator.setMotherJobs([])
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+
+        XCTAssertEqual(center.addedIds, ["mother:j1:await"])
+    }
+
+    func testTheEmptyMapBeforeTheBrokerSnapshotIsNotTheBaseline() {
+        let center = MC4FakeCenter()
+        let coordinator = mc4Coordinator(center: center)
+
+        coordinator.setMotherJobs([], fromSnapshot: false)
+        coordinator.setMotherJobs([mc4AwaitingJob("j1"), mc4AwaitingJob("j2")], fromSnapshot: true)
+
+        XCTAssertTrue(center.added.isEmpty)
+    }
+
+    /// Reconnect: AppStore holds `setMotherJobs` while the guard is holding, then the new
+    /// snapshot carries the same items.
+    func testReconnectHoldsTheItemsThenTheSameSnapshotPostsAndRemovesNothing() {
+        let center = MC4FakeCenter()
+        let coordinator = mc4Coordinator(center: center)
+        var guardState = MotherResnapshotGuard()
+        let items = [mc4AwaitingJob("j1"), mc4AwaitingJob("j2")]
+
+        coordinator.setMotherJobs([])
+        coordinator.setMotherJobs(items)
+        XCTAssertEqual(center.addedIds.sorted(), ["mother:j1:await", "mother:j2:await"])
+        let postedBefore = center.added.count
+
+        // Disconnect: the job map empties but the guard holds, so the coordinator is not told.
+        guardState.disconnected(now: Date())
+        if !guardState.isHolding { coordinator.setMotherJobs([]) }
+        XCTAssertEqual(coordinator.snapshot.total, 2)
+
+        // Reconnect: the snapshot clears the hold and republishes the same items.
+        guardState.snapshotReceived()
+        if !guardState.isHolding { coordinator.setMotherJobs(items) }
+
+        XCTAssertEqual(center.added.count, postedBefore)
+        XCTAssertTrue(center.removedDelivered.isEmpty)
+        XCTAssertTrue(center.removedPending.isEmpty)
+    }
+
+    func testABrokerThatNeverReturnsStopsHoldingAndTheStaleItemsResolve() {
+        let center = MC4FakeCenter()
+        let coordinator = mc4Coordinator(center: center)
+        var guardState = MotherResnapshotGuard()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+
+        coordinator.setMotherJobs([])
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+        guardState.disconnected(now: t0)
+
+        XCTAssertFalse(guardState.pollSucceeded(now: t0.addingTimeInterval(30)))
+        XCTAssertEqual(coordinator.snapshot.total, 1)
+        XCTAssertTrue(guardState.pollSucceeded(now: t0.addingTimeInterval(61)))
+        coordinator.setMotherJobs([])   // AppStore republishes the emptied map
+
+        XCTAssertEqual(coordinator.snapshot.total, 0)
+        XCTAssertEqual(center.removedDelivered, ["mother:j1:await"])
+    }
+}

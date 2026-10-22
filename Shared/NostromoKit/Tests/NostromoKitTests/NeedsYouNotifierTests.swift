@@ -300,34 +300,97 @@ final class NeedsYouNotifierTests: XCTestCase {
 
     // MARK: - Authorization
 
-    func testBaselineModeSilencesItemsAlreadyWaitingAndAlertsOnlyNewArrivals() {
-        let center = FakeNotificationCenter(status: .authorized)
-        let notifier = NeedsYouNotifier(center: center, builders: ["mother": jobTitles([:])], baselineExisting: true)
-        let three = [awaitingItem("j1"), awaitingItem("j2"), awaitingItem("j3")]
-
-        notifier.apply(snapshot(three))
-        XCTAssertTrue(center.added.isEmpty)
-
-        notifier.apply(snapshot(three + [awaitingItem("j4")]))
-        XCTAssertEqual(center.added.map(\.identifier), [awaitingItem("j4").id])
-
-        // A baselined item is cleared when it resolves, and alerts again if it re-awaits.
-        notifier.apply(snapshot([awaitingItem("j4")]))
-        XCTAssertEqual(center.allRemovedDeliveredIds.sorted(), [awaitingItem("j1").id, awaitingItem("j2").id, awaitingItem("j3").id].sorted())
-        notifier.apply(snapshot([awaitingItem("j4"), awaitingItem("j1")]))
-        XCTAssertEqual(center.added.count, 2)
+    private func baselineNotifier(_ center: FakeNotificationCenter) -> NeedsYouNotifier {
+        NeedsYouNotifier(center: center, builders: ["mother": jobTitles([:])], baselineExisting: true)
     }
 
-    func testBaselineModeGrantingPermissionPostsNothingForTheBaseline() {
-        let center = FakeNotificationCenter(status: .notDetermined)
-        let notifier = NeedsYouNotifier(center: center, builders: ["mother": jobTitles([:])], baselineExisting: true)
+    private func job(_ ids: String...) -> [NeedsYouItem] { ids.map { awaitingItem($0) } }
 
-        notifier.apply(snapshot([awaitingItem("j1"), awaitingItem("j2"), awaitingItem("j3")]))
+    func testLaunchWithThreeWaitingPostsNothingAndAFourthPostsExactlyOne() {
+        let center = FakeNotificationCenter(status: .authorized)
+        let notifier = baselineNotifier(center)
+
+        notifier.apply(snapshot(job("j1", "j2", "j3")), baselining: "mother")
+        XCTAssertTrue(center.added.isEmpty)
+
+        notifier.apply(snapshot(job("j1", "j2", "j3", "j4")))
+        XCTAssertEqual(center.addedIds, [awaitingItem("j4").id])
+    }
+
+    func testLaunchEmptyThenOneArrivalPostsExactlyOnce() {
+        let center = FakeNotificationCenter(status: .authorized)
+        let notifier = baselineNotifier(center)
+
+        notifier.apply(snapshot([]), baselining: "mother")
+        XCTAssertTrue(notifier.hasBaselined("mother"))
+        notifier.apply(snapshot(job("j1")))
+        notifier.apply(snapshot(job("j1")))
+
+        XCTAssertEqual(center.addedIds, [awaitingItem("j1").id])
+    }
+
+    func testBaselinedItemsClearOnResolveAndAlertAgainWhenTheyReawait() {
+        let center = FakeNotificationCenter(status: .authorized)
+        let notifier = baselineNotifier(center)
+
+        notifier.apply(snapshot(job("j1", "j2")), baselining: "mother")
+        notifier.apply(snapshot(job("j2")))
+        XCTAssertEqual(center.allRemovedDeliveredIds, [awaitingItem("j1").id])
+        notifier.apply(snapshot(job("j1", "j2")))
+        XCTAssertEqual(center.addedIds, [awaitingItem("j1").id])
+    }
+
+    func testSecondBaseliningCallIsIgnored() {
+        let center = FakeNotificationCenter(status: .authorized)
+        let notifier = baselineNotifier(center)
+
+        notifier.apply(snapshot([]), baselining: "mother")
+        notifier.apply(snapshot(job("j1")), baselining: "mother")
+
+        XCTAssertEqual(center.addedIds, [awaitingItem("j1").id])
+    }
+
+    func testFirstSnapshotWhilePermissionIsUndecidedIsBaselinedAndNeverPrompts() {
+        let center = FakeNotificationCenter(status: .notDetermined)
+        let notifier = baselineNotifier(center)
+
+        notifier.apply(snapshot(job("j1", "j2", "j3")), baselining: "mother")
+        XCTAssertEqual(center.authorizationRequests, 0)
+
         center.status = .authorized
         notifier.refreshAuthorization()
         center.drain()
-
         XCTAssertTrue(center.added.isEmpty)
+
+        notifier.apply(snapshot(job("j1", "j2", "j3", "j4")))
+        XCTAssertEqual(center.addedIds, [awaitingItem("j4").id])
+    }
+
+    func testGrantFromDeniedBaselinesWhatIsWaitingThenAFourthPostsOne() {
+        let center = FakeNotificationCenter(status: .denied)
+        let notifier = baselineNotifier(center)
+        notifier.refreshAuthorization()
+        notifier.apply(snapshot([]), baselining: "mother")
+        notifier.apply(snapshot(job("j1", "j2", "j3")))
+        XCTAssertTrue(center.added.isEmpty)
+
+        center.status = .authorized
+        notifier.refreshAuthorization()
+        XCTAssertTrue(center.added.isEmpty)
+
+        notifier.apply(snapshot(job("j1", "j2", "j3", "j4")))
+        XCTAssertEqual(center.addedIds, [awaitingItem("j4").id])
+    }
+
+    func testAnArrivalThatTriggersOurOwnPromptStillAlertsWhenGranted() {
+        let center = FakeNotificationCenter(status: .notDetermined, grantResult: true)
+        let notifier = baselineNotifier(center)
+        notifier.apply(snapshot([]), baselining: "mother")
+
+        notifier.apply(snapshot(job("j1")))
+
+        XCTAssertEqual(center.authorizationRequests, 1)
+        XCTAssertEqual(center.addedIds, [awaitingItem("j1").id])
     }
 
     func testAuthorizationIsNotRequestedAtInitOrForAnEmptySnapshot() {

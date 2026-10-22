@@ -121,6 +121,9 @@ class AppStore: ObservableObject {
     /// truth, so Mother's "needs you" items stay as they were (no resolve-then-repost).
     /// If the broker never comes back, the 30 s poll lets go of it (see `MotherResnapshotGuard`).
     private var resnapshotGuard = MotherResnapshotGuard()
+    /// The broker has delivered a snapshot this launch: only then is the job map real, and
+    /// Mother's "needs you" baseline can be taken.
+    private var motherSnapshotSeen = false
     private var awaitingMotherResnapshot: Bool { resnapshotGuard.isHolding }
     /// Owns the aggregator, the Dock badge and the notifier. AP3 registers approvals here:
     /// `needsYouCoordinator.setProducer("approvals", items: ...)`, with a content builder for
@@ -679,6 +682,7 @@ class AppStore: ObservableObject {
             }
 
         case .snapshot(let jobs):
+            motherSnapshotSeen = true
             resnapshotGuard.snapshotReceived()
             jobMap = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
             missingOnce.removeAll()
@@ -853,7 +857,7 @@ class AppStore: ObservableObject {
         }
         if jobs != motherJobs { motherJobs = jobs }
         if status != motherStatus { motherStatus = status }
-        if !awaitingMotherResnapshot { needsYouCoordinator.setMotherJobs(jobs) }
+        if !awaitingMotherResnapshot { needsYouCoordinator.setMotherJobs(jobs, fromSnapshot: motherSnapshotSeen) }
         if storesChanged { motherDecisionChanges.send() }
     }
 
@@ -1747,8 +1751,11 @@ final class NeedsYouCoordinator {
             baselineExisting: true)
     }
 
-    func setMotherJobs(_ jobs: [MotherJob]) {
-        setProducer(MotherNeedsYouProducer.name, items: MotherNeedsYouProducer.items(from: jobs))
+    /// `fromSnapshot`: `jobs` came from the broker's snapshot (not the empty map before it
+    /// arrives). The first such call is Mother's baseline, even when empty.
+    func setMotherJobs(_ jobs: [MotherJob], fromSnapshot: Bool = true) {
+        setProducer(MotherNeedsYouProducer.name, items: MotherNeedsYouProducer.items(from: jobs),
+                    baseline: fromSnapshot)
     }
 
     func setAttentionTags(_ tags: Set<String>) {
@@ -1756,16 +1763,17 @@ final class NeedsYouCoordinator {
     }
 
     /// Replace everything `producer` raised. AP3 registers `"approvals"` through this.
-    func setProducer(_ producer: String, items: [NeedsYouItem]) {
+    func setProducer(_ producer: String, items: [NeedsYouItem], baseline: Bool = false) {
         let updated = aggregator.set(producer: producer, items: items)
-        guard updated != snapshot else { return }
+        let takesBaseline = baseline && !notifier.hasBaselined(producer)
+        guard updated != snapshot || takesBaseline else { return }
         snapshot = updated
         let label = updated.total > 0 ? "\(updated.total)" : nil
         if label != lastBadge {
             lastBadge = label
             dockBadge(label)
         }
-        notifier.apply(updated)
+        notifier.apply(updated, baselining: takesBaseline ? producer : nil)
         onChange?(updated)
     }
 
