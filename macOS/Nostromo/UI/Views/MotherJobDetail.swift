@@ -83,11 +83,31 @@ final class GuidanceTextView: NSTextView {
 ///
 /// Hidden (zero height) when the job has no phase data — non-pipeline and
 /// pre-Wedge-C jobs are unaffected.
+/// A wrapping label for text that comes from data. Its intrinsic width is capped, so a long
+/// line can never set the fitting width of the pane (a plain single-line label reports the
+/// text's full width), and it wraps at the width it is actually given.
+final class BoundedLabel: NSTextField {
+    /// Widest the label asks for by itself; the container may give it more.
+    static let intrinsicWidthCap: CGFloat = 200
+
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        if size.width > Self.intrinsicWidthCap { size.width = Self.intrinsicWidthCap }
+        return size
+    }
+
+    override func layout() {
+        super.layout()
+        if preferredMaxLayoutWidth != bounds.width {
+            preferredMaxLayoutWidth = bounds.width
+            invalidateIntrinsicContentSize()
+        }
+    }
+}
+
 extension NSTextField {
-    /// A label whose text comes from data: it wraps (or truncates) instead of reporting the
-    /// text's full single-line width, and yields horizontally so it can never widen its pane.
     static func boundedLabel(_ text: String, maxLines: Int = 3, truncating: Bool = false) -> NSTextField {
-        let f = NSTextField(wrappingLabelWithString: text)
+        let f = BoundedLabel(wrappingLabelWithString: text)
         f.maximumNumberOfLines = maxLines
         f.lineBreakMode = truncating ? .byTruncatingTail : .byWordWrapping
         f.isSelectable = false
@@ -713,7 +733,7 @@ final class MotherJobDetail: NSView {
         for todo in todos {
             let row = todoRow(todo)
             todoStack.addArrangedSubview(row)
-            row.widthAnchor.constraint(lessThanOrEqualTo: todoStack.widthAnchor).isActive = true
+            row.widthAnchor.constraint(equalTo: todoStack.widthAnchor).isActive = true
         }
 
         // Let Auto Layout size the stack by its content.
@@ -879,6 +899,10 @@ final class MotherJobDetail: NSView {
             replyScrollView.heightAnchor.constraint(equalToConstant: 60).isActive = true
             replyScrollView.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
             replyScrollView.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+        }
+        // Data-driven lines (the action error, the "Sent" line) fill the stack and wrap in it.
+        for case let label as BoundedLabel in widgets {
+            label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         // Consequence lines wrap at the stack's width instead of growing past it.
         for view in widthBoundViews {
@@ -1488,7 +1512,7 @@ private class PlanChecklistView: NSView {
         for item in items {
             let row = checklistRow(item)
             stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor).isActive = true
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         heightConstraint.isActive = false
         onItemsChanged?(true)
