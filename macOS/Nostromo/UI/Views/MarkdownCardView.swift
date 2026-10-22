@@ -14,11 +14,30 @@ import NostromoKit
 /// inline spans, and the fence lines themselves never reach the attributed string.
 enum MarkdownRenderer {
 
+    /// A non-empty fenced code block: where its code sits in the rendered text, and
+    /// the code exactly as written (no fences, no language tag, no added newline).
+    struct CodeBlock: Equatable {
+        let range: NSRange
+        let code: String
+    }
+
+    struct Rendered {
+        let text: NSAttributedString
+        /// One entry per non-empty fenced block, in order. Empty blocks have nothing to copy.
+        let codeBlocks: [CodeBlock]
+    }
+
     /// `textColor`: every run's text colour, code included (code keeps its block background).
     /// `Theme.fg` is the conversation; a folded message in an activity lane passes
     /// `Theme.foldedProse`. Colour never changes the height, so measuring ignores it.
     static func render(_ markdown: String, baseFont: NSFont, textColor: NSColor = Theme.fg) -> NSAttributedString {
+        renderBlocks(markdown, baseFont: baseFont, textColor: textColor).text
+    }
+
+    /// `render`, plus the code blocks' ranges and raw code (what the copy button needs).
+    static func renderBlocks(_ markdown: String, baseFont: NSFont, textColor: NSColor = Theme.fg) -> Rendered {
         let result = NSMutableAttributedString()
+        var codeBlocks: [CodeBlock] = []
         // Token colours of the code blocks, applied after the tone in `finish`.
         var tokenRuns: [(range: NSRange, kind: SyntaxTokenKind)] = []
         // Attributes of the code block just appended: the "\n" that ends its last
@@ -48,6 +67,10 @@ enum MarkdownRenderer {
             let start = result.length
             result.append(part)
             if case .code(let block) = segment {
+                if part.length > 0 {
+                    codeBlocks.append(CodeBlock(range: NSRange(location: start, length: part.length),
+                                                code: block.code))
+                }
                 for token in SyntaxHighlighter.tokens(in: block.code, language: block.language) {
                     tokenRuns.append((NSRange(location: start + token.utf16Range.lowerBound,
                                               length: token.utf16Range.count), token.kind))
@@ -65,7 +88,7 @@ enum MarkdownRenderer {
             result.append(NSAttributedString(string: " ", attributes: previousCode))
         }
         finish(result, textColor: textColor, tokenRuns: tokenRuns)
-        return result
+        return Rendered(text: result, codeBlocks: codeBlocks)
     }
 
     // MARK: - Private helpers
@@ -354,16 +377,31 @@ final class MarkdownCardView: NSView {
     /// Width the current `intrinsicContentSize` was computed for.
     private var measuredWidth: CGFloat = -1
 
-    /// `textColor`: see `MarkdownRenderer.render`.
-    init(markdown: String, textColor: NSColor = Theme.fg) {
+    // Copy buttons (see "Code copy buttons" below).
+    private let pasteboard: NSPasteboard
+    private let codeBlocks: [MarkdownRenderer.CodeBlock]
+    /// Each block's box in card coordinates, or nil when it must be recomputed.
+    private var blockRects: [NSRect]?
+    private var activeButtons: [Int: CodeCopyButton] = [:]
+    private var spareButtons: [CodeCopyButton] = []
+    private var clipObserver: NSObjectProtocol?
+
+    /// `textColor`: see `MarkdownRenderer.render`. `pasteboard` is where the code
+    /// blocks' copy buttons write; tests inject their own.
+    init(markdown: String, textColor: NSColor = Theme.fg, pasteboard: NSPasteboard = .general) {
         self.markdown = markdown
+        self.pasteboard = pasteboard
+        let rendered = MarkdownRenderer.renderBlocks(markdown, baseFont: NSFont.systemFont(ofSize: 13),
+                                                     textColor: textColor)
+        self.codeBlocks = rendered.codeBlocks
         super.init(frame: .zero)
         setupLayer()
         setupTextView()
-        let baseFont = NSFont.systemFont(ofSize: 13)
-        textView.textStorage?.setAttributedString(
-            MarkdownRenderer.render(markdown, baseFont: baseFont, textColor: textColor)
-        )
+        textView.textStorage?.setAttributedString(rendered.text)
+    }
+
+    deinit {
+        if let clipObserver { NotificationCenter.default.removeObserver(clipObserver) }
     }
 
     // MARK: - Measurement
@@ -493,6 +531,9 @@ final class MarkdownCardView: NSView {
             measuredWidth = bounds.width
             invalidateIntrinsicContentSize()
         }
+
+        blockRects = nil
+        updateCopyButtons()
     }
 
     // MARK: - Window attachment
@@ -515,6 +556,12 @@ final class MarkdownCardView: NSView {
     /// it unpainted.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        observeEnclosingClipView()
+        // After the forced layout below, whichever way this returns.
+        defer {
+            blockRects = nil
+            updateCopyButtons()
+        }
         guard window != nil,
               let layoutManager = textView.layoutManager,
               let textContainer = textView.textContainer,
@@ -525,6 +572,109 @@ final class MarkdownCardView: NSView {
         layoutManager.ensureLayout(for: textContainer)
         textView.needsDisplay = true
         needsDisplay = true
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        observeEnclosingClipView()
+    }
+
+    // MARK: - Code copy buttons
+
+    /// Live copy buttons, top to bottom. Exists for tests.
+    var codeCopyButtons: [CodeCopyButton] {
+        activeButtons.values.sorted { $0.frame.maxY > $1.frame.maxY }
+    }
+
+    /// Buttons are overlays: frame-positioned subviews that never take part in
+    /// measuring or in the text layout. They exist only while the card is in a
+    /// window and only for blocks near the visible region, taken from a pool, so a
+    /// message with hundreds of blocks in an 18k-tall transcript holds a handful.
+    private func updateCopyButtons() {
+        guard window != nil, !codeBlocks.isEmpty else {
+            releaseCopyButtons(where: { _ in true })
+            return
+        }
+        let region = activeRegion
+        guard !region.isEmpty else {
+            releaseCopyButtons(where: { _ in true })
+            return
+        }
+        let rects = blockRects ?? computeBlockRects()
+        blockRects = rects
+
+        let wanted = rects.indices.filter { rects[$0].intersects(region) }
+        let wantedSet = Set(wanted)
+        releaseCopyButtons(where: { !wantedSet.contains($0) })
+
+        for index in wanted {
+            let button = activeButtons[index] ?? dequeueButton()
+            if activeButtons[index] == nil {
+                button.configure(code: codeBlocks[index].code)
+                activeButtons[index] = button
+                addSubview(button)
+            }
+            let frame = CodeCopyButton.frame(inBlock: rects[index])
+            if button.frame != frame { button.frame = frame }
+        }
+    }
+
+    /// The part of the card worth giving buttons: what the enclosing scroll view
+    /// shows, plus a margin so a button is already there when it scrolls in.
+    private var activeRegion: NSRect {
+        let margin: CGFloat = 200
+        guard let clip = enclosingScrollView?.contentView else { return bounds }
+        return convert(clip.bounds, from: clip).insetBy(dx: 0, dy: -margin).intersection(bounds)
+    }
+
+    private func releaseCopyButtons(where shouldRelease: (Int) -> Bool) {
+        for index in activeButtons.keys.filter(shouldRelease) {
+            guard let button = activeButtons.removeValue(forKey: index) else { continue }
+            button.removeFromSuperview()
+            button.reset()
+            spareButtons.append(button)
+        }
+    }
+
+    private func dequeueButton() -> CodeCopyButton {
+        spareButtons.popLast() ?? CodeCopyButton(pasteboard: pasteboard)
+    }
+
+    /// Each code block's box (padding included, margin excluded), in card
+    /// coordinates, spanning the text container's width.
+    private func computeBlockRects() -> [NSRect] {
+        guard let layoutManager = textView.layoutManager,
+              let container = textView.textContainer,
+              let storage = textView.textStorage
+        else { return [] }
+        let origin = textView.textContainerOrigin
+        let width = container.size.width
+
+        return codeBlocks.map { block in
+            let glyphs = layoutManager.glyphRange(forCharacterRange: block.range, actualCharacterRange: nil)
+            let textBlock = (storage.attribute(.paragraphStyle, at: block.range.location, effectiveRange: nil)
+                as? NSParagraphStyle)?.textBlocks.first
+            var rect = textBlock.map { layoutManager.boundsRect(for: $0, glyphRange: glyphs) } ?? .zero
+            if rect.isEmpty || rect.isInfinite {
+                rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: container).insetBy(dx: -8, dy: -8)
+            }
+            // The block spans the container's full width (content width 100 %).
+            rect = NSRect(x: 0, y: rect.minY, width: width, height: rect.height)
+                .offsetBy(dx: origin.x, dy: origin.y)
+            return convert(rect, from: textView)
+        }
+    }
+
+    /// Scrolling moves the card inside its clip view without laying it out, so the
+    /// clip view's bounds are what say which blocks are in view.
+    private func observeEnclosingClipView() {
+        if let clipObserver { NotificationCenter.default.removeObserver(clipObserver) }
+        clipObserver = nil
+        guard window != nil, let clip = enclosingScrollView?.contentView else { return }
+        clip.postsBoundsChangedNotifications = true
+        clipObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clip, queue: nil
+        ) { [weak self] _ in self?.updateCopyButtons() }
     }
 
     // MARK: - Appearance
@@ -546,5 +696,127 @@ final class MarkdownCardView: NSView {
     private func updateLayerColors() {
         layer?.backgroundColor = Theme.bgBar.cgColor
         layer?.borderColor     = Theme.borderInactive.withAlphaComponent(0.6).cgColor
+    }
+}
+
+// MARK: - CodeCopyButton
+
+/// The copy icon at a fenced code block's top-right corner. Muted at rest, bright
+/// on hover, and `checkmark` for a moment after a copy. It never takes first
+/// responder, so clicking it leaves the transcript's text selection and focus alone.
+final class CodeCopyButton: NSButton {
+
+    static let side: CGFloat = 18
+    static let inset: CGFloat = 6
+    static let restingAlpha: CGFloat = 0.5
+    static let copyLabel = "Copy code"
+    static let copiedLabel = "Copied"
+
+    /// Where the button sits for a code block whose box is `blockRect`: its top-right
+    /// corner inset by `inset`, kept inside the box.
+    static func frame(inBlock blockRect: NSRect) -> NSRect {
+        let x = max(blockRect.maxX - inset - side, blockRect.minX)
+        let y = max(blockRect.maxY - inset - side, blockRect.minY)
+        return NSRect(x: x, y: y, width: side, height: side)
+    }
+
+    private(set) var code = ""
+    private(set) var isShowingCopied = false
+    /// SF Symbol currently shown: `doc.on.doc`, or `checkmark` after a copy.
+    private(set) var symbolName = "doc.on.doc"
+    /// How long `checkmark` stays after a copy.
+    var feedbackDuration: TimeInterval = 1.2
+
+    private let pasteboard: NSPasteboard
+    private var resetWork: DispatchWorkItem?
+    private var hoverArea: NSTrackingArea?
+
+    init(pasteboard: NSPasteboard) {
+        self.pasteboard = pasteboard
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
+        isBordered = false
+        imagePosition = .imageOnly
+        imageScaling = .scaleNone
+        focusRingType = .none
+        refusesFirstResponder = true
+        contentTintColor = Theme.fgMuted
+        target = self
+        action = #selector(clicked)
+        setAccessibilityRole(.button)
+        reset()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func becomeFirstResponder() -> Bool { false }
+
+    /// A click on a transcript in a background window copies straight away.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Points the button at another block (it comes from a pool).
+    func configure(code: String) {
+        self.code = code
+        reset()
+    }
+
+    /// Back to the resting look: copy icon, dim, no pending feedback reset.
+    func reset() {
+        resetWork?.cancel()
+        resetWork = nil
+        isShowingCopied = false
+        show(symbol: "doc.on.doc", tip: Self.copyLabel)
+        setHovered(false)
+    }
+
+    func setHovered(_ hovered: Bool) {
+        alphaValue = hovered ? 1 : Self.restingAlpha
+    }
+
+    /// What a click does: put `code` on the pasteboard as a string, show the check.
+    func copyCode() {
+        pasteboard.clearContents()
+        pasteboard.setString(code, forType: .string)
+
+        isShowingCopied = true
+        show(symbol: "checkmark", tip: Self.copiedLabel)
+        resetWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isShowingCopied = false
+            self.resetWork = nil
+            self.show(symbol: "doc.on.doc", tip: Self.copyLabel)
+        }
+        resetWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + feedbackDuration, execute: work)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    override func accessibilityLabel() -> String? { Self.copyLabel }
+
+    override func accessibilityPerformPress() -> Bool {
+        copyCode()
+        return true
+    }
+
+    @objc private func clicked() { copyCode() }
+
+    private func show(symbol: String, tip: String) {
+        symbolName = symbol
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: Self.copyLabel)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 14, weight: .regular))
+        toolTip = tip
     }
 }
