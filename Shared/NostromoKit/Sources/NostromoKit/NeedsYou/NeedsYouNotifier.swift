@@ -146,6 +146,13 @@ public final class NeedsYouNotifier {
     private var current = NeedsYouSnapshot.empty
     /// Ids posted and not yet resolved.
     private var posted = Set<String>()
+    /// The first snapshot with anything notifiable is the baseline: those items were already
+    /// waiting at launch (or when the operator granted permission), so they count as seen
+    /// and never alert. Only items that arrive afterwards do. A delivered notification from a
+    /// previous run is cleared when its item resolves, because the baseline sits in `posted`.
+    /// Limit: an item that is the first one ever seen after launch is baselined too.
+    private var baselined = false
+    private let baselineExisting: Bool
     private var authorizationInFlight = false
 
     /// What the system says; nil until it has been read.
@@ -158,8 +165,11 @@ public final class NeedsYouNotifier {
     /// Called when `isSurfaceAvailable` changes.
     public var onSurfaceAvailabilityChange: ((Bool) -> Void)?
 
-    public init(center: NotificationCenterLike, builders: [String: NeedsYouContentBuilder]) {
+    /// `baselineExisting`: the app's setting (see `baselined`). Off, every new item alerts.
+    public init(center: NotificationCenterLike, builders: [String: NeedsYouContentBuilder],
+                baselineExisting: Bool = false) {
         self.center = center
+        self.baselineExisting = baselineExisting
         self.builders = builders
     }
 
@@ -185,6 +195,15 @@ public final class NeedsYouNotifier {
             center.removeDelivered(ids: ids)
             center.removePending(ids: ids)
             posted.subtract(resolved)
+        }
+
+        if baselineExisting, !baselined {
+            let notifiable = current.items.filter { builders[$0.producer] != nil }
+            if !notifiable.isEmpty {
+                posted.formUnion(notifiable.map(\.id))
+                baselined = true
+                return
+            }
         }
 
         let waiting = current.items.filter { !posted.contains($0.id) && builders[$0.producer] != nil }

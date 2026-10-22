@@ -119,7 +119,9 @@ class AppStore: ObservableObject {
     private var motherNotifyNote = MotherNotifyNote()
     /// True from a broker disconnect until the next snapshot: the emptied job map is not the
     /// truth, so Mother's "needs you" items stay as they were (no resolve-then-repost).
-    private var awaitingMotherResnapshot = false
+    /// If the broker never comes back, the 30 s poll lets go of it (see `MotherResnapshotGuard`).
+    private var resnapshotGuard = MotherResnapshotGuard()
+    private var awaitingMotherResnapshot: Bool { resnapshotGuard.isHolding }
     /// Owns the aggregator, the Dock badge and the notifier. AP3 registers approvals here:
     /// `needsYouCoordinator.setProducer("approvals", items: ...)`, with a content builder for
     /// its notifications in the Kit notifier. T5 reads per-focus items from `needsYou`.
@@ -677,7 +679,7 @@ class AppStore: ObservableObject {
             }
 
         case .snapshot(let jobs):
-            awaitingMotherResnapshot = false
+            resnapshotGuard.snapshotReceived()
             jobMap = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
             missingOnce.removeAll()
             stateMismatch.removeAll()
@@ -734,7 +736,7 @@ class AppStore: ObservableObject {
             stateMismatch.removeAll()
             jobMap.removeAll()
             motherPeeks.removeAll()
-            awaitingMotherResnapshot = true
+            resnapshotGuard.disconnected(now: Date())
             publishJobsAndStatus()
         }
     }
@@ -835,6 +837,8 @@ class AppStore: ObservableObject {
         // Only a real change wakes the views: an equal re-publish (a crew event whose
         // refreshed job is identical, a state event that folds to the same job) is dropped.
         let status = MotherStatus.from(jobs: jobs)
+        // Note: a Mother hold and a W6 decision (attention tag) for the same job count twice in
+        // the Dock total. Intended: they are two separate asks (the job's hold, the focus's decision).
         // A decision that resolved (or was replaced) takes its send state with it.
         var storesChanged = false
         for (id, var store) in decisionStores {
@@ -989,6 +993,8 @@ class AppStore: ObservableObject {
             let liveIds = Set(raw.compactMap { $0["id"] as? String })
             DispatchQueue.main.async {
                 guard let self else { return }
+                // Broker silent for too long: stop holding, so stale items do not stay counted.
+                if self.resnapshotGuard.pollSucceeded(now: Date()) { self.publishJobsAndStatus() }
                 let stale = self.jobMap.keys.filter { !liveIds.contains($0) }
                 if !stale.isEmpty {
                     stale.forEach { self.jobMap.removeValue(forKey: $0) }
@@ -1737,7 +1743,8 @@ final class NeedsYouCoordinator {
         self.dockBadge = dockBadge
         notifier = NeedsYouNotifier(
             center: center,
-            builders: [MotherNeedsYouProducer.name: MotherNeedsYouContentBuilder(jobTitle: jobTitle)])
+            builders: [MotherNeedsYouProducer.name: MotherNeedsYouContentBuilder(jobTitle: jobTitle)],
+            baselineExisting: true)
     }
 
     func setMotherJobs(_ jobs: [MotherJob]) {
@@ -1805,6 +1812,28 @@ struct MotherNotifyNote {
     /// Notifications were allowed: the note no longer applies (it is not marked dismissed).
     mutating func surfaceBecameAvailable() {
         isRaised = false
+    }
+}
+
+/// Holds Mother's "needs you" items across a broker reconnect: the emptied job map is not the
+/// truth, so items stay as they were until the next `.snapshot` (no resolve-then-repost double
+/// alert). If the broker never returns, a successful 30 s `mother list` poll releases the hold
+/// once it has lasted more than `maxHold` (2 poll intervals); the emptied map then applies and
+/// the stale items resolve, so they are never counted forever.
+struct MotherResnapshotGuard {
+    static let maxHold: TimeInterval = 60
+
+    private var since: Date?
+    var isHolding: Bool { since != nil }
+
+    mutating func disconnected(now: Date) { if since == nil { since = now } }
+    mutating func snapshotReceived() { since = nil }
+
+    /// A poll succeeded. True when it released the hold (the caller republishes).
+    mutating func pollSucceeded(now: Date) -> Bool {
+        guard let start = since, now.timeIntervalSince(start) > Self.maxHold else { return false }
+        since = nil
+        return true
     }
 }
 

@@ -3269,14 +3269,16 @@ final class MC4NeedsYouCoordinatorTests: XCTestCase {
         let center = MC4FakeCenter()
         let coordinator = mc4Coordinator(center: center)
 
-        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
-        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+        let base = mc4AwaitingJob("j0")   // the baseline: already waiting, never alerts
+        coordinator.setMotherJobs([base])
+        coordinator.setMotherJobs([base, mc4AwaitingJob("j1")])
+        coordinator.setMotherJobs([base, mc4AwaitingJob("j1")])
         XCTAssertEqual(center.addedIds, ["mother:j1:await"])
         XCTAssertEqual(center.added.first?.content.title, "Mother needs you")
         XCTAssertEqual(center.added.first?.content.body, "Backfill invoice totals · Waiting for your answer")
 
         let running = mc2Job(id: "j1", state: "running", title: "Backfill invoice totals")
-        coordinator.setMotherJobs([running])
+        coordinator.setMotherJobs([base, running])
         XCTAssertEqual(center.removedDelivered, ["mother:j1:await"])
         XCTAssertEqual(center.removedPending, ["mother:j1:await"])
     }
@@ -3286,7 +3288,8 @@ final class MC4NeedsYouCoordinatorTests: XCTestCase {
         let coordinator = mc4Coordinator(center: center, titles: ["j1": "Letter to Mrs Alvarez"])
         let job = mc4AwaitingJob("j1", title: "Letter to Mrs Alvarez", originLabel: "teri-send")
 
-        coordinator.setMotherJobs([job])
+        coordinator.setMotherJobs([mc4AwaitingJob("j0")])
+        coordinator.setMotherJobs([mc4AwaitingJob("j0"), job])
 
         let request = try XCTUnwrap(center.added.first)
         XCTAssertEqual(request.content.body, "Waiting for your answer")
