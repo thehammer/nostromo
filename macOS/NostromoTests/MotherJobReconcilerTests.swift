@@ -42,13 +42,26 @@ final class MotherJobReconcilerTests: XCTestCase {
         XCTAssertTrue(r.removed.isEmpty)
     }
 
-    func testAnExistingJobTakesTheListedStateButKeepsANewerProgressOverlay() {
+    func testAnExistingJobKeepsANewerProgressOverlayWhenTheListedOneIsOlder() {
+        // Same state on both sides (a differing state is held until two lists agree, see the stale-list tests).
         let mine = shJob(id: "a", state: "running", progressPct: 80, progressAt: "2026-10-17T12:10:00.000Z")
-        let listed = shJob(id: "a", state: "awaiting", progressPct: 40, progressAt: "2026-10-17T12:00:00.000Z")
+        let listed = shJob(id: "a", state: "running", progressPct: 40, progressAt: "2026-10-17T12:00:00.000Z")
         let r = reconcile(current: [mine], listed: [listed])
-        XCTAssertEqual(r.jobs["a"]?.state, "awaiting")
+        XCTAssertEqual(r.jobs["a"]?.state, "running")
         XCTAssertEqual(r.jobs["a"]?.crew.progress?.pct, 80)
         XCTAssertTrue(r.added.isEmpty)
+    }
+
+    func testAnExistingJobTakesTheListedStateOnlyOnTheSecondConsecutiveList() {
+        let mine = shJob(id: "a", state: "running", progressPct: 80, progressAt: "2026-10-17T12:10:00.000Z")
+        let listed = shJob(id: "a", state: "awaiting", progressPct: 40, progressAt: "2026-10-17T12:00:00.000Z")
+        let first = reconcile(current: [mine], listed: [listed])
+        XCTAssertEqual(first.jobs["a"]?.state, "running", "one list may be stale")
+        XCTAssertEqual(first.jobs["a"]?.crew.progress?.pct, 80)
+        let second = MotherJobReconciler.reconcile(current: first.jobs, listed: [listed], missingOnce: [],
+                                                   recentlyArchived: [], stateMismatch: first.stateMismatch)
+        XCTAssertEqual(second.jobs["a"]?.state, "awaiting")
+        XCTAssertEqual(second.jobs["a"]?.crew.progress?.pct, 80, "the newer overlay still wins")
     }
 
     func testAnExistingJobTakesANewerListedProgressOverlay() {
@@ -111,10 +124,10 @@ final class MotherJobReconcilerTests: XCTestCase {
 
     func testAPartialListStillAddsAndUpdates() {
         let r = MotherJobReconciler.reconcile(
-            current: shMap([shJob(id: "a", state: "running")]),
-            listed: [shJob(id: "a", state: "awaiting"), shJob(id: "n")],
+            current: shMap([shJob(id: "a", state: "running", title: "Old")]),
+            listed: [shJob(id: "a", state: "running", title: "New"), shJob(id: "n")],
             missingOnce: [], recentlyArchived: [], partial: true)
-        XCTAssertEqual(r.jobs["a"]?.state, "awaiting")
+        XCTAssertEqual(r.jobs["a"]?.title, "New")
         XCTAssertEqual(r.added, ["n"])
     }
 
