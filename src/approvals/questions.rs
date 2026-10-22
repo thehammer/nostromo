@@ -9,6 +9,9 @@
 //! "Other" answer (which the CLI always offers and never lists among the
 //! options) the typed text.
 //!
+//! The reply drops any `annotations`, `response`, `afkTimeoutMs` or `followUp` the agent put in its
+//! own call (the CLI reads those as the person's words), and sets `answers` itself.
+//!
 //! The daemon builds that input itself from the *held* request's input, so a
 //! caller can only choose among what the agent asked: an unknown question, a
 //! label that is not an option, a missing question or an oversize text is
@@ -18,6 +21,11 @@ use serde_json::{Map, Value};
 
 use super::wire::{QuestionAnswer, MAX_OPTIONS, MAX_OTHER_CHARS, MAX_QUESTIONS};
 use crate::data::work::is_invisible;
+
+/// Input fields the CLI's `AskUserQuestion` reads as the person's own words or state (answers, notes
+/// on an answer, a free-form reply, an away-from-keyboard timeout, a request for more questions).
+/// An agent can write them into its call; the reply never carries them through.
+const HUMAN_OWNED_FIELDS: [&str; 5] = ["answers", "annotations", "response", "afkTimeoutMs", "followUp"];
 
 /// One option of a question.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,10 +136,13 @@ pub fn updated_input(input: &Value, answers: &[QuestionAnswer]) -> Result<Value,
         map.insert(question.question.clone(), Value::String(value.ok_or(AnswerError::MissingAnswer)?));
     }
     let mut updated = input.clone();
-    updated
-        .as_object_mut()
-        .ok_or(AnswerError::NotAnswerable)?
-        .insert("answers".to_owned(), Value::Object(map));
+    let fields = updated.as_object_mut().ok_or(AnswerError::NotAnswerable)?;
+    // The fields the CLI treats as the person's own words are the person's alone: whatever the
+    // agent put there is dropped, so it can't pass its text off as something the user wrote.
+    for key in HUMAN_OWNED_FIELDS {
+        fields.remove(key);
+    }
+    fields.insert("answers".to_owned(), Value::Object(map));
     Ok(updated)
 }
 
