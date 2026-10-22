@@ -378,6 +378,9 @@ struct MotherJob: Identifiable, Equatable {
     /// a `progress_updated` event that raced the refresh must not be undone by it.
     func replacing(with refreshed: MotherJob) -> MotherJob {
         var out = refreshed
+        // The origin label decides whether a notification may show the title: a read that
+        // lacks it must not make a work-send job look ordinary.
+        if out.originLabel == nil { out.originLabel = originLabel }
         if let mine = crew.progress, !MotherJob.isNewer(refreshed.crew.progress, than: mine) {
             out.crew.progress = mine
         }
