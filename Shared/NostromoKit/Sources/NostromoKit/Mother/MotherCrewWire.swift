@@ -635,6 +635,31 @@ public struct MotherProgressSignals: Equatable, Codable {
         self.elapsedActiveS = elapsedActiveS
         self.cost = cost
     }
+
+    /// `cost` is the USD figure: Mother's recordings send `{usd, of_usd, basis, fraction}`,
+    /// older fixtures sent a bare number. Anything else reads as missing, never as an error.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        stage = try c.decodeIfPresent(String.self, forKey: .stage)
+        gates = try c.decodeIfPresent(MotherGateSignal.self, forKey: .gates)
+        elapsedActiveS = try c.decodeIfPresent(Int.self, forKey: .elapsedActiveS)
+        if let bare = try? c.decode(Double.self, forKey: .cost) {
+            cost = bare
+        } else if let object = try? c.decode(CostObject.self, forKey: .cost) {
+            cost = object.usd
+        } else {
+            cost = nil
+        }
+    }
+
+    private struct CostObject: Decodable {
+        let usd: Double?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            usd = try? c.decode(Double.self, forKey: .usd)
+        }
+        enum Keys: String, CodingKey { case usd }
+    }
 }
 
 public struct MotherProgressEta: Equatable, Codable {

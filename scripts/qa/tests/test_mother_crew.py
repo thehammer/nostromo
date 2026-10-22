@@ -297,10 +297,10 @@ class CrewScriptTest(unittest.TestCase):
 
         calls = self.calls()
         waits = self.waits(calls)
-        self.assertIn("1 of 3 gates passed", waits)
-        self.assertIn("3 of 3 gates passed", waits)
-        self.assertLess(waits.index("1 of 3 gates passed"), waits.index("3 of 3 gates passed"),
-                        "the gate run is read step by step: progress 1/3 before 3/3")
+        self.assertIn("4 of 5 gates passed", waits)
+        self.assertIn("5 of 5 gates passed", waits)
+        self.assertLess(waits.index("4 of 5 gates passed"), waits.index("5 of 5 gates passed"),
+                        "the gate run is read step by step: progress 4/5 (one red) before 5/5")
         # the lens wave job is only opened after it has been announced
         self.assertLess(waits.index("Rework consent form validation"), waits.index("perri:ops-infra: skipped"))
 
@@ -353,7 +353,7 @@ class CrewScriptTest(unittest.TestCase):
         r = self.run_script(mode="wait_timeout")                   # fails at its first wait, after the reset
         self.assertNotEqual(r.returncode, 0)
         job = next(j for j in self.ctl({"op": "jobs"})["result"] if j["id"] == "j-gates1")
-        self.assertEqual((job["gates"]["status"], job["progress"]["pct"]), ("running", 55))
+        self.assertEqual((job["gates"]["status"], job["progress"]["pct"]), ("failed", 80))   # the recorded mid-run state: attempt 1 red, 80%
 
 
 if __name__ == "__main__":

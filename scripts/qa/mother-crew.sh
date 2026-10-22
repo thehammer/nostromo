@@ -9,7 +9,7 @@
 # key window) and gives it back on exit.
 #
 # It reads the accessibility tree, so what it expects is each row's VoiceOver text ("lint: passed,
-# took 42 seconds, ..."), not the on-screen glyphs: the visible forms (`≈70% · gates 1/3 · ETA ~2-8 min`,
+# took 42 seconds, ..."), not the on-screen glyphs: the visible forms (`≈80% · gates 4/5 · ETA ?`,
 # `✓ lint  passed · 42s · blocking`) are the live-QA step of the PR (screenshots).
 #
 # Env: QA_SCREEN (display to test, default Sceptre), QA_FMB_SOCK (fake broker socket, default
@@ -37,24 +37,24 @@ ctl '{"op":"reset"}'
 sleep "$SETTLE"
 app click --text "Mother"
 
-# 1. the crew job is in the queue with its progress line (about 55%, no gate signal yet)
+# 1. the crew job is in the queue with its recorded mid-run progress (about 80%, gates 4/5 with one red)
 app wait "Add facility export endpoint" --timeout 8
-app wait "About 55 percent" --timeout 8
+app wait "About 80 percent" --timeout 8
+app wait "4 of 5 gates passed" --timeout 8
 
-# 2. open it: the crew section shows the gates header, waiting for the first result
+# 2. open it: the crew section shows the recorded gate header, attempt 1 failed
 app click --text "Add facility export endpoint"
-app wait "Gates, attempt 1 of 3, running" --timeout 5
+app wait "Gates, attempt 1 of 3, failed" --timeout 5
 
 # 3. replay the gate run: fail, fix, pass. Each step is read from the accessibility tree as it lands.
 ctl '{"op":"replay","file":"gates_fix_pass.ndjson","speed":1}'
-app wait "1 of 3 gates passed" --timeout 15          # progress: gates 1/3
 app wait "lint: passed" --timeout 10
 app wait "unit: failed" --timeout 10
 app wait "exit code 1" --timeout 5                   # a failed gate shows its exit code
-app wait "3 of 3 gates passed" --timeout 25          # progress: gates 3/3 after the fix
+app wait "5 of 5 gates passed" --timeout 25          # progress: gates 5/5 after the fix (attempt 2)
 app wait "unit: passed" --timeout 10
 app wait "static: passed" --timeout 10
-app expect "About 95 percent"
+app expect "About 100 percent"
 
 # 4. the lens wave: a second crew job arrives with its lens rows; one lens is skipped
 ctl '{"op":"replay","file":"lens_wave.ndjson","speed":2}'
@@ -63,7 +63,7 @@ app click --text "Rework consent form validation"
 app wait "perri:ops-infra: skipped" --timeout 10
 app expect "not in scope"                             # the skip reason in words
 app wait "perri:correctness: done" --timeout 15
-app wait "Citations found 2" --timeout 15            # claims are "citations found", never "verified"
+app wait "Citations found 1" --timeout 15            # claims are "citations found", never "verified"
 app expect "verified correct" --absent
 
 # 5. no broken layout in the pane

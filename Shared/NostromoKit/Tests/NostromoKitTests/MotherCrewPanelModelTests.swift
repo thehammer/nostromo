@@ -72,14 +72,15 @@ final class MotherCrewPanelModelTests: XCTestCase {
 
     // MARK: - Progress line
 
-    func testGatesJobShowsTheProgressLineWithMothersEtaBand() throws {
+    func testGatesJobShowsTheProgressLineWithTheGateCount() throws {
         let job = try gatesJob()
         let model = MotherCrewPanelModel.make(job: job)
 
-        XCTAssertEqual(model.progress?.line, "≈55% · ETA ~5-15 min")
+        // The recording has no ETA history yet (basis "none"), so the band is "?".
+        XCTAssertEqual(model.progress?.line, "≈80% · gates 4/5 · ETA ?")
         // The same text the list rows use.
         XCTAssertEqual(MotherProgressLine.make(progress: job.crew.progress, gates: job.crew.gates)?.text,
-                       "≈55% · ETA ~5-15 min")
+                       "≈80% · gates 4/5 · ETA ?")
         XCTAssertFalse(try XCTUnwrap(model.progress).accessibility.isEmpty)
     }
 
@@ -101,7 +102,7 @@ final class MotherCrewPanelModelTests: XCTestCase {
 
         XCTAssertEqual(rows.map(\.id), ["gates:header", "gate:lint", "gate:unit"])
         XCTAssertEqual(rows[0].title, "gates 1/3")
-        XCTAssertEqual(rows[0].detail, "running")
+        XCTAssertEqual(rows[0].detail, "failed", "the recorded gate run's status")
         XCTAssertTrue(rows[1].detail.contains("passed"), rows[1].detail)
         XCTAssertTrue(rows[2].detail.contains("failed"), rows[2].detail)
         XCTAssertTrue(rows[2].detail.contains("exit 1"), rows[2].detail)
@@ -135,8 +136,8 @@ final class MotherCrewPanelModelTests: XCTestCase {
         XCTAssertTrue(ops.detail.contains("skipped"), ops.detail)
         XCTAssertTrue(ops.detail.contains("not in scope"), ops.detail)
 
-        let pending = try row("lens:perri:correctness", in: model.lenses)
-        XCTAssertTrue(pending.detail.contains("pending"), pending.detail)
+        let running = try row("lens:perri:correctness", in: model.lenses)
+        XCTAssertTrue(running.detail.contains("running"), running.detail)
 
         let claims = try row("lenses:claims", in: model.lenses)
         XCTAssertTrue(claims.title.contains("citations found"), claims.title)
@@ -153,7 +154,7 @@ final class MotherCrewPanelModelTests: XCTestCase {
         let hold = try XCTUnwrap(model.hold)
         XCTAssertEqual(hold.kind, "Gates exhausted")
         XCTAssertEqual(hold.options.map(\.id), [.resumeWithGuidance, .escalate, .overrideOpen, .cancel])
-        XCTAssertEqual(hold.options.map(\.label), ["Resume with guidance", "Escalate", "Override and open", "Cancel"])
+        XCTAssertEqual(hold.options.map(\.label), ["Resume with guidance", "Escalate", "Open anyway", "Cancel"])
         XCTAssertEqual(hold.options.count, 4)
         for option in hold.options {
             XCTAssertFalse(option.consequence.isEmpty, option.label)
@@ -209,10 +210,10 @@ final class MotherCrewPanelModelTests: XCTestCase {
         let rows = try XCTUnwrap(model.progress).breakdown
 
         XCTAssertEqual(rows.map(\.title), ["Stage", "Gates", "Active time", "Cost so far", "ETA basis"])
-        XCTAssertEqual(rows[0].detail, "implement")
+        XCTAssertEqual(rows[0].detail, "rework")
         XCTAssertEqual(rows[1].detail, "1 passed, 1 failed, of 3")
-        XCTAssertEqual(rows[2].detail, "7m 00s")
-        XCTAssertEqual(rows[3].detail, "$1.12")
+        XCTAssertEqual(rows[2].detail, "2m 00s")
+        XCTAssertEqual(rows[3].detail, "$0.00")
     }
 
     func testEtaBasisIsSaidInPlainWords() throws {

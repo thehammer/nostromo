@@ -4,13 +4,13 @@
     {
       "id": "j-gates1",
       "state": "running",
-      "repo": "Carefeed/admin-portal",
-      "isolation": "worktree",
+      "repo": "admin-portal",
+      "isolation": "main-dir",
       "title": "Add facility export endpoint",
-      "created_at": "2026-10-17T11:40:00Z",
-      "started_at": "2026-10-17T11:41:05.250Z",
+      "created_at": "2026-10-18T11:00:00Z",
+      "started_at": "2026-10-18T11:01:40Z",
       "finished_at": null,
-      "plan_path": "/tmp/plans/j-gates1.md",
+      "plan_path": "/tmp/mother-root/events/j-gates1-plan.md",
       "question": null,
       "paused_reason": null,
       "adherence_notes": null,
@@ -20,66 +20,155 @@
       "kind": null,
       "phases": [],
       "cycles": [],
-      "activity": "gating",
-      "pr_url": "https://github.com/Carefeed/admin-portal/pull/4321",
+      "origin": {
+        "label": ""
+      },
+      "activity": "gate_fix",
+      "pr_url": "https://github.com/Carefeed/admin-portal/pull/42",
       "crew_opt_in": true,
       "gates": {
         "mode": "enforce",
         "posture": "normal",
-        "status": "running",
+        "status": "failed",
         "attempt": 1,
         "max_attempts": 3,
-        "head_sha": "9d1c4e7",
-        "started_at": "2026-10-17T11:59:58.000Z",
-        "finished_at": null,
-        "results": [],
+        "head_sha": "0000000000000000000000000000000000000002",
+        "started_at": "2026-10-18T11:01:41.000Z",
+        "finished_at": "2026-10-18T11:06:40.000Z",
+        "results": [
+          {
+            "name": "clean_tree",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": null,
+            "unavailable_reason": null
+          },
+          {
+            "name": "pushed",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": null,
+            "unavailable_reason": null
+          },
+          {
+            "name": "lint",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": 0,
+            "unavailable_reason": null
+          },
+          {
+            "name": "unit",
+            "result": "failed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": 1,
+            "unavailable_reason": null
+          },
+          {
+            "name": "static",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": 0,
+            "unavailable_reason": null
+          }
+        ],
         "not_run": []
       },
       "progress": {
         "v": 1,
-        "pct": 55,
-        "label": "Implementing",
-        "stage": "implement",
+        "pct": 80,
+        "label": "≈80% · gates ✗ attempt 1/3 · ETA ?",
+        "stage": "rework",
         "signals": {
-          "stage": "implement",
-          "gates": null,
-          "elapsed_active_s": 420,
-          "cost": 1.12
+          "stage": "rework",
+          "gates": {
+            "passed": 4,
+            "failed": 1,
+            "total": 5
+          },
+          "elapsed_active_s": 120,
+          "cost": 0.0
         },
         "eta": {
-          "lo_s": 300,
-          "hi_s": 900,
-          "label": "5-15 min",
-          "basis": "fleet"
+          "lo_s": null,
+          "hi_s": null,
+          "label": "?",
+          "basis": "none"
         },
         "paused": false,
         "moved_back": null,
         "flags": [],
-        "updated_at": "2026-10-17T12:00:00.000Z"
-      }
+        "updated_at": "2026-10-18T11:13:21.000Z"
+      },
+      "criteria_source": "checklist"
     },
     {
       "id": "j-wave1",
       "state": "running",
-      "repo": "Carefeed/admin-portal",
-      "isolation": "worktree",
+      "repo": "admin-portal",
+      "isolation": "main-dir",
       "title": "Rework consent form validation",
-      "created_at": "2026-10-17T11:20:00Z",
-      "started_at": "2026-10-17T11:21:10.500Z",
+      "created_at": "2026-10-18T11:00:00Z",
+      "started_at": "2026-10-18T11:01:40Z",
       "finished_at": null,
-      "plan_path": "/tmp/plans/j-wave1.md",
+      "plan_path": "/tmp/mother-root/events/j-wave1-plan.md",
       "question": null,
       "paused_reason": null,
       "adherence_notes": null,
       "adherence_status": null,
-      "current_tier": "tier_1",
+      "current_tier": "tier_0",
       "current_activity": null,
       "kind": null,
       "phases": [],
       "cycles": [],
+      "origin": {
+        "label": ""
+      },
       "activity": "review_wave",
-      "pr_url": "https://github.com/Carefeed/admin-portal/pull/4388",
+      "pr_url": "https://github.com/Carefeed/admin-portal/pull/42",
       "crew_opt_in": true,
+      "gates": {
+        "mode": "enforce",
+        "posture": "normal",
+        "status": "passed",
+        "attempt": 1,
+        "max_attempts": 3,
+        "head_sha": "0000000000000000000000000000000000000002",
+        "started_at": "2026-10-18T11:01:41.000Z",
+        "finished_at": "2026-10-18T11:06:40.000Z",
+        "results": [
+          {
+            "name": "clean_tree",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": null,
+            "unavailable_reason": null
+          },
+          {
+            "name": "pushed",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": null,
+            "unavailable_reason": null
+          },
+          {
+            "name": "lint",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": 0,
+            "unavailable_reason": null
+          }
+        ],
+        "not_run": []
+      },
       "review_wave": {
         "mode": "enforce",
         "cycle": 1,
@@ -89,39 +178,39 @@
         "spent_usd": 0.0,
         "lenses": [
           {
-            "reviewer": "archie:adherence",
-            "lens": "adherence",
-            "state": "pending",
-            "skip_reason": null,
-            "findings": {
-              "blocking": 0,
-              "advisory": 0
-            },
-            "cost_usd": 0.0,
-            "examined_files": 0
-          },
-          {
             "reviewer": "perri:correctness",
             "lens": "correctness",
-            "state": "pending",
+            "state": "running",
             "skip_reason": null,
             "findings": {
               "blocking": 0,
               "advisory": 0
             },
-            "cost_usd": 0.0,
+            "cost_usd": null,
             "examined_files": 0
           },
           {
             "reviewer": "perri:phi-security",
             "lens": "phi-security",
-            "state": "pending",
+            "state": "running",
             "skip_reason": null,
             "findings": {
               "blocking": 0,
               "advisory": 0
             },
-            "cost_usd": 0.0,
+            "cost_usd": null,
+            "examined_files": 0
+          },
+          {
+            "reviewer": "perri:tests",
+            "lens": "tests",
+            "state": "running",
+            "skip_reason": null,
+            "findings": {
+              "blocking": 0,
+              "advisory": 0
+            },
+            "cost_usd": null,
             "examined_files": 0
           },
           {
@@ -133,12 +222,12 @@
               "blocking": 0,
               "advisory": 0
             },
-            "cost_usd": 0.0,
+            "cost_usd": null,
             "examined_files": 0
           }
         ],
         "adherence": {
-          "state": "pending",
+          "state": "running",
           "verdict": null
         },
         "coverage_gaps": 0,
@@ -147,19 +236,46 @@
           "refuted": 0,
           "unverified": 0
         }
-      }
+      },
+      "progress": {
+        "v": 1,
+        "pct": 95,
+        "label": "≈95% · gates 3/3 · ETA ?",
+        "stage": "review",
+        "signals": {
+          "stage": "review",
+          "gates": {
+            "passed": 3,
+            "failed": 0,
+            "total": 3
+          },
+          "elapsed_active_s": 120,
+          "cost": 0.0
+        },
+        "eta": {
+          "lo_s": null,
+          "hi_s": null,
+          "label": "?",
+          "basis": "none"
+        },
+        "paused": false,
+        "moved_back": null,
+        "flags": [],
+        "updated_at": "2026-10-18T11:13:21.000Z"
+      },
+      "criteria_source": "checklist"
     },
     {
       "id": "j-hold1",
       "state": "awaiting",
-      "repo": "Carefeed/payments",
-      "isolation": "worktree",
+      "repo": "admin-portal",
+      "isolation": "main-dir",
       "title": "Backfill invoice totals",
-      "created_at": "2026-10-17T11:10:00Z",
-      "started_at": "2026-10-17T11:11:20Z",
+      "created_at": "2026-10-18T11:00:00Z",
+      "started_at": "2026-10-18T11:01:40Z",
       "finished_at": null,
-      "plan_path": "/tmp/plans/j-hold1.md",
-      "question": "Gate attempts are exhausted (3 of 3) with 1 gate still red: unit. Choose how to proceed: resume with guidance, escalate, override and open the PR, or cancel.",
+      "plan_path": "/tmp/mother-root/events/j-hold1-plan.md",
+      "question": "Quality gates are still failing after 2/2 attempt(s): unit.\nBranch: pushed to origin/feature/rec-gate_hold_answered at c0ac7882bfdd.\nGate output and hints: mother status j-hold1\nChoose one:\n  mother resume j-hold1 \"<guidance>\"            resume this worker session with your guidance\n  mother resume j-hold1 --option escalate       re-run one model tier higher\n  mother resume j-hold1 --option override_open  open the PR for review anyway (override recorded)\n  mother resume j-hold1 --option cancel         cancel the job; the branch is left in place",
       "paused_reason": "gate_hold",
       "adherence_notes": null,
       "adherence_status": null,
@@ -168,24 +284,43 @@
       "kind": null,
       "phases": [],
       "cycles": [],
+      "origin": {
+        "label": ""
+      },
       "activity": "gate_hold",
-      "pr_url": "https://github.com/Carefeed/payments/pull/907",
+      "pr_url": "https://github.com/Carefeed/admin-portal/pull/42",
       "crew_opt_in": true,
       "gates": {
         "mode": "enforce",
         "posture": "normal",
-        "status": "exhausted",
-        "attempt": 3,
-        "max_attempts": 3,
-        "head_sha": "e41b7f0",
-        "started_at": "2026-10-17T11:58:00.000Z",
-        "finished_at": "2026-10-17T12:00:00.000Z",
+        "status": "failed",
+        "attempt": 2,
+        "max_attempts": 2,
+        "head_sha": "0000000000000000000000000000000000000003",
+        "started_at": "2026-10-18T11:01:41.000Z",
+        "finished_at": "2026-10-18T11:06:40.000Z",
         "results": [
+          {
+            "name": "clean_tree",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": null,
+            "unavailable_reason": null
+          },
+          {
+            "name": "pushed",
+            "result": "passed",
+            "blocking": true,
+            "duration_s": 1,
+            "exit_code": null,
+            "unavailable_reason": null
+          },
           {
             "name": "unit",
             "result": "failed",
             "blocking": true,
-            "duration_s": 201,
+            "duration_s": 1,
             "exit_code": 1,
             "unavailable_reason": null
           }
@@ -199,39 +334,73 @@
           {
             "id": "resume_with_guidance",
             "label": "Resume with guidance",
-            "consequence": "Worker resumes in the same session with your note; gates re-run.",
+            "consequence": "Resumes the worker with your written guidance as its next instruction.",
             "takes_text": true
           },
           {
             "id": "escalate",
             "label": "Escalate",
-            "consequence": "Re-run one tier up.",
+            "consequence": "Re-runs the work one model tier higher than the attempt that just failed.",
             "takes_text": false
           },
           {
             "id": "override_open",
-            "label": "Override and open",
-            "consequence": "Mark the PR ready with red gates recorded as overridden.",
+            "label": "Open anyway",
+            "consequence": "Opens the PR for review even though these gates are red; the override is recorded on the PR.",
             "takes_text": false
           },
           {
             "id": "cancel",
             "label": "Cancel",
-            "consequence": "Stop the job.",
+            "consequence": "Cancels the job; the branch and any commits already made are left in place.",
             "takes_text": false
           }
         ],
-        "opened_at": "2026-10-17T12:00:02.000Z",
+        "opened_at": "2026-10-18T11:08:20.000Z",
         "resolved_at": null,
         "resolution": null
       },
       "attention": [
         {
           "reason": "decision_awaiting",
-          "since": "2026-10-17T12:00:02.000Z",
+          "since": "2026-10-18T11:10:00.000Z",
           "acked": null
         }
-      ]
+      ],
+      "attention_reasons": [
+        {
+          "reason": "decision_awaiting",
+          "since": "2026-10-18T11:10:00.000Z",
+          "acked": false
+        }
+      ],
+      "progress": {
+        "v": 1,
+        "pct": 5,
+        "label": "≈5% · gates ✗ attempt 2/2 · paused · gate_hold",
+        "stage": "rework",
+        "signals": {
+          "stage": "rework",
+          "gates": {
+            "passed": 2,
+            "failed": 1,
+            "total": 3
+          },
+          "elapsed_active_s": 120,
+          "cost": 0.0
+        },
+        "eta": {
+          "lo_s": null,
+          "hi_s": null,
+          "label": "paused · gate_hold",
+          "basis": "none"
+        },
+        "paused": true,
+        "moved_back": null,
+        "flags": [],
+        "updated_at": "2026-10-18T11:13:21.000Z"
+      },
+      "criteria_source": "checklist"
     }
   ]
 }

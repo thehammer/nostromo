@@ -208,7 +208,19 @@ pub struct ProgressSignals {
     #[serde(deserialize_with = "lenient::opt_object")]
     pub gates: Option<GateSignal>,
     pub elapsed_active_s: Option<u64>,
+    /// Spend so far in USD. Mother's recordings send `{usd, of_usd, basis, fraction}`;
+    /// older fixtures sent a bare number. Both read as the USD figure; anything else is missing.
+    #[serde(deserialize_with = "cost_usd")]
     pub cost: Option<f64>,
+}
+
+fn cost_usd<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::Object(o) => o.get("usd").and_then(serde_json::Value::as_f64),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

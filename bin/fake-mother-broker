@@ -26,13 +26,15 @@ Subscribe categories are honoured: a client only receives the events whose `cate
 subscribed to (the snapshot and pings always go out). `query.get {job}` is answered with
 `{ok, job}`, the raw job from the table.
 
-Crew scenarios (`crew_gates`, `crew_wave`, `crew_hold`) are seeded from the first snapshot of
+Crew scenarios (`crew_gates`, `crew_wave`, `crew_hold`) are seeded from the first non-empty snapshot of
 the vendored contract fixtures in tests/fixtures/mother-contract/, and advertise the
 capabilities of the fixture's `hello` (so `progress` is subscribable). `--caps a,b,c` overrides.
 
 Replay. `replay` streams a fixture's `dir: event` lines (never its hello) to the subscribed
 clients, one every 0.5/speed seconds (fixture timestamps are not monotonic, so they are not
 used; speed 0 sends them back to back; `"wait": true` returns when the last one is out):
+  - a `queued` event for a job the table lacks adds that job from the event's payload (the recordings
+    announce a job this way, after an empty snapshot) and broadcasts it;
   - a snapshot adds the jobs the table lacks (as a `queued` event carrying the full job, the
     way the real broker announces a new job) and replaces the ones it has, silently;
   - state events fold into the table, as for any event;
@@ -58,11 +60,14 @@ HOLD_ACTIVITIES = ("gate_hold", "review_hold")
 # The text of the four decision options, as Mother templates them (copied from the gate_hold fixture).
 DECISION_OPTIONS = {
     "resume_with_guidance": {"id": "resume_with_guidance", "label": "Resume with guidance",
-                             "consequence": "Worker resumes in the same session with your note; gates re-run.", "takes_text": True},
-    "escalate": {"id": "escalate", "label": "Escalate", "consequence": "Re-run one tier up.", "takes_text": False},
-    "override_open": {"id": "override_open", "label": "Override and open",
-                      "consequence": "Mark the PR ready with red gates recorded as overridden.", "takes_text": False},
-    "cancel": {"id": "cancel", "label": "Cancel", "consequence": "Stop the job.", "takes_text": False},
+                             "consequence": "Resumes the worker with your written guidance as its next instruction.", "takes_text": True},
+    "escalate": {"id": "escalate", "label": "Escalate",
+                 "consequence": "Re-runs the work one model tier higher than the attempt that just failed.", "takes_text": False},
+    "override_open": {"id": "override_open", "label": "Open anyway",
+                      "consequence": "Opens the PR for review even though these gates are red; the override is recorded on the PR.",
+                      "takes_text": False},
+    "cancel": {"id": "cancel", "label": "Cancel",
+               "consequence": "Cancels the job; the branch and any commits already made are left in place.", "takes_text": False},
 }
 
 
@@ -80,8 +85,8 @@ def fixture_caps():
 
 
 def fixture_jobs(name):
-    """The jobs of a fixture's first snapshot."""
-    snap = next(m for m in fixture_lines(name) if m["t"] == "snapshot")
+    """The jobs of a fixture's first snapshot that has any (the recordings open with an empty one)."""
+    snap = next(m for m in fixture_lines(name) if m["t"] == "snapshot" and m["data"].get("jobs"))
     return json.loads(json.dumps(snap["data"]["jobs"]))   # a private copy per call
 
 
@@ -214,7 +219,7 @@ class Broker:
                 j["activity"] = None        # a hold ends with the awaiting state
             data = {"job": jid, **extra}
             if kind == "queued":
-                data = dict(j)
+                data = {**j, "job": jid}        # the real broker's announcement carries both `id` and `job`
             self.broadcast(kind, data)
 
     # -- crew events (a small mirror of what Mother records) --------------------
@@ -229,18 +234,19 @@ class Broker:
                 j["gates"] = {"mode": d.get("mode"), "posture": d.get("posture"), "status": "running",
                               "attempt": d.get("attempt"), "max_attempts": d.get("max_attempts"),
                               "head_sha": d.get("head_sha"), "started_at": now_iso(), "finished_at": None,
-                              "results": [], "not_run": [], "override": None}
+                              "results": [], "not_run": []}
                 j["activity"] = "gating"
             elif kind == "gate_result" and g is not None:
                 entry = {"name": d.get("name"), "result": d.get("result"), "blocking": d.get("blocking", False),
-                         "duration_s": d.get("duration_s"), "exit_code": d.get("exit_code"), "unavailable_reason": None}
+                         "duration_s": d.get("duration_s"), "exit_code": d.get("exit_code"), "unavailable_reason": None,
+                         "skip_reason": None}
                 g["results"] = [r for r in g["results"] if r["name"] != entry["name"]] + [entry]
             elif kind == "gates_completed" and g is not None:
                 g["status"], g["finished_at"], g["not_run"] = d.get("status"), now_iso(), list(d.get("not_run") or [])
             elif kind == "gate_fix_started":
                 j["activity"] = "gate_fix"
             elif kind == "gates_exhausted" and g is not None:
-                g["status"], g["finished_at"] = "exhausted", now_iso()
+                g["finished_at"] = now_iso()        # the status stays what gates_completed set ("failed")
             elif kind == "review_cycle_started":
                 w = j.setdefault("review_wave", {"mode": "enforce", "cycle": d.get("cycle"), "cycle_cap": d.get("cycle"),
                                                   "status": "running", "lenses": [], "claims": None, "coverage_gaps": 0})
@@ -270,7 +276,7 @@ class Broker:
                                              for o in d.get("options") or []]}
                 self._attention(j, "raised", "decision_awaiting")
             elif kind == "decision_resolved" and j.get("decision"):
-                j["decision"].update(resolved_at=now_iso(), resolution={"option": d.get("option"), "source": d.get("source"), "at": now_iso()})
+                j["decision"].update(resolved_at=now_iso(), resolution={"option": d.get("option"), "source": d.get("source"), "session": "", "agent": ""})
                 self._attention(j, "cleared", "decision_awaiting")
             elif kind in ("attention_raised", "attention_cleared", "attention_acked"):
                 self._attention(j, kind.split("_")[1], d.get("reason"))
@@ -307,6 +313,10 @@ class Broker:
                         self.jobs[j["id"]] = j
                         if not known:
                             self.broadcast("queued", dict(j))
+            elif kind == "queued" and jid is not None and jid not in self.jobs and d.get("id") == jid:
+                with self.lock:
+                    self.jobs[jid] = {k: v for k, v in d.items() if k not in ("job", "category")}
+                    self.broadcast("queued", {**self.jobs[jid], "job": jid})
             elif jid is None or jid not in self.jobs:
                 continue            # an event for a job the table does not have
             elif kind == "progress_updated":
@@ -366,6 +376,9 @@ def make_handler(broker):
     class H(socketserver.StreamRequestHandler):
         def handle(self):
             sock = self.request
+            # A job announcement carries the whole job (several KB); a client that is not reading yet
+            # (a test mid-replay) must not stall the broker, so give it room to queue.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
             with broker.lock:
                 broker.all_conns.append(sock)
             broker.send(sock, broker.env("event", "hello", {"protocol_version": 1, "capabilities": broker.caps}))
