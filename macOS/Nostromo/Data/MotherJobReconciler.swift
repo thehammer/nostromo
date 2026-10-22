@@ -87,7 +87,7 @@ extension MotherJob {
                   createdAt: createdAt, startedAt: startedAt, finishedAt: held.finishedAt,
                   planPath: planPath, question: held.question, pausedReason: held.pausedReason,
                   adherenceStatus: adherenceStatus, currentTier: currentTier,
-                  kind: kind, phases: phases, cycles: cycles, crew: crew)
+                  kind: kind, phases: phases, cycles: cycles, crew: crew, originLabel: originLabel)
     }
 }
 

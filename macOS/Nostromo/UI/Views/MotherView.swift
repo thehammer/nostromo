@@ -71,6 +71,8 @@ private let mockJobs: [MotherJob] = [
 class MotherView: NSView {
 
     private let countsStrip = MotherCountsStrip()
+    /// One line under the strip; zero height unless the "staying quiet" note is raised.
+    private let notifyNote  = MotherNotifyNoteRow()
     private let jobList     = MotherJobList()
     /// Right-hand side: one closable tab per opened job, plus a fixed
     /// "Overview" tab holding the empty state. See docs/plans/mother-pane.md (P2).
@@ -115,7 +117,7 @@ class MotherView: NSView {
             }
         }
 
-        for v in [countsStrip, jobList, divider, tabRegion] as [NSView] {
+        for v in [countsStrip, notifyNote, jobList, divider, tabRegion] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -127,20 +129,25 @@ class MotherView: NSView {
             countsStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
             countsStrip.heightAnchor.constraint(equalToConstant: 36),
 
+            // Note row — full width, zero height unless raised
+            notifyNote.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
+            notifyNote.leadingAnchor.constraint(equalTo: leadingAnchor),
+            notifyNote.trailingAnchor.constraint(equalTo: trailingAnchor),
+
             // Job list — fixed width left pane
-            jobList.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
+            jobList.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
             jobList.leadingAnchor.constraint(equalTo: leadingAnchor),
             jobList.widthAnchor.constraint(equalToConstant: 280),
             jobList.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             // Divider — 1px, full height of content area
-            divider.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
+            divider.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
             divider.leadingAnchor.constraint(equalTo: jobList.trailingAnchor),
             divider.widthAnchor.constraint(equalToConstant: 1),
             divider.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             // Job tabs — fill remaining width
-            tabRegion.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
+            tabRegion.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
             tabRegion.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
             tabRegion.trailingAnchor.constraint(equalTo: trailingAnchor),
             tabRegion.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -286,11 +293,13 @@ private class MotherCountsStrip: NSView {
             .sink { [weak self] d in self?.renderDaemon(d) }
             .store(in: &cancellables)
 
-        // Render immediately with zeros, then live updates
-        render(AppStore.shared.motherStatus)
+        // Render immediately with zeros, then live updates. The "needs you" chip reads the
+        // app-wide aggregator, so the strip and the Dock badge agree.
+        render(AppStore.shared.motherStatus, needsYou: AppStore.shared.needsYou.mother)
         AppStore.shared.$motherStatus
+            .combineLatest(AppStore.shared.$needsYou)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] s in self?.render(s) }
+            .sink { [weak self] s, needsYou in self?.render(s, needsYou: needsYou.mother) }
             .store(in: &cancellables)
     }
 
@@ -314,9 +323,73 @@ private class MotherCountsStrip: NSView {
         startButton.isHidden = !d.isStopped
     }
 
-    private func render(_ s: MotherStatus) {
-        chips.render(s)
+    private func render(_ s: MotherStatus, needsYou: Int) {
+        var shown = s
+        shown.needsYou = needsYou
+        chips.render(shown)
     }
+}
+
+// MARK: - MotherNotifyNoteRow
+
+/// "Mother is staying quiet because Nostromo is open, but Nostromo can't show notifications."
+/// One dismissible line below the counts strip. Hidden at zero height unless the store raised it.
+private final class MotherNotifyNoteRow: NSView {
+    private static let visibleHeight: CGFloat = 24
+
+    private let label = NSTextField(labelWithString: MotherNotifyNote.text)
+    private let dismissButton = NSButton()
+    private var heightConstraint: NSLayoutConstraint!
+    private var cancellables = Set<AnyCancellable>()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
+
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = Theme.amber
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.toolTip = MotherNotifyNote.text
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        dismissButton.title = "Dismiss"
+        dismissButton.bezelStyle = .inline
+        dismissButton.font = .systemFont(ofSize: 10, weight: .medium)
+        dismissButton.target = self
+        dismissButton.action = #selector(dismiss)
+        dismissButton.setAccessibilityLabel("Dismiss the notifications note")
+        dismissButton.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(label)
+        addSubview(dismissButton)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            heightConstraint,
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: dismissButton.leadingAnchor, constant: -10),
+            dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            dismissButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+
+        apply(visible: AppStore.shared.motherNotifyNoteVisible)
+        AppStore.shared.$motherNotifyNoteVisible
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.apply(visible: $0) }
+            .store(in: &cancellables)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func apply(visible: Bool) {
+        isHidden = !visible
+        heightConstraint.constant = visible ? Self.visibleHeight : 0
+    }
+
+    @objc private func dismiss() { AppStore.shared.dismissMotherNotifyNote() }
 }
 
 // MARK: - MotherJobListViewModel

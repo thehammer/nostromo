@@ -361,6 +361,8 @@ struct MotherJob: Identifiable, Equatable {
     var cycles: [JobCycle] = []    // per-cycle phases (pipeline jobs)
     /// Headless-crew data: gates, review wave, decision, attention, progress. Empty for a job with none.
     var crew:   MotherCrewState = MotherCrewState()
+    /// The job's `origin.label` (`mother add --label`), when it has one; only the label is read.
+    var originLabel: String? = nil
 
     /// Apply a `progress_updated` overlay. A strictly older `updated_at` is ignored (events can
     /// arrive out of order, or after a `query.get` that already has a later one); a tie goes to
@@ -415,7 +417,7 @@ struct MotherJob: Identifiable, Equatable {
     /// The job as NostromoKit's presentation models read it (progress line, hold summary, panel).
     var kitJob: NostromoKit.MotherJob {
         NostromoKit.MotherJob(id: id, state: state, title: title, repo: repo.isEmpty ? nil : repo,
-                              question: question, crew: crew)
+                              question: question, originLabel: originLabel, crew: crew)
     }
 
     /// Computed ribbon model; nil when the job carries no phase data.
@@ -470,9 +472,13 @@ struct MotherJobSlim: Decodable {
     /// Gates, review wave, decision, attention, progress — each key read leniently,
     /// so a malformed one never costs the job (`MotherCrewState(jobDecoder:)`).
     let crew:            MotherCrewState
+    /// `origin.label`; the rest of `origin` is not read.
+    let originLabel:     String?
+
+    private struct Origin: Decodable { let label: String? }
 
     enum CodingKeys: String, CodingKey {
-        case id, state, repo, isolation, title, question, kind, phases, cycles
+        case id, state, repo, isolation, title, question, kind, phases, cycles, origin
         case createdAt       = "created_at"
         case startedAt       = "started_at"
         case finishedAt      = "finished_at"
@@ -504,6 +510,7 @@ struct MotherJobSlim: Decodable {
         phases          = try c.decodeIfPresent([JobPhase].self, forKey: .phases)
         cycles          = try c.decodeIfPresent([JobCycle].self, forKey: .cycles)
         crew            = (try? MotherCrewState(jobDecoder: decoder)) ?? MotherCrewState()
+        originLabel     = (try? c.decodeIfPresent(Origin.self, forKey: .origin))?.label
     }
 
     private static let fmtFrac: ISO8601DateFormatter = {
@@ -535,7 +542,8 @@ struct MotherJobSlim: Decodable {
                   kind:            kind,
                   phases:          phases ?? [],
                   cycles:          cycles ?? [],
-                  crew:            crew)
+                  crew:            crew,
+                  originLabel:     originLabel)
     }
 }
 

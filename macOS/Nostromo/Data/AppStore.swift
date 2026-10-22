@@ -3,6 +3,7 @@ import Foundation
 import Combine
 import NostromoKit
 import os
+import UserNotifications
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "store")
 /// Shared with `DynamicFocusView.swift`'s render-path logging (same
@@ -25,6 +26,12 @@ class AppStore: ObservableObject {
     // MARK: - Published state
 
     // Mother
+    /// Everything that needs the operator, app-wide: Mother jobs, W6 decision tags and, later,
+    /// approvals and the tracker. The Dock badge, the notifier and the Mother counts strip all
+    /// read this one snapshot. Producers register through `needsYouCoordinator`.
+    @Published private(set) var needsYou: NeedsYouSnapshot = .empty
+    /// The one-time "Mother is staying quiet" note in the Mother panel.
+    @Published private(set) var motherNotifyNoteVisible = false
     @Published private(set) var motherStatus:       MotherStatus = MotherStatus()
     @Published private(set) var motherJobs:         [MotherJob]  = []
     /// Live peek snapshots keyed by job id. Cleared on disconnect and on terminal transition.
@@ -109,6 +116,29 @@ class AppStore: ObservableObject {
     // knows nothing about what raised it — `DecisionPresenter` is the writer.
     @Published private(set) var attentionTags: Set<String> = []
     private var attentionRegistry = AttentionRegistry()
+    private var motherNotifyNote = MotherNotifyNote()
+    /// True from a broker disconnect until the next snapshot: the emptied job map is not the
+    /// truth, so Mother's "needs you" items stay as they were (no resolve-then-repost).
+    private var awaitingMotherResnapshot = false
+    /// Owns the aggregator, the Dock badge and the notifier. AP3 registers approvals here:
+    /// `needsYouCoordinator.setProducer("approvals", items: ...)`, with a content builder for
+    /// its notifications in the Kit notifier. T5 reads per-focus items from `needsYou`.
+    private(set) lazy var needsYouCoordinator: NeedsYouCoordinator = {
+        let coordinator = NeedsYouCoordinator(
+            center: NeedsYouCoordinator.liveCenter(),
+            // The ONLY writer of `dockTile.badgeLabel` in the app (policy-tested).
+            dockBadge: { NSApp?.dockTile.badgeLabel = $0 },
+            jobTitle: { [weak self] id in self?.jobMap[id]?.title })
+        coordinator.onChange = { [weak self] in self?.needsYou = $0 }
+        coordinator.notifier.onSurfaceAvailabilityChange = { [weak self] available in
+            self?.broker.setNotifySurfaceAvailable(available)
+            if available {
+                self?.motherNotifyNote.surfaceBecameAvailable()
+                self?.publishMotherNotifyNote()
+            }
+        }
+        return coordinator
+    }()
 
     // Agent-authored pane layout (Phase 1).
     // Keyed by focus tag; updated from FocusLayout / PaneContent broadcasts.
@@ -375,6 +405,19 @@ class AppStore: ObservableObject {
     private func publishAttention() {
         let tags = attentionRegistry.tags
         if tags != attentionTags { attentionTags = tags }
+        needsYouCoordinator.setAttentionTags(tags)
+    }
+
+    // MARK: - Needs you
+
+    /// Hide the "Mother is staying quiet" note. It never comes back during this run.
+    func dismissMotherNotifyNote() {
+        motherNotifyNote.dismiss()
+        publishMotherNotifyNote()
+    }
+
+    private func publishMotherNotifyNote() {
+        if motherNotifyNote.isRaised != motherNotifyNoteVisible { motherNotifyNoteVisible = motherNotifyNote.isRaised }
     }
 
     /// Forward the operator's answer to the daemon. Claiming the answer into
@@ -505,6 +548,13 @@ class AppStore: ObservableObject {
         } else {
             client.start()
         }
+        // Notifications: read the system's setting (never prompts; the prompt waits for the
+        // first item that can be posted), and re-read it whenever the app comes forward, since
+        // the operator may have changed it in System Settings.
+        needsYouCoordinator.notifier.refreshAuthorization()
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.needsYouCoordinator.notifier.refreshAuthorization() }
+            .store(in: &cancellables)
         broker.start()
 
         // Fallback poll: `mother list --format json` every 30 s reconciles any
@@ -619,7 +669,15 @@ class AppStore: ObservableObject {
             // Connection state is already set via broker.connected; the capabilities are new.
             motherDecisionChanges.send()
 
+        case .awaitingNotified(let transport, _):
+            // Mother stood down because a client is connected: warn once if we cannot show it.
+            if transport == "suppressed_client" {
+                motherNotifyNote.suppressionObserved(surfaceAvailable: needsYouCoordinator.notifier.isSurfaceAvailable)
+                publishMotherNotifyNote()
+            }
+
         case .snapshot(let jobs):
+            awaitingMotherResnapshot = false
             jobMap = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
             missingOnce.removeAll()
             stateMismatch.removeAll()
@@ -676,6 +734,7 @@ class AppStore: ObservableObject {
             stateMismatch.removeAll()
             jobMap.removeAll()
             motherPeeks.removeAll()
+            awaitingMotherResnapshot = true
             publishJobsAndStatus()
         }
     }
@@ -760,7 +819,8 @@ class AppStore: ObservableObject {
             kind:   job.kind,
             phases: job.phases,
             cycles: job.cycles,
-            crew:   job.crew
+            crew:   job.crew,
+            originLabel: job.originLabel
         )
     }
 
@@ -789,6 +849,7 @@ class AppStore: ObservableObject {
         }
         if jobs != motherJobs { motherJobs = jobs }
         if status != motherStatus { motherStatus = status }
+        if !awaitingMotherResnapshot { needsYouCoordinator.setMotherJobs(jobs) }
         if storesChanged { motherDecisionChanges.send() }
     }
 
@@ -1650,3 +1711,121 @@ extension ApprovalStore {
         return store
     }()
 }
+
+// MARK: - Needs you (Mac wiring)
+
+/// One app-wide "needs you" source: the aggregator, the Dock badge and the notifier.
+/// Main thread only.
+///
+/// Producers feed it (`setMotherJobs`, `setAttentionTags`, and `setProducer` for AP3's
+/// approvals); consumers read `snapshot` (or `AppStore.needsYou`). Nothing else in the app
+/// writes the Dock tile or posts a "needs you" notification.
+final class NeedsYouCoordinator {
+    private var aggregator = NeedsYouAggregator()
+    private let dockBadge: (String?) -> Void
+    private var lastBadge: String?
+
+    private(set) var snapshot = NeedsYouSnapshot.empty
+    let notifier: NeedsYouNotifier
+    var onChange: ((NeedsYouSnapshot) -> Void)?
+
+    /// `dockBadge` gets `"\(total)"`, or nil at zero, each time the label changes.
+    /// `jobTitle` maps a Mother job id to its title for the notification body.
+    init(center: NotificationCenterLike,
+         dockBadge: @escaping (String?) -> Void,
+         jobTitle: @escaping (String) -> String?) {
+        self.dockBadge = dockBadge
+        notifier = NeedsYouNotifier(
+            center: center,
+            builders: [MotherNeedsYouProducer.name: MotherNeedsYouContentBuilder(jobTitle: jobTitle)])
+    }
+
+    func setMotherJobs(_ jobs: [MotherJob]) {
+        setProducer(MotherNeedsYouProducer.name, items: MotherNeedsYouProducer.items(from: jobs))
+    }
+
+    func setAttentionTags(_ tags: Set<String>) {
+        setProducer(DecisionNeedsYouProducer.name, items: DecisionNeedsYouProducer.items(attentionTags: tags))
+    }
+
+    /// Replace everything `producer` raised. AP3 registers `"approvals"` through this.
+    func setProducer(_ producer: String, items: [NeedsYouItem]) {
+        let updated = aggregator.set(producer: producer, items: items)
+        guard updated != snapshot else { return }
+        snapshot = updated
+        let label = updated.total > 0 ? "\(updated.total)" : nil
+        if label != lastBadge {
+            lastBadge = label
+            dockBadge(label)
+        }
+        notifier.apply(updated)
+        onChange?(updated)
+    }
+
+    /// The system's notification center when running as the app; an inert one (notifications
+    /// unavailable) under tests and in the QA instance, so neither touches the real center.
+    static func liveCenter() -> NotificationCenterLike {
+        guard Bundle.main.bundleURL.pathExtension == "app", !NostromoHome.isQAInstance else {
+            return UnavailableNotificationCenter()
+        }
+        return UNUserNotificationCenter.current()
+    }
+}
+
+/// Stands in for the system center where there is none to use: denied, and it posts nothing.
+private final class UnavailableNotificationCenter: NotificationCenterLike {
+    func authorizationStatus(completion: @escaping (NeedsYouAuthorization) -> Void) { completion(.denied) }
+    func requestAuthorization(completion: @escaping (Bool) -> Void) { completion(false) }
+    func add(request: UNNotificationRequest) {}
+    func removeDelivered(ids: [String]) {}
+    func removePending(ids: [String]) {}
+}
+
+/// The one-time note in the Mother panel for "Mother stood down because Nostromo is open,
+/// but Nostromo cannot show notifications".
+struct MotherNotifyNote {
+    static let text = "Mother is staying quiet because Nostromo is open, but Nostromo can't show notifications. "
+        + "Allow notifications for Nostromo, or set MOTHER_NOTIFY_SUPPRESS_WHEN_CLIENT=0 in Mother's config."
+
+    private(set) var isRaised = false
+    private var dismissed = false
+
+    /// Mother reported `suppressed_client`. Raised only while Nostromo cannot show notifications,
+    /// and never after the operator dismissed it.
+    mutating func suppressionObserved(surfaceAvailable: Bool) {
+        guard !surfaceAvailable, !dismissed else { return }
+        isRaised = true
+    }
+
+    mutating func dismiss() {
+        dismissed = true
+        isRaised = false
+    }
+
+    /// Notifications were allowed: the note no longer applies (it is not marked dismissed).
+    mutating func surfaceBecameAvailable() {
+        isRaised = false
+    }
+}
+
+/// Where a click on a "needs you" notification goes.
+enum NeedsYouRouting {
+    /// Route a delivered notification's `userInfo`. Returns false when it is not one this
+    /// routes (another producer, or malformed). Never activates the app: the caller does that,
+    /// and only for a click.
+    @discardableResult
+    static func route(userInfo: [AnyHashable: Any]) -> Bool {
+        guard userInfo["producer"] as? String == MotherNeedsYouProducer.name,
+              let jobId = userInfo["jobId"] as? String, !jobId.isEmpty else { return false }
+        // The existing "open this Mother job" navigation (see `TeriBindings`): select the Mother
+        // focus (the key window's layout switches to it), then open the job's tab.
+        MotherView.requestedJobId = jobId
+        if let mother = FocusStore.shared.focuses.first(where: { $0.id == "mother" }) {
+            AppStore.shared.focusSelectionRequests.send(mother)
+        }
+        NotificationCenter.default.post(name: MotherView.openJobNotification, object: nil)
+        return true
+    }
+}
+
+extension MotherJob: MotherJobLike {}

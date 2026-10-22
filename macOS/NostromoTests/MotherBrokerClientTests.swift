@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import NostromoKit
 import SwiftUI
+import UserNotifications
 // MotherBrokerClient, BrokerEvent, BrokerError, BrokerErrorCode, MotherJob, MotherJobSlim
 // are compiled into this test target directly (logic test — no host app).
 
@@ -3160,5 +3161,393 @@ final class MC3JobDetailDecisionTests: XCTestCase {
         host.setSendState(.sending(.escalate), for: jobId)
 
         XCTAssertTrue(mc2WaitUntil { self.detail.actionStack !== stack }, "a send-state change must be reflected")
+    }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MC4: one needs-you source (Mother) — the badge, the notifications, the subscribe
+// payload, the quiet-broker note and the click routing.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// MARK: - MC4 builders
+
+private final class MC4FakeCenter: NotificationCenterLike {
+    var status: NeedsYouAuthorization
+    private(set) var added: [UNNotificationRequest] = []
+    private(set) var removedDelivered: [String] = []
+    private(set) var removedPending: [String] = []
+
+    init(status: NeedsYouAuthorization = .authorized) { self.status = status }
+
+    func authorizationStatus(completion: @escaping (NeedsYouAuthorization) -> Void) { completion(status) }
+    func requestAuthorization(completion: @escaping (Bool) -> Void) {
+        if status == .notDetermined { status = .authorized }
+        completion(status == .authorized)
+    }
+    func add(request: UNNotificationRequest) { added.append(request) }
+    func removeDelivered(ids: [String]) { removedDelivered += ids }
+    func removePending(ids: [String]) { removedPending += ids }
+
+    var addedIds: [String] { added.map(\.identifier) }
+}
+
+private func mc4AwaitingJob(_ id: String, title: String = "Backfill invoice totals", originLabel: String? = nil,
+                            crew: MotherCrewState = MotherCrewState()) -> MotherJob {
+    var job = mc2Job(id: id, state: "awaiting", title: title, crew: crew)
+    job.originLabel = originLabel
+    return job
+}
+
+private func mc4Coordinator(center: MC4FakeCenter = MC4FakeCenter(), badges: @escaping (String?) -> Void = { _ in },
+                            titles: [String: String] = ["j1": "Backfill invoice totals", "j2": "Second job"])
+    -> NeedsYouCoordinator {
+    NeedsYouCoordinator(center: center, dockBadge: badges, jobTitle: { titles[$0] })
+}
+
+// MARK: - MC4: the app-wide count and the badge
+
+final class MC4NeedsYouCoordinatorTests: XCTestCase {
+
+    func testTheDockBadgeShowsTheTotalThenClearsAtZero() {
+        var badges: [String?] = []
+        let coordinator = mc4Coordinator(badges: { badges.append($0) })
+
+        coordinator.setMotherJobs([mc4AwaitingJob("j1"), mc4AwaitingJob("j2")])
+        XCTAssertEqual(badges.last ?? nil, "2")
+
+        coordinator.setMotherJobs([])
+        XCTAssertEqual(badges.count, 2)
+        XCTAssertNil(badges[1], "the badge is cleared at zero")
+    }
+
+    func testTheBadgeIsOnlyWrittenWhenItsLabelChanges() {
+        var badges: [String?] = []
+        let coordinator = mc4Coordinator(badges: { badges.append($0) })
+
+        coordinator.setMotherJobs([])
+        coordinator.setMotherJobs([])
+        XCTAssertTrue(badges.isEmpty, "the initial state is already no badge")
+
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+        XCTAssertEqual(badges.count, 1)
+        XCTAssertEqual(badges.last ?? nil, "1")
+    }
+
+    func testDecisionTagsAndOtherProducersCountInTheSameTotal() {
+        var badges: [String?] = []
+        let coordinator = mc4Coordinator(badges: { badges.append($0) })
+
+        coordinator.setMotherJobs([mc4AwaitingJob("j1"), mc4AwaitingJob("j2")])
+        coordinator.setAttentionTags(["tag-a"])
+        XCTAssertEqual(badges.last ?? nil, "3")
+        XCTAssertEqual(coordinator.snapshot.total, 3)
+        XCTAssertEqual(coordinator.snapshot.mother, 2)
+        XCTAssertEqual(coordinator.snapshot.perFocus, ["tag-a": 1])
+
+        coordinator.setProducer("approvals", items: [NeedsYouItem(id: "approvals:1", source: .app, reason: .approvalPending(1))])
+        XCTAssertEqual(badges.last ?? nil, "4")
+
+        coordinator.setProducer("approvals", items: [])
+        coordinator.setAttentionTags([])
+        XCTAssertEqual(badges.last ?? nil, "2")
+    }
+
+    func testOnChangeReportsTheNewSnapshot() {
+        let coordinator = mc4Coordinator()
+        var seen: [NeedsYouSnapshot] = []
+        coordinator.onChange = { seen.append($0) }
+
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+
+        XCTAssertEqual(seen.last?.total, 1)
+        XCTAssertEqual(seen.last, coordinator.snapshot)
+    }
+
+    func testAnAwaitingJobPostsOneNotificationAndLeavingAwaitingRemovesIt() throws {
+        let center = MC4FakeCenter()
+        let coordinator = mc4Coordinator(center: center)
+
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+        XCTAssertEqual(center.addedIds, ["mother:j1:await"])
+        XCTAssertEqual(center.added.first?.content.title, "Mother needs you")
+        XCTAssertEqual(center.added.first?.content.body, "Backfill invoice totals · Waiting for your answer")
+
+        let running = mc2Job(id: "j1", state: "running", title: "Backfill invoice totals")
+        coordinator.setMotherJobs([running])
+        XCTAssertEqual(center.removedDelivered, ["mother:j1:await"])
+        XCTAssertEqual(center.removedPending, ["mother:j1:await"])
+    }
+
+    func testAWorkSendJobNotifiesWithTheReasonAloneAndNoQuestionText() throws {
+        let center = MC4FakeCenter()
+        let coordinator = mc4Coordinator(center: center, titles: ["j1": "Letter to Mrs Alvarez"])
+        let job = mc4AwaitingJob("j1", title: "Letter to Mrs Alvarez", originLabel: "teri-send")
+
+        coordinator.setMotherJobs([job])
+
+        let request = try XCTUnwrap(center.added.first)
+        XCTAssertEqual(request.content.body, "Waiting for your answer")
+        XCTAssertFalse(request.content.body.contains("Alvarez"))
+    }
+
+    func testNotificationsAreNotPostedWhenTheyAreDenied() {
+        let center = MC4FakeCenter(status: .denied)
+        var badges: [String?] = []
+        let coordinator = mc4Coordinator(center: center, badges: { badges.append($0) })
+
+        coordinator.setMotherJobs([mc4AwaitingJob("j1")])
+
+        XCTAssertTrue(center.added.isEmpty)
+        XCTAssertFalse(coordinator.notifier.isSurfaceAvailable)
+        XCTAssertEqual(badges.last ?? nil, "1", "the badge does not depend on notifications")
+    }
+}
+
+// MARK: - MC4: the subscribe payload and the wire
+
+extension MotherBrokerClientTests {
+
+    private static let mc4Classic = ["state", "activity", "await", "current_activity", "quota"]
+
+    fileprivate func mc4SubscribeData(afterHello hello: String) throws -> [String: Any] {
+        let cmd = try subscribeCommand(afterHello: hello)
+        XCTAssertEqual(cmd["t"] as? String, "subscribe")
+        return try XCTUnwrap(cmd["data"] as? [String: Any], "subscribe has no data")
+    }
+
+    fileprivate func mc4AssertClientField(_ data: [String: Any], present: Bool,
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        if present {
+            let field = data["client"] as? [String: Any]
+            XCTAssertEqual(field?["name"] as? String, "nostromo", file: file, line: line)
+            XCTAssertEqual(field?["surfaces"] as? [String], ["notify"], file: file, line: line)
+        } else {
+            XCTAssertNil(data["client"], "\(data)", file: file, line: line)
+        }
+    }
+
+    func testTheCapabilityNameIsClientSurfaces() {
+        XCTAssertEqual(MotherBrokerClient.clientSurfacesCapability, "client.surfaces")
+    }
+
+    func testSubscribeKeepsTodaysKeysWhenTheBrokerDoesNotAdvertiseClientSurfaces() throws {
+        client.setNotifySurfaceAvailable(true)
+        let data = try mc4SubscribeData(afterHello: helloWith(capabilities: Self.mc4Classic))
+
+        XCTAssertEqual(Set(data.keys), ["sub", "jobs", "categories"])
+        XCTAssertEqual(data["sub"] as? String, "queue")
+        XCTAssertEqual(data["jobs"] as? [String], ["all"])
+        mc4AssertClientField(data, present: false)
+    }
+
+    func testSubscribeDeclaresTheNotifySurfaceWhenAdvertisedAndAvailable() throws {
+        client.setNotifySurfaceAvailable(true)
+        let data = try mc4SubscribeData(afterHello: helloWith(capabilities: Self.mc4Classic + [MotherBrokerClient.clientSurfacesCapability]))
+
+        XCTAssertEqual(Set(data.keys), ["sub", "jobs", "categories", "client"])
+        mc4AssertClientField(data, present: true)
+        XCTAssertEqual(Set(try XCTUnwrap(data["categories"] as? [String])), Set(Self.mc4Classic))
+    }
+
+    func testSubscribeDropsTheClientFieldWhenNotificationsAreUnavailable() throws {
+        client.setNotifySurfaceAvailable(false)
+        let data = try mc4SubscribeData(afterHello: helloWith(capabilities: Self.mc4Classic + ["client.surfaces"]))
+
+        XCTAssertEqual(Set(data.keys), ["sub", "jobs", "categories"])
+        mc4AssertClientField(data, present: false)
+    }
+
+    func testSubscribeDataFollowsTheAdvertisedCapabilityAndAvailability() throws {
+        _ = try subscribeCommand(afterHello: helloWith(capabilities: Self.mc4Classic + ["client.surfaces"]))
+
+        client.setNotifySurfaceAvailable(true)
+        mc4AssertClientField(client.subscribeData(), present: true)
+        XCTAssertEqual(client.subscribeData()["sub"] as? String, "queue")
+
+        client.setNotifySurfaceAvailable(false)
+        mc4AssertClientField(client.subscribeData(), present: false)
+    }
+
+    func testSubscribeDataNeverCarriesTheClientFieldWithoutTheCapability() throws {
+        _ = try subscribeCommand(afterHello: helloWith(capabilities: Self.mc4Classic))
+        client.setNotifySurfaceAvailable(true)
+        mc4AssertClientField(client.subscribeData(), present: false)
+    }
+
+    func testAvailabilityChangingWhileConnectedResubscribesWhenAdvertised() throws {
+        try mc3Handshake(capabilities: Self.mc4Classic + ["client.surfaces"])
+
+        client.setNotifySurfaceAvailable(true)
+        let unsubscribe = try readCommandObject()
+        XCTAssertEqual(unsubscribe["t"] as? String, "unsubscribe")
+        XCTAssertEqual(try mc3Data(unsubscribe)["sub"] as? String, "queue")
+        let subscribe = try readCommandObject()
+        XCTAssertEqual(subscribe["t"] as? String, "subscribe")
+        mc4AssertClientField(try mc3Data(subscribe), present: true)
+
+        client.setNotifySurfaceAvailable(false)
+        XCTAssertEqual(try readCommandObject()["t"] as? String, "unsubscribe")
+        let again = try readCommandObject()
+        XCTAssertEqual(again["t"] as? String, "subscribe")
+        mc4AssertClientField(try mc3Data(again), present: false)
+    }
+
+    func testSettingTheSameAvailabilityAgainDoesNotResubscribe() throws {
+        try mc3Handshake(capabilities: Self.mc4Classic + ["client.surfaces"])
+        client.setNotifySurfaceAvailable(true)
+        _ = try readCommandObject()   // unsubscribe
+        _ = try readCommandObject()   // subscribe
+
+        client.setNotifySurfaceAvailable(true)
+        try mc3AssertNothingWasWritten(before: "an unchanged availability")
+    }
+
+    func testAvailabilityChangingWithoutTheCapabilityWritesNothing() throws {
+        try mc3Handshake(capabilities: Self.mc4Classic)
+        client.setNotifySurfaceAvailable(true)
+        try mc3AssertNothingWasWritten(before: "a broker without client.surfaces")
+    }
+
+    // MARK: awaiting_notified
+
+    private func mc4NextAwaitingNotified(sending line: String) throws -> (transport: String, ok: Bool) {
+        var seen: (transport: String, ok: Bool)?
+        let exp = XCTestExpectation(description: "awaiting_notified")
+        client.events.sink { event in
+            if case .awaitingNotified(let transport, let ok) = event { seen = (transport, ok); exp.fulfill() }
+        }.store(in: &cancellables)
+        try performHandshake()
+        serverWrite(line)
+        wait(for: [exp], timeout: 10)
+        return try XCTUnwrap(seen)
+    }
+
+    func testAwaitingNotifiedArrivesWithItsTransportAndOutcomeEvenWithoutAJobKey() throws {
+        let seen = try mc4NextAwaitingNotified(sending: eventLine(
+            "awaiting_notified", id: 20, data: #""kind":"awaiting","count":1,"transport":"suppressed_client","ok":true"#))
+        XCTAssertEqual(seen.transport, "suppressed_client")
+        XCTAssertTrue(seen.ok)
+    }
+
+    func testAwaitingNotifiedWithAJobKeyAndAFailedOutcomeDecodes() throws {
+        let seen = try mc4NextAwaitingNotified(sending: eventLine(
+            "awaiting_notified", id: 21, data: #""job":"j-1","kind":"awaiting","count":2,"transport":"osascript","ok":false"#))
+        XCTAssertEqual(seen.transport, "osascript")
+        XCTAssertFalse(seen.ok)
+    }
+
+    func testAwaitingNotifiedWithoutAnOkFieldReadsAsOk() throws {
+        let seen = try mc4NextAwaitingNotified(sending: eventLine(
+            "awaiting_notified", id: 22, data: #""kind":"awaiting","count":1,"transport":"suppressed_client""#))
+        XCTAssertTrue(seen.ok)
+    }
+}
+
+// MARK: - MC4: the quiet-broker note
+
+final class MC4MotherNotifyNoteTests: XCTestCase {
+
+    func testTheNoteTextIsTheFixedExplanation() {
+        XCTAssertEqual(MotherNotifyNote.text,
+                       "Mother is staying quiet because Nostromo is open, but Nostromo can't show notifications. "
+                       + "Allow notifications for Nostromo, or set MOTHER_NOTIFY_SUPPRESS_WHEN_CLIENT=0 in Mother's config.")
+    }
+
+    func testItStartsLowered() {
+        XCTAssertFalse(MotherNotifyNote().isRaised)
+    }
+
+    func testBeingSuppressedWhileNotificationsAreUnavailableRaisesIt() {
+        var note = MotherNotifyNote()
+        note.suppressionObserved(surfaceAvailable: false)
+        XCTAssertTrue(note.isRaised)
+    }
+
+    func testBeingSuppressedWhileNotificationsAreAvailableDoesNotRaiseIt() {
+        var note = MotherNotifyNote()
+        note.suppressionObserved(surfaceAvailable: true)
+        XCTAssertFalse(note.isRaised)
+    }
+
+    func testDismissingLowersItAndItNeverRaisesAgain() {
+        var note = MotherNotifyNote()
+        note.suppressionObserved(surfaceAvailable: false)
+        note.dismiss()
+        XCTAssertFalse(note.isRaised)
+
+        note.suppressionObserved(surfaceAvailable: false)
+        note.suppressionObserved(surfaceAvailable: false)
+        XCTAssertFalse(note.isRaised, "dismissed for the life of the value")
+    }
+
+    func testDismissingBeforeItWasEverRaisedAlsoKeepsItDown() {
+        var note = MotherNotifyNote()
+        note.dismiss()
+        note.suppressionObserved(surfaceAvailable: false)
+        XCTAssertFalse(note.isRaised)
+    }
+
+    func testRepeatedSuppressionKeepsItRaisedWithoutChange() {
+        var note = MotherNotifyNote()
+        note.suppressionObserved(surfaceAvailable: false)
+        note.suppressionObserved(surfaceAvailable: false)
+        XCTAssertTrue(note.isRaised)
+    }
+}
+
+// MARK: - MC4: clicking a notification
+
+final class MC4NeedsYouRoutingTests: XCTestCase {
+
+    private var opened = 0
+    private var observer: NSObjectProtocol?
+
+    override func setUp() {
+        super.setUp()
+        MotherView.requestedJobId = nil
+        opened = 0
+        observer = NotificationCenter.default.addObserver(forName: MotherView.openJobNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.opened += 1
+        }
+    }
+
+    override func tearDown() {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        MotherView.requestedJobId = nil
+        super.tearDown()
+    }
+
+    func testAMotherNotificationRoutesToThatJobsTab() {
+        let routed = NeedsYouRouting.route(userInfo: ["needsYouId": "mother:j-9:await", "producer": "mother", "jobId": "j-9"])
+
+        XCTAssertTrue(routed)
+        XCTAssertEqual(MotherView.requestedJobId, "j-9")
+        XCTAssertEqual(opened, 1)
+    }
+
+    func testANotificationFromAnotherProducerIsNotRouted() {
+        let routed = NeedsYouRouting.route(userInfo: ["needsYouId": "approvals:1", "producer": "approvals", "jobId": "j-9"])
+
+        XCTAssertFalse(routed)
+        XCTAssertNil(MotherView.requestedJobId)
+        XCTAssertEqual(opened, 0)
+    }
+
+    func testMalformedUserInfoIsNotRoutedAndTouchesNothing() {
+        let cases: [[AnyHashable: Any]] = [
+            [:],
+            ["producer": "mother"],
+            ["producer": "mother", "jobId": 7],
+            ["jobId": "j-9"],
+            ["producer": 3, "jobId": "j-9"],
+        ]
+        for userInfo in cases {
+            XCTAssertFalse(NeedsYouRouting.route(userInfo: userInfo), "\(userInfo)")
+        }
+        XCTAssertNil(MotherView.requestedJobId)
+        XCTAssertEqual(opened, 0)
     }
 }

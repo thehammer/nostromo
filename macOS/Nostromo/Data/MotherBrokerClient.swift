@@ -137,6 +137,9 @@ enum BrokerEvent {
     /// record is authoritative, so AppStore re-reads the job with `query.get` instead of
     /// folding the event itself.
     case crewChanged(jobId: String)
+    /// Mother reported what it did with an awaiting push (`awaiting_notified`). Only
+    /// `transport == "suppressed_client"` matters: Mother stood down because of a client.
+    case awaitingNotified(transport: String, ok: Bool)
     /// Liveness ping — ignore.
     case ping
     /// Client reconnected after disconnect — AppStore must clear jobMap and await next snapshot.
@@ -229,6 +232,19 @@ class MotherBrokerClient {
     var supportsAnswerOption: Bool { advertisedCaps.contains("answer.option") }
     /// The `ack` command (MC3).
     var supportsAck: Bool { advertisedCaps.contains("ack") }
+    /// Explicit client registration in `subscribe` (MC4). Proposed to Mother in
+    /// `.claude/wip/mother-crew-client-feedback-for-mother.md`; Mother has not published it
+    /// yet, so nothing new is sent until the broker's hello advertises it.
+    static let clientSurfacesCapability = "client.surfaces"
+    var supportsClientSurfaces: Bool { advertisedCaps.contains(Self.clientSurfacesCapability) }
+
+    private var _notifySurfaceAvailable = false
+    /// Nostromo can show notifications right now (authorized). Registration claims the
+    /// `notify` surface only while this is true.
+    private var notifySurfaceAvailable: Bool {
+        capsLock.lock(); defer { capsLock.unlock() }
+        return _notifySurfaceAvailable
+    }
 
     /// The `source` this app's answers carry: a person's gesture in the Mac app.
     static let appSource = "nostromo_app"
@@ -238,6 +254,25 @@ class MotherBrokerClient {
     func start() {
         log.info("Broker client starting — \(self.socketPath, privacy: .public)")
         connect()
+    }
+
+    // MARK: - Client registration (MC4)
+
+    /// Tell the client whether notifications are allowed. When that changes on a live connection
+    /// to a broker that advertises `client.surfaces`, re-subscribe (unsubscribe, then subscribe)
+    /// so Mother's registry matches. Any thread.
+    func setNotifySurfaceAvailable(_ available: Bool) {
+        capsLock.lock()
+        let changed = _notifySurfaceAvailable != available
+        _notifySurfaceAvailable = available
+        capsLock.unlock()
+        guard changed, supportsClientSurfaces else { return }
+        sendLock.lock()
+        let live = fd
+        sendLock.unlock()
+        guard live >= 0 else { return }
+        writeJSON(commandEnvelope(type: "unsubscribe", data: ["sub": "queue"]), to: live)
+        sendSubscribe(on: live)
     }
 
     // MARK: - Outbound command API
@@ -481,7 +516,10 @@ class MotherBrokerClient {
         )
     }
 
-    private func sendSubscribe(on sock: Int32) {
+    /// The `data` of the `subscribe` command. Exactly the pre-MC4 payload unless the broker
+    /// advertised `client.surfaces` and notifications are available, which adds the client
+    /// registration: `{"client": {"name": "nostromo", "surfaces": ["notify"]}}`.
+    func subscribeData() -> [String: Any] {
         let desired: Set<String> = ["state", "activity", "await", "current_activity", "quota"]
         let caps    = Set(advertisedCaps)
         // Intersect with advertised to avoid malformed rejection; if caps is empty (unknown broker)
@@ -490,19 +528,30 @@ class MotherBrokerClient {
         // `progress` is newer than the rest: only ever asked for when advertised.
         if caps.contains("progress") { filtered.append("progress") }
 
-        let envelope: [String: Any] = [
-            "v":   1,
-            "dir": "cmd",
-            "t":   "subscribe",
-            "id":  UUID().uuidString,
-            "ts":  isoTimestamp(),
-            "data": [
-                "sub":        "queue",
-                "jobs":       ["all"],
-                "categories": filtered,
-            ] as [String: Any],
+        var data: [String: Any] = [
+            "sub":        "queue",
+            "jobs":       ["all"],
+            "categories": filtered,
         ]
-        writeJSON(envelope, to: sock)
+        if supportsClientSurfaces && notifySurfaceAvailable {
+            data["client"] = ["name": "nostromo", "surfaces": ["notify"]] as [String: Any]
+        }
+        return data
+    }
+
+    private func sendSubscribe(on sock: Int32) {
+        writeJSON(commandEnvelope(type: "subscribe", data: subscribeData()), to: sock)
+    }
+
+    private func commandEnvelope(type: String, data: [String: Any]) -> [String: Any] {
+        [
+            "v":    1,
+            "dir":  "cmd",
+            "t":    type,
+            "id":   UUID().uuidString,
+            "ts":   isoTimestamp(),
+            "data": data,
+        ]
     }
 
     // MARK: - Command sending
@@ -694,6 +743,14 @@ class MotherBrokerClient {
             log.debug("broker snapshot: \(jobs.count, privacy: .public) jobs")
             DispatchQueue.main.async { [weak self] in
                 self?.events.send(.snapshot(jobs))
+            }
+
+        case "awaiting_notified":
+            // Counts only (`kind`, `count`, `transport`, `ok`): there may be no job.
+            let transport = dataDict["transport"] as? String ?? ""
+            let ok = dataDict["ok"] as? Bool ?? true
+            DispatchQueue.main.async { [weak self] in
+                self?.events.send(.awaitingNotified(transport: transport, ok: ok))
             }
 
         default:
