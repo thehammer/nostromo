@@ -7,7 +7,8 @@ to verify the reply shape Nostromo's approval card (AP2c) sends:
     allow, with updatedInput = <original input> plus answers = {"<question text>": "<answer string>"}
 
 What it does: starts `claude -p --input-format stream-json --output-format stream-json
---permission-prompt-tool stdio` in a temp directory, asks the model to call AskUserQuestion with one single-select
+--permission-prompt-tool stdio` (permissions are NOT bypassed; the shell, file-writing and web tools are
+disallowed, and any other tool request is denied) in a temp directory, asks the model to call AskUserQuestion with one single-select
 and one multi-select question, answers the resulting `can_use_tool` control request with an allow whose
 `updatedInput.answers` picks the first option of the first question and the first two of the second (with
 `--other`, a typed free-text answer for the first instead), then prints the tool_result the CLI produced.
@@ -84,7 +85,8 @@ def main():
     try:
         proc = subprocess.Popen(
             [args.claude, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-             "--dangerously-skip-permissions", "--permission-prompt-tool", "stdio"],
+             "--permission-prompt-tool", "stdio",
+             "--disallowedTools", "Bash,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"],
             cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         lines = queue.Queue()
         threading.Thread(target=reader, args=(proc.stdout, lines), daemon=True).start()
@@ -106,7 +108,14 @@ def main():
             except ValueError:
                 continue
             req = msg.get("request") if msg.get("type") == "control_request" else None
-            if req and req.get("subtype") == "can_use_tool" and req.get("tool_name") == "AskUserQuestion":
+            if req and req.get("subtype") == "can_use_tool" and req.get("tool_name") != "AskUserQuestion":
+                # Nothing but the question tool may run: permissions are not bypassed.
+                print("denying a request for", req.get("tool_name"))
+                proc.stdin.write(json.dumps({"type": "control_response", "response": {
+                    "subtype": "success", "request_id": msg["request_id"],
+                    "response": {"behavior": "deny", "message": "probe: only AskUserQuestion is allowed"}}}) + "\n")
+                proc.stdin.flush()
+            elif req and req.get("subtype") == "can_use_tool":
                 answers = answers_for(req["input"]["questions"], args.other)
                 print("request input:", json.dumps(req["input"]))
                 print("sending answers:", json.dumps(answers))
