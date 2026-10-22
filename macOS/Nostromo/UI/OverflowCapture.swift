@@ -11,8 +11,9 @@ import Foundation
 ///
 /// **Structure only, never content.** The file holds class names, frames, sizes, priorities and
 /// constraint attributes. No `stringValue`, title, tooltip, accessibility label, identifier or text of any
-/// kind is read, so no transcript, pane, sidebar label or tab text can reach it. Keep it that way:
-/// a new field must be a number, a flag or a class name.
+/// kind is read, so no transcript, pane, sidebar label or tab text can reach it. The one string that is not
+/// a class name or a fixed word is the display's name (`screen`), which `nostromo-app windows` already
+/// reports. Keep it that way: a new field must be a number, a flag or a class name.
 enum OverflowCapture {
 
     /// At most one capture per window per this long.
@@ -25,6 +26,8 @@ enum OverflowCapture {
     static let maxNodes = 600
     /// Constraints at or above this priority are listed for a view that pokes past the window.
     static let constraintPriorityFloor: Float = 750
+    /// A cap on the constraints listed for one view.
+    static let maxConstraintsPerView = 32
 
     static let filePrefix = "layout-overflow-"
     static let fileSuffix = ".json"
@@ -91,6 +94,8 @@ enum OverflowCapture {
         let over = MainLayout.overflow(layoutSize: layout.frame.size, contentSize: content)
         var budget = maxNodes
         let tree = node(layout, depth: 0, contentSize: content, budget: &budget)
+        // The node budget ran out: later siblings are missing from `tree`, they are not leaves.
+        let truncated = budget <= 0
         return [
             "schema": 1,
             "capturedAtUTC": utcStamp(now),
@@ -104,6 +109,7 @@ enum OverflowCapture {
             "isKey": window.isKeyWindow,
             "fullscreen": window.styleMask.contains(.fullScreen),
             "coordinates": "frameInWindow: AppKit window coordinates, origin bottom-left; frame: in the superview",
+            "truncated": truncated,
             "tree": tree,
         ]
     }
@@ -112,14 +118,19 @@ enum OverflowCapture {
         budget -= 1
         let inWindow = view.convert(view.bounds, to: nil)
         let beyond = pokesPastWindow(inWindow, contentSize: contentSize)
-        let intrinsic = view.intrinsicContentSize
-        let fitting = view.fittingSize
+        // A scroll view's document view and a text view measure their whole text to answer: a stall
+        // of seconds for a big log, in the state being debugged. Their frames are recorded, their
+        // sizes are not (-1, `sizingSkipped`).
+        let isDocument = view.enclosingScrollView?.documentView === view
+        let skipSizing = isDocument || view is NSText
+        let intrinsic = skipSizing ? NSSize(width: -1, height: -1) : view.intrinsicContentSize
+        let fitting = skipSizing ? NSSize(width: -1, height: -1) : view.fittingSize
         // A view whose own minimum is bigger than the room it was given is a demander: what pushes
         // the layout past the window is usually not a view that already pokes out of it. (A text
         // field's width is skipped: a truncating label asks for its whole string by design.)
         let slack = MainLayout.overflowTolerance
-        let demandsMore = fitting.height > view.frame.height + slack
-            || (!(view is NSTextField) && fitting.width > view.frame.width + slack)
+        let demandsMore = !skipSizing && (fitting.height > view.frame.height + slack
+            || (!(view is NSTextField) && fitting.width > view.frame.width + slack))
         var out: [String: Any] = [
             "class": String(describing: type(of: view)),
             "frame": rect(view.frame),
@@ -134,12 +145,12 @@ enum OverflowCapture {
             "translatesAutoresizingMask": view.translatesAutoresizingMaskIntoConstraints,
             "pokesPastWindow": beyond,
             "demandsMoreThanItHas": demandsMore,
+            "sizingSkipped": skipSizing,
         ]
         if beyond || demandsMore { out["constraints"] = strongConstraints(touching: view) }
         guard depth < maxDepth else { return out }
         // A scroll view's document is as tall as its whole content (and its children are the
         // content): the scroll view and its document are recorded, nothing below the document.
-        let isDocument = view.enclosingScrollView?.documentView === view
         guard !isDocument else { return out }
         var kids: [[String: Any]] = []
         for sub in view.subviews where budget > 0 {
@@ -160,9 +171,12 @@ enum OverflowCapture {
     private static func strongConstraints(touching view: NSView) -> [[String: Any]] {
         var out: [[String: Any]] = []
         var holder: NSView? = view
-        while let h = holder, out.count < 32 {
+        func touches(_ item: AnyObject?) -> Bool {
+            item === view || (item as? NSLayoutGuide)?.owningView === view
+        }
+        while let h = holder, out.count < maxConstraintsPerView {
             for c in h.constraints where c.isActive && c.priority.rawValue >= constraintPriorityFloor {
-                guard c.firstItem === view || c.secondItem === view else { continue }
+                guard out.count < maxConstraintsPerView, touches(c.firstItem) || touches(c.secondItem) else { continue }
                 out.append([
                     "first": c.firstItem.map { String(describing: type(of: $0)) } ?? "none",
                     "firstAttribute": attributeName(c.firstAttribute),
