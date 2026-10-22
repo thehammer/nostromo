@@ -187,7 +187,8 @@ final class AppControlServer {
 
     private func windowsInfo() -> [[String: Any]] {
         (appDelegate?.windows ?? []).enumerated().map { i, w in
-            let overflow = (w.contentView as? MainLayout)?.contentOverflow ?? .zero
+            let layout = w.contentView as? MainLayout
+            let overflow = layout?.contentOverflow ?? .zero
             return ["index": i, "title": w.title,
              "frame": ["x": w.frame.minX, "y": w.frame.minY, "w": w.frame.width, "h": w.frame.height],
              "fullscreen": w.styleMask.contains(.fullScreen),
@@ -200,7 +201,10 @@ final class AppControlServer {
              "firstResponder": w.firstResponder.map { String(describing: type(of: $0)) } ?? "none",
              // How far the content view pokes past the window, in points; 0 on an axis that
              // fits. A QA script asserts both are 0 (the 2026-10-21 overflow was 795 x 70).
-             "contentOverflow": ["w": overflow.width, "h": overflow.height]]
+             "contentOverflow": ["w": overflow.width, "h": overflow.height],
+             // The newest structured capture of this window's overflow (`layout-overflow-<index>-<UTC>.json`,
+             // content-free), or null. If `contentOverflow` is non-zero, do not relaunch: send this file.
+             "overflowCapture": layout?.latestOverflowCapturePath.map { $0 as Any } ?? NSNull()]
         }
     }
 
