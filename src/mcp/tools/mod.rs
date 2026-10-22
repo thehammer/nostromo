@@ -442,7 +442,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "mother.resume_job",
-            "description": "Resume an awaiting Mother job by providing the operator's answer. A job held with a structured decision (a gate or review hold with options) is not answered here: it needs the operator's choice in Nostromo's Mother panel, and this tool refuses it (error needs_operator_choice).",
+            "description": "Resume an awaiting Mother job by providing the operator's answer. A job held with a structured decision (a gate or review hold with options) is not answered here: it needs the operator's choice in Nostromo's Mother panel, and this tool refuses it while the daemon's job list shows that decision open (error needs_operator_choice).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

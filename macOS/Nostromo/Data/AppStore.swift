@@ -209,6 +209,8 @@ class AppStore: ObservableObject {
     private var decisionStores: [String: MotherDecisionStore] = [:]
     /// Fires when a decision's send state or the broker's capabilities change.
     private let motherDecisionChanges = PassthroughSubject<Void, Never>()
+    /// Acknowledgements sent and not yet answered, by job and reason.
+    private var acksInFlight = Set<String>()
 
     /// Shared ChatSession instances keyed by agent tag. Like `focusLayouts`,
     /// an entry's lifetime now exactly matches its focus's — see
@@ -776,6 +778,9 @@ class AppStore: ObservableObject {
         // A decision that resolved (or was replaced) takes its send state with it.
         var storesChanged = false
         for (id, var store) in decisionStores {
+            // A send in flight keeps its state through a moment with no decision (a reconnect, an
+            // unreadable refresh): its result is still coming, and the buttons must not re-enable.
+            if case .sending = store.state, jobMap[id]?.crew.decision == nil { continue }
             let before = store
             store.sync(decision: jobMap[id]?.crew.decision)
             guard store != before else { continue }
@@ -838,8 +843,11 @@ class AppStore: ObservableObject {
 
     /// Acknowledge a raised attention flag. The refresh shows it as acknowledged.
     func ackMotherAttention(jobId: String, reason: MotherAttentionReason) {
+        let key = jobId + "\u{0}" + reason.raw
+        guard acksInFlight.insert(key).inserted else { return }   // a double click is one ack
         broker.ack(job: jobId, reason: reason.raw) { [weak self] result in
             guard let self else { return }
+            self.acksInFlight.remove(key)
             switch result {
             case .success:
                 log.info("broker ack succeeded")
@@ -872,7 +880,8 @@ class AppStore: ObservableObject {
             // Mother's own message text is never shown or logged: only its class.
             log.warning("broker decision answer failed: \(err.kind.logName, privacy: .public)")
             motherActionError = err.decisionMessage
-            if err.kind == .invalidState { jobRefresher.request(job: jobId) }
+            // After a timeout Mother may still have applied the answer: read the job before anyone resends.
+            if err.kind == .invalidState || err.kind == .timeout { jobRefresher.request(job: jobId) }
         }
         motherDecisionChanges.send()
     }

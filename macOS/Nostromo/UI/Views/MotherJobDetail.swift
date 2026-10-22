@@ -496,6 +496,11 @@ final class MotherJobDetail: NSView {
     /// Show `job` as the pane's subject: a different job than the one shown, or none (nil).
     /// Starts from a clean slate: the reply draft is cleared and everything is rebuilt.
     func select(_ job: MotherJob?) {
+        // An override confirmation left armed from an earlier visit does not wait for the next click.
+        if let job, let decision = job.crew.decision, decision.isOpen,
+           case .confirming = host.motherDecisionState(jobId: job.id, decisionId: decision.id) {
+            host.cancelMotherDecisionConfirm(jobId: job.id, decisionId: decision.id)
+        }
         logTimer?.invalidate(); logTimer = nil
         currentJob   = job
         currentJobId = job?.id
@@ -552,6 +557,10 @@ final class MotherJobDetail: NSView {
         }
         if job.phases != previous.phases || job.cycles != previous.cycles {
             updateRibbon(job)
+        }
+        // Guidance written for one hold must not ride along to the next one.
+        if let oldDecision = previous.crew.decision, oldDecision.isOpen, oldDecision.id != job.crew.decision?.id {
+            replyTextView.string = ""
         }
         updateCrewSection(job)
 
@@ -1020,9 +1029,11 @@ final class MotherJobDetail: NSView {
 
     // MARK: - Button actions
 
-    /// Nothing that answers Mother or acknowledges a flag runs unless a person did it:
-    /// app-control, synthetic and stale input, and an Accessibility press without VoiceOver,
-    /// are refused. The refusal is logged by its reason only and shows nothing.
+    // Nothing that answers Mother or acknowledges a flag runs unless a person did it:
+    // app-control, synthetic and stale input, and an Accessibility press without VoiceOver,
+    // are refused (`HumanGesture.permit`, called first in each action below).
+
+    /// Log a refused gesture by its reason only; the refusal shows nothing to the user.
     private func logRefused(_ verdict: HumanGestureVerdict, _ what: String) {
         if case .refused(let reason) = verdict {
             log.info("\(what, privacy: .public) refused: \(reason.rawValue, privacy: .public)")
@@ -1070,8 +1081,13 @@ final class MotherJobDetail: NSView {
         host.answerMotherDecision(jobId: job.id, decisionId: decision.id, option: option, text: "")
     }
 
-    /// Back out of the confirmation. Sends nothing, so it needs no gesture check.
+    /// Back out of the confirmation. It sends nothing, but it is part of the confirmation a person
+    /// is making, so synthetic input does not get to move it either.
     @objc private func didBackFromConfirm(_ sender: NSButton) {
+        let verdict = HumanGesture.permit(gestureInputs.currentEvent(), control: sender,
+                                          voiceOverEnabled: gestureInputs.voiceOverEnabled,
+                                          allowsSynthetic: gestureInputs.allowsSynthetic)
+        guard case .human = verdict else { logRefused(verdict, "override back"); return }
         guard let job = currentJob, let decision = optionDecision(for: job) else { return }
         host.cancelMotherDecisionConfirm(jobId: job.id, decisionId: decision.id)
     }
