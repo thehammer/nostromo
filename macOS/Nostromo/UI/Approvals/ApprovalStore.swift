@@ -177,6 +177,7 @@ final class ApprovalStore {
     static func outcomeText(_ outcome: String) -> String {
         switch outcome {
         case "allowed_once": return "Allowed once"
+        case "answered": return "Answered"
         case "denied": return "Denied"
         case "denied_and_stopped": return "Denied and stopped"
         case "timed_out": return "Denied: no answer in 15 min"
@@ -255,6 +256,8 @@ final class ApprovalStore {
             hold(frame.requestId, text: "Not sent: Nostromo isn't verified as the operator (run make mac-install)")
         case .requiresSecureConnection:
             hold(frame.requestId, text: "Not sent: this connection can't answer approvals")
+        case .invalidAnswer:
+            hold(frame.requestId, text: "Not sent: the daemon refused these answers")
         case .unknown:
             hold(frame.requestId, text: "Not sent: the daemon refused the answer")
         }

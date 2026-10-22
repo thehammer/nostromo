@@ -514,3 +514,58 @@ enum ApprovalFixtures {
         return out
     }
 }
+
+// MARK: - AskUserQuestion (AP2c)
+
+extension ApprovalFixtures {
+
+    /// What the daemon lists for an `AskUserQuestion` it can take answers for: the four it always lists, then `answer_questions`.
+    static let askUserQuestionOptions = allOptions + ["answer_questions"]
+
+    /// One option of a question. A nil `description` leaves the key out (the CLI allows that).
+    static func askOption(_ label: String, _ description: String? = "") -> Obj {
+        var o: Obj = ["label": label]
+        if let description = description { o["description"] = description }
+        return o
+    }
+
+    /// One question. Nil `header` / `multiSelect` leave the key out.
+    static func askQuestion(_ question: String, header: String? = nil, multiSelect: Bool? = nil,
+                            options: [Obj]) -> Obj {
+        var q: Obj = ["question": question, "options": options]
+        if let header = header { q["header"] = header }
+        if let multiSelect = multiSelect { q["multiSelect"] = multiSelect }
+        return q
+    }
+
+    /// The two questions in `tests/fixtures/approvals/ask_user_question.json`: one single-select, one multi-select.
+    static let askUserQuestionFixtureQuestions: [Obj] = [
+        askQuestion("Which database should we use?", header: "Database", multiSelect: false, options: [
+            askOption("Postgres", "Relational, strong consistency"),
+            askOption("SQLite", "Embedded, zero setup"),
+        ]),
+        askQuestion("Which features do you want to enable?", header: "Features", multiSelect: true, options: [
+            askOption("Caching", "In-memory response cache"),
+            askOption("Metrics", "Prometheus endpoint"),
+            askOption("Tracing", "OpenTelemetry spans"),
+        ]),
+    ]
+
+    /// An `AskUserQuestion` request as the daemon sends it (a `can_use_tool` for a tool that needs the CLI's own
+    /// interface): `tool_kind` other, `requires_user_interaction`, and `answer_questions` among the options.
+    /// Pass `input` to replace the whole tool input (an unanswerable one, say).
+    static func askUserQuestionRequest(questions: [Obj] = ApprovalFixtures.askUserQuestionFixtureQuestions,
+                                       input: Obj? = nil,
+                                       options: [String] = ApprovalFixtures.askUserQuestionOptions,
+                                       flags: [String: Bool] = ["requires_user_interaction": true],
+                                       toolName: String = "AskUserQuestion",
+                                       agentName: String = "cody") throws -> ApprovalRequestWire {
+        let toolInput: Obj = input ?? ["questions": questions]
+        let pretty = try JSONSerialization.data(withJSONObject: toolInput, options: [.prettyPrinted, .sortedKeys])
+        return try request(toolKind: "other", toolName: toolName, displayName: toolName, agentName: agentName,
+                           input: toolInput,
+                           display: display(lines: jsonDisplayLines(String(decoding: pretty, as: UTF8.self))),
+                           reasonKind: "other", reasonText: "Claude Code asked for approval",
+                           flags: flags, options: options)
+    }
+}

@@ -16,9 +16,11 @@
 //!
 //! # Invariants
 //!
-//! - **Never auto-approve (T-INV-3).** Exactly one path writes
-//!   `"behavior":"allow"`: [`ApprovalBroker::answer`] with `allow_once`, which the
-//!   server calls only for the verified app's connection. Every other ending
+//! - **Never auto-approve (T-INV-3).** Exactly one function writes
+//!   `"behavior":"allow"`: [`ApprovalBroker::answer`], with `allow_once` or (AP2c)
+//!   with `answer_questions` whose answers fit the held `AskUserQuestion`
+//!   request's own questions, which the server calls only for the verified app's
+//!   connection. Every other ending
 //!   (timeout, error, restart, no app, a closed channel, a failed write) writes a
 //!   deny or nothing.
 //! - **Exactly one ending per request.** A request lives in `pending` until one
@@ -60,6 +62,7 @@ use tracing::{debug, error, info, warn};
 use super::audit::{sanitize_string, AuditFilter, AuditLog, Entry, Event};
 use super::display::ApprovalDisplay;
 use super::guard::{self, GuardVerdict, HookPayload, PaneProbe, SystemPaneProbe};
+use super::questions;
 use super::request::{FileSettings, PermissionRequest, SettingsSource};
 use super::wire::{
     clean_note, AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption,
@@ -77,8 +80,8 @@ pub const NO_APP_MESSAGE: &str =
     "Nostromo can't ask anyone right now (the app is closed), so this was denied. Tell the user what you wanted to run.";
 /// What an agent is told when the app is open but cannot show the request: its
 /// approval screen isn't there (the app does not render approvals yet, or the
-/// session cannot be asked about safely). (An `AskUserQuestion` or `ExitPlanMode`
-/// request, if one reaches `can_use_tool`, gets these words too.)
+/// session cannot be asked about safely). (An `ExitPlanMode` request, if one
+/// reaches `can_use_tool` and cannot be held, gets these words too.)
 pub const APPROVAL_UNAVAILABLE_MESSAGE: &str = "Nostromo's approval screen isn't available yet, so this was denied. Tell the user what you wanted to run and give them the exact command; do not retry it.";
 /// The error answer to a `control_request` of any subtype but `can_use_tool`: the
 /// host does not handle it.
@@ -136,6 +139,8 @@ pub enum Outcome {
     DenyWriteFailed,
     TimedOut,
     AllowedOnce,
+    /// The human answered an `AskUserQuestion` request (an allow whose input carries the answers).
+    Answered,
     Denied,
     DeniedAndStopped,
     Restart,
@@ -157,6 +162,7 @@ impl Outcome {
             Self::DenyWriteFailed => "deny_write_failed",
             Self::TimedOut => "timed_out",
             Self::AllowedOnce => "allowed_once",
+            Self::Answered => "answered",
             Self::Denied => "denied",
             Self::DeniedAndStopped => "denied_and_stopped",
             Self::Restart => "restart",
@@ -179,7 +185,8 @@ struct Ending {
     rule: Option<Value>,
     watchdog: bool,
     /// Write `{"behavior":"allow","updatedInput":<this>}` instead of a deny. Set
-    /// only by [`Ending::allow_once`], which only [`ApprovalBroker::answer`] calls.
+    /// only by [`Ending::allow_once`] and [`Ending::answered`], which only
+    /// [`ApprovalBroker::answer`] calls.
     allow: Option<Value>,
     /// The deny also interrupts the agent (`deny_and_stop`).
     interrupt: bool,
@@ -214,6 +221,16 @@ impl Ending {
             allow: Some(input),
             by_window: Some(by_window.to_owned()),
             ..Self::silent(Outcome::AllowedOnce)
+        }
+    }
+
+    /// The other ending that approves: the human answered an `AskUserQuestion` request.
+    /// `updated_input` is the original input plus `answers` ([`questions::updated_input`]).
+    fn answered(updated_input: Value, by_window: &str) -> Self {
+        Self {
+            allow: Some(updated_input),
+            by_window: Some(by_window.to_owned()),
+            ..Self::silent(Outcome::Answered)
         }
     }
 
@@ -450,6 +467,8 @@ pub enum AnswerResult {
     UnknownRequest,
     /// The answering connection is not one the request was shown to.
     NotPresenter,
+    /// An `answer_questions` decision that does not fit the request. The request is still held.
+    InvalidAnswer,
 }
 
 impl AnswerResult {
@@ -460,6 +479,7 @@ impl AnswerResult {
             Self::AlreadyResolved { outcome } => Some((AnswerRefusal::AlreadyResolved, Some(outcome))),
             Self::UnknownRequest => Some((AnswerRefusal::UnknownRequest, None)),
             Self::NotPresenter => Some((AnswerRefusal::NotOperatorApp, None)),
+            Self::InvalidAnswer => Some((AnswerRefusal::InvalidAnswer, None)),
         }
     }
 }
@@ -1128,11 +1148,14 @@ impl ApprovalBroker {
         }
         let window_id = sanitize_string(window_id);
         let window_id = window_id.as_str();
-        let input = {
+        let (input, answerable) = {
             let st = lock(&self.inner.state);
             match st.pending.get(request_id) {
-                Some(p) if p.held => p.input.clone(),
-                Some(_) => None,
+                Some(p) if p.held => (
+                    p.input.clone(),
+                    p.wire.as_ref().is_some_and(|w| w.options.contains(&ApprovalOption::AnswerQuestions)),
+                ),
+                Some(_) => (None, false),
                 None => return st.answer_to_ended(request_id),
             }
         };
@@ -1144,6 +1167,21 @@ impl ApprovalBroker {
             DecisionKind::AllowOnce => Ending::allow_once(input, window_id),
             DecisionKind::Deny => Ending::denied(note.as_deref(), false, window_id),
             DecisionKind::DenyAndStop => Ending::denied(note.as_deref(), true, window_id),
+            DecisionKind::AnswerQuestions => {
+                // Only a request the daemon itself listed as answerable, and only with answers
+                // that fit its questions: anything else leaves the request held and sends nothing.
+                let built = match (answerable, decision.answers.as_deref()) {
+                    (true, Some(answers)) => questions::updated_input(&input, answers),
+                    _ => Err(questions::AnswerError::NotAnswerable),
+                };
+                match built {
+                    Ok(updated) => Ending::answered(updated, window_id),
+                    Err(why) => {
+                        debug!(conn_key, request_id, ?why, "answer refused: it does not fit the questions");
+                        return AnswerResult::InvalidAnswer;
+                    }
+                }
+            }
         };
         match self.inner.finish(request_id, ending) {
             Some(done) => {
@@ -1684,6 +1722,10 @@ fn approval_wire(
     timeout: Duration,
 ) -> ApprovalRequestWire {
     let created_at_ms = now_ms();
+    let mut options = ApprovalOption::ALL.to_vec();
+    if req.tool_name == "AskUserQuestion" && questions::parse_questions(&req.input).is_some() {
+        options.push(ApprovalOption::AnswerQuestions);
+    }
     ApprovalRequestWire {
         request_id: request_id.to_owned(),
         tag: tag.to_owned(),
@@ -1710,7 +1752,7 @@ fn approval_wire(
             classifier_approvable: req.classifier_approvable.unwrap_or(false),
         },
         description: req.description.clone(),
-        options: ApprovalOption::ALL.to_vec(),
+        options,
         session_rule_candidates: Vec::new(),
         created_at_ms,
         deadline_at_ms: created_at_ms + timeout.as_millis() as u64,

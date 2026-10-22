@@ -53,15 +53,18 @@ final class ApprovalKindsTests: XCTestCase {
         XCTAssertNil(options.notice)
     }
 
-    func testThereIsNoRememberControlAndNoControlBeyondTheFourEverCanBeOffered() throws {
-        XCTAssertEqual(Set(ApprovalControl.allCases), [.deny, .denyWithNote, .denyAndStop, .allowOnce])
-        XCTAssertEqual(ApprovalControl.allCases.count, 4)
+    func testThereIsNoRememberControlAndNoControlBeyondTheFourAndSubmitEverCanBeOffered() throws {
+        // AP2c added Submit (`answer_questions`) for an AskUserQuestion the daemon can take answers for. It is the only
+        // addition: nothing that remembers, persists or allows for a session or for good.
+        XCTAssertEqual(Set(ApprovalControl.allCases), [.deny, .denyWithNote, .denyAndStop, .allowOnce, .answerQuestions])
+        XCTAssertEqual(ApprovalControl.allCases.count, 5)
+        XCTAssertEqual(ApprovalControl.answerQuestions.rawValue, "answer_questions")
         for control in ApprovalControl.allCases {
             let raw = control.rawValue.lowercased()
             XCTAssertFalse(raw.contains("remember") || raw.contains("session") || raw.contains("always"), raw)
         }
-        // Whatever the daemon lists, only those four can come back.
-        let allowed: Set<ApprovalControl> = Set(ApprovalControl.allCases)
+        // Whatever the daemon lists for an ordinary tool, only the original four can come back.
+        let allowed: Set<ApprovalControl> = [.deny, .denyWithNote, .denyAndStop, .allowOnce]
         let hostile = try bash(options: ["allow_once", "allow_session", "remember_always", "allow_always", "deny",
                                          "deny_and_stop", "deny_with_note"])
         XCTAssertTrue(Set(ApprovalCardOptions(request: hostile).controls).isSubset(of: allowed))
@@ -98,6 +101,142 @@ final class ApprovalKindsTests: XCTestCase {
     func testDenyIsOfferedAndNothingElseWhenEveryOptionIsOneThisBuildDoesNotKnow() throws {
         let options = ApprovalCardOptions(request: try bash(options: ["allow_session", "allow_forever"]))
         XCTAssertEqual(options.controls, [.deny])
+    }
+
+    // MARK: - AskUserQuestion (AP2c)
+
+    func testAnAnswerableQuestionRequestOffersDenyAndSubmitAndNothingElse() throws {
+        let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest())
+        XCTAssertEqual(options.controls, [.deny, .answerQuestions])
+        XCTAssertNil(options.notice, "the card can answer it: there is nothing to apologise for")
+        XCTAssertFalse(options.offersAllowOnce)
+    }
+
+    func testAQuestionRequestCarriesItsQuestionsForTheForm() throws {
+        let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest())
+        let questions = try XCTUnwrap(options.questions)
+        XCTAssertEqual(questions.map(\.question), ["Which database should we use?", "Which features do you want to enable?"])
+        XCTAssertEqual(questions.map(\.header), ["Database", "Features"])
+        XCTAssertEqual(questions.map(\.multiSelect), [false, true])
+        XCTAssertEqual(questions.map { $0.options.map(\.label) }, [["Postgres", "SQLite"], ["Caching", "Metrics", "Tracing"]])
+        XCTAssertEqual(questions, ApprovalQuestions.parse(try Fx.askUserQuestionRequest().input))
+    }
+
+    func testAQuestionRequestIsSubmittableWhateverTheRequiresUserInteractionFlagSays() throws {
+        for flag in [true, false] {
+            let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(flags: ["requires_user_interaction": flag]))
+            XCTAssertEqual(options.controls, [.deny, .answerQuestions], "requires_user_interaction \(flag)")
+            XCTAssertNil(options.notice, "requires_user_interaction \(flag)")
+            XCTAssertNotNil(options.questions, "requires_user_interaction \(flag)")
+        }
+    }
+
+    func testAQuestionRequestOffersOnlyWhatAnswerableQuestionsNeedEvenIfTheDaemonListedMore() throws {
+        for listed in [Fx.askUserQuestionOptions, ["answer_questions"], ["deny", "answer_questions"],
+                       ["answer_questions", "allow_once", "allow_session", "remember_always", "deny_and_stop", "deny_with_note"]] {
+            let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(options: listed))
+            XCTAssertEqual(options.controls, [.deny, .answerQuestions], "\(listed)")
+            XCTAssertFalse(options.controls.contains(.allowOnce), "\(listed)")
+            XCTAssertFalse(options.controls.contains(.denyAndStop), "\(listed)")
+            XCTAssertFalse(options.controls.contains(.denyWithNote), "\(listed)")
+        }
+    }
+
+    func testAnAskUserQuestionTheDaemonDidNotOfferAnswersForKeepsDenyOnlyAndTheInteractionNotice() throws {
+        let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(options: Fx.allOptions))
+        XCTAssertEqual(options.controls, [.deny])
+        XCTAssertEqual(options.notice, "This tool needs Claude Code's own interface; Nostromo can't approve it")
+        XCTAssertNil(options.questions)
+    }
+
+    func testAnAskUserQuestionTheDaemonListedWithoutAnswerQuestionsEvenWithAGoodInputIsNotSubmittable() throws {
+        for listed in [[String](), ["deny"], ["allow_once", "deny", "deny_and_stop"]] {
+            let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(options: listed))
+            XCTAssertEqual(options.controls.contains(.answerQuestions), false, "\(listed)")
+            XCTAssertNil(options.questions, "\(listed)")
+            XCTAssertEqual(options.notice, "This tool needs Claude Code's own interface; Nostromo can't approve it", "\(listed)")
+        }
+    }
+
+    func testAnAskUserQuestionWithAnInputThisBuildCannotAnswerKeepsDenyOnlyAndTheNoticeEvenIfAnswersWereListed() throws {
+        let b = Fx.askOption("B"), a = Fx.askOption("A")
+        let unanswerable: [(String, Fx.Obj)] = [
+            ("a text question", ["questions": [["question": "Name?", "kind": "text", "options": [a, b]] as Fx.Obj]]),
+            ("a number question", ["questions": [["question": "How many?", "kind": "number", "options": [a, b]] as Fx.Obj]]),
+            ("five questions", ["questions": (1 ... 5).map { Fx.askQuestion("Q\($0)?", options: [a, b]) }]),
+            ("no questions", ["questions": [Fx.Obj]()]),
+            ("one option", ["questions": [Fx.askQuestion("Q?", options: [a])]]),
+            ("five options", ["questions": [Fx.askQuestion("Q?", options: (1 ... 5).map { Fx.askOption("O\($0)") })]]),
+            ("duplicate labels", ["questions": [Fx.askQuestion("Q?", options: [a, a])]]),
+            ("duplicate question texts", ["questions": [Fx.askQuestion("Q?", options: [a, b]), Fx.askQuestion("Q?", options: [a, b])]]),
+            ("the single-question shape", ["question": "Which one?"]),
+            ("no input", [:]),
+        ]
+        for (name, input) in unanswerable {
+            let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(input: input))
+            XCTAssertEqual(options.controls, [.deny], name)
+            XCTAssertNil(options.questions, name)
+            XCTAssertEqual(options.notice, "This tool needs Claude Code's own interface; Nostromo can't approve it", name)
+        }
+    }
+
+    func testAnUnanswerableQuestionRequestWithoutTheInteractionFlagIsLikeAnyOtherTool() throws {
+        let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(
+            input: ["question": "Which one?"], flags: ["requires_user_interaction": false]))
+        XCTAssertEqual(options.controls, [.deny, .denyWithNote, .denyAndStop, .allowOnce], "nothing about this build's change touches it")
+        XCTAssertNil(options.questions)
+        XCTAssertNil(options.notice)
+    }
+
+    func testOnlyTheAskUserQuestionToolCanBeSubmittableWhateverTheDaemonListsAndWhateverTheInputLooksLike() throws {
+        let good: Fx.Obj = ["questions": Fx.askUserQuestionFixtureQuestions]
+        for toolName in ["WebFetch", "Bash", "mcp__x__AskUserQuestion", "askuserquestion", "AskUserQuestion2", "Task"] {
+            let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(input: good, toolName: toolName))
+            XCTAssertFalse(options.controls.contains(.answerQuestions), toolName)
+            XCTAssertNil(options.questions, toolName)
+        }
+    }
+
+    func testABashRequestThatListsAnswerQuestionsIsUnchanged() throws {
+        let normal = ApprovalCardOptions(request: try bash(options: Fx.askUserQuestionOptions))
+        XCTAssertEqual(normal.controls, [.deny, .denyWithNote, .denyAndStop, .allowOnce])
+        XCTAssertNil(normal.questions)
+        XCTAssertNil(normal.notice)
+
+        let interaction = ApprovalCardOptions(request: try bash(flags: ["requires_user_interaction": true],
+                                                                options: Fx.askUserQuestionOptions))
+        XCTAssertEqual(interaction.controls, [.deny])
+        XCTAssertEqual(interaction.notice, "This tool needs Claude Code's own interface; Nostromo can't approve it")
+        XCTAssertNil(interaction.questions)
+    }
+
+    func testOrdinaryRequestsHaveNoQuestions() throws {
+        for request in [try bash(), try Fx.editRequest(), try Fx.writeRequest(), try Fx.mcpRequest(), try Fx.otherToolRequest(),
+                        try Fx.notebookEditRequest()] {
+            XCTAssertNil(ApprovalCardOptions(request: request).questions, request.toolName)
+        }
+    }
+
+    func testTheHeadlineOfAQuestionRequestSaysTheAgentWantsToAskYouAQuestion() throws {
+        let request = try Fx.askUserQuestionRequest()
+        XCTAssertEqual(ApprovalKinds.headline(for: request), "Cody wants to ask you a question")
+        XCTAssertEqual(ApprovalKinds.announcement(for: request), "Approval needed: Cody wants to ask you a question")
+        XCTAssertEqual(ApprovalKinds.headline(for: try Fx.askUserQuestionRequest(agentName: "marty")),
+                       "Marty wants to ask you a question")
+    }
+
+    func testTheHeadlineOfAnAskUserQuestionNamesTheQuestionEvenWhenItCannotBeAnswered() throws {
+        // The tool, not the daemon's offer, decides how it is described.
+        XCTAssertEqual(ApprovalKinds.headline(for: try Fx.askUserQuestionRequest(options: Fx.allOptions)),
+                       "Cody wants to ask you a question")
+    }
+
+    func testOtherToolsKeepTheirHeadlines() throws {
+        XCTAssertEqual(ApprovalKinds.headline(for: try Fx.otherToolRequest()), "Cody wants to use WebFetch")
+        XCTAssertEqual(ApprovalKinds.headline(for: try bash()), "Cody wants to run Bash")
+        XCTAssertEqual(ApprovalKinds.headline(for: try Fx.askUserQuestionRequest(input: ["questions": Fx.askUserQuestionFixtureQuestions],
+                                                                                 toolName: "WebFetch")),
+                       "Cody wants to use WebFetch")
     }
 
     // MARK: - Where keyboard focus starts

@@ -21,6 +21,12 @@ use super::request::{McpTool, Reason, ToolKind};
 
 /// The longest note an answer may carry, in characters (after invisible characters are removed).
 pub const MAX_NOTE_CHARS: usize = 500;
+/// The most questions one `AskUserQuestion` request may carry (the CLI's own schema bound).
+pub const MAX_QUESTIONS: usize = 4;
+/// The most options one question may carry (the CLI's own schema bound).
+pub const MAX_OPTIONS: usize = 4;
+/// The longest free-text ("Other") answer, in characters, before it is cleaned.
+pub const MAX_OTHER_CHARS: usize = 1000;
 
 /// A held permission request, as the card shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +93,9 @@ pub enum ApprovalOption {
     Deny,
     DenyAndStop,
     DenyWithNote,
+    /// Only on an `AskUserQuestion` request whose input can be answered
+    /// (`questions::parse_questions`); never part of [`ApprovalOption::ALL`].
+    AnswerQuestions,
 }
 
 impl ApprovalOption {
@@ -101,6 +110,22 @@ pub struct ApprovalDecision {
     /// Why, for the agent to read (denials). At most [`MAX_NOTE_CHARS`] once cleaned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The answers to an `AskUserQuestion` request (`answer_questions` only; ignored by every other kind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Vec<QuestionAnswer>>,
+}
+
+/// The human's answer to one question of an `AskUserQuestion` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    /// The question's text, exactly as the CLI asked it.
+    pub question: String,
+    /// The option labels chosen.
+    #[serde(default)]
+    pub selected: Vec<String>,
+    /// The free-text ("Other") answer, if that was chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +134,8 @@ pub enum DecisionKind {
     AllowOnce,
     Deny,
     DenyAndStop,
+    /// The human answered an `AskUserQuestion` request.
+    AnswerQuestions,
 }
 
 /// The verdict `approval_resolved` carries is the audit log's outcome name
@@ -124,6 +151,8 @@ pub enum AnswerRefusal {
     NotOperatorApp,
     AlreadyResolved,
     UnknownRequest,
+    /// An `answer_questions` decision that does not fit the request's questions.
+    InvalidAnswer,
 }
 
 impl AnswerRefusal {
@@ -134,6 +163,7 @@ impl AnswerRefusal {
             Self::NotOperatorApp => "not_operator_app",
             Self::AlreadyResolved => "already_resolved",
             Self::UnknownRequest => "unknown_request",
+            Self::InvalidAnswer => "invalid_answer",
         }
     }
 }

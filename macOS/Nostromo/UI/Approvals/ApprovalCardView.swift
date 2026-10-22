@@ -38,6 +38,50 @@ private let cardLog = Logger(subsystem: "com.hammer.nostromo", category: "approv
 //     countdown, an outcome appearing, or a status change never moves any row.
 //
 // Layout is by frame (top to bottom), not Auto Layout, so the height is exact.
+//
+// AskUserQuestion (AP2c): when the daemon lists `answer_questions` for the request, the input is
+// replaced by a form (`ApprovalQuestionFormView`, in a vertical scroll view) and Allow once by
+// Submit. Submit goes through the same gesture check and needs every question answered; the raw
+// input stays behind a collapsed "Details" row. Nothing else about the card changes.
+
+/// Text from a request, drawn with every hidden or direction-changing character as a visible token in
+/// the warning colour (the input's tokens), always left to right so nothing reorders on screen.
+enum ApprovalContextText {
+
+    /// A line feed is kept as a line break only where the label `wraps`; in a one-row label it is a token.
+    static func attributed(_ text: String, prefix: String = "", suffix: String = "", wraps: Bool = true,
+                           lineBreakMode: NSLineBreakMode, font: NSFont, color: NSColor) -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = lineBreakMode
+        style.baseWritingDirection = .leftToRight
+        let direction = [NSWritingDirection.leftToRight.rawValue | NSWritingDirectionFormatType.override.rawValue]
+        func attrs(_ extra: [NSAttributedString.Key: Any] = [:]) -> [NSAttributedString.Key: Any] {
+            var base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: style,
+                                                       .writingDirection: direction]
+            base.merge(extra) { _, new in new }
+            return base
+        }
+        let out = NSMutableAttributedString(string: prefix, attributes: attrs())
+        for run in ApprovalDisplayModel.contextRuns(for: text, keepingLineFeeds: wraps) {
+            if run.kind == .invisible {
+                out.append(NSAttributedString(string: run.text, attributes: attrs([
+                    .foregroundColor: ApprovalPalette.warning,
+                    .backgroundColor: ApprovalPalette.warningFill,
+                ])))
+            } else {
+                out.append(NSAttributedString(string: run.text, attributes: attrs()))
+            }
+        }
+        out.append(NSAttributedString(string: suffix, attributes: attrs()))
+        return out
+    }
+
+    static func set(_ label: NSTextField, _ text: String, prefix: String = "", suffix: String = "",
+                    wraps: Bool = true, font: NSFont, color: NSColor) {
+        label.attributedStringValue = attributed(text, prefix: prefix, suffix: suffix, wraps: wraps,
+                                                 lineBreakMode: label.lineBreakMode, font: font, color: color)
+    }
+}
 
 /// A button that can take keyboard focus (AppKit refuses it unless Full Keyboard Access is
 /// on) and can never be a default button.
@@ -62,6 +106,26 @@ struct ApprovalCardListing: Equatable {
         let enabled: Bool
         let label: String
     }
+    /// One question of an `AskUserQuestion` card, as the form shows it.
+    struct Question: Equatable {
+        struct Choice: Equatable {
+            let label: String
+            let description: String
+            let selected: Bool
+        }
+        let question: String
+        let header: String
+        let multiSelect: Bool
+        let options: [Choice]
+        let otherText: String
+        let otherSelected: Bool
+
+        var jsonObject: [String: Any] {
+            ["question": question, "header": header, "multi_select": multiSelect,
+             "options": options.map { ["label": $0.label, "description": $0.description, "selected": $0.selected] as [String: Any] },
+             "other_text": otherText, "other_selected": otherSelected]
+        }
+    }
 
     let requestID: String
     let focus: String
@@ -82,6 +146,8 @@ struct ApprovalCardListing: Equatable {
     let state: String
     /// The input's text could not be laid out, so Allow once is withheld (additive: `display_failed`).
     let displayFailed: Bool
+    /// For an `AskUserQuestion` card: what the form shows and has chosen (additive: `questions`, null otherwise).
+    let questions: [Question]?
 
     var jsonObject: [String: Any] {
         var json: [String: Any] = [
@@ -101,6 +167,7 @@ struct ApprovalCardListing: Equatable {
             "state": state,
             "display_failed": displayFailed,
         ]
+        json["questions"] = questions.map { $0.map(\.jsonObject) } ?? NSNull()
         json["command_count"] = commandCount ?? NSNull()
         json["banner"] = banner ?? NSNull()
         return json
@@ -116,7 +183,13 @@ final class ApprovalCardView: NSView {
     static let rowGap: CGFloat = 6
     static let buttonHeight: CGFloat = 26
     static let allowButtonWidth: CGFloat = 196
+    static let submitButtonWidth: CGFloat = 96
     static let minimumInputHeight: CGFloat = 44
+    /// A question card's form never gets less than this unless the pane is shorter, and its expanded raw input never more than `detailsInputHeight`.
+    static let minimumFormHeight: CGFloat = 96
+    static let detailsInputHeight: CGFloat = 140
+    /// Room on the form's right for the scroll view's scroller.
+    static let formScrollerGutter: CGFloat = 12
 
     let request: ApprovalRequestWire
     let model: ApprovalDisplayModel
@@ -128,6 +201,12 @@ final class ApprovalCardView: NSView {
     private(set) var denyMoreButton: ApprovalButton?
     private(set) var denyAndStopButton: ApprovalButton?
     private(set) var allowButton: ApprovalButton?
+    /// AskUserQuestion: the form, Submit and the Details disclosure (nil for every other request).
+    private(set) var questionForm: ApprovalQuestionFormView?
+    private(set) var submitButton: ApprovalButton?
+    private(set) var detailsButton: ApprovalButton?
+    /// The raw input is shown (a question card starts with it collapsed).
+    private(set) var detailsExpanded = false
 
     /// Asked to re-measure the card (its content changed height: the note row opened).
     var onNeedsLayout: (() -> Void)?
@@ -150,6 +229,7 @@ final class ApprovalCardView: NSView {
     private let noteCancel = ApprovalButton(title: "Cancel", target: nil, action: nil)
     private let noteRow = NSView()
     private let buttonRow = NSView()
+    private let formScroll = NSScrollView()
 
     private var state: ApprovalAnswerState
     /// False for a moment after the card appears: Allow once can't be pressed yet.
@@ -157,6 +237,9 @@ final class ApprovalCardView: NSView {
     private var armDelay: TimeInterval = 0
     private var armGeneration = 0
     private var inputHeight: CGFloat = 0
+    /// The form's scroll view height, and the form's natural height at `formWidth` (cached per width).
+    private var formHeight: CGFloat = 0
+    private var formNatural: (width: CGFloat, height: CGFloat)?
 
     // Layout is top-down.
     override var isFlipped: Bool { true }
@@ -210,6 +293,7 @@ final class ApprovalCardView: NSView {
     /// otherwise the input, so Space and the arrow keys scroll it.
     var initialKeyView: NSView? {
         if options.defaultsToDeny { return denyButton }
+        if let form = questionForm { return form.optionButton(question: 0, option: 0) ?? denyButton }
         return inputView.textView
     }
 
@@ -247,12 +331,28 @@ final class ApprovalCardView: NSView {
         return "Allow once"
     }
 
+    /// Submit can be pressed: the request is waiting, the card is armed and every question is answered.
+    var canSubmit: Bool {
+        state == .pending && isArmed && (questionForm?.isComplete ?? false)
+    }
+
     // MARK: Measuring and layout
 
     /// The card's height at `width`, and the height it gives the input (up to 60% of the pane,
     /// via `maxHeight`). Sets what `layout()` will use.
     func preferredHeight(forWidth width: CGFloat, maxHeight: CGFloat, hardMaxHeight: CGFloat = .infinity) -> CGFloat {
         let inner = max(40, width - 2 * Self.padding)
+        if questionForm != nil {
+            // The raw input (when expanded) keeps a modest height; the form takes what is left, up
+            // to its natural height, and scrolls beyond that. Neither pushes another row out of the pane.
+            let detailsHeight = detailsExpanded ? min(inputView.contentHeight(forWidth: inner), Self.detailsInputHeight) : 0
+            let chrome = rows(width: width, inputHeight: detailsHeight, formHeight: 0)
+            let natural = naturalFormHeight(forWidth: inner)
+            let floorHeight = min(Self.minimumFormHeight, max(0, hardMaxHeight - chrome))
+            inputHeight = detailsHeight
+            formHeight = min(natural, max(floorHeight, maxHeight - chrome))
+            return rows(width: width, inputHeight: inputHeight, formHeight: formHeight)
+        }
         let chrome = rows(width: width, inputHeight: 0)
         let natural = inputView.contentHeight(forWidth: inner)
         // The input keeps at least a few lines unless the pane itself is too short for that:
@@ -262,9 +362,19 @@ final class ApprovalCardView: NSView {
         return rows(width: width, inputHeight: inputHeight)
     }
 
+    /// The form's height at the width its scroll view gives it (cached: measuring long text is not free).
+    private func naturalFormHeight(forWidth inner: CGFloat) -> CGFloat {
+        guard let form = questionForm else { return 0 }
+        let width = max(40, inner - Self.formScrollerGutter)
+        if let cached = formNatural, cached.width == width { return cached.height }
+        let height = form.contentHeight(forWidth: width)
+        formNatural = (width, height)
+        return height
+    }
+
     override func layout() {
         super.layout()
-        _ = rows(width: bounds.width, inputHeight: inputHeight, apply: true)
+        _ = rows(width: bounds.width, inputHeight: inputHeight, formHeight: formHeight, apply: true)
     }
 
     // MARK: Listing
@@ -288,6 +398,8 @@ final class ApprovalCardView: NSView {
                 options.append(.init(id: control.rawValue, enabled: denyAndStopButton?.isEnabled ?? false, label: denyAndStopButton?.title ?? ""))
             case .allowOnce:
                 options.append(.init(id: control.rawValue, enabled: allowButton?.isEnabled ?? false, label: allowButton?.title ?? ""))
+            case .answerQuestions:
+                options.append(.init(id: control.rawValue, enabled: submitButton?.isEnabled ?? false, label: submitButton?.title ?? ""))
             }
         }
         return ApprovalCardListing(
@@ -301,7 +413,21 @@ final class ApprovalCardView: NSView {
             reasonLine: ApprovalDisplayModel.contextText(request.reason.text), options: options,
             defaultToNoKind: self.options.defaultsToDeny,
             secondsLeft: countdown.secondsLeft, state: stateDescription,
-            displayFailed: inputView.displayFailed)
+            displayFailed: inputView.displayFailed, questions: questionListing)
+    }
+
+    /// What the form shows and has chosen, for `approvals list`.
+    private var questionListing: [ApprovalCardListing.Question]? {
+        guard let questions = options.questions, let form = questionForm else { return nil }
+        return questions.enumerated().map { q, question in
+            let selection = form.selections[q]
+            return ApprovalCardListing.Question(
+                question: question.question, header: question.header, multiSelect: question.multiSelect,
+                options: question.options.enumerated().map { o, option in
+                    .init(label: option.label, description: option.description, selected: selection.selected.contains(o))
+                },
+                otherText: selection.otherText, otherSelected: selection.otherChosen)
+        }
     }
 
     /// The input as the views hold it: the display lines' text from the text view, joined as in
@@ -352,7 +478,26 @@ final class ApprovalCardView: NSView {
             guard canAllow else { return }
             submit(ApprovalDecisionWire(kind: .allowOnce))
         case .denyWithNote: sendNote(from: sender)
+        case .answerQuestions:
+            // Disabled controls don't fire, but the rule is checked where it matters.
+            guard canSubmit, let answers = questionForm?.answers else { return }
+            submit(ApprovalDecisionWire(kind: .answerQuestions, answers: answers))
         }
+    }
+
+    @objc private func detailsPressed(_ sender: ApprovalButton) {
+        guard isHuman(on: sender, control: "details") else { return }
+        detailsExpanded.toggle()
+        applyDetails()
+        needsLayout = true
+        onNeedsLayout?()
+    }
+
+    /// Show or hide the raw input of a question card (and say which, for VoiceOver).
+    private func applyDetails() {
+        inputView.isHidden = questionForm != nil && !detailsExpanded
+        detailsButton?.setAccessibilityValue(detailsExpanded ? "expanded" : "collapsed")
+        detailsButton?.toolTip = detailsExpanded ? "Hide the raw request" : "Show the raw request"
     }
 
     @objc private func showMoreDenyOptions(_ sender: ApprovalButton) {
@@ -493,6 +638,31 @@ final class ApprovalCardView: NSView {
         for v in [noteField, noteSend, noteCancel] { noteRow.addSubview(v) }
         noteRow.isHidden = true
 
+        // AskUserQuestion: the form replaces the input (Why is about a rule, not a question).
+        if let questions = options.questions {
+            let form = ApprovalQuestionFormView(questions: questions)
+            form.permit = { [weak self] control, name in self?.isHuman(on: control, control: name) ?? false }
+            form.onChange = { [weak self] in self?.refresh() }
+            questionForm = form
+            formScroll.documentView = form
+            formScroll.hasVerticalScroller = true
+            formScroll.hasHorizontalScroller = false
+            formScroll.horizontalScrollElasticity = .none
+            formScroll.scrollerStyle = .overlay
+            formScroll.autohidesScrollers = true
+            formScroll.drawsBackground = false
+            formScroll.borderType = .noBorder
+            whyLabel.isHidden = true
+            let details = ApprovalButton(title: "Details", target: self, action: #selector(detailsPressed(_:)))
+            configure(details, id: "details", action: #selector(detailsPressed(_:)))
+            details.title = "Details"
+            details.controlSize = .small
+            details.font = .systemFont(ofSize: 11)
+            details.setAccessibilityLabel("Details: the raw request")
+            detailsButton = details
+            addSubview(details)
+        }
+
         // Buttons: Deny, ▾, Deny & stop, ... Allow once
         denyButton = makeButton(title: "Deny", control: .deny, label: "Deny",
                                 tip: "Don't run it. The agent is told and carries on.")
@@ -509,6 +679,10 @@ final class ApprovalCardView: NSView {
             denyAndStopButton = makeButton(title: "Deny & stop", control: .denyAndStop, label: "Deny and stop",
                                            tip: "Don't run it and end the agent's turn.")
         }
+        if options.controls.contains(.answerQuestions) {
+            submitButton = makeButton(title: "Submit", control: .answerQuestions, label: "Submit answers",
+                                      tip: "Send your answers to the agent.")
+        }
         if options.offersAllowOnce {
             allowButton = makeButton(title: "Allow once", control: .allowOnce,
                                      label: ApprovalKinds.allowOnceAccessibilityLabel(summary: model.summary,
@@ -518,10 +692,12 @@ final class ApprovalCardView: NSView {
         }
 
         for v in [headlineLabel, moreLabel, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
-                  inputView, agentSaysLabel, noticeLabel, noteRow, statusLabel, buttonRow] {
+                  formScroll, inputView, agentSaysLabel, noticeLabel, noteRow, statusLabel, buttonRow] {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
         }
+        formScroll.isHidden = questionForm == nil
+        applyDetails()
         inputView.onShownEveryLine = { [weak self] in self?.refresh() }
         inputView.onDisplayFailed = { [weak self] in self?.showDisplayFailed() }
     }
@@ -563,34 +739,11 @@ final class ApprovalCardView: NSView {
         button.setButtonType(.momentaryPushIn)
     }
 
-    /// Show `text` in `label` with every hidden or direction-changing character as a visible token in
-    /// the warning colour (the input's tokens), always left to right so nothing reorders on screen.
-    /// A line feed is kept as a line break only where the label `wraps`; in a one-row label it is a token.
+    /// Show `text` in `label` with every hidden or direction-changing character as a visible token
+    /// (`ApprovalContextText`). A line feed is kept as a line break only where the label `wraps`.
     private func setContext(_ label: NSTextField, _ text: String, prefix: String = "", suffix: String = "",
                             wraps: Bool = true, font: NSFont, color: NSColor) {
-        let style = NSMutableParagraphStyle()
-        style.lineBreakMode = label.lineBreakMode
-        style.baseWritingDirection = .leftToRight
-        let direction = [NSWritingDirection.leftToRight.rawValue | NSWritingDirectionFormatType.override.rawValue]
-        func attrs(_ extra: [NSAttributedString.Key: Any] = [:]) -> [NSAttributedString.Key: Any] {
-            var base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: style,
-                                                       .writingDirection: direction]
-            base.merge(extra) { _, new in new }
-            return base
-        }
-        let out = NSMutableAttributedString(string: prefix, attributes: attrs())
-        for run in ApprovalDisplayModel.contextRuns(for: text, keepingLineFeeds: wraps) {
-            if run.kind == .invisible {
-                out.append(NSAttributedString(string: run.text, attributes: attrs([
-                    .foregroundColor: ApprovalPalette.warning,
-                    .backgroundColor: ApprovalPalette.warningFill,
-                ])))
-            } else {
-                out.append(NSAttributedString(string: run.text, attributes: attrs()))
-            }
-        }
-        out.append(NSAttributedString(string: suffix, attributes: attrs()))
-        label.attributedStringValue = out
+        ApprovalContextText.set(label, text, prefix: prefix, suffix: suffix, wraps: wraps, font: font, color: color)
     }
 
     private func configureWrapping(_ label: NSTextField, lines: Int) {
@@ -620,6 +773,9 @@ final class ApprovalCardView: NSView {
                 ? "This input can't be displayed safely. Deny it."
                 : "Scroll the input to its end before allowing")
         }
+        submitButton?.isEnabled = canSubmit
+        submitButton?.setAccessibilityHelp(canSubmit ? nil : "Answer every question to submit")
+        questionForm?.isEnabled = pending
         switch state {
         case .pending:
             if !model.isVerified {
@@ -629,7 +785,11 @@ final class ApprovalCardView: NSView {
                 statusLabel.stringValue = ""
             }
         case .inFlight(let kind):
-            statusLabel.stringValue = kind == .allowOnce ? "Allowing…" : "Denying…"
+            switch kind {
+            case .allowOnce: statusLabel.stringValue = "Allowing…"
+            case .answerQuestions: statusLabel.stringValue = "Sending answers…"
+            default: statusLabel.stringValue = "Denying…"
+            }
             statusLabel.textColor = ApprovalPalette.mutedText
         case .notSent(let text):
             statusLabel.stringValue = text
@@ -668,7 +828,7 @@ final class ApprovalCardView: NSView {
 
     /// Lay the rows out top to bottom for `width`; with `apply` set their frames. Returns the total height.
     @discardableResult
-    private func rows(width: CGFloat, inputHeight: CGFloat, apply: Bool = false) -> CGFloat {
+    private func rows(width: CGFloat, inputHeight: CGFloat, formHeight: CGFloat = 0, apply: Bool = false) -> CGFloat {
         let pad = Self.padding
         let inner = max(40, width - 2 * pad)
         var y = pad
@@ -691,12 +851,23 @@ final class ApprovalCardView: NSView {
         }
         y += headerHeight + Self.rowGap
 
-        place(whyLabel, height: wrappedHeight(whyLabel, width: inner))
+        if !whyLabel.isHidden { place(whyLabel, height: wrappedHeight(whyLabel, width: inner)) }
         if !inLabel.isHidden { place(inLabel, height: 14) }
         if !bannerLabel.isHidden { place(bannerLabel, height: wrappedHeight(bannerLabel, width: inner)) }
         if !countLabel.isHidden { place(countLabel, height: 14) }
-        place(inputView, height: inputHeight)
-        if !agentSaysLabel.isHidden { place(agentSaysLabel, height: wrappedHeight(agentSaysLabel, width: inner)) }
+        if let form = questionForm {
+            if apply {
+                form.frame = NSRect(x: 0, y: 0, width: max(40, inner - Self.formScrollerGutter),
+                                    height: naturalFormHeight(forWidth: inner))
+            }
+            place(formScroll, height: formHeight)
+            if !agentSaysLabel.isHidden { place(agentSaysLabel, height: wrappedHeight(agentSaysLabel, width: inner)) }
+            if let details = detailsButton { place(details, height: 20, width: 72) }
+            if detailsExpanded { place(inputView, height: inputHeight) }
+        } else {
+            place(inputView, height: inputHeight)
+            if !agentSaysLabel.isHidden { place(agentSaysLabel, height: wrappedHeight(agentSaysLabel, width: inner)) }
+        }
         if !noticeLabel.isHidden { place(noticeLabel, height: wrappedHeight(noticeLabel, width: inner)) }
         if !noteRow.isHidden {
             if apply { layoutNoteRow(width: inner) }
@@ -733,6 +904,10 @@ final class ApprovalCardView: NSView {
         if let allow = allowButton {
             let w = min(Self.allowButtonWidth, max(100, width - x - 16))
             allow.frame = NSRect(x: width - w, y: 0, width: w, height: Self.buttonHeight)
+        }
+        if let submit = submitButton {
+            let w = min(Self.submitButtonWidth, max(72, width - x - 16))
+            submit.frame = NSRect(x: width - w, y: 0, width: w, height: Self.buttonHeight)
         }
     }
 }

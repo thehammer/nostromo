@@ -266,6 +266,132 @@ final class ApprovalWireTests: XCTestCase {
         XCTAssertEqual(try encode(ClientApprovalRefusalReport(requestId: nil, control: "x", channel: .unknown))["channel"] as? String, "unknown")
     }
 
+    // MARK: - AskUserQuestion (AP2c)
+
+    /// Sorted keys and unescaped slashes: the exact bytes, comparable as a string.
+    private func exactJSON<T: Encodable>(_ value: T) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return String(decoding: try encoder.encode(value), as: UTF8.self)
+    }
+
+    func testAnswerQuestionsIsAListedOptionAndStillOnlyWhatTheDaemonListed() throws {
+        let json = Self.minimalRequest
+            .replacingOccurrences(of: #""options": ["allow_once", "deny"]"#,
+                                  with: #""options": ["allow_once", "deny", "answer_questions"]"#)
+        XCTAssertEqual(try decode(ApprovalRequestWire.self, json).options, [.allowOnce, .deny, .answerQuestions])
+        XCTAssertEqual(ApprovalOption.answerQuestions.rawValue, "answer_questions")
+
+        let mixed = Self.minimalRequest
+            .replacingOccurrences(of: #""options": ["allow_once", "deny"]"#,
+                                  with: #""options": ["answer_questions", "answer_something_new"]"#)
+        XCTAssertEqual(try decode(ApprovalRequestWire.self, mixed).options, [.answerQuestions, .unknown],
+                       "an option this build does not know still falls back instead of failing the frame")
+    }
+
+    func testAnAskUserQuestionRequestDecodesWithItsInputKeptAsReceived() throws {
+        let request = try Fx.askUserQuestionRequest()
+        XCTAssertEqual(request.toolName, "AskUserQuestion")
+        XCTAssertTrue(request.flags.requiresUserInteraction)
+        XCTAssertEqual(request.options, [.allowOnce, .deny, .denyAndStop, .denyWithNote, .answerQuestions])
+        guard case .object(let input) = request.input, case .array(let questions)? = input["questions"] else {
+            return XCTFail("the input keeps its `questions` array: \(request.input)")
+        }
+        XCTAssertEqual(questions.count, 2)
+    }
+
+    func testTheInvalidAnswerRefusalDecodesAndOtherCodesStillDo() throws {
+        let f = try decode(ApprovalAnswerRefusedFrame.self,
+            #"{"type":"approval_answer_refused","request_id":"r1","code":"invalid_answer"}"#)
+        XCTAssertEqual(f.code, .invalidAnswer)
+        XCTAssertEqual(f.requestId, "r1")
+        XCTAssertNil(f.outcome)
+        XCTAssertEqual(ApprovalAnswerRefusalCode.invalidAnswer.rawValue, "invalid_answer")
+        XCTAssertEqual(try decode(ApprovalAnswerRefusedFrame.self,
+            #"{"type":"approval_answer_refused","request_id":"r1","code":"already_resolved","outcome":"answered"}"#).outcome,
+                       "answered", "the outcome of a request answered elsewhere")
+        XCTAssertEqual(try decode(ApprovalAnswerRefusedFrame.self,
+            #"{"type":"approval_answer_refused","request_id":"r1","code":"invalid_answer_v2"}"#).code, .unknown)
+    }
+
+    func testAnAnsweredResolutionDecodes() throws {
+        let f = try decode(ApprovalResolvedFrame.self,
+            #"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"answered","by_window":"win-1","at_ms":9}"#)
+        XCTAssertEqual(f.outcome, "answered")
+        XCTAssertEqual(f.byWindow, "win-1")
+    }
+
+    func testTheAnswerQuestionsDecisionEncodesTheDaemonsExactJSON() throws {
+        let decision = ApprovalDecisionWire(kind: .answerQuestions, answers: [
+            ApprovalQuestionAnswer(question: "Q", selected: ["A"], other: "x"),
+        ])
+        XCTAssertEqual(try exactJSON(decision),
+                       #"{"answers":[{"other":"x","question":"Q","selected":["A"]}],"kind":"answer_questions"}"#)
+    }
+
+    func testAnAnswerWithNoOtherTextHasNoOtherKeyAndAnOtherOnlyAnswerHasAnEmptySelectedList() throws {
+        let decision = ApprovalDecisionWire(kind: .answerQuestions, answers: [
+            ApprovalQuestionAnswer(question: "Which database should we use?", selected: ["Postgres"], other: nil),
+            ApprovalQuestionAnswer(question: "Which features do you want to enable?", selected: ["Caching", "Tracing"], other: nil),
+            ApprovalQuestionAnswer(question: "Anything else?", selected: [], other: "Logging"),
+        ])
+        let expected = #"{"answers":["#
+            + #"{"question":"Which database should we use?","selected":["Postgres"]},"#
+            + #"{"question":"Which features do you want to enable?","selected":["Caching","Tracing"]},"#
+            + #"{"other":"Logging","question":"Anything else?","selected":[]}"#
+            + #"],"kind":"answer_questions"}"#
+        XCTAssertEqual(try exactJSON(decision), expected)
+    }
+
+    func testAnswerTextSurvivesEncodingByteForByte() throws {
+        let text = "  Say \"hi\"\\ / é \u{1F642}\ttab\nnewline \u{200B} "
+        let decision = ApprovalDecisionWire(kind: .answerQuestions, answers: [
+            ApprovalQuestionAnswer(question: text, selected: [text + "1", text + "2"], other: text),
+        ])
+        let object = try encode(decision)
+        let answers = try XCTUnwrap(object["answers"] as? [[String: Any]])
+        XCTAssertEqual(answers.count, 1)
+        XCTAssertEqual(answers[0]["question"] as? String, text)
+        XCTAssertEqual(answers[0]["selected"] as? [String], [text + "1", text + "2"])
+        XCTAssertEqual(answers[0]["other"] as? String, text, "the encoder never trims, folds or drops a character")
+    }
+
+    func testAnswerQuestionsGoesOutInTheFullApprovalAnswerFrame() throws {
+        let frame = ClientApprovalAnswer(
+            requestId: "r1",
+            decision: ApprovalDecisionWire(kind: .answerQuestions, answers: [
+                ApprovalQuestionAnswer(question: "Q", selected: ["A"], other: "x"),
+            ]),
+            windowId: "win-1", operatorNonce: "ab12")
+        let expected = #"{"decision":{"answers":[{"other":"x","question":"Q","selected":["A"]}],"kind":"answer_questions"},"#
+            + #""operator_nonce":"ab12","request_id":"r1","type":"approval_answer","window_id":"win-1"}"#
+        XCTAssertEqual(try exactJSON(frame), expected)
+    }
+
+    func testTheExistingDecisionsEncodeWithoutAnAnswersKey() throws {
+        for kind in [ApprovalDecisionKind.allowOnce, .deny, .denyAndStop] {
+            let decision = try encode(ApprovalDecisionWire(kind: kind))
+            XCTAssertEqual(Set(decision.keys), ["kind"], "\(kind)")
+        }
+        let withNote = try encode(ApprovalDecisionWire(kind: .deny, note: "use /tmp/y"))
+        XCTAssertEqual(Set(withNote.keys), ["kind", "note"])
+        XCTAssertEqual(try exactJSON(ApprovalDecisionWire(kind: .deny)), #"{"kind":"deny"}"#)
+        XCTAssertEqual(try exactJSON(ApprovalDecisionWire(kind: .allowOnce)), #"{"kind":"allow_once"}"#)
+        let frame = try encode(ClientApprovalAnswer(requestId: "r1", decision: ApprovalDecisionWire(kind: .deny),
+                                                    windowId: "w", operatorNonce: nil))
+        XCTAssertNil((frame["decision"] as? [String: Any])?["answers"])
+    }
+
+    func testDecisionsWithAndWithoutAnswersAreNotEqual() {
+        let one = ApprovalQuestionAnswer(question: "Q", selected: ["A"], other: nil)
+        XCTAssertEqual(ApprovalDecisionWire(kind: .answerQuestions, answers: [one]),
+                       ApprovalDecisionWire(kind: .answerQuestions, answers: [one]))
+        XCTAssertNotEqual(ApprovalDecisionWire(kind: .answerQuestions, answers: [one]),
+                          ApprovalDecisionWire(kind: .answerQuestions, answers: [ApprovalQuestionAnswer(question: "Q", selected: ["B"], other: nil)]))
+        XCTAssertNotEqual(ApprovalDecisionWire(kind: .answerQuestions, answers: [one]), ApprovalDecisionWire(kind: .answerQuestions))
+        XCTAssertEqual(ApprovalDecisionWire(kind: .deny), ApprovalDecisionWire(kind: .deny, note: nil, answers: nil))
+    }
+
     // MARK: - subscribe
 
     func testSubscribeEncodesRendersApprovalsAndDefaultsToFalse() throws {

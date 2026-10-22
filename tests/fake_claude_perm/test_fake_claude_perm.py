@@ -26,7 +26,7 @@ REQUIRED_FIXTURES = {
     "simple_rm", "compound", "heredoc_300", "bidi", "zero_width", "tags", "cyrillic",
     "edit", "write", "notebook_edit", "mcp", "subagent",
     "flag_default_to_no", "flag_suppress_always_allow_rule", "flag_requires_user_interaction",
-    "flag_matched_ask_rule", "safety_check", "settings_write", "ansi_reason", "all_fields",
+    "flag_matched_ask_rule", "ask_user_question", "safety_check", "settings_write", "ansi_reason", "all_fields",
     "parallel_3", "cancel", "guard_send_keys", "guard_ecs_connect", "malformed", "non_can_use_tool",
 }
 # Fixtures whose request deliberately lacks `tool_use_id`.
