@@ -1397,7 +1397,8 @@ final class ApprovalQuestionCardTests: XCTestCase {
         XCTAssertTrue(h.recorder.sent.isEmpty, "a synthetic Submit must never answer")
         XCTAssertEqual(h.store.entry(id: "req-1")?.state, ApprovalAnswerState.pending)
         XCTAssertEqual(h.card.listing.state, "pending")
-        XCTAssertTrue(submit.isEnabled && h.card.denyButton.isEnabled && (try form(h)).isEnabled, "a person can still answer")
+        let formStillEnabled = try form(h).isEnabled
+        XCTAssertTrue(submit.isEnabled && h.card.denyButton.isEnabled && formStillEnabled, "a person can still answer")
         XCTAssertEqual(h.recorder.reports, [ApprovalRecorder.Report(requestID: "req-1", control: "answer_questions", channel: .appControl)])
 
         box.permit = ApprovalCardHarness.humanPermit
