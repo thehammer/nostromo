@@ -60,6 +60,13 @@ final class CodeCopyButtonTests: XCTestCase {
         card.codeCopyButtons.sorted { $0.frame.minY > $1.frame.minY } // top to bottom
     }
 
+    /// Only string flavours: AppKit adds the legacy `NSStringPboardType` alias next to `public.utf8-plain-text`.
+    private func assertOnlyStringTypes(file: StaticString = #filePath, line: UInt = #line) {
+        let stringTypes: Set<NSPasteboard.PasteboardType> = [.string, NSPasteboard.PasteboardType("NSStringPboardType")]
+        XCTAssertTrue(Set(pb.types ?? []).isSubset(of: stringTypes), "pasteboard types: \(pb.types ?? [])", file: file, line: line)
+        XCTAssertTrue(pb.types?.contains(.string) == true, file: file, line: line)
+    }
+
     private func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
@@ -117,10 +124,10 @@ final class CodeCopyButtonTests: XCTestCase {
         XCTAssertEqual(list.count, 2)
         list[0].copyCode()
         XCTAssertEqual(pb.string(forType: .string), "let a = 1")
-        XCTAssertEqual(pb.types, [.string])
+        assertOnlyStringTypes()
         list[1].copyCode()
         XCTAssertEqual(pb.string(forType: .string), "second block")
-        XCTAssertEqual(pb.types, [.string])
+        assertOnlyStringTypes()
     }
 
     func testCopyReplacesPriorPasteboardContents() {
@@ -128,7 +135,7 @@ final class CodeCopyButtonTests: XCTestCase {
         pb.setString("<b>old</b>", forType: .html)
         let (card, _) = attachedCard("```\nnew\n```")
         buttons(card)[0].copyCode()
-        XCTAssertEqual(pb.types, [.string])
+        assertOnlyStringTypes()
         XCTAssertEqual(pb.string(forType: .string), "new")
     }
 
@@ -150,7 +157,12 @@ final class CodeCopyButtonTests: XCTestCase {
         let a = MarkdownRenderer.render(twoBlocks, baseFont: base13)
         let b = MarkdownRenderer.renderBlocks(twoBlocks, baseFont: base13).text
         XCTAssertEqual(a.string, b.string)
-        XCTAssertTrue(a.isEqual(to: b))
+        XCTAssertEqual(a.length, b.length)
+        // Each render builds its own NSTextBlock instances, so whole-string `isEqual` can never hold.
+        var fontsA: [NSFont?] = [], fontsB: [NSFont?] = []
+        a.enumerateAttribute(.font, in: NSRange(location: 0, length: a.length)) { v, _, _ in fontsA.append(v as? NSFont) }
+        b.enumerateAttribute(.font, in: NSRange(location: 0, length: b.length)) { v, _, _ in fontsB.append(v as? NSFont) }
+        XCTAssertEqual(fontsA, fontsB)
     }
 
     // MARK: CB-3 no layout impact
@@ -173,8 +185,8 @@ final class CodeCopyButtonTests: XCTestCase {
                                 file: StaticString = #filePath, line: UInt = #line) {
         let bounds = card.bounds
         XCTAssertTrue(bounds.insetBy(dx: -0.5, dy: -0.5).contains(button.frame), "button outside card: \(button.frame) vs \(bounds)", file: file, line: line)
-        XCTAssertLessThanOrEqual(button.frame.maxX, bounds.width - 12 + 4, file: file, line: line)
-        XCTAssertGreaterThanOrEqual(button.frame.maxX, bounds.width / 2, file: file, line: line)
+        XCTAssertLessThanOrEqual(button.frame.maxX, bounds.width - 12 + 4, "button \(button.frame) card \(bounds)", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(button.frame.maxX, bounds.width / 2, "button \(button.frame) card \(bounds)", file: file, line: line)
     }
 
     func testFirstButtonSitsAtTopRightOfTheText() {
@@ -183,6 +195,8 @@ final class CodeCopyButtonTests: XCTestCase {
         assertTopRight(card, button)
         XCTAssertLessThanOrEqual(button.frame.maxY, card.bounds.maxY - 12 + 2)
         XCTAssertGreaterThanOrEqual(button.frame.maxY, card.bounds.maxY - 12 - 30)
+        // Card padding 12 + block top margin 4 + button inset 6: the button hugs the block's top-right.
+        XCTAssertEqual(button.frame.maxY, card.bounds.maxY - 12 - 4 - 6, accuracy: 4, "button \(button.frame) card \(card.bounds)")
     }
 
     func testStackedBlocksGetDistinctButtonsInBlockOrder() {
@@ -250,6 +264,8 @@ final class CodeCopyButtonTests: XCTestCase {
     func testButtonCountStaysBoundedForAHugeMessageAndFollowsScrolling() {
         let (sv, clip, card, codes) = scrollFixture(blockCount: 200)
         XCTAssertGreaterThan(card.frame.height, 2000)
+        // A non-flipped document starts scrolled to its bottom; start at the top.
+        scroll(sv, clip, toFraction: 0, card: card)
         XCTAssertGreaterThan(card.codeCopyButtons.count, 0)
         XCTAssertLessThanOrEqual(card.codeCopyButtons.count, 30)
         XCTAssertTrue(card.codeCopyButtons.map(\.code).contains(codes[0]))

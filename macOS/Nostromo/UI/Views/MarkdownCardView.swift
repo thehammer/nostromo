@@ -641,14 +641,14 @@ final class MarkdownCardView: NSView {
     }
 
     /// Each code block's box (padding included, margin excluded), in card
-    /// coordinates, clipped to the text container's width.
+    /// coordinates, spanning the text container's width.
     private func computeBlockRects() -> [NSRect] {
         guard let layoutManager = textView.layoutManager,
               let container = textView.textContainer,
               let storage = textView.textStorage
         else { return [] }
         let origin = textView.textContainerOrigin
-        let columns = NSRect(x: 0, y: 0, width: container.size.width, height: .greatestFiniteMagnitude)
+        let width = container.size.width
 
         return codeBlocks.map { block in
             let glyphs = layoutManager.glyphRange(forCharacterRange: block.range, actualCharacterRange: nil)
@@ -658,7 +658,9 @@ final class MarkdownCardView: NSView {
             if rect.isEmpty || rect.isInfinite {
                 rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: container).insetBy(dx: -8, dy: -8)
             }
-            rect = rect.intersection(columns).offsetBy(dx: origin.x, dy: origin.y)
+            // The block spans the container's full width (content width 100 %).
+            rect = NSRect(x: 0, y: rect.minY, width: width, height: rect.height)
+                .offsetBy(dx: origin.x, dy: origin.y)
             return convert(rect, from: textView)
         }
     }
@@ -747,6 +749,7 @@ final class CodeCopyButton: NSButton {
     required init?(coder: NSCoder) { fatalError() }
 
     override var acceptsFirstResponder: Bool { false }
+    override func becomeFirstResponder() -> Bool { false }
 
     /// A click on a transcript in a background window copies straight away.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
