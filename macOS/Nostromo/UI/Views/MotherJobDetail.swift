@@ -97,6 +97,25 @@ extension NSTextField {
     }
 }
 
+/// A wrapping label that is pinned to both edges of its container: it reports no intrinsic
+/// width (so its text can never set the container's fitting width) and wraps at the width
+/// it is given.
+private final class EdgePinnedLabel: NSTextField {
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        size.width = NSView.noIntrinsicMetric
+        return size
+    }
+
+    override func layout() {
+        super.layout()
+        if preferredMaxLayoutWidth != bounds.width {
+            preferredMaxLayoutWidth = bounds.width
+            invalidateIntrinsicContentSize()
+        }
+    }
+}
+
 private class PhaseRibbonView: NSView {
 
     private let stack = NSStackView()
@@ -172,7 +191,7 @@ final class MotherJobDetail: NSView {
     private let emptyLabel = NSTextField(labelWithString: "Select a job")
 
     // Content fields
-    private let titleLabel      = NSTextField.boundedLabel("")
+    private let titleLabel      = EdgePinnedLabel(wrappingLabelWithString: "")
     private let stateLabel      = NSTextField.boundedLabel("", maxLines: 1, truncating: true)
     private let phaseRibbonView = PhaseRibbonView()
     private var ribbonHeight:   NSLayoutConstraint!
@@ -266,6 +285,7 @@ final class MotherJobDetail: NSView {
         titleLabel.textColor          = Theme.fg
         titleLabel.lineBreakMode      = .byWordWrapping
         titleLabel.maximumNumberOfLines = 3
+        titleLabel.isSelectable = false
 
         // Safety net: nothing inside the detail may demand more width than the pane gives it.
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
