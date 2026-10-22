@@ -79,6 +79,54 @@ class MainLayout: NSView {
     override func layout() {
         super.layout()
         reportOverflowIfNeeded()
+        scheduleOverflowCaptureIfNeeded()
+    }
+
+    // MARK: - Content overflow (capture)
+
+    /// Where `OverflowCapture` files go. nil means `~/.nostromo/logs`, except under XCTest, where
+    /// nil means no capture at all (a test that overflows must not write into the user's home).
+    var overflowCaptureDirectory: URL?
+    /// How long after the tripwire fires the state is re-checked and captured. A transient
+    /// overflow inside a resize or a full-screen transition is gone by then and costs no capture.
+    var overflowCaptureDelay: TimeInterval = 1
+    private var lastOverflowCaptureAt: Date?
+    private var overflowCapturePending = false
+
+    private var effectiveCaptureDirectory: URL? {
+        overflowCaptureDirectory ?? (NSClassFromString("XCTestCase") == nil ? OverflowCapture.defaultDirectory : nil)
+    }
+
+    /// The newest capture file of this window, for `nostromo-app windows` (`overflowCapture`).
+    var latestOverflowCapturePath: String? {
+        effectiveCaptureDirectory.flatMap { OverflowCapture.latestPath(windowIndex: windowIndex, in: $0) }
+    }
+
+    /// Writes the structured capture if the window overflows right now and none was written for
+    /// this window in the last `OverflowCapture.minInterval`. Returns the file, if one was written.
+    /// Never alters layout.
+    @discardableResult
+    func captureOverflowIfNeeded(now: Date = Date()) -> URL? {
+        guard let directory = effectiveCaptureDirectory, contentOverflow != .zero else { return nil }
+        if let last = lastOverflowCaptureAt, now.timeIntervalSince(last) < OverflowCapture.minInterval { return nil }
+        // Stamped before the write: a directory that cannot be written must not be retried on every pass.
+        lastOverflowCaptureAt = now
+        let focusKind = activeFocus.isBuiltIn ? activeFocus.id : "custom"
+        return OverflowCapture.write(for: self, windowIndex: windowIndex, focusKind: focusKind,
+                                     directory: directory, now: now)
+    }
+
+    /// Measuring (`fittingSize`) inside a layout pass would re-enter layout, so the capture
+    /// runs on a later run-loop turn.
+    private func scheduleOverflowCaptureIfNeeded(now: Date = Date()) {
+        guard !overflowCapturePending, effectiveCaptureDirectory != nil, contentOverflow != .zero else { return }
+        if let last = lastOverflowCaptureAt, now.timeIntervalSince(last) < OverflowCapture.minInterval { return }
+        overflowCapturePending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + overflowCaptureDelay) { [weak self] in
+            guard let self else { return }
+            self.overflowCapturePending = false
+            self.captureOverflowIfNeeded()
+        }
     }
 
     /// Never crashes, never alters layout: it only reports. Content-free: the window index,
