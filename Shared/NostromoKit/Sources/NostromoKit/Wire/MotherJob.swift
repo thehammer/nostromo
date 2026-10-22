@@ -23,12 +23,15 @@ public struct MotherJob: Codable, Identifiable, Equatable {
     /// The question text set when a Mother worker calls `mother await`.
     /// Non-nil only when `state == "awaiting"`.
     public let question:   String?
+    /// The job's `origin.label` (`mother add --label`), when it has one. The only part of
+    /// `origin` that is read.
+    public let originLabel: String?
     /// Headless-crew data (gates, review wave, decision, attention, progress),
     /// read leniently key by key. Empty for a job with none.
     public let crew:       MotherCrewState
 
     enum CodingKeys: String, CodingKey {
-        case id, state, title, repo, branch, question
+        case id, state, title, repo, branch, question, origin
         case prUrl      = "pr_url"
         case createdAt  = "created_at"
         case startedAt  = "started_at"
@@ -46,6 +49,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         startedAt: String? = nil,
         finishedAt: String? = nil,
         question: String? = nil,
+        originLabel: String? = nil,
         crew: MotherCrewState = MotherCrewState()
     ) {
         self.id         = id
@@ -58,7 +62,12 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         self.startedAt  = startedAt
         self.finishedAt = finishedAt
         self.question   = question
+        self.originLabel = originLabel
         self.crew       = crew
+    }
+
+    private struct Origin: Codable {
+        let label: String?
     }
 
     public init(from decoder: Decoder) throws {
@@ -74,6 +83,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         startedAt  = try c.decodeIfPresent(String.self, forKey: .startedAt)
         finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
         question   = try c.decodeIfPresent(String.self, forKey: .question)
+        originLabel = (try? c.decodeIfPresent(Origin.self, forKey: .origin))?.label
         crew       = (try? MotherCrewState(jobDecoder: decoder)) ?? MotherCrewState()
     }
 
@@ -90,6 +100,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(startedAt, forKey: .startedAt)
         try c.encodeIfPresent(finishedAt, forKey: .finishedAt)
         try c.encodeIfPresent(question, forKey: .question)
+        if let originLabel { try c.encode(Origin(label: originLabel), forKey: .origin) }
         try crew.encode(to: encoder)
     }
 }

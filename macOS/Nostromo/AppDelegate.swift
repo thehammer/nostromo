@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 import os
 
 private let appLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "AppDelegate")
@@ -77,6 +78,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             NSApp.terminate(nil)
             return
         }
+
+        // Set at launch, before anything can post: a notification delivered with no delegate
+        // is shown by the system and its click goes nowhere (see `NeedsYouRouting`).
+        UNUserNotificationCenter.current().delegate = self
 
         setupMenu()
         // The approval store listens from before the daemon connects: a permission request
@@ -561,5 +566,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             placementControllers.removeValue(forKey: uuid)
         }
         appLog.warning("windowWillClose — remaining windows=\(self.windows.count, privacy: .public)")
+    }
+}
+
+// MARK: - "Needs you" notifications
+
+/// Clicks on, and presentation of, the notifications `NeedsYouNotifier` posts. What a
+/// notification says is decided in NostromoKit; where a click goes is `NeedsYouRouting`.
+extension AppDelegate: UNUserNotificationCenterDelegate {
+
+    /// A click on the notification (never an arrival) is the only thing that brings the app
+    /// forward for a "needs you" item: it is a user act, so activating is allowed here.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        defer { completionHandler() }
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        // Another producer's items route to their focus once a router exists (AP3); for now the
+        // app just comes forward.
+        NeedsYouRouting.route(userInfo: response.notification.request.content.userInfo)
+    }
+
+    /// While the app is active, show a banner only if the operator is not already looking at the
+    /// Mother view in the key window (the item is on screen there).
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler(Self.motherViewIsVisible(in: NSApp.keyWindow?.contentView) ? [] : [.banner])
+    }
+
+    private static func motherViewIsVisible(in view: NSView?) -> Bool {
+        guard let view else { return false }
+        if view is MotherView { return !view.isHiddenOrHasHiddenAncestor }
+        return view.subviews.contains { motherViewIsVisible(in: $0) }
     }
 }
