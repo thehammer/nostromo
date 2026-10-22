@@ -1816,21 +1816,24 @@ async fn deny_and_stop_on_a_question_request_sends_the_usual_words_with_interrup
 }
 
 #[tokio::test(start_paused = true)]
-async fn allow_once_on_a_question_request_behaves_as_it_always_did_this_slice_does_not_touch_it() {
-    // AP2c leaves `allow_once` alone: the input goes back unchanged, with no answers. The card
-    // does not offer it for a question (see the spec's open point about refusing it at the daemon).
+async fn allow_once_on_a_question_request_is_refused_and_a_valid_answer_still_goes_through() {
+    // The agent's own input can carry `answers`; forwarding it would put words in the person's mouth.
     let rig = Rig::new();
     rig.broker.presenter_connected("app");
     let wire = rig.hold_ask("toolu_q").await;
 
     let result = rig.broker.answer(&wire.request_id, &allow_once(), "w", "app");
 
-    assert_eq!(result, applied("allowed_once"));
+    assert_eq!(result, AnswerResult::InvalidAnswer);
+    rig.barrier().await;
+    assert!(rig.writes().is_empty(), "nothing written: {:?}", rig.writes());
+    assert_eq!(rig.broker.snapshot().len(), 1, "still held");
     assert_eq!(
-        rig.writes(),
-        [("cli-toolu_q".to_owned(), json!({ "behavior": "allow", "updatedInput": fixture_input() }))]
+        rig.broker.answer(&wire.request_id, &answer_questions(valid_answers()), "w", "app"),
+        applied("answered")
     );
-    assert!(rig.writes()[0].1["updatedInput"].get("answers").is_none());
+    assert_eq!(rig.writes().len(), 1);
+    assert_eq!(rig.writes()[0].1, expected_allow());
 }
 
 // ── the clock, the app and the session still end a held question the same way ─

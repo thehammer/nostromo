@@ -1164,6 +1164,12 @@ impl ApprovalBroker {
         };
         let note = decision.note.as_deref().and_then(clean_note);
         let ending = match decision.kind {
+            DecisionKind::AllowOnce if answerable => {
+                // Allowing a question as-is would forward the agent's own input, which can carry
+                // `answers`/`annotations` the CLI reads as the person's words. Only an answer ends it.
+                debug!(conn_key, request_id, "allow_once refused: a question is answered, not allowed");
+                return AnswerResult::InvalidAnswer;
+            }
             DecisionKind::AllowOnce => Ending::allow_once(input, window_id),
             DecisionKind::Deny => Ending::denied(note.as_deref(), false, window_id),
             DecisionKind::DenyAndStop => Ending::denied(note.as_deref(), true, window_id),

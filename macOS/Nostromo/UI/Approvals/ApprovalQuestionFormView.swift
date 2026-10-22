@@ -60,6 +60,11 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
 
     private(set) var selections: [ApprovalQuestionSelection]
 
+    /// An Other answer is chosen and longer than the limit (so Submit stays off).
+    var hasOverLimitOther: Bool {
+        selections.contains { $0.otherChosen && $0.otherText.count > ApprovalQuestions.maxOtherCharacters }
+    }
+
     /// Every question has an answer.
     var isComplete: Bool { answers != nil }
 
@@ -303,7 +308,7 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
     }
 
     private func allowed(_ control: NSView, _ name: String) -> Bool {
-        permit?(control, name) ?? true
+        permit?(control, name) ?? false
     }
 
     /// `q1_opt2` → (1, 2); `q1_other` → (1, 0).

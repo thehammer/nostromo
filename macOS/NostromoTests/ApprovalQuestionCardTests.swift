@@ -146,6 +146,7 @@ final class ApprovalQuestionFormViewTests: XCTestCase {
         -> (form: ApprovalQuestionFormView, window: NSWindow) {
         let window = makeRigWindow(self, size: NSSize(width: width + 100, height: 900))
         let form = ApprovalQuestionFormView(questions: try Q.parsed(questions))
+        form.permit = { _, _ in true }
         form.frame = NSRect(x: 20, y: 20, width: width, height: form.contentHeight(forWidth: width))
         window.contentView!.addSubview(form)
         form.layoutSubtreeIfNeeded()
@@ -429,11 +430,11 @@ final class ApprovalQuestionFormViewTests: XCTestCase {
         XCTAssertEqual(form.selections[0].otherText, "Oracle")
     }
 
-    func testAFormWithNoPermitActsOnEveryClick() throws {
+    func testAFormWithNoPermitRefusesEveryClick() throws {
         let (form, _) = try makeForm()
-        XCTAssertNil(form.permit)
+        form.permit = nil
         QuestionTestViews.press(form.optionButton(question: 0, option: 1))
-        XCTAssertTrue(on(form.optionButton(question: 0, option: 1)))
+        XCTAssertFalse(on(form.optionButton(question: 0, option: 1)), "fails closed")
     }
 
     // MARK: onChange
@@ -861,8 +862,14 @@ final class ApprovalQuestionCardTests: XCTestCase {
         try typeText(String(repeating: "a", count: 1001), intoOtherOf: 0, h)
         XCTAssertFalse(try submitButton(h).isEnabled, "1001 characters")
         XCTAssertNil(try form(h).answers)
+        let message = "Answer too long (max 1000)"
+        func shown() -> Bool {
+            rigAllSubviews(of: h.card).contains { ($0 as? NSTextField)?.stringValue == message }
+        }
+        XCTAssertTrue(shown(), "a visible reason, not only a tooltip")
 
         try typeText(String(repeating: "a", count: 1000), intoOtherOf: 0, h)
+        XCTAssertFalse(shown(), "the reason goes once the answer fits")
         XCTAssertTrue(try submitButton(h).isEnabled, "1000 characters")
         XCTAssertEqual(try form(h).answers?.first?.other?.count, 1000)
     }

@@ -781,6 +781,9 @@ final class ApprovalCardView: NSView {
             if !model.isVerified {
                 statusLabel.stringValue = ApprovalDisplayModel.roundTripFailureLabel
                 statusLabel.textColor = ApprovalPalette.warning
+            } else if questionForm?.hasOverLimitOther == true {
+                statusLabel.stringValue = "Answer too long (max \(ApprovalQuestions.maxOtherCharacters))"
+                statusLabel.textColor = ApprovalPalette.warning
             } else {
                 statusLabel.stringValue = ""
             }
