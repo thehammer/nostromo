@@ -114,6 +114,12 @@ enum OverflowCapture {
         let beyond = pokesPastWindow(inWindow, contentSize: contentSize)
         let intrinsic = view.intrinsicContentSize
         let fitting = view.fittingSize
+        // A view whose own minimum is bigger than the room it was given is a demander: what pushes
+        // the layout past the window is usually not a view that already pokes out of it. (A text
+        // field's width is skipped: a truncating label asks for its whole string by design.)
+        let slack = MainLayout.overflowTolerance
+        let demandsMore = fitting.height > view.frame.height + slack
+            || (!(view is NSTextField) && fitting.width > view.frame.width + slack)
         var out: [String: Any] = [
             "class": String(describing: type(of: view)),
             "frame": rect(view.frame),
@@ -127,8 +133,9 @@ enum OverflowCapture {
                                       "v": Double(view.contentCompressionResistancePriority(for: .vertical).rawValue)],
             "translatesAutoresizingMask": view.translatesAutoresizingMaskIntoConstraints,
             "pokesPastWindow": beyond,
+            "demandsMoreThanItHas": demandsMore,
         ]
-        if beyond { out["constraints"] = strongConstraints(touching: view) }
+        if beyond || demandsMore { out["constraints"] = strongConstraints(touching: view) }
         guard depth < maxDepth else { return out }
         // A scroll view's document is as tall as its whole content (and its children are the
         // content): the scroll view and its document are recorded, nothing below the document.

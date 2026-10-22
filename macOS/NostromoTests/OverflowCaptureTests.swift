@@ -345,6 +345,9 @@ final class OverflowCaptureTests: XCTestCase {
         }
         settle(rig.window)
         overflowBy43(rig)
+        // Off screen an ordinary window GROWS to fit a strong demand instead of being overflowed, so the
+        // probe is placed past the window by hand (no layout pass runs before the capture below).
+        probe.frame = NSRect(x: 0, y: 0, width: contentSize(of: rig.window).width + 500, height: 10)
 
         let url = try XCTUnwrap(layout.captureOverflowIfNeeded(now: t0))
         let tree = try XCTUnwrap(try readReport(url)["tree"] as? [String: Any])
@@ -366,7 +369,8 @@ final class OverflowCaptureTests: XCTestCase {
                 XCTAssertNotNil(pair?["h"] as? Double, "\(cls).\(key).h")
                 XCTAssertNotNil(pair?["v"] as? Double, "\(cls).\(key).v")
             }
-            if node["pokesPastWindow"] as? Bool == true {
+            XCTAssertNotNil(node["demandsMoreThanItHas"] as? Bool, "\(cls) lacks demandsMoreThanItHas")
+            if node["pokesPastWindow"] as? Bool == true || node["demandsMoreThanItHas"] as? Bool == true {
                 poking += 1
                 let constraints = node["constraints"] as? [[String: Any]]
                 XCTAssertNotNil(constraints, "\(cls) pokes past the window and must list its constraints")
@@ -379,7 +383,7 @@ final class OverflowCaptureTests: XCTestCase {
                 }
             } else {
                 notPoking += 1
-                XCTAssertNil(node["constraints"], "\(cls) does not poke past the window and must not list constraints")
+                XCTAssertNil(node["constraints"], "\(cls) neither pokes past the window nor demands more than it has and must not list constraints")
             }
         }
         XCTAssertGreaterThan(poking, 0)

@@ -253,4 +253,26 @@ final class WindowOverflowReproTests: XCTestCase {
             XCTAssertTrue(fits(rig), "\(name) window: \(levels(rig))")
         }
     }
+
+    /// The operator switches focus (tabs) while a long, running session sits in this window, then comes back:
+    /// the cached REPL view is detached and re-attached with new edge constraints each time.
+    func testSwitchingFocusAwayAndBackKeepsTheWindowFitting() throws {
+        let rig = makeRig(index: 730, makeKey: true)
+        let store = AppStore.shared
+        store.applyForTesting(.sessionTurns(tag: tag, turns: try decodeTurns(turnsJSON(count: 400, lines: 8, running: true))))
+        store.applyForTesting(.sessionState(tag: tag, state: .midTurn))
+        settle(rig)
+        guard let tabBar = views(named: "TabBarView", in: rig).first as? TabBarView else {
+            return XCTFail("no TabBarView in the window")
+        }
+        var failures: [String] = []
+        let order = ["mother", "fred", "teri", "perri", "mother", "perri"]
+        for id in order {
+            guard let focus = FocusStore.shared.focuses.first(where: { $0.id == id }) else { continue }
+            tabBar.onSwitch?(focus)
+            settle(rig)
+            if !fits(rig) { failures.append("after switching to [\(id)]: \(levels(rig))") }
+        }
+        XCTAssertTrue(failures.isEmpty, "\(failures.count) switch(es) overflowed ¦ " + failures.joined(separator: " ¦¦ "))
+    }
 }
