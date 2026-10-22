@@ -56,6 +56,54 @@ enum BrokerError: Error {
     }
 }
 
+extension BrokerError {
+    /// The failure in the store's terms (never the broker's message text).
+    var kind: BrokerErrorKind {
+        switch self {
+        case .timeout: return .timeout
+        case .disconnected: return .disconnected
+        case .code(let code, _):
+            switch code {
+            case .noSuchJob: return .noSuchJob
+            case .invalidState: return .invalidState
+            case .unauthorized: return .unauthorized
+            case .unavailable: return .unavailable
+            default: return .other
+            }
+        }
+    }
+
+    /// What to tell the operator about a failed decision answer. Mother's own message text
+    /// is never shown: for `unauthorized` and `internal` only the class is.
+    var decisionMessage: String {
+        switch self {
+        case .code(.invalidState, _):
+            return "This hold was already answered or changed. Refreshed."
+        case .code(.unauthorized, _):
+            return "Mother refused the answer: unauthorized."
+        case .code(.internal, _):
+            return "Mother failed to apply the answer."
+        default:
+            return userFacingMessage
+        }
+    }
+}
+
+extension BrokerErrorKind {
+    /// The class of the failure, for logs.
+    var logName: String {
+        switch self {
+        case .noSuchJob: return "no_such_job"
+        case .invalidState: return "invalid_state"
+        case .unauthorized: return "unauthorized"
+        case .unavailable: return "unavailable"
+        case .timeout: return "timeout"
+        case .disconnected: return "disconnected"
+        case .other: return "other"
+        }
+    }
+}
+
 /// A decoded `query.list` reply. `partial` is true when any entry could not be read.
 struct MotherJobListing: Equatable {
     var jobs: [MotherJob]
@@ -182,6 +230,9 @@ class MotherBrokerClient {
     /// The `ack` command (MC3).
     var supportsAck: Bool { advertisedCaps.contains("ack") }
 
+    /// The `source` this app's answers carry: a person's gesture in the Mac app.
+    static let appSource = "nostromo_app"
+
     // MARK: - Lifecycle
 
     func start() {
@@ -191,9 +242,41 @@ class MotherBrokerClient {
 
     // MARK: - Outbound command API
 
+    /// A free-text answer. Mother records who answered: `nostromo_app` is sent only where the
+    /// broker understands it, and only ever from a control that checked for a human gesture.
     func answer(job: String, text: String,
                 completion: @escaping (Result<Void, BrokerError>) -> Void) {
-        sendCommand(type: "answer", jobId: job, extra: ["text": text], completion: completion)
+        var extra: [String: Any] = ["text": text]
+        if supportsAnswerOption { extra["source"] = MotherBrokerClient.appSource }
+        sendCommand(type: "answer", jobId: job, extra: extra, completion: completion)
+    }
+
+    /// Answer a hold by option id. A broker that does not advertise `answer.option` only knows
+    /// free text: guidance goes as that, and any other option is refused here, sending nothing.
+    func answer(job: String, option: MotherDecisionOptionID, text: String?,
+                source: String = MotherBrokerClient.appSource,
+                completion: @escaping (Result<Void, BrokerError>) -> Void) {
+        guard supportsAnswerOption else {
+            if option == .resumeWithGuidance, let text, !text.isEmpty {
+                sendCommand(type: "answer", jobId: job, extra: ["text": text], completion: completion)
+            } else {
+                completion(.failure(.code(.invalidState, message: "this Mother cannot answer by option")))
+            }
+            return
+        }
+        var extra: [String: Any] = ["option": option.raw, "source": source]
+        if let text { extra["text"] = text }
+        sendCommand(type: "answer", jobId: job, extra: extra, completion: completion)
+    }
+
+    /// Acknowledge a raised attention flag (`ack`), where the broker has the command.
+    func ack(job: String, reason: String,
+             completion: @escaping (Result<Void, BrokerError>) -> Void) {
+        guard supportsAck else {
+            completion(.failure(.code(.invalidState, message: "this Mother cannot acknowledge flags")))
+            return
+        }
+        sendCommand(type: "ack", jobId: job, extra: ["reason": reason], completion: completion)
     }
 
     func cancel(job: String,

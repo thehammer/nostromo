@@ -45,19 +45,23 @@ public struct MotherCrewPanel: View {
     public let onToggleBreakdown: () -> Void
     /// Nil hides the "Details…" button.
     public let onDetails: (() -> Void)?
+    /// Nil hides every Acknowledge button. The host decides whether the click was a person's.
+    public let onAcknowledge: ((MotherAttentionReason) -> Void)?
 
     public init(
         model: MotherCrewPanelModel,
         colors: MotherCrewPanelColors = .standard,
         breakdownExpanded: Bool = false,
         onToggleBreakdown: @escaping () -> Void = {},
-        onDetails: (() -> Void)? = nil
+        onDetails: (() -> Void)? = nil,
+        onAcknowledge: ((MotherAttentionReason) -> Void)? = nil
     ) {
         self.model = model
         self.colors = colors
         self.breakdownExpanded = breakdownExpanded
         self.onToggleBreakdown = onToggleBreakdown
         self.onDetails = onDetails
+        self.onAcknowledge = onAcknowledge
     }
 
     public var body: some View {
@@ -167,17 +171,27 @@ public struct MotherCrewPanel: View {
     private var badgeRow: some View {
         HStack(spacing: 6) {
             ForEach(Array(model.badges.enumerated()), id: \.offset) { _, badge in
-                Text("⚑ \(badge.label)\(badge.acked ? " · acknowledged" : "")")
-                    .foregroundStyle(badgeTint(badge))
-                    .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .frame(height: MotherCrewPanelMetrics.row - 2)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(badgeTint(badge), lineWidth: 1)
-                    )
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(badge.accessibility)
+                HStack(spacing: 4) {
+                    Text("⚑ \(badge.label)\(badge.acked ? " · acknowledged" : "")")
+                        .foregroundStyle(badgeTint(badge))
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .frame(height: MotherCrewPanelMetrics.row - 2)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(badgeTint(badge), lineWidth: 1)
+                        )
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(badge.accessibility)
+                    if badge.canAcknowledge, let onAcknowledge {
+                        Button("Acknowledge") { onAcknowledge(badge.reason) }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(colors.muted)
+                            .underline()
+                            .lineLimit(1)
+                            .accessibilityLabel(badge.acknowledgeAccessibility)
+                    }
+                }
             }
             Spacer(minLength: 0)
         }

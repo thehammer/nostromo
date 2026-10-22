@@ -16,7 +16,7 @@
 //! The targeted channel is registered with the session manager's
 //! client-sender registry on connect and removed on disconnect.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -78,11 +78,19 @@ const ANSWER_PERMISSION_SUPERSEDED: &str = "session_answer_permission is superse
 /// local client that subscribes after the frame was sent.
 type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
 
+/// The ids of the Mother jobs that, in the latest job list the daemon broadcast, are held with an
+/// open structured decision. Only an id is kept, never job content.
+type HeldMotherJobs = Arc<Mutex<HashSet<String>>>;
+
+/// What a local peer that is not the operator's app is told when it tries to answer a held job.
+const MOTHER_HOLD_NEEDS_OPERATOR: &str = "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
+
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
     socket_path: PathBuf,
     pub tx: broadcast::Sender<ServerMsg>,
     retained: RetainedCache,
+    held_mother_jobs: HeldMotherJobs,
     /// Bumped when the retained cache lagged and must be repopulated; the
     /// pollers that own retained frames (`fred`, `teri`) re-publish on it.
     republish: tokio::sync::watch::Sender<u64>,
@@ -144,11 +152,14 @@ impl Server {
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
         let (republish, _) = tokio::sync::watch::channel(0u64);
         tokio::spawn(retain_broadcasts(tx.subscribe(), Arc::clone(&retained), republish.clone()));
+        let held_mother_jobs: HeldMotherJobs = Arc::new(Mutex::new(HashSet::new()));
+        tokio::spawn(track_held_mother_jobs(tx.subscribe(), Arc::clone(&held_mother_jobs)));
 
         let retained_for_loop = Arc::clone(&retained);
+        let held_for_loop = Arc::clone(&held_mother_jobs);
         let unix_peers = UnixPeers { verifier, qa_mode };
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, unix_peers, tx_clone, session_mgr, perri_state_dir, decisions, retained_for_loop).await {
+            if let Err(e) = accept_loop(listener, unix_peers, tx_clone, session_mgr, perri_state_dir, decisions, retained_for_loop, held_for_loop).await {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -159,6 +170,7 @@ impl Server {
             socket_path: path,
             tx,
             retained,
+            held_mother_jobs,
             republish,
         })
     }
@@ -192,8 +204,9 @@ impl Server {
     ) {
         let tx = self.tx.clone();
         let retained = Arc::clone(&self.retained);
+        let held = Arc::clone(&self.held_mother_jobs);
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, session_mgr, perri_state_dir, decisions, retained).await {
+            if let Err(e) = accept_loop_tcp(listener, tx, session_mgr, perri_state_dir, decisions, retained, held).await {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -330,6 +343,7 @@ async fn accept_loop(
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
     retained: RetainedCache,
+    held_mother_jobs: HeldMotherJobs,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -340,6 +354,7 @@ async fn accept_loop(
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
                 let retained = Arc::clone(&retained);
+                let held = Arc::clone(&held_mother_jobs);
                 let peers = peers.clone();
                 tokio::spawn(async move {
                     // Keep a dup of the socket for the verifier: the stream
@@ -352,7 +367,7 @@ async fn accept_loop(
                         }
                     };
                     let origin = PeerOrigin::Unix { verifier: peers.verifier, fd, qa_mode: peers.qa_mode, info: None };
-                    if let Err(e) = handle_client(stream, origin, rx, broadcast_tx, session_mgr, psd, decisions, retained).await {
+                    if let Err(e) = handle_client(stream, origin, rx, broadcast_tx, session_mgr, psd, decisions, retained, held).await {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -371,6 +386,7 @@ async fn accept_loop_tcp(
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
     retained: RetainedCache,
+    held_mother_jobs: HeldMotherJobs,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -382,8 +398,9 @@ async fn accept_loop_tcp(
                 let psd = perri_state_dir.clone();
                 let decisions = Arc::clone(&decisions);
                 let retained = Arc::clone(&retained);
+                let held = Arc::clone(&held_mother_jobs);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, PeerOrigin::Tcp, rx, broadcast_tx, session_mgr, psd, decisions, retained).await {
+                    if let Err(e) = handle_client(stream, PeerOrigin::Tcp, rx, broadcast_tx, session_mgr, psd, decisions, retained, held).await {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -418,6 +435,7 @@ async fn handle_client<S>(
     perri_state_dir: PathBuf,
     decisions: Arc<Mutex<DecisionRegistry>>,
     retained: RetainedCache,
+    held_mother_jobs: HeldMotherJobs,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -856,7 +874,7 @@ where
                             }
                             _ => None,
                         };
-                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions);
+                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions, &held_mother_jobs);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -970,6 +988,7 @@ fn handle_client_msg(
     broadcast_tx: &broadcast::Sender<ServerMsg>,
     perri_state_dir: &Path,
     decisions: &Arc<Mutex<DecisionRegistry>>,
+    held_mother_jobs: &HeldMotherJobs,
 ) {
     // Default-deny for network peers (see `peer::refuse_for_network`): anything
     // but an explicitly allowed read-only request changes nothing.
@@ -1362,6 +1381,14 @@ fn handle_client_msg(
         }
 
         ClientMsg::MotherResume { job_id, answer } => {
+            // A structured hold is the operator's choice, made in Nostromo's Mother panel (the verified
+            // app). Anything else on this machine is turned away, without a call to the `mother` CLI.
+            // A job with no open decision resumes as before. (TCP peers never reach here: refused above.)
+            if trust != PeerTrust::OperatorApp && held_mother_jobs.lock().unwrap().contains(&job_id) {
+                warn!(conn_key, ?trust, "MotherResume refused: the job has an open decision");
+                let _ = targeted_tx.send(ServerMsg::Error { message: MOTHER_HOLD_NEEDS_OPERATOR.to_owned() });
+                return;
+            }
             let btx = broadcast_tx.clone();
             let conn = conn_key.to_string();
             tokio::spawn(async move {
@@ -1981,6 +2008,22 @@ async fn retain_broadcasts(
                 republish.send_modify(|generation| *generation = generation.wrapping_add(1));
                 request_work_resync(&resync);
             }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Keep the set of held Mother jobs current from the `MotherJobs` frames the daemon broadcasts.
+/// A lagged receiver just carries on: the next frame (the poller sends one every two seconds)
+/// replaces the set.
+async fn track_held_mother_jobs(mut rx: broadcast::Receiver<ServerMsg>, held: HeldMotherJobs) {
+    loop {
+        match rx.recv().await {
+            Ok(ServerMsg::MotherJobs { jobs }) => {
+                let ids = jobs.iter().filter(|j| j.open_decision().is_some()).map(|j| j.id.clone()).collect();
+                *held.lock().unwrap() = ids;
+            }
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }

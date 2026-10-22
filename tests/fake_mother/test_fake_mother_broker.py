@@ -589,5 +589,259 @@ class ContractTest(MC2Base):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
+# ── MC3: answering a hold by option, and acknowledging attention ──────────────────────────────────
+
+DECISION_EVENTS = ("decision_resolved", "resumed", "ready", "cancelled")
+
+
+class MC3Base(MC2Base):
+    scenario = "crew_hold"
+    job_id = "j-hold1"
+
+    def command(self, c, t, data, id_="m1"):
+        """Send one command and collect what follows: (the ack's data, the events that came with it).
+
+        The ack for `id_` is required; whether it lands before or after the events is not part of the contract.
+        """
+        c.send(t, data, id_)
+        msgs = c.read_all()
+        acks = [m for m in msgs if m["dir"] == "ack" and m["id"] == id_]
+        self.assertEqual(len(acks), 1, f"expected exactly one ack for {t} {id_}, got {msgs}")
+        self.assertEqual(acks[0]["t"], t)
+        return acks[0]["data"], [m for m in msgs if m["dir"] == "event"]
+
+    def answer(self, c, **data):
+        return self.command(c, "answer", {"job": self.job_id, **data}, "a1")
+
+    def ack(self, c, **data):
+        return self.command(c, "ack", {"job": self.job_id, **data}, "k1")
+
+    def job(self, c):
+        return self.query_get(c, self.job_id)["job"]
+
+    def event_data(self, events, kind):
+        """The data of the one `kind` event among `events` (a failure, not a StopIteration, when it is missing)."""
+        found = [m["data"] for m in events if m["t"] == kind]
+        self.assertEqual(len(found), 1, f"expected one {kind} event, got {[m['t'] for m in events]}")
+        return found[0]
+
+    def hello_caps_from_cli(self, scenario):
+        """The capabilities in the hello of `bin/fake-mother-broker --scenario <scenario>`, run as the QA instructions run it.
+
+        (Through the command line on purpose: that is where a crew scenario takes the fixture's capabilities.)
+        """
+        sock = os.path.join(self.dir, "cli.sock")
+        proc = subprocess.Popen([PATH, "--sock", sock, "--scenario", scenario], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertIn("fake Mother broker", proc.stdout.readline())   # printed once it is listening
+            c = RawConn(sock)
+            try:
+                return c.read()["data"]["capabilities"]
+            finally:
+                c.close()
+        finally:
+            proc.kill(); proc.wait(timeout=10)
+            proc.stdout.close(); proc.stderr.close()
+
+    def assertInvalidState(self, ack):
+        self.assertFalse(ack["ok"], ack)
+        self.assertEqual(ack["error"]["code"], "invalid_state", ack)
+
+    def recorded(self):
+        return self.ctl(op="commands")["result"]
+
+    def raise_attention(self, *reasons):
+        """Raise attention reasons on the hold job the way a recording would (an `attention_raised` event)."""
+        events = [{"v": 1, "dir": "event", "t": "attention_raised", "id": f"att{i}", "ts": "2026-10-18T12:00:00.000Z",
+                   "data": {"job": self.job_id, "reason": reason, "category": "activity"}} for i, reason in enumerate(reasons)]
+        path = os.path.join(self.dir, "attention.ndjson")
+        with open(path, "w") as f:
+            f.write("".join(json.dumps(m) + "\n" for m in events))
+        r = self.ctl(op="replay", file=path, speed=0, wait=True)
+        self.assertTrue(r["ok"], r)
+
+
+class MC3CapabilitiesTest(MC3Base):
+    def test_crew_scenarios_advertise_option_answers_and_acknowledgement_and_basic_does_not(self):
+        for scenario in CREW_SCENARIOS:
+            with self.subTest(scenario):
+                caps = self.hello_caps_from_cli(scenario)
+                for needed in ("answer.option", "ack"):
+                    self.assertIn(needed, caps)
+        caps = self.hello_caps_from_cli("basic")
+        for absent in ("answer.option", "ack"):
+            self.assertNotIn(absent, caps)
+
+
+class AnswerByOptionTest(MC3Base):
+    OPTIONS = {"resume_with_guidance": "Guidance for the worker.", "escalate": None, "override_open": None}
+
+    def answer_with(self, c, option, text=None, **extra):
+        data = {"option": option, **extra}
+        if text is not None:
+            data["text"] = text
+        return self.answer(c, **data)
+
+    def test_the_hold_starts_open_and_awaiting(self):
+        c = self.client()
+        job = self.job(c)
+        self.assertEqual((job["state"], job["decision"]["id"], job["decision"]["resolved_at"]), ("awaiting", "d-0001", None))
+        self.assertEqual([o["id"] for o in job["decision"]["options"]],
+                         ["resume_with_guidance", "escalate", "override_open", "cancel"])
+
+    def test_answering_with_an_option_other_than_cancel_resolves_the_decision_and_readies_the_job(self):
+        for option, text in self.OPTIONS.items():
+            with self.subTest(option):
+                self.restart_broker("crew_hold")
+                c = self.client()
+                ack, events = self.answer_with(c, option, text)
+                self.assertTrue(ack["ok"], ack)
+                job = self.job(c)
+                self.assertEqual(job["state"], "ready")
+                self.assertIsNotNone(job["decision"]["resolved_at"])
+                self.assertEqual(job["decision"]["resolution"]["option"], option)
+                self.assertEqual(job["decision"]["resolution"]["source"], "broker_client")
+                self.assertIsNone(job.get("activity"), "the hold is over")
+                self.assertEqual(job.get("attention", []), [], "decision_awaiting is cleared")
+                self.assertNotIn("decision_awaiting", [r["reason"] for r in job.get("attention_reasons", [])])
+                self.assertEqual(self.recorded(), [{"type": "answer", "data": {"job": "j-hold1", "option": option,
+                                                                              **({"text": text} if text else {})}}])
+                self.assertEqual([m["t"] for m in events if m["t"] in DECISION_EVENTS],
+                                 ["decision_resolved", "resumed", "ready"], [m["t"] for m in events])
+                by_kind = {m["t"]: m["data"] for m in events}
+                self.assertEqual(by_kind["decision_resolved"]["job"], "j-hold1")
+                self.assertEqual(by_kind["decision_resolved"]["decision_id"], "d-0001")
+                for kind in ("decision_resolved", "resumed"):
+                    self.assertEqual((by_kind[kind]["option"], by_kind[kind]["source"]), (option, "broker_client"), kind)
+                self.assertEqual(by_kind["resumed"]["job"], "j-hold1")
+                self.assertEqual(by_kind["ready"]["job"], "j-hold1")
+
+    def test_cancel_resolves_the_decision_and_cancels_the_job_without_resuming_it(self):
+        c = self.client()
+        ack, events = self.answer_with(c, "cancel")
+        self.assertTrue(ack["ok"], ack)
+        kinds = [m["t"] for m in events if m["t"] in DECISION_EVENTS]
+        self.assertEqual(kinds, ["decision_resolved", "cancelled"], [m["t"] for m in events])
+        resolved = self.event_data(events, "decision_resolved")
+        self.assertEqual((resolved["job"], resolved["decision_id"], resolved["option"], resolved["source"]),
+                         ("j-hold1", "d-0001", "cancel", "broker_client"))
+        self.assertEqual(self.event_data(events, "cancelled")["job"], "j-hold1")
+        job = self.job(c)
+        self.assertEqual(job["state"], "cancelled")
+        self.assertEqual(job["decision"]["resolution"]["option"], "cancel")
+        self.assertIsNotNone(job["decision"]["resolved_at"])
+        self.assertEqual(job.get("attention", []), [])
+        self.assertEqual(self.recorded()[-1]["data"]["option"], "cancel")
+
+    def test_the_source_defaults_to_broker_client_and_a_sent_source_is_honoured(self):
+        c = self.client()
+        _, events = self.answer_with(c, "escalate")
+        self.assertEqual(self.event_data(events, "decision_resolved")["source"], "broker_client")
+        for option in ("escalate", "cancel"):
+            with self.subTest(option):
+                self.restart_broker("crew_hold")
+                c = self.client()
+                _, events = self.answer_with(c, option, source="nostromo_app")
+                self.assertEqual(self.event_data(events, "decision_resolved")["source"], "nostromo_app")
+                if option != "cancel":
+                    self.assertEqual(self.event_data(events, "resumed")["source"], "nostromo_app")
+                self.assertEqual(self.job(c)["decision"]["resolution"]["source"], "nostromo_app")
+
+    def test_a_second_option_answer_for_the_resolved_decision_is_invalid_state_and_changes_nothing(self):
+        c = self.client()
+        first, _ = self.answer_with(c, "escalate")
+        self.assertTrue(first["ok"], first)
+        before = self.job(c)
+        self.assertEqual((before["state"], before["decision"]["resolved_at"] is not None), ("ready", True))
+        ack, events = self.answer_with(c, "cancel")
+        self.assertInvalidState(ack)
+        self.assertEqual([m for m in events if m["t"] in DECISION_EVENTS], [])
+        self.assertEqual(self.job(c), before)
+        self.assertEqual((before["state"], before["decision"]["resolution"]["option"]), ("ready", "escalate"))
+        self.assertEqual([x["data"]["option"] for x in self.recorded()], ["escalate", "cancel"], "the refused command is still recorded")
+
+    def test_an_option_that_is_not_one_of_the_decisions_options_is_invalid_state_and_changes_nothing(self):
+        c = self.client()
+        before = self.job(c)
+        ack, events = self.answer_with(c, "do_something_else")
+        self.assertInvalidState(ack)
+        self.assertEqual([m for m in events if m["t"] in DECISION_EVENTS], [])
+        self.assertEqual(self.job(c), before)
+        self.assertEqual((before["state"], before["decision"]["resolved_at"]), ("awaiting", None))
+        self.assertEqual(self.recorded()[-1]["data"]["option"], "do_something_else")
+        ack, _ = self.answer_with(c, "escalate")           # and the hold can still be answered properly
+        self.assertTrue(ack["ok"], ack)
+
+    def test_an_option_answer_for_a_job_with_no_open_decision_is_invalid_state_and_changes_nothing(self):
+        self.restart_broker("basic")
+        c = self.client()
+        self.job_id = "j-ask"                              # awaiting, but asked a free-text question: no structured decision
+        before = self.job(c)
+        self.assertEqual(before["state"], "awaiting")
+        self.assertNotIn("decision", before)
+        ack, events = self.answer_with(c, "escalate")
+        self.assertInvalidState(ack)
+        self.assertEqual([m for m in events if m["t"] in DECISION_EVENTS + ("running",)], [])
+        self.assertEqual(self.job(c), before)
+        self.assertEqual(self.recorded()[-1]["data"]["option"], "escalate")
+
+    def test_an_answer_without_an_option_keeps_its_old_behaviour(self):
+        self.restart_broker("basic")
+        c = self.client()
+        self.job_id = "j-ask"
+        ack, events = self.answer(c, text="Keep it and mark it deprecated.")
+        self.assertTrue(ack["ok"], ack)
+        self.assertEqual(self.job(c)["state"], "running")
+        self.assertIn("running", [m["t"] for m in events])
+        self.assertEqual([m for m in events if m["t"] in DECISION_EVENTS], [])
+        self.assertEqual(self.recorded(), [{"type": "answer", "data": {"job": "j-ask", "text": "Keep it and mark it deprecated."}}])
+
+
+class AcknowledgeTest(MC3Base):
+    def test_acknowledging_a_raised_reason_marks_it_acked_and_removes_it_from_attention(self):
+        c = self.client()
+        self.raise_attention("progress_stalled", "burn_ahead")
+        c.read_all()
+        job = self.job(c)
+        self.assertEqual({r["reason"] for r in job["attention"]}, {"decision_awaiting", "progress_stalled", "burn_ahead"})
+        ack, events = self.ack(c, reason="progress_stalled")
+        self.assertTrue(ack["ok"], ack)
+        acked = [m["data"] for m in events if m["t"] == "attention_acked"]
+        self.assertEqual(len(acked), 1, [m["t"] for m in events])
+        self.assertEqual((acked[0]["job"], acked[0]["reason"], acked[0]["source"]), ("j-hold1", "progress_stalled", "broker_client"))
+        job = self.job(c)
+        by_reason = {r["reason"]: r for r in job["attention_reasons"]}
+        self.assertTrue(by_reason["progress_stalled"]["acked"])
+        self.assertFalse(by_reason["burn_ahead"]["acked"], "only the acknowledged reason changes")
+        self.assertFalse(by_reason["decision_awaiting"]["acked"])
+        self.assertEqual({r["reason"] for r in job["attention"]}, {"decision_awaiting", "burn_ahead"})
+        self.assertEqual(self.recorded(), [{"type": "ack", "data": {"job": "j-hold1", "reason": "progress_stalled"}}])
+
+    def test_a_sent_source_is_honoured_on_the_acknowledgement(self):
+        c = self.client()
+        self.raise_attention("burn_ahead")
+        c.read_all()
+        ack, events = self.ack(c, reason="burn_ahead", source="nostromo_app")
+        self.assertTrue(ack["ok"], ack)
+        self.assertEqual(self.event_data(events, "attention_acked")["source"], "nostromo_app")
+
+    def test_acknowledging_a_reason_that_is_not_raised_is_invalid_state_and_changes_nothing(self):
+        c = self.client()
+        before = self.job(c)
+        ack, events = self.ack(c, reason="burn_ahead")
+        self.assertInvalidState(ack)
+        self.assertEqual([m for m in events if m["t"] == "attention_acked"], [])
+        self.assertEqual(self.job(c), before)
+        self.assertEqual(self.recorded(), [{"type": "ack", "data": {"job": "j-hold1", "reason": "burn_ahead"}}])
+
+    def test_acknowledging_on_a_job_that_has_never_had_attention_is_invalid_state(self):
+        self.restart_broker("basic")
+        c = self.client()
+        self.job_id = "j-run"
+        ack, events = self.ack(c, reason="progress_stalled")
+        self.assertInvalidState(ack)
+        self.assertEqual([m for m in events if m["t"] == "attention_acked"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

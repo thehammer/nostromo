@@ -152,6 +152,13 @@ pub async fn retry_job(state: &McpSharedState, args: &Value) -> Value {
     json!({ "error": "not_supported", "detail": "requires nostromd" })
 }
 
+/// Whether the daemon's latest job list has this job held with an open decision.
+fn has_open_decision(state: &McpSharedState, job_id: &str) -> bool {
+    let Some(feed) = state.mother_feed.as_ref() else { return false };
+    let jobs = feed.jobs_rx().borrow().clone();
+    jobs.iter().any(|j| j.id == job_id && j.open_decision().is_some())
+}
+
 /// Handle `mother.resume_job({ id, answer })`.
 pub async fn resume_job(state: &McpSharedState, args: &Value) -> Value {
     let job_id = match args.get("id").and_then(|v| v.as_str()) {
@@ -164,6 +171,15 @@ pub async fn resume_job(state: &McpSharedState, args: &Value) -> Value {
     };
 
     if state.daemon.is_some() {
+        // A structured hold is the operator's choice, made in Nostromo's Mother panel. An agent can't
+        // answer it here (it can still run `mother resume --option` itself; Mother records that as `cli`).
+        // The reply says nothing about the job.
+        if has_open_decision(state, &job_id) {
+            return json!({
+                "error": "needs_operator_choice",
+                "detail": "This Mother hold needs the operator's choice in Nostromo's Mother panel.",
+            });
+        }
         return daemon_mutation(state, mother::resume(&job_id, &answer)).await;
     }
 

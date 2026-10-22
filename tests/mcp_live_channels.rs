@@ -145,6 +145,21 @@ impl Client {
         }
     }
 
+    /// `tools/list`, returning the `result.tools` array.
+    async fn tools_list(&mut self) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        send(&mut self.writer, &json!({"jsonrpc":"2.0","id":id,"method":"tools/list"})).await;
+        let mut line = String::new();
+        tokio::time::timeout(BOUND, self.reader.read_line(&mut line))
+            .await
+            .unwrap_or_else(|_| panic!("tools/list did not respond within {BOUND:?}"))
+            .unwrap();
+        let resp: Value = serde_json::from_str(line.trim()).expect("response is JSON");
+        assert!(resp.get("error").is_none(), "tools/list JSON-RPC error: {resp}");
+        resp["result"]["tools"].clone()
+    }
+
     /// `tools/call`, returning the parsed tool-content JSON.
     async fn call(&mut self, name: &str, args: Value) -> Value {
         let id = self.next_id;
@@ -1496,6 +1511,125 @@ async fn resume_job_hands_the_answer_to_the_cli_in_a_file_never_in_argv() {
             parts[3]
         );
     }
+}
+
+// ── MC3: a structured hold is the operator's choice, never an agent's ────────
+
+const HOLD_NEEDS_OPERATOR: &str = "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
+
+/// A job as the broker lists it. `decision`: None = no hold, Some(false) = an
+/// open hold, Some(true) = a hold the operator has already answered.
+fn held_job(id: &str, decision: Option<bool>) -> MotherJob {
+    let mut v = json!({
+        "id": id,
+        "state": "awaiting",
+        "title": "SECRET-TITLE-OF-THE-HELD-JOB",
+        "question": "SECRET-QUESTION-FOR-THE-OPERATOR",
+        "activity": "gate_hold",
+    });
+    if let Some(resolved) = decision {
+        v["decision"] = json!({
+            "id": "d-0001",
+            "kind": "gate_hold",
+            "options": [
+                {"id": "resume_with_guidance", "label": "Resume with guidance",
+                 "consequence": "SECRET-CONSEQUENCE-TEXT", "takes_text": true},
+                {"id": "escalate", "label": "Escalate", "consequence": "c", "takes_text": false},
+                {"id": "override_open", "label": "Open PR anyway", "consequence": "c", "takes_text": false},
+                {"id": "cancel", "label": "Cancel job", "consequence": "c", "takes_text": false},
+            ],
+            "opened_at": "2026-10-18T12:00:00.250Z",
+            "resolved_at": if resolved { json!("2026-10-18T12:05:00.000Z") } else { Value::Null },
+            "resolution": if resolved { json!({"option": "escalate", "source": "nostromo_app"}) } else { Value::Null },
+        });
+    }
+    serde_json::from_value(v).unwrap()
+}
+
+fn resume_calls(fake: &FakeMother) -> Vec<String> {
+    fake.calls().into_iter().filter(|l| l.split_whitespace().next() == Some("resume")).collect()
+}
+
+#[tokio::test]
+async fn resume_job_refuses_a_job_with_an_open_decision_and_never_runs_the_cli() {
+    let fake = FakeMother::install().await;
+    let h = harness().await;
+    h.feed.publish_jobs(vec![held_job("hold-1", Some(false))]);
+    let mut c = Client::connect(&h).await;
+
+    let res = c
+        .call("mother.resume_job", json!({ "id": "hold-1", "answer": "AGENT-SELF-ANSWER" }))
+        .await;
+
+    assert_eq!(
+        res,
+        json!({ "error": "needs_operator_choice", "detail": HOLD_NEEDS_OPERATOR }),
+        "an agent must not answer a structured hold"
+    );
+    assert!(resume_calls(&fake).is_empty(), "the CLI must not be called: {:?}", fake.calls());
+    let text = res.to_string();
+    for secret in ["SECRET-TITLE-OF-THE-HELD-JOB", "SECRET-QUESTION-FOR-THE-OPERATOR", "SECRET-CONSEQUENCE-TEXT"] {
+        assert!(!text.contains(secret), "the refusal must not carry job content ({secret}): {text}");
+    }
+}
+
+#[tokio::test]
+async fn resume_job_still_resumes_a_job_without_an_open_decision() {
+    let fake = FakeMother::install().await;
+    let h = harness().await;
+    let mut c = Client::connect(&h).await;
+
+    // A job with no decision, one whose decision is resolved, and one the feed
+    // has never heard of are all resumed exactly as before.
+    for id in ["plain-1", "answered-1", "unlisted-1"] {
+        // Each resume re-lists from the (empty) fake CLI, so seed the feed afresh.
+        h.feed.publish_jobs(vec![
+            held_job("plain-1", None),
+            held_job("answered-1", Some(true)),
+            // Another job's open hold must not block a different id.
+            held_job("hold-elsewhere", Some(false)),
+        ]);
+        let res = c.call("mother.resume_job", json!({ "id": id, "answer": "go ahead" })).await;
+        assert_eq!(res, json!({ "ok": true }), "{id}: {res}");
+        let argv = fake.last_call_of("resume");
+        assert!(
+            argv.starts_with(&format!("resume {id} --from-file")),
+            "{id}: the CLI must be handed the answer as before: {argv}"
+        );
+    }
+    assert_eq!(resume_calls(&fake).len(), 3, "{:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn resume_job_follows_the_feed_once_the_operator_has_answered_the_hold() {
+    let fake = FakeMother::install().await;
+    let h = harness().await;
+    h.feed.publish_jobs(vec![held_job("hold-2", Some(false))]);
+    let mut c = Client::connect(&h).await;
+
+    let res = c.call("mother.resume_job", json!({ "id": "hold-2", "answer": "x" })).await;
+    assert_eq!(res["error"], "needs_operator_choice", "{res}");
+
+    h.feed.publish_jobs(vec![held_job("hold-2", Some(true))]);
+    let res = c.call("mother.resume_job", json!({ "id": "hold-2", "answer": "x" })).await;
+    assert_eq!(res, json!({ "ok": true }), "{res}");
+    assert_eq!(resume_calls(&fake).len(), 1, "{:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn the_resume_job_tool_description_says_a_structured_hold_is_the_operators_choice() {
+    let h = harness().await;
+    let mut c = Client::connect(&h).await;
+    let tools = c.tools_list().await;
+    let tool = tools
+        .as_array()
+        .and_then(|a| a.iter().find(|t| t["name"] == "mother.resume_job"))
+        .unwrap_or_else(|| panic!("mother.resume_job must be listed: {tools}"));
+    let description = tool["description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("operator's choice in Nostromo's Mother panel"),
+        "an agent must be told a structured hold is answered in the Mother panel: {description}"
+    );
 }
 
 #[tokio::test]

@@ -59,7 +59,9 @@ public struct MotherCrewPanelModel: Equatable {
     }
 
     /// Build the model from a job's crew data (nil-safe: a job without any gives an empty model).
-    public static func make(job: MotherJob) -> MotherCrewPanelModel {
+    /// `showsHoldOptions: false` keeps the hold's header but not its option list, for a host
+    /// that draws the options as controls of its own.
+    public static func make(job: MotherJob, showsHoldOptions: Bool = true) -> MotherCrewPanelModel {
         let crew = job.crew
         var progress: Progress?
         if let line = MotherProgressLine.make(progress: crew.progress, gates: crew.gates) {
@@ -73,7 +75,7 @@ public struct MotherCrewPanelModel: Equatable {
             gates: MotherGateRows.make(crew.gates),
             lenses: MotherLensRows.make(crew.reviewWave),
             badges: MotherAttentionBadges.make(crew.attention),
-            hold: MotherHoldSummary.make(job),
+            hold: showsHoldOptions ? MotherHoldSummary.make(job) : MotherHoldSummary.make(job)?.withoutOptions(),
             hasDetails: crew.gates != nil || crew.reviewWave != nil
         )
     }

@@ -723,6 +723,64 @@ private final class MC2StubHost: MotherJobDetailHost {
     func archiveJob(_ id: String) {}
     func openPlan(path: String) { openedPlans.append(path) }
     func clearMotherActionError() {}
+
+    // MC3: structured decisions and acknowledging flags.
+    var supportsAnswerOption = false
+    var supportsAck = false
+    private let decisionChangesSubject = PassthroughSubject<Void, Never>()
+    var motherDecisionChangesPublisher: AnyPublisher<Void, Never> { decisionChangesSubject.eraseToAnyPublisher() }
+
+    /// The send state the stub reports per job (the app keeps one store per job). `.idle` unless set.
+    private var sendStates: [String: MotherDecisionSendState] = [:]
+    var decisionAnswers: [MC3DecisionAnswer] = []
+    var confirms: [MC3DecisionTarget] = []
+    var cancelledConfirms: [MC3DecisionTarget] = []
+    var acks: [MC3Ack] = []
+
+    func motherDecisionState(jobId: String, decisionId: String) -> MotherDecisionSendState { sendStates[jobId] ?? .idle }
+    func beginMotherDecisionConfirm(jobId: String, decisionId: String, option: MotherDecisionOptionID) {
+        confirms.append(MC3DecisionTarget(jobId: jobId, decisionId: decisionId, option: option))
+    }
+    func cancelMotherDecisionConfirm(jobId: String, decisionId: String) {
+        cancelledConfirms.append(MC3DecisionTarget(jobId: jobId, decisionId: decisionId, option: nil))
+    }
+    func answerMotherDecision(jobId: String, decisionId: String, option: MotherDecisionOption, text: String) {
+        decisionAnswers.append(MC3DecisionAnswer(jobId: jobId, decisionId: decisionId, option: option.id, text: text))
+    }
+    func ackMotherAttention(jobId: String, reason: MotherAttentionReason) {
+        acks.append(MC3Ack(jobId: jobId, reason: reason))
+    }
+
+    /// Report `state` for `jobId` and tell the detail the send state changed.
+    func setSendState(_ state: MotherDecisionSendState, for jobId: String) {
+        sendStates[jobId] = state
+        decisionChangesSubject.send()
+    }
+    /// Fire the change publisher without changing anything (capabilities may have changed).
+    func fireDecisionChange() { decisionChangesSubject.send() }
+}
+
+private struct MC3DecisionAnswer: Equatable {
+    let jobId: String
+    let decisionId: String
+    let option: MotherDecisionOptionID
+    let text: String
+}
+
+private struct MC3DecisionTarget: Equatable {
+    let jobId: String
+    let decisionId: String
+    let option: MotherDecisionOptionID?
+}
+
+private struct MC3Ack: Equatable {
+    let jobId: String
+    let reason: MotherAttentionReason
+}
+
+/// A person's click: no event, VoiceOver on, no QA allowance.
+private func mc3PermittedGesture() -> MotherGestureInputs {
+    MotherGestureInputs(currentEvent: { nil }, voiceOverEnabled: { true }, allowsSynthetic: { false })
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1834,6 +1892,7 @@ final class MC2JobDetailNoChurnTests: XCTestCase {
         // The existing free-text Answer still goes to the host, by the job's id.
         let answer = try XCTUnwrap(mc2AllSubviews(detail).compactMap { $0 as? NSButton }.first { $0.title == "Answer" },
                                    "an awaiting job still has an Answer button")
+        detail.gestureInputs = mc3PermittedGesture()   // Answer now takes only a human gesture
         detail.replyTextView.string = "  Fix the seed, do not touch the totals query.  "
         answer.performClick(nil)
 
@@ -1848,6 +1907,7 @@ final class MC2JobDetailNoChurnTests: XCTestCase {
         layout()
         let answer = try XCTUnwrap(mc2AllSubviews(detail).compactMap { $0 as? NSButton }.first { $0.title == "Answer" })
 
+        detail.gestureInputs = mc3PermittedGesture()   // so the empty text, not the gesture, is what stops it
         detail.replyTextView.string = "   \n "
         answer.performClick(nil)
 
@@ -2140,5 +2200,965 @@ final class MC2DetailsSheetTests: XCTestCase {
         sheet.close()
 
         XCTAssertEqual(sheet.shownText, "")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MC3 — answering a hold by option and acknowledging a flag.
+//
+// Trust rule: every control in the Mac that sends `answer` or `ack` takes only a human
+// gesture (`HumanGesture.permit`): app-control input, a stale event and an Accessibility
+// press without VoiceOver do nothing. A VoiceOver press (no event, VoiceOver on) is a person.
+//
+// Three groups: the wire (fake socket broker), BrokerError.kind, and the job detail pane
+// inside a window with the stub host.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// MARK: - MC3: the commands on the wire
+
+extension MotherBrokerClientTests {
+
+    private static let mc3Classic = ["state", "activity", "await", "current_activity", "quota"]
+    private static let mc3WithOptionsAndAck = mc3Classic + ["progress", "answer.option", "ack"]
+
+    /// Connect, send a hello advertising `capabilities`, and consume the subscribe. A server-side read
+    /// then gives up after 5 s (nil) instead of hanging the suite when the client writes nothing.
+    fileprivate func mc3Handshake(capabilities: [String]) throws {
+        client.start()
+        try waitForServerAccept()
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        _ = Darwin.setsockopt(serverFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        serverWrite(helloWith(capabilities: capabilities))
+        let subscribe = try readCommandObject()
+        XCTAssertEqual(subscribe["t"] as? String, "subscribe")
+        waitUntilConnected()
+    }
+
+    fileprivate func mc3Data(_ command: [String: Any], file: StaticString = #filePath, line: UInt = #line) throws -> [String: Any] {
+        try XCTUnwrap(command["data"] as? [String: Any], "the command has no data object", file: file, line: line)
+    }
+
+    /// Run `start` and wait for the completion it is given.
+    fileprivate func mc3Await(_ start: (@escaping (Result<Void, BrokerError>) -> Void) -> Void) -> Result<Void, BrokerError>? {
+        let exp = XCTestExpectation(description: "completion")
+        var result: Result<Void, BrokerError>?
+        start { result = $0; exp.fulfill() }
+        wait(for: [exp], timeout: 10)
+        return result
+    }
+
+    fileprivate func mc3AssertFailsLocallyAsInvalidState(_ result: Result<Void, BrokerError>?, _ what: String,
+                                                         file: StaticString = #filePath, line: UInt = #line) {
+        guard case .failure(let error)? = result else {
+            return XCTFail("\(what): expected a local failure, got \(String(describing: result))", file: file, line: line)
+        }
+        guard case .code(let code, _) = error else {
+            return XCTFail("\(what): expected a coded error, got \(error)", file: file, line: line)
+        }
+        XCTAssertEqual(code, .invalidState, what, file: file, line: line)
+    }
+
+    /// After a command that must have sent nothing: the next thing the broker reads is this `cancel`.
+    fileprivate func mc3AssertNothingWasWritten(before what: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        client.cancel(job: "j-follow-up") { _ in }
+        let next = try readCommandObject()
+        XCTAssertEqual(next["t"] as? String, "cancel",
+                       "\(what): something was written before the follow-up cancel: \(next)", file: file, line: line)
+        XCTAssertEqual(try mc3Data(next, file: file, line: line)["job"] as? String, "j-follow-up", file: file, line: line)
+    }
+
+    // MARK: answer by option (broker advertises answer.option)
+
+    func testMC3AnswerByOptionSendsOnlyJobOptionAndSourceForEveryOption() throws {
+        try mc3Handshake(capabilities: Self.mc3WithOptionsAndAck)
+
+        for option in [MotherDecisionOptionID.resumeWithGuidance, .escalate, .overrideOpen, .cancel] {
+            client.answer(job: "j-hold1", option: option, text: nil) { _ in }
+            let command = try readCommandObject()
+            XCTAssertEqual(command["t"] as? String, "answer", option.raw)
+            XCTAssertEqual(command["dir"] as? String, "cmd", option.raw)
+            let data = try mc3Data(command)
+            XCTAssertEqual(Set(data.keys), ["job", "option", "source"], "\(option.raw): exactly these data keys")
+            XCTAssertEqual(data["job"] as? String, "j-hold1", option.raw)
+            XCTAssertEqual(data["option"] as? String, option.raw, "the option's raw id, not a Swift case name")
+            XCTAssertEqual(data["source"] as? String, "nostromo_app", option.raw)
+        }
+    }
+
+    func testMC3GuidanceByOptionCarriesItsTextAndNothingElseBesides() throws {
+        try mc3Handshake(capabilities: Self.mc3WithOptionsAndAck)
+
+        client.answer(job: "j-hold1", option: .resumeWithGuidance, text: "Use the v2 endpoint instead.") { _ in }
+        let data = try mc3Data(try readCommandObject())
+
+        XCTAssertEqual(Set(data.keys), ["job", "option", "source", "text"])
+        XCTAssertEqual(data["job"] as? String, "j-hold1")
+        XCTAssertEqual(data["option"] as? String, "resume_with_guidance")
+        XCTAssertEqual(data["text"] as? String, "Use the v2 endpoint instead.")
+        XCTAssertEqual(data["source"] as? String, "nostromo_app")
+    }
+
+    func testMC3AnAnswerByOptionCanNameAnotherSource() throws {
+        try mc3Handshake(capabilities: Self.mc3WithOptionsAndAck)
+
+        client.answer(job: "j-hold1", option: .escalate, text: nil, source: "qa_harness") { _ in }
+        let data = try mc3Data(try readCommandObject())
+
+        XCTAssertEqual(data["source"] as? String, "qa_harness")
+        XCTAssertEqual(Set(data.keys), ["job", "option", "source"])
+    }
+
+    func testMC3AnAnswerByOptionCompletesWithTheBrokersAckAndAFailureKeepsItsKind() throws {
+        try mc3Handshake(capabilities: Self.mc3WithOptionsAndAck)
+
+        let okExp = XCTestExpectation(description: "ok ack")
+        var okResult: Result<Void, BrokerError>?
+        client.answer(job: "j-hold1", option: .escalate, text: nil) { okResult = $0; okExp.fulfill() }
+        let okId = try XCTUnwrap(try readCommandObject()["id"] as? String)
+        serverWrite(#"{"v":1,"dir":"ack","t":"answer","id":"\#(okId)","ts":"2026-10-17T12:00:03.000Z","data":{"ok":true,"job":"j-hold1"}}"#)
+        wait(for: [okExp], timeout: 10)
+        guard case .success? = okResult else { return XCTFail("expected success, got \(String(describing: okResult))") }
+
+        let badExp = XCTestExpectation(description: "error ack")
+        var badResult: Result<Void, BrokerError>?
+        client.answer(job: "j-hold1", option: .escalate, text: nil) { badResult = $0; badExp.fulfill() }
+        let badId = try XCTUnwrap(try readCommandObject()["id"] as? String)
+        serverWrite(#"{"v":1,"dir":"ack","t":"answer","id":"\#(badId)","ts":"2026-10-17T12:00:04.000Z","data":{"ok":false,"error":{"code":"invalid_state","message":"decision already resolved"}}}"#)
+        wait(for: [badExp], timeout: 10)
+        guard case .failure(let error)? = badResult else { return XCTFail("expected failure, got \(String(describing: badResult))") }
+        XCTAssertEqual(error.kind, .invalidState)
+    }
+
+    // MARK: answer by option against an older broker (no answer.option)
+
+    func testMC3GuidanceFallsBackToAFreeTextAnswerOnABrokerWithoutAnswerOption() throws {
+        try mc3Handshake(capabilities: Self.mc3Classic)
+
+        client.answer(job: "j-hold1", option: .resumeWithGuidance, text: "Use the v2 endpoint instead.") { _ in }
+        let command = try readCommandObject()
+
+        XCTAssertEqual(command["t"] as? String, "answer")
+        let data = try mc3Data(command)
+        XCTAssertEqual(Set(data.keys), ["job", "text"], "no option and no source for a broker that does not know them")
+        XCTAssertEqual(data["job"] as? String, "j-hold1")
+        XCTAssertEqual(data["text"] as? String, "Use the v2 endpoint instead.")
+    }
+
+    func testMC3EveryOtherOptionFailsLocallyOnABrokerWithoutAnswerOptionAndSendsNothing() throws {
+        try mc3Handshake(capabilities: Self.mc3Classic)
+
+        for option in [MotherDecisionOptionID.escalate, .overrideOpen, .cancel, .unknown("defer")] {
+            let result = mc3Await { done in self.client.answer(job: "j-hold1", option: option, text: nil, completion: done) }
+            mc3AssertFailsLocallyAsInvalidState(result, option.raw)
+        }
+        let blankGuidance = mc3Await { done in
+            self.client.answer(job: "j-hold1", option: .resumeWithGuidance, text: nil, completion: done)
+        }
+        mc3AssertFailsLocallyAsInvalidState(blankGuidance, "guidance without text")
+        let emptyGuidance = mc3Await { done in
+            self.client.answer(job: "j-hold1", option: .resumeWithGuidance, text: "", completion: done)
+        }
+        mc3AssertFailsLocallyAsInvalidState(emptyGuidance, "guidance with empty text")
+
+        try mc3AssertNothingWasWritten(before: "the refused options")
+    }
+
+    // MARK: the free-text answer
+
+    func testMC3TheFreeTextAnswerCarriesJobTextAndSourceWhenTheBrokerAdvertisesAnswerOption() throws {
+        try mc3Handshake(capabilities: Self.mc3WithOptionsAndAck)
+
+        client.answer(job: "j-1", text: "Go ahead.") { _ in }
+        let command = try readCommandObject()
+
+        XCTAssertEqual(command["t"] as? String, "answer")
+        let data = try mc3Data(command)
+        XCTAssertEqual(Set(data.keys), ["job", "text", "source"])
+        XCTAssertEqual(data["job"] as? String, "j-1")
+        XCTAssertEqual(data["text"] as? String, "Go ahead.")
+        XCTAssertEqual(data["source"] as? String, "nostromo_app")
+    }
+
+    func testMC3TheFreeTextAnswerIsJobAndTextOnlyOnABrokerWithoutAnswerOption() throws {
+        try mc3Handshake(capabilities: Self.mc3Classic)
+
+        client.answer(job: "j-1", text: "Go ahead.") { _ in }
+        let data = try mc3Data(try readCommandObject())
+
+        XCTAssertEqual(Set(data.keys), ["job", "text"], "exactly as before MC3")
+        XCTAssertEqual(data["text"] as? String, "Go ahead.")
+    }
+
+    // MARK: ack
+
+    func testMC3AckSendsJobAndReasonWhenTheBrokerAdvertisesAck() throws {
+        try mc3Handshake(capabilities: Self.mc3WithOptionsAndAck)
+
+        client.ack(job: "j-1", reason: "progress_stalled") { _ in }
+        let command = try readCommandObject()
+
+        XCTAssertEqual(command["t"] as? String, "ack")
+        XCTAssertEqual(command["dir"] as? String, "cmd")
+        let data = try mc3Data(command)
+        XCTAssertEqual(Set(data.keys), ["job", "reason"])
+        XCTAssertEqual(data["job"] as? String, "j-1")
+        XCTAssertEqual(data["reason"] as? String, "progress_stalled")
+    }
+
+    func testMC3AckFailsLocallyAndSendsNothingWhenTheBrokerDoesNotAdvertiseAck() throws {
+        try mc3Handshake(capabilities: Self.mc3Classic + ["answer.option"])
+
+        let result = mc3Await { done in self.client.ack(job: "j-1", reason: "burn_ahead", completion: done) }
+
+        mc3AssertFailsLocallyAsInvalidState(result, "ack on a broker without the ack capability")
+        try mc3AssertNothingWasWritten(before: "the refused ack")
+    }
+}
+
+// MARK: - MC3: BrokerError.kind
+
+final class MC3BrokerErrorKindTests: XCTestCase {
+
+    func testTransportFailuresMapToTheirOwnKinds() {
+        XCTAssertEqual(BrokerError.timeout.kind, .timeout)
+        XCTAssertEqual(BrokerError.disconnected.kind, .disconnected)
+    }
+
+    func testBrokerCodesMapToTheStoresKinds() {
+        XCTAssertEqual(BrokerError.code(.noSuchJob, message: "x").kind, .noSuchJob)
+        XCTAssertEqual(BrokerError.code(.invalidState, message: "x").kind, .invalidState)
+        XCTAssertEqual(BrokerError.code(.unauthorized, message: "x").kind, .unauthorized)
+        XCTAssertEqual(BrokerError.code(.unavailable, message: "x").kind, .unavailable)
+    }
+
+    func testAnyOtherBrokerCodeIsOther() {
+        for code in [BrokerErrorCode.malformed, .versionMismatch, .internal] {
+            XCTAssertEqual(BrokerError.code(code, message: "x").kind, .other, code.rawValue)
+        }
+    }
+
+    func testTheKindIgnoresTheBrokersMessageText() {
+        XCTAssertEqual(BrokerError.code(.noSuchJob, message: "").kind, .noSuchJob)
+        XCTAssertEqual(BrokerError.code(.noSuchJob, message: "totally different words").kind, .noSuchJob)
+    }
+}
+
+// MARK: - MC3: the job detail pane
+
+final class MC3JobDetailDecisionTests: XCTestCase {
+
+    private var host: MC2StubHost!
+    private var detail: MotherJobDetail!
+    private var window: NSWindow!
+    private var tmp: URL!
+
+    private let jobId = "j-hold1"
+    private let decisionId = "d-0001"
+    private let guidancePlaceholder = "Guidance for the worker (required)"
+    private let confirmQuestion = "Open the PR for review with red gates recorded as overridden?"
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mc3-detail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        host = MC2StubHost()
+        host.supportsAnswerOption = true      // the fallback tests turn these off
+        host.supportsAck = true
+        detail = MotherJobDetail(host: host, logDirectory: tmp, frame: NSRect(x: 0, y: 0, width: 800, height: 900))
+        // A window with a number (parked off every screen), so real events can resolve to it.
+        window = GestureFixtures.offscreenWindow(size: NSSize(width: 800, height: 900))
+        window.contentView = detail
+        detail.layoutSubtreeIfNeeded()
+    }
+
+    override func tearDown() {
+        detail?.select(nil)
+        window?.contentView = nil
+        window?.close()
+        detail = nil
+        window = nil
+        host = nil
+        if let tmp { try? FileManager.default.removeItem(at: tmp) }
+        super.tearDown()
+    }
+
+    // MARK: Builders and finders
+
+    private func hold(decisionId: String? = "d-0001", state: String = "awaiting", pct: Int = 50,
+                      unit: MotherGateResult = .failed, acked: Bool = false, decisionOpen: Bool = true) -> MotherJob {
+        var crew = mc2Crew(pct: pct, unitResult: unit, acked: acked, decisionId: decisionId, activity: "gate_hold")
+        if !decisionOpen { crew.decision = mc2Decision(id: decisionId ?? "d-0001", open: false) }
+        return mc2Job(id: jobId, state: state, question: "Gate attempts are exhausted (3 of 3).", crew: crew)
+    }
+
+    private func layout() { detail.layoutSubtreeIfNeeded() }
+
+    private func showHold(_ job: MotherJob? = nil) {
+        detail.select(job ?? hold())
+        layout()
+    }
+
+    private var allViews: [NSView] { mc2AllSubviews(detail) }
+    private var allButtons: [NSButton] { allViews.compactMap { $0 as? NSButton } }
+
+    private static let confirmId = "mother.option.confirm"
+    private static let backId = "mother.option.back"
+
+    /// The option buttons, in the order they are laid out.
+    private func optionButtons() -> [NSButton] {
+        allButtons.filter { button in
+            guard let id = button.identifier?.rawValue, id.hasPrefix("mother.option.") else { return false }
+            return id != Self.confirmId && id != Self.backId
+        }
+    }
+
+    private func optionButton(_ raw: String, file: StaticString = #filePath, line: UInt = #line) throws -> NSButton {
+        try XCTUnwrap(optionButtons().first { $0.identifier?.rawValue == "mother.option.\(raw)" },
+                      "no option button \(raw); have \(optionButtons().map { $0.identifier?.rawValue ?? "?" })",
+                      file: file, line: line)
+    }
+
+    private func button(titled title: String) -> NSButton? { allButtons.first { $0.title == title } }
+    private func confirmButton() -> NSButton? { allButtons.first { $0.identifier?.rawValue == Self.confirmId } }
+    private func backButton() -> NSButton? { allButtons.first { $0.identifier?.rawValue == Self.backId } }
+
+    private func isShown(_ view: NSView) -> Bool {
+        var current: NSView? = view
+        while let v = current, v !== detail {
+            if v.isHidden { return false }
+            current = v.superview
+        }
+        return true
+    }
+
+    /// The text of every visible label in the actions area.
+    private func shownTexts() -> [String] {
+        mc2AllSubviews(detail.actionsContainer).compactMap { view in
+            guard let field = view as? NSTextField, isShown(field) else { return nil }
+            return field.stringValue
+        }
+    }
+
+    private func typeGuidance(_ text: String) {
+        detail.replyTextView.string = text
+        NotificationCenter.default.post(name: NSText.didChangeNotification, object: detail.replyTextView)
+    }
+
+    private func typeDraft(_ text: String = "half an answer", selection: NSRange = NSRange(location: 5, length: 3)) {
+        XCTAssertTrue(window.makeFirstResponder(detail.replyTextView), "the guidance box must be able to take focus")
+        typeGuidance(text)
+        detail.replyTextView.selectedRange = selection
+    }
+
+    private func permit() { detail.gestureInputs = mc3PermittedGesture() }
+
+    private func syntheticKey() -> NSEvent {
+        let event = SyntheticInputGate.stamped(GestureFixtures.key(.keyDown, in: window))
+        XCTAssertTrue(SyntheticInputGate.isSynthetic(event), "harness: the event must carry app-control's marker")
+        return event
+    }
+
+    private enum Refusal: CaseIterable {
+        case accessibilityPress          // no event, VoiceOver off
+        case appControlKey               // an event stamped by app-control
+        case appControlRequestRunning    // SyntheticInputGate depth > 0
+    }
+
+    private func refuse(_ refusal: Refusal) {
+        switch refusal {
+        case .accessibilityPress:
+            detail.gestureInputs = MotherGestureInputs(currentEvent: { nil }, voiceOverEnabled: { false }, allowsSynthetic: { false })
+        case .appControlKey:
+            let event = syntheticKey()
+            detail.gestureInputs = MotherGestureInputs(currentEvent: { event }, voiceOverEnabled: { true }, allowsSynthetic: { false })
+        case .appControlRequestRunning:
+            SyntheticInputGate.begin()
+            addTeardownBlock { SyntheticInputGate.end() }
+            detail.gestureInputs = mc3PermittedGesture()
+        }
+    }
+
+    private func assertNothingSent(_ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(host.decisionAnswers.isEmpty, "\(message): answered \(host.decisionAnswers)", file: file, line: line)
+        XCTAssertTrue(host.confirms.isEmpty, "\(message): began a confirm \(host.confirms)", file: file, line: line)
+        XCTAssertTrue(host.cancelledConfirms.isEmpty, "\(message): cancelled a confirm \(host.cancelledConfirms)", file: file, line: line)
+        XCTAssertTrue(host.answers.isEmpty, "\(message): answered as free text \(host.answers)", file: file, line: line)
+        XCTAssertTrue(host.acks.isEmpty, "\(message): acknowledged \(host.acks)", file: file, line: line)
+    }
+
+    private func showConfirm() throws {
+        host.setSendState(.confirming(.overrideOpen), for: jobId)
+        XCTAssertTrue(mc2WaitUntil { self.confirmButton() != nil && self.backButton() != nil },
+                      "the confirm row never appeared")
+    }
+
+    // MARK: - Option mode: what the pane shows
+
+    func testAHoldShowsOneButtonPerOptionInMothersOrderWithTheirLabelsAndIds() throws {
+        showHold()
+
+        XCTAssertEqual(optionButtons().map(\.title), ["Resume with guidance", "Escalate", "Override and open", "Cancel"])
+        XCTAssertEqual(optionButtons().map { $0.identifier?.rawValue },
+                       ["mother.option.resume_with_guidance", "mother.option.escalate",
+                        "mother.option.override_open", "mother.option.cancel"])
+    }
+
+    func testTheGuidanceBoxComesBeforeTheOptionButtons() throws {
+        showHold()
+        let views = allViews
+        let guidance = try XCTUnwrap(views.firstIndex { $0 === detail.replyTextView }, "the guidance box is in the pane")
+        let first = try XCTUnwrap(views.firstIndex { $0 === optionButtons().first })
+        XCTAssertLessThan(guidance, first)
+    }
+
+    func testEachOptionShowsItsConsequenceAsVisibleTextRightAfterItsButton() throws {
+        showHold()
+        let views = allViews
+        let consequences = [
+            "Worker resumes in the same session with your note; gates re-run.",
+            "Re-run one tier up.",
+            "Mark the PR ready with red gates recorded as overridden.",
+            "Stop the job.",
+        ]
+        for (button, consequence) in zip(optionButtons(), consequences) {
+            let index = try XCTUnwrap(views.firstIndex { $0 === button })
+            let next = try XCTUnwrap(views[(index + 1)...].compactMap { $0 as? NSTextField }.first,
+                                     "no text after \(button.title)")
+            XCTAssertEqual(next.stringValue, consequence, button.title)
+            XCTAssertTrue(isShown(next), "the consequence of \(button.title) is visible, not only spoken")
+        }
+    }
+
+    func testEachOptionButtonReadsItsLabelAndConsequenceToVoiceOver() throws {
+        showHold()
+        let expected = [
+            "Resume with guidance. Worker resumes in the same session with your note; gates re-run.",
+            "Escalate. Re-run one tier up.",
+            "Override and open. Mark the PR ready with red gates recorded as overridden.",
+            "Cancel. Stop the job.",
+        ]
+        XCTAssertEqual(optionButtons().map { $0.accessibilityLabel() ?? "" }, expected)
+    }
+
+    func testNoOptionButtonCanBeTriggeredByAKeyboardShortcut() throws {
+        showHold()
+        XCTAssertEqual(optionButtons().count, 4)
+        for button in optionButtons() {
+            XCTAssertEqual(button.keyEquivalent, "", "\(button.title) must not have a key equivalent (Return would answer)")
+        }
+        try showConfirm()
+        XCTAssertEqual(try XCTUnwrap(confirmButton()).keyEquivalent, "")
+        XCTAssertEqual(try XCTUnwrap(backButton()).keyEquivalent, "")
+    }
+
+    func testOptionModeHasNoAnswerOrCancelJobButtonAndKeepsTheGuidanceBox() throws {
+        showHold()
+
+        XCTAssertNil(button(titled: "Answer"))
+        XCTAssertNil(button(titled: "Cancel job"))
+        XCTAssertTrue(allViews.contains { $0 === detail.replyTextView })
+    }
+
+    func testTheGuidanceBoxHasItsPlaceholderForTheReaderAndForVoiceOver() throws {
+        showHold()
+        // How the placeholder is drawn is the pane's business; it must be readable as text or as
+        // the box's accessibility placeholder.
+        let asLabel = shownTexts().contains(guidancePlaceholder)
+        let asAccessibility = detail.replyTextView.accessibilityPlaceholderValue() == guidancePlaceholder
+        XCTAssertTrue(asLabel || asAccessibility,
+                      "no \"\(guidancePlaceholder)\" placeholder; accessibility placeholder is \(String(describing: detail.replyTextView.accessibilityPlaceholderValue()))")
+    }
+
+    func testTheCrewPanelDoesNotDrawTheOptionsTheButtonsAlreadyShow() throws {
+        showHold()
+
+        let summary = try XCTUnwrap(detail.crewSection.model.hold, "the hold's header is still shown")
+        XCTAssertEqual(summary.kind, "Gates exhausted")
+        XCTAssertTrue(summary.options.isEmpty, "the options are buttons now, not rows in the panel")
+    }
+
+    // MARK: - Option mode: when it applies
+
+    func testWithoutAnswerOptionTheHoldKeepsTheTextAnswerAndCancelJob() throws {
+        host.supportsAnswerOption = false
+        showHold()
+
+        XCTAssertNotNil(button(titled: "Answer"))
+        XCTAssertNotNil(button(titled: "Cancel job"))
+        XCTAssertTrue(optionButtons().isEmpty)
+        XCTAssertEqual(try XCTUnwrap(detail.crewSection.model.hold).options.count, 4, "the panel lists the options as before")
+    }
+
+    func testAHoldWithNoOpenDecisionFallsBackToTheTextAnswer() throws {
+        showHold(hold(decisionId: nil))
+
+        XCTAssertNotNil(button(titled: "Answer"))
+        XCTAssertNotNil(button(titled: "Cancel job"))
+        XCTAssertTrue(optionButtons().isEmpty)
+    }
+
+    func testAHoldWhoseDecisionIsResolvedFallsBackToTheTextAnswer() throws {
+        showHold(hold(decisionOpen: false))
+
+        XCTAssertNotNil(button(titled: "Answer"))
+        XCTAssertTrue(optionButtons().isEmpty)
+    }
+
+    func testAJobThatIsNotAwaitingShowsNoOptionButtons() throws {
+        showHold(hold(state: "running"))
+
+        XCTAssertTrue(optionButtons().isEmpty)
+    }
+
+    func testTheDetailFollowsTheBrokerGainingAnswerOption() throws {
+        host.supportsAnswerOption = false
+        showHold()
+        XCTAssertTrue(optionButtons().isEmpty)
+
+        host.supportsAnswerOption = true
+        host.fireDecisionChange()
+
+        XCTAssertTrue(mc2WaitUntil { self.optionButtons().count == 4 }, "the option buttons never appeared")
+        XCTAssertNil(button(titled: "Answer"))
+    }
+
+    // MARK: - Option mode: enabled and disabled
+
+    func testGuidanceIsDisabledUntilThereIsNonBlankTextAndTheOtherOptionsAreEnabled() throws {
+        showHold()
+
+        XCTAssertFalse(try optionButton("resume_with_guidance").isEnabled, "no guidance yet")
+        for raw in ["escalate", "override_open", "cancel"] {
+            XCTAssertTrue(try optionButton(raw).isEnabled, raw)
+        }
+
+        typeGuidance("   \n ")
+        XCTAssertFalse(try optionButton("resume_with_guidance").isEnabled, "whitespace is not guidance")
+
+        typeGuidance("Use the v2 endpoint.")
+        XCTAssertTrue(try optionButton("resume_with_guidance").isEnabled)
+
+        typeGuidance("")
+        XCTAssertFalse(try optionButton("resume_with_guidance").isEnabled, "clearing the box disables it again")
+    }
+
+    func testGuidanceIsEnabledAtFourThousandCharactersAndDisabledBeyond() throws {
+        showHold()
+
+        typeGuidance(String(repeating: "a", count: 4_000))
+        XCTAssertTrue(try optionButton("resume_with_guidance").isEnabled)
+
+        typeGuidance(String(repeating: "a", count: 4_001))
+        XCTAssertFalse(try optionButton("resume_with_guidance").isEnabled)
+    }
+
+    func testEveryOptionIsDisabledWhileTheBrokerIsOffline() throws {
+        host.connectedSubject.send(false)
+        showHold()
+        typeGuidance("Use the v2 endpoint.")
+
+        XCTAssertEqual(optionButtons().count, 4)
+        for button in optionButtons() { XCTAssertFalse(button.isEnabled, button.title) }
+    }
+
+    func testWhileSendingEveryOptionIsDisabledAndASpinnerShows() throws {
+        showHold()
+        typeGuidance("Use the v2 endpoint.")
+        XCTAssertFalse(mc2AllSubviews(detail.actionsContainer).contains { $0 is NSProgressIndicator }, "precondition: no spinner while idle")
+
+        host.setSendState(.sending(.escalate), for: jobId)
+
+        XCTAssertTrue(mc2WaitUntil { let b = self.optionButtons(); return !b.isEmpty && b.allSatisfy { !$0.isEnabled } },
+                      "the options stayed enabled while a send was in flight")
+        XCTAssertTrue(mc2AllSubviews(detail.actionsContainer).contains { $0 is NSProgressIndicator }, "a spinner shows")
+    }
+
+    func testOnceSentThePaneSaysWhichOptionWasSentInsteadOfTheOptionRows() throws {
+        showHold()
+        host.setSendState(.sending(.escalate), for: jobId)
+        host.setSendState(.sent(.escalate), for: jobId)
+
+        XCTAssertTrue(mc2WaitUntil { self.shownTexts().contains("Sent: Escalate") }, "\(shownTexts())")
+        XCTAssertTrue(optionButtons().isEmpty, "the option rows are replaced")
+    }
+
+    func testAFailedSendPutsTheOptionsBackWithoutLosingTheGuidance() throws {
+        showHold()
+        typeGuidance("Use the v2 endpoint.")
+        host.setSendState(.sending(.resumeWithGuidance), for: jobId)
+        XCTAssertTrue(mc2WaitUntil { self.optionButtons().allSatisfy { !$0.isEnabled } })
+
+        host.setSendState(.failed(.resumeWithGuidance, .timeout), for: jobId)
+
+        XCTAssertTrue(mc2WaitUntil { (try? self.optionButton("escalate").isEnabled) == true },
+                      "the options never came back after a failure")
+        XCTAssertEqual(optionButtons().count, 4)
+        XCTAssertEqual(detail.replyTextView.string, "Use the v2 endpoint.", "the guidance is still there to retry with")
+        XCTAssertTrue(try optionButton("resume_with_guidance").isEnabled)
+    }
+
+    // MARK: - Clicking (a person)
+
+    func testAPermittedGuidanceClickAnswersOnceWithTheRawGuidanceText() throws {
+        showHold()
+        permit()
+        typeGuidance("  Use the v2 endpoint.  ")
+
+        try optionButton("resume_with_guidance").performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers,
+                       [MC3DecisionAnswer(jobId: jobId, decisionId: decisionId, option: .resumeWithGuidance,
+                                          text: "  Use the v2 endpoint.  ")],
+                       "the pane hands over the raw text; trimming is the store's job")
+        XCTAssertTrue(host.answers.isEmpty, "not the free-text path")
+        XCTAssertTrue(host.confirms.isEmpty)
+    }
+
+    func testAPermittedEscalateOrCancelClickAnswersOnceWithNoText() throws {
+        for (raw, option) in [("escalate", MotherDecisionOptionID.escalate), ("cancel", .cancel)] {
+            host.decisionAnswers = []
+            showHold()
+            permit()
+            typeGuidance("stray text typed earlier")
+
+            try optionButton(raw).performClick(nil)
+
+            XCTAssertEqual(host.decisionAnswers,
+                           [MC3DecisionAnswer(jobId: jobId, decisionId: decisionId, option: option, text: "")], raw)
+            XCTAssertTrue(host.confirms.isEmpty, raw)
+        }
+    }
+
+    func testAnEmptyGuidanceClickSendsNothing() throws {
+        showHold()
+        permit()
+
+        try optionButton("resume_with_guidance").performClick(nil)
+
+        assertNothingSent("a disabled guidance button")
+    }
+
+    // MARK: - override_open needs a confirm
+
+    func testTheFirstOverrideClickOnlyBeginsTheConfirm() throws {
+        showHold()
+        permit()
+
+        try optionButton("override_open").performClick(nil)
+
+        XCTAssertEqual(host.confirms, [MC3DecisionTarget(jobId: jobId, decisionId: decisionId, option: .overrideOpen)])
+        XCTAssertTrue(host.decisionAnswers.isEmpty, "one click must not open a PR over red gates")
+        XCTAssertNil(confirmButton(), "the confirm row shows only when the host says it is confirming")
+    }
+
+    func testTheConfirmRowAppearsWithItsQuestionAndTwoButtons() throws {
+        showHold()
+        try showConfirm()
+
+        XCTAssertTrue(shownTexts().contains(confirmQuestion), "\(shownTexts())")
+        XCTAssertEqual(try XCTUnwrap(confirmButton()).title, "Open PR anyway")
+        XCTAssertEqual(try XCTUnwrap(backButton()).title, "Back")
+    }
+
+    func testAPermittedOpenPRAnywayClickAnswersOverrideOpenOnce() throws {
+        showHold()
+        permit()
+        try showConfirm()
+
+        try XCTUnwrap(confirmButton()).performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers,
+                       [MC3DecisionAnswer(jobId: jobId, decisionId: decisionId, option: .overrideOpen, text: "")])
+    }
+
+    func testAPermittedBackClickCancelsTheConfirmAndAnswersNothing() throws {
+        showHold()
+        permit()
+        try showConfirm()
+
+        try XCTUnwrap(backButton()).performClick(nil)
+
+        XCTAssertEqual(host.cancelledConfirms.map(\.jobId), [jobId])
+        XCTAssertEqual(host.cancelledConfirms.map(\.decisionId), [decisionId])
+        XCTAssertTrue(host.decisionAnswers.isEmpty)
+    }
+
+    func testTheConfirmRowGoesAwayWhenTheHostStopsConfirming() throws {
+        showHold()
+        try showConfirm()
+
+        host.setSendState(.idle, for: jobId)
+
+        XCTAssertTrue(mc2WaitUntil { self.confirmButton() == nil && self.backButton() == nil }, "the confirm row stayed")
+        XCTAssertEqual(optionButtons().count, 4)
+    }
+
+    // MARK: - Clicking (not a person)
+
+    func testEveryOptionAndConfirmButtonRefusesAnAccessibilityPressWithoutVoiceOver() throws {
+        try assertEverySendPathRefuses(.accessibilityPress)
+    }
+
+    func testEveryOptionAndConfirmButtonRefusesAnEventStampedByAppControl() throws {
+        try assertEverySendPathRefuses(.appControlKey)
+    }
+
+    func testEveryOptionAndConfirmButtonRefusesInputWhileAnAppControlRequestRuns() throws {
+        try assertEverySendPathRefuses(.appControlRequestRunning)
+    }
+
+    /// Options, the override confirm and Back, the free-text Answer and Acknowledge: all refused.
+    private func assertEverySendPathRefuses(_ refusal: Refusal, file: StaticString = #filePath, line: UInt = #line) throws {
+        // Option buttons (guidance has text so it is enabled: the gesture is what refuses).
+        showHold()
+        typeGuidance("Use the v2 endpoint.")
+        refuse(refusal)
+        XCTAssertEqual(optionButtons().count, 4, file: file, line: line)
+        for button in optionButtons() {
+            XCTAssertTrue(button.isEnabled, "precondition: \(button.title) is enabled", file: file, line: line)
+            button.performClick(nil)
+        }
+        assertNothingSent("option buttons", file: file, line: line)
+
+        // The confirm row.
+        try showConfirm()
+        try XCTUnwrap(confirmButton(), file: file, line: line).performClick(nil)
+        try XCTUnwrap(backButton(), file: file, line: line).performClick(nil)
+        assertNothingSent("the confirm row", file: file, line: line)
+
+        // The free-text Answer, on a broker without answer.option.
+        host.setSendState(.idle, for: jobId)
+        host.supportsAnswerOption = false
+        showHold()
+        detail.replyTextView.string = "Go ahead."
+        let answer = try XCTUnwrap(button(titled: "Answer"), file: file, line: line)
+        answer.performClick(nil)
+        assertNothingSent("the free-text Answer", file: file, line: line)
+
+        // Acknowledge.
+        detail.acknowledge(reason: .progressStalled)
+        assertNothingSent("acknowledge", file: file, line: line)
+    }
+
+    func testARefusedClickLeavesTheButtonWorkingForAPerson() throws {
+        showHold()
+        refuse(.accessibilityPress)
+        try optionButton("escalate").performClick(nil)
+        assertNothingSent("the refused click")
+
+        permit()
+        try optionButton("escalate").performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers.map(\.option), [.escalate])
+    }
+
+    func testARealMouseEventInThePanesWindowIsAPerson() throws {
+        showHold()
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window)
+        detail.gestureInputs = MotherGestureInputs(currentEvent: { event }, voiceOverEnabled: { false }, allowsSynthetic: { false })
+
+        try optionButton("escalate").performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers.map(\.option), [.escalate])
+    }
+
+    func testAMouseEventForAnotherWindowIsNotAPerson() throws {
+        showHold()
+        let other = GestureFixtures.offscreenWindow()
+        addTeardownBlock { other.close() }
+        let event = GestureFixtures.mouse(.leftMouseUp, in: other)
+        detail.gestureInputs = MotherGestureInputs(currentEvent: { event }, voiceOverEnabled: { false }, allowsSynthetic: { false })
+
+        try optionButton("escalate").performClick(nil)
+
+        assertNothingSent("an event for another window")
+    }
+
+    func testAStaleMouseEventIsNotAPerson() throws {
+        showHold()
+        let event = GestureFixtures.mouse(.leftMouseUp, in: window,
+                                          timestamp: ProcessInfo.processInfo.systemUptime - 5)
+        detail.gestureInputs = MotherGestureInputs(currentEvent: { event }, voiceOverEnabled: { false }, allowsSynthetic: { false })
+
+        try optionButton("escalate").performClick(nil)
+
+        assertNothingSent("a five-second-old click")
+    }
+
+    func testAVoiceOverPressWithNoEventIsAPerson() throws {
+        showHold()
+        detail.gestureInputs = MotherGestureInputs(currentEvent: { nil }, voiceOverEnabled: { true }, allowsSynthetic: { false })
+
+        try optionButton("cancel").performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers.map(\.option), [.cancel])
+    }
+
+    func testAPressWithNoEventAndVoiceOverOffIsNotAPerson() throws {
+        showHold()
+        detail.gestureInputs = MotherGestureInputs(currentEvent: { nil }, voiceOverEnabled: { false }, allowsSynthetic: { false })
+
+        try optionButton("cancel").performClick(nil)
+
+        assertNothingSent("an Accessibility press")
+    }
+
+    func testSyntheticInputIsAcceptedWhenTheBuildAllowsItForQA() throws {
+        showHold()
+        let event = syntheticKey()
+        detail.gestureInputs = MotherGestureInputs(currentEvent: { event }, voiceOverEnabled: { false }, allowsSynthetic: { true })
+
+        try optionButton("escalate").performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers.map(\.option), [.escalate], "the QA path stays usable")
+    }
+
+    func testInputDuringAnAppControlRequestIsAcceptedWhenTheBuildAllowsSyntheticInput() throws {
+        showHold()
+        SyntheticInputGate.begin()
+        addTeardownBlock { SyntheticInputGate.end() }
+        detail.gestureInputs = MotherGestureInputs(currentEvent: { nil }, voiceOverEnabled: { true }, allowsSynthetic: { true })
+
+        try optionButton("escalate").performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers.map(\.option), [.escalate])
+    }
+
+    // MARK: - The free-text Answer (no answer.option)
+
+    func testWithoutAnswerOptionAPermittedAnswerGoesToTheHostsAnswerJobTrimmed() throws {
+        host.supportsAnswerOption = false
+        showHold()
+        permit()
+        detail.replyTextView.string = "  Fix the seed.  "
+
+        try XCTUnwrap(button(titled: "Answer")).performClick(nil)
+
+        XCTAssertEqual(host.answers.count, 1)
+        XCTAssertEqual(host.answers.first?.id, jobId)
+        XCTAssertEqual(host.answers.first?.text, "Fix the seed.")
+        XCTAssertTrue(host.decisionAnswers.isEmpty)
+    }
+
+    func testTheFreeTextAnswerRefusesAnAppControlClick() throws {
+        host.supportsAnswerOption = false
+        showHold()
+        refuse(.appControlKey)
+        detail.replyTextView.string = "Fix the seed."
+
+        try XCTUnwrap(button(titled: "Answer")).performClick(nil)
+
+        XCTAssertTrue(host.answers.isEmpty)
+        XCTAssertEqual(detail.replyTextView.string, "Fix the seed.", "a refused answer keeps the draft")
+    }
+
+    func testAPlainAwaitingQuestionWithoutADecisionStillTakesATextAnswerFromAPerson() throws {
+        showHold(mc2Job(id: "j-ask", state: "awaiting", question: "Which branch?"))
+        permit()
+        detail.replyTextView.string = "main"
+
+        try XCTUnwrap(button(titled: "Answer")).performClick(nil)
+
+        XCTAssertEqual(host.answers.map(\.id), ["j-ask"])
+        XCTAssertEqual(host.answers.map(\.text), ["main"])
+    }
+
+    // MARK: - Acknowledge
+
+    func testAPermittedAcknowledgeTellsTheHostOnceWithTheJobAndReason() throws {
+        showHold(hold(state: "running"))
+        permit()
+
+        detail.acknowledge(reason: .progressStalled)
+
+        XCTAssertEqual(host.acks, [MC3Ack(jobId: jobId, reason: .progressStalled)])
+    }
+
+    func testAcknowledgeIsRefusedForEveryNonHumanInput() throws {
+        for refusal in [Refusal.accessibilityPress, .appControlKey] {
+            showHold(hold(state: "running"))
+            refuse(refusal)
+            detail.acknowledge(reason: .burnAhead)
+            XCTAssertTrue(host.acks.isEmpty, "\(refusal)")
+        }
+    }
+
+    func testAcknowledgeWithNoJobSelectedDoesNothing() throws {
+        detail.select(nil)
+        permit()
+
+        detail.acknowledge(reason: .progressStalled)
+
+        XCTAssertTrue(host.acks.isEmpty)
+    }
+
+    // MARK: - No layout churn in option mode
+
+    func testTenProgressTicksKeepTheGuidanceSelectionFocusAndTheSameActionStack() throws {
+        showHold()
+        typeDraft()
+        let stack = try XCTUnwrap(detail.actionStack, "a hold has actions")
+        let buttons = optionButtons()
+        let selection = detail.replyTextView.selectedRange
+        XCTAssertEqual(buttons.count, 4)
+
+        let words: [MotherGateResult] = [.unknown("running"), .passed, .failed]
+        for i in 1...10 {
+            detail.update(hold(pct: 50 + i, unit: words[i % 3], acked: i % 2 == 0))
+            layout()
+        }
+
+        XCTAssertEqual(detail.replyTextView.string, "half an answer", "an update must not clear the guidance")
+        XCTAssertEqual(detail.replyTextView.selectedRange, selection, "or move its selection")
+        XCTAssertTrue(window.firstResponder === detail.replyTextView, "or take focus away")
+        XCTAssertTrue(detail.actionStack === stack, "a progress tick must not rebuild the action stack")
+        let after = optionButtons()
+        XCTAssertEqual(after.count, buttons.count)
+        for (a, b) in zip(after, buttons) { XCTAssertTrue(a === b, "the option buttons are the same objects") }
+    }
+
+    func testFiringTheDecisionPublisherWithNothingChangedLeavesTheStackAlone() throws {
+        showHold()
+        typeDraft()
+        let stack = try XCTUnwrap(detail.actionStack)
+
+        host.fireDecisionChange()
+        mc2Spin(0.1)
+        layout()
+
+        XCTAssertTrue(detail.actionStack === stack)
+        XCTAssertEqual(detail.replyTextView.string, "half an answer")
+        XCTAssertTrue(window.firstResponder === detail.replyTextView)
+    }
+
+    func testANewDecisionIdRebuildsTheOptionButtons() throws {
+        showHold(hold(decisionId: "d-0001"))
+        let stack = try XCTUnwrap(detail.actionStack)
+
+        detail.update(hold(decisionId: "d-0002"))
+        layout()
+
+        XCTAssertFalse(try XCTUnwrap(detail.actionStack) === stack)
+        XCTAssertEqual(optionButtons().count, 4)
+    }
+
+    func testAClickAfterANewDecisionAnswersTheNewDecision() throws {
+        showHold(hold(decisionId: "d-0001"))
+        permit()
+        detail.update(hold(decisionId: "d-0002"))
+        layout()
+
+        try optionButton("escalate").performClick(nil)
+
+        XCTAssertEqual(host.decisionAnswers.map(\.decisionId), ["d-0002"])
+    }
+
+    func testASendStateChangeRebuildsTheActions() throws {
+        showHold()
+        let stack = try XCTUnwrap(detail.actionStack)
+
+        host.setSendState(.sending(.escalate), for: jobId)
+
+        XCTAssertTrue(mc2WaitUntil { self.detail.actionStack !== stack }, "a send-state change must be reflected")
     }
 }

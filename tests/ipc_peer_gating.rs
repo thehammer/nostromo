@@ -95,6 +95,15 @@ fn isolate_sent_ledger() {
 
 /// `Server::bind` on a temp Unix socket plus `bind_tcp` on an ephemeral port.
 async fn spawn_server() -> Harness {
+    // Every Unix connection here plays the Mac app (verified bundle + the
+    // `mac_app` claim in `handshake`); `tests/ipc_operator_app.rs` covers
+    // other local processes.
+    spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_app())).await
+}
+
+/// [`spawn_server`] with `verifier` deciding who each Unix connection is
+/// (an ordinary local process, an unidentifiable one, or the app).
+async fn spawn_server_with_verifier(verifier: Arc<dyn nostromo::ipc::peer_verify::PeerVerifier>) -> Harness {
     isolate_sent_ledger();
     install_fake_claude();
     install_fake_bins();
@@ -113,10 +122,7 @@ async fn spawn_server() -> Harness {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        // Every Unix connection here plays the Mac app (verified bundle + the
-        // `mac_app` claim in `handshake`); `tests/ipc_operator_app.rs` covers
-        // other local processes.
-        Arc::new(FakePeerVerifier::always_app()),
+        verifier,
         false,
     )
     .expect("bind unix socket");
@@ -4109,6 +4115,215 @@ async fn a_tcp_client_cannot_resume_an_ordinary_awaiting_mother_job_but_a_unix_c
     assert_no_fake_call("mother", "r5-resume-tcp").await;
     assert_no_fake_call("mother", "ATTACKER-ANSWER").await;
     assert_still_usable(&mut tcp).await;
+}
+
+// ── mother: a structured hold is the operator's choice, not a local script's (MC3) ──
+
+/// The refusal a non-app peer gets for a job whose Mother hold is open.
+const HOLD_NEEDS_OPERATOR: &str = "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
+
+/// A Mother job as the broker lists it; `decision` is its structured hold, if any.
+fn mc3_job(id: &str, decision: Option<Value>) -> nostromo::mother::MotherJob {
+    let mut job = json!({
+        "id": id,
+        "state": "awaiting",
+        "title": "MC3 hold fixture",
+        "activity": "gate_hold",
+    });
+    if let Some(d) = decision {
+        job["decision"] = d;
+    }
+    serde_json::from_value(job).expect("a MotherJob")
+}
+
+fn mc3_decision(resolved: bool) -> Value {
+    json!({
+        "id": "d-0001",
+        "kind": "gate_hold",
+        "options": [
+            {"id": "resume_with_guidance", "label": "Resume with guidance",
+             "consequence": "Resumes the worker with your written guidance.", "takes_text": true},
+            {"id": "escalate", "label": "Escalate",
+             "consequence": "Re-runs the work one tier higher.", "takes_text": false},
+            {"id": "override_open", "label": "Open PR anyway",
+             "consequence": "Opens the PR with red gates recorded as overridden.", "takes_text": false},
+            {"id": "cancel", "label": "Cancel job",
+             "consequence": "Stops the job.", "takes_text": false},
+        ],
+        "opened_at": "2026-10-18T12:00:00.250Z",
+        "resolved_at": if resolved { json!("2026-10-18T12:05:00.000Z") } else { Value::Null },
+        "resolution": if resolved {
+            json!({"option": "escalate", "source": "nostromo_app"})
+        } else {
+            Value::Null
+        },
+    })
+}
+
+/// Publish `jobs` as the daemon's latest Mother list, then give the daemon a
+/// moment to take it in (it mirrors the broadcast channel).
+async fn publish_mother_list(h: &Harness, jobs: Vec<nostromo::mother::MotherJob>) {
+    h.broadcast(ServerMsg::MotherJobs { jobs });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+/// Send a `MotherResume` and collect what the daemon answers on this connection:
+/// everything up to the following `Pong`, plus a short grace window in case the
+/// error arrives later.
+async fn resume_and_collect<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, job_id: &str) -> Vec<ServerMsg> {
+    let mut frames =
+        attack(stream, ClientMsg::MotherResume { job_id: job_id.into(), answer: "MC3-ANSWER".into() }).await;
+    if !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })) {
+        while let Ok(Ok(bytes)) = tokio::time::timeout(Duration::from_millis(500), read_frame(stream)).await {
+            frames.push(serde_json::from_slice(&bytes).unwrap());
+        }
+    }
+    frames
+}
+
+fn assert_hold_refusal(frames: &[ServerMsg], what: &str) {
+    let refused = frames
+        .iter()
+        .any(|m| matches!(m, ServerMsg::Error { message } if message == HOLD_NEEDS_OPERATOR));
+    assert!(
+        refused,
+        "{what}: expected an `error` frame saying {HOLD_NEEDS_OPERATOR:?}, got {frames:?}"
+    );
+}
+
+fn assert_resumed_via_cli(job: &str) {
+    let calls = fake_calls("mother", job);
+    assert!(
+        calls.iter().any(|c| c.starts_with(&format!("resume {job}")) && c.contains("--from-file")),
+        "expected `mother resume {job} --from-file ...`, the fake saw {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_local_script_cannot_resume_a_job_whose_mother_hold_is_open() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+    publish_mother_list(&h, vec![mc3_job("mc3-open-script", Some(mc3_decision(false)))]).await;
+
+    let frames = resume_and_collect(&mut script, "mc3-open-script").await;
+
+    assert_hold_refusal(&frames, "a non-app local peer resuming a job with an open decision");
+    assert_no_fake_call("mother", "mc3-open-script").await;
+    assert_still_usable(&mut script).await;
+}
+
+#[tokio::test]
+async fn a_local_peer_that_cannot_be_identified_cannot_resume_a_job_whose_mother_hold_is_open() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::scripted(Vec::new(), None))).await;
+    let (mut anon, _) = h.unix(vec![]).await;
+    publish_mother_list(&h, vec![mc3_job("mc3-open-anon", Some(mc3_decision(false)))]).await;
+
+    let frames = resume_and_collect(&mut anon, "mc3-open-anon").await;
+
+    assert_hold_refusal(&frames, "an unidentifiable local peer resuming a job with an open decision");
+    assert_no_fake_call("mother", "mc3-open-anon").await;
+}
+
+#[tokio::test]
+async fn a_local_script_can_still_resume_a_plain_awaiting_job_without_a_structured_hold() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+    publish_mother_list(&h, vec![mc3_job("mc3-plain-script", None)]).await;
+
+    let frames = resume_and_collect(&mut script, "mc3-plain-script").await;
+
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "a job with no decision is resumed as before: {frames:?}"
+    );
+    wait_for_fake_call("mother", "mc3-plain-script").await;
+    assert_resumed_via_cli("mc3-plain-script");
+}
+
+#[tokio::test]
+async fn a_local_script_can_still_resume_a_job_whose_decision_is_already_resolved() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+    publish_mother_list(&h, vec![mc3_job("mc3-resolved-script", Some(mc3_decision(true)))]).await;
+
+    let frames = resume_and_collect(&mut script, "mc3-resolved-script").await;
+
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "a resolved decision is no hold: {frames:?}"
+    );
+    wait_for_fake_call("mother", "mc3-resolved-script").await;
+    assert_resumed_via_cli("mc3-resolved-script");
+}
+
+#[tokio::test]
+async fn a_local_script_can_still_resume_a_job_the_daemon_has_no_listing_for() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+    // Nothing published at all: the daemon knows no jobs.
+    let frames = resume_and_collect(&mut script, "mc3-unlisted-script").await;
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })), "{frames:?}");
+    wait_for_fake_call("mother", "mc3-unlisted-script").await;
+    assert_resumed_via_cli("mc3-unlisted-script");
+
+    // A list that holds only other jobs does not change that.
+    publish_mother_list(&h, vec![mc3_job("mc3-someone-else", Some(mc3_decision(false)))]).await;
+    let frames = resume_and_collect(&mut script, "mc3-unlisted-script-2").await;
+    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })), "{frames:?}");
+    wait_for_fake_call("mother", "mc3-unlisted-script-2").await;
+}
+
+#[tokio::test]
+async fn a_local_scripts_resume_follows_the_latest_job_list_once_the_hold_is_resolved() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+
+    publish_mother_list(&h, vec![mc3_job("mc3-follow-script", Some(mc3_decision(false)))]).await;
+    let frames = resume_and_collect(&mut script, "mc3-follow-script").await;
+    assert_hold_refusal(&frames, "while the hold is open");
+    assert_no_fake_call("mother", "mc3-follow-script").await;
+
+    // The operator answers in the panel: the next list shows the decision resolved.
+    publish_mother_list(&h, vec![mc3_job("mc3-follow-script", Some(mc3_decision(true)))]).await;
+    let frames = resume_and_collect(&mut script, "mc3-follow-script").await;
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "the hold is resolved now; the daemon must go by the latest list: {frames:?}"
+    );
+    wait_for_fake_call("mother", "mc3-follow-script").await;
+}
+
+#[tokio::test]
+async fn the_operator_app_can_still_resume_a_job_whose_mother_hold_is_open() {
+    let h = spawn_server().await; // every Unix peer is the verified app
+    let (mut app, _nonce) = h.unix_operator(vec![]).await;
+    publish_mother_list(&h, vec![mc3_job("mc3-open-app", Some(mc3_decision(false)))]).await;
+
+    let frames = resume_and_collect(&mut app, "mc3-open-app").await;
+
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "the app is the operator's own surface; its resume must not be refused: {frames:?}"
+    );
+    wait_for_fake_call("mother", "mc3-open-app").await;
+    assert_resumed_via_cli("mc3-open-app");
+}
+
+#[tokio::test]
+async fn a_tcp_client_is_still_refused_as_insecure_when_it_resumes_a_job_whose_mother_hold_is_open() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    publish_mother_list(&h, vec![mc3_job("mc3-open-tcp", Some(mc3_decision(false)))]).await;
+
+    let frames = attack(
+        &mut tcp,
+        ClientMsg::MotherResume { job_id: "mc3-open-tcp".into(), answer: "ATTACKER-ANSWER".into() },
+    )
+    .await;
+
+    assert_refused(&frames, "mother_resume on a job with an open decision, over TCP");
+    assert_no_fake_call("mother", "mc3-open-tcp").await;
+    assert_no_fake_call("mother", "ATTACKER-ANSWER").await;
 }
 
 #[tokio::test]
