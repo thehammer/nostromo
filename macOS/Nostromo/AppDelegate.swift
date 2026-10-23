@@ -346,19 +346,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Close a window that has no live placement controller. Such a window would stay
     /// `alphaValue = 0` and windowed forever; closing is safe (it is not full-screen, and
-    /// a full-screen one has its full-screen mask dropped first, like screen removal).
+    /// a full-screen one is closed as-is, like screen removal: see `closeAfterDisplayRemoval`).
     private func closeUntrackedWindow(_ win: NostromoWindow, reason: String) {
         placementLog.log("windows", "closing untracked window '\(win.title)': \(reason)", warning: true)
-        win.isOrphanedByScreenRemoval = true
-        win.animationBehavior = .none
-        win.lifecycleHandler = nil
-        if win.styleMask.contains(.fullScreen) {
-            var mask = win.styleMask
-            mask.remove(.fullScreen)
-            win.styleMask = mask
-        }
+        let index = windows.firstIndex { $0 === win }
+        win.prepareForDisplayRemovalClose()
         windows.removeAll { $0 === win }
-        win.close()
+        win.closeAfterDisplayRemoval(logContext: "untracked window \(index.map(String.init) ?? "?")")
     }
 
     private func logTopology(scope: String) {
@@ -514,13 +508,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Close the window of a display that stayed gone for the whole grace period (the
     /// coordinator has already waited out the window's own transition and checked the
-    /// display is still gone). Mark as orphaned first so windowShouldClose allows the
-    /// close without terminating the app. Disable animations and exit full-screen state
-    /// before closing to avoid the _NSExitFullScreenTransitionController crash path
-    /// that fires when a full-screen window is closed mid-animation. The order of the
-    /// steps is `VanishedWindowTeardown`'s contract (unbind before any AppKit call).
+    /// display is still gone). Marks it orphaned first so windowShouldClose allows the
+    /// close without terminating the app, and disables animations. The window is closed
+    /// while still full-screen: clearing `.fullScreen` from its style mask outside a
+    /// transition throws on macOS 27 (see `NostromoWindow.closeAfterDisplayRemoval`).
+    /// The order of the steps is `VanishedWindowTeardown`'s contract (unbind before any AppKit call).
     private func closeWindowForVanishedDisplay(_ uuid: String) {
         guard let win = windowsByDisplayUUID[uuid] else { return }
+        let logContext = "window \(windows.firstIndex { $0 === win }.map(String.init) ?? "?"), display \(uuid.prefix(8))"
         VanishedWindowTeardown.run(.init(
             unbindKey: { [self] in windowsByDisplayUUID.removeValue(forKey: uuid) },
             dropController: { [self] in placementControllers.removeValue(forKey: uuid) },
@@ -532,20 +527,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
                 placementLog.log("screensDidChange", "display \(uuid) removed — closing its window")
             },
-            prepareWindow: {
-                win.isOrphanedByScreenRemoval = true
-                win.animationBehavior = .none
-                win.lifecycleHandler = nil
-            },
-            dropFullScreenMask: {
-                guard win.styleMask.contains(.fullScreen) else { return }
-                // Exit full-screen synchronously before close so AppKit doesn't
-                // schedule an exit-transition cleanup block that outlives the window.
-                var mask = win.styleMask
-                mask.remove(.fullScreen)
-                win.styleMask = mask
-            },
-            close: { win.close() }
+            prepareWindow: { win.prepareForDisplayRemovalClose() },
+            close: { win.closeAfterDisplayRemoval(logContext: logContext) }
         ))
     }
 

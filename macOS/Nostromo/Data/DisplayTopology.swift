@@ -341,11 +341,14 @@ final class DisplayTopologyCoordinator {
 
 /// What `AppDelegate` does to a window whose display stayed gone, as ordered steps.
 /// The ORDER is the contract: the key is unbound BEFORE any AppKit call, because
-/// dropping the full-screen mask and `close()` can synchronously post
-/// didChangeScreenParameters, and a handler that still saw the key bound would act
-/// on the window a second time. The mask goes before `close()` so AppKit does not
-/// schedule an exit-transition cleanup that outlives the window
-/// (`_NSExitFullScreenTransitionController` crash).
+/// `close()` can synchronously post didChangeScreenParameters, and a handler that
+/// still saw the key bound would act on the window a second time.
+///
+/// There is deliberately no step that clears `.fullScreen` from the window's style
+/// mask: AppKit (macOS 27) throws when that happens outside a full-screen transition.
+/// The window is closed as-is, after its own transition has ended (the coordinator's
+/// `attemptClose` waits for that), which is what keeps the
+/// `_NSExitFullScreenTransitionController` crash path closed.
 enum VanishedWindowTeardown {
     struct Steps {
         var unbindKey: () -> Void
@@ -355,8 +358,6 @@ enum VanishedWindowTeardown {
         var afterUnbind: () -> Void
         /// Orphan flag, no animation, no lifecycle handler.
         var prepareWindow: () -> Void
-        /// Drops the full-screen mask if the window has it.
-        var dropFullScreenMask: () -> Void
         var close: () -> Void
     }
 
@@ -366,7 +367,6 @@ enum VanishedWindowTeardown {
         steps.removeFromWindows()
         steps.afterUnbind()
         steps.prepareWindow()
-        steps.dropFullScreenMask()
         steps.close()
     }
 }

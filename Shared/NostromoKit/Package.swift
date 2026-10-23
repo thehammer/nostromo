@@ -14,9 +14,14 @@ let package = Package(
         ),
     ],
     targets: [
+        // A few lines of Objective-C: Swift cannot catch an NSException (see ObjCExceptionGuard).
+        .target(
+            name: "NostromoObjCGuard",
+            path: "Sources/NostromoObjCGuard"
+        ),
         .target(
             name: "NostromoKit",
-            dependencies: [],
+            dependencies: ["NostromoObjCGuard"],
             path: "Sources/NostromoKit"
         ),
         .testTarget(

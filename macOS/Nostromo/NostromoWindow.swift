@@ -1,4 +1,5 @@
 import AppKit
+import NostromoKit
 import os
 
 private let winLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "NostromoWindow")
@@ -328,6 +329,38 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     /// whose screen has disappeared. Prevents the close from terminating the app —
     /// disconnecting a monitor should remove that window, not quit Nostromo.
     var isOrphanedByScreenRemoval = false
+
+    /// Everything that must be true before a window whose display is gone is closed:
+    /// the orphan flag (so `windowShouldClose` lets the close through instead of
+    /// terminating the app), no close animation, and no placement observer.
+    func prepareForDisplayRemovalClose() {
+        isOrphanedByScreenRemoval = true
+        animationBehavior = .none
+        lifecycleHandler = nil
+    }
+
+    /// Closes the window of a vanished display, full-screen or not.
+    ///
+    /// Never clears `.fullScreen` from `styleMask`: macOS 27 raises an uncaught
+    /// NSGenericException ("NSWindowStyleMaskFullScreen cleared on a window outside of a
+    /// full screen transition") for that, and the exception killed the whole app. A
+    /// plain `close()` is the supported way to dismiss a full-screen window; the
+    /// `_NSExitFullScreenTransitionController` crash it was once dropped to avoid is
+    /// covered by closing only once this window's own transition has ended (the
+    /// topology coordinator defers `attemptClose` for that) and by `prepareForDisplayRemovalClose`.
+    ///
+    /// `close()` still goes through the ObjC guard, so a throw on a future OS is logged
+    /// and survived rather than fatal. Returns the caught exception, if any. Logs the
+    /// exception name and `logContext` only — never the window title or the exception
+    /// reason, which can embed window descriptions.
+    @discardableResult
+    func closeAfterDisplayRemoval(logContext: String) -> CaughtObjCException? {
+        let caught = ObjCExceptionGuard.catching { close() }
+        if let caught {
+            winLog.error("closeAfterDisplayRemoval — close() raised \(caught.name, privacy: .public) and was contained (\(logContext, privacy: .public))")
+        }
+        return caught
+    }
 
     /// Set while this window's display is gone and its close waits out the grace. Such a
     /// window starts no full-screen entry, retry or re-entry (it would build a Space on a

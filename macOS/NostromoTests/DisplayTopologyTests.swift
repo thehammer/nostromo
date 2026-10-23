@@ -1138,6 +1138,30 @@ final class DisplayTopologyPendingRemovalTests: XCTestCase {
         XCTAssertEqual(rig.host.closeCount(of: air), 1)
     }
 
+    /// Closing a full-screen window no longer drops its mask first, so the only protection
+    /// against closing mid-transition is this deferral: its timings are part of the contract.
+    func test_a_vanishing_display_mid_full_screen_transition_waits_it_out_and_closes_once_with_unchanged_timings() {
+        XCTAssertEqual(grace, 5, "close grace")
+        XCTAssertEqual(deferral, 0.5, "close deferral interval")
+        XCTAssertEqual(limit, 6, "close deferral limit")
+
+        let rig = Rig(initial: Fake.four)
+        rig.host.transitioning = [air]                  // the doomed window is mid full-screen transition
+        vanish(rig)
+
+        rig.clock.advance(by: grace - 0.25)
+        XCTAssertEqual(rig.host.closed, [], "not before the grace")
+        rig.clock.advance(by: 0.25 + deferral * 3)      // grace expired, three deferrals later
+        XCTAssertEqual(rig.host.closed, [], "never closed while its own transition is in flight")
+
+        rig.host.transitioning = []                     // the transition ends
+        rig.clock.advance(by: deferral)
+        XCTAssertEqual(rig.host.closeCount(of: air), 1, "closed on the next deferral check after the transition ends")
+
+        rig.clock.advance(by: 60)
+        XCTAssertEqual(rig.host.closeCount(of: air), 1, "exactly once")
+    }
+
     func test_a_transition_that_never_ends_defers_the_close_a_bounded_number_of_times_then_closes_anyway() {
         let rig = Rig(initial: Fake.four)
         rig.host.transitioning = [air]
@@ -1254,19 +1278,18 @@ final class DisplayTopologyOrphanedWindowTests: XCTestCase {
 final class VanishedWindowTeardownTests: XCTestCase {
 
     private static let unbindSteps = ["unbindKey", "dropController", "removeFromWindows", "afterUnbind"]
-    private static let appKitSteps = ["prepareWindow", "dropFullScreenMask", "close"]
+    private static let appKitSteps = ["prepareWindow", "close"]
 
     private func steps(_ record: @escaping (String) -> Void,
                        unbindKey: (() -> Void)? = nil,
-                       dropFullScreenMask: (() -> Void)? = nil,
+                       prepareWindow: (() -> Void)? = nil,
                        close: (() -> Void)? = nil) -> VanishedWindowTeardown.Steps {
         VanishedWindowTeardown.Steps(
             unbindKey: { record("unbindKey"); unbindKey?() },
             dropController: { record("dropController") },
             removeFromWindows: { record("removeFromWindows") },
             afterUnbind: { record("afterUnbind") },
-            prepareWindow: { record("prepareWindow") },
-            dropFullScreenMask: { record("dropFullScreenMask"); dropFullScreenMask?() },
+            prepareWindow: { record("prepareWindow"); prepareWindow?() },
             close: { record("close"); close?() })
     }
 
@@ -1274,7 +1297,7 @@ final class VanishedWindowTeardownTests: XCTestCase {
         var order: [String] = []
         VanishedWindowTeardown.run(steps { order.append($0) })
         XCTAssertEqual(order, ["unbindKey", "dropController", "removeFromWindows", "afterUnbind",
-                               "prepareWindow", "dropFullScreenMask", "close"])
+                               "prepareWindow", "close"])
     }
 
     func test_no_appkit_facing_step_runs_before_the_key_is_unbound() {
@@ -1290,18 +1313,18 @@ final class VanishedWindowTeardownTests: XCTestCase {
         }
     }
 
-    func test_a_reentrant_notification_from_the_mask_drop_or_close_finds_the_key_already_unbound() {
+    func test_a_reentrant_notification_from_preparing_or_closing_finds_the_key_already_unbound() {
         var bound = true
-        var boundSeenDuringMaskDrop: Bool?
+        var boundSeenDuringPrepare: Bool?
         var boundSeenDuringClose: Bool?
 
         VanishedWindowTeardown.run(steps(
             { _ in },
             unbindKey: { bound = false },
-            dropFullScreenMask: { boundSeenDuringMaskDrop = bound },     // AppKit may post didChangeScreenParameters here
+            prepareWindow: { boundSeenDuringPrepare = bound },
             close: { boundSeenDuringClose = bound }))
 
-        XCTAssertEqual(boundSeenDuringMaskDrop, false, "a handler re-entered by dropping the mask must not see the key bound")
+        XCTAssertEqual(boundSeenDuringPrepare, false, "a handler re-entered while preparing the window must not see the key bound")
         XCTAssertEqual(boundSeenDuringClose, false, "a handler re-entered by close() must not see the key bound")
     }
 }
