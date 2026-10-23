@@ -67,6 +67,21 @@ Unknown agent names, and `mother`, are ignored with a warning in the daemon log.
 Extra keys inside an agent's table are ignored too. That table is where each
 agent's future per-agent settings will go.
 
+A malformed `[agents]` never stops the daemon: a non-table `agents`, a
+non-table entry, or an `enabled` that is not `true`/`false` is ignored with a
+warning (key names only, never values), and whatever was not clearly switched
+off stays on. If two keys differ only by case (`[agents.Fred]` and
+`[agents.fred]`), the daemon warns once and the key that sorts last in byte
+order wins, so the lowercase key beats a capitalised one.
+
+Refused while an agent is off: its MCP tools, its pane sources (including
+bindings saved before it was disabled, which are neither fetched nor replayed on
+attach), and, for Perri, the app's `PerriAction` requests.
+
+On the wire, the welcome's `enabled_agents` lists what is *running* (always
+including `mother`). A client infers "disabled" as its own switchable agents
+minus that list.
+
 The file is `~/Library/Application Support/nostromo/config.toml` on macOS and
 `~/.config/nostromo/config.toml` elsewhere. Restart `nostromd` after changing
 it; the app picks the change up on its next connection.

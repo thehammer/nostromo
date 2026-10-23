@@ -145,8 +145,10 @@ pub struct Config {
     /// One table per built-in agent, e.g. `[agents.fred] enabled = false`.
     /// A missing table (or missing `enabled` key) means the agent is on;
     /// `mother` cannot be switched off. Unknown keys inside a table are
-    /// ignored. See [`crate::agents`].
-    pub agents: std::collections::BTreeMap<String, crate::agents::AgentConfig>,
+    /// ignored. Kept as a raw value so a malformed `[agents]` can never fail
+    /// the load; [`crate::agents::resolve`] warns and ignores what it cannot
+    /// read. See [`crate::agents`].
+    pub agents: Option<toml::Value>,
 }
 
 impl Default for Config {
@@ -154,7 +156,7 @@ impl Default for Config {
         Self {
             tcp_addr: None,
             code_root: None,
-            agents: std::collections::BTreeMap::new(),
+            agents: None,
             fred_state: None,
             perri_state: None,
             claude_bin: None,
@@ -201,7 +203,7 @@ impl Config {
     /// The enabled built-in agents from the `[agents.<name>]` tables, plus
     /// warnings (unknown names, `mother` disabled) for the caller to log.
     pub fn resolve_agents(&self) -> (crate::agents::EnabledAgents, Vec<String>) {
-        crate::agents::resolve(&self.agents)
+        crate::agents::resolve(self.agents.as_ref())
     }
 
     /// Folder whose children are the code repos. Resolution order:
@@ -414,7 +416,16 @@ mod agents_tests {
     }
 
     #[test]
-    fn non_table_agents_shape_is_a_parse_error() {
-        assert!(toml::from_str::<Config>("[agents]\nfred = false\n").is_err());
+    fn malformed_agents_shapes_never_fail_the_load() {
+        for src in [
+            "[agents]\nfred = false\n",
+            "[agents.fred]\nenabled = \"no\"\n",
+            "agents = 3\n",
+        ] {
+            let cfg = toml::from_str::<Config>(src).expect(src);
+            let (e, w) = cfg.resolve_agents();
+            assert_eq!(e, crate::agents::EnabledAgents::all(), "{src}");
+            assert_eq!(w.len(), 1, "{src}");
+        }
     }
 }

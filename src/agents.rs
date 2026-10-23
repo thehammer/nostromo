@@ -1,23 +1,4 @@
 //! Which built-in agents this daemon runs (`[agents.<name>]` in config.toml).
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
-/// One `[agents.<name>]` table. Unknown keys are ignored (serde's default),
-/// so a later per-agent setting such as Fred's mail provider can be added
-/// without breaking older configs or older daemons.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct AgentConfig {
-    pub enabled: bool,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 /// The agents that can be switched off. Mother is not one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Agent {
@@ -110,17 +91,78 @@ impl EnabledAgents {
     }
 }
 
-/// Resolve the `[agents]` tables. Returns warnings to log, never an error.
-pub fn resolve(tables: &BTreeMap<String, AgentConfig>) -> (EnabledAgents, Vec<String>) {
+/// Keeps the `watch` senders of disabled agents alive for the daemon's
+/// lifetime. A disabled agent still hands its consumers a live receiver: a
+/// dropped sender makes `changed()` fail at once, and
+/// `run_pane_source_broadcaster` exits on that error, which would also kill
+/// the staleness ticker for file and ticket panes.
+#[derive(Default)]
+pub struct ParkedSenders(Vec<Box<dyn std::any::Any + Send>>);
+
+impl ParkedSenders {
+    /// A receiver whose sender is parked here (so it never reports closed and
+    /// never produces a value) for as long as `self` lives.
+    pub fn channel<T: Send + Sync + 'static>(&mut self, initial: T) -> tokio::sync::watch::Receiver<T> {
+        let (tx, rx) = tokio::sync::watch::channel(initial);
+        self.0.push(Box::new(tx));
+        rx
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Resolve the `[agents]` value from config.toml. Returns warnings to log,
+/// never an error: anything unreadable (a non-table `agents`, a non-table
+/// entry, a non-bool `enabled`) is warned about and ignored, so it can never
+/// disable an agent it did not clearly say to disable and never stop the
+/// daemon. Warnings carry key names only, never config values.
+///
+/// If two keys differ only by case (`[agents.Fred]` and `[agents.fred]`), a
+/// warning is logged and the key that sorts last in byte order wins, so the
+/// lowercase key beats a capitalised one.
+pub fn resolve(agents: Option<&toml::Value>) -> (EnabledAgents, Vec<String>) {
     let mut enabled = EnabledAgents::all();
     let mut warnings = Vec::new();
-    for (name, cfg) in tables {
+    let Some(value) = agents else {
+        return (enabled, warnings);
+    };
+    let Some(tables) = value.as_table() else {
+        warnings.push("[agents] must be a table of [agents.<name>] tables; ignoring it".to_string());
+        return (enabled, warnings);
+    };
+    let mut seen: Vec<Agent> = Vec::new();
+    for (name, entry) in tables {
+        let Some(entry) = entry.as_table() else {
+            warnings.push(format!("agents.{name} must be a table; ignoring it"));
+            continue;
+        };
+        let on = match entry.get("enabled") {
+            None => true,
+            Some(toml::Value::Boolean(b)) => *b,
+            Some(_) => {
+                warnings.push(format!("agents.{name}.enabled must be true or false; ignoring it"));
+                continue;
+            }
+        };
         if name.eq_ignore_ascii_case("mother") {
-            if !cfg.enabled {
+            if !on {
                 warnings.push("agents.mother cannot be disabled; ignoring enabled = false".to_string());
             }
         } else if let Some(a) = Agent::from_name(name) {
-            enabled.set(a, cfg.enabled);
+            if seen.contains(&a) {
+                warnings.push(format!(
+                    "agents.{name} duplicates another {} key that differs only by case; the key sorting last wins",
+                    a.name()
+                ));
+            }
+            seen.push(a);
+            enabled.set(a, on);
         } else {
             warnings.push(format!(
                 "unknown agent `{name}` in [agents]; ignoring (known: fred, perri, teri)"
@@ -134,29 +176,28 @@ pub fn resolve(tables: &BTreeMap<String, AgentConfig>) -> (EnabledAgents, Vec<St
 mod tests {
     use super::*;
 
-    fn off() -> AgentConfig {
-        AgentConfig { enabled: false }
+    fn r(toml_src: &str) -> (EnabledAgents, Vec<String>) {
+        let v: toml::Value = toml::from_str(toml_src).unwrap();
+        resolve(v.get("agents"))
     }
 
     #[test]
     fn empty_tables_enable_everything() {
-        let (e, w) = resolve(&BTreeMap::new());
+        let (e, w) = resolve(None);
         assert_eq!(e, EnabledAgents::all());
         assert!(w.is_empty());
     }
 
     #[test]
     fn a_disabled_table_disables_only_that_agent() {
-        let t = BTreeMap::from([("fred".to_string(), off())]);
-        let (e, w) = resolve(&t);
+        let (e, w) = r("[agents.fred]\nenabled = false\n");
         assert_eq!(e, EnabledAgents { fred: false, perri: true, teri: true });
         assert!(w.is_empty());
     }
 
     #[test]
     fn mother_cannot_be_disabled_and_warns() {
-        let t = BTreeMap::from([("mother".to_string(), off())]);
-        let (e, w) = resolve(&t);
+        let (e, w) = r("[agents.mother]\nenabled = false\n");
         assert_eq!(e, EnabledAgents::all());
         assert_eq!(w.len(), 1);
         assert!(w[0].contains("mother"));
@@ -164,17 +205,79 @@ mod tests {
 
     #[test]
     fn mother_enabled_true_is_silent() {
-        let t = BTreeMap::from([("mother".to_string(), AgentConfig::default())]);
-        assert!(resolve(&t).1.is_empty());
+        assert!(r("[agents.mother]\nenabled = true\n").1.is_empty());
     }
 
     #[test]
     fn unknown_agents_warn() {
-        let t = BTreeMap::from([("bob".to_string(), off())]);
-        let (e, w) = resolve(&t);
+        let (e, w) = r("[agents.bob]\nenabled = false\n");
         assert_eq!(e, EnabledAgents::all());
         assert_eq!(w.len(), 1);
         assert!(w[0].contains("bob"));
+    }
+
+    #[test]
+    fn malformed_shapes_warn_and_disable_nothing() {
+        for src in [
+            "agents = 3\n",
+            "agents = \"fred\"\n",
+            "agents = [1, 2]\n",
+            "[agents]\nfred = false\n",
+            "[agents]\nperri = \"off\"\n",
+            "[agents.fred]\nenabled = \"no\"\n",
+            "[agents.fred]\nenabled = 0\n",
+            "[agents.teri]\nenabled = [false]\n",
+        ] {
+            let (e, w) = r(src);
+            assert_eq!(e, EnabledAgents::all(), "{src}");
+            assert_eq!(w.len(), 1, "{src}: {w:?}");
+        }
+    }
+
+    #[test]
+    fn warnings_never_echo_config_values() {
+        let (_, w) = r("[agents.fred]\nenabled = \"hunter2-secret\"\n");
+        assert!(!w.join(" ").contains("hunter2"));
+    }
+
+    #[test]
+    fn a_bad_entry_does_not_stop_a_good_one() {
+        let (e, w) = r("[agents]\nfred = false\n[agents.perri]\nenabled = false\n");
+        assert_eq!(e, EnabledAgents { fred: true, perri: false, teri: true });
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn mother_with_a_bad_enabled_is_just_a_warning() {
+        let (e, w) = r("[agents.mother]\nenabled = \"no\"\n");
+        assert_eq!(e, EnabledAgents::all());
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn case_variant_duplicates_warn_once_and_lowercase_wins() {
+        let (e, w) = r("[agents.Fred]\nenabled = false\n[agents.fred]\nenabled = true\n");
+        assert!(e.fred);
+        assert_eq!(w.len(), 1);
+        let (e, w) = r("[agents.Fred]\nenabled = true\n[agents.fred]\nenabled = false\n");
+        assert!(!e.fred);
+        assert_eq!(w.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn parked_receivers_stay_open_until_the_parking_lot_is_dropped() {
+        let mut parked = ParkedSenders::default();
+        let mut rx = parked.channel(0u8);
+        assert_eq!(parked.len(), 1);
+        // Alive sender: `changed()` stays pending instead of erroring.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.changed())
+                .await
+                .is_err(),
+            "a parked sender must keep changed() pending"
+        );
+        drop(parked);
+        assert!(rx.changed().await.is_err(), "control: dropping the senders closes the channel");
     }
 
     #[test]

@@ -172,6 +172,11 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
     bindings
         .into_iter()
         .filter_map(|(tag, pane_id, binding)| {
+            // A binding persisted before its agent was disabled must not be
+            // fetched (it may run `gh` or read mail) or replayed.
+            if !state.source_available(&binding.source) {
+                return None;
+            }
             let (content, address) =
                 fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())?;
             let fr = apply_layout::freshness(&binding.source, state, Some(&tag));
@@ -696,6 +701,19 @@ mod tests {
     }
 
     // ── bound_pane_contents ───────────────────────────────────────────────────
+
+    #[test]
+    fn bound_pane_contents_skips_a_persisted_binding_for_a_disabled_agent() {
+        let (mut state, _bcast, _qtx, _ptx) = make_state();
+        bind_pane(&state, "perri", "queue", "perri.list_pr_queue");
+        bind_pane(&state, "perri", "diff", "perri.get_pr_diff");
+        assert!(!bound_pane_contents(&state).is_empty(), "control: enabled agent replays");
+        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        assert!(
+            bound_pane_contents(&state).is_empty(),
+            "bindings persisted before perri was disabled must not be fetched or replayed"
+        );
+    }
 
     #[test]
     fn bound_pane_contents_returns_one_message_per_live_binding_and_skips_repl_and_unbound() {

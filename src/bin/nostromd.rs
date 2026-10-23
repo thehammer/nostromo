@@ -309,7 +309,7 @@ async fn main() -> Result<()> {
     // `run_pane_source_broadcaster` exits on that error, which would also kill
     // the staleness ticker for file and ticket panes. So each disabled agent's
     // senders are parked here for the daemon's lifetime.
-    let mut parked: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
+    let mut parked = nostromo::agents::ParkedSenders::default();
 
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
     let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx, perri_pr_rx, perri_pr_refresh_tx) =
@@ -343,10 +343,8 @@ async fn main() -> Result<()> {
                 Some(perri_pr_refresh_tx),
             )
         } else {
-            let (queue_tx, perri_queue_rx) = tokio::sync::watch::channel::<Option<PrQueueSnapshot>>(None);
-            let (pr_tx, perri_pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
-            parked.push(Box::new(queue_tx));
-            parked.push(Box::new(pr_tx));
+            let perri_queue_rx = parked.channel::<Option<PrQueueSnapshot>>(None);
+            let perri_pr_rx = parked.channel(nostromo::data::perri_pr::no_prs());
             (perri_queue_rx, None, None, perri_pr_rx, None)
         };
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
@@ -364,10 +362,8 @@ async fn main() -> Result<()> {
             FredCalendarNativeSource::spawn(config.clone()),
         )
     } else {
-        let (mailbox_tx, mailbox_rx) = tokio::sync::watch::channel::<Option<MailboxSnapshot>>(None);
-        let (calendar_tx, calendar_rx) = tokio::sync::watch::channel::<Option<CalendarSnapshot>>(None);
-        parked.push(Box::new(mailbox_tx));
-        parked.push(Box::new(calendar_tx));
+        let mailbox_rx = parked.channel::<Option<MailboxSnapshot>>(None);
+        let calendar_rx = parked.channel::<Option<CalendarSnapshot>>(None);
         (mailbox_rx, calendar_rx)
     };
     let (teri_todos_rx, work_hub) = if enabled_agents.teri {
@@ -395,8 +391,7 @@ async fn main() -> Result<()> {
         nostromo::data::work::install_work_service(work_hub.clone());
         (teri_todos_rx, Some(work_hub))
     } else {
-        let (todos_tx, teri_todos_rx) = tokio::sync::watch::channel::<Option<nostromo::data::teri_todos::TeriTodosSnapshot>>(None);
-        parked.push(Box::new(todos_tx));
+        let teri_todos_rx = parked.channel::<Option<nostromo::data::teri_todos::TeriTodosSnapshot>>(None);
         (teri_todos_rx, None)
     };
 
