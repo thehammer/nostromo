@@ -292,6 +292,62 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
     link.notify();
 }
 
+// ── resending ──────────────────────────────────────────────────────────────────
+
+/// What [`plan_resend`] decided, made under the session's locks.
+enum ResendPlan {
+    /// The hold is now `Resending` and the session `MidTurn`: write `frame`.
+    Write { frame: PendingMessage, attempt: u8, prev_attempt_stamp: Option<String> },
+    /// Restart the session process first (the credential may be cached), then plan again.
+    Escalate,
+    Skip(ResendOutcome),
+}
+
+/// Decide whether `hold_id` may be written again and, if so, move the hold to
+/// resending and the session to `MidTurn` in one step. `after_restart` skips the
+/// trigger rules: the restart was already the escalation.
+fn plan_resend(shared: &Shared, hold_id: &str, trigger: &ResendTrigger, after_restart: bool) -> ResendPlan {
+    let mut state = lock_recover(&shared.state);
+    let applying = lock_recover(&shared.model).applying.is_some();
+    let mut cell = lock_recover(&shared.login.cell);
+    let Some(hold) = cell.hold.as_mut() else { return ResendPlan::Skip(ResendOutcome::NoOp) };
+    if hold.id != hold_id || hold.phase != HoldPhase::Held {
+        return ResendPlan::Skip(ResendOutcome::NoOp);
+    }
+    let Some(frame) = hold.frame.clone() else { return ResendPlan::Skip(ResendOutcome::NoOp) };
+    if !after_restart && !hold.allows(trigger) {
+        return ResendPlan::Skip(ResendOutcome::NoOp);
+    }
+    if !after_restart && hold.escalation_due && matches!(trigger, ResendTrigger::Keychain { .. }) {
+        hold.escalated = true;
+        hold.escalation_due = false;
+        return ResendPlan::Escalate;
+    }
+    if *state != SessionState::Idle || applying {
+        return ResendPlan::Skip(ResendOutcome::Busy);
+    }
+    let prev_attempt_stamp = hold.last_attempt_stamp.clone();
+    hold.phase = HoldPhase::Resending;
+    hold.attempts = hold.attempts.saturating_add(1);
+    if let ResendTrigger::Keychain { stamp } = trigger {
+        hold.last_attempt_stamp = Some(stamp.clone());
+    }
+    *state = SessionState::MidTurn;
+    ResendPlan::Write { frame, attempt: hold.attempts, prev_attempt_stamp }
+}
+
+/// The message could not be written: back to waiting, as if nothing had been tried.
+fn undo_resend(shared: &Shared, hold_id: &str, prev_attempt_stamp: Option<String>) {
+    let mut state = lock_recover(&shared.state);
+    let mut cell = lock_recover(&shared.login.cell);
+    if let Some(hold) = cell.hold.as_mut().filter(|h| h.id == hold_id) {
+        hold.phase = HoldPhase::Held;
+        hold.attempts = hold.attempts.saturating_sub(1);
+        hold.last_attempt_stamp = prev_attempt_stamp;
+    }
+    *state = SessionState::Idle;
+}
+
 // ── the manager's side ─────────────────────────────────────────────────────────
 
 impl SessionManager {
@@ -315,6 +371,13 @@ impl SessionManager {
     pub(super) fn login_changed(&self) {
         if let Some(c) = &self.login {
             c.changed();
+        }
+    }
+
+    /// Tell clients where things stand again, though nothing changed.
+    fn rebroadcast_login(&self) {
+        if let Some(c) = &self.login {
+            c.rebroadcast();
         }
     }
 
@@ -404,61 +467,21 @@ impl SessionManager {
     }
 
     fn resend_inner(&mut self, tag: &str, hold_id: &str, trigger: &ResendTrigger, after_restart: bool) -> ResendOutcome {
-        enum Plan {
-            Write { frame: PendingMessage, attempt: u8, prev_attempt_stamp: Option<String> },
-            Escalate,
-            Skip(ResendOutcome),
-        }
         let Some(session) = self.sessions.get(tag) else { return ResendOutcome::NoOp };
         if !session.alive() {
             return ResendOutcome::NoOp;
         }
         let shared = session.shared.clone();
-        let plan = {
-            let mut state = lock_recover(&shared.state);
-            let applying = lock_recover(&shared.model).applying.is_some();
-            let mut guard = lock_recover(&shared.login.cell);
-            let cell: &mut LoginCell = &mut guard;
-            match cell.hold.as_mut() {
-                Some(hold) if hold.id == hold_id && hold.phase == HoldPhase::Held && hold.frame.is_some() => {
-                    if !after_restart && !hold.allows(trigger) {
-                        Plan::Skip(ResendOutcome::NoOp)
-                    } else if !after_restart && hold.escalation_due && matches!(trigger, ResendTrigger::Keychain { .. }) {
-                        hold.escalated = true;
-                        hold.escalation_due = false;
-                        Plan::Escalate
-                    } else if *state != SessionState::Idle || applying {
-                        Plan::Skip(ResendOutcome::Busy)
-                    } else {
-                        let prev_attempt_stamp = hold.last_attempt_stamp.clone();
-                        hold.phase = HoldPhase::Resending;
-                        hold.attempts = hold.attempts.saturating_add(1);
-                        if let ResendTrigger::Keychain { stamp } = trigger {
-                            hold.last_attempt_stamp = Some(stamp.clone());
-                        }
-                        *state = SessionState::MidTurn;
-                        Plan::Write {
-                            frame: hold.frame.clone().expect("checked above"),
-                            attempt: hold.attempts,
-                            prev_attempt_stamp,
-                        }
-                    }
-                }
-                _ => Plan::Skip(ResendOutcome::NoOp),
-            }
-        };
-        match plan {
-            Plan::Skip(outcome) => {
+        match plan_resend(&shared, hold_id, trigger, after_restart) {
+            ResendPlan::Skip(outcome) => {
                 // A human's action that changed nothing still hears where things
                 // stand; the poller's own tries stay quiet.
                 if matches!(trigger, ResendTrigger::Manual) {
-                    if let Some(c) = &self.login {
-                        c.rebroadcast();
-                    }
+                    self.rebroadcast_login();
                 }
                 outcome
             }
-            Plan::Escalate => {
+            ResendPlan::Escalate => {
                 info!(tag, "held message resent: restarting");
                 if let Err(e) = self.restart(tag) {
                     warn!(tag, "restart before resending a held message failed: {e:#}");
@@ -466,25 +489,15 @@ impl SessionManager {
                 }
                 self.resend_inner(tag, hold_id, trigger, true)
             }
-            Plan::Write { frame, attempt, prev_attempt_stamp } => {
+            ResendPlan::Write { frame, attempt, prev_attempt_stamp } => {
                 info!(tag, hold_id, trigger = trigger.id(), attempt, "resending held message");
                 if write_recorded(&shared, &frame).is_ok() {
                     shared.broadcast(SessionEvent::State(SessionState::MidTurn));
                     shared.login.notify();
                     return ResendOutcome::Resent;
                 }
-                // Not written: back to waiting, as if nothing had been tried.
                 warn!(tag, "held message could not be written");
-                {
-                    let mut state = lock_recover(&shared.state);
-                    let mut cell = lock_recover(&shared.login.cell);
-                    if let Some(hold) = cell.hold.as_mut().filter(|h| h.id == hold_id) {
-                        hold.phase = HoldPhase::Held;
-                        hold.attempts = hold.attempts.saturating_sub(1);
-                        hold.last_attempt_stamp = prev_attempt_stamp;
-                    }
-                    *state = SessionState::Idle;
-                }
+                undo_resend(&shared, hold_id, prev_attempt_stamp);
                 shared.broadcast(SessionEvent::State(SessionState::Idle));
                 shared.login.notify();
                 ResendOutcome::Busy
@@ -516,9 +529,7 @@ impl SessionManager {
             (matches, *state == SessionState::Idle)
         };
         if !dropped {
-            if let Some(c) = &self.login {
-                c.rebroadcast();
-            }
+            self.rebroadcast_login();
             return false;
         }
         if discarded {
