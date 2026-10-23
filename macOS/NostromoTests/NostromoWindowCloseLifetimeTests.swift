@@ -129,7 +129,7 @@ final class NostromoWindowCloseLifetimeTests: XCTestCase {
         autoreleasepool {
             let win = windows[0]
             VanishedWindowTeardown.run(.init(
-                unbindKey: { windowsByDisplayUUID.removeValue(forKey: displayUUID) },
+                unbindKey: { windowsByDisplayUUID.removeValue(forKey: self.displayUUID) },
                 dropController: {},
                 removeFromWindows: { windows.removeAll { $0 === win } },
                 afterUnbind: {},
