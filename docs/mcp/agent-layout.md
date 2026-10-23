@@ -308,3 +308,13 @@ is lost.
   `native_pane_required` and the layout is left unchanged.
 - `reset_panes` (agent tool) restores the default native layout for those two
   focuses.
+
+## The tracker pane stays closed
+
+When the `tracker` leaf leaves a focus's layout (the user closed it, or an agent's
+layout call dropped it), the daemon records the focus as closed. The flag is
+persisted in the tracker state file, so it survives a daemon restart, and
+`tracker open` then reports `hidden_by_user: true` without re-placing the pane.
+Any layout call that puts the `tracker` leaf back (`apply_layout`,
+`set_pane_layout`, `reset_panes`) clears the flag, as does `tracker open` with
+`show: true`; the clear is persisted too. The flag is per focus.

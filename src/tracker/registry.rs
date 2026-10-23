@@ -300,6 +300,10 @@ struct PersistedState {
     boards: BTreeMap<String, PersistedBoard>,
     #[serde(default)]
     cursors: Cursors,
+    /// Focuses whose tracker pane the user closed; absent in older state
+    /// (then nothing is hidden).
+    #[serde(default)]
+    hidden: BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -562,6 +566,7 @@ impl TrackerRegistry {
             if let Some(path) = inner.bindings.get(tag).cloned() {
                 inner.dirty.insert(path);
             }
+            self.persist(&inner);
         }
     }
 
@@ -966,6 +971,7 @@ impl TrackerRegistry {
                 })
                 .collect(),
             cursors: inner.cursors.clone(),
+            hidden: inner.hidden.iter().cloned().collect(),
         };
         let result = serde_json::to_vec(&state)
             .map_err(io::Error::other)
@@ -1024,6 +1030,7 @@ impl TrackerRegistry {
             }
         }
         inner.cursors = state.cursors;
+        inner.hidden = state.hidden.into_iter().collect();
         let paths: Vec<PathBuf> = inner.boards.keys().cloned().collect();
         inner.dirty.extend(paths);
         self.persist(&inner);
