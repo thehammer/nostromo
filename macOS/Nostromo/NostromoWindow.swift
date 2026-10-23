@@ -24,6 +24,18 @@ private let winLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "Nos
 ///    (leave the window windowed and let the user restore it).
 class NostromoWindow: NSWindow, NSWindowDelegate {
 
+    /// `NSWindow` defaults `isReleasedWhenClosed` to true for windows made in code: `close()`
+    /// then sends the window an extra `release`. The app holds these windows strongly
+    /// (`windows`, `windowsByDisplayUUID`), so ARC already owns them and the extra release
+    /// over-releases: the crash surfaces later, when an autorelease pool drains (crash
+    /// report 2026-10-22 17:10, a display-removal close). This is the only designated init,
+    /// so every `NostromoWindow` (and subclass) gets the flag cleared.
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask,
+                  backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        isReleasedWhenClosed = false
+    }
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
