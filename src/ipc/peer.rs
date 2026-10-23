@@ -673,6 +673,9 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::ApprovalResolved { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
         | ServerMsg::ApprovalAnswerRefused { .. } => ServerClass::LocalOnly,
+        // Which sessions wait for a Claude sign-in: names tags and the claude
+        // path; no content. A network peer has no use for it yet.
+        ServerMsg::ClaudeLoginState { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -870,6 +873,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::DecisionAnswer { .. }
         | ClientMsg::ApprovalAnswer { .. }
         | ClientMsg::ApprovalRefusalReport { .. }
+        // Resends or drops a session's held message: it writes to a session.
+        | ClientMsg::ClaudeLoginAction { .. }
         | ClientMsg::RenderedShape { .. }
         | ClientMsg::WorkDetailRequest { .. }
         | ClientMsg::WorkRefresh { .. }
@@ -912,7 +917,8 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::ActivitySnapshotRequest { tag }
         | ClientMsg::RenderedShape { tag, .. }
         | ClientMsg::SessionModelGet { tag }
-        | ClientMsg::SessionModelSet { tag, .. } => tags.tag_is_sensitive(tag),
+        | ClientMsg::SessionModelSet { tag, .. }
+        | ClientMsg::ClaudeLoginAction { tag, .. } => tags.tag_is_sensitive(tag),
 
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -1517,6 +1523,12 @@ mod tests {
                 control: "allow_once".into(),
                 channel: crate::approvals::wire::RefusalChannel::Unknown,
             },
+            ClientMsg::ClaudeLoginAction {
+                action: crate::ipc::protocol::ClaudeLoginActionKind::Retry,
+                tag: "x1".into(),
+                hold_id: Some("h".into()),
+                operator_nonce: None,
+            },
         ]
     }
 
@@ -1553,7 +1565,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 41;
+    const CLIENT_MSG_VARIANTS: usize = 42;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -1599,6 +1611,7 @@ mod tests {
             ClientMsg::ModelDefaultSet { .. } => 38,
             ClientMsg::ApprovalAnswer { .. } => 39,
             ClientMsg::ApprovalRefusalReport { .. } => 40,
+            ClientMsg::ClaudeLoginAction { .. } => 41,
         }
     }
 
@@ -1635,8 +1648,8 @@ mod tests {
         assert_eq!(by_name("PtyAttach"), 7);
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
-        assert_eq!(CLIENT_MSG_VARIANTS, 41);
-        assert_eq!(every_client_msg().len(), 41);
+        assert_eq!(CLIENT_MSG_VARIANTS, 42);
+        assert_eq!(every_client_msg().len(), 42);
     }
 
     #[test]
@@ -2784,6 +2797,53 @@ mod tests {
             assert_eq!(classify_server_msg(&msg), ServerClass::LocalOnly, "{name}");
             assert_eq!(is_sensitive_server_msg(&msg), SensitiveClass::NotSensitive, "{name}: LocalOnly is not Teri/Fred data");
         }
+    }
+
+    // ── CL1: Claude sign-in frames ────────────────────────────────────────────
+
+    fn claude_login_state() -> ServerMsg {
+        use crate::ipc::protocol::{ClaudeLoginPhase, ClaudeLoginSession, ClaudeLoginWatch};
+        ServerMsg::ClaudeLoginState {
+            needs_login: true,
+            claude_bin: Some("/Users/someone/bin/claude".into()),
+            watch: ClaudeLoginWatch::Keychain,
+            sessions: vec![ClaudeLoginSession {
+                tag: "cody-plain".into(),
+                hold_id: Some("h1".into()),
+                phase: ClaudeLoginPhase::Waiting,
+                queued: 2,
+                failed_at: "2026-10-18T20:04:09Z".into(),
+                auto_resends_left: 3,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_claude_login_state_is_local_only_and_a_network_peer_never_receives_it() {
+        let msg = claude_login_state();
+        assert_eq!(classify_server_msg(&msg), ServerClass::LocalOnly);
+        let tags = SensitiveTags::in_memory();
+        assert!(!may_receive(PeerTrust::Tcp, &msg, &tags));
+        assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none());
+        for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
+            assert!(outbound(trust, msg.clone(), &tags).is_some(), "{trust:?}");
+        }
+    }
+
+    #[test]
+    fn the_claude_login_action_is_refused_for_a_network_peer_and_follows_a_sensitive_tag() {
+        use crate::ipc::protocol::ClaudeLoginActionKind;
+        let action = |tag: &str| ClientMsg::ClaudeLoginAction {
+            action: ClaudeLoginActionKind::Retry,
+            tag: tag.into(),
+            hold_id: Some("h1".into()),
+            operator_nonce: None,
+        };
+        assert_eq!(network_policy(&action("cody-plain")), NetworkPolicy::Refused);
+        let tags = tags_with("cody-work");
+        assert!(targets_sensitive_session(&action("cody-work"), &tags));
+        assert!(!targets_sensitive_session(&action("cody-plain"), &tags));
+        assert!(refuse_for_network(&action("cody-plain"), &tags));
     }
 
     #[test]

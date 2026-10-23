@@ -253,6 +253,10 @@ enum ServerMsg {
     /// An `approval_answer` was not applied.
     case approvalAnswerRefused(ApprovalAnswerRefusedFrame)
 
+    // ── Claude sign-in (CL1; CL2 renders it) ──────────────────────────────────
+    /// Every session waiting for a Claude sign-in (full picture; replaces the last).
+    case claudeLoginState(ClaudeLoginStateFrame)
+
     // ── background tasks ──────────────────────────────────────────────────────
     /// Every background task of a session (full snapshot; replaces the last).
     case sessionTasks(SessionTasksWire)
@@ -1433,6 +1437,13 @@ class NostromodClient {
                 return .approvalAnswerRefused(m)
             } else {
                 log.error("failed to decode approval_answer_refused")
+            }
+
+        case "claude_login_state":
+            if let m = try? decoder.decode(ClaudeLoginStateFrame.self, from: raw) {
+                return .claudeLoginState(m)
+            } else {
+                log.error("failed to decode claude_login_state")
             }
 
         case "session_tasks":

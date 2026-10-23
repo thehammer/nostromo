@@ -31,6 +31,20 @@ real CLI 2.1.296 spike captures) and models the permission-prompt flow:
     the real CLI does (captures/run-interrupt.jsonl);
   * EOF on stdin -> exit 0.
 
+AUTH MODE (an expired Claude login, for the daemon's sign-in handling):
+
+  `FAKE_CLAUDE_AUTH_FILE=<path>` names a file holding `ok` or `expired` (a
+  missing, empty or unknown value means `ok`). It is read on EACH user message,
+  so a test flips the login by rewriting the file; with `FAKE_CLAUDE_AUTH_STICKY=1`
+  it is read once at startup only, like a live CLI that cached a bad credential
+  (a restart picks the new value up). While `expired`, every user message is
+  echoed as usual and then fails the way the real CLI 2.1.301 does: one synthetic
+  assistant line (`error: authentication_failed`, `model: <synthetic>`, zero
+  tokens) and an `is_error` result carrying the same text. The cue AUTH_MIDTURN
+  in the message makes the fake run a real `Bash` tool call (and its result)
+  before failing: a turn that did real work. With the login `ok`, AUTH_MIDTURN
+  is ignored. Nothing is ever read from `~` and no network is touched.
+
 RAW CUES (hand-built lines, concatenated as text so nothing here recurses or
 overflows the way a naive json.dumps of a deeply nested value would):
 
@@ -85,6 +99,8 @@ USER_REJECTED = (
     "what you are doing and wait for the user to tell you how to proceed."
 )
 INTERRUPTED_TEXT = "[Request interrupted by user for tool use]"
+AUTH_FAILURE_TEXT = "Failed to authenticate: OAuth session expired and could not be refreshed"
+AUTH_MIDTURN_CUE = "AUTH_MIDTURN"
 
 
 def now_iso():
@@ -112,6 +128,9 @@ class FakeClaude:
         self.out = sys.stdout.buffer
         self.stdin_log = open(os.path.join(log_dir, "stdin.jsonl"), "ab")
         self.responses_log = open(os.path.join(log_dir, "responses.jsonl"), "ab")
+        self.auth_file = os.environ.get("FAKE_CLAUDE_AUTH_FILE") or None
+        self.auth_sticky = os.environ.get("FAKE_CLAUDE_AUTH_STICKY") == "1"
+        self.auth_at_start = self.read_auth() if self.auth_sticky else None
         self.msg_counter = 0
         self.groups = []  # cue groups (turns), in creation order
         self.requests = {}  # cli request_id -> dict(tool_use_id, tool_name, input, group, state)
@@ -180,6 +199,61 @@ class FakeClaude:
 
     def emit_text(self, text):
         self.emit_assistant([{"type": "text", "text": text}])
+
+    # ---- auth mode ---------------------------------------------------------
+
+    def read_auth(self):
+        """`expired` or `ok`, from FAKE_CLAUDE_AUTH_FILE (anything else is `ok`)."""
+        if not self.auth_file:
+            return "ok"
+        try:
+            with open(self.auth_file, "r", encoding="utf-8") as f:
+                value = f.read().strip()
+        except OSError:
+            return "ok"
+        return "expired" if value == "expired" else "ok"
+
+    def login_expired(self):
+        state = self.auth_at_start if self.auth_sticky else self.read_auth()
+        return state == "expired"
+
+    def emit_auth_failure(self, midturn):
+        if midturn:
+            tool_use_id = "toolu_auth_0"
+            self.emit_assistant(
+                [
+                    {
+                        "type": "tool_use",
+                        "id": tool_use_id,
+                        "name": "Bash",
+                        "input": {"command": "git status", "description": "show status"},
+                    }
+                ]
+            )
+            self.emit_tool_result_ok(tool_use_id, "On branch main", source="config")
+        self.emit(
+            {
+                "type": "assistant",
+                "error": "authentication_failed",
+                "isApiErrorMessage": True,
+                "message": {
+                    "id": "msg_synthetic",
+                    "type": "message",
+                    "model": "<synthetic>",
+                    "role": "assistant",
+                    "stop_reason": "stop_sequence",
+                    "stop_sequence": "",
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "content": [{"type": "text", "text": AUTH_FAILURE_TEXT}],
+                },
+                "parent_tool_use_id": None,
+                "session_id": self.session_id,
+                "uuid": str(uuid.uuid4()),
+                "timestamp": now_iso(),
+                "entrypoint": "sdk-cli",
+            }
+        )
+        self.emit_result(error_text=AUTH_FAILURE_TEXT)
 
     def emit_tool_result_ok(self, tool_use_id, content="ok", source="user_temporary"):
         meta = {"id": tool_use_id, "permission_decision": {"decision": "accept", "source": source}}
@@ -342,6 +416,9 @@ class FakeClaude:
         self.emit(echo)
 
         text = self.message_text(frame)
+        if self.login_expired():
+            self.emit_auth_failure(AUTH_MIDTURN_CUE in text)
+            return
         cue = CUE_RE.search(text)
         raw = RAW_RE.search(text)
         if raw and not cue:

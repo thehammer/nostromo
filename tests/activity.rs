@@ -18,11 +18,18 @@ async fn send(stream: &mut UnixStream, msg: &ClientMsg) {
 }
 
 async fn recv(stream: &mut UnixStream) -> ServerMsg {
-    let bytes = tokio::time::timeout(Duration::from_secs(5), read_frame(stream))
-        .await
-        .expect("timed out waiting for a server frame")
-        .expect("read frame");
-    serde_json::from_slice(&bytes).unwrap()
+    loop {
+        let bytes = tokio::time::timeout(Duration::from_secs(5), read_frame(stream))
+            .await
+            .expect("timed out waiting for a server frame")
+            .expect("read frame");
+        let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
+        // Every local subscriber is replayed the Claude sign-in picture on connect
+        // (CL1): a frame this file's tests are not about.
+        if !matches!(msg, ServerMsg::ClaudeLoginState { .. }) {
+            return msg;
+        }
+    }
 }
 
 async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {

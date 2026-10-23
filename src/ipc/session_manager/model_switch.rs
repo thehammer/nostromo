@@ -911,7 +911,10 @@ impl SessionManager {
                     }
                     let waiting = lock_recover(&s.shared.model).waiting.take();
                     let messages = lock_recover(&s.shared.pending).drain(..).collect();
-                    break Carry { messages, waiting };
+                    // A message held for a sign-in stays held, and the session
+                    // stays paused, across the restart.
+                    let login = s.shared.login.take_for_respawn();
+                    break Carry { messages, waiting, login };
                 }
             }
             None => Carry::default(),
@@ -920,12 +923,16 @@ impl SessionManager {
 
     /// Hand `carry` to `tag`'s (new) session and start on it.
     pub(super) fn resume_carry(&self, tag: &str, carry: Carry) {
-        if carry.messages.is_empty() && carry.waiting.is_none() {
+        if carry.messages.is_empty() && carry.waiting.is_none() && carry.login.is_none() {
             return;
         }
         let Some(session) = self.sessions.get(tag) else {
             return;
         };
+        // Before the queue is advanced, so `step` sees the pause.
+        if let Some(hold) = carry.login {
+            session.shared.login.restore(hold);
+        }
         lock_recover(&session.shared.pending).extend(carry.messages);
         lock_recover(&session.shared.model).waiting = carry.waiting;
         if session.state() == SessionState::Idle {
@@ -1717,4 +1724,6 @@ impl StoredSwitch {
 pub(super) struct Carry {
     pub(super) messages: Vec<PendingMessage>,
     pub(super) waiting: Option<(ModelTarget, Actor)>,
+    /// A message held for a Claude sign-in (see `login.rs`).
+    pub(super) login: Option<super::login::Hold>,
 }
