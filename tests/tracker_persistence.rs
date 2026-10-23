@@ -402,3 +402,69 @@ fn state_pointing_at_a_board_that_can_no_longer_be_read_does_not_stop_the_daemon
     assert!(format!("{:?}", view.nodes).contains("Alpha task"));
     assert_eq!(reg.tracker_frames().len(), 4, "replay still sends both tags' frames");
 }
+
+// ---------------------------------------------------------------------------
+// Closed-by-user flag (T0c follow-up)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_user_closed_tracker_stays_closed_across_a_restart() {
+    let rig = Rig::new();
+    {
+        let reg = rig.start();
+        rig.seeded(&reg);
+        reg.set_pane_hidden_by_user(TAG_A, true);
+    }
+
+    let reg = rig.start();
+
+    assert!(reg.pane_hidden_by_user(TAG_A));
+    assert!(!reg.pane_hidden_by_user(TAG_B), "the flag is per focus");
+    let out = reg.open(TAG_A, SESS_A, &rig.open_args()).expect("open");
+    assert!(out.hidden_by_user);
+}
+
+#[test]
+fn show_clears_the_closed_flag_and_the_clear_persists() {
+    let rig = Rig::new();
+    {
+        let reg = rig.start();
+        rig.seeded(&reg);
+        reg.set_pane_hidden_by_user(TAG_A, true);
+    }
+    {
+        let reg = rig.start();
+        let args = OpenArgs {
+            show: true,
+            ..rig.open_args()
+        };
+        let out = reg.open(TAG_A, SESS_A, &args).expect("open show");
+        assert!(!out.hidden_by_user);
+        assert!(!reg.pane_hidden_by_user(TAG_A));
+    }
+
+    let reg = rig.start();
+
+    assert!(!reg.pane_hidden_by_user(TAG_A));
+}
+
+#[test]
+fn state_written_before_the_closed_flag_existed_loads_as_not_hidden() {
+    let rig = Rig::new();
+    {
+        let reg = rig.start();
+        rig.seeded(&reg);
+        reg.set_pane_hidden_by_user(TAG_A, true);
+    }
+    let state = rig.state_root.join("trackers").join("state.json");
+    let mut doc: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    assert_eq!(doc["hidden"], json!([TAG_A]), "the flag is written");
+    doc.as_object_mut().unwrap().remove("hidden");
+    doc["some_future_field"] = json!({"x": 1});
+    std::fs::write(&state, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+    let reg = rig.start();
+
+    assert!(!reg.pane_hidden_by_user(TAG_A));
+    assert!(reg.bound_path(TAG_A).is_some(), "the rest of the state still loads");
+}
