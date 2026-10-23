@@ -28,7 +28,7 @@ use crate::mcp::pane_sources::{
 };
 use crate::mcp::state::McpSharedState;
 use crate::mcp::tools::apply_layout::{
-    address, fetch_async, freshness, source_is_known, target_tag, FetchArgs,
+    address, fetch_async, freshness, target_tag, FetchArgs,
 };
 
 /// Handle `nostromo.refresh_pane_content`.
@@ -56,7 +56,7 @@ pub async fn refresh_pane_content(
     // is trivially "not in the known registry" — so both fall through to the
     // single `unknown_source` check rather than a separate missing-field error.
     let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("");
-    if !source_is_known(source) {
+    if !state.source_available(source) {
         return json!({ "error": "unknown_source" });
     }
     let source = source.to_string();
@@ -141,6 +141,15 @@ pub async fn refresh_pane_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::tools::apply_layout::source_is_known;
+
+    #[tokio::test]
+    async fn a_disabled_agents_source_is_unknown() {
+        let (mut state, _rx) = make_state();
+        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        let out = refresh_pane_content(&state, &json!({ "view_id": "perri", "pane_id": "queue", "source": "perri.list_pr_queue" }), None).await;
+        assert_eq!(out["error"], "unknown_source");
+    }
     use crate::data::perri_pr::one_pr;
     use crate::ipc::protocol::ServerMsg;
     use tokio::sync::{broadcast, watch};

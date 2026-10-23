@@ -96,6 +96,7 @@ async fn harness_with_feed(feed: JobsFeed) -> Harness {
             fred_calendar_rx: calendar_rx,
             teri_todos_rx: todos_rx,
             work_hub: None,
+            enabled_agents: nostromo::agents::EnabledAgents::all(),
         },
     );
     let socket = dir.path().join("mcp.sock");

@@ -140,6 +140,13 @@ pub struct Config {
     /// this struct — only this path is — so `Config`'s unredacted `Debug`
     /// derive never carries a secret.
     pub jira_credentials_path: Option<PathBuf>,
+
+    // ── Per-agent enable switches ───────────────────────────────────────────
+    /// One table per built-in agent, e.g. `[agents.fred] enabled = false`.
+    /// A missing table (or missing `enabled` key) means the agent is on;
+    /// `mother` cannot be switched off. Unknown keys inside a table are
+    /// ignored. See [`crate::agents`].
+    pub agents: std::collections::BTreeMap<String, crate::agents::AgentConfig>,
 }
 
 impl Default for Config {
@@ -147,6 +154,7 @@ impl Default for Config {
         Self {
             tcp_addr: None,
             code_root: None,
+            agents: std::collections::BTreeMap::new(),
             fred_state: None,
             perri_state: None,
             claude_bin: None,
@@ -188,6 +196,12 @@ impl Config {
         let cfg: Config = toml::from_str(&raw)
             .with_context(|| format!("parsing config {}", resolved.display()))?;
         Ok(cfg)
+    }
+
+    /// The enabled built-in agents from the `[agents.<name>]` tables, plus
+    /// warnings (unknown names, `mother` disabled) for the caller to log.
+    pub fn resolve_agents(&self) -> (crate::agents::EnabledAgents, Vec<String>) {
+        crate::agents::resolve(&self.agents)
     }
 
     /// Folder whose children are the code repos. Resolution order:
@@ -346,5 +360,61 @@ mod code_root_tests {
     fn parses_from_toml() {
         let cfg: Config = toml::from_str("code_root = \"~/Software Development\"").unwrap();
         assert_eq!(cfg.code_root, Some(PathBuf::from("~/Software Development")));
+    }
+}
+
+#[cfg(test)]
+mod agents_tests {
+    use super::*;
+
+    fn parse(s: &str) -> Config {
+        toml::from_str::<Config>(s).unwrap()
+    }
+
+    #[test]
+    fn no_agents_table_enables_everything() {
+        let (e, w) = parse("").resolve_agents();
+        assert_eq!(e, crate::agents::EnabledAgents::all());
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn fred_disabled_disables_only_fred() {
+        let (e, _) = parse("[agents.fred]\nenabled = false\n").resolve_agents();
+        assert!(!e.fred && e.perri && e.teri);
+    }
+
+    #[test]
+    fn empty_agent_table_keeps_it_enabled() {
+        let (e, _) = parse("[agents.perri]\n").resolve_agents();
+        assert!(e.perri);
+    }
+
+    #[test]
+    fn extra_keys_are_ignored() {
+        let (e, w) = parse("[agents.fred]\nenabled = false\nmail_provider = \"gmail\"\n").resolve_agents();
+        assert!(!e.fred);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn mother_disabled_is_ignored_with_a_warning() {
+        let (e, w) = parse("[agents.mother]\nenabled = false\n").resolve_agents();
+        assert_eq!(e, crate::agents::EnabledAgents::all());
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("mother"));
+    }
+
+    #[test]
+    fn unknown_agent_is_ignored_with_a_warning() {
+        let (e, w) = parse("[agents.bob]\nenabled = false\n").resolve_agents();
+        assert_eq!(e, crate::agents::EnabledAgents::all());
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("bob"));
+    }
+
+    #[test]
+    fn non_table_agents_shape_is_a_parse_error() {
+        assert!(toml::from_str::<Config>("[agents]\nfred = false\n").is_err());
     }
 }

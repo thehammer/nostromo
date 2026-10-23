@@ -195,6 +195,10 @@ pub struct McpSharedState {
     /// `teri.list_work_items` / `teri.get_work_item`. `None` outside the daemon.
     pub work_hub: Option<Arc<WorkHub>>,
 
+    /// Which switchable built-in agents the daemon runs. Disabled agents'
+    /// tools, views and pane sources are hidden. `all()` outside the daemon.
+    pub enabled_agents: crate::agents::EnabledAgents,
+
     // ── event-mirrored receivers (Phase 2) ────────────────────────────────────
     // These wrap daemon-fed data (Mother jobs/status, rate limits, posture)
     // in watch channels so MCP tool handlers can read them without an event loop.
@@ -254,6 +258,7 @@ impl McpSharedState {
             fred_calendar_rx,
             teri_todos_rx,
             work_hub: None,
+            enabled_agents: crate::agents::EnabledAgents::all(),
             mother_jobs_rx,
             mother_source_rx: watch::channel(MotherSourceState::Loading).1,
             mother_feed: None,
@@ -365,6 +370,12 @@ impl McpSharedState {
         state
     }
 
+    /// Whether a pane source is both a known source and served by an enabled agent.
+    pub fn source_available(&self, source: &str) -> bool {
+        crate::mcp::tools::apply_layout::source_is_known(source)
+            && self.enabled_agents.allows_source(source)
+    }
+
     /// Construct an `McpSharedState` for an MCP server hosted inside `nostromd`,
     /// wiring in the daemon's live data sources so MCP tools like
     /// `perri.list_pr_queue` and `mother.list_jobs` return real data.
@@ -393,6 +404,7 @@ impl McpSharedState {
         state.fred_calendar_rx = sources.fred_calendar_rx;
         state.teri_todos_rx = sources.teri_todos_rx;
         state.work_hub = sources.work_hub;
+        state.enabled_agents = sources.enabled_agents;
         state
     }
 }
@@ -413,4 +425,6 @@ pub struct DaemonSources {
     pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
     /// The work hub behind `teri.list_work_items`; `None` leaves those tools unavailable.
     pub work_hub: Option<Arc<WorkHub>>,
+    /// Which switchable built-in agents the daemon runs.
+    pub enabled_agents: crate::agents::EnabledAgents,
 }

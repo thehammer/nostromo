@@ -76,6 +76,11 @@ async fn main() -> Result<()> {
 
     // ── Config ────────────────────────────────────────────────────────────────
     let config = Config::load(None).context("loading config")?;
+    let (enabled_agents, agent_warnings) = config.resolve_agents();
+    for w in &agent_warnings {
+        warn!("{w}");
+    }
+    info!(enabled = ?enabled_agents.wire_names(), "agents");
 
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
@@ -88,6 +93,7 @@ async fn main() -> Result<()> {
         info!(guard = %guard_path.display(), "production-shell guard");
     }
     session_mgr.lock().unwrap().set_guard_path(guard_path);
+    session_mgr.lock().unwrap().configure_enabled_agents(enabled_agents);
     // The approval broker: hears every permission request of an approval-capable
     // session, logs it and always answers it. A request found unresolved in the
     // log was pending when the last daemon died; it ends as `restart_crash` before
@@ -298,68 +304,101 @@ async fn main() -> Result<()> {
     });
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
+    // A disabled agent still hands its consumers a live `watch::Receiver`:
+    // a dropped sender makes `changed()` fail at once, and
+    // `run_pane_source_broadcaster` exits on that error, which would also kill
+    // the staleness ticker for file and ticket panes. So each disabled agent's
+    // senders are parked here for the daemon's lifetime.
+    let mut parked: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
+
     // ── Perri background sources (spawned early so MCP state gets live receivers) ─
-    let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx) =
-        PerriQueueNativeSource::spawn(config.clone());
-    // W7 — D8 backstop. The PR source serves a pin only while its focus still
-    // exists, so a missed eviction cannot resurrect one. `None` until a client
-    // has actually pushed a registry: an empty registry means "nobody has told
-    // us yet", and treating it as "no focus exists" would blank every focus's
-    // PR for the window between daemon start and the first push.
-    let live_focuses: nostromo::data::perri_pr_native::LiveFocuses = {
-        let session_mgr = Arc::clone(&session_mgr);
-        Arc::new(move || session_mgr.lock().unwrap().live_focus_tags())
-    };
-    let (perri_pr_rx, perri_pr_refresh_tx) =
-        PerriPrNativeSource::spawn(config.clone(), Some(live_focuses));
+    let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx, perri_pr_rx, perri_pr_refresh_tx) =
+        if enabled_agents.perri {
+            let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx) =
+                PerriQueueNativeSource::spawn(config.clone());
+            // W7 — D8 backstop. The PR source serves a pin only while its focus still
+            // exists, so a missed eviction cannot resurrect one. `None` until a client
+            // has actually pushed a registry: an empty registry means "nobody has told
+            // us yet", and treating it as "no focus exists" would blank every focus's
+            // PR for the window between daemon start and the first push.
+            let live_focuses: nostromo::data::perri_pr_native::LiveFocuses = {
+                let session_mgr = Arc::clone(&session_mgr);
+                Arc::new(move || session_mgr.lock().unwrap().live_focus_tags())
+            };
+            let (perri_pr_rx, perri_pr_refresh_tx) =
+                PerriPrNativeSource::spawn(config.clone(), Some(live_focuses));
+
+            // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
+            // Registered here, not inside the `write_bridge_mcp_config()` success arm
+            // below: Perri replay has nothing to do with the MCP bridge. Registration
+            // order doesn't matter — the provider is read lazily at attach time.
+            session_mgr.lock().unwrap().configure_perri_state_provider(Arc::new(
+                WatchPerriStateProvider::new(perri_queue_rx.clone(), perri_pr_rx.clone()),
+            ));
+            (
+                perri_queue_rx,
+                Some(perri_queue_refresh_tx),
+                Some(perri_queue_relay_tx),
+                perri_pr_rx,
+                Some(perri_pr_refresh_tx),
+            )
+        } else {
+            let (queue_tx, perri_queue_rx) = tokio::sync::watch::channel::<Option<PrQueueSnapshot>>(None);
+            let (pr_tx, perri_pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
+            parked.push(Box::new(queue_tx));
+            parked.push(Box::new(pr_tx));
+            (perri_queue_rx, None, None, perri_pr_rx, None)
+        };
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
-
-    // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
-    // Registered unconditionally, here — not inside the `write_bridge_mcp_config()`
-    // success arm below, where the D8 pane-content provider is registered. Perri
-    // replay has nothing to do with the MCP bridge; nesting it there would
-    // silently disable Perri replay on any machine where the bridge config can't
-    // be written. Registration order doesn't matter — the provider is read
-    // lazily at attach time.
-    {
-        let mut mgr = session_mgr.lock().unwrap();
-        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
-            perri_queue_rx.clone(),
-            perri_pr_rx.clone(),
-        )));
-    }
 
     // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
     let jobs_feed = nostromo::mother::JobsFeed::new();
 
     // Fred / Teri sources are spawned here, before the MCP state is built, so
     // the MCP tools and the broadcasters read the same channels.
-    let fred_mailbox_rx  = FredMailboxNativeSource::spawn(config.clone());
-    let fred_calendar_rx = FredCalendarNativeSource::spawn(config.clone());
-    let todos_refresh    = Arc::new(tokio::sync::Notify::new());
-    let teri_todos_rx    = TeriTodosNativeSource::spawn_with_refresh(Arc::clone(&todos_refresh));
+    let (fred_mailbox_rx, fred_calendar_rx) = if enabled_agents.fred {
+        (
+            FredMailboxNativeSource::spawn(config.clone()),
+            FredCalendarNativeSource::spawn(config.clone()),
+        )
+    } else {
+        let (mailbox_tx, mailbox_rx) = tokio::sync::watch::channel::<Option<MailboxSnapshot>>(None);
+        let (calendar_tx, calendar_rx) = tokio::sync::watch::channel::<Option<CalendarSnapshot>>(None);
+        parked.push(Box::new(mailbox_tx));
+        parked.push(Box::new(calendar_tx));
+        (mailbox_rx, calendar_rx)
+    };
+    let (teri_todos_rx, work_hub) = if enabled_agents.teri {
+        let todos_refresh = Arc::new(tokio::sync::Notify::new());
+        let teri_todos_rx = TeriTodosNativeSource::spawn_with_refresh(Arc::clone(&todos_refresh));
 
-    // The work hub merges every Teri work source (todos now; repo docs, Jira
-    // and Sentry as they land), broadcasts changes and answers `WorkService`
-    // requests from the Mac. It is built after the Teri source and before the
-    // MCP state so the MCP tools read the same hub.
-    let work_hub = nostromo::data::work::hub::WorkHub::spawn(nostromo::data::work::hub::HubDeps {
-        broadcast_tx: broadcast_tx.clone(),
-        todos_rx: teri_todos_rx.clone(),
-        session_mgr: Some(Arc::clone(&session_mgr)),
-        republish_rx: Some(server.subscribe_republish()),
-        jira_site: nostromo::data::work::credentials::JiraSite::from_config(&config),
-        todos_refresh: Some(todos_refresh),
-        jira: Some(Arc::new(nostromo::data::work::jira::JiraWorkSource::from_config(&config))),
-        sentry: Some(nostromo::data::work::sentry::SentryConfig::from_environment()),
-        repo_docs_root: Some(config.code_root_dir()),
-        picks_path: Some(nostromo::data::work::picks::default_path()),
-        picks_host: None,
-        picks_timeout: None,
-    });
-    nostromo::data::work::install_work_service(work_hub.clone());
+        // The work hub merges every Teri work source (todos now; repo docs, Jira
+        // and Sentry as they land), broadcasts changes and answers `WorkService`
+        // requests from the Mac. It is built after the Teri source and before the
+        // MCP state so the MCP tools read the same hub.
+        let work_hub = nostromo::data::work::hub::WorkHub::spawn(nostromo::data::work::hub::HubDeps {
+            broadcast_tx: broadcast_tx.clone(),
+            todos_rx: teri_todos_rx.clone(),
+            session_mgr: Some(Arc::clone(&session_mgr)),
+            republish_rx: Some(server.subscribe_republish()),
+            jira_site: nostromo::data::work::credentials::JiraSite::from_config(&config),
+            todos_refresh: Some(todos_refresh),
+            jira: Some(Arc::new(nostromo::data::work::jira::JiraWorkSource::from_config(&config))),
+            sentry: Some(nostromo::data::work::sentry::SentryConfig::from_environment()),
+            repo_docs_root: Some(config.code_root_dir()),
+            picks_path: Some(nostromo::data::work::picks::default_path()),
+            picks_host: None,
+            picks_timeout: None,
+        });
+        nostromo::data::work::install_work_service(work_hub.clone());
+        (teri_todos_rx, Some(work_hub))
+    } else {
+        let (todos_tx, teri_todos_rx) = tokio::sync::watch::channel::<Option<nostromo::data::teri_todos::TeriTodosSnapshot>>(None);
+        parked.push(Box::new(todos_tx));
+        (teri_todos_rx, None)
+    };
 
     // ── agent tracker ─────────────────────────────────────────────────────────
     // State lives beside the daemon's socket (`~/.nostromo`; a QA instance's own
@@ -421,8 +460,8 @@ async fn main() -> Result<()> {
                 broadcast_tx: broadcast_tx.clone(),
                 perri: nostromo::mcp::PerriDaemonState {
                     state_dir: Some(config.perri_state_dir()),
-                    pr_refresh_tx: Some(perri_pr_refresh_tx_for_mcp.clone()),
-                    queue_refresh_tx: Some(perri_queue_refresh_tx.clone()),
+                    pr_refresh_tx: perri_pr_refresh_tx_for_mcp.clone(),
+                    queue_refresh_tx: perri_queue_refresh_tx.clone(),
                     ..Default::default()
                 },
                 decisions: Arc::clone(&decisions),
@@ -438,7 +477,8 @@ async fn main() -> Result<()> {
                     fred_mailbox_rx: fred_mailbox_rx.clone(),
                     fred_calendar_rx: fred_calendar_rx.clone(),
                     teri_todos_rx: teri_todos_rx.clone(),
-                    work_hub: Some(work_hub.clone()),
+                    work_hub: work_hub.clone(),
+                    enabled_agents,
                 },
             );
 
@@ -526,21 +566,27 @@ async fn main() -> Result<()> {
     // Connects to the relay WebSocket and triggers an immediate queue refresh
     // on every relevant GitHub event, reducing PR-queue lag from the poll
     // interval (~60s) to ~3s. No-ops if relay_url/relay_token are not set.
-    nostromo::data::relay_client::spawn(config.clone(), perri_queue_relay_tx);
+    if let Some(relay_tx) = perri_queue_relay_tx {
+        nostromo::data::relay_client::spawn(config.clone(), relay_tx);
+    }
 
     // ── Perri broadcaster ─────────────────────────────────────────────────────
     // (Sources were spawned earlier so the MCP state could get live receivers.)
-    tokio::spawn(run_perri_broadcaster(
-        broadcast_tx.clone(),
-        Arc::clone(&session_mgr),
-        perri_queue_rx,
-        perri_pr_rx,
-    ));
+    if enabled_agents.perri {
+        tokio::spawn(run_perri_broadcaster(
+            broadcast_tx.clone(),
+            Arc::clone(&session_mgr),
+            perri_queue_rx,
+            perri_pr_rx,
+        ));
+    }
 
     // ── Teri todos broadcaster ────────────────────────────────────────────────
     // (Fred and Teri sources were spawned earlier so the MCP state could get live receivers.)
     let btx_teri = broadcast_tx.clone();
-    tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri, server.subscribe_republish()));
+    if enabled_agents.teri {
+        tokio::spawn(run_teri_broadcaster(teri_todos_rx, btx_teri, server.subscribe_republish()));
+    }
 
     // ── Mother pollers ────────────────────────────────────────────────────────
     // (`jobs_feed` was created earlier so the MCP state shares the poller's channel.)
@@ -554,12 +600,14 @@ async fn main() -> Result<()> {
 
     // ── Fred broadcaster ──────────────────────────────────────────────────────
     let btx_fred = broadcast_tx.clone();
-    tokio::spawn(run_fred_broadcaster(
-        btx_fred,
-        fred_mailbox_rx,
-        fred_calendar_rx,
-        server.subscribe_republish(),
-    ));
+    if enabled_agents.fred {
+        tokio::spawn(run_fred_broadcaster(
+            btx_fred,
+            fred_mailbox_rx,
+            fred_calendar_rx,
+            server.subscribe_republish(),
+        ));
+    }
 
     // ── SIGTERM / SIGINT ──────────────────────────────────────────────────────
     let mut sigterm = signal(SignalKind::terminate())?;

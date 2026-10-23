@@ -199,6 +199,9 @@ pub fn repaint_bound_panes(state: &McpSharedState) {
     };
     let bindings = daemon.pane_registry.lock().unwrap().all_bindings();
     for (tag, pane_id, binding) in bindings {
+        if !state.source_available(&binding.source) {
+            continue;
+        }
         let Some((content, address)) =
             fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())
         else {
@@ -309,6 +312,9 @@ fn push_for_source(
     only_tags: Option<&HashSet<String>>,
     last_sent: &mut LastSent,
 ) {
+    if !state.source_available(source) {
+        return;
+    }
     let Some(daemon) = &state.daemon else {
         return;
     };

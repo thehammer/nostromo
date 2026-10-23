@@ -1016,6 +1016,15 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
         return json!({ "error": "invalid_args", "detail": "provide `name` or `tree`" });
     };
 
+    // A disabled agent's pane sources do not exist.
+    if schema
+        .panes
+        .values()
+        .any(|spec| spec.source.as_deref().is_some_and(|s| !state.source_available(s)))
+    {
+        return json!({ "error": ApplyLayoutError::UnknownSource.code() });
+    }
+
     // ── resolve the target focus tag ────────────────────────────────────────
     let explicit_view = args.get("view_id").and_then(|v| v.as_str()).is_some();
     let Some(tag) = target_tag(args, pty_id) else {
@@ -1102,6 +1111,14 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_layout_with_a_disabled_agents_source_is_refused() {
+        let (mut state, _rx) = make_state();
+        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        let out = apply_layout(&state, &json!({ "name": "perri-standard" }), Some("perri")).await;
+        assert_eq!(out["error"], "unknown_source");
+    }
     use crate::data::perri_pr::one_pr;
     use crate::data::tickets::jira::{JiraCredentials, JiraProvider};
     use crate::data::tickets::{TicketCache, TicketRegistry};

@@ -1622,6 +1622,12 @@ pub enum ServerMsg {
         /// not change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
+        /// The built-in agents this daemon runs (`"mother"` always among them).
+        /// A switchable agent (fred / perri / teri) that is absent is disabled.
+        /// Additive: absent on the wire from an older daemon, which a client must
+        /// read as "every agent enabled"; `PROTOCOL_VERSION` does not change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled_agents: Option<Vec<String>>,
     },
     Activity(ActivityEvent),
     MotherJobs {
@@ -3454,7 +3460,7 @@ mod tests {
 
     #[test]
     fn welcome_carries_the_operator_nonce_only_when_present() {
-        let plain = ServerMsg::Welcome { protocol_version: PROTOCOL_VERSION, daemon_pid: 1, features: vec![], operator_nonce: None };
+        let plain = ServerMsg::Welcome { protocol_version: PROTOCOL_VERSION, daemon_pid: 1, features: vec![], operator_nonce: None, enabled_agents: None };
         let v = serde_json::to_value(&plain).unwrap();
         assert!(!v.as_object().unwrap().contains_key("operator_nonce"), "{v}");
 
@@ -3463,6 +3469,7 @@ mod tests {
             daemon_pid: 1,
             features: vec![],
             operator_nonce: Some("cd34".into()),
+            enabled_agents: None,
         };
         round_trip_server(operator.clone());
         assert_eq!(serde_json::to_value(operator).unwrap()["operator_nonce"], "cd34");
@@ -5350,9 +5357,34 @@ mod work_wire_tests {
                 daemon_pid: 9,
                 features: vec!["work".into(), "approvals_v1".into()],
                 operator_nonce: Some("cd34".into()),
+                enabled_agents: None,
             },
             r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"features":["work","approvals_v1"],"operator_nonce":"cd34"}"#,
         );
+    }
+
+    #[test]
+    fn welcome_with_enabled_agents_has_this_exact_wire_form() {
+        assert_server_golden(
+            ServerMsg::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_pid: 9,
+                features: vec![],
+                operator_nonce: None,
+                enabled_agents: Some(vec!["mother".into(), "teri".into()]),
+            },
+            r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"enabled_agents":["mother","teri"]}"#,
+        );
+    }
+
+    #[test]
+    fn welcome_without_enabled_agents_decodes_as_none() {
+        let msg: ServerMsg =
+            serde_json::from_str(r#"{"type":"welcome","protocol_version":4,"daemon_pid":9}"#).unwrap();
+        match msg {
+            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(enabled_agents, None),
+            other => panic!("{other:?}"),
+        }
     }
 
     // ── Subscribe.renders_approvals (mirrors renders_decisions) ──────────────────

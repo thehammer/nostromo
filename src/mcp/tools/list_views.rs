@@ -121,14 +121,44 @@ fn builtin_entries(state: &McpSharedState) -> Vec<Value> {
             obj.insert(k.into(), v);
         }
     }
-    vec![
-        json!({ "name": "teri", "counts": { "active_todos": active_todos }, "state": teri_state }),
-        json!({
+    let on = state.enabled_agents;
+    let mut entries = Vec::new();
+    if on.teri {
+        entries.push(json!({ "name": "teri", "counts": { "active_todos": active_todos }, "state": teri_state }));
+    }
+    if on.fred {
+        entries.push(json!({
             "name": "fred",
             "counts": { "unread": unread, "today_events": today_events },
             "state": fred_state,
-        }),
-        json!({ "name": "perri", "counts": { "queue": queue }, "state": perri_state }),
-        mother,
-    ]
+        }));
+    }
+    if on.perri {
+        entries.push(json!({ "name": "perri", "counts": { "queue": queue }, "state": perri_state }));
+    }
+    entries.push(mother);
+    entries
+}
+
+#[cfg(test)]
+mod agent_switch_tests {
+    use super::*;
+    use crate::agents::EnabledAgents;
+
+    fn names(state: &McpSharedState) -> Vec<String> {
+        builtin_entries(state)
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_disabled_agent_has_no_entry_but_mother_always_does() {
+        let mut state = McpSharedState::for_test();
+        assert_eq!(names(&state), ["teri", "fred", "perri", "mother"]);
+        state.enabled_agents = EnabledAgents { fred: true, perri: false, teri: true };
+        assert_eq!(names(&state), ["teri", "fred", "mother"]);
+        state.enabled_agents = EnabledAgents { fred: false, perri: false, teri: false };
+        assert_eq!(names(&state), ["mother"]);
+    }
 }

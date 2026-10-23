@@ -426,6 +426,8 @@ pub struct SessionManager {
     /// [`SessionManager::configure_perri_state_provider`]; `None` in tests /
     /// non-daemon use.
     perri_state_provider: Option<Arc<dyn PerriStateProvider>>,
+    /// Built-in agents this daemon runs; reported in the `welcome` frame.
+    enabled_agents: crate::agents::EnabledAgents,
     /// Shared decision-modal registry. Set by the daemon via
     /// [`SessionManager::configure_decisions`]; `None` in tests / non-daemon
     /// use. When a session goes permanently down (explicit stop or the
@@ -515,6 +517,7 @@ impl SessionManager {
             pane_content_provider: None,
             tracker_frame_provider: None,
             perri_state_provider: None,
+            enabled_agents: crate::agents::EnabledAgents::all(),
             decisions: None,
             session_reverse: HashMap::new(),
             activity_store: crate::activity::store::ActivityStore::new(),
@@ -629,6 +632,16 @@ impl SessionManager {
     /// Access the pane-content provider (if wired up).
     pub fn pane_content_provider(&self) -> Option<Arc<dyn PaneContentProvider>> {
         self.pane_content_provider.clone()
+    }
+
+    /// Set which built-in agents this daemon runs (reported in `welcome`).
+    pub fn configure_enabled_agents(&mut self, e: crate::agents::EnabledAgents) {
+        self.enabled_agents = e;
+    }
+
+    /// The built-in agents this daemon runs.
+    pub fn enabled_agents(&self) -> crate::agents::EnabledAgents {
+        self.enabled_agents
     }
 
     /// Wire the [`PerriStateProvider`] the daemon exposes over its live Perri

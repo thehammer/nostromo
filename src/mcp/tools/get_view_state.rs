@@ -37,7 +37,10 @@ pub async fn handle(
     input: &GetViewStateInput,
     pty_id: Option<&str>,
 ) -> Value {
+    let disabled = crate::agents::Agent::from_name(&input.view_id)
+        .is_some_and(|a| !state.enabled_agents.is_enabled(a));
     let mut result = match input.view_id.as_str() {
+        _ if disabled => json!({ "error": "unknown_view", "view_id": input.view_id }),
         "perri" => perri::get_state(state, pty_id.filter(|s| !s.is_empty())),
         "fred" => fred::get_state(state),
         "mother" => mother::get_status(state),
@@ -49,4 +52,21 @@ pub async fn handle(
         map.insert("render_state".to_string(), render_state::compute(state, &input.view_id));
     }
     result
+}
+
+#[cfg(test)]
+mod agent_switch_tests {
+    use super::*;
+    use crate::agents::EnabledAgents;
+
+    #[tokio::test]
+    async fn a_disabled_agents_view_is_unknown() {
+        let mut state = McpSharedState::for_test();
+        state.enabled_agents = EnabledAgents { fred: false, perri: true, teri: true };
+        let out = handle(&state, &GetViewStateInput { view_id: "fred".into() }, None).await;
+        assert_eq!(out["error"], "unknown_view");
+        assert_eq!(out["view_id"], "fred");
+        let out = handle(&state, &GetViewStateInput { view_id: "teri".into() }, None).await;
+        assert_ne!(out["error"], "unknown_view");
+    }
 }

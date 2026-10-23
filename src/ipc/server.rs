@@ -414,6 +414,24 @@ async fn accept_loop_tcp(
 
 // ── per-client task ───────────────────────────────────────────────────────────
 
+/// The `Welcome` frame for a connection: protocol version, advertised
+/// features, the operator nonce (when the peer was verified) and the built-in
+/// agents this daemon runs.
+fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMsg {
+    ServerMsg::Welcome {
+        protocol_version: PROTOCOL_VERSION,
+        daemon_pid: std::process::id(),
+        features: vec![
+            FEATURE_WORK.to_string(),
+            FEATURE_MODEL.to_string(),
+            FEATURE_TASKS.to_string(),
+            FEATURE_APPROVALS.to_string(),
+        ],
+        operator_nonce,
+        enabled_agents: Some(mgr.enabled_agents().wire_names()),
+    }
+}
+
 /// Handle a single connected client over any async transport (Unix socket, TCP, …).
 ///
 /// The caller provides a stream that implements both [`AsyncRead`] and
@@ -486,17 +504,7 @@ where
     // process that then `exec`s the app) cannot contain it.
     let operator_nonce = (trust == PeerTrust::OperatorApp).then(new_operator_nonce);
 
-    let welcome = ServerMsg::Welcome {
-        protocol_version: PROTOCOL_VERSION,
-        daemon_pid: std::process::id(),
-        features: vec![
-            FEATURE_WORK.to_string(),
-            FEATURE_MODEL.to_string(),
-            FEATURE_TASKS.to_string(),
-            FEATURE_APPROVALS.to_string(),
-        ],
-        operator_nonce: operator_nonce.clone(),
-    };
+    let welcome = welcome_msg(&session_mgr.lock().unwrap(), operator_nonce.clone());
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     // Never log the nonce.
     let peer_pid = origin.info().map(|i| i.pid);
@@ -2195,6 +2203,26 @@ pub fn activity_health_msg(mgr: &SessionManager, hook_installed: bool) -> Server
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn welcome_reports_only_the_enabled_agents() {
+        let mut mgr = SessionManager::new();
+        match welcome_msg(&mgr, None) {
+            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
+                enabled_agents,
+                Some(vec!["fred".into(), "mother".into(), "perri".into(), "teri".into()])
+            ),
+            other => panic!("{other:?}"),
+        }
+        mgr.configure_enabled_agents(crate::agents::EnabledAgents { fred: false, perri: true, teri: true });
+        match welcome_msg(&mgr, None) {
+            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
+                enabled_agents,
+                Some(vec!["mother".into(), "perri".into(), "teri".into()])
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
     use super::*;
     use crate::ipc::protocol::DecisionChoice;
 
