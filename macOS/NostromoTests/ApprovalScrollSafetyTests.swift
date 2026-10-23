@@ -474,11 +474,11 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             }
 
             p.rig.assertNoMove("the › button is pressed (following: \(following))", following: following) {
-                p.host.card?.pageNextButton?.performClick(nil)
+                p.host.card?.pageNextButton.performClick(nil)
             }
             XCTAssertEqual(p.host.page?.position, 2)
             p.rig.assertNoMove("the ‹ button is pressed (following: \(following))", following: following) {
-                p.host.card?.pagePreviousButton?.performClick(nil)
+                p.host.card?.pagePreviousButton.performClick(nil)
             }
             XCTAssertEqual(p.host.page?.position, 1)
             XCTAssertTrue(p.recorder.sent.isEmpty, "paging answered nothing")

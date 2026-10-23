@@ -1091,10 +1091,10 @@ final class ApprovalPagingHostTests: XCTestCase {
         XCTAssertEqual(p.host.page?.label, "1 of 3")
         XCTAssertEqual(p.host.listings.first?.page, 1)
         XCTAssertEqual(p.host.listings.first?.of, 3)
-        XCTAssertEqual(card.pagePreviousButton?.isEnabled, false, "nothing before the first")
-        XCTAssertEqual(card.pageNextButton?.isEnabled, true)
-        XCTAssertEqual(card.pagePreviousButton?.isHidden, false)
-        XCTAssertEqual(card.pageNextButton?.isHidden, false)
+        XCTAssertEqual(card.pagePreviousButton.isEnabled, false, "nothing before the first")
+        XCTAssertEqual(card.pageNextButton.isEnabled, true)
+        XCTAssertEqual(card.pagePreviousButton.isHidden, false)
+        XCTAssertEqual(card.pageNextButton.isHidden, false)
     }
 
     func testShowingTheNextRequestAnswersNothingAndTheLastPageHasNoNext() throws {
@@ -1106,8 +1106,8 @@ final class ApprovalPagingHostTests: XCTestCase {
         var card = try XCTUnwrap(p.host.card)
         XCTAssertEqual(card.request.id, "b")
         XCTAssertEqual(card.pageText, "2 of 3")
-        XCTAssertEqual(card.pagePreviousButton?.isEnabled, true)
-        XCTAssertEqual(card.pageNextButton?.isEnabled, true)
+        XCTAssertEqual(card.pagePreviousButton.isEnabled, true)
+        XCTAssertEqual(card.pageNextButton.isEnabled, true)
         XCTAssertEqual(p.host.listings.first?.requestID, "b")
         XCTAssertEqual(p.host.listings.first?.page, 2)
 
@@ -1116,8 +1116,8 @@ final class ApprovalPagingHostTests: XCTestCase {
         card = try XCTUnwrap(p.host.card)
         XCTAssertEqual(card.request.id, "c")
         XCTAssertEqual(card.pageText, "3 of 3")
-        XCTAssertEqual(card.pagePreviousButton?.isEnabled, true)
-        XCTAssertEqual(card.pageNextButton?.isEnabled, false, "no wrap past the last")
+        XCTAssertEqual(card.pagePreviousButton.isEnabled, true)
+        XCTAssertEqual(card.pageNextButton.isEnabled, false, "no wrap past the last")
 
         p.host.showNext()
         p.layout()
@@ -1195,8 +1195,8 @@ final class ApprovalPagingHostTests: XCTestCase {
         h.card.setPage(nil)
 
         XCTAssertEqual(h.card.pageText, "")
-        XCTAssertTrue(h.card.pagePreviousButton?.isHidden ?? true)
-        XCTAssertTrue(h.card.pageNextButton?.isHidden ?? true)
+        XCTAssertTrue(h.card.pagePreviousButton.isHidden)
+        XCTAssertTrue(h.card.pageNextButton.isHidden)
         XCTAssertEqual(h.card.listing.page, 1)
         XCTAssertEqual(h.card.listing.of, 1)
     }
@@ -1207,8 +1207,8 @@ final class ApprovalPagingHostTests: XCTestCase {
 
         let card = try XCTUnwrap(p.host.card)
         XCTAssertEqual(card.pageText, "")
-        XCTAssertTrue(card.pagePreviousButton?.isHidden ?? true, "no ‹")
-        XCTAssertTrue(card.pageNextButton?.isHidden ?? true, "no ›")
+        XCTAssertTrue(card.pagePreviousButton.isHidden, "no ‹")
+        XCTAssertTrue(card.pageNextButton.isHidden, "no ›")
         XCTAssertNil(p.host.page.flatMap { $0.count > 1 ? $0 : nil }, "nothing to page through")
         XCTAssertEqual(p.host.listings.first?.page, 1)
         XCTAssertEqual(p.host.listings.first?.of, 1)
@@ -1247,7 +1247,7 @@ final class ApprovalPagingHostTests: XCTestCase {
         XCTAssertEqual(p.host.card?.pageText, "2 of 4")
         XCTAssertEqual(p.host.listings.first?.page, 2)
         XCTAssertEqual(p.host.listings.first?.of, 4)
-        XCTAssertEqual(p.host.card?.pageNextButton?.isEnabled, true)
+        XCTAssertEqual(p.host.card?.pageNextButton.isEnabled, true)
     }
 
     func testARequestArrivingWhileOnTheFirstPageLeavesTheFirstShown() throws {
@@ -1308,8 +1308,8 @@ final class ApprovalPagingHostTests: XCTestCase {
         let card = try XCTUnwrap(p.host.card)
         XCTAssertEqual(card.request.id, "b")
         XCTAssertEqual(card.pageText, "")
-        XCTAssertTrue(card.pagePreviousButton?.isHidden ?? true)
-        XCTAssertTrue(card.pageNextButton?.isHidden ?? true)
+        XCTAssertTrue(card.pagePreviousButton.isHidden)
+        XCTAssertTrue(card.pageNextButton.isHidden)
         XCTAssertEqual(p.host.listings.first?.of, 1)
     }
 
