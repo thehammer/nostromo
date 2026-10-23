@@ -36,10 +36,17 @@ final class TrackerTextView: NSTextView {
 
     var hasSelection: Bool { selectedRange().length > 0 }
 
-    /// Replace the text, keeping nothing of the old one (selection included).
+    /// Replace the text, keeping nothing of the old one (selection included). Board text is the
+    /// agent's and the file's: links keep their look but are not clickable here (no `.link`
+    /// attribute), since opening them is T6's link chips' job, with their own scheme checks.
     func set(_ text: NSAttributedString) {
-        textStorage?.setAttributedString(text)
+        let inert = NSMutableAttributedString(attributedString: text)
+        inert.removeAttribute(.link, range: NSRange(location: 0, length: inert.length))
+        textStorage?.setAttributedString(inert)
     }
+
+    /// Nothing in the tracker opens a URL in T1 (see `set`); this covers any link that slipped through.
+    override func clicked(onLink link: Any, at charIndex: Int) {}
 
     /// The height of the text wrapped at `width`; also sizes the container to it.
     func height(forWidth width: CGFloat) -> CGFloat {
@@ -213,7 +220,9 @@ final class TrackerProseView: NSView {
         let cells: [[NSView]] = all.enumerated().map { r, row in
             (0 ..< columns).map { c -> NSView in
                 let spans = c < row.count ? row[c] : []
-                let field = NSTextField(labelWithAttributedString: MarkdownBlockDocument.render(spans: spans))
+                let cell = NSMutableAttributedString(attributedString: MarkdownBlockDocument.render(spans: spans))
+                cell.removeAttribute(.link, range: NSRange(location: 0, length: cell.length))   // inert, as in `TrackerTextView.set`
+                let field = NSTextField(labelWithAttributedString: cell)
                 if r == 0 && !header.isEmpty {
                     field.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
                 }
