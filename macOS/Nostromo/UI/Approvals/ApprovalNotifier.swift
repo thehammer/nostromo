@@ -56,6 +56,20 @@ final class ApprovalNotifier {
     }
 }
 
+/// Whether a "needs you" notification shows a banner while the app is active. Each producer has its own
+/// "already on screen" test; one producer's visible view never hides another producer's notification
+/// (an approval for another focus is not swallowed because the Mother view is open).
+enum NeedsYouPresentation {
+    static func showsBanner(userInfo: [AnyHashable: Any],
+                            cardIsVisible: (String) -> Bool,
+                            motherViewIsVisible: () -> Bool) -> Bool {
+        if userInfo["producer"] as? String == ApprovalsNeedsYouProducer.name {
+            return ApprovalNotifier.shouldPresent(userInfo: userInfo, cardIsVisible: cardIsVisible)
+        }
+        return !motherViewIsVisible()
+    }
+}
+
 /// The app's windows as the router: the click brings the app forward and selects the focus
 /// (the key window's layout switches to it; `focusSelectionRequests` is how the app already
 /// asks for that), then shows the card.

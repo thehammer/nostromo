@@ -594,20 +594,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
 // MARK: - "Needs you" notifications
 
-/// Whether a "needs you" notification shows a banner while the app is active. Each producer has its own
-/// "already on screen" test; one producer's visible view never hides another producer's notification
-/// (an approval for another focus is not swallowed because the Mother view is open).
-enum NeedsYouPresentation {
-    static func options(userInfo: [AnyHashable: Any],
-                        cardIsVisible: (String) -> Bool,
-                        motherViewIsVisible: () -> Bool) -> UNNotificationPresentationOptions {
-        if userInfo["producer"] as? String == ApprovalsNeedsYouProducer.name {
-            return ApprovalNotifier.shouldPresent(userInfo: userInfo, cardIsVisible: cardIsVisible) ? [.banner] : []
-        }
-        return motherViewIsVisible() ? [] : [.banner]
-    }
-}
-
 /// Clicks on, and presentation of, the notifications `NeedsYouNotifier` posts. What a
 /// notification says is decided in NostromoKit; where a click goes is `NeedsYouRouting`.
 extension AppDelegate: UNUserNotificationCenterDelegate {
@@ -633,10 +619,11 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler(NeedsYouPresentation.options(
+        let showsBanner = NeedsYouPresentation.showsBanner(
             userInfo: notification.request.content.userInfo,
             cardIsVisible: { Self.approvalCardIsVisible(tag: $0) },
-            motherViewIsVisible: { Self.motherViewIsVisible(in: NSApp.keyWindow?.contentView) }))
+            motherViewIsVisible: { Self.motherViewIsVisible(in: NSApp.keyWindow?.contentView) })
+        completionHandler(showsBanner ? [.banner] : [])
     }
 
     private static func approvalCardIsVisible(tag: String) -> Bool {

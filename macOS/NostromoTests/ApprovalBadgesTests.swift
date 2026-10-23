@@ -370,27 +370,27 @@ final class ApprovalBadgesTests: XCTestCase {
         let info: [AnyHashable: Any] = ["producer": "approvals", "tag": "cody-1"]
         var motherViewAsked = false
 
-        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { _ in false },
+        XCTAssertEqual(NeedsYouPresentation.showsBanner(userInfo: info, cardIsVisible: { _ in false },
                                                     motherViewIsVisible: { motherViewAsked = true; return true }),
-                       [.banner], "the Mother view being open does not swallow an approval")
+                       true, "the Mother view being open does not swallow an approval")
         XCTAssertFalse(motherViewAsked, "an approval's banner has nothing to do with the Mother view")
 
-        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { $0 == "cody-1" },
+        XCTAssertEqual(NeedsYouPresentation.showsBanner(userInfo: info, cardIsVisible: { $0 == "cody-1" },
                                                     motherViewIsVisible: { false }),
-                       [], "its card is on screen in the key window")
+                       false, "its card is on screen in the key window")
 
-        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { $0 == "perri-1" },
+        XCTAssertEqual(NeedsYouPresentation.showsBanner(userInfo: info, cardIsVisible: { $0 == "perri-1" },
                                                     motherViewIsVisible: { true }),
-                       [.banner], "another focus's card being on screen does not hide this one")
+                       true, "another focus's card being on screen does not hide this one")
     }
 
     func testMothersBannerYieldsToTheMotherViewOnlyNotToAnApprovalCard() {
         let info: [AnyHashable: Any] = ["producer": "mother", "jobId": "j1"]
 
-        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { _ in true },
-                                                    motherViewIsVisible: { true }), [])
-        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { _ in true },
-                                                    motherViewIsVisible: { false }), [.banner])
+        XCTAssertEqual(NeedsYouPresentation.showsBanner(userInfo: info, cardIsVisible: { _ in true },
+                                                    motherViewIsVisible: { true }), false)
+        XCTAssertEqual(NeedsYouPresentation.showsBanner(userInfo: info, cardIsVisible: { _ in true },
+                                                    motherViewIsVisible: { false }), true)
     }
 
     // MARK: Pill in every window
