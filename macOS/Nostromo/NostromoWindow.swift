@@ -341,25 +341,46 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
 
     /// Closes the window of a vanished display, full-screen or not.
     ///
-    /// Never clears `.fullScreen` from `styleMask`: macOS 27 raises an uncaught
+    /// Outside a transition the mask is never touched: macOS 27 raises an uncaught
     /// NSGenericException ("NSWindowStyleMaskFullScreen cleared on a window outside of a
-    /// full screen transition") for that, and the exception killed the whole app. A
-    /// plain `close()` is the supported way to dismiss a full-screen window; the
-    /// `_NSExitFullScreenTransitionController` crash it was once dropped to avoid is
-    /// covered by closing only once this window's own transition has ended (the
-    /// topology coordinator defers `attemptClose` for that) and by `prepareForDisplayRemovalClose`.
+    /// full screen transition") for clearing `.fullScreen`, and that exception killed the
+    /// whole app. A plain `close()` is the supported way to dismiss a settled full-screen window.
     ///
-    /// `close()` still goes through the ObjC guard, so a throw on a future OS is logged
-    /// and survived rather than fatal. Returns the caught exception, if any. Logs the
-    /// exception name and `logContext` only — never the window title or the exception
-    /// reason, which can embed window descriptions.
+    /// While this window IS mid enter/exit transition (`isInTransition`), `close()` is the
+    /// `_NSExitFullScreenTransitionController` crash path, so the original protection is
+    /// kept there: the full-screen bit is cleared first, which AppKit allows during a
+    /// transition (`clearFullScreenMaskDuringTransition`). That is when the topology
+    /// coordinator's bounded wait for the transition has run out, and for an untracked window
+    /// (no wait at all).
+    ///
+    /// Both steps go through the ObjC guard, so a throw on a future OS is logged and survived
+    /// rather than fatal. Returns the exception `close()` raised, if any. Logs the exception
+    /// name and `logContext` only, never the window title or the exception reason, which can
+    /// embed window descriptions.
     @discardableResult
     func closeAfterDisplayRemoval(logContext: String) -> CaughtObjCException? {
+        clearFullScreenMaskDuringTransition(logContext: logContext)
         let caught = ObjCExceptionGuard.catching { close() }
         if let caught {
             winLog.error("closeAfterDisplayRemoval — close() raised \(caught.name, privacy: .public) and was contained (\(logContext, privacy: .public))")
         }
         return caught
+    }
+
+    /// The ONLY place in the app that clears `.fullScreen` from `styleMask` (a source-scan
+    /// test enforces that). It does nothing unless this window is mid transition, the one
+    /// time AppKit allows it. If the app's idea of "mid transition" is stale and AppKit
+    /// objects anyway, the exception is contained and logged, and the caller still closes.
+    private func clearFullScreenMaskDuringTransition(logContext: String) {
+        guard isInTransition, styleMask.contains(.fullScreen) else { return }
+        let caught = ObjCExceptionGuard.catching {
+            var mask = styleMask
+            mask.remove(.fullScreen)
+            styleMask = mask
+        }
+        if let caught {
+            winLog.error("clearFullScreenMaskDuringTransition — raised \(caught.name, privacy: .public) and was contained (\(logContext, privacy: .public))")
+        }
     }
 
     /// Set while this window's display is gone and its close waits out the grace. Such a

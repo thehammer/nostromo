@@ -344,11 +344,13 @@ final class DisplayTopologyCoordinator {
 /// `close()` can synchronously post didChangeScreenParameters, and a handler that
 /// still saw the key bound would act on the window a second time.
 ///
-/// There is deliberately no step that clears `.fullScreen` from the window's style
-/// mask: AppKit (macOS 27) throws when that happens outside a full-screen transition.
-/// The window is closed as-is, after its own transition has ended (the coordinator's
-/// `attemptClose` waits for that), which is what keeps the
-/// `_NSExitFullScreenTransitionController` crash path closed.
+/// There is deliberately no teardown step that clears `.fullScreen` from the window's
+/// style mask: AppKit (macOS 27) throws when that happens outside a full-screen transition.
+/// A settled full-screen window is closed as-is, after its own transition has ended (the
+/// coordinator's `attemptClose` waits for that). `close` itself keeps the old
+/// `_NSExitFullScreenTransitionController` protection for the one case left: a window still
+/// mid-transition when the wait runs out has the bit cleared first, which is legal then
+/// (`NostromoWindow.closeAfterDisplayRemoval`).
 enum VanishedWindowTeardown {
     struct Steps {
         var unbindKey: () -> Void

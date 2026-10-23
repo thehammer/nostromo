@@ -346,7 +346,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Close a window that has no live placement controller. Such a window would stay
     /// `alphaValue = 0` and windowed forever; closing is safe (it is not full-screen, and
-    /// a full-screen one is closed as-is, like screen removal: see `closeAfterDisplayRemoval`).
+    /// a full-screen one is closed like screen removal, with the same transition rule: see
+    /// `closeAfterDisplayRemoval`).
     private func closeUntrackedWindow(_ win: NostromoWindow, reason: String) {
         placementLog.log("windows", "closing untracked window '\(win.title)': \(reason)", warning: true)
         let index = windows.firstIndex { $0 === win }
@@ -509,9 +510,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Close the window of a display that stayed gone for the whole grace period (the
     /// coordinator has already waited out the window's own transition and checked the
     /// display is still gone). Marks it orphaned first so windowShouldClose allows the
-    /// close without terminating the app, and disables animations. The window is closed
-    /// while still full-screen: clearing `.fullScreen` from its style mask outside a
-    /// transition throws on macOS 27 (see `NostromoWindow.closeAfterDisplayRemoval`).
+    /// close without terminating the app, and disables animations. A settled full-screen window
+    /// is closed as-is (clearing `.fullScreen` outside a transition throws on macOS 27); one
+    /// still mid-transition gets the bit cleared first (see `NostromoWindow.closeAfterDisplayRemoval`).
     /// The order of the steps is `VanishedWindowTeardown`'s contract (unbind before any AppKit call).
     private func closeWindowForVanishedDisplay(_ uuid: String) {
         guard let win = windowsByDisplayUUID[uuid] else { return }
