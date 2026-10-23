@@ -20,6 +20,34 @@ struct BadgeInputs {
 /// refresh debounce. `TabBarView` only applies the results to its rows.
 struct SidebarBadgeModel {
     private var registry = FocusBadgeRegistry()
+    /// Tags the "needs you now" source last published a pill for.
+    private var needsYouNowTags: Set<String> = []
+    private static let needsYouNowSource = "needs-you-now"
+
+    /// Publish the red "needs you now" pill: `counts` is how many things are blocked on the operator
+    /// per focus tag. Tags missing from `counts` (or at zero) lose their pill. Any producer's count
+    /// may be fed here (approvals today; the tracker's "Waiting on you" strip later).
+    mutating func setNeedsYouNow(_ counts: [String: Int]) {
+        let live = counts.filter { $0.value > 0 }
+        for tag in needsYouNowTags.subtracting(live.keys) {
+            registry.clear(tag: tag, sourceKey: Self.needsYouNowSource)
+        }
+        for (tag, count) in live {
+            registry.publish(tag: tag, sourceKey: Self.needsYouNowSource, badge: .needsYouNow(count: count))
+        }
+        needsYouNowTags = Set(live.keys)
+    }
+
+    /// Per-focus counts of what the app-wide "needs you" snapshot holds for the pill. Decisions are
+    /// left out: they already show the purple attention dot.
+    static func needsYouNowCounts(from snapshot: NeedsYouSnapshot) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        for item in snapshot.items {
+            guard case .focus(let tag) = item.source, item.reason != .decisionOpen else { continue }
+            counts[tag, default: 0] += 1
+        }
+        return counts
+    }
 
     /// Recompute and publish the badges for the built-in focuses.
     mutating func update(_ inputs: BadgeInputs, now: Date, calendar: Calendar = BadgeProviders.chicago,

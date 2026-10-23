@@ -41,6 +41,13 @@ final class ApprovalOverlayHost: NSView {
     /// The card on screen (may be fading out).
     private(set) var card: ApprovalCardView?
 
+    /// The one-line bar standing in for the card while the person has it collapsed (AP3). The card
+    /// stays in the view tree, hidden, so its countdown, arming and scroll state are all kept.
+    private(set) var collapsedBar: ApprovalCollapsedBar?
+
+    /// Whether this window's card is collapsed to its bar.
+    var isCollapsed: Bool { collapsedBar != nil }
+
     /// The guard bar on screen, if the guard blocked something in the last minute (AP2b).
     private(set) var guardBar: GuardBlockedBar?
 
@@ -71,6 +78,9 @@ final class ApprovalOverlayHost: NSView {
     private let reduceMotion: () -> Bool
     private let cardArmDelay: TimeInterval
     private let cardIsOnScreen: (() -> Bool)?
+    /// Gives keyboard focus back to the composer (Esc in the card, or collapsing a focused card). Set
+    /// by the pane that owns the composer.
+    var focusComposer: (() -> Void)?
     private var subscription: AnyCancellable?
     /// Set while a card is fading out; a newer card or a refresh cancels it.
     private var fadingCard: ApprovalCardView?
@@ -118,6 +128,9 @@ final class ApprovalOverlayHost: NSView {
         card.map { [$0.listing] } ?? []
     }
 
+    /// What the bar says while collapsed, for `approvals list` (nil when expanded).
+    var collapsedBarText: String? { collapsedBar?.text }
+
     // MARK: Layout
 
     override func layout() {
@@ -133,7 +146,11 @@ final class ApprovalOverlayHost: NSView {
         guard width > 0 else { return }
         let barSpace = guardBar == nil ? 0 : GuardBlockedBar.height + Self.barGap
         var top = Self.bottomInset
-        if let card {
+        if let bar = collapsedBar {
+            let frame = NSRect(x: Self.leadingInset, y: Self.bottomInset, width: width, height: ApprovalCollapsedBar.height)
+            if bar.frame != frame { bar.frame = frame }
+            top = frame.maxY + Self.barGap
+        } else if let card {
             let height = card.preferredHeight(forWidth: width, maxHeight: bounds.height * Self.maxHeightFraction,
                                               hardMaxHeight: bounds.height - 2 * Self.bottomInset - barSpace)
             let frame = NSRect(x: Self.leadingInset, y: Self.bottomInset, width: width, height: height)
@@ -164,9 +181,72 @@ final class ApprovalOverlayHost: NSView {
         if let card, card.request.id == entry.request.id, fadingCard !== card {
             card.update(entry: entry)
             card.setPage(page)
+            syncCollapsed(entry)
             return
         }
         replaceCard(with: entry, page: page)
+        syncCollapsed(entry)
+    }
+
+    /// Show the bar instead of the card while the store says this request is collapsed (and still
+    /// waiting: an outcome is always shown on the full card).
+    private func syncCollapsed(_ entry: ApprovalEntry) {
+        let wanted = store.isCollapsed(entry.request.id) && !entry.isEnded
+        guard let card else { return }
+        if wanted {
+            let bar: ApprovalCollapsedBar
+            if let existing = collapsedBar, existing.requestID == entry.request.id {
+                bar = existing
+            } else {
+                collapsedBar?.removeFromSuperview()
+                bar = ApprovalCollapsedBar(request: card.request, model: card.model,
+                                           agentName: ApprovalKinds.capitalized(card.request.agent.name))
+                bar.onExpand = { [weak self] in
+                    guard let self, let id = self.currentRequestID else { return }
+                    self.store.setCollapsed(id, false)
+                }
+                addSubview(bar)
+                collapsedBar = bar
+                // A focused card is about to be hidden: keyboard focus goes back to the composer first.
+                if card.hasKeyboardFocus { focusComposer?() }
+            }
+            card.isHidden = true
+            needsLayout = true
+        } else if collapsedBar != nil {
+            collapsedBar?.removeFromSuperview()
+            collapsedBar = nil
+            card.isHidden = false
+            needsLayout = true
+        }
+    }
+
+    /// ⌥⌘A: move keyboard focus into the visible card of one of the focuses `window` shows. An
+    /// expanded bar is expanded first. False (the caller beeps) when no card is there to focus.
+    @discardableResult
+    static func focusCard(in window: NSWindow?) -> Bool {
+        guard let content = window?.contentView else { return false }
+        for host in visibleHosts(in: content) where host.focusVisibleCard() { return true }
+        return false
+    }
+
+    /// Every host below `view` that is on screen (not hidden, itself or by an ancestor).
+    static func visibleHosts(in view: NSView) -> [ApprovalOverlayHost] {
+        var hosts: [ApprovalOverlayHost] = []
+        func walk(_ v: NSView) {
+            if let host = v as? ApprovalOverlayHost, !host.isHiddenOrHasHiddenAncestor { hosts.append(host) }
+            v.subviews.forEach(walk)
+        }
+        walk(view)
+        return hosts
+    }
+
+    private func focusVisibleCard() -> Bool {
+        guard let card, let id = currentRequestID, let entry = store.entry(id: id), !entry.isEnded else { return false }
+        if store.isCollapsed(id) {
+            store.setCollapsed(id, false)   // the store's change refreshes this host synchronously
+            layoutSubtreeIfNeeded()
+        }
+        return card.focusCard()
     }
 
     private func show(requestID: String) {
@@ -183,6 +263,7 @@ final class ApprovalOverlayHost: NSView {
                                    questionDraft: questionDrafts[entry.request.id])
         new.onNeedsLayout = { [weak self] in self?.needsLayout = true }
         new.onShowRequest = { [weak self] id in self?.show(requestID: id) }
+        new.onReturnToComposer = { [weak self] in self?.focusComposer?() }
         new.setPage(page)
         addSubview(new)
         card = new
@@ -229,6 +310,9 @@ final class ApprovalOverlayHost: NSView {
     private func fadeOutCard() {
         guard let gone = card, fadingCard !== gone else { return }
         gone.countdown.stop()
+        collapsedBar?.removeFromSuperview()
+        collapsedBar = nil
+        gone.isHidden = false
         if reduceMotion() {
             removeCardNow()
             return
@@ -244,10 +328,113 @@ final class ApprovalOverlayHost: NSView {
     }
 
     private func removeCardNow() {
+        collapsedBar?.removeFromSuperview()
+        collapsedBar = nil
         card?.countdown.stop()
         card?.removeFromSuperview()
         card = nil
         fadingCard = nil
         needsLayout = true   // the guard bar, if any, drops back to the card's slot
     }
+}
+
+// MARK: - Collapsed bar (AP3)
+
+/// The card collapsed to one line: `⚠ Cody needs approval · Bash · rm -rf build/ …`, the countdown, and a
+/// chevron that expands it. It floats where the card did and keeps counting down; the request is still
+/// pending. It is never first responder on its own (the chevron can be reached with Tab like any button).
+final class ApprovalCollapsedBar: NSView {
+
+    static let height: CGFloat = 28
+    static let chevronWidth: CGFloat = 24
+
+    let requestID: String
+    /// The line: `⚠ Cody needs approval · Bash · rm -rf build/ …`.
+    let textLabel = NSTextField(labelWithString: "")
+    let countdown: ApprovalCountdownLabel
+    let expandButton = ApprovalButton(title: "", target: nil, action: nil)
+
+    /// The person pressed the chevron.
+    var onExpand: (() -> Void)?
+
+    /// The line as shown.
+    var text: String { textLabel.stringValue }
+    /// The countdown as shown (`denies in 14:32`): it ticks while the bar is on screen.
+    var countdownText: String { countdown.label.stringValue }
+
+    /// `nowMs` is the clock the countdown reads (a test injects one).
+    init(request: ApprovalRequestWire, model: ApprovalDisplayModel, agentName: String,
+         nowMs: @escaping () -> UInt64 = { UInt64(max(0, Date().timeIntervalSince1970 * 1000)) }) {
+        requestID = request.id
+        countdown = ApprovalCountdownLabel(deadlineAtMs: request.deadlineAtMs, nowMs: nowMs)
+        super.init(frame: .zero)
+        appearance = NSAppearance(named: .darkAqua)
+        wantsLayer = true
+        layer?.backgroundColor = ApprovalPalette.cardBackground.cgColor
+        layer?.borderColor = ApprovalPalette.warning.withAlphaComponent(0.6).cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = 6
+
+        textLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        textLabel.textColor = ApprovalPalette.commandText
+        textLabel.lineBreakMode = .byTruncatingTail
+        textLabel.maximumNumberOfLines = 1
+        textLabel.cell?.truncatesLastVisibleLine = true
+        textLabel.stringValue = Self.line(request: request, model: model, agentName: agentName)
+        textLabel.toolTip = textLabel.stringValue
+        textLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        expandButton.identifier = NSUserInterfaceItemIdentifier("expand")
+        expandButton.target = self
+        expandButton.action = #selector(expandPressed)
+        expandButton.isBordered = false
+        expandButton.image = NSImage(systemSymbolName: "chevron.up", accessibilityDescription: "Expand")
+        expandButton.imagePosition = .imageOnly
+        expandButton.contentTintColor = ApprovalPalette.mutedText
+        expandButton.setAccessibilityLabel("Expand the approval card")
+        expandButton.toolTip = "Expand"
+
+        for v in [textLabel, countdown.label, expandButton] {
+            v.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(v)
+        }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel(textLabel.stringValue)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    deinit { countdown.stop() }
+
+    /// `⚠ Cody needs approval · Bash · rm -rf build/ …`: the first command as shown (invisible
+    /// characters as tokens), with an ellipsis when there is more than that.
+    static func line(request: ApprovalRequestWire, model: ApprovalDisplayModel, agentName: String) -> String {
+        var line = "⚠ \(agentName) needs approval · \(request.displayName)"
+        let summary = model.summary
+        if !summary.isEmpty {
+            line += " · \(summary)"
+            if model.shownText != summary { line += " …" }
+        }
+        return line
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { countdown.stop() } else { countdown.start() }
+    }
+
+    override func layout() {
+        super.layout()
+        let pad: CGFloat = 8
+        let chevron = Self.chevronWidth
+        let countdownWidth = ApprovalCountdownLabel.width
+        expandButton.frame = NSRect(x: bounds.width - pad - chevron, y: (bounds.height - 18) / 2, width: chevron, height: 18)
+        countdown.label.frame = NSRect(x: expandButton.frame.minX - 4 - countdownWidth, y: (bounds.height - 16) / 2,
+                                       width: countdownWidth, height: 16)
+        textLabel.frame = NSRect(x: pad, y: (bounds.height - 16) / 2,
+                                 width: max(40, countdown.label.frame.minX - 8 - pad), height: 16)
+    }
+
+    @objc private func expandPressed() { onExpand?() }
 }

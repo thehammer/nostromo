@@ -5,7 +5,9 @@ import Foundation
 /// What a sidebar row shows for a focus beyond its label: an optional count pill, an
 /// optional second-line summary, and whether the focus needs the operator right now.
 struct FocusBadge: Equatable {
-    enum Level: Equatable { case info, attention }
+    /// `needsYouNow` outranks `attention` for the pill: something is blocked on the operator right
+    /// now (a pending approval). Any producer may publish it; see `FocusBadge.needsYouNow(count:)`.
+    enum Level: Equatable { case info, attention, needsYouNow }
 
     var pill: String?
     var detail: String?
@@ -17,6 +19,12 @@ struct FocusBadge: Equatable {
         self.detail = detail
         self.level = level
         self.accessibilityLabel = accessibilityLabel
+    }
+
+    /// A red count pill for a focus something is blocked on right now. `noun` reads after the
+    /// count in the accessibility label (`2 waiting on you`).
+    static func needsYouNow(count: Int, noun: String = "waiting on you") -> FocusBadge {
+        FocusBadge(pill: "\(count)", level: .needsYouNow, accessibilityLabel: "\(count) \(noun)")
     }
 }
 
@@ -42,13 +50,21 @@ struct FocusBadgeRegistry {
         entries.removeValue(forKey: Key(tag: tag, source: sourceKey))
     }
 
-    /// The tag's projected badge. Attention wins over info; the pill, detail and
-    /// accessibility label come from ONE source (the first, by source key, that has a
-    /// pill, else the first overall) so they never mix text from different sources.
+    /// The tag's projected badge. `needsYouNow` wins over attention, attention over info; the
+    /// pill, detail and accessibility label come from ONE source (the first, by source key, that
+    /// has a pill, else the first overall) so they never mix text from different sources. A
+    /// `needsYouNow` badge replaces the pill and label (the red count is what the operator must
+    /// see) and keeps the primary's second line.
     func badge(for tag: String) -> FocusBadge? {
         let mine = entries.filter { $0.key.tag == tag }.sorted { $0.key.source < $1.key.source }.map(\.value)
         guard var primary = mine.first(where: { $0.pill != nil }) ?? mine.first else { return nil }
-        if mine.contains(where: { $0.level == .attention }) { primary.level = .attention }
+        if let urgent = mine.first(where: { $0.level == .needsYouNow }) {
+            primary.pill = urgent.pill
+            primary.accessibilityLabel = urgent.accessibilityLabel
+            primary.level = .needsYouNow
+        } else if mine.contains(where: { $0.level == .attention }) {
+            primary.level = .attention
+        }
         return primary
     }
 

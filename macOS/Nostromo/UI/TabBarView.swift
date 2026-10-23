@@ -164,6 +164,13 @@ class TabBarView: NSView {
             .sink { [weak self] _ in self?.updateAttention() }
             .store(in: &cancellables)
 
+        // The red "needs you now" pill (pending approvals, today): applied in place, immediately.
+        // A row's pill and its height never depend on whether the focus is on screen.
+        AppStore.shared.$needsYou
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateBadges() }
+            .store(in: &cancellables)
+
         // Live counts / "needs you" signals on the built-in rows, computed from data the
         // app already holds. Debounced; applied in place (no rebuild, no height change).
         // The 30 s tick refreshes time-based text (meeting countdown, overdue).
@@ -366,6 +373,7 @@ class TabBarView: NSView {
     /// Recompute the built-in rows' badges and apply them in place.
     private func updateBadges() {
         let store = AppStore.shared
+        badges.setNeedsYouNow(SidebarBadgeModel.needsYouNowCounts(from: store.needsYou))
         badges.update(BadgeInputs(
             fredMailbox: store.fredMailbox, fredCalendar: store.fredCalendar, teriTodos: store.teriTodos,
             motherStatus: store.motherStatus, perriQueueCount: store.perriQueue.count,

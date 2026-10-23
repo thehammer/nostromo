@@ -298,6 +298,72 @@ final class NeedsYouNotifierTests: XCTestCase {
         XCTAssertTrue(center.allRemovedPendingIds.isEmpty)
     }
 
+    // MARK: - Producers whose ids are unique for good
+
+    private struct PlainBuilder: NeedsYouContentBuilder {
+        func content(for item: NeedsYouItem) -> NeedsYouNotificationContent? {
+            NeedsYouNotificationContent(title: "t", body: "b", threadIdentifier: "x", userInfo: [:])
+        }
+    }
+
+    private func onceNotifier(_ center: FakeNotificationCenter, baselineExisting: Bool = false) -> NeedsYouNotifier {
+        NeedsYouNotifier(center: center,
+                         builders: ["mother": jobTitles([:]), "approvals": PlainBuilder()],
+                         baselineExisting: baselineExisting, oncePerItemProducers: ["approvals"])
+    }
+
+    private func approvalItems(_ ids: String...) -> [NeedsYouItem] {
+        ids.map { NeedsYouItem(id: "approvals:\($0)", source: .focus("cody-1"), reason: .approvalPending(1)) }
+    }
+
+    func testAnIdOfAOncePerItemProducerThatResolvesAndReturnsIsNotPostedAgain() {
+        let center = FakeNotificationCenter()
+        let notifier = onceNotifier(center)
+
+        notifier.apply(snapshot(approvalItems("r1"), producer: "approvals"))
+        notifier.apply(NeedsYouSnapshot.empty)
+        XCTAssertEqual(center.allRemovedDeliveredIds, ["approvals:r1"], "it is still cleared when it leaves")
+        notifier.apply(snapshot(approvalItems("r1"), producer: "approvals"))
+
+        XCTAssertEqual(center.addedIds, ["approvals:r1"], "alerted once, however often the list drops and relists it")
+    }
+
+    func testANewIdOfAOncePerItemProducerStillPosts() {
+        let center = FakeNotificationCenter()
+        let notifier = onceNotifier(center)
+
+        notifier.apply(snapshot(approvalItems("r1"), producer: "approvals"))
+        notifier.apply(NeedsYouSnapshot.empty)
+        notifier.apply(snapshot(approvalItems("r1", "r2"), producer: "approvals"))
+
+        XCTAssertEqual(center.addedIds, ["approvals:r1", "approvals:r2"])
+    }
+
+    func testAnIdOfAProducerOutsideTheOncePerItemSetIsPostedAgainWhenItReturns() {
+        let center = FakeNotificationCenter()
+        let notifier = onceNotifier(center)
+
+        notifier.apply(snapshot([awaitingItem("j1")]))
+        notifier.apply(NeedsYouSnapshot.empty)
+        notifier.apply(snapshot([awaitingItem("j1")]))
+
+        XCTAssertEqual(center.addedIds, ["mother:j1:await", "mother:j1:await"])
+    }
+
+    func testBaselinedIdsOfAOncePerItemProducerDoNotAlertWhenTheyResolveAndReturn() {
+        let center = FakeNotificationCenter()
+        let notifier = onceNotifier(center, baselineExisting: true)
+
+        notifier.apply(snapshot(approvalItems("r1", "r2"), producer: "approvals"), baselining: "approvals")
+        XCTAssertTrue(center.added.isEmpty)
+        notifier.apply(NeedsYouSnapshot.empty)
+        notifier.apply(snapshot(approvalItems("r1", "r2"), producer: "approvals"))
+        XCTAssertTrue(center.added.isEmpty, "seen at launch, seen for good")
+
+        notifier.apply(snapshot(approvalItems("r1", "r2", "r3"), producer: "approvals"))
+        XCTAssertEqual(center.addedIds, ["approvals:r3"])
+    }
+
     // MARK: - Authorization
 
     private func baselineNotifier(_ center: FakeNotificationCenter) -> NeedsYouNotifier {

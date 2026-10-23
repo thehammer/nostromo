@@ -222,6 +222,14 @@ final class ApprovalCardView: NSView {
     /// Asked to re-measure the card (its content changed height: the note row opened).
     var onNeedsLayout: (() -> Void)?
 
+    /// Esc was pressed with keyboard focus inside the card: hand focus back to the composer (AP3).
+    var onReturnToComposer: (() -> Void)?
+
+    /// The header's chevron: shrink the card to its one-line bar. Collapsing is never an answer.
+    let collapseButton = ApprovalButton(title: "", target: nil, action: nil)
+    /// The header's chevron width.
+    static let chevronWidth: CGFloat = 22
+
     private let store: ApprovalStore
     private let windowID: () -> String
     private let permit: GesturePermit
@@ -311,10 +319,26 @@ final class ApprovalCardView: NSView {
         return inputView.textView
     }
 
-    /// Move keyboard focus into the card. Never called on arrival: only by the person.
-    func focusCard() {
-        guard let window, let target = initialKeyView else { return }
-        window.makeFirstResponder(target)
+    /// Move keyboard focus into the card. Never called on arrival: only by the person (a click, Tab,
+    /// or ⌥⌘A). Returns whether the card now holds focus.
+    @discardableResult
+    func focusCard() -> Bool {
+        guard let window, let target = initialKeyView else { return false }
+        return window.makeFirstResponder(target)
+    }
+
+    /// Keyboard focus is somewhere inside this card.
+    var hasKeyboardFocus: Bool {
+        guard let responder = window?.firstResponder as? NSView else { return false }
+        return responder === self || responder.isDescendant(of: self)
+    }
+
+    /// Esc with focus inside the card gives focus back to the composer without answering anything.
+    /// A second Esc (in the composer, within `ApprovalStore.escapeWindow`) collapses the card.
+    override func cancelOperation(_ sender: Any?) {
+        guard hasKeyboardFocus else { return }
+        store.noteEscapeFromCard(request.id)
+        onReturnToComposer?()
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -681,6 +705,18 @@ final class ApprovalCardView: NSView {
             addSubview(details)
         }
 
+        // The collapse chevron, at the header's right edge.
+        collapseButton.identifier = NSUserInterfaceItemIdentifier("collapse")
+        collapseButton.target = self
+        collapseButton.action = #selector(collapsePressed)
+        collapseButton.bezelStyle = .inline
+        collapseButton.isBordered = false
+        collapseButton.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Collapse")
+        collapseButton.imagePosition = .imageOnly
+        collapseButton.contentTintColor = ApprovalPalette.mutedText
+        collapseButton.setAccessibilityLabel("Collapse to a one-line bar")
+        collapseButton.toolTip = "Collapse (the request stays pending)"
+
         // Buttons: Deny, ▾, Deny & stop, ... Allow once
         denyButton = makeButton(title: "Deny", control: .deny, label: "Deny",
                                 tip: "Don't run it. The agent is told and carries on.")
@@ -709,15 +745,35 @@ final class ApprovalCardView: NSView {
             allowButton?.lineBreakMode = .byTruncatingTail
         }
 
-        for v in [headlineLabel, pageLabel, pagePreviousButton, pageNextButton, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
+        for v in [headlineLabel, pageLabel, pagePreviousButton, pageNextButton, collapseButton, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
                   formScroll, inputView, agentSaysLabel, noticeLabel, noteRow, statusLabel, buttonRow] {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
         }
         formScroll.isHidden = questionForm == nil
+        configureKeyLoop()
         applyDetails()
         inputView.onShownEveryLine = { [weak self] in self?.refresh() }
         inputView.onDisplayFailed = { [weak self] in self?.showDisplayFailed() }
+    }
+
+    /// Tab cycles the card's buttons (and the raw input first, when the card shows it), and wraps:
+    /// keyboard focus stays in the card until Esc.
+    private func configureKeyLoop() {
+        var ring: [NSView] = []
+        if questionForm == nil { ring.append(inputView.textView) }
+        ring.append(denyButton)
+        if let b = denyMoreButton { ring.append(b) }
+        if let b = denyAndStopButton { ring.append(b) }
+        if let b = allowButton { ring.append(b) }
+        if let b = submitButton { ring.append(b) }
+        ring.append(collapseButton)
+        for (i, view) in ring.enumerated() { view.nextKeyView = ring[(i + 1) % ring.count] }
+    }
+
+    @objc private func collapsePressed() {
+        if hasKeyboardFocus { onReturnToComposer?() }   // the card is about to be hidden: leave it first
+        store.setCollapsed(request.id, true)
     }
 
     static let displayFailedBanner = "Can't display this input safely. Deny it."
@@ -903,17 +959,20 @@ final class ApprovalCardView: NSView {
         let headerHeight: CGFloat = 18
         if apply {
             let countdownWidth = ApprovalCountdownLabel.width
-            countdown.label.frame = NSRect(x: pad + inner - countdownWidth, y: y + 1, width: countdownWidth, height: 16)
+            let chevron = Self.chevronWidth
+            collapseButton.frame = NSRect(x: pad + inner - chevron, y: y, width: chevron, height: headerHeight)
+            let right = inner - chevron - 4   // the countdown and pager end here
+            countdown.label.frame = NSRect(x: pad + right - countdownWidth, y: y + 1, width: countdownWidth, height: 16)
             // The page controls are always placed (hidden when the focus holds one request), so showing them moves nothing else.
             let arrow = Self.pageArrowWidth
             let label = max(Self.pageLabelWidth, ceil(pageLabel.cell?.cellSize.width ?? 0) + 4)
             let pager = 2 * arrow + label
-            let left = pad + inner - countdownWidth - 4 - pager
+            let left = pad + right - countdownWidth - 4 - pager
             pagePreviousButton.frame = NSRect(x: left, y: y, width: arrow, height: headerHeight)
             pageLabel.frame = NSRect(x: left + arrow, y: y + 1, width: label, height: 16)
             pageNextButton.frame = NSRect(x: left + arrow + label, y: y, width: arrow, height: headerHeight)
             let pagerWidth: CGFloat = currentPage == nil ? 0 : pager + 4
-            let headlineWidth = max(40, inner - countdownWidth - pagerWidth - 8)
+            let headlineWidth = max(40, right - countdownWidth - pagerWidth - 8)
             headlineLabel.frame = NSRect(x: pad, y: y, width: headlineWidth, height: headerHeight)
         }
         y += headerHeight + Self.rowGap

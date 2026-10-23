@@ -422,6 +422,8 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
 
     // Swallow Escape so it can't trigger a full-screen exit via cancelOperation.
     override func cancelOperation(_ sender: Any?) {
+        // A second Esc right after leaving an approval card with Esc collapses that card (AP3).
+        if ApprovalStore.shared.collapseAfterEscape() { return }
         winLog.debug("cancelOperation swallowed (Escape key)")
     }
 }

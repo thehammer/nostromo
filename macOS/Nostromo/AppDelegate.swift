@@ -1,4 +1,5 @@
 import AppKit
+import NostromoKit
 import UserNotifications
 import os
 
@@ -11,6 +12,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private(set) var windows: [NostromoWindow] = []
+    /// Publishes pending approvals into the app-wide "needs you" source.
+    private var approvalBadges: ApprovalBadges?
 
     /// Every window is bound to ONE display, keyed by its stable display UUID
     /// (not `NSScreenNumber`, which can change across reconnects; not the window
@@ -87,6 +90,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // The approval store listens from before the daemon connects: a permission request
         // is an event, and one that arrives with no listener is gone until the next snapshot.
         _ = ApprovalStore.shared
+        // Pending approvals feed the one app-wide "needs you" source: Dock badge, sidebar pill, notification.
+        approvalBadges = ApprovalBadges(store: .shared) { items, baseline in
+            AppStore.shared.needsYouCoordinator.setProducer(ApprovalsNeedsYouProducer.name, items: items,
+                                                            baseline: baseline)
+        }
         AppStore.shared.start()
         AppStore.shared.startMemoryWatchdog()
         // The single app-wide owner of decision-modal presentation — started
@@ -309,8 +317,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let sessionMenu = NSMenu(title: "Session")
         sessionMenuItem.submenu = sessionMenu
         sessionMenu.addItem(ModelShortcut.makeMenuItem())
+        // ⌥⌘A: move keyboard focus into the visible approval card (AP3). No visible card: a beep.
+        let approvalCardItem = NSMenuItem(title: "Go to Approval Card", action: #selector(goToApprovalCard(_:)),
+                                          keyEquivalent: "a")
+        approvalCardItem.keyEquivalentModifierMask = [.command, .option]
+        approvalCardItem.target = self
+        sessionMenu.addItem(approvalCardItem)
 
         NSApplication.shared.mainMenu = mainMenu
+    }
+
+    /// ⌥⌘A: keyboard focus goes into the key window's visible approval card, on its initial key view
+    /// (Deny for a default-to-no request). A person's act, so it may change first responder; nothing
+    /// else does. Never answers.
+    @objc func goToApprovalCard(_ sender: Any?) {
+        if !ApprovalOverlayHost.focusCard(in: NSApp.keyWindow) { NSSound.beep() }
     }
 
     /// ⇧⌘M with focus outside every input bar (a list, the transcript): open the key
@@ -584,18 +605,30 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         defer { completionHandler() }
         guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        // An approval notification brings the app forward itself (`ApprovalNotifier`), selects its focus and
+        // puts the card in view. It has no action: the person reads the card and answers there.
+        if ApprovalNotifier.live.handleClick(userInfo: response.notification.request.content.userInfo) { return }
         NSApp.activate(ignoringOtherApps: true)
         // Another producer's items route to their focus once a router exists (AP3); for now the
         // app just comes forward.
         NeedsYouRouting.route(userInfo: response.notification.request.content.userInfo)
     }
 
-    /// While the app is active, show a banner only if the operator is not already looking at the
-    /// Mother view in the key window (the item is on screen there).
+    /// While the app is active, show a banner unless the item is already on screen in the key window:
+    /// the Mother view for Mother's items, the card for an approval (`NeedsYouPresentation`).
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler(Self.motherViewIsVisible(in: NSApp.keyWindow?.contentView) ? [] : [.banner])
+        let showsBanner = NeedsYouPresentation.showsBanner(
+            userInfo: notification.request.content.userInfo,
+            cardIsVisible: { Self.approvalCardIsVisible(tag: $0) },
+            motherViewIsVisible: { Self.motherViewIsVisible(in: NSApp.keyWindow?.contentView) })
+        completionHandler(showsBanner ? [.banner] : [])
+    }
+
+    private static func approvalCardIsVisible(tag: String) -> Bool {
+        guard let content = NSApp.keyWindow?.contentView else { return false }
+        return ApprovalOverlayHost.visibleHosts(in: content).contains { $0.focusTag == tag && $0.card != nil }
     }
 
     private static func motherViewIsVisible(in view: NSView?) -> Bool {

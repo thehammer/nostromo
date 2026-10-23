@@ -69,6 +69,13 @@ final class ApprovalStore {
     /// Fires with the focus tag whenever what that focus shows may have changed.
     let changes = PassthroughSubject<String, Never>()
 
+    /// Fires after every daemon snapshot has been applied, EVEN WHEN IT TOUCHED NOTHING (an empty first
+    /// snapshot sends no `changes` event). `ApprovalBadges` uses it to take the notifier's baseline.
+    let snapshotHandled = PassthroughSubject<Void, Never>()
+
+    /// True from the first daemon snapshot on: only then is the pending list the daemon's truth.
+    private(set) var hasHandledSnapshot = false
+
     /// Fires with a tool call's `tool_use_id` whenever the status its row shows may have changed (AP2b).
     let statusChanges = PassthroughSubject<String, Never>()
 
@@ -97,6 +104,12 @@ final class ApprovalStore {
     /// Which request last made each tool call await: only it may end that wait. A reused
     /// `tool_use_id` must not let a late frame for the old request overwrite the new request's wait.
     private var waitOwner: [String: String] = [:]
+    /// Requests whose card the person collapsed to a one-line bar (AP3). Held here, not in a view: a
+    /// rebuilt card or a second window shows the same state. Never an answer: the request stays pending.
+    private var collapsed = Set<String>()
+    /// The request the person last pressed Esc on inside its card, and when: a second Esc soon after
+    /// (now in the composer) collapses it.
+    private var escapeFromCard: (id: String, at: Date)?
     /// The guard block each focus's bar shows.
     private var notices: [String: ApprovalGuardNotice] = [:]
     /// The `entry_id` of the last block each focus was told of: a repeat of it (a replayed frame) says
@@ -157,12 +170,52 @@ final class ApprovalStore {
         visible(tag: tag).filter { !$0.isEnded }.count
     }
 
+    /// Every request still waiting, oldest first, across focuses (what the sidebar pill, the Dock badge
+    /// and the notifications are made from).
+    func pendingRequests() -> [ApprovalRequestWire] {
+        entries.values.filter { !$0.isEnded }.map(\.request).sorted {
+            ($0.createdAtMs, $0.requestId) < ($1.createdAtMs, $1.requestId)
+        }
+    }
+
     /// The number shown as `+N more`: every other entry the focus holds.
     func moreCount(tag: String) -> Int { max(0, visible(tag: tag).count - 1) }
 
     /// True the first time it is asked for `id`: the card announces itself to VoiceOver once.
     func claimAnnouncement(_ id: String) -> Bool {
         announced.insert(id).inserted
+    }
+
+    // MARK: Collapse (AP3)
+
+    /// The card for `id` is collapsed to its one-line bar.
+    func isCollapsed(_ id: String) -> Bool { collapsed.contains(id) }
+
+    /// Collapse or expand the card of a request that is still waiting. Answers nothing.
+    func setCollapsed(_ id: String, _ value: Bool) {
+        guard let entry = entries[id], !entry.isEnded, collapsed.contains(id) != value else { return }
+        if value { collapsed.insert(id) } else { collapsed.remove(id) }
+        changes.send(entry.request.tag)
+    }
+
+    /// Esc pressed with keyboard focus inside the card of `id`: focus goes back to the composer, and
+    /// the next Esc within `escapeWindow` collapses this card (`collapseAfterEscape`).
+    func noteEscapeFromCard(_ id: String, now: Date = Date()) {
+        escapeFromCard = (id, now)
+    }
+
+    /// How long after leaving a card with Esc a second Esc still collapses it.
+    static let escapeWindow: TimeInterval = 2
+
+    /// A second Esc, in the composer. True when it collapsed the card the first one left.
+    @discardableResult
+    func collapseAfterEscape(now: Date = Date()) -> Bool {
+        guard let last = escapeFromCard else { return false }
+        escapeFromCard = nil
+        guard now.timeIntervalSince(last.at) <= Self.escapeWindow, let entry = entries[last.id], !entry.isEnded,
+              !collapsed.contains(last.id) else { return false }
+        setCollapsed(last.id, true)
+        return true
     }
 
     // MARK: Row status (AP2b)
@@ -308,6 +361,8 @@ final class ApprovalStore {
     /// The daemon's list is the truth: add what it holds that we don't, and drop what we
     /// show that it no longer holds.
     private func replaceAll(with requests: [ApprovalRequestWire]) {
+        // Set before any `changes` event goes out, so the first publish that follows is the baseline.
+        hasHandledSnapshot = true
         let held = Set(requests.map(\.id))
         var touched = Set<String>()
         for (id, entry) in entries where !held.contains(id) && !entry.isEnded {
@@ -320,6 +375,7 @@ final class ApprovalStore {
             touched.insert(request.tag)
         }
         touched.forEach { changes.send($0) }
+        snapshotHandled.send()
     }
 
     private func end(_ id: String, text: String) {
@@ -367,6 +423,7 @@ final class ApprovalStore {
 
     private func remove(_ id: String) {
         guard let entry = entries.removeValue(forKey: id) else { return }
+        collapsed.remove(id)
         if waitOwner[entry.request.toolUseId] == id { waitOwner.removeValue(forKey: entry.request.toolUseId) }
         order[entry.request.tag]?.removeAll { $0 == id }
         if order[entry.request.tag]?.isEmpty == true { order.removeValue(forKey: entry.request.tag) }

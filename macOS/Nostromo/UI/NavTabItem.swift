@@ -12,6 +12,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
     /// Pill text currently shown (nil when hidden). Exposed for tests.
     var pillText: String? { pillBox.isHidden ? nil : pillLabel.stringValue }
+    /// The pill shown is the red "needs you now" one. Exposed for tests and `approvals badges`.
+    private(set) var showsNeedsYouNow = false
     /// Second-line text currently shown. Exposed for tests.
     var secondaryText: String? { secondaryLabel?.stringValue }
 
@@ -213,9 +215,14 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     /// Apply a badge in place: pill text, second line (Fred/Mother/Teri built-ins only)
     /// and accessibility label. `nil` clears them. Never changes the row's height.
     func setBadge(_ badge: FocusBadge?) {
+        showsNeedsYouNow = badge?.level == .needsYouNow && badge?.pill != nil
         if let pill = badge?.pill {
             pillLabel.stringValue = pill
             pillBox.isHidden = false
+            // The red "needs you now" variant is opaque; the rest keep the quiet cornflower.
+            pillBox.layer?.backgroundColor = badge?.level == .needsYouNow
+                ? Theme.needsYouNow.cgColor
+                : Theme.cornflower.withAlphaComponent(0.25).cgColor
         } else {
             pillBox.isHidden = true
         }
@@ -226,7 +233,12 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         }
 
         if let badge {
-            let suffix = badge.level == .attention ? ", needs your attention" : ""
+            let suffix: String
+            switch badge.level {
+            case .needsYouNow: suffix = ", needs you now"
+            case .attention: suffix = ", needs your attention"
+            case .info: suffix = ""
+            }
             setAccessibilityElement(true)
             setAccessibilityRole(.button)
             setAccessibilityLabel(badge.accessibilityLabel + suffix)
