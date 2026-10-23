@@ -402,6 +402,9 @@ async fn main() -> Result<()> {
             .configure_tracker_frame_provider(registry.clone());
         registry.start_watching(broadcast_tx.clone());
         registry.flush(&broadcast_tx);
+        // A layout call that drops the tracker pane (the user's close
+        // included) leaves the board bound but hidden.
+        registry.follow_panes(&pane_registry, broadcast_tx.clone());
         registry
     };
 

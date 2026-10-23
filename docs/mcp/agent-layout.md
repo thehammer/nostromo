@@ -276,6 +276,16 @@ adding `work` only when that connection's `welcome` lists it; a later
 `subscribe` on a live connection replaces the topic list and replays retained
 frames for the topics it adds (never to a network peer).
 
+## The tracker pane
+
+`nostromo.tracker` places its own pane (leaf id `tracker`) on a focus's first
+`open`: beside the transcript, or as a pinned `Tracker` tab in the detail region
+(see [`tracker.md`](tracker.md#where-it-appears)). Layout tools do not manage it.
+A layout call (`apply_layout`, `set_pane_layout`, `reset_panes`) whose tree lacks
+the `tracker` leaf hides it: the board stays bound and writable, `visible` turns
+`false`, and the pane only returns on an explicit `open` with `show:true`. Include
+the `tracker` leaf in a tree to keep it.
+
 ## Native panes
 
 Some panes are hosted natively by the Mac app rather than filled by an agent:

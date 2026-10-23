@@ -916,7 +916,13 @@ impl SessionManager {
         // already-assembled workspace.
         if !resume {
             if let Some(reg) = &self.pane_registry {
-                reg.lock().unwrap().init_focus(&tag);
+                // A focus with a bound tracker board keeps its tracker pane
+                // across the fresh session (contract §6).
+                let has_tracker = self
+                    .tracker_frame_provider
+                    .as_ref()
+                    .is_some_and(|p| p.has_bound_board(&tag));
+                reg.lock().unwrap().init_focus_with_tracker(&tag, has_tracker);
             }
         }
 

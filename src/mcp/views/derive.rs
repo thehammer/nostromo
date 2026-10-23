@@ -130,7 +130,9 @@ pub fn view_state(
         let view = bindings
             .get(pane_id)
             .and_then(|b| view_of_binding(b, current_pr));
-        let pinned = view.as_ref().is_some_and(|v| {
+        // The tracker tab is never evicted, whatever it is bound to.
+        let tracker_tab = pane_id == crate::tracker::placement::TRACKER_PANE_ID;
+        let pinned = tracker_tab || view.as_ref().is_some_and(|v| {
             // The PR under review's conversation/diff are pinned; so is any view
             // type the rules mark `pinned` (the review queue).
             let rule_pins = cfg.view(v.view_type.as_str()).map(|r| r.pinned).unwrap_or(false);

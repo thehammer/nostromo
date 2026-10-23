@@ -21,6 +21,7 @@ pub mod format;
 pub mod model;
 pub mod ops;
 pub mod paths;
+pub mod placement;
 pub mod registry;
 pub mod render;
 pub mod view;

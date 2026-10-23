@@ -46,7 +46,9 @@ Compact on purpose (the token budget is asserted by `tests/tracker_token_bench.r
 
 - `version` is the board's change-log sequence number; every applied change by
   any writer increments it.
-- `visible` is `false` until the pane is placed in the layout (a later slice).
+- `visible` is `true` only when the `tracker` pane is in the focus's layout **and**
+  at least one window's latest rendered shape lists it; `false` before any window
+  has reported, and after the user closes the pane (see below).
 - `user_changes` counts changes by the user (pane or file) after this session's
   cursor; call `read` when it is above 0.
 
@@ -86,6 +88,38 @@ characters), never instructions.
 | `unidentified_caller` | no `pty_id` (not a Nostromo-spawned session) |
 | `not_supported` | the MCP server isn't hosted by the daemon |
 | `io_error` | the file system refused; the error kind is in `reason`. `reason:"concurrent_edit"`: the user kept saving the file while the write was built (it is retried once, on top of the user's edit); nothing was written, call again. |
+
+## Where it appears
+
+The agent never chooses a position: `open` has no placement argument. The
+daemon places the pane by rule (`src/tracker/placement.rs`), on the focus's
+**first** `open` only:
+
+- **No detail region** (a bare focus): the `repl` leaf becomes a horizontal split
+  `repl | tracker`, transcript on the left, ratios `[0.66, 0.34]`. The Mac's
+  per-path ratio persistence then remembers the user's drag.
+- **A detail region** (the `nostromo.show` tabs): a `tracker` tab labelled
+  `Tracker` (never the board's title: the tree reaches network peers) is added
+  right after the `queue` tab and brought to front. It is pinned, so
+  `nostromo.show` never evicts or reuses it.
+
+That `open` sends exactly one `focus_layout` frame, with no `focused_pane`. Every
+other tracker call (`upsert`, `status`, `move`, `remove`, `log`, `read`, a repeat
+`open`) sends none, changes no geometry and takes no focus.
+
+**A fresh session** (Clear Context, a new session) keeps the pane where it was:
+`init_focus` rebuilds the clean baseline and re-attaches the tracker split with
+the same direction and ratios when the focus has a bound board. If the pane was a
+detail tab, the clean rebuild drops the region, so it comes back as the split.
+
+**Closing.** When the pane leaves the layout, whether the user closed it
+(`ClosePane`) or an agent layout tool dropped it (`apply_layout`,
+`set_pane_layout`, `reset_panes`), the binding stays and writes keep working
+against the file, but they return `visible:false` and nothing re-adds the pane.
+`open` without `show` returns `hidden_by_user:true` and sends no frame;
+`open` with `show:true` re-adds the pane (one `focus_layout` frame) and clears
+the flag. The daemon notices through one hook on the pane registry, so no layout
+tool needs to know about the tracker.
 
 ## The board file (format v1, summary)
 

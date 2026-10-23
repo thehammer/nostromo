@@ -212,6 +212,16 @@ pub fn label_for(view_type: ViewType, identity: &ViewIdentity) -> String {
     }
 }
 
+/// The caption of a tab that holds no curated view: the tracker's literal
+/// label, else its pane id.
+pub fn pane_label(pane_id: &str) -> String {
+    if pane_id == crate::tracker::placement::TRACKER_PANE_ID {
+        crate::tracker::placement::TRACKER_LABEL.to_string()
+    } else {
+        pane_id.to_string()
+    }
+}
+
 // ── the derived state the engine reasons over ────────────────────────────────
 
 /// One live view in a region.

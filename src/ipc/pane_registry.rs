@@ -32,7 +32,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -59,7 +59,16 @@ pub trait PaneContentProvider: Send + Sync {
 pub trait TrackerFrameProvider: Send + Sync {
     /// One `TrackerBoard` and one `TrackerSummary` per focus with a bound board.
     fn tracker_frames(&self) -> Vec<ServerMsg>;
+
+    /// Whether `tag` has a bound board: a fresh session of it keeps the
+    /// tracker pane where it was ([`PaneRegistry::init_focus_with_tracker`]).
+    fn has_bound_board(&self, tag: &str) -> bool;
 }
+
+/// Told, after a layout mutation of `tag` that changed which panes exist,
+/// which pane ids it `removed` and which it `added`. Runs under the registry's
+/// lock: it must not call back into the pane registry.
+pub type PaneSetHook = Arc<dyn Fn(&str, &[String], &[String]) + Send + Sync>;
 
 /// Supplies the current Perri queue + per-focus PR snapshots for attach
 /// replay. `ServerMsg::PerriState` is otherwise only broadcast on watch
@@ -202,6 +211,8 @@ pub struct PaneRegistry {
     /// of what a pane *is*. A report surviving a daemon restart would claim a
     /// client-side fact the daemon has no way to still vouch for.
     rendered_shapes: HashMap<(String, String), RenderedShapeReport>,
+    /// Told when a mutation changes a focus's pane ids. Not persisted.
+    pane_set_hook: Option<PaneSetHook>,
     store_path: Option<PathBuf>,
 }
 
@@ -244,6 +255,7 @@ impl PaneRegistry {
             painted: HashMap::new(),
             view_focus_lru: HashMap::new(),
             rendered_shapes: HashMap::new(),
+            pane_set_hook: None,
             store_path: Some(store_path),
         }
     }
@@ -257,6 +269,7 @@ impl PaneRegistry {
             painted: HashMap::new(),
             view_focus_lru: HashMap::new(),
             rendered_shapes: HashMap::new(),
+            pane_set_hook: None,
             store_path: None,
         }
     }
@@ -365,6 +378,13 @@ impl PaneRegistry {
         let tree = self.trees.get(tag).cloned().ok_or(PaneError::UnknownView)?;
         if !tree.pane_ids().iter().any(|p| p == pane_id) {
             return Err(PaneError::UnknownPane);
+        }
+        if pane_id == crate::tracker::placement::TRACKER_PANE_ID {
+            // The user closes the tracker wherever it is: a split's side or a
+            // detail tab. The binding stays; only the pane goes.
+            let new_tree = crate::tracker::placement::remove_tracker(&tree)
+                .ok_or(PaneError::NotClosable)?;
+            return self.set_layout(tag, &serde_json::json!({ "tree": new_tree }));
         }
         let is_queue = pane_id == "queue"
             || self.source_for(tag, pane_id) == Some(crate::mcp::tools::apply_layout::SOURCE_PR_QUEUE);
@@ -650,6 +670,19 @@ impl PaneRegistry {
         out
     }
 
+    /// Whether `pane_id` is in `tag`'s tree and at least one window's latest
+    /// rendered-shape report for `tag` lists it. No report at all is "not
+    /// visible": an unknown never counts as a yes.
+    pub fn is_pane_rendered(&self, tag: &str, pane_id: &str) -> bool {
+        self.trees
+            .get(tag)
+            .is_some_and(|t| t.pane_ids().iter().any(|id| id == pane_id))
+            && self
+                .rendered_shapes_for_tag(tag)
+                .iter()
+                .any(|(_, report)| report.pane_ids.iter().any(|id| id == pane_id))
+    }
+
     /// Drop every rendered-shape report that arrived on `conn_key` — called
     /// when that connection disconnects, so a closed window's report
     /// disappears from subsequent tool responses instead of outliving the
@@ -667,8 +700,22 @@ impl PaneRegistry {
     /// (`mother`, `teri`, `fred`; see `default_native_tree`) or else a single
     /// REPL leaf. Called on a fresh, non-resume session spawn.
     pub fn init_focus(&mut self, tag: &str) -> PaneTree {
-        let tree = crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
-        self.trees.insert(tag.to_string(), tree.clone());
+        self.init_focus_with_tracker(tag, false)
+    }
+
+    /// [`Self::init_focus`], and when `has_tracker` (the focus has a bound
+    /// board) a tracker pane the previous tree had is re-attached in the same
+    /// place, so a fresh session keeps it (contract §6).
+    pub fn init_focus_with_tracker(&mut self, tag: &str, has_tracker: bool) -> PaneTree {
+        let baseline =
+            crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
+        let tree = match self.trees.get(tag) {
+            Some(previous) if has_tracker => {
+                crate::tracker::placement::reattach_tracker(&baseline, previous)
+            }
+            _ => baseline,
+        };
+        self.replace_tree(tag, tree.clone());
         self.prune_to_tree(tag);
         self.persist();
         tree
@@ -697,6 +744,7 @@ impl PaneRegistry {
         position: SplitPosition,
         relative_to: &str,
     ) -> Result<PaneTree, PaneError> {
+        let before = self.pane_ids(tag);
         let tree = self.trees.get_mut(tag).ok_or(PaneError::UnknownView)?;
 
         // Reject duplicate ids before mutating anything.
@@ -712,6 +760,7 @@ impl PaneRegistry {
             return Err(PaneError::UnknownPane);
         }
         let result = tree.clone();
+        self.notify_pane_set(tag, &before);
         // create_pane only ever adds panes, so this can't drop a binding — but
         // calling it keeps every tree-mutating path going through the same
         // pruning choke point (D2).
@@ -727,7 +776,7 @@ impl PaneRegistry {
             return Err(PaneError::UnknownView);
         }
         let tree = crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
-        self.trees.insert(tag.to_string(), tree.clone());
+        self.replace_tree(tag, tree.clone());
         self.prune_to_tree(tag);
         self.persist();
         Ok(tree)
@@ -782,7 +831,7 @@ impl PaneRegistry {
                     return Err(PaneError::NativePaneRequired);
                 }
             }
-            self.trees.insert(tag.to_string(), new_tree.clone());
+            self.replace_tree(tag, new_tree.clone());
             self.prune_to_tree(tag);
             self.persist();
             return Ok(new_tree);
@@ -806,6 +855,34 @@ impl PaneRegistry {
         self.prune_to_tree(tag);
         self.persist();
         Ok(result)
+    }
+
+    /// Installs the [`PaneSetHook`] (the daemon wires one: the tracker follows
+    /// its pane through it).
+    pub fn set_pane_set_hook(&mut self, hook: PaneSetHook) {
+        self.pane_set_hook = Some(hook);
+    }
+
+    /// Replaces `tag`'s tree, telling the hook which panes that removed or
+    /// added. Every wholesale replacement goes through here.
+    fn replace_tree(&mut self, tag: &str, tree: PaneTree) {
+        let before = self.pane_ids(tag);
+        self.trees.insert(tag.to_string(), tree);
+        self.notify_pane_set(tag, &before);
+    }
+
+    /// Calls the hook with the difference between `before` and `tag`'s
+    /// current pane ids, when there is one.
+    fn notify_pane_set(&self, tag: &str, before: &[String]) {
+        let Some(hook) = &self.pane_set_hook else {
+            return;
+        };
+        let after = self.pane_ids(tag);
+        let removed: Vec<String> = before.iter().filter(|id| !after.contains(id)).cloned().collect();
+        let added: Vec<String> = after.iter().filter(|id| !before.contains(id)).cloned().collect();
+        if !removed.is_empty() || !added.is_empty() {
+            hook(tag, &removed, &added);
+        }
     }
 
     // ── binding hygiene (D2) ────────────────────────────────────────────────────
@@ -3393,5 +3470,193 @@ mod native_surface_tests {
             reg.set_layout(tag, &serde_json::json!({ "tree": tree }))
                 .unwrap_or_else(|e| panic!("{tag}: {e:?}"));
         }
+    }
+
+    // ── T0c — a fresh session keeps the tracker pane; the pane-set hook ───────
+
+    fn repl_beside_tracker(ratios: Vec<f32>) -> PaneTree {
+        PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf { pane_id: "repl".into() },
+                PaneTree::Leaf { pane_id: "tracker".into() },
+            ],
+            ratios,
+        }
+    }
+
+    fn with_tree(tag: &str, tree: &PaneTree) -> PaneRegistry {
+        let mut reg = PaneRegistry::in_memory();
+        reg.get_or_init(tag);
+        reg.set_layout(tag, &serde_json::json!({ "tree": tree })).unwrap();
+        reg
+    }
+
+    #[test]
+    fn a_fresh_session_with_a_bound_board_keeps_the_tracker_split_and_the_users_ratios() {
+        let previous = repl_beside_tracker(vec![0.5, 0.5]);
+        let mut reg = with_tree("cody-x", &previous);
+        let tree = reg.init_focus_with_tracker("cody-x", true);
+        assert_eq!(tree, previous);
+        assert_eq!(reg.get("cody-x"), Some(&previous), "and the registry holds it");
+    }
+
+    #[test]
+    fn a_fresh_session_without_a_bound_board_gets_todays_baseline() {
+        let mut reg = with_tree("cody-x", &repl_beside_tracker(vec![0.5, 0.5]));
+        assert_eq!(reg.init_focus_with_tracker("cody-x", false), PaneTree::repl_leaf());
+        let mut reg = with_tree("cody-x", &repl_beside_tracker(vec![0.5, 0.5]));
+        assert_eq!(reg.init_focus("cody-x"), PaneTree::repl_leaf());
+        assert_eq!(reg.pane_ids("cody-x"), vec!["repl".to_string()]);
+    }
+
+    #[test]
+    fn a_fresh_session_whose_previous_tracker_was_a_detail_tab_falls_back_to_the_default_split() {
+        let previous = PaneTree::Split {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Tabs {
+                    children: vec![
+                        PaneTree::Leaf { pane_id: "queue".into() },
+                        PaneTree::Leaf { pane_id: "tracker".into() },
+                    ],
+                    labels: vec!["Queue".into(), "Tracker".into()],
+                    active: 1,
+                    region: Some("detail".into()),
+                },
+                PaneTree::Leaf { pane_id: "repl".into() },
+            ],
+            ratios: vec![0.6, 0.4],
+        };
+        let mut reg = with_tree("cody-x", &previous);
+        assert_eq!(
+            reg.init_focus_with_tracker("cody-x", true),
+            repl_beside_tracker(vec![0.66, 0.34])
+        );
+    }
+
+    #[test]
+    fn a_fresh_session_whose_previous_tree_had_no_tracker_gets_the_plain_baseline_even_with_a_board() {
+        let mut reg = with_tree("cody-x", &PaneTree::repl_leaf());
+        assert_eq!(reg.init_focus_with_tracker("cody-x", true), PaneTree::repl_leaf());
+        // A tag the registry has never seen has no previous tree at all.
+        let mut reg = PaneRegistry::in_memory();
+        assert_eq!(reg.init_focus_with_tracker("brand-new", true), PaneTree::repl_leaf());
+    }
+
+    type Calls = std::sync::Arc<Mutex<Vec<(String, Vec<String>, Vec<String>)>>>;
+
+    fn hooked(reg: &mut PaneRegistry) -> Calls {
+        let calls: Calls = Default::default();
+        let sink = calls.clone();
+        reg.set_pane_set_hook(std::sync::Arc::new(move |tag, removed, added| {
+            sink.lock().unwrap().push((tag.to_string(), removed.to_vec(), added.to_vec()));
+        }));
+        calls
+    }
+
+    fn strs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_hook_hears_which_panes_a_set_layout_added_and_removed() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.get_or_init("cody-x");
+        let calls = hooked(&mut reg);
+
+        reg.set_layout("cody-x", &serde_json::json!({ "tree": repl_beside_tracker(vec![0.6, 0.4]) }))
+            .unwrap();
+        reg.set_layout("cody-x", &serde_json::json!({ "tree": PaneTree::repl_leaf() })).unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                ("cody-x".to_string(), vec![], strs(&["tracker"])),
+                ("cody-x".to_string(), strs(&["tracker"]), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_hook_hears_a_reset_that_drops_a_pane() {
+        let mut reg = with_tree("cody-x", &repl_beside_tracker(vec![0.6, 0.4]));
+        let calls = hooked(&mut reg);
+        reg.reset("cody-x").unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("cody-x".to_string(), strs(&["tracker"]), vec![])]
+        );
+    }
+
+    #[test]
+    fn the_hook_hears_a_plain_init_focus_drop_the_tracker_but_not_a_re_attach() {
+        let mut reg = with_tree("cody-x", &repl_beside_tracker(vec![0.6, 0.4]));
+        let calls = hooked(&mut reg);
+
+        reg.init_focus_with_tracker("cody-x", true);
+        assert!(calls.lock().unwrap().is_empty(), "the same panes came back: {:?}", calls.lock().unwrap());
+
+        reg.init_focus("cody-x");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("cody-x".to_string(), strs(&["tracker"]), vec![])]
+        );
+    }
+
+    #[test]
+    fn the_hook_hears_the_first_init_of_a_focus_as_its_panes_appearing() {
+        let mut reg = PaneRegistry::in_memory();
+        let calls = hooked(&mut reg);
+        reg.init_focus("cody-new");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("cody-new".to_string(), vec![], strs(&["repl"]))]
+        );
+    }
+
+    #[test]
+    fn the_hook_hears_closing_the_tracker() {
+        let mut reg = with_tree("cody-x", &repl_beside_tracker(vec![0.6, 0.4]));
+        let calls = hooked(&mut reg);
+        reg.close_tab("cody-x", "tracker").unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("cody-x".to_string(), strs(&["tracker"]), vec![])]
+        );
+        assert_eq!(reg.get("cody-x"), Some(&PaneTree::repl_leaf()));
+    }
+
+    #[test]
+    fn the_hook_is_silent_when_the_pane_ids_do_not_change() {
+        let mut reg = with_tree("cody-x", &repl_beside_tracker(vec![0.6, 0.4]));
+        let calls = hooked(&mut reg);
+
+        // A different tree over the same panes, a ratio-map update, a
+        // re-init that keeps the tracker, a plain read.
+        reg.set_layout("cody-x", &serde_json::json!({ "tree": repl_beside_tracker(vec![0.3, 0.7]) }))
+            .unwrap();
+        reg.set_layout("cody-x", &serde_json::json!({ "repl": 0.5, "tracker": 0.5 })).unwrap();
+        reg.init_focus_with_tracker("cody-x", true);
+        let _ = reg.get_or_init("cody-x");
+
+        assert!(calls.lock().unwrap().is_empty(), "{:?}", calls.lock().unwrap());
+    }
+
+    #[test]
+    fn a_pane_counts_as_rendered_only_when_in_the_tree_and_in_a_windows_latest_report() {
+        let now = chrono::DateTime::from_timestamp(1_760_540_000, 0).unwrap();
+        let mut reg = with_tree("cody-x", &repl_beside_tracker(vec![0.6, 0.4]));
+        assert!(!reg.is_pane_rendered("cody-x", "tracker"), "no report yet");
+
+        reg.record_rendered_shape("c1", "w1", "cody-x", strs(&["repl", "tracker"]), now);
+        assert!(reg.is_pane_rendered("cody-x", "tracker"));
+
+        reg.record_rendered_shape("c1", "w1", "cody-x", strs(&["repl"]), now);
+        assert!(!reg.is_pane_rendered("cody-x", "tracker"), "the latest report lacks it");
+
+        reg.record_rendered_shape("c1", "w1", "cody-x", strs(&["repl", "tracker"]), now);
+        reg.close_tab("cody-x", "tracker").unwrap();
+        assert!(!reg.is_pane_rendered("cody-x", "tracker"), "reported but not in the tree");
     }
 }

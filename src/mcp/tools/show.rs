@@ -311,7 +311,7 @@ pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<
                         .view
                         .as_ref()
                         .map(|v| views::label_for(v.view_type, &v.identity))
-                        .unwrap_or_else(|| t.pane_id.clone());
+                        .unwrap_or_else(|| views::pane_label(&t.pane_id));
                     (t.pane_id.clone(), label)
                 })
                 .collect();
