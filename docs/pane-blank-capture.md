@@ -79,15 +79,16 @@ when it redraws. A `docHeight` that collapses points at the geometry; a `measure
 Evaluated at most once per run-loop turn (when something changed) and on a timer while the pane is
 visible: 250 ms, backing off to 1 s after 4 healthy ticks in a row in which nothing asked for a look
 (no event, no rule watching something); any event, suspicion or hit returns it to 250 ms. A pane is "visible" when it is in a window, not hidden, the window not occluded and it has a
-usable size. A hit writes one file (on the next main-queue turn, not inside the draw or run-loop callback that
-detected it); at most one automatic capture per pane per 5 minutes (a `stall` and
+usable size. A hit writes one file (the report is built at the hit, so it shows the pane as it was; only the file
+write waits for the next main-queue turn, so no file I/O happens inside the draw or run-loop callback
+that detected it); at most one automatic capture per pane per 5 minutes (a `stall` and
 a `blank` are limited independently, so a stall cannot use up the capture of the blank it caused). The
 manual capture bypasses the limit.
 
 - **empty-viewport**: the pane has turns but no turn view overlaps the viewport, on 3 evaluations in a
   row spanning at least 300 ms. While a deliberate shed is in flight (the views were released and the
   compaction that precedes the rebuild has not landed) an empty viewport is expected, so the span must
-  be at least 2 s instead; a blank that outlasts that is reported with the shed visible in `events`.
+  be at least 2 s instead (the whole empty run that began during a shed, up to the rebuild filling it); a blank that outlasts that is reported with the shed visible in `events`.
 - **height-collapse**: the document height falls by more than half, to less than the viewport height, and
   recovers (to at least half of what it was) within 10 s. Not raised when the session cleared its
   transcript, when the height stays down, or after a resize or a fold toggle (those move the height on purpose).
