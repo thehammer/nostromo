@@ -133,18 +133,8 @@ final class NostromoWindowCloseLifetimeTests: XCTestCase {
                 dropController: {},
                 removeFromWindows: { windows.removeAll { $0 === win } },
                 afterUnbind: {},
-                prepareWindow: {
-                    win.isOrphanedByScreenRemoval = true
-                    win.animationBehavior = .none
-                    win.lifecycleHandler = nil
-                },
-                dropFullScreenMask: {
-                    guard win.styleMask.contains(.fullScreen) else { return }
-                    var mask = win.styleMask
-                    mask.remove(.fullScreen)
-                    win.styleMask = mask
-                },
-                close: { win.close() }
+                prepareWindow: { win.prepareForDisplayRemovalClose() },
+                close: { _ = win.closeAfterDisplayRemoval(logContext: "test display \(self.displayUUID)") }
             ))
             XCTAssertFalse(win.isVisible)
             // The app still holds the window across the teardown (AppDelegate's local `win`).
