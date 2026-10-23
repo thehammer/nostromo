@@ -78,6 +78,8 @@ struct PaneBlankDetector {
     /// A collapse that recovers within this long is the blank; one that stays is a real shrink.
     static let heightRecoveryWindowMs = 10_000.0
     static let stallThresholdMs = 250.0
+    /// Rule (c) does not fire again this soon after it fired, unless a draw painted rows in between.
+    static let zeroRowDrawRefractoryMs = 5_000.0
 
     // MARK: - State
 
@@ -87,6 +89,9 @@ struct PaneBlankDetector {
     private var emptyFired = false
 
     /// Rule (b): the last stable document height, and the collapse being watched, if any.
+    /// Rule (c): when it last fired. A blank that stays blank is drawn at display rate; one hit says so.
+    private var lastZeroRowDrawMs: Double?
+
     private var baselineHeight: Double = 0
     private var collapse: (from: Double, to: Double, atMs: Double, clears: Int)?
 
@@ -174,7 +179,13 @@ struct PaneBlankDetector {
     /// gap between "views released" and "views built").
     mutating func noteDraw(nowMs: Double, isVisible: Bool, retainedTurns: Int,
                            rowsPainted: Int, renderPending: Bool) -> Hit? {
-        guard isVisible, retainedTurns > 0, rowsPainted == 0, !renderPending else { return nil }
+        guard isVisible, retainedTurns > 0, rowsPainted == 0 else {
+            lastZeroRowDrawMs = nil   // the pane painted (or has nothing to paint): the next blank is a new one
+            return nil
+        }
+        guard !renderPending else { return nil }
+        if let last = lastZeroRowDrawMs, nowMs - last < Self.zeroRowDrawRefractoryMs { return nil }
+        lastZeroRowDrawMs = nowMs
         return Hit(rule: .zeroRowDraw, severity: .blank,
                    detail: ["retainedTurns": Double(retainedTurns), "atMs": nowMs])
     }

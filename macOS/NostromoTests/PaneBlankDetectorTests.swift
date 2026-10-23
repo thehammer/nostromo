@@ -245,6 +245,27 @@ final class PaneBlankDetectorTests: XCTestCase {
         XCTAssertNil(detector.noteDraw(nowMs: 100, isVisible: true, retainedTurns: 0, rowsPainted: 0, renderPending: false))
     }
 
+    func testABlankThatKeepsBeingDrawnIsOneHitUntilARowIsPainted() {
+        var detector = PaneBlankDetector()
+        XCTAssertNotNil(detector.noteDraw(nowMs: 0, isVisible: true, retainedTurns: 10, rowsPainted: 0, renderPending: false))
+        // Drawn again at display rate while it stays blank: still the same incident.
+        for t in stride(from: 16.0, to: 4_000, by: 16) {
+            XCTAssertNil(detector.noteDraw(nowMs: t, isVisible: true, retainedTurns: 10, rowsPainted: 0, renderPending: false))
+        }
+        // Rows come back, then it blanks again: a new incident.
+        XCTAssertNil(detector.noteDraw(nowMs: 4_100, isVisible: true, retainedTurns: 10, rowsPainted: 2, renderPending: false))
+        XCTAssertNotNil(detector.noteDraw(nowMs: 4_200, isVisible: true, retainedTurns: 10, rowsPainted: 0, renderPending: false))
+    }
+
+    func testAPersistentBlankIsReportedAgainOnceTheRefractoryPeriodPasses() {
+        var detector = PaneBlankDetector()
+        XCTAssertNotNil(detector.noteDraw(nowMs: 0, isVisible: true, retainedTurns: 10, rowsPainted: 0, renderPending: false))
+        XCTAssertNil(detector.noteDraw(nowMs: PaneBlankDetector.zeroRowDrawRefractoryMs - 1, isVisible: true,
+                                       retainedTurns: 10, rowsPainted: 0, renderPending: false))
+        XCTAssertNotNil(detector.noteDraw(nowMs: PaneBlankDetector.zeroRowDrawRefractoryMs, isVisible: true,
+                                          retainedTurns: 10, rowsPainted: 0, renderPending: false))
+    }
+
     // MARK: - Rule (d): main-thread stall
 
     func testAStallLongerThan250msOnAVisiblePaneIsReportedAsAStall() {

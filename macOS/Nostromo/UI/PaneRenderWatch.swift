@@ -76,6 +76,8 @@ final class PaneRenderWatch {
     /// Set by any watch's `requestEvaluation`, cleared by the run-loop observer: so a turn in which
     /// nothing asked for an evaluation costs two clock reads and no walk over the panes.
     fileprivate static var anyEvaluationRequested = false
+    /// When a run-loop stall last wrote a capture, for any pane (see `mainThreadStalled`).
+    private static var lastObservedStallCaptureMs = -minCaptureIntervalMs
     static var isRunningTests: Bool { NSClassFromString("XCTestCase") != nil }
 
     init(subject: PaneRenderSubject) {
@@ -110,6 +112,9 @@ final class PaneRenderWatch {
             transcriptClears: subject.transcriptClearCount)
         let hits = detector.evaluate(sample)
         for hit in hits { handle(hit, nowMs: nowMs, wall: wall) }
+        // A pane that became visible without a notification (it was attached to a window that was
+        // already on screen, then laid out) gets its timer here; one that stopped being visible loses it.
+        updateScheduling()
         return hits
     }
 
@@ -119,7 +124,7 @@ final class PaneRenderWatch {
                   nowMs: Double = PaneRenderWatch.monotonicMs(), wall: Date = Date()) -> [PaneBlankDetector.Hit] {
         guard let subject else { return [] }
         recorder.recordCoalesced(.draw, minIntervalMs: 100, Double(dirtyRect.width), Double(dirtyRect.height),
-                                 Double(subject.visibleTurnViewCount), Double(rowsPainted))
+                                 Double(rowsPainted), Double(rowsPainted))
         guard let hit = detector.noteDraw(nowMs: nowMs, isVisible: isVisible, retainedTurns: subject.retainedTurnCount,
                                           rowsPainted: rowsPainted, renderPending: subject.isRenderPassPending)
         else { return [] }
@@ -129,9 +134,10 @@ final class PaneRenderWatch {
 
     /// The main thread was busy for `ms` without returning to the run loop.
     @discardableResult
-    func noteStall(ms: Double, nowMs: Double = PaneRenderWatch.monotonicMs(), wall: Date = Date()) -> [PaneBlankDetector.Hit] {
+    func noteStall(ms: Double, nowMs: Double = PaneRenderWatch.monotonicMs(), wall: Date = Date(),
+                   capture: Bool = true) -> [PaneBlankDetector.Hit] {
         guard let hit = detector.noteStall(ms: ms, isVisible: isVisible) else { return [] }
-        handle(hit, nowMs: nowMs, wall: wall)
+        handle(hit, nowMs: nowMs, wall: wall, capture: capture)
         return [hit]
     }
 
@@ -176,9 +182,10 @@ final class PaneRenderWatch {
         captureDirectory ?? (Self.isRunningTests ? nil : PaneBlankCapture.defaultDirectory)
     }
 
-    private func handle(_ hit: PaneBlankDetector.Hit, nowMs: Double, wall: Date) {
+    private func handle(_ hit: PaneBlankDetector.Hit, nowMs: Double, wall: Date, capture: Bool = true) {
         recorder.record(.detectorHit, hit.rule.code, hit.severity.code)
         log.error("pane blank suspected: rule=\(hit.rule.rawValue, privacy: .public) severity=\(hit.severity.rawValue, privacy: .public)")
+        guard capture else { return }
         if let last = lastAutoCaptureMs[hit.severity], nowMs - last < Self.minCaptureIntervalMs { return }
         // Stamped before the write: a directory that cannot be written must not be retried on every pass.
         lastAutoCaptureMs[hit.severity] = nowMs
@@ -285,7 +292,7 @@ final class PaneRenderWatch {
     /// The pane moved to `window` (or out of any window): watch its key, screen and occlusion changes.
     func windowChanged(to window: NSWindow?) {
         recorder.record(.moveToWindow, reason: .none, window == nil ? 0 : 1)
-        guard window !== observedWindow else { return }
+        guard window == nil || window !== observedWindow else { return }
         for token in windowObservers { NotificationCenter.default.removeObserver(token) }
         windowObservers.removeAll()
         observedWindow = window
@@ -336,10 +343,17 @@ final class PaneRenderWatch {
         evaluate()
     }
 
-    fileprivate func mainThreadStalled(ms: Double) {
-        guard automaticEvaluation, isVisible else { return }
+    /// One stall is one capture for the whole app: the first visible pane writes it (and a stall is
+    /// captured at most once per `minCaptureIntervalMs` app-wide); every other visible pane only records
+    /// it. Returns whether this pane took the capture.
+    fileprivate func mainThreadStalled(ms: Double, mayCapture: Bool) -> Bool {
+        guard automaticEvaluation, isVisible else { return false }
         recorder.record(.measureStall, reason: .none, ms, -1)
-        noteStall(ms: ms)
+        let now = Self.monotonicMs()
+        let capture = mayCapture && now - Self.lastObservedStallCaptureMs >= Self.minCaptureIntervalMs
+        noteStall(ms: ms, nowMs: now, capture: capture)
+        if capture { Self.lastObservedStallCaptureMs = now }
+        return capture
     }
 
     fileprivate static var liveWatches: [PaneRenderWatch] { all.allObjects }
@@ -381,33 +395,36 @@ final class PaneRenderWatch {
 
 // MARK: - RunLoopTurnObserver
 
-/// One observer on the main run loop for the whole app: marks when a turn starts, and when it ends
-/// (the loop is about to sleep) tells every watch to run a requested evaluation and reports a turn
-/// that was busy for longer than `PaneBlankDetector.stallThresholdMs`. Two clock reads per turn.
+/// Two observers on the main run loop for the whole app: one marks when a turn starts, the other, last
+/// of all (after AppKit's and Core Animation's layout and display, which run in `beforeWaiting` observers
+/// of their own), tells every watch to run a requested evaluation and reports a turn that was busy for
+/// longer than `PaneBlankDetector.stallThresholdMs`. Two clock reads per turn.
 private enum RunLoopTurnObserver {
-    private static var observer: CFRunLoopObserver?
+    private static var observers: [CFRunLoopObserver] = []
     private static var turnStartNs: UInt64 = 0
 
     static func installIfNeeded() {
-        guard observer == nil else { return }
-        let activities: CFRunLoopActivity = [.afterWaiting, .beforeWaiting]
-        let created = CFRunLoopObserverCreateWithHandler(kCFAllocatorDefault, activities.rawValue, true, 0) { _, activity in
-            if activity == .afterWaiting {
-                turnStartNs = DispatchTime.now().uptimeNanoseconds
-                return
-            }
+        guard observers.isEmpty else { return }
+        let start = CFRunLoopObserverCreateWithHandler(kCFAllocatorDefault, CFRunLoopActivity.afterWaiting.rawValue,
+                                                       true, Int.min) { _, _ in
+            turnStartNs = DispatchTime.now().uptimeNanoseconds
+        }
+        let end = CFRunLoopObserverCreateWithHandler(kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue,
+                                                     true, Int.max) { _, _ in
             let now = DispatchTime.now().uptimeNanoseconds
             let busyMs = turnStartNs == 0 ? 0 : Double(now &- turnStartNs) / 1_000_000
             let stalled = busyMs > PaneBlankDetector.stallThresholdMs
             guard stalled || PaneRenderWatch.anyEvaluationRequested else { return }
             PaneRenderWatch.anyEvaluationRequested = false
+            var mayCapture = true
             for watch in PaneRenderWatch.liveWatches {
-                if stalled { watch.mainThreadStalled(ms: busyMs) }
+                if stalled, watch.mainThreadStalled(ms: busyMs, mayCapture: mayCapture) { mayCapture = false }
                 watch.endOfRunLoopTurn()
             }
         }
-        guard let created else { return }
-        observer = created
-        CFRunLoopAddObserver(CFRunLoopGetMain(), created, .commonModes)
+        for case let observer? in [start, end] {
+            observers.append(observer)
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        }
     }
 }

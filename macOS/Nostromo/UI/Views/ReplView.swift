@@ -107,6 +107,8 @@ class ReplView: NSView {
     /// The last materialization window and document height the recorder was told about.
     private var lastRecordedWindow: Range<Int>?
     private var lastRecordedDocumentHeight: CGFloat = 0
+    /// `shedMaterializedViews` released the views and its pass waits for the compaction to land.
+    private var shedInFlight = false
     /// "Tool activity finished, N failed calls", for VoiceOver, when this pane is focused.
     private lazy var announcer = ToolActivityAnnouncer(post: ToolActivityAnnouncer.voiceOver(from: self))
 
@@ -715,8 +717,8 @@ class ReplView: NSView {
     /// frame back is exactly what `materialize` step 4 avoids.
     private func noteDocumentHeightForRecorder(_ height: CGFloat) {
         guard height != lastRecordedDocumentHeight else { return }
-        renderWatch.recorder.record(.docHeight, reason: .none, Double(lastRecordedDocumentHeight), Double(height),
-                                    Double(virtualizer.documentHeight))
+        renderWatch.recorder.recordCoalesced(.docHeight, minIntervalMs: 100, Double(lastRecordedDocumentHeight),
+                                             Double(height), Double(virtualizer.documentHeight))
         lastRecordedDocumentHeight = height
     }
 
@@ -974,7 +976,9 @@ class ReplView: NSView {
     /// has merely asked for.
     func shedMaterializedViews(completion: @escaping () -> Void = {}) {
         releaseAllTurnViews(reason: .shed)
+        shedInFlight = true
         session.shedRetainedContent { [weak self] in
+            self?.shedInFlight = false
             self?.schedulePass()
             completion()
         }
@@ -1223,8 +1227,12 @@ extension ReplView: PaneRenderSubject {
 
     var viewportHeight: Double { Double(scrollView.contentView.bounds.height) }
 
-    /// A pass is queued or running, or a content change asked for one.
-    var isRenderPassPending: Bool { passPending || isMaterializing || contentDirty }
+    /// A pass is queued or running, a content change asked for one, the views were just shed and
+    /// the pass that puts them back waits for the compaction, or `session.turns` is ahead of the
+    /// geometry (its change event is still on its way, and the pass it brings will build the views).
+    var isRenderPassPending: Bool {
+        passPending || isMaterializing || contentDirty || shedInFlight || virtualizer.count != session.turns.count
+    }
 
     var renderPaneState: (alpha: Double, hidden: Bool, scrollViewHidden: Bool, scrollViewAttached: Bool) {
         (Double(alphaValue), isHidden, scrollView.isHidden, scrollView.superview === self)

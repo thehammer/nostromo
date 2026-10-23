@@ -78,14 +78,21 @@ manual capture bypasses the limit.
   recovers (to at least half of what it was) within 10 s. Not raised when the session cleared its
   transcript, when the height stays down, or after a resize or a fold toggle (those move the height on purpose).
 - **zero-row-draw**: the document view is about to draw, the pane is on screen with turns, no turn row is
-  in the visible rect, and no materialization pass is queued to fix it. (The heartbeat is the document
+  in the visible rect, and nothing is queued to fix it (no materialization pass queued or running, no
+  shed waiting for its compaction, and the geometry is in step with the session's turns). Once per
+  incident: it does not repeat for 5 s unless a draw painted rows in between. (The heartbeat is the document
   view's `viewWillDraw`, not `draw(_:)`: overriding `draw(_:)` would tell AppKit the view paints and give
   a view as tall as the whole transcript a backing store.)
 - **main-thread-stall**: one run-loop turn busy for more than 250 ms while the pane is visible
-  (severity `stall`).
+  (severity `stall`). A stall is the app's, not a pane's: every visible pane records it, one file is
+  written for it (by the first visible pane), and not more than one per 5 minutes app-wide.
 
 It does not fire for normal streaming, scrolling, resizing, switching tabs (the pane is not visible) or a
 transcript with no turns.
+
+A memory-watchdog shed (`viewsEvicted` with reason `shed`) releases every turn view and rebuilds them
+after the compaction lands. If that takes longer than 300 ms the pane really is blank, and rule (a)
+reports it with the shed visible in `events`.
 
 ## Cost
 
