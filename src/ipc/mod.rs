@@ -13,6 +13,7 @@
 //! - [`server`]          — daemon-side accept loop and fan-out broadcaster
 //! - [`client`]          — client-side connection and subscription
 //! - [`decisions`]       — daemon-side decision-modal request registry (W6)
+//! - [`orphans`]         — child-process ledger, graceful stop and the startup orphan sweep
 //! - [`peer`]            — peer trust and what each peer may see or do
 //! - [`peer_verify`]     — who is on the other end of a Unix connection (the Mac app?)
 
@@ -20,6 +21,7 @@ pub mod client;
 pub mod codec;
 mod control_scan;
 pub mod decisions;
+pub mod orphans;
 pub mod pane_registry;
 pub mod peer;
 pub mod peer_verify;
