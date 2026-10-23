@@ -161,17 +161,20 @@ def enclosing_function_header(code, pos):
 # Checks
 # --------------------------------------------------------------------------
 
-BADGE = r"\bdockTile\s*\.\s*badgeLabel\b"
+# Either word alone: a split spelling (`let tile = NSApp.dockTile` ... `tile.badgeLabel = x`) is a second
+# writer too, and `dockTile` alone is how the tile is reached at all.
+BADGE = r"\bdockTile\b|\bbadgeLabel\b"
 # `NSApp.activate(...)` and any `x.activate(...)` (NSRunningApplication and the like). The layout
 # system's `NSLayoutConstraint.activate([...])` is not about the app and is allowed.
 APP_ACTIVATION = r"\bNSApp\s*\.\s*activate\b|(?<!NSLayoutConstraint)\s*\.\s*activate\s*\("
 NSAPP_ACTIVATE = r"\bNSApp\s*\.\s*activate\b"
 USER_NOTIFICATIONS_IMPORT = r"^\s*(?:@\w+\s+)*import\s+UserNotifications\b"
-MUTABLE_CONTENT = r"\bUNMutableNotificationContent\b"
+# The mutable class and the immutable one it subclasses: neither is named outside the builder.
+MUTABLE_CONTENT = r"\bUN(?:Mutable)?NotificationContent\b"
 
 
 def badge_writers(sources=None):
-    """Swift files under macOS/ and Shared/ that touch `dockTile.badgeLabel`."""
+    """Swift files under macOS/ and Shared/ that name `dockTile` or `badgeLabel`."""
     paths = list(sources) if sources is not None else swift_files("macOS", "Shared")
     return files_matching(paths, BADGE, sources)
 
@@ -205,7 +208,7 @@ def delegate_activation_problems(src):
 
 
 def mutable_content_files(sources=None):
-    """Swift files under macOS/, Shared/ and iOS/ that build a UNMutableNotificationContent."""
+    """Swift files under macOS/, Shared/ and iOS/ that name UNMutableNotificationContent (or UNNotificationContent)."""
     paths = list(sources) if sources is not None else swift_files("macOS", "Shared", "iOS")
     return files_matching(paths, MUTABLE_CONTENT, sources)
 
@@ -259,6 +262,13 @@ class ChecksBiteTests(unittest.TestCase):
     def test_a_second_badge_writer_is_caught(self):
         sources = {"a/Store.swift": "NSApp.dockTile.badgeLabel = x", "b/Other.swift": "NSApp.dockTile.badgeLabel = nil"}
         self.assertEqual(badge_writers(sources), ["a/Store.swift", "b/Other.swift"])
+
+    def test_a_split_spelling_of_the_badge_write_is_caught(self):
+        for text in ["let tile = NSApp.dockTile\ntile.badgeLabel = \"3\"",
+                     "NSApplication.shared.dockTile.display()",
+                     "someTile.badgeLabel = nil",
+                     "NSApp\n    .dockTile\n    .badgeLabel = x"]:
+            self.assertEqual(badge_writers({"z/Sneaky.swift": text}), ["z/Sneaky.swift"], text)
 
     def test_a_badge_writer_in_a_comment_or_string_is_not_one(self):
         sources = {"a.swift": '// dockTile.badgeLabel = "1"\nlet s = "dockTile.badgeLabel"'}
@@ -320,6 +330,11 @@ class ChecksBiteTests(unittest.TestCase):
                    "m/Other.swift": "let c = UNMutableNotificationContent()"}
         self.assertEqual(mutable_content_files(sources), ["k/NeedsYouNotifier.swift", "m/Other.swift"])
         self.assertEqual(mutable_content_files({"m/Other.swift": "// UNMutableNotificationContent"}), [])
+
+    def test_content_built_through_the_immutable_class_or_a_typealias_is_caught(self):
+        for text in ["typealias C = UNMutableNotificationContent", "let c: UNNotificationContent = x.content",
+                     "let c = UNMutableNotificationContent()\nc.title = \"x\""]:
+            self.assertEqual(mutable_content_files({"m/Sneaky.swift": text}), ["m/Sneaky.swift"], text)
 
     def test_a_stray_user_notifications_import_is_caught(self):
         sources = {"a.swift": "import Foundation\nimport UserNotifications\n", "b.swift": "import Foundation\n",

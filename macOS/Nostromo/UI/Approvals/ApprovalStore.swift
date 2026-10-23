@@ -69,6 +69,13 @@ final class ApprovalStore {
     /// Fires with the focus tag whenever what that focus shows may have changed.
     let changes = PassthroughSubject<String, Never>()
 
+    /// Fires after every daemon snapshot has been applied, EVEN WHEN IT TOUCHED NOTHING (an empty first
+    /// snapshot sends no `changes` event). `ApprovalBadges` uses it to take the notifier's baseline.
+    let snapshotHandled = PassthroughSubject<Void, Never>()
+
+    /// True from the first daemon snapshot on: only then is the pending list the daemon's truth.
+    private(set) var hasHandledSnapshot = false
+
     /// Fires with a tool call's `tool_use_id` whenever the status its row shows may have changed (AP2b).
     let statusChanges = PassthroughSubject<String, Never>()
 
@@ -354,6 +361,8 @@ final class ApprovalStore {
     /// The daemon's list is the truth: add what it holds that we don't, and drop what we
     /// show that it no longer holds.
     private func replaceAll(with requests: [ApprovalRequestWire]) {
+        // Set before any `changes` event goes out, so the first publish that follows is the baseline.
+        hasHandledSnapshot = true
         let held = Set(requests.map(\.id))
         var touched = Set<String>()
         for (id, entry) in entries where !held.contains(id) && !entry.isEnded {
@@ -366,6 +375,7 @@ final class ApprovalStore {
             touched.insert(request.tag)
         }
         touched.forEach { changes.send($0) }
+        snapshotHandled.send()
     }
 
     private func end(_ id: String, text: String) {

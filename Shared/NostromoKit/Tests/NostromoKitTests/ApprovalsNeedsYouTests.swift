@@ -80,4 +80,36 @@ final class ApprovalsNeedsYouTests: XCTestCase {
         let other = NeedsYouItem(id: "approvals:x", source: .app, reason: .trackerWaiting)
         XCTAssertNil(builder(request).content(for: other))
     }
+
+    // A pasted token must never reach a notification: only a known command name is shown (A3F-4).
+
+    func testATokenShapedFirstWordNeverReachesTheNotification() throws {
+        let tokens = [
+            "sk-ant-api03-AbCdEf1234567890",
+            "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+            "AKIAIOSFODNN7EXAMPLE",
+            "d41d8cd98f00b204e9800998ecf8427e",
+            "my-secret-script.sh",
+            "/tmp/ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+        ]
+        for token in tokens {
+            for command in ["\(token) --flag", token] {
+                let body = try content(Fx.bashRequest(command)).body
+                XCTAssertEqual(body, "Bash", "command: \(command)")
+                XCTAssertFalse(body.contains(token.split(separator: "/").last.map(String.init) ?? token), command)
+            }
+        }
+    }
+
+    func testKnownCommandNamesAreStillShown() throws {
+        XCTAssertEqual(try content(Fx.bashRequest("git status")).body, "Bash · git")
+        XCTAssertEqual(try content(Fx.bashRequest("/usr/bin/rm -rf x")).body, "Bash · rm")
+        XCTAssertEqual(try content(Fx.bashRequest("curl")).body, "Bash · curl")
+        XCTAssertEqual(try content(Fx.bashRequest("TOKEN=sk-ant-api03-AbCdEf1234567890 curl https://x")).body, "Bash · curl")
+    }
+
+    func testAKnownCommandNameWithATokenAfterItDoesNotLeakTheToken() throws {
+        let body = try content(Fx.bashRequest("curl -H 'Authorization: Bearer sk-ant-api03-AbCdEf1234567890' https://x")).body
+        XCTAssertEqual(body, "Bash · curl")
+    }
 }

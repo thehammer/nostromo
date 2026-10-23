@@ -51,12 +51,18 @@ private final class Rig {
         coordinator = NeedsYouCoordinator(
             center: center, dockBadge: { [unowned self] in self.dock.append($0) }, jobTitle: { _ in nil },
             approvalRequest: { [store] in store.entry(id: $0)?.request })
-        badges = ApprovalBadges(store: store) { [unowned self] items in
-            self.coordinator.setProducer(ApprovalsNeedsYouProducer.name, items: items)
+        badges = ApprovalBadges(store: store) { [unowned self] items, baseline in
+            self.coordinator.setProducer(ApprovalsNeedsYouProducer.name, items: items, baseline: baseline)
         }
     }
 
     func arrive(_ request: ApprovalRequestWire) { store.handle(.request(request)) }
+
+    /// The daemon's list on (re)subscribe: it replaces what the store holds.
+    func snapshot(_ requests: [ApprovalRequestWire]) { store.handle(.snapshot(requests)) }
+
+    /// The ids of the notifications posted so far, in order.
+    var postedIDs: [String] { center.added.map(\.identifier) }
 
     func end(_ id: String, tag: String = "cody-1") throws {
         store.handle(.resolved(try ApprovalTestRequests.resolved(id: id, outcome: "denied", tag: tag)))
@@ -206,6 +212,7 @@ final class ApprovalBadgesTests: XCTestCase {
         XCTAssertEqual(sent.content.body, "Bash · rm")
         XCTAssertEqual(sent.content.threadIdentifier, "cody-1")
         XCTAssertEqual(sent.content.categoryIdentifier, "", "no category, so no actions")
+        XCTAssertNil(sent.content.sound, "a banner, never a sound")
         XCTAssertNotEqual(sent.content.interruptionLevel, .timeSensitive)
         XCTAssertNil(sent.trigger)
     }
@@ -258,6 +265,212 @@ final class ApprovalBadgesTests: XCTestCase {
         rig.arrive(try ApprovalTestRequests.simpleRm())
         XCTAssertEqual(rig.center.authorizationRequests, 1)
         XCTAssertEqual(rig.center.added.count, 1)
+    }
+
+    // MARK: First snapshot, reconnect and permission (A3F-1)
+
+    private func rm(_ id: String, _ tag: String = "cody-1") throws -> ApprovalRequestWire {
+        try ApprovalTestRequests.simpleRm(id: id, tag: tag)
+    }
+
+    func testRequestsFoundWaitingAtLaunchAlertNobodyButStillCountAndClearAtZero() throws {
+        let rig = Rig()
+
+        rig.snapshot([try rm("a"), try rm("b")])
+
+        XCTAssertTrue(rig.center.added.isEmpty, "what a relaunch finds waiting is the baseline, not a burst")
+        XCTAssertEqual(rig.coordinator.dockLabel, "2")
+        XCTAssertEqual(SidebarBadgeModel.needsYouNowCounts(from: rig.coordinator.snapshot), ["cody-1": 2])
+
+        rig.arrive(try rm("c"))
+        XCTAssertEqual(rig.postedIDs, ["approvals:c"], "the first request after the baseline alerts, and only it")
+        XCTAssertEqual(rig.coordinator.dockLabel, "3")
+
+        try rig.end("a")
+        try rig.end("b")
+        try rig.end("c")
+        rig.recorder.runScheduled()
+
+        XCTAssertNil(rig.coordinator.dockLabel)
+        XCTAssertTrue(SidebarBadgeModel.needsYouNowCounts(from: rig.coordinator.snapshot).isEmpty)
+        XCTAssertEqual(rig.dock, ["2", "3", "2", "1", nil], "each change once, and the clear exactly once")
+    }
+
+    func testAnEmptyFirstSnapshotStillBaselinesSoTheFirstRealArrivalAlerts() throws {
+        let rig = Rig()
+
+        rig.snapshot([])
+        XCTAssertTrue(rig.center.added.isEmpty)
+
+        rig.arrive(try rm("a"))
+        XCTAssertEqual(rig.postedIDs, ["approvals:a"], "the first arrival after an empty snapshot is not swallowed")
+        XCTAssertEqual(rig.coordinator.dockLabel, "1")
+    }
+
+    func testAnArrivalBeforeTheSnapshotAlertsAndTheSnapshotThatListsItDoesNotRepostOrAlertTheRest() throws {
+        let rig = Rig()
+        rig.arrive(try rm("a"))
+        XCTAssertEqual(rig.postedIDs, ["approvals:a"], "before the snapshot nothing is baselined")
+
+        rig.snapshot([try rm("a"), try rm("b")])
+
+        XCTAssertEqual(rig.postedIDs, ["approvals:a"], "b was already waiting at the snapshot; a is not posted twice")
+        XCTAssertEqual(rig.coordinator.dockLabel, "2")
+    }
+
+    func testAReconnectThatDropsAndRelistsARequestDoesNotAlertItAgain() throws {
+        let rig = Rig()
+        rig.snapshot([try rm("a")])
+        rig.arrive(try rm("b"))
+        XCTAssertEqual(rig.postedIDs, ["approvals:b"])
+
+        rig.snapshot([try rm("a")])                    // the daemon's list no longer holds b
+        XCTAssertEqual(rig.coordinator.dockLabel, "1")
+        rig.snapshot([try rm("a"), try rm("b")])       // and then holds it again
+
+        XCTAssertEqual(rig.postedIDs, ["approvals:b"], "b alerted once")
+        XCTAssertEqual(rig.coordinator.dockLabel, "2", "it still counts")
+
+        rig.snapshot([try rm("a"), try rm("b"), try rm("c")])
+        XCTAssertEqual(rig.postedIDs, ["approvals:b", "approvals:c"], "a request the daemon never listed before alerts")
+    }
+
+    func testARequestAlertedLiveIsNotRepeatedWhenASnapshotDropsAndRelistsIt() throws {
+        let rig = Rig()
+        rig.arrive(try rm("a"))
+        XCTAssertEqual(rig.postedIDs, ["approvals:a"])
+
+        rig.snapshot([])
+        XCTAssertNil(rig.coordinator.dockLabel)
+        rig.snapshot([try rm("a")])
+
+        XCTAssertEqual(rig.postedIDs, ["approvals:a"], "no repeat")
+        XCTAssertEqual(rig.coordinator.dockLabel, "1")
+    }
+
+    func testAnApprovalAfterTheBaselineWhilePermissionIsUndecidedPromptsOnceThenPostsOnce() throws {
+        let rig = Rig(center: BadgeFakeCenter(status: .notDetermined))
+        rig.snapshot([try rm("a")])
+        XCTAssertEqual(rig.center.authorizationRequests, 0, "the baseline never prompts")
+        XCTAssertTrue(rig.center.added.isEmpty)
+
+        rig.arrive(try rm("b"))
+
+        XCTAssertEqual(rig.center.authorizationRequests, 1)
+        XCTAssertEqual(rig.postedIDs, ["approvals:b"], "granted: the request that asked is announced, once")
+
+        rig.arrive(try rm("c"))
+        XCTAssertEqual(rig.postedIDs, ["approvals:b", "approvals:c"])
+        XCTAssertEqual(rig.center.authorizationRequests, 1, "never a second prompt")
+    }
+
+    // MARK: Presentation while the app is active
+
+    func testAnApprovalsBannerOnlyYieldsToItsOwnCardNeverToTheMotherView() {
+        let info: [AnyHashable: Any] = ["producer": "approvals", "tag": "cody-1"]
+        var motherViewAsked = false
+
+        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { _ in false },
+                                                    motherViewIsVisible: { motherViewAsked = true; return true }),
+                       [.banner], "the Mother view being open does not swallow an approval")
+        XCTAssertFalse(motherViewAsked, "an approval's banner has nothing to do with the Mother view")
+
+        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { $0 == "cody-1" },
+                                                    motherViewIsVisible: { false }),
+                       [], "its card is on screen in the key window")
+
+        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { $0 == "perri-1" },
+                                                    motherViewIsVisible: { true }),
+                       [.banner], "another focus's card being on screen does not hide this one")
+    }
+
+    func testMothersBannerYieldsToTheMotherViewOnlyNotToAnApprovalCard() {
+        let info: [AnyHashable: Any] = ["producer": "mother", "jobId": "j1"]
+
+        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { _ in true },
+                                                    motherViewIsVisible: { true }), [])
+        XCTAssertEqual(NeedsYouPresentation.options(userInfo: info, cardIsVisible: { _ in true },
+                                                    motherViewIsVisible: { false }), [.banner])
+    }
+
+    // MARK: Pill in every window
+
+    private func dynamicFocus(tag: String, agent: String) -> Focus {
+        var focus = Focus(id: tag, agentTag: agent, projectPath: "/Users/hammer/Code/nostromo", isBuiltIn: false, org: "Carefeed")
+        focus.daemonTag = tag
+        return focus
+    }
+
+    /// One window's sidebar: its own badge model and its own rows, fed the way `TabBarView.updateBadges` does.
+    private struct SidebarWindow {
+        var model = SidebarBadgeModel()
+        let rows: [String: NavTabItem]
+
+        init(focuses: [Focus]) {
+            var rows: [String: NavTabItem] = [:]
+            for focus in focuses {
+                let item = NavTabItem(focus: focus, label: focus.displayName, secondary: "main", indented: false)
+                item.frame = NSRect(x: 0, y: 0, width: 180, height: Theme.navItemSubtitleHeight)
+                item.layoutSubtreeIfNeeded()
+                rows[focus.sessionTag] = item
+            }
+            self.rows = rows
+        }
+
+        mutating func apply(_ snapshot: NeedsYouSnapshot) {
+            model.setNeedsYouNow(SidebarBadgeModel.needsYouNowCounts(from: snapshot))
+            for (tag, item) in rows {
+                item.setBadge(model.badge(for: tag))
+                item.layoutSubtreeIfNeeded()
+            }
+        }
+
+        func activate(_ tag: String) { rows.forEach { $0.value.isActive = ($0.key == tag) } }
+    }
+
+    func testTwoWindowsShowTheSamePillAndSwitchingFocusNeverChangesItOrTheRowHeight() throws {
+        let cody = dynamicFocus(tag: "cody-1", agent: "cody"), perri = dynamicFocus(tag: "perri-1", agent: "perri")
+        var left = SidebarWindow(focuses: [cody, perri]), right = SidebarWindow(focuses: [cody, perri])
+        let rig = Rig()
+        rig.snapshot([try rm("a"), try rm("b")])
+        left.activate("cody-1")      // the person is looking at cody-1 in the left window
+        right.activate("perri-1")    // and at another focus in the right one
+
+        left.apply(rig.coordinator.snapshot)
+        right.apply(rig.coordinator.snapshot)
+
+        for window in [left, right] {
+            XCTAssertEqual(window.rows["cody-1"]?.pillText, "2")
+            XCTAssertEqual(window.rows["cody-1"]?.showsNeedsYouNow, true)
+            XCTAssertNil(window.rows["perri-1"]?.pillText, "only the focus that is waiting shows a pill")
+            for item in window.rows.values {
+                XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight)
+            }
+        }
+        let leftCody = try XCTUnwrap(left.rows["cody-1"])
+        let fitting = leftCody.fittingSize.height
+
+        // Each window switches focus: the pill is the same on screen or off it.
+        left.activate("perri-1")
+        right.activate("cody-1")
+        left.apply(rig.coordinator.snapshot)
+        right.apply(rig.coordinator.snapshot)
+
+        for window in [left, right] {
+            XCTAssertEqual(window.rows["cody-1"]?.pillText, "2", "the same count after a focus switch")
+            XCTAssertNil(window.rows["perri-1"]?.pillText)
+            for item in window.rows.values {
+                XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight)
+            }
+        }
+        XCTAssertEqual(leftCody.fittingSize.height, fitting)
+
+        // One answered request: both windows follow the same snapshot.
+        try rig.end("a")
+        left.apply(rig.coordinator.snapshot)
+        right.apply(rig.coordinator.snapshot)
+        XCTAssertEqual(left.rows["cody-1"]?.pillText, "1")
+        XCTAssertEqual(right.rows["cody-1"]?.pillText, "1")
     }
 
     // MARK: The click

@@ -1760,7 +1760,9 @@ final class NeedsYouCoordinator {
             center: center,
             builders: [MotherNeedsYouProducer.name: MotherNeedsYouContentBuilder(jobTitle: jobTitle),
                        ApprovalsNeedsYouProducer.name: ApprovalsNeedsYouContentBuilder(request: approvalRequest)],
-            baselineExisting: true)
+            baselineExisting: true,
+            // A request id is unique for good: one the daemon drops and relists is not announced twice.
+            oncePerItemProducers: [ApprovalsNeedsYouProducer.name])
     }
 
     /// `fromSnapshot`: `jobs` came from the broker's snapshot (not the empty map before it
@@ -1774,7 +1776,8 @@ final class NeedsYouCoordinator {
         setProducer(DecisionNeedsYouProducer.name, items: DecisionNeedsYouProducer.items(attentionTags: tags))
     }
 
-    /// Replace everything `producer` raised. AP3 registers `"approvals"` through this.
+    /// Replace everything `producer` raised. `ApprovalBadges` registers `"approvals"` through this, with
+    /// `baseline: true` from the daemon's first snapshot on (even an empty one).
     func setProducer(_ producer: String, items: [NeedsYouItem], baseline: Bool = false) {
         let updated = aggregator.set(producer: producer, items: items)
         let takesBaseline = baseline && !notifier.hasBaselined(producer)

@@ -30,8 +30,6 @@ public enum ApprovalsNeedsYouProducer {
 }
 
 public struct ApprovalsNeedsYouContentBuilder: NeedsYouContentBuilder {
-    public static let maxWordLength = 40
-
     private let request: (String) -> ApprovalRequestWire?
 
     /// `request` maps a request id to the request (an item carries no free text).
@@ -63,19 +61,24 @@ public struct ApprovalsNeedsYouContentBuilder: NeedsYouContentBuilder {
         return "\(request.displayName) · \(word)"
     }
 
-    /// The first word of the first command, as displayed, only when it reads as a command name.
-    /// Leading `NAME=value` assignments are skipped (they carry secrets), a path-shaped word is cut
-    /// to its last component, and anything that is not plain ASCII letters, digits and `._+-` is
-    /// dropped: the notification then names the tool alone.
+    /// The first word of the first command, as displayed, only when it is a well-known command name
+    /// (`knownCommands`). Leading `NAME=value` assignments are skipped (they carry secrets) and a
+    /// path-shaped word is cut to its last component. Anything else, a pasted token included, is
+    /// dropped: the notification then names the tool alone. An allow-list, not a shape check: a shape
+    /// that admits a real command name also admits an API key.
     static func firstWord(of request: ApprovalRequestWire) -> String? {
         let words = ApprovalDisplayModel(request: request).summary.split(whereSeparator: { $0.isWhitespace })
         guard var word = words.first(where: { !$0.contains("=") }).map(String.init) else { return nil }
         if word.contains("/") { word = word.split(separator: "/").last.map(String.init) ?? "" }
-        guard !word.isEmpty, word.count <= maxWordLength,
-              word.unicodeScalars.allSatisfy({ commandNameScalars.contains($0) }) else { return nil }
-        return word
+        return knownCommands.contains(word) ? word : nil
     }
 
-    private static let commandNameScalars = CharacterSet(
-        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-")
+    static let knownCommands: Set<String> = [
+        "awk", "aws", "bash", "brew", "bun", "cargo", "cat", "cd", "chmod", "chown", "composer", "cp", "curl",
+        "deno", "diff", "docker", "echo", "env", "export", "find", "gh", "git", "go", "grep", "head", "jq",
+        "kill", "kubectl", "ls", "make", "mkdir", "mv", "node", "npm", "npx", "open", "php", "pip", "pip3",
+        "pkill", "pnpm", "ps", "python", "python3", "rg", "rm", "rsync", "ruby", "rustc", "rwx", "scp", "sed",
+        "sh", "sort", "source", "ssh", "sudo", "swift", "swiftc", "tail", "tar", "terraform", "test", "touch",
+        "unzip", "wc", "wget", "xcodebuild", "xcrun", "yarn", "zsh",
+    ]
 }

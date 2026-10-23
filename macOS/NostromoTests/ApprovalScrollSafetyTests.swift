@@ -210,7 +210,7 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             var dock: [String?] = []
             let coordinator = NeedsYouCoordinator(center: center, dockBadge: { dock.append($0) }, jobTitle: { _ in nil },
                                                   approvalRequest: { [store = p.store] in store.entry(id: $0)?.request })
-            let badges = ApprovalBadges(store: p.store) { coordinator.setProducer(ApprovalsNeedsYouProducer.name, items: $0) }
+            let badges = ApprovalBadges(store: p.store) { coordinator.setProducer(ApprovalsNeedsYouProducer.name, items: $0, baseline: $1) }
             withExtendedLifetime(badges) {
                 p.rig.assertNoMove("a request arrives with the pill, badge and notification (following: \(following))", following: following) {
                     p.store.handle(.request(try! ApprovalTestRequests.compound()))

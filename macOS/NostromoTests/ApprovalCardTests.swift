@@ -4008,20 +4008,51 @@ final class ApprovalCollapseAndFocusTests: XCTestCase {
         XCTAssertFalse(ApprovalOverlayHost.focusCard(in: nil))
     }
 
-    func testTabCyclesTheCardsButtonsAndWraps() throws {
+    /// Walk `nextKeyView` from `first` for `steps` steps. Names each view the way a person would
+    /// (the raw input, then the buttons), and says where the walk ends up.
+    private func walkKeyLoop(of card: ApprovalCardView, from first: NSView, steps: Int) throws -> (names: [String], end: NSView) {
+        func name(_ view: NSView) -> String {
+            if view === card.inputView.textView { return "input" }
+            if view === card.denyButton { return "deny" }
+            if view === card.denyMoreButton { return "denyMore" }
+            if view === card.denyAndStopButton { return "denyAndStop" }
+            if view === card.allowButton { return "allow" }
+            if view === card.submitButton { return "submit" }
+            if view === card.collapseButton { return "collapse" }
+            return "other: \(type(of: view))"
+        }
+        var names: [String] = []
+        var view = first
+        for _ in 0 ..< steps {
+            names.append(name(view))
+            view = try XCTUnwrap(view.nextKeyView, "the key loop breaks after \(names)")
+        }
+        return (names, view)
+    }
+
+    func testTabWalksTheCardsControlsInOrderAndWrapsBackToTheStart() throws {
         let (h, _) = harness()
         h.arrive(try ApprovalTestRequests.compound())
         let card = try XCTUnwrap(h.host.card)
-        var seen: [NSView] = []
-        var view: NSView? = card.denyButton
-        for _ in 0 ..< 12 {
-            guard let v = view else { break }
-            if seen.contains(where: { $0 === v }) { break }
-            seen.append(v)
-            view = v.nextKeyView
-        }
-        XCTAssertTrue(seen.contains { $0 === card.denyButton })
-        XCTAssertTrue(seen.contains { $0 === card.collapseButton })
-        XCTAssertTrue(view === card.denyButton || view === seen.first, "the loop wraps inside the card")
+        XCTAssertNotNil(card.denyMoreButton)
+        XCTAssertNotNil(card.denyAndStopButton)
+        XCTAssertNotNil(card.allowButton)
+        XCTAssertNil(card.submitButton, "no question form on this card")
+
+        let ring = try walkKeyLoop(of: card, from: card.inputView.textView, steps: 6)
+
+        XCTAssertEqual(ring.names, ["input", "deny", "denyMore", "denyAndStop", "allow", "collapse"])
+        XCTAssertTrue(ring.end === card.inputView.textView, "after exactly six steps Tab is back where it started")
+    }
+
+    func testTabOnAQuestionCardSkipsTheRawInputAndWalksDenySubmitCollapse() throws {
+        let h = ApprovalCardHarness(self, request: try QuestionTestRequests.ask())
+        XCTAssertNotNil(h.card.questionForm)
+        XCTAssertNotNil(h.card.submitButton)
+
+        let ring = try walkKeyLoop(of: h.card, from: h.card.denyButton, steps: 3)
+
+        XCTAssertEqual(ring.names, ["deny", "submit", "collapse"], "the raw input is not in a question card's ring")
+        XCTAssertTrue(ring.end === h.card.denyButton, "wraps after three steps")
     }
 }

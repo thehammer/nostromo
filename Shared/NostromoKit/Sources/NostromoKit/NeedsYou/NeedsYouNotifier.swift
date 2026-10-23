@@ -152,6 +152,12 @@ public final class NeedsYouNotifier {
     /// from a previous run is cleared when its item resolves.
     private var baselinedProducers = Set<String>()
     private let baselineExisting: Bool
+    /// Producers whose item ids are unique for good (an approval's request id): such an id alerts at
+    /// most once per process, even if it leaves the snapshot and comes back (a reconnect snapshot that
+    /// drops a request and lists it again). Mother's ids can be raised again, so Mother is not in it.
+    private let oncePerItemProducers: Set<String>
+    /// Every id of a once-per-item producer that was posted or seeded as seen. Never shrinks.
+    private var everPosted = Set<String>()
     private var authorizationInFlight = false
 
     /// What the system says; nil until it has been read.
@@ -165,11 +171,13 @@ public final class NeedsYouNotifier {
     public var onSurfaceAvailabilityChange: ((Bool) -> Void)?
 
     /// `baselineExisting`: the app's setting (see `baselined`). Off, every new item alerts.
+    /// `oncePerItemProducers`: see the property of that name.
     public init(center: NotificationCenterLike, builders: [String: NeedsYouContentBuilder],
-                baselineExisting: Bool = false) {
+                baselineExisting: Bool = false, oncePerItemProducers: Set<String> = []) {
         self.center = center
         self.baselineExisting = baselineExisting
         self.builders = builders
+        self.oncePerItemProducers = oncePerItemProducers
     }
 
     /// Read the system's setting. Never prompts.
@@ -207,7 +215,10 @@ public final class NeedsYouNotifier {
             posted.subtract(resolved)
         }
 
-        let waiting = current.items.filter { !posted.contains($0.id) && builders[$0.producer] != nil }
+        let waiting = current.items.filter {
+            !posted.contains($0.id) && builders[$0.producer] != nil
+                && !(oncePerItemProducers.contains($0.producer) && everPosted.contains($0.id))
+        }
         guard !waiting.isEmpty else { return }
 
         switch authorization {
@@ -242,7 +253,7 @@ public final class NeedsYouNotifier {
     /// Mark what `producer` has waiting right now as seen.
     private func seed(producer: String? = nil) {
         for item in current.items where builders[item.producer] != nil && (producer == nil || item.producer == producer) {
-            posted.insert(item.id)
+            markPosted(item)
         }
     }
 
@@ -262,6 +273,11 @@ public final class NeedsYouNotifier {
         if status == .authorized { reconcile() }
     }
 
+    private func markPosted(_ item: NeedsYouItem) {
+        posted.insert(item.id)
+        if oncePerItemProducers.contains(item.producer) { everPosted.insert(item.id) }
+    }
+
     private func post(_ item: NeedsYouItem) {
         guard let built = builders[item.producer]?.content(for: item) else { return }
         let content = UNMutableNotificationContent()
@@ -269,7 +285,7 @@ public final class NeedsYouNotifier {
         content.body = built.body
         content.threadIdentifier = built.threadIdentifier
         content.userInfo = built.userInfo
-        posted.insert(item.id)
+        markPosted(item)
         center.add(request: UNNotificationRequest(identifier: item.id, content: content, trigger: nil))
     }
 }

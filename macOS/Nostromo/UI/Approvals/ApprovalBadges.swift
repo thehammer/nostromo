@@ -12,19 +12,26 @@ import NostromoKit
 final class ApprovalBadges {
 
     private let store: ApprovalStore
-    private let publish: ([NeedsYouItem]) -> Void
-    private var subscription: AnyCancellable?
+    private let publish: ([NeedsYouItem], _ baseline: Bool) -> Void
+    private var subscriptions: [AnyCancellable] = []
 
     /// `publish` replaces everything the approvals producer has raised (an empty list withdraws it).
-    init(store: ApprovalStore, publish: @escaping ([NeedsYouItem]) -> Void) {
+    /// `baseline` is true once the daemon's first snapshot has been applied: that publish (even an empty
+    /// one) is the notifier's baseline, so the requests a relaunch finds waiting do not alert. Before the
+    /// snapshot the list is not the daemon's truth, and an empty pre-snapshot list must not baseline.
+    init(store: ApprovalStore, publish: @escaping ([NeedsYouItem], _ baseline: Bool) -> Void) {
         self.store = store
         self.publish = publish
-        subscription = store.changes.sink { [weak self] _ in self?.refresh() }
+        subscriptions = [
+            store.changes.sink { [weak self] _ in self?.refresh() },
+            // A snapshot that touched nothing sends no `changes`; this is what carries the baseline then.
+            store.snapshotHandled.sink { [weak self] in self?.refresh() },
+        ]
         refresh()
     }
 
     /// Re-read the store and publish what is waiting.
     func refresh() {
-        publish(ApprovalsNeedsYouProducer.items(pending: store.pendingRequests()))
+        publish(ApprovalsNeedsYouProducer.items(pending: store.pendingRequests()), store.hasHandledSnapshot)
     }
 }

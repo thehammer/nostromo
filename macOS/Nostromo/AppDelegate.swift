@@ -91,8 +91,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // is an event, and one that arrives with no listener is gone until the next snapshot.
         _ = ApprovalStore.shared
         // Pending approvals feed the one app-wide "needs you" source: Dock badge, sidebar pill, notification.
-        approvalBadges = ApprovalBadges(store: .shared) { items in
-            AppStore.shared.needsYouCoordinator.setProducer(ApprovalsNeedsYouProducer.name, items: items)
+        approvalBadges = ApprovalBadges(store: .shared) { items, baseline in
+            AppStore.shared.needsYouCoordinator.setProducer(ApprovalsNeedsYouProducer.name, items: items,
+                                                            baseline: baseline)
         }
         AppStore.shared.start()
         AppStore.shared.startMemoryWatchdog()
@@ -593,6 +594,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
 // MARK: - "Needs you" notifications
 
+/// Whether a "needs you" notification shows a banner while the app is active. Each producer has its own
+/// "already on screen" test; one producer's visible view never hides another producer's notification
+/// (an approval for another focus is not swallowed because the Mother view is open).
+enum NeedsYouPresentation {
+    static func options(userInfo: [AnyHashable: Any],
+                        cardIsVisible: (String) -> Bool,
+                        motherViewIsVisible: () -> Bool) -> UNNotificationPresentationOptions {
+        if userInfo["producer"] as? String == ApprovalsNeedsYouProducer.name {
+            return ApprovalNotifier.shouldPresent(userInfo: userInfo, cardIsVisible: cardIsVisible) ? [.banner] : []
+        }
+        return motherViewIsVisible() ? [] : [.banner]
+    }
+}
+
 /// Clicks on, and presentation of, the notifications `NeedsYouNotifier` posts. What a
 /// notification says is decided in NostromoKit; where a click goes is `NeedsYouRouting`.
 extension AppDelegate: UNUserNotificationCenterDelegate {
@@ -613,17 +628,15 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         NeedsYouRouting.route(userInfo: response.notification.request.content.userInfo)
     }
 
-    /// While the app is active, show a banner only if the operator is not already looking at the
-    /// Mother view in the key window (the item is on screen there).
+    /// While the app is active, show a banner unless the item is already on screen in the key window:
+    /// the Mother view for Mother's items, the card for an approval (`NeedsYouPresentation`).
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        let userInfo = notification.request.content.userInfo
-        guard ApprovalNotifier.shouldPresent(userInfo: userInfo, cardIsVisible: { Self.approvalCardIsVisible(tag: $0) }) else {
-            completionHandler([])   // its card is on screen in the key window: nothing to announce
-            return
-        }
-        completionHandler(Self.motherViewIsVisible(in: NSApp.keyWindow?.contentView) ? [] : [.banner])
+        completionHandler(NeedsYouPresentation.options(
+            userInfo: notification.request.content.userInfo,
+            cardIsVisible: { Self.approvalCardIsVisible(tag: $0) },
+            motherViewIsVisible: { Self.motherViewIsVisible(in: NSApp.keyWindow?.contentView) }))
     }
 
     private static func approvalCardIsVisible(tag: String) -> Bool {
