@@ -223,20 +223,31 @@ final class PaneRenderWatch {
         if let last = lastAutoCaptureMs[hit.severity], nowMs - last < Self.minCaptureIntervalMs { return }
         // Stamped before the write: a directory that cannot be written must not be retried on every pass.
         lastAutoCaptureMs[hit.severity] = nowMs
-        if deferCaptureWrites {
-            DispatchQueue.main.async { [weak self] in self?.write(hit, trigger: "auto", wall: wall) }
-        } else {
-            write(hit, trigger: "auto", wall: wall)
-        }
+        write(hit, trigger: "auto", wall: wall, deferred: deferCaptureWrites)
     }
 
+    /// The report is built now, from the pane as it is at the hit (a repair pass one turn later must not
+    /// make a blank's capture show a healthy pane); with `deferred` only the file write waits for the
+    /// next main-queue turn, so the draw or run-loop callback that detected the blank does no file I/O.
     @discardableResult
-    private func write(_ hit: PaneBlankDetector.Hit, trigger: String, wall: Date) -> URL? {
+    private func write(_ hit: PaneBlankDetector.Hit, trigger: String, wall: Date, deferred: Bool = false) -> URL? {
         guard let directory = effectiveDirectory else { return nil }
         if trigger == "auto" { recorder.record(.capture, 0) }
         let report = report(hit, trigger: trigger, wall: wall)
+        let manual = trigger == "manual"
+        if deferred {
+            DispatchQueue.main.async { [weak self] in
+                self?.writeFile(report, directory: directory, wall: wall, manual: manual)
+            }
+            return nil
+        }
+        return writeFile(report, directory: directory, wall: wall, manual: manual)
+    }
+
+    @discardableResult
+    private func writeFile(_ report: [String: Any], directory: URL, wall: Date, manual: Bool) -> URL? {
         guard let url = PaneBlankCapture.write(report, tagHash: tagHash, directory: directory, now: wall,
-                                                 manual: trigger == "manual") else {
+                                               manual: manual) else {
             log.error("pane blank capture could not be written")
             return nil
         }

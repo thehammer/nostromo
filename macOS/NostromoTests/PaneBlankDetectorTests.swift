@@ -139,6 +139,29 @@ final class PaneBlankDetectorTests: XCTestCase {
         XCTAssertEqual(rules(detector.evaluate(empty(350))), [.emptyViewport])
     }
 
+    func testAnEmptyRunThatBeganDuringAShedStaysUnderTheGraceAfterTheCompactionLands() {
+        var detector = PaneBlankDetector()
+        var shedding = empty(0)
+        shedding.shedInFlight = true
+        XCTAssertTrue(detector.evaluate(shedding).isEmpty)
+        shedding.nowMs = 500
+        XCTAssertTrue(detector.evaluate(shedding).isEmpty)
+        // The compaction landed (flag false) but the rebuild pass has not run yet: still the shed's blank.
+        for t in [600.0, 700, 900, 1_200, 1_900] { XCTAssertTrue(detector.evaluate(empty(t)).isEmpty, "t=\(t)") }
+        XCTAssertEqual(rules(detector.evaluate(empty(2_000))), [.emptyViewport], "outlasting two seconds is a blank")
+    }
+
+    func testTheShedGraceDoesNotLeakIntoALaterEmptyRun() {
+        var detector = PaneBlankDetector()
+        var shedding = empty(0)
+        shedding.shedInFlight = true
+        _ = detector.evaluate(shedding)
+        XCTAssertTrue(detector.evaluate(healthy(100)).isEmpty)   // the rebuild landed: the run is over
+        XCTAssertTrue(detector.evaluate(empty(1_000)).isEmpty)
+        XCTAssertTrue(detector.evaluate(empty(1_150)).isEmpty)
+        XCTAssertEqual(rules(detector.evaluate(empty(1_350))), [.emptyViewport], "an ordinary blank fires at 300 ms again")
+    }
+
     func testAShedThatLandsAndFillsTheViewportNeverFires() {
         var detector = PaneBlankDetector()
         var s = empty(0)
@@ -1311,6 +1334,24 @@ final class PaneBlankDetectorTests: XCTestCase {
         waitUntil { self.files(pane).count == 1 }
         XCTAssertEqual(try report(try newestCapture(pane))["rule"] as? String, "zero-row-draw")
         XCTAssertEqual(pane.watch.captureCount, 1)
+    }
+
+    func testADeferredCaptureShowsThePaneAsItWasAtTheHitNotAsItIsWhenTheFileLands() throws {
+        let pane = makeMaterializedPane()
+        pane.watch.deferCaptureWrites = true
+        let visibleAtHit = pane.repl.visibleTurnViewCount
+        XCTAssertGreaterThan(visibleAtHit, 0)
+
+        _ = pane.watch.noteStall(ms: 400, nowMs: PaneRenderWatch.monotonicMs(), wall: wall(0))
+        // Synchronously, before the write lands, the pane changes under it.
+        pane.repl.evictAllTurnViewsForTesting()
+        XCTAssertEqual(pane.repl.visibleTurnViewCount, 0)
+        XCTAssertTrue(files(pane).isEmpty)
+
+        waitUntil { self.files(pane).count == 1 }
+        let diagnostics = try XCTUnwrap(try report(try newestCapture(pane))["diagnostics"] as? [String: Any])
+        XCTAssertEqual((diagnostics["visibleTurnViews"] as? NSNumber)?.intValue, visibleAtHit,
+                       "the report is built at the hit; only the file write is deferred")
     }
 
     // MARK: - The heartbeat must not change how the document view paints

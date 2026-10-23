@@ -76,7 +76,8 @@ struct PaneBlankDetector {
     /// ...over at least this long (a repair pass runs on the next run-loop turn; this is "not repaired").
     static let emptyViewportMinMs = 300.0
     /// While a deliberate shed (release every view, compact, rebuild) is in flight an empty viewport is
-    /// expected; rule (a) then waits for the blank to outlast this long before it calls it a blank.
+    /// expected; rule (a) then waits for the blank to outlast this long (counted from when the viewport
+    /// went empty, through the compaction landing and until the rebuild fills it) before it calls it a blank.
     static let emptyViewportShedGraceMs = 2_000.0
     /// A drop to less than this fraction of the previous height, and below the viewport, is a collapse.
     static let heightDropFraction = 0.5
@@ -92,6 +93,9 @@ struct PaneBlankDetector {
     private var emptySinceMs: Double?
     private var emptyEvaluations = 0
     private var emptyFired = false
+    /// A deliberate shed was in flight at some point during the current empty run: the run is the
+    /// shed's, and stays under the grace period even after the compaction lands and before the rebuild pass.
+    private var emptyRunHadShed = false
 
     /// Rule (b): the last stable document height, and the collapse being watched, if any.
     /// Rule (c): when it last fired. A blank that stays blank is drawn at display rate; one hit says so.
@@ -120,12 +124,14 @@ struct PaneBlankDetector {
             emptySinceMs = nil
             emptyEvaluations = 0
             emptyFired = false
+            emptyRunHadShed = false
             return nil
         }
         if emptySinceMs == nil { emptySinceMs = s.nowMs }
+        if s.shedInFlight { emptyRunHadShed = true }
         emptyEvaluations += 1
         let span = s.nowMs - (emptySinceMs ?? s.nowMs)
-        let minSpan = s.shedInFlight ? max(Self.emptyViewportMinMs, Self.emptyViewportShedGraceMs) : Self.emptyViewportMinMs
+        let minSpan = emptyRunHadShed ? max(Self.emptyViewportMinMs, Self.emptyViewportShedGraceMs) : Self.emptyViewportMinMs
         guard !emptyFired, emptyEvaluations >= Self.emptyViewportEvaluations, span >= minSpan
         else { return nil }
         emptyFired = true
