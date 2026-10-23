@@ -29,8 +29,6 @@ final class GuardBlockedBar: NSView {
         layer?.borderWidth = 1
         layer?.cornerRadius = 6
 
-        textLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        textLabel.textColor = ApprovalPalette.commandText
         textLabel.lineBreakMode = .byTruncatingTail
         textLabel.maximumNumberOfLines = 1
         textLabel.cell?.truncatesLastVisibleLine = true
@@ -38,8 +36,6 @@ final class GuardBlockedBar: NSView {
 
         logLink.isBordered = false
         logLink.isEnabled = false
-        logLink.target = nil
-        logLink.action = nil
         logLink.refusesFirstResponder = true
         logLink.attributedTitle = NSAttributedString(string: "View in log", attributes: [
             .font: NSFont.systemFont(ofSize: 11),
@@ -76,8 +72,9 @@ final class GuardBlockedBar: NSView {
     func setText(_ text: String) {
         ApprovalContextText.set(textLabel, text, wraps: false, font: .systemFont(ofSize: 12, weight: .medium),
                                 color: ApprovalPalette.commandText)
-        textLabel.toolTip = ApprovalDisplayModel.contextText(text, keepingLineFeeds: false)
-        setAccessibilityLabel(ApprovalDisplayModel.contextText(text, keepingLineFeeds: false))
+        let plain = ApprovalDisplayModel.contextText(text, keepingLineFeeds: false)
+        textLabel.toolTip = plain
+        setAccessibilityLabel(plain)
     }
 
     override func layout() {

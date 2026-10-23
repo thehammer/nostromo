@@ -250,8 +250,12 @@ final class ApprovalStore {
     // MARK: Private
 
     private func setStatus(_ status: ApprovalRowStatus, for request: ApprovalRequestWire) {
-        statusBook.set(status, toolUseId: request.toolUseId, tag: request.tag)
-        statusChanges.send(request.toolUseId)
+        setStatus(status, toolUseId: request.toolUseId, tag: request.tag)
+    }
+
+    private func setStatus(_ status: ApprovalRowStatus, toolUseId: String, tag: String) {
+        statusBook.set(status, toolUseId: toolUseId, tag: tag)
+        statusChanges.send(toolUseId)
     }
 
     /// A request that vanished without an outcome (the daemon no longer holds it) stops saying `awaiting`.
@@ -263,8 +267,7 @@ final class ApprovalStore {
     /// The guard blocked a call: no request, no card. The call's row says so, and the bar shows for a minute.
     private func guardBlocked(_ frame: ApprovalGuardBlockedFrame) {
         guard notices[frame.tag]?.frame.entryId != frame.entryId else { return }
-        statusBook.set(.blockedByGuard, toolUseId: frame.toolUseId, tag: frame.tag)
-        statusChanges.send(frame.toolUseId)
+        setStatus(.blockedByGuard, toolUseId: frame.toolUseId, tag: frame.tag)
         notices[frame.tag] = ApprovalGuardNotice(frame: frame)
         changes.send(frame.tag)
         schedule(Self.guardBarVisibleSeconds) { [weak self] in
