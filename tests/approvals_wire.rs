@@ -36,7 +36,9 @@ use nostromo::approvals::broker::{
 };
 use nostromo::approvals::guard::{self, hook_settings_json, PaneInfo, PaneProbe, ProbeError, TmuxSocket, GUARD_MESSAGE};
 use nostromo::approvals::request::{AskRule, SettingsSource};
-use nostromo::approvals::wire::{AnswerRefusal, ApprovalDecision, ApprovalRequestWire, DecisionKind, RefusalChannel};
+use nostromo::approvals::wire::{
+    AnswerRefusal, ApprovalDecision, ApprovalOption, ApprovalRequestWire, DecisionKind, QuestionAnswer, RefusalChannel,
+};
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::decisions::DecisionRegistry;
 use nostromo::ipc::peer_verify::testing::{app_info, script_info};
@@ -642,15 +644,15 @@ fn approval_answer(request_id: &str, decision: ApprovalDecision, window: &str, n
 }
 
 fn allow_once() -> ApprovalDecision {
-    ApprovalDecision { kind: DecisionKind::AllowOnce, note: None }
+    ApprovalDecision { kind: DecisionKind::AllowOnce, note: None, answers: None }
 }
 
 fn deny(note: Option<&str>) -> ApprovalDecision {
-    ApprovalDecision { kind: DecisionKind::Deny, note: note.map(str::to_owned) }
+    ApprovalDecision { kind: DecisionKind::Deny, note: note.map(str::to_owned), answers: None }
 }
 
 fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
-    ApprovalDecision { kind: DecisionKind::DenyAndStop, note: note.map(str::to_owned) }
+    ApprovalDecision { kind: DecisionKind::DenyAndStop, note: note.map(str::to_owned), answers: None }
 }
 
 // ── predicates over frames ────────────────────────────────────────────────────
@@ -1896,5 +1898,530 @@ fn a_timeout_resolution_and_a_cancel_are_never_sent_to_tcp_peers_either() {
         assert!(!tcp.saw(carries_content), "{:?}", tcp.all());
         assert_eq!(pending_counts(tcp.all(), "cody-1"), [1, 0]);
         assert_eq!(pending_counts(tcp.all(), "cody-2"), [1, 0]);
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 4. AskUserQuestion (AP2c): answering the CLI's questions from the card
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The fake CLI asks the fixture's two questions (`FIXTURE:ask_user_question`): a single-select
+// "Which database should we use?" (Postgres / SQLite) and a multi-select "Which features do you
+// want to enable?" (Caching / Metrics / Tracing). An answer is an allow carrying the original
+// input plus `answers` keyed by the exact question text; only the verified app, with its
+// connection's nonce, may send one, and an answer that does not fit the questions changes nothing.
+
+const ASK_CUE: &str = "FIXTURE:ask_user_question";
+const ASK_TOOL_USE_ID: &str = "toolu_ask_user_question_0";
+const ASK_Q1: &str = "Which database should we use?";
+const ASK_Q2: &str = "Which features do you want to enable?";
+
+/// What the CLI is told for `ask_valid_answers()`: `{"behavior":"allow","updatedInput":<input + answers>}`,
+/// byte for byte as `serde_json` writes a `Value` (object keys sorted).
+const ASK_EXPECTED_ALLOW_JSON: &str = r#"{"behavior":"allow","updatedInput":{"answers":{"Which database should we use?":"SQLite","Which features do you want to enable?":"Caching, Tracing"},"questions":[{"header":"Database","multiSelect":false,"options":[{"description":"Relational, strong consistency","label":"Postgres"},{"description":"Embedded, zero setup","label":"SQLite"}],"question":"Which database should we use?"},{"header":"Features","multiSelect":true,"options":[{"description":"In-memory response cache","label":"Caching"},{"description":"Prometheus endpoint","label":"Metrics"},{"description":"OpenTelemetry spans","label":"Tracing"}],"question":"Which features do you want to enable?"}]}}"#;
+
+fn ask_input() -> Value {
+    fixture("ask_user_question")["requests"][0]["request"]["input"].clone()
+}
+
+fn ask_qa(question: &str, selected: &[&str], other: Option<&str>) -> QuestionAnswer {
+    QuestionAnswer {
+        question: question.to_owned(),
+        selected: selected.iter().map(|s| (*s).to_owned()).collect(),
+        other: other.map(str::to_owned),
+    }
+}
+
+/// SQLite, and Caching + Tracing (given out of option order).
+fn ask_valid_answers() -> Vec<QuestionAnswer> {
+    vec![ask_qa(ASK_Q1, &["SQLite"], None), ask_qa(ASK_Q2, &["Tracing", "Caching"], None)]
+}
+
+/// A different complete, valid answer.
+fn ask_other_valid_answers() -> Vec<QuestionAnswer> {
+    vec![ask_qa(ASK_Q1, &["Postgres"], None), ask_qa(ASK_Q2, &["Metrics"], None)]
+}
+
+fn answer_questions(answers: Vec<QuestionAnswer>) -> ApprovalDecision {
+    ApprovalDecision { kind: DecisionKind::AnswerQuestions, note: None, answers: Some(answers) }
+}
+
+/// Complete answers that do not fit: each is refused `invalid_answer`.
+fn ask_invalid_decisions() -> Vec<(&'static str, ApprovalDecision)> {
+    vec![
+        ("one question left unanswered", answer_questions(vec![ask_qa(ASK_Q1, &["SQLite"], None)])),
+        (
+            "a label that is not an option",
+            answer_questions(vec![ask_qa(ASK_Q1, &["MySQL"], None), ask_qa(ASK_Q2, &["Caching"], None)]),
+        ),
+        (
+            "no answers at all",
+            ApprovalDecision { kind: DecisionKind::AnswerQuestions, note: None, answers: None },
+        ),
+    ]
+}
+
+/// The frame the CLI receives for the valid answer.
+fn ask_allow_frame(cli_request_id: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": cli_request_id,
+            "response": serde_json::from_str::<Value>(ASK_EXPECTED_ALLOW_JSON).unwrap()
+        }
+    })
+}
+
+/// The `control_response` lines the daemon wrote to the fake's stdin, as written.
+fn raw_control_responses(fake: &Fake) -> Vec<String> {
+    fake.raw_stdin().lines().filter(|l| l.contains("\"control_response\"")).map(str::to_owned).collect()
+}
+
+/// The refusal codes of the next `n` `approval_answer_refused` frames, sorted.
+async fn refused_codes(conn: &mut Conn, n: usize) -> Vec<String> {
+    let mut codes = Vec::new();
+    for _ in 0..n {
+        codes.push(conn.next_refused().await.1.as_str().to_owned());
+    }
+    codes.sort();
+    codes
+}
+
+#[test]
+fn a_question_request_is_held_with_answer_questions_offered_and_its_input_intact_on_the_wire() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+
+        assert_eq!((wire.tool_name.as_str(), wire.tool_use_id.as_str()), ("AskUserQuestion", ASK_TOOL_USE_ID));
+        assert_eq!(wire.input, ask_input());
+        assert!(wire.flags.requires_user_interaction);
+        assert_eq!(
+            wire.options,
+            vec![
+                ApprovalOption::AllowOnce,
+                ApprovalOption::Deny,
+                ApprovalOption::DenyAndStop,
+                ApprovalOption::DenyWithNote,
+                ApprovalOption::AnswerQuestions
+            ]
+        );
+        let frame = app.request_frame(&wire.request_id);
+        assert_eq!(frame["request"]["input"], ask_input(), "as it went over the wire, not only in memory");
+        assert_eq!(
+            frame["request"]["options"],
+            json!(["allow_once", "deny", "deny_and_stop", "deny_with_note", "answer_questions"])
+        );
+        app.wait_pending("cody-1", 1).await;
+        settle().await;
+        fake.assert_no_control_responses();
+        assert_eq!(rig.broker.snapshot(), vec![wire], "the broker holds it");
+    });
+}
+
+#[test]
+fn a_request_for_another_tool_is_not_offered_answer_questions() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+
+        let (_fake, wire) = rig.held(&mut app, "cody-1", "FIXTURE:simple_rm").await;
+
+        assert!(!wire.options.contains(&ApprovalOption::AnswerQuestions), "{:?}", wire.options);
+        assert_eq!(wire.options, ApprovalOption::ALL.to_vec());
+    });
+}
+
+#[test]
+fn a_valid_answer_from_the_app_tells_the_cli_exactly_these_bytes_and_every_window_hears_it_was_answered() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+
+        app.answer(&wire.request_id, answer_questions(ask_valid_answers()), "win-q").await;
+
+        let responses = fake.wait_responses(1).await;
+        settle().await;
+        assert_eq!(fake.responses().len(), 1, "exactly one answer reaches the CLI");
+        assert_eq!(responses[0]["response"], ask_allow_frame(cli_request_id(&responses[0])));
+        let body = &responses[0]["response"]["response"]["response"];
+        assert_eq!(body["updatedInput"]["answers"], json!({ "Which database should we use?": "SQLite", "Which features do you want to enable?": "Caching, Tracing" }));
+        assert_eq!(body["updatedInput"]["questions"], ask_input()["questions"], "the original questions are intact");
+        // The bytes the daemon wrote to the CLI's stdin.
+        let lines = raw_control_responses(&fake);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(ASK_EXPECTED_ALLOW_JSON),
+            "the allow reply, byte for byte, is inside the control_response line: {}",
+            lines[0]
+        );
+        assert_eq!(app.next_resolved().await, (wire.request_id.clone(), "answered".to_owned(), Some("win-q".to_owned())));
+        app.wait_pending("cody-1", 0).await;
+        let logged = wait_until("the outcome entry", || {
+            rig.outcomes().into_iter().find(|e| e.request_id.as_deref() == Some(wire.request_id.as_str()))
+        })
+        .await;
+        let Event::Outcome { outcome, by_window, latency_ms, .. } = &logged.event else { unreachable!() };
+        assert_eq!((outcome.as_str(), by_window.as_deref()), ("answered", Some("win-q")));
+        assert!(latency_ms.is_some());
+        assert!(rig.broker.snapshot().is_empty());
+        assert!(rig.refusals().is_empty(), "a valid answer is not a refusal");
+    });
+}
+
+#[test]
+fn free_text_other_answers_reach_the_cli_cleaned() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        let answers = vec![
+            ask_qa(ASK_Q1, &[], Some("  my own\nplan\u{200B} ")),
+            ask_qa(ASK_Q2, &["Metrics", "Caching"], Some("x\u{202E}y")),
+        ];
+
+        app.answer(&wire.request_id, answer_questions(answers), "w").await;
+
+        let responses = fake.wait_responses(1).await;
+        let body = &responses[0]["response"]["response"]["response"];
+        assert_eq!(body["behavior"], "allow");
+        assert_eq!(body["updatedInput"]["answers"], json!({ "Which database should we use?": "my own plan", "Which features do you want to enable?": "Caching, Metrics, xy" }));
+        assert_eq!(body["updatedInput"]["questions"], ask_input()["questions"]);
+    });
+}
+
+#[test]
+fn an_invalid_answer_is_refused_invalid_answer_logged_and_the_request_stays_pending() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        let attempts = ask_invalid_decisions();
+
+        for (_, decision) in &attempts {
+            app.answer(&wire.request_id, decision.clone(), "w").await;
+        }
+
+        for _ in &attempts {
+            let (id, code, outcome) = app.next_refused().await;
+            assert_eq!((id.as_str(), code, outcome), (wire.request_id.as_str(), AnswerRefusal::InvalidAnswer, None));
+        }
+        let refusals = rig.wait_refusals(attempts.len()).await;
+        for e in &refusals {
+            assert_eq!(refusal_code(e), "invalid_answer");
+            assert_eq!(e.request_id.as_deref(), Some(wire.request_id.as_str()));
+            assert_eq!(entry_peer(e)["trust"], "operator_app");
+        }
+        settle().await;
+        assert!(fake.responses().is_empty(), "nothing was written: {:?}", fake.responses());
+        fake.assert_no_control_responses();
+        assert_eq!(rig.broker.snapshot().len(), 1, "the request is still pending");
+        app.sync().await;
+        assert!(!app.saw(is_resolved), "no resolution for a refused answer");
+        assert!(rig.outcomes().is_empty());
+
+        // It can still be answered: a deny is told as usual.
+        app.deny(&wire.request_id, "w").await;
+        let responses = fake.wait_responses(1).await;
+        assert_eq!(responses[0]["response"], deny_frame(cli_request_id(&responses[0]), "The user denied this in Nostromo."));
+        assert_eq!(app.next_resolved().await.1, "denied");
+    });
+}
+
+#[test]
+fn after_an_invalid_answer_a_valid_one_still_goes_through_and_is_the_only_write() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        app.answer(&wire.request_id, answer_questions(vec![ask_qa(ASK_Q1, &["MySQL"], None)]), "w").await;
+        assert_eq!(app.next_refused().await.1, AnswerRefusal::InvalidAnswer);
+
+        app.answer(&wire.request_id, answer_questions(ask_valid_answers()), "w").await;
+
+        let responses = fake.wait_responses(1).await;
+        settle().await;
+        assert_eq!(fake.responses().len(), 1);
+        assert_eq!(responses[0]["response"], ask_allow_frame(cli_request_id(&responses[0])));
+    });
+}
+
+#[test]
+fn answer_questions_from_a_local_process_that_is_not_the_app_is_refused_not_operator_app_and_nothing_is_written() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        let app_nonce = app.nonce.clone().expect("the app has a nonce");
+
+        // No nonce, and then even the app's own nonce.
+        agent.send(&approval_answer(&wire.request_id, answer_questions(ask_valid_answers()), "evil", None)).await;
+        agent.send(&approval_answer(&wire.request_id, answer_questions(ask_valid_answers()), "evil", Some(&app_nonce))).await;
+
+        for _ in 0..2 {
+            let (id, code, outcome) = agent.next_refused().await;
+            assert_eq!((id.as_str(), code, outcome), (wire.request_id.as_str(), AnswerRefusal::NotOperatorApp, None));
+        }
+        let refusals = rig.wait_refusals(2).await;
+        for e in &refusals {
+            assert_eq!(refusal_code(e), "not_operator_app");
+            assert_eq!(e.request_id.as_deref(), Some(wire.request_id.as_str()));
+            assert_eq!(entry_peer(e)["trust"], "local_other");
+        }
+        settle().await;
+        fake.assert_no_control_responses();
+        assert_eq!(rig.broker.snapshot().len(), 1, "the request stays pending");
+        app.sync().await;
+        assert!(!app.saw(is_resolved));
+        // The app's own answer is the one the CLI gets.
+        app.answer(&wire.request_id, answer_questions(ask_other_valid_answers()), "win-1").await;
+        let responses = fake.wait_responses(1).await;
+        assert_eq!(responses[0]["response"]["response"]["response"]["updatedInput"]["answers"][ASK_Q1], "Postgres");
+    });
+}
+
+#[test]
+fn answer_questions_from_a_tcp_peer_is_refused_requires_secure_connection_logged_and_nothing_is_written() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let mut tcp = rig.tcp(ALL_TOPICS.to_vec()).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+
+        tcp.send(&approval_answer(&wire.request_id, answer_questions(ask_valid_answers()), "evil", None)).await;
+
+        tcp.next("the refusal", is_secure_connection_refusal).await;
+        settle().await;
+        fake.assert_no_control_responses();
+        assert_eq!(rig.broker.snapshot().len(), 1);
+        app.sync().await;
+        assert!(!app.saw(is_resolved));
+        let refusals = rig.wait_refusals(1).await;
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusal_code(&refusals[0]), "requires_secure_connection");
+        assert_eq!(refusals[0].request_id.as_deref(), Some(wire.request_id.as_str()));
+        assert_eq!(entry_peer(&refusals[0])["trust"], "tcp");
+        assert!(!tcp.saw(carries_content), "the TCP peer was told no, and nothing about the questions");
+    });
+}
+
+#[test]
+fn answer_questions_from_the_app_without_the_nonce_or_with_the_wrong_one_is_refused_and_nothing_is_written() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+
+        for nonce in [None, Some("not-the-nonce"), Some("")] {
+            app.send(&approval_answer(&wire.request_id, answer_questions(ask_valid_answers()), "w", nonce)).await;
+        }
+
+        for _ in 0..3 {
+            let (_, code, outcome) = app.next_refused().await;
+            assert_eq!((code, outcome), (AnswerRefusal::NotOperatorApp, None));
+        }
+        let refusals = rig.wait_refusals(3).await;
+        assert!(refusals.iter().all(|e| refusal_code(e) == "not_operator_app" && entry_peer(e)["trust"] == "operator_app"));
+        settle().await;
+        fake.assert_no_control_responses();
+        assert_eq!(rig.broker.snapshot().len(), 1);
+        assert!(!app.saw(is_resolved));
+        app.deny(&wire.request_id, "w").await;
+        fake.wait_responses(1).await;
+    });
+}
+
+#[test]
+fn a_second_window_answering_after_the_first_is_refused_already_resolved_answered_and_only_the_first_reaches_the_cli() {
+    run(GUARDED, |mut rig| async move {
+        let mut a = rig.app(true).await;
+        let mut b = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut a, "cody-1", ASK_CUE).await;
+        assert_eq!(b.next_request().await.request_id, wire.request_id, "both windows are shown it");
+
+        a.answer(&wire.request_id, answer_questions(ask_valid_answers()), "win-a").await;
+        fake.wait_responses(1).await;
+        b.answer(&wire.request_id, answer_questions(ask_other_valid_answers()), "win-b").await;
+
+        let (id, code, outcome) = b.next_refused().await;
+        assert_eq!((id.as_str(), code, outcome.as_deref()), (wire.request_id.as_str(), AnswerRefusal::AlreadyResolved, Some("answered")));
+        for window in [&mut a, &mut b] {
+            assert_eq!(
+                window.next_resolved().await,
+                (wire.request_id.clone(), "answered".to_owned(), Some("win-a".to_owned())),
+                "every window is told, and who answered"
+            );
+        }
+        settle().await;
+        let responses = fake.responses();
+        assert_eq!(responses.len(), 1, "{responses:?}");
+        assert_eq!(responses[0]["response"], ask_allow_frame(cli_request_id(&responses[0])), "the first window's answers");
+        assert!(!a.saw(is_answer_refused), "the winner is not refused");
+        let refusals = rig.wait_refusals(1).await;
+        assert_eq!(refusal_code(&refusals[0]), "already_resolved");
+    });
+}
+
+#[test]
+fn deny_on_a_question_request_tells_the_cli_the_usual_words_and_a_late_answer_is_refused() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        // A deny that carries answers: the answers are ignored.
+        let decision = ApprovalDecision {
+            kind: DecisionKind::Deny,
+            note: Some("not now".into()),
+            answers: Some(ask_valid_answers()),
+        };
+
+        app.answer(&wire.request_id, decision, "win-d").await;
+
+        let responses = fake.wait_responses(1).await;
+        assert_eq!(
+            responses[0]["response"],
+            deny_frame(cli_request_id(&responses[0]), "The user denied this in Nostromo.\n\nUser's note: not now")
+        );
+        assert_eq!(app.next_resolved().await, (wire.request_id.clone(), "denied".to_owned(), Some("win-d".to_owned())));
+        app.answer(&wire.request_id, answer_questions(ask_valid_answers()), "late").await;
+        let (_, code, outcome) = app.next_refused().await;
+        assert_eq!((code, outcome.as_deref()), (AnswerRefusal::AlreadyResolved, Some("denied")));
+        let refusals = rig.wait_refusals(1).await;
+        assert_eq!(refusal_code(&refusals[0]), "already_resolved");
+        settle().await;
+        assert_eq!(fake.responses().len(), 1);
+        fake.assert_never_allowed();
+    });
+}
+
+#[test]
+fn an_unanswered_question_is_denied_at_fifteen_minutes_and_a_late_answer_is_refused_and_never_an_allow() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        settle().await;
+
+        tokio::time::advance(APPROVAL_TIMEOUT).await;
+        let responses = fake.wait_responses(1).await;
+
+        assert_eq!(responses[0]["response"], deny_frame(cli_request_id(&responses[0]), TIMED_OUT_MESSAGE));
+        assert_eq!(app.next_resolved().await, (wire.request_id.clone(), "timed_out".to_owned(), None));
+        app.answer(&wire.request_id, answer_questions(ask_valid_answers()), "late").await;
+        let (_, code, outcome) = app.next_refused().await;
+        assert_eq!((code, outcome.as_deref()), (AnswerRefusal::AlreadyResolved, Some("timed_out")));
+        settle().await;
+        assert_eq!(fake.responses().len(), 1, "the late answer produced no second response");
+        fake.assert_never_allowed();
+    });
+}
+
+#[test]
+fn stopping_a_session_with_a_held_question_cancels_it_and_a_late_answer_is_refused_and_nothing_is_written() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        app.wait_pending("cody-1", 1).await;
+
+        app.send(&ClientMsg::SessionControl { tag: "cody-1".into(), action: SessionAction::Stop }).await;
+
+        assert_eq!(app.next_resolved().await, (wire.request_id.clone(), "cancelled".to_owned(), None));
+        app.answer(&wire.request_id, answer_questions(ask_valid_answers()), "late").await;
+        let (_, code, outcome) = app.next_refused().await;
+        assert_eq!((code, outcome.as_deref()), (AnswerRefusal::AlreadyResolved, Some("cancelled")));
+        settle().await;
+        fake.assert_no_control_responses();
+        assert_eq!(fake.stdin().len(), 1, "the user's message is the only thing the CLI was ever sent");
+    });
+}
+
+/// T-INV-3 for questions, over the sockets: of everything tried against a held question, the only
+/// thing that reaches the CLI is the one valid answer from the verified app with its nonce.
+#[test]
+fn the_only_allow_a_question_ever_gets_is_a_valid_answer_from_the_operator_app() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let mut tcp = rig.tcp(vec![]).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        let app_nonce = app.nonce.clone().unwrap();
+
+        // 1. a local script (with the app's nonce), 2. a TCP peer, 3. the app with a wrong nonce,
+        // 4. the app with answers that do not fit, 5. the app for an id that is not held.
+        agent.send(&approval_answer(&wire.request_id, answer_questions(ask_valid_answers()), "w", Some(&app_nonce))).await;
+        tcp.send(&approval_answer(&wire.request_id, answer_questions(ask_valid_answers()), "w", Some(&app_nonce))).await;
+        app.send(&approval_answer(&wire.request_id, answer_questions(ask_valid_answers()), "w", Some("wrong"))).await;
+        app.answer(&wire.request_id, answer_questions(vec![ask_qa(ASK_Q1, &["MySQL"], None)]), "w").await;
+        app.answer("not-a-real-id", answer_questions(ask_valid_answers()), "w").await;
+        assert_eq!(agent.next_refused().await.1, AnswerRefusal::NotOperatorApp);
+        tcp.next("a refusal", is_secure_connection_refusal).await;
+        assert_eq!(refused_codes(&mut app, 3).await, ["invalid_answer", "not_operator_app", "unknown_request"]);
+        settle().await;
+        assert!(fake.responses().is_empty(), "no refused attempt reached the CLI");
+        assert_eq!(rig.broker.snapshot().len(), 1, "and the request is still pending");
+
+        // 6. The real answer; 7. a second valid answer after it is late.
+        app.answer(&wire.request_id, answer_questions(ask_valid_answers()), "win-1").await;
+        fake.wait_responses(1).await;
+        app.next_resolved().await;
+        app.answer(&wire.request_id, answer_questions(ask_other_valid_answers()), "win-2").await;
+        assert_eq!(app.next_refused().await.1, AnswerRefusal::AlreadyResolved);
+        settle().await;
+
+        let responses = fake.responses();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["response"], ask_allow_frame(cli_request_id(&responses[0])));
+        let raw = fake.raw_stdin();
+        assert_eq!(raw.matches("\"behavior\":\"allow\"").count(), 1, "exactly one allow was ever written: {raw}");
+        let mut codes: Vec<String> = rig.wait_refusals(6).await.iter().map(|e| refusal_code(e).to_owned()).collect();
+        codes.sort();
+        assert_eq!(
+            codes,
+            [
+                "already_resolved",
+                "invalid_answer",
+                "not_operator_app",
+                "not_operator_app",
+                "requires_secure_connection",
+                "unknown_request"
+            ],
+            "every refusal was logged"
+        );
+        assert_eq!(rig.refusals().len(), 6);
+    });
+}
+
+#[test]
+fn a_tcp_peer_learns_only_a_count_about_a_question_and_never_its_text_or_its_answers() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let mut tcp_empty = rig.tcp(vec![]).await;
+        let mut tcp_all = rig.tcp(ALL_TOPICS.to_vec()).await;
+        let (fake, wire) = rig.held(&mut app, "cody-1", ASK_CUE).await;
+        app.answer(&wire.request_id, answer_questions(ask_valid_answers()), "w").await;
+        fake.wait_responses(1).await;
+        app.next_resolved().await;
+        app.wait_pending("cody-1", 0).await;
+        let s = rig.sentinel();
+        app.through(&s).await;
+
+        let needles = [
+            ASK_Q1,
+            ASK_Q2,
+            "Postgres",
+            "SQLite",
+            "Caching",
+            "Tracing",
+            "AskUserQuestion",
+            "answer_questions",
+            "Database",
+            wire.request_id.as_str(),
+            wire.tool_use_id.as_str(),
+        ];
+        for (who, c) in [("topics []", &mut tcp_empty), ("every topic", &mut tcp_all)] {
+            c.through(&s).await;
+            assert!(!c.saw(carries_content), "{who}: {:?}", c.all());
+            for raw in &c.raw {
+                let text = String::from_utf8_lossy(raw);
+                for needle in needles {
+                    assert!(!text.contains(needle), "{who}: frame {text} leaks {needle:?}");
+                }
+            }
+            assert_eq!(pending_counts(c.all(), "cody-1"), [1, 0], "{who}: the count, and only the count");
+        }
     });
 }

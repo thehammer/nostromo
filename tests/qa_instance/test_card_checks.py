@@ -1193,5 +1193,121 @@ class CliTests(TmpCase):
         self.assertEqual(self.cli(["frobnicate", "x"], listing(OLD))[0], 2)
 
 
+# ================================================================ 7. AskUserQuestion cards (AP2c)
+
+Q1 = "Which database should we use?"
+Q2 = "Which features do you want to enable?"
+
+
+def question_card(rid="q1", submit_enabled=False, allow=False, chosen=()):
+    """One entry of `approvals list` for an AskUserQuestion card (the `questions` key and a Submit option)."""
+    def opts(labels):
+        return [{"label": l, "description": "d", "selected": l in chosen} for l in labels]
+    c = {"request_id": rid, "input": "{",
+         "questions": [
+             {"question": Q1, "header": "Database", "multi_select": False, "options": opts(["Postgres", "SQLite"]),
+              "other_text": "", "other_selected": False},
+             {"question": Q2, "header": "Features", "multi_select": True,
+              "options": opts(["Caching", "Metrics", "Tracing"]), "other_text": "", "other_selected": False}],
+         "options": [{"id": "deny", "enabled": True, "label": "Deny"},
+                     {"id": "answer_questions", "enabled": submit_enabled, "label": "Submit"}]}
+    if allow:
+        c["options"].append({"id": "allow_once", "enabled": True, "label": "Allow once"})
+    return c
+
+
+class QuestionCardTests(unittest.TestCase):
+    def test_the_question_card_is_picked_by_its_first_question(self):
+        self.assertEqual(cc.pick_question_card(listing(OLD, question_card()), Q1)["request_id"], "q1")
+        self.assertIsNone(cc.pick_question_card(listing(OLD, question_card()), "Another?"))
+        self.assertIsNone(cc.pick_question_card(listing(OLD), Q1))
+
+    def test_two_cards_with_the_same_first_question_are_ambiguous_never_picked_by_position(self):
+        with self.assertRaises(cc.AmbiguousCard):
+            cc.pick_question_card(listing(question_card("a"), question_card("b")), Q1)
+
+    def test_a_bash_card_is_never_a_question_card(self):
+        self.assertEqual(cc.question_cards(listing(OLD, NEW)), [])
+
+    def test_shape_needs_the_questions_options_submit_and_no_allow_once(self):
+        self.assertIsNone(cc.question_shape_problem(question_card(), 2))
+        self.assertIn("expected 3", cc.question_shape_problem(question_card(), 3))
+        self.assertIn("Allow once", cc.question_shape_problem(question_card(allow=True), 2))
+        self.assertIn("not a question card", cc.question_shape_problem(OLD, 2))
+        no_submit = question_card()
+        no_submit["options"] = [o for o in no_submit["options"] if o["id"] != "answer_questions"]
+        self.assertIn("Submit", cc.question_shape_problem(no_submit, 2))
+        self.assertIn("no such card", cc.question_shape_problem(None, 2))
+
+    def test_submit_state_is_ready_only_when_enabled(self):
+        self.assertEqual(cc.submit_state(question_card(submit_enabled=True)), "ready")
+        self.assertEqual(cc.submit_state(question_card(submit_enabled=False)), "waiting")
+        self.assertEqual(cc.submit_state(OLD), "missing")
+        self.assertEqual(cc.submit_state(None), "missing")
+
+    def test_chosen_labels_lists_what_the_form_has_chosen(self):
+        self.assertEqual(cc.chosen_labels(question_card()), {Q1: [], Q2: []})
+        self.assertEqual(cc.chosen_labels(question_card(chosen=("Postgres", "Tracing"))),
+                         {Q1: ["Postgres"], Q2: ["Tracing"]})
+        other = question_card()
+        other["questions"][0].update(other_selected=True, other_text="Mongo")
+        self.assertEqual(cc.chosen_labels(other)[Q1], ["Mongo"])
+
+
+class QuestionCliTests(unittest.TestCase):
+    def cli(self, args, stdin_obj):
+        p = subprocess.run([sys.executable, SCRIPT] + args, input=json.dumps(stdin_obj), capture_output=True, text=True)
+        return p.returncode, p.stdout
+
+    def test_pickq_qshape_qsubmit_and_qchosen(self):
+        lst = listing(OLD, question_card(chosen=("SQLite",)))
+        self.assertEqual(self.cli(["pickq", Q1], lst), (0, "q1\n"))
+        self.assertEqual(self.cli(["pickq", "nope"], lst)[0], 1)
+        self.assertEqual(self.cli(["pickq", Q1], listing(question_card("a"), question_card("b")))[0], 4)
+        self.assertEqual(self.cli(["qshape", "q1", "2"], lst), (0, ""))
+        self.assertEqual(self.cli(["qshape", "q1", "4"], lst)[0], 1)
+        self.assertEqual(self.cli(["qsubmit", "q1"], lst), (0, "waiting\n"))
+        self.assertEqual(json.loads(self.cli(["qchosen", "q1"], lst)[1]), {Q1: ["SQLite"], Q2: []})
+
+
+class FakeAnswersTests(FakeCliLogTests):
+    """The fake CLI's answer to an AskUserQuestion request: updatedInput carries `answers` and the original questions."""
+
+    QUESTIONS = [{"question": Q1, "options": [{"label": "Postgres"}, {"label": "SQLite"}]}]
+    ANSWERS = {Q1: "Postgres"}
+
+    def answered(self, updated):
+        self.proc("43012", [{"text": "FIXTURE:ask_user_question"}],
+                  [{"behavior": "allow", "updatedInput": updated}])
+
+    def test_answers_and_unchanged_questions_pass(self):
+        self.answered({"questions": self.QUESTIONS, "answers": self.ANSWERS})
+        ok, msg = cc.check_answers(self.tmp, "ask_user_question", self.ANSWERS, self.QUESTIONS)
+        self.assertTrue(ok, msg)
+
+    def test_other_answers_fail(self):
+        self.answered({"questions": self.QUESTIONS, "answers": {Q1: "SQLite"}})
+        ok, msg = cc.check_answers(self.tmp, "ask_user_question", self.ANSWERS, self.QUESTIONS)
+        self.assertFalse(ok)
+        self.assertIn("answers", msg)
+
+    def test_changed_questions_fail(self):
+        self.answered({"questions": [], "answers": self.ANSWERS})
+        ok, msg = cc.check_answers(self.tmp, "ask_user_question", self.ANSWERS, self.QUESTIONS)
+        self.assertFalse(ok)
+        self.assertIn("questions", msg)
+
+    def test_a_deny_is_not_an_answer(self):
+        self.proc("43012", [{"text": "FIXTURE:ask_user_question"}], [{"behavior": "deny", "message": "no"}])
+        self.assertFalse(cc.check_answers(self.tmp, "ask_user_question", self.ANSWERS, self.QUESTIONS)[0])
+
+    def test_the_cli_command_exits_zero_only_for_the_right_answers(self):
+        self.answered({"questions": self.QUESTIONS, "answers": self.ANSWERS})
+        args = [sys.executable, SCRIPT, "fakeanswers", self.tmp, "ask_user_question"]
+        ok = subprocess.run(args + [json.dumps(self.ANSWERS), json.dumps(self.QUESTIONS)], capture_output=True, text=True)
+        bad = subprocess.run(args + [json.dumps({Q1: "SQLite"}), json.dumps(self.QUESTIONS)], capture_output=True, text=True)
+        self.assertEqual((ok.returncode, bad.returncode), (0, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

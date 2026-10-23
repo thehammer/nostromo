@@ -20,6 +20,8 @@
 		AP0000000000000000002112 /* ApprovalCardView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002110 /* ApprovalCardView.swift */; };
 		AP0000000000000000002121 /* ApprovalInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002120 /* ApprovalInputView.swift */; };
 		AP0000000000000000002122 /* ApprovalInputView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002120 /* ApprovalInputView.swift */; };
+		AQ0000000000000000000002 /* ApprovalQuestionFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AQ0000000000000000000001 /* ApprovalQuestionFormView.swift */; };
+		AQ0000000000000000000003 /* ApprovalQuestionFormView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AQ0000000000000000000001 /* ApprovalQuestionFormView.swift */; };
 		AP0000000000000000002131 /* ApprovalOverlayHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002130 /* ApprovalOverlayHost.swift */; };
 		AP0000000000000000002132 /* ApprovalOverlayHost.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002130 /* ApprovalOverlayHost.swift */; };
 		AP0000000000000000002141 /* ApprovalCountdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002140 /* ApprovalCountdown.swift */; };
@@ -52,6 +54,7 @@
 		AP0000000000000000002341 /* SessionRulesChipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002340 /* SessionRulesChipTests.swift */; };
 		AP0000000000000000002351 /* ApprovalsLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002350 /* ApprovalsLogTests.swift */; };
 		AP0000000000000000002361 /* PersistedRulesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002360 /* PersistedRulesTests.swift */; };
+		AQ0000000000000000000012 /* ApprovalQuestionCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AQ0000000000000000000011 /* ApprovalQuestionCardTests.swift */; };
 		WK0000000000000000000002 /* WorkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000001 /* WorkModels.swift */; };
 		WK0000000000000000000003 /* WorkModels.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000001 /* WorkModels.swift */; };
 		WK0000000000000000000005 /* WorkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000004 /* WorkStore.swift */; };
@@ -502,6 +505,7 @@
 		AP0000000000000000002100 /* ApprovalStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalStore.swift; sourceTree = "<group>"; };
 		AP0000000000000000002110 /* ApprovalCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalCardView.swift; sourceTree = "<group>"; };
 		AP0000000000000000002120 /* ApprovalInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalInputView.swift; sourceTree = "<group>"; };
+		AQ0000000000000000000001 /* ApprovalQuestionFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalQuestionFormView.swift; sourceTree = "<group>"; };
 		AP0000000000000000002130 /* ApprovalOverlayHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalOverlayHost.swift; sourceTree = "<group>"; };
 		AP0000000000000000002140 /* ApprovalCountdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalCountdown.swift; sourceTree = "<group>"; };
 		AP0000000000000000002150 /* ApprovalRowStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalRowStatus.swift; sourceTree = "<group>"; };
@@ -522,6 +526,7 @@
 		AP0000000000000000002340 /* SessionRulesChipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRulesChipTests.swift; sourceTree = "<group>"; };
 		AP0000000000000000002350 /* ApprovalsLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalsLogTests.swift; sourceTree = "<group>"; };
 		AP0000000000000000002360 /* PersistedRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistedRulesTests.swift; sourceTree = "<group>"; };
+		AQ0000000000000000000011 /* ApprovalQuestionCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalQuestionCardTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000001 /* WorkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkModels.swift; sourceTree = "<group>"; };
 		WK0000000000000000000004 /* WorkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkStore.swift; sourceTree = "<group>"; };
 		WK0000000000000000000095 /* WorkScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkScheduler.swift; sourceTree = "<group>"; };
@@ -940,6 +945,7 @@
 				AP0000000000000000002100 /* ApprovalStore.swift */,
 				AP0000000000000000002110 /* ApprovalCardView.swift */,
 				AP0000000000000000002120 /* ApprovalInputView.swift */,
+				AQ0000000000000000000001 /* ApprovalQuestionFormView.swift */,
 				AP0000000000000000002130 /* ApprovalOverlayHost.swift */,
 				AP0000000000000000002140 /* ApprovalCountdown.swift */,
 				AP0000000000000000002150 /* ApprovalRowStatus.swift */,
@@ -1152,6 +1158,7 @@
 				AP0000000000000000002340 /* SessionRulesChipTests.swift */,
 				AP0000000000000000002350 /* ApprovalsLogTests.swift */,
 				AP0000000000000000002360 /* PersistedRulesTests.swift */,
+				AQ0000000000000000000011 /* ApprovalQuestionCardTests.swift */,
 				PS00000000000000000000F0 /* ProseSelectionTests.swift */,
 				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
@@ -1389,6 +1396,7 @@
 				AP0000000000000000002101 /* ApprovalStore.swift in Sources */,
 				AP0000000000000000002111 /* ApprovalCardView.swift in Sources */,
 				AP0000000000000000002121 /* ApprovalInputView.swift in Sources */,
+				AQ0000000000000000000002 /* ApprovalQuestionFormView.swift in Sources */,
 				AP0000000000000000002131 /* ApprovalOverlayHost.swift in Sources */,
 				AP0000000000000000002141 /* ApprovalCountdown.swift in Sources */,
 				AP0000000000000000002151 /* ApprovalRowStatus.swift in Sources */,
@@ -1611,6 +1619,7 @@
 				AP0000000000000000002102 /* ApprovalStore.swift in TestSources */,
 				AP0000000000000000002112 /* ApprovalCardView.swift in TestSources */,
 				AP0000000000000000002122 /* ApprovalInputView.swift in TestSources */,
+				AQ0000000000000000000003 /* ApprovalQuestionFormView.swift in TestSources */,
 				AP0000000000000000002132 /* ApprovalOverlayHost.swift in TestSources */,
 				AP0000000000000000002142 /* ApprovalCountdown.swift in TestSources */,
 				AP0000000000000000002152 /* ApprovalRowStatus.swift in TestSources */,
@@ -1631,6 +1640,7 @@
 				AP0000000000000000002341 /* SessionRulesChipTests.swift in Sources */,
 				AP0000000000000000002351 /* ApprovalsLogTests.swift in Sources */,
 				AP0000000000000000002361 /* PersistedRulesTests.swift in Sources */,
+				AQ0000000000000000000012 /* ApprovalQuestionCardTests.swift in Sources */,
 				PS00000000000000000000F1 /* ProseSelectionTests.swift in Sources */,
 				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,

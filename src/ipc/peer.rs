@@ -1507,6 +1507,7 @@ mod tests {
                 decision: crate::approvals::wire::ApprovalDecision {
                     kind: crate::approvals::wire::DecisionKind::AllowOnce,
                     note: None,
+                    answers: None,
                 },
                 window_id: "w".into(),
                 operator_nonce: None,
@@ -2857,6 +2858,7 @@ mod tests {
                 decision: crate::approvals::wire::ApprovalDecision {
                     kind: crate::approvals::wire::DecisionKind::AllowOnce,
                     note: None,
+                    answers: None,
                 },
                 window_id: "w".into(),
                 operator_nonce: Some("n".into()),

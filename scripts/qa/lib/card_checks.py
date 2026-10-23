@@ -19,6 +19,14 @@ CLI (used by the script; JSON on stdin or in files, results on stdout):
   card_checks.py fakelog ROOT FIXTURE [COMMAND]            -> the fake CLI's answer for the fixture; exit 0 allow
                                                               (input unchanged when COMMAND is given), 1 not (reason)
   card_checks.py survives < find.json                      -> exit 0 if the `find` result is non-empty (session row still there)
+  card_checks.py pickq QUESTION          < listing.json    -> request_id of the AskUserQuestion card whose first question is
+                                                              QUESTION; exit 1 no card yet, 4 ambiguous
+  card_checks.py qshape REQUEST_ID COUNT < listing.json    -> exit 0 if the card is a question card with COUNT questions, each
+                                                              with options, a Submit option and no Allow once; else the reason, exit 1
+  card_checks.py qsubmit REQUEST_ID      < listing.json    -> ready|waiting|missing (Submit enabled or not)
+  card_checks.py qchosen REQUEST_ID      < listing.json    -> JSON {question: [labels chosen]} (empty lists when nothing is)
+  card_checks.py fakeanswers ROOT FIXTURE EXPECTED QUESTIONS -> exit 0 if the fixture's fake CLI got allow whose
+                                                              updatedInput.answers == EXPECTED (JSON) and updatedInput.questions == QUESTIONS (JSON)
 
 Why pixels: `find` matches NSTextView.string (the model text), accessibility labels, tooltips and class names,
 never glyphs, and it is not scoped to the card; a card with line numbers and an empty text area passes it. The
@@ -125,6 +133,92 @@ def allow_state(card):
     if label == GATED_LABEL:
         return "gated", label
     return "waiting", label
+
+
+# ---- AskUserQuestion cards (AP2c) ----
+
+def question_cards(listing):
+    """The cards that show an AskUserQuestion form (`questions` is a list in the listing)."""
+    return [c for c in cards(listing) if isinstance(c.get("questions"), list) and c["questions"]]
+
+
+def pick_question_card(listing, first_question):
+    """The one question card whose first question is `first_question`, else None (AmbiguousCard on two)."""
+    matches = [c for c in question_cards(listing)
+               if c["questions"][0].get("question") == first_question]
+    if len(matches) > 1:
+        raise AmbiguousCard("ambiguous card selection: %d question cards match (%s)"
+                            % (len(matches), ", ".join(str(c.get("request_id")) for c in matches)))
+    return matches[0] if matches else None
+
+
+def submit_option(card):
+    for o in card.get("options") or []:
+        if o.get("id") == "answer_questions":
+            return o
+    return None
+
+
+def submit_state(card):
+    """'ready' (Submit enabled), 'waiting' (listed, disabled) or 'missing'."""
+    o = submit_option(card) if card else None
+    if o is None:
+        return "missing"
+    return "ready" if o.get("enabled") is True else "waiting"
+
+
+def question_shape_problem(card, count):
+    """None when `card` is a question card with `count` questions that each carry options, a Submit option and
+    no Allow once; else why not."""
+    if card is None:
+        return "no such card"
+    questions = card.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return "the card is not a question card (questions is %r)" % (questions,)
+    if len(questions) != count:
+        return "the card shows %d questions, expected %d" % (len(questions), count)
+    for q in questions:
+        if not q.get("question") or not q.get("options"):
+            return "a question has no text or no options: %r" % (q,)
+    if submit_option(card) is None:
+        return "no Submit (answer_questions) option"
+    if allow_option(card) is not None:
+        return "an Allow once option is offered on a question card"
+    return None
+
+
+def chosen_labels(card):
+    """{question text: [labels chosen]} from a question card's listing (Other text is added when chosen)."""
+    out = {}
+    for q in card.get("questions") or []:
+        picked = [o["label"] for o in q.get("options") or [] if o.get("selected")]
+        if q.get("other_selected") and q.get("other_text"):
+            picked.append(q["other_text"])
+        out[q.get("question")] = picked
+    return out
+
+
+def check_answers(root, fixture, expected_answers, expected_questions):
+    """(ok, message): the fixture's fake CLI got `behavior: allow` whose updatedInput carries exactly
+    `expected_answers` under `answers` and the original `questions` unchanged."""
+    d, responses, fallback = fake_cli_select(root, fixture)
+    if d is None:
+        return False, "no fake CLI responses found under %s" % root
+    if fallback:
+        return False, ("fallback log used: no fake CLI stdin holds the cue FIXTURE:%s, so the newest non-empty log "
+                       "(%s) cannot be tied to this fixture" % (fixture, d))
+    answers = _behaviors(responses)
+    if not answers:
+        return False, "the fake CLI log %s has no permission answer" % d
+    last = answers[-1]
+    if last.get("behavior") != "allow":
+        return False, "the LAST answer after the cue is %s, not allow (%s)" % (last.get("behavior"), d)
+    updated = last.get("updatedInput") or {}
+    if updated.get("answers") != expected_answers:
+        return False, "updatedInput.answers is %r, expected %r (%s)" % (updated.get("answers"), expected_answers, d)
+    if updated.get("questions") != expected_questions:
+        return False, "updatedInput.questions is not the original questions (%s)" % d
+    return True, "allow with answers %r and the questions unchanged (%s)" % (expected_answers, d)
 
 
 def stale_ids(listing):
@@ -472,7 +566,7 @@ def _load(path):
 
 
 _STDIN_COMMANDS = ("pick", "state", "label", "stale", "probe", "window", "present", "responder", "survives",
-                   "composer")
+                   "composer", "pickq", "qshape", "qsubmit", "qchosen")
 
 
 def _main(argv):
@@ -482,6 +576,10 @@ def _main(argv):
         return 0
     if cmd == "fakelog":
         ok, msg = check_allow(argv[2], argv[3], argv[4] if len(argv) > 4 else None)
+        print(msg)
+        return 0 if ok else 1
+    if cmd == "fakeanswers":
+        ok, msg = check_answers(argv[2], argv[3], json.loads(argv[4]), json.loads(argv[5]))
         print(msg)
         return 0 if ok else 1
     if cmd == "excerpt":
@@ -528,6 +626,26 @@ def _main(argv):
             return 4
         print(c["request_id"] if c else "")
         return 0 if c else 1
+    if cmd == "pickq":
+        try:
+            c = pick_question_card(data, argv[2])
+        except AmbiguousCard as e:
+            print(e)
+            return 4
+        print(c["request_id"] if c else "")
+        return 0 if c else 1
+    if cmd == "qshape":
+        why = question_shape_problem(card_by_id(data, argv[2]), int(argv[3]))
+        if why:
+            print(why)
+        return 1 if why else 0
+    if cmd == "qsubmit":
+        print(submit_state(card_by_id(data, argv[2])))
+        return 0
+    if cmd == "qchosen":
+        c = card_by_id(data, argv[2])
+        print(json.dumps(chosen_labels(c) if c else {}))
+        return 0
     if cmd == "state":
         st, label = allow_state(card_by_id(data, argv[2]))
         print(st if st in ("ready", "gated", "missing") else "waiting:%s" % label)

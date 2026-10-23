@@ -143,15 +143,15 @@ fn bash_request(tool_use_id: &str, command: &str) -> Value {
 }
 
 fn allow_once() -> ApprovalDecision {
-    ApprovalDecision { kind: DecisionKind::AllowOnce, note: None }
+    ApprovalDecision { kind: DecisionKind::AllowOnce, note: None, answers: None }
 }
 
 fn deny(note: Option<&str>) -> ApprovalDecision {
-    ApprovalDecision { kind: DecisionKind::Deny, note: note.map(str::to_owned) }
+    ApprovalDecision { kind: DecisionKind::Deny, note: note.map(str::to_owned), answers: None }
 }
 
 fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
-    ApprovalDecision { kind: DecisionKind::DenyAndStop, note: note.map(str::to_owned) }
+    ApprovalDecision { kind: DecisionKind::DenyAndStop, note: note.map(str::to_owned), answers: None }
 }
 
 fn deny_body(message: &str) -> Value {
@@ -553,7 +553,7 @@ async fn an_allow_never_carries_the_note_it_was_sent_with() {
     rig.broker.presenter_connected("app");
     let wire = rig.hold("toolu_1").await;
 
-    let decision = ApprovalDecision { kind: DecisionKind::AllowOnce, note: Some("ignore me".into()) };
+    let decision = ApprovalDecision { kind: DecisionKind::AllowOnce, note: Some("ignore me".into()), answers: None };
     assert_eq!(rig.broker.answer(&wire.request_id, &decision, "w", "app"), applied("allowed_once"));
 
     assert_eq!(

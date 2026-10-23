@@ -30,6 +30,13 @@
 # updatedInput.command unchanged. When no stdin holds the cue the newest non-empty log is used ("fallback log
 # used") and the allow check FAILs.
 #
+# AskUserQuestion (AP2c): `ask_user_question` is a different card (a form, Submit, no input text to prove drawn):
+#   synthetic ON : clicks Postgres, Caching and Tracing, waits for Submit to enable, clicks Submit; the fake CLI's log
+#                  must show allow whose updatedInput.answers is {Q1: "Postgres", Q2: "Caching, Tracing"} and whose
+#                  updatedInput.questions is the fixture's, unchanged.
+#   --no-synthetic: the same arrival; a synthetic click on an option must be refused (nothing chosen, Submit still
+#                  disabled, a `refusal` entry with channel app_control in the QA approvals dir), the card stays.
+#
 # Every exit path prints one `SUMMARY` per fixture (`FAILED` for a fixture that ran and failed, `ABORTED: <reason>`
 # for those that did not run) and a final
 # `RESULT: PASS|FAIL|INCONCLUSIVE` line, then the DEBUG EVIDENCE block.
@@ -395,6 +402,114 @@ wait_card_for() {
   return 1
 }
 
+# The fixture's first tool input's questions (JSON), and its first question's text.
+fixture_questions() {
+  python3 - "$repo/tests/fixtures/approvals/$1.json" <<'PY'
+import json, sys
+print(json.dumps(json.load(open(sys.argv[1]))["tool_uses"][0]["input"]["questions"]))
+PY
+}
+fixture_first_question() {
+  python3 - "$repo/tests/fixtures/approvals/$1.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["tool_uses"][0]["input"]["questions"][0]["question"])
+PY
+}
+
+# Wait up to 15 s for the question card whose first question is $1; prints its request_id. 4 = ambiguous, 1 = timeout.
+wait_question_card() {
+  local out rc
+  for _ in $(seq 1 60); do
+    rc=0; out="$(listing_json | python3 "$checks" pickq "$1")" || rc=$?
+    case "$rc" in
+      0) echo "$out"; return 0 ;;
+      4) echo "$out"; return 4 ;;
+    esac
+    sleep 0.25
+  done
+  return 1
+}
+
+# Poll up to 10 s until the question card $1's Submit is enabled.
+wait_submit_ready() {
+  for _ in $(seq 1 40); do
+    [ "$(listing_json | python3 "$checks" qsubmit "$1")" = ready ] && return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+# The AskUserQuestion fixture $1 against the current instance (see the header). Sets `summary`.
+run_question_fixture() {
+  local fixture="$1" rc rid q1 questions expected chosen log opt
+  summary="$fixture: ran, stopped early"
+  q1="$(fixture_first_question "$fixture")"
+  questions="$(fixture_questions "$fixture")"
+  expected='{"Which database should we use?": "Postgres", "Which features do you want to enable?": "Caching, Tracing"}'
+  echo "--- transcript-anchor before"; ctl transcript-anchor
+  if ! send_cue "$fixture"; then
+    fail "$fixture: the composer never became the first responder (last seen: $composer_seen); no cue sent: $composer_why"
+    return
+  fi
+  rc=0; rid="$(wait_question_card "$q1")" || rc=$?
+  case "$rc" in
+    0) echo "--- approvals list (question card $rid)"; listing_json ;;
+    4) echo "$rid"; fail "$fixture: ambiguous card selection (more than one question card asks '$q1')"; return ;;
+    *) fail "$fixture: no question card asking '$q1' within 15 s"; return ;;
+  esac
+  if ! python3 "$checks" qshape "$rid" 2 < <(listing_json); then
+    fail "$fixture: the card is not a 2-question form with Submit and no Allow once: $(python3 "$checks" qshape "$rid" 2 < <(listing_json))"
+    return
+  fi
+  [ "$(listing_json | python3 "$checks" qsubmit "$rid")" = waiting ] || fail "$fixture: Submit is enabled before anything is answered"
+  summary="$fixture: question card ok (2 questions, Submit disabled until answered)"
+
+  if [ "$synthetic" = 1 ]; then
+    echo "--- click Postgres, Caching, Tracing"
+    for opt in Postgres Caching Tracing; do
+      ctl click --text "$opt" >/dev/null || fail "$fixture: could not click the option '$opt'"
+    done
+    if ! wait_submit_ready "$rid"; then
+      fail "$fixture: Submit never became enabled after answering both questions (chosen: $(listing_json | python3 "$checks" qchosen "$rid"))"
+      return
+    fi
+    echo "--- click Submit"
+    click_card_button "$rid" "Submit" || { fail "$fixture: could not click the card's Submit button"; return; }
+    if ! wait_request_gone "$rid" 8; then
+      fail "$fixture: the card did not go away after Submit"; return
+    fi
+    for _ in $(seq 1 20); do
+      rc=0; fake_msg="$(python3 "$checks" fakeanswers "$root" "$fixture" "$expected" "$questions")" || rc=$?
+      [ "$rc" = 0 ] && break
+      sleep 0.25
+    done
+    echo "--- fake CLI log: $fake_msg"
+    if [ "$rc" = 0 ]; then
+      summary="$summary, submitted: the CLI got allow with the answers and the questions unchanged"
+    else
+      fail "$fixture: the fake CLI did not get the expected answers: $fake_msg"
+    fi
+  else
+    echo "--- synthetic click on an option must be refused"
+    ctl click --text "Postgres" >/dev/null || true
+    sleep 1
+    wait_cards present 2 || fail "$fixture: the card is gone after a synthetic click"
+    chosen="$(listing_json | python3 "$checks" qchosen "$rid")"
+    echo "chosen after the synthetic click: $chosen"
+    [ "$chosen" = '{"Which database should we use?": [], "Which features do you want to enable?": []}' ] \
+      || fail "$fixture: a synthetic click chose an option: $chosen"
+    [ "$(listing_json | python3 "$checks" qsubmit "$rid")" = waiting ] || fail "$fixture: Submit is enabled after a synthetic click"
+    log="$(find "$root" -path '*approvals*' -name 'audit-*.jsonl' -print 2>/dev/null | head -1)"
+    echo "--- QA approvals audit ($log)"
+    if [ -n "$log" ] && grep '"event": *"refusal"' "$log" | grep -q 'app_control'; then
+      grep '"event": *"refusal"' "$log" | tail -n 2
+    else
+      fail "$fixture: no refusal entry with channel app_control in the QA approvals dir"
+    fi
+    summary="$summary, synthetic option click refused (nothing chosen), card still pending"
+  fi
+}
+
 # Poll up to 20 s until the card's Allow once is enabled or gated. Prints "<state> <secs>" or "waiting:<label>".
 wait_allow() {
   local st t0=$SECONDS
@@ -469,6 +584,10 @@ run_fixture() {
   echo
   echo "=== FIXTURE:$fixture (synthetic input $([ "$synthetic" = 1 ] && echo on || echo OFF)) ==="
   # (Every fixture has its own fresh instance, so no card is pending and none needs a click.)
+  if [ "$fixture" = ask_user_question ]; then
+    run_question_fixture "$fixture"
+    return
+  fi
   fixture_cmd="$(fixture_command "$fixture")"
   expected="$(python3 "$checks" expected "$fixture_cmd")"
   echo "--- transcript-anchor before"

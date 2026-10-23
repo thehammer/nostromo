@@ -5276,7 +5276,7 @@ mod work_wire_tests {
         assert_client_golden(
             ClientMsg::ApprovalAnswer {
                 request_id: "r1".into(),
-                decision: ApprovalDecision { kind: DecisionKind::AllowOnce, note: None },
+                decision: ApprovalDecision { kind: DecisionKind::AllowOnce, note: None, answers: None },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
             },
@@ -5285,7 +5285,7 @@ mod work_wire_tests {
         assert_client_golden(
             ClientMsg::ApprovalAnswer {
                 request_id: "r1".into(),
-                decision: ApprovalDecision { kind: DecisionKind::Deny, note: Some("use /tmp/y".into()) },
+                decision: ApprovalDecision { kind: DecisionKind::Deny, note: Some("use /tmp/y".into()), answers: None },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
             },
@@ -5294,7 +5294,7 @@ mod work_wire_tests {
         assert_client_golden(
             ClientMsg::ApprovalAnswer {
                 request_id: "r1".into(),
-                decision: ApprovalDecision { kind: DecisionKind::DenyAndStop, note: None },
+                decision: ApprovalDecision { kind: DecisionKind::DenyAndStop, note: None, answers: None },
                 window_id: "win-2".into(),
                 operator_nonce: None,
             },

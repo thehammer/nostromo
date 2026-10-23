@@ -70,6 +70,8 @@ public enum ApprovalOption: String, Codable, Equatable {
     case deny
     case denyAndStop = "deny_and_stop"
     case denyWithNote = "deny_with_note"
+    /// Listed only on an `AskUserQuestion` request the daemon can take answers for.
+    case answerQuestions = "answer_questions"
     case unknown
 
     public init(from decoder: Decoder) throws {
@@ -127,6 +129,8 @@ public enum ApprovalAnswerRefusalCode: String, Codable, Equatable {
     case notOperatorApp = "not_operator_app"
     case alreadyResolved = "already_resolved"
     case unknownRequest = "unknown_request"
+    /// An `answer_questions` decision that does not fit the request's questions.
+    case invalidAnswer = "invalid_answer"
     case unknown
 
     public init(from decoder: Decoder) throws {
@@ -140,6 +144,7 @@ public enum ApprovalDecisionKind: String, Codable, Equatable {
     case allowOnce = "allow_once"
     case deny
     case denyAndStop = "deny_and_stop"
+    case answerQuestions = "answer_questions"
 }
 
 /// How a refused input reached a control (`approval_refusal_report.channel`).
@@ -382,22 +387,49 @@ public struct ApprovalAnswerRefusedFrame: Decodable, Equatable {
 
 // MARK: - Outbound frames (`ClientMsg`)
 
-/// What the human decided, and (for a denial) a note the agent will read.
+/// The human's answer to one question of an `AskUserQuestion` request: the option
+/// labels chosen, and the free-text ("Other") answer if that was chosen.
+public struct ApprovalQuestionAnswer: Encodable, Equatable {
+    public let question: String
+    public let selected: [String]
+    public let other: String?
+
+    public init(question: String, selected: [String], other: String? = nil) {
+        self.question = question
+        self.selected = selected
+        self.other = other
+    }
+
+    enum CodingKeys: String, CodingKey { case question, selected, other }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(question, forKey: .question)
+        try c.encode(selected, forKey: .selected)
+        try c.encodeIfPresent(other, forKey: .other)
+    }
+}
+
+/// What the human decided, a note the agent will read (a denial), and the answers
+/// (`answer_questions`).
 public struct ApprovalDecisionWire: Encodable, Equatable {
     public let kind: ApprovalDecisionKind
     public let note: String?
+    public let answers: [ApprovalQuestionAnswer]?
 
-    public init(kind: ApprovalDecisionKind, note: String? = nil) {
+    public init(kind: ApprovalDecisionKind, note: String? = nil, answers: [ApprovalQuestionAnswer]? = nil) {
         self.kind = kind
         self.note = note
+        self.answers = answers
     }
 
-    enum CodingKeys: String, CodingKey { case kind, note }
+    enum CodingKeys: String, CodingKey { case kind, note, answers }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(kind, forKey: .kind)
         try c.encodeIfPresent(note, forKey: .note)
+        try c.encodeIfPresent(answers, forKey: .answers)
     }
 }
 

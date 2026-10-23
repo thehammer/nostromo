@@ -7,7 +7,9 @@
 // Rules, from the PRD's "Kinds of request with narrower options":
 //   * Allow once, Deny and Deny & stop are the whole menu. There are no
 //     "remember" options yet, and none are ever modelled here.
-//   * `requires_user_interaction`: Deny only, plus the explanation.
+//   * `requires_user_interaction`: Deny only, plus the explanation. The exception
+//     (AP2c) is an `AskUserQuestion` request the daemon lists as answerable: Deny
+//     and the answer form's Submit.
 //   * Deny is offered on every request, whatever the daemon listed, and Allow
 //     once only when the daemon listed it. The card can never offer more than the
 //     daemon allows.
@@ -20,6 +22,8 @@ public enum ApprovalControl: String, Equatable, CaseIterable {
     case denyWithNote = "deny_with_note"
     case denyAndStop = "deny_and_stop"
     case allowOnce = "allow_once"
+    /// Submit the answers to an `AskUserQuestion` request.
+    case answerQuestions = "answer_questions"
 }
 
 public struct ApprovalCardOptions: Equatable {
@@ -28,8 +32,12 @@ public struct ApprovalCardOptions: Equatable {
     public static let requiresInteractionNotice =
         "This tool needs Claude Code's own interface; Nostromo can't approve it"
 
-    /// What is offered, in display order: deny, deny_with_note, deny_and_stop, allow_once.
+    /// What is offered, in display order: deny, deny_with_note, deny_and_stop, allow_once
+    /// (for a question request: deny, answer_questions).
     public let controls: [ApprovalControl]
+    /// The questions to show a form for: set only for an `AskUserQuestion` request the daemon listed
+    /// `answer_questions` for whose input this build can read.
+    public let questions: [ApprovalQuestion]?
     /// Set for `requires_user_interaction`.
     public let notice: String?
     /// Keyboard focus starts on Deny: the CLI said `default_to_no`, or anything the card shows
@@ -40,14 +48,19 @@ public struct ApprovalCardOptions: Equatable {
 
     public init(request: ApprovalRequestWire) {
         let listed = Set(request.options)
-        let interactionOnly = request.flags.requiresUserInteraction
+        let questions = request.toolName == ApprovalKinds.askUserQuestionTool && listed.contains(.answerQuestions)
+            ? ApprovalQuestions.parse(request.input) : nil
+        let interactionOnly = request.flags.requiresUserInteraction && questions == nil
         var controls: [ApprovalControl] = [.deny]
-        if !interactionOnly {
+        if questions != nil {
+            controls.append(.answerQuestions)
+        } else if !interactionOnly {
             if listed.contains(.denyWithNote) { controls.append(.denyWithNote) }
             if listed.contains(.denyAndStop) { controls.append(.denyAndStop) }
             if listed.contains(.allowOnce) { controls.append(.allowOnce) }
         }
         self.controls = controls
+        self.questions = questions
         self.notice = interactionOnly ? Self.requiresInteractionNotice : nil
         // Counted from the segments too: a frame that under-reports must not lose the Deny default.
         // The model's total also covers the Bash extra-field lines and the text around the input.
@@ -58,6 +71,9 @@ public struct ApprovalCardOptions: Equatable {
 }
 
 public enum ApprovalKinds {
+
+    /// The CLI's tool for asking the person a question.
+    public static let askUserQuestionTool = "AskUserQuestion"
 
     /// `Cody wants to run Bash`, `redd (subagent of Cody) wants to edit a file`,
     /// `Cody wants to use mcp__slack__send_message`.
@@ -82,7 +98,9 @@ public enum ApprovalKinds {
         case .write: return "write a file"
         case .notebookEdit: return "edit a notebook"
         case .mcp: return "use \(request.toolName)"
-        case .other: return "use \(request.displayName.isEmpty ? request.toolName : request.displayName)"
+        case .other:
+            if request.toolName == askUserQuestionTool { return "ask you a question" }
+            return "use \(request.displayName.isEmpty ? request.toolName : request.displayName)"
         }
     }
 
