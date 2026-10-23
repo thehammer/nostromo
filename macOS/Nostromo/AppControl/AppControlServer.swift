@@ -147,6 +147,7 @@ final class AppControlServer {
         case "drag":        return try drag(req)
         case "hittest":     return try hitTest(req)
         case "transcript-anchor": return try transcriptAnchor(req)
+        case "capture-render-state": return captureRenderState()
         case "approvals":   return try approvals(req)
         case "key":         return try key(req)
         case "type":        return try typeText(req)
@@ -204,8 +205,28 @@ final class AppControlServer {
              "contentOverflow": ["w": overflow.width, "h": overflow.height],
              // The newest structured capture of this window's overflow (`layout-overflow-<index>-<UTC>.json`,
              // content-free), or null. If `contentOverflow` is non-zero, do not relaunch: send this file.
-             "overflowCapture": layout?.latestOverflowCapturePath.map { $0 as Any } ?? NSNull()]
+             "overflowCapture": layout?.latestOverflowCapturePath.map { $0 as Any } ?? NSNull(),
+             // The newest content-free capture of a transcript pane in this window going blank
+             // (`pane-blank-<tag hash>-<UTC>.json`), or null. When a pane blanks, send this path.
+             "blankCapture": latestBlankCapturePath(in: w).map { $0 as Any } ?? NSNull()]
         }
+    }
+
+    /// The newest `pane-blank-*.json` of any transcript pane in `window`, visible or not.
+    private func latestBlankCapturePath(in window: NSWindow) -> String? {
+        var paths: [String] = []
+        func walk(_ v: NSView) {
+            if let pane = v as? ReplView, let path = pane.renderWatch.latestCapturePath { paths.append(path) }
+            v.subviews.forEach(walk)
+        }
+        if let content = window.contentView { walk(content) }
+        return PaneBlankCapture.newest(of: paths)
+    }
+
+    /// `capture-render-state`: Debug ▸ Capture render state now, for scripts. Writes a capture for
+    /// every transcript pane on screen right away (no rate limit) and returns the paths.
+    private func captureRenderState() -> Any {
+        ["files": PaneRenderWatch.captureAllVisible().map(\.path)]
     }
 
     // MARK: - Tree / find

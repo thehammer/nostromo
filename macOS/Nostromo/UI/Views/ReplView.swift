@@ -101,6 +101,12 @@ class ReplView: NSView {
     private var rollInHolds: RollInHolds!
     /// The elapsed time on running tool-group rows: one tick for the pane, only while needed.
     private let elapsedTicker = ElapsedTicker()
+    /// This pane's content-free flight recorder, blank detector and capture trigger
+    /// (`docs/pane-blank-capture.md`). Observes only: nothing it does changes rendering, scrolling or measuring.
+    private(set) lazy var renderWatch = PaneRenderWatch(subject: self)
+    /// The last materialization window and document height the recorder was told about.
+    private var lastRecordedWindow: Range<Int>?
+    private var lastRecordedDocumentHeight: CGFloat = 0
     /// "Tool activity finished, N failed calls", for VoiceOver, when this pane is focused.
     private lazy var announcer = ToolActivityAnnouncer(post: ToolActivityAnnouncer.voiceOver(from: self))
 
@@ -112,6 +118,7 @@ class ReplView: NSView {
         session = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
         approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared)
         super.init(frame: .zero)
+        _ = renderWatch
         setup()
         TranscriptDiagnostics.register(self)
         AppStore.shared.registerTranscriptPane(self)
@@ -248,6 +255,13 @@ class ReplView: NSView {
         documentView.translatesAutoresizingMaskIntoConstraints = true
         documentView.frame = NSRect(x: 0, y: 0, width: 400, height: 1)
         scrollView.documentView = documentView
+        // The flight recorder's draw heartbeat. `viewWillDraw`, not `draw(_:)`: overriding `draw(_:)`
+        // on this view would make AppKit give a document view as tall as the whole transcript a
+        // backing store of its own.
+        documentView.onWillDraw = { [weak self] in self?.documentViewWillDraw() }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clipBoundsChangedForRecorder),
+            name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
 
         // Input bar — fixed at bottom
         inputBar.translatesAutoresizingMaskIntoConstraints = false
@@ -398,7 +412,9 @@ class ReplView: NSView {
         case .cleared:
             viewport.discardPending()
             announcer.reset()
-            releaseAllTurnViews()
+            renderWatch.recorder.record(.transcriptClear, reason: .clear, Double(virtualizer.count),
+                                        Double(session.transcriptClears))
+            releaseAllTurnViews(reason: .clear)
             // Nothing in `turns` survives, so nothing recorded against them
             // should either. This is half the bound that stops the interaction
             // store becoming the leak this work exists to remove.
@@ -415,8 +431,15 @@ class ReplView: NSView {
             // frozen at whatever blocks arrived before the disconnect —
             // permanently, and with nothing saying so — while the model held the
             // complete version.
+            var splicedAway = 0
+            defer {
+                if splicedAway > 0 {
+                    renderWatch.recorder.record(.viewsEvicted, reason: .splice, Double(splicedAway),
+                                                Double(turnViews.count), Double(turns.count))
+                }
+            }
             for turn in turns[min(from, turns.count)...] {
-                turnViews.removeValue(forKey: turn.id)?.removeFromSuperview()
+                if turnViews.removeValue(forKey: turn.id)?.removeFromSuperview() != nil { splicedAway += 1 }
                 pendingRemeasure.remove(turn.id)
                 session.payloadStore.unpin(turn.id)
                 // New content under an old id: whatever was held was about the old content.
@@ -459,6 +482,7 @@ class ReplView: NSView {
         // itself must be.
         contentDirty = true
         schedulePass()
+        renderWatch.requestEvaluation()
     }
 
     /// The materialized island of the turn at geometry index `index`, if any. Resolved through
@@ -492,6 +516,7 @@ class ReplView: NSView {
     /// splice here would re-key every turn against `session.turns`, which can be an append ahead.
     private func foldChangeApplied(_ turnIds: Set<UUID>) {
         guard !turnIds.isEmpty else { return }
+        renderWatch.noteLegitimateReflow()   // a fold toggle moves the document height a lot, on purpose
         var changed: [UUID: ChatTurn] = [:]
         for turn in session.turns where turnIds.contains(turn.id) { changed[turn.id] = turn }
         for i in 0 ..< virtualizer.count {
@@ -563,12 +588,14 @@ class ReplView: NSView {
         defer {
             isMaterializing = false
             if contentDirty { schedulePass() }
+            renderWatch.requestEvaluation()
         }
 
         guard !turns.isEmpty else {
-            releaseAllTurnViews()
+            releaseAllTurnViews(reason: .clear)
             documentView.setFrameSize(NSSize(width: contentWidth,
                                              height: max(1, scrollView.contentView.bounds.height)))
+            noteDocumentHeightForRecorder(max(1, scrollView.contentView.bounds.height))
             return
         }
 
@@ -616,15 +643,27 @@ class ReplView: NSView {
         //    constraint in it — recycling has to actually release, not merely
         //    stop adding.
         let wanted = Set(turns[window].map { $0.id })
+        var evicted = 0
         for (id, view) in turnViews where !wanted.contains(id) {
             view.removeFromSuperview()
             turnViews.removeValue(forKey: id)
             pendingRemeasure.remove(id)
             session.payloadStore.unpin(id)
+            evicted += 1
+        }
+        if evicted > 0 {
+            renderWatch.recorder.record(.viewsEvicted, reason: .scroll, Double(evicted),
+                                        Double(turnViews.count), Double(turns.count))
+        }
+        if lastRecordedWindow != window {
+            lastRecordedWindow = window
+            renderWatch.recorder.record(.windowChange, Double(window.lowerBound), Double(window.upperBound - 1),
+                                        Double(anticipated.minY), Double(anticipated.maxY))
         }
 
         // 3. Materialize what is missing and correct its estimated height to the
         //    real measured one.
+        var built = 0
         for i in window {
             let turn = turns[i]
             if turnViews[turn.id] == nil {
@@ -632,10 +671,14 @@ class ReplView: NSView {
                 turnViews[turn.id] = view
                 measure(view, turn: turn, at: i, reason: .materialize)   // detached — see `measure`
                 documentView.addSubview(view)
+                built += 1
             } else if pendingRemeasure.contains(turn.id) {
                 measure(turnViews[turn.id]!, turn: turn, at: i, reason: .remeasure)
             }
             pendingRemeasure.remove(turn.id)
+        }
+        if built > 0 {
+            renderWatch.recorder.record(.viewsMaterialized, Double(built), Double(turnViews.count), Double(turns.count))
         }
 
         // 4. Position, and size the document from the virtualizer's own cache —
@@ -646,6 +689,7 @@ class ReplView: NSView {
         }
         documentView.setFrameSize(NSSize(width: contentWidth,
                                          height: max(virtualizer.documentHeight, viewportBounds.height)))
+        noteDocumentHeightForRecorder(max(virtualizer.documentHeight, viewportBounds.height))
 
         // 5. Put the toggled row or the reading position back, or follow the newest content.
         viewport.endPass()
@@ -663,6 +707,42 @@ class ReplView: NSView {
             afterNextPass = nil
             done()
         }
+    }
+
+    // MARK: Flight recorder hooks (observe only)
+
+    /// The document view's height as the pass last set it. Remembered here because reading the view's
+    /// frame back is exactly what `materialize` step 4 avoids.
+    private func noteDocumentHeightForRecorder(_ height: CGFloat) {
+        guard height != lastRecordedDocumentHeight else { return }
+        renderWatch.recorder.record(.docHeight, reason: .none, Double(lastRecordedDocumentHeight), Double(height),
+                                    Double(virtualizer.documentHeight))
+        lastRecordedDocumentHeight = height
+    }
+
+    /// One scroll of the clip view (coalesced: a scroll gesture is one line saying how many it was).
+    @objc private func clipBoundsChangedForRecorder() {
+        let bounds = scrollView.contentView.bounds
+        renderWatch.recorder.recordCoalesced(.scroll, minIntervalMs: 100, reason: .scroll, Double(bounds.minY),
+                                             Double(lastRecordedDocumentHeight), Double(bounds.height))
+        renderWatch.requestEvaluation()
+    }
+
+    /// Turn views whose frame overlaps the vertical span of `visible` (document coordinates).
+    private func turnViewCount(overlapping visible: NSRect) -> Int {
+        var rows = 0
+        for view in turnViews.values where view.frame.maxY > visible.minY && view.frame.minY < visible.maxY {
+            rows += 1
+        }
+        return rows
+    }
+
+    /// The draw heartbeat: the document view is about to be drawn. Records how many turn rows are in
+    /// the visible rect, and lets rule (c) ask whether a draw is about to paint none.
+    private func documentViewWillDraw() {
+        guard renderWatch.automaticEvaluation else { return }
+        let visible = scrollView.contentView.bounds
+        renderWatch.noteDraw(rowsPainted: turnViewCount(overlapping: visible), dirtyRect: visible)
     }
 
     /// Build a turn view, hydrating its payload first if it has gone cold.
@@ -850,6 +930,7 @@ class ReplView: NSView {
         worstMeasureSeconds = max(worstMeasureSeconds, seconds)
         guard seconds > Self.measureBudgetSeconds else { return }
         slowMeasureCount += 1
+        renderWatch.recorder.record(.measureStall, reason: .none, seconds * 1000, Double(index))
         log.error("""
             slow measure: tag=\(self.session.tag, privacy: .public) turn=\(index, privacy: .public) blocks=\(turn.blocks.count, privacy: .public) subviews=\(Self.subtreeViewCount(view), privacy: .public) constraints=\(Self.subtreeConstraintCount(view), privacy: .public) reason=\(reason.rawValue, privacy: .public) elapsed=\(seconds * 1000, format: .fixed(precision: 1), privacy: .public)ms budget=\(Self.measureBudgetSeconds * 1000, format: .fixed(precision: 0), privacy: .public)ms
             """)
@@ -866,19 +947,23 @@ class ReplView: NSView {
         1 + view.subviews.reduce(0) { $0 + subtreeViewCount($1) }
     }
 
-    private func releaseAllTurnViews() {
+    private func releaseAllTurnViews(reason: PaneFlightRecorder.Reason = .shed) {
         // Unpinning matters as much as removing. `TurnPayloadStore` refuses to
         // compact a pinned turn, so a release that left the pins behind would
         // make `shedMaterializedViews()` structurally unable to compact the very
         // turns it just released — and the pinned set would grow on every window
         // resize until compaction was defeated entirely. Backwards, for a memory
         // fix.
+        let released = turnViews.count
         for (id, view) in turnViews {
             view.removeFromSuperview()
             session.payloadStore.unpin(id)
         }
         turnViews.removeAll()
         pendingRemeasure.removeAll()
+        if released > 0 {
+            renderWatch.recorder.record(.viewsEvicted, reason: reason, Double(released), 0, Double(session.turns.count))
+        }
     }
 
     /// Release every materialized view and re-materialize only what the viewport
@@ -888,7 +973,7 @@ class ReplView: NSView {
     /// watchdog can measure memory that is genuinely free rather than memory it
     /// has merely asked for.
     func shedMaterializedViews(completion: @escaping () -> Void = {}) {
-        releaseAllTurnViews()
+        releaseAllTurnViews(reason: .shed)
         session.shedRetainedContent { [weak self] in
             self?.schedulePass()
             completion()
@@ -948,15 +1033,19 @@ class ReplView: NSView {
         // groups don't depend on width: the virtualizer re-estimates them from cached
         // fold shapes rather than re-planning every turn.)
         let width = contentWidth
+        renderWatch.noteLayout(width: Double(bounds.width), height: Double(bounds.height),
+                               scrollViewHeight: Double(scrollView.frame.height), contentWidth: Double(width))
+        renderWatch.requestEvaluation()
         followTail.paneMayHaveBecomeUsable()
         guard width > 1, abs(width - laidOutWidth) > 0.5 else { return }
         laidOutWidth = width
+        renderWatch.noteLegitimateReflow()   // the height is re-estimated at the new width, on purpose
         if virtualizer.count == session.turns.count {
             virtualizer.invalidateWidth(width, turns: session.turns)
         } else {
             virtualizer.reset(turns: session.turns, width: width)
         }
-        releaseAllTurnViews()   // every measurement was taken at the old width
+        releaseAllTurnViews(reason: .resize)   // every measurement was taken at the old width
         schedulePass()
     }
 
@@ -988,16 +1077,30 @@ class ReplView: NSView {
     override func viewDidHide() {
         super.viewDidHide()
         elapsedTicker.stop()
+        renderWatch.pollPaneState()
+        renderWatch.updateScheduling()
     }
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
         elapsedTicker.reevaluate()
         followTail.paneWasShown()
+        renderWatch.pollPaneState()
+        renderWatch.updateScheduling()
+        renderWatch.requestEvaluation()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        renderWatch.pollPaneState()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        renderWatch.windowChanged(to: window)
+        renderWatch.pollPaneState()
+        renderWatch.updateScheduling()
+        renderWatch.requestEvaluation()
         elapsedTicker.reevaluate()   // stops out of a window
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
@@ -1102,6 +1205,55 @@ extension ReplView: TranscriptDiagnostics.Reporting {
         ToolFoldAdapter.rowCounts(turns: session.turns, resolver: { [interactions, foldsExpandedByDefault] turn in
             FoldResolver(state: interactions.state(for: turn.id), expandedByDefault: foldsExpandedByDefault)
         }, shape: { [virtualizer] turn in virtualizer.foldShape(for: turn) })
+    }
+}
+
+// MARK: - Pane render watch (flight recorder, blank detector)
+
+extension ReplView: PaneRenderSubject {
+    var renderWindow: NSWindow? { window }
+
+    /// On screen with a usable size: a pane in a collapsed split has nothing to draw and is not "blank".
+    var isRenderVisible: Bool {
+        isVisibleOnScreen && scrollView.contentView.bounds.height >= 1 && contentWidth > 1
+    }
+
+    /// Materialized turn views whose frame overlaps the clip view's bounds.
+    var visibleTurnViewCount: Int { turnViewCount(overlapping: scrollView.contentView.bounds) }
+
+    var viewportHeight: Double { Double(scrollView.contentView.bounds.height) }
+
+    /// A pass is queued or running, or a content change asked for one.
+    var isRenderPassPending: Bool { passPending || isMaterializing || contentDirty }
+
+    var renderPaneState: (alpha: Double, hidden: Bool, scrollViewHidden: Bool, scrollViewAttached: Bool) {
+        (Double(alphaValue), isHidden, scrollView.isHidden, scrollView.superview === self)
+    }
+
+    var renderGeometry: [String: Double] {
+        [
+            "paneWidth": Double(bounds.width), "paneHeight": Double(bounds.height),
+            "scrollViewWidth": Double(scrollView.frame.width), "scrollViewHeight": Double(scrollView.frame.height),
+            "clipOriginY": Double(scrollView.contentView.bounds.minY),
+            "clipWidth": Double(scrollView.contentView.bounds.width),
+            "documentFrameHeight": Double(lastRecordedDocumentHeight),
+            "virtualizerCount": Double(virtualizer.count),
+            "passPending": passPending ? 1 : 0, "materializing": isMaterializing ? 1 : 0,
+            "contentDirty": contentDirty ? 1 : 0, "followingTail": isPinnedToBottom ? 1 : 0,
+        ]
+    }
+
+    /// Test seam: releases every turn view and schedules nothing, which is what the blank looks like.
+    func evictAllTurnViewsForTesting() {
+        releaseAllTurnViews(reason: .test)
+    }
+
+    /// Test seam: what the document view's draw heartbeat does, with the clock passed in.
+    @discardableResult
+    func simulateDrawPassForTesting(nowMs: Double, wall: Date) -> [PaneBlankDetector.Hit] {
+        let visible = scrollView.contentView.bounds
+        return renderWatch.noteDraw(rowsPainted: turnViewCount(overlapping: visible), dirtyRect: visible,
+                                    nowMs: nowMs, wall: wall)
     }
 }
 
@@ -1243,6 +1395,16 @@ private class ReplClipView: NSClipView {
 private class TranscriptDocumentView: NSView {
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
+
+    /// The pane's draw heartbeat for its flight recorder. A `viewWillDraw` hook and not a `draw(_:)`
+    /// override: an override of `draw(_:)` is what tells AppKit this view paints, and a document view
+    /// as tall as the whole transcript would then get a backing store of its own.
+    var onWillDraw: (() -> Void)?
+
+    override func viewWillDraw() {
+        super.viewWillDraw()
+        onWillDraw?()
+    }
 }
 
 // MARK: - ContextMeterView
