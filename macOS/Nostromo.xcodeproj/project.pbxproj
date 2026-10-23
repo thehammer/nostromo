@@ -509,6 +509,45 @@
 		OVC000000000000000000012 /* OverflowCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OVC000000000000000000011 /* OverflowCaptureTests.swift */; };
 		OVC000000000000000000022 /* WindowOverflowReproTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OVC000000000000000000021 /* WindowOverflowReproTests.swift */; };
 		WCO000000000000000000023 /* TranscriptLoadHarness.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000060 /* TranscriptLoadHarness.swift */; };
+		ZZ0000000000000000TK0101 /* TrackerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0100 /* TrackerStore.swift */; };
+		ZZ0000000000000000TK0102 /* TrackerStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0100 /* TrackerStore.swift */; };
+		ZZ0000000000000000TK0201 /* TrackerPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0200 /* TrackerPaneView.swift */; };
+		ZZ0000000000000000TK0202 /* TrackerPaneView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0200 /* TrackerPaneView.swift */; };
+		ZZ0000000000000000TK0301 /* TrackerViewportAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0300 /* TrackerViewportAnchor.swift */; };
+		ZZ0000000000000000TK0302 /* TrackerViewportAnchor.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0300 /* TrackerViewportAnchor.swift */; };
+		ZZ0000000000000000TK0401 /* TrackerRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0400 /* TrackerRowView.swift */; };
+		ZZ0000000000000000TK0402 /* TrackerRowView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0400 /* TrackerRowView.swift */; };
+		ZZ0000000000000000TK0501 /* TrackerProseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0500 /* TrackerProseView.swift */; };
+		ZZ0000000000000000TK0502 /* TrackerProseView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0500 /* TrackerProseView.swift */; };
+		ZZ0000000000000000TK0601 /* TrackerMdAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0600 /* TrackerMdAdapter.swift */; };
+		ZZ0000000000000000TK0602 /* TrackerMdAdapter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0600 /* TrackerMdAdapter.swift */; };
+		ZZ0000000000000000TK0701 /* TrackerWaitingStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0700 /* TrackerWaitingStrip.swift */; };
+		ZZ0000000000000000TK0702 /* TrackerWaitingStrip.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0700 /* TrackerWaitingStrip.swift */; };
+		ZZ0000000000000000TK0801 /* TrackerItemEditing.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0800 /* TrackerItemEditing.swift */; };
+		ZZ0000000000000000TK0802 /* TrackerItemEditing.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0800 /* TrackerItemEditing.swift */; };
+		ZZ0000000000000000TK0901 /* TrackerConflictPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0900 /* TrackerConflictPopover.swift */; };
+		ZZ0000000000000000TK0902 /* TrackerConflictPopover.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK0900 /* TrackerConflictPopover.swift */; };
+		ZZ0000000000000000TK1001 /* TrackerCommandBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1000 /* TrackerCommandBlockView.swift */; };
+		ZZ0000000000000000TK1002 /* TrackerCommandBlockView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1000 /* TrackerCommandBlockView.swift */; };
+		ZZ0000000000000000TK1101 /* TrackerBackgroundRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1100 /* TrackerBackgroundRow.swift */; };
+		ZZ0000000000000000TK1102 /* TrackerBackgroundRow.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1100 /* TrackerBackgroundRow.swift */; };
+		ZZ0000000000000000TK1201 /* TrackerLinkChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1200 /* TrackerLinkChip.swift */; };
+		ZZ0000000000000000TK1202 /* TrackerLinkChip.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1200 /* TrackerLinkChip.swift */; };
+		ZZ0000000000000000TK1301 /* AppControlTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1300 /* AppControlTracker.swift */; };
+		ZZ0000000000000000TK1302 /* AppControlTracker.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1300 /* AppControlTracker.swift */; };
+		ZZ0000000000000000TK1401 /* TrackerAnchorProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1400 /* TrackerAnchorProbe.swift */; };
+		ZZ0000000000000000TK1402 /* TrackerAnchorProbe.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1400 /* TrackerAnchorProbe.swift */; };
+		ZZ0000000000000000TK1501 /* TrackerStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1500 /* TrackerStoreTests.swift */; };
+		ZZ0000000000000000TK1601 /* TrackerPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1600 /* TrackerPaneViewTests.swift */; };
+		ZZ0000000000000000TK1701 /* TrackerScrollSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1700 /* TrackerScrollSafetyTests.swift */; };
+		ZZ0000000000000000TK1801 /* TrackerTranscriptSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1800 /* TrackerTranscriptSafetyTests.swift */; };
+		ZZ0000000000000000TK1901 /* TrackerAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */; };
+		ZZ0000000000000000TK2001 /* AppControlTrackerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2000 /* AppControlTrackerTests.swift */; };
+		ZZ0000000000000000TK2101 /* TrackerEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2100 /* TrackerEditingTests.swift */; };
+		ZZ0000000000000000TK2201 /* TrackerCommandBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */; };
+		ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */; };
+		ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */; };
+		ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -848,6 +887,31 @@
 		PBT100000000000000000003 /* PaneBlankDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneBlankDetectorTests.swift; sourceTree = "<group>"; };
 		OVC000000000000000000011 /* OverflowCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverflowCaptureTests.swift; sourceTree = "<group>"; };
 		OVC000000000000000000021 /* WindowOverflowReproTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowOverflowReproTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0100 /* TrackerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerStore.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0200 /* TrackerPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerPaneView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0300 /* TrackerViewportAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerViewportAnchor.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0400 /* TrackerRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0500 /* TrackerProseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerProseView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0600 /* TrackerMdAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerMdAdapter.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0700 /* TrackerWaitingStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerWaitingStrip.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0800 /* TrackerItemEditing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerItemEditing.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK0900 /* TrackerConflictPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerConflictPopover.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1000 /* TrackerCommandBlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCommandBlockView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1100 /* TrackerBackgroundRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerBackgroundRow.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1200 /* TrackerLinkChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLinkChip.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1300 /* AppControlTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlTracker.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1400 /* TrackerAnchorProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerAnchorProbe.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1500 /* TrackerStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerStoreTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1600 /* TrackerPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerPaneViewTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1700 /* TrackerScrollSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerScrollSafetyTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1800 /* TrackerTranscriptSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerTranscriptSafetyTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2000 /* AppControlTrackerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlTrackerTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2100 /* TrackerEditingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerEditingTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCommandBlockTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerWaitingStripTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLinkTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptWidthAnchorTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -951,6 +1015,7 @@
 				ZZ0000000000000000BA0100 /* BackgroundTaskStore.swift */,
 				ZZ0000000000000000BA0200 /* TaskOutputModel.swift */,
 				ZZ0000000000000000BA0300 /* TaskRequests.swift */,
+				ZZ0000000000000000TK0100 /* TrackerStore.swift */,
 			);
 			path = Data;
 			sourceTree = "<group>";
@@ -994,6 +1059,8 @@
 				AC0000000000000000000020 /* AppControlServer.swift */,
 				ZZ0000000000000000BA1300 /* AppControlTasks.swift */,
 				ZZ0000000000000000BA1400 /* TranscriptAnchorProbe.swift */,
+				ZZ0000000000000000TK1300 /* AppControlTracker.swift */,
+				ZZ0000000000000000TK1400 /* TrackerAnchorProbe.swift */,
 			);
 			path = AppControl;
 			sourceTree = "<group>";
@@ -1055,6 +1122,7 @@
 				ZZ0000000000000000M20090 /* Model */,
 				ZZ0000000000000000BA9000 /* Background */,
 				AA0000020000000000000021 /* Views */,
+				ZZ0000000000000000TK9000 /* Tracker */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -1280,6 +1348,17 @@
 				ZZ0000000000000000BA3300 /* TaskStopTests.swift */,
 				ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */,
 				ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */,
+				ZZ0000000000000000TK1500 /* TrackerStoreTests.swift */,
+				ZZ0000000000000000TK1600 /* TrackerPaneViewTests.swift */,
+				ZZ0000000000000000TK1700 /* TrackerScrollSafetyTests.swift */,
+				ZZ0000000000000000TK1800 /* TrackerTranscriptSafetyTests.swift */,
+				ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */,
+				ZZ0000000000000000TK2000 /* AppControlTrackerTests.swift */,
+				ZZ0000000000000000TK2100 /* TrackerEditingTests.swift */,
+				ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */,
+				ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */,
+				ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */,
+				ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -1298,6 +1377,24 @@
 				ZZ0000000000000000BA1200 /* WakeMarkerView.swift */,
 			);
 			path = Background;
+			sourceTree = "<group>";
+		};
+		ZZ0000000000000000TK9000 /* Tracker */ = {
+			isa = PBXGroup;
+			children = (
+				ZZ0000000000000000TK0200 /* TrackerPaneView.swift */,
+				ZZ0000000000000000TK0300 /* TrackerViewportAnchor.swift */,
+				ZZ0000000000000000TK0400 /* TrackerRowView.swift */,
+				ZZ0000000000000000TK0500 /* TrackerProseView.swift */,
+				ZZ0000000000000000TK0600 /* TrackerMdAdapter.swift */,
+				ZZ0000000000000000TK0700 /* TrackerWaitingStrip.swift */,
+				ZZ0000000000000000TK0800 /* TrackerItemEditing.swift */,
+				ZZ0000000000000000TK0900 /* TrackerConflictPopover.swift */,
+				ZZ0000000000000000TK1000 /* TrackerCommandBlockView.swift */,
+				ZZ0000000000000000TK1100 /* TrackerBackgroundRow.swift */,
+				ZZ0000000000000000TK1200 /* TrackerLinkChip.swift */,
+			);
+			path = Tracker;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1560,6 +1657,20 @@
 				ZZ0000000000000000BA1201 /* WakeMarkerView.swift in Sources */,
 				ZZ0000000000000000BA1301 /* AppControlTasks.swift in Sources */,
 				ZZ0000000000000000BA1401 /* TranscriptAnchorProbe.swift in Sources */,
+				ZZ0000000000000000TK0101 /* TrackerStore.swift in Sources */,
+				ZZ0000000000000000TK0201 /* TrackerPaneView.swift in Sources */,
+				ZZ0000000000000000TK0301 /* TrackerViewportAnchor.swift in Sources */,
+				ZZ0000000000000000TK0401 /* TrackerRowView.swift in Sources */,
+				ZZ0000000000000000TK0501 /* TrackerProseView.swift in Sources */,
+				ZZ0000000000000000TK0601 /* TrackerMdAdapter.swift in Sources */,
+				ZZ0000000000000000TK0701 /* TrackerWaitingStrip.swift in Sources */,
+				ZZ0000000000000000TK0801 /* TrackerItemEditing.swift in Sources */,
+				ZZ0000000000000000TK0901 /* TrackerConflictPopover.swift in Sources */,
+				ZZ0000000000000000TK1001 /* TrackerCommandBlockView.swift in Sources */,
+				ZZ0000000000000000TK1101 /* TrackerBackgroundRow.swift in Sources */,
+				ZZ0000000000000000TK1201 /* TrackerLinkChip.swift in Sources */,
+				ZZ0000000000000000TK1301 /* AppControlTracker.swift in Sources */,
+				ZZ0000000000000000TK1401 /* TrackerAnchorProbe.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1896,6 +2007,31 @@
 				ZZ0000000000000000BA3301 /* TaskStopTests.swift in Sources */,
 				ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */,
 				ZZ0000000000000000BA3501 /* WakeMarkerAppearanceTests.swift in Sources */,
+				ZZ0000000000000000TK0102 /* TrackerStore.swift in TestSources */,
+				ZZ0000000000000000TK0202 /* TrackerPaneView.swift in TestSources */,
+				ZZ0000000000000000TK0302 /* TrackerViewportAnchor.swift in TestSources */,
+				ZZ0000000000000000TK0402 /* TrackerRowView.swift in TestSources */,
+				ZZ0000000000000000TK0502 /* TrackerProseView.swift in TestSources */,
+				ZZ0000000000000000TK0602 /* TrackerMdAdapter.swift in TestSources */,
+				ZZ0000000000000000TK0702 /* TrackerWaitingStrip.swift in TestSources */,
+				ZZ0000000000000000TK0802 /* TrackerItemEditing.swift in TestSources */,
+				ZZ0000000000000000TK0902 /* TrackerConflictPopover.swift in TestSources */,
+				ZZ0000000000000000TK1002 /* TrackerCommandBlockView.swift in TestSources */,
+				ZZ0000000000000000TK1102 /* TrackerBackgroundRow.swift in TestSources */,
+				ZZ0000000000000000TK1202 /* TrackerLinkChip.swift in TestSources */,
+				ZZ0000000000000000TK1302 /* AppControlTracker.swift in TestSources */,
+				ZZ0000000000000000TK1402 /* TrackerAnchorProbe.swift in TestSources */,
+				ZZ0000000000000000TK1501 /* TrackerStoreTests.swift in Sources */,
+				ZZ0000000000000000TK1601 /* TrackerPaneViewTests.swift in Sources */,
+				ZZ0000000000000000TK1701 /* TrackerScrollSafetyTests.swift in Sources */,
+				ZZ0000000000000000TK1801 /* TrackerTranscriptSafetyTests.swift in Sources */,
+				ZZ0000000000000000TK1901 /* TrackerAppearanceTests.swift in Sources */,
+				ZZ0000000000000000TK2001 /* AppControlTrackerTests.swift in Sources */,
+				ZZ0000000000000000TK2101 /* TrackerEditingTests.swift in Sources */,
+				ZZ0000000000000000TK2201 /* TrackerCommandBlockTests.swift in Sources */,
+				ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */,
+				ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */,
+				ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -598,6 +598,8 @@ class AppStore: ObservableObject {
                     WorkStore.shared.reset()
                 } else {
                     WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
+                    // Tracker panes keep their last board; the reconnect's replay replaces it in place.
+                    TrackerStore.shared.daemonDisconnected()
                 }
             }
             .store(in: &cancellables)
@@ -667,6 +669,7 @@ class AppStore: ObservableObject {
         ModelStore.shared.forget(tag: tag)
         TranscriptFoldStore.shared.removeFocus(tag: tag)
         TranscriptDiagnostics.forgetTag(tag)
+        TrackerStore.shared.forget(tag: tag)
     }
 
     // MARK: - Broker event fold
@@ -1629,8 +1632,9 @@ class AppStore: ObservableObject {
         case .sessionTasks, .sessionTaskDetail:
             break   // BA3 routes these to BackgroundTaskStore
 
+        // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:
-            break   // T1 routes these to TrackerStore
+            TrackerStore.shared.ingest(msg)
 
         // Permission approvals (AP2a): `ApprovalStore` keeps them, the card shows them. The guard's
         // block (AP2b) reaches the same store: it makes the row's status and the bar, never a card.

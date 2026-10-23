@@ -1,5 +1,6 @@
 import AppKit
 import os
+import NostromoKit
 
 private let ctlLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "AppControl")
 
@@ -147,6 +148,8 @@ final class AppControlServer {
         case "drag":        return try drag(req)
         case "hittest":     return try hitTest(req)
         case "transcript-anchor": return try transcriptAnchor(req)
+        case "tracker":     return try tracker(req)
+        case "tracker-anchor": return try trackerAnchor(req)
         case "capture-render-state": return captureRenderState()
         case "approvals":   return try approvals(req)
         case "key":         return try key(req)
@@ -500,6 +503,68 @@ final class AppControlServer {
             pane = panes[0]
         } else {
             throw AppControlError.notFound("no pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(tags)")
+        }
+        let index = appDelegate?.windows.firstIndex(where: { $0 === w }) ?? req.int("window") ?? 0
+        let data = try JSONEncoder().encode(pane.anchorSnapshot(windowIndex: index))
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    /// The visible tracker panes of `w`, and the one a tracker request means: the pane tagged `focus`,
+    /// else the one beside the transcript holding the first responder, else the window's only one.
+    private func trackerPanes(in w: NSWindow) -> [TrackerPaneView] {
+        var panes: [TrackerPaneView] = []
+        func walk(_ v: NSView) {
+            if let pane = v as? TrackerPaneView, !pane.isHiddenOrHasHiddenAncestor { panes.append(pane) }
+            v.subviews.forEach(walk)
+        }
+        if let content = w.contentView { walk(content) }
+        return panes
+    }
+
+    private func pickTrackerPane(_ req: AppControlRequest, in w: NSWindow) throws -> TrackerPaneView? {
+        let panes = trackerPanes(in: w)
+        if let tag = req.string("focus") { return panes.first { $0.tag == tag } }
+        if let responder = w.firstResponder as? NSView {
+            var v: NSView? = responder
+            while let view = v {
+                if let pane = view as? TrackerPaneView { return pane }
+                if let repl = view as? ReplView, let pane = panes.first(where: { $0.tag == repl.diagnosticsTag }) { return pane }
+                v = view.superview
+            }
+        }
+        if panes.count == 1 { return panes[0] }
+        throw AppControlError.notFound("no tracker pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(panes.map(\.tag))")
+    }
+
+    /// READ-ONLY (`tracker show|file [--focus TAG]`): what the tracker pane shows, or the board's file.
+    /// With no pane on screen for `focus`, `show` reports what the store's board would show
+    /// (`visible: false`). Sends no event, changes no focus, writes nothing.
+    private func tracker(_ req: AppControlRequest) throws -> Any {
+        let sub = req.string("sub") ?? "show"
+        guard sub == "show" || sub == "file" else {
+            throw AppControlError.badRequest("tracker: only `show` and `file` exist (both read-only)")
+        }
+        let w = try window(req)
+        let pane = try pickTrackerPane(req, in: w)
+        guard let tag = pane?.tag ?? req.string("focus") else {
+            throw AppControlError.notFound("no tracker pane in window; pass focus=TAG")
+        }
+        let board = pane?.board ?? TrackerStore.shared.board(for: tag)
+        if sub == "file" {
+            return AppControlTracker.file(tag: tag, board: board,
+                                          fileSize: board.flatMap { AppControlTracker.fileSize(atPath: $0.path) })
+        }
+        if let pane { return pane.showReport() }
+        let presentation = board.map { TrackerPresenter.present(board: $0, now: Date()) }
+        return AppControlTracker.show(tag: tag, presentation: presentation, displayedRows: nil, visible: false)
+    }
+
+    /// READ-ONLY tracker scroll-safety probe: the first visible row, the offset of the viewport top
+    /// into it, the scroll position and the held (deferred) changes. Forces no layout.
+    private func trackerAnchor(_ req: AppControlRequest) throws -> Any {
+        let w = try window(req)
+        guard let pane = try pickTrackerPane(req, in: w) else {
+            throw AppControlError.notFound("no visible tracker pane tagged \"\(req.string("focus") ?? "")\" in window")
         }
         let index = appDelegate?.windows.firstIndex(where: { $0 === w }) ?? req.int("window") ?? 0
         let data = try JSONEncoder().encode(pane.anchorSnapshot(windowIndex: index))
