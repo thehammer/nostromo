@@ -42,10 +42,10 @@ enum AppControlTracker {
                 current = ["id": section.id, "title": section.title, "count": section.count, "done": NSNull()]
             case .item(let item):
                 let state: Any = row.key.hasPrefix(TrackerDeferral.movingPrefix)
-                    ? "moving" : (heldKind[row.key] ?? NSNull())
+                    ? "moving" : (heldKind[row.key].map { $0 as Any } ?? NSNull())
                 items.append(itemJSON(item, folded: false, held: state))
             case .stub(let stub):
-                items.append(itemJSON(stub.item, folded: false, held: heldKind[row.key] ?? NSNull(), stub: stub.text))
+                items.append(itemJSON(stub.item, folded: false, held: heldKind[row.key].map { $0 as Any } ?? NSNull(), stub: stub.text))
             case .doneGroup(let group):
                 current?["done"] = ["count": group.count, "expanded": group.expanded, "title": group.title]
                 if !group.expanded {
@@ -70,7 +70,7 @@ enum AppControlTracker {
             "title": p.header.title,
             "path": p.header.path,
             "updated": p.header.updatedText,
-            "committable": p.header.committableText ?? NSNull(),
+            "committable": p.header.committableText.map { $0 as Any } ?? NSNull(),
             "visible": visible,
             "hidden_by_user": p.hiddenByUser,
             "filter": p.filter.rawValue,
@@ -78,7 +78,7 @@ enum AppControlTracker {
             "strip": [
                 "count": p.strip.count,
                 "title": p.strip.title,
-                "items": p.strip.entries.map { ["key": $0.key, "text": $0.text, "detail": $0.detail ?? NSNull()] as [String: Any] },
+                "items": p.strip.entries.map { ["key": $0.key, "text": $0.text, "detail": $0.detail.map { $0 as Any } ?? NSNull()] as [String: Any] },
             ] as [String: Any],
             "sections": sections,
             "log": log,
@@ -92,15 +92,15 @@ enum AppControlTracker {
             "id": item.id,
             "text": item.text,
             "status": item.status.wireName,
-            "owner": item.owner ?? NSNull(),
+            "owner": item.owner.map { $0 as Any } ?? NSNull(),
             "updated": item.relativeTime,
-            "updated_at": item.updatedAt.map { iso.string(from: $0) } ?? NSNull(),
-            "env": item.envBadge ?? NSNull(),
-            "note": item.noteFirstLine ?? NSNull(),
+            "updated_at": item.updatedAt.map { iso.string(from: $0) as Any } ?? NSNull(),
+            "env": item.envBadge.map { $0 as Any } ?? NSNull(),
+            "note": item.noteFirstLine.map { $0 as Any } ?? NSNull(),
             "links": item.linkTexts,
             "folded": folded,
             "held": held,
-            "stub": stub ?? NSNull(),
+            "stub": stub.map { $0 as Any } ?? NSNull(),
             "conflict": NSNull(),
             "badge": NSNull(),
         ]
@@ -123,8 +123,8 @@ enum AppControlTracker {
             "path": board.path,
             "exists": fileSize != nil,
             "committable": board.committable != nil,
-            "remote": board.committable?.remote ?? NSNull(),
-            "size": fileSize ?? NSNull(),
+            "remote": board.committable?.remote.map { $0 as Any } ?? NSNull(),
+            "size": fileSize.map { $0 as Any } ?? NSNull(),
             "banner": banner,
         ]
     }

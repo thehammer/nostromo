@@ -293,7 +293,11 @@ final class TrackerPaneView: NSView {
         let stripHeight = strip.preferredHeight
         strip.frame = NSRect(x: 0, y: y, width: width, height: stripHeight)
         y += stripHeight
-        scrollView.frame = NSRect(x: 0, y: y, width: width, height: max(bounds.height - y, 0))
+        let scrollFrame = NSRect(x: 0, y: y, width: width, height: max(bounds.height - y, 0))
+        if scrollView.frame != scrollFrame {
+            scrollView.frame = scrollFrame
+            scrollView.tile()   // the clip's size now, not on the next layout pass
+        }
         placeholder.frame = NSRect(x: TrackerRowView.hPad, y: y + 12, width: max(width - TrackerRowView.hPad * 2, 1), height: 16)
     }
 
@@ -485,7 +489,10 @@ final class TrackerHeaderView: NSView {
 
     func update(_ header: TrackerHeader) {
         if titleLabel.stringValue != header.title { titleLabel.stringValue = header.title }
-        if updatedLabel.stringValue != header.updatedText { updatedLabel.stringValue = header.updatedText }
+        if updatedLabel.stringValue != header.updatedText {
+            updatedLabel.stringValue = header.updatedText
+            needsLayout = true   // the badge sits after it (the header's own height never changes)
+        }
         let badge = header.committableText ?? ""
         if badgeLabel.stringValue != badge { badgeLabel.stringValue = badge }
         badgeLabel.isHidden = badge.isEmpty
