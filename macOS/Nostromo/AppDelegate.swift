@@ -213,6 +213,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         appLog.info("code-pane diagnostics copied to pasteboard")
     }
 
+    /// Debug ▸ Capture render state now: the same content-free capture the blank detector writes by
+    /// itself, for every transcript pane on screen, right away (no rate limit). Press it the moment a
+    /// pane blanks if nothing was captured: the recorder already holds the seconds before.
+    @objc private func captureRenderStateNow() {
+        let files = PaneRenderWatch.captureAllVisible()
+        appLog.info("render state captured for \(files.count, privacy: .public) pane(s)")
+        guard !files.isEmpty else { NSSound.beep(); return }
+        // The paths on the pasteboard, ready to send.
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(files.map(\.path).joined(separator: "\n"), forType: .string)
+    }
+
     @objc private func copyPaneDiagnostics() {
         let report = AppStore.shared.paneDiagnosticsReport()
         let pasteboard = NSPasteboard.general
@@ -282,6 +294,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         paneDiagItem.keyEquivalentModifierMask = [.command, .shift]
         paneDiagItem.target = self
         debugMenu.addItem(paneDiagItem)
+        let captureItem = NSMenuItem(title: "Capture render state now",
+                                     action: #selector(captureRenderStateNow),
+                                     keyEquivalent: "b")
+        captureItem.keyEquivalentModifierMask = [.command, .shift]
+        captureItem.target = self
+        debugMenu.addItem(captureItem)
 
         // Session menu — ⇧⌘M opens the model popup. The item has no target, so the action
         // walks the responder chain from the key window's first responder to that window's
