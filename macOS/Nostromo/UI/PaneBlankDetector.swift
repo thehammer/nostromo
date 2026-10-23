@@ -60,6 +60,8 @@ struct PaneBlankDetector {
         var documentHeight: Double
         var viewportHeight: Double
         var transcriptClears: Int
+        /// A deliberate shed released the views and its compaction has not landed yet.
+        var shedInFlight: Bool = false
     }
 
     struct Hit {
@@ -73,6 +75,9 @@ struct PaneBlankDetector {
     static let emptyViewportEvaluations = 3
     /// ...over at least this long (a repair pass runs on the next run-loop turn; this is "not repaired").
     static let emptyViewportMinMs = 300.0
+    /// While a deliberate shed (release every view, compact, rebuild) is in flight an empty viewport is
+    /// expected; rule (a) then waits for the blank to outlast this long before it calls it a blank.
+    static let emptyViewportShedGraceMs = 2_000.0
     /// A drop to less than this fraction of the previous height, and below the viewport, is a collapse.
     static let heightDropFraction = 0.5
     /// A collapse that recovers within this long is the blank; one that stays is a real shrink.
@@ -97,6 +102,10 @@ struct PaneBlankDetector {
 
     init() {}
 
+    /// A rule has seen something suspicious and is waiting to see whether it resolves (an empty run
+    /// has begun, or a height collapse is armed): the caller should keep looking often.
+    var isWatching: Bool { emptySinceMs != nil || collapse != nil }
+
     // MARK: - Rules a and b
 
     mutating func evaluate(_ s: Sample) -> [Hit] {
@@ -116,7 +125,8 @@ struct PaneBlankDetector {
         if emptySinceMs == nil { emptySinceMs = s.nowMs }
         emptyEvaluations += 1
         let span = s.nowMs - (emptySinceMs ?? s.nowMs)
-        guard !emptyFired, emptyEvaluations >= Self.emptyViewportEvaluations, span >= Self.emptyViewportMinMs
+        let minSpan = s.shedInFlight ? max(Self.emptyViewportMinMs, Self.emptyViewportShedGraceMs) : Self.emptyViewportMinMs
+        guard !emptyFired, emptyEvaluations >= Self.emptyViewportEvaluations, span >= minSpan
         else { return nil }
         emptyFired = true
         return Hit(rule: .emptyViewport, severity: .blank,

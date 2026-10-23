@@ -935,7 +935,8 @@ class ReplView: NSView {
         worstMeasureSeconds = max(worstMeasureSeconds, seconds)
         guard seconds > Self.measureBudgetSeconds else { return }
         slowMeasureCount += 1
-        renderWatch.recorder.record(.measureStall, reason: .none, seconds * 1000, Double(index))
+        renderWatch.recorder.recordCoalesced(.measureStall, minIntervalMs: PaneRenderWatch.stallRecordIntervalMs,
+                                             seconds * 1000, Double(index))
         log.error("""
             slow measure: tag=\(self.session.tag, privacy: .public) turn=\(index, privacy: .public) blocks=\(turn.blocks.count, privacy: .public) subviews=\(Self.subtreeViewCount(view), privacy: .public) constraints=\(Self.subtreeConstraintCount(view), privacy: .public) reason=\(reason.rawValue, privacy: .public) elapsed=\(seconds * 1000, format: .fixed(precision: 1), privacy: .public)ms budget=\(Self.measureBudgetSeconds * 1000, format: .fixed(precision: 0), privacy: .public)ms
             """)
@@ -1237,6 +1238,9 @@ extension ReplView: PaneRenderSubject {
         passPending || isMaterializing || contentDirty || shedInFlight || virtualizer.count != session.turns.count
     }
 
+    /// A deliberate shed released the views and the compaction that precedes the rebuild has not landed.
+    var isShedInFlight: Bool { shedInFlight }
+
     var renderPaneState: (alpha: Double, hidden: Bool, scrollViewHidden: Bool, scrollViewAttached: Bool) {
         (Double(alphaValue), isHidden, scrollView.isHidden, scrollView.superview === self)
     }
@@ -1257,6 +1261,12 @@ extension ReplView: PaneRenderSubject {
     /// Test seam: releases every turn view and schedules nothing, which is what the blank looks like.
     func evictAllTurnViewsForTesting() {
         releaseAllTurnViews(reason: .test)
+    }
+
+    /// Test seam: whether the document view overrides `draw(_:)` (it must not: see `TranscriptDocumentView`).
+    var documentViewOverridesDrawForTesting: Bool {
+        let draw = #selector(NSView.draw(_:))
+        return class_getInstanceMethod(type(of: documentView), draw) != class_getInstanceMethod(NSView.self, draw)
     }
 
     /// Test seam: marks the document view dirty so the next real display pass draws it.

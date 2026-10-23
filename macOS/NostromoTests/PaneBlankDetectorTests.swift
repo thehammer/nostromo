@@ -118,6 +118,36 @@ final class PaneBlankDetectorTests: XCTestCase {
         XCTAssertEqual(rules(detector.evaluate(empty(800))), [.emptyViewport], "three fresh sightings over 400 ms")
     }
 
+    func testAnEmptyViewportDuringADeliberateShedIsNotABlankUntilItOutlastsTwoSeconds() {
+        var detector = PaneBlankDetector()
+        func shedding(_ t: Double) -> PaneBlankDetector.Sample {
+            var s = empty(t)
+            s.shedInFlight = true
+            return s
+        }
+        XCTAssertEqual(PaneBlankDetector.emptyViewportShedGraceMs, 2_000)
+        // Far more than three evaluations over far more than 300 ms: still expected, a shed is in flight.
+        for t in stride(from: 0.0, through: 1_900, by: 100) { XCTAssertTrue(detector.evaluate(shedding(t)).isEmpty, "t=\(t)") }
+        // The blank outlasted the bound: now it is one.
+        XCTAssertEqual(rules(detector.evaluate(shedding(2_000))), [.emptyViewport])
+    }
+
+    func testTheSameEmptyViewportWithNoShedInFlightFiresAtThreeHundredMilliseconds() {
+        var detector = PaneBlankDetector()
+        XCTAssertTrue(detector.evaluate(empty(0)).isEmpty)
+        XCTAssertTrue(detector.evaluate(empty(150)).isEmpty)
+        XCTAssertEqual(rules(detector.evaluate(empty(350))), [.emptyViewport])
+    }
+
+    func testAShedThatLandsAndFillsTheViewportNeverFires() {
+        var detector = PaneBlankDetector()
+        var s = empty(0)
+        s.shedInFlight = true
+        for t in stride(from: 0.0, through: 1_000, by: 100) { s.nowMs = t; XCTAssertTrue(detector.evaluate(s).isEmpty) }
+        XCTAssertTrue(detector.evaluate(healthy(1_100)).isEmpty)
+        for t in stride(from: 1_200.0, through: 4_000, by: 100) { XCTAssertTrue(detector.evaluate(healthy(t)).isEmpty) }
+    }
+
     // MARK: - Rule (b): height collapse and recovery
 
     /// Establishes a stable height of `height` over two evaluations.
@@ -620,8 +650,10 @@ final class PaneBlankDetectorTests: XCTestCase {
         XCTAssertTrue(pane.repl.layer != nil, "the pane is layer-backed")
 
         let beforeCount = pane.repl.documentWillDrawCount
-        let drawsBefore = pane.watch.recorder.events.filter { $0.kind == .draw }.count
-        let totalBefore = pane.watch.recorder.totalRecorded
+        func drawsRecorded() -> Int {
+            pane.watch.recorder.events.filter { $0.kind == .draw }.reduce(0) { $0 + $1.coalescedCount }
+        }
+        let drawsBefore = drawsRecorded()
 
         // Dirty the document view, then run real display passes. Nothing here calls the heartbeat.
         for _ in 0 ..< 5 {
@@ -633,11 +665,7 @@ final class PaneBlankDetectorTests: XCTestCase {
 
         XCTAssertGreaterThan(pane.repl.documentWillDrawCount, beforeCount,
                              "AppKit never called viewWillDraw on the document view: the heartbeat is dead")
-        let drawEvents = pane.watch.recorder.events.filter { $0.kind == .draw }
-        XCTAssertTrue(drawEvents.contains { $0.seq > totalBefore } || drawEvents.count > drawsBefore
-                      || drawEvents.contains { $0.coalescedCount > 1 },
-                      "the heartbeat fired but no .draw event was recorded")
-        XCTAssertFalse(drawEvents.isEmpty)
+        XCTAssertGreaterThan(drawsRecorded(), drawsBefore, "the heartbeat fired but no .draw event was recorded")
     }
 
     func testScenarioD_AFourHundredMillisecondStallIsCapturedAsAStall() throws {
@@ -835,7 +863,7 @@ final class PaneBlankDetectorTests: XCTestCase {
         let window = try XCTUnwrap(json["window"] as? [String: Any], "the pane is in a window")
         let frame = try XCTUnwrap(window["frame"] as? [String: Any])
         for key in ["x", "y", "w", "h"] { XCTAssertNotNil(frame[key] as? NSNumber, "window.frame.\(key)") }
-        for key in ["screen", "isKey", "occluded", "alpha", "fullscreen"] {
+        for key in ["screenIndex", "isKey", "occluded", "alpha", "fullscreen"] {
             XCTAssertNotNil(window[key], "window.\(key) is missing")
         }
 
@@ -887,9 +915,44 @@ final class PaneBlankDetectorTests: XCTestCase {
         }
 
         let hash = PaneBlankCapture.tagHash(pane.tag)
-        let expected = (2 ..< 10).map { PaneBlankCapture.fileName(tagHash: hash, at: wall(Double($0))) }
+        let expected = (2 ..< 10).map { PaneBlankCapture.fileName(tagHash: hash, at: wall(Double($0)), manual: true) }
         XCTAssertEqual(files(pane), expected, "exactly the newest eight remain")
         XCTAssertEqual(pane.watch.captureCount, 10, "captureCount counts files written, pruned or not")
+    }
+
+    func testManualCapturesHaveTheirOwnCapAndCannotEvictAutomaticOnes() throws {
+        let dir = tempDirectory()
+        // Three automatic captures, then a dozen manual ones that are all newer.
+        for i in 0 ..< 3 { PaneBlankCapture.write(["i": i], tagHash: "aaaaaaaa", directory: dir, now: wall(Double(i))) }
+        for i in 10 ..< 22 {
+            PaneBlankCapture.write(["i": i], tagHash: "aaaaaaaa", directory: dir, now: wall(Double(i)), manual: true)
+        }
+        let names = captureNames(in: dir)
+        let automatic = names.filter { !$0.contains("-manual") }
+        let manual = names.filter { $0.contains("-manual") }
+        XCTAssertEqual(automatic, (0 ..< 3).map { PaneBlankCapture.fileName(tagHash: "aaaaaaaa", at: wall(Double($0))) },
+                       "manual presses did not evict the automatic evidence")
+        XCTAssertEqual(manual, (14 ..< 22).map { PaneBlankCapture.fileName(tagHash: "aaaaaaaa", at: wall(Double($0)), manual: true) },
+                       "the newest eight manual captures remain")
+    }
+
+    func testAutomaticCapturesAreStillCappedAtEightWhenManualOnesExist() throws {
+        let dir = tempDirectory()
+        PaneBlankCapture.write([:], tagHash: "bbbbbbbb", directory: dir, now: wall(0), manual: true)
+        for i in 1 ..< 13 { PaneBlankCapture.write([:], tagHash: "aaaaaaaa", directory: dir, now: wall(Double(i))) }
+        let names = captureNames(in: dir)
+        XCTAssertEqual(names.filter { !$0.contains("-manual") }.count, 8)
+        XCTAssertEqual(names.filter { $0.contains("-manual") }.count, 1)
+    }
+
+    func testLatestPathSeesManualAndAutomaticCapturesAndSameSecondManualsBothSurvive() throws {
+        let dir = tempDirectory()
+        PaneBlankCapture.write([:], tagHash: "aaaaaaaa", directory: dir, now: wall(1))
+        let m1 = try XCTUnwrap(PaneBlankCapture.write([:], tagHash: "aaaaaaaa", directory: dir, now: wall(5), manual: true))
+        let m2 = try XCTUnwrap(PaneBlankCapture.write([:], tagHash: "aaaaaaaa", directory: dir, now: wall(5), manual: true))
+        XCTAssertNotEqual(m1, m2)
+        XCTAssertEqual(PaneBlankCapture.latestPath(tagHash: "aaaaaaaa", in: dir), m2.path)
+        XCTAssertEqual(captureNames(in: dir).count, 3)
     }
 
     // MARK: - Scenario 9: manual capture
@@ -988,25 +1051,275 @@ final class PaneBlankDetectorTests: XCTestCase {
         XCTAssertLessThanOrEqual(pane.repl.renderWatch.recorder.count, 200)
     }
 
-    // MARK: - Source guard
+    // MARK: - A stall storm cannot evict the evidence
 
-    /// We deliberately watch draws through `viewWillDraw`, so the document view's own `draw`
-    /// (and with it AppKit's backing-store behaviour for that view) stays exactly as it was.
-    func testTheTranscriptDocumentViewDoesNotOverrideDraw() throws {
-        let macOS = URL(fileURLWithPath: #filePath)           // …/macOS/NostromoTests/PaneBlankDetectorTests.swift
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let source = try String(contentsOf: macOS.appendingPathComponent("Nostromo/UI/Views/ReplView.swift"),
-                                encoding: .utf8)
+    func testThreeHundredStallsLeaveTheEarlierStructuralEventsInTheRingAndTheCapture() throws {
+        let pane = makeMaterializedPane()
+        pane.watch.automaticEvaluation = true
+        addTeardownBlock { pane.watch.automaticEvaluation = false }
+        let recorder = pane.watch.recorder
 
-        let declaration = try XCTUnwrap(source.range(of: "class TranscriptDocumentView"),
-                                        "TranscriptDocumentView not found in ReplView.swift: did it move?")
-        let rest = source[declaration.upperBound...]
-        let body = rest.range(of: "\n}\n").map { String(rest[..<$0.lowerBound]) } ?? String(rest)
+        // The structural history that led up to the blank, recorded after the pane has settled.
+        let history: [PaneFlightRecorder.Kind] = [.viewsEvicted, .windowChange, .docHeight, .viewsEvicted, .windowChange, .docHeight]
+        for (i, kind) in history.enumerated() { recorder.record(kind, reason: .scroll, Double(i), 1, 2, 3) }
+        let firstHistorySeq = recorder.totalRecorded - UInt64(history.count) + 1
+        let before = recorder.totalRecorded
 
-        XCTAssertFalse(body.contains("func draw(_ dirtyRect"),
-                       "TranscriptDocumentView must not override draw(_:); use viewWillDraw for the heartbeat")
-        XCTAssertFalse(body.contains("func draw(_ rect"), "same, under another parameter name")
-        XCTAssertTrue(body.contains("viewWillDraw"), "the draw heartbeat lives in viewWillDraw")
+        // 300 stalls, each over the threshold, over ten minutes of simulated clock; three different
+        // routes in: the pane's run-loop stall hook, a slow measurement and the detector entry point.
+        let t = PaneRenderWatch.monotonicMs()
+        for i in 0 ..< 300 {
+            _ = pane.watch.mainThreadStalled(ms: 300 + Double(i), mayCapture: false)
+            recorder.recordCoalesced(.measureStall, minIntervalMs: PaneRenderWatch.stallRecordIntervalMs, 300, Double(i))
+            _ = pane.watch.noteStall(ms: 300 + Double(i), nowMs: t + Double(i) * 10, wall: wall(Double(i)), capture: false)
+        }
+
+        // The storm took a handful of slots (one stall, one measure stall, one hit), not hundreds.
+        XCTAssertLessThanOrEqual(recorder.totalRecorded - before, 6, "events recorded by 900 stall notifications")
+        let seqs = Set(recorder.events.map(\.seq))
+        for offset in 0 ..< UInt64(history.count) {
+            XCTAssertTrue(seqs.contains(firstHistorySeq + offset), "structural event \(offset) was evicted by the storm")
+        }
+        let hits = recorder.events.filter { $0.kind == .detectorHit }
+        XCTAssertLessThanOrEqual(hits.count, 1, "a stall storm is one detectorHit event, not one per stall")
+        XCTAssertTrue(recorder.events.contains { $0.kind == .runLoopStall && $0.coalescedCount > 1 },
+                      "the run-loop stalls were coalesced and say how many")
+        XCTAssertFalse(recorder.events.contains { $0.kind == .measureStall && $0.b == -1 },
+                       "a run-loop stall is no longer a measureStall with turnIndex -1")
+
+        // And the capture written afterwards still contains the history and says what was suppressed.
+        let url = try XCTUnwrap(pane.watch.captureNow(nowMs: t + 5_000, wall: wall(400)))
+        let json = try report(url)
+        let events = try XCTUnwrap(json["events"] as? [[String: Any]])
+        let captured = Set(events.compactMap { ($0["seq"] as? NSNumber)?.uint64Value })
+        for offset in 0 ..< UInt64(history.count) {
+            XCTAssertTrue(captured.contains(firstHistorySeq + offset), "capture lost structural event \(offset)")
+        }
+        let suppressed = try XCTUnwrap(json["suppressedHits"] as? [String: Any])
+        XCTAssertGreaterThanOrEqual((suppressed["main-thread-stall"] as? NSNumber)?.intValue ?? 0, 250)
+    }
+
+    func testAHitIsRecordedAgainOnceItsRecordIntervalPasses() {
+        let pane = makeMaterializedPane()
+        let t = PaneRenderWatch.monotonicMs()
+        _ = pane.watch.noteStall(ms: 400, nowMs: t, wall: wall(0), capture: false)
+        _ = pane.watch.noteStall(ms: 400, nowMs: t + 1_000, wall: wall(1), capture: false)
+        XCTAssertEqual(pane.watch.recorder.events.filter { $0.kind == .detectorHit }.count, 1)
+        _ = pane.watch.noteStall(ms: 400, nowMs: t + PaneRenderWatch.hitRecordIntervalMs + 1, wall: wall(10), capture: false)
+        XCTAssertEqual(pane.watch.recorder.events.filter { $0.kind == .detectorHit }.count, 2)
+    }
+
+    func testDifferentRulesAreRecordedIndependently() {
+        let pane = makeMaterializedPane()
+        let t = PaneRenderWatch.monotonicMs()
+        _ = pane.watch.noteStall(ms: 400, nowMs: t, wall: wall(0), capture: false)
+        pane.repl.evictAllTurnViewsForTesting()
+        _ = pane.repl.simulateDrawPassForTesting(nowMs: t + 10, wall: wall(0))
+        let codes = pane.watch.recorder.events.filter { $0.kind == .detectorHit }.map(\.a)
+        XCTAssertEqual(codes, [PaneBlankDetector.Rule.mainThreadStall.code, PaneBlankDetector.Rule.zeroRowDraw.code],
+                       "a stall does not hide a blank that follows it")
+    }
+
+    // MARK: - No OS free text in a capture
+
+    /// Every key a capture may contain, at any depth. A new field that is not on this list fails here,
+    /// so a free-text field (a screen name, a title) cannot be added silently.
+    private static let allowedCaptureKeys: Set<String> = Set([
+        // top level
+        "schema", "capturedAtUTC", "trigger", "reason", "rule", "severity", "detail", "suppressedHits", "events",
+        "app", "screens", "diagnostics", "pane", "window",
+        // app, screens, window
+        "uptimeSeconds", "build", "pid", "index", "frame", "scale", "x", "y", "w", "h",
+        "screenIndex", "isKey", "occluded", "alpha", "fullscreen",
+        // diagnostics
+        "retainedTurns", "materializedViews", "visibleTurnViews", "estimatedDocHeight", "transcriptClears",
+        "slowMeasures", "worstMeasureMs", "viewportHeight",
+        // pane geometry
+        "paneWidth", "paneHeight", "scrollViewWidth", "scrollViewHeight", "clipOriginY", "clipWidth",
+        "documentFrameHeight", "virtualizerCount", "passPending", "materializing", "contentDirty", "followingTail",
+        // detail (every rule) and suppressedHits (rule names)
+        "evaluations", "emptyForMs", "documentHeight", "heightBefore", "heightCollapsedTo", "heightAfter",
+        "collapsedForMs", "stallMs", "atMs",
+        "empty-viewport", "height-collapse", "zero-row-draw", "main-thread-stall", "manual",
+        // events
+        "seq", "kind", "tMs", "wall", "n",
+    ]).union(PaneFlightRecorder.Kind.allCases.flatMap(\.fieldNames))
+
+    private func allKeys(in value: Any) -> Set<String> {
+        if let dict = value as? [String: Any] {
+            return dict.reduce(into: Set(dict.keys)) { $0.formUnion(allKeys(in: $1.value)) }
+        }
+        if let array = value as? [Any] { return array.reduce(into: Set<String>()) { $0.formUnion(allKeys(in: $1)) } }
+        return []
+    }
+
+    private func stringValues(in value: Any) -> [String] {
+        if let dict = value as? [String: Any] { return dict.values.flatMap { stringValues(in: $0) } }
+        if let array = value as? [Any] { return array.flatMap { stringValues(in: $0) } }
+        if let string = value as? String { return [string] }
+        return []
+    }
+
+    func testACaptureContainsOnlyWhitelistedKeysAndFixedNames() throws {
+        let titleSentinel = "SENTINEL-TITLE-77aa"
+        let pane = makePane(windowTitle: titleSentinel)
+        deliver(pane, turns: (0 ..< 12).map { turn($0) })
+        waitUntil { self.pump(pane, 0.02); return pane.repl.visibleTurnViewCount > 0 }
+        pane.repl.evictAllTurnViewsForTesting()
+        _ = pane.watch.noteStall(ms: 400, nowMs: PaneRenderWatch.monotonicMs(), wall: wall(0))
+        _ = pane.repl.simulateDrawPassForTesting(nowMs: PaneRenderWatch.monotonicMs() + 10, wall: wall(1))
+        _ = pane.watch.captureNow(nowMs: PaneRenderWatch.monotonicMs() + 20, wall: wall(2))
+        XCTAssertEqual(files(pane).count, 3)
+
+        let fixedNames: Set<String> =
+            Set(["auto", "manual"]) .union(["empty-viewport", "height-collapse", "zero-row-draw", "main-thread-stall"])
+            .union(["blank", "stall"])
+            .union(PaneFlightRecorder.Kind.allCases.map(\.name))
+            .union(["none", "scroll", "resize", "clear", "splice", "shed", "fold", "manual", "test"])
+        let stamp = try NSRegularExpression(pattern: #"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$"#)
+        let buildString = try NSRegularExpression(pattern: #"^[0-9A-Za-z.+-]+ \([0-9A-Za-z.+-]+\)$"#)
+        let screenNames = NSScreen.screens.map(\.localizedName).filter { !$0.isEmpty }
+
+        for name in files(pane) {
+            let url = pane.dir.appendingPathComponent(name)
+            let json = try report(url)
+            let unexpected = allKeys(in: json).subtracting(Self.allowedCaptureKeys)
+            XCTAssertTrue(unexpected.isEmpty, "\(name) has fields that are not on the whitelist: \(unexpected.sorted())")
+
+            // Every string in the file is a timestamp, the build string or one of the fixed names.
+            for value in stringValues(in: json) {
+                let range = NSRange(value.startIndex..., in: value)
+                let ok = fixedNames.contains(value)
+                    || stamp.firstMatch(in: value, range: range) != nil
+                    || buildString.firstMatch(in: value, range: range) != nil
+                XCTAssertTrue(ok, "\(name) holds a string that is not a fixed name: '\(value)'")
+            }
+
+            let text = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+            for screenName in screenNames { XCTAssertFalse(text.contains(screenName), "\(name) leaks the screen name '\(screenName)'") }
+            XCTAssertFalse(text.contains("localizedName"))
+            XCTAssertFalse(text.contains(titleSentinel))
+        }
+
+        let json = try report(try newestCapture(pane))
+        let screens = try XCTUnwrap(json["screens"] as? [[String: Any]])
+        for (i, screen) in screens.enumerated() {
+            XCTAssertEqual((screen["index"] as? NSNumber)?.intValue, i)
+            XCTAssertEqual(Set(screen.keys), ["index", "frame", "scale"], "a screen is its index, frame and scale")
+        }
+        let window = try XCTUnwrap(json["window"] as? [String: Any])
+        XCTAssertNotNil((window["screenIndex"] as? NSNumber)?.intValue)
+    }
+
+    // MARK: - Timer backoff
+
+    func testTheTimerBacksOffToOneSecondWhileHealthyAndReturnsToFastOnAnyEvent() {
+        let pane = makeMaterializedPane()
+        let watch = pane.watch
+        watch.automaticEvaluation = true
+        addTeardownBlock { watch.automaticEvaluation = false }
+        XCTAssertEqual(watch.timerIntervalMs, 250, "a visible pane starts at 250 ms")
+
+        for tick in 1 ... PaneRenderWatch.calmTicksBeforeBackoff {
+            XCTAssertEqual(watch.timerIntervalMs, 250, "still fast before tick \(tick)")
+            watch.timerTick()
+        }
+        XCTAssertEqual(watch.timerIntervalMs, PaneRenderWatch.idleEvaluationIntervalMs, "backed off after a healthy stretch")
+        XCTAssertEqual(PaneRenderWatch.idleEvaluationIntervalMs, 1_000)
+
+        watch.timerTick()
+        XCTAssertEqual(watch.timerIntervalMs, 1_000, "and stays there while nothing happens")
+
+        watch.requestEvaluation()
+        XCTAssertEqual(watch.timerIntervalMs, 250, "an event puts it back at 250 ms")
+    }
+
+    func testAnActivityBetweenTicksKeepsTheTimerFast() {
+        let pane = makeMaterializedPane()
+        let watch = pane.watch
+        watch.automaticEvaluation = true
+        addTeardownBlock { watch.automaticEvaluation = false }
+        for _ in 0 ..< 3 * PaneRenderWatch.calmTicksBeforeBackoff {
+            watch.requestEvaluation()   // something is going on in every interval
+            watch.timerTick()
+        }
+        XCTAssertEqual(watch.timerIntervalMs, 250)
+    }
+
+    func testASuspiciousPaneNeverBacksOffAndAHitReturnsAnIdleTimerToFast() {
+        let pane = makeMaterializedPane()
+        let watch = pane.watch
+        watch.automaticEvaluation = true
+        addTeardownBlock { watch.automaticEvaluation = false }
+
+        // A blank in the making (no views, turns retained): every tick is suspicious.
+        pane.repl.evictAllTurnViewsForTesting()
+        for _ in 0 ..< 3 * PaneRenderWatch.calmTicksBeforeBackoff { watch.timerTick() }
+        XCTAssertEqual(watch.timerIntervalMs, 250, "an empty viewport keeps the timer fast")
+
+        // A healthy pane that has backed off, then a stall hit.
+        let healthyPane = makeMaterializedPane()
+        let healthy = healthyPane.watch
+        healthy.automaticEvaluation = true
+        addTeardownBlock { healthy.automaticEvaluation = false }
+        for _ in 0 ... PaneRenderWatch.calmTicksBeforeBackoff { healthy.timerTick() }
+        XCTAssertEqual(healthy.timerIntervalMs, 1_000)
+        _ = healthy.noteStall(ms: 400, nowMs: PaneRenderWatch.monotonicMs(), wall: wall(0), capture: false)
+        XCTAssertEqual(healthy.timerIntervalMs, 250, "a detector hit returns the timer to 250 ms")
+    }
+
+    func testAPaneThatIsNotVisibleHasNoTimerAtAll() {
+        let pane = makeMaterializedPane()
+        pane.watch.automaticEvaluation = true
+        addTeardownBlock { pane.watch.automaticEvaluation = false }
+        pane.watch.visibilityOverride = false
+        pane.watch.updateScheduling()
+        XCTAssertNil(pane.watch.timerIntervalMs)
+    }
+
+    // MARK: - Shed in flight on a real pane
+
+    func testAnEmptyViewportOnARealPaneWhileAShedIsInFlightIsOnlyReportedAfterTwoSeconds() {
+        let pane = makeMaterializedPane()
+        pane.repl.evictAllTurnViewsForTesting()
+        XCTAssertFalse(pane.repl.isShedInFlight)
+        let t = PaneRenderWatch.monotonicMs()
+        // Forced (a real shed's compaction cannot be held open here): the sequence that fires at 350 ms
+        // without a shed in flight stays quiet.
+        pane.watch.shedInFlightOverride = true
+        XCTAssertTrue(pane.watch.evaluate(nowMs: t, wall: wall(0)).isEmpty)
+        XCTAssertTrue(pane.watch.evaluate(nowMs: t + 150, wall: wall(0)).isEmpty)
+        XCTAssertTrue(pane.watch.evaluate(nowMs: t + 350, wall: wall(1)).isEmpty)
+        XCTAssertTrue(pane.watch.evaluate(nowMs: t + 1_500, wall: wall(2)).isEmpty)
+        XCTAssertTrue(files(pane).isEmpty)
+        XCTAssertEqual(pane.watch.evaluate(nowMs: t + 2_100, wall: wall(3)).map(\.rule), [.emptyViewport],
+                       "a blank that outlasts the bound is reported")
+        XCTAssertEqual(files(pane).count, 1)
+    }
+
+    // MARK: - Capture files are written off the draw path
+
+    func testADeferredCaptureIsWrittenOnTheNextMainQueueTurnNotInsideTheCallback() throws {
+        let pane = makeMaterializedPane()
+        pane.watch.deferCaptureWrites = true
+        pane.repl.evictAllTurnViewsForTesting()
+
+        let hits = pane.repl.simulateDrawPassForTesting(nowMs: PaneRenderWatch.monotonicMs(), wall: wall(0))
+
+        XCTAssertEqual(hits.map(\.rule), [.zeroRowDraw])
+        XCTAssertTrue(files(pane).isEmpty, "nothing is written inside the callback that detected the blank")
+        waitUntil { self.files(pane).count == 1 }
+        XCTAssertEqual(try report(try newestCapture(pane))["rule"] as? String, "zero-row-draw")
+        XCTAssertEqual(pane.watch.captureCount, 1)
+    }
+
+    // MARK: - The heartbeat must not change how the document view paints
+
+    /// The heartbeat is proven live by the real-display test above. This guards the other half: the
+    /// document view, as tall as the whole transcript, must not override `draw(_:)`, which would tell
+    /// AppKit it paints and give it a backing store of its own. Checked on the live class, not the source.
+    func testTheDocumentViewDoesNotOverrideDraw() {
+        let pane = makePane()
+        XCTAssertFalse(pane.repl.documentViewOverridesDrawForTesting)
     }
 }

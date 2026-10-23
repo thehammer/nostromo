@@ -2,16 +2,20 @@ import Foundation
 
 /// The files a "transcript pane went blank" capture is written to, and how they are kept.
 ///
-/// `~/.nostromo/logs/pane-blank-<tag hash>-<UTC>.json`, one per incident (the rate limit lives in
-/// `PaneRenderWatch`), the directory 0700 and each file exactly 0600, the newest `keepNewest` kept
-/// over all panes. What goes in a file is built by `PaneRenderWatch.report`; it is structure only
-/// (numbers, flags, class and kind names), never any text. The pane is named by `tagHash` alone.
+/// `~/.nostromo/logs/pane-blank-<tag hash>-<UTC>[-manual].json`, one per incident (the rate limit lives
+/// in `PaneRenderWatch`), the directory 0700 and each file exactly 0600. The newest `keepNewest`
+/// automatic captures and, separately, the newest `keepNewest` manual ones are kept over all panes, so
+/// pressing the menu item cannot evict the evidence a detector hit wrote. What goes in a file is built
+/// by `PaneRenderWatch.report`; it is structure only (numbers, flags, class and kind names), never any
+/// text. The pane is named by `tagHash` alone.
 enum PaneBlankCapture {
 
     static let filePrefix = "pane-blank-"
     static let fileSuffix = ".json"
-    /// The newest this many captures (over all panes) are kept.
+    /// The newest this many automatic captures, and the newest this many manual ones (each over all
+    /// panes), are kept.
     static let keepNewest = 8
+    private static let manualMarker = "manual"
 
     static var defaultDirectory: URL {
         NostromoHome.current.appendingPathComponent(".nostromo/logs", isDirectory: true)
@@ -30,9 +34,10 @@ enum PaneBlankCapture {
         return String(format: "%08x", hash)
     }
 
-    /// `pane-blank-<tag hash>-<UTC>.json`, the UTC part sortable (`20261023T073100Z`).
-    static func fileName(tagHash: String, at date: Date) -> String {
-        "\(filePrefix)\(tagHash)-\(utcStamp(date))\(fileSuffix)"
+    /// `pane-blank-<tag hash>-<UTC>.json` (`-manual` after the UTC part for a manual capture), the UTC
+    /// part sortable (`20261023T073100Z`).
+    static func fileName(tagHash: String, at date: Date, manual: Bool = false) -> String {
+        "\(filePrefix)\(tagHash)-\(utcStamp(date))\(manual ? "-" + manualMarker : "")\(fileSuffix)"
     }
 
     // MARK: - Finding
@@ -59,7 +64,8 @@ enum PaneBlankCapture {
     /// Writes `report` (which must be valid JSON content), then prunes. Returns the file, or nil when
     /// the write failed. Never overwrites: a second capture in the same second takes a `-2`, `-3` suffix.
     @discardableResult
-    static func write(_ report: [String: Any], tagHash: String, directory: URL, now: Date = Date()) -> URL? {
+    static func write(_ report: [String: Any], tagHash: String, directory: URL, now: Date = Date(),
+                      manual: Bool = false) -> URL? {
         guard JSONSerialization.isValidJSONObject(report),
               let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         else { return nil }
@@ -68,7 +74,7 @@ enum PaneBlankCapture {
             try fm.createDirectory(at: directory, withIntermediateDirectories: true,
                                    attributes: [.posixPermissions: 0o700])
         } catch { return nil }
-        let base = fileName(tagHash: tagHash, at: now)
+        let base = fileName(tagHash: tagHash, at: now, manual: manual)
         var url = directory.appendingPathComponent(base)
         var n = 2
         while fm.fileExists(atPath: url.path) {
@@ -82,13 +88,16 @@ enum PaneBlankCapture {
         return url
     }
 
-    /// Keeps the newest `keepNewest` captures, over every pane. Touches nothing that is not one of ours.
+    /// Keeps the newest `keepNewest` automatic and the newest `keepNewest` manual captures, over every
+    /// pane. Touches nothing that is not one of ours.
     static func prune(directory: URL) {
         let ordered = captureURLs(in: directory)
             .compactMap { url in parts(of: url).map { (url, $0) } }
             .sorted { ($0.1.stamp, $0.1.sequence, $0.1.hash) > ($1.1.stamp, $1.1.sequence, $1.1.hash) }
-        for (url, _) in ordered.dropFirst(keepNewest) {
-            try? FileManager.default.removeItem(at: url)
+        for manual in [false, true] {
+            for (url, _) in ordered.filter({ $0.1.manual == manual }).dropFirst(keepNewest) {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 
@@ -109,17 +118,22 @@ enum PaneBlankCapture {
             .map { directory.appendingPathComponent($0) }
     }
 
-    /// `<hash>-<UTC>[-<n>]` from a capture's name; nil for a name that is not one of ours.
-    private static func parts(of url: URL) -> (hash: String, stamp: String, sequence: Int)? {
+    /// `<hash>-<UTC>[-manual][-<n>]` from a capture's name; nil for a name that is not one of ours.
+    private static func parts(of url: URL) -> (hash: String, stamp: String, manual: Bool, sequence: Int)? {
         var name = url.lastPathComponent
         guard name.hasPrefix(filePrefix), name.hasSuffix(fileSuffix) else { return nil }
         name.removeFirst(filePrefix.count)
         name.removeLast(fileSuffix.count)
-        let pieces = name.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
-        guard pieces.count == 2 || pieces.count == 3,
-              pieces[0].count == 8, pieces[1].count == 16, pieces[1].hasSuffix("Z")
+        var pieces = name.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        guard pieces.count >= 2, pieces[0].count == 8, pieces[1].count == 16, pieces[1].hasSuffix("Z")
         else { return nil }
-        let sequence = pieces.count == 3 ? (Int(pieces[2]) ?? 0) : 1
-        return (pieces[0], pieces[1], sequence)
+        let hash = pieces[0], stamp = pieces[1]
+        pieces.removeFirst(2)
+        let manual = pieces.first == manualMarker
+        if manual { pieces.removeFirst() }
+        guard pieces.count <= 1 else { return nil }
+        guard let tail = pieces.first else { return (hash, stamp, manual, 1) }
+        guard let sequence = Int(tail) else { return nil }
+        return (hash, stamp, manual, sequence)
     }
 }

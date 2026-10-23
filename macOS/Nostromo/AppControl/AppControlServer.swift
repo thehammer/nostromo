@@ -215,11 +215,13 @@ final class AppControlServer {
     /// The newest `pane-blank-*.json` of any transcript pane in `window`, visible or not.
     private func latestBlankCapturePath(in window: NSWindow) -> String? {
         var paths: [String] = []
-        func walk(_ v: NSView) {
+        // A transcript pane sits a few levels below the content view; the cap only guards a pathological tree.
+        func walk(_ v: NSView, depth: Int) {
             if let pane = v as? ReplView, let path = pane.renderWatch.latestCapturePath { paths.append(path) }
-            v.subviews.forEach(walk)
+            guard depth < 32 else { return }
+            v.subviews.forEach { walk($0, depth: depth + 1) }
         }
-        if let content = window.contentView { walk(content) }
+        if let content = window.contentView { walk(content, depth: 0) }
         return PaneBlankCapture.newest(of: paths)
     }
 

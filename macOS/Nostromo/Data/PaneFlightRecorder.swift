@@ -32,7 +32,7 @@ final class PaneFlightRecorder {
         case layout
         /// The session's transcript was cleared: a = turns retained before, b = clears so far.
         case transcriptClear
-        /// One measurement blew its budget: a = milliseconds, b = turn index.
+        /// One measurement blew its budget (coalesced): a = milliseconds, b = turn index.
         case measureStall
         /// The window became (1) or resigned (0) key.
         case windowKey
@@ -55,10 +55,12 @@ final class PaneFlightRecorder {
         case moveToWindow
         /// A draw heartbeat (coalesced): a = visible rect width, b = height, c = turn rows in it, d = rows painted.
         case draw
-        /// The detector fired: a = rule (see `PaneRenderWatch`), b = severity.
+        /// The detector fired (at most one per rule per `PaneRenderWatch.hitRecordIntervalMs`): a = rule code, b = severity code.
         case detectorHit
         /// A capture file was written.
         case capture
+        /// The main thread was busy for a whole run-loop turn (coalesced): a = milliseconds.
+        case runLoopStall
 
         var name: String { String(describing: self) }
 
@@ -84,6 +86,7 @@ final class PaneFlightRecorder {
             case .draw:              return ["visibleWidth", "visibleHeight", "rowsInVisibleRect", "rowsPainted"]
             case .detectorHit:       return ["rule", "severity"]
             case .capture:           return ["manual"]
+            case .runLoopStall:      return ["ms"]
             }
         }
     }

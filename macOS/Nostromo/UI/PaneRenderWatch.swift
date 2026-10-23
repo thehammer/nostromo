@@ -14,6 +14,8 @@ protocol PaneRenderSubject: TranscriptDiagnostics.Reporting {
     var viewportHeight: Double { get }
     /// A materialization pass is queued or running (so an empty region is about to be filled).
     var isRenderPassPending: Bool { get }
+    /// A deliberate shed released every view and the compaction before the rebuild has not landed.
+    var isShedInFlight: Bool { get }
     /// (pane alpha, pane hidden, scroll view hidden, scroll view still a subview of the pane).
     var renderPaneState: (alpha: Double, hidden: Bool, scrollViewHidden: Bool, scrollViewAttached: Bool) { get }
     /// Numbers describing the pane's geometry (sizes, offsets): content-free.
@@ -24,14 +26,24 @@ protocol PaneRenderSubject: TranscriptDiagnostics.Reporting {
 ///
 /// Detection and capture only: nothing here changes what the pane renders, scrolls or measures. The
 /// pane tells the watch what it did (`recorder`), the watch looks at the pane at most once per run-loop
-/// turn (`requestEvaluation`) and on a 250 ms timer while the pane is visible, and a detector hit
+/// turn (`requestEvaluation`) and on a timer while the pane is visible (250 ms, backing off to 1 s
+/// while the pane is healthy and nothing has asked for a look), and a detector hit
 /// writes one content-free file (`PaneBlankCapture`). See `docs/pane-blank-capture.md`.
 ///
 /// Everything runs on the main thread.
 final class PaneRenderWatch {
 
-    /// The timer's period while the pane is visible.
+    /// The timer's period while the pane is visible and anything is going on.
     static let evaluationIntervalMs = 250.0
+    /// The timer's period once the pane has been healthy, with nothing asking for a look, for
+    /// `calmTicksBeforeBackoff` ticks in a row. Any event or suspicion puts it back to `evaluationIntervalMs`.
+    static let idleEvaluationIntervalMs = 1_000.0
+    static let calmTicksBeforeBackoff = 4
+    /// Stall events (a slow measurement, a run-loop stall) coalesce into one ring slot per this long, and
+    /// a rule's `detectorHit` event is recorded at most once per this long (the rest are only counted), so
+    /// a storm of stalls cannot push the structural events that led up to it out of the ring.
+    static let stallRecordIntervalMs = 5_000.0
+    static let hitRecordIntervalMs = PaneBlankDetector.zeroRowDrawRefractoryMs
     /// At most one automatic capture per pane per this long, per severity.
     static let minCaptureIntervalMs = 300_000.0
 
@@ -47,6 +59,11 @@ final class PaneRenderWatch {
     var visibilityOverride: Bool?
     /// Test seam: non-nil replaces the sampled document height.
     var documentHeightOverride: Double?
+    /// Test seam: non-nil replaces the pane's "a deliberate shed is in flight".
+    var shedInFlightOverride: Bool?
+    /// An automatic capture is built and written on the next main-queue turn instead of inside the draw
+    /// or run-loop callback that detected the blank. Off under XCTest so a test sees its file at once.
+    var deferCaptureWrites: Bool = PaneRenderWatch.isRunningTests ? false : true
     /// The timer, the run-loop observer and the draw heartbeat only run when this is true. Under XCTest
     /// it starts false so a slow test machine cannot raise a real stall in the middle of a test that
     /// drives the clock itself; the explicit `evaluate`, `noteDraw`, `noteStall` and `captureNow` work either way.
@@ -66,6 +83,14 @@ final class PaneRenderWatch {
     private var evaluationRequested = false
 
     private var timer: Timer?
+    /// The running timer's period, nil when there is no timer.
+    private(set) var timerIntervalMs: Double?
+    private var calmTicks = 0
+    /// Something asked for a look (or a hit fired) since the last timer tick.
+    private var activitySinceTick = false
+    private var lastHitRecordedMs: [PaneBlankDetector.Rule: Double] = [:]
+    /// Hits not recorded in the ring because the same rule had just been recorded, by rule.
+    private var suppressedHits: [PaneBlankDetector.Rule: Int] = [:]
     private var lastRecordedState: (alpha: Double, hidden: Bool, scrollViewHidden: Bool, scrollViewAttached: Bool)?
     private var lastRecordedSize: (w: Double, h: Double)?
     private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
@@ -109,7 +134,8 @@ final class PaneRenderWatch {
             visibleTurnViews: subject.visibleTurnViewCount,
             documentHeight: documentHeightOverride ?? subject.estimatedDocumentHeight,
             viewportHeight: subject.viewportHeight,
-            transcriptClears: subject.transcriptClearCount)
+            transcriptClears: subject.transcriptClearCount,
+            shedInFlight: shedInFlightOverride ?? subject.isShedInFlight)
         let hits = detector.evaluate(sample)
         for hit in hits { handle(hit, nowMs: nowMs, wall: wall) }
         // A pane that became visible without a notification (it was attached to a window that was
@@ -144,7 +170,9 @@ final class PaneRenderWatch {
     /// The pane changed something an evaluation should look at; it is looked at once, at the end of the
     /// current run-loop turn, however many times this is called in it.
     func requestEvaluation() {
-        guard automaticEvaluation, !evaluationRequested else { return }
+        guard automaticEvaluation else { return }
+        noteActivity()
+        guard !evaluationRequested else { return }
         evaluationRequested = true
         Self.anyEvaluationRequested = true
     }
@@ -183,13 +211,23 @@ final class PaneRenderWatch {
     }
 
     private func handle(_ hit: PaneBlankDetector.Hit, nowMs: Double, wall: Date, capture: Bool = true) {
-        recorder.record(.detectorHit, hit.rule.code, hit.severity.code)
-        log.error("pane blank suspected: rule=\(hit.rule.rawValue, privacy: .public) severity=\(hit.severity.rawValue, privacy: .public)")
+        noteActivity()
+        if let last = lastHitRecordedMs[hit.rule], nowMs - last < Self.hitRecordIntervalMs {
+            suppressedHits[hit.rule, default: 0] += 1
+        } else {
+            lastHitRecordedMs[hit.rule] = nowMs
+            recorder.record(.detectorHit, hit.rule.code, hit.severity.code)
+            log.error("pane blank suspected: rule=\(hit.rule.rawValue, privacy: .public) severity=\(hit.severity.rawValue, privacy: .public)")
+        }
         guard capture else { return }
         if let last = lastAutoCaptureMs[hit.severity], nowMs - last < Self.minCaptureIntervalMs { return }
         // Stamped before the write: a directory that cannot be written must not be retried on every pass.
         lastAutoCaptureMs[hit.severity] = nowMs
-        write(hit, trigger: "auto", wall: wall)
+        if deferCaptureWrites {
+            DispatchQueue.main.async { [weak self] in self?.write(hit, trigger: "auto", wall: wall) }
+        } else {
+            write(hit, trigger: "auto", wall: wall)
+        }
     }
 
     @discardableResult
@@ -197,7 +235,8 @@ final class PaneRenderWatch {
         guard let directory = effectiveDirectory else { return nil }
         if trigger == "auto" { recorder.record(.capture, 0) }
         let report = report(hit, trigger: trigger, wall: wall)
-        guard let url = PaneBlankCapture.write(report, tagHash: tagHash, directory: directory, now: wall) else {
+        guard let url = PaneBlankCapture.write(report, tagHash: tagHash, directory: directory, now: wall,
+                                                 manual: trigger == "manual") else {
             log.error("pane blank capture could not be written")
             return nil
         }
@@ -207,7 +246,9 @@ final class PaneRenderWatch {
         return url
     }
 
-    /// The capture as a JSON object. Structure only: numbers, flags and fixed names, never any text.
+    /// The capture as a JSON object. Structure only: numbers, booleans and fixed names (rule, severity,
+    /// event kind and reason, the build string), never any free text, so nothing the OS or the user
+    /// named (a screen, a window title) can reach it. A screen is its index, frame and scale.
     private func report(_ hit: PaneBlankDetector.Hit, trigger: String, wall: Date) -> [String: Any] {
         var out: [String: Any] = [
             "schema": 1,
@@ -217,10 +258,11 @@ final class PaneRenderWatch {
             "rule": hit.rule.rawValue,
             "severity": hit.severity.rawValue,
             "detail": hit.detail,
+            "suppressedHits": Dictionary(uniqueKeysWithValues: suppressedHits.map { ($0.key.rawValue, $0.value) }),
             "events": recorder.eventDictionaries(now: wall),
             "app": appInfo(),
-            "screens": NSScreen.screens.map { screen -> [String: Any] in
-                ["name": screen.localizedName, "frame": Self.rect(screen.frame), "scale": Double(screen.backingScaleFactor)]
+            "screens": NSScreen.screens.enumerated().map { index, screen -> [String: Any] in
+                ["index": index, "frame": Self.rect(screen.frame), "scale": Double(screen.backingScaleFactor)]
             },
         ]
         if let subject {
@@ -239,7 +281,7 @@ final class PaneRenderWatch {
         if let window = subject?.renderWindow {
             out["window"] = [
                 "frame": Self.rect(window.frame),
-                "screen": window.screen?.localizedName ?? "none",
+                "screenIndex": window.screen.flatMap { NSScreen.screens.firstIndex(of: $0) } ?? -1,
                 "isKey": window.isKeyWindow,
                 "occluded": !window.occlusionState.contains(.visible),
                 "alpha": Double(window.alphaValue),
@@ -273,20 +315,55 @@ final class PaneRenderWatch {
         recorder.record(.layout, reason: .resize, width, height, scrollViewHeight, contentWidth)
     }
 
-    /// The pane's visibility may have changed: start or stop the timer, and look once.
+    /// The pane's visibility may have changed: start or stop the timer.
     func updateScheduling() {
         let want = automaticEvaluation && subject != nil && isVisible
         if want, timer == nil {
-            let t = Timer(timeInterval: Self.evaluationIntervalMs / 1000, repeats: true) { [weak self] _ in
-                self?.evaluate()
-            }
-            t.tolerance = 0.05
-            RunLoop.main.add(t, forMode: .common)
-            timer = t
+            startTimer(intervalMs: Self.evaluationIntervalMs)
         } else if !want, let t = timer {
             t.invalidate()
             timer = nil
+            timerIntervalMs = nil
         }
+    }
+
+    /// One timer tick: look, then back off to the idle period after enough healthy ticks in a row with
+    /// nothing asking for a look, or go back to the fast period on anything else.
+    func timerTick() {
+        let hits = evaluate()
+        let calm = hits.isEmpty && !detector.isWatching && !activitySinceTick
+        activitySinceTick = false
+        guard timer != nil else { return }
+        if calm {
+            calmTicks += 1
+            if calmTicks >= Self.calmTicksBeforeBackoff, timerIntervalMs == Self.evaluationIntervalMs {
+                startTimer(intervalMs: Self.idleEvaluationIntervalMs)
+            }
+        } else {
+            calmTicks = 0
+            if timerIntervalMs != Self.evaluationIntervalMs { startTimer(intervalMs: Self.evaluationIntervalMs) }
+        }
+    }
+
+    /// An event or a hit: the next ticks are not calm, and an idle timer goes back to the fast period.
+    private func noteActivity() {
+        activitySinceTick = true
+        calmTicks = 0
+        if let current = timerIntervalMs, current != Self.evaluationIntervalMs {
+            startTimer(intervalMs: Self.evaluationIntervalMs)
+        }
+    }
+
+    private func startTimer(intervalMs: Double) {
+        timer?.invalidate()
+        let t = Timer(timeInterval: intervalMs / 1000, repeats: true) { [weak self] _ in
+            self?.timerTick()
+        }
+        t.tolerance = intervalMs / 1000 * 0.2
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        timerIntervalMs = intervalMs
+        calmTicks = 0
     }
 
     /// The pane moved to `window` (or out of any window): watch its key, screen and occlusion changes.
@@ -346,9 +423,9 @@ final class PaneRenderWatch {
     /// One stall is one capture for the whole app: the first visible pane writes it (and a stall is
     /// captured at most once per `minCaptureIntervalMs` app-wide); every other visible pane only records
     /// it. Returns whether this pane took the capture.
-    fileprivate func mainThreadStalled(ms: Double, mayCapture: Bool) -> Bool {
+    func mainThreadStalled(ms: Double, mayCapture: Bool) -> Bool {
         guard automaticEvaluation, isVisible else { return false }
-        recorder.record(.measureStall, reason: .none, ms, -1)
+        recorder.recordCoalesced(.runLoopStall, minIntervalMs: Self.stallRecordIntervalMs, ms)
         let now = Self.monotonicMs()
         let capture = mayCapture && now - Self.lastObservedStallCaptureMs >= Self.minCaptureIntervalMs
         noteStall(ms: ms, nowMs: now, capture: capture)
