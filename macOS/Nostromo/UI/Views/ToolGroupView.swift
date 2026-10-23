@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import NostromoKit
 
 // MARK: - ToolGroupView
@@ -86,25 +87,26 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     convenience init(group: ToolGroup, blocks: [TurnBlock],
                      contentAvailable: Bool, interaction: TurnInteractionState, isExpanded: Bool,
                      reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-                     now: @escaping () -> Date = Date.init) {
+                     now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
         self.init(group: group, blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil },
                   contentAvailable: contentAvailable, interaction: interaction, isExpanded: isExpanded,
-                  reduceMotion: reduceMotion, now: now)
+                  reduceMotion: reduceMotion, now: now, approvals: approvals)
     }
 
     /// `blockAt`: the turn's block at an index (read during the call only).
     init(group: ToolGroup, blockAt: (Int) -> TurnBlock?,
          contentAvailable: Bool, interaction: TurnInteractionState, isExpanded: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
         self.group = group
         self.contentAvailable = contentAvailable
         self.interaction = interaction
         self.isExpanded = isExpanded
         self.row = ToolGroupRowView(group: group, isExpanded: isExpanded, payloadAvailable: contentAvailable,
-                                    reduceMotion: reduceMotion, now: now)
+                                    reduceMotion: reduceMotion, now: now, approvals: approvals)
         super.init(frame: .zero)
         takeBlocks(of: group, from: blockAt)
+        row.subagentToolUseIds = subagentToolUseIds(of: group)
         translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
         // The rule lives in the turn's gutter, outside these bounds.
@@ -153,6 +155,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     func update(group: ToolGroup, blockAt: (Int) -> TurnBlock?) -> Bool {
         self.group = group
         takeBlocks(of: group, from: blockAt)
+        row.subagentToolUseIds = subagentToolUseIds(of: group)
         row.update(group: group)
         guard isExpanded else { return false }
         let before = contentHeight
@@ -162,6 +165,14 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     }
 
     // MARK: - Members
+
+    /// The calls subagents made under this group's Agent/Task members: their approval requests show on this row.
+    private func subagentToolUseIds(of group: ToolGroup) -> [String] {
+        group.subagentBlocks.values.flatMap { $0 }.compactMap { index -> String? in
+            guard case .toolCall(let call)? = blocks[index] else { return nil }
+            return call.toolUseId
+        }
+    }
 
     private func takeBlocks(of group: ToolGroup, from blockAt: (Int) -> TurnBlock?) {
         for index in group.memberIndices.reversed() {
@@ -487,6 +498,13 @@ class FoldRowView: NSView {
     private let badge = NSTextField(labelWithString: "")
     private let time = NSTextField(labelWithString: "")
     private let stopped = NSTextField(labelWithString: "")
+    private let approval = NSTextField(labelWithString: "")
+    /// Where the approval status is read from (AP2b), and what the row shows of it now.
+    private var approvalStore: ApprovalStore?
+    private var approvalSubscription: AnyCancellable?
+    private(set) var approvalStatus: ApprovalRowStatus?
+    /// The activity dot is wanted (the group is running), pulsing or not.
+    private var activityWanted = false
     private var trackingArea: NSTrackingArea?
     private var mouseDownEvent: NSEvent?
     private var forwardedDrag = false
@@ -505,6 +523,7 @@ class FoldRowView: NSView {
         badge.isHidden = true
         time.isHidden = true
         stopped.isHidden = true
+        approval.isHidden = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -526,6 +545,9 @@ class FoldRowView: NSView {
     var timeField: NSTextField { time }
     /// `· stopped`, shown only for a group the operator stopped mid-call.
     var stoppedField: NSTextField { stopped }
+    /// `· awaiting your approval`, `· approved by you · 14:02`, …: a tool call's permission request
+    /// in place (AP2b). Hidden when no call of the row has one.
+    var approvalField: NSTextField { approval }
     /// The running row's activity dot.
     var activityLayer: CALayer { activityView.layer! }
     /// Whether the activity dot is showing (the group is running).
@@ -555,11 +577,17 @@ class FoldRowView: NSView {
         setText(text.map { "· \($0)" } ?? "", on: stopped, color: Theme.fgMuted)
     }
 
-    /// Show or hide the activity dot. It pulses unless Reduce Motion is on.
+    /// Show or hide the activity dot. It pulses unless Reduce Motion is on, or a call of the row is
+    /// waiting for the person's approval (the row says so instead of a spinner).
     func setActivity(_ active: Bool) {
+        activityWanted = active
+        applyActivity()
+    }
+
+    private func applyActivity() {
         guard let dot = activityView.layer else { return }
-        activityView.isHidden = !active
-        guard active, !reduceMotion() else {
+        activityView.isHidden = !activityWanted
+        guard activityWanted, !reduceMotion(), approvalStatus?.isAwaiting != true else {
             dot.removeAnimation(forKey: "pulse")
             return
         }
@@ -572,6 +600,40 @@ class FoldRowView: NSView {
         pulse.repeatCount = .infinity
         pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         dot.add(pulse, forKey: "pulse")
+    }
+
+    // MARK: Approval status (AP2b)
+
+    /// The `tool_use_id`s of the calls this row stands for (a subclass says which).
+    var approvalToolUseIds: [String] { [] }
+
+    /// Read approval statuses from `store`: the row updates in place whenever one of its calls changes.
+    /// Call before the first `refreshApproval()`.
+    func attachApprovals(_ store: ApprovalStore?) {
+        approvalStore = store
+        approvalSubscription = store?.statusChanges.sink { [weak self] toolUseId in
+            guard let self, self.approvalToolUseIds.contains(toolUseId) else { return }
+            self.refreshApproval()
+        }
+    }
+
+    /// Re-read the status of this row's calls. In place: the field's text and visibility, and whether the
+    /// dot pulses, change; the row's height never does, and nothing is announced.
+    func refreshApproval() {
+        let status = approvalStore?.rowStatus(toolUseIds: approvalToolUseIds)
+        guard status != approvalStatus else { return }
+        approvalStatus = status
+        let text = status?.text()
+        approval.isHidden = text == nil
+        setText(text.map { "· \($0)" } ?? "", on: approval, color: Theme.fgMuted)
+        approval.setAccessibilityLabel(text)
+        applyActivity()
+    }
+
+    /// `label`, then the approval status when there is one (read when the row is focused; never posted).
+    func accessibilityLabel(adding label: String?) -> String? {
+        guard let text = approvalStatus?.text() else { return label }
+        return [label, text].compactMap { $0 }.joined(separator: ", ")
     }
 
     private func setUpActivityDot() {
@@ -626,14 +688,14 @@ class FoldRowView: NSView {
         summary.setContentHuggingPriority(.defaultLow, for: .horizontal)
         summary.menuProvider = { [weak self] in self?.contextMenu() ?? NSMenu() }
 
-        for (field, color) in [(badge, Theme.foldFailure), (time, Theme.fgMuted), (stopped, Theme.fgMuted)] {
+        for (field, color) in [(badge, Theme.foldFailure), (time, Theme.fgMuted), (stopped, Theme.fgMuted), (approval, Theme.fgMuted)] {
             field.font = Self.font
             field.textColor = color
             field.setContentHuggingPriority(.required, for: .horizontal)
             field.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
 
-        let stack = NSStackView(views: [triangleView, activityView, iconField, summary, badge, time, stopped])
+        let stack = NSStackView(views: [triangleView, activityView, iconField, summary, badge, time, stopped, approval])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 5
@@ -836,16 +898,26 @@ final class ToolGroupRowView: FoldRowView {
 
     init(group: ToolGroup, isExpanded: Bool, payloadAvailable: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
         self.group = group
         self.payloadAvailable = payloadAvailable
         self.now = now
         super.init(reduceMotion: reduceMotion)
+        attachApprovals(approvals)
         update(group: group)
         setExpanded(isExpanded, animated: false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// `tool_use_id`s of subagent calls under this group's Agent/Task members (their requests belong to this row too).
+    var subagentToolUseIds: [String] = [] {
+        didSet { if subagentToolUseIds != oldValue { refreshApproval() } }
+    }
+
+    override var approvalToolUseIds: [String] {
+        group.calls.compactMap(\.toolUseId) + subagentToolUseIds
+    }
 
     // MARK: Content
 
@@ -861,6 +933,7 @@ final class ToolGroupRowView: FoldRowView {
         Self.updateCount += 1
         #endif
         self.group = group
+        refreshApproval()
         let running = ToolGroupSummary.runningTitle(for: group)
         if let running {
             iconField.isHidden = true
@@ -912,7 +985,9 @@ final class ToolGroupRowView: FoldRowView {
 
     /// While running, the live text (VoiceOver reads it when the row is focused; nothing is
     /// announced per call).
-    override func accessibilityLabel() -> String? { ToolGroupSummary.accessibilityLabel(for: group, now: now()) }
+    override func accessibilityLabel() -> String? {
+        accessibilityLabel(adding: ToolGroupSummary.accessibilityLabel(for: group, now: now()))
+    }
 }
 
 // MARK: - AgentActivityView

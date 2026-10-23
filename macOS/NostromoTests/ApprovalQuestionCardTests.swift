@@ -1686,7 +1686,7 @@ final class ApprovalQuestionCardTests: XCTestCase {
 
         h.relayout()
         for _ in 0 ..< 3 { h.card.countdown.tick() }
-        h.card.setMoreCount(2)
+        h.card.setPage(ApprovalPage(position: 1, count: 3, previousID: nil, nextID: "x", currentID: "y"))
         press(h.card.detailsButton)
         try fillFixture(h)
         press(try submitButton(h))
@@ -1721,7 +1721,7 @@ final class ApprovalQuestionCardTests: XCTestCase {
         try fillFixture(h)
         try typeText("Logging", intoOtherOf: 1, h)
         for _ in 0 ..< 3 { h.card.countdown.tick() }
-        h.card.setMoreCount(2)
+        h.card.setPage(ApprovalPage(position: 1, count: 3, previousID: nil, nextID: "x", currentID: "y"))
         h.relayout()
 
         XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), preferred)

@@ -22,7 +22,7 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
                                         (class, frame, hidden, alpha, first-responder/selectable/selection state) and key window / app active / first responder
     nostromo-app transcript-anchor [-w N] [--focus TAG]   READ-ONLY (sends no event, no focus change): first visible transcript block, its offset from the viewport top, bottom offset, following-tail; JSON; exit 1 if no pane / app unreachable
     nostromo-app capture-render-state     Debug > Capture render state now, from a script: writes a content-free capture (pane-blank-<hash>-<UTC>.json) for every transcript pane on screen, no rate limit; prints the paths
-    nostromo-app approvals list [--focus TAG]   READ-ONLY (sends no event, answers nothing): the permission-approval cards on screen, from the cards' own views: request_id, focus, agent, tool, the input as displayed (invisible characters as tokens), command_count, invisible_count, reason_line, options [{id, enabled, label}] (Allow once reads "Scroll to the end to allow" until the input was scrolled to its end), default_to_no_kind, seconds_left, windows; JSON
+    nostromo-app approvals list [--focus TAG] [-w N]   READ-ONLY (sends no event, answers nothing): the permission-approval cards on screen, from the cards' own views: request_id, focus, agent, tool, the input as displayed (invisible characters as tokens), command_count, invisible_count, reason_line, options [{id, enabled, label}] (Allow once reads "Scroll to the end to allow" until the input was scrolled to its end), default_to_no_kind, seconds_left, page/of (`1 of 3`), windows (every window showing the request) and window_cards [{window, page, of, state}] (that window's card; `state` is the outcome text once answered); `guard_bars` lists the production-shell guard bars on screen [{window, focus, text}]. With -w N only that window is read (without it, every window); JSON
     nostromo-app key    CHARS [--mod cmd,shift] [-w N]
     nostromo-app type   TEXT [-w N]
     nostromo-app paste  (--image PATH | --text TEXT) [-w N]
@@ -101,7 +101,7 @@ def wait_for(text, window, gone, timeout, sheet=False, poll=0.25):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("-w", "--window", type=int, default=0)
+    p.add_argument("-w", "--window", type=int, default=None)
     p.add_argument("--socket", metavar="PATH", help="control socket (default: $NOSTROMO_APP_CONTROL_SOCKET, else ~/.nostromo/app-control.sock)")
     p.add_argument("--screen", help="target the window on the display whose name contains this (indices can change across relaunches)")
     p.add_argument("--sheet", action="store_true", help="target the sheet attached to the window")
@@ -135,6 +135,8 @@ def main():
     wf.add_argument("--timeout", type=float, default=10.0)
     ex = sub.add_parser("expect"); ex.add_argument("text"); ex.add_argument("--absent", action="store_true")
     a = p.parse_args()
+    explicit_window = a.window   # None unless -w was given (approvals list reads every window then)
+    if a.window is None: a.window = 0
     global SCREEN, SOCK
     SOCK = resolve_socket(a.socket)
     if a.screen:
@@ -174,6 +176,7 @@ def main():
     elif a.cmd == "approvals":
         r["sub"] = a.sub
         if a.focus: r["focus"] = a.focus
+        if explicit_window is not None: r["only_window"] = explicit_window
     elif a.cmd == "key": r.update(chars=a.chars, modifiers=mods, keyCode=a.key_code)
     elif a.cmd == "type": r["text"] = a.text
     elif a.cmd == "paste":

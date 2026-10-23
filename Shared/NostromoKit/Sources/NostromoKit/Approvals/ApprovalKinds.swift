@@ -136,7 +136,8 @@ public enum ApprovalKinds {
         return text
     }
 
-    private static func capitalized(_ s: String) -> String {
+    /// The agent's name as the card says it: `cody` reads `Cody`.
+    public static func capitalized(_ s: String) -> String {
         guard let first = s.first else { return s }
         return first.uppercased() + s.dropFirst()
     }

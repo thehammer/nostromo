@@ -148,6 +148,9 @@ struct ApprovalCardListing: Equatable {
     let displayFailed: Bool
     /// For an `AskUserQuestion` card: what the form shows and has chosen (additive: `questions`, null otherwise).
     let questions: [Question]?
+    /// Where this window's card is among the focus's requests: `page` of `of` (`1 of 3`). 1 of 1 for a lone request.
+    let page: Int
+    let of: Int
 
     var jsonObject: [String: Any] {
         var json: [String: Any] = [
@@ -166,6 +169,8 @@ struct ApprovalCardListing: Equatable {
             "seconds_left": secondsLeft,
             "state": state,
             "display_failed": displayFailed,
+            "page": page,
+            "of": of,
         ]
         json["questions"] = questions.map { $0.map(\.jsonObject) } ?? NSNull()
         json["command_count"] = commandCount ?? NSNull()
@@ -183,6 +188,9 @@ final class ApprovalCardView: NSView {
     static let rowGap: CGFloat = 6
     static let buttonHeight: CGFloat = 26
     static let allowButtonWidth: CGFloat = 196
+    /// The header's `‹ 1 of 3 ›`.
+    static let pageArrowWidth: CGFloat = 22
+    static let pageLabelWidth: CGFloat = 50
     static let submitButtonWidth: CGFloat = 96
     static let minimumInputHeight: CGFloat = 44
     /// A question card's form never gets less than this unless the pane is shorter, and its expanded raw input never more than `detailsInputHeight`.
@@ -216,7 +224,8 @@ final class ApprovalCardView: NSView {
     private let permit: GesturePermit
 
     private let headlineLabel = NSTextField(labelWithString: "")
-    private let moreLabel = NSTextField(labelWithString: "")
+    /// `1 of 3`, between the ‹ › buttons (AP2b). Empty for a lone request.
+    private let pageLabel = NSTextField(labelWithString: "")
     private let whyLabel = NSTextField(wrappingLabelWithString: "")
     private let inLabel = NSTextField(labelWithString: "")
     private let bannerLabel = NSTextField(wrappingLabelWithString: "")
@@ -413,7 +422,8 @@ final class ApprovalCardView: NSView {
             reasonLine: ApprovalDisplayModel.contextText(request.reason.text), options: options,
             defaultToNoKind: self.options.defaultsToDeny,
             secondsLeft: countdown.secondsLeft, state: stateDescription,
-            displayFailed: inputView.displayFailed, questions: questionListing)
+            displayFailed: inputView.displayFailed, questions: questionListing,
+            page: currentPage?.position ?? 1, of: currentPage?.count ?? 1)
     }
 
     /// What the form shows and has chosen, for `approvals list`.
@@ -566,9 +576,10 @@ final class ApprovalCardView: NSView {
         setContext(headlineLabel, headline, wraps: false, font: .systemFont(ofSize: 13, weight: .semibold), color: ApprovalPalette.commandText)
         headlineLabel.toolTip = ApprovalDisplayModel.contextText(headline, keepingLineFeeds: false)
 
-        moreLabel.font = .systemFont(ofSize: 11)
-        moreLabel.textColor = ApprovalPalette.mutedText
-        moreLabel.alignment = .right
+        pageLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        pageLabel.textColor = ApprovalPalette.mutedText
+        pageLabel.alignment = .center
+        pageLabel.isHidden = true
 
         configureWrapping(whyLabel, lines: 2)
         setContext(whyLabel, request.reason.text, prefix: "Why: ", font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
@@ -691,7 +702,7 @@ final class ApprovalCardView: NSView {
             allowButton?.lineBreakMode = .byTruncatingTail
         }
 
-        for v in [headlineLabel, moreLabel, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
+        for v in [headlineLabel, pageLabel, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
                   formScroll, inputView, agentSaysLabel, noticeLabel, noteRow, statusLabel, buttonRow] {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
@@ -803,13 +814,63 @@ final class ApprovalCardView: NSView {
         }
     }
 
-    /// `+2 more` (the other requests this focus holds). Only the label's text changes.
-    func setMoreCount(_ count: Int) {
-        let text = count > 0 ? "+\(count) more" : ""
-        guard moreLabel.stringValue != text else { return }
-        moreLabel.stringValue = text
-        moreLabel.setAccessibilityLabel(count > 0 ? "\(count) more approval request\(count == 1 ? "" : "s") waiting" : nil)
+    /// `1 of 3` with ‹ › (AP2b), or nothing for a lone request. Only the page controls' text, enabled
+    /// flags and visibility change; the card never takes focus for it.
+    func setPage(_ page: ApprovalPage?) {
+        let shown = (page?.count ?? 0) > 1 ? page : nil
+        guard shown != currentPage else { return }
+        currentPage = shown
+        guard let shown else {
+            pageLabel.isHidden = true
+            pageLabel.stringValue = ""
+            for button in [pagePreviousButton, pageNextButton] { button?.removeFromSuperview() }
+            pagePreviousButton = nil
+            pageNextButton = nil
+            needsLayout = true
+            return
+        }
+        if pagePreviousButton == nil {
+            pagePreviousButton = makePageButton(title: "‹", id: "page_previous", label: "Previous request")
+            pageNextButton = makePageButton(title: "›", id: "page_next", label: "Next request")
+        }
+        pageLabel.stringValue = shown.label
+        pageLabel.setAccessibilityLabel("Request \(shown.position) of \(shown.count)")
+        pageLabel.isHidden = false
+        pagePreviousButton?.isEnabled = shown.previousID != nil
+        pageNextButton?.isEnabled = shown.nextID != nil
         needsLayout = true
+    }
+
+    /// The page this card is on, when the focus holds more than one request.
+    private(set) var currentPage: ApprovalPage?
+
+    /// The `1 of 3` text (empty for a lone request).
+    var pageText: String { pageLabel.stringValue }
+    private(set) var pagePreviousButton: ApprovalButton?
+    private(set) var pageNextButton: ApprovalButton?
+    /// A page button was pressed: the id of the request to show.
+    var onShowRequest: ((String) -> Void)?
+
+    private func makePageButton(title: String, id: String, label: String) -> ApprovalButton {
+        let button = ApprovalButton(title: title, target: self, action: #selector(pagePressed(_:)))
+        button.identifier = NSUserInterfaceItemIdentifier(id)
+        button.title = title
+        button.bezelStyle = .inline
+        button.isBordered = true
+        button.font = .systemFont(ofSize: 12, weight: .semibold)
+        button.setButtonType(.momentaryPushIn)
+        button.setAccessibilityLabel(label)
+        button.toolTip = label
+        button.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(button)
+        return button
+    }
+
+    /// Paging answers nothing: it only changes which request this window shows.
+    @objc private func pagePressed(_ sender: ApprovalButton) {
+        guard let page = currentPage else { return }
+        let target = sender === pagePreviousButton ? page.previousID : page.nextID
+        if let target { onShowRequest?(target) }
     }
 
     private var stateDescription: String {
@@ -841,15 +902,22 @@ final class ApprovalCardView: NSView {
             y += height + Self.rowGap
         }
 
-        // Header: headline, "+N more", countdown (fixed width).
+        // Header: headline, `‹ 1 of 3 ›`, countdown (fixed width).
         let headerHeight: CGFloat = 18
         if apply {
             let countdownWidth = ApprovalCountdownLabel.width
-            let moreWidth: CGFloat = moreLabel.stringValue.isEmpty ? 0 : 64
             countdown.label.frame = NSRect(x: pad + inner - countdownWidth, y: y + 1, width: countdownWidth, height: 16)
-            moreLabel.frame = NSRect(x: pad + inner - countdownWidth - moreWidth - 4, y: y + 1, width: moreWidth, height: 16)
-            moreLabel.isHidden = moreWidth == 0
-            let headlineWidth = max(40, inner - countdownWidth - (moreWidth > 0 ? moreWidth + 4 : 0) - 8)
+            var pagerWidth: CGFloat = 0
+            if currentPage != nil, let previous = pagePreviousButton, let next = pageNextButton {
+                let arrow = Self.pageArrowWidth, label = Self.pageLabelWidth
+                pagerWidth = 2 * arrow + label
+                let left = pad + inner - countdownWidth - 4 - pagerWidth
+                previous.frame = NSRect(x: left, y: y, width: arrow, height: headerHeight)
+                pageLabel.frame = NSRect(x: left + arrow, y: y + 1, width: label, height: 16)
+                next.frame = NSRect(x: left + arrow + label, y: y, width: arrow, height: headerHeight)
+                pagerWidth += 4
+            }
+            let headlineWidth = max(40, inner - countdownWidth - pagerWidth - 8)
             headlineLabel.frame = NSRect(x: pad, y: y, width: headlineWidth, height: headerHeight)
         }
         y += headerHeight + Self.rowGap

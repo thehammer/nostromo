@@ -57,6 +57,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     private var folds: FoldResolver
     private let reduceMotion: () -> Bool
     private let now: () -> Date
+    private let approvals: ApprovalStore?
 
     private struct Member {
         /// Anchor key: the message key (`<segmentKey>/m<ordinal>`) for a message's first text
@@ -84,7 +85,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     init(segment: ActivitySegment, blocks: [Int: TurnBlock], contentAvailable: Bool,
          interaction: TurnInteractionState, folds: FoldResolver, isExpanded: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
         self.blocks = blocks
         self.contentAvailable = contentAvailable
         self.interaction = interaction
@@ -92,8 +93,10 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         self.isExpanded = isExpanded
         self.reduceMotion = reduceMotion
         self.now = now
+        self.approvals = approvals
         row = ActivityRowHeaderView(segment: segment, isExpanded: isExpanded,
-                                    payloadAvailable: contentAvailable, reduceMotion: reduceMotion)
+                                    payloadAvailable: contentAvailable, reduceMotion: reduceMotion,
+                                    approvals: approvals)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
@@ -261,7 +264,8 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     private func makeGroupView(_ group: ToolGroup) -> ToolGroupView {
         let view = ToolGroupView(group: group, blockAt: { self.blocks[$0] },
                                  contentAvailable: contentAvailable, interaction: interaction,
-                                 isExpanded: folds.isExpanded(group), reduceMotion: reduceMotion, now: now)
+                                 isExpanded: folds.isExpanded(group), reduceMotion: reduceMotion, now: now,
+                                 approvals: approvals)
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.folds.groupStates[view.group.key] = isExpanded
@@ -446,20 +450,25 @@ final class ActivityRowHeaderView: FoldRowView {
     var blockText: (Int) -> String? = { _ in nil }
 
     init(segment: ActivitySegment, isExpanded: Bool, payloadAvailable: Bool,
-         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
+         reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+         approvals: ApprovalStore? = nil) {
         self.segment = segment
         self.payloadAvailable = payloadAvailable
         super.init(reduceMotion: reduceMotion)
+        attachApprovals(approvals)
         update(segment: segment)
         setExpanded(isExpanded, animated: false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    override var approvalToolUseIds: [String] { segment.calls.compactMap(\.toolUseId) }
+
     /// Show `segment` as it stands. In place: the row's height never changes, and nothing is
     /// announced (no announcement per roll-in).
     func update(segment: ActivitySegment) {
         self.segment = segment
+        refreshApproval()
         setSummary(ActivitySummary.title(for: segment))
         setFailure(ActivitySummary.failureText(for: segment))
         setTime(ActivitySummary.durationText(for: segment))
@@ -495,5 +504,5 @@ final class ActivityRowHeaderView: FoldRowView {
 
     // MARK: Accessibility
 
-    override func accessibilityLabel() -> String? { ActivitySummary.accessibilityLabel(for: segment) }
+    override func accessibilityLabel() -> String? { accessibilityLabel(adding: ActivitySummary.accessibilityLabel(for: segment)) }
 }

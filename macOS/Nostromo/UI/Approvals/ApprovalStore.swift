@@ -23,6 +23,13 @@ enum ApprovalEvent {
     case snapshot([ApprovalRequestWire])
     case resolved(ApprovalResolvedFrame)
     case answerRefused(ApprovalAnswerRefusedFrame)
+    /// The production-shell guard blocked a tool call (no request, no card).
+    case guardBlocked(ApprovalGuardBlockedFrame)
+}
+
+/// A guard block the bar is showing for a focus (AP2b).
+struct ApprovalGuardNotice: Equatable {
+    let frame: ApprovalGuardBlockedFrame
 }
 
 /// Where one request is in its life, as far as this app knows.
@@ -56,8 +63,14 @@ final class ApprovalStore {
     /// How long an outcome stays on the card before it fades.
     static let outcomeVisibleSeconds: TimeInterval = 2
 
+    /// How long the guard bar stays before it hides itself.
+    static let guardBarVisibleSeconds: TimeInterval = 60
+
     /// Fires with the focus tag whenever what that focus shows may have changed.
     let changes = PassthroughSubject<String, Never>()
+
+    /// Fires with a tool call's `tool_use_id` whenever the status its row shows may have changed (AP2b).
+    let statusChanges = PassthroughSubject<String, Never>()
 
     /// `answer` sends this, once per id. `(requestId, decision, windowID)`.
     private let send: (String, ApprovalDecisionWire, String) -> Void
@@ -79,6 +92,10 @@ final class ApprovalStore {
     private var refusalTexts: [String: String] = [:]
     /// Ids whose arrival has been announced to VoiceOver.
     private var announced = Set<String>()
+    /// What each tool call's row says about its request, for the session's lifetime (bounded per focus).
+    private var statusBook = ApprovalStatusBook()
+    /// The guard block each focus's bar shows.
+    private var notices: [String: ApprovalGuardNotice] = [:]
     private var subscription: AnyCancellable?
 
     init(send: @escaping (String, ApprovalDecisionWire, String) -> Void,
@@ -107,9 +124,14 @@ final class ApprovalStore {
         case .snapshot(let requests):
             replaceAll(with: requests)
         case .resolved(let frame):
+            if let entry = entries[frame.requestId] {
+                setStatus(.forOutcome(frame.outcome, atMs: frame.atMs), for: entry.request)
+            }
             end(frame.requestId, text: Self.outcomeText(frame.outcome))
         case .answerRefused(let frame):
             refused(frame)
+        case .guardBlocked(let frame):
+            guardBlocked(frame)
         }
     }
 
@@ -136,6 +158,27 @@ final class ApprovalStore {
     /// True the first time it is asked for `id`: the card announces itself to VoiceOver once.
     func claimAnnouncement(_ id: String) -> Bool {
         announced.insert(id).inserted
+    }
+
+    // MARK: Row status (AP2b)
+
+    /// What the row of the calls `toolUseIds` says: waiting if any waits, else the latest. Nil for nothing.
+    func rowStatus(toolUseIds: [String]) -> ApprovalRowStatus? {
+        statusBook.headline(toolUseIds: toolUseIds)
+    }
+
+    /// How many calls' statuses are kept for a focus.
+    func statusCount(tag: String) -> Int { statusBook.count(tag: tag) }
+
+    // MARK: Guard bar (AP2b)
+
+    /// The guard block the bar shows for a focus, if any.
+    func guardNotice(tag: String) -> ApprovalGuardNotice? { notices[tag] }
+
+    /// The person closed the bar (in every window showing the focus).
+    func dismissGuardNotice(tag: String) {
+        guard notices.removeValue(forKey: tag) != nil else { return }
+        changes.send(tag)
     }
 
     // MARK: Answering
@@ -205,6 +248,32 @@ final class ApprovalStore {
 
     // MARK: Private
 
+    private func setStatus(_ status: ApprovalRowStatus, for request: ApprovalRequestWire) {
+        statusBook.set(status, toolUseId: request.toolUseId, tag: request.tag)
+        statusChanges.send(request.toolUseId)
+    }
+
+    /// A request that vanished without an outcome (the daemon no longer holds it) stops saying `awaiting`.
+    private func forgetAwaiting(_ request: ApprovalRequestWire) {
+        guard statusBook.status(toolUseId: request.toolUseId) == .awaiting else { return }
+        setStatus(.withdrawn, for: request)
+    }
+
+    /// The guard blocked a call: no request, no card. The call's row says so, and the bar shows for a minute.
+    private func guardBlocked(_ frame: ApprovalGuardBlockedFrame) {
+        guard notices[frame.tag]?.frame.entryId != frame.entryId else { return }
+        statusBook.set(.blockedByGuard, toolUseId: frame.toolUseId, tag: frame.tag)
+        statusChanges.send(frame.toolUseId)
+        notices[frame.tag] = ApprovalGuardNotice(frame: frame)
+        changes.send(frame.tag)
+        schedule(Self.guardBarVisibleSeconds) { [weak self] in
+            // A newer block (or the person's close) replaced this one: its own timer decides.
+            guard let self, self.notices[frame.tag]?.frame.entryId == frame.entryId else { return }
+            self.notices.removeValue(forKey: frame.tag)
+            self.changes.send(frame.tag)
+        }
+    }
+
     private func add(_ request: ApprovalRequestWire) {
         guard entries[request.id] == nil else { return }
         // A request this process already answered never comes back as waiting.
@@ -214,6 +283,7 @@ final class ApprovalStore {
         }
         entries[request.id] = ApprovalEntry(request: request, state: state)
         order[request.tag, default: []].append(request.id)
+        setStatus(.awaiting, for: request)
     }
 
     /// The daemon's list is the truth: add what it holds that we don't, and drop what we
@@ -223,6 +293,7 @@ final class ApprovalStore {
         var touched = Set<String>()
         for (id, entry) in entries where !held.contains(id) && !entry.isEnded {
             remove(id)
+            forgetAwaiting(entry.request)
             touched.insert(entry.request.tag)
         }
         for request in requests where entries[request.id] == nil {
@@ -251,6 +322,7 @@ final class ApprovalStore {
         case .alreadyResolved:
             end(frame.requestId, text: Self.alreadyResolvedText(outcome: frame.outcome))
         case .unknownRequest:
+            forgetAwaiting(entry.request)
             end(frame.requestId, text: "Already resolved")
         case .notOperatorApp:
             hold(frame.requestId, text: "Not sent: Nostromo isn't verified as the operator (run make mac-install)")
