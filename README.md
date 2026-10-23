@@ -72,7 +72,9 @@ non-table entry, or an `enabled` that is not `true`/`false` is ignored with a
 warning (key names only, never values), and whatever was not clearly switched
 off stays on. If two keys differ only by case (`[agents.Fred]` and
 `[agents.fred]`), the daemon warns once and the key that sorts last in byte
-order wins, so the lowercase key beats a capitalised one.
+order wins (regardless of the order they are written in), so the lowercase key
+beats a capitalised one. A test pins this; it holds while the `toml` crate is
+built without `preserve_order`.
 
 Refused while an agent is off: its MCP tools, its pane sources (including
 bindings saved before it was disabled, which are neither fetched nor replayed on

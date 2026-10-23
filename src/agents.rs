@@ -172,6 +172,124 @@ pub fn resolve(agents: Option<&toml::Value>) -> (EnabledAgents, Vec<String>) {
     (enabled, warnings)
 }
 
+use std::sync::Arc;
+use tokio::sync::{mpsc, watch};
+
+use crate::data::{
+    fred_calendar::CalendarSnapshot,
+    fred_mailbox::MailboxSnapshot,
+    perri_pr::PrSnapshots,
+    perri_queue::PrQueueSnapshot,
+    relay_client::QueueSignal,
+    teri_todos::TeriTodosSnapshot,
+    work::hub::WorkHub,
+};
+
+pub type PerriQueueRx = watch::Receiver<Option<PrQueueSnapshot>>;
+pub type PerriPrRx = watch::Receiver<PrSnapshots>;
+pub type MailboxRx = watch::Receiver<Option<MailboxSnapshot>>;
+pub type CalendarRx = watch::Receiver<Option<CalendarSnapshot>>;
+pub type TodosRx = watch::Receiver<Option<TeriTodosSnapshot>>;
+
+/// What starting Perri's sources produced.
+pub struct PerriSources {
+    pub queue_rx: PerriQueueRx,
+    pub queue_refresh_tx: mpsc::UnboundedSender<()>,
+    pub queue_relay_tx: mpsc::UnboundedSender<QueueSignal>,
+    pub pr_rx: PerriPrRx,
+    pub pr_refresh_tx: crate::data::perri_pr_native::RefreshTx,
+}
+
+/// What starting Teri's source produced. `work_hub` is installed as the
+/// process-wide work service by [`wire_agents`].
+pub struct TeriSources {
+    pub todos_rx: TodosRx,
+    pub work_hub: Option<Arc<WorkHub>>,
+}
+
+/// The side-effecting half of the daemon's agent wiring: starting pollers and
+/// broadcasters. `nostromd` implements it with the real sources; tests
+/// implement it with a recorder. [`wire_agents`] calls a method only for an
+/// enabled agent.
+pub trait AgentSpawner {
+    fn start_perri(&mut self) -> PerriSources;
+    fn start_fred(&mut self) -> (MailboxRx, CalendarRx);
+    fn start_teri(&mut self) -> TeriSources;
+    fn start_perri_broadcaster(&mut self, queue_rx: PerriQueueRx, pr_rx: PerriPrRx);
+    fn start_fred_broadcaster(&mut self, mailbox_rx: MailboxRx, calendar_rx: CalendarRx);
+    fn start_teri_broadcaster(&mut self, todos_rx: TodosRx);
+}
+
+/// The receivers (live for enabled agents, parked and never-firing for
+/// disabled ones) and handles the rest of the daemon is built on. `parked`
+/// must be kept alive for the daemon's lifetime.
+pub struct WiredAgents {
+    pub perri_queue_rx: PerriQueueRx,
+    pub perri_queue_refresh_tx: Option<mpsc::UnboundedSender<()>>,
+    pub perri_queue_relay_tx: Option<mpsc::UnboundedSender<QueueSignal>>,
+    pub perri_pr_rx: PerriPrRx,
+    pub perri_pr_refresh_tx: Option<crate::data::perri_pr_native::RefreshTx>,
+    pub fred_mailbox_rx: MailboxRx,
+    pub fred_calendar_rx: CalendarRx,
+    pub teri_todos_rx: TodosRx,
+    pub work_hub: Option<Arc<WorkHub>>,
+    pub parked: ParkedSenders,
+}
+
+/// Start sources and broadcasters for enabled agents only; a disabled agent
+/// gets receivers whose senders are parked in the result. Installs the work
+/// hub as the process-wide work service only when Teri is enabled, so a
+/// disabled Teri leaves the Null service in place.
+pub fn wire_agents(enabled: EnabledAgents, spawner: &mut dyn AgentSpawner) -> WiredAgents {
+    let mut parked = ParkedSenders::default();
+
+    let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx, perri_pr_rx, perri_pr_refresh_tx) =
+        if enabled.perri {
+            let p = spawner.start_perri();
+            spawner.start_perri_broadcaster(p.queue_rx.clone(), p.pr_rx.clone());
+            (p.queue_rx, Some(p.queue_refresh_tx), Some(p.queue_relay_tx), p.pr_rx, Some(p.pr_refresh_tx))
+        } else {
+            let q = parked.channel::<Option<PrQueueSnapshot>>(None);
+            let p = parked.channel(crate::data::perri_pr::no_prs());
+            (q, None, None, p, None)
+        };
+
+    let (fred_mailbox_rx, fred_calendar_rx) = if enabled.fred {
+        let (m, c) = spawner.start_fred();
+        spawner.start_fred_broadcaster(m.clone(), c.clone());
+        (m, c)
+    } else {
+        (
+            parked.channel::<Option<MailboxSnapshot>>(None),
+            parked.channel::<Option<CalendarSnapshot>>(None),
+        )
+    };
+
+    let (teri_todos_rx, work_hub) = if enabled.teri {
+        let t = spawner.start_teri();
+        if let Some(hub) = &t.work_hub {
+            crate::data::work::install_work_service(hub.clone());
+        }
+        spawner.start_teri_broadcaster(t.todos_rx.clone());
+        (t.todos_rx, t.work_hub)
+    } else {
+        (parked.channel::<Option<TeriTodosSnapshot>>(None), None)
+    };
+
+    WiredAgents {
+        perri_queue_rx,
+        perri_queue_refresh_tx,
+        perri_queue_relay_tx,
+        perri_pr_rx,
+        perri_pr_refresh_tx,
+        fred_mailbox_rx,
+        fred_calendar_rx,
+        teri_todos_rx,
+        work_hub,
+        parked,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +379,20 @@ mod tests {
         assert_eq!(w.len(), 1);
         let (e, w) = r("[agents.Fred]\nenabled = true\n[agents.fred]\nenabled = false\n");
         assert!(!e.fred);
+        assert_eq!(w.len(), 1);
+    }
+
+    /// Written with the lowercase key FIRST: if the toml table kept file order
+    /// (the `preserve_order` feature), `Fred` would win here instead. These
+    /// pass only while keys iterate in sorted byte order, which is what the
+    /// docs promise.
+    #[test]
+    fn duplicate_winner_follows_sorted_key_order_not_file_order() {
+        let (e, w) = r("[agents.fred]\nenabled = false\n[agents.Fred]\nenabled = true\n");
+        assert!(!e.fred, "`fred` sorts after `Fred`, so it wins even though it is written first");
+        assert_eq!(w.len(), 1);
+        let (e, w) = r("[agents.fred]\nenabled = true\n[agents.Fred]\nenabled = false\n");
+        assert!(e.fred);
         assert_eq!(w.len(), 1);
     }
 

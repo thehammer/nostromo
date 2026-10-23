@@ -165,6 +165,16 @@ pub(crate) fn broadcast_loading_if_first_paint(
 /// fall back to in this stateless snapshot; the broadcaster's own on-change
 /// path will pick it up once the source recovers.
 pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
+    bound_pane_contents_with(state, |tag, source, params| fetch_bound_content(state, tag, source, params))
+}
+
+/// [`bound_pane_contents`] with the fetch injected, so a test can prove which
+/// sources are (not) fetched. A source a disabled agent owns is filtered out
+/// *before* `fetch` is called.
+fn bound_pane_contents_with(
+    state: &McpSharedState,
+    fetch: impl Fn(&str, &str, Option<&serde_json::Value>) -> Option<(PaneContentWire, Option<PaneAddress>)>,
+) -> Vec<ServerMsg> {
     let Some(daemon) = &state.daemon else {
         return Vec::new();
     };
@@ -178,7 +188,7 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
                 return None;
             }
             let (content, address) =
-                fetch_bound_content(state, &tag, &binding.source, binding.params.as_ref())?;
+                fetch(&tag, &binding.source, binding.params.as_ref())?;
             let fr = apply_layout::freshness(&binding.source, state, Some(&tag));
             Some(ServerMsg::PaneContent {
                 tag,
@@ -713,6 +723,24 @@ mod tests {
             bound_pane_contents(&state).is_empty(),
             "bindings persisted before perri was disabled must not be fetched or replayed"
         );
+    }
+
+    #[test]
+    fn a_disabled_agents_binding_is_never_fetched_only_enabled_ones_are() {
+        use std::cell::RefCell;
+        let (mut state, _bcast, _qtx, _ptx) = make_state();
+        bind_pane(&state, "perri", "queue", "perri.list_pr_queue");
+        bind_pane(&state, "perri", "diff", "perri.get_pr_diff");
+        bind_pane(&state, "perri", "conv", "perri.get_pr_conversation");
+        bind_pane(&state, "perri", "file", "nostromo.get_file");
+        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        let fetched: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let msgs = bound_pane_contents_with(&state, |_tag, source, _params| {
+            fetched.borrow_mut().push(source.to_string());
+            Some((PaneContentWire::Loading, None))
+        });
+        assert_eq!(*fetched.borrow(), ["nostromo.get_file"], "only the enabled agent's source is fetched");
+        assert_eq!(msgs.len(), 1);
     }
 
     #[test]
