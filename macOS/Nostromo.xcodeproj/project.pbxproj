@@ -387,6 +387,7 @@
 		ZP0000000000000000000026 /* DisplayTopology.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000005 /* DisplayTopology.swift */; };
 		ZP0000000000000000000046 /* DisplayTopologyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000036 /* DisplayTopologyTests.swift */; };
 		ZP0000000000000000000047 /* NostromoWindowPendingRemovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000037 /* NostromoWindowPendingRemovalTests.swift */; };
+		ZP0000000000000000000048 /* NostromoWindowCloseLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000038 /* NostromoWindowCloseLifetimeTests.swift */; };
 		ZZ0000000000000000000B21 /* AppAppearance.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000000B01 /* AppAppearance.swift */; };
 		ZP0000000000000000000012 /* PlacementMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000002 /* PlacementMachine.swift */; };
 		ZP0000000000000000000022 /* PlacementMachine.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000002 /* PlacementMachine.swift */; };
@@ -772,6 +773,7 @@
 		ZP0000000000000000000031 /* DisplayIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayIdentityTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000036 /* DisplayTopologyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayTopologyTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000037 /* NostromoWindowPendingRemovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoWindowPendingRemovalTests.swift; sourceTree = "<group>"; };
+		ZP0000000000000000000038 /* NostromoWindowCloseLifetimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoWindowCloseLifetimeTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000032 /* PlacementMachineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacementMachineTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000033 /* WindowPlacementControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementControllerTests.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000034 /* WindowPlacementLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementLogTests.swift; sourceTree = "<group>"; };
@@ -1223,6 +1225,7 @@
 				ZP0000000000000000000031 /* DisplayIdentityTests.swift */,
 				ZP0000000000000000000036 /* DisplayTopologyTests.swift */,
 				ZP0000000000000000000037 /* NostromoWindowPendingRemovalTests.swift */,
+				ZP0000000000000000000038 /* NostromoWindowCloseLifetimeTests.swift */,
 				ZP0000000000000000000032 /* PlacementMachineTests.swift */,
 				ZP0000000000000000000033 /* WindowPlacementControllerTests.swift */,
 				ZP0000000000000000000034 /* WindowPlacementLogTests.swift */,
@@ -1555,6 +1558,7 @@
 				ZP0000000000000000000041 /* DisplayIdentityTests.swift in Sources */,
 				ZP0000000000000000000046 /* DisplayTopologyTests.swift in Sources */,
 				ZP0000000000000000000047 /* NostromoWindowPendingRemovalTests.swift in Sources */,
+				ZP0000000000000000000048 /* NostromoWindowCloseLifetimeTests.swift in Sources */,
 				ZP0000000000000000000042 /* PlacementMachineTests.swift in Sources */,
 				ZP0000000000000000000043 /* WindowPlacementControllerTests.swift in Sources */,
 				ZP0000000000000000000044 /* WindowPlacementLogTests.swift in Sources */,
