@@ -1208,9 +1208,9 @@ final class ApprovalCardTests: XCTestCase {
             let h = ApprovalCardHarness(self, request: request)
             let buttons = ApprovalTestViews.buttons(in: h.card)
 
-            XCTAssertEqual(Set(buttons.map(\.title)).subtracting(["Send", "Cancel"]),
+            XCTAssertEqual(Set(buttons.map(\.title)).subtracting(["Send", "Cancel", "‹", "›"]),
                            ["Deny", "▾", "Deny & stop", "Allow once"],
-                           "\(name): Deny, Deny & stop, Allow once and Deny's menu, plus the hidden note row's Send and Cancel")
+                           "\(name): Deny, Deny & stop, Allow once and Deny's menu, plus the hidden note row's Send and Cancel and the hidden page arrows (AP2b)")
             XCTAssertEqual(Set(visibleTitles(h.card)), ["Deny", "▾", "Deny & stop", "Allow once"], "\(name): the visible controls")
             XCTAssertEqual(h.card.listing.options.map(\.id), ["deny", "deny_with_note", "deny_and_stop", "allow_once"], name)
             for button in buttons {
