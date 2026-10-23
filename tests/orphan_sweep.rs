@@ -589,13 +589,18 @@ fn the_ledger_is_private_to_the_user_and_leaves_no_temp_files_behind() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
-    let names: Vec<_> = std::fs::read_dir(dir.path())
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
+    names.sort();
+    // The lock file is the ledger's permanent sibling (see `lock_path_for`).
     assert_eq!(
         names,
-        vec![std::ffi::OsString::from("child-processes.json")],
+        vec![
+            std::ffi::OsString::from("child-processes.json"),
+            std::ffi::OsString::from("child-processes.lock"),
+        ],
         "the write is atomic: no temp file stays"
     );
     let file = read_ledger_file(&ledger_path).expect("a readable ledger");
