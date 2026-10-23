@@ -330,13 +330,20 @@ impl ManagedSession {
     }
 
     /// SIGKILL the child and its group, leaving the ledger as it is.
+    ///
+    /// The group is signalled only while the child is still unreaped
+    /// (`stop_target`'s rule): the group id is the child's pid, and once the
+    /// child has been reaped (`reap_and_recover` does so for a crashed CLI)
+    /// that pid is free to be given to a stranger who leads a group of its
+    /// own. A reaped child gets `Child::kill`, which sends nothing for a
+    /// child that has already been waited for.
     fn signal_kill(&mut self) {
         #[cfg(unix)]
-        if self.own_process_group {
-            // The group id is the child's pid (see `process_group(0)` at spawn).
-            // SAFETY: killpg is a plain syscall; a stale id just fails with ESRCH.
+        if let Some(Target::Group(g)) = self.stop_target() {
+            // SAFETY: killpg is a plain syscall; the child is unreaped, so its
+            // pid, and with it the group id, cannot have been reused.
             unsafe {
-                libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL);
+                libc::killpg(g as libc::pid_t, libc::SIGKILL);
             }
         }
         let _ = self.child.kill();
@@ -1595,6 +1602,13 @@ impl SessionManager {
                 // closed stdout before the reader sets exited).
                 let code = capture_exit_code(&mut s.child);
                 s.last_exit_code = code;
+                // Reaped: nothing is left of this CLI to sweep (its pid is free
+                // for reuse), so the ledger drops it now instead of carrying it
+                // through the backoff, and a guard-tripped session never leaves
+                // it behind.
+                if matches!(s.child.try_wait(), Ok(Some(_))) {
+                    s.ledger.forget(s.child.id());
+                }
 
                 // Re-broadcast Exited with the real exit code so clients see it.
                 // The reader's initial broadcast used None (it can't see the code).
@@ -6598,5 +6612,146 @@ mod orphan_tests {
             read_ledger_file(&ledger_file(&dir)).map(|f| f.children.iter().map(|c| c.pid).collect()).unwrap_or_default();
         assert!(!listed.contains(&cli), "a stopped session is no longer in the ledger: {listed:?}");
         assert!(listed.contains(&other), "the running one still is: {listed:?}");
+    }
+
+    // ── a reaped CLI's pid is no longer ours to signal; its ledger entry goes ──
+
+    /// Every pid listed (one per line) in `file`.
+    fn read_pids(file: &Path) -> Vec<u32> {
+        std::fs::read_to_string(file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    }
+
+    /// SIGKILLs every pid listed in a file when dropped, so a failing assertion cannot leave
+    /// a `sleep 300` behind.
+    struct KillListed(PathBuf);
+
+    impl Drop for KillListed {
+        fn drop(&mut self) {
+            for pid in read_pids(&self.0) {
+                // SAFETY: plain syscall; the pids are this test's own background sleeps.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// A CLI that leaves a background `sleep` in its group (not holding the CLI's stdio, so
+    /// the CLI's exit is noticed) and then exits with `code`.
+    fn cli_that_exits_leaving_a_sleeper(bg_file: &Path, code: i32) -> String {
+        format!("sleep 300 </dev/null >/dev/null 2>&1 &\necho $! >> {}\nexit {code}\n", bg_file.display())
+    }
+
+    /// Wait until the CLI has exited and the manager has noticed.
+    fn wait_for_exit_noticed(mgr: &SessionManager, tag: &str, cli: u32) {
+        wait_until("the CLI to have exited", || is_gone(cli));
+        wait_until("the manager to notice the exit", || {
+            mgr.sessions.get(tag).is_some_and(|s| s.shared.exited.load(Ordering::SeqCst))
+        });
+    }
+
+    fn listed_in_ledger(dir: &tempfile::TempDir) -> Vec<u32> {
+        read_ledger_file(&ledger_file(dir)).map(|f| f.children.iter().map(|c| c.pid).collect()).unwrap_or_default()
+    }
+
+    /// Crash a session whose CLI left a background child, and let the supervisor reap it (a
+    /// client is attached and the exit is non-zero, so it waits out a backoff). Returns the
+    /// CLI pid and the background child's.
+    fn crash_and_reap_leaving_a_sleeper(mgr: &mut Mgr, bg_file: &Path) -> (u32, u32) {
+        let cli = start(mgr, "t", &cli_that_exits_leaving_a_sleeper(bg_file, 1));
+        mgr.sessions.get_mut("t").unwrap().attached_clients.insert("c1".into());
+        wait_until("the background child to be started", || read_pid(bg_file).is_some());
+        let bg = read_pid(bg_file).unwrap();
+        wait_for_exit_noticed(mgr, "t", cli);
+
+        mgr.reap_and_recover();
+
+        let s = mgr.sessions.get_mut("t").expect("still tracked, in backoff");
+        assert!(s.restart_at.is_some(), "setup: the crashed session is waiting out a backoff");
+        assert!(matches!(s.child.try_wait(), Ok(Some(_))), "setup: the CLI has been reaped");
+        assert!(!is_gone(bg), "setup: the CLI's background child outlives it");
+        (cli, bg)
+    }
+
+    #[tokio::test]
+    async fn stopping_a_session_whose_cli_was_already_reaped_signals_nothing_in_its_old_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+
+        mgr.stop("t");
+
+        // A kill is delivered at once, but give a wrongly-sent one time to show.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!is_gone(bg), "the old pid is free to be reused, so nothing in its group may be signalled");
+    }
+
+    #[tokio::test]
+    async fn restarting_a_session_whose_cli_was_already_reaped_signals_nothing_in_its_old_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+
+        mgr.restart("t").expect("restart");
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!is_gone(bg), "the old pid is free to be reused, so nothing in its group may be signalled");
+    }
+
+    #[tokio::test]
+    async fn restarting_a_live_session_ends_its_background_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let ready = dir.path().join("ready");
+        let _cleanup = KillListed(bg_file.clone());
+        let script = format!("sleep 300 &\necho $! >> {}\necho ready > {}\nwait\n", bg_file.display(), ready.display());
+        let cli = start(&mut mgr, "t", &script);
+        wait_until("the CLI to be up", || ready.exists());
+        let bg = read_pids(&bg_file)[0];
+        assert!(!is_gone(bg));
+
+        mgr.restart("t").expect("restart");
+
+        wait_until("the old CLI to be gone", || is_gone(cli));
+        wait_until("the old CLI's background child to be gone", || is_gone(bg));
+    }
+
+    #[tokio::test]
+    async fn a_crashed_cli_that_the_supervisor_has_reaped_is_no_longer_in_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let cli = start(&mut mgr, "t", "exit 1");
+        mgr.sessions.get_mut("t").unwrap().attached_clients.insert("c1".into());
+        wait_for_exit_noticed(&mgr, "t", cli);
+        assert!(listed_in_ledger(&dir).contains(&cli), "setup: the unreaped CLI is still recorded");
+
+        mgr.reap_and_recover();
+
+        assert!(mgr.sessions.get("t").unwrap().restart_at.is_some(), "setup: waiting out a backoff, not respawned");
+        let listed = listed_in_ledger(&dir);
+        assert!(!listed.contains(&cli), "a reaped pid is free for reuse and must not stay listed: {listed:?}");
+    }
+
+    #[tokio::test]
+    async fn a_cli_replaced_after_a_clean_exit_leaves_the_ledger_without_the_old_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let cli = start(&mut mgr, "t", "exit 0");
+        mgr.sessions.get_mut("t").unwrap().attached_clients.insert("c1".into());
+        wait_for_exit_noticed(&mgr, "t", cli);
+
+        mgr.reap_and_recover();
+
+        let listed = listed_in_ledger(&dir);
+        assert!(!listed.contains(&cli), "the replaced CLI's pid must not stay listed: {listed:?}");
     }
 }

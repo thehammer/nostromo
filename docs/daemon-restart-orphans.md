@@ -44,9 +44,28 @@ that no longer applies, which is why the daemon now does the cleanup itself.)
 - Possible later slice (not built): stamp each CLI's environment with `NOSTROMO_DAEMON_BOOT` (already
   set) and have the sweep verify a group member's environment or command line before signalling a
   leaderless group. Until then a leaderless group is never signalled.
-- The ledger file is handed over, not locked: a new daemon's first write replaces a still-running old
-  daemon's file, and each ledger only deletes or rewrites the file while it still carries its own pid
-  and boot marker (checked just before the write, so a very tight race is theoretically possible).
+- **Weaker crash path (read this).** Before this change the sessions shared the daemon's own process
+  group, so when `launchd` cleaned up after a daemon that was SIGKILLed or panicked, it also took
+  background children left behind by a CLI that had already exited. Sessions now lead their own groups,
+  so that backstop no longer reaches them. If the daemon dies hard, **background children of a CLI that
+  has already exited are leaked**, and the next start's sweep cannot find them (see the first bullet:
+  with the leader gone nothing proves who the group belongs to). For that case the crash path is
+  strictly weaker than before. A later slice could close it with an identity marker (the
+  `NOSTROMO_DAEMON_BOOT` environment stamp, checked before signalling a leaderless group). Children of
+  a CLI that is still running when the daemon dies are still swept on the next start.
+- **No group signal for a reaped CLI.** `stop` and `restart` signal a session's group only while the CLI
+  is still unreaped (the same rule the shutdown path uses). A CLI that crashed and was reaped by
+  `reap_and_recover` has a pid that may already belong to a stranger, so a later `stop` or `restart`
+  sends it nothing; background children such a CLI left behind are not killed. The same applies to a
+  CLI that exits and is stopped before the supervisor's next tick.
+- The ledger is shared between daemon boots through an advisory `flock` on
+  `~/.nostromo/child-processes.lock` (a sibling file, never removed). A ledger takes it around its
+  check-and-write and check-and-remove, so a newer daemon's takeover cannot slip in between a ledger's
+  "is this file still mine?" check and its write or delete. Locking is best effort: if the lock file
+  cannot be opened or locked the ledger proceeds as it did before (the narrow window is then open). A
+  new daemon's first write replaces a still-running old daemon's file by design.
+- A crashed, reaped CLI is dropped from the ledger as soon as the supervisor reaps it, not at respawn,
+  so entries do not pile up and each respawn does not rewrite a growing file.
 - Mother's runner and broker, and anything else the daemon did not spawn as a session CLI, are never in
   the ledger and are never touched.
 

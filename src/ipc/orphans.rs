@@ -81,6 +81,12 @@ pub fn ledger_path_beside(store_path: &Path) -> PathBuf {
     store_path.with_file_name("child-processes.json")
 }
 
+/// The lock file that serialises ledger writers: a sibling of the ledger, never
+/// renamed or removed, so the lock survives the ledger's own atomic replace.
+pub fn lock_path_for(ledger: &Path) -> PathBuf {
+    ledger.with_file_name("child-processes.lock")
+}
+
 /// A fresh boot-unique marker.
 fn new_marker() -> String {
     uuid::Uuid::new_v4().simple().to_string()
@@ -162,6 +168,7 @@ impl ChildLedger {
         if !self.wrote.swap(false, Ordering::SeqCst) {
             return;
         }
+        let _lock = self.lock_file();
         if !self.file_is_ours() {
             info!("child ledger now belongs to another daemon boot: left in place");
             return;
@@ -185,11 +192,42 @@ impl ChildLedger {
         }
     }
 
+    /// Hold an exclusive advisory lock on a sibling lock file for as long as the
+    /// returned handle lives (it is released on drop, or when the process dies).
+    /// Every ledger takes it around its check-and-write and check-and-remove,
+    /// so another daemon's takeover cannot land between a ledger's "is this
+    /// still mine?" check and its write or removal. Best effort: if the lock
+    /// cannot be taken the caller carries on without it, as it did before.
+    fn lock_file(&self) -> Option<std::fs::File> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(lock_path_for(&self.path))
+            .map_err(|e| warn!("could not open the child ledger lock: {e}"))
+            .ok()?;
+        // SAFETY: plain syscall on a descriptor this function owns.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            warn!("could not lock the child ledger: {}", std::io::Error::last_os_error());
+            return None;
+        }
+        Some(file)
+    }
+
     fn persist(&self, entries: &[ChildRecord]) {
         // Once this ledger has written the file, a later write must not clobber
         // a file that a newer daemon has since taken over (the overlap while an
         // old daemon is still shutting down). The first write ever is the
         // takeover itself: the startup sweep has already dealt with what was there.
+        let _lock = self.lock_file();
         if self.wrote.load(Ordering::SeqCst) && !self.file_is_ours() {
             return;
         }
@@ -555,5 +593,105 @@ mod tests {
             "/bin/sh /tmp/other",
             "/bin/nonexistent-cli"
         ));
+    }
+
+    // ── ledger writers are serialised by an advisory lock ─────────────────────
+
+    use std::os::fd::AsRawFd as _;
+    use std::sync::{mpsc, Arc, Barrier};
+
+    const SH: &str = "/bin/sh";
+
+    /// Hold the exclusive lock a second ledger writer would have to wait for.
+    fn hold_ledger_lock(ledger_path: &Path) -> std::fs::File {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path_for(ledger_path))
+            .unwrap();
+        // SAFETY: plain syscall on a descriptor this function owns.
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
+        file
+    }
+
+    /// Run `op` on a ledger that has already recorded a child, on another thread, while
+    /// something else holds the ledger lock. It must not get through until the lock is let go.
+    fn assert_waits_for_the_lock(what: &str, op: impl FnOnce(&ChildLedger) + Send + 'static) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child-processes.json");
+        let ledger = Arc::new(ChildLedger::new(path.clone()));
+        ledger.record(4001, true, Path::new(SH));
+        assert!(path.exists(), "setup: the ledger has been written");
+
+        let held = hold_ledger_lock(&path);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = {
+            let ledger = Arc::clone(&ledger);
+            std::thread::spawn(move || {
+                op(&ledger);
+                let _ = done_tx.send(());
+            })
+        };
+
+        let early = done_rx.recv_timeout(Duration::from_millis(300));
+        drop(held);
+        assert!(early.is_err(), "{what} went ahead while another writer held the ledger lock");
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{what} never finished after the lock was released"));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn clearing_the_ledger_waits_for_whoever_holds_the_ledger_lock() {
+        assert_waits_for_the_lock("clear", |l| l.clear());
+    }
+
+    #[test]
+    fn recording_a_child_waits_for_whoever_holds_the_ledger_lock() {
+        assert_waits_for_the_lock("record", |l| l.record(4002, true, Path::new(SH)));
+    }
+
+    #[test]
+    fn forgetting_a_child_waits_for_whoever_holds_the_ledger_lock() {
+        assert_waits_for_the_lock("forget", |l| l.forget(4001));
+    }
+
+    #[test]
+    fn a_newer_daemons_takeover_is_never_deleted_by_the_old_daemons_clean_exit() {
+        // The old daemon is shutting down (clear) just as the new one starts up (record).
+        // Whichever order they land in, the file left behind must be the new daemon's.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child-processes.json");
+        for round in 0..500 {
+            let old = Arc::new(ChildLedger::new(path.clone()));
+            old.record(5001, true, Path::new(SH));
+            let new = Arc::new(ChildLedger::new(path.clone()));
+            let start = Arc::new(Barrier::new(2));
+
+            let a = {
+                let (old, start) = (Arc::clone(&old), Arc::clone(&start));
+                std::thread::spawn(move || {
+                    start.wait();
+                    old.clear();
+                })
+            };
+            let b = {
+                let (new, start) = (Arc::clone(&new), Arc::clone(&start));
+                std::thread::spawn(move || {
+                    start.wait();
+                    new.record(5002, true, Path::new(SH));
+                })
+            };
+            a.join().unwrap();
+            b.join().unwrap();
+
+            let file = read_ledger_file(&path)
+                .unwrap_or_else(|| panic!("round {round}: the new daemon's ledger was deleted or damaged"));
+            assert_eq!(file.marker, new.marker(), "round {round}: the file is not the new daemon's");
+            assert!(file.children.iter().any(|c| c.pid == 5002), "round {round}: the new daemon's child is missing");
+        }
     }
 }
