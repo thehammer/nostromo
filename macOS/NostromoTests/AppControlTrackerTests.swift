@@ -503,7 +503,7 @@ final class AppControlTrackerTests: XCTestCase {
         let first = self.object(object["firstVisible"], "firstVisible")
         XCTAssertEqual(first["rowKey"] as? String, rig.pane.displayedRows.first?.key)
         XCTAssertNotNil(first["offsetPt"] as? Double)
-        XCTAssertEqual(object["pending"] as? [Obj] ?? [], [])
+        XCTAssertEqual((object["pending"] as? [Obj])?.count, 0)
     }
 
     // The pure geometry behind it.
