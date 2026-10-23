@@ -528,7 +528,7 @@ pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) 
     let mut descriptors = tool_descriptors();
     // A disabled agent's tools do not exist; this runs before every other filter.
     descriptors.retain(|d| {
-        d.get("name").and_then(Value::as_str).map_or(true, |n| state.enabled_agents.allows_tool(n))
+        d.get("name").and_then(Value::as_str).is_none_or(|n| state.enabled_agents.allows_tool(n))
     });
     if is_picks_session(pty_id) {
         descriptors.retain(|d| {
