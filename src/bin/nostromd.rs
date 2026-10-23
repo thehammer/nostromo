@@ -51,6 +51,9 @@ use nostromo::{
     mother::{self, statusline_cache_path, MotherStatus},
 };
 
+/// The longest the daemon may take to stop its sessions.
+const SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4500);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // ── Logging ───────────────────────────────────────────────────────────────
@@ -76,6 +79,25 @@ async fn main() -> Result<()> {
 
     // ── Config ────────────────────────────────────────────────────────────────
     let config = Config::load(None).context("loading config")?;
+
+    // ── Orphan sweep ────────────────────────────────────────────────────────────
+    // CLIs (and the background servers they started) that a previous daemon left
+    // running when it died without cleaning up. Runs before this daemon spawns
+    // anything, and only touches processes the ledger proves are the same ones.
+    {
+        let ledger_path = nostromo::ipc::orphans::ledger_path_beside(&nostromo::ipc::session_manager::default_store_path());
+        let swept = tokio::task::spawn_blocking(move || {
+            nostromo::ipc::orphans::sweep(&ledger_path, nostromo::ipc::orphans::SHUTDOWN_GRACE)
+        })
+        .await;
+        match swept {
+            Ok(r) if !r.terminated.is_empty() || r.dropped > 0 => {
+                info!(stopped = r.terminated.len(), dropped = r.dropped, "orphan sweep done");
+            }
+            Ok(_) => {}
+            Err(e) => warn!("orphan sweep failed: {e}"),
+        }
+    }
 
     // ── Session manager (persistent stream-json sessions) ──────────────────────
     let session_mgr: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
@@ -577,8 +599,13 @@ async fn main() -> Result<()> {
         let mut mgr = session_mgr.lock().unwrap();
         // First, tell every agent with a permission request pending that it was
         // not approved (and give it a moment to hear it).
+        let started = std::time::Instant::now();
         mgr.prepare_shutdown(std::time::Duration::from_secs(2));
-        mgr.kill_all_on_shutdown();
+        // Sessions get SIGTERM, then SIGKILL after the grace. The whole shutdown
+        // stays within SHUTDOWN_BUDGET: the grace is what the denials left over.
+        let grace = nostromo::ipc::orphans::SHUTDOWN_GRACE
+            .min(SHUTDOWN_BUDGET.saturating_sub(started.elapsed() + nostromo::ipc::orphans::REAP_WAIT));
+        mgr.kill_all_on_shutdown_with_grace(grace);
     }
 
     // `server` drop impl removes the socket file.
