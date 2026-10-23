@@ -99,11 +99,15 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
 
     override var isFlipped: Bool { true }
 
-    init(questions: [ApprovalQuestion]) {
+    /// - Parameter draft: what was chosen and typed before this form was rebuilt (the person paged
+    ///   away and back). Used only if it fits `questions`; it is a draft, never sent by itself.
+    init(questions: [ApprovalQuestion], draft: [ApprovalQuestionSelection]? = nil) {
         self.questions = questions
-        self.selections = Array(repeating: ApprovalQuestionSelection(), count: questions.count)
+        let fits = draft.map { $0.count == questions.count } ?? false
+        self.selections = fits ? draft! : Array(repeating: ApprovalQuestionSelection(), count: questions.count)
         super.init(frame: .zero)
         for (index, question) in questions.enumerated() { sections.append(buildSection(question, index: index)) }
+        if fits { for (q, section) in sections.enumerated() { section.otherField.stringValue = selections[q].otherText } }
         syncControls()
     }
 

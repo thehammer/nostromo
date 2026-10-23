@@ -127,9 +127,72 @@ final class ApprovalStatusBookTests: XCTestCase {
         var book = ApprovalStatusBook()
         book.set(.awaiting, toolUseId: "a", tag: "cody")
         book.set(.awaiting, toolUseId: "b", tag: "cody")
-        book.set(.deniedByYou, toolUseId: "b", tag: "cody")
+        book.set(.approved(atMs: 3), toolUseId: "b", tag: "cody")
         book.set(.approved(atMs: 7), toolUseId: "a", tag: "cody")
         XCTAssertEqual(book.headline(toolUseIds: ["a", "b"]), .approved(atMs: 7))
+    }
+
+    func testAGroupNeverReadsApprovedAfterADenialWhicheverCameLast() {
+        var denyThenAllow = ApprovalStatusBook()
+        denyThenAllow.set(.deniedByYou, toolUseId: "a", tag: "cody")
+        denyThenAllow.set(.approved(atMs: 9), toolUseId: "b", tag: "cody")
+        XCTAssertEqual(denyThenAllow.headline(toolUseIds: ["a", "b"]), .deniedByYou)
+        XCTAssertEqual(denyThenAllow.headline(toolUseIds: ["b", "a"]), .deniedByYou)
+
+        var allowThenDeny = ApprovalStatusBook()
+        allowThenDeny.set(.approved(atMs: 9), toolUseId: "b", tag: "cody")
+        allowThenDeny.set(.deniedByYou, toolUseId: "a", tag: "cody")
+        XCTAssertEqual(allowThenDeny.headline(toolUseIds: ["a", "b"]), .deniedByYou)
+        XCTAssertEqual(allowThenDeny.headline(toolUseIds: ["b", "a"]), .deniedByYou)
+    }
+
+    func testEveryRefusalOutranksEveryApproval() {
+        let refusals: [ApprovalRowStatus] = [.deniedByYou, .deniedNoAnswer, .deniedAppClosed, .deniedRestarted,
+                                             .deniedUnavailable, .deniedUnreadable, .blockedByGuard]
+        let approvals: [ApprovalRowStatus] = [.approved(atMs: 5), .allowedBySessionRule, .allowedByYourRule]
+        for refusal in refusals {
+            for approval in approvals {
+                var refusedFirst = ApprovalStatusBook()
+                refusedFirst.set(refusal, toolUseId: "r", tag: "cody")
+                refusedFirst.set(approval, toolUseId: "a", tag: "cody")
+                XCTAssertEqual(refusedFirst.headline(toolUseIds: ["r", "a"]), refusal, "\(refusal) then \(approval)")
+
+                var allowedFirst = ApprovalStatusBook()
+                allowedFirst.set(approval, toolUseId: "a", tag: "cody")
+                allowedFirst.set(refusal, toolUseId: "r", tag: "cody")
+                XCTAssertEqual(allowedFirst.headline(toolUseIds: ["a", "r"]), refusal, "\(approval) then \(refusal)")
+            }
+        }
+    }
+
+    func testTimeoutThenAllowReadsTimedOut() {
+        var book = ApprovalStatusBook()
+        book.set(.deniedNoAnswer, toolUseId: "a", tag: "cody")
+        book.set(.approved(atMs: 9), toolUseId: "b", tag: "cody")
+        XCTAssertEqual(book.headline(toolUseIds: ["a", "b"]), .deniedNoAnswer)
+    }
+
+    func testAmongRefusalsTheMostRecentlyUpdatedWins() {
+        var book = ApprovalStatusBook()
+        book.set(.deniedByYou, toolUseId: "a", tag: "cody")
+        book.set(.blockedByGuard, toolUseId: "b", tag: "cody")
+        book.set(.approved(atMs: 1), toolUseId: "c", tag: "cody")
+        XCTAssertEqual(book.headline(toolUseIds: ["a", "b", "c"]), .blockedByGuard)
+    }
+
+    func testAwaitingStillOutranksARefusal() {
+        var book = ApprovalStatusBook()
+        book.set(.deniedByYou, toolUseId: "a", tag: "cody")
+        book.set(.awaiting, toolUseId: "b", tag: "cody")
+        XCTAssertEqual(book.headline(toolUseIds: ["a", "b"]), .awaiting)
+    }
+
+    func testASingleCallReadsWhatItWas() {
+        var book = ApprovalStatusBook()
+        book.set(.approved(atMs: 4), toolUseId: "a", tag: "cody")
+        book.set(.deniedByYou, toolUseId: "b", tag: "cody")
+        XCTAssertEqual(book.headline(toolUseIds: ["a"]), .approved(atMs: 4))
+        XCTAssertEqual(book.headline(toolUseIds: ["b"]), .deniedByYou)
     }
 
     func testTheHeadlineIgnoresCallsThatAreNotListed() {

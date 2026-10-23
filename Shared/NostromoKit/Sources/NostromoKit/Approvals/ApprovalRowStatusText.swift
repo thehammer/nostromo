@@ -44,6 +44,15 @@ public enum ApprovalRowStatus: Equatable, Sendable {
 
     public var isAwaiting: Bool { self == .awaiting }
 
+    /// The call was refused: denied for any reason, or blocked by the guard.
+    public var isRefusal: Bool {
+        switch self {
+        case .deniedByYou, .deniedNoAnswer, .deniedAppClosed, .deniedRestarted, .deniedUnavailable,
+             .deniedUnreadable, .blockedByGuard: return true
+        case .awaiting, .approved, .allowedBySessionRule, .allowedByYourRule, .withdrawn: return false
+        }
+    }
+
     /// What the row says, or nil for nothing. `approved by you · 14:02` uses the local time of `timeZone`.
     public func text(timeZone: TimeZone = .current) -> String? {
         switch self {

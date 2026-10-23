@@ -27,10 +27,11 @@ public struct ApprovalPage: Equatable, Sendable {
 
 public enum ApprovalPaging {
     /// The page showing `current` among `ids` (arrival order, oldest first). `current` nil, or no
-    /// longer among `ids`, shows the oldest. Nil when `ids` is empty.
-    public static func page(ids: [String], current: String?) -> ApprovalPage? {
+    /// longer among `ids`, shows the one now at `fallbackIndex` (where `current` last was: the next
+    /// request takes its place), else the oldest. Nil when `ids` is empty.
+    public static func page(ids: [String], current: String?, fallbackIndex: Int? = nil) -> ApprovalPage? {
         guard !ids.isEmpty else { return nil }
-        let index = current.flatMap { ids.firstIndex(of: $0) } ?? 0
+        let index = current.flatMap { ids.firstIndex(of: $0) } ?? min(max(fallbackIndex ?? 0, 0), ids.count - 1)
         return ApprovalPage(position: index + 1, count: ids.count,
                             previousID: index > 0 ? ids[index - 1] : nil,
                             nextID: index + 1 < ids.count ? ids[index + 1] : nil,

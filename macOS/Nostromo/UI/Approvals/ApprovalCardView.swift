@@ -190,6 +190,7 @@ final class ApprovalCardView: NSView {
     static let allowButtonWidth: CGFloat = 196
     /// The header's `‹ 1 of 3 ›`.
     static let pageArrowWidth: CGFloat = 22
+    /// The least the `1 of 3` label gets; it grows to its measured text (`10 of 12`, `100 of 120`).
     static let pageLabelWidth: CGFloat = 50
     static let submitButtonWidth: CGFloat = 96
     static let minimumInputHeight: CGFloat = 44
@@ -211,6 +212,8 @@ final class ApprovalCardView: NSView {
     private(set) var allowButton: ApprovalButton?
     /// AskUserQuestion: the form, Submit and the Details disclosure (nil for every other request).
     private(set) var questionForm: ApprovalQuestionFormView?
+    /// What an earlier card for this request had chosen (paging away and back), shown again in the form.
+    private let questionDraft: [ApprovalQuestionSelection]?
     private(set) var submitButton: ApprovalButton?
     private(set) var detailsButton: ApprovalButton?
     /// The raw input is shown (a question card starts with it collapsed).
@@ -258,7 +261,9 @@ final class ApprovalCardView: NSView {
     /// - Parameter isOnScreen: replaces "the window is visible and not occluded" for the input's
     ///   coverage (a test's window is never ordered in). Nil asks the window. Ignored in release builds.
     init(entry: ApprovalEntry, store: ApprovalStore, windowID: @escaping () -> String,
-         permit: GesturePermit? = nil, armDelay: TimeInterval = 0, isOnScreen: (() -> Bool)? = nil) {
+         permit: GesturePermit? = nil, armDelay: TimeInterval = 0, isOnScreen: (() -> Bool)? = nil,
+         questionDraft: [ApprovalQuestionSelection]? = nil) {
+        self.questionDraft = questionDraft
         request = entry.request
         state = entry.state
         model = ApprovalDisplayModel(request: entry.request)
@@ -653,7 +658,7 @@ final class ApprovalCardView: NSView {
 
         // AskUserQuestion: the form replaces the input (Why is about a rule, not a question).
         if let questions = options.questions {
-            let form = ApprovalQuestionFormView(questions: questions)
+            let form = ApprovalQuestionFormView(questions: questions, draft: questionDraft)
             form.permit = { [weak self] control, name in self?.isHuman(on: control, control: name) ?? false }
             form.onChange = { [weak self] in self?.refresh() }
             questionForm = form
@@ -900,7 +905,8 @@ final class ApprovalCardView: NSView {
             let countdownWidth = ApprovalCountdownLabel.width
             countdown.label.frame = NSRect(x: pad + inner - countdownWidth, y: y + 1, width: countdownWidth, height: 16)
             // The page controls are always placed (hidden when the focus holds one request), so showing them moves nothing else.
-            let arrow = Self.pageArrowWidth, label = Self.pageLabelWidth
+            let arrow = Self.pageArrowWidth
+            let label = max(Self.pageLabelWidth, ceil(pageLabel.cell?.cellSize.width ?? 0) + 4)
             let pager = 2 * arrow + label
             let left = pad + inner - countdownWidth - 4 - pager
             pagePreviousButton.frame = NSRect(x: left, y: y, width: arrow, height: headerHeight)

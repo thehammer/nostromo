@@ -94,8 +94,14 @@ final class ApprovalStore {
     private var announced = Set<String>()
     /// What each tool call's row says about its request, for the session's lifetime (bounded per focus).
     private var statusBook = ApprovalStatusBook()
+    /// Which request last made each tool call await: only it may end that wait. A reused
+    /// `tool_use_id` must not let a late frame for the old request overwrite the new request's wait.
+    private var waitOwner: [String: String] = [:]
     /// The guard block each focus's bar shows.
     private var notices: [String: ApprovalGuardNotice] = [:]
+    /// The `entry_id` of the last block each focus was told of: a repeat of it (a replayed frame) says
+    /// nothing new, even after the person closed the bar or it hid itself.
+    private var lastGuardEntry: [String: String] = [:]
     private var subscription: AnyCancellable?
 
     init(send: @escaping (String, ApprovalDecisionWire, String) -> Void,
@@ -125,9 +131,7 @@ final class ApprovalStore {
             replaceAll(with: requests)
         case .resolved(let frame):
             // The first ending stands: a second frame for a request that already ended says nothing new.
-            if let entry = entries[frame.requestId], statusBook.status(toolUseId: entry.request.toolUseId) == .awaiting {
-                setStatus(.forOutcome(frame.outcome, atMs: frame.atMs), for: entry.request)
-            }
+            if let entry = entries[frame.requestId] { endWait(of: entry.request, outcome: frame.outcome, atMs: frame.atMs) }
             end(frame.requestId, text: Self.outcomeText(frame.outcome))
         case .answerRefused(let frame):
             refused(frame)
@@ -260,13 +264,23 @@ final class ApprovalStore {
 
     /// A request that vanished without an outcome (the daemon no longer holds it) stops saying `awaiting`.
     private func forgetAwaiting(_ request: ApprovalRequestWire) {
-        guard statusBook.status(toolUseId: request.toolUseId) == .awaiting else { return }
+        guard waitOwner[request.toolUseId] == request.id,
+              statusBook.status(toolUseId: request.toolUseId) == .awaiting else { return }
         setStatus(.withdrawn, for: request)
+    }
+
+    /// The request ended with `outcome`: its call says so, if the call is still awaiting this request.
+    /// An outcome this build has no words for (or none) says nothing, never "awaiting" for ever.
+    private func endWait(of request: ApprovalRequestWire, outcome: String?, atMs: UInt64) {
+        guard waitOwner[request.toolUseId] == request.id,
+              statusBook.status(toolUseId: request.toolUseId) == .awaiting else { return }
+        setStatus(outcome.map { ApprovalRowStatus.forOutcome($0, atMs: atMs) } ?? .withdrawn, for: request)
     }
 
     /// The guard blocked a call: no request, no card. The call's row says so, and the bar shows for a minute.
     private func guardBlocked(_ frame: ApprovalGuardBlockedFrame) {
-        guard notices[frame.tag]?.frame.entryId != frame.entryId else { return }
+        guard lastGuardEntry[frame.tag] != frame.entryId else { return }
+        lastGuardEntry[frame.tag] = frame.entryId
         setStatus(.blockedByGuard, toolUseId: frame.toolUseId, tag: frame.tag)
         notices[frame.tag] = ApprovalGuardNotice(frame: frame)
         changes.send(frame.tag)
@@ -287,6 +301,7 @@ final class ApprovalStore {
         }
         entries[request.id] = ApprovalEntry(request: request, state: state)
         order[request.tag, default: []].append(request.id)
+        waitOwner[request.toolUseId] = request.id
         setStatus(.awaiting, for: request)
     }
 
@@ -296,8 +311,8 @@ final class ApprovalStore {
         let held = Set(requests.map(\.id))
         var touched = Set<String>()
         for (id, entry) in entries where !held.contains(id) && !entry.isEnded {
+            forgetAwaiting(entry.request)   // before `remove`: it forgets who owned the wait
             remove(id)
-            forgetAwaiting(entry.request)
             touched.insert(entry.request.tag)
         }
         for request in requests where entries[request.id] == nil {
@@ -324,6 +339,9 @@ final class ApprovalStore {
         guard let entry = entries[frame.requestId], !entry.isEnded else { return }
         switch frame.code {
         case .alreadyResolved:
+            // The resolved frame may have been lost: the refusal says how it ended. The first ending
+            // stands, so a resolved frame that did arrive first is never overwritten.
+            endWait(of: entry.request, outcome: frame.outcome, atMs: UInt64(Date().timeIntervalSince1970 * 1000))
             end(frame.requestId, text: Self.alreadyResolvedText(outcome: frame.outcome))
         case .unknownRequest:
             forgetAwaiting(entry.request)
@@ -349,6 +367,7 @@ final class ApprovalStore {
 
     private func remove(_ id: String) {
         guard let entry = entries.removeValue(forKey: id) else { return }
+        if waitOwner[entry.request.toolUseId] == id { waitOwner.removeValue(forKey: entry.request.toolUseId) }
         order[entry.request.tag]?.removeAll { $0 == id }
         if order[entry.request.tag]?.isEmpty == true { order.removeValue(forKey: entry.request.tag) }
     }

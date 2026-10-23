@@ -695,6 +695,15 @@ class FoldRowView: NSView {
             field.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
 
+        // The status can be ~190 pt wide, and the row doesn't clip: in a narrow pane it gives way too,
+        // truncating at the tail, but only after the summary has (a higher resistance than the summary's).
+        approval.lineBreakMode = .byTruncatingTail
+        approval.maximumNumberOfLines = 1
+        approval.usesSingleLineMode = true
+        approval.cell?.wraps = false
+        approval.cell?.truncatesLastVisibleLine = true
+        approval.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(rawValue: 260), for: .horizontal)
+
         let stack = NSStackView(views: [triangleView, activityView, iconField, summary, badge, time, stopped, approval])
         stack.orientation = .horizontal
         stack.alignment = .centerY

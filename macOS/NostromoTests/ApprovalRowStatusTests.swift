@@ -279,16 +279,72 @@ final class ApprovalStatusStoreTests: XCTestCase {
         XCTAssertTrue(statuses.values.contains("toolu_a"))
     }
 
-    func testAnAnswerRefusedAsAlreadyResolvedLeavesTheStatusToTheResolvedFrame() throws {
+    func testAnAnswerRefusedAsAlreadyResolvedAfterTheResolvedFrameLeavesTheFirstEndingStanding() throws {
         let (store, _) = make()
         try request(store, "a")
         XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .allowOnce), windowID: "w1"))
 
+        try resolve(store, "a", "timed_out")
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "already_resolved", outcome: "denied")))
+
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_a"]), .deniedNoAnswer, "the resolved frame came first and stands")
+    }
+
+    func testAnAnswerRefusedAsAlreadyResolvedBeforeTheResolvedFrameSeedsTheStatusFromItsOutcome() throws {
+        let (store, _) = make()
+        try request(store, "a")
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .allowOnce), windowID: "w1"))
+        let statuses = ApprovalTap(store.statusChanges)
+
         store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "already_resolved", outcome: "timed_out")))
-        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_a"]), .awaiting, "the refusal does not decide what the row says")
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_a"]), .deniedNoAnswer, "the refusal says how it ended")
+        XCTAssertEqual(statuses.values, ["toolu_a"], "and the row is told")
 
         try resolve(store, "a", "timed_out")
-        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_a"]), .deniedNoAnswer, "the resolved frame does")
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_a"]), .deniedNoAnswer)
+    }
+
+    func testALostResolvedFrameCannotLeaveTheCallAwaitingForEver() throws {
+        let (store, _) = make()
+        try request(store, "a")
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .allowOnce), windowID: "w1"))
+
+        // The resolved frame never arrives; only the refusal does.
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "already_resolved", outcome: "denied")))
+
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_a"]), .deniedByYou)
+    }
+
+    func testARefusalWithoutAnOutcomeOrWithAnUnknownOneStopsTheAwaitingToo() throws {
+        for outcome in [nil, "something_new"] as [String?] {
+            let (store, _) = make()
+            try request(store, "a")
+            store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "already_resolved", outcome: outcome)))
+            XCTAssertNil(store.rowStatus(toolUseIds: ["toolu_a"]), "outcome \(outcome ?? "nil"): the row stops saying awaiting")
+        }
+    }
+
+    func testARefusalThatIsNotAboutAlreadyResolvedLeavesTheCallAwaiting() throws {
+        let (store, _) = make()
+        try request(store, "a")
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer", outcome: "denied")))
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_a"]), .awaiting)
+    }
+
+    func testALateFrameForAnOldRequestDoesNotOverwriteTheNewRequestsWaitOnAReusedToolUseId() throws {
+        let (store, _) = make()
+        store.handle(.request(try ApprovalAP2bFixtures.request(id: "r1", toolUseId: "toolu_same")))
+        try resolve(store, "r1", "denied")                      // r1's entry lingers for two seconds
+        store.handle(.request(try ApprovalAP2bFixtures.request(id: "r2", toolUseId: "toolu_same")))
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_same"]), .awaiting)
+
+        try resolve(store, "r1", "allowed_once")                // a late duplicate for r1
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "r1", code: "already_resolved", outcome: "allowed_once")))
+
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_same"]), .awaiting, "r2 is still waiting")
+
+        try resolve(store, "r2", "allowed_once")
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_same"]), .approved(atMs: ApprovalAP2bFixtures.atMs))
     }
 
     // MARK: Bounded (T-AP2b-2)
@@ -405,6 +461,33 @@ final class ApprovalStatusStoreTests: XCTestCase {
         oldTimer.work()
 
         XCTAssertEqual(store.guardNotice(tag: "cody-1")?.frame.entryId, "e2")
+    }
+
+    func testARepeatOfTheSameBlockAfterTheBarWasClosedDoesNotShowItAgain() throws {
+        let (store, recorder) = make()
+        let frame = try ApprovalAP2bFixtures.guardBlocked(entryId: "e1")
+        store.handle(.guardBlocked(frame))
+        store.dismissGuardNotice(tag: "cody-1")
+        let changes = ApprovalTap(store.changes)
+        recorder.scheduled = []
+
+        store.handle(.guardBlocked(frame))
+
+        XCTAssertNil(store.guardNotice(tag: "cody-1"), "the closed bar stays closed")
+        XCTAssertTrue(changes.values.isEmpty)
+        XCTAssertTrue(recorder.scheduled.isEmpty, "and no new minute is started")
+    }
+
+    func testARepeatOfTheSameBlockAfterTheBarHidItselfDoesNotShowItAgain() throws {
+        let (store, recorder) = make()
+        let frame = try ApprovalAP2bFixtures.guardBlocked(entryId: "e1")
+        store.handle(.guardBlocked(frame))
+        recorder.runScheduled()
+        XCTAssertNil(store.guardNotice(tag: "cody-1"), "precondition")
+
+        store.handle(.guardBlocked(frame))
+
+        XCTAssertNil(store.guardNotice(tag: "cody-1"))
     }
 
     func testABlockForOneFocusLeavesAnotherFocusAlone() throws {
@@ -603,6 +686,19 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
         let (_, row) = makeRow(settledGroup(["toolu_a", "toolu_b"]), store: store)
 
         XCTAssertEqual(row.approvalField.stringValue, "· denied by you")
+    }
+
+    func testADeniedCallKeepsTheGroupFromReadingApprovedWhicheverCameLast() throws {
+        for order in [["a", "b"], ["b", "a"]] {
+            let (store, _) = makeStore()
+            try request(store, "a")
+            try request(store, "b")
+            try resolve(store, order[0] == "a" ? "a" : "b", "denied")
+            try resolve(store, order[1] == "a" ? "a" : "b", "allowed_once")
+            let (_, row) = makeRow(settledGroup(["toolu_a", "toolu_b"]), store: store)
+
+            XCTAssertEqual(row.approvalField.stringValue, "· denied by you", "denied first: \(order[0])")
+        }
     }
 
     func testACallWithNoToolUseIdIsIgnored() throws {
@@ -835,8 +931,11 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
                 XCTAssertEqual(row.fittingSize.height, baseFitting, accuracy: 0.5, "\(at): the row asks for the same height")
                 if !row.approvalField.isHidden {
                     let field = row.approvalField
-                    XCTAssertGreaterThanOrEqual(field.frame.width, field.intrinsicContentSize.width - 0.5,
-                                                "\(at): the status keeps its full text width (never compressed)")
+                    XCTAssertLessThanOrEqual(field.frame.maxX, row.bounds.maxX + 0.5, "\(at): the status stays inside the row")
+                    if width >= 700 {
+                        XCTAssertGreaterThanOrEqual(field.frame.width, field.intrinsicContentSize.width - 0.5,
+                                                    "\(at): in a wide row the status keeps its full text width")
+                    }
                     XCTAssertEqual(field.frame.height, field.intrinsicContentSize.height, accuracy: 2, at)
                 }
             }
@@ -849,6 +948,21 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
         let (_, row) = makeRow(settledGroup(["toolu_a"]), store: store, width: 700)
         XCTAssertLessThanOrEqual(row.approvalField.frame.maxX, row.bounds.maxX + 0.5)
         XCTAssertGreaterThan(row.approvalField.frame.minX, row.summaryField.frame.minX)
+    }
+
+    func testInANarrowPaneTheLongestStatusStaysInsideTheRowAndTruncatesAtTheTail() throws {
+        let (store, _) = makeStore()
+        store.handle(.guardBlocked(try ApprovalAP2bFixtures.guardBlocked(toolUseId: "toolu_a")))
+        let (window, row) = makeRow(settledGroup(["toolu_a"]), store: store, width: 260)
+        window.contentView!.layoutSubtreeIfNeeded()
+        let field = row.approvalField
+
+        XCTAssertEqual(shown(row), "· blocked: production-shell guard")
+        XCTAssertLessThanOrEqual(field.frame.maxX, row.bounds.maxX + 0.5, "the field is inside the row, not spilling past its edge")
+        XCTAssertGreaterThanOrEqual(field.frame.minX, row.bounds.minX)
+        XCTAssertEqual(field.lineBreakMode, .byTruncatingTail)
+        XCTAssertEqual(row.frame.height, 22, "the row keeps its height")
+        XCTAssertGreaterThan(field.frame.width, 0)
     }
 
     func testAStatusChangeAsksNothingOfTheRowsGroupView() throws {
@@ -1845,5 +1959,121 @@ final class ApprovalAP2bSourceScanTests: XCTestCase {
         XCTAssertFalse(joined.contains("makeFirstResponder"))
         XCTAssertFalse(joined.contains("becomeFirstResponder"))
         XCTAssertFalse(joined.contains("NSAccessibility.post"), "the bar is announced nowhere")
+    }
+}
+
+// MARK: - Paging keeps what the person was doing (AF2-4, nits)
+
+final class ApprovalPagingStateTests: XCTestCase {
+
+    private func askThenSimple(_ p: ApprovalPane) throws {
+        p.store.handle(.request(try QuestionTestRequests.ask(id: "q", options: QuestionTestRequests.offered)))
+        p.store.handle(.request(try ApprovalTestRequests.simpleRm(id: "b")))
+        p.layout()
+    }
+
+    func testAQuestionFormKeepsItsChoicesAndTypedTextWhenThePersonPagesAwayAndBack() throws {
+        let p = ApprovalPane(self)
+        try askThenSimple(p)
+        XCTAssertEqual(p.host.card?.request.id, "q")
+        var form = try XCTUnwrap(p.host.card?.questionForm)
+        QuestionTestViews.press(form.optionButton(question: 0, option: 1))
+        QuestionTestViews.press(form.optionButton(question: 1, option: 0))
+        QuestionTestViews.press(form.optionButton(question: 1, option: 2))
+        let other = try XCTUnwrap(form.otherField(question: 1))
+        QuestionTestViews.enter("something else", into: other, in: p.window)
+        let before = form.selections
+        XCTAssertEqual(before[0].selected, [1], "precondition")
+        XCTAssertEqual(before[1].otherText, "something else", "precondition")
+
+        p.host.showNext(); p.layout()
+        XCTAssertEqual(p.host.card?.request.id, "b")
+        p.host.showPrevious(); p.layout()
+
+        form = try XCTUnwrap(p.host.card?.questionForm)
+        XCTAssertEqual(p.host.card?.request.id, "q")
+        XCTAssertEqual(form.selections, before, "the draft came back")
+        XCTAssertEqual(form.otherField(question: 1)?.stringValue, "something else", "with the typed text on screen")
+        XCTAssertEqual(form.optionButton(question: 0, option: 1)?.state, .on)
+        XCTAssertEqual(form.optionButton(question: 1, option: 2)?.state, .on)
+        XCTAssertTrue(p.recorder.sent.isEmpty, "paging, and the draft, sent nothing")
+        XCTAssertEqual(p.store.entry(id: "q")?.state, ApprovalAnswerState.pending)
+    }
+
+    func testTheDraftIsForgottenWhenItsRequestEnds() throws {
+        let p = ApprovalPane(self)
+        try askThenSimple(p)
+        let form = try XCTUnwrap(p.host.card?.questionForm)
+        QuestionTestViews.press(form.optionButton(question: 0, option: 1))
+        p.host.showNext(); p.layout()
+
+        p.store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "q", outcome: "denied")))
+        p.recorder.runScheduled()
+        p.layout()
+        p.store.handle(.request(try QuestionTestRequests.ask(id: "q", options: QuestionTestRequests.offered)))
+        p.layout()
+        while p.host.card?.request.id != "q", p.host.page?.nextID != nil { p.host.showNext(); p.layout() }
+
+        XCTAssertEqual(p.host.card?.request.id, "q")
+        XCTAssertEqual(p.host.card?.questionForm?.selections.first?.selected, [], "a new request starts with an empty form")
+    }
+
+    func testThePersonReadsTheInputAgainAfterPagingBack() throws {
+        let p = ApprovalPane(self)
+        p.store.handle(.request(try ApprovalTestRequests.heredoc300(id: "a")))
+        p.store.handle(.request(try ApprovalTestRequests.simpleRm(id: "b")))
+        p.layout()
+        var card = try XCTUnwrap(p.host.card)
+        XCTAssertFalse(card.inputView.hasShownEveryLine, "precondition")
+        ApprovalTestViews.readThrough(card.inputView)
+        XCTAssertTrue(card.inputView.hasShownEveryLine, "precondition: read through")
+        XCTAssertTrue(card.canAllow, "precondition")
+
+        p.host.showNext(); p.layout()
+        p.host.showPrevious(); p.layout()
+
+        card = try XCTUnwrap(p.host.card)
+        XCTAssertEqual(card.request.id, "a")
+        XCTAssertFalse(card.inputView.hasShownEveryLine, "the scroll gate starts over on a rebuilt card")
+        XCTAssertFalse(card.canAllow)
+    }
+
+    func testWhenTheCurrentRequestEndsTheNextOneTakesItsPlaceNotTheFirst() throws {
+        let p = ApprovalPane(self)
+        try p.arrive(["a", "b", "c", "d"])
+        p.host.showNext(); p.layout()
+        XCTAssertEqual(p.host.card?.request.id, "b", "precondition")
+
+        p.store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "b", outcome: "denied")))
+        p.recorder.runScheduled()
+        p.layout()
+
+        XCTAssertEqual(p.host.card?.request.id, "c", "the one that moved into b's place")
+        XCTAssertEqual(p.host.page?.label, "2 of 3")
+    }
+
+    func testWhenTheLastRequestEndsThePageFallsBackToTheNewLast() throws {
+        let p = ApprovalPane(self)
+        try p.arrive(["a", "b", "c"])
+        p.host.showNext(); p.host.showNext(); p.layout()
+
+        p.store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "c", outcome: "denied")))
+        p.recorder.runScheduled()
+        p.layout()
+
+        XCTAssertEqual(p.host.card?.request.id, "b")
+    }
+
+    func testThePageLabelIsWideEnoughForTwoDigitCounts() throws {
+        let p = ApprovalPane(self)
+        try p.arrive((1 ... 12).map { "r\($0)" })
+        for _ in 0 ..< 9 { p.host.showNext() }
+        p.layout()
+
+        let card = try XCTUnwrap(p.host.card)
+        XCTAssertEqual(card.pageText, "10 of 12")
+        let label = try XCTUnwrap(card.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == "10 of 12" })
+        XCTAssertGreaterThanOrEqual(label.frame.width, ceil(label.cell?.cellSize.width ?? 0), "the whole text fits")
+        XCTAssertLessThanOrEqual(label.frame.maxX, card.bounds.maxX)
     }
 }

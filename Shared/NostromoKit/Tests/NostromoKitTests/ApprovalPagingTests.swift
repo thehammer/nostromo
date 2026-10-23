@@ -47,6 +47,26 @@ final class ApprovalPagingTests: XCTestCase {
         XCTAssertEqual(page, ApprovalPage(position: 1, count: 2, previousID: nil, nextID: "c", currentID: "b"))
     }
 
+    func testACurrentThatWentTakesTheNextRequestWhichMovedIntoItsPlace() {
+        // b (index 1) is gone: c is now at index 1.
+        let page = ApprovalPaging.page(ids: ["a", "c", "d"], current: "b", fallbackIndex: 1)
+        XCTAssertEqual(page, ApprovalPage(position: 2, count: 3, previousID: "a", nextID: "d", currentID: "c"))
+    }
+
+    func testACurrentThatWasLastFallsBackToTheNewLast() {
+        let page = ApprovalPaging.page(ids: ["a", "b"], current: "c", fallbackIndex: 2)
+        XCTAssertEqual(page?.currentID, "b")
+        XCTAssertEqual(page?.position, 2)
+    }
+
+    func testAFallbackIndexIsIgnoredWhileTheCurrentIsStillHeld() {
+        XCTAssertEqual(ApprovalPaging.page(ids: ["a", "b", "c"], current: "a", fallbackIndex: 2)?.currentID, "a")
+    }
+
+    func testANegativeFallbackIndexShowsTheOldest() {
+        XCTAssertEqual(ApprovalPaging.page(ids: ["a", "b"], current: "gone", fallbackIndex: -3)?.currentID, "a")
+    }
+
     func testArrivalOrderIsTheOrderGivenNotAlphabetical() {
         let page = ApprovalPaging.page(ids: ["z", "m", "a"], current: "m")
         XCTAssertEqual(page, ApprovalPage(position: 2, count: 3, previousID: "z", nextID: "a", currentID: "m"))

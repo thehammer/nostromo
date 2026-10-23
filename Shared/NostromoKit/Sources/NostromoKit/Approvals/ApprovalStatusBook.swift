@@ -47,16 +47,20 @@ public struct ApprovalStatusBook: Equatable, Sendable {
     /// How many calls are recorded for `tag`.
     public func count(tag: String) -> Int { ids[tag]?.count ?? 0 }
 
-    /// What one row says about its calls: `.awaiting` if any is waiting, else the most recently
-    /// updated one. Nil when none of `toolUseIds` has a status.
+    /// What one row says about its calls: `.awaiting` if any is waiting; else a refusal (denied,
+    /// timed out, restarted, blocked) outranks an approval, so a row never reads "approved" for a
+    /// group that had a call refused; within a tier the most recently updated one. Nil when none of
+    /// `toolUseIds` has a status.
     public func headline(toolUseIds: [String]) -> ApprovalRowStatus? {
         var latest: Entry?
+        var latestRefusal: Entry?
         for id in toolUseIds {
             guard let entry = entries[id] else { continue }
             if entry.status.isAwaiting { return .awaiting }
             if latest == nil || entry.stamp > latest!.stamp { latest = entry }
+            if entry.status.isRefusal, latestRefusal == nil || entry.stamp > latestRefusal!.stamp { latestRefusal = entry }
         }
-        return latest?.status
+        return (latestRefusal ?? latest)?.status
     }
 
     private mutating func forget(_ toolUseId: String) {
