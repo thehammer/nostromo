@@ -63,14 +63,19 @@ public struct ApprovalsNeedsYouContentBuilder: NeedsYouContentBuilder {
         return "\(request.displayName) · \(word)"
     }
 
-    /// The first word of the first command, as displayed. A path-shaped word is cut to its last
-    /// component, so a path never reaches a lock screen.
+    /// The first word of the first command, as displayed, only when it reads as a command name.
+    /// Leading `NAME=value` assignments are skipped (they carry secrets), a path-shaped word is cut
+    /// to its last component, and anything that is not plain ASCII letters, digits and `._+-` is
+    /// dropped: the notification then names the tool alone.
     static func firstWord(of request: ApprovalRequestWire) -> String? {
-        let first = ApprovalDisplayModel(request: request).summary
-            .split(whereSeparator: { $0.isWhitespace }).first.map(String.init)
-        guard var word = first else { return nil }
+        let words = ApprovalDisplayModel(request: request).summary.split(whereSeparator: { $0.isWhitespace })
+        guard var word = words.first(where: { !$0.contains("=") }).map(String.init) else { return nil }
         if word.contains("/") { word = word.split(separator: "/").last.map(String.init) ?? "" }
-        guard !word.isEmpty else { return nil }
-        return word.count > maxWordLength ? String(word.prefix(maxWordLength - 1)) + "…" : word
+        guard !word.isEmpty, word.count <= maxWordLength,
+              word.unicodeScalars.allSatisfy({ commandNameScalars.contains($0) }) else { return nil }
+        return word
     }
+
+    private static let commandNameScalars = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-")
 }

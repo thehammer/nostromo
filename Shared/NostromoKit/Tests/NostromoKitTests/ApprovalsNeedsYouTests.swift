@@ -49,6 +49,14 @@ final class ApprovalsNeedsYouTests: XCTestCase {
         XCTAssertEqual(try content(Fx.bashRequest("/usr/bin/rm -rf x")).body, "Bash · rm")
     }
 
+    func testAnAssignmentIsSkippedAndAnOddWordFallsBackToTheToolName() throws {
+        XCTAssertEqual(try content(Fx.bashRequest("API_KEY=hunter2 rm -rf x")).body, "Bash · rm")
+        XCTAssertEqual(try content(Fx.bashRequest("A=1 B=2")).body, "Bash")
+        XCTAssertEqual(try content(Fx.bashRequest("user@host:secret ls")).body, "Bash")
+        XCTAssertEqual(try content(Fx.bashRequest("r\u{043C} -rf x")).body, "Bash", "non-ASCII is never shown")
+        XCTAssertEqual(try content(Fx.bashRequest("\(String(repeating: "a", count: 60)) x")).body, "Bash")
+    }
+
     func testNonBashShowsTheToolNameOnly() throws {
         let request = try Fx.request(toolKind: "edit", toolName: "Edit", displayName: "Edit",
                                      input: ["file_path": "/etc/secret"], display: Fx.display(lines: [], commandCount: nil))
