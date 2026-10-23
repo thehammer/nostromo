@@ -523,17 +523,17 @@ final class AppControlServer {
 
     private func pickTrackerPane(_ req: AppControlRequest, in w: NSWindow) throws -> TrackerPaneView? {
         let panes = trackerPanes(in: w)
-        if let tag = req.string("focus") { return panes.first { $0.tag == tag } }
+        if let tag = req.string("focus") { return panes.first { $0.focusTag == tag } }
         if let responder = w.firstResponder as? NSView {
             var v: NSView? = responder
             while let view = v {
                 if let pane = view as? TrackerPaneView { return pane }
-                if let repl = view as? ReplView, let pane = panes.first(where: { $0.tag == repl.diagnosticsTag }) { return pane }
+                if let repl = view as? ReplView, let pane = panes.first(where: { $0.focusTag == repl.diagnosticsTag }) { return pane }
                 v = view.superview
             }
         }
         if panes.count == 1 { return panes[0] }
-        throw AppControlError.notFound("no tracker pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(panes.map(\.tag))")
+        throw AppControlError.notFound("no tracker pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(panes.map(\.focusTag))")
     }
 
     /// READ-ONLY (`tracker show|file [--focus TAG]`): what the tracker pane shows, or the board's file.
@@ -546,7 +546,7 @@ final class AppControlServer {
         }
         let w = try window(req)
         let pane = try pickTrackerPane(req, in: w)
-        guard let tag = pane?.tag ?? req.string("focus") else {
+        guard let tag = pane?.focusTag ?? req.string("focus") else {
             throw AppControlError.notFound("no tracker pane in window; pass focus=TAG")
         }
         let board = pane?.board ?? TrackerStore.shared.board(for: tag)

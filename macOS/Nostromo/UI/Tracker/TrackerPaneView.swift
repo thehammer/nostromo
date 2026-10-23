@@ -24,7 +24,8 @@ import NostromoKit
 final class TrackerPaneView: NSView {
     override var isFlipped: Bool { true }
 
-    let tag: String
+    /// The focus whose board this shows (`NSView.tag` is AppKit's own Int).
+    let focusTag: String
 
     let header = TrackerHeaderView()
     let banner = TrackerBannerView()
@@ -80,7 +81,7 @@ final class TrackerPaneView: NSView {
          },
          timeZone: TimeZone = .current,
          tickInterval: TimeInterval? = 30) {
-        self.tag = tag
+        self.focusTag = tag
         self.store = store
         self.now = now
         self.reduceMotion = reduceMotion
@@ -154,7 +155,7 @@ final class TrackerPaneView: NSView {
 
     /// Present the store's board for this tag and show it.
     func render() {
-        guard let board = store.board(for: tag) else { return }
+        guard let board = store.board(for: focusTag) else { return }
         self.board = board
         commit(TrackerPresenter.present(board: board, now: now(), filter: filter, folds: folds, timeZone: timeZone),
                highlight: true)
@@ -401,7 +402,7 @@ final class TrackerPaneView: NSView {
     /// The whole board's markdown (the file's bytes for a clean file).
     func copyBoardMarkdown() {
         guard let board else { return }
-        write(TrackerMarkdown.board(board))
+        writeToPasteboard(TrackerMarkdown.board(board))
     }
 
     /// A section's or an item's markdown, exactly as the file has it.
@@ -412,10 +413,10 @@ final class TrackerPaneView: NSView {
         case .section(let section): text = TrackerMarkdown.section(section.id, in: board)
         default: text = row.item.flatMap { TrackerMarkdown.item($0.id, in: board) }
         }
-        if let text { write(text) }
+        if let text { writeToPasteboard(text) }
     }
 
-    private func write(_ text: String) {
+    private func writeToPasteboard(_ text: String) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }
@@ -424,14 +425,14 @@ final class TrackerPaneView: NSView {
 
     /// `nostromo-app tracker-anchor`.
     func anchorSnapshot(windowIndex: Int) -> TrackerAnchorSnapshot {
-        TrackerAnchorProbe.snapshot(tag: tag, window: windowIndex, clipBounds: clipView.bounds,
+        TrackerAnchorProbe.snapshot(tag: focusTag, window: windowIndex, clipBounds: clipView.bounds,
                                     documentHeight: documentView.frame.height, rows: rowFrames,
                                     held: deferral.held)
     }
 
     /// `nostromo-app tracker show`: what this pane shows.
     func showReport() -> [String: Any] {
-        AppControlTracker.show(tag: tag, presentation: presentation, displayedRows: displayedRows,
+        AppControlTracker.show(tag: focusTag, presentation: presentation, displayedRows: displayedRows,
                                visible: window != nil && !isHiddenOrHasHiddenAncestor, held: deferral.held,
                                renderGeneration: renderGeneration, rowsUpdatedLast: rowsUpdatedLast)
     }
