@@ -41,6 +41,12 @@ that no longer applies, which is why the daemon now does the cleanup itself.)
 - If the CLI itself is already gone when the sweep runs (for example it exited when the dead daemon's
   pipes closed), its entry no longer verifies and its former background children are **not** swept:
   with the leader gone there is nothing to prove who the group belongs to.
+- Possible later slice (not built): stamp each CLI's environment with `NOSTROMO_DAEMON_BOOT` (already
+  set) and have the sweep verify a group member's environment or command line before signalling a
+  leaderless group. Until then a leaderless group is never signalled.
+- The ledger file is handed over, not locked: a new daemon's first write replaces a still-running old
+  daemon's file, and each ledger only deletes or rewrites the file while it still carries its own pid
+  and boot marker (checked just before the write, so a very tight race is theoretically possible).
 - Mother's runner and broker, and anything else the daemon did not spawn as a session CLI, are never in
   the ledger and are never touched.
 

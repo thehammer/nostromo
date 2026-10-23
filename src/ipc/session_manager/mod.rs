@@ -4547,7 +4547,11 @@ mod tests {
     #[tokio::test]
     async fn restart_clears_stop_reason_and_crash_window() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
-        spawn_stub(&mut mgr, "crashy3", "true");
+        // Exits at once until `ok` exists, then stays up: the restarted session must still be
+        // running when it is checked, which an instantly-exiting stub cannot promise.
+        let ok = tmp_store().with_extension("ok");
+        let script = format!("[ -e '{}' ] && exec sleep 30; exit 0", ok.display());
+        spawn_stub(&mut mgr, "crashy3", &script);
         mgr.sessions
             .get_mut("crashy3")
             .unwrap()
@@ -4569,6 +4573,7 @@ mod tests {
         );
 
         // User-initiated restart — should build a fresh ManagedSession.
+        std::fs::write(&ok, b"").unwrap();
         mgr.restart("crashy3").unwrap();
 
         let s = mgr
@@ -4584,6 +4589,8 @@ mod tests {
             "restarted session must have an empty crash window"
         );
         assert!(s.alive(), "restarted session must be alive");
+        mgr.kill_all_on_shutdown();
+        let _ = std::fs::remove_file(&ok);
     }
 
     // ── a switch task that dies must not take the session's queue with it ─────

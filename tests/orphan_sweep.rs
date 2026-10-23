@@ -194,6 +194,7 @@ fn write(path: &Path, daemon_pid: u32, children: Vec<ChildRecord>) {
         &LedgerFile {
             version: 1,
             daemon_pid,
+            marker: "boot-test".into(),
             children,
         },
     )
@@ -490,6 +491,7 @@ fn nothing_is_touched_and_the_record_stays_when_the_daemon_that_wrote_it_is_aliv
     let file = LedgerFile {
         version: 1,
         daemon_pid: daemon.pid,
+        marker: "boot-test".into(),
         children: vec![cli.record()],
     };
     write_ledger_file(&ledger, &file).unwrap();
@@ -547,6 +549,7 @@ fn a_ledger_of_another_version_is_ignored_and_none_of_its_records_are_acted_on()
     let file = LedgerFile {
         version: 2,
         daemon_pid: dead_pid(),
+        marker: "boot-test".into(),
         children: vec![cli.record()],
     };
     write_ledger_file(&ledger, &file).unwrap();
@@ -627,6 +630,43 @@ fn the_ledger_lists_what_is_running_and_is_removed_when_cleared() {
     ledger.clear(); // clearing twice is harmless
 }
 
+/// Two ledgers in one process stand for the old and the new daemon: same pid, different boot.
+#[test]
+fn an_old_daemons_final_clear_does_not_delete_the_file_a_newer_daemon_took_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = ledger_in(dir.path());
+    let old = ChildLedger::new(path.clone());
+    old.record(4242, true, Path::new("/opt/claude"));
+
+    // The new daemon starts while the old one is still shutting down, and records its first CLI.
+    let new = ChildLedger::new(path.clone());
+    new.record(5151, true, Path::new("/opt/claude"));
+
+    old.forget(4242); // the old daemon is still stopping its sessions...
+    old.clear(); // ...and finishes.
+
+    let file = read_ledger_file(&path).expect("the new daemon's ledger is still there");
+    assert_eq!(file.marker, new.marker());
+    let pids: Vec<u32> = file.children.iter().map(|c| c.pid).collect();
+    assert_eq!(pids, vec![5151], "the new daemon's record is untouched");
+
+    new.clear();
+    assert!(!path.exists(), "the owner still removes its own file");
+}
+
+#[test]
+fn clear_leaves_a_file_that_carries_another_boots_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = ledger_in(dir.path());
+    let mine = ChildLedger::new(path.clone());
+    mine.record(4242, true, Path::new("/opt/claude"));
+    write(&path, std::process::id(), vec![]); // someone else's boot, same pid, marker "boot-test"
+
+    mine.clear();
+
+    assert!(path.exists());
+}
+
 #[test]
 fn a_ledger_file_that_was_written_reads_back_the_same_and_its_directory_is_created_on_demand() {
     let dir = tempfile::tempdir().unwrap();
@@ -638,6 +678,7 @@ fn a_ledger_file_that_was_written_reads_back_the_same_and_its_directory_is_creat
     let file = LedgerFile {
         version: 1,
         daemon_pid: 77,
+        marker: "boot-test".into(),
         children: vec![ChildRecord {
             pid: 5,
             pgid: 5,
@@ -655,8 +696,10 @@ fn a_ledger_file_that_was_written_reads_back_the_same_and_its_directory_is_creat
 
 // ── the CLI is gone but what it started is not ───────────────────────────────
 
+/// Known limit: with the recorded leader gone there is nothing to prove who the group belongs to,
+/// so the sweep drops the record and signals nobody.
 #[test]
-fn a_leftover_group_whose_cli_already_exited_is_still_stopped() {
+fn a_leftover_group_whose_cli_already_exited_is_not_signalled() {
     let dir = tempfile::tempdir().unwrap();
     let ledger = ledger_in(dir.path());
     let mut cli = spawn(dir.path(), "cli", LEADER_WITH_BG, Group::Own);
@@ -672,30 +715,7 @@ fn a_leftover_group_whose_cli_already_exited_is_still_stopped() {
     assert!(!is_gone(bg), "the background child outlives its CLI");
     write(&ledger, dead_pid(), vec![record]);
 
-    let report = sweep_reaping(&ledger, Duration::from_secs(3), &mut [&mut cli]);
-
-    assert_eq!(report.terminated, vec![cli.pid]);
-    wait_until("the background child to be gone", || is_gone(bg));
-}
-
-#[test]
-fn a_leftover_group_that_started_before_the_record_is_not_swept() {
-    let dir = tempfile::tempdir().unwrap();
-    let ledger = ledger_in(dir.path());
-    let mut cli = spawn(dir.path(), "cli", LEADER_WITH_BG, Group::Own);
-    let bg = cli.bg_pid();
-    let mut record = cli.record();
-    // SAFETY: the pid is this test's own child.
-    unsafe {
-        libc::kill(cli.pid as libc::pid_t, libc::SIGKILL);
-    }
-    wait_until("the CLI to be reaped", || cli.try_reap());
-    // The record claims the leader started an hour from now: the members predate it, so the group
-    // cannot be the one recorded.
-    record.started_at = now() + 3600;
-    write(&ledger, dead_pid(), vec![record]);
-
-    let report = sweep(&ledger, Duration::from_secs(1));
+    let report = sweep_reaping(&ledger, Duration::from_secs(1), &mut [&mut cli]);
 
     assert_eq!(report.terminated, Vec::<u32>::new());
     assert_eq!(report.dropped, 1);

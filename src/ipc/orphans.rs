@@ -69,6 +69,10 @@ pub struct LedgerFile {
     /// The daemon that wrote it. A previous daemon that is still alive owns
     /// its children: the sweep leaves them alone.
     pub daemon_pid: u32,
+    /// The boot marker of the daemon that wrote it, so a daemon can tell
+    /// whether the file on disk is still its own (also when `children` is empty).
+    #[serde(default)]
+    pub marker: String,
     pub children: Vec<ChildRecord>,
 }
 
@@ -148,11 +152,18 @@ impl ChildLedger {
         }
     }
 
-    /// The daemon is exiting cleanly with nothing left running: remove the file.
+    /// The daemon is exiting cleanly with nothing left running: remove the file,
+    /// but only if it is still this daemon's (its pid and boot marker). A newer
+    /// daemon may have taken the file over while this one was shutting down; its
+    /// record is not ours to delete.
     pub fn clear(&self) {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.clear();
         if !self.wrote.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        if !self.file_is_ours() {
+            info!("child ledger now belongs to another daemon boot: left in place");
             return;
         }
         match std::fs::remove_file(&self.path) {
@@ -162,11 +173,31 @@ impl ChildLedger {
         }
     }
 
+    /// Whether the file on disk carries this daemon's pid and boot marker. A
+    /// missing file counts as ours (there is nothing of anyone else's to lose);
+    /// an unreadable or foreign one does not.
+    fn file_is_ours(&self) -> bool {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice::<LedgerFile>(&bytes)
+                .map(|f| f.daemon_pid == std::process::id() && f.marker == self.marker)
+                .unwrap_or(false),
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
+
     fn persist(&self, entries: &[ChildRecord]) {
+        // Once this ledger has written the file, a later write must not clobber
+        // a file that a newer daemon has since taken over (the overlap while an
+        // old daemon is still shutting down). The first write ever is the
+        // takeover itself: the startup sweep has already dealt with what was there.
+        if self.wrote.load(Ordering::SeqCst) && !self.file_is_ours() {
+            return;
+        }
         self.wrote.store(true, Ordering::SeqCst);
         let file = LedgerFile {
             version: LEDGER_VERSION,
             daemon_pid: std::process::id(),
+            marker: self.marker.clone(),
             children: entries.to_vec(),
         };
         if let Err(e) = write_ledger_file(&self.path, &file) {
@@ -371,9 +402,7 @@ fn verified_target(rec: &ChildRecord) -> Option<Target> {
     if rec.pid <= 1 || rec.pgid <= 1 || rec.program.trim().is_empty() {
         return None;
     }
-    let Some(live_pgid) = current_pgid_of(rec.pid) else {
-        return leaderless_group(rec);
-    };
+    let live_pgid = current_pgid_of(rec.pid)?;
     if live_pgid != rec.pgid || (rec.own_group && rec.pgid != rec.pid) {
         return None;
     }
@@ -388,28 +417,6 @@ fn verified_target(rec: &ChildRecord) -> Option<Target> {
     } else {
         Target::Pid(rec.pid)
     })
-}
-
-/// The recorded CLI is gone but its group is not (background servers outlived
-/// it, e.g. it exited when a dead daemon's pipes closed). The kernel does not
-/// hand out a pid that is still in use as a group id, so a group that exists
-/// under the recorded leader's id, while that pid does not, is the one the
-/// daemon created, provided every member started after the record (no member
-/// can predate its group's leader).
-fn leaderless_group(rec: &ChildRecord) -> Option<Target> {
-    if !rec.own_group || rec.pgid != rec.pid || !valid_group(rec.pgid) {
-        return None;
-    }
-    let target = Target::Group(rec.pgid);
-    if !target.exists() {
-        return None;
-    }
-    let members = group_member_elapsed(rec.pgid)?;
-    let all_after_record = !members.is_empty()
-        && members
-            .iter()
-            .all(|e| unix_now().saturating_sub(*e) + START_TIME_TOLERANCE_SECS >= rec.started_at);
-    all_after_record.then_some(target)
 }
 
 fn same_start(recorded: u64, elapsed: u64) -> bool {
@@ -468,33 +475,6 @@ fn process_info(pid: u32) -> Option<ProcessInfo> {
         return None;
     }
     parse_ps_line(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// Elapsed seconds of every process in group `pgid`, from one `ps` listing.
-fn group_member_elapsed(pgid: u32) -> Option<Vec<u64>> {
-    let ps = ["/bin/ps", "/usr/bin/ps"]
-        .into_iter()
-        .find(|p| Path::new(p).exists())?;
-    let out = Command::new(ps)
-        .args(["-A", "-o", "pgid=", "-o", "etime="])
-        .env("LC_ALL", "C")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut members = Vec::new();
-    for line in text.lines() {
-        let mut cols = line.split_whitespace();
-        let (Some(g), Some(e)) = (cols.next(), cols.next()) else {
-            continue;
-        };
-        if g.parse::<u32>().ok() == Some(pgid) {
-            members.push(parse_etime(e)?);
-        }
-    }
-    Some(members)
 }
 
 fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
