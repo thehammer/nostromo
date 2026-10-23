@@ -74,6 +74,12 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
         }
     };
 
+    // A view served by a disabled agent does not exist (checked before the
+    // target is looked at, so the refusal is the same whatever was passed).
+    if !state.source_available(source_for(view_type)) {
+        return refusal(&PlacementError::UnknownViewType(view_type.as_str().to_string()));
+    }
+
     let identity = match identity_from_target(view_type, args.get("target")) {
         Ok(id) => id,
         Err(e) => return refusal(&e),
@@ -975,6 +981,18 @@ showable: the ambient activity stream is populated only by what actually happene
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pr_views_are_refused_when_perri_is_disabled_but_files_are_not() {
+        let (mut state, _rx) = make_state();
+        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        for ty in ["review_queue", "pr_diff", "pr_conversation"] {
+            let out = show(&state, &json!({ "type": ty }), Some("perri")).await;
+            assert_eq!(out["error"], "unknown_view_type", "for {ty}");
+        }
+        let out = show(&state, &json!({ "type": "file", "target": { "path": "" } }), Some("perri")).await;
+        assert_ne!(out["error"], "unknown_view_type");
+    }
     use crate::ipc::pane_registry::PaneRegistry;
     use crate::ipc::protocol::{PaneTree, SplitDirection};
     use crate::ipc::SessionManager;

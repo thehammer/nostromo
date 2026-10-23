@@ -1,5 +1,6 @@
 import XCTest
 import Combine
+import NostromoKit
 
 // Behavioural spec for `SidebarBadgeModel`: the per-tag badges the sidebar shows, which
 // tags need the operator, where a pill click lands, and the refresh debounce. All times
@@ -87,6 +88,13 @@ final class SidebarBadgeModelTests: XCTestCase {
     func testOverdueTodosPutTeriInTheAttentionTags() throws {
         let m = updated(inputs(teri: try todos(["2026-10-09"])))
         XCTAssertEqual(m.attentionTags, ["teri"])
+    }
+
+    func testADisabledAgentPublishesNoBadgeAndRaisesNoAttention() throws {
+        var m = SidebarBadgeModel()
+        m.update(inputs(teri: try todos(["2026-10-09"])), now: now, enabled: EnabledAgents(disabled: ["teri"]))
+        XCTAssertNil(m.badge(for: "teri"))
+        XCTAssertFalse(m.attentionTags.contains("teri"))
     }
 
     func testCombinedAttentionTagsKeepStoreTagsAndAddBadgeTags() throws {

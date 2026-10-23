@@ -1074,10 +1074,25 @@ final class BackgroundTaskWireDecodeTests: XCTestCase {
     }
 
     func testTaskFramesDoNotDisturbDecodingOfOtherFrames() {
-        guard case let .welcome(version, pid) = decode(#"{"type":"welcome","protocol_version":3,"daemon_pid":77}"#) else {
+        guard case let .welcome(version, pid, _) = decode(#"{"type":"welcome","protocol_version":3,"daemon_pid":77}"#) else {
             return XCTFail("expected .welcome")
         }
         XCTAssertEqual(version, 3)
         XCTAssertEqual(pid, 77)
+    }
+
+    func testWelcomeWithEnabledAgentsDisablesTheOnesNotListed() {
+        guard case let .welcome(_, _, enabled) = decode(#"{"type":"welcome","protocol_version":4,"daemon_pid":7,"enabled_agents":["mother","teri"]}"#) else {
+            return XCTFail("expected .welcome")
+        }
+        XCTAssertFalse(enabled.isEnabled("fred"))
+        XCTAssertTrue(enabled.isEnabled("teri"))
+    }
+
+    func testWelcomeWithoutEnabledAgentsEnablesEverything() {
+        guard case let .welcome(_, _, enabled) = decode(#"{"type":"welcome","protocol_version":4,"daemon_pid":7}"#) else {
+            return XCTFail("expected .welcome")
+        }
+        XCTAssertEqual(enabled, .all)
     }
 }

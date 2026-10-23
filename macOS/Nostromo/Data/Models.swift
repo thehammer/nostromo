@@ -133,6 +133,14 @@ struct Focus: Codable, Hashable, Identifiable {
               ], org: "Carefeed"),
         Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
     ]
+
+    /// The built-ins the daemon actually runs, in canonical order.
+    static func builtIns(enabled: EnabledAgents) -> [Focus] {
+        builtIns.filter { enabled.isEnabled($0.agentTag) }
+    }
+
+    /// Mother can never be switched off, so this is always present.
+    static var mother: Focus { builtIns.first { $0.id == "mother" }! }
 }
 
 extension Focus {

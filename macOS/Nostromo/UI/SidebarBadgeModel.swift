@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import NostromoKit
 
 /// A snapshot of the already-held data the built-in rows' badges are computed from.
 /// Plain values, so the model needs no `AppStore` and can be tested headlessly.
@@ -21,7 +22,8 @@ struct SidebarBadgeModel {
     private var registry = FocusBadgeRegistry()
 
     /// Recompute and publish the badges for the built-in focuses.
-    mutating func update(_ inputs: BadgeInputs, now: Date, calendar: Calendar = BadgeProviders.chicago) {
+    mutating func update(_ inputs: BadgeInputs, now: Date, calendar: Calendar = BadgeProviders.chicago,
+                         enabled: EnabledAgents = .all) {
         let published: [(tag: String, badge: FocusBadge?)] = [
             ("fred", BadgeProviders.fred(mailbox: inputs.fredMailbox, calendar: inputs.fredCalendar, now: now)),
             ("mother", BadgeProviders.mother(inputs.motherStatus)),
@@ -29,7 +31,10 @@ struct SidebarBadgeModel {
                                            error: inputs.perriQueueError, loading: inputs.perriQueueLoading)),
             ("teri", BadgeProviders.teri(todos: inputs.teriTodos, now: now, calendar: calendar)),
         ]
-        for (tag, badge) in published { registry.publish(tag: tag, sourceKey: tag, badge: badge) }
+        // A disabled agent publishes nil, so a hidden row can never raise attention.
+        for (tag, badge) in published {
+            registry.publish(tag: tag, sourceKey: tag, badge: enabled.isEnabled(tag) ? badge : nil)
+        }
     }
 
     func badge(for tag: String) -> FocusBadge? { registry.badge(for: tag) }

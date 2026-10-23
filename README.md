@@ -44,6 +44,50 @@ reads the same env var and file, so launch it from a shell with the variable
 set, or use `config.toml`. Restart `nostromd` and relaunch the app after
 changing it.
 
+### Agents
+
+Every built-in agent (Fred, Perri, Teri) is on by default, and Mother cannot be
+turned off. To switch one off, give it a table in `config.toml`:
+
+```toml
+[agents.fred]
+enabled = false
+
+[agents.perri]
+enabled = false
+```
+
+A disabled agent uses no resources and takes no space: `nostromd` does not
+start its pollers, the MCP server does not register its tools, views or pane
+sources, and the macOS app hides its sidebar entry. With Perri off,
+`nostromo.show` cannot show PR views (`review_queue`, `pr_diff`,
+`pr_conversation`); files and tickets still work.
+
+Unknown agent names, and `mother`, are ignored with a warning in the daemon log.
+Extra keys inside an agent's table are ignored too. That table is where each
+agent's future per-agent settings will go.
+
+A malformed `[agents]` never stops the daemon: a non-table `agents`, a
+non-table entry, or an `enabled` that is not `true`/`false` is ignored with a
+warning (key names only, never values), and whatever was not clearly switched
+off stays on. If two keys differ only by case (`[agents.Fred]` and
+`[agents.fred]`), the daemon warns once and the key that sorts last in byte
+order wins (regardless of the order they are written in), so the lowercase key
+beats a capitalised one. A test pins this; it holds while the `toml` crate is
+built without `preserve_order`.
+
+Refused while an agent is off: its MCP tools, its pane sources (including
+bindings saved before it was disabled, which are neither fetched nor replayed on
+attach), and, for Perri, the app's `PerriAction` requests.
+
+On the wire, the welcome's `enabled_agents` lists what is *running* (always
+including `mother`). A client infers "disabled" as its own switchable agents
+minus that list.
+
+The file is `~/Library/Application Support/nostromo/config.toml` on macOS and
+`~/.config/nostromo/config.toml` elsewhere. Restart `nostromd` after changing
+it; the app picks the change up on its next connection.
+
 ## Daemon
 
 `nostromd` is a daemon that runs in the background and serves the macOS and iOS

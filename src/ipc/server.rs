@@ -82,6 +82,9 @@ type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
 /// open structured decision. Only an id is kept, never job content.
 type HeldMotherJobs = Arc<Mutex<HashSet<String>>>;
 
+/// What a client is told when it sends a `PerriAction` while Perri is switched off.
+const PERRI_DISABLED: &str = "Perri is disabled in this daemon's config ([agents.perri] enabled = false).";
+
 /// What a local peer that is not the operator's app is told when it tries to answer a held job.
 const MOTHER_HOLD_NEEDS_OPERATOR: &str = "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
 
@@ -414,6 +417,24 @@ async fn accept_loop_tcp(
 
 // ── per-client task ───────────────────────────────────────────────────────────
 
+/// The `Welcome` frame for a connection: protocol version, advertised
+/// features, the operator nonce (when the peer was verified) and the built-in
+/// agents this daemon runs.
+fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMsg {
+    ServerMsg::Welcome {
+        protocol_version: PROTOCOL_VERSION,
+        daemon_pid: std::process::id(),
+        features: vec![
+            FEATURE_WORK.to_string(),
+            FEATURE_MODEL.to_string(),
+            FEATURE_TASKS.to_string(),
+            FEATURE_APPROVALS.to_string(),
+        ],
+        operator_nonce,
+        enabled_agents: Some(mgr.enabled_agents().wire_names()),
+    }
+}
+
 /// Handle a single connected client over any async transport (Unix socket, TCP, …).
 ///
 /// The caller provides a stream that implements both [`AsyncRead`] and
@@ -486,17 +507,7 @@ where
     // process that then `exec`s the app) cannot contain it.
     let operator_nonce = (trust == PeerTrust::OperatorApp).then(new_operator_nonce);
 
-    let welcome = ServerMsg::Welcome {
-        protocol_version: PROTOCOL_VERSION,
-        daemon_pid: std::process::id(),
-        features: vec![
-            FEATURE_WORK.to_string(),
-            FEATURE_MODEL.to_string(),
-            FEATURE_TASKS.to_string(),
-            FEATURE_APPROVALS.to_string(),
-        ],
-        operator_nonce: operator_nonce.clone(),
-    };
+    let welcome = welcome_msg(&session_mgr.lock().unwrap(), operator_nonce.clone());
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     // Never log the nonce.
     let peer_pid = origin.info().map(|i| i.pid);
@@ -1410,6 +1421,13 @@ fn handle_client_msg(
             repo,
             tag,
         } => {
+            // A disabled Perri must not run `gh` or write its state files.
+            // The refusal names no action, repo or PR.
+            if !session_mgr.lock().unwrap().enabled_agents().is_enabled(crate::agents::Agent::Perri) {
+                warn!(conn_key, "PerriAction refused: perri is disabled");
+                let _ = targeted_tx.send(ServerMsg::Error { message: PERRI_DISABLED.to_owned() });
+                return;
+            }
             let conn = conn_key.to_string();
             let psd = perri_state_dir.to_path_buf();
             // W7: the PR under review belongs to a focus. A client that names
@@ -2195,8 +2213,83 @@ pub fn activity_health_msg(mgr: &SessionManager, hook_installed: bool) -> Server
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn welcome_reports_only_the_enabled_agents() {
+        let mut mgr = SessionManager::new();
+        match welcome_msg(&mgr, None) {
+            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
+                enabled_agents,
+                Some(vec!["fred".into(), "mother".into(), "perri".into(), "teri".into()])
+            ),
+            other => panic!("{other:?}"),
+        }
+        mgr.configure_enabled_agents(crate::agents::EnabledAgents { fred: false, perri: true, teri: true });
+        match welcome_msg(&mgr, None) {
+            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
+                enabled_agents,
+                Some(vec!["mother".into(), "perri".into(), "teri".into()])
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
     use super::*;
     use crate::ipc::protocol::DecisionChoice;
+
+    fn perri_action_with(enabled: crate::agents::EnabledAgents, dir: &Path) -> Vec<ServerMsg> {
+        let mut mgr = SessionManager::new();
+        mgr.configure_enabled_agents(enabled);
+        let mgr = Arc::new(Mutex::new(mgr));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        handle_client_msg(
+            ClientMsg::PerriAction { action: "load_pr".into(), pr_number: Some(7), repo: Some("o/r".into()), tag: None },
+            PeerTrust::OperatorApp,
+            None,
+            None,
+            &SensitiveTags::in_memory(),
+            "conn",
+            "client",
+            &mgr,
+            &ttx,
+            &btx,
+            dir,
+            &Arc::new(Mutex::new(DecisionRegistry::new())),
+            &Arc::new(Mutex::new(HashSet::new())),
+        );
+        let mut out = Vec::new();
+        while let Ok(m) = trx.try_recv() {
+            out.push(m);
+        }
+        out
+    }
+
+    #[test]
+    fn perri_action_is_refused_without_touching_state_when_perri_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let off = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        let out = perri_action_with(off, dir.path());
+        assert!(
+            matches!(out.as_slice(), [ServerMsg::Error { message }] if message == PERRI_DISABLED),
+            "{out:?}"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "no Perri state files written");
+    }
+
+    #[tokio::test]
+    async fn perri_action_still_runs_when_perri_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = perri_action_with(crate::agents::EnabledAgents::all(), dir.path());
+        assert!(out.is_empty(), "{out:?}");
+        // The action runs on a spawned task; wait for its state file.
+        for _ in 0..100 {
+            if std::fs::read_dir(dir.path()).unwrap().count() > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("enabled Perri's load_pr wrote nothing");
+    }
 
     #[test]
     fn log_safe_strips_newlines_and_bounds_length() {

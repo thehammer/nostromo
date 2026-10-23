@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod agent_bus;
+pub mod agents;
 pub mod approvals;
 pub mod mdns;
 pub mod config;

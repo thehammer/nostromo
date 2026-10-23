@@ -1,5 +1,6 @@
 import Combine
 import XCTest
+import NostromoKit
 
 /// Fitness functions, not behavioural tests — same spirit as
 /// `ActivityTickerWiringTests`. The logic under test here spans
@@ -23,6 +24,64 @@ import XCTest
 /// expected to keep passing; a failure here means one of those already-fixed
 /// behaviors regressed, not that a feature is still pending.
 final class PerFocusEvictionWiringTests: XCTestCase {
+
+    // MARK: - Agent enable switches (behavioural: FocusStore is compiled into this target)
+
+    private func tmpStore(_ enabled: EnabledAgents = .all) -> FocusStore {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("focuses-\(UUID().uuidString).json")
+        return FocusStore(storageURL: url, enabledAgents: enabled)
+    }
+
+    private func builtInIDs(_ s: FocusStore) -> [String] { s.focuses.filter(\.isBuiltIn).map(\.id) }
+
+    func testDefaultStoreHasAllFourBuiltIns() {
+        XCTAssertEqual(builtInIDs(tmpStore()), ["fred", "mother", "perri", "teri"])
+    }
+
+    func testStoreBuiltWithDisabledAgentsOmitsThem() {
+        XCTAssertEqual(builtInIDs(tmpStore(EnabledAgents(disabled: ["fred", "perri"]))), ["mother", "teri"])
+    }
+
+    func testApplyingEnabledAgentsHidesAnAgentAndAnnouncesOneRemoval() {
+        let store = tmpStore()
+        let dyn1 = Focus(id: "d1", agentTag: "cody", projectPath: "/a", isBuiltIn: false)
+        let dyn2 = Focus(id: "d2", agentTag: "cody", projectPath: "/b", isBuiltIn: false)
+        store.add(dyn1); store.add(dyn2)
+        var removed: [String] = []
+        let c = store.focusRemovals.sink { removed.append($0.id) }
+        store.applyEnabledAgents(EnabledAgents(disabled: ["fred"]))
+        XCTAssertEqual(removed, ["fred"])
+        XCTAssertEqual(builtInIDs(store), ["mother", "perri", "teri"])
+        XCTAssertEqual(store.focuses.filter { !$0.isBuiltIn }.map(\.id), ["d1", "d2"])
+        c.cancel()
+    }
+
+    func testApplyingAllRestoresFredInPlaceWithoutARemoval() {
+        let store = tmpStore(EnabledAgents(disabled: ["fred"]))
+        var removed = 0
+        let c = store.focusRemovals.sink { _ in removed += 1 }
+        store.applyEnabledAgents(.all)
+        XCTAssertEqual(store.focuses.first?.id, "fred")
+        XCTAssertEqual(removed, 0)
+        c.cancel()
+    }
+
+    func testApplyingTheSameSetTwiceDoesNotPublishAgain() {
+        let store = tmpStore()
+        store.applyEnabledAgents(EnabledAgents(disabled: ["fred"]))
+        var publishes = 0
+        let c = store.$focuses.dropFirst().sink { _ in publishes += 1 }
+        store.applyEnabledAgents(EnabledAgents(disabled: ["fred"]))
+        XCTAssertEqual(publishes, 0)
+        c.cancel()
+    }
+
+    func testBuiltInsStillCannotBeRemoved() {
+        let store = tmpStore()
+        store.remove(Focus.mother)
+        XCTAssertTrue(builtInIDs(store).contains("mother"))
+    }
 
     // MARK: - AppStore.swift subscribes to FocusStore.shared.focusRemovals
 

@@ -400,6 +400,7 @@ mod tests {
             daemon_pid,
             features: vec![],
             operator_nonce: None,
+            enabled_agents: None,
         };
         write_frame(&mut writer, &serde_json::to_vec(&welcome).unwrap())
             .await

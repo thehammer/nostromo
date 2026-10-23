@@ -526,6 +526,10 @@ pub fn tool_descriptors() -> Vec<Value> {
 /// every agent's surface unchanged until an operator says otherwise.
 pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) -> Vec<Value> {
     let mut descriptors = tool_descriptors();
+    // A disabled agent's tools do not exist; this runs before every other filter.
+    descriptors.retain(|d| {
+        d.get("name").and_then(Value::as_str).is_none_or(|n| state.enabled_agents.allows_tool(n))
+    });
     if is_picks_session(pty_id) {
         descriptors.retain(|d| {
             d.get("name").and_then(Value::as_str).is_some_and(|n| PICKS_TOOLS.contains(&n))
@@ -704,6 +708,11 @@ async fn dispatch_inner(
     state: &McpSharedState,
     pty_id: Option<&str>,
 ) -> ToolResult {
+    // A disabled agent's tools do not exist (not merely forbidden).
+    if !state.enabled_agents.allows_tool(name) {
+        return ToolResult::UnknownTool(name.to_string());
+    }
+
     // The picks session may call its three tools and nothing else.
     if is_picks_session(pty_id) && !PICKS_TOOLS.contains(&name) {
         return ToolResult::Forbidden(name.to_string());
@@ -932,6 +941,30 @@ fn parse_args<T: serde::de::DeserializeOwned>(arguments: Option<&Value>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_names(descriptors: &[Value]) -> Vec<String> {
+        descriptors.iter().filter_map(|d| d["name"].as_str().map(str::to_string)).collect()
+    }
+
+    #[tokio::test]
+    async fn the_default_tool_list_is_unfiltered() {
+        let state = McpSharedState::for_test();
+        assert_eq!(tool_descriptors_for(&state, None).await, tool_descriptors());
+    }
+
+    #[tokio::test]
+    async fn disabled_agents_tools_are_hidden_and_uncallable() {
+        let mut state = McpSharedState::for_test();
+        state.enabled_agents = crate::agents::EnabledAgents { fred: false, perri: false, teri: true };
+        let all = tool_names(&tool_descriptors());
+        let shown = tool_names(&tool_descriptors_for(&state, None).await);
+        assert!(!shown.iter().any(|n| n.starts_with("fred.") || n.starts_with("perri.")));
+        for n in all.iter().filter(|n| ["teri.", "mother.", "nostromo."].iter().any(|p| n.starts_with(p))) {
+            assert!(shown.contains(n), "{n} should still be listed");
+        }
+        let r = dispatch("fred.get_state", None, &state, None).await;
+        assert!(matches!(r, ToolResult::UnknownTool(_)));
+    }
 
     // ── activity-path wedge: no agent-callable control over the stream ───────
 

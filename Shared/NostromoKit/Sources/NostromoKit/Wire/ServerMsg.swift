@@ -12,7 +12,7 @@ import Foundation
 
 /// Decoded form of a daemon → client message.
 public enum ServerMsg {
-    case welcome(protocolVersion: Int, daemonPid: Int)
+    case welcome(protocolVersion: Int, daemonPid: Int, enabledAgents: EnabledAgents = .all)
     case pong
     case error(String)
 
@@ -605,7 +605,8 @@ extension ServerMsg {
         case "welcome":
             return .welcome(
                 protocolVersion: json["protocol_version"] as? Int ?? 0,
-                daemonPid:       json["daemon_pid"]       as? Int ?? 0
+                daemonPid:       json["daemon_pid"]       as? Int ?? 0,
+                enabledAgents:   EnabledAgents(wireValue: json["enabled_agents"])
             )
 
         case "pong":
