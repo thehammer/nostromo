@@ -297,6 +297,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private var folds: FoldResolver
     /// The clock the running rows read their elapsed time from.
     private let now: () -> Date
+    /// Where tool rows read their permission-request status from (AP2b). Nil: rows show none.
+    private let approvals: ApprovalStore?
     /// The last group, while it may still change (no item after it, the turn still open).
     private var openGroupId: Int?
     /// Top-level calls fed unfinished, by `toolUseId`: a quiet completion arrives as an in-place
@@ -381,7 +383,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     ///     choices in `interaction`, else the Focus default (collapsed).
     ///   - heldOrdinals: messages whose roll-in the pane is holding back (`decideRollIn`).
     init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState,
-         folds: FoldResolver? = nil, heldOrdinals: Set<Int> = [], now: @escaping () -> Date = Date.init) {
+         folds: FoldResolver? = nil, heldOrdinals: Set<Int> = [], now: @escaping () -> Date = Date.init,
+         approvals: ApprovalStore? = nil) {
+        self.approvals        = approvals
         self.contentAvailable = contentAvailable
         self.interaction      = interaction
         self.folds            = folds ?? FoldResolver(state: interaction)
@@ -804,7 +808,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private func makeGroupView(_ group: ToolGroup, blockAt: (Int) -> TurnBlock?) -> ToolGroupView {
         let view = ToolGroupView(group: group, blockAt: blockAt,
                                  contentAvailable: contentAvailable, interaction: interaction,
-                                 isExpanded: folds.isExpanded(group), now: now)
+                                 isExpanded: folds.isExpanded(group), now: now, approvals: approvals)
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.folds.groupStates[view.group.key] = isExpanded
@@ -827,7 +831,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         ActivityRowView.collectBlocks(of: segment, from: blockAt, into: &blocks)
         let view = ActivityRowView(segment: segment, blocks: blocks, contentAvailable: contentAvailable,
                                    interaction: interaction, folds: folds,
-                                   isExpanded: folds.isActivityExpanded(key: segment.key), now: now)
+                                   isExpanded: folds.isActivityExpanded(key: segment.key), now: now,
+                                   approvals: approvals)
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.folds.activityStates[view.segment.key] = isExpanded

@@ -1208,9 +1208,9 @@ final class ApprovalCardTests: XCTestCase {
             let h = ApprovalCardHarness(self, request: request)
             let buttons = ApprovalTestViews.buttons(in: h.card)
 
-            XCTAssertEqual(Set(buttons.map(\.title)).subtracting(["Send", "Cancel"]),
+            XCTAssertEqual(Set(buttons.map(\.title)).subtracting(["Send", "Cancel", "‹", "›"]),
                            ["Deny", "▾", "Deny & stop", "Allow once"],
-                           "\(name): Deny, Deny & stop, Allow once and Deny's menu, plus the hidden note row's Send and Cancel")
+                           "\(name): Deny, Deny & stop, Allow once and Deny's menu, plus the hidden note row's Send and Cancel and the hidden page arrows (AP2b)")
             XCTAssertEqual(Set(visibleTitles(h.card)), ["Deny", "▾", "Deny & stop", "Allow once"], "\(name): the visible controls")
             XCTAssertEqual(h.card.listing.options.map(\.id), ["deny", "deny_with_note", "deny_and_stop", "allow_once"], name)
             for button in buttons {
@@ -1427,7 +1427,7 @@ final class ApprovalCardTests: XCTestCase {
 
         h.relayout()
         for _ in 0 ..< 3 { h.card.countdown.tick() }
-        h.card.setMoreCount(2)
+        h.card.setPage(ApprovalPage(position: 1, count: 3, previousID: nil, nextID: "x", currentID: "y"))
         h.card.inputView.scrollToEnd()
         press(h.card.denyButton)
         h.sync()
@@ -2314,15 +2314,15 @@ final class ApprovalCardTests: XCTestCase {
         XCTAssertEqual(h.rowGeometry, rows)
     }
 
-    func testTheCardsHeightAndRowsDoNotChangeWhenAMoreCountAppears() throws {
+    func testTheCardsHeightAndRowsDoNotChangeWhenAPageIndicatorAppears() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm())
         let preferred = h.card.preferredHeight(forWidth: 560, maxHeight: 520)
         let rows = h.rowGeometry
 
-        h.card.setMoreCount(2)
+        h.card.setPage(ApprovalPage(position: 1, count: 3, previousID: nil, nextID: "x", currentID: "y"))
         h.relayout()
 
-        XCTAssertTrue(ApprovalTestViews.labelTexts(in: h.card).contains("+2 more"))
+        XCTAssertEqual(h.card.pageText, "1 of 3")
         XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), preferred)
         XCTAssertEqual(h.rowGeometry, rows)
     }
@@ -3425,7 +3425,7 @@ final class ApprovalOverlayHostTests: XCTestCase {
 
     // MARK: One card for a focus
 
-    func testOnlyTheOldestRequestIsShownAndTheOthersAreCountedAsMore() throws {
+    func testOnlyTheOldestRequestIsShownAndTheOthersArePagedThrough() throws {
         let h = HostHarness(self)
         h.arrive(try ApprovalTestRequests.simpleRm(id: "a"))
         h.arrive(try ApprovalTestRequests.simpleRm(id: "b"))
@@ -3434,7 +3434,7 @@ final class ApprovalOverlayHostTests: XCTestCase {
         XCTAssertEqual(card.request.id, "a", "the oldest")
         XCTAssertEqual(h.host.subviews.count, 1, "one card for the focus")
         XCTAssertEqual(h.host.listings.map(\.requestID), ["a"])
-        XCTAssertTrue(ApprovalTestViews.labelTexts(in: card).contains("+1 more"), "\(ApprovalTestViews.labelTexts(in: card))")
+        XCTAssertEqual(card.pageText, "1 of 2", "\(ApprovalTestViews.labelTexts(in: card))")
     }
 
     func testTheNextRequestTakesTheCardWhenTheFirstHasEndedAndLeft() throws {
@@ -3449,7 +3449,7 @@ final class ApprovalOverlayHostTests: XCTestCase {
 
         let card = try XCTUnwrap(h.host.card)
         XCTAssertEqual(card.request.id, "b")
-        XCTAssertFalse(ApprovalTestViews.labelTexts(in: card).contains { $0.hasSuffix(" more") }, "nothing else is waiting")
+        XCTAssertEqual(card.pageText, "", "nothing else is waiting")
         XCTAssertEqual(h.host.subviews.count, 1)
         XCTAssertEqual(card.denyButton.isEnabled, true, "the new card is waiting for an answer")
     }

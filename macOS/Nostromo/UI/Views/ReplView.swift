@@ -119,8 +119,10 @@ class ReplView: NSView {
         self.quickActions = quickActions
         // Use the shared registry so multiple windows showing the same tag
         // observe the same session and stay in sync (mirrored).
-        session = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
-        approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared)
+        let shared = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
+        session = shared
+        // The guard bar names who was blocked (`Blocked: Cody tried to …`).
+        approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared, agentName: { shared.agentName })
         super.init(frame: .zero)
         _ = renderWatch
         setup()
@@ -771,7 +773,7 @@ class ReplView: NSView {
         let state = interactions.state(for: turn.id)
         let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable, interaction: state,
                                 folds: FoldResolver(state: state, expandedByDefault: foldsExpandedByDefault),
-                                heldOrdinals: state.heldOrdinals)
+                                heldOrdinals: state.heldOrdinals, approvals: ApprovalStore.shared)
         view.onSend = { [weak self] text in
             guard let self else { return }
             self.followTail.setPinned(true, cause: .send)

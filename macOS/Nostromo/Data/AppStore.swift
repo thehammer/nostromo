@@ -1627,8 +1627,9 @@ class AppStore: ObservableObject {
         case .trackerBoard, .trackerSummary:
             break   // T1 routes these to TrackerStore
 
-        // Permission approvals (AP2a): `ApprovalStore` keeps them, the card shows them. The
-        // count-only `approval_pending` and the guard's bar are later slices (AP3, AP2b).
+        // Permission approvals (AP2a): `ApprovalStore` keeps them, the card shows them. The guard's
+        // block (AP2b) reaches the same store: it makes the row's status and the bar, never a card.
+        // The count-only `approval_pending` is a later slice (AP3).
         case .approvalRequest(_, let request):
             approvalEvents.send(.request(request))
         case .approvalsSnapshot(let requests):
@@ -1637,7 +1638,9 @@ class AppStore: ObservableObject {
             approvalEvents.send(.resolved(frame))
         case .approvalAnswerRefused(let frame):
             approvalEvents.send(.answerRefused(frame))
-        case .approvalPending, .approvalGuardBlocked:
+        case .approvalGuardBlocked(let frame):
+            approvalEvents.send(.guardBlocked(frame))
+        case .approvalPending:
             break
 
         case .pong, .unknown:

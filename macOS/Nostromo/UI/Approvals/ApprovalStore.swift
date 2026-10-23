@@ -23,6 +23,13 @@ enum ApprovalEvent {
     case snapshot([ApprovalRequestWire])
     case resolved(ApprovalResolvedFrame)
     case answerRefused(ApprovalAnswerRefusedFrame)
+    /// The production-shell guard blocked a tool call (no request, no card).
+    case guardBlocked(ApprovalGuardBlockedFrame)
+}
+
+/// A guard block the bar is showing for a focus (AP2b).
+struct ApprovalGuardNotice: Equatable {
+    let frame: ApprovalGuardBlockedFrame
 }
 
 /// Where one request is in its life, as far as this app knows.
@@ -56,8 +63,14 @@ final class ApprovalStore {
     /// How long an outcome stays on the card before it fades.
     static let outcomeVisibleSeconds: TimeInterval = 2
 
+    /// How long the guard bar stays before it hides itself.
+    static let guardBarVisibleSeconds: TimeInterval = 60
+
     /// Fires with the focus tag whenever what that focus shows may have changed.
     let changes = PassthroughSubject<String, Never>()
+
+    /// Fires with a tool call's `tool_use_id` whenever the status its row shows may have changed (AP2b).
+    let statusChanges = PassthroughSubject<String, Never>()
 
     /// `answer` sends this, once per id. `(requestId, decision, windowID)`.
     private let send: (String, ApprovalDecisionWire, String) -> Void
@@ -79,6 +92,16 @@ final class ApprovalStore {
     private var refusalTexts: [String: String] = [:]
     /// Ids whose arrival has been announced to VoiceOver.
     private var announced = Set<String>()
+    /// What each tool call's row says about its request, for the session's lifetime (bounded per focus).
+    private var statusBook = ApprovalStatusBook()
+    /// Which request last made each tool call await: only it may end that wait. A reused
+    /// `tool_use_id` must not let a late frame for the old request overwrite the new request's wait.
+    private var waitOwner: [String: String] = [:]
+    /// The guard block each focus's bar shows.
+    private var notices: [String: ApprovalGuardNotice] = [:]
+    /// The `entry_id` of the last block each focus was told of: a repeat of it (a replayed frame) says
+    /// nothing new, even after the person closed the bar or it hid itself.
+    private var lastGuardEntry: [String: String] = [:]
     private var subscription: AnyCancellable?
 
     init(send: @escaping (String, ApprovalDecisionWire, String) -> Void,
@@ -107,9 +130,13 @@ final class ApprovalStore {
         case .snapshot(let requests):
             replaceAll(with: requests)
         case .resolved(let frame):
+            // The first ending stands: a second frame for a request that already ended says nothing new.
+            if let entry = entries[frame.requestId] { endWait(of: entry.request, outcome: frame.outcome, atMs: frame.atMs) }
             end(frame.requestId, text: Self.outcomeText(frame.outcome))
         case .answerRefused(let frame):
             refused(frame)
+        case .guardBlocked(let frame):
+            guardBlocked(frame)
         }
     }
 
@@ -136,6 +163,27 @@ final class ApprovalStore {
     /// True the first time it is asked for `id`: the card announces itself to VoiceOver once.
     func claimAnnouncement(_ id: String) -> Bool {
         announced.insert(id).inserted
+    }
+
+    // MARK: Row status (AP2b)
+
+    /// What the row of the calls `toolUseIds` says: waiting if any waits, else the latest. Nil for nothing.
+    func rowStatus(toolUseIds: [String]) -> ApprovalRowStatus? {
+        statusBook.headline(toolUseIds: toolUseIds)
+    }
+
+    /// How many calls' statuses are kept for a focus.
+    func statusCount(tag: String) -> Int { statusBook.count(tag: tag) }
+
+    // MARK: Guard bar (AP2b)
+
+    /// The guard block the bar shows for a focus, if any.
+    func guardNotice(tag: String) -> ApprovalGuardNotice? { notices[tag] }
+
+    /// The person closed the bar (in every window showing the focus).
+    func dismissGuardNotice(tag: String) {
+        guard notices.removeValue(forKey: tag) != nil else { return }
+        changes.send(tag)
     }
 
     // MARK: Answering
@@ -205,6 +253,45 @@ final class ApprovalStore {
 
     // MARK: Private
 
+    private func setStatus(_ status: ApprovalRowStatus, for request: ApprovalRequestWire) {
+        setStatus(status, toolUseId: request.toolUseId, tag: request.tag)
+    }
+
+    private func setStatus(_ status: ApprovalRowStatus, toolUseId: String, tag: String) {
+        statusBook.set(status, toolUseId: toolUseId, tag: tag)
+        statusChanges.send(toolUseId)
+    }
+
+    /// A request that vanished without an outcome (the daemon no longer holds it) stops saying `awaiting`.
+    private func forgetAwaiting(_ request: ApprovalRequestWire) {
+        guard waitOwner[request.toolUseId] == request.id,
+              statusBook.status(toolUseId: request.toolUseId) == .awaiting else { return }
+        setStatus(.withdrawn, for: request)
+    }
+
+    /// The request ended with `outcome`: its call says so, if the call is still awaiting this request.
+    /// An outcome this build has no words for (or none) says nothing, never "awaiting" for ever.
+    private func endWait(of request: ApprovalRequestWire, outcome: String?, atMs: UInt64) {
+        guard waitOwner[request.toolUseId] == request.id,
+              statusBook.status(toolUseId: request.toolUseId) == .awaiting else { return }
+        setStatus(outcome.map { ApprovalRowStatus.forOutcome($0, atMs: atMs) } ?? .withdrawn, for: request)
+    }
+
+    /// The guard blocked a call: no request, no card. The call's row says so, and the bar shows for a minute.
+    private func guardBlocked(_ frame: ApprovalGuardBlockedFrame) {
+        guard lastGuardEntry[frame.tag] != frame.entryId else { return }
+        lastGuardEntry[frame.tag] = frame.entryId
+        setStatus(.blockedByGuard, toolUseId: frame.toolUseId, tag: frame.tag)
+        notices[frame.tag] = ApprovalGuardNotice(frame: frame)
+        changes.send(frame.tag)
+        schedule(Self.guardBarVisibleSeconds) { [weak self] in
+            // A newer block (or the person's close) replaced this one: its own timer decides.
+            guard let self, self.notices[frame.tag]?.frame.entryId == frame.entryId else { return }
+            self.notices.removeValue(forKey: frame.tag)
+            self.changes.send(frame.tag)
+        }
+    }
+
     private func add(_ request: ApprovalRequestWire) {
         guard entries[request.id] == nil else { return }
         // A request this process already answered never comes back as waiting.
@@ -214,6 +301,8 @@ final class ApprovalStore {
         }
         entries[request.id] = ApprovalEntry(request: request, state: state)
         order[request.tag, default: []].append(request.id)
+        waitOwner[request.toolUseId] = request.id
+        setStatus(.awaiting, for: request)
     }
 
     /// The daemon's list is the truth: add what it holds that we don't, and drop what we
@@ -222,6 +311,7 @@ final class ApprovalStore {
         let held = Set(requests.map(\.id))
         var touched = Set<String>()
         for (id, entry) in entries where !held.contains(id) && !entry.isEnded {
+            forgetAwaiting(entry.request)   // before `remove`: it forgets who owned the wait
             remove(id)
             touched.insert(entry.request.tag)
         }
@@ -249,8 +339,12 @@ final class ApprovalStore {
         guard let entry = entries[frame.requestId], !entry.isEnded else { return }
         switch frame.code {
         case .alreadyResolved:
+            // The resolved frame may have been lost: the refusal says how it ended. The first ending
+            // stands, so a resolved frame that did arrive first is never overwritten.
+            endWait(of: entry.request, outcome: frame.outcome, atMs: UInt64(Date().timeIntervalSince1970 * 1000))
             end(frame.requestId, text: Self.alreadyResolvedText(outcome: frame.outcome))
         case .unknownRequest:
+            forgetAwaiting(entry.request)
             end(frame.requestId, text: "Already resolved")
         case .notOperatorApp:
             hold(frame.requestId, text: "Not sent: Nostromo isn't verified as the operator (run make mac-install)")
@@ -273,6 +367,7 @@ final class ApprovalStore {
 
     private func remove(_ id: String) {
         guard let entry = entries.removeValue(forKey: id) else { return }
+        if waitOwner[entry.request.toolUseId] == id { waitOwner.removeValue(forKey: entry.request.toolUseId) }
         order[entry.request.tag]?.removeAll { $0 == id }
         if order[entry.request.tag]?.isEmpty == true { order.removeValue(forKey: entry.request.tag) }
     }

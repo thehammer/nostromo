@@ -506,17 +506,22 @@ final class AppControlServer {
         return try JSONSerialization.jsonObject(with: data)
     }
 
-    /// READ-ONLY: the approval cards on screen right now (`approvals list [--focus TAG]`), read from
-    /// the cards' own views. Sends no event, changes no focus, answers nothing. One entry per
-    /// request, with the indexes of every window showing it.
+    /// READ-ONLY: the approval cards on screen right now (`approvals list [--focus TAG] [-w N]`), read from
+    /// the cards' own views. Sends no event, changes no focus, answers nothing. One entry per request,
+    /// with the indexes of every window showing it (`windows`) and, per window, where that window's card
+    /// is (`window_cards`: `window`, `page`, `of`, `state`). `page` and `of` (`1 of 3`) are the first
+    /// window's. `guard_bars` lists the production-shell guard bars on screen. With `only_window` (the
+    /// CLI's explicit `-w`), only that window's hosts are read.
     private func approvals(_ req: AppControlRequest) throws -> Any {
         guard (req.string("sub") ?? "list") == "list" else {
             throw AppControlError.badRequest("approvals: only `list` exists (it is read-only)")
         }
         let focus = req.string("focus")
+        let onlyWindow = req.int("only_window")
         var byRequest: [String: [String: Any]] = [:]
         var order: [String] = []
-        for (index, window) in (appDelegate?.windows ?? []).enumerated() {
+        var guardBars: [[String: Any]] = []
+        for (index, window) in (appDelegate?.windows ?? []).enumerated() where onlyWindow == nil || onlyWindow == index {
             var hosts: [ApprovalOverlayHost] = []
             func walk(_ v: NSView) {
                 if let host = v as? ApprovalOverlayHost, !host.isHiddenOrHasHiddenAncestor { hosts.append(host) }
@@ -524,15 +529,20 @@ final class AppControlServer {
             }
             if let content = window.contentView { walk(content) }
             for host in hosts where focus == nil || host.focusTag == focus {
+                if let text = host.guardBarText {
+                    guardBars.append(["window": index, "focus": host.focusTag, "text": text])
+                }
                 for listing in host.listings {
                     var entry = byRequest[listing.requestID] ?? listing.jsonObject
                     if byRequest[listing.requestID] == nil { order.append(listing.requestID) }
                     entry["windows"] = ((entry["windows"] as? [Int]) ?? []) + [index]
+                    let card: [String: Any] = ["window": index, "page": listing.page, "of": listing.of, "state": listing.state]
+                    entry["window_cards"] = ((entry["window_cards"] as? [[String: Any]]) ?? []) + [card]
                     byRequest[listing.requestID] = entry
                 }
             }
         }
-        return ["approvals": order.compactMap { byRequest[$0] }]
+        return ["approvals": order.compactMap { byRequest[$0] }, "guard_bars": guardBars]
     }
 
     /// Press at one point, drag to another, release — for selecting text.

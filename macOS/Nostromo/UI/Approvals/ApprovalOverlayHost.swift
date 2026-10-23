@@ -7,8 +7,11 @@ import NostromoKit
 // A transparent view pinned to the scroll view's frame (added above it by `ReplView`,
 // like `JumpToLatestOverlay`). It hit-tests only inside the card, so every click
 // elsewhere falls through to the transcript and the composer. It hosts at most one
-// card for its focus: the oldest request. (AP2b adds paging `1 of N`; until then the
-// card says `+N more`.)
+// card for its focus: the one the person is on (`1 of 3`, paged with ‹ ›; arrival order, and a
+// newer request never moves the person off the one they are reading). Above the card, the
+// production-shell guard's bar (AP2b), when the guard blocked something in the last minute.
+// Every `ReplView` showing the focus has its own host over the one shared `ApprovalStore`, so two
+// windows show the same requests and a resolution made in one reaches the other.
 //
 // What it must never do, and how:
 //   * Move the transcript or the composer. The card is an overlay with a frame of its
@@ -38,7 +41,31 @@ final class ApprovalOverlayHost: NSView {
     /// The card on screen (may be fading out).
     private(set) var card: ApprovalCardView?
 
+    /// The guard bar on screen, if the guard blocked something in the last minute (AP2b).
+    private(set) var guardBar: GuardBlockedBar?
+
+    /// What the guard bar says now, for `approvals list`.
+    var guardBarText: String? { guardBar?.textLabel.stringValue }
+
+    /// Where this window is in the focus's requests (`1 of 3`). Nil with none.
+    var page: ApprovalPage? {
+        ApprovalPaging.page(ids: store.visible(tag: focusTag).map(\.request.id), current: currentRequestID,
+                            fallbackIndex: currentIndex)
+    }
+
+    /// Show the request before / after the one on screen. Paging answers nothing.
+    func showPrevious() { if let id = page?.previousID { show(requestID: id) } }
+    func showNext() { if let id = page?.nextID { show(requestID: id) } }
+
     private let store: ApprovalStore
+    private let agentName: (() -> String?)?
+    /// The request this window shows (its own place among the focus's requests).
+    private var currentRequestID: String?
+    /// Where that request sat in the list, so that when it goes the one that took its place is shown.
+    private var currentIndex: Int?
+    /// What the person chose and typed on an AskUserQuestion card they paged away from, per request id,
+    /// for as long as the request is pending. Only a draft: nothing here is ever sent.
+    private var questionDrafts: [String: [ApprovalQuestionSelection]] = [:]
     private let windowIDProvider: (() -> String)?
     private let permit: ApprovalCardView.GesturePermit?
     private let reduceMotion: () -> Bool
@@ -49,6 +76,7 @@ final class ApprovalOverlayHost: NSView {
     private var fadingCard: ApprovalCardView?
 
     init(tag: String, store: ApprovalStore,
+         agentName: (() -> String?)? = nil,
          windowID: (() -> String)? = nil,
          permit: ApprovalCardView.GesturePermit? = nil,
          armDelay: TimeInterval = ApprovalOverlayHost.armDelay,
@@ -56,6 +84,7 @@ final class ApprovalOverlayHost: NSView {
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
         self.focusTag = tag
         self.store = store
+        self.agentName = agentName
         self.windowIDProvider = windowID
         self.permit = permit
         self.reduceMotion = reduceMotion
@@ -96,38 +125,65 @@ final class ApprovalOverlayHost: NSView {
         layoutCard()
     }
 
+    /// Gap between the guard bar and the card under it.
+    static let barGap: CGFloat = 6
+
     private func layoutCard() {
-        guard let card else { return }
         let width = max(0, bounds.width - Self.leadingInset - Self.trailingInset)
         guard width > 0 else { return }
-        let height = card.preferredHeight(forWidth: width, maxHeight: bounds.height * Self.maxHeightFraction,
-                                          hardMaxHeight: bounds.height - 2 * Self.bottomInset)
-        let frame = NSRect(x: Self.leadingInset, y: Self.bottomInset, width: width, height: height)
-        if card.frame != frame { card.frame = frame }
+        let barSpace = guardBar == nil ? 0 : GuardBlockedBar.height + Self.barGap
+        var top = Self.bottomInset
+        if let card {
+            let height = card.preferredHeight(forWidth: width, maxHeight: bounds.height * Self.maxHeightFraction,
+                                              hardMaxHeight: bounds.height - 2 * Self.bottomInset - barSpace)
+            let frame = NSRect(x: Self.leadingInset, y: Self.bottomInset, width: width, height: height)
+            if card.frame != frame { card.frame = frame }
+            top = frame.maxY + Self.barGap
+        }
+        if let bar = guardBar {
+            let frame = NSRect(x: Self.leadingInset, y: top, width: width, height: GuardBlockedBar.height)
+            if bar.frame != frame { bar.frame = frame }
+        }
     }
 
     // MARK: Following the store
 
-    /// Show what the store says this focus should show: the oldest request, or nothing.
+    /// Show what the store says this focus should show: the request this window is on (the oldest
+    /// until the person pages), the guard bar, or nothing.
     func refresh() {
-        guard let entry = store.current(tag: focusTag) else {
+        refreshGuardBar()
+        pruneQuestionDrafts()
+        guard let page, let entry = store.entry(id: page.currentID) else {
+            currentRequestID = nil
+            currentIndex = nil
             fadeOutCard()
             return
         }
+        currentRequestID = page.currentID
+        currentIndex = page.position - 1
         if let card, card.request.id == entry.request.id, fadingCard !== card {
             card.update(entry: entry)
-            card.setMoreCount(store.moreCount(tag: focusTag))
+            card.setPage(page)
             return
         }
-        replaceCard(with: entry)
+        replaceCard(with: entry, page: page)
     }
 
-    private func replaceCard(with entry: ApprovalEntry) {
+    private func show(requestID: String) {
+        currentRequestID = requestID
+        refresh()
+    }
+
+    private func replaceCard(with entry: ApprovalEntry, page: ApprovalPage) {
+        if let old = card, let selections = old.questionForm?.selections { questionDrafts[old.request.id] = selections }
         removeCardNow()
+        // The scroll gate and the arm delay start over on every card: paging is the safe direction.
         let new = ApprovalCardView(entry: entry, store: store, windowID: { [weak self] in self?.currentWindowID() ?? "w0" },
-                                   permit: permit, armDelay: cardArmDelay, isOnScreen: cardIsOnScreen)
+                                   permit: permit, armDelay: cardArmDelay, isOnScreen: cardIsOnScreen,
+                                   questionDraft: questionDrafts[entry.request.id])
         new.onNeedsLayout = { [weak self] in self?.needsLayout = true }
-        new.setMoreCount(store.moreCount(tag: focusTag))
+        new.onShowRequest = { [weak self] id in self?.show(requestID: id) }
+        new.setPage(page)
         addSubview(new)
         card = new
         if store.claimAnnouncement(entry.request.id) {
@@ -136,6 +192,37 @@ final class ApprovalOverlayHost: NSView {
                                  userInfo: [.announcement: ApprovalDisplayModel.contextText(ApprovalKinds.announcement(for: entry.request), keepingLineFeeds: false),
                                             .priority: NSAccessibilityPriorityLevel.high.rawValue])
         }
+        needsLayout = true
+    }
+
+    /// A draft lives only while its request is pending.
+    private func pruneQuestionDrafts() {
+        guard !questionDrafts.isEmpty else { return }
+        let live = Set(store.visible(tag: focusTag).filter { !$0.isEnded }.map(\.request.id))
+        questionDrafts = questionDrafts.filter { live.contains($0.key) }
+    }
+
+    /// The guard bar follows the store's notice for this focus. It is never announced and never takes focus.
+    private func refreshGuardBar() {
+        guard let notice = store.guardNotice(tag: focusTag) else {
+            guard let bar = guardBar else { return }
+            bar.removeFromSuperview()
+            guardBar = nil
+            needsLayout = true
+            return
+        }
+        let text = ApprovalGuardBarText.line(agent: agentName?().map(ApprovalKinds.capitalized), summary: notice.frame.summary)
+        if let bar = guardBar {
+            if bar.textLabel.stringValue != text { bar.setText(text) }
+            return
+        }
+        let bar = GuardBlockedBar(text: text)
+        bar.onClose = { [weak self] in
+            guard let self else { return }
+            self.store.dismissGuardNotice(tag: self.focusTag)
+        }
+        addSubview(bar)
+        guardBar = bar
         needsLayout = true
     }
 
@@ -161,5 +248,6 @@ final class ApprovalOverlayHost: NSView {
         card?.removeFromSuperview()
         card = nil
         fadingCard = nil
+        needsLayout = true   // the guard bar, if any, drops back to the card's slot
     }
 }
