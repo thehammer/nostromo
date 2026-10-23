@@ -12,9 +12,11 @@ use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
 
+use crate::ipc::protocol::{PaneTree, ServerMsg};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::sensitive_text::{first_class, GuardConfig};
 use crate::tracker::ops::{LinkInput, Op, MAX_BATCH_OPS};
+use crate::tracker::placement::{place_tracker, TRACKER_PANE_ID};
 use crate::tracker::registry::{OpenArgs, OpenOutcome, ReadOutcome, TrackerError, WriteOutcome};
 use crate::tracker::{validate_command_text, Author, TrackerRegistry};
 
@@ -227,24 +229,24 @@ impl Failure {
 // ── dispatch on the op ───────────────────────────────────────────────────────
 
 fn run(daemon: &DaemonMcpBackend, caller: &Caller, args: &Value) -> Result<Value, Failure> {
-    let registry = &*daemon.tracker;
     if let Some(ops) = args.get("ops") {
         let ops = parse_batch(ops)?;
-        return write(registry, caller, &ops);
+        return write(daemon, caller, &ops);
     }
     match args.get("op").and_then(Value::as_str) {
-        Some("open") => open(registry, caller, args),
-        Some("read") => read(registry, caller),
+        Some("open") => open(daemon, caller, args),
+        Some("read") => read(&daemon.tracker, caller),
         Some("upsert" | "status" | "remove" | "move" | "log") => {
             let op = parse_op(args, None)?;
-            write(registry, caller, &[op])
+            write(daemon, caller, &[op])
         }
         Some(other) => Err(invalid(None, format!("unknown op {:?}", clip(other)))),
         None => Err(invalid(None, "give op or ops".to_string())),
     }
 }
 
-fn open(registry: &TrackerRegistry, caller: &Caller, args: &Value) -> Result<Value, Failure> {
+fn open(daemon: &DaemonMcpBackend, caller: &Caller, args: &Value) -> Result<Value, Failure> {
+    let registry = &*daemon.tracker;
     let string = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
     let sections: Vec<String> = match args.get("sections") {
         None | Some(Value::Null) => Vec::new(),
@@ -273,7 +275,44 @@ fn open(registry: &TrackerRegistry, caller: &Caller, args: &Value) -> Result<Val
         guard("sections", Some(section), None)?;
     }
     let outcome = registry.open(&caller.tag, &caller.session_id, &open_args)?;
-    Ok(open_response(registry, caller, &outcome))
+    // The open is the only tracker op that ever changes geometry, and only
+    // when the pane is missing and the user hasn't closed it (or `show:true`
+    // asks for it back): one frame, naming no focused pane.
+    if !outcome.hidden_by_user {
+        if let Some(tree) = ensure_pane(daemon, &caller.tag) {
+            let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
+                tag: caller.tag.clone(),
+                tree,
+                focused_pane: None,
+            });
+        }
+    }
+    Ok(open_response(daemon, caller, &outcome))
+}
+
+/// Adds the tracker pane to `tag`'s layout when it has none; the new tree, or
+/// `None` when nothing changed. Decided and applied under one lock, so two
+/// racing opens place it once.
+fn ensure_pane(daemon: &DaemonMcpBackend, tag: &str) -> Option<PaneTree> {
+    let mut panes = daemon.pane_registry.lock().unwrap_or_else(|e| e.into_inner());
+    let placed = place_tracker(&panes.get_or_init(tag))?;
+    match panes.set_layout(tag, &json!({ "tree": placed })) {
+        Ok(tree) => Some(tree),
+        Err(err) => {
+            tracing::warn!(tag, code = err.code(), "tracker pane could not be placed");
+            None
+        }
+    }
+}
+
+/// Whether the pane is on screen: in the focus's tree and in at least one
+/// window's latest rendered shape (contract §6).
+fn is_visible(daemon: &DaemonMcpBackend, tag: &str) -> bool {
+    daemon
+        .pane_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_pane_rendered(tag, TRACKER_PANE_ID)
 }
 
 fn read(registry: &TrackerRegistry, caller: &Caller) -> Result<Value, Failure> {
@@ -283,31 +322,34 @@ fn read(registry: &TrackerRegistry, caller: &Caller) -> Result<Value, Failure> {
     })
 }
 
-fn write(registry: &TrackerRegistry, caller: &Caller, ops: &[Op]) -> Result<Value, Failure> {
+fn write(daemon: &DaemonMcpBackend, caller: &Caller, ops: &[Op]) -> Result<Value, Failure> {
     // Everything is checked before anything is applied.
     for (index, op) in ops.iter().enumerate() {
         let index = (ops.len() > 1).then_some(index);
         guard_op(op, index)?;
         check_command_text(op, index)?;
     }
-    let outcome = registry.apply(&caller.tag, &caller.session_id, ops, &caller.author())?;
-    Ok(write_response(registry, caller, &outcome))
+    let outcome = daemon
+        .tracker
+        .apply(&caller.tag, &caller.session_id, ops, &caller.author())?;
+    Ok(write_response(daemon, caller, &outcome))
 }
 
-fn write_response(registry: &TrackerRegistry, caller: &Caller, outcome: &WriteOutcome) -> Value {
+fn write_response(daemon: &DaemonMcpBackend, caller: &Caller, outcome: &WriteOutcome) -> Value {
     json!({
         "ok": true,
         "version": outcome.version,
-        "visible": registry.is_visible(&caller.tag),
+        "visible": is_visible(daemon, &caller.tag),
         "user_changes": outcome.user_changes,
     })
 }
 
-fn open_response(registry: &TrackerRegistry, caller: &Caller, outcome: &OpenOutcome) -> Value {
+fn open_response(daemon: &DaemonMcpBackend, caller: &Caller, outcome: &OpenOutcome) -> Value {
+    let registry = &*daemon.tracker;
     let mut out = Map::new();
     out.insert("ok".into(), json!(true));
     out.insert("version".into(), json!(outcome.version));
-    out.insert("visible".into(), json!(registry.is_visible(&caller.tag)));
+    out.insert("visible".into(), json!(is_visible(daemon, &caller.tag)));
     out.insert(
         "user_changes".into(),
         json!(registry.user_changes(&caller.tag, &caller.session_id)),

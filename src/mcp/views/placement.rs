@@ -459,7 +459,7 @@ impl LiveView {
     fn label(&self) -> String {
         match &self.view {
             Some(v) => label_for(v.view_type, &v.identity),
-            None => self.pane_id.clone(),
+            None => super::pane_label(&self.pane_id),
         }
     }
 }

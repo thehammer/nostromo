@@ -569,9 +569,41 @@ impl TrackerRegistry {
         self.lock().hidden.contains(tag)
     }
 
-    /// Whether the pane is on screen. The pane isn't placed yet (T0c).
-    pub fn is_visible(&self, _tag: &str) -> bool {
-        false
+    /// The pane of `tag` left its layout (the user closed it, or an agent's
+    /// layout call dropped it): the binding stays, writes go on, and `open`
+    /// won't re-add the pane without `show`. No-op without a bound board.
+    pub fn mark_pane_closed(&self, tag: &str) {
+        if self.lock().bindings.contains_key(tag) {
+            self.set_pane_hidden_by_user(tag, true);
+        }
+    }
+
+    /// Makes the registry follow `panes`: whenever a layout mutation removes
+    /// the tracker leaf from a focus, that focus's pane counts as closed by
+    /// the user; when one puts it back, it doesn't. Views of the change are
+    /// flushed to `tx`. One hook on the pane registry, so no layout tool needs
+    /// to know about the tracker.
+    pub fn follow_panes(
+        self: &Arc<Self>,
+        panes: &std::sync::Mutex<crate::ipc::pane_registry::PaneRegistry>,
+        tx: broadcast::Sender<ServerMsg>,
+    ) {
+        let registry = Arc::clone(self);
+        let hook: crate::ipc::pane_registry::PaneSetHook = Arc::new(move |tag, removed, added| {
+            if added.iter().any(|p| p == super::placement::TRACKER_PANE_ID) {
+                registry.set_pane_hidden_by_user(tag, false);
+            }
+            if removed.iter().any(|p| p == super::placement::TRACKER_PANE_ID) {
+                registry.mark_pane_closed(tag);
+            }
+            registry.flush(&tx);
+        });
+        panes.lock().unwrap_or_else(|e| e.into_inner()).set_pane_set_hook(hook);
+    }
+
+    /// Whether `tag` has a bound board (a fresh session re-attaches the pane).
+    pub fn has_bound_board(&self, tag: &str) -> bool {
+        self.lock().bindings.contains_key(tag)
     }
 
     /// Test seam: what the registry should believe about `tag`'s focus when
@@ -1039,6 +1071,10 @@ impl TrackerFrameProvider for TrackerRegistry {
         let mut tags: Vec<String> = self.lock().bindings.keys().cloned().collect();
         tags.sort();
         tags.iter().flat_map(|tag| self.frames_for_tag(tag)).collect()
+    }
+
+    fn has_bound_board(&self, tag: &str) -> bool {
+        TrackerRegistry::has_bound_board(self, tag)
     }
 }
 
