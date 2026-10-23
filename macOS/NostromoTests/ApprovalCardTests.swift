@@ -1161,7 +1161,8 @@ final class ApprovalCardTests: XCTestCase {
     }
 
     private func visibleTitles(_ card: ApprovalCardView) -> [String] {
-        ApprovalTestViews.buttons(in: card, visibleOnly: true).map(\.title)
+        // The collapse chevron (AP3) is chrome, not one of the card's answering controls.
+        ApprovalTestViews.buttons(in: card, visibleOnly: true).filter { $0 !== card.collapseButton }.map(\.title)
     }
 
     private func press(_ button: NSButton?, file: StaticString = #filePath, line: UInt = #line) {
@@ -1208,7 +1209,7 @@ final class ApprovalCardTests: XCTestCase {
             let h = ApprovalCardHarness(self, request: request)
             let buttons = ApprovalTestViews.buttons(in: h.card)
 
-            XCTAssertEqual(Set(buttons.map(\.title)).subtracting(["Send", "Cancel", "‹", "›"]),
+            XCTAssertEqual(Set(buttons.filter { $0 !== h.card.collapseButton }.map(\.title)).subtracting(["Send", "Cancel", "‹", "›"]),
                            ["Deny", "▾", "Deny & stop", "Allow once"],
                            "\(name): Deny, Deny & stop, Allow once and Deny's menu, plus the hidden note row's Send and Cancel and the hidden page arrows (AP2b)")
             XCTAssertEqual(Set(visibleTitles(h.card)), ["Deny", "▾", "Deny & stop", "Allow once"], "\(name): the visible controls")
@@ -3779,7 +3780,8 @@ final class ApprovalSourceScanTests: XCTestCase {
     /// AP3: the only code that moves keyboard focus is the person's: ⌥⌘A (`focusCard`) and Esc/collapse
     /// handing it back to the composer. Neither is on the arrival path (host and store never call it).
     func testFocusMovesOnlyThroughTheShortcutAndEscape() throws {
-        for file in try approvalSources() where file != "ApprovalCardView.swift" {
+        // The card and its question form are where a person's keyboard focus moves (Tab, ⌥⌘A, Esc, clicks).
+        for file in try approvalSources() where file != "ApprovalCardView.swift" && file != "ApprovalQuestionFormView.swift" {
             let joined = try code(of: file).joined(separator: "\n")
             XCTAssertFalse(joined.contains("makeFirstResponder"), "\(file) must not move focus itself")
         }

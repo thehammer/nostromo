@@ -336,7 +336,7 @@ final class ApprovalCardView: NSView {
     /// Esc with focus inside the card gives focus back to the composer without answering anything.
     /// A second Esc (in the composer, within `ApprovalStore.escapeWindow`) collapses the card.
     override func cancelOperation(_ sender: Any?) {
-        guard hasKeyboardFocus else { super.cancelOperation(sender); return }
+        guard hasKeyboardFocus else { return }
         store.noteEscapeFromCard(request.id)
         onReturnToComposer?()
     }
