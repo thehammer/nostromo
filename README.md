@@ -44,6 +44,33 @@ reads the same env var and file, so launch it from a shell with the variable
 set, or use `config.toml`. Restart `nostromd` and relaunch the app after
 changing it.
 
+### Agents
+
+Every built-in agent (Fred, Perri, Teri) is on by default, and Mother cannot be
+turned off. To switch one off, give it a table in `config.toml`:
+
+```toml
+[agents.fred]
+enabled = false
+
+[agents.perri]
+enabled = false
+```
+
+A disabled agent uses no resources and takes no space: `nostromd` does not
+start its pollers, the MCP server does not register its tools, views or pane
+sources, and the macOS app hides its sidebar entry. With Perri off,
+`nostromo.show` cannot show PR views (`review_queue`, `pr_diff`,
+`pr_conversation`); files and tickets still work.
+
+Unknown agent names, and `mother`, are ignored with a warning in the daemon log.
+Extra keys inside an agent's table are ignored too. That table is where each
+agent's future per-agent settings will go.
+
+The file is `~/Library/Application Support/nostromo/config.toml` on macOS and
+`~/.config/nostromo/config.toml` elsewhere. Restart `nostromd` after changing
+it; the app picks the change up on its next connection.
+
 ## Daemon
 
 `nostromd` is a daemon that runs in the background and serves the macOS and iOS

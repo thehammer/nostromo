@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import NostromoKit
 
 final class FocusStore {
     static let shared = FocusStore()
@@ -16,17 +17,43 @@ final class FocusStore {
 
     private let storageURL: URL
 
+    /// Where the last welcome's disabled-agent set is cached (`[String]`), so a
+    /// launch does not flash hidden agents before the first welcome arrives.
+    /// `nil` (the test seam default) never persists.
+    private let defaults: UserDefaults?
+    static let disabledAgentsDefaultsKey = "nostromo.disabledAgents"
+
     private convenience init() {
         let dir = NostromoHome.current
             .appendingPathComponent(".nostromo")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        self.init(storageURL: dir.appendingPathComponent("focuses.json"))
+        let cached = UserDefaults.standard.stringArray(forKey: Self.disabledAgentsDefaultsKey) ?? []
+        self.init(storageURL: dir.appendingPathComponent("focuses.json"),
+                  enabledAgents: EnabledAgents(disabled: Set(cached)),
+                  defaults: .standard)
     }
 
     /// Test seam: a store backed by an arbitrary file (never the real `~/.nostromo`).
-    init(storageURL: URL) {
+    init(storageURL: URL, enabledAgents: EnabledAgents = .all, defaults: UserDefaults? = nil) {
         self.storageURL = storageURL
-        focuses = Focus.builtIns + Self.load(from: storageURL)
+        self.defaults = defaults
+        focuses = Focus.builtIns(enabled: enabledAgents) + Self.load(from: storageURL)
+    }
+
+    /// Show only the built-ins the daemon runs (from its `welcome`). The
+    /// daemon is the source of truth; the cached copy only avoids a launch flicker.
+    /// Built-ins are never persisted, so this does not `save()`.
+    func applyEnabledAgents(_ enabled: EnabledAgents) {
+        defaults?.set(Array(enabled.disabled).sorted(), forKey: Self.disabledAgentsDefaultsKey)
+        let wanted = Focus.builtIns(enabled: enabled)
+        let currentBuiltIns = focuses.filter(\.isBuiltIn)
+        guard currentBuiltIns.map(\.id) != wanted.map(\.id) else { return }
+        let hidden = currentBuiltIns.filter { b in !wanted.contains { $0.id == b.id } }
+        focuses = wanted + focuses.filter { !$0.isBuiltIn }
+        // Same ordering contract as `remove(_:)`: mutate first, then announce,
+        // so AppStore.evictPerFocusState detaches the hidden agent's session
+        // after MainLayout's `$focuses` sink has switched away from it.
+        for f in hidden { focusRemovals.send(f) }
     }
 
     /// Set (or, with nil/blank, clear) the label of a dynamic focus. Returns false

@@ -177,6 +177,7 @@ class TabBarView: NSView {
             store.$perriQueueError.map { _ in () }.eraseToAnyPublisher(),
             store.$perriQueueLoading.map { _ in () }.eraseToAnyPublisher(),
             store.$motherStatus.map { _ in () }.eraseToAnyPublisher(),
+            store.$enabledAgents.map { _ in () }.eraseToAnyPublisher(),
             Timer.publish(every: 30, on: .main, in: .common).autoconnect().map { _ in () }.eraseToAnyPublisher(),
         ], interval: .milliseconds(250), scheduler: DispatchQueue.main)
         .sink { [weak self] in self?.updateBadges() }
@@ -369,7 +370,8 @@ class TabBarView: NSView {
             fredMailbox: store.fredMailbox, fredCalendar: store.fredCalendar, teriTodos: store.teriTodos,
             motherStatus: store.motherStatus, perriQueueCount: store.perriQueue.count,
             perriQueueStale: store.perriQueueStale, perriQueueError: store.perriQueueError,
-            perriQueueLoading: store.perriQueueLoading), now: Date())
+            perriQueueLoading: store.perriQueueLoading), now: Date(),
+            enabled: store.enabledAgents)
         for row in currentRows {
             guard case .focus(let focus, _, _, _) = row else { continue }
             items[focus.id]?.setBadge(badges.badge(for: focus.sessionTag))

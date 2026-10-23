@@ -143,7 +143,7 @@ struct FocusCreatedMeta: Decodable {
 // MARK: - ServerMsg (inbound)
 
 enum ServerMsg {
-    case welcome(protocolVersion: Int, daemonPid: Int)
+    case welcome(protocolVersion: Int, daemonPid: Int, enabledAgents: EnabledAgents = .all)
     case activity(ActivityEvent)
     case motherJobs([MotherJob])
     case motherStatusline(MotherStatus)
@@ -1174,7 +1174,8 @@ class NostromodClient {
         case "welcome":
             return .welcome(
                 protocolVersion: json["protocol_version"] as? Int ?? 0,
-                daemonPid:       json["daemon_pid"]       as? Int ?? 0
+                daemonPid:       json["daemon_pid"]       as? Int ?? 0,
+                enabledAgents:   EnabledAgents(wireValue: json["enabled_agents"])
             )
 
         case "activity":

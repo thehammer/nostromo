@@ -28,6 +28,12 @@ final class SidenavGroupingTests: XCTestCase {
               org: org, sessionSummary: summary)
     }
 
+    func testDisabledBuiltInsGetNoRows() {
+        let rows = buildNavRows(Focus.builtIns(enabled: EnabledAgents(disabled: ["fred", "perri"])))
+        let ids: [String] = rows.compactMap { if case .focus(let f, _, _, _) = $0 { return f.id } else { return nil } }
+        XCTAssertEqual(ids, ["mother", "teri"])
+    }
+
     // MARK: - Test 1: Built-ins in CAREFEED org appear in canonical order
 
     func testBuiltIns_carefeedOrgHeader_andCanonicalOrder() {

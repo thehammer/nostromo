@@ -172,7 +172,7 @@ class MainLayout: NSView {
         // Restore active focus by ID from UserDefaults; fall back to mother
         let savedId = UserDefaults.standard.string(forKey: DisplayFocusKeys.activeTabKey(displayUUID: displayUUID))
         let allFocuses = FocusStore.shared.focuses
-        self.activeFocus = allFocuses.first { $0.id == savedId } ?? allFocuses.first { $0.id == "mother" } ?? Focus.builtIns[1]
+        self.activeFocus = allFocuses.first { $0.id == savedId } ?? allFocuses.first { $0.id == "mother" } ?? Focus.mother
         super.init(frame: .zero)
         setup()
     }
@@ -282,7 +282,7 @@ class MainLayout: NSView {
                 // Mother, exactly like a click-to-close used to for the one
                 // window that initiated it.
                 if !focuses.contains(where: { $0.id == self.activeFocus.id }) {
-                    let mother = focuses.first { $0.id == "mother" } ?? Focus.builtIns[1]
+                    let mother = focuses.first { $0.id == "mother" } ?? Focus.mother
                     self.switchFocus(mother)
                 }
                 // Evict this window's cached view for any focus that's gone —

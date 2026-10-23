@@ -30,6 +30,8 @@ class AppStore: ObservableObject {
     /// approvals and the tracker. The Dock badge, the notifier and the Mother counts strip all
     /// read this one snapshot. Producers register through `needsYouCoordinator`.
     @Published private(set) var needsYou: NeedsYouSnapshot = .empty
+    /// Built-in agents the daemon runs (from `welcome`); `.all` until a welcome says otherwise.
+    @Published private(set) var enabledAgents: EnabledAgents = .all
     /// The one-time "Mother is staying quiet" note in the Mother panel.
     @Published private(set) var motherNotifyNoteVisible = false
     @Published private(set) var motherStatus:       MotherStatus = MotherStatus()
@@ -1356,8 +1358,10 @@ class AppStore: ObservableObject {
 
     private func handle(_ msg: ServerMsg) {
         switch msg {
-        case .welcome(let version, let pid):
+        case .welcome(let version, let pid, let enabled):
             log.info("nostromd v\(version, privacy: .public) pid \(pid, privacy: .public)")
+            FocusStore.shared.applyEnabledAgents(enabled)
+            if enabledAgents != enabled { enabledAgents = enabled }
 
         case .motherJobs(let jobs):
             // Ignored — jobs now come from the broker
