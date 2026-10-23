@@ -280,6 +280,9 @@ public struct TrackerPresentation: Equatable {
     public let filter: TrackerFilter
     /// Done items folded into a collapsed "Done (N)" group (not in `rows`), by item id.
     public let foldedItems: [String: TrackerItemRow]
+    /// Items the filter leaves out (not in `rows`), by item id. Lets `TrackerDeferral` keep an item
+    /// that changes out of the filter's view in place while the reader can see it.
+    public let hiddenItems: [String: TrackerItemRow]
     public let hiddenByUser: Bool
 }
 
@@ -313,34 +316,45 @@ public enum TrackerPresenter {
 
         return TrackerPresentation(
             header: header,
-            banner: board.banner.flatMap { banner(for: $0, now: now, timeZone: timeZone) },
+            banner: board.banner.flatMap { banner(for: $0, path: board.path, now: now, timeZone: timeZone) },
             strip: TrackerStrip(entries: sources.flatMap { $0.waitingEntries(board: board) }),
             rows: builder.rows,
             filter: filter,
             foldedItems: builder.folded,
+            hiddenItems: builder.hidden,
             hiddenByUser: board.hiddenByUser)
     }
 
-    static func banner(for wire: TrackerBannerWire, now: Date, timeZone: TimeZone) -> TrackerBannerRow? {
+    /// "Can't read index.md (line 42: duplicate item id). Showing the version from 10:42" and
+    /// "index.md is gone (last seen 10:42)" (PRD, "Malformed, missing or oversized files").
+    static func banner(for wire: TrackerBannerWire, path: String, now: Date, timeZone: TimeZone) -> TrackerBannerRow? {
+        let file = path.split(separator: "/").last.map(String.init) ?? "The board"
         switch wire {
         case .unreadable(let line, let reason, let lastGoodAt):
-            var text = "This board can't be read (line \(line): \(reason))."
+            var text = "Can't read \(file) (line \(line): \(readableReason(reason)))."
             if let lastGoodAt {
-                text += " Showing the last good version, \(TrackerRelativeTime.since(lastGoodAt, now: now, timeZone: timeZone))."
+                text += " Showing the version from \(TrackerRelativeTime.clock(lastGoodAt, now: now, timeZone: timeZone))"
             } else {
-                text += " Showing the last good version."
+                text += " Showing the last good version"
             }
             return TrackerBannerRow(kind: .unreadable, text: text)
         case .missing(let lastSeen):
-            var text = "The board's file is gone."
-            if let lastSeen {
-                text += " Showing the version last seen \(TrackerRelativeTime.since(lastSeen, now: now, timeZone: timeZone))."
-            } else {
-                text += " Showing the last version seen."
-            }
+            let text = lastSeen.map {
+                "\(file) is gone (last seen \(TrackerRelativeTime.clock($0, now: now, timeZone: timeZone)))"
+            } ?? "\(file) is gone"
             return TrackerBannerRow(kind: .missing, text: text)
         case .unknown:
             return nil
+        }
+    }
+
+    /// The daemon's reason code in words (`duplicate_id` → "duplicate item id").
+    static func readableReason(_ code: String) -> String {
+        switch code {
+        case "duplicate_id": return "duplicate item id"
+        case "invalid_utf8": return "not valid UTF-8"
+        case "garbled_marker": return "garbled item marker"
+        default: return code.replacingOccurrences(of: "_", with: " ")
         }
     }
 
@@ -353,6 +367,7 @@ public enum TrackerPresenter {
 
         var rows: [TrackerRow] = []
         var folded: [String: TrackerItemRow] = [:]
+        var hidden: [String: TrackerItemRow] = [:]
         var sawLog = false
         var logTitle: String?
 
@@ -405,18 +420,22 @@ public enum TrackerPresenter {
                 } else {
                     rows.append(TrackerRow(key: TrackerRow.itemKey(row.id), content: .item(row)))
                 }
-            case .open:
-                guard !row.isDone else { return }
+            case .open, .waiting, .done:
+                guard Self.matches(row, filter) else {
+                    hidden[row.id] = row
+                    return
+                }
                 sectionCount += 1
                 rows.append(TrackerRow(key: TrackerRow.itemKey(row.id), content: .item(row)))
-            case .waiting:
-                guard row.isNeedsYou else { return }
-                sectionCount += 1
-                rows.append(TrackerRow(key: TrackerRow.itemKey(row.id), content: .item(row)))
-            case .done:
-                guard row.isDone else { return }
-                sectionCount += 1
-                rows.append(TrackerRow(key: TrackerRow.itemKey(row.id), content: .item(row)))
+            }
+        }
+
+        static func matches(_ row: TrackerItemRow, _ filter: TrackerFilter) -> Bool {
+            switch filter {
+            case .all: return true
+            case .open: return !row.isDone
+            case .waiting: return row.isNeedsYou
+            case .done: return row.isDone
             }
         }
 
@@ -558,15 +577,33 @@ public enum TrackerRelativeTime {
         return now.timeIntervalSince(date) < 86_400 ? "\(text) ago" : text
     }
 
+    /// A wall-clock time: "10:42" on `now`'s day, else "Oct 14 10:42".
+    public static func clock(_ date: Date, now: Date, timeZone: TimeZone = .current) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let format = calendar.isDate(date, inSameDayAs: now) ? "HH:mm" : "MMM d HH:mm"
+        return formatter(format, timeZone).string(from: date)
+    }
+
+    private static let lock = NSLock()
     private static var formatters: [String: DateFormatter] = [:]
 
     private static func dayFormatter(_ timeZone: TimeZone) -> DateFormatter {
-        if let cached = formatters[timeZone.identifier] { return cached }
+        formatter("MMM d", timeZone)
+    }
+
+    /// Cached per format and time zone; a `DateFormatter` is costly to make and a board has
+    /// hundreds of times.
+    private static func formatter(_ format: String, _ timeZone: TimeZone) -> DateFormatter {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = "\(format)|\(timeZone.identifier)"
+        if let cached = formatters[key] { return cached }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
-        formatter.dateFormat = "MMM d"
-        formatters[timeZone.identifier] = formatter
+        formatter.dateFormat = format
+        formatters[key] = formatter
         return formatter
     }
 }

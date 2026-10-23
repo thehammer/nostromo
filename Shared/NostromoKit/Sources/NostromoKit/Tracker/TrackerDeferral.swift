@@ -9,6 +9,8 @@
 // - An item the user can see that the agent moves to another section appears in its new section
 //   at once (under a temporary `moving:<id>` key) while a muted "moved to <Section>" stub keeps
 //   its old key and place until that place leaves the viewport.
+// - Under a narrowing filter, an item the user can see that changes out of the filter (done under
+//   Open, no longer needing you under Waiting on you) stays in place with its new state likewise.
 // - An item the user can see that is removed leaves a muted "removed" stub in its place until it
 //   leaves the viewport.
 // - A row holding a text selection keeps its content until the selection is cleared.
@@ -23,6 +25,9 @@ import Foundation
 public struct TrackerHold: Equatable {
     public enum Kind: String, Equatable {
         case doneInPlace = "done_in_place"
+        /// An item that changed out of the filter's view (say, no longer needs you under "Waiting
+        /// on you"): shown in place with its new state until it leaves the viewport.
+        case keptInPlace = "kept_in_place"
         case moved
         case removed
         case selection
@@ -132,6 +137,9 @@ public struct TrackerDeferral {
             if let folded = target.foldedItems[shown.id] {
                 guard !releasedSections.contains(folded.sectionId) else { continue }
                 holds.append(TrackerHold(key: key, kind: .doneInPlace, row: TrackerRow(key: key, content: .item(folded))))
+            } else if let hidden = target.hiddenItems[shown.id] {
+                holds.append(TrackerHold(key: key, kind: hidden.isDone ? .doneInPlace : .keptInPlace,
+                                         row: TrackerRow(key: key, content: .item(hidden))))
             } else {
                 holds.append(TrackerHold(key: key, kind: .removed, row: TrackerRow(
                     key: key, content: .stub(TrackerStubRow(kind: .removed, item: shown)))))
@@ -157,7 +165,7 @@ public struct TrackerDeferral {
             case .selection:
                 rows[index] = hold.row
                 placed.insert(hold.key)
-            case .doneInPlace, .removed:
+            case .doneInPlace, .keptInPlace, .removed:
                 break
             }
         }
