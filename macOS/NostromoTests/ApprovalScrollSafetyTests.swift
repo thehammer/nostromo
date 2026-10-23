@@ -264,9 +264,9 @@ final class ApprovalScrollSafetyTests: XCTestCase {
     // MARK: A row's status changes (AP2b, criterion 36)
 
     /// Swap the rig's turn views for ones whose tool rows read the pane's store (the rig builds its own with no
-    /// store), keeping every frame. Returns the tool groups on screen and counts the height changes any of
-    /// them asks its turn for.
-    private func installApprovalAwareTurns(in p: Pane, heightChanges: HeightChangeCounter) throws -> [ToolGroupView] {
+    /// store), keeping every frame. Returns the activity rows on screen (the Focus view folds each turn's tool
+    /// group into one, collapsed) and counts the height changes any of them asks its turn for.
+    private func installApprovalAwareTurns(in p: Pane, heightChanges: HeightChangeCounter) throws -> [ActivityRowView] {
         let rig = p.rig
         for (id, old) in rig.materialized {
             guard let turn = rig.turns.first(where: { $0.id == id }) else { continue }
@@ -284,12 +284,12 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             rig.materialized[id] = view
         }
         settle(p)
-        return rigAllSubviews(of: rig.doc).compactMap { $0 as? ToolGroupView }
+        return rigAllSubviews(of: rig.doc).compactMap { $0 as? ActivityRowView }
     }
 
     final class HeightChangeCounter { var count = 0 }
 
-    private func frames(of groups: [ToolGroupView]) -> [NSRect] {
+    private func frames(of groups: [ActivityRowView]) -> [NSRect] {
         groups.flatMap { [$0.frame, $0.row.frame] } + groups.compactMap { $0.superview?.frame }
     }
 
@@ -298,8 +298,8 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             let p = pane(following: following)
             let heightChanges = HeightChangeCounter()
             let groups = try installApprovalAwareTurns(in: p, heightChanges: heightChanges)
-            let a = try XCTUnwrap(groups.first, "precondition: a tool row is materialised")
-            let ids = a.group.calls.compactMap(\.toolUseId)
+            let a = try XCTUnwrap(groups.first, "precondition: an activity row is materialised")
+            let ids = a.segment.calls.compactMap(\.toolUseId)
             XCTAssertGreaterThanOrEqual(ids.count, 4, "precondition: four calls to give four statuses")
             let scrollFrame = p.rig.scrollView.frame, barFrame = p.rig.inputBar.frame
             let before = frames(of: groups)

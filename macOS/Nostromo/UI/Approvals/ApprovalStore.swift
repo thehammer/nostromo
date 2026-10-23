@@ -124,7 +124,8 @@ final class ApprovalStore {
         case .snapshot(let requests):
             replaceAll(with: requests)
         case .resolved(let frame):
-            if let entry = entries[frame.requestId] {
+            // The first ending stands: a second frame for a request that already ended says nothing new.
+            if let entry = entries[frame.requestId], statusBook.status(toolUseId: entry.request.toolUseId) == .awaiting {
                 setStatus(.forOutcome(frame.outcome, atMs: frame.atMs), for: entry.request)
             }
             end(frame.requestId, text: Self.outcomeText(frame.outcome))

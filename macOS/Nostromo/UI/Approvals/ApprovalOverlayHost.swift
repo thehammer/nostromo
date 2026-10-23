@@ -229,5 +229,6 @@ final class ApprovalOverlayHost: NSView {
         card?.removeFromSuperview()
         card = nil
         fadingCard = nil
+        needsLayout = true   // the guard bar, if any, drops back to the card's slot
     }
 }

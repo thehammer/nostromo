@@ -580,6 +580,8 @@ final class ApprovalCardView: NSView {
         pageLabel.textColor = ApprovalPalette.mutedText
         pageLabel.alignment = .center
         pageLabel.isHidden = true
+        configurePageButton(pagePreviousButton, id: "page_previous", label: "Previous request")
+        configurePageButton(pageNextButton, id: "page_next", label: "Next request")
 
         configureWrapping(whyLabel, lines: 2)
         setContext(whyLabel, request.reason.text, prefix: "Why: ", font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
@@ -702,7 +704,7 @@ final class ApprovalCardView: NSView {
             allowButton?.lineBreakMode = .byTruncatingTail
         }
 
-        for v in [headlineLabel, pageLabel, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
+        for v in [headlineLabel, pageLabel, pagePreviousButton, pageNextButton, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
                   formScroll, inputView, agentSaysLabel, noticeLabel, noteRow, statusLabel, buttonRow] {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
@@ -815,29 +817,20 @@ final class ApprovalCardView: NSView {
     }
 
     /// `1 of 3` with ‹ › (AP2b), or nothing for a lone request. Only the page controls' text, enabled
-    /// flags and visibility change; the card never takes focus for it.
+    /// flags and visibility change (they always exist, hidden, so no other row moves); the card never
+    /// takes focus for it.
     func setPage(_ page: ApprovalPage?) {
         let shown = (page?.count ?? 0) > 1 ? page : nil
         guard shown != currentPage else { return }
         currentPage = shown
-        guard let shown else {
-            pageLabel.isHidden = true
-            pageLabel.stringValue = ""
-            for button in [pagePreviousButton, pageNextButton] { button?.removeFromSuperview() }
-            pagePreviousButton = nil
-            pageNextButton = nil
-            needsLayout = true
-            return
-        }
-        if pagePreviousButton == nil {
-            pagePreviousButton = makePageButton(title: "‹", id: "page_previous", label: "Previous request")
-            pageNextButton = makePageButton(title: "›", id: "page_next", label: "Next request")
-        }
-        pageLabel.stringValue = shown.label
-        pageLabel.setAccessibilityLabel("Request \(shown.position) of \(shown.count)")
-        pageLabel.isHidden = false
-        pagePreviousButton?.isEnabled = shown.previousID != nil
-        pageNextButton?.isEnabled = shown.nextID != nil
+        let visible = shown != nil
+        pageLabel.stringValue = shown?.label ?? ""
+        pageLabel.setAccessibilityLabel(shown.map { "Request \($0.position) of \($0.count)" })
+        pageLabel.isHidden = !visible
+        pagePreviousButton.isHidden = !visible
+        pageNextButton.isHidden = !visible
+        pagePreviousButton.isEnabled = shown?.previousID != nil
+        pageNextButton.isEnabled = shown?.nextID != nil
         needsLayout = true
     }
 
@@ -846,24 +839,23 @@ final class ApprovalCardView: NSView {
 
     /// The `1 of 3` text (empty for a lone request).
     var pageText: String { pageLabel.stringValue }
-    private(set) var pagePreviousButton: ApprovalButton?
-    private(set) var pageNextButton: ApprovalButton?
+    let pagePreviousButton = ApprovalButton(title: "‹", target: nil, action: nil)
+    let pageNextButton = ApprovalButton(title: "›", target: nil, action: nil)
     /// A page button was pressed: the id of the request to show.
     var onShowRequest: ((String) -> Void)?
 
-    private func makePageButton(title: String, id: String, label: String) -> ApprovalButton {
-        let button = ApprovalButton(title: title, target: self, action: #selector(pagePressed(_:)))
+    private func configurePageButton(_ button: ApprovalButton, id: String, label: String) {
         button.identifier = NSUserInterfaceItemIdentifier(id)
-        button.title = title
+        button.target = self
+        button.action = #selector(pagePressed(_:))
         button.bezelStyle = .inline
         button.isBordered = true
         button.font = .systemFont(ofSize: 12, weight: .semibold)
         button.setButtonType(.momentaryPushIn)
         button.setAccessibilityLabel(label)
         button.toolTip = label
-        button.translatesAutoresizingMaskIntoConstraints = true
-        addSubview(button)
-        return button
+        button.isHidden = true
+        button.isEnabled = false
     }
 
     /// Paging answers nothing: it only changes which request this window shows.
@@ -907,16 +899,14 @@ final class ApprovalCardView: NSView {
         if apply {
             let countdownWidth = ApprovalCountdownLabel.width
             countdown.label.frame = NSRect(x: pad + inner - countdownWidth, y: y + 1, width: countdownWidth, height: 16)
-            var pagerWidth: CGFloat = 0
-            if currentPage != nil, let previous = pagePreviousButton, let next = pageNextButton {
-                let arrow = Self.pageArrowWidth, label = Self.pageLabelWidth
-                pagerWidth = 2 * arrow + label
-                let left = pad + inner - countdownWidth - 4 - pagerWidth
-                previous.frame = NSRect(x: left, y: y, width: arrow, height: headerHeight)
-                pageLabel.frame = NSRect(x: left + arrow, y: y + 1, width: label, height: 16)
-                next.frame = NSRect(x: left + arrow + label, y: y, width: arrow, height: headerHeight)
-                pagerWidth += 4
-            }
+            // The page controls are always placed (hidden when the focus holds one request), so showing them moves nothing else.
+            let arrow = Self.pageArrowWidth, label = Self.pageLabelWidth
+            let pager = 2 * arrow + label
+            let left = pad + inner - countdownWidth - 4 - pager
+            pagePreviousButton.frame = NSRect(x: left, y: y, width: arrow, height: headerHeight)
+            pageLabel.frame = NSRect(x: left + arrow, y: y + 1, width: label, height: 16)
+            pageNextButton.frame = NSRect(x: left + arrow + label, y: y, width: arrow, height: headerHeight)
+            let pagerWidth: CGFloat = currentPage == nil ? 0 : pager + 4
             let headlineWidth = max(40, inner - countdownWidth - pagerWidth - 8)
             headlineLabel.frame = NSRect(x: pad, y: y, width: headlineWidth, height: headerHeight)
         }
