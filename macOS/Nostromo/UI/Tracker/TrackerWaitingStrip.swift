@@ -24,6 +24,7 @@ final class TrackerWaitingStrip: NSView {
         label.refusesFirstResponder = true
         label.cell?.truncatesLastVisibleLine = true
         addSubview(label)
+        isHidden = true   // nothing waits until a board says so
     }
 
     required init?(coder: NSCoder) { fatalError() }

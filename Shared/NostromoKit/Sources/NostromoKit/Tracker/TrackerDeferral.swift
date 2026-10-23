@@ -183,6 +183,20 @@ public struct TrackerDeferral {
             rows.insert(hold.row, at: insertAt)
             placed.insert(hold.key)
         }
-        return rows
+        return Self.uncountHeldDone(holds, in: rows)
+    }
+
+    /// A done item still shown in place has not folded yet, so its section's "Done (N)" does not
+    /// count it; a group left with nothing in it is not shown until something folds.
+    private static func uncountHeldDone(_ holds: [TrackerHold], in rows: [TrackerRow]) -> [TrackerRow] {
+        let heldIds = Set(holds.filter { $0.kind == .doneInPlace }.compactMap { $0.row.item?.id })
+        guard !heldIds.isEmpty else { return rows }
+        return rows.compactMap { row in
+            guard case .doneGroup(let group) = row.content, group.itemIds.contains(where: heldIds.contains) else { return row }
+            let ids = group.itemIds.filter { !heldIds.contains($0) }
+            guard !ids.isEmpty else { return nil }
+            return TrackerRow(key: row.key, content: .doneGroup(TrackerDoneGroupRow(
+                sectionId: group.sectionId, count: ids.count, expanded: group.expanded, itemIds: ids)))
+        }
     }
 }

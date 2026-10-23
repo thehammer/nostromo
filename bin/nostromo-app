@@ -129,6 +129,8 @@ def main():
     tr.add_argument("--focus", metavar="TAG", help="the focus whose tracker (default: beside the transcript with keyboard focus, else the only visible tracker)")
     tra = sub.add_parser("tracker-anchor", help="READ-ONLY tracker scroll anchor (first visible row, offset, scroll position, held changes)")
     tra.add_argument("--focus", metavar="TAG", help="the focus whose tracker (default: beside the transcript with keyboard focus, else the only visible tracker)")
+    for tp in (tr, tra):   # `-w N` also after the subcommand, as documented (SUPPRESS keeps a `-w` given before it)
+        tp.add_argument("-w", "--window", type=int, default=argparse.SUPPRESS)
     sub.add_parser("capture-render-state", help="write a content-free render-state capture for every visible transcript pane now")
     ap = sub.add_parser("approvals", help="READ-ONLY approval cards on screen (what each card shows, its options and which are enabled)")
     ap.add_argument("sub", choices=["list", "badges"])

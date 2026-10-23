@@ -39,17 +39,22 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
         let leftWidth = content.frame.width
         let height = content.frame.height
 
-        let split = NSSplitView(frame: content.frame)
+        // Classic (non-arranged) split subviews with explicit frames, so AppKit never redistributes the
+        // widths: the window grows by the tracker's width, then the split takes the transcript's content
+        // view on the left at its original width and the tracker on the right.
+        let split = NSSplitView(frame: .zero)
         split.isVertical = true
         split.dividerStyle = .thin
+        let total = leftWidth + split.dividerThickness + Self.trackerWidth
+        window.setContentSize(NSSize(width: total, height: height))
+        split.frame = NSRect(x: 0, y: 0, width: total, height: height)
         window.contentView = split
-        window.setContentSize(NSSize(width: leftWidth + split.dividerThickness + Self.trackerWidth, height: height))
 
         let harness = try TrackerGateHarness(self)
-        split.addArrangedSubview(content)
-        split.addArrangedSubview(harness.pane)
-        split.adjustSubviews()
-        split.setPosition(leftWidth, ofDividerAt: 0)
+        split.addSubview(content)
+        split.addSubview(harness.pane)
+        content.frame = NSRect(x: 0, y: 0, width: leftWidth, height: height)
+        harness.pane.frame = NSRect(x: leftWidth + split.dividerThickness, y: 0, width: Self.trackerWidth, height: height)
         split.layoutSubtreeIfNeeded()
         window.contentView?.layoutSubtreeIfNeeded()
 

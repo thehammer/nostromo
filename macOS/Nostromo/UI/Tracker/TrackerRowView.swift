@@ -188,8 +188,9 @@ final class TrackerRowView: NSView {
 
     /// A Done group is one click target as a whole (its label must not swallow the click).
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if case .doneGroup = row.content { return frame.contains(point) ? self : nil }
-        return super.hitTest(point)
+        guard let hit = super.hitTest(point) else { return nil }
+        if case .doneGroup = row.content { return self }
+        return hit
     }
 
     override func mouseDown(with event: NSEvent) {

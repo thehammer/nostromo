@@ -240,7 +240,7 @@ final class TrackerPaneView: NSView {
         displayedRows = result.rows
 
         layoutChrome()
-        layoutRows(width: contentWidth)
+        layoutRowsToFit()
         restore(anchor, renamed: result.renamed)
 
         if !result.applyNow.isEmpty { renderGeneration += 1 }
@@ -277,9 +277,18 @@ final class TrackerPaneView: NSView {
         let anchor = captureAnchor()
         layoutChrome()
         if contentWidth != laidOutWidth {
-            layoutRows(width: contentWidth)
+            layoutRowsToFit()
             restore(anchor, renamed: [:])
         }
+    }
+
+    /// Lay the rows out at the clip's width; if that shows or hides the vertical scroller (which
+    /// changes the clip's width with legacy scrollers), lay them out again at the width that results,
+    /// so no later update finds them at a stale width.
+    private func layoutRowsToFit() {
+        layoutRows(width: contentWidth)
+        scrollView.tile()
+        if contentWidth != laidOutWidth { layoutRows(width: contentWidth) }
     }
 
     /// Header, banner and strip stacked at the top; the scroll view takes the rest.
@@ -457,7 +466,7 @@ final class TrackerHeaderView: NSView {
 
     let titleLabel = NSTextField(labelWithString: "")
     let updatedLabel = NSTextField(labelWithString: "")
-    let badgeLabel = NSTextField(labelWithString: "")
+    let committableLabel = NSTextField(labelWithString: "")
     let filterControl = NSSegmentedControl(labels: TrackerFilter.allCases.map(\.label),
                                            trackingMode: .selectOne, target: nil, action: nil)
 
@@ -468,10 +477,10 @@ final class TrackerHeaderView: NSView {
         titleLabel.lineBreakMode = .byTruncatingTail
         updatedLabel.font = TrackerTheme.metaFont
         updatedLabel.textColor = TrackerTheme.muted
-        badgeLabel.font = TrackerTheme.metaFont
-        badgeLabel.textColor = Theme.amber
-        badgeLabel.lineBreakMode = .byTruncatingTail
-        for label in [titleLabel, updatedLabel, badgeLabel] {
+        committableLabel.font = TrackerTheme.metaFont
+        committableLabel.textColor = Theme.amber
+        committableLabel.lineBreakMode = .byTruncatingTail
+        for label in [titleLabel, updatedLabel, committableLabel] {
             label.refusesFirstResponder = true
             addSubview(label)
         }
@@ -495,8 +504,8 @@ final class TrackerHeaderView: NSView {
             needsLayout = true   // the badge sits after it (the header's own height never changes)
         }
         let badge = header.committableText ?? ""
-        if badgeLabel.stringValue != badge { badgeLabel.stringValue = badge }
-        badgeLabel.isHidden = badge.isEmpty
+        if committableLabel.stringValue != badge { committableLabel.stringValue = badge }
+        committableLabel.isHidden = badge.isEmpty
         toolTip = header.path
     }
 
@@ -536,7 +545,7 @@ final class TrackerHeaderView: NSView {
         updatedLabel.sizeToFit()
         updatedLabel.frame = NSRect(x: h, y: 29, width: updatedLabel.frame.width, height: 15)
         let badgeX = updatedLabel.frame.maxX + 10
-        badgeLabel.frame = NSRect(x: badgeX, y: 29, width: max(bounds.width - h - badgeX, 1), height: 15)
+        committableLabel.frame = NSRect(x: badgeX, y: 29, width: max(bounds.width - h - badgeX, 1), height: 15)
     }
 }
 

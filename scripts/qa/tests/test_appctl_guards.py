@@ -555,6 +555,41 @@ class TestCommandAllowList(StubCase):
         self.assertEqual(len(self.invocations()), len(reachable))
 
 
+class TestTrackerCommandsAreAllowedAndReadOnly(StubCase):
+    """`tracker` (show|file) and `tracker-anchor` only read the tracker pane, so QA scripts may use them."""
+
+    def test_both_tracker_commands_are_on_the_allow_list(self):
+        self.assertIn("tracker", appctl.ALLOWED_COMMANDS)
+        self.assertIn("tracker-anchor", appctl.ALLOWED_COMMANDS)
+
+    def test_they_are_not_guarded_like_click_and_key(self):
+        self.assertFalse({"tracker", "tracker-anchor"} & appctl._GUARDED_COMMANDS)
+
+    def test_tracker_show_and_file_reach_the_cli_under_the_window_selection(self):
+        app = App(self.make_stub(), window_args=["-w", "1"])
+        self.assertIsNotNone(app._run("tracker", ["show", "--focus", "kate"]))
+        self.assertIsNotNone(app._run("tracker", ["file"]))
+        self.assertEqual(self.invocations(), [
+            ["-w", "1", "tracker", "show", "--focus", "kate"],
+            ["-w", "1", "tracker", "file"],
+        ])
+
+    def test_tracker_anchor_reaches_the_cli_under_the_window_selection(self):
+        app = App(self.make_stub(), window_args=["-w", "2"])
+        self.assertIsNotNone(app._run("tracker-anchor", ["--focus", "kate"]))
+        self.assertEqual(self.invocations(), [["-w", "2", "tracker-anchor", "--focus", "kate"]])
+
+    def test_nothing_that_edits_or_acts_on_the_tracker_is_allowed(self):
+        edits = {"tracker-edit", "tracker-set", "tracker-add", "tracker-run", "tracker-open-link"}
+        self.assertFalse(edits & set(appctl.ALLOWED_COMMANDS))
+        app = App(self.make_stub())
+        for cmd in sorted(edits):
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(RefusedError):
+                    app._run(cmd, [])
+        self.assertEqual(self.invocations(), [])
+
+
 class TestArgvConstruction(StubCase):
     def test_window_selection_goes_before_the_subcommand_except_for_app_wide_commands(self):
         app = App(self.make_stub(), window_args=["-w", "1"])

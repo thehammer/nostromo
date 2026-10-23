@@ -11,6 +11,8 @@ import NostromoKit
 /// window are folded into one delivery at the end of it, which always carries the latest state.
 /// A subscriber reads `board(for:)` when it hears its tag.
 ///
+/// Summaries are announced only when they change; boards on every frame (see `ingest`).
+///
 /// A dropped daemon connection keeps every board (the pane never blanks); the reconnect's replayed
 /// board replaces it. `forget(tag:)` drops a removed focus.
 final class TrackerStore {
@@ -54,8 +56,10 @@ final class TrackerStore {
         case .trackerBoard(let frame):
             isConnected = true
             // `board: null` means the focus has no tracker now. The pane only exists while the
-            // tree has a tracker leaf, and it never blanks, so the last board stays.
-            guard let board = frame.board, boards[frame.tag] != board else { return }
+            // tree has a tracker leaf, and it never blanks, so the last board stays. An identical
+            // board is still announced: the pane's diff turns it into no change at all, which is
+            // what its render probe reports (PRD criterion 20).
+            guard let board = frame.board else { return }
             boards[frame.tag] = board
             noteChange(frame.tag)
         case .trackerSummary(let summary):
