@@ -203,7 +203,8 @@ final class TrackerProseView: NSView {
     static func codeView(text: String, lang: String?) -> (view: NSView, size: NSSize) {
         let view = TrackerTextView.make()
         let body = text.hasSuffix("\n") ? String(text.dropLast()) : text
-        view.set(NSAttributedString(string: body, attributes: [.font: Theme.monoFont, .foregroundColor: Theme.fg]))
+        // The code font (ligatures off), so the code shows exactly the characters written.
+        view.set(NSAttributedString(string: body, attributes: [.font: Theme.codeFont(size: 13), .foregroundColor: Theme.fg]))
         view.textContainerInset = NSSize(width: widePadding, height: widePadding)
         guard let container = view.textContainer, let layout = view.layoutManager else { return (view, .zero) }
         container.size = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)

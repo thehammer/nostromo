@@ -7,6 +7,9 @@ enum TrackerTheme {
     static let background = Theme.bg
     static let text = Theme.fg
     static let muted = Theme.fgMuted
+    /// Metadata on a `needs-you` row: its fill (and a chip's on top) is lighter than the pane's
+    /// background, so plain muted grey would fall under 4.5:1 there.
+    static let mutedOnFill = Theme.foldedProse
     /// The `needs-you` row fill; item text stays ≥ 7:1 and muted metadata ≥ 4.5:1 on it.
     static let needsYouFill = Theme.attention.withAlphaComponent(0.14)
     /// The left edge of an item touching a hazardous environment, and its badge text.
@@ -386,6 +389,7 @@ final class TrackerRowView: NSView {
 
     private func buildItem(_ item: TrackerItemRow) {
         if item.isNeedsYou { layer?.backgroundColor = TrackerTheme.needsYouFill.cgColor }
+        let muted = item.isNeedsYou ? TrackerTheme.mutedOnFill : TrackerTheme.muted
         if item.isHazard {
             let edge = NSView()
             edge.wantsLayer = true
@@ -403,7 +407,7 @@ final class TrackerRowView: NSView {
         mainText = addText(text)
 
         if let env = item.envBadge {
-            let badge = addLabel(env, color: item.isHazard ? TrackerTheme.hazard : TrackerTheme.muted,
+            let badge = addLabel(env, color: item.isHazard ? TrackerTheme.hazard : muted,
                                  font: NSFont.systemFont(ofSize: 10, weight: .semibold))
             badge.alignment = .center
             badge.wantsLayer = true
@@ -412,14 +416,14 @@ final class TrackerRowView: NSView {
             badges.append(badge)
         }
         if let owner = item.owner, !owner.isEmpty {
-            let chip = addLabel(owner, color: TrackerTheme.muted, font: TrackerTheme.metaFont)
+            let chip = addLabel(owner, color: muted, font: TrackerTheme.metaFont)
             chip.alignment = .center
             chip.wantsLayer = true
             chip.layer?.backgroundColor = TrackerTheme.badgeFill.cgColor
             chip.layer?.cornerRadius = 7
             badges.append(chip)
         }
-        let time = addLabel(item.relativeTime, color: TrackerTheme.muted, font: TrackerTheme.timeFont)
+        let time = addLabel(item.relativeTime, color: muted, font: TrackerTheme.timeFont)
         time.alignment = .right
         timeLabel = time
 
@@ -431,7 +435,7 @@ final class TrackerRowView: NSView {
             } else if let first = item.noteFirstLine {
                 let view = TrackerTextView.make(singleLine: true)
                 view.set(NSAttributedString(string: first, attributes: [
-                    .font: TrackerTheme.metaFont, .foregroundColor: TrackerTheme.muted]))
+                    .font: TrackerTheme.metaFont, .foregroundColor: muted]))
                 addSubview(view)
                 textViews.append(view)
                 noteText = view
@@ -442,7 +446,7 @@ final class TrackerRowView: NSView {
         }
         if !item.linkTexts.isEmpty {
             linksText = addText(NSAttributedString(string: item.linkTexts.joined(separator: " · "), attributes: [
-                .font: TrackerTheme.metaFont, .foregroundColor: TrackerTheme.muted]))
+                .font: TrackerTheme.metaFont, .foregroundColor: muted]))
         }
     }
 

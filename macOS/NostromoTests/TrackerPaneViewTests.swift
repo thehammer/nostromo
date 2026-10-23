@@ -580,7 +580,11 @@ final class TrackerPaneViewTests: XCTestCase {
         let codeText = try XCTUnwrap(scrollers.compactMap { $0.documentView as? NSTextView }.first { $0.string.contains("let answer") })
         XCTAssertEqual(codeText.string, "let answer = 42\nprint(answer)")
         let font = try XCTUnwrap(codeText.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
-        XCTAssertTrue(font.isFixedPitch || font.fontDescriptor.symbolicTraits.contains(.monoSpace), "code is monospaced, not \(font.fontName)")
+        // Monospaced by measurement (Fira Code Nerd Font does not report `isFixedPitch`): every
+        // character advances the same width.
+        let narrow = ("iiii" as NSString).size(withAttributes: [.font: font]).width
+        let wide = ("MMMM" as NSString).size(withAttributes: [.font: font]).width
+        XCTAssertEqual(narrow, wide, accuracy: 0.5, "code is monospaced, not \(font.fontName)")
         let codeScroller = try XCTUnwrap(scrollers.first { $0.documentView === codeText })
         XCTAssertTrue(codeScroller.hasHorizontalScroller)
         XCTAssertFalse(codeScroller.hasVerticalScroller)

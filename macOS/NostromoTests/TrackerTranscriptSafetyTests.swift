@@ -45,6 +45,9 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
         let split = NSSplitView(frame: .zero)
         split.isVertical = true
         split.dividerStyle = .thin
+        // Not arranged: an arranged split lays its subviews out with its own constraints and holding
+        // priorities and would not keep the frames below.
+        split.arrangesAllSubviews = false
         let total = leftWidth + split.dividerThickness + Self.trackerWidth
         window.setContentSize(NSSize(width: total, height: height))
         split.frame = NSRect(x: 0, y: 0, width: total, height: height)
@@ -53,6 +56,8 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
         let harness = try TrackerGateHarness(self)
         split.addSubview(content)
         split.addSubview(harness.pane)
+        content.autoresizingMask = []
+        harness.pane.autoresizingMask = []
         content.frame = NSRect(x: 0, y: 0, width: leftWidth, height: height)
         harness.pane.frame = NSRect(x: leftWidth + split.dividerThickness, y: 0, width: Self.trackerWidth, height: height)
         split.layoutSubtreeIfNeeded()
