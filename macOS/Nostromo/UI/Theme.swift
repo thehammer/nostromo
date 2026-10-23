@@ -26,6 +26,9 @@ enum Theme {
     /// distinct from the cornflower selection highlight and the sage/amber/red
     /// session-health dots on a dark background.
     static let attention   = NSColor(red: 192/255, green: 132/255, blue: 252/255, alpha: 1)
+    /// "Needs you now" pill background (a pending approval): an explicit dark red so the pill's
+    /// white digit reads at 5.6:1 (WCAG AA needs 4.5:1). Not `redSweater`, which is too light for white text.
+    static let needsYouNow = NSColor(red: 198/255, green: 40/255, blue: 40/255, alpha: 1)
     /// Cornflower — active tab / border highlight.
     static let cornflower  = NSColor(red: 100/255, green: 149/255, blue: 237/255, alpha: 1)
 

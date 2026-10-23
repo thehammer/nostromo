@@ -22,7 +22,8 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
                                         (class, frame, hidden, alpha, first-responder/selectable/selection state) and key window / app active / first responder
     nostromo-app transcript-anchor [-w N] [--focus TAG]   READ-ONLY (sends no event, no focus change): first visible transcript block, its offset from the viewport top, bottom offset, following-tail; JSON; exit 1 if no pane / app unreachable
     nostromo-app capture-render-state     Debug > Capture render state now, from a script: writes a content-free capture (pane-blank-<hash>-<UTC>.json) for every transcript pane on screen, no rate limit; prints the paths
-    nostromo-app approvals list [--focus TAG] [-w N]   READ-ONLY (sends no event, answers nothing): the permission-approval cards on screen, from the cards' own views: request_id, focus, agent, tool, the input as displayed (invisible characters as tokens), command_count, invisible_count, reason_line, options [{id, enabled, label}] (Allow once reads "Scroll to the end to allow" until the input was scrolled to its end), default_to_no_kind, seconds_left, page/of (`1 of 3`), windows (every window showing the request) and window_cards [{window, page, of, state}] (that window's card; `state` is the outcome text once answered); `guard_bars` lists the production-shell guard bars on screen [{window, focus, text}]. With -w N only that window is read (without it, every window); JSON
+    nostromo-app approvals badges   READ-ONLY: the red "needs you now" sidebar pills and the Dock badge: {focuses: [{tag, pill}], dock} (dock is null when clear)
+    nostromo-app approvals list [--focus TAG] [-w N]   READ-ONLY (sends no event, answers nothing): the permission-approval cards on screen, from the cards' own views: request_id, focus, agent, tool, the input as displayed (invisible characters as tokens), command_count, invisible_count, reason_line, options [{id, enabled, label}] (Allow once reads "Scroll to the end to allow" until the input was scrolled to its end), default_to_no_kind, seconds_left, collapsed (the card is a one-line bar; window_cards[].collapsed, .bar_text, .bar_countdown), page/of (`1 of 3`), windows (every window showing the request) and window_cards [{window, page, of, state}] (that window's card; `state` is the outcome text once answered); `guard_bars` lists the production-shell guard bars on screen [{window, focus, text}]. With -w N only that window is read (without it, every window); JSON
     nostromo-app key    CHARS [--mod cmd,shift] [-w N]
     nostromo-app type   TEXT [-w N]
     nostromo-app paste  (--image PATH | --text TEXT) [-w N]
@@ -122,7 +123,7 @@ def main():
     ta.add_argument("--focus", metavar="TAG", help="pane tag (default: the pane with keyboard focus, else the only visible pane)")
     sub.add_parser("capture-render-state", help="write a content-free render-state capture for every visible transcript pane now")
     ap = sub.add_parser("approvals", help="READ-ONLY approval cards on screen (what each card shows, its options and which are enabled)")
-    ap.add_argument("sub", choices=["list"])
+    ap.add_argument("sub", choices=["list", "badges"])
     ap.add_argument("--focus", metavar="TAG", help="only the cards of this focus")
     k = sub.add_parser("key"); k.add_argument("chars"); k.add_argument("--mod", default="")
     k.add_argument("--key-code", type=int, default=0)

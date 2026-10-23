@@ -1,0 +1,75 @@
+import XCTest
+@testable import NostromoKit
+
+final class ApprovalsNeedsYouTests: XCTestCase {
+
+    private func builder(_ request: ApprovalRequestWire) -> ApprovalsNeedsYouContentBuilder {
+        ApprovalsNeedsYouContentBuilder(request: { $0 == request.requestId ? request : nil })
+    }
+
+    private func content(_ request: ApprovalRequestWire) throws -> NeedsYouNotificationContent {
+        let item = ApprovalsNeedsYouProducer.items(pending: [request])[0]
+        return try XCTUnwrap(builder(request).content(for: item))
+    }
+
+    func testItemsAreOnePerRequestOnTheirFocus() throws {
+        let a = try Fx.bashRequest("rm -rf build/")
+        let items = ApprovalsNeedsYouProducer.items(pending: [a])
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].id, "approvals:\(a.requestId)")
+        XCTAssertEqual(items[0].source, .focus(a.tag))
+        var agg = NeedsYouAggregator()
+        XCTAssertEqual(agg.set(producer: "approvals", items: items).perFocus[a.tag], 1)
+    }
+
+    func testBodyIsToolAndFirstWordOnlyForEveryBashFixture() throws {
+        for fixture in Fx.bashCases where !fixture.command.isEmpty {
+            let request = try fixture.request()
+            let c = try content(request)
+            XCTAssertEqual(c.title, "Cody needs approval", fixture.name)
+            // Whatever the fixture, the body is the tool and at most one word.
+            XCTAssertTrue(c.body.hasPrefix("Bash"), fixture.name)
+            XCTAssertLessThanOrEqual(c.body.split(separator: " ").count, 3, "\(fixture.name): \(c.body)")
+            if fixture.name == "simple_rm" || fixture.name == "compound" || fixture.name == "compound_fixture" {
+                XCTAssertEqual(c.body, "Bash · rm", fixture.name)
+            }
+            XCTAssertFalse(c.body.contains("build"), fixture.name)
+            XCTAssertFalse(c.body.contains("/"), "\(fixture.name): \(c.body)")
+        }
+    }
+
+    func testCompoundAndHeredocShowOnlyTheFirstWord() throws {
+        XCTAssertEqual(try content(Fx.compoundRm.request()).body, "Bash · rm")
+        let heredoc = try content(Fx.heredoc300.request())
+        XCTAssertEqual(heredoc.body.split(separator: " ").count, 3)   // "Bash", "·", one word
+        XCTAssertLessThanOrEqual(heredoc.body.count, 50)
+    }
+
+    func testPathShapedFirstWordIsCutToItsLastComponent() throws {
+        XCTAssertEqual(try content(Fx.bashRequest("/usr/bin/rm -rf x")).body, "Bash · rm")
+    }
+
+    func testNonBashShowsTheToolNameOnly() throws {
+        let request = try Fx.request(toolKind: "edit", toolName: "Edit", displayName: "Edit",
+                                     input: ["file_path": "/etc/secret"], display: Fx.display(lines: [], commandCount: nil))
+        let c = try content(request)
+        XCTAssertEqual(c.body, "Edit")
+        XCTAssertFalse(c.body.contains("secret"))
+    }
+
+    func testContentCarriesNoReasonAndIsThreadedByTag() throws {
+        let request = try Fx.bashRequest("rm -rf build/")
+        let c = try content(request)
+        XCTAssertEqual(c.threadIdentifier, request.tag)
+        XCTAssertEqual(c.userInfo["requestId"], request.requestId)
+        XCTAssertFalse(c.body.contains(request.reason.text))
+    }
+
+    func testUnknownRequestOrOtherReasonYieldsNothing() throws {
+        let request = try Fx.bashRequest("ls")
+        let item = ApprovalsNeedsYouProducer.items(pending: [request])[0]
+        XCTAssertNil(ApprovalsNeedsYouContentBuilder(request: { _ in nil }).content(for: item))
+        let other = NeedsYouItem(id: "approvals:x", source: .app, reason: .trackerWaiting)
+        XCTAssertNil(builder(request).content(for: other))
+    }
+}

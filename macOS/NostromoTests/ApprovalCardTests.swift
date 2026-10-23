@@ -3754,9 +3754,34 @@ final class ApprovalSourceScanTests: XCTestCase {
         for file in try approvalSources() {
             let lines = try code(of: file)
             for needle in DecisionCoordinatorTests.forbiddenForegroundAndFocusCalls {
+                // The one exception (AP3): a click on a notification is a user act and may bring the app forward.
+                if file == "ApprovalNotifier.swift", needle == "NSApp.activate" || needle == ".activate(" { continue }
                 let hits = lines.filter { $0.contains(needle) }
                 XCTAssertTrue(hits.isEmpty, "UI/Approvals/\(file) must not call `\(needle)`: an approval never steals foreground or focus on arrival: \(hits)")
             }
+        }
+    }
+
+    /// AP3 (T-AP3-1): in `ApprovalNotifier.swift` the app comes forward in exactly one place, the router's
+    /// `bringAppForward`, and its only caller is the click handler.
+    func testOnlyTheNotificationClickHandlerActivatesTheApp() throws {
+        let lines = try code(of: "ApprovalNotifier.swift")
+        let activations = lines.filter { $0.contains("NSApp.activate") || $0.contains(".activate(") }
+        XCTAssertEqual(activations.count, 1, "one activation in the notifier file: \(activations)")
+        let joined = lines.joined(separator: "\n")
+        let callers = lines.filter { $0.contains("bringAppForward()") && !$0.contains("func ") }
+        XCTAssertEqual(callers.count, 1, "bringAppForward() has one caller: \(callers)")
+        let handler = try XCTUnwrap(joined.range(of: "func handleClick"), "the click handler")
+        let call = try XCTUnwrap(joined.range(of: "router.bringAppForward()"))
+        XCTAssertTrue(call.lowerBound > handler.lowerBound, "and it is inside the click handler")
+    }
+
+    /// AP3: the only code that moves keyboard focus is the person's: ⌥⌘A (`focusCard`) and Esc/collapse
+    /// handing it back to the composer. Neither is on the arrival path (host and store never call it).
+    func testFocusMovesOnlyThroughTheShortcutAndEscape() throws {
+        for file in try approvalSources() where file != "ApprovalCardView.swift" {
+            let joined = try code(of: file).joined(separator: "\n")
+            XCTAssertFalse(joined.contains("makeFirstResponder"), "\(file) must not move focus itself")
         }
     }
 
@@ -3778,5 +3803,223 @@ final class ApprovalSourceScanTests: XCTestCase {
                 XCTAssertFalse(line.contains("defaultButtonCell"), "UI/Approvals/\(file): \(line)")
             }
         }
+    }
+}
+
+
+// MARK: - AP3: collapse, Esc and ⌥⌘A
+
+final class ApprovalCollapseAndFocusTests: XCTestCase {
+
+    private typealias Harness = ApprovalOverlayHostTests.HostHarness
+
+    /// A host with a composer standing in for the pane's: `focusComposer` hands focus to it.
+    private func harness() -> (h: Harness, composer: NSTextView) {
+        let h = Harness(self)
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
+        composer.string = "half-typed reply"
+        h.window.contentView!.addSubview(composer, positioned: .below, relativeTo: h.host)
+        h.host.focusComposer = { [weak h, weak composer] in
+            guard let h, let composer else { return }
+            h.window.makeFirstResponder(composer)
+        }
+        h.window.makeFirstResponder(composer)
+        return (h, composer)
+    }
+
+    func testCollapseShowsTheOneLineBarKeepsTheRequestPendingAndSendsNothing() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+
+        h.store.setCollapsed("req-1", true)
+        h.layout()
+
+        let bar = try XCTUnwrap(h.host.collapsedBar)
+        XCTAssertEqual(bar.text, "⚠ Cody needs approval · Bash · rm -rf build/ …")
+        XCTAssertTrue(card.isHidden)
+        XCTAssertEqual(bar.frame.height, ApprovalCollapsedBar.height)
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, .pending)
+        XCTAssertTrue(h.recorder.sent.isEmpty, "collapsing is never an answer")
+        XCTAssertEqual(h.store.pendingCount(tag: "cody-1"), 1)
+        XCTAssertEqual(h.host.collapsedBarText, bar.text)
+    }
+
+    func testTheChevronsCollapseAndExpandKeepTheRequestPending() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+
+        card.collapseButton.performClick(nil)
+        h.layout()
+        XCTAssertTrue(h.store.isCollapsed("req-1"))
+        let bar = try XCTUnwrap(h.host.collapsedBar)
+
+        bar.expandButton.performClick(nil)
+        h.layout()
+        XCTAssertFalse(h.store.isCollapsed("req-1"))
+        XCTAssertNil(h.host.collapsedBar)
+        XCTAssertFalse(card.isHidden)
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, .pending)
+        XCTAssertTrue(h.recorder.sent.isEmpty)
+    }
+
+    func testTheCountdownKeepsRunningOnTheHiddenCardAndTheBar() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+        h.store.setCollapsed("req-1", true)
+        h.layout()
+
+        XCTAssertTrue(card.countdown.isRunning)
+        XCTAssertTrue(try XCTUnwrap(h.host.collapsedBar).countdown.isRunning)
+    }
+
+    func testTheBarsCountdownTextDecreasesWithTheClock() throws {
+        let h = Harness(self)
+        let request = try ApprovalTestRequests.compound()
+        var now = request.deadlineAtMs - 90_000
+        let bar = ApprovalCollapsedBar(request: request, model: ApprovalDisplayModel(request: request),
+                                       agentName: "Cody", nowMs: { now })
+        h.window.contentView!.addSubview(bar)
+        bar.countdown.tick()
+        let before = bar.countdownText
+        now += 30_000
+        bar.countdown.tick()
+        XCTAssertNotEqual(bar.countdownText, before)
+        XCTAssertEqual(bar.countdownText, ApprovalCountdown.label(seconds: 60))
+    }
+
+    func testCollapsedStateLivesInTheStoreSoARebuiltHostShowsTheBar() throws {
+        let h = Harness(self)
+        h.arrive(try ApprovalTestRequests.compound())
+        h.store.setCollapsed("req-1", true)
+
+        let second = ApprovalOverlayHost(tag: "cody-1", store: h.store, windowID: { "w-2" },
+                                         permit: ApprovalCardHarness.humanPermit, armDelay: 0, isOnScreen: { true },
+                                         reduceMotion: { true })
+        second.frame = h.host.frame
+        h.window.contentView!.addSubview(second)
+
+        XCTAssertNotNil(second.collapsedBar)
+    }
+
+    func testAnOutcomeIsShownOnTheFullCardEvenIfItWasCollapsed() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        h.store.setCollapsed("req-1", true)
+
+        h.store.handle(.resolved(try ApprovalTestRequests.resolved(id: "req-1", outcome: "timed_out")))
+        h.layout()
+
+        XCTAssertNil(h.host.collapsedBar)
+        XCTAssertFalse(try XCTUnwrap(h.host.card).isHidden)
+    }
+
+    // MARK: Esc
+
+    func testEscapeInTheCardReturnsFocusToTheComposerUnanswered() throws {
+        let (h, composer) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+        XCTAssertTrue(card.focusCard())
+        XCTAssertTrue(card.hasKeyboardFocus)
+
+        card.cancelOperation(nil)
+
+        XCTAssertTrue(h.window.firstResponder === composer)
+        XCTAssertEqual(composer.string, "half-typed reply")
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, .pending)
+        XCTAssertTrue(h.recorder.sent.isEmpty)
+        XCTAssertFalse(h.store.isCollapsed("req-1"), "one Esc only leaves the card")
+    }
+
+    func testASecondEscapeSoonAfterCollapsesAndALateOneDoesNot() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+        let start = Date()
+
+        card.focusCard()
+        h.store.noteEscapeFromCard("req-1", now: start)
+        XCTAssertFalse(h.store.collapseAfterEscape(now: start.addingTimeInterval(ApprovalStore.escapeWindow + 1)))
+        XCTAssertFalse(h.store.isCollapsed("req-1"))
+
+        h.store.noteEscapeFromCard("req-1", now: start)
+        XCTAssertTrue(h.store.collapseAfterEscape(now: start.addingTimeInterval(0.5)))
+        XCTAssertTrue(h.store.isCollapsed("req-1"))
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, .pending)
+        XCTAssertFalse(h.store.collapseAfterEscape(), "a second Esc with nothing pending does nothing")
+    }
+
+    func testEscapeWithFocusOutsideTheCardDoesNothingToIt() throws {
+        let (h, composer) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+
+        card.cancelOperation(nil)
+
+        XCTAssertTrue(h.window.firstResponder === composer)
+        XCTAssertFalse(h.store.collapseAfterEscape())
+    }
+
+    // MARK: ⌥⌘A
+
+    func testTheShortcutFocusesTheCardsInitialKeyViewAndLeavesTheComposerText() throws {
+        let (h, composer) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+
+        XCTAssertTrue(ApprovalOverlayHost.focusCard(in: h.window))
+
+        XCTAssertTrue(h.window.firstResponder === card.initialKeyView)
+        XCTAssertEqual(composer.string, "half-typed reply")
+        XCTAssertTrue(h.recorder.sent.isEmpty, "moving focus answers nothing")
+    }
+
+    func testTheShortcutLandsOnDenyForADefaultToNoRequest() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.defaultToNo())
+        let card = try XCTUnwrap(h.host.card)
+
+        XCTAssertTrue(ApprovalOverlayHost.focusCard(in: h.window))
+
+        XCTAssertTrue(h.window.firstResponder === card.denyButton)
+    }
+
+    func testTheShortcutExpandsACollapsedBarAndFocusesTheCard() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        h.store.setCollapsed("req-1", true)
+        h.layout()
+
+        XCTAssertTrue(ApprovalOverlayHost.focusCard(in: h.window))
+
+        XCTAssertNil(h.host.collapsedBar)
+        XCTAssertTrue(try XCTUnwrap(h.host.card).hasKeyboardFocus)
+    }
+
+    func testTheShortcutWithNoCardIsFalseSoTheCallerBeeps() {
+        let (h, composer) = harness()
+        XCTAssertFalse(ApprovalOverlayHost.focusCard(in: h.window))
+        XCTAssertTrue(h.window.firstResponder === composer)
+        XCTAssertFalse(ApprovalOverlayHost.focusCard(in: nil))
+    }
+
+    func testTabCyclesTheCardsButtonsAndWraps() throws {
+        let (h, _) = harness()
+        h.arrive(try ApprovalTestRequests.compound())
+        let card = try XCTUnwrap(h.host.card)
+        var seen: [NSView] = []
+        var view: NSView? = card.denyButton
+        for _ in 0 ..< 12 {
+            guard let v = view else { break }
+            if seen.contains(where: { $0 === v }) { break }
+            seen.append(v)
+            view = v.nextKeyView
+        }
+        XCTAssertTrue(seen.contains { $0 === card.denyButton })
+        XCTAssertTrue(seen.contains { $0 === card.collapseButton })
+        XCTAssertTrue(view === card.denyButton || view === seen.first, "the loop wraps inside the card")
     }
 }

@@ -513,8 +513,10 @@ final class AppControlServer {
     /// window's. `guard_bars` lists the production-shell guard bars on screen. With `only_window` (the
     /// CLI's explicit `-w`), only that window's hosts are read.
     private func approvals(_ req: AppControlRequest) throws -> Any {
-        guard (req.string("sub") ?? "list") == "list" else {
-            throw AppControlError.badRequest("approvals: only `list` exists (it is read-only)")
+        let sub = req.string("sub") ?? "list"
+        if sub == "badges" { return approvalBadges() }
+        guard sub == "list" else {
+            throw AppControlError.badRequest("approvals: only `list` and `badges` exist (both read-only)")
         }
         let focus = req.string("focus")
         let onlyWindow = req.int("only_window")
@@ -534,15 +536,40 @@ final class AppControlServer {
                 }
                 for listing in host.listings {
                     var entry = byRequest[listing.requestID] ?? listing.jsonObject
-                    if byRequest[listing.requestID] == nil { order.append(listing.requestID) }
+                    if byRequest[listing.requestID] == nil {
+                        order.append(listing.requestID)
+                        entry["collapsed"] = host.isCollapsed   // the first window's; each window's own is in `window_cards`
+                    }
                     entry["windows"] = ((entry["windows"] as? [Int]) ?? []) + [index]
-                    let card: [String: Any] = ["window": index, "page": listing.page, "of": listing.of, "state": listing.state]
+                    var card: [String: Any] = ["window": index, "page": listing.page, "of": listing.of, "state": listing.state,
+                                               "collapsed": host.isCollapsed]
+                    if let bar = host.collapsedBar { card["bar_text"] = bar.text; card["bar_countdown"] = bar.countdownText }
                     entry["window_cards"] = ((entry["window_cards"] as? [[String: Any]]) ?? []) + [card]
                     byRequest[listing.requestID] = entry
                 }
             }
         }
         return ["approvals": order.compactMap { byRequest[$0] }, "guard_bars": guardBars]
+    }
+
+    /// READ-ONLY: what the approvals surfaces outside the card show (`approvals badges`): the red "needs
+    /// you now" pill on each sidebar row that has one (`focuses: [{tag, pill}]`, from the rows' own views in
+    /// the first window that has any) and the Dock badge (`dock`, the label the one coordinator last wrote to the Dock tile, null
+    /// when clear). Sends no event, changes no focus.
+    private func approvalBadges() -> Any {
+        var focuses: [[String: Any]] = []
+        for window in appDelegate?.windows ?? [] {
+            var found: [[String: Any]] = []
+            func walk(_ v: NSView) {
+                if let item = v as? NavTabItem, item.showsNeedsYouNow, let pill = item.pillText {
+                    found.append(["tag": item.focus.sessionTag, "pill": pill])
+                }
+                v.subviews.forEach(walk)
+            }
+            if let content = window.contentView { walk(content) }
+            if !found.isEmpty { focuses = found; break }
+        }
+        return ["focuses": focuses, "dock": AppStore.shared.needsYouCoordinator.dockLabel.map { $0 as Any } ?? NSNull()]
     }
 
     /// Press at one point, drag to another, release — for selecting text.

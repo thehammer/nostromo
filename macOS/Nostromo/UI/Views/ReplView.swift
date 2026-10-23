@@ -292,6 +292,11 @@ class ReplView: NSView {
         // its card, and it never touches the scroll view's or the input bar's frames.
         approvalHost.translatesAutoresizingMaskIntoConstraints = false
         addSubview(approvalHost, positioned: .above, relativeTo: jumpOverlay)
+        // Esc in the approval card (or collapsing a focused card) hands keyboard focus back to the composer.
+        approvalHost.focusComposer = { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self.inputBar.textView)
+        }
         // The whole pane (transcript included) accepts image drops.
         registerForDraggedTypes(ImagePasteboard.draggedTypes)
 

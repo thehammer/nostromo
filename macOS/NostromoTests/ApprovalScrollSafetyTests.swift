@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import UserNotifications
 import NostromoKit
 
 // AP2a: the scroll-safety gate for the approval card (PRD "Scroll and focus safety", criterion 36).
@@ -165,6 +166,90 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             XCTAssertEqual(card.allowButton?.isEnabled, true, "Allow becomes enabled once every line has been shown")
             XCTAssertEqual(card.allowButton?.title, "Allow once")
             try assertCardFloatsInsideThePane(p, scrollFrame: scrollFrame, barFrame: barFrame, name: "input scrolled (following: \(following))")
+        }
+    }
+
+    // MARK: AP3: collapse, expand, the pill and the Dock badge
+
+    func testCollapsingAndExpandingMoveNothingAndKeepTheRequestPendingAndCountingDown() throws {
+        let request = try ApprovalTestRequests.compound()
+        for following in [true, false] {
+            let p = pane(following: following)
+            let card = try arrive(request, in: p)
+            let scrollFrame = p.rig.scrollView.frame, barFrame = p.rig.inputBar.frame
+
+            p.rig.assertNoMove("the card collapses (following: \(following))", following: following) {
+                p.store.setCollapsed("req-1", true)
+            }
+            let bar = try XCTUnwrap(p.host.collapsedBar, "the one-line bar is up")
+            XCTAssertTrue(card.isHidden)
+            XCTAssertEqual(p.store.entry(id: "req-1")?.state, .pending)
+            XCTAssertTrue(bar.countdown.isRunning && card.countdown.isRunning, "both keep counting down")
+            XCTAssertEqual(p.rig.scrollView.frame, scrollFrame)
+            XCTAssertEqual(p.rig.inputBar.frame, barFrame)
+
+            p.rig.assertNoMove("the countdown ticks on the bar (following: \(following))", following: following) {
+                for _ in 0 ..< 3 { bar.countdown.tick() }
+            }
+
+            p.rig.assertNoMove("the card expands (following: \(following))", following: following) {
+                p.store.setCollapsed("req-1", false)
+            }
+            XCTAssertNil(p.host.collapsedBar)
+            XCTAssertFalse(card.isHidden)
+            XCTAssertEqual(p.store.entry(id: "req-1")?.state, .pending)
+            XCTAssertTrue(p.recorder.sent.isEmpty, "collapse and expand answer nothing")
+            try assertCardFloatsInsideThePane(p, scrollFrame: scrollFrame, barFrame: barFrame, name: "collapse and expand (following: \(following))")
+        }
+    }
+
+    func testThePillTheDockBadgeAndTheNotificationAppearAndChangeWithoutMovingAnything() throws {
+        for following in [true, false] {
+            let p = pane(following: following)
+            let center = ScrollSafetyFakeCenter()
+            var dock: [String?] = []
+            let coordinator = NeedsYouCoordinator(center: center, dockBadge: { dock.append($0) }, jobTitle: { _ in nil },
+                                                  approvalRequest: { [store = p.store] in store.entry(id: $0)?.request })
+            let badges = ApprovalBadges(store: p.store) { coordinator.setProducer(ApprovalsNeedsYouProducer.name, items: $0) }
+            withExtendedLifetime(badges) {
+                p.rig.assertNoMove("a request arrives with the pill, badge and notification (following: \(following))", following: following) {
+                    p.store.handle(.request(try! ApprovalTestRequests.compound()))
+                }
+                XCTAssertEqual(dock.last ?? nil, "1")
+                XCTAssertEqual(center.added, 1)
+
+                p.rig.assertNoMove("a second request changes them (following: \(following))", following: following) {
+                    p.store.handle(.request(try! ApprovalTestRequests.simpleRm(id: "req-2")))
+                }
+                XCTAssertEqual(dock.last ?? nil, "2")
+                XCTAssertEqual(coordinator.snapshot.perFocus["cody-1"], 2)
+            }
+        }
+    }
+
+    // MARK: AP3: ⌥⌘A and Esc
+
+    func testTheShortcutIsTheOneEventThatMovesFocusAndTheComposerTextSurvivesIt() throws {
+        let request = try ApprovalTestRequests.compound()
+        for following in [true, false] {
+            let p = pane(following: following)
+            let card = try arrive(request, in: p)
+            let scrollFrame = p.rig.scrollView.frame, barFrame = p.rig.inputBar.frame
+            p.host.focusComposer = { [rig = p.rig] in _ = rig.window.makeFirstResponder(rig.textView) }
+
+            XCTAssertTrue(ApprovalOverlayHost.focusCard(in: p.rig.window))
+
+            XCTAssertTrue(p.rig.window.firstResponder === card.initialKeyView, "focus went into the card")
+            XCTAssertEqual(p.rig.textView.string, SafetyRig.typedText, "the composer text survives (following: \(following))")
+            XCTAssertEqual(p.rig.textView.selectedRange(), SafetyRig.typedSelection)
+            XCTAssertEqual(p.rig.scrollView.frame, scrollFrame)
+            XCTAssertEqual(p.rig.inputBar.frame, barFrame)
+            XCTAssertTrue(p.recorder.sent.isEmpty)
+
+            card.cancelOperation(nil)   // Esc inside the card
+            XCTAssertTrue(p.rig.window.firstResponder === p.rig.textView, "Esc gives focus back to the composer")
+            XCTAssertEqual(p.rig.textView.string, SafetyRig.typedText)
+            XCTAssertEqual(p.store.entry(id: "req-1")?.state, .pending)
         }
     }
 
@@ -611,4 +696,13 @@ final class ScrollSafetyGateToleranceTests: XCTestCase {
         XCTAssertNotEqual(rig.snapshot().firstVisible?.turnKey, keyBefore,
                           "precondition: the append changed the turn's content key (the reason the gate compares its identity)")
     }
+}
+
+private final class ScrollSafetyFakeCenter: NotificationCenterLike {
+    private(set) var added = 0
+    func authorizationStatus(completion: @escaping (NeedsYouAuthorization) -> Void) { completion(.authorized) }
+    func requestAuthorization(completion: @escaping (Bool) -> Void) { completion(true) }
+    func add(request: UNNotificationRequest) { added += 1 }
+    func removeDelivered(ids: [String]) {}
+    func removePending(ids: [String]) {}
 }

@@ -127,15 +127,16 @@ class AppStore: ObservableObject {
     /// Mother's "needs you" baseline can be taken.
     private var motherSnapshotSeen = false
     private var awaitingMotherResnapshot: Bool { resnapshotGuard.isHolding }
-    /// Owns the aggregator, the Dock badge and the notifier. AP3 registers approvals here:
-    /// `needsYouCoordinator.setProducer("approvals", items: ...)`, with a content builder for
-    /// its notifications in the Kit notifier. T5 reads per-focus items from `needsYou`.
+    /// Owns the aggregator, the Dock badge and the notifier. Approvals register here through
+    /// `ApprovalBadges` (`setProducer("approvals", ...)`), with a content builder for their
+    /// notifications in the Kit notifier. T5 reads per-focus items from `needsYou`.
     private(set) lazy var needsYouCoordinator: NeedsYouCoordinator = {
         let coordinator = NeedsYouCoordinator(
             center: NeedsYouCoordinator.liveCenter(),
             // The ONLY writer of `dockTile.badgeLabel` in the app (policy-tested).
             dockBadge: { NSApp?.dockTile.badgeLabel = $0 },
-            jobTitle: { [weak self] id in self?.jobMap[id]?.title })
+            jobTitle: { [weak self] id in self?.jobMap[id]?.title },
+            approvalRequest: { ApprovalStore.shared.entry(id: $0)?.request })
         coordinator.onChange = { [weak self] in self?.needsYou = $0 }
         coordinator.notifier.onSurfaceAvailabilityChange = { [weak self] available in
             self?.broker.setNotifySurfaceAvailable(available)
@@ -1734,13 +1735,14 @@ extension ApprovalStore {
 /// One app-wide "needs you" source: the aggregator, the Dock badge and the notifier.
 /// Main thread only.
 ///
-/// Producers feed it (`setMotherJobs`, `setAttentionTags`, and `setProducer` for AP3's
-/// approvals); consumers read `snapshot` (or `AppStore.needsYou`). Nothing else in the app
+/// Producers feed it (`setMotherJobs`, `setAttentionTags`, and `setProducer` for approvals,
+/// through `ApprovalBadges`); consumers read `snapshot` (or `AppStore.needsYou`). Nothing else in the app
 /// writes the Dock tile or posts a "needs you" notification.
 final class NeedsYouCoordinator {
     private var aggregator = NeedsYouAggregator()
     private let dockBadge: (String?) -> Void
-    private var lastBadge: String?
+    /// What the Dock badge says now (nil at zero).
+    private(set) var dockLabel: String?
 
     private(set) var snapshot = NeedsYouSnapshot.empty
     let notifier: NeedsYouNotifier
@@ -1748,13 +1750,16 @@ final class NeedsYouCoordinator {
 
     /// `dockBadge` gets `"\(total)"`, or nil at zero, each time the label changes.
     /// `jobTitle` maps a Mother job id to its title for the notification body.
+    /// `approvalRequest` maps a request id to its request for the approvals notification text.
     init(center: NotificationCenterLike,
          dockBadge: @escaping (String?) -> Void,
-         jobTitle: @escaping (String) -> String?) {
+         jobTitle: @escaping (String) -> String?,
+         approvalRequest: @escaping (String) -> ApprovalRequestWire? = { _ in nil }) {
         self.dockBadge = dockBadge
         notifier = NeedsYouNotifier(
             center: center,
-            builders: [MotherNeedsYouProducer.name: MotherNeedsYouContentBuilder(jobTitle: jobTitle)],
+            builders: [MotherNeedsYouProducer.name: MotherNeedsYouContentBuilder(jobTitle: jobTitle),
+                       ApprovalsNeedsYouProducer.name: ApprovalsNeedsYouContentBuilder(request: approvalRequest)],
             baselineExisting: true)
     }
 
@@ -1776,8 +1781,8 @@ final class NeedsYouCoordinator {
         guard updated != snapshot || takesBaseline else { return }
         snapshot = updated
         let label = updated.total > 0 ? "\(updated.total)" : nil
-        if label != lastBadge {
-            lastBadge = label
+        if label != dockLabel {
+            dockLabel = label
             dockBadge(label)
         }
         notifier.apply(updated, baselining: takesBaseline ? producer : nil)
