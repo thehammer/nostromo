@@ -109,6 +109,8 @@ class ReplView: NSView {
     private var lastRecordedDocumentHeight: CGFloat = 0
     /// `shedMaterializedViews` released the views and its pass waits for the compaction to land.
     private var shedInFlight = false
+    /// How many times the document view's draw heartbeat has fired (a test proves it is alive).
+    private(set) var documentWillDrawCount = 0
     /// "Tool activity finished, N failed calls", for VoiceOver, when this pane is focused.
     private lazy var announcer = ToolActivityAnnouncer(post: ToolActivityAnnouncer.voiceOver(from: self))
 
@@ -742,6 +744,7 @@ class ReplView: NSView {
     /// The draw heartbeat: the document view is about to be drawn. Records how many turn rows are in
     /// the visible rect, and lets rule (c) ask whether a draw is about to paint none.
     private func documentViewWillDraw() {
+        documentWillDrawCount += 1
         guard renderWatch.automaticEvaluation else { return }
         let visible = scrollView.contentView.bounds
         renderWatch.noteDraw(rowsPainted: turnViewCount(overlapping: visible), dirtyRect: visible)
@@ -1254,6 +1257,11 @@ extension ReplView: PaneRenderSubject {
     /// Test seam: releases every turn view and schedules nothing, which is what the blank looks like.
     func evictAllTurnViewsForTesting() {
         releaseAllTurnViews(reason: .test)
+    }
+
+    /// Test seam: marks the document view dirty so the next real display pass draws it.
+    func dirtyDocumentViewForTesting() {
+        documentView.setNeedsDisplay(documentView.visibleRect.isEmpty ? documentView.bounds : documentView.visibleRect)
     }
 
     /// Test seam: what the document view's draw heartbeat does, with the clock passed in.

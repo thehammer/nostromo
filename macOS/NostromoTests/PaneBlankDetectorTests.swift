@@ -610,6 +610,36 @@ final class PaneBlankDetectorTests: XCTestCase {
         XCTAssertTrue(files(pane).isEmpty)
     }
 
+    /// The proof that rule (c) has a heartbeat at all: every other rule-(c) test feeds a simulated draw.
+    /// This one lets AppKit draw the real document view in an ordered-in, layer-backed window.
+    func testTheRealDocumentViewDrawHeartbeatFiresWhenAppKitDisplaysTheDirtiedView() {
+        let pane = makeMaterializedPane()
+        pane.watch.automaticEvaluation = true
+        addTeardownBlock { pane.watch.automaticEvaluation = false }
+        XCTAssertTrue(pane.window.isVisible, "the window is ordered in, so AppKit really displays it")
+        XCTAssertTrue(pane.repl.layer != nil, "the pane is layer-backed")
+
+        let beforeCount = pane.repl.documentWillDrawCount
+        let drawsBefore = pane.watch.recorder.events.filter { $0.kind == .draw }.count
+        let totalBefore = pane.watch.recorder.totalRecorded
+
+        // Dirty the document view, then run real display passes. Nothing here calls the heartbeat.
+        for _ in 0 ..< 5 {
+            pane.repl.dirtyDocumentViewForTesting()
+            pane.window.displayIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            if pane.repl.documentWillDrawCount > beforeCount { break }
+        }
+
+        XCTAssertGreaterThan(pane.repl.documentWillDrawCount, beforeCount,
+                             "AppKit never called viewWillDraw on the document view: the heartbeat is dead")
+        let drawEvents = pane.watch.recorder.events.filter { $0.kind == .draw }
+        XCTAssertTrue(drawEvents.contains { $0.seq > totalBefore } || drawEvents.count > drawsBefore
+                      || drawEvents.contains { $0.coalescedCount > 1 },
+                      "the heartbeat fired but no .draw event was recorded")
+        XCTAssertFalse(drawEvents.isEmpty)
+    }
+
     func testScenarioD_AFourHundredMillisecondStallIsCapturedAsAStall() throws {
         let pane = makeMaterializedPane()
 
