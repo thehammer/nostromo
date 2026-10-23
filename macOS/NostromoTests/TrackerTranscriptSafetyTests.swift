@@ -86,7 +86,7 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
 
         // The setup is what the criterion describes.
         XCTAssertTrue(rig.window.contentView === p.split)
-        XCTAssertEqual(p.split.arrangedSubviews.count, 2)
+        XCTAssertEqual(p.split.subviews.count, 2)
         XCTAssertEqual(p.left.frame.width, p.leftWidth, accuracy: 0.5, "the transcript kept its width")
         XCTAssertGreaterThan(tracker.frame.width, 300, "the tracker has room on the right of the divider")
         XCTAssertNotNil(rig.snapshot().firstVisible, "the transcript has a first visible block")

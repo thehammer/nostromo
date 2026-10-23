@@ -289,10 +289,18 @@ final class TrackerAppearanceTests: XCTestCase {
         let key = results(keyWindow: true).measured
         let notKey = results(keyWindow: false).measured
         XCTAssertFalse(key.isEmpty, "something was measured")
+        var lines: [String] = []
         for id in key.keys.sorted() where id != "pane-background" {
             let k = key[id].map { String(format: "%.2f", $0.ratio) } ?? "n/a"
             let n = notKey[id].map { String(format: "%.2f", $0.ratio) } ?? "n/a"
-            print("TRACKER-CONTRAST \(id) key=\(k) nonkey=\(n)")
+            lines.append("\(id) key=\(k) nonkey=\(n)")
+        }
+        print(lines.map { "TRACKER-CONTRAST \($0)" }.joined(separator: "\n"))
+        // `make mac-test` keeps only lines with "error:", "failed" or a test count, so a print never
+        // reaches the CI log. An expected failure does (the scroll-gate self-tests use the same
+        // route) and the run stays green: it is how the measured ratios get into the PR.
+        XCTExpectFailure("records the measured contrast ratios in the CI log; not a defect") {
+            XCTFail("TRACKER-CONTRAST " + lines.joined(separator: " | "))
         }
     }
 
