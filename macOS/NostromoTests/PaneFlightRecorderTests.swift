@@ -190,7 +190,7 @@ final class PaneFlightRecorderTests: XCTestCase {
                 XCTAssertFalse(kind.fieldNames.contains(reserved), "\(kind.name) shadows the '\(reserved)' key")
             }
         }
-        XCTAssertEqual(PaneFlightRecorder.Kind.allCases.count, 20)
+        XCTAssertEqual(PaneFlightRecorder.Kind.allCases.count, 21)
     }
 
     // MARK: - Overhead budget
