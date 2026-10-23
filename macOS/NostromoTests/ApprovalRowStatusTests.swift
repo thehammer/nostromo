@@ -1391,7 +1391,7 @@ final class ApprovalPagingHostTests: XCTestCase {
         XCTAssertEqual(p.store.entry(id: "b")?.state, ApprovalAnswerState.inFlight(.deny), "the answered one is on its way, the others still wait")
     }
 
-    func testAnAnsweredRequestShowsItsOutcomeThenTheCardFallsBackToTheOldestRemaining() throws {
+    func testAnAnsweredRequestShowsItsOutcomeThenTheCardMovesToTheNextOne() throws {
         let p = ApprovalPane(self)
         try p.arrive(["a", "b", "c"])
         p.host.showNext()
@@ -1406,8 +1406,8 @@ final class ApprovalPagingHostTests: XCTestCase {
         p.recorder.runScheduled()
         p.layout()
 
-        XCTAssertEqual(p.host.card?.request.id, "a", "the oldest remaining")
-        XCTAssertEqual(p.host.card?.pageText, "1 of 2")
+        XCTAssertEqual(p.host.card?.request.id, "c", "the next one, not back to the first")
+        XCTAssertEqual(p.host.card?.pageText, "2 of 2")
         XCTAssertEqual(p.host.card?.denyButton.isEnabled, true, "and it is waiting for its own answer")
         XCTAssertEqual(p.recorder.sent.count, 1)
     }
