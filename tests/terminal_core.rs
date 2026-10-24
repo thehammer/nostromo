@@ -567,6 +567,20 @@ impl Unix {
 
 // ── the daemon under test ────────────────────────────────────────────────────
 
+/// The fake verifier that makes the n-th Unix connection `peers[n]`.
+fn peer_verifier(peers: &[Peer]) -> FakePeerVerifier {
+    let script: Vec<Option<PeerInfo>> = peers
+        .iter()
+        .map(|p| {
+            Some(match p {
+                Peer::App => app_info(),
+                Peer::Script => script_info(),
+            })
+        })
+        .collect();
+    FakePeerVerifier::scripted(script, Some(script_info()))
+}
+
 /// Who the fake verifier says the n-th Unix connection is, in connect order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Peer {
@@ -624,22 +638,47 @@ impl Daemon {
         audit_path: PathBuf,
         store_path: PathBuf,
     ) -> Daemon {
+        Self::serve_with(
+            peer_verifier(peers),
+            tmp,
+            terminals,
+            panes,
+            audit_path,
+            store_path,
+        )
+        .await
+    }
+
+    /// [`Daemon::start`] with a verifier of the test's own.
+    async fn start_with(verifier: FakePeerVerifier) -> Daemon {
+        isolate_process_env();
+        let tmp = TempDir::new().expect("tempdir");
+        let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+        let audit_path = tmp.path().join("audit").join("terminal.jsonl");
+        let store_path = tmp.path().join("daemon-terminals.json");
+        let terminals = TerminalManager::new(TerminalConfig {
+            audit: AuditLog::open(&audit_path).expect("open the audit log"),
+            store: TerminalStore::at(&store_path),
+            pane_registry: Some(Arc::clone(&panes)),
+        });
+        Self::serve_with(verifier, tmp, terminals, panes, audit_path, store_path).await
+    }
+
+    async fn serve_with(
+        verifier: FakePeerVerifier,
+        tmp: TempDir,
+        terminals: Arc<Mutex<TerminalManager>>,
+        panes: Arc<Mutex<PaneRegistry>>,
+        audit_path: PathBuf,
+        store_path: PathBuf,
+    ) -> Daemon {
         isolate_process_env();
         let socket_path = tmp.path().join("test.sock");
         let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
             tmp.path().join("sessions.json"),
         )));
         let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
-        let script: Vec<Option<PeerInfo>> = peers
-            .iter()
-            .map(|p| {
-                Some(match p {
-                    Peer::App => app_info(),
-                    Peer::Script => script_info(),
-                })
-            })
-            .collect();
-        let verifier = Arc::new(FakePeerVerifier::scripted(script, Some(script_info())));
+        let verifier = Arc::new(verifier);
 
         let server = Server::bind(
             &socket_path,
@@ -2773,4 +2812,55 @@ async fn an_absurd_resize_is_refused_and_changes_nothing() {
     }
     let now = d.info(&info.terminal_id).expect("still there");
     assert_eq!((now.cols, now.rows), (info.cols, info.rows));
+}
+
+/// Once a fresh look at the peer stops seeing the verified app (another
+/// process took over the socket), the connection loses terminal access for
+/// good: the verb that noticed is refused, and so is every later one,
+/// keystrokes included.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_re_check_of_the_peer_revokes_terminal_access_for_good() {
+    // Re-inspections: activation (Subscribe) and the open see the app; the
+    // attach sees someone else.
+    let verifier =
+        peer_verifier(&[Peer::App]).with_reinspect(vec![Some(app_info()), Some(app_info()), None]);
+    let d = Daemon::start_with(verifier).await;
+    let (_dir, cwd) = canonical_tmp();
+    let mut app = d.app(vec![]).await;
+    let info = app.open(TAG, Some(&cwd), "req-revoke").await;
+    let tid = info.terminal_id.clone();
+
+    let from = app.mark();
+    app.send(&ClientMsg::TerminalAttach {
+        terminal_id: tid.clone(),
+    })
+    .await;
+    let (_, refused) = app
+        .wait_since(from, "the attach refusal", |m| {
+            matches!(m, ServerMsg::TerminalRefused { .. })
+        })
+        .await;
+    assert!(
+        matches!(&refused, ServerMsg::TerminalRefused { code, .. } if code == "terminal_read_forbidden"),
+        "{refused:?}"
+    );
+
+    // Within the re-check interval, input is not re-inspected, yet it is
+    // refused: the cap is gone.
+    let from = app.mark();
+    app.input(&tid, b"echo SHOULD-NOT-RUN\r").await;
+    let (_, refused) = app
+        .wait_since(from, "the input refusal", |m| {
+            matches!(m, ServerMsg::TerminalRefused { .. })
+        })
+        .await;
+    assert!(
+        matches!(&refused, ServerMsg::TerminalRefused { code, .. } if code == "terminal_input_forbidden"),
+        "{refused:?}"
+    );
+    app.sync().await;
+    assert!(
+        !app.log.iter().any(is_terminal_bytes_frame),
+        "no terminal bytes after the failed re-check"
+    );
 }

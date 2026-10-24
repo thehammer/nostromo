@@ -94,6 +94,10 @@ type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
 /// open structured decision. Only an id is kept, never job content.
 type HeldMotherJobs = Arc<Mutex<HashSet<String>>>;
 
+/// How long an operator connection's terminal input and resizes go without
+/// a fresh look at the peer (open, attach, close and restart always get one).
+const TERMINAL_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// What a client is told when it sends a `PerriAction` while Perri is switched off.
 const PERRI_DISABLED: &str =
     "Perri is disabled in this daemon's config ([agents.perri] enabled = false).";
@@ -635,6 +639,8 @@ where
     // frames a process buffered before `exec`ing the app cannot hold the nonce.
     let mut pending_cap = access::mint(trust);
     let mut cap: Option<OperatorCap> = None;
+    // When the peer behind the cap was last inspected and found unchanged.
+    let mut cap_checked_at = std::time::Instant::now();
 
     let welcome = welcome_msg(&session_mgr.lock().unwrap(), operator_nonce.clone());
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
@@ -794,7 +800,10 @@ where
     if pending_cap.is_some() {
         match check_operator_answer(&origin, operator_nonce.as_deref(), sub_nonce.as_deref()).await
         {
-            Ok(()) => activate(&mut pending_cap, &mut cap, capabilities),
+            Ok(()) => {
+                activate(&mut pending_cap, &mut cap, capabilities);
+                cap_checked_at = std::time::Instant::now();
+            }
             Err(e) => debug!(conn_key, "terminal verbs not enabled yet: {e}"),
         }
     }
@@ -1089,7 +1098,10 @@ where
                                 lock_terminals(&terminals).set_capabilities(cap, &conn_key, capabilities);
                             } else if pending_cap.is_some() {
                                 match check_operator_answer(&origin, operator_nonce.as_deref(), sent.as_deref()).await {
-                                    Ok(()) => activate(&mut pending_cap, &mut cap, capabilities),
+                                    Ok(()) => {
+                                        activate(&mut pending_cap, &mut cap, capabilities);
+                                        cap_checked_at = std::time::Instant::now();
+                                    }
                                     Err(e) => debug!(conn_key, "terminal verbs not enabled yet: {e}"),
                                 }
                             }
@@ -1146,27 +1158,34 @@ where
                             _ => None,
                         };
                         // Opening, attaching, closing and restarting a terminal
-                        // also re-check the peer (a code-signing check, too
-                        // slow for every keystroke): a process that took over
-                        // the app's socket gets no cap for them.
-                        let terminal_cap = match &msg {
-                            ClientMsg::TerminalOpenLocal { .. }
-                            | ClientMsg::TerminalAttach { .. }
-                            | ClientMsg::TerminalClose { .. }
-                            | ClientMsg::TerminalRestart { .. }
-                                if cap.is_some() =>
-                            {
-                                match origin.still_the_operator().await {
-                                    Ok(()) => cap.as_ref(),
-                                    Err(e) => {
-                                        warn!(conn_key, "terminal verb refused: {e}");
-                                        None
+                        // re-check the peer every time; input and resize at most
+                        // every `TERMINAL_RECHECK` (the check verifies code
+                        // signing: too slow for every keystroke). A failed check
+                        // revokes the cap for good: a process that took over the
+                        // app's socket gets nothing more.
+                        let recheck = cap.is_some()
+                            && match &msg {
+                                ClientMsg::TerminalOpenLocal { .. }
+                                | ClientMsg::TerminalAttach { .. }
+                                | ClientMsg::TerminalClose { .. }
+                                | ClientMsg::TerminalRestart { .. } => true,
+                                ClientMsg::TerminalInput { .. } | ClientMsg::TerminalResize { .. } => {
+                                    cap_checked_at.elapsed() >= TERMINAL_RECHECK
+                                }
+                                _ => false,
+                            };
+                        if recheck {
+                            match origin.still_the_operator().await {
+                                Ok(()) => cap_checked_at = std::time::Instant::now(),
+                                Err(e) => {
+                                    warn!(conn_key, "terminal access revoked: {e}");
+                                    if let Some(revoked) = cap.take() {
+                                        lock_terminals(&terminals).unregister_conn(&revoked, &conn_key);
                                     }
                                 }
                             }
-                            _ => cap.as_ref(),
-                        };
-                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions, &held_mother_jobs, terminal_cap, &terminals);
+                        }
+                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions, &held_mother_jobs, cap.as_ref(), &terminals);
                     }
                     Err(_) => {
                         // Client disconnected.
