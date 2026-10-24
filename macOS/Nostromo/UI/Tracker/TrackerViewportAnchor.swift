@@ -36,14 +36,18 @@ struct TrackerViewportAnchor: Equatable {
     }
 
     /// The viewport top that restores the anchor in the new layout, clamped to the scrollable range;
-    /// nil when none of the anchored rows survived.
-    func restoredTop(frames: [String: CGRect], renamed: [String: String] = [:],
-                     documentHeight: CGFloat, viewportHeight: CGFloat) -> CGFloat? {
-        for entry in entries {
+    /// nil when none of the anchored rows survived in place.
+    /// - Parameters:
+    ///   - skipping: rows that changed their order; anchoring to one would carry the viewport along.
+    ///   - shift: how far the viewport's top edge moved down on screen (the banner or the strip
+    ///     appeared above it); the content scrolls by as much so the read line stays put.
+    func restoredTop(frames: [String: CGRect], renamed: [String: String] = [:], skipping: Set<String> = [],
+                     shift: CGFloat = 0, documentHeight: CGFloat, viewportHeight: CGFloat) -> CGFloat? {
+        for entry in entries where !skipping.contains(entry.key) {
             let key = frames[entry.key] != nil ? entry.key : renamed[entry.key]
-            guard let key, let frame = frames[key] else { continue }
+            guard let key, !skipping.contains(key), let frame = frames[key] else { continue }
             let maxTop = max(0, documentHeight - viewportHeight)
-            return min(max(0, frame.minY + entry.offset), maxTop)
+            return min(max(0, frame.minY + entry.offset + shift), maxTop)
         }
         return nil
     }

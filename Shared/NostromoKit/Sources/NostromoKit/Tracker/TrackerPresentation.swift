@@ -561,7 +561,7 @@ public enum TrackerRelativeTime {
         if seconds < 60 { return "now" }
         if seconds < 3_600 { return "\(Int(seconds / 60)) m" }
         if seconds < 86_400 { return "\(Int(seconds / 3_600)) h" }
-        return dayFormatter(timeZone).string(from: date)
+        return formatter("MMM d", timeZone).string(from: date)
     }
 
     /// The header's "updated 2 m ago" ("updated just now", "updated Oct 14").
@@ -587,10 +587,6 @@ public enum TrackerRelativeTime {
 
     private static let lock = NSLock()
     private static var formatters: [String: DateFormatter] = [:]
-
-    private static func dayFormatter(_ timeZone: TimeZone) -> DateFormatter {
-        formatter("MMM d", timeZone)
-    }
 
     /// Cached per format and time zone; a `DateFormatter` is costly to make and a board has
     /// hundreds of times.

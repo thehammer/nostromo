@@ -13,6 +13,8 @@
 //   Open, no longer needing you under Waiting on you) stays in place with its new state likewise.
 // - An item the user can see that is removed leaves a muted "removed" stub in its place until it
 //   leaves the viewport.
+// - An item the user can see that moves within its section (by the agent, or into or out of an
+//   open Done group) stays where it is, with its new content, until it leaves the viewport.
 // - A row holding a text selection keeps its content until the selection is cleared.
 //
 // Pure and stateless between calls apart from one-shot release requests: every `resolve` works
@@ -39,6 +41,19 @@ public struct TrackerHold: Equatable {
     /// What is shown in its place: the struck-through done item, a stub, or (for a selection) the
     /// row as it was.
     public let row: TrackerRow
+
+    /// What happens to the board's own row for this key while the hold lasts.
+    enum Placement: Equatable {
+        /// The board has no row for it: the held row goes back where the reader saw it.
+        case insert
+        /// The board's row is in the same place: the held row replaces it.
+        case replace
+        /// The board's row moved: it shows at its new place as `moving:<id>`, the held row stays.
+        case relocateTarget
+        /// The board's row moved within its section: it waits, the held row stays.
+        case removeTarget
+    }
+    var placement: Placement = .insert
 }
 
 public struct TrackerDeferralResult: Equatable {
@@ -69,7 +84,8 @@ public struct TrackerDeferral {
 
     public var hasHeld: Bool { !held.isEmpty }
 
-    /// The pane was reopened (or the user changed the filter): the next `resolve` holds nothing.
+    /// The pane was reopened (or the user changed the filter): the next `resolve` holds nothing but
+    /// a text selection's row.
     public mutating func releaseAll() {
         releaseEverything = true
     }
@@ -87,9 +103,11 @@ public struct TrackerDeferral {
             releaseEverything = false
             releasedSections = []
         }
-        let holds = releaseEverything ? [] : findHolds(displayed: displayed, target: target,
-                                                       visibleKeys: visibleKeys, selectedKey: selectedKey)
-        let rows = place(holds, displayed: displayed, target: target.rows)
+        // Releasing everything (the pane was reopened, the filter changed) still never takes the
+        // content of a row out from under a text selection.
+        let holds = findHolds(displayed: displayed, target: target, visibleKeys: releaseEverything ? [] : visibleKeys,
+                              selectedKey: selectedKey)
+        let rows = place(holds, displayed: displayed, target: target)
 
         var renamed: [String: String] = [:]
         let shownKeys = Set(rows.map(\.key))
@@ -112,13 +130,22 @@ public struct TrackerDeferral {
     private func findHolds(displayed: [TrackerRow], target: TrackerPresentation,
                            visibleKeys: Set<String>, selectedKey: String?) -> [TrackerHold] {
         let targetByKey = Dictionary(target.rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        // Rows whose place among the others changed (not just shifted by inserts and removals).
+        let movedKeys = Set(TrackerDiff.ops(from: displayed, to: target.rows).compactMap { op -> String? in
+            if case .move(let key, _) = op { return key }
+            return nil
+        })
         var holds: [TrackerHold] = []
         for row in displayed where !row.key.hasPrefix(Self.movingPrefix) {
             let key = row.key
+            let now = targetByKey[key]
             if key == selectedKey {
-                if targetByKey[key] != row {
-                    holds.append(TrackerHold(key: key, kind: .selection, row: row))
-                }
+                guard now != row else { continue }
+                // The selected row keeps its content and its place; if the board moved it, the live
+                // item shows at its new place under `moving:<id>` meanwhile.
+                let elsewhere = now != nil && (movedKeys.contains(key) || now?.item?.sectionId != row.item?.sectionId)
+                holds.append(TrackerHold(key: key, kind: .selection, row: row,
+                                         placement: now == nil ? .insert : (elsewhere ? .relocateTarget : .replace)))
                 continue
             }
             guard let shown = row.item else { continue }   // only items are deferred
@@ -126,11 +153,17 @@ public struct TrackerDeferral {
             let onScreen = visibleKeys.contains(key) || selectedKey == Self.movingPrefix + shown.id
             guard onScreen else { continue }
 
-            if let now = targetByKey[key] {
-                if case .item(let item) = now.content, item.sectionId != shown.sectionId {
+            if let now {
+                guard case .item(let item) = now.content else { continue }
+                if item.sectionId != shown.sectionId {
                     holds.append(TrackerHold(key: key, kind: .moved, row: TrackerRow(
                         key: key, content: .stub(TrackerStubRow(kind: .movedTo(sectionTitle: item.sectionTitle),
-                                                               item: shown)))))
+                                                               item: shown))), placement: .relocateTarget))
+                } else if movedKeys.contains(key), !(item.isDone && releasedSections.contains(item.sectionId)) {
+                    // Moved within its section (by the agent, or into or out of an open Done group):
+                    // it stays where the reader is, with its new content, until it leaves the viewport.
+                    holds.append(TrackerHold(key: key, kind: item.isDone ? .doneInPlace : .keptInPlace,
+                                             row: now, placement: .removeTarget))
                 }
                 continue
             }
@@ -149,23 +182,27 @@ public struct TrackerDeferral {
     }
 
     /// The target rows with every hold put back where the reader last saw it.
-    private func place(_ holds: [TrackerHold], displayed: [TrackerRow], target: [TrackerRow]) -> [TrackerRow] {
-        guard !holds.isEmpty else { return target }
-        var rows = target
+    private func place(_ holds: [TrackerHold], displayed: [TrackerRow], target: TrackerPresentation) -> [TrackerRow] {
+        guard !holds.isEmpty else { return target.rows }
+        var rows = target.rows
         var placed = Set<String>()
 
         for hold in holds {
             guard let index = rows.firstIndex(where: { $0.key == hold.key }) else { continue }
-            switch hold.kind {
-            case .moved:
-                // The live item shows in its new section under its temporary key.
+            switch hold.placement {
+            case .relocateTarget:
+                // The live item shows at its new place under its temporary key.
                 if let id = rows[index].item?.id {
                     rows[index] = TrackerRow(key: Self.movingPrefix + id, content: rows[index].content)
+                } else {
+                    rows.remove(at: index)
                 }
-            case .selection:
+            case .replace:
                 rows[index] = hold.row
                 placed.insert(hold.key)
-            case .doneInPlace, .keptInPlace, .removed:
+            case .removeTarget:
+                rows.remove(at: index)
+            case .insert:
                 break
             }
         }
@@ -173,23 +210,50 @@ public struct TrackerDeferral {
         let byKey = Dictionary(holds.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         for (i, row) in displayed.enumerated() {
             guard let hold = byKey[row.key], !placed.contains(hold.key) else { continue }
-            var insertAt = 0
-            for j in stride(from: i - 1, through: 0, by: -1) {
-                if let index = rows.firstIndex(where: { $0.key == displayed[j].key }) {
-                    insertAt = index + 1
-                    break
-                }
-            }
-            rows.insert(hold.row, at: insertAt)
+            rows.insert(hold.row, at: Self.insertionIndex(for: row, at: i, displayed: displayed, in: rows))
             placed.insert(hold.key)
         }
-        return Self.uncountHeldDone(holds, in: rows)
+        return Self.uncountHeldDone(holds, folded: target.foldedItems, in: rows)
     }
 
-    /// A done item still shown in place has not folded yet, so its section's "Done (N)" does not
-    /// count it; a group left with nothing in it is not shown until something folds.
-    private static func uncountHeldDone(_ holds: [TrackerHold], in rows: [TrackerRow]) -> [TrackerRow] {
-        let heldIds = Set(holds.filter { $0.kind == .doneInPlace }.compactMap { $0.row.item?.id })
+    /// Right after the nearest row above it on screen that is still shown and in the same section
+    /// (or after that section's heading), so a held row never lands under another section's heading.
+    private static func insertionIndex(for held: TrackerRow, at position: Int, displayed: [TrackerRow],
+                                       in rows: [TrackerRow]) -> Int {
+        let section = held.item?.sectionId
+        var fallback: Int?
+        for j in stride(from: position - 1, through: 0, by: -1) {
+            guard let index = rows.firstIndex(where: { $0.key == displayed[j].key }) else { continue }
+            if fallback == nil { fallback = index + 1 }
+            if section == nil || Self.section(of: rows[index]) == section { return index + 1 }
+        }
+        if let section, let heading = rows.firstIndex(where: { $0.key == TrackerRow.sectionKey(section) }) {
+            return heading + 1
+        }
+        return fallback ?? 0
+    }
+
+    private static func section(of row: TrackerRow) -> String? {
+        switch row.content {
+        case .section(let section): return section.id
+        case .doneGroup(let group): return group.sectionId
+        default: return row.item?.sectionId
+        }
+    }
+
+    /// A done item still shown in place (struck through, or frozen under a selection) has not
+    /// folded yet, so its section's "Done (N)" does not count it; a group left with nothing in it is
+    /// not shown until something folds.
+    private static func uncountHeldDone(_ holds: [TrackerHold], folded: [String: TrackerItemRow],
+                                        in rows: [TrackerRow]) -> [TrackerRow] {
+        let heldIds = Set(holds.compactMap { hold -> String? in
+            guard let id = hold.row.item?.id else { return nil }
+            switch hold.kind {
+            case .doneInPlace: return id
+            case .selection: return folded[id] != nil || hold.placement == .relocateTarget ? id : nil
+            default: return nil
+            }
+        })
         guard !heldIds.isEmpty else { return rows }
         return rows.compactMap { row in
             guard case .doneGroup(let group) = row.content, group.itemIds.contains(where: heldIds.contains) else { return row }

@@ -64,6 +64,8 @@ final class TrackerPaneView: NSView {
     private var isApplying = false
     private var laidOutWidth: CGFloat = -1
     private var selectedKey: String?
+    /// The pane was out of any window for longer than a layout rebuild.
+    private var wasAway = false
 
     /// - Parameters:
     ///   - now: the clock relative times are drawn from.
@@ -144,6 +146,12 @@ final class TrackerPaneView: NSView {
             forName: NSView.boundsDidChangeNotification, object: clipView, queue: nil) { [weak self] _ in
                 self?.viewportMoved()
             })
+        // Plugging in a mouse switches overlay and legacy scrollers, which changes the clip's width.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil, queue: nil) { [weak self] _ in
+                self?.scrollView.tile()
+                self?.needsLayout = true
+            })
         observers.append(NotificationCenter.default.addObserver(
             forName: NSTextView.didChangeSelectionNotification, object: nil, queue: nil) { [weak self] note in
                 guard let self, let view = note.object as? TrackerTextView, view.isDescendant(of: self.documentView) else { return }
@@ -201,6 +209,7 @@ final class TrackerPaneView: NSView {
 
         let anchor = captureAnchor()
         let visible = visibleKeys()
+        let scrollTop = scrollView.frame.minY
         header.update(target.header)
         banner.update(target.banner)
         strip.update(target.strip)
@@ -240,8 +249,19 @@ final class TrackerPaneView: NSView {
         displayedRows = result.rows
 
         layoutChrome()
+        // The banner or the strip appearing or going pushes the scroll view's top by this much: the
+        // reading position follows it, so the line being read stays where it is on screen.
+        let chromeShift = scrollView.frame.minY - scrollTop
+        if result.applyNow.isEmpty && chromeShift == 0 && contentWidth == laidOutWidth && !firstRender {
+            rowsUpdatedLast = 0
+            return   // nothing on screen changed (a re-check on scroll, an identical board)
+        }
         layoutRowsToFit()
-        restore(anchor, renamed: result.renamed)
+        let moved = Set(result.applyNow.compactMap { op -> String? in
+            if case .move(let key, _) = op { return key }
+            return nil
+        })
+        restore(anchor, renamed: result.renamed, skipping: moved, shift: chromeShift, firstRender: firstRender)
 
         if !result.applyNow.isEmpty { renderGeneration += 1 }
         rowsUpdatedLast = updated
@@ -278,7 +298,7 @@ final class TrackerPaneView: NSView {
         layoutChrome()
         if contentWidth != laidOutWidth {
             layoutRowsToFit()
-            restore(anchor, renamed: [:])
+            restore(anchor, renamed: [:], skipping: [], shift: 0, firstRender: false)
         }
     }
 
@@ -335,18 +355,32 @@ final class TrackerPaneView: NSView {
         return TrackerViewportAnchor.capture(rows: rowFrames, viewport: clipView.bounds)
     }
 
-    private func restore(_ anchor: TrackerViewportAnchor?, renamed: [String: String]) {
+    /// Scroll so the anchored row is back where the reader saw it. Rows that changed their order
+    /// (`skipping`) are not anchored to: following one would carry the whole viewport along with it.
+    /// `shift` is how far the scroll view's top moved on screen. With no anchor the position stays,
+    /// except on the first render, which starts at the top.
+    private func restore(_ anchor: TrackerViewportAnchor?, renamed: [String: String], skipping: Set<String>,
+                         shift: CGFloat, firstRender: Bool) {
         let frames = Dictionary(rowFrames.map { ($0.key, $0.frame) }, uniquingKeysWith: { first, _ in first })
-        let top = anchor?.restoredTop(frames: frames, renamed: renamed,
-                                      documentHeight: documentView.frame.height,
-                                      viewportHeight: clipView.bounds.height) ?? 0
-        guard abs(clipView.bounds.minY - top) > 0.01 || anchor == nil else { return }
+        let maxTop = max(0, documentView.frame.height - clipView.bounds.height)
+        let top: CGFloat
+        if let anchor, let restored = anchor.restoredTop(frames: frames, renamed: renamed, skipping: skipping,
+                                                          shift: shift, documentHeight: documentView.frame.height,
+                                                          viewportHeight: clipView.bounds.height) {
+            top = restored
+        } else if firstRender {
+            top = 0
+        } else {
+            top = min(max(0, clipView.bounds.minY + shift), maxTop)
+        }
+        guard abs(clipView.bounds.minY - top) > 0.01 || firstRender else { return }
         clipView.scroll(to: NSPoint(x: 0, y: top))
         scrollView.reflectScrolledClipView(clipView)
     }
 
     /// Keys of the rows intersecting the viewport now.
     func visibleKeys() -> Set<String> {
+        guard !isHiddenOrHasHiddenAncestor else { return [] }   // a background tab holds nothing back
         let viewport = clipView.bounds
         return Set(rowFrames.filter { $0.frame.maxY > viewport.minY && $0.frame.minY < viewport.maxY }.map(\.key))
     }
@@ -385,13 +419,23 @@ final class TrackerPaneView: NSView {
         super.viewDidMoveToWindow()
         tickTimer?.invalidate()
         tickTimer = nil
-        guard window != nil else { return }
+        guard window != nil else {
+            // A layout rebuild detaches the reused pane and puts it back within the same turn of
+            // the run loop; only a pane still out of a window after that was really away.
+            DispatchQueue.main.async { [weak self] in
+                if let self, self.window == nil { self.wasAway = true }
+            }
+            return
+        }
         if let tickInterval {
             let timer = Timer(timeInterval: tickInterval, repeats: true) { [weak self] _ in self?.tick() }
             RunLoop.main.add(timer, forMode: .common)
             tickTimer = timer
         }
-        reopened()
+        if wasAway {
+            wasAway = false
+            reopened()
+        }
     }
 
     override func viewDidUnhide() {

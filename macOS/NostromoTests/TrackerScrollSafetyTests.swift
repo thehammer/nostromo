@@ -595,12 +595,23 @@ final class TrackerGateHarness {
 
     // MARK: The gate
 
-    /// Run `event` and assert what the reader sees did not move: the first visible row key is the
-    /// same, the viewport top's offset into it moved by at most 1 pt, and the pane never took focus.
+    /// The top edge of `key`'s row in window coordinates: where the reader sees it.
+    func screenTop(of key: String) -> CGFloat? {
+        pane.rowViews[key].map { $0.convert($0.bounds, to: nil).maxY }
+    }
+
+    /// Run `event` and assert what the reader sees did not move: the row that was first visible is
+    /// at the same place on screen (≤ 1 pt), and, when nothing above the scroll view changed height,
+    /// it is still the first visible row with the viewport top's offset into it moved by at most
+    /// 1 pt; the pane never took focus. (When the banner or the strip appears, the scroll view's top
+    /// moves down and the content scrolls by as much, so the read line stays put on screen.)
     func assertNoMove(_ name: String, _ event: TrackerGateEvent,
                       file: StaticString = #filePath, line: UInt = #line) {
         let before = pane.anchorSnapshot(windowIndex: 0)
         XCTAssertNotNil(before.firstVisible, "\(name): the pane has a first visible row", file: file, line: line)
+        let readKey = before.firstVisible?.rowKey
+        let screenBefore = readKey.flatMap(screenTop(of:))
+        let chromeBefore = pane.scrollView.frame.minY
         do {
             try perform(event)
         } catch {
@@ -608,10 +619,19 @@ final class TrackerGateHarness {
             return
         }
         let after = pane.anchorSnapshot(windowIndex: 0)
-        XCTAssertEqual(after.firstVisible?.rowKey, before.firstVisible?.rowKey,
-                       "\(name): first visible row changed", file: file, line: line)
-        let drift = abs((after.firstVisible?.offsetPt ?? .infinity) - (before.firstVisible?.offsetPt ?? 0))
-        XCTAssertLessThanOrEqual(drift, 1, "\(name): first visible row moved by \(drift) pt", file: file, line: line)
+        if let readKey, let screenBefore, let screenAfter = screenTop(of: readKey) {
+            let moved = abs(screenAfter - screenBefore)
+            XCTAssertLessThanOrEqual(moved, 1, "\(name): the line being read (\(readKey)) moved \(moved) pt on screen",
+                                     file: file, line: line)
+        } else {
+            XCTFail("\(name): the first visible row \(readKey ?? "nil") is no longer shown", file: file, line: line)
+        }
+        if pane.scrollView.frame.minY == chromeBefore {
+            XCTAssertEqual(after.firstVisible?.rowKey, before.firstVisible?.rowKey,
+                           "\(name): first visible row changed", file: file, line: line)
+            let drift = abs((after.firstVisible?.offsetPt ?? .infinity) - (before.firstVisible?.offsetPt ?? 0))
+            XCTAssertLessThanOrEqual(drift, 1, "\(name): first visible row moved by \(drift) pt", file: file, line: line)
+        }
         XCTAssertFalse(paneOwnsFirstResponder(),
                        "\(name): the tracker took keyboard focus (\(String(describing: pane.window?.firstResponder)))",
                        file: file, line: line)

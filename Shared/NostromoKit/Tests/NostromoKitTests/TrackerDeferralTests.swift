@@ -479,3 +479,90 @@ final class TrackerDeferralTests: XCTestCase {
         assertUniqueKeys(result.rows)
     }
 }
+
+// MARK: - Moves within a section, open Done groups, selections that move (review edge cases)
+
+final class TrackerDeferralInSectionTests: XCTestCase {
+
+    private func index(_ key: String, _ rows: [TrackerRow]) -> Int? {
+        rows.firstIndex { $0.key == key }
+    }
+
+    func testAnOnScreenItemMovedWithinItsSectionStaysWhereTheReaderIsUntilOffScreen() throws {
+        let before = TFx.present(try TFx.golden())
+        let target = TFx.present(try TFx.edited { try $0.moveItem("check-1000", after: "backf-1333") })
+        let key = "item:check-1000"
+        let oldIndex = try XCTUnwrap(index(key, before.rows))
+        XCTAssertNotEqual(index(key, target.rows), oldIndex, "the board moved it")
+
+        var deferral = TrackerDeferral()
+        let held = deferral.resolve(displayed: before.rows, target: target, visibleKeys: [key], selectedKey: nil)
+        XCTAssertEqual(held.held.map(\.kind), [.keptInPlace])
+        XCTAssertEqual(index(key, held.rows), oldIndex, "still where the reader saw it")
+        XCTAssertEqual(held.rows.filter { $0.key.hasSuffix("check-1000") }.count, 1, "shown once")
+        XCTAssertFalse(held.applyNow.contains { if case .move = $0 { return true } else { return false } },
+                       "nothing on screen moves")
+
+        let released = deferral.resolve(displayed: held.rows, target: target, visibleKeys: [], selectedKey: nil)
+        XCTAssertEqual(released.rows, target.rows)
+    }
+
+    func testAnOnScreenItemSetToDoneInsideAnOpenDoneGroupStaysInPlace() throws {
+        let folds = TrackerFoldState(expandedDoneGroups: ["findings"])
+        let before = TFx.present(try TFx.golden(), folds: folds)
+        let target = TFx.present(try TFx.edited { try $0.setStatus("repro-2554", "done") }, folds: folds)
+        let key = "item:repro-2554"
+        let oldIndex = try XCTUnwrap(index(key, before.rows))
+
+        var deferral = TrackerDeferral()
+        let result = deferral.resolve(displayed: before.rows, target: target, visibleKeys: [key], selectedKey: nil)
+        XCTAssertEqual(result.held.map(\.kind), [.doneInPlace])
+        XCTAssertEqual(index(key, result.rows), oldIndex)
+        XCTAssertEqual(result.rows[oldIndex].item?.status, .done, "struck through in place")
+        guard case .doneGroup(let group)? = result.rows.first(where: { $0.key == "done:findings" })?.content else {
+            return XCTFail("the Findings Done group is still shown")
+        }
+        XCTAssertFalse(group.itemIds.contains("repro-2554"), "not counted until it folds")
+    }
+
+    func testASelectedItemMovedToAnotherSectionKeepsItsPlaceAndContent() throws {
+        let before = TFx.present(try TFx.golden())
+        let target = TFx.present(try TFx.edited { try $0.moveItem("verif-1037", toSection: "next") })
+        let key = "item:verif-1037"
+        let oldIndex = try XCTUnwrap(index(key, before.rows))
+
+        var deferral = TrackerDeferral()
+        let result = deferral.resolve(displayed: before.rows, target: target, visibleKeys: [key], selectedKey: key)
+        XCTAssertEqual(result.held.map(\.kind), [.selection])
+        XCTAssertEqual(index(key, result.rows), oldIndex, "the selected row stays put")
+        XCTAssertEqual(result.rows[oldIndex], before.rows[oldIndex], "with the content the selection is in")
+        XCTAssertNotNil(index("moving:verif-1037", result.rows), "the live item shows in Next meanwhile")
+        XCTAssertEqual(Set(result.rows.map(\.key)).count, result.rows.count)
+    }
+
+    func testReleasingEverythingKeepsTheSelectedRow() throws {
+        let before = TFx.present(try TFx.golden())
+        let target = TFx.present(try TFx.edited { try $0.setText("verif-1037", "Verify webhook retries again") })
+        let key = "item:verif-1037"
+        var deferral = TrackerDeferral()
+        deferral.releaseAll()
+        let result = deferral.resolve(displayed: before.rows, target: target, visibleKeys: [key], selectedKey: key)
+        XCTAssertEqual(result.held.map(\.kind), [.selection])
+        XCTAssertEqual(result.rows.first { $0.key == key }, before.rows.first { $0.key == key })
+    }
+
+    func testAHeldRowStaysUnderItsOwnSectionWhenTheRowAboveItMovesAway() throws {
+        // Next's first item moves to Findings in the same write that removes Next's second (on screen).
+        let before = TFx.present(try TFx.golden())
+        let target = TFx.present(try TFx.edited { edit in
+            try edit.moveItem("rotat-1370", toSection: "findings")
+            try edit.removeItem("audit-1407")
+        })
+        var deferral = TrackerDeferral()
+        let result = deferral.resolve(displayed: before.rows, target: target, visibleKeys: ["item:audit-1407"], selectedKey: nil)
+        let stubIndex = try XCTUnwrap(index("item:audit-1407", result.rows))
+        let heading = try XCTUnwrap(index("section:next", result.rows))
+        let nextHeading = try XCTUnwrap(index("section:waiting-on-you", result.rows))
+        XCTAssertTrue(heading < stubIndex && stubIndex < nextHeading, "the removed stub stays under Next")
+    }
+}

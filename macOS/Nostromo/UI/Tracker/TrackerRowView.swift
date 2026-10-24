@@ -77,7 +77,8 @@ final class TrackerRowView: NSView {
     private var badges: [NSTextField] = []
     private var mainText: TrackerTextView?
     private var noteText: TrackerTextView?
-    private var noteProse: TrackerProseView?
+    /// The row's prose (a prose row, or an expanded note).
+    private(set) var proseView: TrackerProseView?
     private var linksText: TrackerTextView?
     private var disclosure: NSButton?
     private var hazardEdge: NSView?
@@ -117,7 +118,7 @@ final class TrackerRowView: NSView {
         var parts: [String] = []
         if let markLabel { parts.append(markLabel.stringValue) }
         parts += textViews.map(\.string).filter { !$0.isEmpty }
-        if let noteProse { parts.append(noteProse.plainText) }
+        if let proseView { parts.append(proseView.plainText) }
         parts += badges.map(\.stringValue)
         if let timeLabel, !timeLabel.stringValue.isEmpty { parts.append(timeLabel.stringValue) }
         return parts.joined(separator: " ")
@@ -129,11 +130,8 @@ final class TrackerRowView: NSView {
     }
 
     var allTextViews: [TrackerTextView] {
-        textViews + (noteProse?.textViews ?? [])
+        textViews + (proseView?.textViews ?? [])
     }
-
-    /// The text views of this row's prose (a prose row, or an expanded note).
-    var proseView: TrackerProseView? { noteProse }
 
     var isStrikethrough: Bool {
         guard let mainText, mainText.textStorage?.length ?? 0 > 0 else { return false }
@@ -268,9 +266,9 @@ final class TrackerRowView: NSView {
             return y + v
 
         case .prose:
-            guard let noteProse else { return 0 }
-            let proseHeight = noteProse.layout(width: max(width - h * 2, 1))
-            noteProse.frame = NSRect(x: h, y: v, width: max(width - h * 2, 1), height: proseHeight)
+            guard let proseView else { return 0 }
+            let proseHeight = proseView.layout(width: max(width - h * 2, 1))
+            proseView.frame = NSRect(x: h, y: v, width: max(width - h * 2, 1), height: proseHeight)
             return v + proseHeight + v
         }
     }
@@ -295,10 +293,10 @@ final class TrackerRowView: NSView {
         y += max(mainHeight, 17)
 
         let blockWidth = max(width - h - textX, 1)
-        if let noteProse {
+        if let proseView {
             y += 2
-            let ph = noteProse.layout(width: blockWidth)
-            noteProse.frame = NSRect(x: textX, y: y, width: blockWidth, height: ph)
+            let ph = proseView.layout(width: blockWidth)
+            proseView.frame = NSRect(x: textX, y: y, width: blockWidth, height: ph)
             y += ph
         } else if let noteText {
             y += 2
@@ -311,7 +309,7 @@ final class TrackerRowView: NSView {
             }
             y += nh
         }
-        if noteProse != nil, let disclosure {
+        if proseView != nil, let disclosure {
             let size = disclosure.intrinsicContentSize
             disclosure.frame = NSRect(x: textX, y: y, width: size.width, height: size.height)
             y += size.height
@@ -337,7 +335,7 @@ final class TrackerRowView: NSView {
         timeLabel = nil
         mainText = nil
         noteText = nil
-        noteProse = nil
+        proseView = nil
         linksText = nil
         disclosure = nil
         hazardEdge = nil
@@ -381,7 +379,7 @@ final class TrackerRowView: NSView {
         case .prose(let prose):
             let view = TrackerProseView(blocks: TrackerMdAdapter.blocks(prose.blocks))
             addSubview(view)
-            noteProse = view
+            proseView = view
         }
         for view in allTextViews { view.extraMenuItems = { [weak self] in self?.copyMenuItems() ?? [] } }
         needsLayout = true
@@ -431,7 +429,7 @@ final class TrackerRowView: NSView {
             if item.noteExpanded {
                 let prose = TrackerProseView(blocks: TrackerMdAdapter.blocks(item.noteBlocks))
                 addSubview(prose)
-                noteProse = prose
+                proseView = prose
             } else if let first = item.noteFirstLine {
                 let view = TrackerTextView.make(singleLine: true)
                 view.set(NSAttributedString(string: first, attributes: [
