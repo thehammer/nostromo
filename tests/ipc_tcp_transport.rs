@@ -42,6 +42,7 @@ async fn spawn_server() -> (Server, u16, TempDir) {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .expect("bind unix socket");
 
@@ -91,6 +92,8 @@ async fn do_handshake(mut stream: &mut TcpStream) {
         topics: vec![],
         renders_decisions: false,
         renders_approvals: false,
+        capabilities: vec![],
+        operator_nonce: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await
@@ -175,6 +178,8 @@ async fn tcp_and_unix_share_broadcast() {
         topics: vec![Topic::Activity],
         renders_decisions: false,
         renders_approvals: false,
+        capabilities: vec![],
+        operator_nonce: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await

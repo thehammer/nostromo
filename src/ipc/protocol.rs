@@ -103,6 +103,12 @@ pub enum Topic {
     /// it: the empty "everything" list does not include it (an older client
     /// fails to decode a transcript carrying a note).
     Model,
+    /// Terminal pane metadata: `TerminalState` and `TerminalClosed`. Never
+    /// terminal bytes: `TerminalOutput`/`TerminalReplay` go only to the
+    /// connections attached to a terminal, on their targeted channel. An empty
+    /// topic list still includes it for a local peer; FND-1 keeps every
+    /// terminal frame off TCP (`ServerClass::LocalOnly`).
+    Terminal,
     /// A topic this build does not know (a newer client's). Decoded rather
     /// than rejected so a future topic never makes an older daemon drop the
     /// whole `Subscribe`; it matches no message, and, because it keeps the
@@ -666,6 +672,15 @@ pub enum PaneContentWire {
     Loading,
     /// The agent encountered an error fetching this pane's data.
     Error { message: String },
+    /// A terminal pane (pane id `terminal-<8 hex>`): a placeholder for clients
+    /// that cannot attach (iOS). Never carries terminal bytes. `environment`
+    /// (a remote shell's) is omitted for a local terminal.
+    Terminal {
+        terminal_id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<String>,
+    },
     /// A file's contents at a revision, line-addressable (W2 —
     /// curated-agent-views).
     ///
@@ -1168,6 +1183,18 @@ pub enum ClientMsg {
         /// the field decodes as `false` and is never a presenter.
         #[serde(default)]
         renders_approvals: bool,
+        /// Optional client capabilities (`terminal_ui`, later
+        /// `remote_shell_confirm`, `terminal_follow_ui`). Recorded only for
+        /// the verified Mac app; a capability grants nothing by itself.
+        /// `#[serde(default)]`: an older client sends none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+        /// The `operator_nonce` from this connection's `Welcome`. A verified
+        /// app's terminal verbs are honoured only after a `Subscribe` that
+        /// echoes it (and a fresh look at the peer): bytes a process wrote
+        /// before `exec`ing the genuine app cannot contain it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
     },
     Ping,
 
@@ -1558,6 +1585,59 @@ pub enum ClientMsg {
         offset: Option<u64>,
         max_bytes: u32,
     },
+
+    // ── terminal panes (1a; every one refused over TCP) ───────────────────────
+    /// Open a local login shell in a new terminal leaf of `tag`'s pane tree
+    /// (default: below `repl`). Operator app only.
+    TerminalOpenLocal {
+        tag: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relative_to: Option<String>,
+        /// `split_left` / `split_right` / `split_above` / `split_below`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// Echoed back as `TerminalInfo.opened_by_request`.
+        client_request_id: String,
+    },
+    /// Start receiving a terminal's bytes: a `TerminalReplay`, then
+    /// `TerminalOutput`. Operator app only.
+    TerminalAttach {
+        terminal_id: String,
+    },
+    /// Stop receiving a terminal's bytes (this connection only).
+    TerminalDetach {
+        terminal_id: String,
+    },
+    /// Keystrokes for a terminal, base64. Operator app only.
+    TerminalInput {
+        terminal_id: String,
+        bytes: String,
+    },
+    /// Operator app only.
+    TerminalResize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Kill the process and remove the leaf. Operator app only.
+    TerminalClose {
+        terminal_id: String,
+    },
+    /// A fresh shell in an `ended` local terminal's pane, with a new
+    /// `terminal_id`. Operator app only.
+    TerminalRestart {
+        terminal_id: String,
+    },
+    /// The app refused a synthetic/agent attempt on a terminal (for example
+    /// through app-control); the daemon audits it. Operator app only.
+    TerminalRefusalReport {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_id: Option<String>,
+        op: String,
+        channel: String,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -1745,6 +1825,86 @@ pub struct TaskDetailMsg {
     pub progress_summary: Option<String>,
     pub completion_summary: Option<String>,
     pub prompt: Option<String>,
+}
+
+// ── terminal wire types ───────────────────────────────────────────────────────
+
+/// Where a terminal's process runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKind {
+    Local,
+    Ecs,
+}
+
+/// A terminal's lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalStatus {
+    Connecting,
+    Running,
+    Ended,
+}
+
+/// The remote shell a terminal is connected to (`ecs` only; phase 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalTarget {
+    pub project: String,
+    pub environment: String,
+    pub service: String,
+    pub shell_type: String,
+}
+
+/// Who asked for a terminal: `kind` is `user` (the operator app) or `focus`
+/// (an agent, through 1b's facade), with the focus `tag` for the latter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRequester {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+/// A terminal's metadata. Never its bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInfo {
+    pub terminal_id: String,
+    pub tag: String,
+    pub pane_id: String,
+    pub kind: TerminalKind,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<TerminalTarget>,
+    pub status: TerminalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Why an `ended` terminal ended, when not by its own exit
+    /// (`daemon_stopped`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_reason: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub requested_by: TerminalRequester,
+    /// The `client_request_id` of the `TerminalOpenLocal` that opened it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_by_request: Option<String>,
+}
+
+/// `ServerMsg::TerminalClosed`'s fields. `reason`: `exited`, `user_closed`,
+/// `daemon_stopped`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalClosedInfo {
+    pub terminal_id: String,
+    pub tag: String,
+    pub pane_id: String,
+    pub label: String,
+    pub kind: TerminalKind,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<TerminalTarget>,
 }
 
 // ── daemon → client messages ──────────────────────────────────────────────────
@@ -2245,6 +2405,45 @@ pub enum ServerMsg {
         counts: TrackerCounts,
     },
 
+    // ── terminal panes (1a; all `LocalOnly`) ──────────────────────────────────
+    /// Every terminal the daemon knows, sent to each local connection after the
+    /// layout replay. `closed` lists terminals that ended while the daemon was
+    /// stopped and whose panes are gone (remote shells; see `terminal::store`).
+    TerminalList {
+        terminals: Vec<TerminalInfo>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        closed: Vec<TerminalClosedInfo>,
+    },
+    /// A terminal's metadata changed (opened, resized, ended, restarted).
+    /// Broadcast under `Topic::Terminal`. Never carries terminal bytes.
+    TerminalState {
+        terminal: TerminalInfo,
+    },
+    /// A terminal and its pane are gone. Broadcast under `Topic::Terminal`.
+    TerminalClosed(TerminalClosedInfo),
+    /// The start of an attachment: reset the view to `cols`×`rows` and feed
+    /// `bytes` (base64: the replay ring, then a repaint of the screen). A
+    /// replay larger than one frame continues in `TerminalOutput` frames.
+    /// Targeted to the attaching operator connection only.
+    TerminalReplay {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+        bytes: String,
+    },
+    /// Terminal bytes (base64). Targeted to attached operator connections only.
+    TerminalOutput {
+        terminal_id: String,
+        bytes: String,
+    },
+    /// A terminal request was refused or failed; nothing changed.
+    TerminalRefused {
+        op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_id: Option<String>,
+        code: String,
+    },
+
     /// TUI-internal pseudo-event — **never produced by the daemon**.
     ///
     /// Injected locally by the [`DaemonClient`] supervisor immediately after a
@@ -2486,12 +2685,16 @@ mod tests {
             topics: vec![],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
             topics: vec![],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         })
         .unwrap();
         assert_eq!(v["type"], "subscribe");
@@ -2508,12 +2711,16 @@ mod tests {
             topics: vec![],
             renders_decisions: true,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
             topics: vec![],
             renders_decisions: true,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         })
         .unwrap();
         assert_eq!(v["renders_decisions"], true);
@@ -6248,6 +6455,8 @@ mod work_wire_tests {
                 topics: vec![],
                 renders_decisions: false,
                 renders_approvals: value,
+                capabilities: vec![],
+                operator_nonce: None,
             };
             round_trip_client(msg.clone());
             assert_client_golden(
@@ -6467,5 +6676,245 @@ mod work_wire_tests {
     #[test]
     fn the_output_cap_is_one_mebibyte() {
         assert_eq!(TASK_OUTPUT_MAX_BYTES, 1_048_576);
+    }
+}
+
+#[cfg(test)]
+mod terminal_wire_tests {
+    use super::*;
+
+    fn round_trip_client(msg: ClientMsg) -> serde_json::Value {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            json,
+            serde_json::to_string(&back).unwrap(),
+            "mismatch: {json}"
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn round_trip_server(msg: ServerMsg) -> serde_json::Value {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            json,
+            serde_json::to_string(&back).unwrap(),
+            "mismatch: {json}"
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn info() -> TerminalInfo {
+        TerminalInfo {
+            terminal_id: "t1".into(),
+            tag: "core-1".into(),
+            pane_id: "terminal-0a1b2c3d".into(),
+            kind: TerminalKind::Local,
+            label: "Terminal".into(),
+            cwd: Some("/tmp".into()),
+            target: None,
+            status: TerminalStatus::Running,
+            exit_code: None,
+            ended_reason: None,
+            cols: 80,
+            rows: 24,
+            requested_by: TerminalRequester {
+                kind: "user".into(),
+                tag: None,
+            },
+            opened_by_request: Some("req-1".into()),
+        }
+    }
+
+    #[test]
+    fn terminal_client_messages_round_trip_with_their_wire_names() {
+        let cases = [
+            (
+                ClientMsg::TerminalOpenLocal {
+                    tag: "core-1".into(),
+                    relative_to: Some("repl".into()),
+                    position: Some("split_below".into()),
+                    cwd: Some("/tmp".into()),
+                    client_request_id: "req-1".into(),
+                },
+                "terminal_open_local",
+            ),
+            (
+                ClientMsg::TerminalAttach {
+                    terminal_id: "t1".into(),
+                },
+                "terminal_attach",
+            ),
+            (
+                ClientMsg::TerminalDetach {
+                    terminal_id: "t1".into(),
+                },
+                "terminal_detach",
+            ),
+            (
+                ClientMsg::TerminalInput {
+                    terminal_id: "t1".into(),
+                    bytes: "bHMK".into(),
+                },
+                "terminal_input",
+            ),
+            (
+                ClientMsg::TerminalResize {
+                    terminal_id: "t1".into(),
+                    cols: 120,
+                    rows: 40,
+                },
+                "terminal_resize",
+            ),
+            (
+                ClientMsg::TerminalClose {
+                    terminal_id: "t1".into(),
+                },
+                "terminal_close",
+            ),
+            (
+                ClientMsg::TerminalRestart {
+                    terminal_id: "t1".into(),
+                },
+                "terminal_restart",
+            ),
+            (
+                ClientMsg::TerminalRefusalReport {
+                    terminal_id: None,
+                    op: "input".into(),
+                    channel: "app_control".into(),
+                },
+                "terminal_refusal_report",
+            ),
+        ];
+        for (msg, name) in cases {
+            assert_eq!(round_trip_client(msg)["type"], name);
+        }
+    }
+
+    #[test]
+    fn a_minimal_open_local_omits_its_optional_fields() {
+        let v = round_trip_client(ClientMsg::TerminalOpenLocal {
+            tag: "core-1".into(),
+            relative_to: None,
+            position: None,
+            cwd: None,
+            client_request_id: "req-1".into(),
+        });
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys.len(), 3, "{v}");
+    }
+
+    #[test]
+    fn terminal_server_messages_round_trip_with_their_wire_names() {
+        let closed = TerminalClosedInfo {
+            terminal_id: "t1".into(),
+            tag: "core-1".into(),
+            pane_id: "terminal-0a1b2c3d".into(),
+            label: "Terminal".into(),
+            kind: TerminalKind::Ecs,
+            reason: "daemon_stopped".into(),
+            exit_code: None,
+            target: Some(TerminalTarget {
+                project: "admin-portal".into(),
+                environment: "production".into(),
+                service: "web".into(),
+                shell_type: "shell".into(),
+            }),
+        };
+        let cases = [
+            (
+                ServerMsg::TerminalList {
+                    terminals: vec![info()],
+                    closed: vec![closed.clone()],
+                },
+                "terminal_list",
+            ),
+            (
+                ServerMsg::TerminalState { terminal: info() },
+                "terminal_state",
+            ),
+            (ServerMsg::TerminalClosed(closed), "terminal_closed"),
+            (
+                ServerMsg::TerminalReplay {
+                    terminal_id: "t1".into(),
+                    cols: 80,
+                    rows: 24,
+                    bytes: "aGk=".into(),
+                },
+                "terminal_replay",
+            ),
+            (
+                ServerMsg::TerminalOutput {
+                    terminal_id: "t1".into(),
+                    bytes: "aGk=".into(),
+                },
+                "terminal_output",
+            ),
+            (
+                ServerMsg::TerminalRefused {
+                    op: "input".into(),
+                    terminal_id: Some("t1".into()),
+                    code: "terminal_input_forbidden".into(),
+                },
+                "terminal_refused",
+            ),
+        ];
+        for (msg, name) in cases {
+            assert_eq!(round_trip_server(msg)["type"], name);
+        }
+    }
+
+    #[test]
+    fn terminal_closed_is_flat_on_the_wire() {
+        let v = round_trip_server(ServerMsg::TerminalClosed(TerminalClosedInfo {
+            terminal_id: "t1".into(),
+            tag: "core-1".into(),
+            pane_id: "terminal-0a1b2c3d".into(),
+            label: "Terminal".into(),
+            kind: TerminalKind::Local,
+            reason: "exited".into(),
+            exit_code: Some(0),
+            target: None,
+        }));
+        assert_eq!(v["reason"], "exited");
+        assert_eq!(v["exit_code"], 0);
+        assert_eq!(v["kind"], "local");
+        assert!(v.get("target").is_none(), "{v}");
+    }
+
+    #[test]
+    fn a_local_terminal_pane_content_has_no_environment_key() {
+        let v = round_trip_server(ServerMsg::PaneContent {
+            tag: "core-1".into(),
+            pane_id: "terminal-0a1b2c3d".into(),
+            content: PaneContentWire::Terminal {
+                terminal_id: "t1".into(),
+                label: "Terminal".into(),
+                environment: None,
+            },
+            freshness: None,
+            address: None,
+        });
+        assert_eq!(v["content"]["kind"], "terminal");
+        assert!(v["content"].get("environment").is_none(), "{v}");
+    }
+
+    #[test]
+    fn a_subscribe_without_capabilities_still_decodes() {
+        let sub: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":["layout","terminal"]}"#).unwrap();
+        match sub {
+            ClientMsg::Subscribe {
+                topics,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(topics, vec![Topic::Layout, Topic::Terminal]);
+                assert!(capabilities.is_empty());
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
     }
 }

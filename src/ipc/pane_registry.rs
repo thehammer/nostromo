@@ -30,7 +30,7 @@
 //!    leaf of that tag's tree; any mutation that removes a pane (or the whole
 //!    tag) drops its binding too. `"repl"` can never be bound.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -213,6 +213,11 @@ pub struct PaneRegistry {
     rendered_shapes: HashMap<(String, String), RenderedShapeReport>,
     /// Told when a mutation changes a focus's pane ids. Not persisted.
     pane_set_hook: Option<PaneSetHook>,
+    /// tag → the terminal leaves (`terminal-<8 hex>`) the `TerminalManager`
+    /// owns in that focus. Registration only; the leaves themselves are in
+    /// `trees`. Not persisted here: the terminal store re-registers them at
+    /// daemon start.
+    terminal_leaves: HashMap<String, BTreeSet<String>>,
     store_path: Option<PathBuf>,
 }
 
@@ -256,6 +261,7 @@ impl PaneRegistry {
             view_focus_lru: HashMap::new(),
             rendered_shapes: HashMap::new(),
             pane_set_hook: None,
+            terminal_leaves: HashMap::new(),
             store_path: Some(store_path),
         }
     }
@@ -270,6 +276,7 @@ impl PaneRegistry {
             view_focus_lru: HashMap::new(),
             rendered_shapes: HashMap::new(),
             pane_set_hook: None,
+            terminal_leaves: HashMap::new(),
             store_path: None,
         }
     }
@@ -902,6 +909,62 @@ impl PaneRegistry {
         }
     }
 
+    // ── terminal leaves ─────────────────────────────────────────────────────────
+
+    /// Record that `pane_id` in `tag` is a terminal leaf.
+    pub fn register_terminal_leaf(&mut self, tag: &str, pane_id: &str) {
+        self.terminal_leaves
+            .entry(tag.to_string())
+            .or_default()
+            .insert(pane_id.to_string());
+    }
+
+    /// Forget that `pane_id` in `tag` is a terminal leaf.
+    pub fn unregister_terminal_leaf(&mut self, tag: &str, pane_id: &str) {
+        if let Some(leaves) = self.terminal_leaves.get_mut(tag) {
+            leaves.remove(pane_id);
+            if leaves.is_empty() {
+                self.terminal_leaves.remove(tag);
+            }
+        }
+    }
+
+    /// The registered terminal leaves of `tag`, sorted.
+    pub fn terminal_leaves(&self, tag: &str) -> Vec<String> {
+        self.terminal_leaves
+            .get(tag)
+            .map(|leaves| leaves.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Split `relative_to` in `tag` to add the terminal leaf `pane_id`
+    /// (creating the focus's default tree first if it has none). Returns the
+    /// new tree. Does not register the leaf.
+    pub fn insert_terminal_leaf(
+        &mut self,
+        tag: &str,
+        relative_to: &str,
+        position: SplitPosition,
+        pane_id: &str,
+    ) -> Result<PaneTree, PaneError> {
+        self.get_or_init(tag);
+        self.create_pane(tag, pane_id, position, relative_to)
+    }
+
+    /// Remove the leaf `pane_id` from `tag`'s tree wherever it is, collapsing
+    /// a split (or tabs node) left with one child. Returns the new tree, or
+    /// `None` if there was no such leaf. Does not unregister the leaf.
+    pub fn remove_terminal_leaf(&mut self, tag: &str, pane_id: &str) -> Option<PaneTree> {
+        let mut tree = self.trees.get(tag)?.clone();
+        if !matches!(remove_leaf(&mut tree, pane_id), LeafRemoval::Removed) {
+            return None;
+        }
+        self.replace_tree(tag, tree.clone());
+        self.prune_to_tree(tag);
+        self.persist();
+        Some(tree)
+    }
+
     // ── binding hygiene (D2) ────────────────────────────────────────────────────
 
     /// Drop any binding for `tag` whose pane id is no longer a leaf of `tag`'s
@@ -974,6 +1037,79 @@ fn split_leaf(
                 }
             }
             false
+        }
+    }
+}
+
+enum LeafRemoval {
+    NotFound,
+    Removed,
+    /// The node itself is the leaf: the parent must drop it.
+    IsLeaf,
+}
+
+/// Remove the leaf `pane_id` below `node`. A split left with one child is
+/// replaced by that child (ratios renormalised); a tabs node loses the tab, or
+/// goes entirely when it was its last.
+fn remove_leaf(node: &mut PaneTree, pane_id: &str) -> LeafRemoval {
+    match node {
+        PaneTree::Leaf { pane_id: id } => {
+            if id == pane_id {
+                LeafRemoval::IsLeaf
+            } else {
+                LeafRemoval::NotFound
+            }
+        }
+        PaneTree::Split {
+            children, ratios, ..
+        } => {
+            for i in 0..children.len() {
+                match remove_leaf(&mut children[i], pane_id) {
+                    LeafRemoval::NotFound => continue,
+                    LeafRemoval::Removed => return LeafRemoval::Removed,
+                    LeafRemoval::IsLeaf => {
+                        children.remove(i);
+                        if i < ratios.len() {
+                            ratios.remove(i);
+                        }
+                        let sum: f32 = ratios.iter().sum();
+                        if sum > 0.0 {
+                            ratios.iter_mut().for_each(|r| *r /= sum);
+                        }
+                        if children.len() == 1 {
+                            *node = children.remove(0);
+                        }
+                        return LeafRemoval::Removed;
+                    }
+                }
+            }
+            LeafRemoval::NotFound
+        }
+        PaneTree::Tabs {
+            children,
+            labels,
+            active,
+            ..
+        } => {
+            for i in 0..children.len() {
+                match remove_leaf(&mut children[i], pane_id) {
+                    LeafRemoval::NotFound => continue,
+                    LeafRemoval::Removed => return LeafRemoval::Removed,
+                    // Its last tab: the whole tabs node goes, like `remove_tab`.
+                    LeafRemoval::IsLeaf if children.len() == 1 => return LeafRemoval::IsLeaf,
+                    LeafRemoval::IsLeaf => {
+                        children.remove(i);
+                        if i < labels.len() {
+                            labels.remove(i);
+                        }
+                        if i < *active || *active >= children.len() {
+                            *active = active.saturating_sub(1);
+                        }
+                        return LeafRemoval::Removed;
+                    }
+                }
+            }
+            LeafRemoval::NotFound
         }
     }
 }

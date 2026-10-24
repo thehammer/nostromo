@@ -239,6 +239,7 @@ impl Rig {
             Arc::clone(&decisions),
             peers.clone(),
             false,
+            nostromo::terminal::TerminalManager::in_memory(),
         )
         .expect("bind the unix socket");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
@@ -375,6 +376,8 @@ impl Rig {
                 topics: vec![Topic::Decision],
                 renders_decisions: false,
                 renders_approvals: renders,
+                capabilities: vec![],
+                operator_nonce: None,
             })
             .unwrap(),
         )
@@ -396,6 +399,8 @@ impl Rig {
                 topics,
                 renders_decisions: false,
                 renders_approvals: true,
+                capabilities: vec![],
+                operator_nonce: None,
             })
             .unwrap(),
         )
@@ -415,6 +420,8 @@ impl Rig {
                     topics,
                     renders_decisions: false,
                     renders_approvals: true,
+                    capabilities: vec![],
+                    operator_nonce: None,
                 })
                 .unwrap(),
             )
@@ -1013,6 +1020,8 @@ fn a_connection_that_resubscribes_with_renders_approvals_becomes_a_presenter() {
             topics: vec![Topic::Decision],
             renders_decisions: false,
             renders_approvals: true,
+            capabilities: vec![],
+            operator_nonce: None,
         })
         .await;
         let snapshot = app.next("the snapshot", is_snapshot).await;

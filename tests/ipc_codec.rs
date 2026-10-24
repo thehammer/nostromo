@@ -78,6 +78,8 @@ async fn codec_client_msg_subscribe_round_trip() {
         topics: vec![Topic::Activity, Topic::MotherJobs, Topic::MotherStatusline],
         renders_decisions: false,
         renders_approvals: false,
+        capabilities: vec![],
+        operator_nonce: None,
     };
     let bytes = serde_json::to_vec(&msg).unwrap();
     let (mut reader, mut writer) = tokio::io::duplex(256);
