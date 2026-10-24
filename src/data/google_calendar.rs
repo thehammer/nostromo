@@ -88,6 +88,9 @@ struct RawPerson {
     response_status: Option<String>,
 }
 
+/// Most `events.list` pages followed in one poll; more is an error.
+const MAX_EVENT_PAGES: usize = 20;
+
 // ── Source ────────────────────────────────────────────────────────────────────
 
 pub struct GoogleCalendarSource {
@@ -168,7 +171,10 @@ impl GoogleCalendarSource {
                         Some(wait),
                     )
                 }
-                None => (CalendarSnapshot::failed(previous, reason), None),
+                None => (
+                    CalendarSnapshot::failed(previous, reason),
+                    backoff.persistent(poll),
+                ),
             }
         };
 
@@ -213,7 +219,12 @@ async fn fetch_events(
     let time_max = window.1.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut events = Vec::new();
     let mut page_token: Option<String> = None;
+    let mut pages = 0usize;
     loop {
+        pages += 1;
+        if pages > MAX_EVENT_PAGES {
+            bail!("events list exceeded {MAX_EVENT_PAGES} pages");
+        }
         let mut params: Vec<(&str, &str)> = vec![
             ("timeMin", &time_min),
             ("timeMax", &time_max),
@@ -231,6 +242,9 @@ async fn fetch_events(
         };
         events.extend(items);
         match page.next_page_token {
+            Some(t) if page_token.as_deref() == Some(t.as_str()) => {
+                bail!("events list repeated a page token")
+            }
             Some(t) => page_token = Some(t),
             None => return Ok(events),
         }

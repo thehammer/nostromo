@@ -875,10 +875,19 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
     }
 
     fn start_fred(&mut self) -> (nostromo::agents::MailboxRx, nostromo::agents::CalendarRx) {
-        (
-            FredMailboxNativeSource::spawn(self.config.clone()),
-            FredCalendarNativeSource::spawn(self.config.clone()),
-        )
+        let (accounts, warnings) = self.config.resolve_fred_accounts();
+        for w in &warnings {
+            tracing::warn!("{w}");
+        }
+        match accounts {
+            nostromo::config::FredAccounts::Legacy => (
+                FredMailboxNativeSource::spawn(self.config.clone()),
+                FredCalendarNativeSource::spawn(self.config.clone()),
+            ),
+            nostromo::config::FredAccounts::Configured(_) => {
+                nostromo::data::fred_accounts::spawn(&self.config)
+            }
+        }
     }
 
     fn start_teri(&mut self) -> nostromo::agents::TeriSources {
