@@ -16,7 +16,11 @@
 //! - [`orphans`]         — child-process ledger, graceful stop and the startup orphan sweep
 //! - [`peer`]            — peer trust and what each peer may see or do
 //! - [`peer_verify`]     — who is on the other end of a Unix connection (the Mac app?)
+//! - [`auth_failure`]    — spotting a turn that failed because Claude could not sign in
+//! - [`claude_login`]    — the credential watch and the "sessions waiting for a sign-in" frame
 
+pub mod auth_failure;
+pub mod claude_login;
 pub mod client;
 pub mod codec;
 mod control_scan;

@@ -37,10 +37,10 @@ use super::{
     },
     peer_verify::{classify_peer, claim_diagnostic, still_same_operator, PeerInfo, PeerVerifier, MAC_APP_CLIENT_KIND},
     protocol::{
-        ActivityStreamWire, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
-        MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
+        FEATURE_LOGIN, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
-    session_manager::{ModelRequestOutcome, SessionManager, SwitchRequest},
+    session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
 use crate::approvals::broker::ApprovalBroker;
 use crate::approvals::wire::{AnswerRefusal, RefusalChannel};
@@ -70,6 +70,10 @@ const FEATURE_TASKS: &str = "tasks";
 /// The optional capability advertised in `Welcome.features`: this daemon can hold
 /// a permission request for the Mac app and takes its answer (`approval_*`).
 const FEATURE_APPROVALS: &str = "approvals_v1";
+
+/// The refusal a `ClaudeLoginAction` from anyone but the verified Mac app gets. No content.
+const NOT_OPERATOR_APP_LOGIN: &str =
+    "not_operator_app: only the verified Nostromo app may resend or discard a held message";
 
 /// What `SessionAnswerPermission` is answered with, from every peer.
 const ANSWER_PERMISSION_SUPERSEDED: &str = "session_answer_permission is superseded by approval_answer";
@@ -149,6 +153,11 @@ impl Server {
         // The approval broker, if the daemon has one, broadcasts its frames on this channel.
         if let Some(broker) = session_mgr.lock().unwrap().approvals() {
             broker.configure_broadcast(tx.clone());
+        }
+
+        // Likewise the Claude sign-in coordinator, which tells clients which sessions wait.
+        if let Some(login) = session_mgr.lock().unwrap().login() {
+            login.configure_broadcast(tx.clone());
         }
 
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
@@ -429,6 +438,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
             FEATURE_MODEL.to_string(),
             FEATURE_TASKS.to_string(),
             FEATURE_APPROVALS.to_string(),
+            FEATURE_LOGIN.to_string(),
         ],
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
@@ -604,6 +614,14 @@ where
     // (registered above, so one held from here on is also broadcast to it; the
     // app dedupes by request id).
     replay_messages(&mut writer, std::mem::take(&mut approvals_replay)).await;
+
+    // ── Claude sign-in replay — who is waiting for one, as of now ─────────────
+    // The whole picture (REPLACE semantics), so a client that connects while a
+    // session waits shows it at once. `LocalOnly`: a network peer is sent none.
+    if !trust.is_network() {
+        let snapshot = session_mgr.lock().unwrap().login_snapshot();
+        replay_messages(&mut writer, [snapshot]).await;
+    }
 
     // ── Layout replay — push existing pane trees to newly subscribed client ──
     // A freshly connected or reconnected client would otherwise see empty panes
@@ -879,6 +897,7 @@ where
                         let answer_check = match &msg {
                             ClientMsg::DecisionAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalAnswer { operator_nonce: sent, .. }
+                            | ClientMsg::ClaudeLoginAction { operator_nonce: sent, .. }
                                 if trust == PeerTrust::OperatorApp =>
                             {
                                 Some(check_operator_answer(&origin, operator_nonce.as_deref(), sent.as_deref()).await)
@@ -1155,11 +1174,22 @@ fn handle_client_msg(
 
         ClientMsg::SessionInterrupt { tag } => {
             let mut mgr = session_mgr.lock().unwrap();
-            if let Err(e) = mgr.interrupt(&tag) {
-                warn!(conn_key, %tag, "SessionInterrupt error: {e}");
-                let _ = targeted_tx.send(ServerMsg::Error {
-                    message: format!("SessionInterrupt failed: {e}"),
-                });
+            match mgr.interrupt(&tag) {
+                Ok(crate::ipc::session_manager::InterruptOutcome::DiscardedHold) => {
+                    // Said without content: what was held is gone, and nothing is sent after the sign-in.
+                    let _ = targeted_tx.send(ServerMsg::Notification {
+                        tag: tag.clone(),
+                        level: crate::ipc::protocol::NotificationLevel::Info,
+                        message: "Stopped: the message waiting for sign-in was discarded.".to_string(),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(conn_key, %tag, "SessionInterrupt error: {e}");
+                    let _ = targeted_tx.send(ServerMsg::Error {
+                        message: format!("SessionInterrupt failed: {e}"),
+                    });
+                }
             }
         }
 
@@ -1228,6 +1258,41 @@ fn handle_client_msg(
                     let _ = tx.send(refusal);
                 }
             });
+        }
+
+        ClientMsg::ClaudeLoginAction { action, tag, hold_id, .. } => {
+            // Only the verified Mac app resends or drops a held message, and only with
+            // the connection's nonce from a process still verified (checked by the
+            // caller). Anything else changes nothing and is told, with no content.
+            let refusal = if trust != PeerTrust::OperatorApp {
+                Some("not the verified Nostromo app".to_string())
+            } else {
+                match answer_check {
+                    Some(Ok(())) => None,
+                    Some(Err(why)) => Some(why),
+                    None => Some("ClaudeLoginAction refused: not checked".to_string()),
+                }
+            };
+            if let Some(why) = refusal {
+                debug!(conn_key, ?trust, peer_pid = peer.map(|p| p.pid), "ClaudeLoginAction refused: {why}");
+                let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP_LOGIN.to_string() });
+                return;
+            }
+            let mut mgr = session_mgr.lock().unwrap();
+            match (action, hold_id) {
+                (ClaudeLoginActionKind::Retry, Some(hold_id)) => {
+                    mgr.resend_held(&tag, &hold_id, ResendTrigger::Manual);
+                }
+                // Nothing is held to send again; the sender learns where things stand.
+                (ClaudeLoginActionKind::Retry, None) => {
+                    if let Some(login) = mgr.login() {
+                        login.rebroadcast();
+                    }
+                }
+                (ClaudeLoginActionKind::Discard, hold_id) => {
+                    mgr.discard_held(&tag, hold_id.as_deref());
+                }
+            }
         }
 
         ClientMsg::ApprovalRefusalReport { request_id, control, channel } => {
@@ -2148,6 +2213,9 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         | ServerMsg::SessionPermissionRequest { .. } => false,
         // The count: for anyone who follows decisions (an empty list included).
         ServerMsg::ApprovalPending { .. } => subscribed(topics, Topic::Decision),
+        // Which sessions wait for a Claude sign-in: every local subscriber, whatever
+        // its topics (like `Error`). A network peer never gets it (`LocalOnly`).
+        ServerMsg::ClaudeLoginState { .. } => true,
         ServerMsg::Activity(_)
         | ServerMsg::ActivitySnapshot { .. }
         | ServerMsg::ActivityHealth { .. } => subscribed(topics, Topic::Activity),

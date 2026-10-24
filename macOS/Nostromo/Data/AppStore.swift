@@ -1648,6 +1648,10 @@ class AppStore: ObservableObject {
         case .approvalPending:
             break
 
+        // CL1 only decodes the frame; the sign-in card that renders it is CL2.
+        case .claudeLoginState:
+            break
+
         case .pong, .unknown:
             break
         }

@@ -115,6 +115,14 @@ async fn main() -> Result<()> {
         info!(guard = %guard_path.display(), "production-shell guard");
     }
     session_mgr.lock().unwrap().set_guard_path(guard_path);
+    // A session whose Claude login expired holds its failed message instead of
+    // losing it (and the queue behind it) to failing turns. The coordinator tells
+    // the Mac and watches the Keychain item's modification date: never the secret.
+    // The server wires its broadcast channel to it when it binds.
+    nostromo::ipc::claude_login::LoginCoordinator::new(std::sync::Arc::new(
+        nostromo::ipc::claude_login::KeychainItemDate,
+    ))
+    .attach(&session_mgr);
     session_mgr.lock().unwrap().configure_enabled_agents(enabled_agents);
     // The approval broker: hears every permission request of an approval-capable
     // session, logs it and always answers it. A request found unresolved in the

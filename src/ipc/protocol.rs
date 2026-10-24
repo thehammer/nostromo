@@ -1075,6 +1075,60 @@ pub(crate) mod base64_bytes {
 
 // ── client → daemon messages ──────────────────────────────────────────────────
 
+// ── Claude sign-in (CL1) ────────────────────────────────────────────────────────
+
+/// The optional capability advertised in `Welcome.features`: this daemon holds a
+/// message whose turn failed because Claude could not authenticate, broadcasts
+/// `claude_login_state` and takes `claude_login_action`.
+pub const FEATURE_LOGIN: &str = "claude_login_v1";
+
+/// What a session waiting for a Claude sign-in is doing (`ClaudeLoginSession`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeLoginPhase {
+    /// The failed message is held, and goes out again once the login changes.
+    Waiting,
+    /// The held message was written again and its turn has not ended.
+    Resending,
+    /// The failed turn had already done real work (or was not started by a
+    /// message the daemon wrote): the message is held but only a human resends it.
+    NotResendable,
+    /// Paused, but there is no message to send again.
+    PausedNoHold,
+}
+
+/// Whether the daemon can see the Claude credential change (`ClaudeLoginState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeLoginWatch {
+    Keychain,
+    Unavailable,
+}
+
+/// One session waiting for a Claude sign-in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLoginSession {
+    pub tag: String,
+    /// The hold a `ClaudeLoginAction` names; `None` when nothing is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_id: Option<String>,
+    pub phase: ClaudeLoginPhase,
+    /// Messages sent to the session since, kept in order behind the held one.
+    pub queued: u32,
+    /// When the turn failed (RFC 3339, UTC, whole seconds).
+    pub failed_at: String,
+    /// How many more times the daemon may send the message again by itself.
+    pub auto_resends_left: u8,
+}
+
+/// What a `ClaudeLoginAction` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeLoginActionKind {
+    Retry,
+    Discard,
+}
+
 /// Messages sent from a TUI client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1335,6 +1389,22 @@ pub enum ClientMsg {
         /// Which control it was aimed at (`allow_once`, …).
         control: String,
         channel: crate::approvals::wire::RefusalChannel,
+    },
+
+    /// The human's answer to a held message of a session waiting for a Claude
+    /// sign-in (`ClaudeLoginState`): send it again now (`retry`) or drop it
+    /// (`discard`). Applied only from the verified Mac app: it must echo the
+    /// connection's `operator_nonce` and pass the same answer-time peer re-check
+    /// as a `DecisionAnswer`. `hold_id` names the hold the human saw; one that
+    /// is no longer current changes nothing. It is absent for a session that is
+    /// paused with nothing held (`paused_no_hold`). Refused for network peers.
+    ClaudeLoginAction {
+        action: ClaudeLoginActionKind,
+        tag: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
     },
 
     /// Request a full ambient-activity snapshot (all streams) for one focus.
@@ -1885,6 +1955,20 @@ pub enum ServerMsg {
         code: crate::approvals::wire::AnswerRefusal,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<String>,
+    },
+
+    /// Which sessions are waiting for a Claude sign-in, as a whole picture
+    /// (REPLACE semantics): broadcast on every change and replayed to a local
+    /// peer after Subscribe. `needs_login` is false exactly when `sessions` is
+    /// empty. Carries no message text and no error text; `LocalOnly` (it names
+    /// tags and the absolute path of `claude`).
+    ClaudeLoginState {
+        needs_login: bool,
+        /// The `claude` the daemon runs: the one a sign-in must be done with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude_bin: Option<String>,
+        watch: ClaudeLoginWatch,
+        sessions: Vec<ClaudeLoginSession>,
     },
 
     /// A daemon-originated, tag-addressed, operator-facing notification (W5
@@ -5328,6 +5412,94 @@ mod work_wire_tests {
             );
             assert!(serde_json::from_str::<ClientMsg>(&text).is_err(), "{kind:?} must not decode");
         }
+    }
+
+    #[test]
+    fn claude_login_state_has_this_exact_wire_form() {
+        assert_server_golden(
+            ServerMsg::ClaudeLoginState {
+                needs_login: true,
+                claude_bin: Some("/opt/homebrew/bin/claude".into()),
+                watch: ClaudeLoginWatch::Keychain,
+                sessions: vec![ClaudeLoginSession {
+                    tag: "cody-1".into(),
+                    hold_id: Some("7d0a1c2e-0000-4000-8000-000000000001".into()),
+                    phase: ClaudeLoginPhase::Waiting,
+                    queued: 3,
+                    failed_at: "2026-10-18T20:04:09Z".into(),
+                    auto_resends_left: 3,
+                }],
+            },
+            r#"{"type":"claude_login_state","needs_login":true,"claude_bin":"/opt/homebrew/bin/claude","watch":"keychain","sessions":[{"tag":"cody-1","hold_id":"7d0a1c2e-0000-4000-8000-000000000001","phase":"waiting","queued":3,"failed_at":"2026-10-18T20:04:09Z","auto_resends_left":3}]}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ClaudeLoginState {
+                needs_login: false,
+                claude_bin: None,
+                watch: ClaudeLoginWatch::Unavailable,
+                sessions: vec![],
+            },
+            r#"{"type":"claude_login_state","needs_login":false,"watch":"unavailable","sessions":[]}"#,
+        );
+    }
+
+    #[test]
+    fn claude_login_phases_have_these_wire_names_and_a_paused_entry_has_no_hold_id() {
+        for (phase, name) in [
+            (ClaudeLoginPhase::Waiting, "waiting"),
+            (ClaudeLoginPhase::Resending, "resending"),
+            (ClaudeLoginPhase::NotResendable, "not_resendable"),
+            (ClaudeLoginPhase::PausedNoHold, "paused_no_hold"),
+        ] {
+            let entry = ClaudeLoginSession {
+                tag: "t".into(),
+                hold_id: None,
+                phase,
+                queued: 0,
+                failed_at: "2026-10-18T20:04:09Z".into(),
+                auto_resends_left: 0,
+            };
+            let v = serde_json::to_value(&entry).unwrap();
+            assert_eq!(v["phase"], name);
+            assert!(v.get("hold_id").is_none(), "{v}");
+            assert_eq!(serde_json::from_value::<ClaudeLoginSession>(v).unwrap(), entry);
+        }
+    }
+
+    #[test]
+    fn claude_login_action_has_this_exact_wire_form() {
+        assert_client_golden(
+            ClientMsg::ClaudeLoginAction {
+                action: ClaudeLoginActionKind::Retry,
+                tag: "cody-1".into(),
+                hold_id: Some("7d0a1c2e-0000-4000-8000-000000000001".into()),
+                operator_nonce: Some("ab12".into()),
+            },
+            r#"{"type":"claude_login_action","action":"retry","tag":"cody-1","hold_id":"7d0a1c2e-0000-4000-8000-000000000001","operator_nonce":"ab12"}"#,
+        );
+        assert_client_golden(
+            ClientMsg::ClaudeLoginAction {
+                action: ClaudeLoginActionKind::Discard,
+                tag: "cody-1".into(),
+                hold_id: None,
+                operator_nonce: None,
+            },
+            r#"{"type":"claude_login_action","action":"discard","tag":"cody-1"}"#,
+        );
+    }
+
+    #[test]
+    fn a_claude_login_action_without_a_nonce_still_decodes_and_the_daemon_refuses_it_later() {
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"claude_login_action","action":"retry","tag":"t","hold_id":"h"}"#).unwrap();
+        assert!(matches!(msg, ClientMsg::ClaudeLoginAction { operator_nonce: None, .. }), "{msg:?}");
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"claude_login_action","action":"resend","tag":"t"}"#).is_err());
+    }
+
+    #[test]
+    fn the_protocol_version_is_unchanged_by_the_claude_login_frames() {
+        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(FEATURE_LOGIN, "claude_login_v1");
     }
 
     #[test]

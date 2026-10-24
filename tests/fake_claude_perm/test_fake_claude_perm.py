@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -60,9 +61,11 @@ def allow(request_id, updated_input=None):
 class Fake:
     """Drive the fake over pipes. Frames it emits are queued by a reader thread."""
 
-    def __init__(self, test, argv=None):
+    def __init__(self, test, argv=None, env=None):
         self.log_dir = tempfile.mkdtemp(prefix="fcp")
-        env = {"PATH": os.environ.get("PATH", ""), "FAKE_CLAUDE_LOG_DIR": self.log_dir}
+        base_env = {"PATH": os.environ.get("PATH", ""), "FAKE_CLAUDE_LOG_DIR": self.log_dir}
+        base_env.update(env or {})
+        env = base_env
         self.argv = PERM_ARGV if argv is None else argv
         self.proc = subprocess.Popen(
             [sys.executable, "-I", os.path.abspath(FAKE)] + self.argv,
@@ -774,6 +777,202 @@ class RawCueTest(unittest.TestCase):
     def test_unknown_raw_kind_ends_the_turn_with_an_error_result(self):
         lines = self.run_cue("RAW:nonsense")
         self.assertTrue(any(b"unknown raw cue" in l for l in lines))
+
+
+AUTH_TEXT = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+
+class AuthModeTest(unittest.TestCase):
+    """FAKE_CLAUDE_AUTH_FILE / FAKE_CLAUDE_AUTH_STICKY: an expired Claude login."""
+
+    def auth_file(self, value=None):
+        d = tempfile.mkdtemp(prefix="fcpauth")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "auth")
+        if value is not None:
+            self.set_auth(path, value)
+        return path
+
+    @staticmethod
+    def set_auth(path, value):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(value)
+
+    def fake(self, path, sticky=False):
+        env = {} if path is None else {"FAKE_CLAUDE_AUTH_FILE": path}
+        if sticky:
+            env["FAKE_CLAUDE_AUTH_STICKY"] = "1"
+        fake = Fake(self, env=env)
+        fake.start()
+        return fake
+
+    def turn(self, fake, text="hello"):
+        fake.send(user(text))
+        return fake.until_result()
+
+    def assert_failed_turn(self, frames):
+        self.assertEqual(frames[0]["type"], "user")
+        self.assertIs(frames[0]["isReplay"], True)
+        failing = [f for f in frames if f.get("error") == "authentication_failed"]
+        self.assertEqual(len(failing), 1, frames)
+        line = failing[0]
+        self.assertEqual(line["type"], "assistant")
+        self.assertIs(line["isApiErrorMessage"], True)
+        self.assertEqual(line["message"]["model"], "<synthetic>")
+        self.assertEqual(line["message"]["role"], "assistant")
+        self.assertEqual(line["message"]["usage"]["input_tokens"], 0)
+        self.assertEqual(line["message"]["usage"]["output_tokens"], 0)
+        self.assertEqual(line["message"]["content"], [{"type": "text", "text": AUTH_TEXT}])
+        result = frames[-1]
+        self.assertEqual(result["type"], "result")
+        self.assertIs(result["is_error"], True)
+        self.assertEqual(result["result"], AUTH_TEXT)
+        # The failing assistant line comes right before the result.
+        self.assertIs(frames[-2], line)
+
+    def assert_normal_turn(self, frames):
+        kinds = [f["type"] for f in frames]
+        self.assertEqual(kinds, ["user", "assistant", "result"])
+        self.assertEqual(frames[1]["message"]["content"], [{"type": "text", "text": "ok"}])
+        self.assertNotIn("error", frames[1])
+        self.assertIs(frames[2]["is_error"], False)
+        self.assertEqual(frames[2]["result"], "done")
+
+    def test_expired_login_echoes_the_message_then_fails_with_the_synthetic_auth_line(self):
+        fake = self.fake(self.auth_file("expired"))
+        frames = self.turn(fake)
+        self.assertEqual(len(frames), 3)
+        self.assert_failed_turn(frames)
+
+    def test_the_echo_of_a_failed_turn_carries_the_sent_message(self):
+        fake = self.fake(self.auth_file("expired"))
+        frames = self.turn(fake, "hello there")
+        self.assertEqual(frames[0]["message"]["content"], "hello there")
+
+    def test_an_ok_file_gives_a_normal_turn(self):
+        fake = self.fake(self.auth_file("ok"))
+        self.assert_normal_turn(self.turn(fake))
+
+    def test_a_missing_file_gives_a_normal_turn(self):
+        path = self.auth_file()
+        self.assertFalse(os.path.exists(path))
+        fake = self.fake(path)
+        self.assert_normal_turn(self.turn(fake))
+
+    def test_no_auth_env_var_gives_a_normal_turn(self):
+        fake = self.fake(None)
+        self.assert_normal_turn(self.turn(fake))
+
+    def test_an_empty_or_unknown_value_means_ok(self):
+        for value in ("", "banana", "EXPIRED-ish"):
+            with self.subTest(value=value):
+                fake = self.fake(self.auth_file(value))
+                self.assert_normal_turn(self.turn(fake))
+
+    def test_the_file_is_read_on_each_message_so_the_login_can_flip_mid_session(self):
+        path = self.auth_file("ok")
+        fake = self.fake(path)
+        self.assert_normal_turn(self.turn(fake))
+        self.set_auth(path, "expired")
+        self.assert_failed_turn(self.turn(fake))
+        self.assert_failed_turn(self.turn(fake))
+        self.set_auth(path, "ok")
+        self.assert_normal_turn(self.turn(fake))
+
+    def test_sticky_mode_reads_the_file_once_at_startup(self):
+        path = self.auth_file("expired")
+        fake = self.fake(path, sticky=True)
+        self.assert_failed_turn(self.turn(fake))
+        self.set_auth(path, "ok")
+        self.assert_failed_turn(self.turn(fake))
+
+    def test_sticky_mode_started_ok_stays_ok_after_the_file_flips(self):
+        path = self.auth_file("ok")
+        fake = self.fake(path, sticky=True)
+        self.assert_normal_turn(self.turn(fake))
+        self.set_auth(path, "expired")
+        self.assert_normal_turn(self.turn(fake))
+
+    def test_sticky_mode_rereads_the_file_in_each_new_process(self):
+        path = self.auth_file("expired")
+        first = self.fake(path, sticky=True)
+        self.assert_failed_turn(self.turn(first))
+        self.set_auth(path, "ok")
+        second = self.fake(path, sticky=True)
+        self.assert_normal_turn(self.turn(second))
+
+    def test_midturn_cue_while_expired_runs_a_bash_tool_call_before_failing(self):
+        fake = self.fake(self.auth_file("expired"))
+        frames = self.turn(fake, "please AUTH_MIDTURN now")
+        self.assertEqual([f["type"] for f in frames], ["user", "assistant", "user", "assistant", "result"])
+        tool_use = frames[1]["message"]["content"][0]
+        self.assertEqual(tool_use["type"], "tool_use")
+        self.assertEqual(tool_use["name"], "Bash")
+        tool_result = frames[2]["message"]["content"][0]
+        self.assertEqual(tool_result["type"], "tool_result")
+        self.assertEqual(tool_result["tool_use_id"], tool_use["id"])
+        self.assertIs(tool_result["is_error"], False)
+        self.assertEqual(frames[3]["error"], "authentication_failed")
+        self.assertIs(frames[4]["is_error"], True)
+        self.assertEqual(frames[4]["result"], AUTH_TEXT)
+
+    def test_midturn_cue_while_ok_is_ignored(self):
+        fake = self.fake(self.auth_file("ok"))
+        self.assert_normal_turn(self.turn(fake, "please AUTH_MIDTURN now"))
+
+    def test_midturn_cue_turn_after_the_login_recovers_is_normal(self):
+        path = self.auth_file("expired")
+        fake = self.fake(path)
+        self.turn(fake, "AUTH_MIDTURN")
+        self.set_auth(path, "ok")
+        self.assert_normal_turn(self.turn(fake, "AUTH_MIDTURN"))
+
+    def test_stdin_log_records_every_message_verbatim_failed_or_not(self):
+        path = self.auth_file("expired")
+        fake = self.fake(path)
+        sent = [user("first AUTH_MIDTURN"), user("second")]
+        for frame in sent:
+            fake.send(frame)
+            fake.until_result()
+        self.set_auth(path, "ok")
+        sent.append(user("third"))
+        fake.send(sent[-1])
+        fake.until_result()
+        self.assertEqual(fake.jsonl("stdin.jsonl"), sent)
+
+    def test_die_cue_while_ok_echoes_the_message_then_the_process_dies_without_a_result(self):
+        fake = self.fake(self.auth_file("ok"))
+        echo = fake.cue("please DIE_MIDTURN now")
+        self.assertEqual(echo["message"]["content"], "please DIE_MIDTURN now")
+        self.assertIsNone(fake.frames.get(timeout=TIMEOUT), "nothing after the echo, then EOF")
+        self.assertEqual(fake.proc.wait(timeout=TIMEOUT), -signal.SIGKILL)
+
+    def test_die_cue_while_expired_is_an_ordinary_auth_failure_and_the_process_lives(self):
+        fake = self.fake(self.auth_file("expired"))
+        self.assert_failed_turn(self.turn(fake, "please DIE_MIDTURN now"))
+        self.assertIsNone(fake.proc.poll())
+
+    def test_hang_cue_while_ok_echoes_the_message_and_never_ends_the_turn(self):
+        fake = self.fake(self.auth_file("ok"))
+        fake.cue("please HANG_MIDTURN now")
+        self.assertTrue(fake.no_more_frames(grace=0.5))
+        self.assertIsNone(fake.proc.poll(), "still alive")
+
+    def test_hang_cue_while_expired_is_an_ordinary_auth_failure(self):
+        fake = self.fake(self.auth_file("expired"))
+        self.assert_failed_turn(self.turn(fake, "please HANG_MIDTURN now"))
+
+    def test_a_process_that_hung_still_answers_the_next_message(self):
+        fake = self.fake(self.auth_file("ok"))
+        fake.cue("HANG_MIDTURN")
+        self.assert_normal_turn(self.turn(fake, "next"))
+
+    def test_the_auth_file_is_never_written_by_the_fake(self):
+        path = self.auth_file("expired")
+        fake = self.fake(path)
+        self.turn(fake)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "expired")
 
 
 class HygieneTest(unittest.TestCase):

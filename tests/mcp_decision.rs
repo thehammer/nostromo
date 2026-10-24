@@ -533,11 +533,18 @@ async fn raw_send(stream: &mut UnixStream, msg: &ClientMsg) {
 }
 
 async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
-    let bytes = tokio::time::timeout(Duration::from_secs(5), nostromo::ipc::codec::read_frame(stream))
-        .await
-        .expect("timed out waiting for a server frame")
-        .expect("read frame");
-    serde_json::from_slice(&bytes).unwrap()
+    loop {
+        let bytes = tokio::time::timeout(Duration::from_secs(5), nostromo::ipc::codec::read_frame(stream))
+            .await
+            .expect("timed out waiting for a server frame")
+            .expect("read frame");
+        let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
+        // Every local subscriber is replayed the Claude sign-in picture on connect
+        // (CL1): a frame this file's tests are not about.
+        if !matches!(msg, ServerMsg::ClaudeLoginState { .. }) {
+            return msg;
+        }
+    }
 }
 
 /// Assert that no frame arrives on `stream` within `within` — used to prove a
@@ -545,10 +552,14 @@ async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
 /// (a spurious notice here would read to the agent as a second, contradictory
 /// resolution nobody actually made).
 async fn raw_recv_none_within(stream: &mut UnixStream, within: Duration) {
-    if let Ok(frame_result) = tokio::time::timeout(within, nostromo::ipc::codec::read_frame(stream)).await {
+    let deadline = tokio::time::Instant::now() + within;
+    while let Ok(frame_result) = tokio::time::timeout_at(deadline, nostromo::ipc::codec::read_frame(stream)).await {
         let bytes = frame_result.expect("read frame");
         let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
-        panic!("expected no frame to arrive, but got: {msg:?}");
+        // The Claude sign-in replay (CL1) is not what this proves the absence of.
+        if !matches!(msg, ServerMsg::ClaudeLoginState { .. }) {
+            panic!("expected no frame to arrive, but got: {msg:?}");
+        }
     }
 }
 

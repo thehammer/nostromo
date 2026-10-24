@@ -51,6 +51,8 @@ use crate::approvals::broker::{
     APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, UNSUPPORTED_REQUEST_ERROR,
 };
 
+use super::auth_failure::{classify_line, TurnAuthTracker};
+use super::claude_login::{LoginCoordinator, LOGIN_QUEUE_CAP};
 use super::decisions::DecisionRegistry;
 use super::orphans::{self, ledger_path_beside, ChildLedger, Target, MARKER_ENV, SESSIONS_LEAD_OWN_GROUP, SHUTDOWN_GRACE};
 use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
@@ -68,9 +70,11 @@ use crate::model::store as model_store;
 use crate::model::{Actor, ModelPaths, ModelTarget};
 
 mod control;
+mod login;
 mod model_switch;
 mod task_runtime;
 pub use control::CONTROL_TIMEOUT;
+pub use login::{ResendOutcome, ResendTrigger};
 use control::ControlReply;
 use task_runtime::{
     detail_msg, drive_timer, ensure_poller, forward_session_events, tasks_msg, TaskRuntime,
@@ -159,9 +163,9 @@ struct PendingMessage {
 /// `model_io` → `state` → `model` → `pending`.
 /// The task runtime's `hub` lock (in `tasks`) may be held while the
 /// `transcript` lock is taken, never the reverse.
-/// `stdin`, `note_prefix`, `transcript` and `waiters` are leaf locks: they may
-/// be taken while holding the others, but nothing else is ever acquired while
-/// one of them is held.
+/// `stdin`, `note_prefix`, `transcript`, `waiters` and the `login` cell are leaf
+/// locks: they may be taken while holding the others, but nothing else is ever
+/// acquired while one of them is held.
 ///
 /// Nothing slow runs under `state` or `model`: those are read by `info()` and
 /// `list()` under the manager lock, so a blocking write to a stalled CLI's
@@ -205,6 +209,9 @@ struct Shared {
     runtime: tokio::runtime::Handle,
     /// The session's background tasks: registry, publication, previews.
     tasks: Arc<TaskRuntime>,
+    /// The message of a turn that failed to authenticate, held while the session
+    /// waits for a Claude sign-in (a leaf lock; see `login.rs`).
+    login: Arc<login::LoginLink>,
 }
 
 /// Lock `m`, taking the data even if a panicking holder poisoned it. For the
@@ -321,6 +328,13 @@ struct ManagedSession {
 impl ManagedSession {
     fn alive(&self) -> bool {
         !self.shared.exited.load(Ordering::SeqCst)
+    }
+
+    /// Can a held message of this session still be resent? Not once it is
+    /// stopped (by the user or the crash-loop guard) or while its process is down
+    /// (a respawn takes the hold along, see `take_carry`).
+    fn waits_for_login(&self) -> bool {
+        self.alive() && self.stop_reason.is_none()
     }
 
     /// Kill the child, and its whole process group when it leads one.
@@ -511,6 +525,12 @@ pub struct SessionManager {
     /// without the guard's `--settings` element, to prove the broker holds
     /// nothing for them.
     omit_guard_hook: bool,
+    /// Tells clients which sessions wait for a Claude sign-in and watches the
+    /// credential; `None` in tests and non-daemon use, where a session still
+    /// holds a failed message but nothing is published and nothing resends it.
+    login: Option<Arc<LoginCoordinator>>,
+    /// Where `claude` was last found (`login_snapshot`); see `claude_bin`.
+    claude_bin_cache: Mutex<Option<(Option<PathBuf>, Instant)>>,
 }
 
 impl SessionManager {
@@ -573,6 +593,8 @@ impl SessionManager {
                 .unwrap_or_else(|| PathBuf::from(crate::approvals::guard::GUARD_SENTINEL_PATH)),
             approvals: None,
             omit_guard_hook: false,
+            login: None,
+            claude_bin_cache: Mutex::new(None),
         }
     }
 
@@ -1072,6 +1094,7 @@ impl SessionManager {
             note_prefix: Arc::new(Mutex::new(None)),
             runtime: tokio::runtime::Handle::current(),
             tasks,
+            login: login::LoginLink::new(self.login.clone()),
         };
         // Ends vanished tasks and flushes coalesced task snapshots; stops
         // when the CLI has exited.
@@ -1198,7 +1221,13 @@ impl SessionManager {
         let should_write = {
             let mut state = lock_recover(&session.shared.state);
             let applying = lock_recover(&session.shared.model).applying.is_some();
-            if *state == SessionState::Idle && !applying {
+            // Paused for a sign-in: whatever the state, the message waits behind
+            // the held one, up to the cap (the refusal carries no content).
+            let paused = session.shared.login.paused();
+            if paused && lock_recover(&session.shared.pending).len() >= LOGIN_QUEUE_CAP {
+                anyhow::bail!("waiting_for_sign_in: queue full");
+            }
+            if *state == SessionState::Idle && !applying && !paused {
                 // Optimistically mark mid-turn so a follow-up send queues rather
                 // than racing a second message onto stdin before the echo lands.
                 *state = SessionState::MidTurn;
@@ -1208,6 +1237,9 @@ impl SessionManager {
                 false
             }
         };
+        if !should_write {
+            session.shared.login.notify();
+        }
 
         if should_write {
             // After a crash left a permission request of this focus pending, its
@@ -1250,6 +1282,10 @@ impl SessionManager {
     /// immediately starting the next queued message. The transcript is told, so
     /// the result that ends this turn renders as "Interrupted", not a failure.
     ///
+    /// A session that waits for a sign-in is Stop's too: the held message and the
+    /// queue behind it are discarded, so nothing is sent after the sign-in
+    /// ([`InterruptOutcome::DiscardedHold`], unless a turn was running too).
+    ///
     /// A no-op ([`InterruptOutcome::NotRunning`]) when the session is idle.
     pub fn interrupt(&mut self, tag: &str) -> Result<InterruptOutcome> {
         let session = self
@@ -1268,7 +1304,7 @@ impl SessionManager {
         // that same hold, so a writer that pops after it finds nothing. The
         // wait is bounded like `take_carry`'s.
         let deadline = std::time::Instant::now() + WRITE_WAIT_LIMIT;
-        let running = loop {
+        let (running, discarded) = loop {
             let state = lock_recover(&session.shared.state);
             if session.shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
                 drop(state);
@@ -1276,13 +1312,18 @@ impl SessionManager {
                 continue;
             }
             let running = matches!(*state, SessionState::MidTurn | SessionState::AwaitingPermission);
-            if running {
+            let discarded = session.shared.login.discard_for_stop();
+            if running || discarded {
                 lock_recover(&session.shared.pending).clear();
             }
-            break running;
+            break (running, discarded);
         };
+        if discarded {
+            info!(tag, "held message discarded: stopped by the user");
+            session.shared.login.notify();
+        }
         if !running {
-            return Ok(InterruptOutcome::NotRunning);
+            return Ok(if discarded { InterruptOutcome::DiscardedHold } else { InterruptOutcome::NotRunning });
         }
 
         lock_recover(&session.shared.transcript).mark_interrupt_requested();
@@ -1438,6 +1479,8 @@ impl SessionManager {
             }
             session.intentional_stop.store(true, Ordering::SeqCst);
             session.stop_reason = Some(StopReason::User);
+            // A stopped session waits for no sign-in: its held message is dropped.
+            session.shared.login.clear();
             session.kill();
             session.shared.exited.store(true, Ordering::SeqCst);
             // The forwarders are aborted below, before the reader reaches
@@ -1469,6 +1512,8 @@ impl SessionManager {
         if let Some(reg) = &self.decisions {
             reg.lock().unwrap().cancel_tag(tag);
         }
+        // A stopped session is no longer waiting for a sign-in.
+        self.login_changed();
     }
 
     /// Stop then respawn with `--resume <session_id>`, preserving the set of
@@ -1553,6 +1598,7 @@ impl SessionManager {
         self.stop(tag);
         self.sessions.remove(tag);
         save_id(&self.store_path, tag, None);
+        self.login_changed();
         debug!(tag, "session id cleared — next spawn is fresh");
     }
 
@@ -1670,7 +1716,9 @@ impl SessionManager {
                 // A switch still waiting (its apply never started, or the
                 // session died first) is work the respawn must pick up.
                 let has_waiting_switch = lock_recover(&s.shared.model).waiting.is_some();
-                wants_recovery = !s.attached_clients.is_empty() || has_pending || has_waiting_switch;
+                // A held message (a sign-in is awaited) is work the respawn inherits.
+                let has_hold = s.shared.login.paused();
+                wants_recovery = !s.attached_clients.is_empty() || has_pending || has_waiting_switch || has_hold;
                 let crash_count = s.crash_times.len() as u32;
                 guard_tripped = crash_count >= MAX_RESTARTS;
                 exit_code = s.last_exit_code;
@@ -1724,10 +1772,13 @@ impl SessionManager {
                 if let Some(s) = self.sessions.get_mut(&tag) {
                     s.intentional_stop.store(true, Ordering::SeqCst);
                     s.stop_reason = Some(StopReason::CrashLoopGuard);
+                    // Given up on: it waits for no sign-in, and its held message is dropped.
+                    s.shared.login.clear();
                     s.shared.broadcast(SessionEvent::PermanentlyDown {
                         reason: StopReason::CrashLoopGuard,
                     });
                 }
+                self.login_changed();
                 // The session will not auto-restart — cancel any decision
                 // pending for this tag rather than leaving its caller blocked
                 // on a session that is never coming back on its own.
@@ -2250,6 +2301,9 @@ impl Default for SessionManager {
 /// recorded; the reader itself never waits on anything but stdout.
 fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, approvals: Option<ApprovalLink>) {
     let reader = BufReader::new(stdout);
+    // Follows the turn now running, to tell at its end whether it failed to
+    // authenticate and whether sending its message again repeats anything.
+    let mut auth = TurnAuthTracker::new();
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -2261,7 +2315,9 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
         if line.trim().is_empty() {
             continue;
         }
-        let Some(parsed) = parse_line(&line) else {
+        let parsed = parse_line(&line);
+        auth.feed(classify_line(&line), parsed.as_ref());
+        let Some(parsed) = parsed else {
             continue;
         };
 
@@ -2327,6 +2383,8 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
         for delta in deltas {
             match &delta {
                 TurnDelta::TurnStarted { .. } => {
+                    auth.begin_turn();
+                    login::on_turn_started(&shared);
                     shared.set_state(SessionState::MidTurn);
                 }
                 // A phantom dropped as the real prompt arrives is no turn
@@ -2335,6 +2393,9 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
                 TurnDelta::TurnErrored { discarded: true, .. } => {}
                 TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. } => {
                     shared.broadcast(SessionEvent::Delta(delta.clone()));
+                    // A turn that failed to authenticate makes a hold, and `step`
+                    // does not drain the queue while one exists.
+                    login::on_turn_end(&shared, &tag, auth.finish());
                     advance(&shared);
                     continue;
                 }
@@ -2545,7 +2606,9 @@ fn step(shared: &Shared, finished_apply: bool) {
             // `take_carry` (restart and crash recovery) waits for the write's
             // outcome, which keeps a message either written here or still
             // queued for the respawned session, never dropped between the two.
-            let msg = if exited { None } else { lock_recover(&shared.pending).pop_front() };
+            // Nor while the session waits for a sign-in: the queue stays behind
+            // the held message (a switch may still apply).
+            let msg = if exited || shared.login.paused() { None } else { lock_recover(&shared.pending).pop_front() };
             match msg {
                 Some(msg) => {
                     shared.writing.store(true, Ordering::SeqCst);
@@ -2694,6 +2757,9 @@ pub enum InterruptOutcome {
     Requested,
     /// The session was idle: nothing to interrupt.
     NotRunning,
+    /// The session was waiting for a sign-in: Stop discarded the held message
+    /// and the queue behind it, so nothing is sent after the sign-in.
+    DiscardedHold,
 }
 
 /// Write one stream-json `control_request` frame (`request` is the body, e.g.
@@ -2777,20 +2843,21 @@ fn write_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, frame: &serde_json::Value
 }
 
 /// Write a queued or direct user message, with the pending agent note (if
-/// any) in front of it.
+/// any) in front of it. The exact frame is remembered (see `login::write_recorded`)
+/// so a turn that fails to authenticate can hold it.
 fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
     let prefix = lock_recover(&shared.note_prefix).take();
     match prefix {
         Some(note) => {
             let text = format!("{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}", msg.text);
-            let result = write_user_frame(&shared.stdin, &text, &msg.images);
+            let result = login::write_recorded(shared, &PendingMessage { text, images: msg.images.clone() });
             if result.is_err() {
                 // Not delivered: the note goes with the next message instead.
                 *lock_recover(&shared.note_prefix) = Some(note);
             }
             result
         }
-        None => write_user_frame(&shared.stdin, &msg.text, &msg.images),
+        None => login::write_recorded(shared, msg),
     }
 }
 
