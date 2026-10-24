@@ -28,6 +28,9 @@ fn the_approvals_dir_is_the_env_override_and_a_test_binary_can_never_reach_the_r
             .cloned()
             .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_default();
-        assert!(message.contains(APPROVALS_DIR_ENV), "the panic names the variable to set: {message:?}");
+        assert!(
+            message.contains(APPROVALS_DIR_ENV),
+            "the panic names the variable to set: {message:?}"
+        );
     }
 }

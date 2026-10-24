@@ -78,40 +78,72 @@ fn assert_crew_fields(j: &Value) {
     assert_eq!(j["id"], "j-gates1", "{j}");
     assert_eq!(j["activity"], "gating", "{j}");
     assert_eq!(j["crew_opt_in"], true, "{j}");
-    assert_eq!(j["pr_url"], "https://github.com/Carefeed/admin-portal/pull/4321", "{j}");
+    assert_eq!(
+        j["pr_url"], "https://github.com/Carefeed/admin-portal/pull/4321",
+        "{j}"
+    );
     assert_eq!(j["gates"]["attempt"], 1, "{j}");
     assert_eq!(j["gates"]["max_attempts"], 3, "{j}");
     assert_eq!(j["gates"]["results"][0]["name"], "lint", "{j}");
     assert_eq!(j["progress"]["pct"], 55, "{j}");
     assert_eq!(j["progress"]["eta"]["basis"], "fleet", "{j}");
-    assert!(j.get("crew").is_none(), "the opaque crew blob must not reach agents: {j}");
+    assert!(
+        j.get("crew").is_none(),
+        "the opaque crew blob must not reach agents: {j}"
+    );
     let text = j.to_string();
-    assert!(!text.contains("gate_commands") && !text.contains("SECRET-GATE-COMMAND"), "crew blob leaked: {text}");
+    assert!(
+        !text.contains("gate_commands") && !text.contains("SECRET-GATE-COMMAND"),
+        "crew blob leaked: {text}"
+    );
 }
 
 #[tokio::test]
 async fn mother_get_job_returns_the_crew_fields_and_no_crew_blob() {
     let state = state_with(vec![plain_job(), crew_job()]);
-    let result = mother::get_job(&state, &mother::GetJobInput { id: "j-gates1".into() });
+    let result = mother::get_job(
+        &state,
+        &mother::GetJobInput {
+            id: "j-gates1".into(),
+        },
+    );
     assert_crew_fields(&result);
 }
 
 #[tokio::test]
 async fn mother_list_jobs_returns_the_crew_fields_and_no_crew_blob() {
     let state = state_with(vec![plain_job(), crew_job()]);
-    let result = mother::list_jobs(&state, &mother::ListJobsInput { include_archived: false, status: None }).await;
+    let result = mother::list_jobs(
+        &state,
+        &mother::ListJobsInput {
+            include_archived: false,
+            status: None,
+        },
+    )
+    .await;
     let arr = result.as_array().expect("array");
     assert_eq!(arr.len(), 2, "{result}");
-    let crew = arr.iter().find(|j| j["id"] == "j-gates1").expect("crew job listed");
+    let crew = arr
+        .iter()
+        .find(|j| j["id"] == "j-gates1")
+        .expect("crew job listed");
     assert_crew_fields(crew);
 }
 
 #[tokio::test]
 async fn a_job_without_crew_data_shows_none_of_the_crew_keys_over_mcp() {
     let state = state_with(vec![plain_job(), crew_job()]);
-    let got = mother::get_job(&state, &mother::GetJobInput { id: "j-plain".into() });
+    let got = mother::get_job(
+        &state,
+        &mother::GetJobInput {
+            id: "j-plain".into(),
+        },
+    );
     assert_eq!(got["id"], "j-plain");
     for key in NEW_KEYS.iter().chain(["crew"].iter()) {
-        assert!(got.get(*key).is_none(), "key `{key}` must be absent for a job without crew data: {got}");
+        assert!(
+            got.get(*key).is_none(),
+            "key `{key}` must be absent for a job without crew data: {got}"
+        );
     }
 }

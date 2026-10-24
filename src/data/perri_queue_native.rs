@@ -1839,7 +1839,12 @@ pub(crate) async fn fetch_check_runs_state(
         .map(|r| CiState::from_check(r.status.as_deref(), r.conclusion.as_deref()))
         .collect();
 
-    let display_state = CiState::rollup(run_states.iter().copied().chain(status_states.iter().copied()));
+    let display_state = CiState::rollup(
+        run_states
+            .iter()
+            .copied()
+            .chain(status_states.iter().copied()),
+    );
 
     // A failed GitHub Actions run, or any failed/errored commit status, drops
     // the PR from the queue.
@@ -3123,8 +3128,8 @@ mod tests {
         )
         .unwrap();
         std::env::remove_var("GITHUB_TOKEN");
-        let client =
-            GithubClient::new(Some(&hosts_path)).expect("client should build from hosts.yml fixture");
+        let client = GithubClient::new(Some(&hosts_path))
+            .expect("client should build from hosts.yml fixture");
         std::mem::forget(dir);
         client
     }

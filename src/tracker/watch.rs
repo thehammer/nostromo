@@ -246,7 +246,14 @@ mod temp_name_tests {
     #[test]
     fn only_the_exact_tempfile_shape_is_ours() {
         assert!(is_our_temp_name(".tracker-aB3xY9.tmp"));
-        for not_ours in [".tracker-notes.tmp", ".tracker-.tmp", ".tracker-aB3xY9z.tmp", ".tracker-aB3x_9.tmp", "tracker-aB3xY9.tmp", ".tracker-aB3xY9.tmp.bak"] {
+        for not_ours in [
+            ".tracker-notes.tmp",
+            ".tracker-.tmp",
+            ".tracker-aB3xY9z.tmp",
+            ".tracker-aB3x_9.tmp",
+            "tracker-aB3xY9.tmp",
+            ".tracker-aB3xY9.tmp.bak",
+        ] {
             assert!(!is_our_temp_name(not_ours), "{not_ours}");
         }
     }

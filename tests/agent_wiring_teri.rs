@@ -4,8 +4,8 @@
 //! Null one while Teri is off, and this installs a real one.
 
 use nostromo::agents::{
-    wire_agents, AgentSpawner, CalendarRx, EnabledAgents, MailboxRx, PerriPrRx, PerriQueueRx, PerriSources,
-    TeriSources, TodosRx,
+    wire_agents, AgentSpawner, CalendarRx, EnabledAgents, MailboxRx, PerriPrRx, PerriQueueRx,
+    PerriSources, TeriSources, TodosRx,
 };
 use nostromo::data::work::hub::{HubDeps, WorkHub};
 use nostromo::data::work::work_service;
@@ -44,7 +44,10 @@ impl AgentSpawner for WithHub {
     }
     fn start_teri(&mut self) -> TeriSources {
         let todos_rx = self.rx(None);
-        TeriSources { todos_rx, work_hub: Some(self.hub.clone()) }
+        TeriSources {
+            todos_rx,
+            work_hub: Some(self.hub.clone()),
+        }
     }
     fn start_perri_broadcaster(&mut self, _q: PerriQueueRx, _p: PerriPrRx) {}
     fn start_fred_broadcaster(&mut self, _m: MailboxRx, _c: CalendarRx) {}
@@ -65,11 +68,26 @@ async fn an_enabled_teri_installs_its_work_hub_as_the_work_service() {
         repo_docs_root: Some(dir.path().join("no-code-here")),
         ..HubDeps::new(btx, trx)
     });
-    assert!(!same_service(&work_service(), &hub), "setup: the Null service is installed first");
+    assert!(
+        !same_service(&work_service(), &hub),
+        "setup: the Null service is installed first"
+    );
 
-    let mut spawner = WithHub { hub: hub.clone(), keep: Vec::new() };
+    let mut spawner = WithHub {
+        hub: hub.clone(),
+        keep: Vec::new(),
+    };
     let wired = wire_agents(EnabledAgents::all(), &mut spawner);
 
-    assert!(wired.work_hub.as_ref().is_some_and(|h| Arc::ptr_eq(h, &hub)), "the hub is handed back");
-    assert!(same_service(&work_service(), &hub), "and installed as the process-wide work service");
+    assert!(
+        wired
+            .work_hub
+            .as_ref()
+            .is_some_and(|h| Arc::ptr_eq(h, &hub)),
+        "the hub is handed back"
+    );
+    assert!(
+        same_service(&work_service(), &hub),
+        "and installed as the process-wide work service"
+    );
 }

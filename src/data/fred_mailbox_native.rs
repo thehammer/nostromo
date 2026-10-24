@@ -128,9 +128,7 @@ struct UnreadCount {
 
 impl UnreadCount {
     fn needs_fetch(&self, ttl: Duration) -> bool {
-        self.dirty
-            || self.value.is_none()
-            || self.fetched_at.is_none_or(|t| t.elapsed() >= ttl)
+        self.dirty || self.value.is_none() || self.fetched_at.is_none_or(|t| t.elapsed() >= ttl)
     }
 }
 
@@ -156,7 +154,10 @@ impl FredMailboxNativeSource {
             };
             // The same client serves message/event detail requests.
             install_fred_detail_service(Arc::new(GraphFredDetail::new(graph.clone())));
-            let source = FredMailboxNativeSource { config, timing: FredTiming::default() };
+            let source = FredMailboxNativeSource {
+                config,
+                timing: FredTiming::default(),
+            };
             source.run(graph, tx, &mut dirty_rx).await;
         });
 
@@ -203,7 +204,14 @@ impl FredMailboxNativeSource {
         loop {
             let previous = tx.borrow().clone();
             let (next, throttled_for) = self
-                .refresh(&graph, &delta_file, &mut store, &mut unread, &mut backoff, previous.as_ref())
+                .refresh(
+                    &graph,
+                    &delta_file,
+                    &mut store,
+                    &mut unread,
+                    &mut backoff,
+                    previous.as_ref(),
+                )
                 .await;
             let _ = tx.send(Some(next));
 
@@ -244,8 +252,12 @@ impl FredMailboxNativeSource {
             match backoff.throttled(e) {
                 Some(wait) => {
                     let wait = wait.max(poll);
-                    let retry_at = Utc::now() + chrono::Duration::from_std(wait).unwrap_or_default();
-                    (MailboxSnapshot::rate_limited(previous, reason, retry_at), Some(wait))
+                    let retry_at =
+                        Utc::now() + chrono::Duration::from_std(wait).unwrap_or_default();
+                    (
+                        MailboxSnapshot::rate_limited(previous, reason, retry_at),
+                        Some(wait),
+                    )
                 }
                 None => (MailboxSnapshot::failed(previous, reason), None),
             }
@@ -299,7 +311,10 @@ impl FredMailboxNativeSource {
         }
 
         backoff.succeeded();
-        (build_snapshot(store, unread.value.unwrap_or(0), &self.config), None)
+        (
+            build_snapshot(store, unread.value.unwrap_or(0), &self.config),
+            None,
+        )
     }
 
     fn delta_cache_dir(&self) -> PathBuf {
@@ -349,10 +364,9 @@ impl From<UnavailableGraph> for MailboxSnapshot {
                 error: Some(NOT_CONFIGURED_REASON.to_owned()),
                 ..Default::default()
             },
-            UnavailableGraph::Failed(reason) => MailboxSnapshot::failed(
-                None,
-                format!("Graph client init failed: {reason}"),
-            ),
+            UnavailableGraph::Failed(reason) => {
+                MailboxSnapshot::failed(None, format!("Graph client init failed: {reason}"))
+            }
         }
     }
 }
@@ -367,10 +381,9 @@ impl From<UnavailableGraph> for CalendarSnapshot {
                 error: Some(NOT_CONFIGURED_REASON.to_owned()),
                 ..Default::default()
             },
-            UnavailableGraph::Failed(reason) => Self::failed(
-                None,
-                format!("Graph client init failed: {reason}"),
-            ),
+            UnavailableGraph::Failed(reason) => {
+                Self::failed(None, format!("Graph client init failed: {reason}"))
+            }
         }
     }
 }

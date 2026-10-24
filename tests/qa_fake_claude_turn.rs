@@ -19,15 +19,30 @@ fn the_qa_fake_claude_wrapper_completes_a_plain_turn_through_the_daemon_parser()
     let work = tmp.path().join("work");
     std::fs::create_dir_all(&work).unwrap();
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
     rt.block_on(async {
         let mut mgr = SessionManager::with_store_path(tmp.path().join("daemon-sessions.json"));
-        mgr.spawn_session("qa-1".into(), "cody".into(), "view-qa-1".into(), Some(work), None, false)
-            .expect("the fake CLI starts");
+        mgr.spawn_session(
+            "qa-1".into(),
+            "cody".into(),
+            "view-qa-1".into(),
+            Some(work),
+            None,
+            false,
+        )
+        .expect("the fake CLI starts");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerMsg>();
-        mgr.client_sender_registry().lock().unwrap().insert("probe".into(), tx);
+        mgr.client_sender_registry()
+            .lock()
+            .unwrap()
+            .insert("probe".into(), tx);
         mgr.attach("qa-1", "probe").unwrap();
-        mgr.send_user_message("qa-1", "hello from the QA harness", &[]).expect("message accepted");
+        mgr.send_user_message("qa-1", "hello from the QA harness", &[])
+            .expect("message accepted");
 
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut saw_text = false;
@@ -40,7 +55,10 @@ fn the_qa_fake_claude_wrapper_completes_a_plain_turn_through_the_daemon_parser()
             while let Ok(msg) = rx.try_recv() {
                 if let ServerMsg::SessionTurnDelta { delta, .. } = msg {
                     match delta {
-                        TurnDelta::BlockAppended { block: TurnBlock::Text { .. }, .. } => saw_text = true,
+                        TurnDelta::BlockAppended {
+                            block: TurnBlock::Text { .. },
+                            ..
+                        } => saw_text = true,
                         TurnDelta::TurnCompleted { .. } => completed = true,
                         _ => {}
                     }

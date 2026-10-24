@@ -28,7 +28,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event};
 use nostromo::approvals::broker::{
     restart_note_text, ApprovalBroker, BrokerParts, Incoming, Presenter, SessionInfo, SessionSink,
-    APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, APPROVAL_TIMEOUT, RESTART_MESSAGE,
+    APPROVAL_TIMEOUT, APPROVAL_UNAVAILABLE_MESSAGE, INVALID_REQUEST_MESSAGE, RESTART_MESSAGE,
     RESTART_NOTES_FILE, TIMED_OUT_MESSAGE, UNSUPPORTED_REQUEST_ERROR,
 };
 use nostromo::approvals::guard::{
@@ -709,7 +709,8 @@ fn a_remote_control_session_is_not_approval_capable() {
 // ── PRD 1 + 3: every prompt is answered, recorded, and denied before the clock moves ──
 
 #[test]
-fn every_ordinary_prompt_is_denied_approval_unavailable_with_exactly_one_response_and_one_logged_outcome() {
+fn every_ordinary_prompt_is_denied_approval_unavailable_with_exactly_one_response_and_one_logged_outcome(
+) {
     run(Opts::default(), |mut w| async move {
         let fake = w.spawn("focus-1", false);
         let start = tokio::time::Instant::now();

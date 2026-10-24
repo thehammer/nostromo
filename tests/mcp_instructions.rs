@@ -49,29 +49,44 @@ fn harness(focuses: &[&str]) -> Harness {
     for d in [&repo, &base.join("home"), &base.join("state")] {
         std::fs::create_dir_all(d).unwrap();
     }
-    let git = Command::new("git").args(["init", "-q"]).current_dir(&repo).output().unwrap();
+    let git = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
     assert!(git.status.success());
     let registry = Arc::new(TrackerRegistry::new(RegistryParts::hermetic(
         base.join("state"),
         base.join("home"),
         Arc::new(FakeClock::at_secs(1_760_540_000)),
     )));
-    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(base.join("sessions.json"))));
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        base.join("sessions.json"),
+    )));
     session_mgr
         .lock()
         .unwrap()
         .set_focus_registry(focuses.iter().map(|t| focus(t)).collect());
     let (tx, _rx) = broadcast::channel::<ServerMsg>(64);
     let state = McpSharedState::for_daemon(DaemonMcpBackend {
-        pane_registry: Arc::new(Mutex::new(PaneRegistry::with_store_path(base.join("panes.json")))),
+        pane_registry: Arc::new(Mutex::new(PaneRegistry::with_store_path(
+            base.join("panes.json"),
+        ))),
         session_mgr,
         broadcast_tx: tx,
         perri: PerriDaemonState::default(),
-        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+        decisions: Arc::new(Mutex::new(
+            nostromo::ipc::decisions::DecisionRegistry::default(),
+        )),
         tickets: Default::default(),
         tracker: Arc::clone(&registry),
     });
-    Harness { state, registry, repo, dir }
+    Harness {
+        state,
+        registry,
+        repo,
+        dir,
+    }
 }
 
 fn tui_state() -> McpSharedState {
@@ -123,8 +138,15 @@ fn todays_response() -> Value {
 #[tokio::test]
 async fn a_known_daemon_focus_gets_the_tracker_instructions() {
     let h = harness(&["cody-1"]);
-    let resp = initialize(&h.state, h.dir.path(), json!({"type":"hello","pty_id":"cody-1"})).await;
-    let text = resp["result"]["instructions"].as_str().expect("instructions");
+    let resp = initialize(
+        &h.state,
+        h.dir.path(),
+        json!({"type":"hello","pty_id":"cody-1"}),
+    )
+    .await;
+    let text = resp["result"]["instructions"]
+        .as_str()
+        .expect("instructions");
     for needle in [
         "mcp__nostromo__nostromo_tracker",
         "keep track",
@@ -150,7 +172,12 @@ async fn every_other_caller_gets_todays_bytes() {
         assert_eq!(resp, todays_response(), "{why}");
     }
     let tui = tui_state();
-    let resp = initialize(&tui, h.dir.path(), json!({"type":"hello","pty_id":"cody-1"})).await;
+    let resp = initialize(
+        &tui,
+        h.dir.path(),
+        json!({"type":"hello","pty_id":"cody-1"}),
+    )
+    .await;
     assert_eq!(resp, todays_response(), "TUI-hosted server");
 }
 
@@ -159,7 +186,10 @@ async fn a_focus_with_a_bound_board_is_told_its_topic_and_stays_in_budget() {
     let h = harness(&["cody-1", "cody-2"]);
     h.registry.set_caller_facts(
         "cody-1",
-        CallerFacts { cwd: Some(h.repo.clone()), session_id: Some("s1".into()) },
+        CallerFacts {
+            cwd: Some(h.repo.clone()),
+            session_id: Some("s1".into()),
+        },
     );
     let opened = nostromo::mcp::tools::dispatch(
         "nostromo.tracker",
@@ -170,11 +200,26 @@ async fn a_focus_with_a_bound_board_is_told_its_topic_and_stays_in_budget() {
     .await;
     assert!(matches!(opened, nostromo::mcp::tools::ToolResult::Ok(_)));
 
-    let bound = initialize(&h.state, h.dir.path(), json!({"type":"hello","pty_id":"cody-1"})).await;
+    let bound = initialize(
+        &h.state,
+        h.dir.path(),
+        json!({"type":"hello","pty_id":"cody-1"}),
+    )
+    .await;
     let text = bound["result"]["instructions"].as_str().unwrap();
-    assert!(text.contains("A tracker is open in this focus: \"sentry-triage\". Call op:\"read\" to load it."));
+    assert!(text.contains(
+        "A tracker is open in this focus: \"sentry-triage\". Call op:\"read\" to load it."
+    ));
     assert!(text.chars().count() <= 1_200);
 
-    let other = initialize(&h.state, h.dir.path(), json!({"type":"hello","pty_id":"cody-2"})).await;
-    assert!(!other["result"]["instructions"].as_str().unwrap().contains("A tracker is open"));
+    let other = initialize(
+        &h.state,
+        h.dir.path(),
+        json!({"type":"hello","pty_id":"cody-2"}),
+    )
+    .await;
+    assert!(!other["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("A tracker is open"));
 }

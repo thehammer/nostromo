@@ -76,7 +76,15 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     )
     .await;
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
-    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false }).await;
+    send(
+        stream,
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+            renders_approvals: false,
+        },
+    )
+    .await;
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -100,14 +108,18 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
             tmp.path().join("mcp-config.json"),
         );
     }
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -149,8 +161,7 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
         if saw_layout && saw_queue_content && saw_diff_content {
             break;
         }
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => break,
         };
@@ -226,14 +237,18 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
             tmp.path().join("mcp-config.json"),
         );
     }
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -273,7 +288,10 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         Some("perri"),
     )
     .await;
-    assert_eq!(refresh_result["ok"], true, "binding the diff pane to get_file must succeed: {refresh_result:?}");
+    assert_eq!(
+        refresh_result["ok"], true,
+        "binding the diff pane to get_file must succeed: {refresh_result:?}"
+    );
 
     // A client connecting after that binding exists is exactly the path that
     // used to deadlock: attach-replay calls bound_pane_contents() while
@@ -287,16 +305,18 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
         if saw_layout && saw_code_content {
             break;
         }
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => break, // a deadlocked server never writes another frame
         };
         match msg {
             ServerMsg::FocusLayout { tag, .. } if tag == "perri" => saw_layout = true,
-            ServerMsg::PaneContent { tag, pane_id, content, .. }
-                if tag == "perri" && pane_id == "diff" =>
-            {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                ..
+            } if tag == "perri" && pane_id == "diff" => {
                 assert!(matches!(content, PaneContentWire::Code { .. }));
                 saw_code_content = true;
             }
@@ -345,7 +365,9 @@ async fn fresh_registry_after_simulated_restart_has_bound_pane_content_ready_wit
         session_mgr,
         broadcast_tx,
         perri: PerriDaemonState::default(),
-        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+        decisions: Arc::new(Mutex::new(
+            nostromo::ipc::decisions::DecisionRegistry::default(),
+        )),
         tickets: Default::default(),
         tracker: Default::default(),
     };
@@ -390,15 +412,15 @@ async fn attaching_client_gets_perri_state_replayed() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let (_queue_tx, queue_rx) = tokio::sync::watch::channel(Some(seeded_queue_snapshot()));
     let (_pr_tx, pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
     {
         let mut mgr = session_mgr.lock().unwrap();
-        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
-            queue_rx, pr_rx,
-        )));
+        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(queue_rx, pr_rx)));
     }
 
     let server = Server::bind(
@@ -406,7 +428,9 @@ async fn attaching_client_gets_perri_state_replayed() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -416,8 +440,7 @@ async fn attaching_client_gets_perri_state_replayed() {
 
     let mut seen_seeded_item = false;
     for _ in 0..8 {
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => break,
         };
@@ -462,18 +485,20 @@ async fn attaching_client_with_empty_topics_gets_layout_and_perri_replayed() {
             tmp.path().join("mcp.sock"),
             tmp.path().join("mcp-config.json"),
         );
-        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
-            queue_rx, pr_rx,
-        )));
+        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(queue_rx, pr_rx)));
     }
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -486,8 +511,7 @@ async fn attaching_client_with_empty_topics_gets_layout_and_perri_replayed() {
 
     let mut messages: Vec<ServerMsg> = Vec::new();
     for _ in 0..8 {
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => break,
         };
@@ -523,7 +547,9 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     // Both watch channels are still at their initial `None` — neither the PR
     // queue nor the current-PR source has fetched anything yet.
@@ -531,9 +557,7 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
     let (_pr_tx, pr_rx) = tokio::sync::watch::channel(nostromo::data::perri_pr::no_prs());
     {
         let mut mgr = session_mgr.lock().unwrap();
-        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
-            queue_rx, pr_rx,
-        )));
+        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(queue_rx, pr_rx)));
     }
 
     let server = Server::bind(
@@ -541,7 +565,9 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -551,8 +577,7 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
 
     let mut saw_perri_state = false;
     for _ in 0..4 {
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -584,7 +609,9 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     fn pr(repo: &str, number: u64) -> Arc<PrSnapshot> {
         Arc::new(PrSnapshot {
@@ -624,9 +651,7 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
     {
         let mut mgr = session_mgr.lock().unwrap();
         mgr.set_focus_registry(vec![focus("perri"), focus("reviewer-two")]);
-        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
-            queue_rx, pr_rx,
-        )));
+        mgr.configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(queue_rx, pr_rx)));
     }
 
     let server = Server::bind(
@@ -634,7 +659,9 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -644,8 +671,7 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
 
     let mut frames: Vec<(String, Option<(String, u64)>)> = Vec::new();
     for _ in 0..8 {
-        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await
-        {
+        let msg = match tokio::time::timeout(Duration::from_millis(500), recv(&mut stream)).await {
             Ok(m) => m,
             Err(_) => break,
         };
@@ -656,7 +682,9 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
         } = msg
         {
             assert!(
-                queue.iter().any(|item| item.repo == "acme/web" && item.number == 42),
+                queue
+                    .iter()
+                    .any(|item| item.repo == "acme/web" && item.number == 42),
                 "every replayed frame carries the fleet-wide queue: {tag}"
             );
             let current = current.map(|c| (c.repo, c.pr_number.unwrap_or_default()));

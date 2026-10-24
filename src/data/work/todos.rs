@@ -22,22 +22,35 @@ pub const NOT_CONFIGURED_REASON: &str = "Teri's todo store ~/.teri/teri.db not f
 pub fn adapt(snap: &TeriTodosSnapshot) -> (SourceStatus, Vec<WorkItem>) {
     let items: Vec<WorkItem> = snap.items.iter().map(to_work_item).collect();
     let (state, reason) = if snap.not_configured {
-        (SourceState::NotConfigured, Some(NOT_CONFIGURED_REASON.to_string()))
+        (
+            SourceState::NotConfigured,
+            Some(NOT_CONFIGURED_REASON.to_string()),
+        )
     } else if let Some(error) = &snap.error {
         let why = format!("Couldn't read Teri's todo store: {error}");
         if snap.stale && !items.is_empty() {
-            (SourceState::Stale, Some(format!("{why}; showing the last good list")))
+            (
+                SourceState::Stale,
+                Some(format!("{why}; showing the last good list")),
+            )
         } else {
             (SourceState::Error, Some(why))
         }
     } else if snap.stale {
-        (SourceState::Stale, Some("Teri's todo store could not be read; showing the last good list".into()))
+        (
+            SourceState::Stale,
+            Some("Teri's todo store could not be read; showing the last good list".into()),
+        )
     } else if items.is_empty() {
         (SourceState::Empty, None)
     } else {
         (SourceState::Fresh, None)
     };
-    let items = if snap.not_configured { Vec::new() } else { items };
+    let items = if snap.not_configured {
+        Vec::new()
+    } else {
+        items
+    };
     let status = SourceStatus {
         source: WorkSource::Todos,
         state,
@@ -72,7 +85,10 @@ fn to_work_item(todo: &TeriTodo) -> WorkItem {
         project: None,
         status: Some(todo.status.clone()),
         status_category: None,
-        priority: Some(Priority { label: format!("P{rank}"), rank }),
+        priority: Some(Priority {
+            label: format!("P{rank}"),
+            rank,
+        }),
         severity: None,
         environment: None,
         created_at: None,
@@ -108,7 +124,10 @@ pub fn detail(
 
     let mut fields = vec![
         ("Status".to_string(), humanize_status(&todo.status)),
-        ("Priority".to_string(), format!("P{}", todo.priority.clamp(1, 5))),
+        (
+            "Priority".to_string(),
+            format!("P{}", todo.priority.clamp(1, 5)),
+        ),
     ];
     if let Some(due) = todo.due_date.as_deref().and_then(parse_due) {
         fields.push(("Due".to_string(), format!("{due} ({})", weekday_short(due))));

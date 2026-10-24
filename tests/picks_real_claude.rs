@@ -24,7 +24,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use nostromo::data::work::picks::{picks_restrictions, transcript_dir_for, GeneratorEnv, PICKS_MCP_TOOLS};
+use nostromo::data::work::picks::{
+    picks_restrictions, transcript_dir_for, GeneratorEnv, PICKS_MCP_TOOLS,
+};
 use nostromo::ipc::session_manager::{build_claude_args_with, resolve_claude};
 use serde_json::{json, Value};
 
@@ -131,13 +133,20 @@ fn event_kind(event: &Value) -> String {
 
 /// Content blocks of an assistant or user event.
 fn blocks(event: &Value) -> Vec<&Value> {
-    event["message"]["content"].as_array().map(|a| a.iter().collect()).unwrap_or_default()
+    event["message"]["content"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default()
 }
 
 fn tool_result_text(block: &Value) -> String {
     match &block["content"] {
         Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => String::new(),
     }
 }
@@ -179,10 +188,22 @@ fn the_real_claude_can_call_exactly_the_picks_tools_under_the_picks_session_argu
     let cwd = tempfile::tempdir().unwrap();
     let session_id = uuid::Uuid::new_v4().to_string();
     // The real guard binary, as production wires it.
-    let guard_settings =
-        nostromo::approvals::guard::hook_settings_json(std::path::Path::new(env!("CARGO_BIN_EXE_nostromo-guard")));
-    let mut args = build_claude_args_with("", "picks probe", false, &session_id, false, Some(&picks_restrictions()), &guard_settings);
-    args.extend(["--mcp-config".into(), mcp_config.to_string_lossy().into_owned()]);
+    let guard_settings = nostromo::approvals::guard::hook_settings_json(std::path::Path::new(
+        env!("CARGO_BIN_EXE_nostromo-guard"),
+    ));
+    let mut args = build_claude_args_with(
+        "",
+        "picks probe",
+        false,
+        &session_id,
+        false,
+        Some(&picks_restrictions()),
+        &guard_settings,
+    );
+    args.extend([
+        "--mcp-config".into(),
+        mcp_config.to_string_lossy().into_owned(),
+    ]);
     args.extend(["--model".into(), "haiku".into()]);
 
     let stderr_log = rig.path().join("claude.stderr");
@@ -197,7 +218,10 @@ fn the_real_claude_can_call_exactly_the_picks_tools_under_the_picks_session_argu
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let projects = GeneratorEnv::local().projects_dir;
-    let _probe = Probe { child, transcripts: projects.map(|p| transcript_dir_for(&p, cwd.path())) };
+    let _probe = Probe {
+        child,
+        transcripts: projects.map(|p| transcript_dir_for(&p, cwd.path())),
+    };
 
     let message = json!({"type": "user", "message": {"role": "user", "content": PROBE_PROMPT}});
     writeln!(stdin, "{message}").unwrap();
@@ -224,12 +248,19 @@ fn the_real_claude_can_call_exactly_the_picks_tools_under_the_picks_session_argu
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break, // claude closed stdout: it is done
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!("the probe was still running after {SAFETY_KILL_AFTER:?}; killing it. {}", summary(&events, &stderr_log));
+                panic!(
+                    "the probe was still running after {SAFETY_KILL_AFTER:?}; killing it. {}",
+                    summary(&events, &stderr_log)
+                );
             }
         }
     }
 
-    let called: Vec<String> = std::fs::read_to_string(&log).unwrap_or_default().lines().map(String::from).collect();
+    let called: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect();
     let context = || format!("stub saw {called:?}. {}", summary(&events, &stderr_log));
 
     // (a) the session starts with ToolSearch and the three picks tools, and nothing from the user's setup
@@ -237,26 +268,48 @@ fn the_real_claude_can_call_exactly_the_picks_tools_under_the_picks_session_argu
         .iter()
         .find(|e| e["type"] == "system" && e["subtype"] == "init")
         .unwrap_or_else(|| panic!("no system/init event. {}", context()));
-    let tools: Vec<&str> = init["tools"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-    assert!(tools.contains(&"ToolSearch"), "ToolSearch is available: {tools:?}");
+    let tools: Vec<&str> = init["tools"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        tools.contains(&"ToolSearch"),
+        "ToolSearch is available: {tools:?}"
+    );
     for tool in PICKS_MCP_TOOLS {
-        assert!(tools.contains(&tool), "{tool} is available to the session: {tools:?}");
+        assert!(
+            tools.contains(&tool),
+            "{tool} is available to the session: {tools:?}"
+        );
     }
 
     // (b) the picks tools are loadable AND callable
     for tool in ["teri_list_work_items", "teri_publish_picks"] {
-        assert!(called.iter().any(|c| c == tool), "{tool} was never reached. {}", context());
+        assert!(
+            called.iter().any(|c| c == tool),
+            "{tool} was never reached. {}",
+            context()
+        );
     }
 
     // (c) nothing else can be reached, and asking for it is refused with a denial
     for tool in ["mother_enqueue_job", "nostromo_set_pane_content"] {
-        assert!(!called.iter().any(|c| c == tool), "{tool} must never run. {}", context());
+        assert!(
+            !called.iter().any(|c| c == tool),
+            "{tool} must never run. {}",
+            context()
+        );
     }
     let attempt = events
         .iter()
         .filter(|e| e["type"] == "assistant")
         .flat_map(blocks)
-        .find(|b| b["type"] == "tool_use" && b["name"].as_str().is_some_and(|n| n.contains("mother_enqueue_job")))
+        .find(|b| {
+            b["type"] == "tool_use"
+                && b["name"]
+                    .as_str()
+                    .is_some_and(|n| n.contains("mother_enqueue_job"))
+        })
         .unwrap_or_else(|| panic!("the probe never tried mother_enqueue_job. {}", context()));
     let attempt_id = attempt["id"].as_str().expect("a tool_use id");
     let result = events
@@ -264,15 +317,34 @@ fn the_real_claude_can_call_exactly_the_picks_tools_under_the_picks_session_argu
         .filter(|e| e["type"] == "user")
         .flat_map(blocks)
         .find(|b| b["type"] == "tool_result" && b["tool_use_id"] == attempt_id)
-        .unwrap_or_else(|| panic!("no tool_result for the mother_enqueue_job call. {}", context()));
-    assert_eq!(result["is_error"], true, "the call is an error. {}", context());
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool_result for the mother_enqueue_job call. {}",
+                context()
+            )
+        });
+    assert_eq!(
+        result["is_error"],
+        true,
+        "the call is an error. {}",
+        context()
+    );
     let text = tool_result_text(result).to_lowercase();
-    assert!(text.contains("denied"), "the error says the call was denied: {text:.300}");
+    assert!(
+        text.contains("denied"),
+        "the error says the call was denied: {text:.300}"
+    );
 
     // (d) no user hooks ran
-    let hooks: Vec<String> =
-        events.iter().filter(|e| e["type"] == "system" && e["subtype"] == "hook_started").map(event_kind).collect();
-    assert!(hooks.is_empty(), "user hooks must not run in the picks session: {hooks:?}");
+    let hooks: Vec<String> = events
+        .iter()
+        .filter(|e| e["type"] == "system" && e["subtype"] == "hook_started")
+        .map(event_kind)
+        .collect();
+    assert!(
+        hooks.is_empty(),
+        "user hooks must not run in the picks session: {hooks:?}"
+    );
 }
 
 /// What happened, without any event bodies: event kinds, tool names and the tail of stderr.

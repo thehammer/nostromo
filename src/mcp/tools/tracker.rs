@@ -59,14 +59,20 @@ pub fn input_schema() -> Value {
         },
         "required": ["op"]
     });
-    let mut properties = item_op["properties"].as_object().cloned().unwrap_or_default();
+    let mut properties = item_op["properties"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     properties.insert(
         "op".into(),
         json!({ "type": "string", "enum": ["open", "read", "upsert", "status", "remove", "move", "log"] }),
     );
     properties.insert("topic".into(), json!({ "type": "string" }));
     properties.insert("title".into(), json!({ "type": "string" }));
-    properties.insert("sections".into(), json!({ "type": "array", "items": { "type": "string" } }));
+    properties.insert(
+        "sections".into(),
+        json!({ "type": "array", "items": { "type": "string" } }),
+    );
     properties.insert("path".into(), json!({ "type": "string" }));
     properties.insert("show".into(), json!({ "type": "boolean" }));
     properties.insert("ops".into(), json!({ "type": "array", "items": item_op }));
@@ -94,14 +100,15 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
     // The registry does blocking file and `git` work: keep it off the async
     // workers (the `git` probe is bounded by its own timeout).
     let (daemon_owned, args_owned) = (daemon.clone(), args.clone());
-    let response = tokio::task::spawn_blocking(move || {
-        match run(&daemon_owned, &caller, &args_owned) {
+    let response =
+        tokio::task::spawn_blocking(move || match run(&daemon_owned, &caller, &args_owned) {
             Ok(value) => value,
             Err(failure) => failure.to_json(),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| json!({ "ok": false, "error": "io_error", "reason": "tracker call panicked" }));
+        })
+        .await
+        .unwrap_or_else(
+            |_| json!({ "ok": false, "error": "io_error", "reason": "tracker call panicked" }),
+        );
     // Whatever the outcome, a board whose view changed (even by ingesting an
     // edit before a refused write) is sent to every focus bound to it.
     daemon.tracker.flush(&daemon.broadcast_tx);
@@ -148,10 +155,17 @@ impl Caller {
 
 enum Failure {
     Tracker(TrackerError),
-    InvalidCommandText { index: Option<usize>, reason: String },
+    InvalidCommandText {
+        index: Option<usize>,
+        reason: String,
+    },
     /// The daemon can't tie the caller to a working directory.
     NoWorkingDirectory,
-    Sensitive { index: Option<usize>, field: &'static str, class: &'static str },
+    Sensitive {
+        index: Option<usize>,
+        field: &'static str,
+        class: &'static str,
+    },
 }
 
 impl From<TrackerError> for Failure {
@@ -195,7 +209,10 @@ impl Failure {
                     }
                     TrackerError::NotPermitted { id } => {
                         put("id", json!(id));
-                        put("reason", json!("only the user can mark a command done or change it once done"));
+                        put(
+                            "reason",
+                            json!("only the user can mark a command done or change it once done"),
+                        );
                     }
                     TrackerError::Io(kind) => put("reason", json!(kind)),
                     TrackerError::NoTracker
@@ -205,7 +222,10 @@ impl Failure {
             }
             Failure::NoWorkingDirectory => {
                 put("error", json!("unidentified_caller"));
-                put("reason", json!("the daemon has no working directory for this focus"));
+                put(
+                    "reason",
+                    json!("the daemon has no working directory for this focus"),
+                );
             }
             Failure::InvalidCommandText { index, reason } => {
                 put("error", json!("invalid_command_text"));
@@ -214,7 +234,11 @@ impl Failure {
                 }
                 put("reason", json!(reason));
             }
-            Failure::Sensitive { index, field, class } => {
+            Failure::Sensitive {
+                index,
+                field,
+                class,
+            } => {
                 // Names the field and the class, never the matched text.
                 put("error", json!("possible_sensitive_data"));
                 put("field", json!(field));
@@ -319,7 +343,10 @@ enum Placement {
 /// Adds the tracker pane to `tag`'s layout when it has none. Decided and
 /// applied under one lock, so two racing opens place it once.
 fn ensure_pane(daemon: &DaemonMcpBackend, tag: &str) -> Placement {
-    let mut panes = daemon.pane_registry.lock().unwrap_or_else(|e| e.into_inner());
+    let mut panes = daemon
+        .pane_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let current = panes.get_or_init(tag);
     if has_tracker(&current) {
         return Placement::AlreadyThere;
@@ -349,7 +376,9 @@ fn is_visible(daemon: &DaemonMcpBackend, tag: &str) -> bool {
 fn read(registry: &TrackerRegistry, caller: &Caller) -> Result<Value, Failure> {
     Ok(match registry.read(&caller.tag, &caller.session_id)? {
         ReadOutcome::Full { version, board } => json!({ "version": version, "board": board }),
-        ReadOutcome::Delta { version, changes } => json!({ "version": version, "changes": changes }),
+        ReadOutcome::Delta { version, changes } => {
+            json!({ "version": version, "changes": changes })
+        }
     })
 }
 
@@ -449,7 +478,10 @@ fn parse_op(value: &Value, index: Option<usize>) -> Result<Op, Failure> {
         Some(other) => {
             return Err(invalid(
                 index,
-                format!("{:?} is not an item op (upsert, status, remove, move, log)", clip(other)),
+                format!(
+                    "{:?} is not an item op (upsert, status, remove, move, log)",
+                    clip(other)
+                ),
             ))
         }
         None => return Err(invalid(index, "op is required".to_string())),
@@ -501,7 +533,12 @@ fn guard_op(op: &Op, index: Option<usize>) -> Result<(), Failure> {
             guard("command", u.command.as_deref(), index)
         }
         Op::Status { id, .. } | Op::Remove { id } => guard("id", Some(id), index),
-        Op::Move { id, section, before, after } => {
+        Op::Move {
+            id,
+            section,
+            before,
+            after,
+        } => {
             guard("id", Some(id), index)?;
             guard("section", Some(section), index)?;
             guard("id", before.as_deref(), index)?;
@@ -538,7 +575,9 @@ mod tests {
 
     #[test]
     fn a_batch_over_the_cap_is_refused_before_any_op_runs() {
-        let ops: Vec<Value> = (0..=MAX_BATCH_OPS).map(|_| json!({"op":"log","text":"x"})).collect();
+        let ops: Vec<Value> = (0..=MAX_BATCH_OPS)
+            .map(|_| json!({"op":"log","text":"x"}))
+            .collect();
         assert!(parse_batch(&Value::Array(ops)).is_err());
     }
 }

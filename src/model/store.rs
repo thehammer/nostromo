@@ -321,13 +321,21 @@ pub fn resolve_for_new_focus(
         (
             Some(default.model),
             explicit_effort.or(default.effort),
-            if explicit.is_some() { ModelSource::Focus } else { ModelSource::AgentDefault },
+            if explicit.is_some() {
+                ModelSource::Focus
+            } else {
+                ModelSource::AgentDefault
+            },
         )
     } else if let Some(declared) = super::policy::declared_model(agent) {
         (
             Some(declared),
             explicit_effort,
-            if explicit.is_some() { ModelSource::Focus } else { ModelSource::AgentDeclared },
+            if explicit.is_some() {
+                ModelSource::Focus
+            } else {
+                ModelSource::AgentDeclared
+            },
         )
     } else {
         (None, None, ModelSource::CliDefault)
@@ -367,7 +375,10 @@ mod tests {
         std::fs::write(&path, b"{ \"cody-1\": {\"model\": \"opus\"} TRUNCATED").unwrap();
 
         update_focus_record(&path, "cody-2", |_| {
-            Some(FocusModelRecord { model: "sonnet".into(), ..FocusModelRecord::default() })
+            Some(FocusModelRecord {
+                model: "sonnet".into(),
+                ..FocusModelRecord::default()
+            })
         })
         .unwrap();
 
@@ -409,8 +420,16 @@ mod tests {
         });
 
         assert!(result.is_err(), "the failure is reported, not swallowed");
-        assert_eq!(std::fs::read(&path).unwrap(), before, "the existing file is byte-identical");
-        assert_eq!(temp_files(dir.path()), Vec::<String>::new(), "no half-written temp file is left");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the existing file is byte-identical"
+        );
+        assert_eq!(
+            temp_files(dir.path()),
+            Vec::<String>::new(),
+            "no half-written temp file is left"
+        );
     }
 
     // [seam: store::write_atomic_with]
@@ -431,7 +450,11 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["focus-models.json"], "the temp file was renamed over the target, not copied");
+        assert_eq!(
+            names,
+            ["focus-models.json"],
+            "the temp file was renamed over the target, not copied"
+        );
     }
 
     // [seam: store::write_atomic_with]
@@ -449,7 +472,10 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(temp_files(dir.path()), Vec::<String>::new());
-        assert!(target.join("occupant").exists(), "what was there is untouched");
+        assert!(
+            target.join("occupant").exists(),
+            "what was there is untouched"
+        );
     }
 
     #[test]
@@ -461,13 +487,17 @@ mod tests {
         write_json_atomic(&path, &BTreeMap::from([("a".to_owned(), 2)])).unwrap();
 
         assert_eq!(temp_files(dir.path()), Vec::<String>::new());
-        let back: BTreeMap<String, i32> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let back: BTreeMap<String, i32> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back["a"], 2);
     }
 
     fn names_in(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> =
-            std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
         names.sort();
         names
     }
@@ -475,14 +505,23 @@ mod tests {
     /// Make `path` look like it was last written five minutes ago.
     fn age(path: &Path) {
         let then = std::time::SystemTime::now() - std::time::Duration::from_secs(300);
-        std::fs::File::options().write(true).open(path).unwrap().set_modified(then).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
     }
 
     // [seam: store::sweep_temp_files]
     #[test]
     fn sweeping_removes_the_leftovers_of_interrupted_writes_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
-        for leftover in ["focus-models.tmp-0b5e1c1e-9d1a-4c1e-8f3a-000000000001", "model-defaults.tmp-abc", "model-catalog.tmp-"] {
+        for leftover in [
+            "focus-models.tmp-0b5e1c1e-9d1a-4c1e-8f3a-000000000001",
+            "model-defaults.tmp-abc",
+            "model-catalog.tmp-",
+        ] {
             std::fs::write(dir.path().join(leftover), b"{\"half").unwrap();
             age(&dir.path().join(leftover));
         }
@@ -505,9 +544,17 @@ mod tests {
         assert_eq!(removed, 3);
         let mut expected: Vec<String> = keep.iter().map(|n| (*n).to_owned()).collect();
         expected.sort();
-        assert_eq!(names_in(dir.path()), expected, "only the `.tmp-` leftovers went");
+        assert_eq!(
+            names_in(dir.path()),
+            expected,
+            "only the `.tmp-` leftovers went"
+        );
         for name in keep {
-            assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), b"precious", "{name} is untouched");
+            assert_eq!(
+                std::fs::read(dir.path().join(name)).unwrap(),
+                b"precious",
+                "{name} is untouched"
+            );
         }
     }
 
@@ -515,12 +562,17 @@ mod tests {
     #[test]
     fn a_temp_file_of_a_write_that_is_in_flight_is_not_swept() {
         let dir = tempfile::tempdir().unwrap();
-        let in_flight = dir.path().join("focus-models.tmp-0b5e1c1e-9d1a-4c1e-8f3a-000000000002");
+        let in_flight = dir
+            .path()
+            .join("focus-models.tmp-0b5e1c1e-9d1a-4c1e-8f3a-000000000002");
         std::fs::write(&in_flight, b"{\"being writ").unwrap();
 
         assert_eq!(sweep_temp_files(dir.path()), 0);
 
-        assert!(in_flight.exists(), "a writer in this process or another sharing the directory is still using it");
+        assert!(
+            in_flight.exists(),
+            "a writer in this process or another sharing the directory is still using it"
+        );
     }
 
     // [seam: store::sweep_temp_files]
@@ -541,12 +593,21 @@ mod tests {
         let path = dir.path().join("focus-models.json");
 
         update_focus_record(&path, "cody-1", |_| {
-            Some(FocusModelRecord { model: "opus".into(), ..FocusModelRecord::default() })
+            Some(FocusModelRecord {
+                model: "opus".into(),
+                ..FocusModelRecord::default()
+            })
         })
         .unwrap();
-        let stamped = focus_record(&path, "cody-1").unwrap().updated_at.expect("stamped by the write");
+        let stamped = focus_record(&path, "cody-1")
+            .unwrap()
+            .updated_at
+            .expect("stamped by the write");
         let age = chrono::Utc::now() - stamped;
-        assert!(age.num_seconds().abs() < 10, "stamped with now, not copied from the caller: {stamped}");
+        assert!(
+            age.num_seconds().abs() < 10,
+            "stamped with now, not copied from the caller: {stamped}"
+        );
 
         // Even a change that hands back the old record unchanged is a write, and is stamped.
         update_focus_record(&path, "cody-1", |r| r).unwrap();
@@ -561,14 +622,21 @@ mod tests {
         })
         .unwrap();
         let restamped = focus_record(&path, "cody-1").unwrap().updated_at.unwrap();
-        assert!(restamped > long_ago + chrono::Duration::days(300), "{restamped}");
+        assert!(
+            restamped > long_ago + chrono::Duration::days(300),
+            "{restamped}"
+        );
     }
 
     #[test]
     fn a_record_without_an_updated_at_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("focus-models.json");
-        std::fs::write(&path, br#"{"cody-1": {"model": "opus", "source": "focus"}}"#).unwrap();
+        std::fs::write(
+            &path,
+            br#"{"cody-1": {"model": "opus", "source": "focus"}}"#,
+        )
+        .unwrap();
 
         let record = focus_record(&path, "cody-1").expect("an older file still loads");
 
@@ -582,8 +650,14 @@ mod tests {
     fn only_a_focus_choice_or_an_agent_default_counts_as_chosen() {
         assert!(ModelSource::Focus.is_chosen());
         assert!(ModelSource::AgentDefault.is_chosen());
-        assert!(!ModelSource::AgentDeclared.is_chosen(), "the agent's own front matter is not a choice made for the focus");
-        assert!(!ModelSource::CliDefault.is_chosen(), "what the CLI picked is observed, not chosen");
+        assert!(
+            !ModelSource::AgentDeclared.is_chosen(),
+            "the agent's own front matter is not a choice made for the focus"
+        );
+        assert!(
+            !ModelSource::CliDefault.is_chosen(),
+            "what the CLI picked is observed, not chosen"
+        );
     }
 
     #[test]
@@ -594,7 +668,11 @@ mod tests {
 
         let record = focus_record(&path, "cody-1").unwrap();
 
-        assert_eq!(record.source, ModelSource::CliDefault, "a migrated record was observed, never chosen");
+        assert_eq!(
+            record.source,
+            ModelSource::CliDefault,
+            "a migrated record was observed, never chosen"
+        );
         let from_json: FocusModelRecord = serde_json::from_str(r#"{"model": "opus"}"#).unwrap();
         assert_eq!(from_json.source, ModelSource::CliDefault);
     }
@@ -602,7 +680,8 @@ mod tests {
     #[test]
     fn a_record_the_daemon_builds_for_a_choice_defaults_to_a_focus_choice() {
         assert_eq!(FocusModelRecord::default().source, ModelSource::Focus);
-        let explicit: FocusModelRecord = serde_json::from_str(r#"{"model": "opus", "source": "focus"}"#).unwrap();
+        let explicit: FocusModelRecord =
+            serde_json::from_str(r#"{"model": "opus", "source": "focus"}"#).unwrap();
         assert_eq!(explicit.source, ModelSource::Focus);
     }
 }

@@ -205,14 +205,16 @@ impl ActivityStore {
         mut event: ActivityEvent,
     ) -> ActivityEvent {
         let by_agent = self.streams.entry(tag.to_string()).or_default();
-        let stream = by_agent.entry(agent_id.clone()).or_insert_with(|| ActivityStream {
-            agent_id: agent_id.clone(),
-            agent_type: agent_type.clone(),
-            parent_agent_id: parent_agent_id.clone(),
-            events: VecDeque::new(),
-            finished: false,
-            next_seq: 0,
-        });
+        let stream = by_agent
+            .entry(agent_id.clone())
+            .or_insert_with(|| ActivityStream {
+                agent_id: agent_id.clone(),
+                agent_type: agent_type.clone(),
+                parent_agent_id: parent_agent_id.clone(),
+                events: VecDeque::new(),
+                finished: false,
+                next_seq: 0,
+            });
         // A stream created before its type/parent were known (shouldn't
         // normally happen, but defensively) picks them up on a later event.
         if stream.agent_type.is_none() {
@@ -228,7 +230,8 @@ impl ActivityStore {
         if event.kind == "subagent_stop" {
             stream.finished = true;
             if let Some(aid) = &agent_id {
-                self.finished_eviction_order.push_back((tag.to_string(), aid.clone()));
+                self.finished_eviction_order
+                    .push_back((tag.to_string(), aid.clone()));
             }
         }
 
@@ -329,10 +332,19 @@ mod tests {
             .find(|s| s.agent_id.as_deref() == Some("agent-b"))
             .expect("agent-b must have its own stream");
 
-        assert!(stream_a.events.iter().all(|e| e.summary.contains("agent A")));
-        assert!(stream_b.events.iter().all(|e| e.summary.contains("agent B")));
+        assert!(stream_a
+            .events
+            .iter()
+            .all(|e| e.summary.contains("agent A")));
+        assert!(stream_b
+            .events
+            .iter()
+            .all(|e| e.summary.contains("agent B")));
         assert!(
-            !stream_a.events.iter().any(|e| e.summary.contains("agent B")),
+            !stream_a
+                .events
+                .iter()
+                .any(|e| e.summary.contains("agent B")),
             "agent A's stream must never contain agent B's events"
         );
 
@@ -398,7 +410,11 @@ mod tests {
             .iter()
             .map(|e| e.seq.expect("seq must be assigned by ingest"))
             .collect();
-        assert_eq!(seqs, vec![0, 1, 2], "seq must be assigned in ingestion order, starting at 0");
+        assert_eq!(
+            seqs,
+            vec![0, 1, 2],
+            "seq must be assigned in ingestion order, starting at 0"
+        );
     }
 
     // ── 5. per-stream retention ────────────────────────────────────────────────
@@ -477,7 +493,9 @@ mod tests {
 
         let streams = store.streams_for_focus("fred");
         let main = streams.iter().find(|s| s.agent_id.is_none()).unwrap();
-        let old = streams.iter().find(|s| s.agent_id.as_deref() == Some("agent-old"));
+        let old = streams
+            .iter()
+            .find(|s| s.agent_id.as_deref() == Some("agent-old"));
         let new = streams
             .iter()
             .find(|s| s.agent_id.as_deref() == Some("agent-new"))
@@ -512,17 +530,26 @@ mod tests {
         // finished_eviction_order ahead of anything else.
         store.ingest(
             raw_event("claude", "subagent_start", "agent-old started"),
-            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-old".into() },
+            Attribution::Subagent {
+                tag: "fred".into(),
+                agent_id: "agent-old".into(),
+            },
         );
         for i in 0..(MAX_EVENTS_PER_STREAM - 2) {
             store.ingest(
                 raw_event("claude", "tool_use", &format!("agent-old event {i}")),
-                Attribution::Subagent { tag: "fred".into(), agent_id: "agent-old".into() },
+                Attribution::Subagent {
+                    tag: "fred".into(),
+                    agent_id: "agent-old".into(),
+                },
             );
         }
         store.ingest(
             raw_event("claude", "subagent_stop", "agent-old finished"),
-            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-old".into() },
+            Attribution::Subagent {
+                tag: "fred".into(),
+                agent_id: "agent-old".into(),
+            },
         );
 
         // Push pressure just barely past the budget. Reclaiming agent-old's
@@ -540,7 +567,9 @@ mod tests {
         // Sanity check on the setup: agent-old should already be reclaimed —
         // otherwise the rest of this test isn't exercising what it claims to.
         let streams = store.streams_for_focus("fred");
-        let old = streams.iter().find(|s| s.agent_id.as_deref() == Some("agent-old"));
+        let old = streams
+            .iter()
+            .find(|s| s.agent_id.as_deref() == Some("agent-old"));
         assert!(
             old.is_none() || old.unwrap().events.is_empty(),
             "setup error: agent-old should already be reclaimed once pressure crossed the budget"
@@ -550,15 +579,24 @@ mod tests {
         // starts, does a little work, and finishes.
         store.ingest(
             raw_event("claude", "subagent_start", "agent-fresh started"),
-            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-fresh".into() },
+            Attribution::Subagent {
+                tag: "fred".into(),
+                agent_id: "agent-fresh".into(),
+            },
         );
         store.ingest(
             raw_event("claude", "tool_use", "agent-fresh did something"),
-            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-fresh".into() },
+            Attribution::Subagent {
+                tag: "fred".into(),
+                agent_id: "agent-fresh".into(),
+            },
         );
         store.ingest(
             raw_event("claude", "subagent_stop", "agent-fresh finished"),
-            Attribution::Subagent { tag: "fred".into(), agent_id: "agent-fresh".into() },
+            Attribution::Subagent {
+                tag: "fred".into(),
+                agent_id: "agent-fresh".into(),
+            },
         );
 
         let streams = store.streams_for_focus("fred");
@@ -586,7 +624,9 @@ mod tests {
         );
         let finalized = store.ingest(raw, Attribution::Focus { tag: "fred".into() });
         assert!(
-            !finalized.summary.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+            !finalized
+                .summary
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
             "ActivityStore::ingest must defensively re-scrub the summary: {}",
             finalized.summary
         );

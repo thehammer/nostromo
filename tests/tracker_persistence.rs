@@ -93,7 +93,10 @@ impl Rig {
 
     /// Two focuses on one board; the first session writes a few items.
     fn seeded(&self, reg: &TrackerRegistry) -> PathBuf {
-        let path = reg.open(TAG_A, SESS_A, &self.open_args()).expect("open a").path;
+        let path = reg
+            .open(TAG_A, SESS_A, &self.open_args())
+            .expect("open a")
+            .path;
         reg.open(TAG_B, SESS_B, &self.open_args()).expect("open b");
         reg.apply(
             TAG_A,
@@ -137,11 +140,17 @@ fn bindings_survive_a_restart() {
 
     assert_eq!(reg.bound_path(TAG_A), Some(path.clone()));
     assert_eq!(reg.bound_path(TAG_B), Some(path.clone()));
-    assert_eq!(reg.bound_tags_for(&path), vec![TAG_A.to_string(), TAG_B.to_string()]);
+    assert_eq!(
+        reg.bound_tags_for(&path),
+        vec![TAG_A.to_string(), TAG_B.to_string()]
+    );
     let summary = reg.summary(TAG_B);
     assert!(summary.has_tracker);
     assert_eq!(summary.counts.todo, 3);
-    assert!(reg.board_view(TAG_A).is_some(), "the board is back, parsed from the file");
+    assert!(
+        reg.board_view(TAG_A).is_some(),
+        "the board is back, parsed from the file"
+    );
 }
 
 #[test]
@@ -153,17 +162,27 @@ fn a_session_that_resumes_after_a_restart_gets_only_what_changed_since_its_curso
         // B reads everything so far: its cursor is at the current version.
         let _ = reg.read(TAG_B, SESS_B).unwrap();
         // Then A changes something B has not seen.
-        reg.apply(TAG_A, SESS_A, &[status("alpha", "done")], &agent_a()).unwrap();
+        reg.apply(TAG_A, SESS_A, &[status("alpha", "done")], &agent_a())
+            .unwrap();
     }
 
     let reg = rig.start();
     let outcome = reg.read(TAG_B, SESS_B).expect("read after the restart");
 
     let changes = changes_of(outcome);
-    assert_eq!(changes.len(), 1, "a resumed session gets a delta, not the board: {changes:?}");
+    assert_eq!(
+        changes.len(),
+        1,
+        "a resumed session gets a delta, not the board: {changes:?}"
+    );
     assert_eq!(changes[0]["id"], json!("alpha"));
     assert_eq!(changes[0]["status"][1], json!("done"));
-    assert!(changes[0]["by"].as_str().is_some_and(|b| b.starts_with("agent ")), "{changes:?}");
+    assert!(
+        changes[0]["by"]
+            .as_str()
+            .is_some_and(|b| b.starts_with("agent ")),
+        "{changes:?}"
+    );
     // And the cursor advanced: nothing more to read.
     assert!(changes_of(reg.read(TAG_B, SESS_B).unwrap()).is_empty());
 }
@@ -179,7 +198,9 @@ fn a_different_session_id_after_a_restart_gets_the_whole_board() {
 
     let reg = rig.start();
     // The focus is the same; the Claude session is a different one (a fresh spawn).
-    let outcome = reg.read(TAG_B, "sess-b-fresh").expect("read after the restart");
+    let outcome = reg
+        .read(TAG_B, "sess-b-fresh")
+        .expect("read after the restart");
 
     match outcome {
         ReadOutcome::Full { board, .. } => {
@@ -213,8 +234,15 @@ fn the_version_continues_after_a_restart() {
         .unwrap()
         .version;
 
-    assert_eq!(view_version, version, "the reloaded board shows the persisted version");
-    assert_eq!(next, version + 1, "the next change is the next version, not version 1 again");
+    assert_eq!(
+        view_version, version,
+        "the reloaded board shows the persisted version"
+    );
+    assert_eq!(
+        next,
+        version + 1,
+        "the next change is the next version, not version 1 again"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +261,10 @@ fn an_edit_made_while_the_daemon_was_down_is_ingested_as_a_file_change() {
     // The daemon is down; the user ticks alpha and rewrites gamma in an editor.
     let edited = text_of(&path)
         .replace("- [ ] Alpha task", "- [x] Alpha task")
-        .replace("Gamma task", "Gamma task, rewritten while the daemon was down");
+        .replace(
+            "Gamma task",
+            "Gamma task, rewritten while the daemon was down",
+        );
     std::fs::write(&path, edited).unwrap();
 
     let reg = rig.start();
@@ -247,9 +278,21 @@ fn an_edit_made_while_the_daemon_was_down_is_ingested_as_a_file_change() {
             _ => None,
         })
         .collect();
-    assert!(texts.iter().any(|t| t.starts_with("alpha Done")), "{texts:?}");
-    assert!(texts.iter().any(|t| t.contains("rewritten while the daemon was down")), "{texts:?}");
-    assert_eq!(reg.user_changes(TAG_B, SESS_B), 2, "two user changes since B's cursor");
+    assert!(
+        texts.iter().any(|t| t.starts_with("alpha Done")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("rewritten while the daemon was down")),
+        "{texts:?}"
+    );
+    assert_eq!(
+        reg.user_changes(TAG_B, SESS_B),
+        2,
+        "two user changes since B's cursor"
+    );
 
     let changes = changes_of(reg.read(TAG_B, SESS_B).unwrap());
     assert_eq!(changes.len(), 2, "{changes:?}");
@@ -257,7 +300,10 @@ fn an_edit_made_while_the_daemon_was_down_is_ingested_as_a_file_change() {
         assert_eq!(c["by"], json!(FILE_LABEL), "{c}");
     }
     let ids: Vec<&Value> = changes.iter().map(|c| &c["id"]).collect();
-    assert!(ids.contains(&&json!("alpha")) && ids.contains(&&json!("gamma")), "{changes:?}");
+    assert!(
+        ids.contains(&&json!("alpha")) && ids.contains(&&json!("gamma")),
+        "{changes:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -270,11 +316,16 @@ fn the_attach_replay_of_a_restarted_registry_carries_the_board_and_summary_of_ev
     let path = {
         let reg = rig.start();
         let path = rig.seeded(&reg);
-        reg.apply(TAG_A, SESS_A, &[status("alpha", "needs-you")], &agent_a()).unwrap();
+        reg.apply(TAG_A, SESS_A, &[status("alpha", "needs-you")], &agent_a())
+            .unwrap();
         path
     };
     // An edit made while the daemon was down must be in the replayed board.
-    std::fs::write(&path, text_of(&path).replace("Beta task", "Beta task (edited offline)")).unwrap();
+    std::fs::write(
+        &path,
+        text_of(&path).replace("Beta task", "Beta task (edited offline)"),
+    )
+    .unwrap();
 
     let reg = rig.start();
     let frames = reg.tracker_frames();
@@ -290,13 +341,20 @@ fn the_attach_replay_of_a_restarted_registry_carries_the_board_and_summary_of_ev
             .as_ref()
             .unwrap_or_else(|| panic!("the tracker_board for {tag} carries a board"));
         assert_eq!(board.path, path.display().to_string());
-        assert!(format!("{:?}", board.nodes).contains("edited offline"), "{tag}: the replay is the file as it is now");
+        assert!(
+            format!("{:?}", board.nodes).contains("edited offline"),
+            "{tag}: the replay is the file as it is now"
+        );
         assert_eq!(board.banner, None);
 
         let (has_tracker, counts) = frames
             .iter()
             .find_map(|m| match m {
-                ServerMsg::TrackerSummary { tag: t, has_tracker, counts } if t == tag => Some((*has_tracker, *counts)),
+                ServerMsg::TrackerSummary {
+                    tag: t,
+                    has_tracker,
+                    counts,
+                } if t == tag => Some((*has_tracker, *counts)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no tracker_summary for {tag}: {frames:?}"));
@@ -329,8 +387,14 @@ fn a_board_deleted_while_the_daemon_was_down_shows_missing_and_open_recreates_it
 
     let reg = rig.start();
 
-    let view = reg.board_view(TAG_A).expect("the last good board is still shown");
-    assert!(matches!(view.banner, Some(Banner::Missing { .. })), "{:?}", view.banner);
+    let view = reg
+        .board_view(TAG_A)
+        .expect("the last good board is still shown");
+    assert!(
+        matches!(view.banner, Some(Banner::Missing { .. })),
+        "{:?}",
+        view.banner
+    );
     assert!(format!("{:?}", view.nodes).contains("Alpha task"));
     let err = reg
         .apply(TAG_A, SESS_A, &[status("alpha", "done")], &agent_a())
@@ -338,7 +402,9 @@ fn a_board_deleted_while_the_daemon_was_down_shows_missing_and_open_recreates_it
     assert_eq!(err.code(), "board_missing");
     assert!(!path.exists());
 
-    let opened = reg.open(TAG_A, SESS_A, &rig.open_args()).expect("open recreates");
+    let opened = reg
+        .open(TAG_A, SESS_A, &rig.open_args())
+        .expect("open recreates");
     assert!(opened.recreated, "{opened:?}");
     assert!(!opened.created, "{opened:?}");
     assert_eq!(std::fs::read(&path).unwrap(), last_good);
@@ -362,7 +428,10 @@ fn a_corrupt_state_file_is_ignored_and_the_registry_starts_empty_and_works() {
         ("garbage", b"\x00\xff not json at all {{{".to_vec()),
         ("empty", Vec::new()),
         ("wrong shape", b"[1, 2, 3]".to_vec()),
-        ("wrong field types", br#"{"bindings": 5, "boards": "x", "cursors": []}"#.to_vec()),
+        (
+            "wrong field types",
+            br#"{"bindings": 5, "boards": "x", "cursors": []}"#.to_vec(),
+        ),
         ("truncated", truncated),
     ];
     for (name, bytes) in cases {
@@ -380,7 +449,11 @@ fn a_corrupt_state_file_is_ignored_and_the_registry_starts_empty_and_works() {
         let path = rig.seeded(&reg);
         drop(reg);
         let reg = rig.start();
-        assert_eq!(reg.bound_path(TAG_A), Some(path), "{name}: state written after the corrupt file is valid");
+        assert_eq!(
+            reg.bound_path(TAG_A),
+            Some(path),
+            "{name}: state written after the corrupt file is valid"
+        );
         assert!(reg.summary(TAG_A).has_tracker, "{name}");
     }
 }
@@ -398,9 +471,17 @@ fn state_pointing_at_a_board_that_can_no_longer_be_read_does_not_stop_the_daemon
     let reg = rig.start();
 
     let view = reg.board_view(TAG_A).expect("the last good board is shown");
-    assert!(matches!(view.banner, Some(Banner::Unreadable { line: 5, .. })), "{:?}", view.banner);
+    assert!(
+        matches!(view.banner, Some(Banner::Unreadable { line: 5, .. })),
+        "{:?}",
+        view.banner
+    );
     assert!(format!("{:?}", view.nodes).contains("Alpha task"));
-    assert_eq!(reg.tracker_frames().len(), 4, "replay still sends both tags' frames");
+    assert_eq!(
+        reg.tracker_frames().len(),
+        4,
+        "replay still sends both tags' frames"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -466,5 +547,8 @@ fn state_written_before_the_closed_flag_existed_loads_as_not_hidden() {
     let reg = rig.start();
 
     assert!(!reg.pane_hidden_by_user(TAG_A));
-    assert!(reg.bound_path(TAG_A).is_some(), "the rest of the state still loads");
+    assert!(
+        reg.bound_path(TAG_A).is_some(),
+        "the rest of the state still loads"
+    );
 }

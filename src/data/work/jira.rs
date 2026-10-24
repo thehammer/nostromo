@@ -60,11 +60,11 @@ use tracing::warn;
 
 use super::credentials::{default_env_path, EnvFile};
 use super::hub::SourceUpdate;
-use super::sentry::Clock;
-use super::untrusted::{one_line, MAX_LINE_CHARS};
 use super::model::{
     Link, Priority, SourceState, SourceStatus, WorkDetail, WorkError, WorkItem, WorkSource,
 };
+use super::sentry::Clock;
+use super::untrusted::{one_line, MAX_LINE_CHARS};
 use crate::config::Config;
 use crate::data::tickets::jira::adf_to_blocks;
 use crate::ipc::protocol::{MdBlock, MdSpan};
@@ -74,8 +74,16 @@ const ENV_EMAIL: &str = "ATLASSIAN_USER_EMAIL";
 const ENV_TOKEN: &str = "ATLASSIAN_API_TOKEN";
 
 pub const JQL: &str = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
-const LIST_FIELDS: [&str; 8] =
-    ["summary", "status", "priority", "updated", "created", "project", "issuetype", "duedate"];
+const LIST_FIELDS: [&str; 8] = [
+    "summary",
+    "status",
+    "priority",
+    "updated",
+    "created",
+    "project",
+    "issuetype",
+    "duedate",
+];
 const PAGE_SIZE: usize = 100;
 const MAX_ISSUES: usize = 500;
 /// Safety stop for a server that keeps promising pages while returning few issues.
@@ -99,12 +107,19 @@ ATLASSIAN_USER_EMAIL and ATLASSIAN_API_TOKEN in ~/.claude/credentials/.env, as t
 
 /// Shown when the site name is not a valid Atlassian site (the tab prefixes "Jira: ").
 /// Names the setting, never its value.
-pub const INVALID_SITE_REASON: &str = "ATLASSIAN_SITE_NAME (or jira_site in the daemon config) is not \
+pub const INVALID_SITE_REASON: &str =
+    "ATLASSIAN_SITE_NAME (or jira_site in the daemon config) is not \
 a valid Atlassian site name such as your-team.atlassian.net. Nothing was sent to Jira.";
 
 /// Start the dormant placeholder (used when the hub is not given a real source).
 pub fn spawn(_refresh: Arc<Notify>) -> watch::Receiver<SourceUpdate> {
-    let status = status(SourceState::NotConfigured, Some("Coming soon".into()), None, None, 0);
+    let status = status(
+        SourceState::NotConfigured,
+        Some("Coming soon".into()),
+        None,
+        None,
+        0,
+    );
     // The sender is dropped on purpose: the placeholder never changes.
     watch::channel((status, Vec::new())).1
 }
@@ -272,8 +287,12 @@ impl JiraWorkSource {
 
     /// From the daemon config (`jira_site`, `jira_email`, `jira_credentials_path`).
     pub fn from_config(config: &Config) -> Self {
-        let mut source =
-            Self::new(config.jira_credentials_path.clone().unwrap_or_else(default_env_path));
+        let mut source = Self::new(
+            config
+                .jira_credentials_path
+                .clone()
+                .unwrap_or_else(default_env_path),
+        );
         source.config_site = config.jira_site.clone().filter(|s| !s.is_empty());
         source.config_email = config.jira_email.clone().filter(|s| !s.is_empty());
         source
@@ -324,8 +343,10 @@ impl JiraWorkSource {
     /// Start polling. `refresh` is poked by a manual refresh that passed the
     /// hub's debounce; the source then fetches immediately.
     pub fn spawn(self: Arc<Self>, refresh: Arc<Notify>) -> watch::Receiver<SourceUpdate> {
-        let (tx, rx) =
-            watch::channel((status(SourceState::Loading, None, None, None, 0), Vec::new()));
+        let (tx, rx) = watch::channel((
+            status(SourceState::Loading, None, None, None, 0),
+            Vec::new(),
+        ));
         tokio::spawn(async move { self.run(tx, refresh).await });
         rx
     }
@@ -356,22 +377,33 @@ impl JiraWorkSource {
         if let Some(refused) = self.hold_error(fingerprint) {
             return Err(refused);
         }
-        let (detail, cacheable) = self.fetch_detail(&creds, key, item_id).await.map_err(|e| match e {
-            FetchError::Rejected(code) => {
-                self.set_hold(fingerprint, HoldKind::Rejected(code), MAX_HOLD);
-                WorkError::new("unauthenticated", rejected_reason(code))
-            }
-            FetchError::RateLimited(retry_after) => {
-                self.set_hold(fingerprint, HoldKind::RateLimited, retry_after.unwrap_or_else(|| self.backoff(1)));
-                WorkError::new("rate_limited", "Jira is rate-limiting requests")
-            }
-            FetchError::Failed(why) => WorkError::new("fetch_failed", format!("Couldn't load {key}: {why}")),
-        })?;
+        let (detail, cacheable) =
+            self.fetch_detail(&creds, key, item_id)
+                .await
+                .map_err(|e| match e {
+                    FetchError::Rejected(code) => {
+                        self.set_hold(fingerprint, HoldKind::Rejected(code), MAX_HOLD);
+                        WorkError::new("unauthenticated", rejected_reason(code))
+                    }
+                    FetchError::RateLimited(retry_after) => {
+                        self.set_hold(
+                            fingerprint,
+                            HoldKind::RateLimited,
+                            retry_after.unwrap_or_else(|| self.backoff(1)),
+                        );
+                        WorkError::new("rate_limited", "Jira is rate-limiting requests")
+                    }
+                    FetchError::Failed(why) => {
+                        WorkError::new("fetch_failed", format!("Couldn't load {key}: {why}"))
+                    }
+                })?;
         if cacheable {
             let mut cache = self.detail_cache.lock().unwrap();
             if cache.credentials == fingerprint {
                 cache.entries.retain(|_, (at, _)| at.elapsed() < DETAIL_TTL);
-                cache.entries.insert(item_id.to_string(), (Instant::now(), detail.clone()));
+                cache
+                    .entries
+                    .insert(item_id.to_string(), (Instant::now(), detail.clone()));
             }
         }
         Ok(detail)
@@ -398,7 +430,13 @@ impl JiraWorkSource {
             Err(problem) => {
                 st.items.clear();
                 let update = (
-                    status(SourceState::NotConfigured, Some(problem.reason().into()), None, None, 0),
+                    status(
+                        SourceState::NotConfigured,
+                        Some(problem.reason().into()),
+                        None,
+                        None,
+                        0,
+                    ),
                     Vec::new(),
                 );
                 return (update, self.poll_interval, Wake::RefreshOrCredentials);
@@ -416,11 +454,18 @@ impl JiraWorkSource {
                 let now = self.now();
                 st.last_good = Some(now);
                 // A cut or partly unreadable list is a note on a fresh list, not a failure.
-                let state = if st.items.is_empty() { SourceState::Empty } else { SourceState::Fresh };
+                let state = if st.items.is_empty() {
+                    SourceState::Empty
+                } else {
+                    SourceState::Fresh
+                };
                 // `complete` only when nothing was cut at the cap or unreadable (that is what the note says).
                 let complete = fetched.note.is_none();
                 let update = (
-                    SourceStatus { complete, ..status(state, fetched.note, Some(now), None, st.items.len()) },
+                    SourceStatus {
+                        complete,
+                        ..status(state, fetched.note, Some(now), None, st.items.len())
+                    },
                     vec![(None, st.items.clone())],
                 );
                 (update, self.poll_interval, Wake::RefreshOrCredentials)
@@ -431,7 +476,13 @@ impl JiraWorkSource {
                 warn!("jira work source: credentials rejected ({code})");
                 self.set_hold(creds.fingerprint(), HoldKind::Rejected(code), MAX_HOLD);
                 let update = (
-                    status(SourceState::Unauthenticated, Some(rejected_reason(code)), None, None, 0),
+                    status(
+                        SourceState::Unauthenticated,
+                        Some(rejected_reason(code)),
+                        None,
+                        None,
+                        0,
+                    ),
                     Vec::new(),
                 );
                 // A bad token will not fix itself: hold until the file changes or the user asks.
@@ -439,11 +490,22 @@ impl JiraWorkSource {
             }
             Err(FetchError::RateLimited(retry_after)) => {
                 st.failures += 1;
-                let hold = retry_after.unwrap_or_else(|| self.backoff(st.failures)).min(MAX_HOLD);
-                warn!("jira work source: rate limited, holding for {}s", hold.as_secs());
+                let hold = retry_after
+                    .unwrap_or_else(|| self.backoff(st.failures))
+                    .min(MAX_HOLD);
+                warn!(
+                    "jira work source: rate limited, holding for {}s",
+                    hold.as_secs()
+                );
                 self.set_hold(creds.fingerprint(), HoldKind::RateLimited, hold);
                 let update = (
-                    status(SourceState::RateLimited, None, st.last_good, retry_at(hold, self.now()), st.items.len()),
+                    status(
+                        SourceState::RateLimited,
+                        None,
+                        st.last_good,
+                        retry_at(hold, self.now()),
+                        st.items.len(),
+                    ),
                     vec![(None, st.items.clone())],
                 );
                 (update, hold, Wake::CredentialsOnly)
@@ -452,12 +514,23 @@ impl JiraWorkSource {
                 st.failures += 1;
                 warn!("jira work source: fetch failed: {why}");
                 let update = if st.items.is_empty() {
-                    (status(SourceState::Error, Some(format!("couldn't reach Jira ({why})")), None, None, 0), Vec::new())
+                    (
+                        status(
+                            SourceState::Error,
+                            Some(format!("couldn't reach Jira ({why})")),
+                            None,
+                            None,
+                            0,
+                        ),
+                        Vec::new(),
+                    )
                 } else {
                     (
                         status(
                             SourceState::Stale,
-                            Some(format!("couldn't reach Jira ({why}); showing the last good list")),
+                            Some(format!(
+                                "couldn't reach Jira ({why}); showing the last good list"
+                            )),
                             st.last_good,
                             None,
                             st.items.len(),
@@ -465,17 +538,32 @@ impl JiraWorkSource {
                         vec![(None, st.items.clone())],
                     )
                 };
-                (update, self.backoff(st.failures), Wake::RefreshOrCredentials)
+                (
+                    update,
+                    self.backoff(st.failures),
+                    Wake::RefreshOrCredentials,
+                )
             }
         }
     }
 
     /// What the poller publishes, without a request, while a hold is running.
-    fn held(&self, st: &mut PollState, kind: HoldKind, remaining: Duration) -> (SourceUpdate, Duration, Wake) {
+    fn held(
+        &self,
+        st: &mut PollState,
+        kind: HoldKind,
+        remaining: Duration,
+    ) -> (SourceUpdate, Duration, Wake) {
         match kind {
             HoldKind::RateLimited => (
                 (
-                    status(SourceState::RateLimited, None, st.last_good, retry_at(remaining, self.now()), st.items.len()),
+                    status(
+                        SourceState::RateLimited,
+                        None,
+                        st.last_good,
+                        retry_at(remaining, self.now()),
+                        st.items.len(),
+                    ),
                     vec![(None, st.items.clone())],
                 ),
                 remaining,
@@ -484,7 +572,16 @@ impl JiraWorkSource {
             HoldKind::Rejected(code) => {
                 st.items.clear();
                 (
-                    (status(SourceState::Unauthenticated, Some(rejected_reason(code)), None, None, 0), Vec::new()),
+                    (
+                        status(
+                            SourceState::Unauthenticated,
+                            Some(rejected_reason(code)),
+                            None,
+                            None,
+                            0,
+                        ),
+                        Vec::new(),
+                    ),
                     remaining,
                     Wake::RefreshOrCredentials,
                 )
@@ -520,12 +617,19 @@ impl JiraWorkSource {
     }
 
     fn seen(&self) -> Seen {
-        Seen { mtime: self.env.mtime(), credentials: self.credentials().map(|c| c.fingerprint()) }
+        Seen {
+            mtime: self.env.mtime(),
+            credentials: self.credentials().map(|c| c.fingerprint()),
+        }
     }
 
     fn set_hold(&self, credentials: u64, kind: HoldKind, duration: Duration) {
         let until = Instant::now() + duration.min(MAX_HOLD);
-        *self.hold.lock().unwrap() = Some(Hold { until, credentials, kind });
+        *self.hold.lock().unwrap() = Some(Hold {
+            until,
+            credentials,
+            kind,
+        });
     }
 
     fn clear_hold(&self) {
@@ -534,7 +638,10 @@ impl JiraWorkSource {
 
     fn clear_rejected_hold(&self) {
         let mut guard = self.hold.lock().unwrap();
-        if guard.as_ref().is_some_and(|h| matches!(h.kind, HoldKind::Rejected(_))) {
+        if guard
+            .as_ref()
+            .is_some_and(|h| matches!(h.kind, HoldKind::Rejected(_)))
+        {
             *guard = None;
         }
     }
@@ -543,7 +650,10 @@ impl JiraWorkSource {
     fn active_hold(&self, credentials: u64) -> Option<(HoldKind, Duration)> {
         let guard = self.hold.lock().unwrap();
         let hold = guard.as_ref().filter(|h| h.credentials == credentials)?;
-        let remaining = hold.until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
+        let remaining = hold
+            .until
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())?;
         Some((hold.kind, remaining))
     }
 
@@ -552,7 +662,9 @@ impl JiraWorkSource {
     fn hold_error(&self, credentials: u64) -> Option<WorkError> {
         let (kind, _) = self.active_hold(credentials)?;
         Some(match kind {
-            HoldKind::RateLimited => WorkError::new("rate_limited", "Jira is rate-limiting requests"),
+            HoldKind::RateLimited => {
+                WorkError::new("rate_limited", "Jira is rate-limiting requests")
+            }
             HoldKind::Rejected(code) => WorkError::new("unauthenticated", rejected_reason(code)),
         })
     }
@@ -598,7 +710,9 @@ impl JiraWorkSource {
 
     async fn fetch_all(&self, creds: &Credentials) -> Result<Fetched, FetchError> {
         match self.fetch_via_search_jql(creds).await {
-            Err(FetchError::Failed(why)) if why == ENDPOINT_GONE => self.fetch_via_legacy_search(creds).await,
+            Err(FetchError::Failed(why)) if why == ENDPOINT_GONE => {
+                self.fetch_via_legacy_search(creds).await
+            }
             other => other,
         }
     }
@@ -617,13 +731,22 @@ impl JiraWorkSource {
             if let Some(t) = &token {
                 body["nextPageToken"] = json!(t);
             }
-            let req = self.http.post(&url).basic_auth(&creds.email, Some(&creds.token)).json(&body);
+            let req = self
+                .http
+                .post(&url)
+                .basic_auth(&creds.email, Some(&creds.token))
+                .json(&body);
             let page = self.send_json(req, true).await?;
             let issues = issues_of(&page)?;
-            let next = page.get("nextPageToken").and_then(Value::as_str).filter(|t| !t.is_empty());
+            let next = page
+                .get("nextPageToken")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty());
             if issues.is_empty() && (token.is_some() || next.is_some()) {
                 // We asked for a promised page (or it promises another) and got nothing.
-                return Err(FetchError::Failed("an empty page while more were promised".into()));
+                return Err(FetchError::Failed(
+                    "an empty page while more were promised".into(),
+                ));
             }
             collected.add(issues);
             match (next, page.get("isLast").and_then(Value::as_bool)) {
@@ -654,14 +777,17 @@ impl JiraWorkSource {
             let total = page
                 .get("total")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| FetchError::Failed("unexpected response".into()))? as usize;
+                .ok_or_else(|| FetchError::Failed("unexpected response".into()))?
+                as usize;
             collected.add(issues);
             start += issues.len();
             if start >= total {
                 return collected.finish(false);
             }
             if issues.is_empty() {
-                return Err(FetchError::Failed("an empty page before the total was reached".into()));
+                return Err(FetchError::Failed(
+                    "an empty page before the total was reached".into(),
+                ));
             }
             if collected.is_full() {
                 return collected.finish(true);
@@ -682,9 +808,14 @@ impl JiraWorkSource {
             .http
             .get(format!("{base}/rest/api/3/issue/{key}"))
             .basic_auth(&creds.email, Some(&creds.token))
-            .query(&[("fields", "summary,status,priority,assignee,description,duedate,updated")]);
+            .query(&[(
+                "fields",
+                "summary,status,priority,assignee,description,duedate,updated",
+            )]);
         let issue = self.send_json(issue_req, false).await?;
-        if issue.get("errorMessages").is_some() || !issue.get("fields").is_some_and(Value::is_object) {
+        if issue.get("errorMessages").is_some()
+            || !issue.get("fields").is_some_and(Value::is_object)
+        {
             return Err(FetchError::Failed("unexpected response".into()));
         }
         let comments_req = self
@@ -715,8 +846,14 @@ impl JiraWorkSource {
         let summary = text(&f, &["summary"]).unwrap_or_default();
         let mut fields = vec![
             ("Summary".to_string(), summary.clone()),
-            ("Status".to_string(), text(&f, &["status", "name"]).unwrap_or_default()),
-            ("Priority".to_string(), text(&f, &["priority", "name"]).unwrap_or_default()),
+            (
+                "Status".to_string(),
+                text(&f, &["status", "name"]).unwrap_or_default(),
+            ),
+            (
+                "Priority".to_string(),
+                text(&f, &["priority", "name"]).unwrap_or_default(),
+            ),
             (
                 "Assignee".to_string(),
                 text(&f, &["assignee", "displayName"]).unwrap_or_else(|| "Unassigned".into()),
@@ -738,7 +875,8 @@ impl JiraWorkSource {
             Ok(recent) => {
                 let mut section = String::from("## Recent comments\n");
                 for c in recent.iter().take(5) {
-                    let author = text(c, &["author", "displayName"]).unwrap_or_else(|| "Unknown".into());
+                    let author =
+                        text(c, &["author", "displayName"]).unwrap_or_else(|| "Unknown".into());
                     let when = text(c, &["created"]).unwrap_or_default();
                     let body = cap_text(
                         blocks_to_markdown(&adf_to_blocks(c.get("body").unwrap_or(&Value::Null))),
@@ -748,7 +886,9 @@ impl JiraWorkSource {
                 }
                 Some(section)
             }
-            Err(why) => Some(format!("## Recent comments\n\n_Comments unavailable ({why})._\n")),
+            Err(why) => Some(format!(
+                "## Recent comments\n\n_Comments unavailable ({why})._\n"
+            )),
         };
         if let Some(section) = comments_section {
             if !markdown.is_empty() {
@@ -763,7 +903,10 @@ impl JiraWorkSource {
             markdown,
             files: Vec::new(),
             links: browse_url(&creds.site, key)
-                .map(|url| Link { label: format!("Open {key} in Jira"), url })
+                .map(|url| Link {
+                    label: format!("Open {key} in Jira"),
+                    url,
+                })
                 .into_iter()
                 .collect(),
         };
@@ -773,8 +916,15 @@ impl JiraWorkSource {
     /// Send and decode one JSON response, classifying failures. With
     /// `gone_is_endpoint_missing`, 404/410 means "this endpoint doesn't exist here".
     /// Redirects are never followed (the client's policy), so a 3xx is a failure.
-    async fn send_json(&self, req: reqwest::RequestBuilder, gone_is_endpoint_missing: bool) -> Result<Value, FetchError> {
-        let resp = req.send().await.map_err(|e| FetchError::Failed(describe_transport_error(&e)))?;
+    async fn send_json(
+        &self,
+        req: reqwest::RequestBuilder,
+        gone_is_endpoint_missing: bool,
+    ) -> Result<Value, FetchError> {
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| FetchError::Failed(describe_transport_error(&e)))?;
         let status = resp.status();
         match status.as_u16() {
             401 | 403 => return Err(FetchError::Rejected(status.as_u16())),
@@ -786,13 +936,17 @@ impl JiraWorkSource {
                     .and_then(|raw| parse_retry_after(raw, self.now()));
                 return Err(FetchError::RateLimited(retry));
             }
-            404 | 410 if gone_is_endpoint_missing => return Err(FetchError::Failed(ENDPOINT_GONE.into())),
+            404 | 410 if gone_is_endpoint_missing => {
+                return Err(FetchError::Failed(ENDPOINT_GONE.into()))
+            }
             _ => {}
         }
         if !status.is_success() {
             return Err(FetchError::Failed(format!("HTTP {}", status.as_u16())));
         }
-        resp.json::<Value>().await.map_err(|_| FetchError::Failed("unreadable response".into()))
+        resp.json::<Value>()
+            .await
+            .map_err(|_| FetchError::Failed("unreadable response".into()))
     }
 }
 
@@ -840,7 +994,9 @@ fn validate_site(raw: &str) -> Option<String> {
         && label.len() <= 63
         && !label.starts_with('-')
         && !label.ends_with('-')
-        && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     valid.then(|| format!("{label}.atlassian.net"))
 }
 
@@ -871,7 +1027,9 @@ fn valid_key(key: &str) -> bool {
     };
     project.len() >= 2
         && project.starts_with(|c: char| c.is_ascii_uppercase())
-        && project.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && project
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
         && !number.is_empty()
         && number.len() <= 10
         && number.bytes().all(|b| b.is_ascii_digit())
@@ -894,7 +1052,9 @@ fn browse_url(site: &str, key: &str) -> Option<String> {
 /// marker is never part of the code; a cut inside the closing line itself
 /// drops the half line, so no stray fence characters are left.
 fn cap_text(text: String, max_chars: usize) -> String {
-    let Some((cut, _)) = text.char_indices().nth(max_chars) else { return text };
+    let Some((cut, _)) = text.char_indices().nth(max_chars) else {
+        return text;
+    };
     let mut kept = &text[..cut];
     let mut closer = String::new();
     if let Some((fence_char, len)) = open_fence(kept) {
@@ -916,14 +1076,18 @@ fn open_fence(text: &str) -> Option<(char, usize)> {
     let mut open: Option<(char, usize)> = None;
     for line in text.lines() {
         let line = line.trim_start();
-        let Some(first) = line.chars().next().filter(|c| matches!(c, '`' | '~')) else { continue };
+        let Some(first) = line.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+            continue;
+        };
         let run = line.chars().take_while(|&c| c == first).count();
         if run < 3 {
             continue;
         }
         match open {
             None => open = Some((first, run)),
-            Some((c, opener)) if c == first && run >= opener && line[run..].trim().is_empty() => open = None,
+            Some((c, opener)) if c == first && run >= opener && line[run..].trim().is_empty() => {
+                open = None
+            }
             Some(_) => {}
         }
     }
@@ -950,7 +1114,11 @@ struct Collected<'a> {
 
 impl<'a> Collected<'a> {
     fn new(site: &'a str) -> Self {
-        Self { site, items: Vec::new(), unreadable: 0 }
+        Self {
+            site,
+            items: Vec::new(),
+            unreadable: 0,
+        }
     }
 
     fn add(&mut self, issues: &[Value]) {
@@ -969,27 +1137,45 @@ impl<'a> Collected<'a> {
     /// `more_remain`: Jira promised issues beyond what was fetched.
     fn finish(mut self, more_remain: bool) -> Result<Fetched, FetchError> {
         if self.items.is_empty() && self.unreadable > 0 {
-            return Err(FetchError::Failed("none of the issues Jira returned could be read".into()));
+            return Err(FetchError::Failed(
+                "none of the issues Jira returned could be read".into(),
+            ));
         }
         let cut = more_remain || self.items.len() > MAX_ISSUES;
         self.items.truncate(MAX_ISSUES);
         let mut notes = Vec::new();
         if cut {
-            notes.push(format!("showing the first {} issues; Jira has more", self.items.len()));
+            notes.push(format!(
+                "showing the first {} issues; Jira has more",
+                self.items.len()
+            ));
         }
         if self.unreadable > 0 {
             let n = self.unreadable;
-            notes.push(format!("{n} issue{} could not be read", if n == 1 { "" } else { "s" }));
+            notes.push(format!(
+                "{n} issue{} could not be read",
+                if n == 1 { "" } else { "s" }
+            ));
         }
-        Ok(Fetched { items: self.items, note: (!notes.is_empty()).then(|| notes.join("; ")) })
+        Ok(Fetched {
+            items: self.items,
+            note: (!notes.is_empty()).then(|| notes.join("; ")),
+        })
     }
 }
 
 fn to_work_item(issue: &Value, site: &str) -> Option<WorkItem> {
-    let key = issue.get("key")?.as_str().filter(|k| valid_key(k))?.to_string();
+    let key = issue
+        .get("key")?
+        .as_str()
+        .filter(|k| valid_key(k))?
+        .to_string();
     let f = issue.get("fields").filter(|f| f.is_object())?.clone();
     let text = |path: &[&str]| -> Option<String> {
-        path.iter().try_fold(&f, |acc, p| acc.get(p)).and_then(Value::as_str).map(str::to_string)
+        path.iter()
+            .try_fold(&f, |acc, p| acc.get(p))
+            .and_then(Value::as_str)
+            .map(str::to_string)
     };
     let summary = one_line(&text(&["summary"]).unwrap_or_default(), MAX_LINE_CHARS);
     let category = match text(&["status", "statusCategory", "key"]).as_deref() {
@@ -1011,7 +1197,9 @@ fn to_work_item(issue: &Value, site: &str) -> Option<WorkItem> {
     Some(WorkItem {
         id: format!("jira:{key}"),
         source: WorkSource::Jira,
-        kind: text(&["issuetype", "name"]).unwrap_or_else(|| "issue".into()).to_lowercase(),
+        kind: text(&["issuetype", "name"])
+            .unwrap_or_else(|| "issue".into())
+            .to_lowercase(),
         title: summary.clone(),
         repo: None,
         project: text(&["project", "key"]),
@@ -1022,7 +1210,8 @@ fn to_work_item(issue: &Value, site: &str) -> Option<WorkItem> {
         environment: None,
         created_at: text(&["created"]).as_deref().and_then(parse_jira_time),
         updated_at: text(&["updated"]).as_deref().and_then(parse_jira_time),
-        due: text(&["duedate"]).and_then(|d| NaiveDate::parse_from_str(d.get(..10)?, "%Y-%m-%d").ok()),
+        due: text(&["duedate"])
+            .and_then(|d| NaiveDate::parse_from_str(d.get(..10)?, "%Y-%m-%d").ok()),
         url: browse_url(site, &key),
         path: None,
         metrics: Default::default(),
@@ -1043,23 +1232,39 @@ fn parse_jira_time(raw: &str) -> Option<DateTime<Utc>> {
 // ── ADF blocks -> markdown ────────────────────────────────────────────────
 
 fn blocks_to_markdown(blocks: &[MdBlock]) -> String {
-    blocks.iter().map(block_to_markdown).collect::<Vec<_>>().join("\n\n")
+    blocks
+        .iter()
+        .map(block_to_markdown)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn block_to_markdown(block: &MdBlock) -> String {
     match block {
         MdBlock::Paragraph { spans } => spans_to_markdown(spans),
         MdBlock::Heading { level, spans } => {
-            format!("{} {}", "#".repeat((*level).clamp(1, 6) as usize), spans_to_markdown(spans))
+            format!(
+                "{} {}",
+                "#".repeat((*level).clamp(1, 6) as usize),
+                spans_to_markdown(spans)
+            )
         }
         MdBlock::CodeBlock { lang, text } => {
             format!("```{}\n{text}\n```", lang.as_deref().unwrap_or(""))
         }
-        MdBlock::List { ordered, start, items } => items
+        MdBlock::List {
+            ordered,
+            start,
+            items,
+        } => items
             .iter()
             .enumerate()
             .map(|(i, blocks)| {
-                let marker = if *ordered { format!("{}.", start.unwrap_or(1).saturating_add(i as u64)) } else { "-".into() };
+                let marker = if *ordered {
+                    format!("{}.", start.unwrap_or(1).saturating_add(i as u64))
+                } else {
+                    "-".into()
+                };
                 let body = blocks_to_markdown(blocks).replace('\n', "\n  ");
                 format!("{marker} {body}")
             })
@@ -1072,9 +1277,19 @@ fn block_to_markdown(block: &MdBlock) -> String {
             .join("\n"),
         MdBlock::Table { header, rows } => {
             let row = |cells: &Vec<Vec<MdSpan>>| {
-                format!("| {} |", cells.iter().map(|c| spans_to_markdown(c)).collect::<Vec<_>>().join(" | "))
+                format!(
+                    "| {} |",
+                    cells
+                        .iter()
+                        .map(|c| spans_to_markdown(c))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
             };
-            let mut lines = vec![row(header), format!("|{}", " --- |".repeat(header.len().max(1)))];
+            let mut lines = vec![
+                row(header),
+                format!("|{}", " --- |".repeat(header.len().max(1))),
+            ];
             lines.extend(rows.iter().map(row));
             lines.join("\n")
         }
@@ -1103,26 +1318,54 @@ mod tests {
 
     /// A fixed "now" for the pure time functions.
     fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-10-11T12:00:00Z").unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339("2026-10-11T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     #[test]
     fn retry_after_accepts_seconds_and_http_dates() {
-        assert_eq!(parse_retry_after("30", now()), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_retry_after("30", now()),
+            Some(Duration::from_secs(30))
+        );
         let past = parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", now()).unwrap();
-        assert_eq!(past, Duration::from_secs(1), "a date in the past still waits a second");
+        assert_eq!(
+            past,
+            Duration::from_secs(1),
+            "a date in the past still waits a second"
+        );
         assert_eq!(parse_retry_after("0", now()), Some(Duration::from_secs(1)));
         assert_eq!(parse_retry_after("soon", now()), None);
     }
 
     #[test]
     fn retry_after_is_clamped_and_never_overflows() {
-        for huge in ["18446744073709551615", "18446744073709551616", "99999999999999999999999999", "901", "86400"] {
+        for huge in [
+            "18446744073709551615",
+            "18446744073709551616",
+            "99999999999999999999999999",
+            "901",
+            "86400",
+        ] {
             assert_eq!(parse_retry_after(huge, now()), Some(MAX_HOLD), "{huge}");
         }
-        assert_eq!(parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT", now()), Some(MAX_HOLD));
+        assert_eq!(
+            parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT", now()),
+            Some(MAX_HOLD)
+        );
         assert_eq!(parse_retry_after("900", now()), Some(MAX_HOLD));
-        for unusable in ["-5", "-0", "", "  ", "1.5", "+5", "5 s", "NaN", "Tue, 99 Foo 2026"] {
+        for unusable in [
+            "-5",
+            "-0",
+            "",
+            "  ",
+            "1.5",
+            "+5",
+            "5 s",
+            "NaN",
+            "Tue, 99 Foo 2026",
+        ] {
             assert_eq!(parse_retry_after(unusable, now()), None, "{unusable:?}");
         }
         let hold = retry_at(MAX_HOLD, now()).expect("a 15 minute hold has an end time");
@@ -1160,14 +1403,37 @@ mod tests {
         }
         let too_long = format!("{}.atlassian.net", "a".repeat(64));
         for hostile in [
-            "", " ", "/", "https://", ".atlassian.net", "evil.example", "evil.example/", "x@evil",
-            "a.atlassian.net.evil.example", "user:pw@example.atlassian.net", "example.atlassian.net:443",
-            "example.atlassian.net:8443", "exa mple", "example.atlassian.net evil.example",
-            "exаmple.atlassian.net", "example．atlassian．net", "-bad", "bad-", "x.sub.atlassian.net",
-            "example.atlassian.net.", "http://example.atlassian.net", "https://https://example",
-            "example.atlassian.net//", "//evil.example", "evil.example#.atlassian.net",
-            "evil.example?.atlassian.net", "evil.example\\.atlassian.net", "atlassian.net",
-            "example.atlassian.net/browse", "ex\0ample", too_long.as_str(),
+            "",
+            " ",
+            "/",
+            "https://",
+            ".atlassian.net",
+            "evil.example",
+            "evil.example/",
+            "x@evil",
+            "a.atlassian.net.evil.example",
+            "user:pw@example.atlassian.net",
+            "example.atlassian.net:443",
+            "example.atlassian.net:8443",
+            "exa mple",
+            "example.atlassian.net evil.example",
+            "exаmple.atlassian.net",
+            "example．atlassian．net",
+            "-bad",
+            "bad-",
+            "x.sub.atlassian.net",
+            "example.atlassian.net.",
+            "http://example.atlassian.net",
+            "https://https://example",
+            "example.atlassian.net//",
+            "//evil.example",
+            "evil.example#.atlassian.net",
+            "evil.example?.atlassian.net",
+            "evil.example\\.atlassian.net",
+            "atlassian.net",
+            "example.atlassian.net/browse",
+            "ex\0ample",
+            too_long.as_str(),
         ] {
             assert_eq!(validate_site(hostile), None, "{hostile:?}");
         }
@@ -1188,7 +1454,19 @@ mod tests {
         for good in ["PROJ-1", "MY_PROJ-12", "A1-7", "AB-1234567890"] {
             assert!(valid_key(good), "{good}");
         }
-        for bad in ["P-1", "_X-1", "1AB-2", "PROJ-", "PROJ-1-2", "proj-1", "PROJ-abc", "PROJ-1/x", "", "-1", "AB-12345678901"] {
+        for bad in [
+            "P-1",
+            "_X-1",
+            "1AB-2",
+            "PROJ-",
+            "PROJ-1-2",
+            "proj-1",
+            "PROJ-abc",
+            "PROJ-1/x",
+            "",
+            "-1",
+            "AB-12345678901",
+        ] {
             assert!(!valid_key(bad), "{bad}");
         }
     }
@@ -1198,7 +1476,10 @@ mod tests {
         assert_eq!(cap_text("short".into(), 10), "short");
         assert_eq!(cap_text("exactly10!".into(), 10), "exactly10!");
         let cut = cap_text("é".repeat(50), 10);
-        assert!(cut.starts_with(&"é".repeat(10)) && cut.ends_with("(truncated)"), "{cut}");
+        assert!(
+            cut.starts_with(&"é".repeat(10)) && cut.ends_with("(truncated)"),
+            "{cut}"
+        );
     }
 
     #[test]
@@ -1217,10 +1498,15 @@ mod tests {
 
         let mut c = Collected::new("example.atlassian.net");
         c.add(&[json!({"key": "../x"})]);
-        assert!(c.finish(false).is_err(), "all unreadable is a failure, not an empty list");
+        assert!(
+            c.finish(false).is_err(),
+            "all unreadable is a failure, not an empty list"
+        );
 
         let mut c = Collected::new("example.atlassian.net");
-        let many: Vec<Value> = (1..=MAX_ISSUES + 20).map(|n| json!({"key": format!("AB-{n}"), "fields": {}})).collect();
+        let many: Vec<Value> = (1..=MAX_ISSUES + 20)
+            .map(|n| json!({"key": format!("AB-{n}"), "fields": {}}))
+            .collect();
         c.add(&many);
         let f = c.finish(false).unwrap();
         assert_eq!(f.items.len(), MAX_ISSUES);
@@ -1234,7 +1520,10 @@ mod tests {
     }
 
     /// Whether `wait` is still waiting after `after` of simulated time.
-    async fn still_waiting(wait: &mut (impl std::future::Future<Output = ()> + Unpin), after: Duration) -> bool {
+    async fn still_waiting(
+        wait: &mut (impl std::future::Future<Output = ()> + Unpin),
+        after: Duration,
+    ) -> bool {
         tokio::time::timeout(after, wait).await.is_err()
     }
 
@@ -1245,10 +1534,19 @@ mod tests {
         let seen = src.seen();
         let mut wait = Box::pin(src.wait(MAX_HOLD, Wake::CredentialsOnly, &refresh, &seen));
         refresh.notify_one();
-        assert!(still_waiting(&mut wait, Duration::from_secs(60)).await, "the poke ended the hold");
+        assert!(
+            still_waiting(&mut wait, Duration::from_secs(60)).await,
+            "the poke ended the hold"
+        );
         refresh.notify_one();
-        assert!(still_waiting(&mut wait, MAX_HOLD - Duration::from_secs(120)).await, "a later poke ended the hold");
-        assert!(!still_waiting(&mut wait, Duration::from_secs(120)).await, "the hold never ended");
+        assert!(
+            still_waiting(&mut wait, MAX_HOLD - Duration::from_secs(120)).await,
+            "a later poke ended the hold"
+        );
+        assert!(
+            !still_waiting(&mut wait, Duration::from_secs(120)).await,
+            "the hold never ended"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1256,17 +1554,29 @@ mod tests {
         let src = quiet_source();
         let refresh = Notify::new();
         let seen = src.seen();
-        let mut ordinary = Box::pin(src.wait(MAX_HOLD, Wake::RefreshOrCredentials, &refresh, &seen));
+        let mut ordinary =
+            Box::pin(src.wait(MAX_HOLD, Wake::RefreshOrCredentials, &refresh, &seen));
         assert!(still_waiting(&mut ordinary, Duration::from_secs(10)).await);
         refresh.notify_one();
-        assert!(!still_waiting(&mut ordinary, Duration::from_secs(1)).await, "a poke wakes an ordinary wait");
+        assert!(
+            !still_waiting(&mut ordinary, Duration::from_secs(1)).await,
+            "a poke wakes an ordinary wait"
+        );
 
         // A poke that lands during a hold is consumed by it: the next wait is not cut short.
-        let mut hold = Box::pin(src.wait(Duration::from_secs(30), Wake::CredentialsOnly, &refresh, &seen));
+        let mut hold = Box::pin(src.wait(
+            Duration::from_secs(30),
+            Wake::CredentialsOnly,
+            &refresh,
+            &seen,
+        ));
         refresh.notify_one();
         assert!(!still_waiting(&mut hold, Duration::from_secs(31)).await);
         let mut next = Box::pin(src.wait(MAX_HOLD, Wake::RefreshOrCredentials, &refresh, &seen));
-        assert!(still_waiting(&mut next, Duration::from_secs(60)).await, "the held poke was replayed");
+        assert!(
+            still_waiting(&mut next, Duration::from_secs(60)).await,
+            "the held poke was replayed"
+        );
     }
 
     fn env_text(token: &str) -> String {
@@ -1275,7 +1585,12 @@ mod tests {
 
     fn touch(path: &std::path::Path, secs_ahead: u64) {
         let later = SystemTime::now() + Duration::from_secs(secs_ahead);
-        std::fs::File::options().write(true).open(path).unwrap().set_modified(later).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -1283,18 +1598,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = dir.path().join(".env");
         std::fs::write(&env, env_text("one")).unwrap();
-        let src = JiraWorkSource::new(&env).file_credentials_only().with_env_watch_interval(Duration::from_secs(1));
+        let src = JiraWorkSource::new(&env)
+            .file_credentials_only()
+            .with_env_watch_interval(Duration::from_secs(1));
         let refresh = Notify::new();
         let seen = src.seen();
         let mut wait = Box::pin(src.wait(MAX_HOLD, Wake::CredentialsOnly, &refresh, &seen));
-        assert!(still_waiting(&mut wait, Duration::from_secs(5)).await, "nothing changed yet");
+        assert!(
+            still_waiting(&mut wait, Duration::from_secs(5)).await,
+            "nothing changed yet"
+        );
 
         touch(&env, 60); // same credentials, new mtime (an editor, a backup tool)
-        assert!(still_waiting(&mut wait, Duration::from_secs(10)).await, "a touched file ended the hold");
+        assert!(
+            still_waiting(&mut wait, Duration::from_secs(10)).await,
+            "a touched file ended the hold"
+        );
 
         std::fs::write(&env, env_text("two")).unwrap();
         touch(&env, 120);
-        assert!(!still_waiting(&mut wait, Duration::from_secs(5)).await, "a new token was not noticed");
+        assert!(
+            !still_waiting(&mut wait, Duration::from_secs(5)).await,
+            "a new token was not noticed"
+        );
     }
 
     #[test]
@@ -1307,7 +1633,11 @@ mod tests {
         src.set_hold(7, HoldKind::Rejected(403), Duration::from_secs(u64::MAX));
         let refused = src.hold_error(7).unwrap();
         assert_eq!(refused.code, "unauthenticated");
-        assert!(refused.message.contains("403") && refused.message.contains("permission"), "{}", refused.message);
+        assert!(
+            refused.message.contains("403") && refused.message.contains("permission"),
+            "{}",
+            refused.message
+        );
         src.clear_hold();
         assert!(src.hold_error(7).is_none());
         src.set_hold(7, HoldKind::RateLimited, Duration::ZERO);
@@ -1319,7 +1649,8 @@ mod tests {
         let src = quiet_source();
         let refresh = Notify::new();
         let seen = src.seen();
-        let mut wait = Box::pin(src.wait(Duration::MAX, Wake::RefreshOrCredentials, &refresh, &seen));
+        let mut wait =
+            Box::pin(src.wait(Duration::MAX, Wake::RefreshOrCredentials, &refresh, &seen));
         assert!(still_waiting(&mut wait, Duration::from_secs(60)).await);
         refresh.notify_one();
         assert!(!still_waiting(&mut wait, Duration::from_secs(1)).await);
@@ -1328,19 +1659,27 @@ mod tests {
     // ── cap_text never leaves a code fence open ──────────────────────────────
 
     fn fence_lines(text: &str) -> usize {
-        text.lines().filter(|l| l.trim_start().starts_with("```")).count()
+        text.lines()
+            .filter(|l| l.trim_start().starts_with("```"))
+            .count()
     }
 
     #[test]
     fn a_cut_inside_a_code_fence_closes_the_fence_before_the_marker() {
         let text = format!("intro\n```\n{}", "code line\n".repeat(50));
         let cut = cap_text(text.clone(), 60);
-        assert!(cut.starts_with(&text[..60]), "the first 60 characters are kept: {cut}");
+        assert!(
+            cut.starts_with(&text[..60]),
+            "the first 60 characters are kept: {cut}"
+        );
         assert_eq!(fence_lines(&cut) % 2, 0, "the fences are balanced: {cut}");
         assert!(cut.ends_with("… (truncated)"), "{cut}");
         let marker_at = cut.rfind("… (truncated)").unwrap();
         let last_fence_at = cut.rfind("```").unwrap();
-        assert!(last_fence_at < marker_at, "the marker is outside the fence: {cut}");
+        assert!(
+            last_fence_at < marker_at,
+            "the marker is outside the fence: {cut}"
+        );
     }
 
     #[test]
@@ -1348,7 +1687,10 @@ mod tests {
         let text = format!("```rust\nfn main() {{}}\n{}", "let x = 1;\n".repeat(20));
         let cut = cap_text(text, 40);
         assert_eq!(fence_lines(&cut) % 2, 0, "{cut}");
-        assert!(cut.rfind("```").unwrap() < cut.rfind("… (truncated)").unwrap(), "{cut}");
+        assert!(
+            cut.rfind("```").unwrap() < cut.rfind("… (truncated)").unwrap(),
+            "{cut}"
+        );
     }
 
     #[test]
@@ -1362,7 +1704,11 @@ mod tests {
     fn a_closed_fence_before_the_cut_leaves_the_text_unchanged() {
         let text = format!("```\ncode\n```\n{}", "plain text ".repeat(30));
         let cut = cap_text(text.clone(), 50);
-        assert_eq!(cut, format!("{}\n\n… (truncated)", &text[..50]), "nothing is open, so nothing is added");
+        assert_eq!(
+            cut,
+            format!("{}\n\n… (truncated)", &text[..50]),
+            "nothing is open, so nothing is added"
+        );
         assert_eq!(fence_lines(&cut), 2);
     }
 
@@ -1375,7 +1721,10 @@ mod tests {
         let text = format!("intro\n~~~\n{}", "code line\n".repeat(50));
         let cut = cap_text(text.clone(), 40);
         assert!(cut.starts_with(&text[..40]), "{cut}");
-        assert!(cut.ends_with(&format!("\n~~~{MARKER}")), "closed with `~~~`, then the marker outside the fence: {cut}");
+        assert!(
+            cut.ends_with(&format!("\n~~~{MARKER}")),
+            "closed with `~~~`, then the marker outside the fence: {cut}"
+        );
         assert!(!cut.contains("```"), "no backtick fence is invented: {cut}");
         assert_eq!(open_fence(&cut), None, "balanced: {cut}");
     }
@@ -1384,8 +1733,15 @@ mod tests {
     fn a_tilde_line_does_not_close_a_backtick_fence_and_the_cut_closes_it_with_backticks() {
         let text = format!("```\ncode\n~~~\n{}", "more code\n".repeat(30));
         let cut = cap_text(text.clone(), 40);
-        assert!(cut.ends_with(&format!("\n```{MARKER}")), "still inside the backtick fence, so it is closed with backticks: {cut}");
-        assert_eq!(cut.lines().filter(|l| l.starts_with("```")).count(), 2, "{cut}");
+        assert!(
+            cut.ends_with(&format!("\n```{MARKER}")),
+            "still inside the backtick fence, so it is closed with backticks: {cut}"
+        );
+        assert_eq!(
+            cut.lines().filter(|l| l.starts_with("```")).count(),
+            2,
+            "{cut}"
+        );
         assert_eq!(open_fence(&cut), None, "{cut}");
     }
 
@@ -1426,6 +1782,10 @@ mod tests {
         assert_eq!(open_fence("```\ncode\n``"), Some(('`', 3)));
         assert_eq!(open_fence("~~~\ncode\n~~~~"), None);
         assert_eq!(open_fence("~~~~\ncode\n~~~"), Some(('~', 4)));
-        assert_eq!(open_fence("```\ncode\n``` after"), Some(('`', 3)), "a closing line has nothing else on it");
+        assert_eq!(
+            open_fence("```\ncode\n``` after"),
+            Some(('`', 3)),
+            "a closing line has nothing else on it"
+        );
     }
 }

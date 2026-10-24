@@ -46,7 +46,11 @@ impl EnvFile {
 
     /// Like [`new`](Self::new) with an explicit stand-in for the process environment.
     pub fn with_process_env(path: impl Into<PathBuf>, process_env: ProcessEnv) -> Self {
-        Self { path: path.into(), process_env, cached: Mutex::new(Cached::default()) }
+        Self {
+            path: path.into(),
+            process_env,
+            cached: Mutex::new(Cached::default()),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -55,7 +59,9 @@ impl EnvFile {
 
     /// The file's current mtime (`None` when it does not exist).
     pub fn mtime(&self) -> Option<SystemTime> {
-        std::fs::metadata(&self.path).and_then(|m| m.modified()).ok()
+        std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok()
     }
 
     /// Value of `name`: a non-empty process environment variable wins, then a
@@ -93,14 +99,20 @@ pub struct JiraSite {
 impl JiraSite {
     /// `configured` is `Config::jira_site`; `env_path` the credentials file.
     pub fn new(configured: Option<String>, env_path: impl Into<PathBuf>) -> Self {
-        Self { configured, file: EnvFile::new(env_path) }
+        Self {
+            configured,
+            file: EnvFile::new(env_path),
+        }
     }
 
     /// From the daemon config (`jira_site`, `jira_credentials_path`).
     pub fn from_config(config: &crate::config::Config) -> Self {
         Self::new(
             config.jira_site.clone(),
-            config.jira_credentials_path.clone().unwrap_or_else(default_env_path),
+            config
+                .jira_credentials_path
+                .clone()
+                .unwrap_or_else(default_env_path),
         )
     }
 
@@ -219,16 +231,31 @@ mod tests {
     fn lookup_reads_the_file_and_reloads_when_the_mtime_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
-        std::fs::write(&path, "NOSTROMO_TEST_CRED_A=from-file\nNOSTROMO_TEST_CRED_B=\n").unwrap();
+        std::fs::write(
+            &path,
+            "NOSTROMO_TEST_CRED_A=from-file\nNOSTROMO_TEST_CRED_B=\n",
+        )
+        .unwrap();
         let env = EnvFile::new(&path);
-        assert_eq!(env.lookup("NOSTROMO_TEST_CRED_A").as_deref(), Some("from-file"));
+        assert_eq!(
+            env.lookup("NOSTROMO_TEST_CRED_A").as_deref(),
+            Some("from-file")
+        );
         assert_eq!(env.lookup("NOSTROMO_TEST_CRED_B"), None, "blank is absent");
         assert_eq!(env.lookup("NOSTROMO_TEST_CRED_MISSING"), None);
 
         std::fs::write(&path, "NOSTROMO_TEST_CRED_A=updated\n").unwrap();
         let later = SystemTime::now() + std::time::Duration::from_secs(5);
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
-        assert_eq!(env.lookup("NOSTROMO_TEST_CRED_A").as_deref(), Some("updated"));
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(
+            env.lookup("NOSTROMO_TEST_CRED_A").as_deref(),
+            Some("updated")
+        );
     }
 
     #[test]

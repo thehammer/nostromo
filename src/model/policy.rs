@@ -110,7 +110,9 @@ mod tests {
     use super::*;
 
     fn agent_file(dir: &Path, agent: &str, front_matter_model: Option<&str>) {
-        let model = front_matter_model.map(|m| format!("model: {m}\n")).unwrap_or_default();
+        let model = front_matter_model
+            .map(|m| format!("model: {m}\n"))
+            .unwrap_or_default();
         std::fs::write(
             dir.join(format!("{agent}.md")),
             format!("---\nname: {agent}\ndescription: test agent\n{model}---\nYou are {agent}.\n"),
@@ -124,8 +126,15 @@ mod tests {
         agent_file(dir.path(), "tester", Some("haiku"));
         agent_file(dir.path(), "silent", None);
 
-        assert_eq!(declared_model_in(dir.path(), "tester").as_deref(), Some("haiku"));
-        assert_eq!(declared_model_in(dir.path(), "plugin:tester").as_deref(), Some("haiku"), "looked up by its bare name");
+        assert_eq!(
+            declared_model_in(dir.path(), "tester").as_deref(),
+            Some("haiku")
+        );
+        assert_eq!(
+            declared_model_in(dir.path(), "plugin:tester").as_deref(),
+            Some("haiku"),
+            "looked up by its bare name"
+        );
         assert_eq!(declared_model_in(dir.path(), "silent"), None);
         assert_eq!(declared_model_in(dir.path(), "missing"), None);
     }

@@ -31,7 +31,12 @@ struct SourceView {
 
 impl SourceView {
     fn loading() -> Self {
-        SourceView { state: SourceState::Loading, updated_at: None, reason: None, auth: None }
+        SourceView {
+            state: SourceState::Loading,
+            updated_at: None,
+            reason: None,
+            auth: None,
+        }
     }
 }
 
@@ -45,7 +50,9 @@ fn auth_json(p: &DeviceFlowPrompt) -> Value {
 }
 
 fn mailbox_view(snap: Option<&MailboxSnapshot>) -> SourceView {
-    let Some(snap) = snap else { return SourceView::loading() };
+    let Some(snap) = snap else {
+        return SourceView::loading();
+    };
     SourceView {
         state: snap.state,
         updated_at: snap.updated_at,
@@ -55,7 +62,9 @@ fn mailbox_view(snap: Option<&MailboxSnapshot>) -> SourceView {
 }
 
 fn calendar_view(snap: Option<&CalendarSnapshot>) -> SourceView {
-    let Some(snap) = snap else { return SourceView::loading() };
+    let Some(snap) = snap else {
+        return SourceView::loading();
+    };
     SourceView {
         state: snap.state,
         updated_at: snap.updated_at,
@@ -79,7 +88,11 @@ fn severity(state: SourceState) -> u8 {
 /// The overall state of Fred: the worse of the two sources. When both are
 /// healthy but differ (fresh + empty), something is there: `fresh`.
 fn composite_state(mailbox: &SourceView, calendar: &SourceView) -> SourceState {
-    let worst = if severity(calendar.state) > severity(mailbox.state) { calendar } else { mailbox };
+    let worst = if severity(calendar.state) > severity(mailbox.state) {
+        calendar
+    } else {
+        mailbox
+    };
     if severity(worst.state) == 0 && mailbox.state != calendar.state {
         SourceState::Fresh
     } else {
@@ -92,7 +105,10 @@ fn composite_state(mailbox: &SourceView, calendar: &SourceView) -> SourceState {
 pub(crate) fn summary(state: &McpSharedState) -> (SourceState, usize, usize) {
     let mailbox = state.fred_mailbox_rx.borrow();
     let calendar = state.fred_calendar_rx.borrow();
-    let overall = composite_state(&mailbox_view(mailbox.as_ref()), &calendar_view(calendar.as_ref()));
+    let overall = composite_state(
+        &mailbox_view(mailbox.as_ref()),
+        &calendar_view(calendar.as_ref()),
+    );
     (
         overall,
         mailbox.as_ref().map_or(0, |s| s.unread_count),
@@ -102,7 +118,10 @@ pub(crate) fn summary(state: &McpSharedState) -> (SourceState, usize, usize) {
 
 /// Today's meetings: cancelled events are listed but not counted.
 fn meeting_count(snap: &CalendarSnapshot) -> usize {
-    snap.events.iter().filter(|e| !e.is_cancelled && e.status != "cancelled").count()
+    snap.events
+        .iter()
+        .filter(|e| !e.is_cancelled && e.status != "cancelled")
+        .count()
 }
 
 fn ser<T: serde::Serialize>(v: &T) -> Value {
@@ -119,7 +138,10 @@ pub fn list_unread_emails(state: &McpSharedState) -> Value {
     let borrow = state.fred_mailbox_rx.borrow();
     let view = mailbox_view(borrow.as_ref());
     let (unread_count, items) = match borrow.as_ref() {
-        Some(snap) => (snap.unread_count, snap.items.iter().filter(|i| !i.is_read).collect()),
+        Some(snap) => (
+            snap.unread_count,
+            snap.items.iter().filter(|i| !i.is_read).collect(),
+        ),
         None => (0, Vec::new()),
     };
     let mut out = json!({
@@ -195,7 +217,11 @@ pub fn get_state(state: &McpSharedState) -> Value {
 
     let (mailbox_state, calendar_state) = (mailbox.state, calendar.state);
     let composite = composite_state(&mailbox, &calendar);
-    let worst = if severity(calendar_state) > severity(mailbox_state) { calendar } else { mailbox };
+    let worst = if severity(calendar_state) > severity(mailbox_state) {
+        calendar
+    } else {
+        mailbox
+    };
     let mut out = json!({
         "state": composite,
         "updated_at": worst.updated_at,
@@ -211,7 +237,9 @@ pub fn get_state(state: &McpSharedState) -> Value {
 }
 
 fn insert_reason_auth(out: &mut Value, view: &SourceView) {
-    let Some(obj) = out.as_object_mut() else { return };
+    let Some(obj) = out.as_object_mut() else {
+        return;
+    };
     if let Some(r) = &view.reason {
         obj.insert("reason".into(), json!(r));
     }

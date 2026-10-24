@@ -17,7 +17,7 @@ use std::time::Duration;
 use nostromo::ipc::protocol::ServerMsg;
 use nostromo::tracker::view::{Banner, ViewItem, ViewNode};
 use nostromo::tracker::{
-    Author, FakeClock, OpenArgs, Op, ReadOutcome, RegistryParts, TrackerBoardView, TrackerRegistry,
+    Author, FakeClock, Op, OpenArgs, ReadOutcome, RegistryParts, TrackerBoardView, TrackerRegistry,
     Upsert,
 };
 use serde_json::{json, Value};
@@ -154,7 +154,10 @@ fn board_in(frames: &[ServerMsg], tag: &str) -> TrackerBoardView {
         .iter()
         .rev()
         .find_map(|m| match m {
-            ServerMsg::TrackerBoard { tag: t, board: Some(b) } if t == tag => Some(b.clone()),
+            ServerMsg::TrackerBoard {
+                tag: t,
+                board: Some(b),
+            } if t == tag => Some(b.clone()),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no tracker_board frame with a board for {tag}: {frames:?}"))
@@ -215,14 +218,23 @@ fn ticking_an_item_in_an_editor_is_broadcast_and_read_as_a_file_change() {
     let rig = Rig::new();
     let version_before = board_in(&rig.reg.frames_for_tag(READER), READER).version;
 
-    let frames = rig.external_edit(|t| map_line(t, "#alpha ", |l| l.replacen("- [ ] ", "- [x] ", 1)));
+    let frames =
+        rig.external_edit(|t| map_line(t, "#alpha ", |l| l.replacen("- [ ] ", "- [x] ", 1)));
 
     for tag in [READER, WRITER] {
         let view = board_in(&frames, tag);
         assert!(view.version > version_before, "{tag}: the version moves on");
         let alpha = item(&view, "alpha").expect("alpha is still there");
-        assert_eq!(format!("{:?}", alpha.status), "Done", "{tag}: the pane shows it done");
-        assert_eq!(format!("{:?}", item(&view, "beta").unwrap().status), "Todo", "{tag}");
+        assert_eq!(
+            format!("{:?}", alpha.status),
+            "Done",
+            "{tag}: the pane shows it done"
+        );
+        assert_eq!(
+            format!("{:?}", item(&view, "beta").unwrap().status),
+            "Todo",
+            "{tag}"
+        );
     }
     let summary = frames
         .iter()
@@ -261,7 +273,11 @@ fn a_line_typed_into_the_file_appears_in_the_view_and_reads_as_an_added_item() {
     let changes = rig.reader_changes();
     assert_eq!(changes.len(), 1, "{changes:?}");
     assert_all_by_file(&changes);
-    assert_eq!(changes[0]["added"]["text"], json!("Human typed this"), "{changes:?}");
+    assert_eq!(
+        changes[0]["added"]["text"],
+        json!("Human typed this"),
+        "{changes:?}"
+    );
     assert_eq!(changes[0]["added"]["section"], json!("now"), "{changes:?}");
 }
 
@@ -280,7 +296,10 @@ fn editing_an_items_text_in_the_file_reads_as_a_text_change() {
     assert_eq!(changes.len(), 1, "{changes:?}");
     assert_all_by_file(&changes);
     assert_eq!(changes[0]["id"], json!("gamma"));
-    assert_eq!(changes[0]["text"], json!(["Gamma task", "Gamma task, reworded by hand"]));
+    assert_eq!(
+        changes[0]["text"],
+        json!(["Gamma task", "Gamma task, reworded by hand"])
+    );
 }
 
 #[test]
@@ -326,7 +345,8 @@ fn deleting_an_items_line_from_the_file_removes_it_from_the_view_and_reads_as_re
 fn an_edit_to_the_free_prose_reaches_the_pane_without_inventing_item_changes() {
     let rig = Rig::new();
 
-    let frames = rig.external_edit(|t| t.replacen("## Now", "Remember to ask about the rollout.\n\n## Now", 1));
+    let frames = rig
+        .external_edit(|t| t.replacen("## Now", "Remember to ask about the rollout.\n\n## Now", 1));
 
     let view = board_in(&frames, READER);
     assert!(
@@ -387,10 +407,15 @@ fn the_daemons_own_write_produces_no_file_change() {
     let changes = rig.reader_changes();
     assert_eq!(changes.len(), 1, "{changes:?}");
     assert!(
-        changes[0]["by"].as_str().is_some_and(|b| b.starts_with("agent ")),
+        changes[0]["by"]
+            .as_str()
+            .is_some_and(|b| b.starts_with("agent ")),
         "only the agent's own authorship is recorded: {changes:?}"
     );
-    assert!(!changes.iter().any(|c| c["by"] == json!(FILE_LABEL)), "{changes:?}");
+    assert!(
+        !changes.iter().any(|c| c["by"] == json!(FILE_LABEL)),
+        "{changes:?}"
+    );
 }
 
 #[test]
@@ -417,7 +442,11 @@ fn deleting_the_file_shows_a_missing_banner_and_putting_the_same_content_back_cl
     rig.reg.flush(&rig.tx);
     let frames = rig.drain();
     let view = board_in(&frames, READER);
-    assert!(matches!(view.banner, Some(Banner::Missing { .. })), "{:?}", view.banner);
+    assert!(
+        matches!(view.banner, Some(Banner::Missing { .. })),
+        "{:?}",
+        view.banner
+    );
     assert_eq!(view.nodes, nodes_before, "the pane keeps what it had");
 
     std::fs::write(&rig.path, &bytes).unwrap();
@@ -426,7 +455,11 @@ fn deleting_the_file_shows_a_missing_banner_and_putting_the_same_content_back_cl
     let view = board_in(&rig.drain(), READER);
     assert_eq!(view.banner, None);
     assert_eq!(view.nodes, nodes_before);
-    assert_eq!(rig.reader_changes(), Vec::<Value>::new(), "restoring the same bytes is not an edit");
+    assert_eq!(
+        rig.reader_changes(),
+        Vec::<Value>::new(),
+        "restoring the same bytes is not an edit"
+    );
 }
 
 #[test]
@@ -439,7 +472,11 @@ fn recreating_the_file_with_an_edit_clears_the_banner_and_reads_the_edit_as_a_fi
     rig.reg.flush(&rig.tx);
     rig.drain();
 
-    std::fs::write(&rig.path, bytes.replace("Alpha task", "Alpha task, from a restored backup")).unwrap();
+    std::fs::write(
+        &rig.path,
+        bytes.replace("Alpha task", "Alpha task, from a restored backup"),
+    )
+    .unwrap();
     assert!(rig.reg.ingest_file_change(&rig.path));
     rig.reg.flush(&rig.tx);
     let view = board_in(&rig.drain(), READER);
@@ -461,7 +498,9 @@ fn an_edit_made_just_before_an_agent_write_is_ingested_first_and_both_survive() 
     let rig = Rig::new();
 
     // The user ticks alpha in their editor; the watcher has not fired yet.
-    let edited = map_line(&rig.text(), "#alpha ", |l| l.replacen("- [ ] ", "- [x] ", 1));
+    let edited = map_line(&rig.text(), "#alpha ", |l| {
+        l.replacen("- [ ] ", "- [x] ", 1)
+    });
     std::fs::write(&rig.path, &edited).unwrap();
 
     // The agent changes beta in the meantime.
@@ -487,21 +526,35 @@ fn an_edit_made_just_before_an_agent_write_is_ingested_first_and_both_survive() 
         line_with(&text, "#beta ").contains("blocked"),
         "the agent's change is in the file:\n{text}"
     );
-    assert_eq!(outcome.user_changes, 1, "the writer is told the user changed something");
+    assert_eq!(
+        outcome.user_changes, 1,
+        "the writer is told the user changed something"
+    );
 
     // Attribution: the tick is the file's, the status is the agent's.
     let changes = rig.reader_changes();
     assert_eq!(changes.len(), 2, "{changes:?}");
     assert_eq!(changes[0]["by"], json!(FILE_LABEL), "{changes:?}");
     assert_eq!(changes[0]["id"], json!("alpha"));
-    assert!(changes[1]["by"].as_str().is_some_and(|b| b.starts_with("agent ")), "{changes:?}");
+    assert!(
+        changes[1]["by"]
+            .as_str()
+            .is_some_and(|b| b.starts_with("agent ")),
+        "{changes:?}"
+    );
     assert_eq!(changes[1]["id"], json!("beta"));
 
     // Both changes are in what the clients see.
     rig.reg.flush(&rig.tx);
     let view = board_in(&rig.drain(), READER);
-    assert_eq!(format!("{:?}", item(&view, "alpha").unwrap().status), "Done");
-    assert_eq!(format!("{:?}", item(&view, "beta").unwrap().status), "Blocked");
+    assert_eq!(
+        format!("{:?}", item(&view, "alpha").unwrap().status),
+        "Done"
+    );
+    assert_eq!(
+        format!("{:?}", item(&view, "beta").unwrap().status),
+        "Blocked"
+    );
 }
 
 #[test]
@@ -524,7 +577,11 @@ fn an_agent_write_over_an_unreadable_edit_changes_nothing_and_keeps_the_users_by
         .expect_err("the board is unreadable");
 
     assert_eq!(err.code(), "board_unreadable");
-    assert_eq!(rig.text(), garbled, "the user's bytes are never overwritten");
+    assert_eq!(
+        rig.text(),
+        garbled,
+        "the user's bytes are never overwritten"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -543,12 +600,19 @@ async fn with_the_real_watcher_an_external_edit_is_broadcast_without_any_call_fr
 
     // The edit changes the file's length as well as its mtime.
     let before = rig.text();
-    std::fs::write(&rig.path, before.replace("Delta task", "Delta task, edited while the watcher runs")).unwrap();
+    std::fs::write(
+        &rig.path,
+        before.replace("Delta task", "Delta task, edited while the watcher runs"),
+    )
+    .unwrap();
 
     let seen = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match rx.recv().await {
-                Ok(ServerMsg::TrackerBoard { tag, board: Some(board) }) if tag == READER => {
+                Ok(ServerMsg::TrackerBoard {
+                    tag,
+                    board: Some(board),
+                }) if tag == READER => {
                     if item_with_text(&board, "edited while the watcher runs").is_some() {
                         return board;
                     }
@@ -561,7 +625,12 @@ async fn with_the_real_watcher_an_external_edit_is_broadcast_without_any_call_fr
     .await
     .expect("an external edit must be broadcast by the watcher within the timeout");
 
-    assert_eq!(item_with_text(&seen, "edited while the watcher runs").unwrap().id, "delta");
+    assert_eq!(
+        item_with_text(&seen, "edited while the watcher runs")
+            .unwrap()
+            .id,
+        "delta"
+    );
     let changes = rig.reader_changes();
     assert_eq!(changes.len(), 1, "{changes:?}");
     assert_all_by_file(&changes);

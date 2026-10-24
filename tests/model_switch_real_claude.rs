@@ -79,7 +79,13 @@ impl Drop for Mgr {
 }
 
 fn switch(model: Option<&str>, effort: Option<EffortChoice>) -> SwitchRequest {
-    SwitchRequest { model: model.map(str::to_owned), effort, actor: Actor::User, set_as_agent_default: false, request_id: None }
+    SwitchRequest {
+        model: model.map(str::to_owned),
+        effort,
+        actor: Actor::User,
+        set_as_agent_default: false,
+        request_id: None,
+    }
 }
 
 struct Chat {
@@ -92,9 +98,15 @@ impl Chat {
     async fn wait_for_turns(&mut self, n: usize) {
         let started = Instant::now();
         while self.completed < n {
-            assert!(started.elapsed() < TURN_DEADLINE, "turn {n} did not end within {TURN_DEADLINE:?}");
+            assert!(
+                started.elapsed() < TURN_DEADLINE,
+                "turn {n} did not end within {TURN_DEADLINE:?}"
+            );
             match tokio::time::timeout(Duration::from_millis(200), self.rx.recv()).await {
-                Ok(Some(ServerMsg::SessionTurnDelta { delta: TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. }, .. })) => {
+                Ok(Some(ServerMsg::SessionTurnDelta {
+                    delta: TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. },
+                    ..
+                })) => {
                     self.completed += 1;
                 }
                 Ok(Some(_)) | Err(_) => {}
@@ -107,7 +119,10 @@ impl Chat {
 /// Text of the newest turn's reply, as a freshly attaching client sees it.
 fn last_reply(mgr: &mut SessionManager, probe: &str) -> String {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    mgr.client_sender_registry().lock().unwrap().insert(probe.to_owned(), tx);
+    mgr.client_sender_registry()
+        .lock()
+        .unwrap()
+        .insert(probe.to_owned(), tx);
     mgr.attach(TAG, probe).unwrap();
     let mut turns: Vec<Turn> = Vec::new();
     while let Ok(m) = rx.try_recv() {
@@ -118,19 +133,35 @@ fn last_reply(mgr: &mut SessionManager, probe: &str) -> String {
     mgr.detach(TAG, probe);
     turns
         .last()
-        .map(|t| t.blocks.iter().filter_map(|b| if let TurnBlock::Text { text, .. } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" "))
+        .map(|t| {
+            t.blocks
+                .iter()
+                .filter_map(|b| {
+                    if let TurnBlock::Text { text, .. } = b {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .unwrap_or_default()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "opt-in: NOSTROMO_REAL_CLAUDE=1 cargo test --test model_switch_real_claude -- --ignored --nocapture"]
-async fn a_real_session_switches_model_live_keeps_its_context_survives_a_bad_model_and_changes_effort() {
+async fn a_real_session_switches_model_live_keeps_its_context_survives_a_bad_model_and_changes_effort(
+) {
     if !opted_in() {
         return;
     }
     let real = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/bin/claude");
     if !real.exists() {
-        println!("model_switch_real_claude: skipped (no claude at {})", real.display());
+        println!(
+            "model_switch_real_claude: skipped (no claude at {})",
+            real.display()
+        );
         return;
     }
 
@@ -156,59 +187,125 @@ async fn a_real_session_switches_model_live_keeps_its_context_survives_a_bad_mod
     let store_path = rig.path().join("state").join("sessions.json");
     let paths = ModelPaths::beside(&store_path);
     let projects = GeneratorEnv::local().projects_dir;
-    let _cleanup = Cleanup { transcripts: projects.map(|p| transcript_dir_for(&p, &cwd)) };
+    let _cleanup = Cleanup {
+        transcripts: projects.map(|p| transcript_dir_for(&p, &cwd)),
+    };
     let mut mgr = Mgr(SessionManager::with_store_path(store_path));
 
     // The catalogue comes from the real CLI, exactly as the daemon fetches it.
-    let catalog = nostromo::model::catalog::probe(&real).await.expect("the real CLI answers `initialize`");
+    let catalog = nostromo::model::catalog::probe(&real)
+        .await
+        .expect("the real CLI answers `initialize`");
     for family in ["haiku", "sonnet"] {
-        assert!(catalog.family(family).is_some(), "the installed CLI offers {family}: {:?}", catalog.families);
+        assert!(
+            catalog.family(family).is_some(),
+            "the installed CLI offers {family}: {:?}",
+            catalog.families
+        );
     }
     mgr.set_model_catalog(catalog);
 
     // The focus starts on Haiku.
     store::update_focus_record(&paths.focus_models, TAG, |_| {
-        Some(FocusModelRecord { model: "haiku".into(), effort: None, source: ModelSource::Focus, pending: None, ..FocusModelRecord::default() })
+        Some(FocusModelRecord {
+            model: "haiku".into(),
+            effort: None,
+            source: ModelSource::Focus,
+            pending: None,
+            ..FocusModelRecord::default()
+        })
     })
     .unwrap();
-    mgr.spawn_session(TAG.into(), String::new(), "real-model-switch".into(), Some(cwd), None, false).expect("the session starts");
+    mgr.spawn_session(
+        TAG.into(),
+        String::new(),
+        "real-model-switch".into(),
+        Some(cwd),
+        None,
+        false,
+    )
+    .expect("the session starts");
     let (tx, rx) = mpsc::unbounded_channel();
-    mgr.client_sender_registry().lock().unwrap().insert("window".into(), tx);
+    mgr.client_sender_registry()
+        .lock()
+        .unwrap()
+        .insert("window".into(), tx);
     mgr.attach(TAG, "window").unwrap();
     let mut chat = Chat { rx, completed: 0 };
 
     // 1. A fact, on Haiku.
-    mgr.send_user_message(TAG, "The codeword is PLUM. Reply with just OK.", &[]).unwrap();
+    mgr.send_user_message(TAG, "The codeword is PLUM. Reply with just OK.", &[])
+        .unwrap();
     chat.wait_for_turns(1).await;
     assert!(
-        mgr.session_model_state(TAG).reported.is_some_and(|r| r.model.contains("haiku")),
+        mgr.session_model_state(TAG)
+            .reported
+            .is_some_and(|r| r.model.contains("haiku")),
         "the session says it runs Haiku: {:?}",
         mgr.session_model_state(TAG).reported
     );
 
     // 2. Switch to Sonnet; the context comes along.
-    let outcome = mgr.request_switch(TAG, switch(Some("sonnet"), None)).outcome().await;
+    let outcome = mgr
+        .request_switch(TAG, switch(Some("sonnet"), None))
+        .outcome()
+        .await;
     assert_eq!(outcome.status, ModelRequestStatus::Applied, "{outcome:?}");
-    mgr.send_user_message(TAG, "What was the codeword? One word.", &[]).unwrap();
+    mgr.send_user_message(TAG, "What was the codeword? One word.", &[])
+        .unwrap();
     chat.wait_for_turns(2).await;
     let reply = last_reply(&mut mgr.0, "probe-1");
-    assert!(reply.to_uppercase().contains("PLUM"), "the conversation survived the switch: {reply:?}");
-    let reported = mgr.session_model_state(TAG).reported.expect("a reported model");
-    assert!(reported.model.contains("sonnet"), "the session says it runs Sonnet: {reported:?}");
-    assert_eq!(mgr.session_model_state(TAG).recorded.unwrap().model, "sonnet");
+    assert!(
+        reply.to_uppercase().contains("PLUM"),
+        "the conversation survived the switch: {reply:?}"
+    );
+    let reported = mgr
+        .session_model_state(TAG)
+        .reported
+        .expect("a reported model");
+    assert!(
+        reported.model.contains("sonnet"),
+        "the session says it runs Sonnet: {reported:?}"
+    );
+    assert_eq!(
+        mgr.session_model_state(TAG).recorded.unwrap().model,
+        "sonnet"
+    );
 
     // 3. A model that does not exist: refused by the CLI, the session carries on.
-    let bad = mgr.request_switch(TAG, switch(Some("claude-no-such-model-xyz"), None)).outcome().await;
+    let bad = mgr
+        .request_switch(TAG, switch(Some("claude-no-such-model-xyz"), None))
+        .outcome()
+        .await;
     assert_eq!(bad.status, ModelRequestStatus::Failed, "{bad:?}");
-    assert_eq!(mgr.session_model_state(TAG).recorded.unwrap().model, "sonnet", "the recorded choice is unchanged");
+    assert_eq!(
+        mgr.session_model_state(TAG).recorded.unwrap().model,
+        "sonnet",
+        "the recorded choice is unchanged"
+    );
     assert_eq!(mgr.session_model_state(TAG).phase, SwitchPhase::Steady);
     mgr.send_user_message(TAG, "Say hi.", &[]).unwrap();
     chat.wait_for_turns(3).await;
-    assert!(!last_reply(&mut mgr.0, "probe-2").trim().is_empty(), "the session still answers after the failed switch");
+    assert!(
+        !last_reply(&mut mgr.0, "probe-2").trim().is_empty(),
+        "the session still answers after the failed switch"
+    );
 
     // 4. Effort, through apply_flag_settings and verified through get_settings.
-    let low = mgr.request_switch(TAG, switch(None, Some(EffortChoice::Low))).outcome().await;
+    let low = mgr
+        .request_switch(TAG, switch(None, Some(EffortChoice::Low)))
+        .outcome()
+        .await;
     assert_eq!(low.status, ModelRequestStatus::Applied, "{low:?}");
-    assert_eq!(mgr.session_model_state(TAG).effective_effort.as_deref(), Some("low"));
-    assert_eq!(store::focus_record(&paths.focus_models, TAG).unwrap().effort.as_deref(), Some("low"));
+    assert_eq!(
+        mgr.session_model_state(TAG).effective_effort.as_deref(),
+        Some("low")
+    );
+    assert_eq!(
+        store::focus_record(&paths.focus_models, TAG)
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("low")
+    );
 }

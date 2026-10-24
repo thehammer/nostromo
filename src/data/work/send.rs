@@ -59,7 +59,12 @@ impl RecentSends {
         let cell = {
             let mut cells = self.cells.lock().unwrap();
             cells.retain(|_, (at, _)| at.elapsed() < RECENT_SEND_WINDOW);
-            Arc::clone(&cells.entry(key).or_insert_with(|| (Instant::now(), Arc::default())).1)
+            Arc::clone(
+                &cells
+                    .entry(key)
+                    .or_insert_with(|| (Instant::now(), Arc::default()))
+                    .1,
+            )
         };
         cell.get_or_try_init(|| send).await.cloned()
     }
@@ -99,14 +104,23 @@ async fn send_once(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, W
         other => {
             return Err(WorkError::new(
                 "invalid_args",
-                format!("destination must be \"focus\" or \"mother_job\", not \"{}\"", one_line(other, 40)),
+                format!(
+                    "destination must be \"focus\" or \"mother_job\", not \"{}\"",
+                    one_line(other, 40)
+                ),
             ))
         }
     };
     let item = hub.item(&request.item_id).ok_or_else(unknown_item)?;
     let ctx = hub.context();
-    let session_mgr = ctx.session_mgr.clone().ok_or_else(WorkError::not_available)?;
-    let host = FocusHost { session_mgr, broadcast_tx: ctx.broadcast_tx.clone() };
+    let session_mgr = ctx
+        .session_mgr
+        .clone()
+        .ok_or_else(WorkError::not_available)?;
+    let host = FocusHost {
+        session_mgr,
+        broadcast_tx: ctx.broadcast_tx.clone(),
+    };
 
     let label = match request.label.trim() {
         "" => suggested_label(&item),
@@ -135,7 +149,10 @@ async fn send_once(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, W
         working_directory,
         initial_context,
         instruction: Some(instruction),
-        source_item: Some(SourceItemRef { id: item.id.clone(), title: item.title.clone() }),
+        source_item: Some(SourceItemRef {
+            id: item.id.clone(),
+            title: item.title.clone(),
+        }),
         allow_duplicate: request.allow_duplicate,
         destination,
         select_for_client: request.client_id,
@@ -151,7 +168,11 @@ async fn send_once(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, W
         OutcomeKind::Existing => "existing",
         OutcomeKind::Queued => "mother_job",
     };
-    Ok(SendOutcome { kind: kind.to_owned(), focus_tag: outcome.focus_tag, job_id: outcome.job_id })
+    Ok(SendOutcome {
+        kind: kind.to_owned(),
+        focus_tag: outcome.focus_tag,
+        job_id: outcome.job_id,
+    })
 }
 
 fn unknown_item() -> WorkError {
@@ -175,7 +196,9 @@ fn suggested_label(item: &WorkItem) -> String {
         WorkSource::Sentry => item.linked.first().cloned(),
         _ => None,
     };
-    let label = short_id.map(|id| one_line(&id, MAX_LABEL_CHARS)).filter(|l| !l.is_empty());
+    let label = short_id
+        .map(|id| one_line(&id, MAX_LABEL_CHARS))
+        .filter(|l| !l.is_empty());
     label.unwrap_or_else(|| one_line(&item.title, MAX_LABEL_CHARS))
 }
 
@@ -210,7 +233,13 @@ async fn sentry_repo(hub: &WorkHub, item: &WorkItem) -> Option<String> {
 /// data by `create_focus`) and as the sheet shows it read-only: where it came
 /// from, the whole item as the detail view shows it, and why Teri picked it.
 fn shared_material(hub: &WorkHub, item: &WorkItem, detail: &WorkDetail) -> String {
-    let reason = hub.picks().snapshot().items.into_iter().find(|p| p.item_id == item.id).map(|p| p.reason);
+    let reason = hub
+        .picks()
+        .snapshot()
+        .items
+        .into_iter()
+        .find(|p| p.item_id == item.id)
+        .map(|p| p.reason);
     material_for(item, detail, reason.as_deref())
 }
 

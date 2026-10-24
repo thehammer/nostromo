@@ -244,7 +244,9 @@ fn initialize_instructions(state: &McpSharedState, pty_id: Option<&str>) -> Opti
         return None;
     }
     let topic = daemon.tracker.bound_topic(tag);
-    Some(crate::mcp::instructions::nostromo_instructions(topic.as_deref()))
+    Some(crate::mcp::instructions::nostromo_instructions(
+        topic.as_deref(),
+    ))
 }
 
 /// `tools/list`, narrowed to what this caller may see (W5 —

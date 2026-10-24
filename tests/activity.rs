@@ -43,7 +43,15 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     )
     .await;
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
-    send(stream, &ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false }).await;
+    send(
+        stream,
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+            renders_approvals: false,
+        },
+    )
+    .await;
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -59,14 +67,18 @@ async fn activity_snapshot_request_yields_an_activity_snapshot() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -78,11 +90,16 @@ async fn activity_snapshot_request_yields_an_activity_snapshot() {
     // focus (none here) followed by one ActivityHealth — drain those first so
     // the explicit request's reply isn't confused with the replay.
     let health = recv(&mut stream).await;
-    assert!(matches!(health, ServerMsg::ActivityHealth { .. }), "{health:?}");
+    assert!(
+        matches!(health, ServerMsg::ActivityHealth { .. }),
+        "{health:?}"
+    );
 
     send(
         &mut stream,
-        &ClientMsg::ActivitySnapshotRequest { tag: "cody-1".into() },
+        &ClientMsg::ActivitySnapshotRequest {
+            tag: "cody-1".into(),
+        },
     )
     .await;
 

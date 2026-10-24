@@ -121,9 +121,10 @@ pub fn insert_beside(
 /// `children.len() >= 2` invariant — the removal has to leave a tree that is
 /// still valid, not one that merely has the node gone.
 pub fn remove_tabs_region(tree: &mut PaneTree, region: &str) -> bool {
-    remove_where(tree, &|node| {
-        matches!(node, PaneTree::Tabs { region: Some(name), .. } if name == region)
-    })
+    remove_where(
+        tree,
+        &|node| matches!(node, PaneTree::Tabs { region: Some(name), .. } if name == region),
+    )
 }
 
 /// Remove the first node satisfying `pred`, collapsing its parent split. The
@@ -168,7 +169,9 @@ fn remove_where(tree: &mut PaneTree, pred: &dyn Fn(&PaneTree) -> bool) -> bool {
 /// A split or tabs node left holding exactly one child becomes that child.
 fn collapse_single_child(node: &mut PaneTree) {
     let only = match node {
-        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } if children.len() == 1 => {
+        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. }
+            if children.len() == 1 =>
+        {
             Some(children.remove(0))
         }
         _ => None,
@@ -332,7 +335,8 @@ pub fn fold_queue_into_detail(tree: &mut PaneTree) -> bool {
         return false;
     }
     if tabs_region(tree, "detail").is_some() {
-        let is_bare_queue = |node: &PaneTree| matches!(node, PaneTree::Leaf { pane_id } if pane_id == "queue");
+        let is_bare_queue =
+            |node: &PaneTree| matches!(node, PaneTree::Leaf { pane_id } if pane_id == "queue");
         if !remove_where(tree, &is_bare_queue) {
             return false;
         }
@@ -516,7 +520,9 @@ mod tests {
             detail(&["detail.0"], 0),
         );
         let PaneTree::Split {
-            direction, children, ..
+            direction,
+            children,
+            ..
         } = &tree
         else {
             panic!()
@@ -557,7 +563,10 @@ mod tests {
             "detail",
             detail(&["detail.0", "detail.1"], 1)
         ));
-        assert_eq!(tree.pane_ids(), vec!["queue", "detail.0", "detail.1", "repl"]);
+        assert_eq!(
+            tree.pane_ids(),
+            vec!["queue", "detail.0", "detail.1", "repl"]
+        );
         let PaneTree::Tabs { active, .. } = tabs_region(&tree, "detail").unwrap() else {
             panic!()
         };
@@ -625,10 +634,7 @@ mod tests {
             &[0.6, 0.4],
             detail(&["detail.0"], 0),
         );
-        assert_eq!(
-            tree.pane_ids().iter().filter(|id| *id == "repl").count(),
-            1
-        );
+        assert_eq!(tree.pane_ids().iter().filter(|id| *id == "repl").count(), 1);
         remove_tabs_region(&mut tree, "detail");
         assert_eq!(tree, leaf("repl"));
     }
@@ -658,7 +664,10 @@ mod tests {
     #[test]
     fn the_default_review_layout_is_the_queue_as_the_active_tab_above_the_repl() {
         let tree = default_review_tree();
-        assert_eq!(tree.pane_ids(), vec!["queue".to_string(), "repl".to_string()]);
+        assert_eq!(
+            tree.pane_ids(),
+            vec!["queue".to_string(), "repl".to_string()]
+        );
         match tabs_region(&tree, "detail").expect("a detail tabs node") {
             PaneTree::Tabs { labels, active, .. } => {
                 assert_eq!(labels, &vec!["Queue".to_string()]);
@@ -666,14 +675,19 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert!(!has_bare_queue(&tree), "the queue is a tab, not a bare pane");
+        assert!(
+            !has_bare_queue(&tree),
+            "the queue is a tab, not a bare pane"
+        );
     }
 
     #[test]
     fn a_bare_queue_is_detected_and_a_queue_tab_is_not() {
         assert!(has_bare_queue(&curated()));
         assert!(!has_bare_queue(&default_review_tree()));
-        assert!(!has_bare_queue(&PaneTree::Leaf { pane_id: "repl".into() }));
+        assert!(!has_bare_queue(&PaneTree::Leaf {
+            pane_id: "repl".into()
+        }));
     }
 
     #[test]
@@ -684,7 +698,8 @@ mod tests {
     }
 
     #[test]
-    fn migrating_queue_beside_detail_makes_the_queue_the_first_tab_and_keeps_the_same_tab_frontmost() {
+    fn migrating_queue_beside_detail_makes_the_queue_the_first_tab_and_keeps_the_same_tab_frontmost(
+    ) {
         // The old arrangement: (queue | detail-tabs) over repl, detail.1 frontmost.
         let mut tree = PaneTree::Split {
             direction: SplitDirection::Vertical,
@@ -703,19 +718,34 @@ mod tests {
 
         assert_eq!(
             tree.pane_ids(),
-            vec!["queue".to_string(), "detail.0".to_string(), "detail.1".to_string(), "repl".to_string()]
+            vec![
+                "queue".to_string(),
+                "detail.0".to_string(),
+                "detail.1".to_string(),
+                "repl".to_string()
+            ]
         );
         match tabs_region(&tree, "detail").unwrap() {
-            PaneTree::Tabs { labels, active, children, .. } => {
+            PaneTree::Tabs {
+                labels,
+                active,
+                children,
+                ..
+            } => {
                 assert_eq!(labels[0], "Queue");
                 assert_eq!(children.len(), 3);
-                assert_eq!(labels[*active], "DETAIL.1", "the tab that was frontmost still is");
+                assert_eq!(
+                    labels[*active], "DETAIL.1",
+                    "the tab that was frontmost still is"
+                );
             }
             other => panic!("{other:?}"),
         }
         // The one-child horizontal split collapsed: detail now sits directly over the repl.
         match &tree {
-            PaneTree::Split { children, ratios, .. } => {
+            PaneTree::Split {
+                children, ratios, ..
+            } => {
                 assert_eq!(children.len(), 2);
                 assert_eq!(ratios.len(), 2);
                 assert!((ratios.iter().sum::<f32>() - 1.0).abs() < 1e-5);
@@ -735,7 +765,10 @@ mod tests {
         let mut once = curated();
         assert!(fold_queue_into_detail(&mut once));
         let after_once = once.clone();
-        assert!(!fold_queue_into_detail(&mut once), "a second pass must be a no-op");
+        assert!(
+            !fold_queue_into_detail(&mut once),
+            "a second pass must be a no-op"
+        );
         assert_eq!(once, after_once);
     }
 }

@@ -46,7 +46,11 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     assert!(matches!(recv(stream).await, ServerMsg::Welcome { .. }));
     send(
         stream,
-        &ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false },
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+            renders_approvals: false,
+        },
     )
     .await;
 }
@@ -80,14 +84,18 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -141,14 +149,18 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("sessions.json"),
     )));
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
 
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -405,7 +417,9 @@ async fn serve_with_session_mgr() -> (
         Arc::clone(&session_mgr),
         perri_state_dir.clone(),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();

@@ -107,7 +107,10 @@ mod tests {
         append(dir.path(), "sid-1", &note(2, "second")).unwrap();
         append(dir.path(), "sid-2", &note(1, "someone else's")).unwrap();
 
-        let texts: Vec<String> = load(dir.path(), "sid-1").into_iter().map(|n| n.text).collect();
+        let texts: Vec<String> = load(dir.path(), "sid-1")
+            .into_iter()
+            .map(|n| n.text)
+            .collect();
 
         assert_eq!(texts, ["first", "second"]);
     }
@@ -120,8 +123,12 @@ mod tests {
         let before = load(dir.path(), "sid-1");
         assert_eq!(before.len(), 2);
         // The daemon died halfway through writing the next line: no trailing newline, half the JSON.
-        let mut file = std::fs::OpenOptions::new().append(true).open(ledger_path(dir.path(), "sid-1")).unwrap();
-        file.write_all(br#"{"after_prompt":2,"kind":"model_chan"#).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(ledger_path(dir.path(), "sid-1"))
+            .unwrap();
+        file.write_all(br#"{"after_prompt":2,"kind":"model_chan"#)
+            .unwrap();
         drop(file);
 
         append(dir.path(), "sid-1", &note(2, "after the crash")).unwrap();

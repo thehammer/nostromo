@@ -120,7 +120,10 @@ pub fn resolve_board_path(
     }
     let canonical = canonicalize_lenient(&absolute).ok_or(PathNotAllowed)?;
     // The extension is checked again on the resolved path: `x.md -> .git/hooks/pre-commit` is not a board.
-    if !canonical.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
+    if !canonical
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+    {
         return Err(PathNotAllowed);
     }
     let allowed_under = |allowed: Option<PathBuf>| {
@@ -170,11 +173,17 @@ fn is_instruction_path(relative: &Path) -> bool {
     let dot_ok = |i: usize, n: &str| {
         n == ".claude" && names.get(i + 1).map(String::as_str) == Some("wip") && i + 2 < names.len()
     };
-    if names.iter().enumerate().any(|(i, n)| n.starts_with('.') && !dot_ok(i, n)) {
+    if names
+        .iter()
+        .enumerate()
+        .any(|(i, n)| n.starts_with('.') && !dot_ok(i, n))
+    {
         return true;
     }
     file.starts_with('.')
-        || INSTRUCTION_FILES.iter().any(|f| f.eq_ignore_ascii_case(file))
+        || INSTRUCTION_FILES
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(file))
         || names.iter().any(|n| n == ".github")
         || names
             .windows(2)
@@ -366,17 +375,30 @@ mod tests {
             "docs/.hidden/x.md",
             "a/.claude/commands/x.md",
         ] {
-            assert!(is_instruction_path(Path::new(denied)), "{denied} must be refused");
+            assert!(
+                is_instruction_path(Path::new(denied)),
+                "{denied} must be refused"
+            );
         }
-        for allowed in [".claude/wip/topic/index.md", "docs/board.md", "a/.claude/wip/t/index.md"] {
-            assert!(!is_instruction_path(Path::new(allowed)), "{allowed} must be allowed");
+        for allowed in [
+            ".claude/wip/topic/index.md",
+            "docs/board.md",
+            "a/.claude/wip/t/index.md",
+        ] {
+            assert!(
+                !is_instruction_path(Path::new(allowed)),
+                "{allowed} must be allowed"
+            );
         }
     }
 
     #[test]
     fn remote_is_shown_as_host_owner_repo_without_credentials() {
         for (url, want) in [
-            ("git@github.com:thehammer/nostromo.git", "github.com/thehammer/nostromo"),
+            (
+                "git@github.com:thehammer/nostromo.git",
+                "github.com/thehammer/nostromo",
+            ),
             ("https://github.com/o/r.git", "github.com/o/r"),
             ("https://user:ghp_SECRET@github.com/o/r", "github.com/o/r"),
             ("ssh://git@host.example:2222/o/r.git", "host.example/o/r"),
@@ -406,7 +428,10 @@ mod tests {
         ] {
             let args = command.args();
             let first = args[0].to_str().unwrap();
-            assert!(["check-ignore", "ls-files", "remote"].contains(&first), "{first}");
+            assert!(
+                ["check-ignore", "ls-files", "remote"].contains(&first),
+                "{first}"
+            );
             for banned in ["add", "commit", "push", "stage", "reset", "checkout", "rm"] {
                 assert!(!args.iter().any(|a| a == banned), "{banned} in {args:?}");
             }
@@ -420,7 +445,10 @@ mod tests {
         let mut slow = Command::new("sleep");
         slow.arg("5");
         assert!(output_before(slow, Instant::now() + Duration::from_millis(100)).is_none());
-        assert!(started.elapsed() < Duration::from_secs(3), "the deadline was not enforced");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the deadline was not enforced"
+        );
 
         let mut quick = Command::new("echo");
         quick.arg("hello");

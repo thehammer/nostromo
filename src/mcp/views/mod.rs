@@ -149,7 +149,11 @@ impl ViewIdentity {
         match self {
             ViewIdentity::Singleton => String::new(),
             ViewIdentity::Pr { repo, number } => format!("{repo}#{number}"),
-            ViewIdentity::File { repo, path, revision } => {
+            ViewIdentity::File {
+                repo,
+                path,
+                revision,
+            } => {
                 let base = match revision {
                     Some(r) => format!("{path}@{r}"),
                     None => path.clone(),
@@ -419,11 +423,13 @@ mod tests {
         // There is nowhere to *put* an anchor on a `ViewIdentity`, which is
         // the point: R2's "one file, one tab" can't be broken by a caller.
         let a = ViewIdentity::File {
-            repo: None, path: "src/a.rs".into(),
+            repo: None,
+            path: "src/a.rs".into(),
             revision: None,
         };
         let b = ViewIdentity::File {
-            repo: None, path: "src/a.rs".into(),
+            repo: None,
+            path: "src/a.rs".into(),
             revision: None,
         };
         assert_eq!(a, b);
@@ -435,24 +441,42 @@ mod tests {
         // `docs/README.md` exists in nearly every repo. Without the repo in the
         // identity, showing it from two PRs in two repos would silently reuse
         // (re-anchor) one tab and show the wrong repo's content.
-        let a = ViewIdentity::File { repo: Some("o/one".into()), path: "README.md".into(), revision: None };
-        let b = ViewIdentity::File { repo: Some("o/two".into()), path: "README.md".into(), revision: None };
-        let local = ViewIdentity::File { repo: None, path: "README.md".into(), revision: None };
+        let a = ViewIdentity::File {
+            repo: Some("o/one".into()),
+            path: "README.md".into(),
+            revision: None,
+        };
+        let b = ViewIdentity::File {
+            repo: Some("o/two".into()),
+            path: "README.md".into(),
+            revision: None,
+        };
+        let local = ViewIdentity::File {
+            repo: None,
+            path: "README.md".into(),
+            revision: None,
+        };
         assert_ne!(a, b);
         assert_ne!(a, local);
         assert_ne!(a.key(), b.key());
         assert!(a.key().contains("o/one"));
-        assert_eq!(local.key(), "README.md", "the repo-less key must stay exactly as before");
+        assert_eq!(
+            local.key(),
+            "README.md",
+            "the repo-less key must stay exactly as before"
+        );
     }
 
     #[test]
     fn a_file_identity_distinguishes_two_revisions_of_the_same_path() {
         let working = ViewIdentity::File {
-            repo: None, path: "src/a.rs".into(),
+            repo: None,
+            path: "src/a.rs".into(),
             revision: None,
         };
         let pinned = ViewIdentity::File {
-            repo: None, path: "src/a.rs".into(),
+            repo: None,
+            path: "src/a.rs".into(),
             revision: Some("deadbeef".into()),
         };
         assert_ne!(working, pinned);
@@ -488,7 +512,8 @@ mod tests {
             label_for(
                 ViewType::File,
                 &ViewIdentity::File {
-                    repo: None, path: "src/ipc/session_manager.rs".into(),
+                    repo: None,
+                    path: "src/ipc/session_manager.rs".into(),
                     revision: None
                 }
             ),
@@ -532,7 +557,10 @@ mod tests {
             ),
             "Diff"
         );
-        assert_eq!(label_for(ViewType::ReviewQueue, &ViewIdentity::Singleton), "Queue");
+        assert_eq!(
+            label_for(ViewType::ReviewQueue, &ViewIdentity::Singleton),
+            "Queue"
+        );
     }
 
     // ── 4. error codes are all distinct ───────────────────────────────────────

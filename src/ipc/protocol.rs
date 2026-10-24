@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_bus::ActivityEvent,
-    data::{perri_pr::PrSnapshot, perri_queue::{CiState, PrQueueItem}},
+    data::{
+        perri_pr::PrSnapshot,
+        perri_queue::{CiState, PrQueueItem},
+    },
     ipc::{
         session_manager::StopReason,
         stream_json::{SessionState, Turn, TurnDelta},
@@ -1606,7 +1609,10 @@ pub enum TaskStatus {
 impl TaskStatus {
     /// `true` once the task can no longer change state.
     pub fn is_terminal(self) -> bool {
-        matches!(self, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Stopped)
+        matches!(
+            self,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Stopped
+        )
     }
 }
 
@@ -2019,7 +2025,10 @@ pub enum ServerMsg {
     },
     /// How many requests are held for a focus. The count only: the one approval
     /// frame a network peer may receive (for a non-sensitive focus).
-    ApprovalPending { tag: String, count: u32 },
+    ApprovalPending {
+        tag: String,
+        count: u32,
+    },
     /// The production-shell guard blocked a call. `summary` is the tool name and
     /// the first command word only.
     ApprovalGuardBlocked {
@@ -2278,7 +2287,10 @@ mod tests {
         round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionInterrupt { tag: "fred".into() });
-        round_trip_client(ClientMsg::ClosePane { tag: "perri".into(), pane_id: "detail.1".into() });
+        round_trip_client(ClientMsg::ClosePane {
+            tag: "perri".into(),
+            pane_id: "detail.1".into(),
+        });
         round_trip_client(ClientMsg::SessionSend {
             tag: "fred".into(),
             text: "hello".into(),
@@ -2367,7 +2379,10 @@ mod tests {
 
     #[test]
     fn session_interrupt_serialises_as_session_interrupt() {
-        let v = serde_json::to_value(ClientMsg::SessionInterrupt { tag: "perri".into() }).unwrap();
+        let v = serde_json::to_value(ClientMsg::SessionInterrupt {
+            tag: "perri".into(),
+        })
+        .unwrap();
         assert_eq!(v.get("type").unwrap(), "session_interrupt");
         assert_eq!(v.get("tag").unwrap(), "perri");
     }
@@ -2397,10 +2412,13 @@ mod tests {
     /// old/unaware client be miscounted as an operator.
     #[test]
     fn subscribe_without_a_renders_decisions_key_decodes_as_false() {
-        let msg: ClientMsg =
-            serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions, .. } => {
+            ClientMsg::Subscribe {
+                topics,
+                renders_decisions,
+                ..
+            } => {
                 assert_eq!(topics, vec![]);
                 assert!(
                     !renders_decisions,
@@ -2417,10 +2435,13 @@ mod tests {
     #[test]
     fn subscribe_with_topics_and_no_renders_decisions_key_still_decodes_successfully() {
         let msg: ClientMsg =
-            serde_json::from_str(r#"{"type":"subscribe","topics":["decision","layout"]}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"type":"subscribe","topics":["decision","layout"]}"#).unwrap();
         match msg {
-            ClientMsg::Subscribe { topics, renders_decisions, .. } => {
+            ClientMsg::Subscribe {
+                topics,
+                renders_decisions,
+                ..
+            } => {
                 assert_eq!(topics, vec![Topic::Decision, Topic::Layout]);
                 assert!(!renders_decisions);
             }
@@ -2430,24 +2451,26 @@ mod tests {
 
     #[test]
     fn subscribe_with_renders_decisions_true_decodes_true() {
-        let msg: ClientMsg = serde_json::from_str(
-            r#"{"type":"subscribe","topics":[],"renders_decisions":true}"#,
-        )
-        .unwrap();
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_decisions":true}"#)
+                .unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_decisions, .. } => assert!(renders_decisions),
+            ClientMsg::Subscribe {
+                renders_decisions, ..
+            } => assert!(renders_decisions),
             other => panic!("expected Subscribe, got {other:?}"),
         }
     }
 
     #[test]
     fn subscribe_with_renders_decisions_false_decodes_false() {
-        let msg: ClientMsg = serde_json::from_str(
-            r#"{"type":"subscribe","topics":[],"renders_decisions":false}"#,
-        )
-        .unwrap();
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_decisions":false}"#)
+                .unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_decisions, .. } => assert!(!renders_decisions),
+            ClientMsg::Subscribe {
+                renders_decisions, ..
+            } => assert!(!renders_decisions),
             other => panic!("expected Subscribe, got {other:?}"),
         }
     }
@@ -2459,10 +2482,18 @@ mod tests {
     /// just "some boolean survives a round trip."
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_false_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false });
+        round_trip_client(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: false,
+            renders_approvals: false,
+        });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false })
-            .unwrap();
+        let v = serde_json::to_value(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: false,
+            renders_approvals: false,
+        })
+        .unwrap();
         assert_eq!(v["type"], "subscribe");
         assert_eq!(v["topics"], serde_json::json!([]));
         assert_eq!(
@@ -2473,10 +2504,18 @@ mod tests {
 
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_decisions_true_key() {
-        round_trip_client(ClientMsg::Subscribe { topics: vec![], renders_decisions: true, renders_approvals: false });
+        round_trip_client(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: true,
+            renders_approvals: false,
+        });
 
-        let v = serde_json::to_value(ClientMsg::Subscribe { topics: vec![], renders_decisions: true, renders_approvals: false })
-            .unwrap();
+        let v = serde_json::to_value(ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: true,
+            renders_approvals: false,
+        })
+        .unwrap();
         assert_eq!(v["renders_decisions"], true);
     }
 
@@ -2487,7 +2526,11 @@ mod tests {
         let json = r#"{"type":"hello","client_id":"old-app","protocol_version":4}"#;
         let msg: ClientMsg = serde_json::from_str(json).expect("an old Hello must still decode");
         match msg {
-            ClientMsg::Hello { client_id, protocol_version, client_kind } => {
+            ClientMsg::Hello {
+                client_id,
+                protocol_version,
+                client_kind,
+            } => {
                 assert_eq!(client_id, "old-app");
                 assert_eq!(protocol_version, 4);
                 assert_eq!(client_kind, None);
@@ -2498,9 +2541,12 @@ mod tests {
 
     #[test]
     fn a_hello_carrying_client_kind_mac_app_decodes_it() {
-        let json = r#"{"type":"hello","client_id":"app","protocol_version":4,"client_kind":"mac_app"}"#;
+        let json =
+            r#"{"type":"hello","client_id":"app","protocol_version":4,"client_kind":"mac_app"}"#;
         match serde_json::from_str::<ClientMsg>(json).unwrap() {
-            ClientMsg::Hello { client_kind, .. } => assert_eq!(client_kind.as_deref(), Some("mac_app")),
+            ClientMsg::Hello { client_kind, .. } => {
+                assert_eq!(client_kind.as_deref(), Some("mac_app"))
+            }
             other => panic!("expected Hello, got {other:?}"),
         }
     }
@@ -2601,10 +2647,7 @@ mod tests {
 
     #[test]
     fn topic_teri_serializes_to_teri() {
-        assert_eq!(
-            serde_json::to_string(&Topic::Teri).unwrap(),
-            "\"teri\""
-        );
+        assert_eq!(serde_json::to_string(&Topic::Teri).unwrap(), "\"teri\"");
     }
 
     #[test]
@@ -2613,12 +2656,12 @@ mod tests {
         let full = FocusMeta {
             initial_model: None,
             initial_effort: None,
-            tag:             "cody-abc12345".into(),
-            display_name:    "Cody in Admin Portal".into(),
-            agent_name:      "cody".into(),
-            project_name:    Some("Admin Portal".into()),
-            org:             Some("Carefeed".into()),
-            is_built_in:     false,
+            tag: "cody-abc12345".into(),
+            display_name: "Cody in Admin Portal".into(),
+            agent_name: "cody".into(),
+            project_name: Some("Admin Portal".into()),
+            org: Some("Carefeed".into()),
+            is_built_in: false,
             session_summary: Some("Build the auth flow".into()),
             label: None,
             project_path: None,
@@ -2632,12 +2675,12 @@ mod tests {
         let minimal = FocusMeta {
             initial_model: None,
             initial_effort: None,
-            tag:             "fred".into(),
-            display_name:    "Fred".into(),
-            agent_name:      "fred".into(),
-            project_name:    None,
-            org:             None,
-            is_built_in:     true,
+            tag: "fred".into(),
+            display_name: "Fred".into(),
+            agent_name: "fred".into(),
+            project_name: None,
+            org: None,
+            is_built_in: true,
             session_summary: None,
             label: None,
             project_path: None,
@@ -2702,13 +2745,28 @@ mod tests {
         round_trip_server(ServerMsg::MotherPeek {
             job_id: "job-abc123".into(),
             todos: vec![
-                PeekTodo { status: "completed".into(), content: "Add Rust protocol variant".into() },
-                PeekTodo { status: "in_progress".into(), content: "Add NostromoKit wire types".into() },
-                PeekTodo { status: "pending".into(), content: "Add iOS tab".into() },
+                PeekTodo {
+                    status: "completed".into(),
+                    content: "Add Rust protocol variant".into(),
+                },
+                PeekTodo {
+                    status: "in_progress".into(),
+                    content: "Add NostromoKit wire types".into(),
+                },
+                PeekTodo {
+                    status: "pending".into(),
+                    content: "Add iOS tab".into(),
+                },
             ],
             tool_trail: vec![
-                PeekToolCall { tool: "Read".into(), brief: "src/ipc/protocol.rs".into() },
-                PeekToolCall { tool: "Edit".into(), brief: "add MotherPeek variant".into() },
+                PeekToolCall {
+                    tool: "Read".into(),
+                    brief: "src/ipc/protocol.rs".into(),
+                },
+                PeekToolCall {
+                    tool: "Edit".into(),
+                    brief: "add MotherPeek variant".into(),
+                },
             ],
             last_text: "Implementing the MotherPeek broadcast".into(),
         });
@@ -2738,12 +2796,12 @@ mod tests {
         let meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
-            tag:             "fred".into(),
-            display_name:    "Fred".into(),
-            agent_name:      "fred".into(),
-            project_name:    None,
-            org:             Some("Carefeed".into()),
-            is_built_in:     true,
+            tag: "fred".into(),
+            display_name: "Fred".into(),
+            agent_name: "fred".into(),
+            project_name: None,
+            org: Some("Carefeed".into()),
+            is_built_in: true,
             session_summary: None,
             label: None,
             project_path: None,
@@ -2855,7 +2913,9 @@ mod tests {
         round_trip_server(ServerMsg::PaneContent {
             tag: "perri".into(),
             pane_id: "queue".into(),
-            content: PaneContentWire::Text { text: "fresh".into() },
+            content: PaneContentWire::Text {
+                text: "fresh".into(),
+            },
             freshness: None,
             address: None,
         });
@@ -2884,9 +2944,17 @@ mod tests {
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
-                assert!(matches!(content, PaneContentWire::Text { text } if text == "from an old daemon"));
-                assert_eq!(freshness, None, "an absent \"freshness\" key must deserialize to None");
-                assert_eq!(address, None, "an absent \"address\" key must deserialize to None");
+                assert!(
+                    matches!(content, PaneContentWire::Text { text } if text == "from an old daemon")
+                );
+                assert_eq!(
+                    freshness, None,
+                    "an absent \"freshness\" key must deserialize to None"
+                );
+                assert_eq!(
+                    address, None,
+                    "an absent \"address\" key must deserialize to None"
+                );
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -3124,7 +3192,10 @@ mod tests {
         let msg: ServerMsg = serde_json::from_str(raw).expect("old-shaped frame must still parse");
         match msg {
             ServerMsg::PaneContent { address, .. } => {
-                assert_eq!(address, None, "an absent \"address\" key must deserialize to None");
+                assert_eq!(
+                    address, None,
+                    "an absent \"address\" key must deserialize to None"
+                );
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -3306,10 +3377,7 @@ mod tests {
 
     #[test]
     fn topic_perri_serializes_to_perri() {
-        assert_eq!(
-            serde_json::to_string(&Topic::Perri).unwrap(),
-            "\"perri\""
-        );
+        assert_eq!(serde_json::to_string(&Topic::Perri).unwrap(), "\"perri\"");
         let decoded: Topic = serde_json::from_str("\"perri\"").unwrap();
         assert_eq!(decoded, Topic::Perri);
     }
@@ -3325,7 +3393,7 @@ mod tests {
 
         // (a) Empty snapshots
         round_trip_server(ServerMsg::FredState {
-            mailbox:  MailboxSnapshot::default(),
+            mailbox: MailboxSnapshot::default(),
             calendar: CalendarSnapshot::default(),
         });
 
@@ -3335,39 +3403,39 @@ mod tests {
             generated_at: None,
             unread_count: 1,
             items: vec![MailboxItem {
-                from:        "Alice <alice@example.com>".into(),
-                subject:     "Important: Meeting Tomorrow".into(),
+                from: "Alice <alice@example.com>".into(),
+                subject: "Important: Meeting Tomorrow".into(),
                 received_at: Some(chrono::Utc::now()),
-                vip:         true,
-                is_invite:   false,
-                is_read:     false,
+                vip: true,
+                is_invite: false,
+                is_read: false,
                 ..Default::default()
             }],
-            stale:       false,
-            error:       None,
+            stale: false,
+            error: None,
             auth_prompt: Some(DeviceFlowPrompt {
                 verification_uri: "https://microsoft.com/devicelogin".into(),
-                user_code:        "ABCD-1234".into(),
-                expires_at:       chrono::Utc::now(),
+                user_code: "ABCD-1234".into(),
+                expires_at: chrono::Utc::now(),
             }),
             ..Default::default()
         };
         let calendar = CalendarSnapshot {
             events: vec![CalendarEvent {
-                start:  Some(chrono::Utc::now()),
-                end:    Some(chrono::Utc::now()),
-                title:  "Daily standup".into(),
+                start: Some(chrono::Utc::now()),
+                end: Some(chrono::Utc::now()),
+                title: "Daily standup".into(),
                 status: "accepted".into(),
                 is_now: true,
                 ..Default::default()
             }],
             next: Some(NextEvent {
-                title:      "Lunch".into(),
+                title: "Lunch".into(),
                 in_minutes: 45,
             }),
             sweater: "amber".into(),
-            stale:   false,
-            error:   None,
+            stale: false,
+            error: None,
             generated_at: Some(chrono::Utc::now()),
             ..Default::default()
         };
@@ -3377,7 +3445,7 @@ mod tests {
     #[test]
     fn fred_state_type_tag_is_fred_state() {
         let v = serde_json::to_value(ServerMsg::FredState {
-            mailbox:  crate::data::fred_mailbox::MailboxSnapshot::default(),
+            mailbox: crate::data::fred_mailbox::MailboxSnapshot::default(),
             calendar: crate::data::fred_calendar::CalendarSnapshot::default(),
         })
         .unwrap();
@@ -3394,15 +3462,15 @@ mod tests {
             pane_id: "queue".into(),
             content: PaneContentWire::PrList {
                 items: vec![PrListItem {
-                    repo:         "acme/web".into(),
-                    number:       42,
-                    title:        "feat: auth".into(),
-                    author:       "alice".into(),
-                    bucket:       "requested".into(),
-                    ci_state:     CiState::Success,
+                    repo: "acme/web".into(),
+                    number: 42,
+                    title: "feat: auth".into(),
+                    author: "alice".into(),
+                    bucket: "requested".into(),
+                    ci_state: CiState::Success,
                     new_activity: false,
-                    url:          "https://github.com/acme/web/pull/42".into(),
-                    head_sha:     "abc123".into(),
+                    url: "https://github.com/acme/web/pull/42".into(),
+                    head_sha: "abc123".into(),
                 }],
             },
             freshness: None,
@@ -3484,7 +3552,9 @@ mod tests {
 
     #[test]
     fn activity_snapshot_request_round_trips() {
-        round_trip_client(ClientMsg::ActivitySnapshotRequest { tag: "cody-1".into() });
+        round_trip_client(ClientMsg::ActivitySnapshotRequest {
+            tag: "cody-1".into(),
+        });
     }
 
     // ── render-state visibility (W1) ──────────────────────────────────────────
@@ -3537,7 +3607,8 @@ mod tests {
             "kind": "tool_use",
             "summary": "reading a file"
         }"#;
-        let msg: ServerMsg = serde_json::from_str(raw).expect("old 4-field Activity shape must still parse");
+        let msg: ServerMsg =
+            serde_json::from_str(raw).expect("old 4-field Activity shape must still parse");
         match msg {
             ServerMsg::Activity(ev) => {
                 assert_eq!(ev.agent, "perri");
@@ -3620,7 +3691,10 @@ mod tests {
             v.as_object().unwrap().contains_key("choice_id"),
             "choice_id must be present on the wire even when dismissed"
         );
-        assert!(v["choice_id"].is_null(), "a dismissed answer must serialize choice_id as null");
+        assert!(
+            v["choice_id"].is_null(),
+            "a dismissed answer must serialize choice_id as null"
+        );
     }
 
     /// The operator nonce is additive: absent from the wire when `None` (an
@@ -3633,7 +3707,10 @@ mod tests {
             operator_nonce: None,
         })
         .unwrap();
-        assert!(!v.as_object().unwrap().contains_key("operator_nonce"), "{v}");
+        assert!(
+            !v.as_object().unwrap().contains_key("operator_nonce"),
+            "{v}"
+        );
 
         let with = ClientMsg::DecisionAnswer {
             request_id: "req-1".into(),
@@ -3641,18 +3718,38 @@ mod tests {
             operator_nonce: Some("ab12".into()),
         };
         round_trip_client(with.clone());
-        assert_eq!(serde_json::to_value(with).unwrap()["operator_nonce"], "ab12");
+        assert_eq!(
+            serde_json::to_value(with).unwrap()["operator_nonce"],
+            "ab12"
+        );
 
         let old: ClientMsg =
-            serde_json::from_str(r#"{"type":"decision_answer","request_id":"r","choice_id":null}"#).unwrap();
-        assert!(matches!(old, ClientMsg::DecisionAnswer { operator_nonce: None, .. }));
+            serde_json::from_str(r#"{"type":"decision_answer","request_id":"r","choice_id":null}"#)
+                .unwrap();
+        assert!(matches!(
+            old,
+            ClientMsg::DecisionAnswer {
+                operator_nonce: None,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn welcome_carries_the_operator_nonce_only_when_present() {
-        let plain = ServerMsg::Welcome { protocol_version: PROTOCOL_VERSION, daemon_pid: 1, features: vec![], operator_nonce: None, enabled_agents: None, disabled_agents: None };
+        let plain = ServerMsg::Welcome {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_pid: 1,
+            features: vec![],
+            operator_nonce: None,
+            enabled_agents: None,
+            disabled_agents: None,
+        };
         let v = serde_json::to_value(&plain).unwrap();
-        assert!(!v.as_object().unwrap().contains_key("operator_nonce"), "{v}");
+        assert!(
+            !v.as_object().unwrap().contains_key("operator_nonce"),
+            "{v}"
+        );
 
         let operator = ServerMsg::Welcome {
             protocol_version: PROTOCOL_VERSION,
@@ -3663,7 +3760,10 @@ mod tests {
             disabled_agents: None,
         };
         round_trip_server(operator.clone());
-        assert_eq!(serde_json::to_value(operator).unwrap()["operator_nonce"], "cd34");
+        assert_eq!(
+            serde_json::to_value(operator).unwrap()["operator_nonce"],
+            "cd34"
+        );
     }
 
     #[test]
@@ -3826,7 +3926,10 @@ mod tests {
         ];
         for (variant, wire) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, wire, "DecisionResolution::{variant:?} must serialize as {wire}");
+            assert_eq!(
+                json, wire,
+                "DecisionResolution::{variant:?} must serialize as {wire}"
+            );
             let back: DecisionResolution = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
@@ -3915,7 +4018,10 @@ mod tests {
         ];
         for (variant, wire) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, wire, "DiffStatus::{variant:?} must serialize as {wire}");
+            assert_eq!(
+                json, wire,
+                "DiffStatus::{variant:?} must serialize as {wire}"
+            );
             let back: DiffStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
@@ -3931,7 +4037,10 @@ mod tests {
         ];
         for (variant, wire) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, wire, "DiffLineKind::{variant:?} must serialize as {wire}");
+            assert_eq!(
+                json, wire,
+                "DiffLineKind::{variant:?} must serialize as {wire}"
+            );
             let back: DiffLineKind = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
@@ -4118,7 +4227,9 @@ mod tests {
             },
             MdBlock::Heading {
                 level: 2,
-                spans: vec![MdSpan::Text { text: "title".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "title".into(),
+                }],
             },
             MdBlock::CodeBlock {
                 lang: Some("rust".into()),
@@ -4132,7 +4243,9 @@ mod tests {
                 ordered: false,
                 start: None,
                 items: vec![vec![MdBlock::Paragraph {
-                    spans: vec![MdSpan::Text { text: "item".into() }],
+                    spans: vec![MdSpan::Text {
+                        text: "item".into(),
+                    }],
                 }]],
             },
             MdBlock::List {
@@ -4149,7 +4262,9 @@ mod tests {
             },
             MdBlock::Quote {
                 blocks: vec![MdBlock::Paragraph {
-                    spans: vec![MdSpan::Text { text: "quoted".into() }],
+                    spans: vec![MdSpan::Text {
+                        text: "quoted".into(),
+                    }],
                 }],
             },
             MdBlock::Table {
@@ -4191,18 +4306,26 @@ mod tests {
     fn every_md_span_variant_round_trips() {
         let cases = vec![
             MdSpan::Text { text: "hi".into() },
-            MdSpan::Code { text: "x = 1".into() },
+            MdSpan::Code {
+                text: "x = 1".into(),
+            },
             MdSpan::Emph {
                 spans: vec![MdSpan::Text { text: "em".into() }],
             },
             MdSpan::Strong {
-                spans: vec![MdSpan::Text { text: "strong".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "strong".into(),
+                }],
             },
             MdSpan::Strike {
-                spans: vec![MdSpan::Text { text: "struck".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "struck".into(),
+                }],
             },
             MdSpan::Link {
-                spans: vec![MdSpan::Text { text: "text".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "text".into(),
+                }],
                 url: "http://example.com".into(),
             },
             MdSpan::Image {
@@ -4254,7 +4377,10 @@ mod tests {
         };
         let json = serde_json::to_string(&comment).unwrap();
         let back: ConversationComment = serde_json::from_str(&json).unwrap();
-        assert_eq!(comment, back, "ConversationComment round trip mismatch: {json}");
+        assert_eq!(
+            comment, back,
+            "ConversationComment round trip mismatch: {json}"
+        );
     }
 
     #[test]
@@ -4390,7 +4516,10 @@ mod tests {
             conversation_error: Some("conversation fetch partially failed: reviews".into()),
         };
         let json = serde_json::to_value(&content).unwrap();
-        assert_eq!(json["conversation_error"], "conversation fetch partially failed: reviews");
+        assert_eq!(
+            json["conversation_error"],
+            "conversation fetch partially failed: reviews"
+        );
         let back: PaneContentWire = serde_json::from_value(json).unwrap();
         assert_eq!(back, content);
     }
@@ -4402,7 +4531,9 @@ mod tests {
         let section = TicketSection {
             name: "description".into(),
             heading: None,
-            blocks: vec![MdBlock::Paragraph { spans: vec![MdSpan::Text { text: "hi".into() }] }],
+            blocks: vec![MdBlock::Paragraph {
+                spans: vec![MdSpan::Text { text: "hi".into() }],
+            }],
         };
         let json = serde_json::to_value(&section).unwrap();
         assert!(
@@ -4421,7 +4552,10 @@ mod tests {
             blocks: vec![],
         };
         let json = serde_json::to_value(&section).unwrap();
-        assert_eq!(json["heading"], serde_json::json!([{ "kind": "text", "text": "AC" }]));
+        assert_eq!(
+            json["heading"],
+            serde_json::json!([{ "kind": "text", "text": "AC" }])
+        );
         let back: TicketSection = serde_json::from_value(json).unwrap();
         assert_eq!(back, section);
     }
@@ -4435,7 +4569,9 @@ mod tests {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
             blocks: vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text { text: "a comment".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "a comment".into(),
+                }],
             }],
         };
         let json = serde_json::to_string(&comment).unwrap();
@@ -4450,7 +4586,9 @@ mod tests {
             name: "acceptance_criteria".into(),
             heading: Some(vec![MdSpan::Text { text: "AC".into() }]),
             blocks: vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text { text: "Must work.".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "Must work.".into(),
+                }],
             }],
         }
     }
@@ -4461,7 +4599,9 @@ mod tests {
             author: "bob".into(),
             created_at: chrono::Utc::now(),
             blocks: vec![MdBlock::Paragraph {
-                spans: vec![MdSpan::Text { text: "a comment".into() }],
+                spans: vec![MdSpan::Text {
+                    text: "a comment".into(),
+                }],
             }],
         }
     }
@@ -4558,10 +4698,22 @@ mod tests {
 
     fn only_tabs(tree: &PaneTree) -> (&Vec<PaneTree>, &Vec<String>, usize) {
         match tree {
-            PaneTree::Tabs { children, labels, active, .. } => (children, labels, *active),
-            PaneTree::Split { children, .. } => children.iter().find_map(|c| {
-                if let PaneTree::Tabs { .. } | PaneTree::Split { .. } = c { Some(only_tabs(c)) } else { None }
-            }).expect("a tabs node"),
+            PaneTree::Tabs {
+                children,
+                labels,
+                active,
+                ..
+            } => (children, labels, *active),
+            PaneTree::Split { children, .. } => children
+                .iter()
+                .find_map(|c| {
+                    if let PaneTree::Tabs { .. } | PaneTree::Split { .. } = c {
+                        Some(only_tabs(c))
+                    } else {
+                        None
+                    }
+                })
+                .expect("a tabs node"),
             PaneTree::Leaf { .. } => panic!("no tabs node"),
         }
     }
@@ -4571,9 +4723,15 @@ mod tests {
         let mut t = curated(&["detail.0", "detail.1", "detail.2"], 2);
         assert!(t.remove_tab("detail.0"));
         let (children, labels, active) = only_tabs(&t);
-        assert_eq!(labels, &vec!["detail.1".to_string(), "detail.2".to_string()]);
+        assert_eq!(
+            labels,
+            &vec!["detail.1".to_string(), "detail.2".to_string()]
+        );
         assert_eq!(children.len(), 2);
-        assert_eq!(active, 1, "detail.2 is now at index 1 and must still be the active tab");
+        assert_eq!(
+            active, 1,
+            "detail.2 is now at index 1 and must still be the active tab"
+        );
     }
 
     #[test]
@@ -4607,7 +4765,9 @@ mod tests {
         // queue | (gone) collapses to the bare queue leaf; the outer split keeps repl.
         assert_eq!(t.pane_ids(), vec!["queue".to_string(), "repl".to_string()]);
         match &t {
-            PaneTree::Split { children, ratios, .. } => {
+            PaneTree::Split {
+                children, ratios, ..
+            } => {
                 assert_eq!(children.len(), 2);
                 assert_eq!(ratios.len(), 2);
                 assert!((ratios.iter().sum::<f32>() - 1.0).abs() < 1e-5);
@@ -4639,7 +4799,7 @@ mod tests {
 mod work_wire_tests {
     use super::*;
     use crate::data::work::{
-        GroupError, Link, PicksSnapshot, Pick, Priority, SendOutcome, SendPreview, SentMarker,
+        GroupError, Link, Pick, PicksSnapshot, Priority, SendOutcome, SendPreview, SentMarker,
         SourceState, SourceStatus, WorkDetail, WorkError, WorkItem, WorkResult, WorkSource,
     };
 
@@ -4657,7 +4817,10 @@ mod work_wire_tests {
             project: Some("CORE".into()),
             status: Some("In Progress".into()),
             status_category: Some("in_progress".into()),
-            priority: Some(Priority { label: "High".into(), rank: 2 }),
+            priority: Some(Priority {
+                label: "High".into(),
+                rank: 2,
+            }),
             severity: None,
             environment: None,
             created_at: Some(ts()),
@@ -4686,7 +4849,10 @@ mod work_wire_tests {
             reason: Some("slow down".into()),
             retry_at: Some(ts()),
             count: 4,
-            group_errors: vec![GroupError { group: "repo".into(), reason: "boom".into() }],
+            group_errors: vec![GroupError {
+                group: "repo".into(),
+                reason: "boom".into(),
+            }],
             complete: true,
         }
     }
@@ -4694,30 +4860,49 @@ mod work_wire_tests {
     fn round_trip_server(msg: ServerMsg) -> String {
         let json = serde_json::to_string(&msg).unwrap();
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
-        assert_eq!(json, serde_json::to_string(&back).unwrap(), "mismatch: {json}");
+        assert_eq!(
+            json,
+            serde_json::to_string(&back).unwrap(),
+            "mismatch: {json}"
+        );
         json
     }
 
     fn round_trip_client(msg: ClientMsg) -> String {
         let json = serde_json::to_string(&msg).unwrap();
         let back: ClientMsg = serde_json::from_str(&json).unwrap();
-        assert_eq!(json, serde_json::to_string(&back).unwrap(), "mismatch: {json}");
+        assert_eq!(
+            json,
+            serde_json::to_string(&back).unwrap(),
+            "mismatch: {json}"
+        );
         json
     }
 
     #[test]
     fn a_status_without_complete_from_an_older_sender_decodes_as_not_complete() {
         // "Completeness unknown" must never read as "complete".
-        let minimal: SourceStatus = serde_json::from_str(r#"{"source":"jira","state":"fresh"}"#).unwrap();
+        let minimal: SourceStatus =
+            serde_json::from_str(r#"{"source":"jira","state":"fresh"}"#).unwrap();
         assert!(!minimal.complete);
         assert_eq!(minimal.state, SourceState::Fresh);
         assert_eq!(minimal.count, 0);
 
         // The same through a whole frame: drop `complete` from what this build sends.
-        let mut frame = serde_json::to_value(ServerMsg::WorkSourceStatus { status: status() }).unwrap();
-        let sent = frame.pointer_mut("/status").and_then(|s| s.as_object_mut()).expect("a status object");
-        assert_eq!(sent.remove("complete"), Some(serde_json::json!(true)), "this build always sends it");
-        let ServerMsg::WorkSourceStatus { status: decoded } = serde_json::from_value(frame).unwrap() else {
+        let mut frame =
+            serde_json::to_value(ServerMsg::WorkSourceStatus { status: status() }).unwrap();
+        let sent = frame
+            .pointer_mut("/status")
+            .and_then(|s| s.as_object_mut())
+            .expect("a status object");
+        assert_eq!(
+            sent.remove("complete"),
+            Some(serde_json::json!(true)),
+            "this build always sends it"
+        );
+        let ServerMsg::WorkSourceStatus { status: decoded } =
+            serde_json::from_value(frame).unwrap()
+        else {
             panic!("not a WorkSourceStatus frame");
         };
         assert!(!decoded.complete, "absent decodes as false, deliberately");
@@ -4727,10 +4912,20 @@ mod work_wire_tests {
     #[test]
     fn complete_is_always_sent_and_survives_a_round_trip_either_way() {
         for complete in [true, false] {
-            let sent = SourceStatus { complete, ..status() };
-            let json = serde_json::to_string(&ServerMsg::WorkSourceStatus { status: sent.clone() }).unwrap();
-            assert!(json.contains(&format!("\"complete\":{complete}")), "always on the wire, even when false: {json}");
-            let ServerMsg::WorkSourceStatus { status: back } = serde_json::from_str(&json).unwrap() else {
+            let sent = SourceStatus {
+                complete,
+                ..status()
+            };
+            let json = serde_json::to_string(&ServerMsg::WorkSourceStatus {
+                status: sent.clone(),
+            })
+            .unwrap();
+            assert!(
+                json.contains(&format!("\"complete\":{complete}")),
+                "always on the wire, even when false: {json}"
+            );
+            let ServerMsg::WorkSourceStatus { status: back } = serde_json::from_str(&json).unwrap()
+            else {
                 panic!("not a WorkSourceStatus frame");
             };
             assert_eq!(back, sent);
@@ -4779,7 +4974,10 @@ mod work_wire_tests {
                 fields: vec![("Status".into(), "In Progress".into())],
                 markdown: "# hi".into(),
                 files: vec!["a.md".into()],
-                links: vec![Link { label: "Open".into(), url: "https://example.invalid".into() }],
+                links: vec![Link {
+                    label: "Open".into(),
+                    url: "https://example.invalid".into(),
+                }],
             }),
         });
         round_trip_server(ServerMsg::WorkDetail {
@@ -4822,9 +5020,17 @@ mod work_wire_tests {
             request_id: "r1".into(),
             item_id: "mail:abc".into(),
         });
-        round_trip_client(ClientMsg::WorkRefresh { source: Some(WorkSource::Jira), fred: false });
-        round_trip_client(ClientMsg::WorkRefresh { source: None, fred: true });
-        round_trip_client(ClientMsg::PicksRefresh { reason: "manual".into() });
+        round_trip_client(ClientMsg::WorkRefresh {
+            source: Some(WorkSource::Jira),
+            fred: false,
+        });
+        round_trip_client(ClientMsg::WorkRefresh {
+            source: None,
+            fred: true,
+        });
+        round_trip_client(ClientMsg::PicksRefresh {
+            reason: "manual".into(),
+        });
         round_trip_client(ClientMsg::WorkSendPreviewRequest {
             request_id: "r2".into(),
             item_id: "todo:1".into(),
@@ -4839,13 +5045,22 @@ mod work_wire_tests {
             instruction: "b".into(),
             allow_duplicate: true,
         });
-        round_trip_client(ClientMsg::FredSeed { request_id: "r4".into(), text: "hi".into() });
+        round_trip_client(ClientMsg::FredSeed {
+            request_id: "r4".into(),
+            text: "hi".into(),
+        });
     }
 
     #[test]
     fn work_client_frames_tolerate_missing_optional_fields() {
         let m: ClientMsg = serde_json::from_str(r#"{"type":"work_refresh"}"#).unwrap();
-        assert!(matches!(m, ClientMsg::WorkRefresh { source: None, fred: false }));
+        assert!(matches!(
+            m,
+            ClientMsg::WorkRefresh {
+                source: None,
+                fred: false
+            }
+        ));
         let m: ClientMsg = serde_json::from_str(
             r#"{"type":"work_send","request_id":"r","item_id":"i","destination":"focus","agent":"a","label":"l","context":"c"}"#,
         )
@@ -4867,7 +5082,11 @@ mod work_wire_tests {
         assert_eq!(old.project_path, None);
         assert_eq!(old.select_for_client, None);
         let out = serde_json::to_string(&old).unwrap();
-        assert!(!out.contains("label") && !out.contains("project_path") && !out.contains("select_for_client"));
+        assert!(
+            !out.contains("label")
+                && !out.contains("project_path")
+                && !out.contains("select_for_client")
+        );
 
         let mut full = old;
         full.label = Some("CORE-1".into());
@@ -4908,11 +5127,24 @@ mod work_wire_tests {
     #[test]
     fn a_bare_task_meta_serialises_only_its_required_keys() {
         let value = serde_json::to_value(bare_task_meta()).unwrap();
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["description", "has_output", "housekeeping", "id", "kind", "status", "task_type"]
+            [
+                "description",
+                "has_output",
+                "housekeeping",
+                "id",
+                "kind",
+                "status",
+                "task_type"
+            ]
         );
     }
 
@@ -4926,7 +5158,10 @@ mod work_wire_tests {
             tasks: vec![bare_task_meta()],
         };
         let json = serde_json::to_string(&bare).unwrap();
-        assert!(!json.contains("session_id") && !json.contains("stop_supported"), "{json}");
+        assert!(
+            !json.contains("session_id") && !json.contains("stop_supported"),
+            "{json}"
+        );
         round_trip_server(bare);
 
         let mut full = bare_task_meta();
@@ -4970,7 +5205,9 @@ mod work_wire_tests {
         };
         let json = serde_json::to_string(&only_preview).unwrap();
         assert!(
-            !json.contains("progress_summary") && !json.contains("completion_summary") && !json.contains("prompt"),
+            !json.contains("progress_summary")
+                && !json.contains("completion_summary")
+                && !json.contains("prompt"),
             "{json}"
         );
         assert!(json.contains(r#""preview":"building 3/9""#));
@@ -4992,7 +5229,10 @@ mod work_wire_tests {
             completion_summary: None,
             prompt: None,
         };
-        assert_eq!(serde_json::to_string(&nothing).unwrap(), r#"{"type":"session_task_detail","tag":"t","task_id":"t1"}"#);
+        assert_eq!(
+            serde_json::to_string(&nothing).unwrap(),
+            r#"{"type":"session_task_detail","tag":"t","task_id":"t1"}"#
+        );
     }
 
     #[test]
@@ -5004,7 +5244,10 @@ mod work_wire_tests {
             stop_supported: None,
             tasks: vec![],
         };
-        assert_eq!(serde_json::to_value(&tasks).unwrap()["type"], "session_tasks");
+        assert_eq!(
+            serde_json::to_value(&tasks).unwrap()["type"],
+            "session_tasks"
+        );
         let detail = ServerMsg::SessionTaskDetail {
             tag: "t".into(),
             task_id: "x".into(),
@@ -5013,7 +5256,10 @@ mod work_wire_tests {
             completion_summary: None,
             prompt: None,
         };
-        assert_eq!(serde_json::to_value(&detail).unwrap()["type"], "session_task_detail");
+        assert_eq!(
+            serde_json::to_value(&detail).unwrap()["type"],
+            "session_task_detail"
+        );
     }
 
     // ── agent tracker frames (T0b) ────────────────────────────────────────────
@@ -5038,9 +5284,15 @@ mod work_wire_tests {
             tag: "cody-x".into(),
             board: Some(tracker_view()),
         });
-        assert!(json.contains("Sentry triage") && json.contains("check-1"), "{json}");
+        assert!(
+            json.contains("Sentry triage") && json.contains("check-1"),
+            "{json}"
+        );
 
-        let none = ServerMsg::TrackerBoard { tag: "cody-x".into(), board: None };
+        let none = ServerMsg::TrackerBoard {
+            tag: "cody-x".into(),
+            board: None,
+        };
         let json = round_trip_server(none.clone());
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(
@@ -5055,7 +5307,13 @@ mod work_wire_tests {
 
     #[test]
     fn tracker_summary_round_trips_and_carries_exactly_its_five_counts() {
-        let counts = TrackerCounts { todo: 1, in_progress: 2, blocked: 3, needs_you: 4, done: 5 };
+        let counts = TrackerCounts {
+            todo: 1,
+            in_progress: 2,
+            blocked: 3,
+            needs_you: 4,
+            done: 5,
+        };
         let json = round_trip_server(ServerMsg::TrackerSummary {
             tag: "cody-x".into(),
             has_tracker: true,
@@ -5068,7 +5326,11 @@ mod work_wire_tests {
         );
         assert_eq!(value["has_tracker"], true);
         match serde_json::from_str::<ServerMsg>(&json).unwrap() {
-            ServerMsg::TrackerSummary { tag, has_tracker, counts: back } => {
+            ServerMsg::TrackerSummary {
+                tag,
+                has_tracker,
+                counts: back,
+            } => {
                 assert_eq!((tag.as_str(), has_tracker, back), ("cody-x", true, counts));
             }
             other => panic!("{other:?}"),
@@ -5077,19 +5339,29 @@ mod work_wire_tests {
 
     #[test]
     fn the_tracker_frames_use_the_type_names_the_clients_decode() {
-        let board = ServerMsg::TrackerBoard { tag: "t".into(), board: None };
-        assert_eq!(serde_json::to_value(&board).unwrap()["type"], "tracker_board");
+        let board = ServerMsg::TrackerBoard {
+            tag: "t".into(),
+            board: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&board).unwrap()["type"],
+            "tracker_board"
+        );
         let summary = ServerMsg::TrackerSummary {
             tag: "t".into(),
             has_tracker: false,
             counts: TrackerCounts::default(),
         };
-        assert_eq!(serde_json::to_value(&summary).unwrap()["type"], "tracker_summary");
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap()["type"],
+            "tracker_summary"
+        );
     }
 
     #[test]
     fn the_tracker_frames_decode_from_the_documented_wire_shape() {
-        let board: ServerMsg = serde_json::from_str(r#"{"type":"tracker_board","tag":"t","board":null}"#).unwrap();
+        let board: ServerMsg =
+            serde_json::from_str(r#"{"type":"tracker_board","tag":"t","board":null}"#).unwrap();
         assert!(matches!(board, ServerMsg::TrackerBoard { ref tag, board: None } if tag == "t"));
 
         let summary: ServerMsg = serde_json::from_str(
@@ -5098,10 +5370,17 @@ mod work_wire_tests {
         )
         .unwrap();
         match summary {
-            ServerMsg::TrackerSummary { tag, has_tracker, counts } => {
+            ServerMsg::TrackerSummary {
+                tag,
+                has_tracker,
+                counts,
+            } => {
                 assert_eq!(tag, "t");
                 assert!(has_tracker);
-                assert_eq!((counts.in_progress, counts.needs_you, counts.done), (1, 2, 3));
+                assert_eq!(
+                    (counts.in_progress, counts.needs_you, counts.done),
+                    (1, 2, 3)
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -5149,19 +5428,38 @@ mod work_wire_tests {
         let json = r#"{"type":"session_tasks","tag":"t","daemon_epoch":"e","tasks":[
             {"id":"t1","task_type":"","kind":"other","description":"","housekeeping":false,"status":"running","has_output":false}]}"#;
         let msg: ServerMsg = serde_json::from_str(json).unwrap();
-        let ServerMsg::SessionTasks { session_id, stop_supported, tasks, .. } = msg else { panic!() };
+        let ServerMsg::SessionTasks {
+            session_id,
+            stop_supported,
+            tasks,
+            ..
+        } = msg
+        else {
+            panic!()
+        };
         assert_eq!((session_id, stop_supported), (None, None));
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].run_id, None);
-        assert_eq!(tasks[0].total_tokens, None, "an absent count stays absent, not zero");
+        assert_eq!(
+            tasks[0].total_tokens, None,
+            "an absent count stays absent, not zero"
+        );
     }
 
     #[test]
     fn a_task_detail_that_names_only_its_task_decodes() {
-        let msg: ServerMsg = serde_json::from_str(r#"{"type":"session_task_detail","tag":"t","task_id":"x"}"#).unwrap();
+        let msg: ServerMsg =
+            serde_json::from_str(r#"{"type":"session_task_detail","tag":"t","task_id":"x"}"#)
+                .unwrap();
         assert!(matches!(
             msg,
-            ServerMsg::SessionTaskDetail { preview: None, progress_summary: None, completion_summary: None, prompt: None, .. }
+            ServerMsg::SessionTaskDetail {
+                preview: None,
+                progress_summary: None,
+                completion_summary: None,
+                prompt: None,
+                ..
+            }
         ));
     }
 
@@ -5176,8 +5474,8 @@ mod work_wire_tests {
     use crate::approvals::display::{ApprovalDisplay, DisplayLine, LineKind, Segment, SegmentKind};
     use crate::approvals::request::{FoundRule, McpTool, Reason, ReasonKind, ToolKind};
     use crate::approvals::wire::{
-        AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption, ApprovalRequestWire,
-        DecisionKind, RefusalChannel, SubagentWire,
+        AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption,
+        ApprovalRequestWire, DecisionKind, RefusalChannel, SubagentWire,
     };
 
     /// An `ApprovalRequestWire` with every optional field set.
@@ -5188,12 +5486,18 @@ mod work_wire_tests {
             tool_use_id: "toolu_1".into(),
             agent: AgentWire {
                 name: "cody".into(),
-                subagent: Some(SubagentWire { agent_id: "agent_abc".into(), agent_type: Some("general-purpose".into()) }),
+                subagent: Some(SubagentWire {
+                    agent_id: "agent_abc".into(),
+                    agent_type: Some("general-purpose".into()),
+                }),
             },
             tool_name: "mcp__slack__post_message".into(),
             display_name: "Post message".into(),
             tool_kind: ToolKind::Mcp,
-            mcp: Some(McpTool { server: "slack".into(), tool: "post_message".into() }),
+            mcp: Some(McpTool {
+                server: "slack".into(),
+                tool: "post_message".into(),
+            }),
             input: serde_json::json!({ "channel": "#eng", "text": "hi", "nested": { "a": [1, 2, { "b": null }] } }),
             display: ApprovalDisplay {
                 lines: vec![
@@ -5202,16 +5506,32 @@ mod work_wire_tests {
                         kind: LineKind::Json,
                         cont: false,
                         segments: vec![
-                            Segment { text: "{".into(), kind: SegmentKind::Plain, cp: None },
-                            Segment { text: "\u{27E8}U+202E RLO\u{27E9}".into(), kind: SegmentKind::Invisible, cp: Some(0x202E) },
-                            Segment { text: "\u{e9}".into(), kind: SegmentKind::NonAscii, cp: Some(0xE9) },
+                            Segment {
+                                text: "{".into(),
+                                kind: SegmentKind::Plain,
+                                cp: None,
+                            },
+                            Segment {
+                                text: "\u{27E8}U+202E RLO\u{27E9}".into(),
+                                kind: SegmentKind::Invisible,
+                                cp: Some(0x202E),
+                            },
+                            Segment {
+                                text: "\u{e9}".into(),
+                                kind: SegmentKind::NonAscii,
+                                cp: Some(0xE9),
+                            },
                         ],
                     },
                     DisplayLine {
                         number: 2,
                         kind: LineKind::Command,
                         cont: true,
-                        segments: vec![Segment { text: "&&".into(), kind: SegmentKind::Separator, cp: None }],
+                        segments: vec![Segment {
+                            text: "&&".into(),
+                            kind: SegmentKind::Separator,
+                            cp: None,
+                        }],
                     },
                 ],
                 command_count: Some(2),
@@ -5293,15 +5613,28 @@ mod work_wire_tests {
             request_id: "r-min".into(),
             tag: "t".into(),
             tool_use_id: "toolu_2".into(),
-            agent: AgentWire { name: "cody".into(), subagent: None },
+            agent: AgentWire {
+                name: "cody".into(),
+                subagent: None,
+            },
             tool_name: "Bash".into(),
             display_name: "Bash".into(),
             tool_kind: ToolKind::Bash,
             mcp: None,
             input: serde_json::json!({ "command": "ls" }),
-            display: ApprovalDisplay { lines: vec![], command_count: None, invisible_count: 0, non_ascii_count: 0, unparsed: false },
+            display: ApprovalDisplay {
+                lines: vec![],
+                command_count: None,
+                invisible_count: 0,
+                non_ascii_count: 0,
+                unparsed: false,
+            },
             cwd: None,
-            reason: Reason { kind: ReasonKind::Other, text: "Claude Code asked for approval".into(), rule: None },
+            reason: Reason {
+                kind: ReasonKind::Other,
+                text: "Claude Code asked for approval".into(),
+                rule: None,
+            },
             flags: ApprovalFlags::default(),
             description: None,
             options: vec![ApprovalOption::AllowOnce, ApprovalOption::Deny],
@@ -5343,32 +5676,64 @@ mod work_wire_tests {
     fn assert_server_golden(msg: ServerMsg, golden: &str) {
         let encoded = serde_json::to_value(&msg).unwrap();
         assert_eq!(encoded, json(golden), "encoding changed: {encoded}");
-        let decoded: ServerMsg = serde_json::from_str(golden).unwrap_or_else(|e| panic!("golden does not decode ({e}): {golden}"));
-        assert_eq!(serde_json::to_value(&decoded).unwrap(), json(golden), "decode then encode is not the identity");
+        let decoded: ServerMsg = serde_json::from_str(golden)
+            .unwrap_or_else(|e| panic!("golden does not decode ({e}): {golden}"));
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            json(golden),
+            "decode then encode is not the identity"
+        );
     }
 
     #[track_caller]
     fn assert_client_golden(msg: ClientMsg, golden: &str) {
         let encoded = serde_json::to_value(&msg).unwrap();
         assert_eq!(encoded, json(golden), "encoding changed: {encoded}");
-        let decoded: ClientMsg = serde_json::from_str(golden).unwrap_or_else(|e| panic!("golden does not decode ({e}): {golden}"));
-        assert_eq!(serde_json::to_value(&decoded).unwrap(), json(golden), "decode then encode is not the identity");
+        let decoded: ClientMsg = serde_json::from_str(golden)
+            .unwrap_or_else(|e| panic!("golden does not decode ({e}): {golden}"));
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            json(golden),
+            "decode then encode is not the identity"
+        );
     }
 
     #[test]
     fn approval_request_with_every_field_populated_has_this_exact_wire_form() {
-        let golden = format!(r#"{{"type":"approval_request","tag":"cody-1","request":{FULL_APPROVAL_WIRE_JSON}}}"#);
-        assert_server_golden(ServerMsg::ApprovalRequest { tag: "cody-1".into(), request: full_approval_wire() }, &golden);
-        round_trip_server(ServerMsg::ApprovalRequest { tag: "cody-1".into(), request: full_approval_wire() });
+        let golden = format!(
+            r#"{{"type":"approval_request","tag":"cody-1","request":{FULL_APPROVAL_WIRE_JSON}}}"#
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalRequest {
+                tag: "cody-1".into(),
+                request: full_approval_wire(),
+            },
+            &golden,
+        );
+        round_trip_server(ServerMsg::ApprovalRequest {
+            tag: "cody-1".into(),
+            request: full_approval_wire(),
+        });
     }
 
     #[test]
     fn approval_request_with_only_the_required_fields_omits_the_optional_keys() {
-        let golden = format!(r#"{{"type":"approval_request","tag":"t","request":{MINIMAL_APPROVAL_WIRE_JSON}}}"#);
-        assert_server_golden(ServerMsg::ApprovalRequest { tag: "t".into(), request: minimal_approval_wire() }, &golden);
+        let golden = format!(
+            r#"{{"type":"approval_request","tag":"t","request":{MINIMAL_APPROVAL_WIRE_JSON}}}"#
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalRequest {
+                tag: "t".into(),
+                request: minimal_approval_wire(),
+            },
+            &golden,
+        );
         let v = serde_json::to_value(minimal_approval_wire()).unwrap();
         for key in ["mcp", "cwd", "description"] {
-            assert!(v.get(key).is_none(), "an absent {key} is omitted, not null: {v}");
+            assert!(
+                v.get(key).is_none(),
+                "an absent {key} is omitted, not null: {v}"
+            );
         }
     }
 
@@ -5382,17 +5747,28 @@ mod work_wire_tests {
         ] {
             let mut wire = minimal_approval_wire();
             wire.input = input.clone();
-            let v = serde_json::to_value(ServerMsg::ApprovalRequest { tag: "t".into(), request: wire }).unwrap();
+            let v = serde_json::to_value(ServerMsg::ApprovalRequest {
+                tag: "t".into(),
+                request: wire,
+            })
+            .unwrap();
             assert_eq!(v["request"]["input"], input);
         }
     }
 
     #[test]
     fn approvals_snapshot_has_this_exact_wire_form_empty_and_full() {
-        assert_server_golden(ServerMsg::ApprovalsSnapshot { requests: vec![] }, r#"{"type":"approvals_snapshot","requests":[]}"#);
-        let golden = format!(r#"{{"type":"approvals_snapshot","requests":[{FULL_APPROVAL_WIRE_JSON},{MINIMAL_APPROVAL_WIRE_JSON}]}}"#);
         assert_server_golden(
-            ServerMsg::ApprovalsSnapshot { requests: vec![full_approval_wire(), minimal_approval_wire()] },
+            ServerMsg::ApprovalsSnapshot { requests: vec![] },
+            r#"{"type":"approvals_snapshot","requests":[]}"#,
+        );
+        let golden = format!(
+            r#"{{"type":"approvals_snapshot","requests":[{FULL_APPROVAL_WIRE_JSON},{MINIMAL_APPROVAL_WIRE_JSON}]}}"#
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalsSnapshot {
+                requests: vec![full_approval_wire(), minimal_approval_wire()],
+            },
             &golden,
         );
     }
@@ -5424,12 +5800,23 @@ mod work_wire_tests {
     #[test]
     fn approval_pending_has_this_exact_wire_form_and_carries_nothing_but_a_tag_and_a_count() {
         assert_server_golden(
-            ServerMsg::ApprovalPending { tag: "cody-1".into(), count: 2 },
+            ServerMsg::ApprovalPending {
+                tag: "cody-1".into(),
+                count: 2,
+            },
             r#"{"type":"approval_pending","tag":"cody-1","count":2}"#,
         );
-        let v = serde_json::to_value(ServerMsg::ApprovalPending { tag: "cody-1".into(), count: 0 }).unwrap();
+        let v = serde_json::to_value(ServerMsg::ApprovalPending {
+            tag: "cody-1".into(),
+            count: 0,
+        })
+        .unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["count", "tag", "type"], "the only approval frame a LAN peer may see has no room for content");
+        assert_eq!(
+            keys,
+            ["count", "tag", "type"],
+            "the only approval frame a LAN peer may see has no room for content"
+        );
     }
 
     #[test]
@@ -5457,15 +5844,28 @@ mod work_wire_tests {
             r#"{"type":"approval_answer_refused","request_id":"r1","code":"already_resolved","outcome":"allowed_once"}"#,
         );
         for (code, name) in [
-            (AnswerRefusal::RequiresSecureConnection, "requires_secure_connection"),
+            (
+                AnswerRefusal::RequiresSecureConnection,
+                "requires_secure_connection",
+            ),
             (AnswerRefusal::NotOperatorApp, "not_operator_app"),
             (AnswerRefusal::UnknownRequest, "unknown_request"),
         ] {
             assert_server_golden(
-                ServerMsg::ApprovalAnswerRefused { request_id: "r1".into(), code, outcome: None },
-                &format!(r#"{{"type":"approval_answer_refused","request_id":"r1","code":"{name}"}}"#),
+                ServerMsg::ApprovalAnswerRefused {
+                    request_id: "r1".into(),
+                    code,
+                    outcome: None,
+                },
+                &format!(
+                    r#"{{"type":"approval_answer_refused","request_id":"r1","code":"{name}"}}"#
+                ),
             );
-            assert_eq!(code.as_str(), name, "the audit log writes the same code the wire carries");
+            assert_eq!(
+                code.as_str(),
+                name,
+                "the audit log writes the same code the wire carries"
+            );
         }
     }
 
@@ -5474,7 +5874,11 @@ mod work_wire_tests {
         assert_client_golden(
             ClientMsg::ApprovalAnswer {
                 request_id: "r1".into(),
-                decision: ApprovalDecision { kind: DecisionKind::AllowOnce, note: None, answers: None },
+                decision: ApprovalDecision {
+                    kind: DecisionKind::AllowOnce,
+                    note: None,
+                    answers: None,
+                },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
             },
@@ -5483,7 +5887,11 @@ mod work_wire_tests {
         assert_client_golden(
             ClientMsg::ApprovalAnswer {
                 request_id: "r1".into(),
-                decision: ApprovalDecision { kind: DecisionKind::Deny, note: Some("use /tmp/y".into()), answers: None },
+                decision: ApprovalDecision {
+                    kind: DecisionKind::Deny,
+                    note: Some("use /tmp/y".into()),
+                    answers: None,
+                },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
             },
@@ -5492,7 +5900,11 @@ mod work_wire_tests {
         assert_client_golden(
             ClientMsg::ApprovalAnswer {
                 request_id: "r1".into(),
-                decision: ApprovalDecision { kind: DecisionKind::DenyAndStop, note: None, answers: None },
+                decision: ApprovalDecision {
+                    kind: DecisionKind::DenyAndStop,
+                    note: None,
+                    answers: None,
+                },
                 window_id: "win-2".into(),
                 operator_nonce: None,
             },
@@ -5508,7 +5920,16 @@ mod work_wire_tests {
             r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"allow_once"},"window_id":"w"}"#,
         )
         .unwrap();
-        assert!(matches!(msg, ClientMsg::ApprovalAnswer { operator_nonce: None, .. }), "{msg:?}");
+        assert!(
+            matches!(
+                msg,
+                ClientMsg::ApprovalAnswer {
+                    operator_nonce: None,
+                    ..
+                }
+            ),
+            "{msg:?}"
+        );
     }
 
     #[test]
@@ -5517,7 +5938,10 @@ mod work_wire_tests {
             let text = format!(
                 r#"{{"type":"approval_answer","request_id":"r1","decision":{{"kind":"{kind}"}},"window_id":"w"}}"#
             );
-            assert!(serde_json::from_str::<ClientMsg>(&text).is_err(), "{kind:?} must not decode");
+            assert!(
+                serde_json::from_str::<ClientMsg>(&text).is_err(),
+                "{kind:?} must not decode"
+            );
         }
     }
 
@@ -5569,7 +5993,10 @@ mod work_wire_tests {
             let v = serde_json::to_value(&entry).unwrap();
             assert_eq!(v["phase"], name);
             assert!(v.get("hold_id").is_none(), "{v}");
-            assert_eq!(serde_json::from_value::<ClaudeLoginSession>(v).unwrap(), entry);
+            assert_eq!(
+                serde_json::from_value::<ClaudeLoginSession>(v).unwrap(),
+                entry
+            );
         }
     }
 
@@ -5597,10 +6024,24 @@ mod work_wire_tests {
 
     #[test]
     fn a_claude_login_action_without_a_nonce_still_decodes_and_the_daemon_refuses_it_later() {
-        let msg: ClientMsg =
-            serde_json::from_str(r#"{"type":"claude_login_action","action":"retry","tag":"t","hold_id":"h"}"#).unwrap();
-        assert!(matches!(msg, ClientMsg::ClaudeLoginAction { operator_nonce: None, .. }), "{msg:?}");
-        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"claude_login_action","action":"resend","tag":"t"}"#).is_err());
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"claude_login_action","action":"retry","tag":"t","hold_id":"h"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                msg,
+                ClientMsg::ClaudeLoginAction {
+                    operator_nonce: None,
+                    ..
+                }
+            ),
+            "{msg:?}"
+        );
+        assert!(serde_json::from_str::<ClientMsg>(
+            r#"{"type":"claude_login_action","action":"resend","tag":"t"}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -5617,13 +6058,23 @@ mod work_wire_tests {
             (RefusalChannel::Unknown, "unknown"),
         ] {
             assert_client_golden(
-                ClientMsg::ApprovalRefusalReport { request_id: Some("r1".into()), control: "allow_once".into(), channel },
-                &format!(r#"{{"type":"approval_refusal_report","request_id":"r1","control":"allow_once","channel":"{name}"}}"#),
+                ClientMsg::ApprovalRefusalReport {
+                    request_id: Some("r1".into()),
+                    control: "allow_once".into(),
+                    channel,
+                },
+                &format!(
+                    r#"{{"type":"approval_refusal_report","request_id":"r1","control":"allow_once","channel":"{name}"}}"#
+                ),
             );
             assert_eq!(channel.as_str(), name);
         }
         assert_client_golden(
-            ClientMsg::ApprovalRefusalReport { request_id: None, control: "deny".into(), channel: RefusalChannel::Accessibility },
+            ClientMsg::ApprovalRefusalReport {
+                request_id: None,
+                control: "deny".into(),
+                channel: RefusalChannel::Accessibility,
+            },
             r#"{"type":"approval_refusal_report","control":"deny","channel":"accessibility"}"#,
         );
     }
@@ -5675,12 +6126,20 @@ mod work_wire_tests {
 
     #[test]
     fn welcome_without_disabled_agents_decodes_as_none_and_an_unknown_field_is_ignored() {
-        let msg: ServerMsg =
-            serde_json::from_str(r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"enabled_agents":["mother"]}"#)
-                .unwrap();
+        let msg: ServerMsg = serde_json::from_str(
+            r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"enabled_agents":["mother"]}"#,
+        )
+        .unwrap();
         match msg {
-            ServerMsg::Welcome { disabled_agents, enabled_agents, .. } => {
-                assert_eq!(disabled_agents, None, "an older daemon says nothing about what is off");
+            ServerMsg::Welcome {
+                disabled_agents,
+                enabled_agents,
+                ..
+            } => {
+                assert_eq!(
+                    disabled_agents, None,
+                    "an older daemon says nothing about what is off"
+                );
                 assert_eq!(enabled_agents, Some(vec!["mother".to_string()]));
             }
             other => panic!("{other:?}"),
@@ -5690,7 +6149,9 @@ mod work_wire_tests {
         )
         .unwrap();
         match msg {
-            ServerMsg::Welcome { disabled_agents, .. } => assert_eq!(disabled_agents, Some(vec!["fred".to_string()])),
+            ServerMsg::Welcome {
+                disabled_agents, ..
+            } => assert_eq!(disabled_agents, Some(vec!["fred".to_string()])),
             other => panic!("{other:?}"),
         }
     }
@@ -5698,7 +6159,8 @@ mod work_wire_tests {
     #[test]
     fn welcome_without_enabled_agents_decodes_as_none() {
         let msg: ServerMsg =
-            serde_json::from_str(r#"{"type":"welcome","protocol_version":4,"daemon_pid":9}"#).unwrap();
+            serde_json::from_str(r#"{"type":"welcome","protocol_version":4,"daemon_pid":9}"#)
+                .unwrap();
         match msg {
             ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(enabled_agents, None),
             other => panic!("{other:?}"),
@@ -5711,8 +6173,13 @@ mod work_wire_tests {
     fn subscribe_without_a_renders_approvals_key_decodes_as_false() {
         let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[]}"#).unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_approvals, .. } => {
-                assert!(!renders_approvals, "an absent renders_approvals key must decode to false, never to true");
+            ClientMsg::Subscribe {
+                renders_approvals, ..
+            } => {
+                assert!(
+                    !renders_approvals,
+                    "an absent renders_approvals key must decode to false, never to true"
+                );
             }
             other => panic!("expected Subscribe, got {other:?}"),
         }
@@ -5720,12 +6187,21 @@ mod work_wire_tests {
 
     #[test]
     fn subscribe_with_renders_decisions_but_no_renders_approvals_key_is_not_a_presenter_claim() {
-        let msg: ClientMsg =
-            serde_json::from_str(r#"{"type":"subscribe","topics":["decision"],"renders_decisions":true}"#).unwrap();
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"subscribe","topics":["decision"],"renders_decisions":true}"#,
+        )
+        .unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_decisions, renders_approvals, .. } => {
+            ClientMsg::Subscribe {
+                renders_decisions,
+                renders_approvals,
+                ..
+            } => {
                 assert!(renders_decisions);
-                assert!(!renders_approvals, "claiming to render decisions says nothing about approvals");
+                assert!(
+                    !renders_approvals,
+                    "claiming to render decisions says nothing about approvals"
+                );
             }
             other => panic!("expected Subscribe, got {other:?}"),
         }
@@ -5733,9 +6209,15 @@ mod work_wire_tests {
 
     #[test]
     fn subscribe_with_renders_approvals_true_decodes_true() {
-        let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_approvals":true}"#).unwrap();
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_approvals":true}"#)
+                .unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_approvals, renders_decisions, .. } => {
+            ClientMsg::Subscribe {
+                renders_approvals,
+                renders_decisions,
+                ..
+            } => {
                 assert!(renders_approvals);
                 assert!(!renders_decisions, "the two claims are independent");
             }
@@ -5745,9 +6227,13 @@ mod work_wire_tests {
 
     #[test]
     fn subscribe_with_renders_approvals_false_decodes_false() {
-        let msg: ClientMsg = serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_approvals":false}"#).unwrap();
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"subscribe","topics":[],"renders_approvals":false}"#)
+                .unwrap();
         match msg {
-            ClientMsg::Subscribe { renders_approvals, .. } => assert!(!renders_approvals),
+            ClientMsg::Subscribe {
+                renders_approvals, ..
+            } => assert!(!renders_approvals),
             other => panic!("expected Subscribe, got {other:?}"),
         }
     }
@@ -5755,11 +6241,17 @@ mod work_wire_tests {
     #[test]
     fn encoding_subscribe_includes_an_explicit_renders_approvals_key_either_way() {
         for value in [false, true] {
-            let msg = ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: value };
+            let msg = ClientMsg::Subscribe {
+                topics: vec![],
+                renders_decisions: false,
+                renders_approvals: value,
+            };
             round_trip_client(msg.clone());
             assert_client_golden(
                 msg,
-                &format!(r#"{{"type":"subscribe","topics":[],"renders_decisions":false,"renders_approvals":{value}}}"#),
+                &format!(
+                    r#"{{"type":"subscribe","topics":[],"renders_decisions":false,"renders_approvals":{value}}}"#
+                ),
             );
         }
     }
@@ -5772,7 +6264,11 @@ mod work_wire_tests {
     #[test]
     fn the_stop_verb_has_this_exact_wire_form() {
         assert_client_golden(
-            ClientMsg::SessionTaskStop { request_id: "r1".into(), tag: "cody-1".into(), task_id: "b7k2m9x1a".into() },
+            ClientMsg::SessionTaskStop {
+                request_id: "r1".into(),
+                tag: "cody-1".into(),
+                task_id: "b7k2m9x1a".into(),
+            },
             r#"{"type":"session_task_stop","request_id":"r1","tag":"cody-1","task_id":"b7k2m9x1a"}"#,
         );
     }
@@ -5808,7 +6304,17 @@ mod work_wire_tests {
             r#"{"type":"session_task_output","request_id":"r","tag":"t","task_id":"x","offset":null,"max_bytes":10}"#,
         )
         .unwrap();
-        assert!(matches!(msg, ClientMsg::SessionTaskOutput { offset: None, max_bytes: 10, .. }), "{msg:?}");
+        assert!(
+            matches!(
+                msg,
+                ClientMsg::SessionTaskOutput {
+                    offset: None,
+                    max_bytes: 10,
+                    ..
+                }
+            ),
+            "{msg:?}"
+        );
     }
 
     #[test]
@@ -5853,7 +6359,10 @@ mod work_wire_tests {
             (TaskStopOutcome::NotRunning, "not_running"),
         ] {
             assert_eq!(serde_json::to_value(outcome).unwrap(), name);
-            assert_eq!(serde_json::from_value::<TaskStopOutcome>(serde_json::json!(name)).unwrap(), outcome);
+            assert_eq!(
+                serde_json::from_value::<TaskStopOutcome>(serde_json::json!(name)).unwrap(),
+                outcome
+            );
         }
     }
 
@@ -5866,11 +6375,20 @@ mod work_wire_tests {
             (TaskOutputOutcome::Error, "error"),
         ] {
             assert_eq!(serde_json::to_value(outcome).unwrap(), name);
-            assert_eq!(serde_json::from_value::<TaskOutputOutcome>(serde_json::json!(name)).unwrap(), outcome);
+            assert_eq!(
+                serde_json::from_value::<TaskOutputOutcome>(serde_json::json!(name)).unwrap(),
+                outcome
+            );
         }
-        for (source, name) in [(TaskOutputSource::File, "file"), (TaskOutputSource::CliTail, "cli_tail")] {
+        for (source, name) in [
+            (TaskOutputSource::File, "file"),
+            (TaskOutputSource::CliTail, "cli_tail"),
+        ] {
             assert_eq!(serde_json::to_value(source).unwrap(), name);
-            assert_eq!(serde_json::from_value::<TaskOutputSource>(serde_json::json!(name)).unwrap(), source);
+            assert_eq!(
+                serde_json::from_value::<TaskOutputSource>(serde_json::json!(name)).unwrap(),
+                source
+            );
         }
     }
 
@@ -5928,8 +6446,19 @@ mod work_wire_tests {
             message: None,
         };
         let back: ServerMsg = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
-        let ServerMsg::SessionTaskOutputResult { start_offset, end_offset, total_bytes, .. } = back else { panic!() };
-        assert_eq!((start_offset, end_offset, total_bytes), (big, big + 1, big + 1));
+        let ServerMsg::SessionTaskOutputResult {
+            start_offset,
+            end_offset,
+            total_bytes,
+            ..
+        } = back
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (start_offset, end_offset, total_bytes),
+            (big, big + 1, big + 1)
+        );
     }
 
     #[test]

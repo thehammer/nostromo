@@ -215,7 +215,10 @@ pub struct FocusHost {
 
 impl From<&DaemonMcpBackend> for FocusHost {
     fn from(daemon: &DaemonMcpBackend) -> Self {
-        Self { session_mgr: Arc::clone(&daemon.session_mgr), broadcast_tx: daemon.broadcast_tx.clone() }
+        Self {
+            session_mgr: Arc::clone(&daemon.session_mgr),
+            broadcast_tx: daemon.broadcast_tx.clone(),
+        }
     }
 }
 
@@ -242,12 +245,14 @@ async fn create(
     daemon: FocusHost,
     req: CreateFocusRequest,
 ) -> Result<CreateFocusOutcome, CreateFocusError> {
-    let label = non_blank(req.label.as_deref()).unwrap_or(&req.title).to_owned();
+    let label = non_blank(req.label.as_deref())
+        .unwrap_or(&req.title)
+        .to_owned();
 
-    let key = req
-        .source_item
-        .as_ref()
-        .map_or_else(|| format!("tag:{}", derive_tag(&req.agent, &req.title)), |i| format!("item:{}", i.id));
+    let key = req.source_item.as_ref().map_or_else(
+        || format!("tag:{}", derive_tag(&req.agent, &req.title)),
+        |i| format!("item:{}", i.id),
+    );
     let _serialized = lock_key(key).await;
 
     if let Some(item) = req.source_item.as_ref().filter(|_| !req.allow_duplicate) {
@@ -269,8 +274,14 @@ async fn create(
 /// (sanitised and capped), since it is the user's own.
 fn sanitize(mut req: CreateFocusRequest) -> CreateFocusRequest {
     req.title = one_line(&req.title, MAX_LINE_CHARS);
-    req.label = req.label.map(|l| one_line(&l, MAX_LINE_CHARS)).filter(|l| !l.is_empty());
-    req.org = req.org.map(|o| one_line(&o, MAX_LINE_CHARS)).filter(|o| !o.is_empty());
+    req.label = req
+        .label
+        .map(|l| one_line(&l, MAX_LINE_CHARS))
+        .filter(|l| !l.is_empty());
+    req.org = req
+        .org
+        .map(|o| one_line(&o, MAX_LINE_CHARS))
+        .filter(|o| !o.is_empty());
     req.instruction = req.instruction.as_deref().and_then(sanitize_instruction);
     if let Some(item) = &mut req.source_item {
         item.title = one_line(&item.title, MAX_FENCED_TITLE_CHARS);
@@ -288,7 +299,10 @@ fn validate(req: &CreateFocusRequest) -> Result<(), CreateFocusError> {
     // The agent becomes `--agent <name>`, a focus tag and `FocusMeta.agent_name`:
     // a persona name (`cody`, `teri:fred`) and nothing else.
     if req.agent.chars().count() > MAX_AGENT_CHARS
-        || !req.agent.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
+        || !req
+            .agent
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
     {
         return Err(CreateFocusError::InvalidArgs(format!(
             "agent must be at most {MAX_AGENT_CHARS} characters of letters, digits, ':', '_' and '-'"
@@ -299,7 +313,9 @@ fn validate(req: &CreateFocusRequest) -> Result<(), CreateFocusError> {
     }
     if let Some(cwd) = &req.working_directory {
         if !cwd.is_absolute() || !cwd.is_dir() {
-            return Err(CreateFocusError::InvalidWorkingDirectory(cwd.to_string_lossy().into_owned()));
+            return Err(CreateFocusError::InvalidWorkingDirectory(
+                cwd.to_string_lossy().into_owned(),
+            ));
         }
     }
     if let Some(target) = choice_of(req) {
@@ -310,9 +326,14 @@ fn validate(req: &CreateFocusRequest) -> Result<(), CreateFocusError> {
             ));
         }
     }
-    if let Destination::MotherJob { max_cost: Some(cost) } = &req.destination {
+    if let Destination::MotherJob {
+        max_cost: Some(cost),
+    } = &req.destination
+    {
         if !cost.is_finite() || *cost <= 0.0 {
-            return Err(CreateFocusError::InvalidArgs("max_cost must be a positive number".into()));
+            return Err(CreateFocusError::InvalidArgs(
+                "max_cost must be a positive number".into(),
+            ));
         }
     }
     Ok(())
@@ -320,8 +341,15 @@ fn validate(req: &CreateFocusRequest) -> Result<(), CreateFocusError> {
 
 /// The model choice of a request: its model (with the effort), if it named one.
 fn choice_of(req: &CreateFocusRequest) -> Option<crate::model::ModelTarget> {
-    let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty())?;
-    Some(crate::model::ModelTarget { model: model.to_owned(), effort: req.effort.clone() })
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())?;
+    Some(crate::model::ModelTarget {
+        model: model.to_owned(),
+        effort: req.effort.clone(),
+    })
 }
 
 /// The newest live marker for `item_id`, as an `Existing` outcome.
@@ -338,7 +366,10 @@ async fn live_marker(daemon: &FocusHost, item_id: &str) -> Option<CreateFocusOut
                 if job_ids.is_none() {
                     job_ids = Some(sent::mother_job_ids().await);
                 }
-                job_ids.as_ref().and_then(Option::as_ref).is_none_or(|ids| ids.contains(&marker.target_id))
+                job_ids
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_none_or(|ids| ids.contains(&marker.target_id))
             }
             _ => false,
         };
@@ -379,7 +410,12 @@ async fn create_focus_session(
     // same item was handled above), so take the next free suffix.
     let base = derive_tag(&agent, &title);
     let existing = |tag: String, label: String| {
-        Ok(CreateFocusOutcome { kind: OutcomeKind::Existing, focus_tag: Some(tag), job_id: None, label })
+        Ok(CreateFocusOutcome {
+            kind: OutcomeKind::Existing,
+            focus_tag: Some(tag),
+            job_id: None,
+            label,
+        })
     };
     if source_item.is_none() && daemon.session_mgr.lock().unwrap().has_live_session(&base) {
         return existing(base, label);
@@ -399,12 +435,24 @@ async fn create_focus_session(
         } else {
             first_free_tag(&base, |t| mgr.has_live_session(t))
         };
-        register_sensitivity(&mgr, &tag, caller.as_deref(), initial_context.is_some() || instruction.is_some());
+        register_sensitivity(
+            &mgr,
+            &tag,
+            caller.as_deref(),
+            initial_context.is_some() || instruction.is_some(),
+        );
 
         // Spawn the session (no remote control; daemon-hosted stream-json child).
         // `spawn_session` already initialises the focus's pane tree.
-        mgr.spawn_session(tag.clone(), agent.clone(), title.clone(), cwd.clone(), None, false)
-            .map_err(|e| CreateFocusError::SpawnFailed(e.to_string()))?;
+        mgr.spawn_session(
+            tag.clone(),
+            agent.clone(),
+            title.clone(),
+            cwd.clone(),
+            None,
+            false,
+        )
+        .map_err(|e| CreateFocusError::SpawnFailed(e.to_string()))?;
         mgr.set_focus_nonce(&tag, nonce.clone());
         tag
     };
@@ -414,7 +462,11 @@ async fn create_focus_session(
     // agent the focus is useless (an empty session that looks started), so it
     // is stopped and nothing is announced or recorded as sent.
     if instruction.is_some() || initial_context.is_some() {
-        let message = seeded_message(source_item.as_ref(), instruction.as_deref(), initial_context.as_deref());
+        let message = seeded_message(
+            source_item.as_ref(),
+            instruction.as_deref(),
+            initial_context.as_deref(),
+        );
         let mut mgr = daemon.session_mgr.lock().unwrap();
         if let Err(e) = mgr.send_user_message(&tag, &message, &[]) {
             tracing::warn!(tag = %tag, "create_focus: failed to seed the first message: {e}");
@@ -445,7 +497,12 @@ async fn create_focus_session(
     // for the items that were sent to the old one.
     sent::ledger().supersede_focus(&tag, &nonce);
     record_sent(source_item.as_ref(), "focus", &tag, &label, Some(nonce));
-    Ok(CreateFocusOutcome { kind: OutcomeKind::Created, focus_tag: Some(tag), job_id: None, label })
+    Ok(CreateFocusOutcome {
+        kind: OutcomeKind::Created,
+        focus_tag: Some(tag),
+        job_id: None,
+        label,
+    })
 }
 
 /// The first message of a seeded focus: the user's instruction (the directive,
@@ -454,7 +511,11 @@ async fn create_focus_session(
 /// The notice says only that the data came from a work item: the item's id (a
 /// `doc:` id carries a file path from a possibly hostile clone) stays out of
 /// the text in front of the fence.
-fn seeded_message(source: Option<&SourceItemRef>, instruction: Option<&str>, context: Option<&str>) -> String {
+fn seeded_message(
+    source: Option<&SourceItemRef>,
+    instruction: Option<&str>,
+    context: Option<&str>,
+) -> String {
     let mut message = String::new();
     if let Some(instruction) = instruction {
         message.push_str(&format!("The user's instruction:\n\n{instruction}\n\n"));
@@ -474,7 +535,11 @@ fn seeded_message(source: Option<&SourceItemRef>, instruction: Option<&str>, con
 
 /// Where fenced text came from, for the notice in front of it.
 fn origin_of(source: Option<&SourceItemRef>) -> &'static str {
-    if source.is_some() { "a work item" } else { "the caller" }
+    if source.is_some() {
+        "a work item"
+    } else {
+        "the caller"
+    }
 }
 
 /// The request's org, else the one inferred from the working directory's GitHub remote.
@@ -508,7 +573,11 @@ fn register_sensitivity(mgr: &SessionManager, tag: &str, caller: Option<&str>, h
 /// Register the focus and tell every client about it and its initial layout.
 fn announce_focus(daemon: &FocusHost, meta: FocusMeta) {
     let tag = meta.tag.clone();
-    daemon.session_mgr.lock().unwrap().add_or_update_focus(meta.clone());
+    daemon
+        .session_mgr
+        .lock()
+        .unwrap()
+        .add_or_update_focus(meta.clone());
     let _ = daemon.broadcast_tx.send(ServerMsg::FocusCreated { meta });
     let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
         tag,
@@ -522,7 +591,10 @@ async fn queue_mother_job(
     max_cost: Option<f64>,
     label: String,
 ) -> Result<CreateFocusOutcome, CreateFocusError> {
-    let cwd = req.working_directory.as_deref().ok_or(CreateFocusError::ProjectRequired)?;
+    let cwd = req
+        .working_directory
+        .as_deref()
+        .ok_or(CreateFocusError::ProjectRequired)?;
     let repo = main_checkout(cwd)
         .await
         .ok_or_else(|| CreateFocusError::NotAGitRepo(cwd.to_string_lossy().into_owned()))?;
@@ -531,11 +603,17 @@ async fn queue_mother_job(
         .and_then(|n| n.to_str())
         .map(str::to_owned)
         .ok_or_else(|| CreateFocusError::NotAGitRepo(repo.to_string_lossy().into_owned()))?;
-    let base = git_output(&repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .await
-        .unwrap_or_else(|| "origin/main".to_owned());
+    let base = git_output(
+        &repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    .unwrap_or_else(|| "origin/main".to_owned());
 
-    let slug_source = req.source_item.as_ref().map_or(req.title.as_str(), |i| i.id.as_str());
+    let slug_source = req
+        .source_item
+        .as_ref()
+        .map_or(req.title.as_str(), |i| i.id.as_str());
     let slug: String = slugify(slug_source).chars().take(MAX_SLUG_LEN).collect();
     let slug = match slug.trim_end_matches('-') {
         "" => "item".to_owned(),
@@ -565,12 +643,29 @@ async fn queue_mother_job(
     let _ = std::fs::remove_file(&plan_file);
     let job_id = added.map_err(|e| CreateFocusError::MotherFailed(e.to_string()))?;
 
-    record_sent(req.source_item.as_ref(), "mother_job", &job_id, &label, None);
-    Ok(CreateFocusOutcome { kind: OutcomeKind::Queued, focus_tag: None, job_id: Some(job_id), label })
+    record_sent(
+        req.source_item.as_ref(),
+        "mother_job",
+        &job_id,
+        &label,
+        None,
+    );
+    Ok(CreateFocusOutcome {
+        kind: OutcomeKind::Queued,
+        focus_tag: None,
+        job_id: Some(job_id),
+        label,
+    })
 }
 
 /// Remember that `item` was sent (no item, nothing to key it on).
-fn record_sent(item: Option<&SourceItemRef>, kind: &str, target_id: &str, label: &str, nonce: Option<String>) {
+fn record_sent(
+    item: Option<&SourceItemRef>,
+    kind: &str,
+    target_id: &str,
+    label: &str,
+    nonce: Option<String>,
+) {
     let Some(item) = item else { return };
     let marker = SentMarker {
         kind: kind.to_owned(),
@@ -596,14 +691,23 @@ fn record_sent(item: Option<&SourceItemRef>, kind: &str, target_id: &str, label:
 fn brief_markdown(label: &str, req: &CreateFocusRequest, repo_name: &str, branch: &str) -> String {
     let source = req.source_item.as_ref();
     let title = source.map_or(req.title.as_str(), |i| i.title.as_str());
-    let context = req.initial_context.as_deref().map_or("(no context was supplied)", str::trim);
+    let context = req
+        .initial_context
+        .as_deref()
+        .map_or("(no context was supplied)", str::trim);
     let item_line = source.map_or_else(String::new, |i| format!("Item: {}\n", i.id));
     let nonce = NonceFence::new();
-    let fenced = nonce.block(&format!("Label: {label}\n{item_line}Title: {title}\n\n{context}"));
+    let fenced = nonce.block(&format!(
+        "Label: {label}\n{item_line}Title: {title}\n\n{context}"
+    ));
     let task = req.instruction.as_deref().map_or_else(String::new, |instruction| {
         format!("## Task\n\nThe user's instruction for this job (the user directs this work):\n\n{instruction}\n\n")
     });
-    let started_from = if source.is_some() { "a work item sent by Teri" } else { "a request sent by Teri" };
+    let started_from = if source.is_some() {
+        "a work item sent by Teri"
+    } else {
+        "a request sent by Teri"
+    };
     let reference = if source.is_some() {
         "references the source item (its `Item:` line in the fenced block) by id or link"
     } else {
@@ -666,7 +770,10 @@ fn write_brief(slug: &str, brief: &str) -> std::io::Result<PathBuf> {
     sent::create_private_dir(&dir)?;
     let stamp = Utc::now().format("%Y%m%dT%H%M%S%3f");
     loop {
-        let path = dir.join(format!("{slug}-{stamp}-{}.md", NEXT.fetch_add(1, Ordering::Relaxed)));
+        let path = dir.join(format!(
+            "{slug}-{stamp}-{}.md",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         match sent::private_file_new(&path) {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(brief.as_bytes()) {
@@ -723,7 +830,10 @@ async fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
     for var in GIT_REPO_ENV {
         cmd.env_remove(var);
     }
-    let out = tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await.ok()?.ok()?;
+    let out = tokio::time::timeout(GIT_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -820,7 +930,9 @@ fn derive_tag(agent: &str, title: &str) -> String {
 
 /// Title-cased last path component, for `FocusMeta::project_name`.
 fn project_name_from(cwd: &Path) -> Option<String> {
-    cwd.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
+    cwd.file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
 }
 
 /// Handle `nostromo.create_focus`: parse the arguments, run
@@ -855,26 +967,39 @@ fn outcome_json(outcome: &CreateFocusOutcome) -> Value {
     out
 }
 
-fn parse_request(args: &Value, pty_id: Option<&str>) -> Result<CreateFocusRequest, CreateFocusError> {
+fn parse_request(
+    args: &Value,
+    pty_id: Option<&str>,
+) -> Result<CreateFocusRequest, CreateFocusError> {
     let invalid = |detail: &str| CreateFocusError::InvalidArgs(detail.to_owned());
     // Absent or null is `None`; anything else must be a string.
     let string = |key: &str| -> Result<Option<String>, CreateFocusError> {
         match args.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::String(s)) => Ok(Some(s.clone())),
-            Some(_) => Err(CreateFocusError::InvalidArgs(format!("{key} must be a string"))),
+            Some(_) => Err(CreateFocusError::InvalidArgs(format!(
+                "{key} must be a string"
+            ))),
         }
     };
-    let agent = string("agent")?.filter(|s| !s.is_empty()).ok_or_else(|| invalid("missing agent"))?;
-    let title = string("title")?.filter(|s| !s.is_empty()).ok_or_else(|| invalid("missing title"))?;
-    let working_directory = string("working_directory")?.filter(|s| !s.is_empty()).map(PathBuf::from);
+    let agent = string("agent")?
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| invalid("missing agent"))?;
+    let title = string("title")?
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| invalid("missing title"))?;
+    let working_directory = string("working_directory")?
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
 
     let source_item_title = string("source_item_title")?.filter(|t| !t.is_empty());
     // The id as `teri.list_work_items` gave it is escaped; the ledger and the hub use the real one.
-    let source_item = string("source_item_id")?.filter(|s| !s.is_empty()).map(|id| SourceItemRef {
-        title: source_item_title.unwrap_or_else(|| title.clone()),
-        id: unescape_id(&id),
-    });
+    let source_item = string("source_item_id")?
+        .filter(|s| !s.is_empty())
+        .map(|id| SourceItemRef {
+            title: source_item_title.unwrap_or_else(|| title.clone()),
+            id: unescape_id(&id),
+        });
     let allow_duplicate = match args.get("allow_duplicate") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
@@ -885,7 +1010,10 @@ fn parse_request(args: &Value, pty_id: Option<&str>) -> Result<CreateFocusReques
         Some("mother_job") => Destination::MotherJob {
             max_cost: match args.get("max_cost") {
                 None | Some(Value::Null) => None,
-                Some(v) => Some(v.as_f64().ok_or_else(|| invalid("max_cost must be a number"))?),
+                Some(v) => Some(
+                    v.as_f64()
+                        .ok_or_else(|| invalid("max_cost must be a number"))?,
+                ),
             },
         },
         Some(other) => {
@@ -927,7 +1055,10 @@ mod tests {
         let req = parse_request(&args, None).expect("valid");
         assert_eq!(req.source_item.expect("item").id, "doc:repo:My Plan%50.md");
         let plain = json!({ "agent": "cody", "title": "T", "source_item_id": "jira:CORE-1" });
-        assert_eq!(parse_request(&plain, None).unwrap().source_item.unwrap().id, "jira:CORE-1");
+        assert_eq!(
+            parse_request(&plain, None).unwrap().source_item.unwrap().id,
+            "jira:CORE-1"
+        );
     }
 
     #[test]
@@ -954,7 +1085,11 @@ mod tests {
             "git@github.com:CareFeed/portal.git",
             "  https://github.com/CAREFEED/portal\n",
         ] {
-            assert_eq!(org_from_remote_url(url).as_deref(), Some("Carefeed"), "{url:?}");
+            assert_eq!(
+                org_from_remote_url(url).as_deref(),
+                Some("Carefeed"),
+                "{url:?}"
+            );
         }
     }
 
@@ -965,7 +1100,11 @@ mod tests {
             "https://github.com/thehammer/nostromo",
             "ssh://git@github.com/TheHammer/nostromo.git",
         ] {
-            assert_eq!(org_from_remote_url(url).as_deref(), Some("Personal"), "{url:?}");
+            assert_eq!(
+                org_from_remote_url(url).as_deref(),
+                Some("Personal"),
+                "{url:?}"
+            );
         }
     }
 
@@ -1008,7 +1147,11 @@ mod tests {
             ("git@github-personal:thehammer/x.git", "Personal"),
             ("ssh://git@github.com-work/carefeed/x", "Carefeed"),
         ] {
-            assert_eq!(org_from_remote_url(url).as_deref(), Some(expected), "{url:?}");
+            assert_eq!(
+                org_from_remote_url(url).as_deref(),
+                Some(expected),
+                "{url:?}"
+            );
         }
     }
 

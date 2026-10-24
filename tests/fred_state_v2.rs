@@ -213,10 +213,7 @@ fn assert_no_secrets(what: &str, text: &str) {
         REFRESH_TOKEN,
         DEVICE_CODE_SECRET,
     ] {
-        assert!(
-            !text.contains(needle),
-            "{what} leaks {needle:?}: {text}"
-        );
+        assert!(!text.contains(needle), "{what} leaks {needle:?}: {text}");
     }
 }
 
@@ -355,10 +352,38 @@ fn mail(id: &str, subject: &str, is_read: bool, received: &str, name: &str, addr
 /// (m2 newest overall, m4 oldest). Expected order: m1, m3, m2, m4.
 fn standard_window() -> Vec<Value> {
     vec![
-        mail("m2", "FYI notes", true, "2026-10-12T15:00:00Z", "Bob Jones", "bob@x.com"),
-        mail("m3", "Older unread", false, "2026-10-12T13:00:00Z", "Carol Diaz", "carol@x.com"),
-        mail("m1", "Quarterly numbers", false, "2026-10-12T14:00:00Z", "Alice Smith", "alice@x.com"),
-        mail("m4", "Old read", true, "2026-10-12T09:00:00Z", "Dan Lee", "dan@x.com"),
+        mail(
+            "m2",
+            "FYI notes",
+            true,
+            "2026-10-12T15:00:00Z",
+            "Bob Jones",
+            "bob@x.com",
+        ),
+        mail(
+            "m3",
+            "Older unread",
+            false,
+            "2026-10-12T13:00:00Z",
+            "Carol Diaz",
+            "carol@x.com",
+        ),
+        mail(
+            "m1",
+            "Quarterly numbers",
+            false,
+            "2026-10-12T14:00:00Z",
+            "Alice Smith",
+            "alice@x.com",
+        ),
+        mail(
+            "m4",
+            "Old read",
+            true,
+            "2026-10-12T09:00:00Z",
+            "Dan Lee",
+            "dan@x.com",
+        ),
     ]
 }
 
@@ -499,12 +524,28 @@ async fn mailbox_unread_count_is_the_inbox_total_not_the_unread_items_in_the_fet
     mount_mail(&e, standard_window(), 42).await;
 
     let mut rx = spawn_mailbox(&e, timing(fast(), an_hour()));
-    let snap = wait_for(&mut rx, "a fresh mailbox", &[], |s| s.state == SourceState::Fresh).await;
+    let snap = wait_for(&mut rx, "a fresh mailbox", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
-    assert_eq!(snap.unread_count, 42, "count comes from unreadItemCount: {snap:?}");
-    assert_eq!(snap.items.len(), 4, "the window itself still lists its messages");
-    assert!(snap.updated_at.is_some(), "a successful fetch stamps updated_at");
-    assert!(!snap.stale && snap.error.is_none() && snap.auth_prompt.is_none(), "{snap:?}");
+    assert_eq!(
+        snap.unread_count, 42,
+        "count comes from unreadItemCount: {snap:?}"
+    );
+    assert_eq!(
+        snap.items.len(),
+        4,
+        "the window itself still lists its messages"
+    );
+    assert!(
+        snap.updated_at.is_some(),
+        "a successful fetch stamps updated_at"
+    );
+    assert!(
+        !snap.stale && snap.error.is_none() && snap.auth_prompt.is_none(),
+        "{snap:?}"
+    );
 }
 
 #[tokio::test]
@@ -513,17 +554,30 @@ async fn mailbox_lists_unread_first_then_newest_first_with_ids_links_and_vip_fla
     mount_mail(&e, standard_window(), 2).await;
 
     let mut rx = spawn_mailbox(&e, timing(fast(), an_hour()));
-    let snap = wait_for(&mut rx, "a fresh mailbox", &[], |s| s.state == SourceState::Fresh).await;
+    let snap = wait_for(&mut rx, "a fresh mailbox", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
-    assert_eq!(ids_of(&snap), ["m1", "m3", "m2", "m4"], "unread first, newest first: {snap:?}");
+    assert_eq!(
+        ids_of(&snap),
+        ["m1", "m3", "m2", "m4"],
+        "unread first, newest first: {snap:?}"
+    );
     assert!(!snap.items[0].is_read && !snap.items[1].is_read);
     assert!(snap.items[2].is_read && snap.items[3].is_read);
 
     let first = &snap.items[0];
     assert_eq!(first.subject, "Quarterly numbers");
     assert!(first.from.contains("Alice Smith"), "from: {}", first.from);
-    assert_eq!(first.web_link.as_deref(), Some("https://outlook.office.com/mail/m1"));
-    assert_eq!(first.received_at, Some("2026-10-12T14:00:00Z".parse().unwrap()));
+    assert_eq!(
+        first.web_link.as_deref(),
+        Some("https://outlook.office.com/mail/m1")
+    );
+    assert_eq!(
+        first.received_at,
+        Some("2026-10-12T14:00:00Z".parse().unwrap())
+    );
     assert!(first.vip, "alice@x.com is on the VIP list");
     assert!(
         snap.items[1..].iter().all(|i| !i.vip),
@@ -536,7 +590,10 @@ async fn mailbox_asks_graph_for_the_fields_the_snapshot_needs() {
     let e = env(true, &[]).await;
     mount_mail(&e, standard_window(), 2).await;
     let mut rx = spawn_mailbox(&e, timing(fast(), an_hour()));
-    wait_for(&mut rx, "a fresh mailbox", &[], |s| s.state == SourceState::Fresh).await;
+    wait_for(&mut rx, "a fresh mailbox", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
     let rs = reqs(&e.server).await;
     let first_delta = rs
@@ -549,13 +606,23 @@ async fn mailbox_asks_graph_for_the_fields_the_snapshot_needs() {
         .find(|(k, _)| k == "$select")
         .map(|(_, v)| v.into_owned())
         .expect("delta request has a $select");
-    for field in ["id", "webLink", "from", "subject", "receivedDateTime", "isRead"] {
+    for field in [
+        "id",
+        "webLink",
+        "from",
+        "subject",
+        "receivedDateTime",
+        "isRead",
+    ] {
         assert!(
             select.split(',').any(|f| f == field),
             "$select {select:?} lacks {field}"
         );
     }
-    let bearer = first_delta.headers.get("authorization").and_then(|v| v.to_str().ok());
+    let bearer = first_delta
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(bearer, Some(format!("Bearer {ACCESS_TOKEN}").as_str()));
 }
 
@@ -611,7 +678,10 @@ async fn mailbox_follows_pagination_and_then_continues_from_the_delta_link() {
             !q.contains("skiptoken") && !q.contains("deltatoken")
         })
         .count();
-    assert_eq!(full_syncs, 1, "only one initial sync; the rest follow the delta link");
+    assert_eq!(
+        full_syncs, 1,
+        "only one initial sync; the rest follow the delta link"
+    );
     assert!(
         delta_reqs
             .iter()
@@ -639,19 +709,41 @@ async fn mailbox_unread_count_is_refreshed_right_after_a_read_state_change_despi
     let flip_served = Arc::new(AtomicBool::new(false));
 
     {
-        let (first_served, flip_requested, flip_served) =
-            (first_served.clone(), flip_requested.clone(), flip_served.clone());
+        let (first_served, flip_requested, flip_served) = (
+            first_served.clone(),
+            flip_requested.clone(),
+            flip_served.clone(),
+        );
         mount_get(&e.server, DELTA, move |_: &Request| {
             if !first_served.swap(true, SeqCst) {
                 let window = vec![
-                    mail("m1", "Quarterly numbers", false, "2026-10-12T14:00:00Z", "Alice Smith", "alice@x.com"),
-                    mail("m2", "FYI notes", true, "2026-10-12T15:00:00Z", "Bob Jones", "bob@x.com"),
+                    mail(
+                        "m1",
+                        "Quarterly numbers",
+                        false,
+                        "2026-10-12T14:00:00Z",
+                        "Alice Smith",
+                        "alice@x.com",
+                    ),
+                    mail(
+                        "m2",
+                        "FYI notes",
+                        true,
+                        "2026-10-12T15:00:00Z",
+                        "Bob Jones",
+                        "bob@x.com",
+                    ),
                 ];
                 delta_page(&base, window, "d1")
             } else if flip_requested.load(SeqCst) && !flip_served.swap(true, SeqCst) {
                 // The user read m1 elsewhere: Graph reports the changed message.
                 let changed = vec![mail(
-                    "m1", "Quarterly numbers", true, "2026-10-12T14:00:00Z", "Alice Smith", "alice@x.com",
+                    "m1",
+                    "Quarterly numbers",
+                    true,
+                    "2026-10-12T14:00:00Z",
+                    "Alice Smith",
+                    "alice@x.com",
                 )];
                 delta_page(&base, changed, "d2")
             } else {
@@ -674,10 +766,17 @@ async fn mailbox_unread_count_is_refreshed_right_after_a_read_state_change_despi
     .await;
 
     flip_requested.store(true, SeqCst);
-    let snap = wait_for(&mut rx, "the refreshed count of 4", &[], |s| s.unread_count == 4).await;
+    let snap = wait_for(&mut rx, "the refreshed count of 4", &[], |s| {
+        s.unread_count == 4
+    })
+    .await;
 
     assert_eq!(snap.state, SourceState::Fresh, "{snap:?}");
-    let m1 = snap.items.iter().find(|i| i.id == "m1").expect("m1 still listed");
+    let m1 = snap
+        .items
+        .iter()
+        .find(|i| i.id == "m1")
+        .expect("m1 still listed");
     assert!(m1.is_read, "the changed message is shown as read: {snap:?}");
 }
 
@@ -687,13 +786,19 @@ async fn mailbox_does_not_refetch_the_unread_count_within_its_ttl_when_nothing_c
     mount_mail(&e, standard_window(), 7).await;
 
     let mut rx = spawn_mailbox(&e, timing(fast(), an_hour()));
-    wait_for(&mut rx, "a fresh mailbox", &[], |s| s.state == SourceState::Fresh).await;
+    wait_for(&mut rx, "a fresh mailbox", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
     // Let several poll cycles with an unchanged delta go by.
     wait_for_gets(&e.server, DELTA, 6).await;
 
     let folder_hits = count(&reqs(&e.server).await, "GET", FOLDER);
-    assert_eq!(folder_hits, 1, "unread count fetched once, then served from the ttl");
+    assert_eq!(
+        folder_hits, 1,
+        "unread count fetched once, then served from the ttl"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -713,7 +818,10 @@ async fn mailbox_with_an_empty_inbox_is_empty_not_fresh() {
 
     assert_eq!(snap.unread_count, 0);
     assert!(snap.items.is_empty());
-    assert!(snap.updated_at.is_some(), "an empty inbox is still a successful fetch");
+    assert!(
+        snap.updated_at.is_some(),
+        "an empty inbox is still a successful fetch"
+    );
     assert!(!snap.stale && snap.error.is_none(), "{snap:?}");
 }
 
@@ -743,11 +851,17 @@ async fn mailbox_failure_after_a_good_snapshot_is_stale_with_the_old_data_and_re
     mount_get(&e.server, FOLDER, |_: &Request| folder_count(42)).await;
 
     let mut rx = spawn_mailbox(&e, timing(fast(), an_hour()));
-    let good = wait_for(&mut rx, "a fresh mailbox", &[], |s| s.state == SourceState::Fresh).await;
+    let good = wait_for(&mut rx, "a fresh mailbox", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
     let good_at = good.updated_at.expect("fresh snapshot has updated_at");
 
     failing.store(true, SeqCst);
-    let stale = wait_for(&mut rx, "a stale mailbox", &[], |s| s.state == SourceState::Stale).await;
+    let stale = wait_for(&mut rx, "a stale mailbox", &[], |s| {
+        s.state == SourceState::Stale
+    })
+    .await;
 
     assert!(stale.stale, "{stale:?}");
     assert!(
@@ -764,15 +878,26 @@ async fn mailbox_failure_after_a_good_snapshot_is_stale_with_the_old_data_and_re
     wait_for_gets(&e.server, DELTA, delta_gets_so_far + 3).await;
     let later = rx.borrow().clone().expect("still published");
     assert_eq!(later.state, SourceState::Stale);
-    assert_eq!(later.updated_at, Some(stale_at), "failures must not look like fresh fetches");
+    assert_eq!(
+        later.updated_at,
+        Some(stale_at),
+        "failures must not look like fresh fetches"
+    );
 
     // Graph recovers: the source returns to Fresh by itself.
     failing.store(false, SeqCst);
     let back = wait_for(&mut rx, "recovery", &[], |s| s.state == SourceState::Fresh).await;
     assert!(back.error.is_none() && !back.stale, "{back:?}");
     assert_eq!(back.unread_count, 42);
-    assert_eq!(ids_of(&back), ids_of(&good), "the in-memory window survives the outage");
-    assert!(back.updated_at.unwrap() > stale_at, "recovery is a new successful fetch");
+    assert_eq!(
+        ids_of(&back),
+        ids_of(&good),
+        "the in-memory window survives the outage"
+    );
+    assert!(
+        back.updated_at.unwrap() > stale_at,
+        "recovery is a new successful fetch"
+    );
 }
 
 #[tokio::test]
@@ -788,8 +913,14 @@ async fn mailbox_failure_with_no_previous_data_is_an_error_never_fresh_or_empty(
     })
     .await;
     assert!(snap.items.is_empty(), "{snap:?}");
-    assert!(snap.error.as_deref().is_some_and(|r| !r.trim().is_empty()), "{snap:?}");
-    assert!(snap.updated_at.is_none(), "nothing has ever succeeded: {snap:?}");
+    assert!(
+        snap.error.as_deref().is_some_and(|r| !r.trim().is_empty()),
+        "{snap:?}"
+    );
+    assert!(
+        snap.updated_at.is_none(),
+        "nothing has ever succeeded: {snap:?}"
+    );
 
     // It keeps failing honestly over several more cycles.
     wait_for_gets(&e.server, DELTA, 4).await;
@@ -805,7 +936,12 @@ async fn mailbox_failure_with_no_previous_data_is_an_error_never_fresh_or_empty(
 #[tokio::test]
 async fn mailbox_when_only_the_unread_count_fetch_fails_it_is_an_error_not_a_confident_zero() {
     let e = env(true, &[]).await;
-    mount_get(&e.server, DELTA, window_then_quiet(e.base(), standard_window())).await;
+    mount_get(
+        &e.server,
+        DELTA,
+        window_then_quiet(e.base(), standard_window()),
+    )
+    .await;
     mount_get(&e.server, FOLDER, |_: &Request| server_error()).await;
 
     let mut rx = spawn_mailbox(&e, timing(fast(), an_hour()));
@@ -814,7 +950,10 @@ async fn mailbox_when_only_the_unread_count_fetch_fails_it_is_an_error_not_a_con
         s.state == SourceState::Error
     })
     .await;
-    assert!(snap.error.as_deref().is_some_and(|r| !r.trim().is_empty()), "{snap:?}");
+    assert!(
+        snap.error.as_deref().is_some_and(|r| !r.trim().is_empty()),
+        "{snap:?}"
+    );
 
     // Still never healthy after more cycles (the count is retried).
     wait_for_gets(&e.server, FOLDER, 3).await;
@@ -830,7 +969,8 @@ async fn mailbox_when_only_the_unread_count_fetch_fails_it_is_an_error_not_a_con
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn without_a_token_both_sources_show_one_shared_sign_in_prompt_then_recover_without_restart() {
+async fn without_a_token_both_sources_show_one_shared_sign_in_prompt_then_recover_without_restart()
+{
     let e = env(false, &["alice@x.com"]).await;
     let approve = Arc::new(AtomicBool::new(false));
     mount_oauth(&e.server, approve.clone()).await;
@@ -867,14 +1007,24 @@ async fn without_a_token_both_sources_show_one_shared_sign_in_prompt_then_recove
             p.expires_at
         );
     }
-    assert!(m.items.is_empty() && m.unread_count == 0, "no data while signed out: {m:?}");
-    assert!(c.events.is_empty() && c.next.is_none(), "no data while signed out: {c:?}");
+    assert!(
+        m.items.is_empty() && m.unread_count == 0,
+        "no data while signed out: {m:?}"
+    );
+    assert!(
+        c.events.is_empty() && c.next.is_none(),
+        "no data while signed out: {c:?}"
+    );
     assert!(m.error.as_deref().is_some_and(|r| !r.trim().is_empty()));
     assert!(c.error.as_deref().is_some_and(|r| !r.trim().is_empty()));
     assert!(m.updated_at.is_none() && c.updated_at.is_none());
 
     // The client also exposes the pending prompt.
-    let pending = e.graph.pending_prompt().await.expect("a device flow is in flight");
+    let pending = e
+        .graph
+        .pending_prompt()
+        .await
+        .expect("a device flow is in flight");
     assert_eq!(pending.user_code, "ABCD-EFGH");
 
     // Let several poll cycles pass while the user has not approved.
@@ -931,13 +1081,22 @@ async fn without_a_token_both_sources_show_one_shared_sign_in_prompt_then_recove
     assert!(!data_reqs.is_empty());
     for r in data_reqs {
         let auth = r.headers.get("authorization").and_then(|v| v.to_str().ok());
-        assert_eq!(auth, Some(format!("Bearer {ACCESS_TOKEN}").as_str()), "{}", r.url);
+        assert_eq!(
+            auth,
+            Some(format!("Bearer {ACCESS_TOKEN}").as_str()),
+            "{}",
+            r.url
+        );
     }
 
     // No tool output carries any token material either.
     let state = mcp_state(mrx.clone(), crx.clone());
     let (st, unread, cal) = tool_outputs(&state);
-    for (name, out) in [("get_state", st), ("list_unread_emails", unread), ("list_calendar_events", cal)] {
+    for (name, out) in [
+        ("get_state", st),
+        ("list_unread_emails", unread),
+        ("list_calendar_events", cal),
+    ] {
         assert_no_secrets(name, &out.to_string());
     }
 }
@@ -953,7 +1112,10 @@ async fn calendar_requests_exactly_todays_local_window_and_the_fields_it_needs()
 
     let offset = noon_offset();
     let mut rx = spawn_calendar(&e, timing_at(fast(), an_hour(), offset));
-    wait_for(&mut rx, "a fresh calendar", &[], |s| s.state == SourceState::Fresh).await;
+    wait_for(&mut rx, "a fresh calendar", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
     let (start, end) = today_window(Utc::now(), &offset);
     let rs = reqs(&e.server).await;
@@ -973,15 +1135,28 @@ async fn calendar_requests_exactly_todays_local_window_and_the_fields_it_needs()
     assert_eq!(param("endDateTime"), end.format(fmt).to_string());
     let select = param("$select");
     for field in [
-        "id", "subject", "start", "end", "responseStatus", "isCancelled", "webLink", "location",
-        "onlineMeeting", "organizer", "isAllDay",
+        "id",
+        "subject",
+        "start",
+        "end",
+        "responseStatus",
+        "isCancelled",
+        "webLink",
+        "location",
+        "onlineMeeting",
+        "organizer",
+        "isAllDay",
     ] {
-        assert!(select.split(',').any(|f| f == field), "$select {select:?} lacks {field}");
+        assert!(
+            select.split(',').any(|f| f == field),
+            "$select {select:?} lacks {field}"
+        );
     }
 }
 
 #[tokio::test]
-async fn calendar_sorts_by_start_keeps_new_fields_drops_outside_events_and_never_picks_cancelled_as_next() {
+async fn calendar_sorts_by_start_keeps_new_fields_drops_outside_events_and_never_picks_cancelled_as_next(
+) {
     let e = env(true, &[]).await;
     let now = whole_seconds_now();
     let mins = |n: i64| now + ChronoDuration::minutes(n);
@@ -992,7 +1167,8 @@ async fn calendar_sorts_by_start_keeps_new_fields_drops_outside_events_and_never
     let mut eng_sync = event("e-eng", "Eng sync", mins(90), mins(150));
     eng_sync["webLink"] = json!("https://outlook.office.com/calendar/item/e-eng");
     eng_sync["location"] = json!({ "displayName": "Room 4" });
-    eng_sync["onlineMeeting"] = json!({ "joinUrl": "https://teams.microsoft.com/l/meetup-join/abc" });
+    eng_sync["onlineMeeting"] =
+        json!({ "joinUrl": "https://teams.microsoft.com/l/meetup-join/abc" });
     eng_sync["organizer"] = json!({ "emailAddress": { "name": "Pat", "address": "pat@x.com" } });
 
     let mut flagged = event("e-flagged", "Planning", mins(30), mins(60));
@@ -1031,16 +1207,28 @@ async fn calendar_sorts_by_start_keeps_new_fields_drops_outside_events_and_never
 
     mount_calendar(
         &e.server,
-        vec![eng_sync, tomorrow, flagged, declined, yesterday, earlier, prefixed, overnight],
+        vec![
+            eng_sync, tomorrow, flagged, declined, yesterday, earlier, prefixed, overnight,
+        ],
     )
     .await;
 
     let mut rx = spawn_calendar(&e, timing_at(fast(), an_hour(), offset));
-    let snap = wait_for(&mut rx, "a fresh calendar", &[], |s| s.state == SourceState::Fresh).await;
+    let snap = wait_for(&mut rx, "a fresh calendar", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
     assert_eq!(
         titles_of(&snap),
-        ["Overnight", "Earlier today", "Planning", "Prefix only", "Declined thing", "Eng sync"],
+        [
+            "Overnight",
+            "Earlier today",
+            "Planning",
+            "Prefix only",
+            "Declined thing",
+            "Eng sync"
+        ],
         "sorted by start, outside-the-window events dropped, 'Canceled: ' stripped: {snap:?}"
     );
     assert!(snap.updated_at.is_some());
@@ -1065,12 +1253,19 @@ async fn calendar_sorts_by_start_keeps_new_fields_drops_outside_events_and_never
     // upcoming live event is the 90-minute-away Eng sync.
     let next = snap.next.as_ref().expect("there is an upcoming event");
     assert_eq!(next.title, "Eng sync", "{snap:?}");
-    assert!((88..=90).contains(&next.in_minutes), "in_minutes {}", next.in_minutes);
+    assert!(
+        (88..=90).contains(&next.in_minutes),
+        "in_minutes {}",
+        next.in_minutes
+    );
     assert_eq!(snap.sweater, "sage");
 
     // New fields.
     let eng = by_id(&snap, "e-eng");
-    assert_eq!(eng.web_link.as_deref(), Some("https://outlook.office.com/calendar/item/e-eng"));
+    assert_eq!(
+        eng.web_link.as_deref(),
+        Some("https://outlook.office.com/calendar/item/e-eng")
+    );
     assert_eq!(eng.location.as_deref(), Some("Room 4"));
     assert_eq!(
         eng.online_meeting_url.as_deref(),
@@ -1125,14 +1320,27 @@ async fn calendar_failure_after_a_good_snapshot_is_stale_with_the_old_events_and
     }
 
     let mut rx = spawn_calendar(&e, timing(fast(), an_hour()));
-    let good = wait_for(&mut rx, "a fresh calendar", &[], |s| s.state == SourceState::Fresh).await;
+    let good = wait_for(&mut rx, "a fresh calendar", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
     assert_eq!(good.events.len(), 1);
 
     failing.store(true, SeqCst);
-    let stale = wait_for(&mut rx, "a stale calendar", &[], |s| s.state == SourceState::Stale).await;
+    let stale = wait_for(&mut rx, "a stale calendar", &[], |s| {
+        s.state == SourceState::Stale
+    })
+    .await;
     assert!(stale.stale);
-    assert!(stale.error.as_deref().is_some_and(|r| !r.trim().is_empty()), "{stale:?}");
-    assert_eq!(titles_of(&stale), titles_of(&good), "previous events are retained");
+    assert!(
+        stale.error.as_deref().is_some_and(|r| !r.trim().is_empty()),
+        "{stale:?}"
+    );
+    assert_eq!(
+        titles_of(&stale),
+        titles_of(&good),
+        "previous events are retained"
+    );
     let stale_at = stale.updated_at.expect("updated_at is the last success");
     assert!(stale_at >= good.updated_at.unwrap());
 
@@ -1154,7 +1362,10 @@ async fn calendar_failure_with_no_previous_data_is_an_error_never_empty() {
     })
     .await;
     assert!(snap.events.is_empty());
-    assert!(snap.error.as_deref().is_some_and(|r| !r.trim().is_empty()), "{snap:?}");
+    assert!(
+        snap.error.as_deref().is_some_and(|r| !r.trim().is_empty()),
+        "{snap:?}"
+    );
     assert!(snap.updated_at.is_none());
 
     wait_for_gets(&e.server, CALENDAR_VIEW, 4).await;
@@ -1194,10 +1405,18 @@ fn today_window_in_cst_is_the_local_day_in_utc() {
 fn today_window_flips_to_the_next_day_exactly_at_local_midnight() {
     let cdt = west(5);
     let (before_start, _) = today_window(utc("2026-10-12T04:59:59Z"), &cdt);
-    assert_eq!(before_start, utc("2026-10-11T05:00:00Z"), "one second before local midnight");
+    assert_eq!(
+        before_start,
+        utc("2026-10-11T05:00:00Z"),
+        "one second before local midnight"
+    );
 
     let (start, end) = today_window(utc("2026-10-12T05:00:00Z"), &cdt);
-    assert_eq!(start, utc("2026-10-12T05:00:00Z"), "midnight itself belongs to the new day");
+    assert_eq!(
+        start,
+        utc("2026-10-12T05:00:00Z"),
+        "midnight itself belongs to the new day"
+    );
     assert_eq!(end, utc("2026-10-13T05:00:00Z"));
 
     let cst = west(6);
@@ -1221,10 +1440,17 @@ fn today_window_is_a_24_hour_local_day_containing_now_for_any_fixed_offset() {
             let now = first + ChronoDuration::minutes(hours * 37);
             let (start, end) = today_window(now, &offset);
             assert_eq!(end - start, ChronoDuration::hours(24), "{offset} @ {now}");
-            assert!(start <= now && now < end, "{offset}: {now} not in [{start}, {end})");
+            assert!(
+                start <= now && now < end,
+                "{offset}: {now} not in [{start}, {end})"
+            );
             let local_start = start.with_timezone(&offset);
             assert_eq!(
-                (local_start.hour(), local_start.minute(), local_start.second()),
+                (
+                    local_start.hour(),
+                    local_start.minute(),
+                    local_start.second()
+                ),
                 (0, 0, 0),
                 "{offset} @ {now}: window must start at local midnight"
             );
@@ -1314,8 +1540,16 @@ fn today_window_on_the_spring_forward_day_is_23_hours_long() {
     let tz = UsCentral2026;
     // Mid-morning CDT, after the 02:00 -> 03:00 jump.
     let (start, end) = today_window(utc("2026-03-08T15:00:00Z"), &tz);
-    assert_eq!(start, utc("2026-03-08T06:00:00Z"), "local midnight is still CST");
-    assert_eq!(end, utc("2026-03-09T05:00:00Z"), "next local midnight is CDT");
+    assert_eq!(
+        start,
+        utc("2026-03-08T06:00:00Z"),
+        "local midnight is still CST"
+    );
+    assert_eq!(
+        end,
+        utc("2026-03-09T05:00:00Z"),
+        "next local midnight is CDT"
+    );
     assert_eq!(end - start, ChronoDuration::hours(23));
 
     // Before the jump the same local day gives the same window.
@@ -1327,8 +1561,16 @@ fn today_window_on_the_spring_forward_day_is_23_hours_long() {
 fn today_window_on_the_fall_back_day_is_25_hours_long() {
     let tz = UsCentral2026;
     let (start, end) = today_window(utc("2026-11-01T12:00:00Z"), &tz);
-    assert_eq!(start, utc("2026-11-01T05:00:00Z"), "local midnight is still CDT");
-    assert_eq!(end, utc("2026-11-02T06:00:00Z"), "next local midnight is CST");
+    assert_eq!(
+        start,
+        utc("2026-11-01T05:00:00Z"),
+        "local midnight is still CDT"
+    );
+    assert_eq!(
+        end,
+        utc("2026-11-02T06:00:00Z"),
+        "next local midnight is CST"
+    );
     assert_eq!(end - start, ChronoDuration::hours(25));
 }
 
@@ -1377,8 +1619,18 @@ async fn mcp_tools_and_the_broadcast_report_exactly_what_the_live_sources_publis
     mount_calendar(
         &e.server,
         vec![
-            event("e1", "Eng sync", now + ChronoDuration::minutes(60), now + ChronoDuration::minutes(90)),
-            event("e2", "Retro", now + ChronoDuration::minutes(120), now + ChronoDuration::minutes(150)),
+            event(
+                "e1",
+                "Eng sync",
+                now + ChronoDuration::minutes(60),
+                now + ChronoDuration::minutes(90),
+            ),
+            event(
+                "e2",
+                "Retro",
+                now + ChronoDuration::minutes(120),
+                now + ChronoDuration::minutes(150),
+            ),
         ],
     )
     .await;
@@ -1387,8 +1639,14 @@ async fn mcp_tools_and_the_broadcast_report_exactly_what_the_live_sources_publis
     // what we read below is exactly what the tools will read.
     let mut mrx = spawn_mailbox(&e, timing(an_hour(), an_hour()));
     let mut crx = spawn_calendar(&e, timing(an_hour(), an_hour()));
-    let m = wait_for(&mut mrx, "a fresh mailbox", &[], |s| s.state == SourceState::Fresh).await;
-    let c = wait_for(&mut crx, "a fresh calendar", &[], |s| s.state == SourceState::Fresh).await;
+    let m = wait_for(&mut mrx, "a fresh mailbox", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
+    let c = wait_for(&mut crx, "a fresh calendar", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
     let state = mcp_state(mrx.clone(), crx.clone());
     let (st, unread, cal) = tool_outputs(&state);
@@ -1403,14 +1661,22 @@ async fn mcp_tools_and_the_broadcast_report_exactly_what_the_live_sources_publis
         .iter()
         .map(|i| i["id"].as_str().unwrap())
         .collect();
-    let snapshot_unread_ids: Vec<&str> =
-        m.items.iter().filter(|i| !i.is_read).map(|i| i.id.as_str()).collect();
+    let snapshot_unread_ids: Vec<&str> = m
+        .items
+        .iter()
+        .filter(|i| !i.is_read)
+        .map(|i| i.id.as_str())
+        .collect();
     assert_eq!(unread_ids, snapshot_unread_ids);
 
     // list_calendar_events
     assert_eq!(cal["state"], "fresh", "{cal}");
     assert_eq!(cal["updated_at"], json_of(&c.updated_at), "{cal}");
-    assert_eq!(cal["events"].as_array().map(Vec::len), Some(c.events.len()), "{cal}");
+    assert_eq!(
+        cal["events"].as_array().map(Vec::len),
+        Some(c.events.len()),
+        "{cal}"
+    );
 
     // get_state
     assert_eq!(st["state"], "fresh", "{st}");
@@ -1418,8 +1684,16 @@ async fn mcp_tools_and_the_broadcast_report_exactly_what_the_live_sources_publis
     assert_eq!(st["calendar_state"], json_of(&c.state), "{st}");
     assert_eq!(st["unread_count"], 42, "{st}");
     assert_eq!(st["today_event_count"], 2, "{st}");
-    assert_eq!(st["mailbox"].as_array().map(Vec::len), Some(m.items.len()), "{st}");
-    assert_eq!(st["calendar"].as_array().map(Vec::len), Some(c.events.len()), "{st}");
+    assert_eq!(
+        st["mailbox"].as_array().map(Vec::len),
+        Some(m.items.len()),
+        "{st}"
+    );
+    assert_eq!(
+        st["calendar"].as_array().map(Vec::len),
+        Some(c.events.len()),
+        "{st}"
+    );
     let stamps = [json_of(&m.updated_at), json_of(&c.updated_at)];
     assert!(stamps.contains(&st["updated_at"]), "{st}");
 
@@ -1441,7 +1715,8 @@ fn a_prompt() -> DeviceFlowPrompt {
 }
 
 #[tokio::test]
-async fn mcp_tools_and_the_broadcast_say_unauthenticated_with_the_prompt_and_never_fresh_or_empty() {
+async fn mcp_tools_and_the_broadcast_say_unauthenticated_with_the_prompt_and_never_fresh_or_empty()
+{
     let reason = "Sign in to Microsoft to see your mail and calendar";
     let mailbox = MailboxSnapshot {
         state: SourceState::Unauthenticated,
@@ -1458,10 +1733,17 @@ async fn mcp_tools_and_the_broadcast_say_unauthenticated_with_the_prompt_and_nev
     let state = mcp_state(fixed(mailbox.clone()), fixed(calendar.clone()));
     let (st, unread, cal) = tool_outputs(&state);
 
-    for (name, out) in [("get_state", &st), ("list_unread_emails", &unread), ("list_calendar_events", &cal)] {
+    for (name, out) in [
+        ("get_state", &st),
+        ("list_unread_emails", &unread),
+        ("list_calendar_events", &cal),
+    ] {
         assert_eq!(out["state"], "unauthenticated", "{name}: {out}");
         assert_eq!(out["reason"], reason, "{name}: {out}");
-        assert_eq!(out["auth"]["verification_uri"], "https://microsoft.com/devicelogin", "{name}: {out}");
+        assert_eq!(
+            out["auth"]["verification_uri"], "https://microsoft.com/devicelogin",
+            "{name}: {out}"
+        );
         assert_eq!(out["auth"]["user_code"], "ABCD-EFGH", "{name}: {out}");
         assert!(out["auth"]["expires_at"].is_string(), "{name}: {out}");
         assert_no_secrets(name, &out.to_string());
@@ -1496,16 +1778,27 @@ async fn mcp_tools_and_the_broadcast_say_stale_with_the_reason_and_the_retained_
     let calendar = CalendarSnapshot {
         state: SourceState::Fresh,
         updated_at: Some(utc("2026-10-10T15:01:00Z")),
-        events: vec![CalendarEvent { id: "e1".into(), title: "Eng sync".into(), ..Default::default() }],
+        events: vec![CalendarEvent {
+            id: "e1".into(),
+            title: "Eng sync".into(),
+            ..Default::default()
+        }],
         ..Default::default()
     };
     let state = mcp_state(fixed(mailbox.clone()), fixed(calendar.clone()));
     let (st, unread, _cal) = tool_outputs(&state);
 
     assert_eq!(unread["state"], "stale", "{unread}");
-    assert_eq!(unread["reason"], "Microsoft Graph is not responding", "{unread}");
+    assert_eq!(
+        unread["reason"], "Microsoft Graph is not responding",
+        "{unread}"
+    );
     assert_eq!(unread["unread_count"], 42, "{unread}");
-    assert_eq!(unread["items"].as_array().map(Vec::len), Some(2), "{unread}");
+    assert_eq!(
+        unread["items"].as_array().map(Vec::len),
+        Some(2),
+        "{unread}"
+    );
     assert_eq!(unread["updated_at"], json_of(&Some(mailbox_at)), "{unread}");
 
     assert_eq!(st["state"], "stale", "overall is the worse source: {st}");
@@ -1534,9 +1827,16 @@ async fn mcp_tools_and_the_broadcast_say_error_when_nothing_has_ever_been_fetche
     let state = mcp_state(fixed(mailbox.clone()), fixed(calendar.clone()));
     let (st, unread, cal) = tool_outputs(&state);
 
-    for (name, out) in [("get_state", &st), ("list_unread_emails", &unread), ("list_calendar_events", &cal)] {
+    for (name, out) in [
+        ("get_state", &st),
+        ("list_unread_emails", &unread),
+        ("list_calendar_events", &cal),
+    ] {
         assert_eq!(out["state"], "error", "{name}: {out}");
-        assert_eq!(out["reason"], "Microsoft Graph returned an error", "{name}: {out}");
+        assert_eq!(
+            out["reason"], "Microsoft Graph returned an error",
+            "{name}: {out}"
+        );
     }
     let msg = broadcast_of(&mailbox, &calendar);
     assert_eq!(msg["mailbox"]["state"], "error", "{msg}");
@@ -1568,7 +1868,10 @@ async fn mcp_today_event_count_does_not_count_cancelled_events() {
         state: SourceState::Fresh,
         updated_at: Some(utc("2026-10-10T15:00:00Z")),
         unread_count: 1,
-        items: vec![MailboxItem { id: "m1".into(), ..Default::default() }],
+        items: vec![MailboxItem {
+            id: "m1".into(),
+            ..Default::default()
+        }],
         ..Default::default()
     };
     let state = mcp_state(fixed(mailbox), fixed(calendar));
@@ -1591,8 +1894,14 @@ async fn across_sign_in_and_polling_every_graph_call_is_a_get_and_only_oauth_end
     let ttl = Duration::from_millis(150);
     let mut mrx = spawn_mailbox(&e, timing(fast(), ttl));
     let mut crx = spawn_calendar(&e, timing(fast(), ttl));
-    wait_for(&mut mrx, "a fresh mailbox", &[], |s| s.state == SourceState::Fresh).await;
-    wait_for(&mut crx, "a fresh calendar", &[], |s| s.state == SourceState::Fresh).await;
+    wait_for(&mut mrx, "a fresh mailbox", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
+    wait_for(&mut crx, "a fresh calendar", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
 
     // Several steady-state cycles on every endpoint (the short unread-count
     // ttl makes the folder endpoint get exercised repeatedly too).

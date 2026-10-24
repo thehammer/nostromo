@@ -33,29 +33,42 @@ struct Daemon {
 fn spawn() -> Daemon {
     let tmp = TempDir::new().unwrap();
     let socket_path = tmp.path().join("nostromd.sock");
-    let registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(tmp.path().join("panes.json"))));
-    let session_mgr =
-        Arc::new(Mutex::new(SessionManager::with_store_path(tmp.path().join("sessions.json"))));
+    let registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
+        tmp.path().join("panes.json"),
+    )));
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        tmp.path().join("sessions.json"),
+    )));
     session_mgr.lock().unwrap().configure_mcp_bridge(
         registry,
         tmp.path().join("mcp.sock"),
         tmp.path().join("mcp-config.json"),
     );
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
     let server = Server::bind(
         &socket_path,
         session_mgr,
         tmp.path().join("perri-state"),
         decisions,
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
-    Daemon { socket_path, server, _tmp: tmp }
+    Daemon {
+        socket_path,
+        server,
+        _tmp: tmp,
+    }
 }
 
 async fn send(s: &mut UnixStream, msg: &ClientMsg) {
-    write_frame(s, &serde_json::to_vec(msg).unwrap()).await.unwrap();
+    write_frame(s, &serde_json::to_vec(msg).unwrap())
+        .await
+        .unwrap();
 }
 
 /// Next frame, or a description of why the connection is no longer usable.
@@ -83,14 +96,31 @@ async fn sync(s: &mut UnixStream) -> Result<Vec<ServerMsg>, String> {
 /// replayed before the first Pong.
 async fn connect(d: &Daemon, topics: Vec<Topic>) -> (UnixStream, Vec<ServerMsg>) {
     let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
-    send(&mut s, &ClientMsg::Hello { client_id: "oversized-frame-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None })
-        .await;
+    send(
+        &mut s,
+        &ClientMsg::Hello {
+            client_id: "oversized-frame-it".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client_kind: None,
+        },
+    )
+    .await;
     match try_recv(&mut s).await {
         Ok(ServerMsg::Welcome { .. }) => {}
         other => panic!("expected Welcome, got {other:?}"),
     }
-    send(&mut s, &ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false }).await;
-    let replay = sync(&mut s).await.unwrap_or_else(|e| panic!("subscribe sync failed: {e}"));
+    send(
+        &mut s,
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions: false,
+            renders_approvals: false,
+        },
+    )
+    .await;
+    let replay = sync(&mut s)
+        .await
+        .unwrap_or_else(|e| panic!("subscribe sync failed: {e}"));
     (s, replay)
 }
 
@@ -119,7 +149,10 @@ fn teri_state(title: String) -> ServerMsg {
 /// A `TeriState` whose JSON is over `MAX_FRAME_LEN`.
 fn oversized_teri_state() -> ServerMsg {
     let msg = teri_state("x".repeat(5 * 1024 * 1024));
-    assert!(serde_json::to_vec(&msg).unwrap().len() > MAX_FRAME_LEN, "fixture must be oversized");
+    assert!(
+        serde_json::to_vec(&msg).unwrap().len() > MAX_FRAME_LEN,
+        "fixture must be oversized"
+    );
     msg
 }
 
@@ -136,7 +169,10 @@ async fn an_oversized_broadcast_is_dropped_and_the_subscribed_connection_stays_u
     let (mut client, _) = connect(&d, vec![Topic::Teri]).await;
 
     d.server.tx.send(oversized_teri_state()).unwrap();
-    d.server.tx.send(teri_state("small after the big one".into())).unwrap();
+    d.server
+        .tx
+        .send(teri_state("small after the big one".into()))
+        .unwrap();
 
     // The very next TeriState on the SAME connection is the small one.
     let got = loop {
@@ -149,11 +185,14 @@ async fn an_oversized_broadcast_is_dropped_and_the_subscribed_connection_stays_u
     assert_eq!(title_of(&got).as_deref(), Some("small after the big one"));
 
     // And the connection still answers requests.
-    sync(&mut client).await.unwrap_or_else(|why| panic!("Ping/Pong after the oversized frame failed: {why}"));
+    sync(&mut client)
+        .await
+        .unwrap_or_else(|why| panic!("Ping/Pong after the oversized frame failed: {why}"));
 }
 
 #[tokio::test]
-async fn a_client_connecting_while_an_oversized_frame_is_retained_still_gets_a_working_connection() {
+async fn a_client_connecting_while_an_oversized_frame_is_retained_still_gets_a_working_connection()
+{
     let d = spawn();
 
     // The oversized TeriState goes into the retained cache; a FredState after it
@@ -161,14 +200,20 @@ async fn a_client_connecting_while_an_oversized_frame_is_retained_still_gets_a_w
     d.server.tx.send(oversized_teri_state()).unwrap();
     d.server
         .tx
-        .send(ServerMsg::FredState { mailbox: MailboxSnapshot::default(), calendar: CalendarSnapshot::default() })
+        .send(ServerMsg::FredState {
+            mailbox: MailboxSnapshot::default(),
+            calendar: CalendarSnapshot::default(),
+        })
         .unwrap();
 
     // Connect afresh until the retained Fred frame is replayed (bounded retry).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let (mut client, replay) = connect(&d, vec![Topic::Teri, Topic::Fred]).await;
-        if replay.iter().any(|m| matches!(m, ServerMsg::FredState { .. })) {
+        if replay
+            .iter()
+            .any(|m| matches!(m, ServerMsg::FredState { .. }))
+        {
             // Welcome arrived and the replay did not hang (connect would have
             // panicked); the connection is usable.
             sync(&mut client)

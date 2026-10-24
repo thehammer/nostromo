@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use nostromo::approvals::audit::{self, AuditLog, Entry, Event};
-use nostromo::approvals::guard::{self, GuardVerdict, HookPayload, SystemPaneProbe, FAIL_CLOSED_MESSAGE};
+use nostromo::approvals::guard::{
+    self, GuardVerdict, HookPayload, SystemPaneProbe, FAIL_CLOSED_MESSAGE,
+};
 use nostromo::approvals::ApprovalsPaths;
 
 /// The largest hook payload accepted. Anything bigger is refused (blocked).
@@ -63,7 +65,10 @@ fn start_watchdog() {
 /// [`WATCHDOG`]; debug builds let a test shorten it.
 fn watchdog_delay() -> Duration {
     #[cfg(debug_assertions)]
-    if let Some(ms) = std::env::var("NOSTROMO_GUARD_TEST_WATCHDOG_MS").ok().and_then(|v| v.parse().ok()) {
+    if let Some(ms) = std::env::var("NOSTROMO_GUARD_TEST_WATCHDOG_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         return Duration::from_millis(ms);
     }
     WATCHDOG
@@ -80,13 +85,19 @@ fn run() -> Result<()> {
     }
 
     let mut input = Vec::new();
-    std::io::stdin().take(MAX_STDIN + 1).read_to_end(&mut input).context("reading stdin")?;
+    std::io::stdin()
+        .take(MAX_STDIN + 1)
+        .read_to_end(&mut input)
+        .context("reading stdin")?;
     if input.len() as u64 > MAX_STDIN {
         bail!("hook payload larger than {MAX_STDIN} bytes");
     }
-    let payload: HookPayload = serde_json::from_slice(&input).context("parsing the hook payload")?;
+    let payload: HookPayload =
+        serde_json::from_slice(&input).context("parsing the hook payload")?;
 
-    let GuardVerdict::Block { rule_id, detail } = guard::evaluate(&payload, &SystemPaneProbe::new())? else {
+    let GuardVerdict::Block { rule_id, detail } =
+        guard::evaluate(&payload, &SystemPaneProbe::new())?
+    else {
         return Ok(());
     };
     // Log first: a block nobody can find later is a failure, and an exit 2
@@ -101,7 +112,9 @@ fn run() -> Result<()> {
         },
         chrono::Utc::now(),
     );
-    entry.tag = std::env::var("NOSTROMO_FOCUS_TAG").ok().filter(|t| !t.is_empty());
+    entry.tag = std::env::var("NOSTROMO_FOCUS_TAG")
+        .ok()
+        .filter(|t| !t.is_empty());
     entry.session_id = payload.session_id;
     entry.tool_use_id = payload.tool_use_id;
     let paths = ApprovalsPaths::resolve();

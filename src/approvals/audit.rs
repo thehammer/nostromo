@@ -40,7 +40,11 @@ pub fn sanitize_recorded(input: &Value) -> Value {
     match input {
         Value::String(s) => Value::String(sanitize_string(s)),
         Value::Array(items) => Value::Array(items.iter().map(sanitize_recorded).collect()),
-        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), sanitize_recorded(v))).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), sanitize_recorded(v)))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -209,10 +213,15 @@ pub struct AuditLog {
 impl AuditLog {
     /// Open (creating with mode 0700 if needed) the store at `dir`.
     pub fn open(dir: &Path) -> io::Result<Self> {
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
         // An existing directory is tightened too: the log holds full tool inputs.
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        Ok(Self { dir: dir.to_path_buf() })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+        })
     }
 
     pub fn dir(&self) -> &Path {
@@ -221,7 +230,10 @@ impl AuditLog {
 
     /// The file an entry stamped `ts` goes to.
     pub fn file_for(&self, ts: DateTime<Utc>) -> PathBuf {
-        self.dir.join(format!("{FILE_PREFIX}{}{FILE_SUFFIX}", ts.format("%Y-%m-%d")))
+        self.dir.join(format!(
+            "{FILE_PREFIX}{}{FILE_SUFFIX}",
+            ts.format("%Y-%m-%d")
+        ))
     }
 
     /// Append one entry as one line (flock, one write, sync).
@@ -244,7 +256,11 @@ impl AuditLog {
 
     /// Entries with `range.start <= ts < range.end` matching `filter`, oldest
     /// first. Lines that don't parse are skipped.
-    pub fn read(&self, range: Range<DateTime<Utc>>, filter: &AuditFilter) -> io::Result<Vec<Entry>> {
+    pub fn read(
+        &self,
+        range: Range<DateTime<Utc>>,
+        filter: &AuditFilter,
+    ) -> io::Result<Vec<Entry>> {
         let mut out = Vec::new();
         self.for_each(range, filter, |e| out.push(e))?;
         out.sort_by_key(|e| e.ts);
@@ -272,8 +288,14 @@ impl AuditLog {
                     return;
                 };
                 if range.contains(&entry.ts)
-                    && filter.tag.as_ref().is_none_or(|t| entry.tag.as_ref() == Some(t))
-                    && filter.event.as_ref().is_none_or(|k| entry.event.kind() == k)
+                    && filter
+                        .tag
+                        .as_ref()
+                        .is_none_or(|t| entry.tag.as_ref() == Some(t))
+                    && filter
+                        .event
+                        .as_ref()
+                        .is_none_or(|k| entry.event.kind() == k)
                 {
                     f(entry);
                 }

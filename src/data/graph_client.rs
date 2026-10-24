@@ -82,13 +82,18 @@ impl GraphHttpError {
     /// Graph is throttling us: a 429, or a 503 that says when to come back.
     pub fn is_throttle(&self) -> bool {
         self.status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || (self.status == reqwest::StatusCode::SERVICE_UNAVAILABLE && self.retry_after.is_some())
+            || (self.status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                && self.retry_after.is_some())
     }
 }
 
 impl std::fmt::Display for GraphHttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Graph GET {} -> {}: {}", self.url, self.status, self.body)
+        write!(
+            f,
+            "Graph GET {} -> {}: {}",
+            self.url, self.status, self.body
+        )
     }
 }
 
@@ -106,7 +111,9 @@ pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<std::time::D
     let wait = if let Ok(secs) = value.parse::<u64>() {
         std::time::Duration::from_secs(secs)
     } else {
-        let when = DateTime::parse_from_rfc2822(value).ok()?.with_timezone(&Utc);
+        let when = DateTime::parse_from_rfc2822(value)
+            .ok()?
+            .with_timezone(&Utc);
         (when - now).to_std().unwrap_or(std::time::Duration::ZERO)
     };
     Some(wait.min(MAX_RETRY_AFTER))
@@ -173,7 +180,10 @@ pub fn failure_reason(what: &str, e: &anyhow::Error) -> String {
             _ => format!("{what}: Microsoft Graph returned {code}"),
         };
     }
-    if e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout())) {
+    if e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_connect() || r.is_timeout())
+    }) {
         return format!("{what}: could not reach Microsoft Graph");
     }
     format!("{what}: unexpected response from Microsoft Graph")
@@ -242,8 +252,9 @@ impl GraphClient {
     /// one device flow (two clients would issue two sign-in codes).
     pub async fn shared(client_id: String, tenant: String, cache_path: PathBuf) -> Result<Self> {
         type Key = (String, String, PathBuf);
-        static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Key, GraphClient>>> =
-            std::sync::OnceLock::new();
+        static REGISTRY: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<Key, GraphClient>>,
+        > = std::sync::OnceLock::new();
         let registry = REGISTRY.get_or_init(Default::default);
         let key = (client_id.clone(), tenant.clone(), cache_path.clone());
         if let Some(existing) = registry.lock().expect("graph registry").get(&key) {
@@ -489,9 +500,7 @@ impl GraphClient {
         for (name, value) in headers {
             req = req.header(*name, *value);
         }
-        req.send()
-            .await
-            .with_context(|| format!("GET {url}"))
+        req.send().await.with_context(|| format!("GET {url}"))
     }
 
     async fn refresh_once(&self) -> Result<()> {
@@ -547,7 +556,10 @@ impl GraphClient {
     }
 
     async fn start_device_flow(&self) -> Result<DeviceFlowPrompt> {
-        let url = format!("{}/{}/oauth2/v2.0/devicecode", self.opts.login_base, self.tenant);
+        let url = format!(
+            "{}/{}/oauth2/v2.0/devicecode",
+            self.opts.login_base, self.tenant
+        );
         let params = [("client_id", self.client_id.as_str()), ("scope", SCOPES)];
 
         let dc: DeviceCodeResponse = self
@@ -573,9 +585,12 @@ impl GraphClient {
         // Spawn background poll task.
         let client = self.clone();
         let device_code = dc.device_code.clone();
-        let poll_interval = std::time::Duration::from_secs(dc.interval).max(self.opts.min_device_poll);
+        let poll_interval =
+            std::time::Duration::from_secs(dc.interval).max(self.opts.min_device_poll);
         tokio::spawn(async move {
-            client.poll_device_code(&device_code, poll_interval, expires_at).await;
+            client
+                .poll_device_code(&device_code, poll_interval, expires_at)
+                .await;
         });
 
         Ok(prompt)
@@ -601,13 +616,7 @@ impl GraphClient {
                 break;
             }
 
-            let resp: TokenResponse = match self
-                .http
-                .post(&url)
-                .form(&params)
-                .send()
-                .await
-            {
+            let resp: TokenResponse = match self.http.post(&url).form(&params).send().await {
                 // Azure answers "still pending" / "expired" with HTTP 400 and a
                 // JSON `error` body, so the body (not the status) decides.
                 Ok(r) => match r.json().await {
@@ -763,7 +772,13 @@ async fn ensure_success(resp: reqwest::Response, url: &str) -> Result<reqwest::R
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_retry_after(v, Utc::now()));
     let body = resp.text().await.unwrap_or_default();
-    Err(GraphHttpError { status, url: url.to_owned(), body, retry_after }.into())
+    Err(GraphHttpError {
+        status,
+        url: url.to_owned(),
+        body,
+        retry_after,
+    }
+    .into())
 }
 
 /// The `value` array of a collection page. A page without one (including a
@@ -793,7 +808,10 @@ mod tests {
     #[test]
     fn graph_client_only_issues_get_requests_to_graph_and_posts_only_to_oauth() {
         let src = include_str!("graph_client.rs");
-        let code = src.split("#[cfg(test)]").next().expect("source before tests");
+        let code = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source before tests");
         for verb in [".put(", ".patch(", ".delete(", ".request("] {
             assert!(!code.contains(verb), "graph_client.rs must not use {verb}");
         }

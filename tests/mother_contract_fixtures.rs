@@ -47,7 +47,8 @@ fn fixture_dir() -> PathBuf {
 
 fn events(name: &str) -> Vec<Value> {
     let path = fixture_dir().join(format!("{name}.ndjson"));
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{name}: bad NDJSON line: {e}")))
@@ -69,7 +70,8 @@ fn snapshot_jobs(name: &str) -> Vec<MotherJob> {
     assert!(!arrays.is_empty(), "{name} has no snapshot event");
     let mut out = vec![];
     for jobs in arrays {
-        let (decoded, skipped) = parse_jobs(&serde_json::to_vec(&jobs).unwrap()).expect("jobs array parses");
+        let (decoded, skipped) =
+            parse_jobs(&serde_json::to_vec(&jobs).unwrap()).expect("jobs array parses");
         assert_eq!(skipped, 0, "{name}: no fixture job may be skipped");
         out.extend(decoded);
     }
@@ -85,7 +87,9 @@ fn fixture_job_json(name: &str, id: &str) -> Value {
 }
 
 fn find<'a>(jobs: &'a [MotherJob], id: &str) -> &'a MotherJob {
-    jobs.iter().find(|j| j.id == id).unwrap_or_else(|| panic!("{id} not decoded"))
+    jobs.iter()
+        .find(|j| j.id == id)
+        .unwrap_or_else(|| panic!("{id} not decoded"))
 }
 
 fn job_from(v: Value) -> MotherJob {
@@ -130,14 +134,22 @@ fn warn_lines(log: &str) -> Vec<&str> {
 }
 
 /// The error classes the daemon's content-free warnings use (see `decode.rs`).
-const ERROR_CLASSES: [&str; 4] = ["invalid type", "invalid value", "missing field", "decode error"];
+const ERROR_CLASSES: [&str; 4] = [
+    "invalid type",
+    "invalid value",
+    "missing field",
+    "decode error",
+];
 
 // ── comparison helpers ────────────────────────────────────────────────────────
 
 /// The MC1 keys of a job as seen on its serialized form; an absent key reads as `null`.
 fn crew_view(job: &MotherJob) -> BTreeMap<&'static str, Value> {
     let v = serde_json::to_value(job).unwrap();
-    NEW_KEYS.iter().map(|k| (*k, v.get(*k).cloned().unwrap_or(Value::Null))).collect()
+    NEW_KEYS
+        .iter()
+        .map(|k| (*k, v.get(*k).cloned().unwrap_or(Value::Null)))
+        .collect()
 }
 
 /// Everything about a job EXCEPT its id and the MC1 keys.
@@ -169,7 +181,13 @@ fn decode_one(value: Value) -> (Vec<MotherJob>, usize, String) {
 /// (never skipped), `broken_key` fell back to its default while every other MC1
 /// key and every legacy key is exactly what the unmodified job decodes to, and
 /// the single warning names the key without echoing any of `poisons`.
-fn assert_lenient(original: &Value, unique_id: &str, broken_key: &str, poisons: &[&str], mutate: impl FnOnce(&mut Value)) -> MotherJob {
+fn assert_lenient(
+    original: &Value,
+    unique_id: &str,
+    broken_key: &str,
+    poisons: &[&str],
+    mutate: impl FnOnce(&mut Value),
+) -> MotherJob {
     let (baseline, skipped, _) = decode_one(original.clone());
     assert_eq!(skipped, 0);
     let baseline = &baseline[0];
@@ -179,7 +197,10 @@ fn assert_lenient(original: &Value, unique_id: &str, broken_key: &str, poisons: 
     mutate(&mut mutated);
     let (jobs, skipped, log) = decode_one(mutated);
 
-    assert_eq!(skipped, 0, "a malformed `{broken_key}` must not skip the job; log: {log}");
+    assert_eq!(
+        skipped, 0,
+        "a malformed `{broken_key}` must not skip the job; log: {log}"
+    );
     assert_eq!(jobs.len(), 1, "the job must be retained");
     let job = jobs.into_iter().next().unwrap();
     assert_eq!(job.id, unique_id);
@@ -187,23 +208,45 @@ fn assert_lenient(original: &Value, unique_id: &str, broken_key: &str, poisons: 
     let (before, after) = (crew_view(baseline), crew_view(&job));
     for key in NEW_KEYS {
         if key == broken_key {
-            assert_eq!(after[key], Value::Null, "`{key}` must fall back to its default");
+            assert_eq!(
+                after[key],
+                Value::Null,
+                "`{key}` must fall back to its default"
+            );
         } else {
-            assert_eq!(after[key], before[key], "`{key}` must be untouched by a broken `{broken_key}`");
+            assert_eq!(
+                after[key], before[key],
+                "`{key}` must be untouched by a broken `{broken_key}`"
+            );
         }
     }
-    assert_eq!(legacy_view(&job), legacy_view(baseline), "legacy keys must be untouched");
+    assert_eq!(
+        legacy_view(&job),
+        legacy_view(baseline),
+        "legacy keys must be untouched"
+    );
 
     let warns = warn_lines(&log);
-    assert_eq!(warns.len(), 1, "exactly one warning expected, got {warns:?}");
-    assert!(warns[0].contains(broken_key), "the warning must name `{broken_key}`: {}", warns[0]);
+    assert_eq!(
+        warns.len(),
+        1,
+        "exactly one warning expected, got {warns:?}"
+    );
+    assert!(
+        warns[0].contains(broken_key),
+        "the warning must name `{broken_key}`: {}",
+        warns[0]
+    );
     assert!(
         ERROR_CLASSES.iter().any(|c| warns[0].contains(c)),
         "the warning must carry an error class: {}",
         warns[0]
     );
     for poison in poisons {
-        assert!(!log.contains(poison), "log leaked payload value `{poison}`: {log}");
+        assert!(
+            !log.contains(poison),
+            "log leaked payload value `{poison}`: {log}"
+        );
     }
     job
 }
@@ -229,24 +272,46 @@ fn gates_fix_pass_snapshot_decodes_with_the_contract_values() {
     assert_eq!(job.state, "running");
     assert_eq!(job.activity.as_deref(), Some("gate_fix"));
     assert!(job.crew_opt_in, "the fixture job carries a `crew` key");
-    assert_eq!(job.pr_url.as_deref(), Some("https://github.com/Carefeed/admin-portal/pull/42"));
+    assert_eq!(
+        job.pr_url.as_deref(),
+        Some("https://github.com/Carefeed/admin-portal/pull/42")
+    );
 
     let gates = job.gates.as_ref().expect("gates");
     assert_eq!(gates.attempt, Some(1));
     assert_eq!(gates.max_attempts, Some(3));
     assert_eq!(gates.mode.as_deref(), Some("enforce"));
     assert_eq!(gates.status.as_deref(), Some("failed"));
-    assert_eq!(gates.head_sha.as_deref(), Some("0000000000000000000000000000000000000002"));
     assert_eq!(
-        gates.results.iter().map(|g| (g.name.as_str(), g.result.as_str())).collect::<Vec<_>>(),
-        [("clean_tree", "passed"), ("pushed", "passed"), ("lint", "passed"), ("unit", "failed"), ("static", "passed")]
+        gates.head_sha.as_deref(),
+        Some("0000000000000000000000000000000000000002")
+    );
+    assert_eq!(
+        gates
+            .results
+            .iter()
+            .map(|g| (g.name.as_str(), g.result.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("clean_tree", "passed"),
+            ("pushed", "passed"),
+            ("lint", "passed"),
+            ("unit", "failed"),
+            ("static", "passed")
+        ]
     );
     assert!(gates.not_run.is_empty());
-    assert!(!gates.overridden, "a recording without an `override` key is not an override");
+    assert!(
+        !gates.overridden,
+        "a recording without an `override` key is not an override"
+    );
 
     let progress = job.progress.as_ref().expect("progress");
     assert_eq!(progress.pct, Some(80));
-    assert_eq!(progress.label.as_deref(), Some("\u{2248}80% \u{b7} gates \u{2717} attempt 1/3 \u{b7} ETA ?"));
+    assert_eq!(
+        progress.label.as_deref(),
+        Some("\u{2248}80% \u{b7} gates \u{2717} attempt 1/3 \u{b7} ETA ?")
+    );
     assert_eq!(progress.stage.as_deref(), Some("rework"));
     assert!(!progress.paused);
     assert!(progress.flags.is_empty());
@@ -256,7 +321,11 @@ fn gates_fix_pass_snapshot_decodes_with_the_contract_values() {
     assert_eq!((eta.lo_s, eta.hi_s), (None, None));
     let signals = progress.signals.as_ref().expect("signals");
     assert_eq!(signals.elapsed_active_s, Some(120));
-    assert_eq!(signals.cost, Some(0.0), "`signals.cost` is an object now; its `usd` is read");
+    assert_eq!(
+        signals.cost,
+        Some(0.0),
+        "`signals.cost` is an object now; its `usd` is read"
+    );
 
     assert!(job.review_wave.is_none() && job.decision.is_none());
     assert!(job.attention.is_empty() && job.attention_reasons.is_empty());
@@ -280,16 +349,43 @@ fn lens_wave_snapshot_decodes_with_the_contract_values() {
         ["perri:correctness", "perri:phi-security", "perri:tests", "perri:ops-infra"],
         "lenses keep Mother's order; the adherence reviewer is reported under `adherence`, not in `lenses`"
     );
-    let correctness = wave.lenses.iter().find(|l| l.reviewer == "perri:correctness").expect("correctness lens");
-    assert_eq!((correctness.lens.as_str(), correctness.state.as_str()), ("correctness", "running"));
-    let ops = wave.lenses.iter().find(|l| l.reviewer == "perri:ops-infra").expect("ops-infra lens");
+    let correctness = wave
+        .lenses
+        .iter()
+        .find(|l| l.reviewer == "perri:correctness")
+        .expect("correctness lens");
+    assert_eq!(
+        (correctness.lens.as_str(), correctness.state.as_str()),
+        ("correctness", "running")
+    );
+    let ops = wave
+        .lenses
+        .iter()
+        .find(|l| l.reviewer == "perri:ops-infra")
+        .expect("ops-infra lens");
     assert_eq!(ops.lens, "ops-infra");
     assert_eq!(ops.state, "skipped");
     assert_eq!(ops.skip_reason.as_deref(), Some("path_scope"));
-    assert_eq!(ops.findings, LensFindings { blocking: 0, advisory: 0 });
-    assert_eq!(wave.adherence.as_ref().and_then(|a| a.state.as_deref()), Some("running"));
+    assert_eq!(
+        ops.findings,
+        LensFindings {
+            blocking: 0,
+            advisory: 0
+        }
+    );
+    assert_eq!(
+        wave.adherence.as_ref().and_then(|a| a.state.as_deref()),
+        Some("running")
+    );
     assert_eq!(wave.coverage_gaps, Some(0));
-    assert_eq!(wave.claims, Some(ClaimCounts { verified: 0, refuted: 0, unverified: 0 }));
+    assert_eq!(
+        wave.claims,
+        Some(ClaimCounts {
+            verified: 0,
+            refuted: 0,
+            unverified: 0
+        })
+    );
 }
 
 #[test]
@@ -305,12 +401,29 @@ fn gate_hold_snapshot_decodes_with_the_contract_values() {
     assert_eq!(decision.id, "d-0001");
     assert_eq!(decision.kind, "gate_hold");
     assert_eq!(
-        decision.options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
-        ["resume_with_guidance", "escalate", "override_open", "cancel"]
+        decision
+            .options
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "resume_with_guidance",
+            "escalate",
+            "override_open",
+            "cancel"
+        ]
     );
     for option in &decision.options {
-        assert_eq!(option.takes_text, option.id == "resume_with_guidance", "takes_text on {}", option.id);
-        assert!(!option.label.is_empty() && !option.consequence.is_empty(), "{option:?}");
+        assert_eq!(
+            option.takes_text,
+            option.id == "resume_with_guidance",
+            "takes_text on {}",
+            option.id
+        );
+        assert!(
+            !option.label.is_empty() && !option.consequence.is_empty(),
+            "{option:?}"
+        );
     }
     assert_eq!(decision.options[0].label, "Resume with guidance");
 
@@ -325,8 +438,15 @@ fn gate_hold_snapshot_decodes_with_the_contract_values() {
     assert_eq!(gates.status.as_deref(), Some("failed"));
     assert_eq!((gates.attempt, gates.max_attempts), (Some(2), Some(2)));
     assert_eq!(gates.results.len(), 3);
-    let unit = gates.results.iter().find(|g| g.name == "unit").expect("unit result");
-    assert_eq!((unit.name.as_str(), unit.result.as_str()), ("unit", "failed"));
+    let unit = gates
+        .results
+        .iter()
+        .find(|g| g.name == "unit")
+        .expect("unit result");
+    assert_eq!(
+        (unit.name.as_str(), unit.result.as_str()),
+        ("unit", "failed")
+    );
     assert!(unit.blocking);
     assert_eq!((unit.duration_s, unit.exit_code), (Some(1), Some(1)));
     assert_eq!(unit.unavailable_reason, None);
@@ -336,17 +456,27 @@ fn gate_hold_snapshot_decodes_with_the_contract_values() {
 fn every_progress_updated_event_decodes_as_a_progress_overlay() {
     let mut seen = 0;
     for name in FIXTURES {
-        for event in events(name).into_iter().filter(|e| e["t"] == "progress_updated") {
+        for event in events(name)
+            .into_iter()
+            .filter(|e| e["t"] == "progress_updated")
+        {
             let mut data = event["data"].clone();
             let obj = data.as_object_mut().expect("data object");
             obj.remove("job");
             obj.remove("category");
-            let p: CrewProgress = serde_json::from_value(data).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert!(p.pct.is_some() && p.eta.is_some() && p.signals.is_some(), "{name}: {p:?}");
+            let p: CrewProgress =
+                serde_json::from_value(data).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                p.pct.is_some() && p.eta.is_some() && p.signals.is_some(),
+                "{name}: {p:?}"
+            );
             seen += 1;
         }
     }
-    assert_eq!(seen, 8, "the three recordings carry 3 + 3 + 2 progress_updated events");
+    assert_eq!(
+        seen, 8,
+        "the three recordings carry 3 + 3 + 2 progress_updated events"
+    );
 }
 
 #[test]
@@ -361,15 +491,37 @@ fn gates_fix_pass_progress_events_carry_the_documented_percentages_and_gate_sign
             serde_json::from_value(d).expect("progress decodes")
         })
         .collect();
-    assert_eq!(progress.iter().map(|p| p.pct).collect::<Vec<_>>(), [Some(5), Some(80), Some(100)]);
+    assert_eq!(
+        progress.iter().map(|p| p.pct).collect::<Vec<_>>(),
+        [Some(5), Some(80), Some(100)]
+    );
     let first = progress[0].signals.as_ref().and_then(|s| s.gates.clone());
     assert_eq!(first, None, "no gate signal before the gates have run");
     let second = progress[1].signals.as_ref().and_then(|s| s.gates.clone());
-    assert_eq!(second, Some(GateSignal { passed: 4, failed: 1, total: 5 }));
-    assert_eq!(progress[0].label.as_deref(), Some("\u{2248}5% \u{b7} ETA ?"));
-    assert_eq!(progress[2].eta.as_ref().and_then(|e| e.label.as_deref()), Some(""));
-    let stamps: Vec<_> = progress.iter().map(|p| p.updated_at.clone().expect("updated_at")).collect();
-    assert!(stamps.windows(2).all(|w| w[0] < w[1]), "updated_at increases across recorded progress events: {stamps:?}");
+    assert_eq!(
+        second,
+        Some(GateSignal {
+            passed: 4,
+            failed: 1,
+            total: 5
+        })
+    );
+    assert_eq!(
+        progress[0].label.as_deref(),
+        Some("\u{2248}5% \u{b7} ETA ?")
+    );
+    assert_eq!(
+        progress[2].eta.as_ref().and_then(|e| e.label.as_deref()),
+        Some("")
+    );
+    let stamps: Vec<_> = progress
+        .iter()
+        .map(|p| p.updated_at.clone().expect("updated_at"))
+        .collect();
+    assert!(
+        stamps.windows(2).all(|w| w[0] < w[1]),
+        "updated_at increases across recorded progress events: {stamps:?}"
+    );
 }
 
 // ── per-key leniency (B2): mutation cases built from fixture jobs ────────────
@@ -377,35 +529,63 @@ fn gates_fix_pass_progress_events_carry_the_documented_percentages_and_gate_sign
 #[test]
 fn a_gates_value_that_is_a_string_costs_only_the_gates_key() {
     let original = kitchen_sink();
-    let job = assert_lenient(&original, "mut-gates-string", "gates", &["SECRET-PAYLOAD-123"], |j| {
-        j["gates"] = json!("SECRET-PAYLOAD-123");
-    });
+    let job = assert_lenient(
+        &original,
+        "mut-gates-string",
+        "gates",
+        &["SECRET-PAYLOAD-123"],
+        |j| {
+            j["gates"] = json!("SECRET-PAYLOAD-123");
+        },
+    );
     assert!(job.gates.is_none());
-    assert!(job.open_decision().is_some(), "the decision beside it survives");
+    assert!(
+        job.open_decision().is_some(),
+        "the decision beside it survives"
+    );
     assert!(job.review_wave.is_some() && job.progress.is_some());
 }
 
 #[test]
 fn review_wave_lenses_that_are_a_number_cost_only_the_review_wave_key() {
     let original = fixture_job_json("lens_wave", "j-wave1");
-    let job = assert_lenient(&original, "mut-wave-lenses-number", "review_wave", &["SECRET-PAYLOAD-456"], |j| {
-        set(j, "/review_wave/lenses", json!(7));
-        set(j, "/review_wave/mode", json!("SECRET-PAYLOAD-456"));
-    });
+    let job = assert_lenient(
+        &original,
+        "mut-wave-lenses-number",
+        "review_wave",
+        &["SECRET-PAYLOAD-456"],
+        |j| {
+            set(j, "/review_wave/lenses", json!(7));
+            set(j, "/review_wave/mode", json!("SECRET-PAYLOAD-456"));
+        },
+    );
     assert!(job.review_wave.is_none());
     assert_eq!(job.activity.as_deref(), Some("review_wave"));
-    assert_eq!(job.pr_url.as_deref(), Some("https://github.com/Carefeed/admin-portal/pull/42"));
+    assert_eq!(
+        job.pr_url.as_deref(),
+        Some("https://github.com/Carefeed/admin-portal/pull/42")
+    );
 }
 
 #[test]
 fn progress_eta_that_is_an_empty_array_costs_only_the_progress_key() {
     let original = fixture_job_json("gates_fix_pass", "j-gates1");
-    let job = assert_lenient(&original, "mut-progress-eta-array", "progress", &["SECRET-PAYLOAD-789"], |j| {
-        set(j, "/progress/eta", json!([]));
-        set(j, "/progress/label", json!("SECRET-PAYLOAD-789"));
-    });
+    let job = assert_lenient(
+        &original,
+        "mut-progress-eta-array",
+        "progress",
+        &["SECRET-PAYLOAD-789"],
+        |j| {
+            set(j, "/progress/eta", json!([]));
+            set(j, "/progress/label", json!("SECRET-PAYLOAD-789"));
+        },
+    );
     assert!(job.progress.is_none());
-    assert_eq!(job.gates.as_ref().and_then(|g| g.attempt), Some(1), "gates survive a broken progress overlay");
+    assert_eq!(
+        job.gates.as_ref().and_then(|g| g.attempt),
+        Some(1),
+        "gates survive a broken progress overlay"
+    );
     assert_eq!(job.activity.as_deref(), Some("gate_fix"));
 }
 
@@ -420,14 +600,21 @@ fn an_unknown_gate_result_value_is_not_an_error_and_survives_verbatim() {
     assert_eq!(skipped, 0);
     let job = &jobs[0];
     assert_eq!(job.gates.as_ref().unwrap().results[2].result, "flaky");
-    assert!(warn_lines(&log).is_empty(), "an unknown value is not worth a warning: {log}");
+    assert!(
+        warn_lines(&log).is_empty(),
+        "an unknown value is not worth a warning: {log}"
+    );
 
     let (baseline, _, _) = decode_one(original);
     let (a, b) = (crew_view(job), crew_view(&baseline[0]));
     for key in NEW_KEYS.iter().filter(|k| **k != "gates") {
         assert_eq!(a[key], b[key], "`{key}`");
     }
-    assert_eq!(job.gates.as_ref().unwrap().results[0].name, "clean_tree", "the rest of the gate entry is intact");
+    assert_eq!(
+        job.gates.as_ref().unwrap().results[0].name,
+        "clean_tree",
+        "the rest of the gate entry is intact"
+    );
 }
 
 #[test]
@@ -435,16 +622,32 @@ fn an_unknown_decision_option_id_is_not_an_error_and_survives_verbatim() {
     let original = fixture_job_json("gate_hold_answered", "j-hold1");
     let mut mutated = original.clone();
     mutated["id"] = json!("mut-option-future");
-    set(&mut mutated, "/decision/options/1/id", json!("future_option"));
+    set(
+        &mut mutated,
+        "/decision/options/1/id",
+        json!("future_option"),
+    );
 
     let (jobs, skipped, log) = decode_one(mutated);
     assert_eq!(skipped, 0);
     let decision = jobs[0].open_decision().expect("decision survives");
     assert_eq!(
-        decision.options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
-        ["resume_with_guidance", "future_option", "override_open", "cancel"]
+        decision
+            .options
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "resume_with_guidance",
+            "future_option",
+            "override_open",
+            "cancel"
+        ]
     );
-    assert!(warn_lines(&log).is_empty(), "an unknown value is not worth a warning: {log}");
+    assert!(
+        warn_lines(&log).is_empty(),
+        "an unknown value is not worth a warning: {log}"
+    );
     assert!(jobs[0].is_held_for_operator());
 }
 
@@ -460,10 +663,16 @@ fn progress_flags_decode_from_objects_and_ignore_their_extra_detail() {
     );
     let (jobs, skipped, log) = decode_one(mutated);
     assert_eq!(skipped, 0);
-    let progress = jobs[0].progress.as_ref().expect("progress survives object flags");
+    let progress = jobs[0]
+        .progress
+        .as_ref()
+        .expect("progress survives object flags");
     assert_eq!(
         progress.flags,
-        vec![ProgressFlag { reason: "burn_ahead".into(), since: Some("2026-10-17T12:00:00.000Z".into()) }]
+        vec![ProgressFlag {
+            reason: "burn_ahead".into(),
+            since: Some("2026-10-17T12:00:00.000Z".into())
+        }]
     );
     assert_eq!(progress.pct, Some(80));
     assert!(warn_lines(&log).is_empty(), "{log}");
@@ -477,8 +686,17 @@ fn progress_flags_decode_from_plain_strings() {
     set(&mut mutated, "/progress/flags", json!(["stalled"]));
     let (jobs, skipped, log) = decode_one(mutated);
     assert_eq!(skipped, 0);
-    let progress = jobs[0].progress.as_ref().expect("progress survives string flags");
-    assert_eq!(progress.flags, vec![ProgressFlag { reason: "stalled".into(), since: None }]);
+    let progress = jobs[0]
+        .progress
+        .as_ref()
+        .expect("progress survives string flags");
+    assert_eq!(
+        progress.flags,
+        vec![ProgressFlag {
+            reason: "stalled".into(),
+            since: None
+        }]
+    );
     assert_eq!(progress.pct, Some(80));
     assert!(warn_lines(&log).is_empty(), "{log}");
 }
@@ -491,13 +709,25 @@ fn progress_signals_cost_reads_as_usd_from_an_object_a_bare_number_or_nothing() 
         set(&mut j, "/progress/signals/cost", v);
         let (jobs, skipped, log) = decode_one(j);
         assert_eq!(skipped, 0);
-        assert!(warn_lines(&log).is_empty(), "a cost shape is never worth a warning: {log}");
-        let progress = jobs[0].progress.clone().expect("progress survives any cost shape");
+        assert!(
+            warn_lines(&log).is_empty(),
+            "a cost shape is never worth a warning: {log}"
+        );
+        let progress = jobs[0]
+            .progress
+            .clone()
+            .expect("progress survives any cost shape");
         assert_eq!(progress.pct, Some(80));
         progress.signals.expect("signals").cost
     };
-    assert_eq!(cost(json!({"usd": 1.25, "of_usd": 3.0, "basis": "plan", "fraction": 0.4})), Some(1.25));
-    assert_eq!(cost(json!({"usd": null, "of_usd": null, "basis": "none", "fraction": null})), None);
+    assert_eq!(
+        cost(json!({"usd": 1.25, "of_usd": 3.0, "basis": "plan", "fraction": 0.4})),
+        Some(1.25)
+    );
+    assert_eq!(
+        cost(json!({"usd": null, "of_usd": null, "basis": "none", "fraction": null})),
+        None
+    );
     assert_eq!(cost(json!(1.12)), Some(1.12));
     assert_eq!(cost(json!("SECRET-COST")), None);
     assert_eq!(cost(Value::Null), None);
@@ -508,22 +738,46 @@ fn every_new_key_is_lenient_on_its_own() {
     // (key, a value of the wrong shape for it, the poison hidden inside it).
     // A leaked payload value is detectable in the captured log.
     let cases: [(&str, Value, &str); 10] = [
-        ("activity", json!({"x": "SECRET-PAYLOAD-K1"}), "SECRET-PAYLOAD-K1"),
+        (
+            "activity",
+            json!({"x": "SECRET-PAYLOAD-K1"}),
+            "SECRET-PAYLOAD-K1",
+        ),
         ("pr_url", json!(["SECRET-PAYLOAD-K2"]), "SECRET-PAYLOAD-K2"),
         ("gates", json!("SECRET-PAYLOAD-K3"), "SECRET-PAYLOAD-K3"),
-        ("review_wave", json!("SECRET-PAYLOAD-K4"), "SECRET-PAYLOAD-K4"),
+        (
+            "review_wave",
+            json!("SECRET-PAYLOAD-K4"),
+            "SECRET-PAYLOAD-K4",
+        ),
         ("decision", json!("SECRET-PAYLOAD-K5"), "SECRET-PAYLOAD-K5"),
         ("attention", json!("SECRET-PAYLOAD-K6"), "SECRET-PAYLOAD-K6"),
-        ("attention_reasons", json!({"SECRET-PAYLOAD-K7": 1}), "SECRET-PAYLOAD-K7"),
-        ("last_answer", json!("SECRET-PAYLOAD-K8"), "SECRET-PAYLOAD-K8"),
+        (
+            "attention_reasons",
+            json!({"SECRET-PAYLOAD-K7": 1}),
+            "SECRET-PAYLOAD-K7",
+        ),
+        (
+            "last_answer",
+            json!("SECRET-PAYLOAD-K8"),
+            "SECRET-PAYLOAD-K8",
+        ),
         ("progress", json!("SECRET-PAYLOAD-K9"), "SECRET-PAYLOAD-K9"),
-        ("criteria_source", json!(["SECRET-PAYLOAD-K10"]), "SECRET-PAYLOAD-K10"),
+        (
+            "criteria_source",
+            json!(["SECRET-PAYLOAD-K10"]),
+            "SECRET-PAYLOAD-K10",
+        ),
     ];
     let original = kitchen_sink();
     let (baseline, _, _) = decode_one(original.clone());
     let base = crew_view(&baseline[0]);
     for key in NEW_KEYS {
-        assert_ne!(base[key], Value::Null, "the kitchen-sink job must populate `{key}`");
+        assert_ne!(
+            base[key],
+            Value::Null,
+            "the kitchen-sink job must populate `{key}`"
+        );
     }
 
     for (key, bad, poison) in cases {
@@ -542,7 +796,11 @@ fn unknown_enum_like_values_survive_verbatim_without_a_warning() {
     set(&mut j, "/gates/mode", json!("weird_mode"));
     set(&mut j, "/decision/kind", json!("new_kind"));
     set(&mut j, "/review_wave/lenses/0/state", json!("teleporting"));
-    set(&mut j, "/review_wave/lenses/3/skip_reason", json!("new_reason"));
+    set(
+        &mut j,
+        "/review_wave/lenses/3/skip_reason",
+        json!("new_reason"),
+    );
     set(&mut j, "/progress/eta/basis", json!("weird_basis"));
     j["attention"] = json!([{"reason": "future_reason", "since": "2026-10-17T12:00:02.000Z"}]);
     j["attention_reasons"] = json!([]);
@@ -554,31 +812,66 @@ fn unknown_enum_like_values_survive_verbatim_without_a_warning() {
     assert_eq!(job.activity.as_deref(), Some("future_activity"));
     assert_eq!(job.criteria_source.as_deref(), Some("future_source"));
     let gates = job.gates.as_ref().unwrap();
-    assert_eq!((gates.status.as_deref(), gates.mode.as_deref()), (Some("weird_status"), Some("weird_mode")));
+    assert_eq!(
+        (gates.status.as_deref(), gates.mode.as_deref()),
+        (Some("weird_status"), Some("weird_mode"))
+    );
     assert_eq!(job.decision.as_ref().unwrap().kind, "new_kind");
     let wave = job.review_wave.as_ref().unwrap();
     assert_eq!(wave.lenses[0].state, "teleporting");
     assert_eq!(wave.lenses[3].skip_reason.as_deref(), Some("new_reason"));
-    assert_eq!(job.progress.as_ref().unwrap().eta.as_ref().unwrap().basis.as_deref(), Some("weird_basis"));
+    assert_eq!(
+        job.progress
+            .as_ref()
+            .unwrap()
+            .eta
+            .as_ref()
+            .unwrap()
+            .basis
+            .as_deref(),
+        Some("weird_basis")
+    );
     assert_eq!(job.attention[0].reason, "future_reason");
-    assert_eq!(job.unacked_attention().count(), 1, "an unknown reason is still attention");
+    assert_eq!(
+        job.unacked_attention().count(),
+        1,
+        "an unknown reason is still attention"
+    );
 }
 
 #[test]
 fn a_decision_resolution_decodes_from_a_plain_string_or_an_object() {
     let mut as_string = fixture_job_json("gate_hold_answered", "j-hold1");
     as_string["id"] = json!("resolution-string");
-    set(&mut as_string, "/decision/resolved_at", json!("2026-10-17T12:05:00.000Z"));
-    set(&mut as_string, "/decision/resolution", json!("resume_with_guidance"));
+    set(
+        &mut as_string,
+        "/decision/resolved_at",
+        json!("2026-10-17T12:05:00.000Z"),
+    );
+    set(
+        &mut as_string,
+        "/decision/resolution",
+        json!("resume_with_guidance"),
+    );
     let (jobs, skipped, log) = decode_one(as_string);
     assert_eq!(skipped, 0);
     assert!(warn_lines(&log).is_empty(), "{log}");
-    let resolution = jobs[0].decision.as_ref().unwrap().resolution.clone().expect("resolution");
+    let resolution = jobs[0]
+        .decision
+        .as_ref()
+        .unwrap()
+        .resolution
+        .clone()
+        .expect("resolution");
     assert_eq!(resolution.option.as_deref(), Some("resume_with_guidance"));
 
     let mut as_object = fixture_job_json("gate_hold_answered", "j-hold1");
     as_object["id"] = json!("resolution-object");
-    set(&mut as_object, "/decision/resolved_at", json!("2026-10-17T12:05:00.000Z"));
+    set(
+        &mut as_object,
+        "/decision/resolved_at",
+        json!("2026-10-17T12:05:00.000Z"),
+    );
     set(
         &mut as_object,
         "/decision/resolution",
@@ -587,7 +880,13 @@ fn a_decision_resolution_decodes_from_a_plain_string_or_an_object() {
     let (jobs, skipped, log) = decode_one(as_object);
     assert_eq!(skipped, 0);
     assert!(warn_lines(&log).is_empty(), "{log}");
-    let resolution = jobs[0].decision.as_ref().unwrap().resolution.clone().expect("resolution");
+    let resolution = jobs[0]
+        .decision
+        .as_ref()
+        .unwrap()
+        .resolution
+        .clone()
+        .expect("resolution");
     assert_eq!(resolution.option.as_deref(), Some("escalate"));
     assert_eq!(resolution.source.as_deref(), Some("nostromo_app"));
     assert_eq!(resolution.at.as_deref(), Some("2026-10-17T12:05:00.000Z"));
@@ -600,10 +899,16 @@ fn an_overridden_gate_run_is_reported_and_survives_a_round_trip() {
     // The recordings carry no `override` key at all; Mother adds it when a gate run is overridden.
     j["gates"]["override"] = json!({"by": "nostromo_app", "at": "2026-10-17T12:05:00.000Z"});
     let job = job_from(j);
-    assert!(job.gates.as_ref().unwrap().overridden, "a non-null `override` means overridden");
+    assert!(
+        job.gates.as_ref().unwrap().overridden,
+        "a non-null `override` means overridden"
+    );
 
     let again: MotherJob = serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
-    assert!(again.gates.as_ref().unwrap().overridden, "overridden must survive the daemon's own JSON");
+    assert!(
+        again.gates.as_ref().unwrap().overridden,
+        "overridden must survive the daemon's own JSON"
+    );
     assert_eq!(again, job);
 }
 
@@ -636,8 +941,13 @@ fn a_null_or_absent_crew_key_means_not_opted_in() {
 
 #[test]
 fn the_daemons_own_crew_opt_in_key_is_accepted_on_input() {
-    assert!(job_from(json!({"id": "optin-true", "state": "running", "crew_opt_in": true})).crew_opt_in);
-    assert!(!job_from(json!({"id": "optin-false", "state": "running", "crew_opt_in": false})).crew_opt_in);
+    assert!(
+        job_from(json!({"id": "optin-true", "state": "running", "crew_opt_in": true})).crew_opt_in
+    );
+    assert!(
+        !job_from(json!({"id": "optin-false", "state": "running", "crew_opt_in": false}))
+            .crew_opt_in
+    );
 }
 
 // ── serialization ────────────────────────────────────────────────────────────
@@ -648,7 +958,10 @@ fn a_job_without_crew_data_serializes_none_of_the_new_keys() {
     let v = serde_json::to_value(&job).unwrap();
     let obj = v.as_object().unwrap();
     for key in NEW_KEYS {
-        assert!(!obj.contains_key(key), "`{key}` must be absent for a job without crew data: {v}");
+        assert!(
+            !obj.contains_key(key),
+            "`{key}` must be absent for a job without crew data: {v}"
+        );
     }
     assert!(!obj.contains_key("crew"));
 }
@@ -658,8 +971,13 @@ fn every_fixture_job_survives_a_serialize_deserialize_round_trip() {
     for name in FIXTURES {
         for job in snapshot_jobs(name) {
             let wire = serde_json::to_string(&job).unwrap();
-            let again: MotherJob = serde_json::from_str(&wire).unwrap_or_else(|e| panic!("{name}/{}: {e}", job.id));
-            assert_eq!(again, job, "{name}/{} changed across the daemon's own JSON", job.id);
+            let again: MotherJob =
+                serde_json::from_str(&wire).unwrap_or_else(|e| panic!("{name}/{}: {e}", job.id));
+            assert_eq!(
+                again, job,
+                "{name}/{} changed across the daemon's own JSON",
+                job.id
+            );
         }
     }
 }
@@ -713,12 +1031,24 @@ fn an_empty_attention_reasons_list_does_not_hide_attention() {
 #[test]
 fn open_decision_is_none_without_a_decision_or_once_it_is_resolved() {
     let open = fixture_job_json("gate_hold_answered", "j-hold1");
-    assert_eq!(job_from(open.clone()).open_decision().map(|d| d.id.as_str()), Some("d-0001"));
+    assert_eq!(
+        job_from(open.clone())
+            .open_decision()
+            .map(|d| d.id.as_str()),
+        Some("d-0001")
+    );
 
     let mut resolved = open;
-    set(&mut resolved, "/decision/resolved_at", json!("2026-10-17T12:05:00.000Z"));
+    set(
+        &mut resolved,
+        "/decision/resolved_at",
+        json!("2026-10-17T12:05:00.000Z"),
+    );
     let resolved = job_from(resolved);
-    assert!(resolved.decision.is_some(), "the resolved decision is still carried");
+    assert!(
+        resolved.decision.is_some(),
+        "the resolved decision is still carried"
+    );
     assert!(resolved.open_decision().is_none());
 
     assert!(job_with(json!({})).open_decision().is_none());
@@ -734,14 +1064,25 @@ fn open_decision_json() -> Value {
 fn is_held_for_operator_follows_state_activity_and_open_decision() {
     // Awaiting with a hold activity: held.
     assert!(job_with(json!({"state": "awaiting", "activity": "gate_hold"})).is_held_for_operator());
-    assert!(job_with(json!({"state": "awaiting", "activity": "review_hold"})).is_held_for_operator());
+    assert!(
+        job_with(json!({"state": "awaiting", "activity": "review_hold"})).is_held_for_operator()
+    );
     // An open decision holds the job whatever its state says.
-    assert!(job_with(json!({"state": "running", "decision": open_decision_json()})).is_held_for_operator());
+    assert!(
+        job_with(json!({"state": "running", "decision": open_decision_json()}))
+            .is_held_for_operator()
+    );
     // Not held.
     assert!(!job_with(json!({"state": "running"})).is_held_for_operator());
-    assert!(!job_with(json!({"state": "running", "activity": "gate_hold"})).is_held_for_operator(), "hold activity needs state awaiting");
+    assert!(
+        !job_with(json!({"state": "running", "activity": "gate_hold"})).is_held_for_operator(),
+        "hold activity needs state awaiting"
+    );
     assert!(!job_with(json!({"state": "awaiting", "activity": "gating"})).is_held_for_operator());
-    assert!(!job_with(json!({"state": "awaiting"})).is_held_for_operator(), "no activity and no decision");
+    assert!(
+        !job_with(json!({"state": "awaiting"})).is_held_for_operator(),
+        "no activity and no decision"
+    );
     let mut resolved = open_decision_json();
     resolved["resolved_at"] = json!("2026-10-17T12:05:00.000Z");
     assert!(!job_with(json!({"state": "running", "decision": resolved})).is_held_for_operator());
@@ -759,7 +1100,10 @@ fn the_mother_jobs_frame_for_the_fixture_snapshots_matches_the_golden() {
     for name in FIXTURES {
         jobs.extend(snapshot_jobs(name).into_iter().take(1));
     }
-    assert_eq!(jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["j-gates1", "j-wave1", "j-hold1"]);
+    assert_eq!(
+        jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+        ["j-gates1", "j-wave1", "j-hold1"]
+    );
 
     let frame = serde_json::to_string_pretty(&ServerMsg::MotherJobs { jobs }).unwrap();
     let path = fixture_dir().join("ipc_mother_jobs.golden.json");
@@ -771,11 +1115,17 @@ fn the_mother_jobs_frame_for_the_fixture_snapshots_matches_the_golden() {
 
     let parsed: Value = serde_json::from_str(&frame).unwrap();
     assert_eq!(parsed["type"], "mother_jobs");
-    assert!(!frame.contains("gate_commands") && !frame.contains("\"crew\":"), "the crew blob is never on the wire");
+    assert!(
+        !frame.contains("gate_commands") && !frame.contains("\"crew\":"),
+        "the crew blob is never on the wire"
+    );
 
     let golden = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e} (UPDATE_GOLDEN=1 to create)", path.display()));
-    assert_eq!(frame, golden, "the MotherJobs wire form changed; regenerate with UPDATE_GOLDEN=1 if intended");
+    assert_eq!(
+        frame, golden,
+        "the MotherJobs wire form changed; regenerate with UPDATE_GOLDEN=1 if intended"
+    );
 }
 
 // ── a Go producer writes nil slices and unset values as `null` ───────────────
@@ -793,11 +1143,19 @@ fn null_members_inside_a_key_are_read_as_missing_not_as_a_type_error() {
 
     let (jobs, skipped, log) = decode_one(job);
     assert_eq!(skipped, 0, "{log}");
-    assert!(warn_lines(&log).is_empty(), "null members are not malformed: {log}");
+    assert!(
+        warn_lines(&log).is_empty(),
+        "null members are not malformed: {log}"
+    );
     let j = &jobs[0];
     let gates = j.gates.as_ref().expect("gates survives");
     assert!(gates.not_run.is_empty() && !gates.results[0].blocking);
-    assert!(j.review_wave.as_ref().expect("review_wave survives").lenses.is_empty());
+    assert!(j
+        .review_wave
+        .as_ref()
+        .expect("review_wave survives")
+        .lenses
+        .is_empty());
     let progress = j.progress.as_ref().expect("progress survives");
     assert!(progress.flags.is_empty() && !progress.paused);
     assert_eq!(progress.pct, Some(80));

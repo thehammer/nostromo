@@ -73,7 +73,10 @@ fn strip(text: &str, depth: u32) -> String {
             '$' => match c.get(i + 1).copied() {
                 Some('{') => {
                     if let Some(end) = matching(&c, i + 1, '{', '}') {
-                        out.push_str(&parameter_value(&c[i + 2..end].iter().collect::<String>(), depth));
+                        out.push_str(&parameter_value(
+                            &c[i + 2..end].iter().collect::<String>(),
+                            depth,
+                        ));
                         i = end + 1;
                         continue;
                     }
@@ -102,7 +105,10 @@ fn strip(text: &str, depth: u32) -> String {
                 }
                 Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => {
                     i += 2;
-                    while c.get(i).is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_') {
+                    while c
+                        .get(i)
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    {
                         i += 1;
                     }
                     continue;
@@ -190,7 +196,9 @@ fn write_out_braces(text: &str, overflow: &mut bool) -> Option<String> {
             out.push_str(word);
             continue;
         }
-        let alternatives = (word.len() <= MAX_EXPANDABLE_WORD).then(|| expand_word(word)).flatten();
+        let alternatives = (word.len() <= MAX_EXPANDABLE_WORD)
+            .then(|| expand_word(word))
+            .flatten();
         match alternatives {
             Some(alts) => {
                 let joined = alts.join(" ");
@@ -226,7 +234,8 @@ pub fn brace_alternatives(word: &str) -> Option<Vec<String>> {
 
 /// Does the word contain a brace group (`{a,b}`, `{a..c}`)?
 fn has_group(word: &str) -> bool {
-    word.match_indices('{').any(|(open, _)| group_at(word, open).is_some())
+    word.match_indices('{')
+        .any(|(open, _)| group_at(word, open).is_some())
 }
 
 /// Every word `word` expands to, `None` past [`MAX_BRACE_ALTERNATIVES`].
@@ -344,7 +353,11 @@ fn matcher(p: &[char], n: &[char], shell_glob: bool) -> bool {
         }
         Some('?') if shell_glob => !n.is_empty() && matcher(&p[1..], &n[1..], shell_glob),
         Some('[') if shell_glob => match class_end(p) {
-            Some(end) => !n.is_empty() && class_matches(&p[1..end], n[0]) && matcher(&p[end + 1..], &n[1..], shell_glob),
+            Some(end) => {
+                !n.is_empty()
+                    && class_matches(&p[1..end], n[0])
+                    && matcher(&p[end + 1..], &n[1..], shell_glob)
+            }
             None => !n.is_empty() && n[0] == '[' && matcher(&p[1..], &n[1..], shell_glob),
         },
         Some(&c) => !n.is_empty() && n[0] == c && matcher(&p[1..], &n[1..], shell_glob),
@@ -393,7 +406,8 @@ pub fn could_spell(pattern: &str, markers: &[&str]) -> bool {
     }
     let literal = pattern.chars().filter(|c| *c != WILDCARD).count();
     let open_end = pattern.starts_with(WILDCARD) || pattern.ends_with(WILDCARD);
-    let enough = literal >= if open_end { 6 } else { 4 } || (literal >= 4 && pattern.to_lowercase().starts_with("ecs_"));
+    let enough = literal >= if open_end { 6 } else { 4 }
+        || (literal >= 4 && pattern.to_lowercase().starts_with("ecs_"));
     enough && markers.iter().any(|m| wild_match(pattern, m))
 }
 
@@ -437,7 +451,11 @@ mod tests {
     fn writes_alternatives_as_words() {
         let e = expanded_texts("aws ec{s,} execute-comman{d,}");
         assert!(!e.overflow);
-        assert!(e.texts.last().unwrap().contains("ecs ec execute-command execute-comman"));
+        assert!(e
+            .texts
+            .last()
+            .unwrap()
+            .contains("ecs ec execute-command execute-comman"));
         assert!(expanded_texts("echo {a..z}{a..z}{a..z}").overflow);
         assert!(!expanded_texts("echo {1..100000}").overflow);
     }

@@ -85,21 +85,41 @@ fn graph_error_body() -> Value {
 
 impl Failure {
     fn throttled(retry_after: Option<RetryAfter>) -> Self {
-        Self { status: 429, retry_after, body: graph_error_body() }
+        Self {
+            status: 429,
+            retry_after,
+            body: graph_error_body(),
+        }
     }
     fn unavailable(retry_after: Option<RetryAfter>) -> Self {
-        Self { status: 503, retry_after, body: graph_error_body() }
+        Self {
+            status: 503,
+            retry_after,
+            body: graph_error_body(),
+        }
     }
     fn forbidden() -> Self {
-        Self { status: 403, retry_after: None, body: graph_error_body() }
+        Self {
+            status: 403,
+            retry_after: None,
+            body: graph_error_body(),
+        }
     }
     /// HTTP 200 carrying a Graph error object instead of a page.
     fn ok_error_object() -> Self {
-        Self { status: 200, retry_after: None, body: graph_error_body() }
+        Self {
+            status: 200,
+            retry_after: None,
+            body: graph_error_body(),
+        }
     }
     /// HTTP 200 with an arbitrary (wrong) body.
     fn ok_body(body: Value) -> Self {
-        Self { status: 200, retry_after: None, body }
+        Self {
+            status: 200,
+            retry_after: None,
+            body,
+        }
     }
 }
 
@@ -181,7 +201,9 @@ fn failure_template(f: &Failure) -> (ResponseTemplate, Option<DateTime<Utc>>) {
             let date = DateTime::from_timestamp(at.timestamp(), 0).unwrap();
             t = t.insert_header(
                 "Retry-After",
-                date.format("%a, %d %b %Y %H:%M:%S GMT").to_string().as_str(),
+                date.format("%a, %d %b %Y %H:%M:%S GMT")
+                    .to_string()
+                    .as_str(),
             );
             sent = Some(date);
         }
@@ -287,7 +309,12 @@ async fn env() -> Env {
     )
     .await
     .expect("graph client builds");
-    Env { server, dir, graph, config }
+    Env {
+        server,
+        dir,
+        graph,
+        config,
+    }
 }
 
 /// An offset at which it is currently 12:00 local time, so "today" never rolls
@@ -376,7 +403,13 @@ fn assert_honest<S: Snap>(s: &S) {
         _ => {}
     }
     let json = serde_json::to_string(s).unwrap();
-    for secret in [OLD_AT, NEW_AT, REFRESH_TOKEN, "access_token", "refresh_token"] {
+    for secret in [
+        OLD_AT,
+        NEW_AT,
+        REFRESH_TOKEN,
+        "access_token",
+        "refresh_token",
+    ] {
         assert!(!json.contains(secret), "snapshot leaks {secret:?}: {json}");
     }
 }
@@ -572,18 +605,28 @@ async fn wait_for<S: Snap>(
     .await;
     match waited {
         Ok(s) => s,
-        Err(_) => panic!("timed out after {limit:?} waiting for {what}; last snapshot: {:?}", rx.borrow().clone()),
+        Err(_) => panic!(
+            "timed out after {limit:?} waiting for {what}; last snapshot: {:?}",
+            rx.borrow().clone()
+        ),
     }
 }
 
 /// Wait for the first non-healthy snapshot after a throttled response and
 /// require it to be `rate_limited` (fails fast with the real state otherwise).
-async fn wait_rate_limited<X: Subject>(rx: &mut watch::Receiver<Option<X::S>>, each: impl Fn(&X::S)) -> X::S {
+async fn wait_rate_limited<X: Subject>(
+    rx: &mut watch::Receiver<Option<X::S>>,
+    each: impl Fn(&X::S),
+) -> X::S {
     let s = wait_for(rx, "a non-fresh snapshot after the 429", REACT, each, |s| {
         s.state() != SourceState::Fresh
     })
     .await;
-    assert_eq!(s.state(), SourceState::RateLimited, "a 429 must read as rate_limited: {s:?}");
+    assert_eq!(
+        s.state(),
+        SourceState::RateLimited,
+        "a 429 must read as rate_limited: {s:?}"
+    );
     s
 }
 
@@ -598,7 +641,10 @@ async fn wait_hits(sh: &Shared, what: &str, limit: Duration, ok: impl Fn(&[Hit])
     })
     .await;
     if waited.is_err() {
-        panic!("timed out after {limit:?} waiting for {what}; hits so far: {:?}", sh.hits());
+        panic!(
+            "timed out after {limit:?} waiting for {what}; hits so far: {:?}",
+            sh.hits()
+        );
     }
 }
 
@@ -628,23 +674,43 @@ async fn rig<X: Subject>(t: FredTiming, pre: impl FnOnce(&Shared)) -> Rig<X::S> 
 /// A source that has published one good (Fresh) snapshot.
 async fn rig_good<X: Subject>(t: FredTiming) -> (Rig<X::S>, X::S) {
     let mut r = rig::<X>(t, |_| {}).await;
-    let good = wait_for(&mut r.rx, "a fresh first snapshot", WAIT, assert_honest, |s| {
-        s.state() == SourceState::Fresh
-    })
+    let good = wait_for(
+        &mut r.rx,
+        "a fresh first snapshot",
+        WAIT,
+        assert_honest,
+        |s| s.state() == SourceState::Fresh,
+    )
     .await;
-    assert!(!X::is_blank(&good), "fixture must start with data: {good:?}");
+    assert!(
+        !X::is_blank(&good),
+        "fixture must start with data: {good:?}"
+    );
     (r, good)
 }
 
 /// Plain English, no URL, no token, no raw body.
 fn assert_plain_reason(reason: &str) {
     assert!(!reason.trim().is_empty(), "the reason must not be blank");
-    for bad in ["://", "127.0.0.1", "localhost", "/me/", "Bearer", "SomethingWentWrong", "slow down and try"] {
+    for bad in [
+        "://",
+        "127.0.0.1",
+        "localhost",
+        "/me/",
+        "Bearer",
+        "SomethingWentWrong",
+        "slow down and try",
+    ] {
         assert!(!reason.contains(bad), "reason leaks {bad:?}: {reason}");
     }
 }
 
-fn assert_retry_at_about(retry_at: DateTime<Utc>, served: DateTime<Utc>, observed: DateTime<Utc>, wait_secs: i64) {
+fn assert_retry_at_about(
+    retry_at: DateTime<Utc>,
+    served: DateTime<Utc>,
+    observed: DateTime<Utc>,
+    wait_secs: i64,
+) {
     let lo = served + ChronoDuration::seconds(wait_secs - 2);
     let hi = observed + ChronoDuration::seconds(wait_secs + 2);
     assert!(
@@ -681,8 +747,15 @@ async fn rate_limited_keeps_the_data_and_says_when_it_will_retry<X: Subject>() {
     let served = r.sh.failure_hits()[0].utc;
 
     assert!(snap.is_stale(), "kept data is marked stale: {snap:?}");
-    assert_eq!(X::fingerprint(&snap), fp, "previous items and unread count are kept: {snap:?}");
-    assert!(snap.updated_at().is_some(), "updated_at is the last SUCCESS: {snap:?}");
+    assert_eq!(
+        X::fingerprint(&snap),
+        fp,
+        "previous items and unread count are kept: {snap:?}"
+    );
+    assert!(
+        snap.updated_at().is_some(),
+        "updated_at is the last SUCCESS: {snap:?}"
+    );
     assert_plain_reason(snap.error().unwrap());
     assert_retry_at_about(snap.retry_at().unwrap(), served, observed, 3);
 }
@@ -708,14 +781,21 @@ async fn stays_quiet_for_the_whole_retry_after_and_ignores_the_dirty_signal<X: S
         }
     })
     .await;
-    assert!(consumed.is_ok(), "the dirty-file watcher must have taken the signal (harness check)");
+    assert!(
+        consumed.is_ok(),
+        "the dirty-file watcher must have taken the signal (harness check)"
+    );
 
     // The very next request of ANY kind may only come after the full wait.
     wait_hits(&r.sh, "a request after the quiet period", WAIT, |hits| {
         hits.iter().any(|h| h.at > throttled.at)
     })
     .await;
-    let next = r.sh.hits().into_iter().find(|h| h.at > throttled.at).unwrap();
+    let next =
+        r.sh.hits()
+            .into_iter()
+            .find(|h| h.at > throttled.at)
+            .unwrap();
     assert!(
         gap(&throttled, &next) >= 3.0,
         "a {} request ({}) went out only {:.2}s after a 429 with Retry-After: 3",
@@ -739,12 +819,18 @@ async fn recovers_to_fresh_after_the_quiet_period_and_clears_retry_at<X: Subject
     let throttled = r.sh.failure_hits()[0].clone();
     r.sh.heal();
 
-    let back = wait_for(&mut r.rx, "recovery", WAIT, &each, |s| s.state() == SourceState::Fresh).await;
+    let back = wait_for(&mut r.rx, "recovery", WAIT, &each, |s| {
+        s.state() == SourceState::Fresh
+    })
+    .await;
     assert!(
         Instant::now().duration_since(throttled.at) >= Duration::from_secs(2),
         "recovered before the Retry-After had passed"
     );
-    assert!(back.retry_at().is_none(), "retry_at is cleared on success: {back:?}");
+    assert!(
+        back.retry_at().is_none(),
+        "retry_at is cleared on success: {back:?}"
+    );
     assert!(!back.is_stale() && back.error().is_none(), "{back:?}");
     assert_eq!(X::fingerprint(&back), fp);
 }
@@ -754,7 +840,9 @@ both!(
     recovers_to_fresh_after_the_quiet_period_and_clears_retry_at
 );
 
-async fn throttled_with_nothing_fetched_yet_is_rate_limited_not_error_and_still_waits<X: Subject>() {
+async fn throttled_with_nothing_fetched_yet_is_rate_limited_not_error_and_still_waits<
+    X: Subject,
+>() {
     let mut r = rig::<X>(X::timing(fast()), |sh| {
         sh.fail(Failure::throttled(Some(RetryAfter::Seconds(3))), X::ALL)
     })
@@ -766,11 +854,23 @@ async fn throttled_with_nothing_fetched_yet_is_rate_limited_not_error_and_still_
     .await;
     let observed = Utc::now();
 
-    assert_eq!(snap.state(), SourceState::RateLimited, "throttled is not a generic error: {snap:?}");
+    assert_eq!(
+        snap.state(),
+        SourceState::RateLimited,
+        "throttled is not a generic error: {snap:?}"
+    );
     assert!(X::is_blank(&snap), "no fake data: {snap:?}");
-    assert!(snap.updated_at().is_none(), "nothing has ever been fetched: {snap:?}");
+    assert!(
+        snap.updated_at().is_none(),
+        "nothing has ever been fetched: {snap:?}"
+    );
     assert_plain_reason(snap.error().unwrap());
-    assert_retry_at_about(snap.retry_at().unwrap(), r.sh.failure_hits()[0].utc, observed, 3);
+    assert_retry_at_about(
+        snap.retry_at().unwrap(),
+        r.sh.failure_hits()[0].utc,
+        observed,
+        3,
+    );
 
     // The 5 s "look again soon while empty" shortcut must not undercut Retry-After.
     let throttled = r.sh.failure_hits()[0].clone();
@@ -778,8 +878,16 @@ async fn throttled_with_nothing_fetched_yet_is_rate_limited_not_error_and_still_
         hits.iter().any(|h| h.at > throttled.at)
     })
     .await;
-    let next = r.sh.hits().into_iter().find(|h| h.at > throttled.at).unwrap();
-    assert!(gap(&throttled, &next) >= 3.0, "retried after {:.2}s", gap(&throttled, &next));
+    let next =
+        r.sh.hits()
+            .into_iter()
+            .find(|h| h.at > throttled.at)
+            .unwrap();
+    assert!(
+        gap(&throttled, &next) >= 3.0,
+        "retried after {:.2}s",
+        gap(&throttled, &next)
+    );
 }
 both!(
     mailbox_throttled_before_any_data_is_rate_limited_with_no_fake_zero_and_still_waits,
@@ -800,7 +908,12 @@ async fn a_503_with_retry_after_is_rate_limited<X: Subject>() {
     assert_eq!(snap.state(), SourceState::RateLimited, "{snap:?}");
     assert!(snap.is_stale());
     assert_eq!(X::fingerprint(&snap), fp);
-    assert_retry_at_about(snap.retry_at().unwrap(), r.sh.failure_hits()[0].utc, observed, 3);
+    assert_retry_at_about(
+        snap.retry_at().unwrap(),
+        r.sh.failure_hits()[0].utc,
+        observed,
+        3,
+    );
 }
 both!(
     mailbox_503_with_retry_after_is_rate_limited_with_retry_at,
@@ -808,13 +921,22 @@ both!(
     a_503_with_retry_after_is_rate_limited
 );
 
-async fn a_503_without_retry_after_is_a_plain_stale_failure_polled_at_the_normal_pace<X: Subject>() {
+async fn a_503_without_retry_after_is_a_plain_stale_failure_polled_at_the_normal_pace<
+    X: Subject,
+>() {
     let (mut r, good) = rig_good::<X>(X::timing(fast())).await;
     let fp = X::fingerprint(&good);
     r.sh.fail(Failure::unavailable(None), X::ALL);
     let each = guard::<X>(Some(fp.clone()));
-    let snap = wait_for(&mut r.rx, "a stale snapshot", REACT, &each, |s| s.state() != SourceState::Fresh).await;
-    assert_eq!(snap.state(), SourceState::Stale, "no Retry-After, so not a throttle: {snap:?}");
+    let snap = wait_for(&mut r.rx, "a stale snapshot", REACT, &each, |s| {
+        s.state() != SourceState::Fresh
+    })
+    .await;
+    assert_eq!(
+        snap.state(),
+        SourceState::Stale,
+        "no Retry-After, so not a throttle: {snap:?}"
+    );
     assert!(snap.retry_at().is_none());
     assert_eq!(X::fingerprint(&snap), fp);
 
@@ -822,7 +944,10 @@ async fn a_503_without_retry_after_is_a_plain_stale_failure_polled_at_the_normal
     let before = r.sh.hits().len();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let polled = r.sh.hits().len() - before;
-    assert!(polled >= 5, "only {polled} requests in 2s at a 100ms poll after a plain 503");
+    assert!(
+        polled >= 5,
+        "only {polled} requests in 2s at a 100ms poll after a plain 503"
+    );
     let later = r.rx.borrow().clone().unwrap();
     assert_eq!(later.state(), SourceState::Stale, "{later:?}");
 }
@@ -839,7 +964,9 @@ async fn an_http_date_retry_after_sets_retry_at_to_that_moment<X: Subject>() {
     r.sh.fail(Failure::throttled(Some(RetryAfter::DateIn(120))), X::ALL);
     let each = guard::<X>(Some(X::fingerprint(&good)));
     let snap = wait_rate_limited::<X>(&mut r.rx, &each).await;
-    let sent = r.sh.failure_hits()[0].sent_date.expect("the mock sent an HTTP-date");
+    let sent = r.sh.failure_hits()[0]
+        .sent_date
+        .expect("the mock sent an HTTP-date");
     let retry_at = snap.retry_at().unwrap();
     assert!(
         (retry_at - sent).num_seconds().abs() <= 3,
@@ -849,7 +976,11 @@ async fn an_http_date_retry_after_sets_retry_at_to_that_moment<X: Subject>() {
     // ... and nothing goes out in the meantime.
     let n = r.sh.hits().len();
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(r.sh.hits().len(), n, "Graph was asked again during a 2-minute Retry-After");
+    assert_eq!(
+        r.sh.hits().len(),
+        n,
+        "Graph was asked again during a 2-minute Retry-After"
+    );
 }
 both!(
     mailbox_http_date_retry_after_sets_retry_at_to_that_date_and_sends_nothing_meanwhile,
@@ -869,7 +1000,11 @@ async fn an_http_date_retry_after_is_waited_out<X: Subject>() {
         hits.iter().any(|h| h.at > throttled.at)
     })
     .await;
-    let next = r.sh.hits().into_iter().find(|h| h.at > throttled.at).unwrap();
+    let next =
+        r.sh.hits()
+            .into_iter()
+            .find(|h| h.at > throttled.at)
+            .unwrap();
     // HTTP-dates have 1 s resolution: allow a second of rounding.
     assert!(
         next.utc >= date - ChronoDuration::seconds(1),
@@ -889,7 +1024,12 @@ async fn a_huge_retry_after_is_capped_at_fifteen_minutes<X: Subject>() {
     let each = guard::<X>(Some(X::fingerprint(&good)));
     let snap = wait_rate_limited::<X>(&mut r.rx, &each).await;
     let observed = Utc::now();
-    assert_retry_at_about(snap.retry_at().unwrap(), r.sh.failure_hits()[0].utc, observed, 15 * 60);
+    assert_retry_at_about(
+        snap.retry_at().unwrap(),
+        r.sh.failure_hits()[0].utc,
+        observed,
+        15 * 60,
+    );
 
     let n = r.sh.hits().len();
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -903,19 +1043,30 @@ both!(
 
 // ── Backoff without Retry-After ──────────────────────────────────────────────
 
-async fn consecutive_429s_without_retry_after_back_off_2_4_seconds_with_bounded_jitter<X: Subject>() {
+async fn consecutive_429s_without_retry_after_back_off_2_4_seconds_with_bounded_jitter<
+    X: Subject,
+>() {
     let (r, _good) = rig_good::<X>(X::timing(fast())).await;
     r.sh.fail(Failure::throttled(None), X::ALL);
-    wait_hits(&r.sh, "three throttled responses", Duration::from_secs(40), |hits| {
-        hits.iter().filter(|h| h.is_failure()).count() >= 3
-    })
+    wait_hits(
+        &r.sh,
+        "three throttled responses",
+        Duration::from_secs(40),
+        |hits| hits.iter().filter(|h| h.is_failure()).count() >= 3,
+    )
     .await;
     let fh = r.sh.failure_hits();
     let (g1, g2) = (gap(&fh[0], &fh[1]), gap(&fh[1], &fh[2]));
     // Base step 2 s then 4 s; jitter adds at most 25% of the base (+1 s of
     // scheduling slack).
-    assert!((2.0..=3.5).contains(&g1), "first wait was {g1:.2}s, expected 2s + <=25% jitter");
-    assert!((4.0..=6.0).contains(&g2), "second wait was {g2:.2}s, expected 4s + <=25% jitter");
+    assert!(
+        (2.0..=3.5).contains(&g1),
+        "first wait was {g1:.2}s, expected 2s + <=25% jitter"
+    );
+    assert!(
+        (4.0..=6.0).contains(&g2),
+        "second wait was {g2:.2}s, expected 4s + <=25% jitter"
+    );
 }
 both!(
     mailbox_backs_off_2_then_4_seconds_after_consecutive_429s_without_retry_after,
@@ -931,7 +1082,10 @@ async fn a_successful_fetch_resets_the_backoff<X: Subject>() {
     r.sh.fail(Failure::throttled(None), X::ALL);
     wait_rate_limited::<X>(&mut r.rx, &each).await;
     r.sh.heal();
-    wait_for(&mut r.rx, "recovery", WAIT, &each, |s| s.state() == SourceState::Fresh).await;
+    wait_for(&mut r.rx, "recovery", WAIT, &each, |s| {
+        s.state() == SourceState::Fresh
+    })
+    .await;
 
     // Throttled again: the wait starts from the first step (~2 s), not 4 s.
     let mark = r.sh.hits().len();
@@ -940,9 +1094,16 @@ async fn a_successful_fetch_resets_the_backoff<X: Subject>() {
         hits[mark..].iter().filter(|h| h.is_failure()).count() >= 2
     })
     .await;
-    let fh: Vec<Hit> = r.sh.hits()[mark..].iter().filter(|h| h.is_failure()).cloned().collect();
+    let fh: Vec<Hit> = r.sh.hits()[mark..]
+        .iter()
+        .filter(|h| h.is_failure())
+        .cloned()
+        .collect();
     let g = gap(&fh[0], &fh[1]);
-    assert!((2.0..=3.5).contains(&g), "after a success the wait restarts at ~2s, was {g:.2}s");
+    assert!(
+        (2.0..=3.5).contains(&g),
+        "after a success the wait restarts at ~2s, was {g:.2}s"
+    );
 }
 both!(
     mailbox_success_resets_the_backoff_to_the_first_step,
@@ -955,15 +1116,24 @@ async fn retry_after_wins_over_the_exponential_step<X: Subject>() {
     // First 429 carries no header (wait ~2 s); the second carries Retry-After: 3,
     // where the exponential step would have been 4-5 s.
     r.sh.fail(Failure::throttled(None), X::ALL);
-    wait_hits(&r.sh, "the first throttled response", REACT, |hits| hits.iter().any(Hit::is_failure)).await;
-    r.sh.fail(Failure::throttled(Some(RetryAfter::Seconds(3))), X::ALL);
-    wait_hits(&r.sh, "three throttled responses", Duration::from_secs(40), |hits| {
-        hits.iter().filter(|h| h.is_failure()).count() >= 3
+    wait_hits(&r.sh, "the first throttled response", REACT, |hits| {
+        hits.iter().any(Hit::is_failure)
     })
+    .await;
+    r.sh.fail(Failure::throttled(Some(RetryAfter::Seconds(3))), X::ALL);
+    wait_hits(
+        &r.sh,
+        "three throttled responses",
+        Duration::from_secs(40),
+        |hits| hits.iter().filter(|h| h.is_failure()).count() >= 3,
+    )
     .await;
     let fh = r.sh.failure_hits();
     let g = gap(&fh[1], &fh[2]);
-    assert!((3.0..=3.9).contains(&g), "Retry-After: 3 must set the wait (not the 4-5s backoff step); was {g:.2}s");
+    assert!(
+        (3.0..=3.9).contains(&g),
+        "Retry-After: 3 must set the wait (not the 4-5s backoff step); was {g:.2}s"
+    );
 }
 both!(
     mailbox_retry_after_wins_over_the_exponential_step,
@@ -1018,13 +1188,22 @@ async fn failure_after_a_401_refresh_keeps_the_data<X: Subject>(
     r.sh.reject_old_on(paths);
     r.sh.fail(failure, paths);
 
-    wait_hits(&r.sh, "the refreshed retry to be answered with the failure", WAIT, |hits| {
-        hits.iter().any(Hit::is_failure)
-    })
+    wait_hits(
+        &r.sh,
+        "the refreshed retry to be answered with the failure",
+        WAIT,
+        |hits| hits.iter().any(Hit::is_failure),
+    )
     .await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(r.sh.refreshes.load(SeqCst) >= 1, "harness check: the token was refreshed");
-    assert!(r.sh.hits().iter().any(|h| h.status == 401), "harness check: a 401 was served");
+    assert!(
+        r.sh.refreshes.load(SeqCst) >= 1,
+        "harness check: the token was refreshed"
+    );
+    assert!(
+        r.sh.hits().iter().any(|h| h.status == 401),
+        "harness check: a 401 was served"
+    );
 
     let snap = r.rx.borrow().clone().expect("published");
     guard::<X>(Some(fp.clone()))(&snap);
@@ -1032,11 +1211,19 @@ async fn failure_after_a_401_refresh_keeps_the_data<X: Subject>(
         Expect::RateLimited => SourceState::RateLimited,
         Expect::Stale => SourceState::Stale,
     };
-    assert_eq!(snap.state(), want, "the snapshot published after the failed retry: {snap:?}");
+    assert_eq!(
+        snap.state(),
+        want,
+        "the snapshot published after the failed retry: {snap:?}"
+    );
     assert!(snap.is_stale(), "{snap:?}");
     assert_eq!(X::fingerprint(&snap), fp, "previous data kept: {snap:?}");
     assert_plain_reason(snap.error().unwrap());
-    assert_eq!(snap.retry_at().is_some(), expect == Expect::RateLimited, "{snap:?}");
+    assert_eq!(
+        snap.retry_at().is_some(),
+        expect == Expect::RateLimited,
+        "{snap:?}"
+    );
 }
 
 /// Fast polling and the unread count re-read on every cycle.
@@ -1058,12 +1245,24 @@ async fn mailbox_delta_429_after_a_401_refresh_is_rate_limited_with_the_data_kep
 
 #[tokio::test]
 async fn mailbox_delta_503_after_a_401_refresh_is_stale_with_the_data_kept() {
-    failure_after_a_401_refresh_keeps_the_data::<Mailbox>(an_hour(), &[DELTA], Failure::unavailable(None), Expect::Stale).await;
+    failure_after_a_401_refresh_keeps_the_data::<Mailbox>(
+        an_hour(),
+        &[DELTA],
+        Failure::unavailable(None),
+        Expect::Stale,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn mailbox_delta_403_after_a_401_refresh_is_stale_with_the_data_kept() {
-    failure_after_a_401_refresh_keeps_the_data::<Mailbox>(an_hour(), &[DELTA], Failure::forbidden(), Expect::Stale).await;
+    failure_after_a_401_refresh_keeps_the_data::<Mailbox>(
+        an_hour(),
+        &[DELTA],
+        Failure::forbidden(),
+        Expect::Stale,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1079,7 +1278,13 @@ async fn mailbox_unread_count_429_after_a_401_refresh_is_rate_limited_with_the_d
 
 #[tokio::test]
 async fn mailbox_unread_count_403_after_a_401_refresh_is_stale_never_a_zero_count() {
-    failure_after_a_401_refresh_keeps_the_data::<Mailbox>(Duration::ZERO, &[FOLDER], Failure::forbidden(), Expect::Stale).await;
+    failure_after_a_401_refresh_keeps_the_data::<Mailbox>(
+        Duration::ZERO,
+        &[FOLDER],
+        Failure::forbidden(),
+        Expect::Stale,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1095,12 +1300,24 @@ async fn calendar_429_after_a_401_refresh_is_rate_limited_with_the_events_kept()
 
 #[tokio::test]
 async fn calendar_503_after_a_401_refresh_is_stale_with_the_events_kept() {
-    failure_after_a_401_refresh_keeps_the_data::<Calendar>(an_hour(), &[CALENDAR_VIEW], Failure::unavailable(None), Expect::Stale).await;
+    failure_after_a_401_refresh_keeps_the_data::<Calendar>(
+        an_hour(),
+        &[CALENDAR_VIEW],
+        Failure::unavailable(None),
+        Expect::Stale,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn calendar_403_after_a_401_refresh_is_stale_never_no_meetings_today() {
-    failure_after_a_401_refresh_keeps_the_data::<Calendar>(an_hour(), &[CALENDAR_VIEW], Failure::forbidden(), Expect::Stale).await;
+    failure_after_a_401_refresh_keeps_the_data::<Calendar>(
+        an_hour(),
+        &[CALENDAR_VIEW],
+        Failure::forbidden(),
+        Expect::Stale,
+    )
+    .await;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1112,7 +1329,10 @@ async fn a_200_error_object_with_previous_data_is_stale_with_the_data_kept<X: Su
     let fp = X::fingerprint(&good);
     r.sh.fail(Failure::ok_error_object(), X::MAIN);
     let each = guard::<X>(Some(fp.clone()));
-    let snap = wait_for(&mut r.rx, "a degraded snapshot", REACT, &each, |s| s.state() != SourceState::Fresh).await;
+    let snap = wait_for(&mut r.rx, "a degraded snapshot", REACT, &each, |s| {
+        s.state() != SourceState::Fresh
+    })
+    .await;
     assert_eq!(snap.state(), SourceState::Stale, "{snap:?}");
     assert!(snap.is_stale() && snap.error().is_some());
     assert_eq!(X::fingerprint(&snap), fp);
@@ -1124,11 +1344,20 @@ both!(
 );
 
 async fn a_200_error_object_with_no_previous_data_is_an_error_never_empty<X: Subject>() {
-    let mut r = rig::<X>(X::timing(fast()), |sh| sh.fail(Failure::ok_error_object(), X::MAIN)).await;
+    let mut r = rig::<X>(X::timing(fast()), |sh| {
+        sh.fail(Failure::ok_error_object(), X::MAIN)
+    })
+    .await;
     let each = guard::<X>(None);
-    let snap = wait_for(&mut r.rx, "an error snapshot", REACT, &each, |s| s.state() != SourceState::Loading).await;
+    let snap = wait_for(&mut r.rx, "an error snapshot", REACT, &each, |s| {
+        s.state() != SourceState::Loading
+    })
+    .await;
     assert_eq!(snap.state(), SourceState::Error, "{snap:?}");
-    assert!(snap.updated_at().is_none(), "nothing was ever fetched: {snap:?}");
+    assert!(
+        snap.updated_at().is_none(),
+        "nothing was ever fetched: {snap:?}"
+    );
     assert!(X::is_blank(&snap), "{snap:?}");
 }
 both!(
@@ -1143,18 +1372,30 @@ async fn mailbox_unread_count_body_without_unread_item_count_never_becomes_zero_
     let fp = Mailbox::fingerprint(&good);
     r.sh.fail(Failure::ok_body(json!({})), &[FOLDER]);
     let each = guard::<Mailbox>(Some(fp.clone()));
-    let snap = wait_for(&mut r.rx, "a degraded snapshot", REACT, &each, |s| s.state() != SourceState::Fresh).await;
+    let snap = wait_for(&mut r.rx, "a degraded snapshot", REACT, &each, |s| {
+        s.state() != SourceState::Fresh
+    })
+    .await;
     assert_eq!(snap.state(), SourceState::Stale, "{snap:?}");
-    assert_eq!(snap.unread_count as u64, UNREAD, "the previous count is kept: {snap:?}");
+    assert_eq!(
+        snap.unread_count as u64, UNREAD,
+        "the previous count is kept: {snap:?}"
+    );
     assert_eq!(Mailbox::fingerprint(&snap), fp);
     assert!(snap.error().is_some());
 }
 
 #[tokio::test]
 async fn mailbox_unread_count_body_without_unread_item_count_and_no_data_is_an_error() {
-    let mut r = rig::<Mailbox>(NO_TTL(), |sh| sh.fail(Failure::ok_body(json!({})), &[FOLDER])).await;
+    let mut r = rig::<Mailbox>(NO_TTL(), |sh| {
+        sh.fail(Failure::ok_body(json!({})), &[FOLDER])
+    })
+    .await;
     let each = guard::<Mailbox>(None);
-    let snap = wait_for(&mut r.rx, "an error snapshot", REACT, &each, |s| s.state() != SourceState::Loading).await;
+    let snap = wait_for(&mut r.rx, "an error snapshot", REACT, &each, |s| {
+        s.state() != SourceState::Loading
+    })
+    .await;
     assert_eq!(snap.state(), SourceState::Error, "{snap:?}");
     assert!(snap.updated_at.is_none(), "{snap:?}");
     assert!(snap.error.is_some());
@@ -1165,17 +1406,24 @@ async fn mailbox_unread_count_body_without_unread_item_count_and_no_data_is_an_e
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn mailbox_429_on_the_unread_count_call_is_rate_limited_keeps_the_count_and_silences_every_call() {
+async fn mailbox_429_on_the_unread_count_call_is_rate_limited_keeps_the_count_and_silences_every_call(
+) {
     let (mut r, good) = rig_good::<Mailbox>(NO_TTL()).await;
     let fp = Mailbox::fingerprint(&good);
     r.sh.fail(Failure::throttled(Some(RetryAfter::Seconds(3))), &[FOLDER]);
 
     let each = guard::<Mailbox>(Some(fp.clone()));
-    let snap = wait_for(&mut r.rx, "a rate-limited snapshot", REACT, &each, |s| s.state() != SourceState::Fresh).await;
+    let snap = wait_for(&mut r.rx, "a rate-limited snapshot", REACT, &each, |s| {
+        s.state() != SourceState::Fresh
+    })
+    .await;
     let observed = Utc::now();
     assert_eq!(snap.state(), SourceState::RateLimited, "{snap:?}");
     assert!(snap.stale);
-    assert_eq!(snap.unread_count as u64, UNREAD, "never a confident zero: {snap:?}");
+    assert_eq!(
+        snap.unread_count as u64, UNREAD,
+        "never a confident zero: {snap:?}"
+    );
     assert_eq!(Mailbox::fingerprint(&snap), fp);
     assert_plain_reason(snap.error.as_deref().unwrap());
     let throttled = r.sh.failure_hits()[0].clone();
@@ -1187,7 +1435,11 @@ async fn mailbox_429_on_the_unread_count_call_is_rate_limited_keeps_the_count_an
         hits.iter().any(|h| h.at > throttled.at)
     })
     .await;
-    let next = r.sh.hits().into_iter().find(|h| h.at > throttled.at).unwrap();
+    let next =
+        r.sh.hits()
+            .into_iter()
+            .find(|h| h.at > throttled.at)
+            .unwrap();
     assert!(
         gap(&throttled, &next) >= 3.0,
         "a {} request went out {:.2}s after the unread-count 429",
@@ -1208,7 +1460,10 @@ async fn mailbox_429_on_the_unread_count_call_with_no_prior_data_is_rate_limited
     })
     .await;
     assert_eq!(snap.state, SourceState::RateLimited, "{snap:?}");
-    assert!(snap.updated_at.is_none(), "no count was ever read: {snap:?}");
+    assert!(
+        snap.updated_at.is_none(),
+        "no count was ever read: {snap:?}"
+    );
     assert_eq!(snap.unread_count, 0);
     assert!(snap.retry_at.is_some());
 }

@@ -439,7 +439,9 @@ impl PerriPrNativeSource {
                         // which reads as badly stale immediately.
                         snap.generated_at = previous
                             .get(&tag)
-                            .filter(|prev| prev.repo == pin.repo && prev.pr_number == Some(pin.number))
+                            .filter(|prev| {
+                                prev.repo == pin.repo && prev.pr_number == Some(pin.number)
+                            })
                             .and_then(|prev| prev.generated_at);
                     }
                     debug!(%tag, repo = %pin.repo, pr = pin.number, "perri diff refreshed");
@@ -1417,7 +1419,9 @@ mod tests {
     fn issue_comment(id: u64, author: &str, created_at: &str, body: &str) -> RawIssueComment {
         RawIssueComment {
             id,
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             created_at: created_at.parse().unwrap(),
             body: Some(body.to_string()),
         }
@@ -1426,7 +1430,9 @@ mod tests {
     fn review(id: u64, author: &str, submitted_at: Option<&str>, body: Option<&str>) -> RawReview {
         RawReview {
             id,
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             submitted_at: submitted_at.map(|s| s.parse().unwrap()),
             body: body.map(str::to_string),
             state: "APPROVED".to_string(),
@@ -1437,7 +1443,9 @@ mod tests {
     fn pending_review(id: u64, author: &str, body: Option<&str>) -> RawReview {
         RawReview {
             id,
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             submitted_at: None,
             body: body.map(str::to_string),
             state: "PENDING".to_string(),
@@ -1462,7 +1470,9 @@ mod tests {
             line,
             original_line,
             diff_hunk: diff_hunk.map(str::to_string),
-            user: Some(RawGhUser { login: author.to_string() }),
+            user: Some(RawGhUser {
+                login: author.to_string(),
+            }),
             created_at: created_at.parse().unwrap(),
             body: Some(format!("comment {id}")),
         }
@@ -1488,7 +1498,12 @@ mod tests {
         let threads = assemble_threads(
             vec![],
             vec![],
-            vec![review(1, "bob", Some("2024-01-01T00:00:00Z"), Some("looks good"))],
+            vec![review(
+                1,
+                "bob",
+                Some("2024-01-01T00:00:00Z"),
+                Some("looks good"),
+            )],
         );
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "review-1");
@@ -1543,8 +1558,26 @@ mod tests {
     #[test]
     fn a_straightforward_reply_chain_groups_into_one_thread_rooted_at_the_top_level_comment() {
         // A (top-level) at 10:00, B (reply to A) at 10:05.
-        let a = review_comment(1, None, Some("src/main.rs"), Some(10), None, Some("@@ hunk @@"), "alice", "2024-01-01T10:00:00Z");
-        let b = review_comment(2, Some(1), None, None, None, None, "bob", "2024-01-01T10:05:00Z");
+        let a = review_comment(
+            1,
+            None,
+            Some("src/main.rs"),
+            Some(10),
+            None,
+            Some("@@ hunk @@"),
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let b = review_comment(
+            2,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:05:00Z",
+        );
         let threads = assemble_inline_threads(vec![a, b]);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "inline-1");
@@ -1556,13 +1589,22 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_whose_in_reply_to_id_is_not_present_in_the_payload_becomes_its_own_thread_never_dropped()
-    {
+    fn a_reply_whose_in_reply_to_id_is_not_present_in_the_payload_becomes_its_own_thread_never_dropped(
+    ) {
         // The highest-risk case per the plan: comment 99 replies to comment 1,
         // but comment 1 was never fetched (predates this page, or was
         // filtered out upstream). Comment 99 must become its own thread's
         // root — not be silently dropped.
-        let orphan = review_comment(99, Some(1), Some("src/main.rs"), Some(20), None, Some("@@ hunk @@"), "carol", "2024-01-01T11:00:00Z");
+        let orphan = review_comment(
+            99,
+            Some(1),
+            Some("src/main.rs"),
+            Some(20),
+            None,
+            Some("@@ hunk @@"),
+            "carol",
+            "2024-01-01T11:00:00Z",
+        );
         let threads = assemble_inline_threads(vec![orphan]);
         assert_eq!(
             threads.len(),
@@ -1576,8 +1618,26 @@ mod tests {
 
     #[test]
     fn two_independent_orphans_pointing_at_the_same_missing_parent_become_two_separate_threads() {
-        let orphan_a = review_comment(101, Some(5), Some("src/a.rs"), Some(1), None, None, "alice", "2024-01-01T10:00:00Z");
-        let orphan_b = review_comment(102, Some(5), Some("src/b.rs"), Some(2), None, None, "bob", "2024-01-01T10:01:00Z");
+        let orphan_a = review_comment(
+            101,
+            Some(5),
+            Some("src/a.rs"),
+            Some(1),
+            None,
+            None,
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let orphan_b = review_comment(
+            102,
+            Some(5),
+            Some("src/b.rs"),
+            Some(2),
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:01:00Z",
+        );
         let threads = assemble_inline_threads(vec![orphan_a, orphan_b]);
         assert_eq!(
             threads.len(),
@@ -1588,14 +1648,36 @@ mod tests {
         assert!(ids.contains("inline-101"));
         assert!(ids.contains("inline-102"));
         for t in &threads {
-            assert_eq!(t.comments.len(), 1, "each orphan's thread carries only itself");
+            assert_eq!(
+                t.comments.len(),
+                1,
+                "each orphan's thread carries only itself"
+            );
         }
     }
 
     #[test]
     fn a_threads_path_line_and_diff_hunk_come_from_the_root_comment() {
-        let root = review_comment(1, None, Some("src/main.rs"), Some(10), None, Some("@@ -1,3 +1,3 @@"), "alice", "2024-01-01T10:00:00Z");
-        let reply = review_comment(2, Some(1), None, None, None, None, "bob", "2024-01-01T10:05:00Z");
+        let root = review_comment(
+            1,
+            None,
+            Some("src/main.rs"),
+            Some(10),
+            None,
+            Some("@@ -1,3 +1,3 @@"),
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let reply = review_comment(
+            2,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:05:00Z",
+        );
         let threads = assemble_inline_threads(vec![root, reply]);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].path.as_deref(), Some("src/main.rs"));
@@ -1608,7 +1690,16 @@ mod tests {
         // Matches a GitHub "outdated" inline comment: `line` is null once the
         // diff has moved on, but `original_line` still names where the
         // comment was anchored.
-        let root = review_comment(1, None, Some("src/main.rs"), None, Some(7), Some("@@ hunk @@"), "alice", "2024-01-01T10:00:00Z");
+        let root = review_comment(
+            1,
+            None,
+            Some("src/main.rs"),
+            None,
+            Some(7),
+            Some("@@ hunk @@"),
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
         let threads = assemble_inline_threads(vec![root]);
         assert_eq!(threads.len(), 1);
         assert_eq!(
@@ -1621,9 +1712,36 @@ mod tests {
     #[test]
     fn comment_ordering_within_a_thread_is_chronological_and_tie_broken_by_id_deterministically() {
         // b and c share an identical timestamp; only id order can break the tie.
-        let a = review_comment(1, None, Some("f.rs"), Some(1), None, None, "alice", "2024-01-01T10:00:00Z");
-        let c = review_comment(3, Some(1), None, None, None, None, "carol", "2024-01-01T10:05:00Z");
-        let b = review_comment(2, Some(1), None, None, None, None, "bob", "2024-01-01T10:05:00Z");
+        let a = review_comment(
+            1,
+            None,
+            Some("f.rs"),
+            Some(1),
+            None,
+            None,
+            "alice",
+            "2024-01-01T10:00:00Z",
+        );
+        let c = review_comment(
+            3,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "carol",
+            "2024-01-01T10:05:00Z",
+        );
+        let b = review_comment(
+            2,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            "bob",
+            "2024-01-01T10:05:00Z",
+        );
 
         // Feed in a shuffled order — the output order must not depend on input order.
         let threads = assemble_inline_threads(vec![c.clone(), a.clone(), b.clone()]);
@@ -1659,7 +1777,8 @@ mod tests {
         )
         .unwrap();
         std::env::remove_var("GITHUB_TOKEN");
-        let client = GithubClient::new(Some(&hosts_path)).expect("client should build from hosts.yml fixture");
+        let client = GithubClient::new(Some(&hosts_path))
+            .expect("client should build from hosts.yml fixture");
         // Keep the tempdir alive for the client's lifetime (it only reads the
         // file once at construction, so leaking is fine for a short-lived test).
         std::mem::forget(dir);
@@ -1680,7 +1799,9 @@ mod tests {
         use wiremock::{Mock, ResponseTemplate};
 
         Mock::given(method("GET"))
-            .and(path(format!("/repos/{owner}/{repo}/issues/{number}/comments")))
+            .and(path(format!(
+                "/repos/{owner}/{repo}/issues/{number}/comments"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
                     "id": 1,
@@ -1694,7 +1815,9 @@ mod tests {
             .await;
 
         Mock::given(method("GET"))
-            .and(path(format!("/repos/{owner}/{repo}/pulls/{number}/comments")))
+            .and(path(format!(
+                "/repos/{owner}/{repo}/pulls/{number}/comments"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
                     "id": 2,
@@ -1713,7 +1836,9 @@ mod tests {
             .await;
 
         Mock::given(method("GET"))
-            .and(path(format!("/repos/{owner}/{repo}/pulls/{number}/reviews")))
+            .and(path(format!(
+                "/repos/{owner}/{repo}/pulls/{number}/reviews"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
                     "id": 3,
@@ -1728,8 +1853,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_conversation_with_all_three_endpoints_succeeding_produces_no_error_and_the_expected_threads()
-    {
+    async fn fetch_conversation_with_all_three_endpoints_succeeding_produces_no_error_and_the_expected_threads(
+    ) {
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
@@ -1742,8 +1867,15 @@ mod tests {
         let source = test_source();
         let result = source.fetch_conversation(&client, "acme", "web", 42).await;
 
-        assert!(result.error.is_none(), "all three fetches succeeded — error must be None");
-        assert_eq!(result.threads.len(), 3, "one issue, one inline, one review thread");
+        assert!(
+            result.error.is_none(),
+            "all three fetches succeeded — error must be None"
+        );
+        assert_eq!(
+            result.threads.len(),
+            3,
+            "one issue, one inline, one review thread"
+        );
         let kinds: Vec<PrThreadKind> = result.threads.iter().map(|t| t.kind).collect();
         assert!(kinds.contains(&PrThreadKind::Issue));
         assert!(kinds.contains(&PrThreadKind::Inline));
@@ -1751,8 +1883,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_conversation_with_review_comments_failing_still_returns_the_other_two_threads_and_names_the_failure()
-    {
+    async fn fetch_conversation_with_review_comments_failing_still_returns_the_other_two_threads_and_names_the_failure(
+    ) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1846,9 +1978,11 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/repos/acme/web/pulls/42/comments"))
-            .respond_with(ResponseTemplate::new(200).insert_header("ETag", "\"rc-etag-1\"").set_body_json(
-                serde_json::json!([]),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"rc-etag-1\"")
+                    .set_body_json(serde_json::json!([])),
+            )
             .up_to_n_times(1)
             .expect(1)
             .mount(&server)
@@ -2734,7 +2868,10 @@ mod tests {
             .fetch_all(&client, &crate::data::perri_pr::no_prs(), None)
             .await;
         let warm_at = warm[FOCUS_A].generated_at;
-        assert!(warm_at.is_some(), "a wholly successful pass stamps generated_at");
+        assert!(
+            warm_at.is_some(),
+            "a wholly successful pass stamps generated_at"
+        );
 
         server.reset().await;
         Mock::given(method("GET"))
@@ -2800,7 +2937,10 @@ mod tests {
         let after = source.fetch_all(&client, &previous, None).await;
         let snap = &after[FOCUS_A];
         assert!(snap.stale, "the pass served a cached diff, so it is stale");
-        assert!(snap.diff.contains(MOUNTED_DIFF), "the cached diff is still served");
+        assert!(
+            snap.diff.contains(MOUNTED_DIFF),
+            "the cached diff is still served"
+        );
         assert_eq!(
             snap.generated_at, None,
             "another PR's timestamp must not date this PR's cached content"
@@ -3263,11 +3403,11 @@ mod tests {
         // five conditional GETs a poll makes (the sixth call, the octocrab
         // metadata read, is uncached by design and has nothing to prune).
         for endpoint in [
-            "/pulls/42",                             // the raw diff
+            "/pulls/42",                               // the raw diff
             "/commits/abc123/check-runs?per_page=100", // CI, keyed on the head SHA
-            "/issues/42/comments?per_page=100",      // issue comments
-            "/pulls/42/comments?per_page=100",       // review comments
-            "/pulls/42/reviews?per_page=100",        // reviews
+            "/issues/42/comments?per_page=100",        // issue comments
+            "/pulls/42/comments?per_page=100",         // review comments
+            "/pulls/42/reviews?per_page=100",          // reviews
         ] {
             assert!(
                 before.iter().any(|url| url.ends_with(endpoint)),
@@ -3337,7 +3477,6 @@ mod tests {
         );
     }
 
-
     // ── GitHub HTTP timeout (fix/pr-source-http-timeout) ─────────────────────
     //
     // A stalled GitHub connection or a half-delivered response body used to
@@ -3385,7 +3524,12 @@ mod tests {
     /// so it is checked first for the identical path, per wiremock's
     /// documented "same-priority ties break by first-mounted, but an
     /// explicit priority always wins" rule.
-    async fn mount_pr_metadata_mock(server: &wiremock::MockServer, owner: &str, repo: &str, number: u64) {
+    async fn mount_pr_metadata_mock(
+        server: &wiremock::MockServer,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, ResponseTemplate};
 
@@ -3436,8 +3580,8 @@ mod tests {
     /// an `Err`, and doesn't affect this test's assertions. No real network
     /// is needed.
     #[tokio::test]
-    async fn a_stalled_diff_fetch_fails_within_the_configured_timeout_instead_of_hanging_the_source()
-    {
+    async fn a_stalled_diff_fetch_fails_within_the_configured_timeout_instead_of_hanging_the_source(
+    ) {
         use std::time::Duration;
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -3459,7 +3603,9 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("diff that never fully arrives")
-                    .set_delay(Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 30)),
+                    .set_delay(Duration::from_secs(
+                        crate::config::GITHUB_HTTP_TIMEOUT_SECS + 30,
+                    )),
             )
             .with_priority(1)
             .mount(&server)
@@ -3469,7 +3615,8 @@ mod tests {
         let source = test_source();
 
         let hard_deadline = Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 15);
-        let outcome = tokio::time::timeout(hard_deadline, source.fetch_pr(&client, "acme/web", 7)).await;
+        let outcome =
+            tokio::time::timeout(hard_deadline, source.fetch_pr(&client, "acme/web", 7)).await;
 
         match outcome {
             Err(_) => panic!(
@@ -3522,7 +3669,9 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string(diff_body.clone())
-                    .set_delay(Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS / 2)),
+                    .set_delay(Duration::from_secs(
+                        crate::config::GITHUB_HTTP_TIMEOUT_SECS / 2,
+                    )),
             )
             .with_priority(1)
             .mount(&server)
@@ -3564,8 +3713,8 @@ mod tests {
     /// long comment on the headline test for why that was tried and dropped
     /// in this file.
     #[tokio::test]
-    async fn a_stalled_diff_fetch_publishes_an_error_snapshot_via_run_and_generated_at_advances_on_recovery()
-    {
+    async fn a_stalled_diff_fetch_publishes_an_error_snapshot_via_run_and_generated_at_advances_on_recovery(
+    ) {
         use std::time::Duration;
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -3608,7 +3757,9 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("diff that never fully arrives")
-                    .set_delay(Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 30)),
+                    .set_delay(Duration::from_secs(
+                        crate::config::GITHUB_HTTP_TIMEOUT_SECS + 30,
+                    )),
             )
             .with_priority(1)
             .up_to_n_times(1)
@@ -3625,8 +3776,14 @@ mod tests {
             .await;
 
         let state_dir = tempfile::tempdir().unwrap();
-        crate::data::perri_current_pr::write_pointer(state_dir.path(), "perri", 7, "acme/web", None)
-            .unwrap();
+        crate::data::perri_current_pr::write_pointer(
+            state_dir.path(),
+            "perri",
+            7,
+            "acme/web",
+            None,
+        )
+        .unwrap();
 
         let config = Config {
             perri_state: Some(state_dir.path().to_path_buf()),
@@ -3660,8 +3817,15 @@ mod tests {
             .await
             .expect("initial fetch hung")
             .expect("watch sender dropped unexpectedly");
-        let initial_snap = rx.borrow().get("perri").cloned().expect("expected a published snapshot");
-        assert!(!initial_snap.stale, "initial fetch should succeed: {initial_snap:?}");
+        let initial_snap = rx
+            .borrow()
+            .get("perri")
+            .cloned()
+            .expect("expected a published snapshot");
+        assert!(
+            !initial_snap.stale,
+            "initial fetch should succeed: {initial_snap:?}"
+        );
         assert!(initial_snap.error.is_none());
         assert_eq!(initial_snap.diff, initial_diff);
         let t0 = initial_snap
@@ -3678,8 +3842,15 @@ mod tests {
                  snapshot for the stalled fetch",
             )
             .expect("watch sender dropped unexpectedly");
-        let error_snap = rx.borrow().get("perri").cloned().expect("expected a published snapshot");
-        assert!(error_snap.stale, "stalled fetch must publish stale:true: {error_snap:?}");
+        let error_snap = rx
+            .borrow()
+            .get("perri")
+            .cloned()
+            .expect("expected a published snapshot");
+        assert!(
+            error_snap.stale,
+            "stalled fetch must publish stale:true: {error_snap:?}"
+        );
         assert!(
             error_snap.error.is_some(),
             "stalled fetch must publish a populated error: {error_snap:?}"
@@ -3701,8 +3872,15 @@ mod tests {
             .await
             .expect("recovery fetch hung")
             .expect("watch sender dropped unexpectedly");
-        let recovered_snap = rx.borrow().get("perri").cloned().expect("expected a published snapshot");
-        assert!(!recovered_snap.stale, "recovered fetch should succeed: {recovered_snap:?}");
+        let recovered_snap = rx
+            .borrow()
+            .get("perri")
+            .cloned()
+            .expect("expected a published snapshot");
+        assert!(
+            !recovered_snap.stale,
+            "recovered fetch should succeed: {recovered_snap:?}"
+        );
         assert!(recovered_snap.error.is_none());
         assert_eq!(recovered_snap.diff, recovered_diff);
         let t2 = recovered_snap
@@ -3782,9 +3960,7 @@ mod tests {
             Mock::given(method("GET"))
                 .and(path("/repos/acme/web/pulls/7"))
                 .and(header("accept", "application/vnd.github.diff"))
-                .respond_with(
-                    ResponseTemplate::new(500).set_body_string(format!("boom {i}")),
-                )
+                .respond_with(ResponseTemplate::new(500).set_body_string(format!("boom {i}")))
                 .with_priority(1)
                 .up_to_n_times(1)
                 .mount(&server)
@@ -3792,8 +3968,14 @@ mod tests {
         }
 
         let state_dir = tempfile::tempdir().unwrap();
-        crate::data::perri_current_pr::write_pointer(state_dir.path(), "perri", 7, "acme/web", None)
-            .unwrap();
+        crate::data::perri_current_pr::write_pointer(
+            state_dir.path(),
+            "perri",
+            7,
+            "acme/web",
+            None,
+        )
+        .unwrap();
 
         let config = Config {
             perri_state: Some(state_dir.path().to_path_buf()),
@@ -3828,8 +4010,15 @@ mod tests {
             .await
             .expect("initial fetch hung")
             .expect("watch sender dropped unexpectedly");
-        let initial_snap = rx.borrow().get("perri").cloned().expect("expected a published snapshot");
-        assert!(!initial_snap.stale, "initial fetch should succeed: {initial_snap:?}");
+        let initial_snap = rx
+            .borrow()
+            .get("perri")
+            .cloned()
+            .expect("expected a published snapshot");
+        assert!(
+            !initial_snap.stale,
+            "initial fetch should succeed: {initial_snap:?}"
+        );
         assert!(initial_snap.error.is_none());
         assert_eq!(initial_snap.diff, initial_diff);
         let t0 = initial_snap
@@ -3843,9 +4032,15 @@ mod tests {
             refresh_tx.send(Some("perri".into())).unwrap();
             tokio::time::timeout(deadline, rx.changed())
                 .await
-                .unwrap_or_else(|_| panic!("run() hung publishing failure snapshot for cycle {cycle}"))
+                .unwrap_or_else(|_| {
+                    panic!("run() hung publishing failure snapshot for cycle {cycle}")
+                })
                 .expect("watch sender dropped unexpectedly");
-            let error_snap = rx.borrow().get("perri").cloned().expect("expected a published snapshot");
+            let error_snap = rx
+                .borrow()
+                .get("perri")
+                .cloned()
+                .expect("expected a published snapshot");
             assert!(
                 error_snap.stale,
                 "cycle {cycle}: failed fetch must publish stale:true: {error_snap:?}"

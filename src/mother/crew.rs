@@ -32,7 +32,11 @@ pub struct CrewGates {
     pub not_run: Vec<String>,
     /// True when the wire's `override` is present and non-null. Its content
     /// is not read, and is re-serialized as `override: true`.
-    #[serde(rename = "override", deserialize_with = "lenient::present", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        rename = "override",
+        deserialize_with = "lenient::present",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub overridden: bool,
 }
 
@@ -151,7 +155,10 @@ impl<'de> Deserialize<'de> for DecisionResolution {
             },
         }
         Ok(match Raw::deserialize(d)? {
-            Raw::Option(option) => Self { option: Some(option), ..Self::default() },
+            Raw::Option(option) => Self {
+                option: Some(option),
+                ..Self::default()
+            },
             Raw::Object { option, source, at } => Self { option, source, at },
         })
     }
@@ -271,7 +278,10 @@ impl<'de> Deserialize<'de> for ProgressFlag {
             },
         }
         Ok(match Raw::deserialize(d)? {
-            Raw::Reason(reason) => Self { reason, since: None },
+            Raw::Reason(reason) => Self {
+                reason,
+                since: None,
+            },
             Raw::Object { reason, since } => Self { reason, since },
         })
     }

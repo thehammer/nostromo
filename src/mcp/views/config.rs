@@ -137,8 +137,8 @@ impl ViewPlacementConfig {
 
 /// Parse and validate a `views.yaml` document.
 pub fn parse(yaml: &str) -> Result<ViewPlacementConfig, PlacementError> {
-    let cfg: ViewPlacementConfig = serde_yaml::from_str(yaml)
-        .map_err(|e| PlacementError::InvalidConfig(e.to_string()))?;
+    let cfg: ViewPlacementConfig =
+        serde_yaml::from_str(yaml).map_err(|e| PlacementError::InvalidConfig(e.to_string()))?;
     validate(&cfg)?;
     Ok(cfg)
 }
@@ -239,7 +239,13 @@ mod tests {
     #[test]
     fn the_compiled_in_default_gives_every_v1_view_type_a_home_and_an_order() {
         let cfg = parse(COMPILED_IN).unwrap();
-        for t in ["review_queue", "pr_conversation", "pr_diff", "ticket", "file"] {
+        for t in [
+            "review_queue",
+            "pr_conversation",
+            "pr_diff",
+            "ticket",
+            "file",
+        ] {
             assert_eq!(cfg.view(t).unwrap().region, "detail", "{t}");
         }
         let mut orders: Vec<u32> = cfg.views.values().map(|v| v.order).collect();
@@ -253,7 +259,10 @@ mod tests {
         let cfg = parse(COMPILED_IN).unwrap();
         let queue = cfg.view("review_queue").unwrap();
         assert_eq!(queue.pane.as_deref(), Some("queue"));
-        assert!(queue.pinned, "the queue must always be reachable: never evicted");
+        assert!(
+            queue.pinned,
+            "the queue must always be reachable: never evicted"
+        );
         let min_order = cfg.views.values().map(|v| v.order).min().unwrap();
         assert_eq!(queue.order, min_order, "the queue is the first tab");
         for t in ["pr_conversation", "pr_diff", "ticket", "file"] {
@@ -267,7 +276,10 @@ mod tests {
     fn the_compiled_in_default_declares_a_creation_path_for_every_region() {
         let cfg = parse(COMPILED_IN).unwrap();
         for (name, region) in &cfg.regions {
-            assert!(!region.create.is_empty(), "region `{name}` must be creatable");
+            assert!(
+                !region.create.is_empty(),
+                "region `{name}` must be creatable"
+            );
         }
     }
 
@@ -376,9 +388,15 @@ mod tests {
             .unwrap()
         };
         write(2);
-        assert_eq!(load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap, Some(2));
+        assert_eq!(
+            load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap,
+            Some(2)
+        );
         write(9);
-        assert_eq!(load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap, Some(9));
+        assert_eq!(
+            load_from_dir(dir.path()).unwrap().regions["detail"].tab_cap,
+            Some(9)
+        );
     }
 
     #[test]

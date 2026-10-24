@@ -14,7 +14,10 @@ use url::{Host, Url};
 /// is `evil`, `https://evil\@good` is `evil`).
 pub fn https_api_base(raw: &str, host_ok: impl Fn(&str) -> bool, api_path: &str) -> Option<String> {
     let url = https_url(raw, host_ok)?;
-    if url.query().is_some() || url.fragment().is_some() || url.path().trim_end_matches('/') != api_path {
+    if url.query().is_some()
+        || url.fragment().is_some()
+        || url.path().trim_end_matches('/') != api_path
+    {
         return None;
     }
     Some(format!("https://{}{api_path}", url.host_str()?))
@@ -30,7 +33,9 @@ pub fn https_link(raw: &str, host_ok: impl Fn(&str) -> bool) -> Option<String> {
 pub fn is_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 fn https_url(raw: &str, host_ok: impl Fn(&str) -> bool) -> Option<Url> {
@@ -55,7 +60,12 @@ mod tests {
 
     #[test]
     fn only_https_sentry_hosts_with_the_exact_api_path_pass() {
-        for ok in ["https://sentry.io/api/0", "https://sentry.io/api/0/", "https://us.sentry.io/api/0", "HTTPS://Acme.Sentry.IO/api/0"] {
+        for ok in [
+            "https://sentry.io/api/0",
+            "https://sentry.io/api/0/",
+            "https://us.sentry.io/api/0",
+            "HTTPS://Acme.Sentry.IO/api/0",
+        ] {
             assert!(https_api_base(ok, sentry, "/api/0").is_some(), "{ok}");
         }
         for bad in [
@@ -79,8 +89,17 @@ mod tests {
 
     #[test]
     fn links_keep_only_https_on_an_accepted_host() {
-        assert!(https_link("https://acme.sentry.io/organizations/acme/issues/1/", sentry).is_some());
-        for bad in ["http://sentry.io/x", "javascript:alert(1)", "file:///etc/passwd", "https://sentry.io@evil.example/x"] {
+        assert!(https_link(
+            "https://acme.sentry.io/organizations/acme/issues/1/",
+            sentry
+        )
+        .is_some());
+        for bad in [
+            "http://sentry.io/x",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://sentry.io@evil.example/x",
+        ] {
             assert!(https_link(bad, sentry).is_none(), "{bad}");
         }
     }

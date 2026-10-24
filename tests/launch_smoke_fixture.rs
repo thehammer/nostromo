@@ -64,7 +64,12 @@ fn for_each_tabs<'a>(
                 for_each_tabs(child, visit);
             }
         }
-        PaneTree::Tabs { children, labels, region, .. } => {
+        PaneTree::Tabs {
+            children,
+            labels,
+            region,
+            ..
+        } => {
             visit(children, labels, region);
             for child in children {
                 for_each_tabs(child, visit);
@@ -111,7 +116,10 @@ fn every_frame_carries_a_split_whose_children_and_ratios_agree_and_sum_to_one() 
 
         let mut found_valid_split = false;
         for_each_split(tree, &mut |node| {
-            let PaneTree::Split { children, ratios, .. } = node else {
+            let PaneTree::Split {
+                children, ratios, ..
+            } = node
+            else {
                 unreachable!("for_each_split only visits Split nodes");
             };
             // Daemon invariant (src/ipc/protocol.rs): every Split has
@@ -235,7 +243,10 @@ fn every_frame_renders_exactly_two_split_nodes_and_four_leaves() {
         // against these exact numbers. Four leaves since D7: queue, the
         // detail region's two tabs, and repl. A Tabs node is not a Split, so
         // the split count is unchanged at two.
-        assert_eq!(split_count, 2, "focus {tag:?}: expected exactly 2 split nodes");
+        assert_eq!(
+            split_count, 2,
+            "focus {tag:?}: expected exactly 2 split nodes"
+        );
         assert_eq!(leaves.len(), 4, "focus {tag:?}: expected exactly 4 leaves");
     }
 }
@@ -293,7 +304,9 @@ fn approx_json_eq(a: &Value, b: &Value, epsilon: f64) -> bool {
         }
         (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len()
-                && x.iter().zip(y.iter()).all(|(v, w)| approx_json_eq(v, w, epsilon))
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(v, w)| approx_json_eq(v, w, epsilon))
         }
         _ => a == b,
     }

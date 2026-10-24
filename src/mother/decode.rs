@@ -56,7 +56,11 @@ pub fn decode_jobs(elements: Vec<Value>) -> (Vec<MotherJob>, usize) {
     let mut jobs = Vec::with_capacity(elements.len());
     let mut skipped = 0usize;
     for element in elements {
-        let id = element.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        let id = element
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let Some(id) = id else {
             skipped += 1;
             warn_once(None, "id", "missing field");
@@ -73,7 +77,11 @@ pub fn decode_jobs(elements: Vec<Value>) -> (Vec<MotherJob>, usize) {
         }
     }
     if skipped > 0 {
-        tracing::debug!(skipped, decoded = jobs.len(), "mother: skipped unreadable jobs");
+        tracing::debug!(
+            skipped,
+            decoded = jobs.len(),
+            "mother: skipped unreadable jobs"
+        );
     }
     (jobs, skipped)
 }
@@ -96,13 +104,19 @@ pub fn decode_event_data(kind: &str, data: &Value) -> Option<EventData> {
 /// not be read and was dropped to its default. `inner` is the failing path inside
 /// that key (`.` for the key itself), as returned by [`describe`].
 pub(super) fn warn_unreadable_key(key: &str, inner: &str, class: &'static str) {
-    let path = if inner == "." { key.to_owned() } else { format!("{key}.{inner}") };
+    let path = if inner == "." {
+        key.to_owned()
+    } else {
+        format!("{key}.{inner}")
+    };
     let id = CURRENT_JOB.with(|c| c.borrow().clone());
     warn_once(id.as_deref(), &path, class);
 }
 
 /// (key path, error class) of a decode failure, with no values in either.
-pub(super) fn describe(e: &serde_path_to_error::Error<serde_json::Error>) -> (String, &'static str) {
+pub(super) fn describe(
+    e: &serde_path_to_error::Error<serde_json::Error>,
+) -> (String, &'static str) {
     let msg = e.inner().to_string();
     let class = if msg.starts_with("invalid type") {
         "invalid type"
@@ -117,7 +131,11 @@ pub(super) fn describe(e: &serde_path_to_error::Error<serde_json::Error>) -> (St
     if class == "missing field" {
         // The field name comes from our own struct, not from the payload.
         if let Some(name) = msg.split('`').nth(1) {
-            path = if path == "." { name.to_owned() } else { format!("{path}.{name}") };
+            path = if path == "." {
+                name.to_owned()
+            } else {
+                format!("{path}.{name}")
+            };
         }
     }
     (path, class)
@@ -133,7 +151,12 @@ fn warn_once(id: Option<&str>, path: &str, class: &'static str) {
             return;
         }
     }
-    tracing::warn!(job = id.unwrap_or("<none>"), key_path = path, class, "mother: skipped unreadable payload");
+    tracing::warn!(
+        job = id.unwrap_or("<none>"),
+        key_path = path,
+        class,
+        "mother: skipped unreadable payload"
+    );
 }
 
 #[cfg(test)]
@@ -184,11 +207,21 @@ mod tests {
         bad["created_at"] = json!("SECRET-yesterday");
         let body = serde_json::to_vec(&json!([job("a-1"), bad, job("c-1")])).unwrap();
         let ((jobs, skipped), log) = captured(|| parse_jobs(&body).unwrap());
-        assert_eq!(jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["a-1", "c-1"]);
+        assert_eq!(
+            jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+            ["a-1", "c-1"]
+        );
         assert_eq!(skipped, 1);
-        assert_eq!(log.matches("skipped unreadable payload").count(), 1, "{log}");
+        assert_eq!(
+            log.matches("skipped unreadable payload").count(),
+            1,
+            "{log}"
+        );
         assert!(log.contains("mid-1") && log.contains("created_at"), "{log}");
-        assert!(!log.contains("SECRET") && !log.contains("yesterday"), "{log}");
+        assert!(
+            !log.contains("SECRET") && !log.contains("yesterday"),
+            "{log}"
+        );
     }
 
     #[test]
@@ -214,7 +247,10 @@ mod tests {
     fn missing_required_field_is_named_by_class_and_key() {
         let (r, log) = captured(|| decode_jobs(vec![json!({"id": "nostate-1"})]));
         assert_eq!(r.1, 1);
-        assert!(log.contains("missing field") && log.contains("state") && log.contains("nostate-1"), "{log}");
+        assert!(
+            log.contains("missing field") && log.contains("state") && log.contains("nostate-1"),
+            "{log}"
+        );
     }
 
     #[test]
@@ -232,7 +268,11 @@ mod tests {
         els[500]["started_at"] = json!(12345);
         let ((jobs, skipped), log) = captured(|| decode_jobs(els));
         assert_eq!((jobs.len(), skipped), (999, 1));
-        assert_eq!(log.matches("skipped unreadable payload").count(), 1, "{log}");
+        assert_eq!(
+            log.matches("skipped unreadable payload").count(),
+            1,
+            "{log}"
+        );
     }
 
     #[test]
@@ -243,7 +283,11 @@ mod tests {
             decode_jobs(vec![bad.clone()]);
             decode_jobs(vec![bad.clone()])
         });
-        assert_eq!(log.matches("skipped unreadable payload").count(), 1, "{log}");
+        assert_eq!(
+            log.matches("skipped unreadable payload").count(),
+            1,
+            "{log}"
+        );
     }
 
     #[test]
@@ -261,6 +305,8 @@ mod tests {
         assert!(r.is_none());
         assert!(log.contains("ev-1") && log.contains("state"), "{log}");
         assert!(!log.contains("SECRET"), "{log}");
-        assert!(decode_event_data("whatever_new_kind", &json!({"job": "j", "extra": [1]})).is_some());
+        assert!(
+            decode_event_data("whatever_new_kind", &json!({"job": "j", "extra": [1]})).is_some()
+        );
     }
 }

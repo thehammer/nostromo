@@ -105,7 +105,11 @@ impl MailboxSnapshot {
     /// The snapshot to publish when Graph is throttling us: like `failed`
     /// (previous good data kept, marked `stale`; never `fresh`/`empty`) but in
     /// the `rate_limited` state with the time we will ask again.
-    pub fn rate_limited(previous: Option<&MailboxSnapshot>, reason: String, retry_at: DateTime<Utc>) -> MailboxSnapshot {
+    pub fn rate_limited(
+        previous: Option<&MailboxSnapshot>,
+        reason: String,
+        retry_at: DateTime<Utc>,
+    ) -> MailboxSnapshot {
         MailboxSnapshot {
             state: SourceState::RateLimited,
             retry_at: Some(retry_at),
@@ -139,7 +143,10 @@ impl MailboxSnapshot {
         } else {
             SourceState::Fresh
         };
-        if !matches!(self.state, SourceState::Error | SourceState::Unauthenticated) {
+        if !matches!(
+            self.state,
+            SourceState::Error | SourceState::Unauthenticated
+        ) {
             self.updated_at = self.updated_at.or(self.generated_at);
         }
         self

@@ -97,41 +97,63 @@ fn check_golden(name: &str, msg: &ServerMsg) {
 }
 
 #[test]
-fn the_tracker_board_frame_of_the_sixty_item_board_matches_the_committed_golden_file_byte_for_byte() {
+fn the_tracker_board_frame_of_the_sixty_item_board_matches_the_committed_golden_file_byte_for_byte()
+{
     check_golden(BOARD_FRAME, &board_frame());
 }
 
 #[test]
-fn the_tracker_summary_frame_of_the_sixty_item_board_matches_the_committed_golden_file_byte_for_byte() {
+fn the_tracker_summary_frame_of_the_sixty_item_board_matches_the_committed_golden_file_byte_for_byte(
+) {
     check_golden(SUMMARY_FRAME, &summary_frame());
 }
 
 #[test]
 fn the_golden_board_frame_decodes_back_to_the_same_frame() {
     let text = std::fs::read_to_string(fixture_path(BOARD_FRAME)).expect("golden board frame");
-    let msg: ServerMsg = serde_json::from_str(&text).expect("the golden frame decodes as a ServerMsg");
+    let msg: ServerMsg =
+        serde_json::from_str(&text).expect("the golden frame decodes as a ServerMsg");
     match &msg {
-        ServerMsg::TrackerBoard { tag, board: Some(board) } => {
+        ServerMsg::TrackerBoard {
+            tag,
+            board: Some(board),
+        } => {
             assert_eq!(tag, TAG);
             assert_eq!(board.version, 7);
             assert_eq!(board.title, "Synthetic release triage");
             assert_eq!(board.path, "/repo/.claude/wip/sentry-triage/index.md");
             assert_eq!(board.banner, None);
-            assert!(board.updated_at.is_some(), "the board's updated time comes from its items");
-            let items = board.nodes.iter().filter(|n| matches!(n, ViewNode::Item(_))).count();
+            assert!(
+                board.updated_at.is_some(),
+                "the board's updated time comes from its items"
+            );
+            let items = board
+                .nodes
+                .iter()
+                .filter(|n| matches!(n, ViewNode::Item(_)))
+                .count();
             assert_eq!(items, 60);
         }
         other => panic!("expected a tracker_board frame with a board, got {other:?}"),
     }
-    assert_eq!(rendered(&msg), text, "decode then encode reproduces the file");
+    assert_eq!(
+        rendered(&msg),
+        text,
+        "decode then encode reproduces the file"
+    );
 }
 
 #[test]
 fn the_golden_summary_frame_decodes_back_to_the_same_frame() {
     let text = std::fs::read_to_string(fixture_path(SUMMARY_FRAME)).expect("golden summary frame");
-    let msg: ServerMsg = serde_json::from_str(&text).expect("the golden frame decodes as a ServerMsg");
+    let msg: ServerMsg =
+        serde_json::from_str(&text).expect("the golden frame decodes as a ServerMsg");
     match &msg {
-        ServerMsg::TrackerSummary { tag, has_tracker, counts } => {
+        ServerMsg::TrackerSummary {
+            tag,
+            has_tracker,
+            counts,
+        } => {
             assert_eq!(tag, TAG);
             assert!(*has_tracker);
             assert_eq!(
@@ -156,8 +178,18 @@ fn the_golden_board_frame_shows_every_node_kind_the_clients_must_decode() {
         .iter()
         .map(|n| n["type"].as_str().expect("node type"))
         .collect();
-    for kind in ["title", "section", "log_heading", "prose", "item", "log_line"] {
-        assert!(kinds.contains(kind), "the golden board has no `{kind}` node: {kinds:?}");
+    for kind in [
+        "title",
+        "section",
+        "log_heading",
+        "prose",
+        "item",
+        "log_line",
+    ] {
+        assert!(
+            kinds.contains(kind),
+            "the golden board has no `{kind}` node: {kinds:?}"
+        );
     }
     // A command item (with its command) and a link are in the fixture, so the
     // clients' decoders see those keys too.
@@ -167,23 +199,40 @@ fn the_golden_board_frame_shows_every_node_kind_the_clients_must_decode() {
         .iter()
         .filter(|n| n["type"] == "item")
         .collect();
-    assert!(items.iter().any(|i| i["kind"] == "command" && i["command"].is_string()));
-    assert!(items.iter().any(|i| i["links"].as_array().is_some_and(|l| !l.is_empty())));
+    assert!(items
+        .iter()
+        .any(|i| i["kind"] == "command" && i["command"].is_string()));
+    assert!(items
+        .iter()
+        .any(|i| i["links"].as_array().is_some_and(|l| !l.is_empty())));
     assert!(items.iter().any(|i| i["owner"].is_string()));
 
     let summary: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(fixture_path(SUMMARY_FRAME)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(fixture_path(SUMMARY_FRAME)).unwrap())
+            .unwrap();
     assert_eq!(summary["type"], "tracker_summary");
-    let mut keys: Vec<&str> = summary.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut keys: Vec<&str> = summary
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     keys.sort_unstable();
     assert_eq!(keys, ["counts", "has_tracker", "tag", "type"]);
 }
 
 #[test]
 fn joining_every_nodes_source_reproduces_the_board_file() {
-    let ServerMsg::TrackerBoard { board: Some(board), .. } = board_frame() else {
+    let ServerMsg::TrackerBoard {
+        board: Some(board), ..
+    } = board_frame()
+    else {
         panic!("a board frame")
     };
     let joined: String = board.nodes.iter().map(ViewNode::source).collect();
-    assert_eq!(joined, board60_source(), "Copy as Markdown is the file's own text");
+    assert_eq!(
+        joined,
+        board60_source(),
+        "Copy as Markdown is the file's own text"
+    );
 }

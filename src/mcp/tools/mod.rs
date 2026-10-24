@@ -528,17 +528,23 @@ pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) 
     let mut descriptors = tool_descriptors();
     // A disabled agent's tools do not exist; this runs before every other filter.
     descriptors.retain(|d| {
-        d.get("name").and_then(Value::as_str).is_none_or(|n| state.enabled_agents.allows_tool(n))
+        d.get("name")
+            .and_then(Value::as_str)
+            .is_none_or(|n| state.enabled_agents.allows_tool(n))
     });
     if is_picks_session(pty_id) {
         descriptors.retain(|d| {
-            d.get("name").and_then(Value::as_str).is_some_and(|n| PICKS_TOOLS.contains(&n))
+            d.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| PICKS_TOOLS.contains(&n))
         });
         return descriptors;
     }
     if is_network_driven(state, pty_id) {
         descriptors.retain(|d| {
-            !d.get("name").and_then(Value::as_str).is_some_and(is_network_withheld_tool)
+            !d.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(is_network_withheld_tool)
         });
     }
     let policy = crate::mcp::tool_policy::load();
@@ -560,7 +566,9 @@ fn is_picks_session(pty_id: Option<&str>) -> bool {
 /// session an unauthenticated network peer is steering (see
 /// `SensitiveTags::mark_network_driven`).
 fn is_network_withheld_tool(name: &str) -> bool {
-    ["fred.", "teri.", "mother."].iter().any(|prefix| name.starts_with(prefix))
+    ["fred.", "teri.", "mother."]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 /// The built-in views whose state is Teri/Fred/Mother data.
@@ -589,7 +597,10 @@ const FOCUS_SCOPED_TOOLS: [&str; 15] = [
 /// Is `target` (a view id or focus tag) Teri/Fred/Mother data?
 fn is_sensitive_target(tags: &SensitiveTags, target: &str) -> bool {
     let bare = target.trim();
-    SENSITIVE_VIEW_IDS.iter().any(|v| bare.eq_ignore_ascii_case(v)) || tags.tag_is_sensitive(bare)
+    SENSITIVE_VIEW_IDS
+        .iter()
+        .any(|v| bare.eq_ignore_ascii_case(v))
+        || tags.tag_is_sensitive(bare)
 }
 
 /// Must `name(arguments)` be refused to a session a network peer is steering?
@@ -642,7 +653,9 @@ fn is_denied_to_network_driven(
         "nostromo.refresh_pane_content" => {
             args.get("source").and_then(Value::as_str) == Some(apply_layout::SOURCE_TICKET)
         }
-        "nostromo.apply_layout" => apply_layout::layout_binds_source(args, apply_layout::SOURCE_TICKET),
+        "nostromo.apply_layout" => {
+            apply_layout::layout_binds_source(args, apply_layout::SOURCE_TICKET)
+        }
         _ => false,
     }
 }
@@ -818,9 +831,7 @@ async fn dispatch_inner(
 
         // ── Phase 2: Teri ─────────────────────────────────────────────────
         "teri.list_todos" => teri::list_todos(state),
-        "teri.list_work_items" => {
-            teri::list_work_items(state, arguments.unwrap_or(&Value::Null))
-        }
+        "teri.list_work_items" => teri::list_work_items(state, arguments.unwrap_or(&Value::Null)),
         "teri.get_work_item" => teri::get_work_item(state, arguments.unwrap_or(&Value::Null)).await,
         "teri.get_picks" => teri::get_picks(state),
         "teri.publish_picks" => teri::publish_picks(state, arguments.unwrap_or(&Value::Null)),
@@ -943,7 +954,10 @@ mod tests {
     use super::*;
 
     fn tool_names(descriptors: &[Value]) -> Vec<String> {
-        descriptors.iter().filter_map(|d| d["name"].as_str().map(str::to_string)).collect()
+        descriptors
+            .iter()
+            .filter_map(|d| d["name"].as_str().map(str::to_string))
+            .collect()
     }
 
     #[tokio::test]
@@ -955,11 +969,21 @@ mod tests {
     #[tokio::test]
     async fn disabled_agents_tools_are_hidden_and_uncallable() {
         let mut state = McpSharedState::for_test();
-        state.enabled_agents = crate::agents::EnabledAgents { fred: false, perri: false, teri: true };
+        state.enabled_agents = crate::agents::EnabledAgents {
+            fred: false,
+            perri: false,
+            teri: true,
+        };
         let all = tool_names(&tool_descriptors());
         let shown = tool_names(&tool_descriptors_for(&state, None).await);
-        assert!(!shown.iter().any(|n| n.starts_with("fred.") || n.starts_with("perri.")));
-        for n in all.iter().filter(|n| ["teri.", "mother.", "nostromo."].iter().any(|p| n.starts_with(p))) {
+        assert!(!shown
+            .iter()
+            .any(|n| n.starts_with("fred.") || n.starts_with("perri.")));
+        for n in all.iter().filter(|n| {
+            ["teri.", "mother.", "nostromo."]
+                .iter()
+                .any(|p| n.starts_with(p))
+        }) {
             assert!(shown.contains(n), "{n} should still be listed");
         }
         let r = dispatch("fred.get_state", None, &state, None).await;
@@ -980,7 +1004,10 @@ mod tests {
             .iter()
             .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
-        assert!(!names.is_empty(), "sanity: the tool registry must not be empty");
+        assert!(
+            !names.is_empty(),
+            "sanity: the tool registry must not be empty"
+        );
         for name in &names {
             assert!(
                 !name.to_lowercase().contains("activity"),
@@ -1010,8 +1037,16 @@ mod tests {
 
         let mut offenders = Vec::new();
         for d in tool_descriptors() {
-            let name = d.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
-            let desc = d.get("description").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+            let name = d
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let desc = d
+                .get("description")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
             let hit = |text: &str| approval.is_match(text) && verb.is_match(text);
             if (hit(&name) || hit(&desc)) && !allowed.iter().any(|(n, _)| *n == name) {
                 offenders.push(name);
@@ -1030,12 +1065,19 @@ mod tests {
     fn ask_decision_cannot_address_a_request_it_did_not_create() {
         let src = include_str!("ask_decision.rs");
 
-        let sig_start = src.find("pub async fn handle(").expect("ask_decision::handle must exist");
+        let sig_start = src
+            .find("pub async fn handle(")
+            .expect("ask_decision::handle must exist");
         let sig_end = src[sig_start..].find('{').expect("handle has a body") + sig_start;
         let signature = &src[sig_start..sig_end];
-        assert!(!signature.contains("request_id"), "handle must take no request id: {signature}");
+        assert!(
+            !signature.contains("request_id"),
+            "handle must take no request id: {signature}"
+        );
 
-        let in_start = src.find("struct AskDecisionInput").expect("AskDecisionInput must exist");
+        let in_start = src
+            .find("struct AskDecisionInput")
+            .expect("AskDecisionInput must exist");
         let in_end = src[in_start..].find("\n}").expect("struct closes") + in_start;
         let input_struct = &src[in_start..in_end];
         assert!(

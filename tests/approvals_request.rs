@@ -1369,14 +1369,24 @@ fn matching_an_ask_rule_against_a_four_mib_pathological_command_returns() {
         ("dollar quote pairs", "\"$".repeat(FOUR_MIB / 4 + 1)),
         ("backticks", "`".repeat(FOUR_MIB + 1)),
     ];
-    let rules = ["Bash(rm:*)", "Bash(rm -rf /tmp/x)", "Bash(ls *)", "Bash(ls*)", "Bash", "Edit(*.rs)"];
+    let rules = [
+        "Bash(rm:*)",
+        "Bash(rm -rf /tmp/x)",
+        "Bash(ls *)",
+        "Bash(ls*)",
+        "Bash",
+        "Edit(*.rs)",
+    ];
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for (what, command) in shapes {
             let input = json!({ "command": command });
             for rule in rules {
-                let rule = AskRule { rule: rule.into(), source_path: "~/.claude/settings.json".into() };
+                let rule = AskRule {
+                    rule: rule.into(),
+                    source_path: "~/.claude/settings.json".into(),
+                };
                 let matched = rule.matches("Bash", &input);
                 // None of these runs `rm` or `ls`: only a rule with no content covers them.
                 let _ = tx.send((what, rule.rule.clone(), matched));
@@ -1387,18 +1397,32 @@ fn matching_an_ask_rule_against_a_four_mib_pathological_command_returns() {
     while seen < 9 * rules.len() {
         let (what, rule, matched) = rx
             .recv_timeout(std::time::Duration::from_secs(300))
-            .unwrap_or_else(|_| panic!("matching did not finish after {seen} of {} cases", 9 * rules.len()));
-        assert_eq!(matched, rule == "Bash", "{what} against {rule}: only the whole-tool rule covers it");
+            .unwrap_or_else(|_| {
+                panic!(
+                    "matching did not finish after {seen} of {} cases",
+                    9 * rules.len()
+                )
+            });
+        assert_eq!(
+            matched,
+            rule == "Bash",
+            "{what} against {rule}: only the whole-tool rule covers it"
+        );
         seen += 1;
     }
 }
 
 #[test]
 fn an_ordinary_command_still_matches_its_ask_rule() {
-    let rm = AskRule { rule: "Bash(rm:*)".into(), source_path: "~/.claude/settings.json".into() };
+    let rm = AskRule {
+        rule: "Bash(rm:*)".into(),
+        source_path: "~/.claude/settings.json".into(),
+    };
     assert!(rm.matches("Bash", &json!({ "command": "rm -rf /tmp/x/a" })));
     assert!(rm.matches("Bash", &json!({ "command": "ls && rm -rf /tmp/x/a" })));
-    assert!(rm.matches("Bash", &json!({ "command": "bash -c 'echo hi; rm -rf /tmp/x'" })));
+    assert!(rm.matches(
+        "Bash",
+        &json!({ "command": "bash -c 'echo hi; rm -rf /tmp/x'" })
+    ));
     assert!(!rm.matches("Bash", &json!({ "command": "ls -la" })));
 }
-

@@ -156,7 +156,11 @@ async fn ask_decision_answered_with_a_valid_choice_returns_ok_and_the_chosen_cho
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-decision.sock");
     let harness = make_daemon_state();
-    harness.decisions.lock().unwrap().add_operator("operator-conn");
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .add_operator("operator-conn");
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .expect("server should bind");
@@ -198,7 +202,11 @@ async fn ask_decision_dismissed_returns_ok_with_dismissed_outcome() {
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-decision.sock");
     let harness = make_daemon_state();
-    harness.decisions.lock().unwrap().add_operator("operator-conn");
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .add_operator("operator-conn");
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .expect("server should bind");
@@ -231,7 +239,11 @@ async fn ask_decision_with_fewer_than_two_choices_returns_invalid_args_without_b
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-decision.sock");
     let harness = make_daemon_state();
-    harness.decisions.lock().unwrap().add_operator("operator-conn");
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .add_operator("operator-conn");
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .expect("server should bind");
@@ -260,7 +272,11 @@ async fn ask_decision_with_duplicate_choice_ids_returns_invalid_args() {
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-decision.sock");
     let harness = make_daemon_state();
-    harness.decisions.lock().unwrap().add_operator("operator-conn");
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .add_operator("operator-conn");
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .expect("server should bind");
@@ -329,7 +345,11 @@ async fn a_second_ask_decision_call_for_the_same_tag_queues_and_both_are_eventua
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-decision.sock");
     let harness = make_daemon_state();
-    harness.decisions.lock().unwrap().add_operator("operator-conn");
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .add_operator("operator-conn");
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .expect("server should bind");
@@ -405,7 +425,11 @@ async fn ask_decision_that_times_out_returns_a_timeout_error() {
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-decision.sock");
     let harness = make_daemon_state();
-    harness.decisions.lock().unwrap().add_operator("operator-conn");
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .add_operator("operator-conn");
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .expect("server should bind");
@@ -480,7 +504,10 @@ fn make_raw_daemon_state() -> RawHarness {
         false,
     )
     .expect("raw server should bind");
-    decisions.lock().unwrap().configure_broadcast(server.tx.clone());
+    decisions
+        .lock()
+        .unwrap()
+        .configure_broadcast(server.tx.clone());
 
     RawHarness {
         _dir: dir,
@@ -508,8 +535,18 @@ fn submit_and_broadcast_via(
         prompt.to_string(),
         None,
         vec![
-            DecisionChoice { id: "approve".into(), label: "Approve".into(), detail: None, is_default: false },
-            DecisionChoice { id: "reject".into(), label: "Reject".into(), detail: None, is_default: false },
+            DecisionChoice {
+                id: "approve".into(),
+                label: "Approve".into(),
+                detail: None,
+                is_default: false,
+            },
+            DecisionChoice {
+                id: "reject".into(),
+                label: "Reject".into(),
+                detail: None,
+                is_default: false,
+            },
         ],
         None,
     );
@@ -529,15 +566,20 @@ fn submit_and_broadcast(harness: &RawHarness, tag: &str, prompt: &str) -> String
 
 async fn raw_send(stream: &mut UnixStream, msg: &ClientMsg) {
     let bytes = serde_json::to_vec(msg).unwrap();
-    nostromo::ipc::codec::write_frame(stream, &bytes).await.unwrap();
+    nostromo::ipc::codec::write_frame(stream, &bytes)
+        .await
+        .unwrap();
 }
 
 async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
     loop {
-        let bytes = tokio::time::timeout(Duration::from_secs(5), nostromo::ipc::codec::read_frame(stream))
-            .await
-            .expect("timed out waiting for a server frame")
-            .expect("read frame");
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            nostromo::ipc::codec::read_frame(stream),
+        )
+        .await
+        .expect("timed out waiting for a server frame")
+        .expect("read frame");
         let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
         // Every local subscriber is replayed the Claude sign-in picture on connect
         // (CL1): a frame this file's tests are not about.
@@ -553,7 +595,9 @@ async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
 /// resolution nobody actually made).
 async fn raw_recv_none_within(stream: &mut UnixStream, within: Duration) {
     let deadline = tokio::time::Instant::now() + within;
-    while let Ok(frame_result) = tokio::time::timeout_at(deadline, nostromo::ipc::codec::read_frame(stream)).await {
+    while let Ok(frame_result) =
+        tokio::time::timeout_at(deadline, nostromo::ipc::codec::read_frame(stream)).await
+    {
         let bytes = frame_result.expect("read frame");
         let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
         // The Claude sign-in replay (CL1) is not what this proves the absence of.
@@ -580,14 +624,26 @@ async fn raw_handshake(
 ) -> Option<String> {
     raw_send(
         stream,
-        &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4, client_kind: Some("mac_app".into()) },
+        &ClientMsg::Hello {
+            client_id: client_id.into(),
+            protocol_version: 4,
+            client_kind: Some("mac_app".into()),
+        },
     )
     .await;
     let operator_nonce = match raw_recv(stream).await {
         ServerMsg::Welcome { operator_nonce, .. } => operator_nonce,
         other => panic!("expected Welcome, got {other:?}"),
     };
-    raw_send(stream, &ClientMsg::Subscribe { topics, renders_decisions, renders_approvals: false }).await;
+    raw_send(
+        stream,
+        &ClientMsg::Subscribe {
+            topics,
+            renders_decisions,
+            renders_approvals: false,
+        },
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     operator_nonce
 }
@@ -596,22 +652,41 @@ async fn raw_handshake(
 /// the registry — the matching `DecisionResolved { resolution: Answered, .. }`
 /// notice for that same request_id.
 #[tokio::test]
-async fn a_subscribed_client_receives_the_request_then_an_answered_resolved_notice_for_the_same_id() {
+async fn a_subscribed_client_receives_the_request_then_an_answered_resolved_notice_for_the_same_id()
+{
     let harness = make_raw_daemon_state();
     let mut stream = UnixStream::connect(&harness.socket_path).await.unwrap();
-    raw_handshake(&mut stream, "decision-it-answered", vec![Topic::Decision], false).await;
+    raw_handshake(
+        &mut stream,
+        "decision-it-answered",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
 
     let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
 
     match raw_recv(&mut stream).await {
-        ServerMsg::DecisionRequest { request_id: wire_id, .. } => assert_eq!(wire_id, request_id),
+        ServerMsg::DecisionRequest {
+            request_id: wire_id,
+            ..
+        } => assert_eq!(wire_id, request_id),
         other => panic!("expected DecisionRequest, got {other:?}"),
     }
 
-    harness.decisions.lock().unwrap().answer(&request_id, Some("approve".into()));
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .answer(&request_id, Some("approve".into()));
 
     match raw_recv(&mut stream).await {
-        ServerMsg::DecisionResolved { request_id: wire_id, resolution, choice_id, .. } => {
+        ServerMsg::DecisionResolved {
+            request_id: wire_id,
+            resolution,
+            choice_id,
+            ..
+        } => {
             assert_eq!(wire_id, request_id);
             assert_eq!(resolution, DecisionResolution::Answered);
             assert_eq!(choice_id, Some("approve".into()));
@@ -625,7 +700,13 @@ async fn a_subscribed_client_receives_the_request_then_an_answered_resolved_noti
 async fn a_subscribed_client_receives_the_request_then_a_timeout_resolved_notice_for_the_same_id() {
     let harness = make_raw_daemon_state();
     let mut stream = UnixStream::connect(&harness.socket_path).await.unwrap();
-    raw_handshake(&mut stream, "decision-it-timeout", vec![Topic::Decision], false).await;
+    raw_handshake(
+        &mut stream,
+        "decision-it-timeout",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
 
     let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
     match raw_recv(&mut stream).await {
@@ -633,10 +714,19 @@ async fn a_subscribed_client_receives_the_request_then_a_timeout_resolved_notice
         other => panic!("expected DecisionRequest, got {other:?}"),
     }
 
-    harness.decisions.lock().unwrap().timeout_request(&request_id);
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .timeout_request(&request_id);
 
     match raw_recv(&mut stream).await {
-        ServerMsg::DecisionResolved { request_id: wire_id, resolution, choice_id, .. } => {
+        ServerMsg::DecisionResolved {
+            request_id: wire_id,
+            resolution,
+            choice_id,
+            ..
+        } => {
             assert_eq!(wire_id, request_id);
             assert_eq!(resolution, DecisionResolution::Timeout);
             assert_eq!(choice_id, None);
@@ -647,10 +737,17 @@ async fn a_subscribed_client_receives_the_request_then_a_timeout_resolved_notice
 
 /// Same shape, but resolved via `cancel_tag()`.
 #[tokio::test]
-async fn a_subscribed_client_receives_the_request_then_a_cancelled_resolved_notice_for_the_same_id() {
+async fn a_subscribed_client_receives_the_request_then_a_cancelled_resolved_notice_for_the_same_id()
+{
     let harness = make_raw_daemon_state();
     let mut stream = UnixStream::connect(&harness.socket_path).await.unwrap();
-    raw_handshake(&mut stream, "decision-it-cancelled", vec![Topic::Decision], false).await;
+    raw_handshake(
+        &mut stream,
+        "decision-it-cancelled",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
 
     let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
     match raw_recv(&mut stream).await {
@@ -661,7 +758,11 @@ async fn a_subscribed_client_receives_the_request_then_a_cancelled_resolved_noti
     harness.decisions.lock().unwrap().cancel_tag("mother");
 
     match raw_recv(&mut stream).await {
-        ServerMsg::DecisionResolved { request_id: wire_id, resolution, .. } => {
+        ServerMsg::DecisionResolved {
+            request_id: wire_id,
+            resolution,
+            ..
+        } => {
             assert_eq!(wire_id, request_id);
             assert_eq!(resolution, DecisionResolution::Cancelled);
         }
@@ -679,20 +780,39 @@ async fn both_of_two_subscribed_clients_receive_the_request_and_its_resolution_a
 ) {
     let harness = make_raw_daemon_state();
     let mut stream_a = UnixStream::connect(&harness.socket_path).await.unwrap();
-    raw_handshake(&mut stream_a, "decision-it-multi-a", vec![Topic::Decision], false).await;
+    raw_handshake(
+        &mut stream_a,
+        "decision-it-multi-a",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
     let mut stream_b = UnixStream::connect(&harness.socket_path).await.unwrap();
-    raw_handshake(&mut stream_b, "decision-it-multi-b", vec![Topic::Decision], false).await;
+    raw_handshake(
+        &mut stream_b,
+        "decision-it-multi-b",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
 
     let request_id = submit_and_broadcast(&harness, "mother", "Ship it?");
 
     for stream in [&mut stream_a, &mut stream_b] {
         match raw_recv(stream).await {
-            ServerMsg::DecisionRequest { request_id: wire_id, .. } => assert_eq!(wire_id, request_id),
+            ServerMsg::DecisionRequest {
+                request_id: wire_id,
+                ..
+            } => assert_eq!(wire_id, request_id),
             other => panic!("expected DecisionRequest, got {other:?}"),
         }
     }
 
-    let first = harness.decisions.lock().unwrap().answer(&request_id, Some("approve".into()));
+    let first = harness
+        .decisions
+        .lock()
+        .unwrap()
+        .answer(&request_id, Some("approve".into()));
     match first {
         nostromo::ipc::decisions::AnswerOutcome::Answered { .. } => {}
         other => panic!("the first, legitimate answer must succeed, got {other:?}"),
@@ -700,7 +820,12 @@ async fn both_of_two_subscribed_clients_receive_the_request_and_its_resolution_a
 
     for stream in [&mut stream_a, &mut stream_b] {
         match raw_recv(stream).await {
-            ServerMsg::DecisionResolved { request_id: wire_id, resolution, choice_id, .. } => {
+            ServerMsg::DecisionResolved {
+                request_id: wire_id,
+                resolution,
+                choice_id,
+                ..
+            } => {
                 assert_eq!(wire_id, request_id);
                 assert_eq!(resolution, DecisionResolution::Answered);
                 assert_eq!(choice_id, Some("approve".into()));
@@ -713,10 +838,16 @@ async fn both_of_two_subscribed_clients_receive_the_request_and_its_resolution_a
     // after the fact — this is the exact bug being fixed: today the daemon
     // guard swallows it, but nothing tells the other window's stale sheet to
     // close, and nothing here must broadcast a second/conflicting notice.
-    let second = harness.decisions.lock().unwrap().answer(&request_id, Some("reject".into()));
+    let second = harness
+        .decisions
+        .lock()
+        .unwrap()
+        .answer(&request_id, Some("reject".into()));
     match second {
         nostromo::ipc::decisions::AnswerOutcome::AlreadyAnswered => {}
-        other => panic!("a second answer to an already-resolved request must be AlreadyAnswered, got {other:?}"),
+        other => panic!(
+            "a second answer to an already-resolved request must be AlreadyAnswered, got {other:?}"
+        ),
     }
 
     raw_recv_none_within(&mut stream_a, Duration::from_millis(200)).await;
@@ -780,7 +911,10 @@ async fn make_combined_harness() -> CombinedHarness {
         false,
     )
     .expect("raw server should bind");
-    decisions.lock().unwrap().configure_broadcast(raw_server.tx.clone());
+    decisions
+        .lock()
+        .unwrap()
+        .configure_broadcast(raw_server.tx.clone());
 
     let backend = DaemonMcpBackend {
         pane_registry,
@@ -855,13 +989,26 @@ async fn a_wildcard_subscriber_still_receives_a_decision_request_broadcast_from_
     raw_handshake(&mut wildcard, "ios-wildcard", vec![], false).await;
 
     let mut operator = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
-    raw_handshake(&mut operator, "macos-operator", vec![Topic::Decision], false).await;
+    raw_handshake(
+        &mut operator,
+        "macos-operator",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
 
-    let request_id =
-        submit_and_broadcast_via(&harness.decisions, &harness.raw_server.tx, "mother", "Ship it?");
+    let request_id = submit_and_broadcast_via(
+        &harness.decisions,
+        &harness.raw_server.tx,
+        "mother",
+        "Ship it?",
+    );
 
     match raw_recv(&mut wildcard).await {
-        ServerMsg::DecisionRequest { request_id: wire_id, .. } => assert_eq!(
+        ServerMsg::DecisionRequest {
+            request_id: wire_id,
+            ..
+        } => assert_eq!(
             wire_id, request_id,
             "a topics: [] connection must still receive DecisionRequest broadcasts — \
              delivery must not be narrowed by the operator-accounting change"
@@ -869,7 +1016,10 @@ async fn a_wildcard_subscriber_still_receives_a_decision_request_broadcast_from_
         other => panic!("expected DecisionRequest on the wildcard connection, got {other:?}"),
     }
     match raw_recv(&mut operator).await {
-        ServerMsg::DecisionRequest { request_id: wire_id, .. } => assert_eq!(wire_id, request_id),
+        ServerMsg::DecisionRequest {
+            request_id: wire_id,
+            ..
+        } => assert_eq!(wire_id, request_id),
         other => panic!("expected DecisionRequest on the operator connection, got {other:?}"),
     }
 }
@@ -886,7 +1036,13 @@ async fn a_subscriber_with_explicit_decision_topic_counts_as_operator_and_ask_de
     let harness = make_combined_harness().await;
 
     let mut operator = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
-    let nonce = raw_handshake(&mut operator, "macos-operator", vec![Topic::Decision], false).await;
+    let nonce = raw_handshake(
+        &mut operator,
+        "macos-operator",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
 
     let (mut reader, mut writer) = connect(&harness.mcp_socket_path, "perri").await;
     let call = tokio::spawn(async move {
@@ -906,7 +1062,11 @@ async fn a_subscriber_with_explicit_decision_topic_counts_as_operator_and_ask_de
     };
     raw_send(
         &mut operator,
-        &ClientMsg::DecisionAnswer { request_id, choice_id: Some("approve".into()), operator_nonce: nonce },
+        &ClientMsg::DecisionAnswer {
+            request_id,
+            choice_id: Some("approve".into()),
+            operator_nonce: nonce,
+        },
     )
     .await;
 
@@ -949,7 +1109,11 @@ async fn a_wildcard_subscriber_with_renders_decisions_true_counts_as_operator_an
     };
     raw_send(
         &mut operator,
-        &ClientMsg::DecisionAnswer { request_id, choice_id: Some("approve".into()), operator_nonce: nonce },
+        &ClientMsg::DecisionAnswer {
+            request_id,
+            choice_id: Some("approve".into()),
+            operator_nonce: nonce,
+        },
     )
     .await;
 
@@ -980,7 +1144,13 @@ async fn disconnecting_the_only_real_operator_returns_no_operator_even_though_a_
     raw_handshake(&mut wildcard, "ios-wildcard", vec![], false).await;
 
     let mut operator = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
-    raw_handshake(&mut operator, "macos-operator", vec![Topic::Decision], false).await;
+    raw_handshake(
+        &mut operator,
+        "macos-operator",
+        vec![Topic::Decision],
+        false,
+    )
+    .await;
 
     // Sanity check on the setup, not the assertion under test: an operator
     // really is present right now.
@@ -1003,7 +1173,10 @@ async fn disconnecting_the_only_real_operator_returns_no_operator_even_though_a_
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(cleaned_up, "operator cleanup did not land within the wait window");
+    assert!(
+        cleaned_up,
+        "operator cleanup did not land within the wait window"
+    );
 
     let (mut reader, mut writer) = connect(&harness.mcp_socket_path, "perri").await;
     let result = tokio::time::timeout(
@@ -1039,10 +1212,17 @@ async fn a_connection_whose_second_frame_is_ping_instead_of_subscribe_does_not_c
     let mut stream = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
     raw_send(
         &mut stream,
-        &ClientMsg::Hello { client_id: "ping-only".into(), protocol_version: 4, client_kind: Some("mac_app".into()) },
+        &ClientMsg::Hello {
+            client_id: "ping-only".into(),
+            protocol_version: 4,
+            client_kind: Some("mac_app".into()),
+        },
     )
     .await;
-    assert!(matches!(raw_recv(&mut stream).await, ServerMsg::Welcome { .. }));
+    assert!(matches!(
+        raw_recv(&mut stream).await,
+        ServerMsg::Welcome { .. }
+    ));
     raw_send(&mut stream, &ClientMsg::Ping).await;
     assert!(matches!(raw_recv(&mut stream).await, ServerMsg::Pong));
     // Same settle window `raw_handshake` uses, for the same reason: give the

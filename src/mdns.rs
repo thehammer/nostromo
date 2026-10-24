@@ -26,8 +26,8 @@ pub const SERVICE_TYPE: &str = "_nostromo._tcp.local.";
 /// shutdown — binding to `let _mdns_guard = advertise(port)?;` at the top of
 /// `main` is the canonical pattern.
 pub struct MdnsAdvertiser {
-    daemon:    ServiceDaemon,
-    fullname:  String,
+    daemon: ServiceDaemon,
+    fullname: String,
 }
 
 impl Drop for MdnsAdvertiser {
@@ -64,7 +64,7 @@ pub fn advertise(port: u16) -> Result<MdnsAdvertiser> {
         SERVICE_TYPE,
         &instance_name,
         &host_name,
-        "",   // ip — left empty; enable_addr_auto() fills it in
+        "", // ip — left empty; enable_addr_auto() fills it in
         port,
         &props[..],
     )
@@ -73,7 +73,9 @@ pub fn advertise(port: u16) -> Result<MdnsAdvertiser> {
 
     let daemon = ServiceDaemon::new().context("creating mDNS ServiceDaemon")?;
     let fullname = service_info.get_fullname().to_owned();
-    daemon.register(service_info).context("registering mDNS service")?;
+    daemon
+        .register(service_info)
+        .context("registering mDNS service")?;
 
     Ok(MdnsAdvertiser { daemon, fullname })
 }

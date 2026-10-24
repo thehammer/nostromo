@@ -100,7 +100,12 @@ pub enum ApprovalOption {
 
 impl ApprovalOption {
     /// Everything this slice offers.
-    pub const ALL: [ApprovalOption; 4] = [Self::AllowOnce, Self::Deny, Self::DenyAndStop, Self::DenyWithNote];
+    pub const ALL: [ApprovalOption; 4] = [
+        Self::AllowOnce,
+        Self::Deny,
+        Self::DenyAndStop,
+        Self::DenyWithNote,
+    ];
 }
 
 /// What the human decided.

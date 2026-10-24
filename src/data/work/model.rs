@@ -246,7 +246,10 @@ pub struct WorkError {
 
 impl WorkError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into() }
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
     }
 
     pub fn not_available() -> Self {

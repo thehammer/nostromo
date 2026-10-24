@@ -127,7 +127,11 @@ pub trait PaneProbe {
     fn servers(&self, extra_dirs: &[PathBuf]) -> Result<Vec<TmuxSocket>, ProbeError>;
     /// The line the cursor is on in pane `target` (the input typed so far, with
     /// the prompt), or `None` when it can't be read.
-    fn pending_input(&self, _socket: &TmuxSocket, _target: &str) -> Result<Option<String>, ProbeError> {
+    fn pending_input(
+        &self,
+        _socket: &TmuxSocket,
+        _target: &str,
+    ) -> Result<Option<String>, ProbeError> {
         Ok(None)
     }
 }
@@ -180,18 +184,29 @@ impl SystemPaneProbe {
         let mut cmd = Self::tmux(socket, args);
         let label = format!("tmux {}", args.first().copied().unwrap_or_default());
         let out = match run_with_timeout(&mut cmd, &label) {
-            Err(ProbeError::Failed { message, .. }) if message.contains("No such file") => return Ok(None),
+            Err(ProbeError::Failed { message, .. }) if message.contains("No such file") => {
+                return Ok(None)
+            }
             r => r?,
         };
         if out.status.success() {
             return Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()));
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let absent = ["no server running", "error connecting", "No such file or directory", "can't find", "no current"];
+        let absent = [
+            "no server running",
+            "error connecting",
+            "No such file or directory",
+            "can't find",
+            "no current",
+        ];
         if absent.iter().any(|m| stderr.contains(m)) {
             return Ok(None);
         }
-        Err(ProbeError::Failed { command: label, message: stderr.trim().to_owned() })
+        Err(ProbeError::Failed {
+            command: label,
+            message: stderr.trim().to_owned(),
+        })
     }
 
     fn processes(&self) -> Result<&ProcessTable, ProbeError> {
@@ -225,12 +240,18 @@ impl SystemPaneProbe {
 /// tmux at a fixed install location, so a `tmux` an agent puts earlier on
 /// `PATH` can't answer for it. Falls back to `PATH` only when none exists.
 fn tmux_program() -> &'static str {
-    tmux_bin::TMUX_INSTALL_PATHS.iter().copied().find(|p| Path::new(p).is_file()).unwrap_or("tmux")
+    tmux_bin::TMUX_INSTALL_PATHS
+        .iter()
+        .copied()
+        .find(|p| Path::new(p).is_file())
+        .unwrap_or("tmux")
 }
 
 /// tmux's socket directory: `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`.
 fn tmux_socket_dir() -> PathBuf {
-    let base = std::env::var_os("TMUX_TMPDIR").filter(|d| !d.is_empty()).unwrap_or_else(|| "/tmp".into());
+    let base = std::env::var_os("TMUX_TMPDIR")
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "/tmp".into());
     // SAFETY: getuid(2) has no preconditions and cannot fail.
     PathBuf::from(base).join(format!("tmux-{}", unsafe { libc::getuid() }))
 }
@@ -239,24 +260,37 @@ fn tmux_socket_dir() -> PathBuf {
 fn default_socket() -> PathBuf {
     std::env::var("TMUX")
         .ok()
-        .and_then(|t| t.split(',').next().filter(|p| !p.is_empty()).map(PathBuf::from))
+        .and_then(|t| {
+            t.split(',')
+                .next()
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(|| tmux_socket_dir().join("default"))
 }
 
 fn parse_pane_line(line: &str) -> Option<PaneInfo> {
     let (pid, title) = line.split_once(' ')?;
-    Some(PaneInfo { pid: pid.trim().parse().ok()?, title: title.to_owned() })
+    Some(PaneInfo {
+        pid: pid.trim().parse().ok()?,
+        title: title.to_owned(),
+    })
 }
 
 impl PaneProbe for SystemPaneProbe {
     fn pane(&self, socket: &TmuxSocket, target: &str) -> Result<Option<PaneInfo>, ProbeError> {
-        let out = Self::query(socket, &["display-message", "-p", "-t", target, PANE_FORMAT])?;
+        let out = Self::query(
+            socket,
+            &["display-message", "-p", "-t", target, PANE_FORMAT],
+        )?;
         Ok(out.and_then(|o| o.lines().next().and_then(parse_pane_line)))
     }
 
     fn all_panes(&self, socket: &TmuxSocket) -> Result<Vec<PaneInfo>, ProbeError> {
         let out = Self::query(socket, &["list-panes", "-a", "-F", PANE_FORMAT])?;
-        Ok(out.map(|o| o.lines().filter_map(parse_pane_line).collect()).unwrap_or_default())
+        Ok(out
+            .map(|o| o.lines().filter_map(parse_pane_line).collect())
+            .unwrap_or_default())
     }
 
     fn subtree_args(&self, pid: u32) -> Result<Vec<String>, ProbeError> {
@@ -280,10 +314,19 @@ impl PaneProbe for SystemPaneProbe {
         Ok(found)
     }
 
-    fn pending_input(&self, socket: &TmuxSocket, target: &str) -> Result<Option<String>, ProbeError> {
+    fn pending_input(
+        &self,
+        socket: &TmuxSocket,
+        target: &str,
+    ) -> Result<Option<String>, ProbeError> {
         // The last non-blank line of the pane: the prompt and what is typed after it.
         let out = Self::query(socket, &["capture-pane", "-p", "-J", "-t", target])?;
-        Ok(out.and_then(|o| o.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_owned)))
+        Ok(out.and_then(|o| {
+            o.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .map(str::to_owned)
+        }))
     }
 
     fn servers(&self, extra_dirs: &[PathBuf]) -> Result<Vec<TmuxSocket>, ProbeError> {
@@ -293,11 +336,18 @@ impl PaneProbe for SystemPaneProbe {
             let entries = match std::fs::read_dir(&dir) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(ProbeError::Failed { command: format!("listing {}", dir.display()), message: e.to_string() }),
+                Err(e) => {
+                    return Err(ProbeError::Failed {
+                        command: format!("listing {}", dir.display()),
+                        message: e.to_string(),
+                    })
+                }
             };
             for entry in entries.flatten() {
                 if entry.file_type().is_ok_and(|t| t.is_socket()) {
-                    out.push(TmuxSocket::Path(entry.path().to_string_lossy().into_owned()));
+                    out.push(TmuxSocket::Path(
+                        entry.path().to_string_lossy().into_owned(),
+                    ));
                 }
             }
         }
@@ -307,8 +357,16 @@ impl PaneProbe for SystemPaneProbe {
 
 /// Run `cmd` (stdin closed, output captured), killing it after [`PROBE_TIMEOUT`].
 fn run_with_timeout(cmd: &mut Command, label: &str) -> Result<Output, ProbeError> {
-    let failed = |e: std::io::Error| ProbeError::Failed { command: label.to_owned(), message: e.to_string() };
-    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(failed)?;
+    let failed = |e: std::io::Error| ProbeError::Failed {
+        command: label.to_owned(),
+        message: e.to_string(),
+    };
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(failed)?;
     let pid = child.id();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -335,7 +393,10 @@ fn tool_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         let run_task = if BLOCK_RUN_TASK { "|ecs_run_task" } else { "" };
-        Regex::new(&format!("(?i)(ecs_connect|ecs_shell|ecs_open_tmux_pane{run_task})")).unwrap()
+        Regex::new(&format!(
+            "(?i)(ecs_connect|ecs_shell|ecs_open_tmux_pane{run_task})"
+        ))
+        .unwrap()
     })
 }
 
@@ -363,16 +424,34 @@ fn command_re() -> &'static Regex {
 /// words an expansion could build: `ecs_${U}connect`, `execute-${U}command`.
 fn word_markers() -> &'static [&'static str] {
     if BLOCK_RUN_TASK {
-        &["ecs_connect", "ecs_shell", "ecs_open_tmux_pane", "ecs_run_task", "session-manager-plugin", "execute-command", "start-session", "run-task"]
+        &[
+            "ecs_connect",
+            "ecs_shell",
+            "ecs_open_tmux_pane",
+            "ecs_run_task",
+            "session-manager-plugin",
+            "execute-command",
+            "start-session",
+            "run-task",
+        ]
     } else {
-        &["ecs_connect", "ecs_shell", "ecs_open_tmux_pane", "session-manager-plugin", "execute-command", "start-session"]
+        &[
+            "ecs_connect",
+            "ecs_shell",
+            "ecs_open_tmux_pane",
+            "session-manager-plugin",
+            "execute-command",
+            "start-session",
+        ]
     }
 }
 
 /// A pane title set by `ecs_open_tmux_pane` (`${env}:${project}:${service}`).
 fn remote_title_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)^(production|prod|demo|canada|can|ca|staging|stg|stage):").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^(production|prod|demo|canada|can|ca|staging|stg|stage):").unwrap()
+    })
 }
 
 /// A process in a pane's subtree that is a remote shell.
@@ -397,7 +476,9 @@ fn tmux_mention_re() -> &'static Regex {
 /// before them: a bare `tmux.conf` or `.tmux` could be a copy of the binary.
 fn tmux_config_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)/\.tmux\.conf\b|/\.tmux/|/tmux/tmux\.conf\b|/tmux-\d+/").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)/\.tmux\.conf\b|/\.tmux/|/tmux/tmux\.conf\b|/tmux-\d+/").unwrap()
+    })
 }
 
 /// A tmux command that types or pipes into a pane, named without the binary
@@ -449,36 +530,95 @@ enum TmuxKind {
 const TMUX_COMMANDS: &[(&str, &str, TmuxKind)] = {
     use TmuxKind::{Indirect as I, Pane as P, Respawn as R, Safe as S};
     &[
-        ("attach-session", "attach", S), ("bind-key", "bind", I), ("break-pane", "breakp", S),
-        ("capture-pane", "capturep", S), ("choose-buffer", "", I), ("choose-client", "", I),
-        ("choose-tree", "", I), ("clear-history", "clearhist", S), ("clear-prompt-history", "clearphist", S),
-        ("clock-mode", "", S), ("command-prompt", "", I), ("confirm-before", "confirm", I),
-        ("copy-mode", "", S), ("customize-mode", "", S), ("delete-buffer", "deleteb", S),
-        ("detach-client", "detach", S), ("display-menu", "menu", I), ("display-message", "display", S),
-        ("display-panes", "displayp", I), ("display-popup", "popup", I), ("find-window", "findw", S),
-        ("has-session", "has", S), ("if-shell", "if", I), ("join-pane", "joinp", S),
-        ("kill-pane", "killp", S), ("kill-server", "", S), ("kill-session", "", S),
-        ("kill-window", "killw", S), ("last-pane", "lastp", S), ("last-window", "last", S),
-        ("link-window", "linkw", S), ("list-buffers", "lsb", S), ("list-clients", "lsc", S),
-        ("list-commands", "lscm", S), ("list-keys", "lsk", S), ("list-panes", "lsp", S),
-        ("list-sessions", "ls", S), ("list-windows", "lsw", S), ("load-buffer", "loadb", I),
-        ("lock-client", "lockc", S), ("lock-server", "lock", S), ("lock-session", "locks", S),
-        ("move-pane", "movep", S), ("move-window", "movew", S), ("new-session", "new", S),
-        ("new-window", "neww", S), ("next-layout", "nextl", S), ("next-window", "next", S),
-        ("paste-buffer", "pasteb", P), ("pipe-pane", "pipep", P), ("previous-layout", "prevl", S),
-        ("previous-window", "prev", S), ("refresh-client", "refresh", S), ("rename-session", "rename", S),
-        ("rename-window", "renamew", S), ("resize-pane", "resizep", S), ("resize-window", "resizew", S),
-        ("respawn-pane", "respawnp", R), ("respawn-window", "respawnw", R), ("rotate-window", "rotatew", S),
-        ("run-shell", "run", I), ("save-buffer", "saveb", S), ("select-layout", "selectl", S),
-        ("select-pane", "selectp", S), ("select-window", "selectw", S), ("send-keys", "send", P),
-        ("send-prefix", "", P), ("server-access", "", S), ("set-buffer", "setb", I),
-        ("set-environment", "setenv", S), ("set-hook", "", I), ("set-option", "set", S),
-        ("set-window-option", "setw", S), ("show-buffer", "showb", S), ("show-environment", "showenv", S),
-        ("show-hooks", "", S), ("show-messages", "showmsgs", S), ("show-options", "show", S),
-        ("show-prompt-history", "showphist", S), ("show-window-options", "showw", S),
-        ("source-file", "source", S), ("split-window", "splitw", S), ("start-server", "start", S),
-        ("suspend-client", "suspendc", S), ("swap-pane", "swapp", S), ("swap-window", "swapw", S),
-        ("switch-client", "switchc", S), ("unbind-key", "unbind", S), ("unlink-window", "unlinkw", S),
+        ("attach-session", "attach", S),
+        ("bind-key", "bind", I),
+        ("break-pane", "breakp", S),
+        ("capture-pane", "capturep", S),
+        ("choose-buffer", "", I),
+        ("choose-client", "", I),
+        ("choose-tree", "", I),
+        ("clear-history", "clearhist", S),
+        ("clear-prompt-history", "clearphist", S),
+        ("clock-mode", "", S),
+        ("command-prompt", "", I),
+        ("confirm-before", "confirm", I),
+        ("copy-mode", "", S),
+        ("customize-mode", "", S),
+        ("delete-buffer", "deleteb", S),
+        ("detach-client", "detach", S),
+        ("display-menu", "menu", I),
+        ("display-message", "display", S),
+        ("display-panes", "displayp", I),
+        ("display-popup", "popup", I),
+        ("find-window", "findw", S),
+        ("has-session", "has", S),
+        ("if-shell", "if", I),
+        ("join-pane", "joinp", S),
+        ("kill-pane", "killp", S),
+        ("kill-server", "", S),
+        ("kill-session", "", S),
+        ("kill-window", "killw", S),
+        ("last-pane", "lastp", S),
+        ("last-window", "last", S),
+        ("link-window", "linkw", S),
+        ("list-buffers", "lsb", S),
+        ("list-clients", "lsc", S),
+        ("list-commands", "lscm", S),
+        ("list-keys", "lsk", S),
+        ("list-panes", "lsp", S),
+        ("list-sessions", "ls", S),
+        ("list-windows", "lsw", S),
+        ("load-buffer", "loadb", I),
+        ("lock-client", "lockc", S),
+        ("lock-server", "lock", S),
+        ("lock-session", "locks", S),
+        ("move-pane", "movep", S),
+        ("move-window", "movew", S),
+        ("new-session", "new", S),
+        ("new-window", "neww", S),
+        ("next-layout", "nextl", S),
+        ("next-window", "next", S),
+        ("paste-buffer", "pasteb", P),
+        ("pipe-pane", "pipep", P),
+        ("previous-layout", "prevl", S),
+        ("previous-window", "prev", S),
+        ("refresh-client", "refresh", S),
+        ("rename-session", "rename", S),
+        ("rename-window", "renamew", S),
+        ("resize-pane", "resizep", S),
+        ("resize-window", "resizew", S),
+        ("respawn-pane", "respawnp", R),
+        ("respawn-window", "respawnw", R),
+        ("rotate-window", "rotatew", S),
+        ("run-shell", "run", I),
+        ("save-buffer", "saveb", S),
+        ("select-layout", "selectl", S),
+        ("select-pane", "selectp", S),
+        ("select-window", "selectw", S),
+        ("send-keys", "send", P),
+        ("send-prefix", "", P),
+        ("server-access", "", S),
+        ("set-buffer", "setb", I),
+        ("set-environment", "setenv", S),
+        ("set-hook", "", I),
+        ("set-option", "set", S),
+        ("set-window-option", "setw", S),
+        ("show-buffer", "showb", S),
+        ("show-environment", "showenv", S),
+        ("show-hooks", "", S),
+        ("show-messages", "showmsgs", S),
+        ("show-options", "show", S),
+        ("show-prompt-history", "showphist", S),
+        ("show-window-options", "showw", S),
+        ("source-file", "source", S),
+        ("split-window", "splitw", S),
+        ("start-server", "start", S),
+        ("suspend-client", "suspendc", S),
+        ("swap-pane", "swapp", S),
+        ("swap-window", "swapw", S),
+        ("switch-client", "switchc", S),
+        ("unbind-key", "unbind", S),
+        ("unlink-window", "unlinkw", S),
         ("wait-for", "wait", S),
     ]
 };
@@ -492,10 +632,18 @@ fn tmux_kind(name: &str) -> TmuxKind {
     if name.is_empty() || name.starts_with('-') {
         return TmuxKind::Safe;
     }
-    if let Some(&(_, _, kind)) = TMUX_COMMANDS.iter().find(|(n, a, _)| *n == name || *a == name) {
+    if let Some(&(_, _, kind)) = TMUX_COMMANDS
+        .iter()
+        .find(|(n, a, _)| *n == name || *a == name)
+    {
         return kind;
     }
-    let named = || TMUX_COMMANDS.iter().filter(|(n, _, _)| n.starts_with(name.as_str())).map(|(_, _, k)| *k);
+    let named = || {
+        TMUX_COMMANDS
+            .iter()
+            .filter(|(n, _, _)| n.starts_with(name.as_str()))
+            .map(|(_, _, k)| *k)
+    };
     if named().any(|k| k == TmuxKind::Indirect) {
         TmuxKind::Indirect
     } else if named().any(|k| k == TmuxKind::Pane) {
@@ -522,9 +670,20 @@ fn tmux_is_stateless(full: &str) -> bool {
         || full.starts_with("show-")
         || matches!(
             full,
-            "capture-pane" | "display-message" | "has-session" | "save-buffer" | "delete-buffer" | "clear-history"
-                | "send-keys" | "send-prefix" | "paste-buffer" | "pipe-pane" | "respawn-pane" | "respawn-window"
-                | "wait-for" | "display-panes"
+            "capture-pane"
+                | "display-message"
+                | "has-session"
+                | "save-buffer"
+                | "delete-buffer"
+                | "clear-history"
+                | "send-keys"
+                | "send-prefix"
+                | "paste-buffer"
+                | "pipe-pane"
+                | "respawn-pane"
+                | "respawn-window"
+                | "wait-for"
+                | "display-panes"
         )
 }
 
@@ -538,22 +697,41 @@ fn tmux_changes_state(name: &str) -> bool {
     if name.is_empty() || name.starts_with('-') {
         return false;
     }
-    if let Some(&(full, _, _)) = TMUX_COMMANDS.iter().find(|(n, a, _)| *n == name || *a == name) {
+    if let Some(&(full, _, _)) = TMUX_COMMANDS
+        .iter()
+        .find(|(n, a, _)| *n == name || *a == name)
+    {
         return !tmux_is_stateless(full);
     }
-    let mut named = TMUX_COMMANDS.iter().filter(|(n, _, _)| n.starts_with(name.as_str())).peekable();
+    let mut named = TMUX_COMMANDS
+        .iter()
+        .filter(|(n, _, _)| n.starts_with(name.as_str()))
+        .peekable();
     named.peek().is_none() || named.any(|(n, _, _)| !tmux_is_stateless(n))
 }
 
 /// A tmux pane id (`%12`): it names one pane for as long as it lives.
 fn is_pane_id(target: &str) -> bool {
-    target.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    target
+        .strip_prefix('%')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The tmux commands that type or pipe into a pane, which `tmux` need not
 /// precede for the guard to treat `<word> send-keys …` as a tmux call.
-const INPUT_COMMANDS: &[&str] =
-    &["send-keys", "send", "send-prefix", "paste-buffer", "pasteb", "pipe-pane", "pipep", "respawn-pane", "respawnp", "respawn-window", "respawnw"];
+const INPUT_COMMANDS: &[&str] = &[
+    "send-keys",
+    "send",
+    "send-prefix",
+    "paste-buffer",
+    "pasteb",
+    "pipe-pane",
+    "pipep",
+    "respawn-pane",
+    "respawnp",
+    "respawn-window",
+    "respawnw",
+];
 
 /// Does `rest` (the words after some word) start, after tmux's global
 /// options, with an input command? The name must be exact, or a prefix of at
@@ -568,10 +746,15 @@ fn starts_with_input_command(rest: &[Word]) -> bool {
         }
         let _ = option_value(w, "LSfcT", rest, &mut i);
     }
-    let Some(first) = rest.get(i).filter(|w| !w.dynamic) else { return false };
+    let Some(first) = rest.get(i).filter(|w| !w.dynamic) else {
+        return false;
+    };
     let name = first.text.to_ascii_lowercase();
     INPUT_COMMANDS.contains(&name.as_str())
-        || (name.len() >= 4 && INPUT_COMMANDS.iter().any(|full| full.len() > 5 && full.starts_with(name.as_str())))
+        || (name.len() >= 4
+            && INPUT_COMMANDS
+                .iter()
+                .any(|full| full.len() > 5 && full.starts_with(name.as_str())))
 }
 
 /// A `-t` target tmux resolves from where the client is (`{next}`, `{last}`,
@@ -579,7 +762,9 @@ fn starts_with_input_command(rest: &[Word]) -> bool {
 fn relative_target(target: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
     target.contains(['{', '}', '!', '~', '^'])
-        || RE.get_or_init(|| Regex::new(r"(^|[:.])[+-]\d*$").unwrap()).is_match(target)
+        || RE
+            .get_or_init(|| Regex::new(r"(^|[:.])[+-]\d*$").unwrap())
+            .is_match(target)
 }
 
 /// Decide whether this tool call may run.
@@ -625,7 +810,11 @@ pub fn evaluate(payload: &HookPayload, probe: &dyn PaneProbe) -> Result<GuardVer
 }
 
 /// Rules 2 to 4 for one command string.
-fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
+fn evaluate_command(
+    raw: &str,
+    cwd: &Path,
+    probe: &dyn PaneProbe,
+) -> Result<Option<GuardVerdict>, GuardError> {
     // The shell deletes a backslash-newline before it reads anything (in double
     // quotes, here-docs and unquoted text), so `$\<newline>(cmd)` is `$(cmd)`:
     // every scan reads the text with them gone.
@@ -633,17 +822,29 @@ fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Opti
     let parsed = parse_both(raw, &joined);
     let normalized = unquote(&joined);
     // Each command's words after quote removal (resolves `$'\x65…'`).
-    let words = parsed.commands.iter().map(|c| c.texts().join(" ")).collect::<Vec<_>>().join("\n");
+    let words = parsed
+        .commands
+        .iter()
+        .map(|c| c.texts().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n");
     // The same text decoded without any tokenizer (`$'\x65cs_connect'`, `aws ecs
     // $'execute\x2dcommand'`): a `$` before a quote dropped, `\xHH`, `\NNN`, `\uXXXX`
     // and `\UXXXXXXXX` written out, quotes and backslashes deleted. It does not depend
     // on where the tokenizer is in the text, so a parse that lost its place (a `#`
     // comment, a here-doc, a `case` arm, `${…}`) hides nothing from it.
-    let decoded: Vec<String> = if joined == raw { vec![decode_text(&joined)] } else { vec![decode_text(&joined), decode_text(raw)] };
+    let decoded: Vec<String> = if joined == raw {
+        vec![decode_text(&joined)]
+    } else {
+        vec![decode_text(&joined), decode_text(raw)]
+    };
     let mut bases: Vec<&str> = vec![&normalized, &words];
     bases.extend(decoded.iter().map(String::as_str));
     let Ok(texts) = scan_texts(&bases) else {
-        return Ok(Some(block(RULE_COMMAND, "brace expansion too large to scan".to_owned())));
+        return Ok(Some(block(
+            RULE_COMMAND,
+            "brace expansion too large to scan".to_owned(),
+        )));
     };
     // A command that only mentions a marker, as data, is not a remote shell.
     if inert::is_inert_mention(raw, &parsed) {
@@ -652,15 +853,37 @@ fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Opti
     if let Some(m) = texts.iter().find_map(|t| marker_find(t)) {
         return Ok(Some(block(RULE_COMMAND, format!("command matches `{m}`"))));
     }
-    if let Some(op) = parsed.commands.iter().find_map(|c| aws_remote_shell(&c.words)) {
+    if let Some(op) = parsed
+        .commands
+        .iter()
+        .find_map(|c| aws_remote_shell(&c.words))
+    {
         return Ok(Some(block(RULE_COMMAND, format!("command runs `{op}`"))));
     }
-    if let Some(w) = parsed.commands.iter().flat_map(|c| &c.words).find(|w| expand::could_spell(&w.pattern, word_markers())) {
-        return Ok(Some(block(RULE_COMMAND, format!("word `{}` could expand to a production-shell command", snippet(&w.text)))));
+    if let Some(w) = parsed
+        .commands
+        .iter()
+        .flat_map(|c| &c.words)
+        .find(|w| expand::could_spell(&w.pattern, word_markers()))
+    {
+        return Ok(Some(block(
+            RULE_COMMAND,
+            format!(
+                "word `{}` could expand to a production-shell command",
+                snippet(&w.text)
+            ),
+        )));
     }
     let lower = format!("{normalized}\n{words}\n{}", decoded.join("\n")).to_lowercase();
-    if runs_built_command(&lower) || texts[2..].iter().any(|t| runs_built_command(&t.to_lowercase())) {
-        return Ok(Some(block(RULE_COMMAND, "command runs the output of `ecs_build_command`".to_owned())));
+    if runs_built_command(&lower)
+        || texts[2..]
+            .iter()
+            .any(|t| runs_built_command(&t.to_lowercase()))
+    {
+        return Ok(Some(block(
+            RULE_COMMAND,
+            "command runs the output of `ecs_build_command`".to_owned(),
+        )));
     }
 
     let env_moved = texts.iter().any(|t| tmux_env_moved_re().is_match(t));
@@ -670,12 +893,18 @@ fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Opti
         track_cd(c, &mut cwd);
         if let Some(at) = find_tmux(c, &cwd) {
             calls.push(tmux_call(c, at, env_moved));
-        } else if let Some(w) = shell::command_word_index(&c.words).map(|i| &c.words[i]).filter(|w| built_from_expansions(w)) {
+        } else if let Some(w) = shell::command_word_index(&c.words)
+            .map(|i| &c.words[i])
+            .filter(|w| built_from_expansions(w))
+        {
             // `a=ecs_; b=connect; $a$b`: assigned values are not tracked, so a
             // command word built from expansions is not run blind.
             return Ok(Some(block(
                 RULE_COMMAND,
-                format!("command word `{}` is built from expansions the guard can't evaluate", snippet(&w.text)),
+                format!(
+                    "command word `{}` is built from expansions the guard can't evaluate",
+                    snippet(&w.text)
+                ),
             )));
         }
     }
@@ -687,13 +916,23 @@ fn evaluate_command(raw: &str, cwd: &Path, probe: &dyn PaneProbe) -> Result<Opti
         texts
             .iter()
             // A tmux config file's name (`~/.tmux.conf`) is not another tmux.
-            .map(|t| re.find_iter(&tmux_config_name_re().replace_all(t, "")).count())
+            .map(|t| {
+                re.find_iter(&tmux_config_name_re().replace_all(t, ""))
+                    .count()
+            })
             .max()
             .unwrap_or(0)
     };
     let named_calls: usize = calls.iter().map(|c| c.named).sum();
-    let parsed_verbs = parsed.commands.iter().flat_map(|c| &c.words).filter(|w| INPUT_COMMANDS.contains(&w.text.to_ascii_lowercase().as_str())).count();
-    let opaque = parsed.unparsed || count(tmux_mention_re()) > named_calls || count(tmux_verb_re()) > parsed_verbs;
+    let parsed_verbs = parsed
+        .commands
+        .iter()
+        .flat_map(|c| &c.words)
+        .filter(|w| INPUT_COMMANDS.contains(&w.text.to_ascii_lowercase().as_str()))
+        .count();
+    let opaque = parsed.unparsed
+        || count(tmux_mention_re()) > named_calls
+        || count(tmux_verb_re()) > parsed_verbs;
     if calls.is_empty() && !opaque {
         return Ok(None);
     }
@@ -747,7 +986,9 @@ fn parse_both(raw: &str, joined: &str) -> shell::ShellParse {
     let mut parsed = shell::parse(joined);
     if joined != raw {
         let as_written = shell::parse(raw);
-        let owned = |c: &shell::SimpleCommand| -> Vec<String> { c.texts().into_iter().map(str::to_owned).collect() };
+        let owned = |c: &shell::SimpleCommand| -> Vec<String> {
+            c.texts().into_iter().map(str::to_owned).collect()
+        };
         let mut seen: HashSet<Vec<String>> = parsed.commands.iter().map(owned).collect();
         for c in as_written.commands {
             if seen.insert(owned(&c)) {
@@ -790,8 +1031,15 @@ fn decode_text(text: &str) -> String {
                         continue;
                     }
                 };
-                let digits: String = c[i + skip..].iter().take(max).take_while(|d| d.is_digit(radix)).collect();
-                match u32::from_str_radix(&digits, radix).ok().and_then(char::from_u32) {
+                let digits: String = c[i + skip..]
+                    .iter()
+                    .take(max)
+                    .take_while(|d| d.is_digit(radix))
+                    .collect();
+                match u32::from_str_radix(&digits, radix)
+                    .ok()
+                    .and_then(char::from_u32)
+                {
                     Some(ch) if !digits.is_empty() => {
                         out.push(ch);
                         i += skip + digits.len();
@@ -810,12 +1058,18 @@ fn decode_text(text: &str) -> String {
 
 /// `text` with quotes and backslashes deleted.
 fn unquote(text: &str) -> String {
-    text.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect()
+    text.chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect()
 }
 
 /// A matched snippet for a log line: at most 120 characters.
 fn snippet(text: &str) -> String {
-    let mut s: String = text.trim_matches(|c: char| !c.is_alphanumeric()).chars().take(120).collect();
+    let mut s: String = text
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .chars()
+        .take(120)
+        .collect();
     if text.chars().count() > 120 {
         s.push('…');
     }
@@ -854,8 +1108,13 @@ fn marker_in_typed(text: &str) -> Option<String> {
 
 /// Every top-level string field named `command`, `cmd` or `script`.
 fn command_strings(input: &Value) -> Vec<&str> {
-    let Some(obj) = input.as_object() else { return Vec::new() };
-    ["command", "cmd", "script"].iter().filter_map(|k| obj.get(*k).and_then(Value::as_str)).collect()
+    let Some(obj) = input.as_object() else {
+        return Vec::new();
+    };
+    ["command", "cmd", "script"]
+        .iter()
+        .filter_map(|k| obj.get(*k).and_then(Value::as_str))
+        .collect()
 }
 
 /// `aws … ecs … execute-command` (and `ssm … start-session`, `ecs … run-task`)
@@ -870,16 +1129,23 @@ fn aws_remote_shell(words: &[Word]) -> Option<String> {
     ops.into_iter().find_map(|(service, op)| {
         let service_before = |op_at: usize| {
             lower[..op_at].iter().zip(words).any(|(w, word)| {
-                w == service || (word.pattern.contains(shell::WILDCARD) && expand::wild_match(&word.pattern, service))
+                w == service
+                    || (word.pattern.contains(shell::WILDCARD)
+                        && expand::wild_match(&word.pattern, service))
             })
         };
-        let found = lower.iter().enumerate().any(|(at, w)| w == op && service_before(at));
+        let found = lower
+            .iter()
+            .enumerate()
+            .any(|(at, w)| w == op && service_before(at));
         found.then(|| format!("{service} {op}"))
     })
 }
 
 /// Commands that only show their input; piping the built command into one is fine.
-const VIEWERS: &[&str] = &["pbcopy", "cat", "less", "more", "head", "tail", "grep", "wc"];
+const VIEWERS: &[&str] = &[
+    "pbcopy", "cat", "less", "more", "head", "tail", "grep", "wc",
+];
 
 /// `lower` runs what `ecs_build_command` prints (the full `aws ecs
 /// execute-command …` line): inside `$( )`, backticks or a process
@@ -892,12 +1158,17 @@ fn runs_built_command(lower: &str) -> bool {
             return true;
         }
         // `||` passes no output; `|&` is a pipe.
-        let after = lower[at + name.len()..].replace("||", ";").replace("|&", "|");
+        let after = lower[at + name.len()..]
+            .replace("||", ";")
+            .replace("|&", "|");
         // Every later pipe stage must be a viewer (a pipe into nothing visible,
         // as at a line end, counts as running it).
         after.contains(">(")
             || after.split('|').skip(1).any(|stage| {
-                stage.split_whitespace().next().is_none_or(|first| !VIEWERS.contains(&shell::basename(first)))
+                stage
+                    .split_whitespace()
+                    .next()
+                    .is_none_or(|first| !VIEWERS.contains(&shell::basename(first)))
             })
     })
 }
@@ -966,15 +1237,25 @@ impl TypedText {
                 }
             }
         }
-        Self { keys: keys::type_keys(&typed), buffers: buffers.contents().map(str::to_owned).collect() }
+        Self {
+            keys: keys::type_keys(&typed),
+            buffers: buffers.contents().map(str::to_owned).collect(),
+        }
     }
 }
 
 /// A marker in what the calls type, wherever the text goes (rule 3).
 fn typed_marker(typed: &TypedText) -> Option<String> {
-    let found = typed.keys.texts().into_iter().chain(typed.buffers.iter().map(String::as_str)).find_map(marker_in_typed);
+    let found = typed
+        .keys
+        .texts()
+        .into_iter()
+        .chain(typed.buffers.iter().map(String::as_str))
+        .find_map(marker_in_typed);
     if let Some(m) = found {
-        return Some(format!("keys sent to tmux spell a production-shell command ({m})"));
+        return Some(format!(
+            "keys sent to tmux spell a production-shell command ({m})"
+        ));
     }
     // Text typed along with a key that rearranges it in a way the line editor
     // doesn't apply (`connect M-b ecs_`): the line can't be told, so text that
@@ -988,9 +1269,12 @@ fn typed_marker(typed: &TypedText) -> Option<String> {
     // A Tab after the start of `ecs_connect` lets the shell finish the word.
     typed.keys.tab_words.iter().find_map(|w| {
         let w = w.to_ascii_lowercase();
-        let starts = |m: &&str| (m.starts_with("ecs_") || m.starts_with("session-")) && m.starts_with(w.as_str());
-        (w.len() >= 5 && word_markers().iter().any(starts))
-            .then(|| format!("a Tab after `{w}` lets the shell complete a production-shell command"))
+        let starts = |m: &&str| {
+            (m.starts_with("ecs_") || m.starts_with("session-")) && m.starts_with(w.as_str())
+        };
+        (w.len() >= 5 && word_markers().iter().any(starts)).then(|| {
+            format!("a Tab after `{w}` lets the shell complete a production-shell command")
+        })
     })
 }
 
@@ -999,10 +1283,12 @@ fn typed_marker(typed: &TypedText) -> Option<String> {
 fn completes_marker(pending: &str, typed: &keys::Typed) -> Option<String> {
     typed.texts().into_iter().find_map(|text| {
         // A trailing space on the prompt line is trimmed by tmux: try it both ways.
-        [pending.to_owned(), format!("{pending} ")].iter().find_map(|p| {
-            let joined = marker_in_typed(&format!("{p}{text}"))?;
-            (marker_in_typed(p).is_none() && marker_in_typed(text).is_none()).then_some(joined)
-        })
+        [pending.to_owned(), format!("{pending} ")]
+            .iter()
+            .find_map(|p| {
+                let joined = marker_in_typed(&format!("{p}{text}"))?;
+                (marker_in_typed(p).is_none() && marker_in_typed(text).is_none()).then_some(joined)
+            })
     })
 }
 
@@ -1014,11 +1300,20 @@ type Why = String;
 /// `inexact`: the keys of the calls include one the line editor can't apply
 /// next to typed text, or one the guard can't read as tmux does, so what the
 /// pane's shell reads can't be told.
-fn tmux_rule(normalized: &str, calls: &[TmuxCall], opaque: bool, inexact: bool, probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
+fn tmux_rule(
+    normalized: &str,
+    calls: &[TmuxCall],
+    opaque: bool,
+    inexact: bool,
+    probe: &dyn PaneProbe,
+) -> Result<Option<GuardVerdict>, GuardError> {
     // Scopes to check whole (`None` is every server), and why each is.
     let mut cant_tell: Vec<(Scope, Why)> = Vec::new();
     if opaque {
-        cant_tell.push((None, "tmux called from text the guard can't read as a tmux command".to_owned()));
+        cant_tell.push((
+            None,
+            "tmux called from text the guard can't read as a tmux command".to_owned(),
+        ));
     }
     // One earlier command in the call can change what `-t prod` names (the
     // pane `select-pane` made active): only `%N` pane ids stay put.
@@ -1038,7 +1333,10 @@ fn tmux_rule(normalized: &str, calls: &[TmuxCall], opaque: bool, inexact: bool, 
                 continue;
             };
             if relative_target(target) {
-                cant_tell.push((Some(socket.clone()), format!("`{target}`, a relative target tmux resolves from where the client is")));
+                cant_tell.push((
+                    Some(socket.clone()),
+                    format!("`{target}`, a relative target tmux resolves from where the client is"),
+                ));
                 continue;
             }
             if state_changed && !is_pane_id(target) {
@@ -1051,19 +1349,30 @@ fn tmux_rule(normalized: &str, calls: &[TmuxCall], opaque: bool, inexact: bool, 
             match probe.pane(socket, target) {
                 Ok(Some(pane)) => match is_remote(&pane, probe) {
                     Ok(true) => {
-                        return Ok(Some(block(RULE_TMUX_INPUT, format!("tmux input to remote pane {target} ({})", pane.title))))
+                        return Ok(Some(block(
+                            RULE_TMUX_INPUT,
+                            format!("tmux input to remote pane {target} ({})", pane.title),
+                        )))
                     }
                     Ok(false) => {
-                        if let Some(detail) = completes_pending_input(input, socket, target, probe) {
+                        if let Some(detail) = completes_pending_input(input, socket, target, probe)
+                        {
                             return Ok(Some(block(RULE_COMMAND, detail)));
                         }
                     }
-                    Err(_) => cant_tell.push((Some(socket.clone()), format!("`{target}`, whose process tree could not be inspected"))),
+                    Err(_) => cant_tell.push((
+                        Some(socket.clone()),
+                        format!("`{target}`, whose process tree could not be inspected"),
+                    )),
                 },
-                Ok(None) => {
-                    cant_tell.push((Some(socket.clone()), format!("`{target}`, which could not be resolved on this tmux server")))
-                }
-                Err(_) => cant_tell.push((Some(socket.clone()), format!("`{target}`, which could not be looked up")))
+                Ok(None) => cant_tell.push((
+                    Some(socket.clone()),
+                    format!("`{target}`, which could not be resolved on this tmux server"),
+                )),
+                Err(_) => cant_tell.push((
+                    Some(socket.clone()),
+                    format!("`{target}`, which could not be looked up"),
+                )),
             }
         }
     }
@@ -1073,13 +1382,26 @@ fn tmux_rule(normalized: &str, calls: &[TmuxCall], opaque: bool, inexact: bool, 
 /// A `send-keys` into a local pane that finishes a marker the pane's prompt
 /// line already holds (`ecs_` then, in another tool call, `connect`). Best
 /// effort: a pane that can't be read counts as nothing pending.
-fn completes_pending_input(input: &TmuxInput, socket: &TmuxSocket, target: &str, probe: &dyn PaneProbe) -> Option<String> {
+fn completes_pending_input(
+    input: &TmuxInput,
+    socket: &TmuxSocket,
+    target: &str,
+    probe: &dyn PaneProbe,
+) -> Option<String> {
     let typed = keys::type_keys(&input.keys);
-    if !typed.texts().iter().any(|t| t.chars().any(|c| !c.is_whitespace())) {
+    if !typed
+        .texts()
+        .iter()
+        .any(|t| t.chars().any(|c| !c.is_whitespace()))
+    {
         return None;
     }
     let pending = probe.pending_input(socket, target).ok().flatten()?;
-    completes_marker(&pending, &typed).map(|m| format!("keys sent to {target} finish a production-shell command the pane already holds ({m})"))
+    completes_marker(&pending, &typed).map(|m| {
+        format!(
+            "keys sent to {target} finish a production-shell command the pane already holds ({m})"
+        )
+    })
 }
 
 /// The tmux socket directories named by literal `TMUX_TMPDIR=` / `TMUX=`
@@ -1096,18 +1418,32 @@ fn socket_dirs(normalized: &str) -> Vec<PathBuf> {
             }
             match &c[1] {
                 "TMUX_TMPDIR" => Some(Path::new(value).join(format!("tmux-{uid}"))),
-                _ => Path::new(value.split(',').next()?).parent().map(Path::to_path_buf),
+                _ => Path::new(value.split(',').next()?)
+                    .parent()
+                    .map(Path::to_path_buf),
             }
         })
         .collect()
 }
 
 /// Block if any pane in any of `scopes` is remote (the target can't be told).
-fn any_remote_pane(scopes: &[(Scope, Why)], extra_dirs: &[PathBuf], probe: &dyn PaneProbe) -> Result<Option<GuardVerdict>, GuardError> {
+fn any_remote_pane(
+    scopes: &[(Scope, Why)],
+    extra_dirs: &[PathBuf],
+    probe: &dyn PaneProbe,
+) -> Result<Option<GuardVerdict>, GuardError> {
     // Every server a scope names, and the first reason it is checked.
-    let mut sockets: Vec<(TmuxSocket, &str)> = scopes.iter().filter_map(|(s, why)| s.clone().map(|s| (s, why.as_str()))).collect();
+    let mut sockets: Vec<(TmuxSocket, &str)> = scopes
+        .iter()
+        .filter_map(|(s, why)| s.clone().map(|s| (s, why.as_str())))
+        .collect();
     if let Some((_, why)) = scopes.iter().find(|(s, _)| s.is_none()) {
-        sockets.extend(probe.servers(extra_dirs)?.into_iter().map(|s| (s, why.as_str())));
+        sockets.extend(
+            probe
+                .servers(extra_dirs)?
+                .into_iter()
+                .map(|s| (s, why.as_str())),
+        );
     }
     let mut checked: Vec<&TmuxSocket> = Vec::new();
     for (socket, why) in &sockets {
@@ -1119,7 +1455,10 @@ fn any_remote_pane(scopes: &[(Scope, Why)], extra_dirs: &[PathBuf], probe: &dyn 
             if is_remote(&pane, probe)? {
                 return Ok(Some(block(
                     RULE_TMUX_INPUT,
-                    format!("tmux input aimed at {why}, while a remote pane is open ({})", pane.title),
+                    format!(
+                        "tmux input aimed at {why}, while a remote pane is open ({})",
+                        pane.title
+                    ),
                 )));
             }
         }
@@ -1131,19 +1470,32 @@ fn is_remote(pane: &PaneInfo, probe: &dyn PaneProbe) -> Result<bool, ProbeError>
     if remote_title_re().is_match(&pane.title) {
         return Ok(true);
     }
-    Ok(probe.subtree_args(pane.pid)?.iter().any(|a| remote_process_re().is_match(a)))
+    Ok(probe
+        .subtree_args(pane.pid)?
+        .iter()
+        .any(|a| remote_process_re().is_match(a)))
 }
 
 /// Follow a literal `cd` / `pushd`, so a relative command word is looked up
 /// where the shell would look.
 fn track_cd(cmd: &SimpleCommand, cwd: &mut PathBuf) {
-    let Some(at) = shell::command_word_index(&cmd.words) else { return };
+    let Some(at) = shell::command_word_index(&cmd.words) else {
+        return;
+    };
     if !matches!(shell::basename(&cmd.words[at].text), "cd" | "pushd") {
         return;
     }
-    if let Some(arg) = cmd.words[at + 1..].iter().find(|a| !a.text.starts_with('-')).filter(|a| !a.dynamic) {
+    if let Some(arg) = cmd.words[at + 1..]
+        .iter()
+        .find(|a| !a.text.starts_with('-'))
+        .filter(|a| !a.dynamic)
+    {
         let p = Path::new(&arg.text);
-        *cwd = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+        *cwd = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        };
     }
 }
 
@@ -1154,7 +1506,10 @@ fn track_cd(cmd: &SimpleCommand, cwd: &mut PathBuf) {
 /// send-keys …`), whatever the binary is called.
 fn find_tmux(cmd: &SimpleCommand, cwd: &Path) -> Option<usize> {
     let words = &cmd.words;
-    if let Some(at) = words.iter().position(|w| shell::basename(&w.text).eq_ignore_ascii_case("tmux")) {
+    if let Some(at) = words
+        .iter()
+        .position(|w| shell::basename(&w.text).eq_ignore_ascii_case("tmux"))
+    {
         return Some(at);
     }
     let command_at = shell::command_word_index(words);
@@ -1170,7 +1525,9 @@ fn find_tmux(cmd: &SimpleCommand, cwd: &Path) -> Option<usize> {
 /// default and `-L` servers can't be told.
 fn tmux_call(cmd: &SimpleCommand, at: usize, env_moved: bool) -> TmuxCall {
     let spelled = expand::strip_empty_expansions(&cmd.words[at].text);
-    let named = expand::brace_alternatives(&spelled).map_or(0, |alts| tmux_mention_re().find_iter(&alts.join(" ")).count());
+    let named = expand::brace_alternatives(&spelled).map_or(0, |alts| {
+        tmux_mention_re().find_iter(&alts.join(" ")).count()
+    });
     let words = &cmd.words[at + 1..];
     let mut socket = (!env_moved).then_some(TmuxSocket::Default);
     let mut i = 0;
@@ -1196,13 +1553,25 @@ fn tmux_call(cmd: &SimpleCommand, at: usize, env_moved: bool) -> TmuxCall {
     let mut subs = Vec::new();
     let mut changes_state = false;
     for sub in split_tmux_commands(&words[i..]) {
-        let Some((name, args)) = sub.split_first() else { continue };
+        let Some((name, args)) = sub.split_first() else {
+            continue;
+        };
         changes_state |= name.dynamic || tmux_changes_state(&name.text);
         // A `command-alias` change can make any name (even `ls`) an input command.
-        let sets_alias = args.iter().any(|a| a.text.to_ascii_lowercase().contains("command-alias"));
-        let mut kind = if name.dynamic || sets_alias { TmuxKind::Indirect } else { tmux_kind(&name.text) };
+        let sets_alias = args
+            .iter()
+            .any(|a| a.text.to_ascii_lowercase().contains("command-alias"));
+        let mut kind = if name.dynamic || sets_alias {
+            TmuxKind::Indirect
+        } else {
+            tmux_kind(&name.text)
+        };
         if kind == TmuxKind::Respawn {
-            kind = if respawn_kills(args) { TmuxKind::Pane } else { TmuxKind::Safe };
+            kind = if respawn_kills(args) {
+                TmuxKind::Pane
+            } else {
+                TmuxKind::Safe
+            };
         }
         if kind == TmuxKind::Safe {
             continue;
@@ -1220,11 +1589,31 @@ fn tmux_call(cmd: &SimpleCommand, at: usize, env_moved: bool) -> TmuxCall {
             }
         }
         let lname = name.text.to_ascii_lowercase();
-        let keys = if could_be(&lname, "send-keys", "send") { keys::send_keys(args) } else { Vec::new() };
-        inputs.push(TmuxInput { target: if kind == TmuxKind::Indirect { None } else { target.flatten() }, keys });
-        subs.push(Sub { name: lname, args: args.to_vec() });
+        let keys = if could_be(&lname, "send-keys", "send") {
+            keys::send_keys(args)
+        } else {
+            Vec::new()
+        };
+        inputs.push(TmuxInput {
+            target: if kind == TmuxKind::Indirect {
+                None
+            } else {
+                target.flatten()
+            },
+            keys,
+        });
+        subs.push(Sub {
+            name: lname,
+            args: args.to_vec(),
+        });
     }
-    TmuxCall { socket, inputs, subs, changes_state, named }
+    TmuxCall {
+        socket,
+        inputs,
+        subs,
+        changes_state,
+        named,
+    }
 }
 
 /// Does this `respawn-pane` / `respawn-window` carry `-k` (kill what runs in the pane)?
@@ -1255,16 +1644,27 @@ fn respawn_kills(args: &[Word]) -> bool {
 /// In the short-option cluster `opt` (`-lt`), the first option in
 /// `with_arg`, its value (the rest of the cluster, else the next word, which
 /// `next` then skips) and whether that value holds an unexpanded variable.
-fn option_value(opt: &Word, with_arg: &str, words: &[Word], next: &mut usize) -> Option<(char, String, bool)> {
+fn option_value(
+    opt: &Word,
+    with_arg: &str,
+    words: &[Word],
+    next: &mut usize,
+) -> Option<(char, String, bool)> {
     let cluster = &opt.text[1..];
-    let (k, c) = cluster.char_indices().find(|(_, c)| with_arg.contains(*c))?;
+    let (k, c) = cluster
+        .char_indices()
+        .find(|(_, c)| with_arg.contains(*c))?;
     let rest = &cluster[k + c.len_utf8()..];
     if !rest.is_empty() {
         return Some((c, rest.to_owned(), opt.dynamic));
     }
     let value = words.get(*next);
     *next += 1;
-    Some((c, value.map(|w| w.text.clone()).unwrap_or_default(), value.is_some_and(|w| w.dynamic)))
+    Some((
+        c,
+        value.map(|w| w.text.clone()).unwrap_or_default(),
+        value.is_some_and(|w| w.dynamic),
+    ))
 }
 
 /// Split tmux's arguments into commands at `;` (a word `;` or a trailing `;`).
@@ -1274,7 +1674,10 @@ fn split_tmux_commands(words: &[Word]) -> Vec<Vec<Word>> {
         if w.text == ";" {
             out.push(Vec::new());
         } else if let Some(stripped) = w.text.strip_suffix(';').filter(|s| !s.ends_with('\\')) {
-            out.last_mut().unwrap().push(Word { text: stripped.to_owned(), ..w.clone() });
+            out.last_mut().unwrap().push(Word {
+                text: stripped.to_owned(),
+                ..w.clone()
+            });
             out.push(Vec::new());
         } else {
             out.last_mut().unwrap().push(w.clone());
@@ -1300,7 +1703,8 @@ pub fn deny_output_json() -> String {
 /// and a guard that can't run exits 2, which blocks the call (fail closed).
 pub fn hook_settings_json(guard_path: &Path) -> String {
     let quoted = format!("'{}'", guard_path.to_string_lossy().replace('\'', r"'\''"));
-    let command = format!("{quoted} pre-tool-use || {{ echo \"{FAIL_CLOSED_MESSAGE}\" >&2; exit 2; }}");
+    let command =
+        format!("{quoted} pre-tool-use || {{ echo \"{FAIL_CLOSED_MESSAGE}\" >&2; exit 2; }}");
     let command = serde_json::to_string(&command).expect("a string serializes");
     format!(
         r#"{{"disableAllHooks":false,"hooks":{{"PreToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":{command},"timeout":30}}]}}]}}}}"#
@@ -1314,7 +1718,11 @@ pub fn resolve_guard_path() -> PathBuf {
     if let Some(p) = std::env::var_os(GUARD_BIN_ENV).filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    let beside = |exe: PathBuf| exe.parent().map(|d| d.join("nostromo-guard")).filter(|p| p.is_file());
+    let beside = |exe: PathBuf| {
+        exe.parent()
+            .map(|d| d.join("nostromo-guard"))
+            .filter(|p| p.is_file())
+    };
     if let Ok(exe) = std::env::current_exe() {
         if let Some(p) = exe.canonicalize().ok().and_then(beside) {
             return p;
@@ -1335,11 +1743,25 @@ mod tests {
 
     impl PaneProbe for OneServer {
         fn pane(&self, socket: &TmuxSocket, target: &str) -> Result<Option<PaneInfo>, ProbeError> {
-            Ok((*socket == TmuxSocket::Default && target == "%0").then(|| PaneInfo { pid: 1, title: "zsh".into() }))
+            Ok(
+                (*socket == TmuxSocket::Default && target == "%0").then(|| PaneInfo {
+                    pid: 1,
+                    title: "zsh".into(),
+                }),
+            )
         }
         fn all_panes(&self, socket: &TmuxSocket) -> Result<Vec<PaneInfo>, ProbeError> {
             Ok(if *socket == TmuxSocket::Default {
-                vec![PaneInfo { pid: 1, title: "zsh".into() }, PaneInfo { pid: 2, title: "production:ap:portal".into() }]
+                vec![
+                    PaneInfo {
+                        pid: 1,
+                        title: "zsh".into(),
+                    },
+                    PaneInfo {
+                        pid: 2,
+                        title: "production:ap:portal".into(),
+                    },
+                ]
             } else {
                 Vec::new()
             })
@@ -1368,9 +1790,15 @@ mod tests {
     #[test]
     fn an_explicit_dash_s_naming_the_default_socket_is_the_default_server() {
         let default = default_socket();
-        let command = format!("tmux -S {} send-keys -t %0 'cargo test' Enter", default.display());
+        let command = format!(
+            "tmux -S {} send-keys -t %0 'cargo test' Enter",
+            default.display()
+        );
         assert_eq!(verdict(&command), GuardVerdict::Allow, "{command}");
         // Another socket is another server: %0 does not exist there, and nothing there is remote.
-        assert_eq!(verdict("tmux -S /tmp/other.sock send-keys -t %0 x"), GuardVerdict::Allow);
+        assert_eq!(
+            verdict("tmux -S /tmp/other.sock send-keys -t %0 x"),
+            GuardVerdict::Allow
+        );
     }
 }

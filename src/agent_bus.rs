@@ -335,13 +335,15 @@ mod tests {
         assert_eq!(events.len(), 1, "the complete line must be parsed");
 
         // Append a partial line with no trailing newline yet.
-        let partial =
-            r#"{"ts":"2026-08-19T00:00:01Z","agent":"a","kind":"tool_use","summary":"tw"#;
+        let partial = r#"{"ts":"2026-08-19T00:00:01Z","agent":"a","kind":"tool_use","summary":"tw"#;
         append(&path, partial);
 
         let mut events2 = vec![];
         let offset2 = drain_new_lines(&path, offset, &mut |ev| events2.push(ev));
-        assert!(events2.is_empty(), "a torn line must not be parsed as an event yet");
+        assert!(
+            events2.is_empty(),
+            "a torn line must not be parsed as an event yet"
+        );
         assert_eq!(
             offset2, offset,
             "the offset must not advance past the start of a partial line"
@@ -352,7 +354,11 @@ mod tests {
 
         let mut events3 = vec![];
         let _offset3 = drain_new_lines(&path, offset2, &mut |ev| events3.push(ev));
-        assert_eq!(events3.len(), 1, "the now-complete line must be parsed exactly once");
+        assert_eq!(
+            events3.len(),
+            1,
+            "the now-complete line must be parsed exactly once"
+        );
         assert_eq!(events3[0].summary, "two");
     }
 
@@ -376,7 +382,11 @@ mod tests {
 
         let mut events = vec![];
         let new_offset = drain_new_lines(&path, offset, &mut |ev| events.push(ev));
-        assert_eq!(events.len(), 1, "post-truncation content must be re-read from offset 0");
+        assert_eq!(
+            events.len(),
+            1,
+            "post-truncation content must be re-read from offset 0"
+        );
         assert_eq!(events[0].agent, "b");
         assert!(new_offset > 0);
     }

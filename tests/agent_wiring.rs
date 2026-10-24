@@ -4,12 +4,11 @@
 //! untouched by any other test.
 
 use nostromo::agents::{
-    wire_agents, AgentSpawner, CalendarRx, EnabledAgents, MailboxRx, PerriPrRx, PerriQueueRx, PerriSources,
-    TeriSources, TodosRx,
+    wire_agents, AgentSpawner, CalendarRx, EnabledAgents, MailboxRx, PerriPrRx, PerriQueueRx,
+    PerriSources, TeriSources, TodosRx,
 };
 use nostromo::data::work::work_service;
 use tokio::sync::{mpsc, watch};
-
 
 /// Records which spawn methods ran; hands back receivers whose senders it
 /// keeps alive, as a real source would.
@@ -47,7 +46,10 @@ impl AgentSpawner for Recorder {
     }
     fn start_teri(&mut self) -> TeriSources {
         self.calls.push("teri");
-        TeriSources { todos_rx: self.rx(None), work_hub: None }
+        TeriSources {
+            todos_rx: self.rx(None),
+            work_hub: None,
+        }
     }
     fn start_perri_broadcaster(&mut self, _q: PerriQueueRx, _p: PerriPrRx) {
         self.calls.push("perri-broadcaster");
@@ -81,7 +83,14 @@ async fn everything_enabled_spawns_every_source_and_broadcaster() {
     let (rec, wired) = wire(EnabledAgents::all());
     assert_eq!(
         rec.calls,
-        ["perri", "perri-broadcaster", "fred", "fred-broadcaster", "teri", "teri-broadcaster"]
+        [
+            "perri",
+            "perri-broadcaster",
+            "fred",
+            "fred-broadcaster",
+            "teri",
+            "teri-broadcaster"
+        ]
     );
     assert!(wired.parked.is_empty());
     assert!(wired.perri_queue_refresh_tx.is_some() && wired.perri_pr_refresh_tx.is_some());
@@ -91,18 +100,27 @@ async fn everything_enabled_spawns_every_source_and_broadcaster() {
 #[tokio::test]
 async fn disabled_perri_spawns_no_poller_or_broadcaster_and_parks_its_senders() {
     let (rec, wired) = wire(only_off("perri"));
-    assert_eq!(rec.calls, ["fred", "fred-broadcaster", "teri", "teri-broadcaster"]);
+    assert_eq!(
+        rec.calls,
+        ["fred", "fred-broadcaster", "teri", "teri-broadcaster"]
+    );
     assert_eq!(wired.parked.len(), 2);
     assert!(wired.perri_queue_refresh_tx.is_none() && wired.perri_pr_refresh_tx.is_none());
     assert!(wired.perri_queue_relay_tx.is_none());
-    assert!(wired.perri_queue_rx.has_changed().is_ok(), "receiver must stay open");
+    assert!(
+        wired.perri_queue_rx.has_changed().is_ok(),
+        "receiver must stay open"
+    );
     assert!(wired.perri_pr_rx.has_changed().is_ok());
 }
 
 #[tokio::test]
 async fn disabled_fred_spawns_no_poller_or_broadcaster_and_parks_its_senders() {
     let (rec, wired) = wire(only_off("fred"));
-    assert_eq!(rec.calls, ["perri", "perri-broadcaster", "teri", "teri-broadcaster"]);
+    assert_eq!(
+        rec.calls,
+        ["perri", "perri-broadcaster", "teri", "teri-broadcaster"]
+    );
     assert_eq!(wired.parked.len(), 2);
     assert!(wired.fred_mailbox_rx.has_changed().is_ok());
     assert!(wired.fred_calendar_rx.has_changed().is_ok());
@@ -112,7 +130,10 @@ async fn disabled_fred_spawns_no_poller_or_broadcaster_and_parks_its_senders() {
 #[tokio::test]
 async fn disabled_teri_spawns_nothing_parks_its_sender_and_leaves_the_null_work_service() {
     let (rec, wired) = wire(only_off("teri"));
-    assert_eq!(rec.calls, ["perri", "perri-broadcaster", "fred", "fred-broadcaster"]);
+    assert_eq!(
+        rec.calls,
+        ["perri", "perri-broadcaster", "fred", "fred-broadcaster"]
+    );
     assert_eq!(wired.parked.len(), 1);
     assert!(wired.work_hub.is_none());
     assert!(wired.teri_todos_rx.has_changed().is_ok());
@@ -122,7 +143,11 @@ async fn disabled_teri_spawns_nothing_parks_its_sender_and_leaves_the_null_work_
 
 #[tokio::test]
 async fn everything_disabled_spawns_nothing_and_keeps_all_receivers_open() {
-    let (rec, wired) = wire(EnabledAgents { fred: false, perri: false, teri: false });
+    let (rec, wired) = wire(EnabledAgents {
+        fred: false,
+        perri: false,
+        teri: false,
+    });
     assert!(rec.calls.is_empty());
     assert_eq!(wired.parked.len(), 5);
     assert!(wired.perri_queue_rx.has_changed().is_ok());

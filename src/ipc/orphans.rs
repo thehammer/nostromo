@@ -674,7 +674,10 @@ mod tests {
 
         let early = done_rx.recv_timeout(Duration::from_millis(300));
         drop(held);
-        assert!(early.is_err(), "{what} went ahead while another writer held the ledger lock");
+        assert!(
+            early.is_err(),
+            "{what} went ahead while another writer held the ledger lock"
+        );
         done_rx
             .recv_timeout(Duration::from_secs(10))
             .unwrap_or_else(|_| panic!("{what} never finished after the lock was released"));
@@ -690,8 +693,14 @@ mod tests {
         let started = std::time::Instant::now();
         ledger.record(4003, true, Path::new(SH));
         let took = started.elapsed();
-        assert!(took >= LEDGER_LOCK_WAIT, "it waited for the lock first: {took:?}");
-        assert!(took < LEDGER_LOCK_WAIT + Duration::from_secs(5), "the wait is bounded: {took:?}");
+        assert!(
+            took >= LEDGER_LOCK_WAIT,
+            "it waited for the lock first: {took:?}"
+        );
+        assert!(
+            took < LEDGER_LOCK_WAIT + Duration::from_secs(5),
+            "the wait is bounded: {took:?}"
+        );
         let recorded = read_ledger_file(&path).expect("the write went ahead without the lock");
         assert!(recorded.children.iter().any(|c| c.pid == 4003));
     }
@@ -740,10 +749,18 @@ mod tests {
             a.join().unwrap();
             b.join().unwrap();
 
-            let file = read_ledger_file(&path)
-                .unwrap_or_else(|| panic!("round {round}: the new daemon's ledger was deleted or damaged"));
-            assert_eq!(file.marker, new.marker(), "round {round}: the file is not the new daemon's");
-            assert!(file.children.iter().any(|c| c.pid == 5002), "round {round}: the new daemon's child is missing");
+            let file = read_ledger_file(&path).unwrap_or_else(|| {
+                panic!("round {round}: the new daemon's ledger was deleted or damaged")
+            });
+            assert_eq!(
+                file.marker,
+                new.marker(),
+                "round {round}: the file is not the new daemon's"
+            );
+            assert!(
+                file.children.iter().any(|c| c.pid == 5002),
+                "round {round}: the new daemon's child is missing"
+            );
         }
     }
 }

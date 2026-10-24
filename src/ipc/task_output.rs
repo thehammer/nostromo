@@ -103,7 +103,10 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
             }
             // nF sequences: intermediates 0x20-0x2F, then one final 0x30-0x7E.
             Some(c) if ('\u{20}'..='\u{2f}').contains(&c) => {
-                while chars.next_if(|c| ('\u{20}'..='\u{2f}').contains(c)).is_some() {}
+                while chars
+                    .next_if(|c| ('\u{20}'..='\u{2f}').contains(c))
+                    .is_some()
+                {}
                 chars.next_if(|c| ('\u{30}'..='\u{7e}').contains(c));
                 return;
             }
@@ -123,8 +126,14 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 /// one final 0x40-0x7E. A byte that fits none of them ends the sequence
 /// without being consumed.
 fn skip_csi_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while chars.next_if(|c| ('\u{30}'..='\u{3f}').contains(c)).is_some() {}
-    while chars.next_if(|c| ('\u{20}'..='\u{2f}').contains(c)).is_some() {}
+    while chars
+        .next_if(|c| ('\u{30}'..='\u{3f}').contains(c))
+        .is_some()
+    {}
+    while chars
+        .next_if(|c| ('\u{20}'..='\u{2f}').contains(c))
+        .is_some()
+    {}
     chars.next_if(|c| ('\u{40}'..='\u{7e}').contains(c));
 }
 
@@ -439,7 +448,10 @@ impl OutputFileValidator {
         if !path.is_absolute() {
             return Err(OutputFileError::Rejected("relative path"));
         }
-        if path.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+        if path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
             return Err(OutputFileError::Rejected("dot component"));
         }
         let name = path
@@ -484,7 +496,11 @@ fn leading_skip(bytes: &[u8], start: u64, tail: bool) -> usize {
     if start == 0 {
         return 0;
     }
-    let scalar_rest = bytes.iter().take(3).take_while(|b| (**b & 0xC0) == 0x80).count();
+    let scalar_rest = bytes
+        .iter()
+        .take(3)
+        .take_while(|b| (**b & 0xC0) == 0x80)
+        .count();
     if !tail {
         return scalar_rest;
     }
@@ -546,7 +562,10 @@ fn safe_end(window: &[u8], reached_eof: bool) -> usize {
 /// scanned forward, the way the sanitiser reads it, so an introducer inside
 /// a string sequence's text is not mistaken for the start of a sequence.
 fn unfinished_escape(window: &[u8]) -> Option<usize> {
-    let line_start = window.iter().rposition(|b| *b == b'\n').map_or(0, |p| p + 1);
+    let line_start = window
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |p| p + 1);
     let mut at = line_start.max(window.len().saturating_sub(ESCAPE_LOOKBACK));
     while at < window.len() {
         let Some(body) = introducer_body(window, at) else {
@@ -663,7 +682,10 @@ const TRUSTED_TMP_PARENTS: [&str; 2] = ["/tmp", "/private/tmp"];
 /// puts the CLI's files anywhere else (a project's `Documents` folder, say)
 /// teaches nothing, so a hostile report cannot widen what the daemon reads.
 pub fn learnable_root(path: &Path, uid: u32) -> Option<PathBuf> {
-    if path.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
         return None;
     }
     let root = root_of_output_path(path)?;
@@ -675,7 +697,11 @@ pub fn learnable_root(path: &Path, uid: u32) -> Option<PathBuf> {
 }
 
 fn default_tmp_root() -> PathBuf {
-    let base = if cfg!(target_os = "macos") { "/private/tmp" } else { "/tmp" };
+    let base = if cfg!(target_os = "macos") {
+        "/private/tmp"
+    } else {
+        "/tmp"
+    };
     PathBuf::from(base).join(format!("claude-{}", current_uid()))
 }
 
@@ -714,7 +740,10 @@ mod tests {
 
     #[test]
     fn colour_codes_are_removed_and_the_text_is_kept() {
-        assert_eq!(sanitize(b"\x1b[31mred\x1b[0m and \x1b[1;4;38;5;208mbold\x1b[m"), "red and bold");
+        assert_eq!(
+            sanitize(b"\x1b[31mred\x1b[0m and \x1b[1;4;38;5;208mbold\x1b[m"),
+            "red and bold"
+        );
     }
 
     #[test]
@@ -726,12 +755,18 @@ mod tests {
     fn a_window_title_sequence_is_removed_whether_it_ends_in_bel_or_st() {
         assert_eq!(sanitize(b"x\x1b]0;my title\x07y"), "xy");
         assert_eq!(sanitize(b"x\x1b]0;my title\x1b\\y"), "xy");
-        assert_eq!(sanitize(b"x\x1b]8;;https://example.invalid\x07link\x1b]8;;\x07y"), "xlinky");
+        assert_eq!(
+            sanitize(b"x\x1b]8;;https://example.invalid\x07link\x1b]8;;\x07y"),
+            "xlinky"
+        );
     }
 
     #[test]
     fn an_unterminated_title_sequence_does_not_swallow_the_following_lines() {
-        assert_eq!(sanitize(b"before\x1b]0;never ends\nnext line\n"), "before\nnext line\n");
+        assert_eq!(
+            sanitize(b"before\x1b]0;never ends\nnext line\n"),
+            "before\nnext line\n"
+        );
     }
 
     #[test]
@@ -739,7 +774,11 @@ mod tests {
         assert_eq!(sanitize(b"a\x1bcb"), "ab", "reset");
         assert_eq!(sanitize(b"a\x1b7b\x1b8c"), "abc", "save and restore cursor");
         assert_eq!(sanitize(b"a\x1b(Bb"), "ab", "charset selection");
-        assert_eq!(sanitize(b"a\x1bPq#0;2;0;0;0\x1b\\b"), "ab", "device control string");
+        assert_eq!(
+            sanitize(b"a\x1bPq#0;2;0;0;0\x1b\\b"),
+            "ab",
+            "device control string"
+        );
     }
 
     #[test]
@@ -753,7 +792,10 @@ mod tests {
     #[test]
     fn a_carriage_return_inside_a_line_keeps_only_what_follows_it() {
         assert_eq!(sanitize(b"a\rb\n"), "b\n");
-        assert_eq!(sanitize(b"10%\r50%\r100% done\nnext\n"), "100% done\nnext\n");
+        assert_eq!(
+            sanitize(b"10%\r50%\r100% done\nnext\n"),
+            "100% done\nnext\n"
+        );
     }
 
     #[test]
@@ -778,7 +820,10 @@ mod tests {
 
     #[test]
     fn eight_bit_control_characters_are_dropped() {
-        assert_eq!(sanitize("a\u{9b}31mb\u{85}c".as_bytes()), "a" .to_owned() + "b" + "c");
+        assert_eq!(
+            sanitize("a\u{9b}31mb\u{85}c".as_bytes()),
+            "a".to_owned() + "b" + "c"
+        );
         assert_eq!(sanitize("a\u{9d}0;title\u{07}b".as_bytes()), "ab");
     }
 
@@ -801,7 +846,11 @@ mod tests {
     fn ten_percent_nul_is_still_text_and_more_than_that_is_binary() {
         let mut at_limit = vec![b'x'; 100];
         at_limit[..10].fill(0);
-        assert_eq!(sanitize(&at_limit), "x".repeat(90), "exactly 10% is not over the limit");
+        assert_eq!(
+            sanitize(&at_limit),
+            "x".repeat(90),
+            "exactly 10% is not over the limit"
+        );
 
         let mut over = vec![b'x'; 100];
         over[..11].fill(0);
@@ -823,7 +872,10 @@ mod tests {
 
     #[test]
     fn plain_unicode_text_is_untouched() {
-        assert_eq!(sanitize("caf\u{e9} \u{2713} \u{1f600}\n".as_bytes()), "caf\u{e9} \u{2713} \u{1f600}\n");
+        assert_eq!(
+            sanitize("caf\u{e9} \u{2713} \u{1f600}\n".as_bytes()),
+            "caf\u{e9} \u{2713} \u{1f600}\n"
+        );
     }
 
     /// xorshift64*: deterministic, no external crate.
@@ -846,9 +898,34 @@ mod tests {
     /// and plain text, in random order, with some fully random bytes.
     fn hostile_bytes(rng: &mut Prng, len: usize) -> Vec<u8> {
         const PIECES: &[&[u8]] = &[
-            b"\x1b", b"\x1b[", b"\x1b]", b"\x1bP", b"\x1b_", b"\x1b^", b"\x1bX", b"\x1b(", b"\x1b\\",
-            b"\x07", b"\r", b"\r\n", b"\n", b"\t", b"[", b"]", b";", b"31", b"0", b"m", b"H", b"abc ", b" ",
-            "\u{9b}".as_bytes(), "\u{9d}".as_bytes(), "\u{e9}".as_bytes(), b"\x00", b"\x7f",
+            b"\x1b",
+            b"\x1b[",
+            b"\x1b]",
+            b"\x1bP",
+            b"\x1b_",
+            b"\x1b^",
+            b"\x1bX",
+            b"\x1b(",
+            b"\x1b\\",
+            b"\x07",
+            b"\r",
+            b"\r\n",
+            b"\n",
+            b"\t",
+            b"[",
+            b"]",
+            b";",
+            b"31",
+            b"0",
+            b"m",
+            b"H",
+            b"abc ",
+            b" ",
+            "\u{9b}".as_bytes(),
+            "\u{9d}".as_bytes(),
+            "\u{e9}".as_bytes(),
+            b"\x00",
+            b"\x7f",
         ];
         let mut out = Vec::with_capacity(len + 8);
         while out.len() < len {
@@ -890,14 +967,18 @@ mod tests {
             let len = rng.below(64);
             let input = hostile_bytes(&mut rng, len);
             let out = sanitize(&input);
-            assert!(!out.contains('\u{1b}'), "round {round}: {input:?} -> {out:?}");
+            assert!(
+                !out.contains('\u{1b}'),
+                "round {round}: {input:?} -> {out:?}"
+            );
             assert_clean(&out);
         }
     }
 
     #[test]
     fn every_truncation_of_an_escape_sequence_leaves_no_escape_byte() {
-        let full: &[u8] = b"text\x1b[38;5;208m\x1b]0;title\x07\x1b]8;;http://x.invalid\x1b\\\x1bPq\x1b\\end";
+        let full: &[u8] =
+            b"text\x1b[38;5;208m\x1b]0;title\x07\x1b]8;;http://x.invalid\x1b\\\x1bPq\x1b\\end";
         for cut in 0..=full.len() {
             let out = sanitize(&full[..cut]);
             assert!(!out.contains('\u{1b}'), "cut {cut}: {out:?}");
@@ -939,7 +1020,12 @@ mod tests {
     #[test]
     fn a_long_run_of_nested_string_openers_neither_overflows_the_stack_nor_leaks_an_escape() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "ipc::task_output::tests::nested_string_openers_child", "--ignored", "--test-threads=1"])
+            .args([
+                "--exact",
+                "ipc::task_output::tests::nested_string_openers_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
             .output()
             .expect("run the test binary");
         assert!(
@@ -955,18 +1041,27 @@ mod tests {
 
     #[test]
     fn the_preview_is_the_last_line_with_anything_on_it() {
-        assert_eq!(last_nonempty_line("first\nsecond\nthird\n"), Some("third".into()));
+        assert_eq!(
+            last_nonempty_line("first\nsecond\nthird\n"),
+            Some("third".into())
+        );
         assert_eq!(last_nonempty_line("first\nsecond"), Some("second".into()));
     }
 
     #[test]
     fn trailing_blank_and_whitespace_only_lines_are_skipped() {
-        assert_eq!(last_nonempty_line("real\n\n   \n\t\n\n"), Some("real".into()));
+        assert_eq!(
+            last_nonempty_line("real\n\n   \n\t\n\n"),
+            Some("real".into())
+        );
     }
 
     #[test]
     fn the_preview_line_is_trimmed() {
-        assert_eq!(last_nonempty_line("   padded line \t\n"), Some("padded line".into()));
+        assert_eq!(
+            last_nonempty_line("   padded line \t\n"),
+            Some("padded line".into())
+        );
     }
 
     #[test]
@@ -1004,7 +1099,10 @@ mod tests {
     #[test]
     fn a_progress_bar_previews_as_its_final_state() {
         let raw = b"\x1b[32mDownloading\x1b[0m 10%\rDownloading 55%\rDownloading 100%\n\n";
-        assert_eq!(last_nonempty_line(&sanitize(raw)), Some("Downloading 100%".into()));
+        assert_eq!(
+            last_nonempty_line(&sanitize(raw)),
+            Some("Downloading 100%".into())
+        );
     }
 
     // ── file validation ─────────────────────────────────────────────────────
@@ -1023,7 +1121,11 @@ mod tests {
         let root = dir.path().join("claude-501");
         let tasks = root.join("-repo").join("sess-1").join("tasks");
         std::fs::create_dir_all(&tasks).unwrap();
-        Rig { _dir: dir, root, tasks }
+        Rig {
+            _dir: dir,
+            root,
+            tasks,
+        }
     }
 
     impl Rig {
@@ -1046,8 +1148,14 @@ mod tests {
     }
 
     fn rejected(v: &OutputFileValidator, path: &Path, id: &str) {
-        assert!(v.open(path, id).is_err(), "{path:?} with id {id:?} must not open");
-        assert!(v.read_tail(path, id, TAIL_MAX_BYTES).is_err(), "{path:?} with id {id:?} must not read");
+        assert!(
+            v.open(path, id).is_err(),
+            "{path:?} with id {id:?} must not open"
+        );
+        assert!(
+            v.read_tail(path, id, TAIL_MAX_BYTES).is_err(),
+            "{path:?} with id {id:?} must not read"
+        );
     }
 
     #[test]
@@ -1055,7 +1163,10 @@ mod tests {
         let rig = rig();
         let path = rig.write(&format!("{ID}.output"), b"hello\nworld\n");
 
-        let tail = rig.validator().read_tail(&path, ID, TAIL_MAX_BYTES).expect("reads");
+        let tail = rig
+            .validator()
+            .read_tail(&path, ID, TAIL_MAX_BYTES)
+            .expect("reads");
 
         assert_eq!(tail.bytes, b"hello\nworld\n");
         assert_eq!(tail.total_bytes, 12);
@@ -1087,7 +1198,16 @@ mod tests {
         let rig = rig();
         let v = rig.validator();
         let long = "k".repeat(65);
-        for id in ["", long.as_str(), "a.b", "a b", "caf\u{e9}", "a\nb", "..", "a;b"] {
+        for id in [
+            "",
+            long.as_str(),
+            "a.b",
+            "a b",
+            "caf\u{e9}",
+            "a\nb",
+            "..",
+            "a;b",
+        ] {
             let path = rig.write(&format!("{id}.output").replace('\n', "_"), b"x");
             rejected(&v, &path, id);
         }
@@ -1120,13 +1240,21 @@ mod tests {
         let rig = rig();
         let v = rig.validator();
         rig.write(&format!("{ID}.output"), b"x");
-        let sneaky = rig.tasks.join("..").join("tasks").join(format!("{ID}.output"));
+        let sneaky = rig
+            .tasks
+            .join("..")
+            .join("tasks")
+            .join(format!("{ID}.output"));
         assert!(sneaky.exists(), "the path does resolve to a real file");
         rejected(&v, &sneaky, ID);
 
         let outside = rig.outside();
         std::fs::write(outside.join(format!("{ID}.output")), b"secret").unwrap();
-        let escaping = rig.root.join("..").join("elsewhere").join(format!("{ID}.output"));
+        let escaping = rig
+            .root
+            .join("..")
+            .join("elsewhere")
+            .join(format!("{ID}.output"));
         rejected(&v, &escaping, ID);
     }
 
@@ -1134,7 +1262,11 @@ mod tests {
     fn a_relative_path_is_refused() {
         let rig = rig();
         rig.write(&format!("{ID}.output"), b"x");
-        rejected(&rig.validator(), Path::new(&format!("tasks/{ID}.output")), ID);
+        rejected(
+            &rig.validator(),
+            Path::new(&format!("tasks/{ID}.output")),
+            ID,
+        );
         rejected(&rig.validator(), Path::new(&format!("{ID}.output")), ID);
     }
 
@@ -1191,7 +1323,10 @@ mod tests {
         let link_dir = rig.root.join("link");
         std::os::unix::fs::symlink(&outside, &link_dir).unwrap();
         let through_link = link_dir.join(format!("{ID}.output"));
-        assert!(through_link.exists(), "the file is reachable through the link");
+        assert!(
+            through_link.exists(),
+            "the file is reachable through the link"
+        );
 
         rejected(&rig.validator(), &through_link, ID);
     }
@@ -1221,8 +1356,16 @@ mod tests {
     #[test]
     fn a_missing_file_is_an_error_not_a_panic() {
         let rig = rig();
-        rejected(&rig.validator(), &rig.tasks.join(format!("{ID}.output")), ID);
-        rejected(&rig.validator(), &rig.root.join("no-such-dir").join(format!("{ID}.output")), ID);
+        rejected(
+            &rig.validator(),
+            &rig.tasks.join(format!("{ID}.output")),
+            ID,
+        );
+        rejected(
+            &rig.validator(),
+            &rig.root.join("no-such-dir").join(format!("{ID}.output")),
+            ID,
+        );
     }
 
     #[test]
@@ -1258,15 +1401,24 @@ mod tests {
     fn a_small_file_is_returned_whole() {
         let rig = rig();
         let path = rig.write(&format!("{ID}.output"), b"short");
-        let tail = rig.validator().read_tail(&path, ID, TAIL_MAX_BYTES).unwrap();
-        assert_eq!((tail.bytes.as_slice(), tail.total_bytes), (&b"short"[..], 5));
+        let tail = rig
+            .validator()
+            .read_tail(&path, ID, TAIL_MAX_BYTES)
+            .unwrap();
+        assert_eq!(
+            (tail.bytes.as_slice(), tail.total_bytes),
+            (&b"short"[..], 5)
+        );
     }
 
     #[test]
     fn an_empty_file_reads_as_empty() {
         let rig = rig();
         let path = rig.write(&format!("{ID}.output"), b"");
-        let tail = rig.validator().read_tail(&path, ID, TAIL_MAX_BYTES).unwrap();
+        let tail = rig
+            .validator()
+            .read_tail(&path, ID, TAIL_MAX_BYTES)
+            .unwrap();
         assert!(tail.bytes.is_empty());
         assert_eq!(tail.total_bytes, 0);
     }
@@ -1276,7 +1428,10 @@ mod tests {
         let rig = rig();
         let content = vec![b'q'; TAIL_MAX_BYTES];
         let path = rig.write(&format!("{ID}.output"), &content);
-        let tail = rig.validator().read_tail(&path, ID, TAIL_MAX_BYTES).unwrap();
+        let tail = rig
+            .validator()
+            .read_tail(&path, ID, TAIL_MAX_BYTES)
+            .unwrap();
         assert_eq!(tail.bytes, content);
         assert_eq!(tail.total_bytes, TAIL_MAX_BYTES as u64);
     }
@@ -1287,7 +1442,10 @@ mod tests {
         let content: Vec<u8> = (0..20_000u32).map(|i| b'a' + (i % 26) as u8).collect();
         let path = rig.write(&format!("{ID}.output"), &content);
 
-        let tail = rig.validator().read_tail(&path, ID, TAIL_MAX_BYTES).unwrap();
+        let tail = rig
+            .validator()
+            .read_tail(&path, ID, TAIL_MAX_BYTES)
+            .unwrap();
 
         assert_eq!(tail.total_bytes, 20_000);
         assert_eq!(tail.bytes.len(), TAIL_MAX_BYTES);
@@ -1328,10 +1486,13 @@ mod tests {
         for window in 1..=content.len() {
             let tail = v.read_tail(&path, ID, window).unwrap();
             assert!(tail.bytes.len() <= window, "window {window}");
-            let text = std::str::from_utf8(&tail.bytes)
-                .unwrap_or_else(|e| panic!("window {window}: {e}"));
+            let text =
+                std::str::from_utf8(&tail.bytes).unwrap_or_else(|e| panic!("window {window}: {e}"));
             assert!(content.ends_with(text), "window {window}");
-            assert!(tail.bytes.len() + 3 >= window.min(content.len()), "window {window} dropped too much");
+            assert!(
+                tail.bytes.len() + 3 >= window.min(content.len()),
+                "window {window} dropped too much"
+            );
         }
     }
 
@@ -1367,14 +1528,27 @@ mod tests {
             ('\u{2029}', "paragraph separator"),
         ];
         for (c, name) in table {
-            assert_eq!(sanitize(format!("a{c}b").as_bytes()), "ab", "U+{:04X} {name} must be removed", *c as u32);
-            assert_eq!(sanitize(format!("{c}{c}ab{c}").as_bytes()), "ab", "U+{:04X} {name} at the edges", *c as u32);
+            assert_eq!(
+                sanitize(format!("a{c}b").as_bytes()),
+                "ab",
+                "U+{:04X} {name} must be removed",
+                *c as u32
+            );
+            assert_eq!(
+                sanitize(format!("{c}{c}ab{c}").as_bytes()),
+                "ab",
+                "U+{:04X} {name} at the edges",
+                *c as u32
+            );
         }
     }
 
     #[test]
     fn a_reversed_filename_trick_shows_its_true_text() {
-        assert_eq!(sanitize("report\u{202E}fdp.exe".as_bytes()), "reportfdp.exe");
+        assert_eq!(
+            sanitize("report\u{202E}fdp.exe".as_bytes()),
+            "reportfdp.exe"
+        );
     }
 
     #[test]
@@ -1385,7 +1559,10 @@ mod tests {
 
     #[test]
     fn escape_sequences_are_still_removed_next_to_invisible_characters() {
-        assert_eq!(sanitize("a\u{202E}\x1b[31mb\x1b[0m\u{200B}\x1b]0;t\x07c".as_bytes()), "abc");
+        assert_eq!(
+            sanitize("a\u{202E}\x1b[31mb\x1b[0m\u{200B}\x1b]0;t\x07c".as_bytes()),
+            "abc"
+        );
     }
 
     #[test]
@@ -1399,7 +1576,9 @@ mod tests {
     #[test]
     fn the_root_is_four_levels_above_a_cli_output_path() {
         assert_eq!(
-            root_of_output_path(Path::new("/private/tmp/claude-501/-Users-x-repo/sess-1/tasks/b7k2m9x1a.output")),
+            root_of_output_path(Path::new(
+                "/private/tmp/claude-501/-Users-x-repo/sess-1/tasks/b7k2m9x1a.output"
+            )),
             Some(PathBuf::from("/private/tmp/claude-501"))
         );
         assert_eq!(
@@ -1410,15 +1589,25 @@ mod tests {
 
     #[test]
     fn a_path_whose_directory_is_not_tasks_has_no_root() {
-        assert_eq!(root_of_output_path(Path::new("/t/claude-501/-repo/sess/out/b1.output")), None);
-        assert_eq!(root_of_output_path(Path::new("/t/claude-501/-repo/sess/b1.output")), None);
+        assert_eq!(
+            root_of_output_path(Path::new("/t/claude-501/-repo/sess/out/b1.output")),
+            None
+        );
+        assert_eq!(
+            root_of_output_path(Path::new("/t/claude-501/-repo/sess/b1.output")),
+            None
+        );
     }
 
     #[test]
     fn a_path_too_shallow_to_have_the_shape_has_no_root_and_never_the_filesystem_root() {
         assert_eq!(root_of_output_path(Path::new("/tasks/b1.output")), None);
         assert_eq!(root_of_output_path(Path::new("/a/tasks/b1.output")), None);
-        assert_eq!(root_of_output_path(Path::new("/a/b/tasks/b1.output")), None, "that would be `/`");
+        assert_eq!(
+            root_of_output_path(Path::new("/a/b/tasks/b1.output")),
+            None,
+            "that would be `/`"
+        );
         assert_eq!(root_of_output_path(Path::new("tasks/b1.output")), None);
         assert_eq!(root_of_output_path(Path::new("b1.output")), None);
         assert_eq!(root_of_output_path(Path::new("")), None);
@@ -1429,11 +1618,17 @@ mod tests {
     #[test]
     fn a_cli_path_under_its_claude_uid_folder_in_tmp_teaches_that_folder() {
         assert_eq!(
-            learnable_root(Path::new("/private/tmp/claude-502/-Users-h-repo/sess/tasks/b1.output"), 502),
+            learnable_root(
+                Path::new("/private/tmp/claude-502/-Users-h-repo/sess/tasks/b1.output"),
+                502
+            ),
             Some(PathBuf::from("/private/tmp/claude-502"))
         );
         assert_eq!(
-            learnable_root(Path::new("/tmp/claude-502/-Users-h-repo/sess/tasks/b1.output"), 502),
+            learnable_root(
+                Path::new("/tmp/claude-502/-Users-h-repo/sess/tasks/b1.output"),
+                502
+            ),
             Some(PathBuf::from("/tmp/claude-502"))
         );
     }
@@ -1443,23 +1638,42 @@ mod tests {
         let cases: &[(&str, u32)] = &[
             ("/Users/h/Documents/x/sess/tasks/t1.output", 502),
             ("/Users/h/Documents/-work-repo/sess-1/tasks/t1.output", 502),
-            ("/private/tmp/claude-501/-Users-h-repo/sess/tasks/b1.output", 502), // someone else's
+            (
+                "/private/tmp/claude-501/-Users-h-repo/sess/tasks/b1.output",
+                502,
+            ), // someone else's
             ("/tmp/claude-501/-Users-h-repo/sess/tasks/b1.output", 502),
-            ("/var/folders/ab/T/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
-            ("/tmp/sub/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
-            ("/private/tmp/sub/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            (
+                "/var/folders/ab/T/claude-502/-Users-h-repo/sess/tasks/b1.output",
+                502,
+            ),
+            (
+                "/tmp/sub/claude-502/-Users-h-repo/sess/tasks/b1.output",
+                502,
+            ),
+            (
+                "/private/tmp/sub/claude-502/-Users-h-repo/sess/tasks/b1.output",
+                502,
+            ),
             ("/tmp/claude-502x/-Users-h-repo/sess/tasks/b1.output", 502),
             ("/tmp/xclaude-502/-Users-h-repo/sess/tasks/b1.output", 502),
             ("/tmp/claude-/-Users-h-repo/sess/tasks/b1.output", 502),
             ("/tmp/claude/-Users-h-repo/sess/tasks/b1.output", 502),
             ("/tmp/claude-0502/-Users-h-repo/sess/tasks/b1.output", 502),
-            ("/elsewhere/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
+            (
+                "/elsewhere/claude-502/-Users-h-repo/sess/tasks/b1.output",
+                502,
+            ),
             ("/claude-502/-Users-h-repo/sess/tasks/b1.output", 502),
             ("/tmp/claude-502/-Users-h-repo/sess/out/b1.output", 502), // not a tasks folder
             ("tmp/claude-502/-Users-h-repo/sess/tasks/b1.output", 502), // relative
         ];
         for (path, uid) in cases {
-            assert_eq!(learnable_root(Path::new(path), *uid), None, "{path} as uid {uid}");
+            assert_eq!(
+                learnable_root(Path::new(path), *uid),
+                None,
+                "{path} as uid {uid}"
+            );
         }
     }
 
@@ -1480,7 +1694,10 @@ mod tests {
     fn the_real_default_root_for_this_user_is_learnable() {
         let uid = current_uid();
         let path = format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output");
-        assert_eq!(learnable_root(Path::new(&path), uid), Some(PathBuf::from(format!("/tmp/claude-{uid}"))));
+        assert_eq!(
+            learnable_root(Path::new(&path), uid),
+            Some(PathBuf::from(format!("/tmp/claude-{uid}")))
+        );
     }
 
     #[test]
@@ -1513,10 +1730,23 @@ mod tests {
         for _ in 0..1_000_000 {
             let r = v
                 .read_range_of(path, ID, Some(offset), max, true)
-                .unwrap_or_else(|e| panic!("read_range_of(offset {offset}, max {max}) failed: {e:?}"));
-            assert_eq!(r.start, offset, "a range must start where the previous one ended (max {max})");
-            assert_eq!(r.end - r.start, r.bytes.len() as u64, "end - start is the number of bytes (max {max})");
-            assert!(r.bytes.len() <= max, "{} bytes for a window of {max}", r.bytes.len());
+                .unwrap_or_else(|e| {
+                    panic!("read_range_of(offset {offset}, max {max}) failed: {e:?}")
+                });
+            assert_eq!(
+                r.start, offset,
+                "a range must start where the previous one ended (max {max})"
+            );
+            assert_eq!(
+                r.end - r.start,
+                r.bytes.len() as u64,
+                "end - start is the number of bytes (max {max})"
+            );
+            assert!(
+                r.bytes.len() <= max,
+                "{} bytes for a window of {max}",
+                r.bytes.len()
+            );
             assert!(
                 std::str::from_utf8(&r.bytes).is_ok(),
                 "a range of valid UTF-8 text must be valid UTF-8 (max {max}, start {})",
@@ -1524,7 +1754,11 @@ mod tests {
             );
             let done = r.end >= r.total_bytes;
             if !done {
-                assert!(r.end > r.start, "no progress at offset {offset} of {} (max {max})", r.total_bytes);
+                assert!(
+                    r.end > r.start,
+                    "no progress at offset {offset} of {} (max {max})",
+                    r.total_bytes
+                );
             }
             offset = r.end;
             out.push(r);
@@ -1547,7 +1781,9 @@ mod tests {
             let line = match i % 7 {
                 0 => format!("\x1b[1;3{}mline {i}: caf\u{e9} \u{2713}\x1b[0m\n", i % 8),
                 1 => format!("\x1b]0;title {i}\x07progress {i}%\r{}%\n", i + 1),
-                2 => format!("\x1b]8;;http://example.test/{i}\x1b\\link {i}\x1b]8;;\x1b\\ \u{1f600}\n"),
+                2 => format!(
+                    "\x1b]8;;http://example.test/{i}\x1b\\link {i}\x1b]8;;\x1b\\ \u{1f600}\n"
+                ),
                 3 => format!("plain {i} {}\n", "x".repeat(i % 97)),
                 4 => format!("\x1b[2K\x1b[1G{i}\u{9b}31m red\n"),
                 5 => format!("\u{9d}0;t{i}\x07tab\there {i}\n"),
@@ -1561,7 +1797,8 @@ mod tests {
     }
 
     #[test]
-    fn ranges_read_in_one_mebibyte_requests_from_offset_zero_reassemble_the_sanitised_whole_of_a_two_mebibyte_file() {
+    fn ranges_read_in_one_mebibyte_requests_from_offset_zero_reassemble_the_sanitised_whole_of_a_two_mebibyte_file(
+    ) {
         let rig = rig();
         let content = escaped_log_of(2 * MIB);
         assert_eq!(content.len(), 2 * MIB);
@@ -1569,19 +1806,34 @@ mod tests {
 
         let ranges = read_all(&rig.validator(), &path, MIB);
 
-        assert!(ranges.len() >= 2, "a 2 MiB file does not fit one 1 MiB request: {} range(s)", ranges.len());
+        assert!(
+            ranges.len() >= 2,
+            "a 2 MiB file does not fit one 1 MiB request: {} range(s)",
+            ranges.len()
+        );
         assert_eq!(ranges[0].start, 0);
         for pair in ranges.windows(2) {
             assert_eq!(pair[0].end, pair[1].start, "contiguous [start, end) ranges");
         }
-        assert_eq!(ranges.last().unwrap().end, (2 * MIB) as u64, "the last range ends at the end of the file");
+        assert_eq!(
+            ranges.last().unwrap().end,
+            (2 * MIB) as u64,
+            "the last range ends at the end of the file"
+        );
         for r in &ranges {
             assert_eq!(r.total_bytes, (2 * MIB) as u64);
         }
         let text = sanitised_join(&ranges);
         assert!(!text.contains('\u{1b}'), "no escape byte survives");
-        assert_eq!(text, sanitize(&content), "the ranges, sanitised one by one, join to the sanitised whole");
-        let raw: Vec<u8> = ranges.iter().flat_map(|r| r.bytes.iter().copied()).collect();
+        assert_eq!(
+            text,
+            sanitize(&content),
+            "the ranges, sanitised one by one, join to the sanitised whole"
+        );
+        let raw: Vec<u8> = ranges
+            .iter()
+            .flat_map(|r| r.bytes.iter().copied())
+            .collect();
         assert_eq!(raw, content, "the ranges tile the file exactly");
     }
 
@@ -1637,7 +1889,10 @@ mod tests {
         let rig = rig();
         let path = rig.write(&format!("{ID}.output"), whole.as_bytes());
         let expected = sanitize(whole.as_bytes());
-        assert_eq!(expected, "aaaabbbb", "control: the whole title is swallowed");
+        assert_eq!(
+            expected, "aaaabbbb",
+            "control: the whole title is swallowed"
+        );
         // Every window that can hold the whole title sequence, wherever the cuts before it fall.
         for max in "\x1b]0;ti\u{9b}tle\x07".len()..=whole.len() + 2 {
             let ranges = read_all(&rig.validator(), &path, max);
@@ -1659,10 +1914,20 @@ mod tests {
 
         let first = range(&rig.validator(), &path, Some(0), 4096);
 
-        assert_eq!((first.start, first.end), (0, 4096), "an ASCII line with no newline in the window ends where the window does");
+        assert_eq!(
+            (first.start, first.end),
+            (0, 4096),
+            "an ASCII line with no newline in the window ends where the window does"
+        );
         assert_eq!(first.bytes.len(), 4096);
         let ranges = read_all(&rig.validator(), &path, 4096);
-        assert_eq!(ranges.iter().flat_map(|r| r.bytes.iter().copied()).collect::<Vec<_>>(), content.as_bytes());
+        assert_eq!(
+            ranges
+                .iter()
+                .flat_map(|r| r.bytes.iter().copied())
+                .collect::<Vec<_>>(),
+            content.as_bytes()
+        );
         assert_eq!(sanitised_join(&ranges), content);
     }
 
@@ -1675,13 +1940,24 @@ mod tests {
         let first = range(&rig.validator(), &path, Some(0), 4097);
 
         assert_eq!(first.end, 4096, "4097 would cut an e-acute in half");
-        assert_eq!(sanitised_join(&read_all(&rig.validator(), &path, 4097)), content);
+        assert_eq!(
+            sanitised_join(&read_all(&rig.validator(), &path, 4097)),
+            content
+        );
     }
 
     #[test]
     fn a_long_line_of_mixed_escapes_and_scalars_reassembles_for_every_nearby_window_size() {
         const PIECES: [&str; 9] = [
-            "\x1b[1;31m", "\x1b]0;t\x07", "\u{e9}", "\u{2713}", "\u{1f600}", "\x1b]8;;u\x1b\\", "\u{9b}31m", "\u{9d}0;t\x07", "text ",
+            "\x1b[1;31m",
+            "\x1b]0;t\x07",
+            "\u{e9}",
+            "\u{2713}",
+            "\u{1f600}",
+            "\x1b]8;;u\x1b\\",
+            "\u{9b}31m",
+            "\u{9d}0;t\x07",
+            "text ",
         ];
         let mut rng = Prng(7);
         let mut line = String::new();
@@ -1700,7 +1976,16 @@ mod tests {
 
     #[test]
     fn a_long_escaped_line_over_a_one_mebibyte_window_reassembles() {
-        const PIECES: [&str; 8] = ["\x1b[1;31m", "\x1b]0;t\x07", "\u{e9}", "\u{2713}", "\u{1f600}", "\x1b]8;;u\x1b\\", "\x1b[0m", "word "];
+        const PIECES: [&str; 8] = [
+            "\x1b[1;31m",
+            "\x1b]0;t\x07",
+            "\u{e9}",
+            "\u{2713}",
+            "\u{1f600}",
+            "\x1b]8;;u\x1b\\",
+            "\x1b[0m",
+            "word ",
+        ];
         let mut rng = Prng(99);
         let mut line = String::new();
         while line.len() < MIB + MIB / 2 {
@@ -1720,8 +2005,32 @@ mod tests {
         // Valid UTF-8 pieces only (lossy decoding of cut invalid bytes legitimately differs), no
         // `\r` (carriage returns collapse per line, and a line may be split), newline-free runs.
         const PIECES: &[&str] = &[
-            "\x1b", "\x1b[", "\x1b]", "\x1bP", "\x1b_", "\x1b^", "\x1bX", "\x1b(", "\x1b\\", "\x07", "\t", "[", "]", ";", "31", "0",
-            "m", "H", "abc ", " ", "\u{e9}", "\u{2713}", "\u{1f600}", "\x7f", "\x1b[0m", "\x1b]0;t\x07",
+            "\x1b",
+            "\x1b[",
+            "\x1b]",
+            "\x1bP",
+            "\x1b_",
+            "\x1b^",
+            "\x1bX",
+            "\x1b(",
+            "\x1b\\",
+            "\x07",
+            "\t",
+            "[",
+            "]",
+            ";",
+            "31",
+            "0",
+            "m",
+            "H",
+            "abc ",
+            " ",
+            "\u{e9}",
+            "\u{2713}",
+            "\u{1f600}",
+            "\x7f",
+            "\x1b[0m",
+            "\x1b]0;t\x07",
         ];
         let rig = rig();
         let mut rng = Prng(0xC0FFEE);
@@ -1738,7 +2047,11 @@ mod tests {
             let path = rig.write(&format!("{ID}.output"), text.as_bytes());
             let max = 4096 + rng.below(1024);
             let ranges = read_all(&rig.validator(), &path, max);
-            assert_eq!(sanitised_join(&ranges), sanitize(text.as_bytes()), "round {round}, window {max}, text {text:?}");
+            assert_eq!(
+                sanitised_join(&ranges),
+                sanitize(text.as_bytes()),
+                "round {round}, window {max}, text {text:?}"
+            );
         }
     }
 
@@ -1751,12 +2064,27 @@ mod tests {
         let r = range(&rig.validator(), &path, None, 4096);
 
         assert!(r.bytes.len() <= 4096, "{} bytes", r.bytes.len());
-        assert_eq!(r.end, content.len() as u64, "a tail ends at the end of the file");
+        assert_eq!(
+            r.end,
+            content.len() as u64,
+            "a tail ends at the end of the file"
+        );
         assert_eq!(r.total_bytes, content.len() as u64);
         assert!(r.start > 0);
-        assert_eq!(content.as_bytes()[r.start as usize - 1], b'\n', "a tail starts right after a newline");
-        assert_eq!(r.bytes, content.as_bytes()[r.start as usize..], "the bytes are the file's, start to end");
-        assert!(String::from_utf8(r.bytes).unwrap().starts_with("line "), "no half line at the top");
+        assert_eq!(
+            content.as_bytes()[r.start as usize - 1],
+            b'\n',
+            "a tail starts right after a newline"
+        );
+        assert_eq!(
+            r.bytes,
+            content.as_bytes()[r.start as usize..],
+            "the bytes are the file's, start to end"
+        );
+        assert!(
+            String::from_utf8(r.bytes).unwrap().starts_with("line "),
+            "no half line at the top"
+        );
     }
 
     #[test]
@@ -1767,11 +2095,15 @@ mod tests {
         let r = range(&rig.validator(), &path, None, 4096);
 
         assert_eq!((r.start, r.end, r.total_bytes), (0, 13, 13));
-        assert_eq!(r.bytes, b"one\ntwo\nthree", "the last line needs no newline when it is the end of the file");
+        assert_eq!(
+            r.bytes, b"one\ntwo\nthree",
+            "the last line needs no newline when it is the end of the file"
+        );
     }
 
     #[test]
-    fn a_tail_of_a_file_with_no_newline_in_its_window_still_ends_at_the_end_and_starts_on_a_scalar() {
+    fn a_tail_of_a_file_with_no_newline_in_its_window_still_ends_at_the_end_and_starts_on_a_scalar()
+    {
         let rig = rig();
         let content = "\u{e9}".repeat(5_000);
         let path = rig.write(&format!("{ID}.output"), content.as_bytes());
@@ -1780,7 +2112,10 @@ mod tests {
             let r = range(&rig.validator(), &path, None, max);
             assert_eq!(r.end, content.len() as u64, "window {max}");
             assert!(r.bytes.len() <= max);
-            assert!(!r.bytes.is_empty(), "window {max}: a window with no newline is still returned");
+            assert!(
+                !r.bytes.is_empty(),
+                "window {max}: a window with no newline is still returned"
+            );
             assert_eq!(r.start % 2, 0, "window {max}: starts between two e-acutes");
             assert!(String::from_utf8(r.bytes).is_ok());
         }
@@ -1800,7 +2135,11 @@ mod tests {
         let path = rig.write(&format!("{ID}.output"), b"0123456789");
         for offset in [10u64, 11, 4096, u64::MAX] {
             let r = range(&rig.validator(), &path, Some(offset), 4096);
-            assert_eq!((r.start, r.end, r.total_bytes), (10, 10, 10), "offset {offset}");
+            assert_eq!(
+                (r.start, r.end, r.total_bytes),
+                (10, 10, 10),
+                "offset {offset}"
+            );
             assert!(r.bytes.is_empty(), "offset {offset}");
         }
     }
@@ -1811,7 +2150,11 @@ mod tests {
         let path = rig.write(&format!("{ID}.output"), b"");
         for offset in [0u64, 1, 100] {
             let r = range(&rig.validator(), &path, Some(offset), 4096);
-            assert_eq!((r.start, r.end, r.total_bytes, r.bytes.len()), (0, 0, 0, 0), "offset {offset}");
+            assert_eq!(
+                (r.start, r.end, r.total_bytes, r.bytes.len()),
+                (0, 0, 0, 0),
+                "offset {offset}"
+            );
         }
     }
 
@@ -1861,7 +2204,11 @@ mod tests {
             text.push_str(&sanitize(&r.bytes));
             offset = r.end;
         }
-        assert_eq!(text, "\u{1f600}".repeat(9), "every smiley after the cut one, once");
+        assert_eq!(
+            text,
+            "\u{1f600}".repeat(9),
+            "every smiley after the cut one, once"
+        );
     }
 
     #[test]
@@ -1872,7 +2219,10 @@ mod tests {
         let first = range(&v, &path, Some(0), 4096);
         assert_eq!((first.end, first.total_bytes), (8, 8));
 
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         std::io::Write::write_all(&mut file, b"three\nfour\n").unwrap();
         let second = range(&v, &path, Some(first.end), 4096);
 
@@ -1881,14 +2231,21 @@ mod tests {
     }
 
     #[test]
-    fn a_line_still_being_written_is_returned_as_far_as_it_goes_and_continued_by_the_next_request() {
+    fn a_line_still_being_written_is_returned_as_far_as_it_goes_and_continued_by_the_next_request()
+    {
         let rig = rig();
         let path = rig.write(&format!("{ID}.output"), b"done\nhalf");
         let v = rig.validator();
         let first = range(&v, &path, Some(0), 4096);
-        assert_eq!(first.bytes, b"done\nhalf", "the end of the file needs no newline");
+        assert_eq!(
+            first.bytes, b"done\nhalf",
+            "the end of the file needs no newline"
+        );
 
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         std::io::Write::write_all(&mut file, b" a line\n").unwrap();
         let second = range(&v, &path, Some(first.end), 4096);
 
@@ -1908,7 +2265,11 @@ mod tests {
         let v = rig.validator();
 
         let first = range(&v, &path, Some(0), 4096);
-        assert_eq!((first.bytes.as_slice(), first.end), (&b"ab"[..], 2), "the half scalar is not returned");
+        assert_eq!(
+            (first.bytes.as_slice(), first.end),
+            (&b"ab"[..], 2),
+            "the half scalar is not returned"
+        );
 
         std::fs::write(&path, bytes).unwrap();
         let second = range(&v, &path, Some(first.end), 4096);
@@ -1924,12 +2285,20 @@ mod tests {
         let v = rig.validator();
 
         let first = range(&v, &path, Some(0), 4096);
-        assert_eq!((first.bytes.as_slice(), first.end), (&b"ok\n"[..], 3), "the unfinished escape is not returned");
+        assert_eq!(
+            (first.bytes.as_slice(), first.end),
+            (&b"ok\n"[..], 3),
+            "the unfinished escape is not returned"
+        );
 
         std::fs::write(&path, b"ok\n\x1b[31mred\n").unwrap();
         let second = range(&v, &path, Some(first.end), 4096);
 
-        assert_eq!(sanitized_text(&[&first, &second]), "ok\nred\n", "the colour code was never shown as `1mred`");
+        assert_eq!(
+            sanitized_text(&[&first, &second]),
+            "ok\nred\n",
+            "the colour code was never shown as `1mred`"
+        );
     }
 
     #[test]
@@ -1941,7 +2310,11 @@ mod tests {
         let v = rig.validator();
 
         let first = range(&v, &path, Some(0), 4096);
-        assert_eq!(first.end, 0, "nothing safe to return yet: the range stays empty ({:?})", first.bytes);
+        assert_eq!(
+            first.end, 0,
+            "nothing safe to return yet: the range stays empty ({:?})",
+            first.bytes
+        );
 
         std::fs::write(&path, b"\x1b[31mred\n").unwrap();
         let second = range(&v, &path, Some(first.end), 4096);
@@ -1954,16 +2327,27 @@ mod tests {
         // an ended task's file never will, so nothing may be left behind unread.
         let rig = rig();
         let v = rig.validator();
-        for tail in [&b"\x1b[3"[..], &b"\x1b]0;title"[..], &"\u{e9}".as_bytes()[..1]] {
+        for tail in [
+            &b"\x1b[3"[..],
+            &b"\x1b]0;title"[..],
+            &"\u{e9}".as_bytes()[..1],
+        ] {
             let mut content = b"done\n".to_vec();
             content.extend_from_slice(tail);
             let path = rig.write(&format!("{ID}.output"), &content);
 
             let running = range(&v, &path, Some(0), 4096);
-            assert!(running.end < content.len() as u64, "a file that may grow keeps {tail:?} back");
+            assert!(
+                running.end < content.len() as u64,
+                "a file that may grow keeps {tail:?} back"
+            );
 
             let ended = v.read_range_of(&path, ID, Some(0), 4096, true).unwrap();
-            assert_eq!((ended.start, ended.end), (0, content.len() as u64), "an ended file ends at its end");
+            assert_eq!(
+                (ended.start, ended.end),
+                (0, content.len() as u64),
+                "an ended file ends at its end"
+            );
             assert_eq!(ended.total_bytes, content.len() as u64);
             assert!(!sanitize(&ended.bytes).contains('\u{1b}'));
         }
@@ -1977,7 +2361,10 @@ mod tests {
         let path = rig.write(&format!("{ID}.output"), &content);
 
         let tail = range(&rig.validator(), &path, None, 4096);
-        assert!(!tail.bytes.is_empty(), "the window is all one line: it is returned, not skipped");
+        assert!(
+            !tail.bytes.is_empty(),
+            "the window is all one line: it is returned, not skipped"
+        );
         assert_eq!(tail.end, content.len() as u64);
         assert!(tail.bytes.len() <= 4096);
     }
@@ -2010,7 +2397,12 @@ mod tests {
             let finished = done.load(Ordering::SeqCst);
             let r = range(&v, &path, Some(offset), 4096);
             assert_eq!(r.start, offset);
-            assert!(r.total_bytes >= r.end, "the reported size covers what was read: {} < {}", r.total_bytes, r.end);
+            assert!(
+                r.total_bytes >= r.end,
+                "the reported size covers what was read: {} < {}",
+                r.total_bytes,
+                r.end
+            );
             assert_eq!(r.end - r.start, r.bytes.len() as u64);
             offset = r.end;
             raw.extend_from_slice(&r.bytes);
@@ -2023,7 +2415,11 @@ mod tests {
         }
         writer.join().unwrap();
 
-        assert_eq!(raw, std::fs::read(&path).unwrap(), "every appended byte arrived once, in order");
+        assert_eq!(
+            raw,
+            std::fs::read(&path).unwrap(),
+            "every appended byte arrived once, in order"
+        );
         assert!(String::from_utf8(raw).is_ok());
     }
 
@@ -2047,7 +2443,10 @@ mod tests {
 
     fn counted(rig: &Rig) -> (OutputFileValidator, Arc<AtomicUsize>) {
         let counter = Arc::new(AtomicUsize::new(0));
-        (rig.validator().with_open_counter(Arc::clone(&counter)), counter)
+        (
+            rig.validator().with_open_counter(Arc::clone(&counter)),
+            counter,
+        )
     }
 
     #[test]
@@ -2091,9 +2490,15 @@ mod tests {
     fn a_ranged_read_for_an_invalid_task_id_is_refused_even_though_the_file_exists() {
         let rig = rig();
         for bad in ["a/b", "..", "a.b", "", &"x".repeat(65)] {
-            let path = rig.write(&format!("{bad}.output").replace('/', "_"), b"SECRET-OUTPUT-ID\n");
+            let path = rig.write(
+                &format!("{bad}.output").replace('/', "_"),
+                b"SECRET-OUTPUT-ID\n",
+            );
             let (v, opens) = counted(&rig);
-            assert!(v.read_range(&path, bad, Some(0), 4096).is_err(), "id {bad:?}");
+            assert!(
+                v.read_range(&path, bad, Some(0), 4096).is_err(),
+                "id {bad:?}"
+            );
             assert_eq!(opens.load(Ordering::SeqCst), 1, "id {bad:?}");
         }
     }
@@ -2123,7 +2528,9 @@ mod tests {
         });
 
         // A hang guard, not a timing assertion: a blocked `open` never answers.
-        let refused = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the read of a FIFO blocked");
+        let refused = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the read of a FIFO blocked");
 
         assert!(refused);
         assert_eq!(opens.load(Ordering::SeqCst), 1);
@@ -2133,7 +2540,9 @@ mod tests {
     fn a_ranged_read_of_a_missing_file_is_an_error_after_one_open() {
         let rig = rig();
         let (v, opens) = counted(&rig);
-        assert!(v.read_range(&rig.tasks.join(format!("{ID}.output")), ID, Some(0), 4096).is_err());
+        assert!(v
+            .read_range(&rig.tasks.join(format!("{ID}.output")), ID, Some(0), 4096)
+            .is_err());
         assert_eq!(opens.load(Ordering::SeqCst), 1);
     }
 
@@ -2151,7 +2560,10 @@ mod tests {
     fn a_validator_without_a_counter_reads_normally() {
         let rig = rig();
         let path = rig.write(&format!("{ID}.output"), b"hello\n");
-        assert_eq!(range(&rig.validator(), &path, Some(0), 4096).bytes, b"hello\n");
+        assert_eq!(
+            range(&rig.validator(), &path, Some(0), 4096).bytes,
+            b"hello\n"
+        );
     }
 
     // ── the largest frame a read can produce ─────────────────────────────────
@@ -2181,8 +2593,16 @@ mod tests {
             ("double quotes (each is escaped)", vec![b'"'; MIB]),
             ("backslashes (each is escaped)", vec![b'\\'; MIB]),
             ("newlines (each is escaped)", vec![b'\n'; MIB]),
-            ("four-byte scalars", "\u{1f600}".repeat(MIB / 4).into_bytes()),
-            ("alternating invalid bytes and quotes", (0..MIB).map(|i| if i % 2 == 0 { 0xFF } else { b'"' }).collect()),
+            (
+                "four-byte scalars",
+                "\u{1f600}".repeat(MIB / 4).into_bytes(),
+            ),
+            (
+                "alternating invalid bytes and quotes",
+                (0..MIB)
+                    .map(|i| if i % 2 == 0 { 0xFF } else { b'"' })
+                    .collect(),
+            ),
         ];
         for (what, content) in worst {
             let path = rig.write(&format!("{ID}.output"), &content);

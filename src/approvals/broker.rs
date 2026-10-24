@@ -245,7 +245,11 @@ impl Ending {
             interrupt: stop,
             by_window: Some(by_window.to_owned()),
             ..Self::deny(
-                if stop { Outcome::DeniedAndStopped } else { Outcome::Denied },
+                if stop {
+                    Outcome::DeniedAndStopped
+                } else {
+                    Outcome::Denied
+                },
                 &message,
             )
         }
@@ -476,7 +480,9 @@ impl AnswerResult {
     pub fn refusal(&self) -> Option<(AnswerRefusal, Option<&str>)> {
         match self {
             Self::Applied { .. } => None,
-            Self::AlreadyResolved { outcome } => Some((AnswerRefusal::AlreadyResolved, Some(outcome))),
+            Self::AlreadyResolved { outcome } => {
+                Some((AnswerRefusal::AlreadyResolved, Some(outcome)))
+            }
             Self::UnknownRequest => Some((AnswerRefusal::UnknownRequest, None)),
             Self::NotPresenter => Some((AnswerRefusal::NotOperatorApp, None)),
             Self::InvalidAnswer => Some((AnswerRefusal::InvalidAnswer, None)),
@@ -545,11 +551,18 @@ struct State {
 impl State {
     /// Held requests of `tag` still pending.
     fn held_count(&self, tag: &str) -> u32 {
-        self.pending.values().filter(|p| p.held && p.ident.tag == tag).count() as u32
+        self.pending
+            .values()
+            .filter(|p| p.held && p.ident.tag == tag)
+            .count() as u32
     }
 
     fn remember_ended(&mut self, request_id: &str, outcome: &str) {
-        if self.ended.insert(request_id.to_owned(), outcome.to_owned()).is_none() {
+        if self
+            .ended
+            .insert(request_id.to_owned(), outcome.to_owned())
+            .is_none()
+        {
             self.ended_order.push_back(request_id.to_owned());
             while self.ended_order.len() > RECENT_ENDED {
                 if let Some(old) = self.ended_order.pop_front() {
@@ -563,7 +576,9 @@ impl State {
     /// that nobody knows it.
     fn answer_to_ended(&self, request_id: &str) -> AnswerResult {
         match self.ended.get(request_id) {
-            Some(outcome) => AnswerResult::AlreadyResolved { outcome: outcome.clone() },
+            Some(outcome) => AnswerResult::AlreadyResolved {
+                outcome: outcome.clone(),
+            },
             None => AnswerResult::UnknownRequest,
         }
     }
@@ -841,7 +856,8 @@ impl ApprovalBroker {
             &ident,
             Utc::now(),
         ));
-        self.inner.answer_and_log(&ident, Ending::unavailable(), answer);
+        self.inner
+            .answer_and_log(&ident, Ending::unavailable(), answer);
     }
 
     /// A permission request the reader could not read (nested too deep, too large,
@@ -967,7 +983,8 @@ impl ApprovalBroker {
                 let Event::Request { tool_name, .. } = &e.event else {
                     return;
                 };
-                let Some(request_id) = e.request_id.as_deref().filter(|id| !ended.contains(*id)) else {
+                let Some(request_id) = e.request_id.as_deref().filter(|id| !ended.contains(*id))
+                else {
                     return;
                 };
                 let mut outcome = Entry::new(
@@ -1121,8 +1138,10 @@ impl ApprovalBroker {
         for wire in wires {
             let size = wire_len(&wire);
             if used + size > MAX_FRAME_LEN - FRAME_MARGIN {
-                self.inner
-                    .finish(&wire.request_id, Ending::deny(Outcome::TooLarge, TOO_LARGE_MESSAGE));
+                self.inner.finish(
+                    &wire.request_id,
+                    Ending::deny(Outcome::TooLarge, TOO_LARGE_MESSAGE),
+                );
             } else {
                 used += size;
                 kept.push(wire);
@@ -1153,7 +1172,9 @@ impl ApprovalBroker {
             match st.pending.get(request_id) {
                 Some(p) if p.held => (
                     p.input.clone(),
-                    p.wire.as_ref().is_some_and(|w| w.options.contains(&ApprovalOption::AnswerQuestions)),
+                    p.wire
+                        .as_ref()
+                        .is_some_and(|w| w.options.contains(&ApprovalOption::AnswerQuestions)),
                 ),
                 Some(_) => (None, false),
                 None => return st.answer_to_ended(request_id),
@@ -1167,7 +1188,10 @@ impl ApprovalBroker {
             DecisionKind::AllowOnce if answerable => {
                 // Allowing a question as-is would forward the agent's own input, which can carry
                 // `answers`/`annotations` the CLI reads as the person's words. Only an answer ends it.
-                debug!(conn_key, request_id, "allow_once refused: a question is answered, not allowed");
+                debug!(
+                    conn_key,
+                    request_id, "allow_once refused: a question is answered, not allowed"
+                );
                 return AnswerResult::InvalidAnswer;
             }
             DecisionKind::AllowOnce => Ending::allow_once(input, window_id),
@@ -1183,7 +1207,12 @@ impl ApprovalBroker {
                 match built {
                     Ok(updated) => Ending::answered(updated, window_id),
                     Err(why) => {
-                        debug!(conn_key, request_id, ?why, "answer refused: it does not fit the questions");
+                        debug!(
+                            conn_key,
+                            request_id,
+                            ?why,
+                            "answer refused: it does not fit the questions"
+                        );
                         return AnswerResult::InvalidAnswer;
                     }
                 }
@@ -1191,8 +1220,15 @@ impl ApprovalBroker {
         };
         match self.inner.finish(request_id, ending) {
             Some(done) => {
-                debug!(conn_key, request_id, outcome = done.outcome.as_str(), "approval answered");
-                AnswerResult::Applied { outcome: done.outcome.as_str().to_owned() }
+                debug!(
+                    conn_key,
+                    request_id,
+                    outcome = done.outcome.as_str(),
+                    "approval answered"
+                );
+                AnswerResult::Applied {
+                    outcome: done.outcome.as_str().to_owned(),
+                }
             }
             // Another answer (or the timeout, or the app quitting) got there between
             // the look above and the removal.
@@ -1432,7 +1468,12 @@ impl Inner {
 
     /// Run `answer` (the caller's write of the deny for `ending`), then log the outcome:
     /// `ending`'s, or `deny_write_failed` if the write failed.
-    fn answer_and_log(&self, ident: &Ident, ending: Ending, answer: impl FnOnce() -> io::Result<()>) {
+    fn answer_and_log(
+        &self,
+        ident: &Ident,
+        ending: Ending,
+        answer: impl FnOnce() -> io::Result<()>,
+    ) {
         let ending = match answer() {
             Ok(()) => ending,
             Err(e) => {
@@ -1444,7 +1485,13 @@ impl Inner {
     }
 
     /// Write the `outcome` entry; returns its id.
-    fn log_outcome(&self, ident: &Ident, outcome: Outcome, ending: &Ending, latency_ms: u64) -> String {
+    fn log_outcome(
+        &self,
+        ident: &Ident,
+        outcome: Outcome,
+        ending: &Ending,
+        latency_ms: u64,
+    ) -> String {
         let event = Event::Outcome {
             outcome: outcome.as_str().into(),
             rule: ending.rule.clone(),
@@ -1601,7 +1648,12 @@ impl Inner {
     }
 
     /// The ending the guard imposes on `req`, or `None` if it lets the request through.
-    fn guard_block(&self, req: &PermissionRequest, ident: &Ident, cwd: Option<&Path>) -> Option<Ending> {
+    fn guard_block(
+        &self,
+        req: &PermissionRequest,
+        ident: &Ident,
+        cwd: Option<&Path>,
+    ) -> Option<Ending> {
         let payload = HookPayload {
             tool_name: req.tool_name.clone(),
             tool_input: req.input.clone(),
@@ -1631,7 +1683,10 @@ impl Inner {
     /// presenter was asked; a change since means one came or went in between.
     fn hold(&self, request_id: &str, wire: ApprovalRequestWire, input: Value, epoch_at_check: u64) {
         if wire_len(&wire) > MAX_FRAME_LEN - FRAME_MARGIN {
-            self.finish(request_id, Ending::deny(Outcome::TooLarge, TOO_LARGE_MESSAGE));
+            self.finish(
+                request_id,
+                Ending::deny(Outcome::TooLarge, TOO_LARGE_MESSAGE),
+            );
             return;
         }
         let tag = wire.tag.clone();
@@ -1655,7 +1710,10 @@ impl Inner {
         ));
         let count = st.held_count(&tag);
         drop(st);
-        self.broadcast(ServerMsg::ApprovalRequest { tag: tag.clone(), request: wire });
+        self.broadcast(ServerMsg::ApprovalRequest {
+            tag: tag.clone(),
+            request: wire,
+        });
         self.broadcast(ServerMsg::ApprovalPending { tag, count });
         if self.grace_epoch.load(Ordering::SeqCst) != epoch_at_check {
             // The presenter set changed while this request was being prepared:
@@ -1669,7 +1727,9 @@ impl Inner {
     /// request that nobody can be asked about is denied.
     fn arm_presenter_grace(&self) {
         let epoch = self.grace_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        let Some(runtime) = lock(&self.runtime).clone() else { return };
+        let Some(runtime) = lock(&self.runtime).clone() else {
+            return;
+        };
         let weak = self.weak.clone();
         runtime.spawn(async move {
             tokio::time::sleep(PRESENTER_GRACE).await;
@@ -1690,7 +1750,10 @@ impl Inner {
             .collect();
         for (id, tag) in held {
             if !self.parts.presenter.can_present(&tag) {
-                self.finish(&id, Ending::cannot_ask(true, self.parts.presenter.app_connected()));
+                self.finish(
+                    &id,
+                    Ending::cannot_ask(true, self.parts.presenter.app_connected()),
+                );
             }
         }
     }
@@ -1738,13 +1801,16 @@ fn approval_wire(
         tool_use_id: req.tool_use_id.clone(),
         agent: AgentWire {
             name: agent.to_owned(),
-            subagent: req
-                .agent_id
-                .as_ref()
-                .map(|id| SubagentWire { agent_id: id.clone(), agent_type: None }),
+            subagent: req.agent_id.as_ref().map(|id| SubagentWire {
+                agent_id: id.clone(),
+                agent_type: None,
+            }),
         },
         tool_name: req.tool_name.clone(),
-        display_name: req.display_name.clone().unwrap_or_else(|| req.tool_name.clone()),
+        display_name: req
+            .display_name
+            .clone()
+            .unwrap_or_else(|| req.tool_name.clone()),
         tool_kind: req.tool_kind,
         mcp: req.mcp.clone(),
         input: req.input.clone(),
@@ -1772,9 +1838,19 @@ fn guard_summary(req: &PermissionRequest) -> String {
         .then(|| req.input.get("command").and_then(Value::as_str))
         .flatten()
         .and_then(|c| c.split_whitespace().next())
-        .map(|w| w.chars().filter(|c| !is_invisible(*c)).take(64).collect::<String>())
+        .map(|w| {
+            w.chars()
+                .filter(|c| !is_invisible(*c))
+                .take(64)
+                .collect::<String>()
+        })
         .filter(|w| !w.is_empty());
-    let name: String = req.tool_name.chars().filter(|c| !is_invisible(*c)).take(64).collect();
+    let name: String = req
+        .tool_name
+        .chars()
+        .filter(|c| !is_invisible(*c))
+        .take(64)
+        .collect();
     match first_word {
         Some(w) => format!("{name} {w}"),
         None => name,

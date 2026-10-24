@@ -21,7 +21,6 @@ use tokio::sync::{broadcast, watch, Notify};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-
 /// A Repo docs root that does not exist: a hub with none of its own would read (and
 /// watch) the user's real code folder.
 fn no_docs_root() -> Option<PathBuf> {
@@ -34,7 +33,11 @@ fn no_docs_root() -> Option<PathBuf> {
 fn isolate_sent_ledger() {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("nostromo-{}-teri-{}", "hub-todos", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "nostromo-{}-teri-{}",
+            "hub-todos",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("temp teri dir");
         nostromo::data::work::sent::install_ledger(std::sync::Arc::new(
             nostromo::data::work::sent::SentLedger::new(dir.join("sent.json")),
@@ -66,7 +69,11 @@ fn todo(
 }
 
 fn fresh(items: Vec<TeriTodo>) -> TeriTodosSnapshot {
-    TeriTodosSnapshot { generated_at: Some(Utc::now()), items, ..Default::default() }
+    TeriTodosSnapshot {
+        generated_at: Some(Utc::now()),
+        items,
+        ..Default::default()
+    }
 }
 
 fn ids(items: &[WorkItem]) -> Vec<String> {
@@ -80,12 +87,18 @@ fn titles(items: &[WorkItem]) -> Vec<String> {
 /// Spawn a hub fed by a channel we control (no database involved).
 fn hub_with_channel(
     initial: Option<TeriTodosSnapshot>,
-) -> (std::sync::Arc<WorkHub>, watch::Sender<Option<TeriTodosSnapshot>>, broadcast::Receiver<ServerMsg>)
-{
+) -> (
+    std::sync::Arc<WorkHub>,
+    watch::Sender<Option<TeriTodosSnapshot>>,
+    broadcast::Receiver<ServerMsg>,
+) {
     let (btx, brx) = broadcast::channel(1024);
     let (ttx, trx) = watch::channel(initial);
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps { repo_docs_root: no_docs_root(), ..HubDeps::new(btx, trx) });
+    let hub = WorkHub::spawn(HubDeps {
+        repo_docs_root: no_docs_root(),
+        ..HubDeps::new(btx, trx)
+    });
     (hub, ttx, brx)
 }
 
@@ -112,7 +125,11 @@ async fn recv_until<T>(
 
 fn todos_snapshot(msg: &ServerMsg) -> Option<Vec<WorkItem>> {
     match msg {
-        ServerMsg::WorkSnapshot { source: WorkSource::Todos, items, .. } => Some(items.clone()),
+        ServerMsg::WorkSnapshot {
+            source: WorkSource::Todos,
+            items,
+            ..
+        } => Some(items.clone()),
         _ => None,
     }
 }
@@ -136,7 +153,10 @@ async fn wait_for_status(
         if pred(&s) {
             return s;
         }
-        assert!(Instant::now() < deadline, "status of {source:?} never matched; last: {s:?}");
+        assert!(
+            Instant::now() < deadline,
+            "status of {source:?} never matched; last: {s:?}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -145,7 +165,11 @@ async fn wait_for_status(
 
 #[test]
 fn a_user_without_a_teri_database_is_not_configured_with_a_plain_english_reason() {
-    let snap = TeriTodosSnapshot { not_configured: true, generated_at: Some(Utc::now()), ..Default::default() };
+    let snap = TeriTodosSnapshot {
+        not_configured: true,
+        generated_at: Some(Utc::now()),
+        ..Default::default()
+    };
     let (status, items) = adapt(&snap);
 
     assert_eq!(status.source, WorkSource::Todos);
@@ -153,7 +177,10 @@ fn a_user_without_a_teri_database_is_not_configured_with_a_plain_english_reason(
     assert!(items.is_empty());
     assert_eq!(status.count, 0);
     let reason = status.reason.expect("not_configured must say why");
-    assert!(reason.contains("teri.db"), "reason should name the missing store: {reason}");
+    assert!(
+        reason.contains("teri.db"),
+        "reason should name the missing store: {reason}"
+    );
 }
 
 // ── `complete`: true only when the list is known to be whole ──────────────────
@@ -178,8 +205,16 @@ fn a_stale_failed_or_missing_store_is_never_complete() {
         error: Some("database is locked".into()),
         ..Default::default()
     };
-    let failed = TeriTodosSnapshot { generated_at: Some(Utc::now()), error: Some("no such table: todos".into()), ..Default::default() };
-    let missing = TeriTodosSnapshot { not_configured: true, generated_at: Some(Utc::now()), ..Default::default() };
+    let failed = TeriTodosSnapshot {
+        generated_at: Some(Utc::now()),
+        error: Some("no such table: todos".into()),
+        ..Default::default()
+    };
+    let missing = TeriTodosSnapshot {
+        not_configured: true,
+        generated_at: Some(Utc::now()),
+        ..Default::default()
+    };
     for (label, snap, state) in [
         ("stale", stale, SourceState::Stale),
         ("error", failed, SourceState::Error),
@@ -192,13 +227,17 @@ fn a_stale_failed_or_missing_store_is_never_complete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_hub_reports_a_source_that_has_not_loaded_yet_as_not_complete_and_a_loaded_one_as_complete() {
+async fn the_hub_reports_a_source_that_has_not_loaded_yet_as_not_complete_and_a_loaded_one_as_complete(
+) {
     let (hub, ttx, _brx) = hub_with_channel(None);
     let loading = hub.status(WorkSource::Todos);
     assert_eq!(loading.state, SourceState::Loading);
     assert!(!loading.complete, "nothing is known yet: {loading:?}");
 
-    ttx.send(Some(fresh(vec![todo(1, "One", "open", 2, None, None, None)]))).unwrap();
+    ttx.send(Some(fresh(vec![todo(
+        1, "One", "open", 2, None, None, None,
+    )])))
+    .unwrap();
 
     let loaded = wait_for_status(&hub, WorkSource::Todos, |s| s.state == SourceState::Fresh).await;
     assert!(loaded.complete, "{loaded:?}");
@@ -206,18 +245,33 @@ async fn the_hub_reports_a_source_that_has_not_loaded_yet_as_not_complete_and_a_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_complete_flag_travels_in_the_broadcast_status_frame() {
-    let (_hub, ttx, mut brx) = hub_with_channel(Some(fresh(vec![todo(1, "One", "open", 2, None, None, None)])));
+    let (_hub, ttx, mut brx) = hub_with_channel(Some(fresh(vec![todo(
+        1, "One", "open", 2, None, None, None,
+    )])));
     let healthy = recv_until(&mut brx, |m| match m {
-        ServerMsg::WorkSourceStatus { status } if status.source == WorkSource::Todos && status.state == SourceState::Fresh => Some(status.clone()),
+        ServerMsg::WorkSourceStatus { status }
+            if status.source == WorkSource::Todos && status.state == SourceState::Fresh =>
+        {
+            Some(status.clone())
+        }
         _ => None,
     })
     .await;
     assert!(healthy.complete);
 
     // A failed read keeps the last good items as stale: same items, no longer known to be whole.
-    ttx.send(Some(TeriTodosSnapshot { generated_at: Some(Utc::now()), error: Some("database is locked".into()), ..Default::default() })).unwrap();
+    ttx.send(Some(TeriTodosSnapshot {
+        generated_at: Some(Utc::now()),
+        error: Some("database is locked".into()),
+        ..Default::default()
+    }))
+    .unwrap();
     let stale = recv_until(&mut brx, |m| match m {
-        ServerMsg::WorkSourceStatus { status } if status.source == WorkSource::Todos && status.state == SourceState::Stale => Some(status.clone()),
+        ServerMsg::WorkSourceStatus { status }
+            if status.source == WorkSource::Todos && status.state == SourceState::Stale =>
+        {
+            Some(status.clone())
+        }
         _ => None,
     })
     .await;
@@ -238,7 +292,10 @@ fn a_failed_read_that_kept_the_last_items_is_stale_and_still_shows_them() {
     assert_eq!(status.state, SourceState::Stale);
     assert_eq!(ids(&items), vec!["todo:1"]);
     assert_eq!(status.count, 1);
-    assert!(status.reason.as_deref().is_some_and(|r| !r.is_empty()), "stale needs a reason");
+    assert!(
+        status.reason.as_deref().is_some_and(|r| !r.is_empty()),
+        "stale needs a reason"
+    );
 }
 
 #[test]
@@ -253,7 +310,10 @@ fn a_failed_read_with_nothing_to_show_is_an_error_with_a_reason_never_empty() {
 
     assert_eq!(status.state, SourceState::Error);
     assert!(items.is_empty());
-    assert!(status.reason.as_deref().is_some_and(|r| !r.is_empty()), "error needs a reason");
+    assert!(
+        status.reason.as_deref().is_some_and(|r| !r.is_empty()),
+        "error needs a reason"
+    );
 }
 
 #[test]
@@ -275,7 +335,10 @@ fn a_healthy_read_with_todos_is_fresh_with_a_count_and_a_timestamp() {
     assert_eq!(status.state, SourceState::Fresh);
     assert_eq!(status.count, 2);
     assert_eq!(items.len(), 2);
-    assert_eq!(status.updated_at, snap.generated_at, "updated_at is the last successful fetch");
+    assert_eq!(
+        status.updated_at, snap.generated_at,
+        "updated_at is the last successful fetch"
+    );
 }
 
 #[test]
@@ -301,31 +364,83 @@ fn a_todo_becomes_a_work_item_with_priority_due_link_and_searchable_text() {
     assert_eq!((p.label.as_str(), p.rank), ("P2", 2));
     assert_eq!(item.due, NaiveDate::from_ymd_opt(2026, 10, 15));
     assert_eq!(item.linked, vec!["CORE-1"]);
-    assert!(item.search_text.contains("Fix payment webhook"), "title is searchable");
-    assert!(item.search_text.contains("retry backoff"), "body is searchable");
+    assert!(
+        item.search_text.contains("Fix payment webhook"),
+        "title is searchable"
+    );
+    assert!(
+        item.search_text.contains("retry backoff"),
+        "body is searchable"
+    );
 }
 
 #[test]
 fn a_todo_with_no_body_and_an_unparseable_due_date_still_becomes_an_item() {
-    let snap = fresh(vec![todo(3, "Odd one", "open", 5, Some("next tuesday"), None, None)]);
+    let snap = fresh(vec![todo(
+        3,
+        "Odd one",
+        "open",
+        5,
+        Some("next tuesday"),
+        None,
+        None,
+    )]);
     let (_, items) = adapt(&snap);
 
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].due, None, "a due date that is not a date is dropped, not fatal");
+    assert_eq!(
+        items[0].due, None,
+        "a due date that is not a date is dropped, not fatal"
+    );
     assert!(items[0].search_text.contains("Odd one"));
-    assert_eq!(items[0].priority.as_ref().map(|p| p.label.as_str()), Some("P5"));
+    assert_eq!(
+        items[0].priority.as_ref().map(|p| p.label.as_str()),
+        Some("P5")
+    );
 }
 
 // ── hub: ordering, statuses, broadcasts (channel-fed) ─────────────────────────
 
 fn mixed_todos() -> Vec<TeriTodo> {
     vec![
-        todo(1, "Write the quarterly report", "open", 3, Some("2026-10-12"), None, None),
+        todo(
+            1,
+            "Write the quarterly report",
+            "open",
+            3,
+            Some("2026-10-12"),
+            None,
+            None,
+        ),
         todo(2, "Book travel", "open", 1, None, None, None),
-        todo(3, "Fix payment webhook", "in_progress", 1, Some("2026-10-11"), Some("CORE-1"), Some("Check the retry backoff.")),
+        todo(
+            3,
+            "Fix payment webhook",
+            "in_progress",
+            1,
+            Some("2026-10-11"),
+            Some("CORE-1"),
+            Some("Check the retry backoff."),
+        ),
         todo(4, "Audit access list", "blocked", 1, None, None, None),
-        todo(5, "Order supplies", "open", 2, Some("2026-10-15"), None, None),
-        todo(6, "Call the plumber", "open", 3, Some("2026-10-09"), None, None),
+        todo(
+            5,
+            "Order supplies",
+            "open",
+            2,
+            Some("2026-10-15"),
+            None,
+            None,
+        ),
+        todo(
+            6,
+            "Call the plumber",
+            "open",
+            3,
+            Some("2026-10-09"),
+            None,
+            None,
+        ),
     ]
 }
 
@@ -336,7 +451,11 @@ async fn todos_are_ordered_by_priority_then_due_date_none_last_then_title() {
     let broadcast_items = next_todos_where(&mut brx, |i| i.len() == 6).await;
     let want = vec!["todo:3", "todo:4", "todo:2", "todo:5", "todo:6", "todo:1"];
     assert_eq!(ids(&broadcast_items), want, "broadcast order");
-    assert_eq!(ids(&hub.items(&WorkFilter::default())), want, "hub.items order");
+    assert_eq!(
+        ids(&hub.items(&WorkFilter::default())),
+        want,
+        "hub.items order"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -355,7 +474,10 @@ async fn hub_status_for_todos_is_loading_until_the_source_reports() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn jira_without_an_implementation_yet_says_coming_soon() {
     let (hub, _ttx, _brx) = hub_with_channel(Some(fresh(vec![])));
-    let s = wait_for_status(&hub, WorkSource::Jira, |s| s.state == SourceState::NotConfigured).await;
+    let s = wait_for_status(&hub, WorkSource::Jira, |s| {
+        s.state == SourceState::NotConfigured
+    })
+    .await;
     assert_eq!(s.reason.as_deref(), Some("Coming soon"));
 }
 
@@ -364,10 +486,21 @@ async fn jira_without_an_implementation_yet_says_coming_soon() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sentry_stays_dormant_unless_the_hub_is_given_a_configuration() {
     let (hub, _ttx, _brx) = hub_with_channel(Some(fresh(vec![])));
-    let s = wait_for_status(&hub, WorkSource::Sentry, |s| s.state == SourceState::NotConfigured).await;
+    let s = wait_for_status(&hub, WorkSource::Sentry, |s| {
+        s.state == SourceState::NotConfigured
+    })
+    .await;
     assert_eq!(s.reason.as_deref(), Some("Coming soon"));
-    assert!(hub.items(&WorkFilter { sources: vec![WorkSource::Sentry], ..Default::default() }).is_empty());
-    let err = hub.detail("sentry:1").await.expect_err("no Sentry configured");
+    assert!(hub
+        .items(&WorkFilter {
+            sources: vec![WorkSource::Sentry],
+            ..Default::default()
+        })
+        .is_empty());
+    let err = hub
+        .detail("sentry:1")
+        .await
+        .expect_err("no Sentry configured");
     assert_eq!(err.code, "not_available");
 }
 
@@ -381,7 +514,12 @@ async fn the_hub_reports_a_status_for_every_source() {
     sources.sort();
     assert_eq!(
         sources,
-        vec![WorkSource::Todos, WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry]
+        vec![
+            WorkSource::Todos,
+            WorkSource::RepoDocs,
+            WorkSource::Jira,
+            WorkSource::Sentry
+        ]
     );
 }
 
@@ -401,7 +539,11 @@ async fn the_hub_broadcasts_the_todos_status_and_snapshot() {
     assert_eq!(status.count, 6);
 
     let group = recv_until(&mut brx, |m| match m {
-        ServerMsg::WorkSnapshot { source: WorkSource::Todos, group, .. } => Some(group.clone()),
+        ServerMsg::WorkSnapshot {
+            source: WorkSource::Todos,
+            group,
+            ..
+        } => Some(group.clone()),
         _ => None,
     })
     .await;
@@ -410,12 +552,21 @@ async fn the_hub_broadcasts_the_todos_status_and_snapshot() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_teri_store_broadcasts_not_configured_and_never_an_item_list() {
-    let snap = TeriTodosSnapshot { not_configured: true, generated_at: Some(Utc::now()), ..Default::default() };
+    let snap = TeriTodosSnapshot {
+        not_configured: true,
+        generated_at: Some(Utc::now()),
+        ..Default::default()
+    };
     let (hub, _ttx, mut brx) = hub_with_channel(Some(snap));
 
-    wait_for_status(&hub, WorkSource::Todos, |s| s.state == SourceState::NotConfigured).await;
+    wait_for_status(&hub, WorkSource::Todos, |s| {
+        s.state == SourceState::NotConfigured
+    })
+    .await;
     let status = recv_until(&mut brx, |m| match m {
-        ServerMsg::WorkSourceStatus { status } if status.source == WorkSource::Todos => Some(status.clone()),
+        ServerMsg::WorkSourceStatus { status } if status.source == WorkSource::Todos => {
+            Some(status.clone())
+        }
         _ => None,
     })
     .await;
@@ -425,7 +576,10 @@ async fn a_missing_teri_store_broadcasts_not_configured_and_never_an_item_list()
     tokio::time::sleep(Duration::from_millis(400)).await;
     while let Ok(msg) = brx.try_recv() {
         if let Some(items) = todos_snapshot(&msg) {
-            assert!(items.is_empty(), "no todos may be published for an unconfigured store");
+            assert!(
+                items.is_empty(),
+                "no todos may be published for an unconfigured store"
+            );
         }
     }
     assert!(hub.items(&WorkFilter::default()).is_empty());
@@ -440,7 +594,11 @@ async fn an_unchanged_snapshot_is_not_broadcast_again() {
     // The very same snapshot again, and again with only a newer timestamp
     // (what every poll of an unchanged database looks like)...
     ttx.send(Some(first.clone())).unwrap();
-    ttx.send(Some(TeriTodosSnapshot { generated_at: Some(Utc::now()), ..first.clone() })).unwrap();
+    ttx.send(Some(TeriTodosSnapshot {
+        generated_at: Some(Utc::now()),
+        ..first.clone()
+    }))
+    .unwrap();
     // ...then a real change.
     let mut changed = mixed_todos();
     changed.push(todo(9, "Brand new todo", "open", 4, None, None, None));
@@ -457,13 +615,18 @@ async fn an_unchanged_snapshot_is_not_broadcast_again() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_burst_of_changes_is_coalesced_into_a_few_snapshots_ending_on_the_latest_state() {
-    let (_hub, ttx, mut brx) = hub_with_channel(Some(fresh(vec![todo(1, "Seed", "open", 3, None, None, None)])));
+    let (_hub, ttx, mut brx) = hub_with_channel(Some(fresh(vec![todo(
+        1, "Seed", "open", 3, None, None, None,
+    )])));
     next_todos_where(&mut brx, |i| i.len() == 1).await;
 
     let started = Instant::now();
     let changes = 8;
     for n in 0..changes {
-        let items = vec![todo(1, "Seed", "open", 3, None, None, None), todo(100 + n, &format!("Burst {n}"), "open", 4, None, None, None)];
+        let items = vec![
+            todo(1, "Seed", "open", 3, None, None, None),
+            todo(100 + n, &format!("Burst {n}"), "open", 4, None, None, None),
+        ];
         ttx.send(Some(fresh(items))).unwrap();
         tokio::task::yield_now().await;
     }
@@ -482,7 +645,10 @@ async fn a_burst_of_changes_is_coalesced_into_a_few_snapshots_ending_on_the_late
         eprintln!("burst took {burst_took:?}; machine too loaded to assert on coalescing");
         return;
     }
-    assert!(received <= 4, "{changes} rapid changes produced {received} snapshots; they should be coalesced");
+    assert!(
+        received <= 4,
+        "{changes} rapid changes produced {received} snapshots; they should be coalesced"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -490,13 +656,22 @@ async fn hub_items_apply_a_filter_to_todos() {
     let (hub, _ttx, mut brx) = hub_with_channel(Some(fresh(mixed_todos())));
     next_todos_where(&mut brx, |i| i.len() == 6).await;
 
-    let by_body = hub.items(&WorkFilter { query: "backoff".into(), ..Default::default() });
+    let by_body = hub.items(&WorkFilter {
+        query: "backoff".into(),
+        ..Default::default()
+    });
     assert_eq!(ids(&by_body), vec!["todo:3"]);
 
-    let blocked = hub.items(&WorkFilter { statuses: vec!["blocked".into()], ..Default::default() });
+    let blocked = hub.items(&WorkFilter {
+        statuses: vec!["blocked".into()],
+        ..Default::default()
+    });
     assert_eq!(ids(&blocked), vec!["todo:4"]);
 
-    let jira_only = hub.items(&WorkFilter { sources: vec![WorkSource::Jira], ..Default::default() });
+    let jira_only = hub.items(&WorkFilter {
+        sources: vec![WorkSource::Jira],
+        ..Default::default()
+    });
     assert!(jira_only.is_empty(), "no Jira items exist yet");
 }
 
@@ -511,15 +686,34 @@ async fn a_todos_detail_has_its_body_priority_due_status_and_jira_link() {
 
     assert_eq!(d.item_id, "todo:3");
     assert_eq!(d.title, "Fix payment webhook");
-    assert!(d.markdown.contains("Check the retry backoff."), "body is the markdown: {:?}", d.markdown);
+    assert!(
+        d.markdown.contains("Check the retry backoff."),
+        "body is the markdown: {:?}",
+        d.markdown
+    );
     let values: Vec<&str> = d.fields.iter().map(|(_, v)| v.as_str()).collect();
     assert!(values.contains(&"P1"), "priority field: {:?}", d.fields);
-    assert!(values.iter().any(|v| v.contains("2026-10-11")), "due field: {:?}", d.fields);
-    assert!(values.iter().any(|v| v.contains("in_progress") || v.contains("In progress") || v.contains("in progress")), "status field: {:?}", d.fields);
+    assert!(
+        values.iter().any(|v| v.contains("2026-10-11")),
+        "due field: {:?}",
+        d.fields
+    );
+    assert!(
+        values.iter().any(|v| v.contains("in_progress")
+            || v.contains("In progress")
+            || v.contains("in progress")),
+        "status field: {:?}",
+        d.fields
+    );
     let mentions_jira = values.iter().any(|v| v.contains("CORE-1"))
-        || d.links.iter().any(|l| l.url.contains("CORE-1") || l.label.contains("CORE-1"))
+        || d.links
+            .iter()
+            .any(|l| l.url.contains("CORE-1") || l.label.contains("CORE-1"))
         || d.markdown.contains("CORE-1");
-    assert!(mentions_jira, "the linked Jira key must be in the detail: {d:?}");
+    assert!(
+        mentions_jira,
+        "the linked Jira key must be in the detail: {d:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -528,7 +722,10 @@ async fn a_detail_request_for_an_unknown_item_is_an_error() {
     next_todos_where(&mut brx, |i| i.len() == 6).await;
 
     assert!(hub.detail("bogus:1").await.is_err(), "unknown prefix");
-    assert!(hub.detail("todo:9999").await.is_err(), "a todo that does not exist");
+    assert!(
+        hub.detail("todo:9999").await.is_err(),
+        "a todo that does not exist"
+    );
 }
 
 // ── hub: the stale banner keeps the last healthy timestamp ───────────────────
@@ -563,7 +760,11 @@ async fn a_failed_read_after_a_healthy_one_keeps_the_last_healthy_timestamp_on_t
 
     let s = wait_for_status(&hub, WorkSource::Todos, |s| s.state == SourceState::Stale).await;
     assert_eq!(s.count, 3, "the last good list stays visible");
-    assert_eq!(s.updated_at, Some(t0), "updated_at is when the list was last read OK, not when the failure happened");
+    assert_eq!(
+        s.updated_at,
+        Some(t0),
+        "updated_at is when the list was last read OK, not when the failure happened"
+    );
     let frame = recv_until(&mut brx, |m| match m {
         ServerMsg::WorkSourceStatus { status }
             if status.source == WorkSource::Todos && status.state == SourceState::Stale =>
@@ -573,13 +774,21 @@ async fn a_failed_read_after_a_healthy_one_keeps_the_last_healthy_timestamp_on_t
         _ => None,
     })
     .await;
-    assert_eq!(frame.updated_at, Some(t0), "the broadcast frame carries the last healthy timestamp too");
+    assert_eq!(
+        frame.updated_at,
+        Some(t0),
+        "the broadcast frame carries the last healthy timestamp too"
+    );
 
     // Still failing later: still the same healthy timestamp.
-    ttx.send(Some(failed_read(t1 + chrono::Duration::hours(1)))).unwrap();
+    ttx.send(Some(failed_read(t1 + chrono::Duration::hours(1))))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     let s = hub.status(WorkSource::Todos);
-    assert_eq!((s.state, s.count, s.updated_at), (SourceState::Stale, 3, Some(t0)));
+    assert_eq!(
+        (s.state, s.count, s.updated_at),
+        (SourceState::Stale, 3, Some(t0))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -604,7 +813,11 @@ fn hub_with_jira_site(site: JiraSite) -> (std::sync::Arc<WorkHub>, broadcast::Re
     let (_ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
     std::mem::forget(_ttx); // keep the source alive for the test's duration
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps { jira_site: site, repo_docs_root: no_docs_root(), ..HubDeps::new(btx, trx) });
+    let hub = WorkHub::spawn(HubDeps {
+        jira_site: site,
+        repo_docs_root: no_docs_root(),
+        ..HubDeps::new(btx, trx)
+    });
     (hub, brx)
 }
 
@@ -629,18 +842,27 @@ async fn a_todos_jira_key_links_to_the_site_from_the_credentials_file() {
 
     let d = hub.detail("todo:3").await.expect("detail");
 
-    assert_eq!(jira_urls(&d), vec!["https://example.atlassian.net/browse/CORE-1"], "{d:?}");
+    assert_eq!(
+        jira_urls(&d),
+        vec!["https://example.atlassian.net/browse/CORE-1"],
+        "{d:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_configured_jira_site_wins_over_the_credentials_file_in_the_detail_link() {
     let (_dir, path) = env_file(Some("ATLASSIAN_SITE_NAME=example.atlassian.net\n"));
-    let (hub, mut brx) = hub_with_jira_site(JiraSite::new(Some("override.atlassian.net".into()), path));
+    let (hub, mut brx) =
+        hub_with_jira_site(JiraSite::new(Some("override.atlassian.net".into()), path));
     next_todos_where(&mut brx, |i| i.len() == 6).await;
 
     let d = hub.detail("todo:3").await.expect("detail");
 
-    assert_eq!(jira_urls(&d), vec!["https://override.atlassian.net/browse/CORE-1"], "{d:?}");
+    assert_eq!(
+        jira_urls(&d),
+        vec!["https://override.atlassian.net/browse/CORE-1"],
+        "{d:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -652,7 +874,11 @@ async fn without_a_jira_site_the_detail_has_no_link_but_still_lists_the_key() {
 
         let d = hub.detail("todo:3").await.expect("detail");
 
-        assert!(d.links.is_empty(), "file {contents:?}: no site, no link: {:?}", d.links);
+        assert!(
+            d.links.is_empty(),
+            "file {contents:?}: no site, no link: {:?}",
+            d.links
+        );
         assert!(
             d.fields.iter().any(|(k, v)| k == "Jira" && v == "CORE-1"),
             "file {contents:?}: the Jira field still lists the key: {:?}",
@@ -669,20 +895,30 @@ fn hub_with_todos_refresh() -> (std::sync::Arc<WorkHub>, std::sync::Arc<Notify>)
     let (ttx, trx) = watch::channel(Some(fresh(mixed_todos())));
     std::mem::forget(ttx);
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps { todos_refresh: Some(notify.clone()), repo_docs_root: no_docs_root(), ..HubDeps::new(btx, trx) });
+    let hub = WorkHub::spawn(HubDeps {
+        todos_refresh: Some(notify.clone()),
+        repo_docs_root: no_docs_root(),
+        ..HubDeps::new(btx, trx)
+    });
     (hub, notify)
 }
 
 async fn poked(notify: &Notify, within: Duration) -> bool {
-    tokio::time::timeout(within, notify.notified()).await.is_ok()
+    tokio::time::timeout(within, notify.notified())
+        .await
+        .is_ok()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refreshing_the_todos_source_pokes_the_source_once_and_a_second_refresh_within_the_debounce_does_not() {
+async fn refreshing_the_todos_source_pokes_the_source_once_and_a_second_refresh_within_the_debounce_does_not(
+) {
     let (hub, notify) = hub_with_todos_refresh();
 
     hub.refresh(Some(WorkSource::Todos), false).await.unwrap();
-    assert!(poked(&notify, WAIT).await, "the todos source was never poked by a manual refresh");
+    assert!(
+        poked(&notify, WAIT).await,
+        "the todos source was never poked by a manual refresh"
+    );
 
     hub.refresh(Some(WorkSource::Todos), false).await.unwrap();
     assert!(
@@ -697,7 +933,10 @@ async fn refreshing_every_source_also_pokes_the_todos_source() {
 
     hub.refresh(None, false).await.unwrap();
 
-    assert!(poked(&notify, WAIT).await, "refresh of all sources never poked the todos source");
+    assert!(
+        poked(&notify, WAIT).await,
+        "refresh of all sources never poked the todos source"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -706,14 +945,19 @@ async fn refreshing_another_source_does_not_poke_the_todos_source() {
 
     hub.refresh(Some(WorkSource::Jira), false).await.unwrap();
 
-    assert!(!poked(&notify, Duration::from_millis(300)).await, "a Jira refresh must leave the todos source alone");
+    assert!(
+        !poked(&notify, Duration::from_millis(300)).await,
+        "a Jira refresh must leave the todos source alone"
+    );
 }
 
 // ── the real source: SQLite file → broadcast ─────────────────────────────────
 
 fn open_wal(path: &Path) -> Connection {
     let conn = Connection::open(path).unwrap();
-    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(mode.to_lowercase(), "wal");
     conn
 }
@@ -772,19 +1016,52 @@ fn seeded_db() -> Db {
     let path = dir.path().join("teri.db");
     let writer = open_wal(&path);
     writer.execute_batch(TODOS_DDL).unwrap();
-    insert(&writer, "Prepare demo", "open", 2, Some("2026-10-20"), None, None);
-    insert(&writer, "Fix flaky test", "blocked", 1, None, Some("ABC-1"), None);
+    insert(
+        &writer,
+        "Prepare demo",
+        "open",
+        2,
+        Some("2026-10-20"),
+        None,
+        None,
+    );
+    insert(
+        &writer,
+        "Fix flaky test",
+        "blocked",
+        1,
+        None,
+        Some("ABC-1"),
+        None,
+    );
     insert(&writer, "Already finished", "done", 1, None, None, None);
-    let tomorrow = (Utc::now() + chrono::Duration::days(1)).format("%Y-%m-%d %H:%M:%S").to_string();
-    insert(&writer, "Snoozed until tomorrow", "open", 1, None, None, Some(&tomorrow));
-    Db { _dir: dir, path, writer }
+    let tomorrow = (Utc::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    insert(
+        &writer,
+        "Snoozed until tomorrow",
+        "open",
+        1,
+        None,
+        None,
+        Some(&tomorrow),
+    );
+    Db {
+        _dir: dir,
+        path,
+        writer,
+    }
 }
 
 fn hub_on_db(path: PathBuf) -> (std::sync::Arc<WorkHub>, broadcast::Receiver<ServerMsg>) {
     let (btx, brx) = broadcast::channel(1024); // subscribed before anything can send
     let todos_rx = TeriTodosNativeSource::spawn_at(path);
     isolate_sent_ledger();
-    let hub = WorkHub::spawn(HubDeps { repo_docs_root: no_docs_root(), ..HubDeps::new(btx, todos_rx) });
+    let hub = WorkHub::spawn(HubDeps {
+        repo_docs_root: no_docs_root(),
+        ..HubDeps::new(btx, todos_rx)
+    });
     (hub, brx)
 }
 
@@ -796,10 +1073,16 @@ async fn only_active_unsnoozed_todos_are_broadcast_with_p1_first() {
     let items = next_todos_where(&mut brx, |i| !i.is_empty()).await;
 
     assert_eq!(titles(&items), vec!["Fix flaky test", "Prepare demo"]);
-    assert_eq!(items[0].priority.as_ref().map(|p| p.label.as_str()), Some("P1"));
+    assert_eq!(
+        items[0].priority.as_ref().map(|p| p.label.as_str()),
+        Some("P1")
+    );
     assert_eq!(items[0].linked, vec!["ABC-1"]);
     assert_eq!(items[1].due, NaiveDate::from_ymd_opt(2026, 10, 20));
-    assert!(items[1].search_text.contains("Body of Prepare demo"), "body reaches search_text");
+    assert!(
+        items[1].search_text.contains("Body of Prepare demo"),
+        "body reaches search_text"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -810,18 +1093,29 @@ async fn adding_completing_and_reprioritising_a_todo_reach_the_hub_within_five_s
 
     // Add (another connection, as Teri's own tooling would).
     let new_id = insert(&db.writer, "Email vendor", "open", 3, None, None, None);
-    let after_add = next_todos_where(&mut brx, |i| titles(i).contains(&"Email vendor".to_string())).await;
-    assert_eq!(titles(&after_add), vec!["Fix flaky test", "Prepare demo", "Email vendor"]);
+    let after_add = next_todos_where(&mut brx, |i| {
+        titles(i).contains(&"Email vendor".to_string())
+    })
+    .await;
+    assert_eq!(
+        titles(&after_add),
+        vec!["Fix flaky test", "Prepare demo", "Email vendor"]
+    );
 
     // Complete.
     db.writer
         .execute("UPDATE todos SET status = 'done', completed_at = datetime('now') WHERE title = 'Fix flaky test'", [])
         .unwrap();
-    let after_done = next_todos_where(&mut brx, |i| !titles(i).contains(&"Fix flaky test".to_string())).await;
+    let after_done = next_todos_where(&mut brx, |i| {
+        !titles(i).contains(&"Fix flaky test".to_string())
+    })
+    .await;
     assert_eq!(titles(&after_done), vec!["Prepare demo", "Email vendor"]);
 
     // Reprioritise.
-    db.writer.execute("UPDATE todos SET priority = 1 WHERE id = ?1", [new_id]).unwrap();
+    db.writer
+        .execute("UPDATE todos SET priority = 1 WHERE id = ?1", [new_id])
+        .unwrap();
     let after_prio = next_todos_where(&mut brx, |i| {
         i.first().is_some_and(|f| f.title == "Email vendor")
     })
@@ -830,7 +1124,10 @@ async fn adding_completing_and_reprioritising_a_todo_reach_the_hub_within_five_s
     assert_eq!(after_prio[0].priority.as_ref().map(|p| p.rank), Some(1));
 
     // The hub's own view agrees with what it broadcast.
-    assert_eq!(titles(&hub.items(&WorkFilter::default())), vec!["Email vendor", "Prepare demo"]);
+    assert_eq!(
+        titles(&hub.items(&WorkFilter::default())),
+        vec!["Email vendor", "Prepare demo"]
+    );
     assert_eq!(hub.status(WorkSource::Todos).state, SourceState::Fresh);
 }
 
@@ -840,7 +1137,10 @@ async fn a_missing_database_is_not_configured_and_never_published_as_an_empty_li
     let missing = dir.path().join(".teri").join("teri.db");
     let (hub, mut brx) = hub_on_db(missing);
 
-    let status = wait_for_status(&hub, WorkSource::Todos, |s| s.state == SourceState::NotConfigured).await;
+    let status = wait_for_status(&hub, WorkSource::Todos, |s| {
+        s.state == SourceState::NotConfigured
+    })
+    .await;
     let reason = status.reason.expect("a reason");
     assert!(reason.contains("teri.db"), "{reason}");
     assert!(
@@ -855,7 +1155,11 @@ async fn a_missing_database_is_not_configured_and_never_published_as_an_empty_li
         }
         if let ServerMsg::WorkSourceStatus { status } = &msg {
             if status.source == WorkSource::Todos {
-                assert_eq!(status.state, SourceState::NotConfigured, "never fresh/empty: {status:?}");
+                assert_eq!(
+                    status.state,
+                    SourceState::NotConfigured,
+                    "never fresh/empty: {status:?}"
+                );
             }
         }
     }

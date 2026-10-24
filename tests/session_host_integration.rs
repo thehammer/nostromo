@@ -53,7 +53,17 @@ async fn session_round_trip_drives_real_claude() {
 
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(store_path)));
     let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
-    let _server = Server::bind(&socket_path, session_mgr, tmp.join("perri-state"), decisions, Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.join("operator-app.pin"))), false).unwrap();
+    let _server = Server::bind(
+        &socket_path,
+        session_mgr,
+        tmp.join("perri-state"),
+        decisions,
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.join("operator-app.pin"),
+        )),
+        false,
+    )
+    .unwrap();
 
     // Give the listener a moment to bind.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -71,7 +81,15 @@ async fn session_round_trip_drives_real_claude() {
     )
     .await;
     assert!(matches!(recv(&mut stream).await, ServerMsg::Welcome { .. }));
-    send(&mut stream, &ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false }).await;
+    send(
+        &mut stream,
+        &ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: false,
+            renders_approvals: false,
+        },
+    )
+    .await;
 
     // Spawn a fresh session (no remote control, fresh session id).
     send(

@@ -301,7 +301,11 @@ pub fn resolve_code_root(
     let chosen = env
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| configured.filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf));
+        .or_else(|| {
+            configured
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+        });
     match chosen {
         Some(p) => match p.strip_prefix("~") {
             Ok(rest) => home.join(rest),
@@ -340,13 +344,19 @@ mod code_root_tests {
 
     #[test]
     fn env_overrides_config() {
-        assert_eq!(resolve(Some("/env"), Some("/work/src")), PathBuf::from("/env"));
+        assert_eq!(
+            resolve(Some("/env"), Some("/work/src")),
+            PathBuf::from("/env")
+        );
     }
 
     #[test]
     fn empty_values_fall_through() {
         assert_eq!(resolve(Some(""), Some("")), PathBuf::from("/Users/me/Code"));
-        assert_eq!(resolve(Some(""), Some("/work/src")), PathBuf::from("/work/src"));
+        assert_eq!(
+            resolve(Some(""), Some("/work/src")),
+            PathBuf::from("/work/src")
+        );
     }
 
     #[test]
@@ -394,7 +404,8 @@ mod agents_tests {
 
     #[test]
     fn extra_keys_are_ignored() {
-        let (e, w) = parse("[agents.fred]\nenabled = false\nmail_provider = \"gmail\"\n").resolve_agents();
+        let (e, w) =
+            parse("[agents.fred]\nenabled = false\nmail_provider = \"gmail\"\n").resolve_agents();
         assert!(!e.fred);
         assert!(w.is_empty());
     }

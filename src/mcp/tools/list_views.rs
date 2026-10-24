@@ -106,7 +106,11 @@ fn builtin_entries(state: &McpSharedState) -> Vec<Value> {
         Some(s) => (s.items.len(), "fresh"),
     };
     let jobs = state.mother_jobs_rx.borrow();
-    let count = |states: &[&str]| jobs.iter().filter(|j| states.contains(&j.state.as_str())).count();
+    let count = |states: &[&str]| {
+        jobs.iter()
+            .filter(|j| states.contains(&j.state.as_str()))
+            .count()
+    };
     let mut mother = json!({
         "name": "mother",
         "counts": {
@@ -134,7 +138,8 @@ fn builtin_entries(state: &McpSharedState) -> Vec<Value> {
         }));
     }
     if on.perri {
-        entries.push(json!({ "name": "perri", "counts": { "queue": queue }, "state": perri_state }));
+        entries
+            .push(json!({ "name": "perri", "counts": { "queue": queue }, "state": perri_state }));
     }
     entries.push(mother);
     entries
@@ -156,9 +161,17 @@ mod agent_switch_tests {
     fn a_disabled_agent_has_no_entry_but_mother_always_does() {
         let mut state = McpSharedState::for_test();
         assert_eq!(names(&state), ["teri", "fred", "perri", "mother"]);
-        state.enabled_agents = EnabledAgents { fred: true, perri: false, teri: true };
+        state.enabled_agents = EnabledAgents {
+            fred: true,
+            perri: false,
+            teri: true,
+        };
         assert_eq!(names(&state), ["teri", "fred", "mother"]);
-        state.enabled_agents = EnabledAgents { fred: false, perri: false, teri: false };
+        state.enabled_agents = EnabledAgents {
+            fred: false,
+            perri: false,
+            teri: false,
+        };
         assert_eq!(names(&state), ["mother"]);
     }
 }

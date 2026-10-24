@@ -283,11 +283,16 @@ pub fn resolve_revision(
 pub fn validate_remote_path(path: &str) -> Result<(), FileSourceError> {
     if path.is_empty()
         || path.starts_with('/')
-        || path.chars().any(|c| c.is_control() || matches!(c, '?' | '#' | '%' | '\\'))
+        || path
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '?' | '#' | '%' | '\\'))
     {
         return Err(FileSourceError::PathEscapesRoot);
     }
-    if path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+    if path
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
         return Err(FileSourceError::PathEscapesRoot);
     }
     Ok(())
@@ -336,7 +341,11 @@ fn remote_key(repo: &str, revision: &str, path: &str) -> String {
 
 /// A previously read `repo`/`revision`/`path`, if any.
 pub fn remote_cache_get(repo: &str, revision: &str, path: &str) -> Option<String> {
-    remote_cache().lock().ok()?.get(&remote_key(repo, revision, path)).cloned()
+    remote_cache()
+        .lock()
+        .ok()?
+        .get(&remote_key(repo, revision, path))
+        .cloned()
 }
 
 /// Remember a successful GitHub read for [`remote_cache_get`].
@@ -515,7 +524,15 @@ pub fn read_git_revision(
 
 /// Whether the local clone can resolve `rev` to a commit.
 fn revision_exists(root: &Path, rev: &str) -> Result<bool, FileSourceError> {
-    let output = git(root, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])?;
+    let output = git(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )?;
     Ok(output.status.success())
 }
 
@@ -537,7 +554,11 @@ fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, FileSourceErr
 /// object", which is the caller's signal to try [`read_from_github`] — not a
 /// terminal answer. Kept next to [`read_working_tree`]/[`read_git_revision`]
 /// since it is just their dispatch, with no daemon state involved.
-pub fn read_at_revision(root: &Path, revision: &str, path: &str) -> Result<String, FileSourceError> {
+pub fn read_at_revision(
+    root: &Path,
+    revision: &str,
+    path: &str,
+) -> Result<String, FileSourceError> {
     if revision == WORKING_TREE {
         return read_working_tree(root, path);
     }
@@ -600,7 +621,10 @@ mod tests {
             FileSourceError::RevisionRepoMismatch.code(),
             "revision_repo_mismatch"
         );
-        assert_eq!(FileSourceError::RevisionRequired.code(), "revision_required");
+        assert_eq!(
+            FileSourceError::RevisionRequired.code(),
+            "revision_required"
+        );
     }
 
     // ── FileRequest::from_params — malformed shapes are refused ──────────────
@@ -626,7 +650,13 @@ mod tests {
 
     #[test]
     fn from_params_rejects_a_malformed_or_non_string_repo() {
-        for bad in [json!("noslash"), json!("a/b/c"), json!("org/repo;rm -rf /"), json!(42), json!(["a/b"])] {
+        for bad in [
+            json!("noslash"),
+            json!("a/b/c"),
+            json!("org/repo;rm -rf /"),
+            json!(42),
+            json!(["a/b"]),
+        ] {
             assert_eq!(
                 FileRequest::from_params(&json!({ "path": "a.rs", "repo": bad.clone() })),
                 Err(FileSourceError::InvalidParams),
@@ -641,8 +671,20 @@ mod tests {
     #[test]
     fn a_repo_qualified_request_rejects_a_path_that_could_retarget_the_github_url() {
         for bad in [
-            "../../../user", "a/../b", "./a", "a/./b", "/etc/passwd", "a//b", "a\\b",
-            "a?ref=main", "a#frag", "a%2e%2e/b", "a\nb", "..", ".", "a/..",
+            "../../../user",
+            "a/../b",
+            "./a",
+            "a/./b",
+            "/etc/passwd",
+            "a//b",
+            "a\\b",
+            "a?ref=main",
+            "a#frag",
+            "a%2e%2e/b",
+            "a\nb",
+            "..",
+            ".",
+            "a/..",
         ] {
             assert_eq!(
                 FileRequest::from_params(&json!({ "path": bad, "repo": "o/r" })),
@@ -654,7 +696,14 @@ mod tests {
 
     #[test]
     fn a_repo_qualified_request_still_accepts_ordinary_nested_paths() {
-        for ok in ["README.md", "docs/a b.md", "src/mcp/tools/apply_layout.rs", ".github/workflows/ci.yml", "a/.hidden/b", "weird..name.rs"] {
+        for ok in [
+            "README.md",
+            "docs/a b.md",
+            "src/mcp/tools/apply_layout.rs",
+            ".github/workflows/ci.yml",
+            "a/.hidden/b",
+            "weird..name.rs",
+        ] {
             assert!(
                 FileRequest::from_params(&json!({ "path": ok, "repo": "o/r" })).is_ok(),
                 "path {ok:?} must be accepted"
@@ -679,25 +728,47 @@ mod tests {
 
     #[test]
     fn a_repo_qualified_request_reads_at_the_explicit_revision_first() {
-        let req = FileRequest { path: "a.rs".into(), repo: Some("o/r".into()), revision: Some("deadbeef".into()), ..Default::default() };
-        assert_eq!(resolve_remote_revision(&req, Some(("o/r", "headsha"))).unwrap(), "deadbeef");
+        let req = FileRequest {
+            path: "a.rs".into(),
+            repo: Some("o/r".into()),
+            revision: Some("deadbeef".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_remote_revision(&req, Some(("o/r", "headsha"))).unwrap(),
+            "deadbeef"
+        );
     }
 
     #[test]
     fn a_repo_qualified_request_defaults_to_the_pinned_prs_head_in_the_same_repo() {
-        let req = FileRequest { path: "a.rs".into(), repo: Some("o/r".into()), ..Default::default() };
-        assert_eq!(resolve_remote_revision(&req, Some(("o/r", "headsha"))).unwrap(), "headsha");
+        let req = FileRequest {
+            path: "a.rs".into(),
+            repo: Some("o/r".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_remote_revision(&req, Some(("o/r", "headsha"))).unwrap(),
+            "headsha"
+        );
     }
 
     #[test]
     fn a_repo_qualified_request_never_borrows_a_revision_from_a_pr_in_another_repo() {
-        let req = FileRequest { path: "a.rs".into(), repo: Some("o/r".into()), ..Default::default() };
+        let req = FileRequest {
+            path: "a.rs".into(),
+            repo: Some("o/r".into()),
+            ..Default::default()
+        };
         assert_eq!(
             resolve_remote_revision(&req, Some(("someone/else", "headsha"))),
             Err(FileSourceError::RevisionRequired),
             "serving another repo's head SHA against this repo is the wrong-content bug W5 closed"
         );
-        assert_eq!(resolve_remote_revision(&req, None), Err(FileSourceError::RevisionRequired));
+        assert_eq!(
+            resolve_remote_revision(&req, None),
+            Err(FileSourceError::RevisionRequired)
+        );
         assert_eq!(
             resolve_remote_revision(&req, Some(("o/r", ""))),
             Err(FileSourceError::RevisionRequired),
@@ -708,9 +779,20 @@ mod tests {
     #[test]
     fn the_remote_cache_round_trips_and_keys_on_repo_revision_and_path() {
         remote_cache_put("o/r", "rev1", "a.rs", "fn a() {}");
-        assert_eq!(remote_cache_get("o/r", "rev1", "a.rs").as_deref(), Some("fn a() {}"));
-        assert_eq!(remote_cache_get("o/r", "rev2", "a.rs"), None, "a different revision is a different file");
-        assert_eq!(remote_cache_get("o/other", "rev1", "a.rs"), None, "a different repo is a different file");
+        assert_eq!(
+            remote_cache_get("o/r", "rev1", "a.rs").as_deref(),
+            Some("fn a() {}")
+        );
+        assert_eq!(
+            remote_cache_get("o/r", "rev2", "a.rs"),
+            None,
+            "a different revision is a different file"
+        );
+        assert_eq!(
+            remote_cache_get("o/other", "rev1", "a.rs"),
+            None,
+            "a different repo is a different file"
+        );
         assert_eq!(remote_cache_get("o/r", "rev1", "b.rs"), None);
     }
 
@@ -931,8 +1013,14 @@ mod tests {
     #[test]
     fn local_repo_slug_parses_an_ssh_style_origin_url() {
         let repo = init_repo();
-        git_ok(repo.path(), &["remote", "add", "origin", "git@github.com:acme/widget.git"]);
-        assert_eq!(local_repo_slug(repo.path()), Some("acme/widget".to_string()));
+        git_ok(
+            repo.path(),
+            &["remote", "add", "origin", "git@github.com:acme/widget.git"],
+        );
+        assert_eq!(
+            local_repo_slug(repo.path()),
+            Some("acme/widget".to_string())
+        );
     }
 
     #[test]
@@ -940,9 +1028,17 @@ mod tests {
         let repo = init_repo();
         git_ok(
             repo.path(),
-            &["remote", "add", "origin", "https://github.com/acme/widget.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/widget.git",
+            ],
         );
-        assert_eq!(local_repo_slug(repo.path()), Some("acme/widget".to_string()));
+        assert_eq!(
+            local_repo_slug(repo.path()),
+            Some("acme/widget".to_string())
+        );
     }
 
     #[test]
@@ -952,7 +1048,10 @@ mod tests {
             repo.path(),
             &["remote", "add", "origin", "https://github.com/acme/widget"],
         );
-        assert_eq!(local_repo_slug(repo.path()), Some("acme/widget".to_string()));
+        assert_eq!(
+            local_repo_slug(repo.path()),
+            Some("acme/widget".to_string())
+        );
     }
 
     #[test]

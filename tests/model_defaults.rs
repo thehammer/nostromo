@@ -90,11 +90,15 @@ fn fake_claude_script() -> PathBuf {
     FAKE_DIR_ROOT
         .get_or_init(|| {
             use std::os::unix::fs::PermissionsExt;
-            let dir = std::env::temp_dir().join(format!("nostromo-fake-claude-modeldefaults-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "nostromo-fake-claude-modeldefaults-{}",
+                std::process::id()
+            ));
             std::fs::create_dir_all(&dir).expect("fake claude dir");
             let script = dir.join("claude");
             std::fs::write(&script, FAKE_CLAUDE).expect("write fake claude");
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
             dir
         })
         .join("claude")
@@ -192,7 +196,10 @@ impl Rig {
         store::set_default(
             &self.paths.defaults,
             agent,
-            Some(AgentDefault { model: model.into(), effort: effort.map(str::to_owned) }),
+            Some(AgentDefault {
+                model: model.into(),
+                effort: effort.map(str::to_owned),
+            }),
         )
         .unwrap();
     }
@@ -207,7 +214,14 @@ impl Rig {
 
     fn spawn(&mut self, tag: &str, agent: &str) {
         self.mgr
-            .spawn_session(tag.into(), agent.into(), format!("view-{tag}"), Some(self.cwd.clone()), None, false)
+            .spawn_session(
+                tag.into(),
+                agent.into(),
+                format!("view-{tag}"),
+                Some(self.cwd.clone()),
+                None,
+                false,
+            )
             .expect("the session starts")
             .expect("a session id");
     }
@@ -229,7 +243,10 @@ impl Rig {
             if s.len() >= n {
                 return s;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for {n} session start(s)");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {n} session start(s)"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -243,7 +260,10 @@ impl Rig {
     }
 
     fn lines_of_kind(&self, kind: &str) -> Vec<Value> {
-        self.activity_lines().into_iter().filter(|l| l["kind"] == kind).collect()
+        self.activity_lines()
+            .into_iter()
+            .filter(|l| l["kind"] == kind)
+            .collect()
     }
 }
 
@@ -270,7 +290,10 @@ fn meta(tag: &str, agent: &str, model: Option<&str>, effort: Option<&str>) -> Fo
 }
 
 fn target(model: &str, effort: Option<&str>) -> ModelTarget {
-    ModelTarget { model: model.into(), effort: effort.map(str::to_owned) }
+    ModelTarget {
+        model: model.into(),
+        effort: effort.map(str::to_owned),
+    }
 }
 
 // ── precedence at spawn ───────────────────────────────────────────────────────
@@ -286,7 +309,10 @@ async fn a_per_agent_default_beats_the_agents_declared_model() {
     let runs = rig.wait_for_starts(1).await;
     assert_eq!(arg_of(&runs[0], "--model"), Some("haiku"), "{:?}", runs[0]);
     let record = rig.record(TAG).expect("the new focus has a record");
-    assert_eq!((record.model.as_str(), record.source), ("haiku", ModelSource::AgentDefault));
+    assert_eq!(
+        (record.model.as_str(), record.source),
+        ("haiku", ModelSource::AgentDefault)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -335,7 +361,10 @@ async fn with_no_default_and_no_declared_model_the_cli_default_applies_and_nothi
     let runs = rig.wait_for_starts(1).await;
     assert!(!runs[0].iter().any(|a| a == "--model"), "{:?}", runs[0]);
     assert!(!runs[0].iter().any(|a| a == "--effort"), "{:?}", runs[0]);
-    assert!(rig.record(TAG).is_none(), "nothing is recorded until the CLI reports what ran");
+    assert!(
+        rig.record(TAG).is_none(),
+        "nothing is recorded until the CLI reports what ran"
+    );
     assert!(!rig.paths.focus_models.exists(), "no store file at all");
     assert!(!rig.paths.defaults.exists(), "no defaults file either");
 }
@@ -348,22 +377,28 @@ async fn an_initial_choice_on_the_focus_beats_the_default_and_the_declared_model
     rig.declare_agent("claudia", "sonnet");
     rig.set_default("claudia", "haiku", None);
 
-    rig.mgr.apply_initial_models(&[meta(TAG, "claudia", Some("opus"), Some("high"))]);
+    rig.mgr
+        .apply_initial_models(&[meta(TAG, "claudia", Some("opus"), Some("high"))]);
     rig.spawn(TAG, "claudia");
 
     let runs = rig.wait_for_starts(1).await;
     assert_eq!(arg_of(&runs[0], "--model"), Some("opus"), "{:?}", runs[0]);
     assert_eq!(arg_of(&runs[0], "--effort"), Some("high"), "{:?}", runs[0]);
     let record = rig.record(TAG).unwrap();
-    assert_eq!((record.model.as_str(), record.source), ("opus", ModelSource::Focus));
+    assert_eq!(
+        (record.model.as_str(), record.source),
+        ("opus", ModelSource::Focus)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeating_the_initial_choice_in_later_pushes_never_overwrites_the_record() {
     let rig = Rig::new().await;
-    rig.mgr.apply_initial_models(&[meta(TAG, "claudia", Some("opus"), None)]);
+    rig.mgr
+        .apply_initial_models(&[meta(TAG, "claudia", Some("opus"), None)]);
 
-    rig.mgr.apply_initial_models(&[meta(TAG, "claudia", Some("haiku"), Some("low"))]);
+    rig.mgr
+        .apply_initial_models(&[meta(TAG, "claudia", Some("haiku"), Some("low"))]);
 
     let record = rig.record(TAG).unwrap();
     assert_eq!((record.model.as_str(), record.effort), ("opus", None));
@@ -394,7 +429,8 @@ async fn an_explicit_choice_recorded_by_the_manager_beats_the_default() {
     rig.declare_agent("claudia", "sonnet");
     rig.set_default("claudia", "haiku", None);
 
-    rig.mgr.record_new_focus_model(TAG, "claudia", Some(&target("opus", Some("high"))));
+    rig.mgr
+        .record_new_focus_model(TAG, "claudia", Some(&target("opus", Some("high"))));
     rig.spawn(TAG, "claudia");
 
     let runs = rig.wait_for_starts(1).await;
@@ -407,7 +443,14 @@ async fn an_explicit_effort_alone_rides_on_the_default_model() {
     let mut rig = Rig::new().await;
     rig.set_default("claudia", "haiku", None);
 
-    rig.mgr.record_new_focus_model(TAG, "claudia", Some(&ModelTarget { model: String::new(), effort: Some("low".into()) }));
+    rig.mgr.record_new_focus_model(
+        TAG,
+        "claudia",
+        Some(&ModelTarget {
+            model: String::new(),
+            effort: Some("low".into()),
+        }),
+    );
     rig.spawn(TAG, "claudia");
 
     let runs = rig.wait_for_starts(1).await;
@@ -429,7 +472,13 @@ async fn changing_or_clearing_a_default_never_changes_an_existing_focus_on_resta
     rig.set_default("claudia", "opus", Some("high"));
     rig.mgr.restart(TAG).unwrap();
     let runs = rig.wait_for_starts(2).await;
-    assert_eq!(arg_of(&runs[1], "--model"), arg_of(&first, "--model"), "{:?} vs {:?}", runs[1], first);
+    assert_eq!(
+        arg_of(&runs[1], "--model"),
+        arg_of(&first, "--model"),
+        "{:?} vs {:?}",
+        runs[1],
+        first
+    );
     assert_eq!(arg_of(&runs[1], "--effort"), arg_of(&first, "--effort"));
     assert_eq!(arg_of(&runs[1], "--model"), Some("haiku"));
 
@@ -460,7 +509,11 @@ async fn a_default_set_after_a_focus_started_on_its_declared_model_does_not_move
 async fn a_focus_with_a_record_keeps_it_when_respawned_even_if_a_default_exists() {
     let mut rig = Rig::new().await;
     store::update_focus_record(&rig.paths.focus_models, TAG, |_| {
-        Some(FocusModelRecord { model: "fable".into(), source: ModelSource::Focus, ..FocusModelRecord::default() })
+        Some(FocusModelRecord {
+            model: "fable".into(),
+            source: ModelSource::Focus,
+            ..FocusModelRecord::default()
+        })
     })
     .unwrap();
     rig.set_default("claudia", "haiku", None);
@@ -475,7 +528,8 @@ async fn a_focus_with_a_record_keeps_it_when_respawned_even_if_a_default_exists(
 // ── "use for new focuses" ─────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn switching_with_use_for_new_focuses_writes_the_focus_record_and_the_agent_default_with_one_activity_line() {
+async fn switching_with_use_for_new_focuses_writes_the_focus_record_and_the_agent_default_with_one_activity_line(
+) {
     let mut rig = Rig::new().await;
     rig.declare_agent("claudia", "sonnet");
     rig.spawn(TAG, "claudia");
@@ -491,16 +545,36 @@ async fn switching_with_use_for_new_focuses_writes_the_focus_record_and_the_agen
             request_id: None,
         },
     );
-    let outcome = tokio::time::timeout(WAIT, ticket.outcome()).await.expect("the switch finished");
+    let outcome = tokio::time::timeout(WAIT, ticket.outcome())
+        .await
+        .expect("the switch finished");
 
     assert_eq!(outcome.status, ModelRequestStatus::Applied);
     let record = rig.record(TAG).unwrap();
-    assert_eq!((record.model.as_str(), record.effort.as_deref()), ("opus", Some("high")));
+    assert_eq!(
+        (record.model.as_str(), record.effort.as_deref()),
+        ("opus", Some("high"))
+    );
     let defaults = store::load_defaults(&rig.paths.defaults);
-    let default = defaults.get("claudia").expect("the agent default was written");
-    assert_eq!((default.model.as_str(), default.effort.as_deref()), ("opus", Some("high")));
-    assert_eq!(rig.lines_of_kind("model_default").len(), 1, "{:#?}", rig.activity_lines());
-    assert_eq!(rig.lines_of_kind("model_switch").len(), 1, "{:#?}", rig.activity_lines());
+    let default = defaults
+        .get("claudia")
+        .expect("the agent default was written");
+    assert_eq!(
+        (default.model.as_str(), default.effort.as_deref()),
+        ("opus", Some("high"))
+    );
+    assert_eq!(
+        rig.lines_of_kind("model_default").len(),
+        1,
+        "{:#?}",
+        rig.activity_lines()
+    );
+    assert_eq!(
+        rig.lines_of_kind("model_switch").len(),
+        1,
+        "{:#?}",
+        rig.activity_lines()
+    );
 
     // And the next focus of that agent starts there.
     rig.spawn("focus-b", "claudia");
@@ -518,11 +592,24 @@ async fn switching_without_use_for_new_focuses_leaves_the_agent_default_alone() 
 
     let ticket = rig.mgr.request_switch(
         TAG,
-        SwitchRequest { model: Some("opus".into()), effort: None, actor: Actor::User, set_as_agent_default: false, request_id: None },
+        SwitchRequest {
+            model: Some("opus".into()),
+            effort: None,
+            actor: Actor::User,
+            set_as_agent_default: false,
+            request_id: None,
+        },
     );
-    tokio::time::timeout(WAIT, ticket.outcome()).await.expect("the switch finished");
+    tokio::time::timeout(WAIT, ticket.outcome())
+        .await
+        .expect("the switch finished");
 
-    assert_eq!(store::load_defaults(&rig.paths.defaults).get("claudia").map(|d| d.model.as_str()), Some("haiku"));
+    assert_eq!(
+        store::load_defaults(&rig.paths.defaults)
+            .get("claudia")
+            .map(|d| d.model.as_str()),
+        Some("haiku")
+    );
     assert!(rig.lines_of_kind("model_default").is_empty());
 }
 
@@ -539,10 +626,20 @@ async fn resolving_walks_explicit_then_default_then_declared_then_cli() {
 
     rig.set_default("claudia", "haiku", Some("low"));
     let r = store::resolve_for_new_focus(defaults, "claudia", None);
-    assert_eq!(r, (Some("haiku".into()), Some("low".into()), ModelSource::AgentDefault));
+    assert_eq!(
+        r,
+        (
+            Some("haiku".into()),
+            Some("low".into()),
+            ModelSource::AgentDefault
+        )
+    );
 
     let r = store::resolve_for_new_focus(defaults, "claudia", Some(&target("opus", Some("max"))));
-    assert_eq!(r, (Some("opus".into()), Some("max".into()), ModelSource::Focus));
+    assert_eq!(
+        r,
+        (Some("opus".into()), Some("max".into()), ModelSource::Focus)
+    );
 
     // An explicit model with no effort does not inherit the default's effort.
     let r = store::resolve_for_new_focus(defaults, "claudia", Some(&target("opus", None)));
@@ -557,18 +654,33 @@ async fn resolving_walks_explicit_then_default_then_declared_then_cli() {
 async fn an_explicit_effort_alone_rides_on_whatever_model_resolves_and_is_dropped_when_none_does() {
     let rig = Rig::new().await;
     let defaults = &rig.paths.defaults;
-    let effort_only = ModelTarget { model: String::new(), effort: Some("high".into()) };
+    let effort_only = ModelTarget {
+        model: String::new(),
+        effort: Some("high".into()),
+    };
     rig.declare_agent("claudia", "sonnet");
 
     let r = store::resolve_for_new_focus(defaults, "claudia", Some(&effort_only));
-    assert_eq!((r.0.as_deref(), r.1.as_deref()), (Some("sonnet"), Some("high")), "declared model + explicit effort");
+    assert_eq!(
+        (r.0.as_deref(), r.1.as_deref()),
+        (Some("sonnet"), Some("high")),
+        "declared model + explicit effort"
+    );
 
     rig.set_default("claudia", "haiku", Some("low"));
     let r = store::resolve_for_new_focus(defaults, "claudia", Some(&effort_only));
-    assert_eq!((r.0.as_deref(), r.1.as_deref()), (Some("haiku"), Some("high")), "explicit effort beats the default's");
+    assert_eq!(
+        (r.0.as_deref(), r.1.as_deref()),
+        (Some("haiku"), Some("high")),
+        "explicit effort beats the default's"
+    );
 
     let r = store::resolve_for_new_focus(defaults, "nobody", Some(&effort_only));
-    assert_eq!(r, (None, None, ModelSource::CliDefault), "no model to attach the effort to");
+    assert_eq!(
+        r,
+        (None, None, ModelSource::CliDefault),
+        "no model to attach the effort to"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -584,10 +696,20 @@ async fn resolving_writes_nothing() {
 
 #[test]
 fn only_plain_model_names_and_known_efforts_are_plausible_choices() {
-    for ok in [target("opus", None), target("claude-opus-4-6", Some("high")), target("sonnet[1m]", None)] {
+    for ok in [
+        target("opus", None),
+        target("claude-opus-4-6", Some("high")),
+        target("sonnet[1m]", None),
+    ] {
         assert!(store::is_plausible_choice(&ok), "{ok:?}");
     }
-    for bad in [target("--evil", None), target("", None), target("a b", None), target("opus", Some("ludicrous")), target(&"x".repeat(65), None)] {
+    for bad in [
+        target("--evil", None),
+        target("", None),
+        target("a b", None),
+        target("opus", Some("ludicrous")),
+        target(&"x".repeat(65), None),
+    ] {
         assert!(!store::is_plausible_choice(&bad), "{bad:?}");
     }
 }

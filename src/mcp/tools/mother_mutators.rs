@@ -49,7 +49,11 @@ fn parse_add_request(args: &Value) -> Result<AddJobRequest, String> {
     let depends_on = args
         .get("depends_on")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let req = AddJobRequest {
         plan_file: PathBuf::from(plan_file),
@@ -97,7 +101,9 @@ async fn daemon_mutation(
 }
 
 async fn rebroadcast_jobs(state: &McpSharedState) {
-    let Some(daemon) = state.daemon.as_ref() else { return };
+    let Some(daemon) = state.daemon.as_ref() else {
+        return;
+    };
     let listed = match state.mother_feed.as_ref() {
         Some(feed) => feed.refresh().await,
         None => mother::list_jobs().await,
@@ -154,9 +160,12 @@ pub async fn retry_job(state: &McpSharedState, args: &Value) -> Value {
 
 /// Whether the daemon's latest job list has this job held with an open decision.
 fn has_open_decision(state: &McpSharedState, job_id: &str) -> bool {
-    let Some(feed) = state.mother_feed.as_ref() else { return false };
+    let Some(feed) = state.mother_feed.as_ref() else {
+        return false;
+    };
     let jobs = feed.jobs_rx().borrow().clone();
-    jobs.iter().any(|j| j.id == job_id && j.open_decision().is_some())
+    jobs.iter()
+        .any(|j| j.id == job_id && j.open_decision().is_some())
 }
 
 /// Handle `mother.resume_job({ id, answer })`.

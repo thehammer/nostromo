@@ -219,10 +219,18 @@ pub struct MotherJob {
     // content-free warning and never costs the job. Skipped when empty on the
     // way out, so a job without crew data serializes exactly as before.
     /// What the job is doing now (`gating`, `review_wave`, `gate_hold`, ...).
-    #[serde(default, deserialize_with = "crew::lenient::activity", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::activity",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub activity: Option<String>,
     /// The job's pull request.
-    #[serde(default, deserialize_with = "crew::lenient::pr_url", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::pr_url",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pr_url: Option<String>,
     /// The repo opted in to the crew: Mother's `crew` key is present and non-null.
     /// The blob itself (repo gate commands and hints) is deliberately not kept
@@ -235,25 +243,57 @@ pub struct MotherJob {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub crew_opt_in: bool,
-    #[serde(default, deserialize_with = "crew::lenient::gates", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::gates",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub gates: Option<CrewGates>,
-    #[serde(default, deserialize_with = "crew::lenient::review_wave", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::review_wave",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub review_wave: Option<ReviewWave>,
-    #[serde(default, deserialize_with = "crew::lenient::decision", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::decision",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub decision: Option<CrewDecision>,
     /// Mother's `attention` (`[{reason, since}]`).
-    #[serde(default, deserialize_with = "crew::lenient::attention", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::attention",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub attention: Vec<AttentionEntry>,
     /// Mother's derived `attention_reasons` (`[{reason, since, acked}]`); preferred over `attention`.
-    #[serde(default, deserialize_with = "crew::lenient::attention_reasons", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::attention_reasons",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub attention_reasons: Vec<AttentionEntry>,
-    #[serde(default, deserialize_with = "crew::lenient::last_answer", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::last_answer",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub last_answer: Option<LastAnswer>,
     /// Mother's `.progress` overlay.
-    #[serde(default, deserialize_with = "crew::lenient::progress", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::progress",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub progress: Option<CrewProgress>,
     /// `checklist` or `ledger`.
-    #[serde(default, deserialize_with = "crew::lenient::criteria_source", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crew::lenient::criteria_source",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub criteria_source: Option<String>,
 }
 
@@ -299,15 +339,19 @@ impl MotherJob {
     /// Attention reasons that have not been acknowledged. `attention_reasons`
     /// (which carries `acked`) wins over `attention` when it has entries.
     pub fn unacked_attention(&self) -> impl Iterator<Item = &AttentionEntry> {
-        let entries = if self.attention_reasons.is_empty() { &self.attention } else { &self.attention_reasons };
+        let entries = if self.attention_reasons.is_empty() {
+            &self.attention
+        } else {
+            &self.attention_reasons
+        };
         entries.iter().filter(|a| a.acked != Some(true))
     }
 
     /// True when the job is stopped for the operator's choice: a gate or review
     /// hold, or an open decision.
     pub fn is_held_for_operator(&self) -> bool {
-        let held_activity =
-            self.is_awaiting() && matches!(self.activity.as_deref(), Some("gate_hold" | "review_hold"));
+        let held_activity = self.is_awaiting()
+            && matches!(self.activity.as_deref(), Some("gate_hold" | "review_hold"));
         held_activity || self.open_decision().is_some()
     }
 }
@@ -333,7 +377,10 @@ pub async fn list_jobs_counted() -> Result<(Vec<MotherJob>, usize)> {
     }
     // The serde message can embed a payload value; report only the class.
     decode::parse_jobs(&out.stdout).map_err(|e| {
-        anyhow::anyhow!("mother list output is not a readable JSON job array ({:?})", e.classify())
+        anyhow::anyhow!(
+            "mother list output is not a readable JSON job array ({:?})",
+            e.classify()
+        )
     })
 }
 
@@ -406,7 +453,9 @@ pub async fn resume(id: &str, answer: &str) -> Result<()> {
 fn validate_job_id(id: &str) -> Result<()> {
     if id.is_empty()
         || id.starts_with('-')
-        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         anyhow::bail!("invalid job id: {id:?}");
     }
@@ -534,7 +583,11 @@ impl Drop for AnswerFile {
 
 /// Stderr as text, trimmed and capped at 500 chars.
 fn trimmed_stderr(stderr: &[u8]) -> String {
-    String::from_utf8_lossy(stderr).trim().chars().take(500).collect()
+    String::from_utf8_lossy(stderr)
+        .trim()
+        .chars()
+        .take(500)
+        .collect()
 }
 
 /// Archive every terminal-state job, regardless of age
@@ -569,7 +622,10 @@ impl AddJobRequest {
     /// `-` could be parsed as another option.
     pub fn validate(&self) -> Result<()> {
         if !self.plan_file.is_absolute() {
-            anyhow::bail!("plan_path must be an absolute path: {}", self.plan_file.display());
+            anyhow::bail!(
+                "plan_path must be an absolute path: {}",
+                self.plan_file.display()
+            );
         }
         let singles = [
             ("repo", Some(self.repo.as_str())),

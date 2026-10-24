@@ -55,14 +55,23 @@ fn literal_text(raw: &str, parsed: &ShellParse) -> bool {
     // `${…}`, `$(( ))` and `$[ ]` run commands the tokenizer skips, and a bare
     // `$` can start `$'…'`, `$"…"` or `$\<newline>(`: no `$` at all. `/dev/tcp`
     // and friends are a redirect to something that is not a file.
-    const NOT_LITERAL: &[&str] = &["$", "`", "<(", ">(", "/dev/tcp", "/dev/udp", "/dev/fd", "/proc/"];
+    const NOT_LITERAL: &[&str] = &[
+        "$", "`", "<(", ">(", "/dev/tcp", "/dev/udp", "/dev/fd", "/proc/",
+    ];
     let mut rest = raw;
     let mut offset = 0;
-    let mut bodies: Vec<_> = parsed.heredocs.iter().filter(|h| h.quoted).map(|h| h.body_span.clone()).collect();
+    let mut bodies: Vec<_> = parsed
+        .heredocs
+        .iter()
+        .filter(|h| h.quoted)
+        .map(|h| h.body_span.clone())
+        .collect();
     bodies.sort_by_key(|r| r.start);
     let mut checked = String::new();
     for body in bodies {
-        let (Some(before), Some(after)) = (raw.get(offset..body.start), raw.get(body.end..)) else { return false };
+        let (Some(before), Some(after)) = (raw.get(offset..body.start), raw.get(body.end..)) else {
+            return false;
+        };
         checked.push_str(before);
         checked.push('\n');
         offset = body.end;
@@ -96,14 +105,66 @@ const GIT_HISTORY: Flags = Flags {
     short: "pswbiau",
     short_value: "nSGU",
     long: &[
-        "stat", "shortstat", "numstat", "name-only", "name-status", "oneline", "no-color", "color", "cached", "staged",
-        "patch", "no-patch", "graph", "decorate", "abbrev-commit", "no-merges", "merges", "all", "first-parent",
-        "reverse", "follow", "summary", "raw", "no-ext-diff", "no-textconv", "ignore-all-space",
-        "ignore-space-change", "word-diff", "check", "full-index", "binary", "topo-order", "date-order", "pretty",
-        "format", "date", "abbrev", "diff-filter", "regexp-ignore-case", "fixed-strings", "extended-regexp",
-        "all-match", "invert-grep", "left-right", "boundary", "source", "no-abbrev-commit", "stat-width",
+        "stat",
+        "shortstat",
+        "numstat",
+        "name-only",
+        "name-status",
+        "oneline",
+        "no-color",
+        "color",
+        "cached",
+        "staged",
+        "patch",
+        "no-patch",
+        "graph",
+        "decorate",
+        "abbrev-commit",
+        "no-merges",
+        "merges",
+        "all",
+        "first-parent",
+        "reverse",
+        "follow",
+        "summary",
+        "raw",
+        "no-ext-diff",
+        "no-textconv",
+        "ignore-all-space",
+        "ignore-space-change",
+        "word-diff",
+        "check",
+        "full-index",
+        "binary",
+        "topo-order",
+        "date-order",
+        "pretty",
+        "format",
+        "date",
+        "abbrev",
+        "diff-filter",
+        "regexp-ignore-case",
+        "fixed-strings",
+        "extended-regexp",
+        "all-match",
+        "invert-grep",
+        "left-right",
+        "boundary",
+        "source",
+        "no-abbrev-commit",
+        "stat-width",
     ],
-    long_value: &["grep", "author", "committer", "since", "until", "after", "before", "max-count", "skip"],
+    long_value: &[
+        "grep",
+        "author",
+        "committer",
+        "since",
+        "until",
+        "after",
+        "before",
+        "max-count",
+        "skip",
+    ],
     digits: true,
 };
 
@@ -111,10 +172,36 @@ const GIT_GREP: Flags = Flags {
     short: "nivwlLchHIaEFPqoWpr",
     short_value: "eABC",
     long: &[
-        "cached", "untracked", "no-index", "full-name", "heading", "break", "count", "line-number", "ignore-case",
-        "word-regexp", "invert-match", "files-with-matches", "files-without-match", "name-only", "text",
-        "fixed-strings", "extended-regexp", "perl-regexp", "basic-regexp", "and", "or", "not", "show-function",
-        "function-context", "no-color", "color", "only-matching", "quiet", "recursive", "no-recurse-submodules",
+        "cached",
+        "untracked",
+        "no-index",
+        "full-name",
+        "heading",
+        "break",
+        "count",
+        "line-number",
+        "ignore-case",
+        "word-regexp",
+        "invert-match",
+        "files-with-matches",
+        "files-without-match",
+        "name-only",
+        "text",
+        "fixed-strings",
+        "extended-regexp",
+        "perl-regexp",
+        "basic-regexp",
+        "and",
+        "or",
+        "not",
+        "show-function",
+        "function-context",
+        "no-color",
+        "color",
+        "only-matching",
+        "quiet",
+        "recursive",
+        "no-recurse-submodules",
         "recurse-submodules",
     ],
     long_value: &[],
@@ -124,7 +211,18 @@ const GIT_GREP: Flags = Flags {
 const GIT_COMMIT: Flags = Flags {
     short: "asqnv",
     short_value: "mF",
-    long: &["all", "amend", "no-edit", "allow-empty", "allow-empty-message", "no-verify", "signoff", "quiet", "verbose", "dry-run"],
+    long: &[
+        "all",
+        "amend",
+        "no-edit",
+        "allow-empty",
+        "allow-empty-message",
+        "no-verify",
+        "signoff",
+        "quiet",
+        "verbose",
+        "dry-run",
+    ],
     long_value: &["message", "author", "date", "file"],
     digits: false,
 };
@@ -132,7 +230,15 @@ const GIT_COMMIT: Flags = Flags {
 const GIT_ADD: Flags = Flags {
     short: "AunvfN",
     short_value: "",
-    long: &["all", "update", "dry-run", "verbose", "force", "intent-to-add", "ignore-errors"],
+    long: &[
+        "all",
+        "update",
+        "dry-run",
+        "verbose",
+        "force",
+        "intent-to-add",
+        "ignore-errors",
+    ],
     long_value: &[],
     digits: false,
 };
@@ -140,7 +246,15 @@ const GIT_ADD: Flags = Flags {
 const GIT_STATUS: Flags = Flags {
     short: "sbv",
     short_value: "",
-    long: &["short", "branch", "porcelain", "long", "verbose", "untracked-files", "ignored"],
+    long: &[
+        "short",
+        "branch",
+        "porcelain",
+        "long",
+        "verbose",
+        "untracked-files",
+        "ignored",
+    ],
     long_value: &[],
     digits: false,
 };
@@ -153,19 +267,55 @@ const GIT_TAG: Flags = Flags {
     digits: false,
 };
 
-const GIT_NOTES: Flags = Flags { short: "f", short_value: "mF", long: &["force"], long_value: &["message", "file"], digits: false };
+const GIT_NOTES: Flags = Flags {
+    short: "f",
+    short_value: "mF",
+    long: &["force"],
+    long_value: &["message", "file"],
+    digits: false,
+};
 
 const GREP: Flags = Flags {
     short: "nivwxlLcrRhHoqsEFPGaIUTbV",
     short_value: "eABCmdD",
     long: &[
-        "recursive", "dereference-recursive", "ignore-case", "no-ignore-case", "invert-match", "word-regexp",
-        "line-regexp", "count", "files-with-matches", "files-without-match", "line-number", "no-filename",
-        "with-filename", "only-matching", "quiet", "silent", "no-messages", "extended-regexp", "fixed-strings",
-        "perl-regexp", "basic-regexp", "text", "color", "colour", "null", "initial-tab", "byte-offset",
+        "recursive",
+        "dereference-recursive",
+        "ignore-case",
+        "no-ignore-case",
+        "invert-match",
+        "word-regexp",
+        "line-regexp",
+        "count",
+        "files-with-matches",
+        "files-without-match",
+        "line-number",
+        "no-filename",
+        "with-filename",
+        "only-matching",
+        "quiet",
+        "silent",
+        "no-messages",
+        "extended-regexp",
+        "fixed-strings",
+        "perl-regexp",
+        "basic-regexp",
+        "text",
+        "color",
+        "colour",
+        "null",
+        "initial-tab",
+        "byte-offset",
     ],
     long_value: &[
-        "include", "exclude", "exclude-dir", "binary-files", "max-count", "context", "after-context", "before-context",
+        "include",
+        "exclude",
+        "exclude-dir",
+        "binary-files",
+        "max-count",
+        "context",
+        "after-context",
+        "before-context",
         "regexp",
     ],
     digits: true,
@@ -177,27 +327,80 @@ const RG: Flags = Flags {
     short: "nNilLwFSscvHIuUoqaPx",
     short_value: "egtTABCmrd",
     long: &[
-        "files", "no-heading", "heading", "hidden", "no-ignore", "ignore-case", "smart-case", "case-sensitive",
-        "line-number", "no-line-number", "word-regexp", "fixed-strings", "count", "count-matches",
-        "files-with-matches", "files-without-match", "invert-match", "only-matching", "multiline", "pcre2", "text",
-        "follow", "stats", "no-messages", "color", "line-regexp", "with-filename", "no-filename", "quiet",
-        "unrestricted", "column", "vimgrep", "json", "trim", "no-config",
+        "files",
+        "no-heading",
+        "heading",
+        "hidden",
+        "no-ignore",
+        "ignore-case",
+        "smart-case",
+        "case-sensitive",
+        "line-number",
+        "no-line-number",
+        "word-regexp",
+        "fixed-strings",
+        "count",
+        "count-matches",
+        "files-with-matches",
+        "files-without-match",
+        "invert-match",
+        "only-matching",
+        "multiline",
+        "pcre2",
+        "text",
+        "follow",
+        "stats",
+        "no-messages",
+        "color",
+        "line-regexp",
+        "with-filename",
+        "no-filename",
+        "quiet",
+        "unrestricted",
+        "column",
+        "vimgrep",
+        "json",
+        "trim",
+        "no-config",
     ],
     long_value: &[
-        "engine", "glob", "type", "type-not", "max-count", "max-depth", "context", "after-context", "before-context",
-        "regexp", "replace",
+        "engine",
+        "glob",
+        "type",
+        "type-not",
+        "max-count",
+        "max-depth",
+        "context",
+        "after-context",
+        "before-context",
+        "regexp",
+        "replace",
     ],
     digits: false,
 };
 
 /// `ag` is only exempt as `ag -n/-i/-l/-w/-Q <literal> <paths>`: no long flags
 /// (`--pager` runs a command, and abbreviations of it work).
-const AG: Flags = Flags { short: "nilwQ", short_value: "", long: &[], long_value: &[], digits: false };
+const AG: Flags = Flags {
+    short: "nilwQ",
+    short_value: "",
+    long: &[],
+    long_value: &[],
+    digits: false,
+};
 
 const SORT: Flags = Flags {
     short: "nrufbhVdiMcCsz",
     short_value: "kt",
-    long: &["numeric-sort", "reverse", "unique", "ignore-case", "version-sort", "human-numeric-sort", "stable"],
+    long: &[
+        "numeric-sort",
+        "reverse",
+        "unique",
+        "ignore-case",
+        "version-sort",
+        "human-numeric-sort",
+        "stable",
+    ],
     long_value: &[],
     digits: false,
 };
@@ -212,7 +415,13 @@ const UNIQ: Flags = Flags {
 
 /// `ls` takes short flags and no flag runs anything, but it is held to the
 /// same rule as the others: short letters only.
-const LS: Flags = Flags { short: "1aAbBcCdFgGhHiIklLmnNopqQrRsStuUvxXZ", short_value: "", long: &[], long_value: &[], digits: false };
+const LS: Flags = Flags {
+    short: "1aAbBcCdFgGhHiIklLmnNopqQrRsStuUvxXZ",
+    short_value: "",
+    long: &[],
+    long_value: &[],
+    digits: false,
+};
 
 /// Is every flag in `args` on the list? Flag-like words end at a bare `--`.
 fn flags_allowed(args: &[&str], spec: &Flags) -> bool {
@@ -286,7 +495,9 @@ fn not_plain(raw: &str, word: &Word, takes_flags: bool, group_word: bool) -> boo
     if group_word {
         return false;
     }
-    let Some(written) = raw.get(word.span.clone()) else { return true };
+    let Some(written) = raw.get(word.span.clone()) else {
+        return true;
+    };
     let outside = unquoted(written);
     outside.contains(['{', '}', '#']) || (takes_flags && outside.contains(['*', '?', '[']))
 }
@@ -303,7 +514,9 @@ fn inert_command(raw: &str, cmd: &SimpleCommand) -> bool {
     if opens_group {
         words = &words[1..];
     }
-    let Some(first) = words.first() else { return false };
+    let Some(first) = words.first() else {
+        return false;
+    };
     if first.text == "}" && words.len() == 1 {
         return true;
     }
@@ -314,14 +527,24 @@ fn inert_command(raw: &str, cmd: &SimpleCommand) -> bool {
     let args = &words[1..];
     let texts: Vec<&str> = args.iter().map(|w| w.text.as_str()).collect();
     let name = first.text.as_str();
-    let takes_flags = matches!(name, "git" | "grep" | "egrep" | "fgrep" | "rg" | "ag" | "sort" | "uniq");
-    if not_plain(raw, first, false, false) || args.iter().any(|w| not_plain(raw, w, takes_flags, w.text == "}")) {
+    let takes_flags = matches!(
+        name,
+        "git" | "grep" | "egrep" | "fgrep" | "rg" | "ag" | "sort" | "uniq"
+    );
+    if not_plain(raw, first, false, false)
+        || args
+            .iter()
+            .any(|w| not_plain(raw, w, takes_flags, w.text == "}"))
+    {
         return false;
     }
     match name {
-        "echo" | "cat" | "tee" | "wc" | "head" | "tail" | "cd" | "pwd" | "true" | "false" | "test" | "[" => true,
+        "echo" | "cat" | "tee" | "wc" | "head" | "tail" | "cd" | "pwd" | "true" | "false"
+        | "test" | "[" => true,
         // `printf -v 'a[…]'` assigns a variable (and evaluates its subscript): no options.
-        "printf" => texts.first().is_none_or(|t| !t.starts_with('-') || *t == "--"),
+        "printf" => texts
+            .first()
+            .is_none_or(|t| !t.starts_with('-') || *t == "--"),
         "grep" | "egrep" | "fgrep" => flags_allowed(&texts, &GREP),
         "rg" => flags_allowed(&texts, &RG),
         "ag" => flags_allowed(&texts, &AG),
@@ -341,7 +564,10 @@ fn inert_command(raw: &str, cmd: &SimpleCommand) -> bool {
 /// pager, an alias, an fsmonitor) the program that runs.
 fn git_inert(args: &[&str]) -> bool {
     let mut i = 0;
-    while matches!(args.get(i), Some(&("--no-pager" | "-P" | "--no-optional-locks"))) {
+    while matches!(
+        args.get(i),
+        Some(&("--no-pager" | "-P" | "--no-optional-locks"))
+    ) {
         i += 1;
     }
     let Some(sub) = args.get(i) else { return false };
@@ -354,7 +580,12 @@ fn git_inert(args: &[&str]) -> bool {
         "log" | "show" | "diff" => flags_allowed(rest, &GIT_HISTORY),
         "grep" => flags_allowed(rest, &GIT_GREP),
         // `edit` opens an editor and `merge` runs the merge strategy.
-        "notes" => matches!(rest.first(), Some(&("add" | "append" | "show" | "list" | "remove"))) && flags_allowed(&rest[1..], &GIT_NOTES),
+        "notes" => {
+            matches!(
+                rest.first(),
+                Some(&("add" | "append" | "show" | "list" | "remove"))
+            ) && flags_allowed(&rest[1..], &GIT_NOTES)
+        }
         _ => false,
     }
 }

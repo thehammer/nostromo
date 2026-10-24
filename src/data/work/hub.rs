@@ -29,10 +29,13 @@ use super::model::{
     SendOutcome, SendPreview, SentMarker, SourceState, SourceStatus, WorkDetail, WorkError,
     WorkItem, WorkSource,
 };
+use super::picks::{
+    self, PickEntry, PicksGenerator, PicksSessionHost, PicksStore, PublishError,
+    SessionManagerHost, SourcePresence,
+};
 use super::query::{self, WorkFilter};
 use super::service::{SendRequest, WorkService};
-use super::picks::{self, PickEntry, PicksGenerator, PicksSessionHost, PicksStore, PublishError, SessionManagerHost, SourcePresence};
-use super::{credentials, repo_docs, send, sent, jira, sentry, todos};
+use super::{credentials, jira, repo_docs, send, sent, sentry, todos};
 
 /// What one source publishes: its status and its items, one entry per group
 /// (`None` for sources that are a single flat list, the repo for repo docs).
@@ -111,8 +114,12 @@ impl HubDeps {
     }
 }
 
-const SOURCE_ORDER: [WorkSource; 4] =
-    [WorkSource::Todos, WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry];
+const SOURCE_ORDER: [WorkSource; 4] = [
+    WorkSource::Todos,
+    WorkSource::RepoDocs,
+    WorkSource::Jira,
+    WorkSource::Sentry,
+];
 
 pub struct WorkHub {
     ctx: HubContext,
@@ -181,7 +188,12 @@ fn presence_of(state: &State) -> Vec<SourcePresence> {
             let slot = &state.slots[source];
             SourcePresence {
                 status: slot.status.clone(),
-                ids: slot.groups.values().flatten().map(|item| item.id.clone()).collect(),
+                ids: slot
+                    .groups
+                    .values()
+                    .flatten()
+                    .map(|item| item.id.clone())
+                    .collect(),
             }
         })
         .collect()
@@ -232,10 +244,17 @@ impl WorkHub {
         let sentry = sentry.map(Arc::new);
         let picks = PicksStore::load(picks_path, broadcast_tx.clone());
         let picks_host = picks_host.or_else(|| {
-            session_mgr.clone().map(|mgr| Arc::new(SessionManagerHost::new(mgr)) as Arc<dyn PicksSessionHost>)
+            session_mgr
+                .clone()
+                .map(|mgr| Arc::new(SessionManagerHost::new(mgr)) as Arc<dyn PicksSessionHost>)
         });
-        let picks_generator = picks_host
-            .map(|host| PicksGenerator::new(picks.clone(), host, picks_timeout.unwrap_or(picks::GENERATION_TIMEOUT)));
+        let picks_generator = picks_host.map(|host| {
+            PicksGenerator::new(
+                picks.clone(),
+                host,
+                picks_timeout.unwrap_or(picks::GENERATION_TIMEOUT),
+            )
+        });
         let repo_docs_root = repo_docs_root.unwrap_or_else(repo_docs::code_root);
         let mut refresh: HashMap<WorkSource, Arc<Notify>> =
             [WorkSource::RepoDocs, WorkSource::Jira, WorkSource::Sentry]
@@ -246,7 +265,10 @@ impl WorkHub {
             refresh.insert(WorkSource::Todos, notify);
         }
         let hub = Arc::new(Self {
-            ctx: HubContext { broadcast_tx, session_mgr },
+            ctx: HubContext {
+                broadcast_tx,
+                session_mgr,
+            },
             state: Mutex::new(State {
                 slots: SOURCE_ORDER.iter().map(|s| (*s, Slot::new(*s))).collect(),
                 todos: None,
@@ -275,7 +297,10 @@ impl WorkHub {
             None => sentry::spawn_dormant(sentry_refresh),
         };
         let sources = [
-            (WorkSource::RepoDocs, repo_docs::spawn_at(repo_docs_root, hub.refresh[&WorkSource::RepoDocs].clone())),
+            (
+                WorkSource::RepoDocs,
+                repo_docs::spawn_at(repo_docs_root, hub.refresh[&WorkSource::RepoDocs].clone()),
+            ),
             (WorkSource::Jira, jira_rx),
             (WorkSource::Sentry, sentry_rx),
         ];
@@ -338,7 +363,9 @@ impl WorkHub {
 
     /// Where the Sentry project -> repo mapping lives, when Sentry is configured.
     pub(crate) fn sentry_repos_path(&self) -> Option<&std::path::Path> {
-        self.sentry.as_ref().map(|config| config.repos_path.as_path())
+        self.sentry
+            .as_ref()
+            .map(|config| config.repos_path.as_path())
     }
 
     /// The markers a resend of `item_id` would run into, judged by the rule
@@ -351,7 +378,11 @@ impl WorkHub {
         let ledger = sent::ledger();
         // Asked of Mother only if a job marker needs it, and for no longer than
         // the Mac waits on this answer: a hung Mother is unknown, so live.
-        let jobs = if ledger.markers(item_id).iter().any(|m| m.kind == "mother_job") {
+        let jobs = if ledger
+            .markers(item_id)
+            .iter()
+            .any(|m| m.kind == "mother_job")
+        {
             sent::mother_job_ids_within(sent::MOTHER_PREVIEW_TIMEOUT).await
         } else {
             None
@@ -377,7 +408,10 @@ impl WorkHub {
     }
 
     /// Publish Teri's picks (`teri.publish_picks`).
-    pub fn publish_picks(&self, entries: &[PickEntry]) -> Result<crate::data::work::PicksSnapshot, PublishError> {
+    pub fn publish_picks(
+        &self,
+        entries: &[PickEntry],
+    ) -> Result<crate::data::work::PicksSnapshot, PublishError> {
         self.picks.publish(entries, self)
     }
 
@@ -410,7 +444,10 @@ impl WorkHub {
     /// Every source's status, in source order.
     pub fn statuses(&self) -> Vec<SourceStatus> {
         let state = self.state.lock().unwrap();
-        SOURCE_ORDER.iter().map(|s| state.slots[s].status.clone()).collect()
+        SOURCE_ORDER
+            .iter()
+            .map(|s| state.slots[s].status.clone())
+            .collect()
     }
 
     // ── updates ───────────────────────────────────────────────────────────────
@@ -419,11 +456,19 @@ impl WorkHub {
         let groups: BTreeMap<Option<String>, Vec<WorkItem>> = groups
             .into_iter()
             .filter(|(_, items)| !items.is_empty())
-            .map(|(group, items)| (group, prepare_group(source, items, &|m| self.marker_is_live(m))))
+            .map(|(group, items)| {
+                (
+                    group,
+                    prepare_group(source, items, &|m| self.marker_is_live(m)),
+                )
+            })
             .collect();
         {
             let mut state = self.state.lock().unwrap();
-            let slot = state.slots.get_mut(&source).expect("every source has a slot");
+            let slot = state
+                .slots
+                .get_mut(&source)
+                .expect("every source has a slot");
             slot.status = status;
             slot.groups = groups;
         }
@@ -434,7 +479,10 @@ impl WorkHub {
 
     fn apply_todos(&self, snap: Option<TeriTodosSnapshot>) {
         let Some(mut snap) = snap else {
-            self.apply_update(WorkSource::Todos, (loading_status(WorkSource::Todos), Vec::new()));
+            self.apply_update(
+                WorkSource::Todos,
+                (loading_status(WorkSource::Todos), Vec::new()),
+            );
             return;
         };
         {
@@ -443,7 +491,9 @@ impl WorkHub {
             if healthy {
                 state.last_good_todos = snap.items.clone();
                 state.last_good_at = snap.generated_at;
-            } else if snap.error.is_some() && snap.items.is_empty() && !state.last_good_todos.is_empty()
+            } else if snap.error.is_some()
+                && snap.items.is_empty()
+                && !state.last_good_todos.is_empty()
             {
                 // A failed read keeps showing the last good list, marked stale.
                 snap.items = state.last_good_todos.clone();
@@ -532,19 +582,25 @@ impl WorkHub {
             .iter()
             .any(|id| ledger.markers(id).iter().any(|m| m.kind == "mother_job"));
         // Unknown (`None`) keeps every job marker.
-        let jobs = if has_jobs { sent::mother_job_ids().await } else { None };
+        let jobs = if has_jobs {
+            sent::mother_job_ids().await
+        } else {
+            None
+        };
         let focus_exists = |marker: &SentMarker| {
             self.ctx.session_mgr.as_ref().is_some_and(|mgr| {
                 let mgr = mgr.lock().unwrap();
                 !mgr.registry_known()
                     || (sent::focus_marker_matches(&mgr, marker)
-                        && (mgr.has_live_session(&marker.target_id) || mgr.focus_may_exist(&marker.target_id)))
+                        && (mgr.has_live_session(&marker.target_id)
+                            || mgr.focus_may_exist(&marker.target_id)))
             })
         };
         let removed = ledger.prune(&|m| match m.kind.as_str() {
             "focus" => focus_exists(m),
             "mother_job" => {
-                m.created_at >= listed_at || jobs.as_ref().is_none_or(|jobs| jobs.contains(&m.target_id))
+                m.created_at >= listed_at
+                    || jobs.as_ref().is_none_or(|jobs| jobs.contains(&m.target_id))
             }
             _ => true,
         });
@@ -575,7 +631,9 @@ impl WorkHub {
                     .is_none_or(|published| !same_signature(published, &slot.status));
                 if changed {
                     slot.published_status = Some(slot.status.clone());
-                    frames.push(ServerMsg::WorkSourceStatus { status: slot.status.clone() });
+                    frames.push(ServerMsg::WorkSourceStatus {
+                        status: slot.status.clone(),
+                    });
                 }
                 for (group, items) in &slot.groups {
                     let items = fit_frame(*source, group.as_deref(), items);
@@ -597,7 +655,11 @@ impl WorkHub {
                     .collect();
                 for group in gone {
                     slot.published_groups.remove(&group);
-                    frames.push(ServerMsg::WorkSnapshot { source: *source, group, items: Vec::new() });
+                    frames.push(ServerMsg::WorkSnapshot {
+                        source: *source,
+                        group,
+                        items: Vec::new(),
+                    });
                 }
             }
         }
@@ -624,7 +686,9 @@ fn prepare_group(
 
 fn digest_of(items: &[WorkItem]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    serde_json::to_vec(items).unwrap_or_default().hash(&mut hasher);
+    serde_json::to_vec(items)
+        .unwrap_or_default()
+        .hash(&mut hasher);
     hasher.finish()
 }
 
@@ -635,7 +699,10 @@ fn fit_frame(source: WorkSource, group: Option<&str>, items: &[WorkItem]) -> Vec
     if size(items) <= MAX_SNAPSHOT_BYTES {
         return items.to_vec();
     }
-    warn!(source = source.as_str(), group, "work snapshot over the frame limit; trimming search text");
+    warn!(
+        source = source.as_str(),
+        group, "work snapshot over the frame limit; trimming search text"
+    );
     let mut trimmed = items.to_vec();
     for keep in [2048usize, 0] {
         for item in &mut trimmed {
@@ -656,7 +723,11 @@ fn fit_frame(source: WorkSource, group: Option<&str>, items: &[WorkItem]) -> Vec
 
 // ── tasks ─────────────────────────────────────────────────────────────────────
 
-async fn follow_source(hub: Arc<WorkHub>, source: WorkSource, mut rx: watch::Receiver<SourceUpdate>) {
+async fn follow_source(
+    hub: Arc<WorkHub>,
+    source: WorkSource,
+    mut rx: watch::Receiver<SourceUpdate>,
+) {
     while rx.changed().await.is_ok() {
         let update = rx.borrow_and_update().clone();
         hub.apply_update(source, update);
@@ -718,9 +789,8 @@ impl WorkService for WorkHub {
         match prefix {
             "todo" => {
                 let snap = self.state.lock().unwrap().todos.clone();
-                let snap = snap.ok_or_else(|| {
-                    WorkError::new("unknown_item", "Todos have not loaded yet")
-                })?;
+                let snap = snap
+                    .ok_or_else(|| WorkError::new("unknown_item", "Todos have not loaded yet"))?;
                 // Reads a credentials file: keep it off the async threads.
                 let jira_site = Arc::clone(&self.jira_site);
                 let site = tokio::task::spawn_blocking(move || jira_site.lookup())
@@ -747,8 +817,13 @@ impl WorkService for WorkHub {
         {
             let mut state = self.state.lock().unwrap();
             for target in &targets {
-                let slot = state.slots.get_mut(target).expect("every source has a slot");
-                let due = slot.last_refresh.is_none_or(|t| now.duration_since(t) >= REFRESH_DEBOUNCE);
+                let slot = state
+                    .slots
+                    .get_mut(target)
+                    .expect("every source has a slot");
+                let due = slot
+                    .last_refresh
+                    .is_none_or(|t| now.duration_since(t) >= REFRESH_DEBOUNCE);
                 if due {
                     slot.last_refresh = Some(now);
                     if let Some(notify) = self.refresh.get(target) {

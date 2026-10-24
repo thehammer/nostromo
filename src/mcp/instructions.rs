@@ -29,7 +29,11 @@ pub fn nostromo_instructions(open_topic: Option<&str>) -> String {
         // The topic is validated (`^[a-z0-9][a-z0-9-]{0,47}$`) when a board is
         // opened; a board adopted from a path derives it from the file name, so
         // keep the line bounded and single-line regardless.
-        let topic: String = topic.chars().filter(|c| !c.is_control() && *c != '"').take(64).collect();
+        let topic: String = topic
+            .chars()
+            .filter(|c| !c.is_control() && *c != '"')
+            .take(64)
+            .collect();
         text.push_str(&format!(
             "\nA tracker is open in this focus: \"{topic}\". Call op:\"read\" to load it."
         ));

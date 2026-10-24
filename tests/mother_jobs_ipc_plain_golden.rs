@@ -86,7 +86,8 @@ fn extra_plain_jobs() -> serde_json::Value {
 }
 
 fn plain_frame() -> String {
-    let list = std::fs::read(fixtures_dir().join("mother_list.json")).expect("read mother_list.json");
+    let list =
+        std::fs::read(fixtures_dir().join("mother_list.json")).expect("read mother_list.json");
     let (mut jobs, skipped) = parse_jobs(&list).expect("mother_list.json parses");
     assert_eq!(skipped, 0, "mother_list.json must decode fully");
     let extra = serde_json::to_vec(&extra_plain_jobs()).unwrap();
@@ -95,9 +96,13 @@ fn plain_frame() -> String {
     jobs.extend(extra_jobs);
 
     let states: std::collections::BTreeSet<&str> = jobs.iter().map(|j| j.state.as_str()).collect();
-    assert!(states.len() >= 5, "golden must cover several states, got {states:?}");
     assert!(
-        jobs.iter().any(|j| j.origin.is_some() && !j.phases.is_empty()),
+        states.len() >= 5,
+        "golden must cover several states, got {states:?}"
+    );
+    assert!(
+        jobs.iter()
+            .any(|j| j.origin.is_some() && !j.phases.is_empty()),
         "golden must include a job with origin and phases"
     );
 
