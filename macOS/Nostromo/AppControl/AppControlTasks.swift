@@ -22,15 +22,14 @@ enum AppControlTasks {
     static func chip(tag: String, list: BackgroundTaskList) -> [String: Any] {
         [
             "tag": tag,
-            "text": list.chip.text.map { $0 as Any } ?? NSNull(),
+            "text": value(list.chip.text),
             "state": list.chip.name,
         ]
     }
 
     /// One task as the popover shows it.
     static func row(_ row: BackgroundTaskRow) -> [String: Any] {
-        func value<T>(_ v: T?) -> Any { v.map { $0 as Any } ?? NSNull() }
-        return [
+        [
             "id": row.id,
             "section": row.section.rawValue,
             "kind": row.kindLabel,
@@ -48,4 +47,7 @@ enum AppControlTasks {
             "stop_offered": row.stopOffered,
         ]
     }
+
+    /// The value, or JSON `null` when unknown.
+    private static func value<T>(_ v: T?) -> Any { v.map { $0 as Any } ?? NSNull() }
 }

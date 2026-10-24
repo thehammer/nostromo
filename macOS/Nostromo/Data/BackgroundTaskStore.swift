@@ -128,11 +128,9 @@ final class BackgroundTaskStore {
             let stamp = nowMs
             state.restartStopped += state.awaitingReconnect
                 + state.tasks.filter { !$0.status.isTerminal }.map { $0.ended(as: .stopped, endReason: .restart, atMs: stamp) }
-            state.awaitingReconnect = []
-        } else {
-            // Same daemon: its snapshot is the truth about every task it knows.
-            state.awaitingReconnect = []
         }
+        // Either way the wait is over. Same daemon: its snapshot is the truth about every task it knows.
+        state.awaitingReconnect = []
 
         if newSession {
             // Clear Context or a new session: what still ran shows stopped first, then the list clears.
@@ -194,10 +192,11 @@ final class BackgroundTaskStore {
     func markSeen(tag: String) {
         guard let state = states[tag] else { return }
         let all = state.allTasks
+        // A task that ended without an `ended_at_ms` still counts as seen: mark 0.
         let mark = BackgroundTaskList.seenMark(of: all) ?? (all.contains { $0.status.isTerminal } ? 0 : nil)
         let previous = seen[tag]?.mark
-        let newMark = max(previous ?? 0, mark ?? 0)
         guard mark != nil || previous != nil else { return }
+        let newMark = max(previous ?? 0, mark ?? 0)
         seen[tag] = (newMark, now().timeIntervalSince1970)
         trimSeen()
         saveSeen()

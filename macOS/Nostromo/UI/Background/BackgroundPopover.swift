@@ -245,7 +245,7 @@ final class BackgroundPopoverViewController: NSViewController {
     /// Rebuild what is shown from the store: a change for this tag, or the elapsed tick. Row views
     /// are kept per task and updated in place; the selection and the scroll position stay.
     func reload() {
-        _ = view
+        _ = view   // load the view first: `reload` can run before the popover shows
         reloadCount += 1
         let next = store.list(for: tag)
         announceNewFailures(in: next)
@@ -254,6 +254,7 @@ final class BackgroundPopoverViewController: NSViewController {
 
         let selectedKey = selectedIndex.flatMap { selectables.indices.contains($0) ? key(of: selectables[$0]) : nil }
         var ordered: [NSView] = []
+        var placed: [(NSView, CGFloat)] = []
         var used = Set<String>()
         func rowView(_ row: BackgroundTaskRow) -> BackgroundTaskRowView {
             used.insert(row.id)
@@ -267,22 +268,21 @@ final class BackgroundPopoverViewController: NSViewController {
             rowViews[row.id] = view
             return view
         }
-
-        var placed: [(NSView, CGFloat)] = []
-        for row in list.running {
-            let v = rowView(row)
-            placed.append((v, BackgroundTaskRowView.height(for: row)))
-            ordered.append(v)
-        }
-        if !list.ended.isEmpty {
-            let header = endedHeader ?? BackgroundSectionHeaderView(text: "Ended", isDisclosure: false)
-            endedHeader = header
-            placed.append((header, BackgroundSectionHeaderView.height))
-            for row in list.ended {
+        // Lay `rows` out next; each can hold the keyboard selection.
+        func placeRows(_ rows: [BackgroundTaskRow]) {
+            for row in rows {
                 let v = rowView(row)
                 placed.append((v, BackgroundTaskRowView.height(for: row)))
                 ordered.append(v)
             }
+        }
+
+        placeRows(list.running)
+        if !list.ended.isEmpty {
+            let header = endedHeader ?? BackgroundSectionHeaderView(text: "Ended", isDisclosure: false)
+            endedHeader = header
+            placed.append((header, BackgroundSectionHeaderView.height))
+            placeRows(list.ended)
         } else {
             endedHeader = nil
         }
@@ -296,13 +296,7 @@ final class BackgroundPopoverViewController: NSViewController {
             header.setText(housekeepingTitle)
             placed.append((header, BackgroundSectionHeaderView.height))
             ordered.append(header)
-            if housekeepingExpanded {
-                for row in list.housekeeping {
-                    let v = rowView(row)
-                    placed.append((v, BackgroundTaskRowView.height(for: row)))
-                    ordered.append(v)
-                }
-            }
+            if housekeepingExpanded { placeRows(list.housekeeping) }
         } else {
             housekeepingHeader = nil
         }
@@ -453,15 +447,16 @@ final class BackgroundPopoverViewController: NSViewController {
     /// Copy Description now; Open, Stop and Show in Transcript once a later slice implements them.
     func contextMenu(for row: BackgroundTaskRow) -> NSMenu {
         let menu = NSMenu()
+        let actions = self.actions, tag = self.tag
         if actions.canOpen(row, tag: tag) {
-            menu.addItem(item("Open") { [weak self] in self?.actions.open(row, tag: self?.tag ?? "") })
+            menu.addItem(item("Open") { actions.open(row, tag: tag) })
         }
         if actions.canStop(row, tag: tag) {
-            menu.addItem(item("Stop") { [weak self] in self?.actions.stop(row, tag: self?.tag ?? "") })
+            menu.addItem(item("Stop") { actions.stop(row, tag: tag) })
         }
         menu.addItem(item("Copy Description") { [weak self] in self?.copyDescription(row) })
         if actions.canShowInTranscript(row, tag: tag) {
-            menu.addItem(item("Show in Transcript") { [weak self] in self?.actions.showInTranscript(row, tag: self?.tag ?? "") })
+            menu.addItem(item("Show in Transcript") { actions.showInTranscript(row, tag: tag) })
         }
         return menu
     }
@@ -472,8 +467,7 @@ final class BackgroundPopoverViewController: NSViewController {
     }
 
     private func item(_ title: String, _ action: @escaping () -> Void) -> NSMenuItem {
-        let item = BlockMenuItem(title: title, action: action)
-        return item
+        BlockMenuItem(title: title, action: action)
     }
 
     // MARK: Announcements
@@ -483,7 +477,7 @@ final class BackgroundPopoverViewController: NSViewController {
         let rows = next.allRows
         defer { lastStatuses = Dictionary(rows.map { ($0.id, $0.status) }, uniquingKeysWith: { a, _ in a }) }
         guard reloadCount > 1 else { return }   // the first load is not news
-        // A task seen failing, or one that started and failed between two snapshots.
+        // Failed now and not failed at the last reload (a task new since then counts too).
         let failed = rows.filter { $0.isFailed && lastStatuses[$0.id] != .failed }
         guard !failed.isEmpty else { return }
         announce(failed.count == 1 ? "\(failed[0].title) failed" : "\(failed.count) background tasks failed")

@@ -136,7 +136,7 @@ public struct BackgroundTaskList: Equatable {
     public let housekeeping: [BackgroundTaskRow]
     public let chip: BackgroundChipState
 
-    /// The chip's tooltip: the first three running tasks' descriptions, one per line.
+    /// The chip's tooltip: the first three running tasks' titles, one per line.
     public var chipTooltip: String? {
         switch chip {
         case .hidden:
@@ -228,25 +228,22 @@ public struct BackgroundTaskList: Equatable {
                             + newestFirst(chores.filter { $0.status.isTerminal }))
             .map { row($0, .housekeeping, depth: 0) }
 
-        let chip: BackgroundChipState
-        if !running.isEmpty {
-            chip = .running(running.count)
-        } else {
-            let unseen = over.filter { task in
-                guard let seen = seenEndedAtMs else { return true }
-                return (task.endedAtMs ?? 0) > seen
-            }
-            let failures = unseen.filter { $0.status == .failed }.count
-            if failures > 0 {
-                chip = .failed(failures)
-            } else if !unseen.isEmpty {
-                chip = .done(unseen.count)
-            } else {
-                chip = .hidden
-            }
-        }
+        let chip = chipState(runningCount: running.count, ended: over, seenEndedAtMs: seenEndedAtMs)
+        return BackgroundTaskList(running: running, ended: ended, housekeeping: housekeeping, chip: chip)
+    }
 
-        return BackgroundTaskList(running: running, ended: Array(ended), housekeeping: housekeeping, chip: chip)
+    /// Running wins; else ended tasks newer than the seen mark (never opened: all of them), failed
+    /// ones first; else hidden. Housekeeping tasks are not passed in: they never count.
+    private static func chipState(runningCount: Int, ended: [TaskMetaWire],
+                                  seenEndedAtMs: UInt64?) -> BackgroundChipState {
+        if runningCount > 0 { return .running(runningCount) }
+        let unseen = ended.filter { task in
+            guard let seen = seenEndedAtMs else { return true }
+            return (task.endedAtMs ?? 0) > seen
+        }
+        let failures = unseen.filter { $0.status == .failed }.count
+        if failures > 0 { return .failed(failures) }
+        return unseen.isEmpty ? .hidden : .done(unseen.count)
     }
 
     /// The `ended_at_ms` high-water mark of `tasks`: what "the user has seen everything" means.
@@ -374,11 +371,9 @@ public struct BackgroundTaskList: Equatable {
                                 detail: SessionTaskDetailWire?, nowMs: UInt64,
                                 stopSupported: Bool?) -> BackgroundTaskRow {
         let ended = task.status.isTerminal
-        let elapsed: UInt64? = ended ? nil : task.startedAtMs.map { nowMs >= $0 ? nowMs - $0 : 0 }
-        let duration: UInt64? = ended
-            ? (task.durationMs ?? both(task.startedAtMs, task.endedAtMs).map { pair in pair.1 >= pair.0 ? pair.1 - pair.0 : 0 })
-            : nil
-        let ago: UInt64? = ended ? task.endedAtMs.map { nowMs >= $0 ? nowMs - $0 : 0 } : nil
+        let elapsed: UInt64? = ended ? nil : task.startedAtMs.map { msBetween($0, nowMs) }
+        let duration: UInt64? = ended ? ranFor(task) : nil
+        let ago: UInt64? = ended ? task.endedAtMs.map { msBetween($0, nowMs) } : nil
         let time = (elapsed ?? duration).flatMap { ToolGroupSummary.durationText(seconds: Double($0) / 1000) }
         return BackgroundTaskRow(
             id: task.id,
@@ -434,9 +429,16 @@ public struct BackgroundTaskList: Equatable {
         }.map(\.element)
     }
 
-    private static func both(_ a: UInt64?, _ b: UInt64?) -> (UInt64, UInt64)? {
-        guard let a, let b else { return nil }
-        return (a, b)
+    /// How long an ended task ran: the daemon's own duration, else end minus start; nil if unknown.
+    private static func ranFor(_ task: TaskMetaWire) -> UInt64? {
+        if let duration = task.durationMs { return duration }
+        guard let start = task.startedAtMs, let end = task.endedAtMs else { return nil }
+        return msBetween(start, end)
+    }
+
+    /// `to - from`, never negative (timestamps out of order read as zero).
+    private static func msBetween(_ from: UInt64, _ to: UInt64) -> UInt64 {
+        to >= from ? to - from : 0
     }
 
     /// One line: newlines and tabs become spaces, ends trimmed.
