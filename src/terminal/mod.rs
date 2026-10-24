@@ -23,7 +23,7 @@ mod tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc};
@@ -208,13 +208,9 @@ impl TerminalManager {
     /// once, at daemon start, before anything connects.
     pub fn reconcile(&mut self) {
         let records = self.store.load();
-        let reconciled = match &self.panes {
-            Some(panes) => {
-                let mut panes = panes.lock().unwrap_or_else(|e| e.into_inner());
-                store::reconcile(records, Some(&mut panes))
-            }
-            None => store::reconcile(records, None),
-        };
+        let mut panes = self.lock_panes();
+        let reconciled = store::reconcile(records, panes.as_deref_mut());
+        drop(panes);
         for info in reconciled.ended {
             let fanout = Fanout::idle(&info.terminal_id, Arc::clone(&self.probe));
             self.terminals.insert(
@@ -323,11 +319,9 @@ impl TerminalManager {
         let (cols, rows) = (store::DEFAULT_COLS, store::DEFAULT_ROWS);
 
         // Place the leaf first: a bad `relative_to` must not start a process.
-        let tree = match &self.panes {
-            Some(panes) => Some(
+        let tree = match self.lock_panes() {
+            Some(mut panes) => Some(
                 panes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
                     .insert_terminal_leaf(&req.tag, relative_to, position, &pane_id)
                     .map_err(TerminalError::Pane)?,
             ),
@@ -341,11 +335,8 @@ impl TerminalManager {
                 return Err(TerminalError::OpenFailed);
             }
         };
-        if let Some(panes) = &self.panes {
-            panes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .register_terminal_leaf(&req.tag, &pane_id);
+        if let Some(mut panes) = self.lock_panes() {
+            panes.register_terminal_leaf(&req.tag, &pane_id);
         }
 
         let user_opened = requested_by.kind == "user";
@@ -414,11 +405,17 @@ impl TerminalManager {
         );
     }
 
+    /// The shared pane registry, if this manager has one (tolerates poison).
+    fn lock_panes(&self) -> Option<MutexGuard<'_, PaneRegistry>> {
+        self.panes
+            .as_ref()
+            .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     fn new_pane_id(&self, tag: &str) -> String {
         let taken = self
-            .panes
-            .as_ref()
-            .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).pane_ids(tag))
+            .lock_panes()
+            .map(|panes| panes.pane_ids(tag))
             .unwrap_or_default();
         loop {
             let hex = Uuid::new_v4().simple().to_string();
@@ -734,11 +731,7 @@ impl TerminalManager {
 
     /// Unregister and remove a terminal leaf; the new tree if it changed.
     fn remove_leaf(&self, tag: &str, pane_id: &str) -> Option<PaneTree> {
-        let mut panes = self
-            .panes
-            .as_ref()?
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut panes = self.lock_panes()?;
         panes.unregister_terminal_leaf(tag, pane_id);
         panes.remove_terminal_leaf(tag, pane_id)
     }
