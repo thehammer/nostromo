@@ -1083,17 +1083,19 @@ fn handle_client_msg(
             match result {
                 Ok(session_id) => {
                     // A fresh spawn re-seeds the layout (`init_focus`), which for a
-                    // focus that owns a native pane replaces the tree a window may
-                    // still hold. Tell every client the tree the daemon now has.
-                    if crate::mcp::views::tree::native_pane_for(&tag).is_some() {
-                        let tree = registry.and_then(|reg| reg.lock().unwrap().get(&tag).cloned());
-                        if let Some(tree) = tree {
-                            let _ = broadcast_tx.send(ServerMsg::FocusLayout {
-                                tag: tag.clone(),
-                                tree,
-                                focused_pane: None,
-                            });
-                        }
+                    // focus that owns a native pane, or keeps its tracker pane,
+                    // replaces the tree a window may still hold. Tell every client
+                    // the tree the daemon now has.
+                    let tree = registry.and_then(|reg| reg.lock().unwrap().get(&tag).cloned());
+                    if let Some(tree) = tree.filter(|tree| {
+                        crate::mcp::views::tree::native_pane_for(&tag).is_some()
+                            || crate::tracker::placement::has_tracker(tree)
+                    }) {
+                        let _ = broadcast_tx.send(ServerMsg::FocusLayout {
+                            tag: tag.clone(),
+                            tree,
+                            focused_pane: None,
+                        });
                     }
                     let _ = targeted_tx.send(ServerMsg::SessionSpawned { tag, session_id });
                 }

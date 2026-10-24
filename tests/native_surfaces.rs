@@ -29,6 +29,7 @@ struct Daemon {
     socket_path: std::path::PathBuf,
     tcp_port: u16,
     registry: Arc<Mutex<PaneRegistry>>,
+    session_mgr: Arc<Mutex<SessionManager>>,
     state: McpSharedState,
     _server: Server,
     _tmp: TempDir,
@@ -56,6 +57,7 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         tmp.path().join("mcp-config.json"),
     );
     let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let session_mgr_handle = Arc::clone(&session_mgr);
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
@@ -84,7 +86,7 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         tickets: Default::default(),
         tracker: Default::default(),
     });
-    Daemon { socket_path, tcp_port, registry, state, _server: server, _tmp: tmp }
+    Daemon { socket_path, tcp_port, registry, session_mgr: session_mgr_handle, state, _server: server, _tmp: tmp }
 }
 
 async fn send(s: &mut UnixStream, msg: &ClientMsg) {
@@ -438,6 +440,49 @@ async fn spawning_after_new_session_keeps_the_native_pane_and_announces_it_again
         let replayed = replayed_layout(&d, tag).await.unwrap_or_else(|| panic!("{tag}: no layout replayed"));
         assert_eq!(ids(&replayed), vec![native, "repl"], "{tag}: replay after new_session + spawn");
     }
+}
+
+/// Every focus has a bound tracker board (and so keeps its tracker pane across a fresh session).
+struct EveryFocusHasABoard;
+
+impl nostromo::ipc::pane_registry::TrackerFrameProvider for EveryFocusHasABoard {
+    fn tracker_frames(&self) -> Vec<ServerMsg> {
+        Vec::new()
+    }
+
+    fn has_bound_board(&self, _tag: &str) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_spawn_of_an_ordinary_focus_with_a_tracker_announces_the_layout_that_keeps_it() {
+    use_stub_claude();
+    let d = spawn();
+    d.session_mgr
+        .lock()
+        .unwrap()
+        .configure_tracker_frame_provider(Arc::new(EveryFocusHasABoard));
+    let mut client = connect(&d).await;
+
+    // The focus had the tracker beside its REPL (a window holds that tree).
+    {
+        let mut reg = d.registry.lock().unwrap();
+        reg.get_or_init("cody-x");
+        let tree = json!({"tree": {"kind": "split", "direction": "horizontal", "ratios": [0.66, 0.34], "children": [
+            {"kind": "leaf", "pane_id": "repl"}, {"kind": "leaf", "pane_id": "tracker"}]}});
+        reg.set_layout("cody-x", &tree).expect("a layout with the tracker");
+    }
+
+    let frames = spawn_and_collect(&mut client, "cody-x").await;
+
+    assert_eq!(registry_ids(&d, "cody-x"), vec!["repl", "tracker"], "the fresh session keeps the tracker pane");
+    let layouts = layouts_for(&frames, "cody-x");
+    assert!(
+        !layouts.is_empty(),
+        "the re-seeded tree is announced, so a window does not keep a tree without the tracker: {frames:?}"
+    );
+    assert_eq!(ids(layouts.last().unwrap()), vec!["repl", "tracker"]);
 }
 
 #[tokio::test]
