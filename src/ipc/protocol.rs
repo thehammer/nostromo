@@ -3417,6 +3417,9 @@ mod tests {
                 verification_uri: "https://microsoft.com/devicelogin".into(),
                 user_code: "ABCD-1234".into(),
                 expires_at: chrono::Utc::now(),
+                kind: "device_code".into(),
+                account: None,
+                provider: None,
             }),
             ..Default::default()
         };

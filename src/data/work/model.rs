@@ -46,6 +46,20 @@ pub enum SourceState {
     Error,
 }
 
+impl SourceState {
+    /// How bad a state is, for picking the worst of several sources.
+    pub fn severity(self) -> u8 {
+        match self {
+            SourceState::Unauthenticated => 5,
+            SourceState::NotConfigured => 4,
+            SourceState::Error => 3,
+            SourceState::RateLimited | SourceState::Stale => 2,
+            SourceState::Loading => 1,
+            SourceState::Fresh | SourceState::Empty => 0,
+        }
+    }
+}
+
 /// A per-group failure inside a source (e.g. one repo's docs failed to scan).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupError {

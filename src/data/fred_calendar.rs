@@ -30,14 +30,18 @@ use tracing::{debug, warn};
 
 use crate::{
     config::Config,
-    data::{dirty_file, graph_client::DeviceFlowPrompt, work::model::SourceState},
+    data::{
+        dirty_file, fred_mailbox::AccountStatus, graph_client::DeviceFlowPrompt,
+        work::model::SourceState,
+    },
 };
 
 // ── Snapshot types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CalendarEvent {
-    /// Graph event id. Empty for the legacy bash source.
+    /// Provider event id; `<label>:<native id>` in multi-account mode. Empty
+    /// for the legacy bash source.
     #[serde(default)]
     pub id: String,
     pub start: Option<DateTime<Utc>>,
@@ -64,6 +68,13 @@ pub struct CalendarEvent {
     /// All-day events are never "now" and never the next meeting.
     #[serde(default)]
     pub is_all_day: bool,
+    /// Configured account label (multi-account mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Cross-account identity (iCalUID) used to drop duplicate invitations.
+    /// Never serialised.
+    #[serde(skip)]
+    pub dedupe_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -97,6 +108,9 @@ pub struct CalendarSnapshot {
     /// Graph again.
     #[serde(default)]
     pub retry_at: Option<DateTime<Utc>>,
+    /// Per-account health (multi-account mode only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<AccountStatus>,
 }
 
 impl CalendarSnapshot {
@@ -142,11 +156,19 @@ impl CalendarSnapshot {
     /// The snapshot to publish while the user must sign in: no data, the
     /// device-flow prompt, and a plain-English reason. Carries no token.
     pub fn unauthenticated(prompt: DeviceFlowPrompt) -> CalendarSnapshot {
+        Self::unauthenticated_with(
+            prompt,
+            "Sign in to Microsoft 365 to see your calendar".to_owned(),
+        )
+    }
+
+    /// [`unauthenticated`](Self::unauthenticated) with a provider-specific reason.
+    pub fn unauthenticated_with(prompt: DeviceFlowPrompt, reason: String) -> CalendarSnapshot {
         CalendarSnapshot {
             generated_at: Some(Utc::now()),
             sweater: "sage".to_owned(),
             state: SourceState::Unauthenticated,
-            error: Some("Sign in to Microsoft 365 to see your calendar".to_owned()),
+            error: Some(reason),
             auth_prompt: Some(prompt),
             ..Default::default()
         }
@@ -167,6 +189,45 @@ impl CalendarSnapshot {
             self.updated_at = self.updated_at.or(self.generated_at);
         }
         self
+    }
+}
+
+/// The next upcoming timed, not cancelled/declined event and the sweater colour
+/// for how soon it starts. `events` must be sorted by start.
+pub fn next_and_sweater(
+    events: &[CalendarEvent],
+    now: DateTime<Utc>,
+) -> (Option<NextEvent>, String) {
+    let next = events.iter().find(|ev| {
+        ev.start.is_some_and(|s| s > now)
+            && ev.status != "cancelled"
+            && ev.status != "declined"
+            && !ev.is_all_day
+    });
+
+    match next {
+        Some(ev) => {
+            let mins = ev
+                .start
+                .map(|s| (s - now).num_minutes())
+                .unwrap_or(i64::MAX);
+            let ne = NextEvent {
+                title: ev.title.clone(),
+                in_minutes: mins,
+            };
+            (Some(ne), sweater_for_minutes(mins))
+        }
+        None => (None, "sage".to_owned()),
+    }
+}
+
+fn sweater_for_minutes(mins: i64) -> String {
+    if mins < 5 {
+        "red".to_owned()
+    } else if mins <= 15 {
+        "amber".to_owned()
+    } else {
+        "sage".to_owned()
     }
 }
 
@@ -240,5 +301,28 @@ impl FredCalendarSource {
         let snap: CalendarSnapshot = serde_json::from_slice(&output.stdout)
             .with_context(|| "parsing fred-calendar-pane --json output")?;
         Ok(snap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_snapshot_serialises_without_account_keys() {
+        let snap = CalendarSnapshot {
+            events: vec![CalendarEvent {
+                dedupe_key: Some("uid".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("\"account\""), "{json}");
+        assert!(!json.contains("\"accounts\""), "{json}");
+        assert!(
+            !json.contains("dedupe_key") && !json.contains("uid"),
+            "{json}"
+        );
     }
 }

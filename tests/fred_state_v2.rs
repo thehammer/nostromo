@@ -1711,6 +1711,9 @@ fn a_prompt() -> DeviceFlowPrompt {
         verification_uri: "https://microsoft.com/devicelogin".into(),
         user_code: "ABCD-EFGH".into(),
         expires_at: utc("2026-10-10T16:00:00Z"),
+        kind: "device_code".into(),
+        account: None,
+        provider: None,
     }
 }
 

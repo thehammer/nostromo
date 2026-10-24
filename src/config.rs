@@ -149,6 +149,17 @@ pub struct Config {
     /// the load; [`crate::agents::resolve`] warns and ignores what it cannot
     /// read. See [`crate::agents`].
     pub agents: Option<toml::Value>,
+
+    // ── Fred: multiple mail/calendar accounts ───────────────────────────────
+    /// `[[fred_accounts]]` entries (label, provider, optional email and
+    /// token_cache). Absent = legacy single Microsoft account. Kept raw, like
+    /// `agents`, so a malformed entry can never fail the load; see
+    /// [`Config::resolve_fred_accounts`].
+    pub fred_accounts: Option<toml::Value>,
+    /// Path to the Google OAuth client JSON (Desktop app). The secret lives in
+    /// that file, never in `Config` (which derives `Debug`).
+    /// Default: `<config dir>/google-oauth-client.json`.
+    pub google_oauth_client: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -157,6 +168,8 @@ impl Default for Config {
             tcp_addr: None,
             code_root: None,
             agents: None,
+            fred_accounts: None,
+            google_oauth_client: None,
             fred_state: None,
             perri_state: None,
             claude_bin: None,
@@ -204,6 +217,116 @@ impl Config {
     /// warnings (unknown names, `mother` disabled) for the caller to log.
     pub fn resolve_agents(&self) -> (crate::agents::EnabledAgents, Vec<String>) {
         crate::agents::resolve(self.agents.as_ref())
+    }
+
+    /// The Fred accounts from `[[fred_accounts]]`, plus warnings (naming the
+    /// entry index and the problem, never its values) for the caller to log.
+    pub fn resolve_fred_accounts(&self) -> (FredAccounts, Vec<String>) {
+        let Some(raw) = self.fred_accounts.as_ref() else {
+            return (FredAccounts::Legacy, Vec::new());
+        };
+        let mut warnings = Vec::new();
+        let Some(entries) = raw.as_array() else {
+            warnings.push(
+                "fred_accounts must be an array of tables ([[fred_accounts]]); ignoring it"
+                    .to_owned(),
+            );
+            return (FredAccounts::Configured(Vec::new()), warnings);
+        };
+        let home = home_dir();
+        let mut accounts: Vec<FredAccount> = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let Some(table) = entry.as_table() else {
+                warnings.push(format!("fred_accounts[{i}] is not a table; skipped"));
+                continue;
+            };
+            let label = match table.get("label").and_then(|v| v.as_str()) {
+                Some(l) if valid_account_label(l) => l.to_owned(),
+                Some(_) => {
+                    warnings.push(format!(
+                        "fred_accounts[{i}]: label must match [a-z0-9][a-z0-9_-]{{0,31}}; skipped"
+                    ));
+                    continue;
+                }
+                None => {
+                    warnings.push(format!("fred_accounts[{i}]: missing label; skipped"));
+                    continue;
+                }
+            };
+            if accounts
+                .iter()
+                .any(|a| a.label.eq_ignore_ascii_case(&label))
+            {
+                warnings.push(format!("fred_accounts[{i}]: duplicate label; skipped"));
+                continue;
+            }
+            let provider = match table.get("provider").and_then(|v| v.as_str()) {
+                Some("google") => FredProvider::Google,
+                Some("microsoft") => FredProvider::Microsoft,
+                _ => {
+                    warnings.push(format!(
+                        "fred_accounts[{i}]: provider must be \"google\" or \"microsoft\"; skipped"
+                    ));
+                    continue;
+                }
+            };
+            let mut email = table
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty());
+            let configured_cache = table.get("token_cache").and_then(|v| v.as_str());
+            let token_cache = match provider {
+                FredProvider::Google => match configured_cache.filter(|c| !c.trim().is_empty()) {
+                    Some(c) => expand_tilde(c, &home),
+                    None => home
+                        .join(".cache")
+                        .join("nostromo")
+                        .join(format!("google-{label}-token.json")),
+                },
+                FredProvider::Microsoft => {
+                    if accounts
+                        .iter()
+                        .any(|a| a.provider == FredProvider::Microsoft)
+                    {
+                        warnings.push(format!(
+                            "fred_accounts[{i}]: only one microsoft account is supported; skipped"
+                        ));
+                        continue;
+                    }
+                    if email.is_some() || configured_cache.is_some() {
+                        warnings.push(format!(
+                            "fred_accounts[{i}]: email and token_cache are ignored for microsoft (use graph_token_cache)"
+                        ));
+                        email = None;
+                    }
+                    self.graph_token_cache_path()
+                }
+            };
+            accounts.push(FredAccount {
+                label,
+                provider,
+                email,
+                token_cache,
+            });
+        }
+        (FredAccounts::Configured(accounts), warnings)
+    }
+
+    /// Where the Google OAuth client JSON lives (`~` expanded).
+    pub fn google_oauth_client_path(&self) -> PathBuf {
+        match self
+            .google_oauth_client
+            .as_ref()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            Some(p) => expand_tilde(&p.to_string_lossy(), &home_dir()),
+            None => default_config_path()
+                .ok()
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| home_dir().join(".config").join("nostromo"))
+                .join("google-oauth-client.json"),
+        }
     }
 
     /// Folder whose children are the code repos. Resolution order:
@@ -277,6 +400,50 @@ impl Config {
 
     pub fn pr_diff_poll_interval(&self) -> Duration {
         Duration::from_secs(self.pr_diff_poll_secs)
+    }
+}
+
+/// Which backend serves a Fred account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FredProvider {
+    Google,
+    Microsoft,
+}
+
+/// One resolved `[[fred_accounts]]` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FredAccount {
+    pub label: String,
+    pub provider: FredProvider,
+    /// Lower-cased; the login hint and the expected identity (Google).
+    pub email: Option<String>,
+    pub token_cache: PathBuf,
+}
+
+/// Result of [`Config::resolve_fred_accounts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FredAccounts {
+    /// No `fred_accounts` key: the original single Microsoft code path.
+    Legacy,
+    Configured(Vec<FredAccount>),
+}
+
+/// `^[a-z0-9][a-z0-9_-]{0,31}$`. No `:` so a label can prefix item ids.
+fn valid_account_label(label: &str) -> bool {
+    let mut chars = label.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    first_ok
+        && label.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+fn expand_tilde(path: &str, home: &Path) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None if path == "~" => home.to_path_buf(),
+        None => PathBuf::from(path),
     }
 }
 
@@ -438,5 +605,119 @@ mod agents_tests {
             assert_eq!(e, crate::agents::EnabledAgents::all(), "{src}");
             assert_eq!(w.len(), 1, "{src}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fred_accounts_tests {
+    use super::*;
+
+    fn parse(s: &str) -> Config {
+        toml::from_str::<Config>(s).unwrap()
+    }
+
+    #[test]
+    fn absent_means_legacy() {
+        let (a, w) = parse("").resolve_fred_accounts();
+        assert_eq!(a, FredAccounts::Legacy);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn two_google_accounts_resolve_in_order_with_default_token_paths() {
+        let cfg = parse(
+            "[[fred_accounts]]\nlabel = \"personal\"\nprovider = \"google\"\nemail = \" Me@Gmail.com \"\n\
+             [[fred_accounts]]\nlabel = \"family\"\nprovider = \"google\"\n",
+        );
+        let (a, w) = cfg.resolve_fred_accounts();
+        assert!(w.is_empty(), "{w:?}");
+        let FredAccounts::Configured(list) = a else {
+            panic!("expected configured")
+        };
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].label, "personal");
+        assert_eq!(list[0].email.as_deref(), Some("me@gmail.com"));
+        assert!(list[0]
+            .token_cache
+            .ends_with(".cache/nostromo/google-personal-token.json"));
+        assert!(list[1].token_cache.ends_with("google-family-token.json"));
+    }
+
+    #[test]
+    fn invalid_entries_are_skipped_with_a_warning_that_omits_values() {
+        let cfg = parse(
+            "[[fred_accounts]]\nlabel = \"Bad:Label\"\nprovider = \"google\"\n\
+             [[fred_accounts]]\nlabel = \"ok\"\nprovider = \"google\"\n\
+             [[fred_accounts]]\nlabel = \"OK\"\nprovider = \"google\"\n\
+             [[fred_accounts]]\nlabel = \"odd\"\nprovider = \"yahoo\"\n\
+             [[fred_accounts]]\nlabel = \"work\"\nprovider = \"microsoft\"\n\
+             [[fred_accounts]]\nlabel = \"work2\"\nprovider = \"microsoft\"\n",
+        );
+        let (a, w) = cfg.resolve_fred_accounts();
+        let FredAccounts::Configured(list) = a else {
+            panic!("expected configured")
+        };
+        let labels: Vec<&str> = list.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["ok", "work"]);
+        assert_eq!(w.len(), 4, "{w:?}");
+        assert!(w
+            .iter()
+            .all(|m| !m.contains("Bad:Label") && !m.contains("yahoo")));
+        assert!(w[0].contains("fred_accounts[0]"));
+    }
+
+    #[test]
+    fn non_array_value_is_configured_empty_with_a_warning() {
+        let (a, w) = parse("fred_accounts = 3\n").resolve_fred_accounts();
+        assert_eq!(a, FredAccounts::Configured(vec![]));
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn tilde_expands_in_token_cache() {
+        let cfg = parse("[[fred_accounts]]\nlabel = \"a\"\nprovider = \"google\"\ntoken_cache = \"~/tok.json\"\n");
+        let (a, _) = cfg.resolve_fred_accounts();
+        let FredAccounts::Configured(list) = a else {
+            panic!()
+        };
+        assert_eq!(list[0].token_cache, home_dir().join("tok.json"));
+    }
+
+    #[test]
+    fn microsoft_entry_ignores_email_and_token_cache_with_a_warning() {
+        let cfg = parse(
+            "[[fred_accounts]]\nlabel = \"w\"\nprovider = \"microsoft\"\nemail = \"a@b.c\"\n",
+        );
+        let (a, w) = cfg.resolve_fred_accounts();
+        let FredAccounts::Configured(list) = a else {
+            panic!()
+        };
+        assert_eq!(list[0].email, None);
+        assert_eq!(list[0].token_cache, cfg.graph_token_cache_path());
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn malformed_shapes_never_fail_the_load() {
+        for src in [
+            "fred_accounts = \"x\"\n",
+            "[fred_accounts]\nlabel = \"a\"\n",
+            "fred_accounts = [1, 2]\n",
+            "[[fred_accounts]]\nlabel = 5\n",
+        ] {
+            let cfg = toml::from_str::<Config>(src).expect(src);
+            let (a, w) = cfg.resolve_fred_accounts();
+            assert_eq!(a, FredAccounts::Configured(vec![]), "{src}");
+            assert!(!w.is_empty(), "{src}");
+        }
+    }
+
+    #[test]
+    fn oauth_client_path_defaults_next_to_the_config_and_expands_tilde() {
+        assert!(parse("")
+            .google_oauth_client_path()
+            .ends_with("google-oauth-client.json"));
+        let cfg = parse("google_oauth_client = \"~/c.json\"\n");
+        assert_eq!(cfg.google_oauth_client_path(), home_dir().join("c.json"));
     }
 }

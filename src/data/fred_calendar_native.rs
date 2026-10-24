@@ -18,7 +18,7 @@ use crate::{
     config::Config,
     data::{
         dirty_file,
-        fred_calendar::{CalendarEvent, CalendarSnapshot, NextEvent},
+        fred_calendar::{next_and_sweater, CalendarEvent, CalendarSnapshot},
         fred_mailbox_native::{shared_graph_client, FredTiming},
         graph_client::{failure_reason, GraphClient, ThrottleBackoff},
         work::model::SourceState,
@@ -122,17 +122,25 @@ impl FredCalendarNativeSource {
         config: Config,
         timing: FredTiming,
     ) -> watch::Receiver<Option<CalendarSnapshot>> {
-        let (tx, rx) = watch::channel(None);
-        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
-
+        let (dirty_tx, dirty_rx) = mpsc::unbounded_channel::<()>();
         let dirty_path = config.fred_state_dir().join("calendar.dirty");
         dirty_file::spawn_watcher(dirty_path, dirty_tx);
+        Self::spawn_with_dirty(graph, config, timing, dirty_rx)
+    }
 
+    /// Like [`spawn_with`](Self::spawn_with) but wakes on a caller-owned dirty
+    /// channel (see the mailbox source for why).
+    pub fn spawn_with_dirty(
+        graph: GraphClient,
+        _config: Config,
+        timing: FredTiming,
+        mut dirty_rx: mpsc::UnboundedReceiver<()>,
+    ) -> watch::Receiver<Option<CalendarSnapshot>> {
+        let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
             let source = FredCalendarNativeSource { timing };
             source.run(graph, tx, &mut dirty_rx).await;
         });
-
         rx
     }
 
@@ -376,6 +384,8 @@ fn build_snapshot(
                 is_cancelled,
                 response_status: response,
                 is_all_day,
+                account: None,
+                dedupe_key: None,
             })
         })
         .collect();
@@ -383,29 +393,7 @@ fn build_snapshot(
     // Sort by start time ascending (then end, so the order is deterministic).
     events.sort_by_key(|ev| (ev.start, ev.end));
 
-    // Find next upcoming event — skip cancelled/declined/all-day.
-    let next = events.iter().find(|ev| {
-        ev.start.is_some_and(|s| s > now)
-            && ev.status != "cancelled"
-            && ev.status != "declined"
-            && !ev.is_all_day
-    });
-
-    let (next_event, sweater) = match next {
-        Some(ev) => {
-            let mins = ev
-                .start
-                .map(|s| (s - now).num_minutes())
-                .unwrap_or(i64::MAX);
-            let sweater = sweater_for_minutes(mins);
-            let ne = NextEvent {
-                title: ev.title.clone(),
-                in_minutes: mins,
-            };
-            (Some(ne), sweater)
-        }
-        None => (None, "sage".to_owned()),
-    };
+    let (next_event, sweater) = next_and_sweater(&events, now);
 
     let state = if events.is_empty() {
         SourceState::Empty
@@ -423,15 +411,6 @@ fn build_snapshot(
         updated_at: Some(now),
         auth_prompt: None,
         retry_at: None,
-    }
-}
-
-fn sweater_for_minutes(mins: i64) -> String {
-    if mins < 5 {
-        "red".to_owned()
-    } else if mins <= 15 {
-        "amber".to_owned()
-    } else {
-        "sage".to_owned()
+        accounts: Vec::new(),
     }
 }
