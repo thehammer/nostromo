@@ -278,4 +278,57 @@ final class ClientMsgTests: XCTestCase {
             "the surface."
         )
     }
+    // MARK: - Background task verbs (BA1)
+    //
+    // The keys are the ones `ClientMsg::SessionTaskStop` / `SessionTaskOutput` deserialise
+    // (`src/ipc/protocol.rs`); `offset` is absent for "the tail" and never null.
+
+    func testSessionTaskStopEncodesExactlyItsFourKeys() throws {
+        let dict = try encode(ClientSessionTaskStop(requestId: "req-1", tag: "cody-1", taskId: "b7k2m9x1a"))
+        XCTAssertEqual(Set(dict.keys), ["type", "request_id", "tag", "task_id"], "\(dict)")
+        XCTAssertEqual(dict["type"] as? String, "session_task_stop")
+        XCTAssertEqual(dict["request_id"] as? String, "req-1")
+        XCTAssertEqual(dict["tag"] as? String, "cody-1")
+        XCTAssertEqual(dict["task_id"] as? String, "b7k2m9x1a")
+    }
+
+    func testSessionTaskOutputWithAnOffsetEncodesAllSixKeys() throws {
+        let dict = try encode(ClientSessionTaskOutput(requestId: "req-2", tag: "cody-1", taskId: "t1", offset: 4096, maxBytes: 65_536))
+        XCTAssertEqual(Set(dict.keys), ["type", "request_id", "tag", "task_id", "offset", "max_bytes"], "\(dict)")
+        XCTAssertEqual(dict["type"] as? String, "session_task_output")
+        XCTAssertEqual(dict["request_id"] as? String, "req-2")
+        XCTAssertEqual(dict["tag"] as? String, "cody-1")
+        XCTAssertEqual(dict["task_id"] as? String, "t1")
+        XCTAssertEqual(dict["offset"] as? Int, 4096)
+        XCTAssertEqual(dict["max_bytes"] as? Int, 65_536)
+    }
+
+    func testSessionTaskOutputWithoutAnOffsetOmitsTheKeyAndNeverSendsNull() throws {
+        let msg = ClientSessionTaskOutput(requestId: "req-3", tag: "cody-1", taskId: "t1", offset: nil, maxBytes: 8192)
+        let dict = try encode(msg)
+        XCTAssertEqual(Set(dict.keys), ["type", "request_id", "tag", "task_id", "max_bytes"], "\(dict)")
+        let data = try JSONEncoder().encode(msg)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains("null"), text)
+        XCTAssertFalse(text.contains("offset"), text)
+    }
+
+    func testAnOffsetOfZeroIsSentAndIsNotTheTail() throws {
+        let dict = try encode(ClientSessionTaskOutput(requestId: "req-4", tag: "t", taskId: "x", offset: 0, maxBytes: 4))
+        XCTAssertEqual(dict["offset"] as? Int, 0, "\(dict)")
+    }
+
+    func testAnOffsetBeyondFourGibibytesAndTheLargestWindowEncodeExactly() throws {
+        let big: UInt64 = 5 * 1024 * 1024 * 1024 + 7
+        let dict = try encode(ClientSessionTaskOutput(requestId: "r", tag: "t", taskId: "x", offset: big, maxBytes: UInt32.max))
+        XCTAssertEqual((dict["offset"] as? NSNumber)?.uint64Value, big)
+        XCTAssertEqual((dict["max_bytes"] as? NSNumber)?.uint32Value, UInt32.max)
+    }
+
+    func testTheTaskVerbsKeepAHostileTaskIdAsOneStringMember() throws {
+        let hostile = "a\"b\\c\n../../etc/passwd"
+        let dict = try encode(ClientSessionTaskStop(requestId: "r", tag: "t", taskId: hostile))
+        XCTAssertEqual(dict["task_id"] as? String, hostile)
+        XCTAssertEqual(dict.count, 4)
+    }
 }

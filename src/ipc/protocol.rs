@@ -1536,6 +1536,25 @@ pub enum ClientMsg {
         clear: bool,
         request_id: String,
     },
+    /// Stop a background task (refused over TCP). Answered with
+    /// `ServerMsg::SessionTaskStopResult` to the asking client.
+    SessionTaskStop {
+        request_id: String,
+        tag: String,
+        task_id: String,
+    },
+    /// Read a shell or monitor task's output (refused over TCP). `offset` is a
+    /// raw byte offset into the output (`None`: the tail); `max_bytes` is
+    /// clamped to `TASK_OUTPUT_MAX_BYTES`. Answered with
+    /// `ServerMsg::SessionTaskOutputResult` to the asking client.
+    SessionTaskOutput {
+        request_id: String,
+        tag: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        max_bytes: u32,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -1593,6 +1612,49 @@ pub enum TaskEndReason {
     /// The task left the CLI's live background set and never reported an end.
     Vanished,
 }
+
+/// How a stop request ended (`ServerMsg::SessionTaskStopResult`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStopOutcome {
+    /// The CLI took the stop. The task's status changes only when the CLI
+    /// reports the task ended.
+    Accepted,
+    /// The CLI (or the daemon, over the network) said no; `message` says why.
+    Refused,
+    /// The CLI did not answer in time.
+    Timeout,
+    /// The CLI predates stopping tasks.
+    Unsupported,
+    /// The task is unknown or already ended: nothing was sent.
+    NotRunning,
+}
+
+/// How an output read ended (`ServerMsg::SessionTaskOutputResult`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOutputOutcome {
+    Ok,
+    /// The task has no readable output (no file, and the CLI has none either).
+    Unavailable,
+    Refused,
+    /// The task is not one this session holds.
+    Error,
+}
+
+/// Where a read's text came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOutputSource {
+    /// The task's output file: ranged, up to the whole output.
+    File,
+    /// The CLI's own `get_task_output`: at most the last 8 KiB.
+    CliTail,
+}
+
+/// The largest read one `SessionTaskOutput` may ask for. A request for more
+/// is clamped (the text's JSON form then stays far under `MAX_FRAME_LEN`).
+pub const TASK_OUTPUT_MAX_BYTES: u32 = 1024 * 1024;
 
 /// Metadata of one background task (`ServerMsg::SessionTasks`).
 ///
@@ -2110,6 +2172,32 @@ pub enum ServerMsg {
         completion_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+    },
+    /// Answer to `SessionTaskStop`, to the asking client only. `LocalOnly`.
+    SessionTaskStopResult {
+        request_id: String,
+        tag: String,
+        task_id: String,
+        outcome: TaskStopOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    /// Answer to `SessionTaskOutput`, to the asking client only. `text` is
+    /// sanitised output (no escape sequences) for the raw byte range
+    /// `[start_offset, end_offset)` of an output of `total_bytes`. `LocalOnly`.
+    SessionTaskOutputResult {
+        request_id: String,
+        tag: String,
+        task_id: String,
+        outcome: TaskOutputOutcome,
+        text: String,
+        start_offset: u64,
+        end_offset: u64,
+        total_bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<TaskOutputSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
 
     // ── agent tracker ─────────────────────────────────────────────────────────
@@ -5616,5 +5704,178 @@ mod work_wire_tests {
                 &format!(r#"{{"type":"subscribe","topics":[],"renders_decisions":false,"renders_approvals":{value}}}"#),
             );
         }
+    }
+
+    // ── BA1: the task verbs and their results (golden JSON) ───────────────────
+    //
+    // The Swift decoders and encoders (`TaskWire.swift`, `ClientMsg.swift`, and the Mac app's
+    // `NostromodClient`) are tested against these exact strings.
+
+    #[test]
+    fn the_stop_verb_has_this_exact_wire_form() {
+        assert_client_golden(
+            ClientMsg::SessionTaskStop { request_id: "r1".into(), tag: "cody-1".into(), task_id: "b7k2m9x1a".into() },
+            r#"{"type":"session_task_stop","request_id":"r1","tag":"cody-1","task_id":"b7k2m9x1a"}"#,
+        );
+    }
+
+    #[test]
+    fn the_output_verb_names_an_offset_only_when_it_has_one() {
+        assert_client_golden(
+            ClientMsg::SessionTaskOutput {
+                request_id: "r2".into(),
+                tag: "cody-1".into(),
+                task_id: "t1".into(),
+                offset: Some(4096),
+                max_bytes: 65536,
+            },
+            r#"{"type":"session_task_output","request_id":"r2","tag":"cody-1","task_id":"t1","offset":4096,"max_bytes":65536}"#,
+        );
+        // The tail: the key is absent (never `null`), and a client that omits it decodes the same.
+        assert_client_golden(
+            ClientMsg::SessionTaskOutput {
+                request_id: "r3".into(),
+                tag: "cody-1".into(),
+                task_id: "t1".into(),
+                offset: None,
+                max_bytes: 8192,
+            },
+            r#"{"type":"session_task_output","request_id":"r3","tag":"cody-1","task_id":"t1","max_bytes":8192}"#,
+        );
+    }
+
+    #[test]
+    fn an_output_verb_with_a_null_offset_decodes_as_the_tail() {
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"session_task_output","request_id":"r","tag":"t","task_id":"x","offset":null,"max_bytes":10}"#,
+        )
+        .unwrap();
+        assert!(matches!(msg, ClientMsg::SessionTaskOutput { offset: None, max_bytes: 10, .. }), "{msg:?}");
+    }
+
+    #[test]
+    fn an_output_verb_without_a_max_is_not_a_request() {
+        assert!(serde_json::from_str::<ClientMsg>(
+            r#"{"type":"session_task_output","request_id":"r","tag":"t","task_id":"x"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_stop_result_has_this_exact_wire_form_with_and_without_a_message() {
+        assert_server_golden(
+            ServerMsg::SessionTaskStopResult {
+                request_id: "r1".into(),
+                tag: "cody-1".into(),
+                task_id: "t1".into(),
+                outcome: TaskStopOutcome::Accepted,
+                message: None,
+            },
+            r#"{"type":"session_task_stop_result","request_id":"r1","tag":"cody-1","task_id":"t1","outcome":"accepted"}"#,
+        );
+        assert_server_golden(
+            ServerMsg::SessionTaskStopResult {
+                request_id: "r2".into(),
+                tag: "cody-1".into(),
+                task_id: "t1".into(),
+                outcome: TaskStopOutcome::Refused,
+                message: Some("StopTask: not stoppable".into()),
+            },
+            r#"{"type":"session_task_stop_result","request_id":"r2","tag":"cody-1","task_id":"t1","outcome":"refused","message":"StopTask: not stoppable"}"#,
+        );
+    }
+
+    #[test]
+    fn every_stop_outcome_has_its_documented_wire_name() {
+        for (outcome, name) in [
+            (TaskStopOutcome::Accepted, "accepted"),
+            (TaskStopOutcome::Refused, "refused"),
+            (TaskStopOutcome::Timeout, "timeout"),
+            (TaskStopOutcome::Unsupported, "unsupported"),
+            (TaskStopOutcome::NotRunning, "not_running"),
+        ] {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), name);
+            assert_eq!(serde_json::from_value::<TaskStopOutcome>(serde_json::json!(name)).unwrap(), outcome);
+        }
+    }
+
+    #[test]
+    fn every_output_outcome_and_source_has_its_documented_wire_name() {
+        for (outcome, name) in [
+            (TaskOutputOutcome::Ok, "ok"),
+            (TaskOutputOutcome::Unavailable, "unavailable"),
+            (TaskOutputOutcome::Refused, "refused"),
+            (TaskOutputOutcome::Error, "error"),
+        ] {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), name);
+            assert_eq!(serde_json::from_value::<TaskOutputOutcome>(serde_json::json!(name)).unwrap(), outcome);
+        }
+        for (source, name) in [(TaskOutputSource::File, "file"), (TaskOutputSource::CliTail, "cli_tail")] {
+            assert_eq!(serde_json::to_value(source).unwrap(), name);
+            assert_eq!(serde_json::from_value::<TaskOutputSource>(serde_json::json!(name)).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn an_output_result_has_this_exact_wire_form_with_every_field() {
+        assert_server_golden(
+            ServerMsg::SessionTaskOutputResult {
+                request_id: "r1".into(),
+                tag: "cody-1".into(),
+                task_id: "t1".into(),
+                outcome: TaskOutputOutcome::Ok,
+                text: "line one\nline two\n".into(),
+                start_offset: 100,
+                end_offset: 118,
+                total_bytes: 4096,
+                source: Some(TaskOutputSource::CliTail),
+                message: Some("a note".into()),
+            },
+            r#"{"type":"session_task_output_result","request_id":"r1","tag":"cody-1","task_id":"t1","outcome":"ok","text":"line one\nline two\n","start_offset":100,"end_offset":118,"total_bytes":4096,"source":"cli_tail","message":"a note"}"#,
+        );
+    }
+
+    #[test]
+    fn an_output_result_without_a_source_or_message_omits_both_keys() {
+        assert_server_golden(
+            ServerMsg::SessionTaskOutputResult {
+                request_id: "r2".into(),
+                tag: "cody-1".into(),
+                task_id: "t1".into(),
+                outcome: TaskOutputOutcome::Unavailable,
+                text: String::new(),
+                start_offset: 0,
+                end_offset: 0,
+                total_bytes: 0,
+                source: None,
+                message: None,
+            },
+            r#"{"type":"session_task_output_result","request_id":"r2","tag":"cody-1","task_id":"t1","outcome":"unavailable","text":"","start_offset":0,"end_offset":0,"total_bytes":0}"#,
+        );
+    }
+
+    #[test]
+    fn an_output_result_keeps_large_offsets_exact() {
+        let big = 5u64 * 1024 * 1024 * 1024 + 7;
+        let msg = ServerMsg::SessionTaskOutputResult {
+            request_id: "r".into(),
+            tag: "t".into(),
+            task_id: "x".into(),
+            outcome: TaskOutputOutcome::Ok,
+            text: "x".into(),
+            start_offset: big,
+            end_offset: big + 1,
+            total_bytes: big + 1,
+            source: Some(TaskOutputSource::File),
+            message: None,
+        };
+        let back: ServerMsg = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        let ServerMsg::SessionTaskOutputResult { start_offset, end_offset, total_bytes, .. } = back else { panic!() };
+        assert_eq!((start_offset, end_offset, total_bytes), (big, big + 1, big + 1));
+    }
+
+    #[test]
+    fn the_output_cap_is_one_mebibyte() {
+        assert_eq!(TASK_OUTPUT_MAX_BYTES, 1_048_576);
     }
 }

@@ -1,6 +1,7 @@
 // NostromoKit — TaskWire.swift
 //
-// Background-task frames (`session_tasks`, `session_task_detail`): what a
+// Background-task frames (`session_tasks`, `session_task_detail`, and the two
+// answers `session_task_stop_result` / `session_task_output_result`): what a
 // session's Claude Code CLI is running in the background. Mirrors the Rust
 // types in `src/ipc/protocol.rs` ("background tasks").
 //
@@ -12,7 +13,9 @@
 //
 // `TaskMetaWire` is metadata only. Free text derived from a task's output or
 // from the conversation (preview line, summaries, prompt) arrives in
-// `session_task_detail`, which the daemon never sends to a network peer.
+// `session_task_detail`, which the daemon never sends to a network peer. The
+// two answers are local only too: one carries output, the other replies to a
+// verb a network peer can never send.
 
 import Foundation
 
@@ -87,6 +90,87 @@ public enum TaskEndReasonWire: Equatable {
         case "vanished": self = .vanished
         default: self = .unknown(raw)
         }
+    }
+}
+
+/// How a stop request ended (`TaskStopOutcome`).
+public enum TaskStopOutcomeWire: Equatable {
+    /// The CLI took the stop. The task's status changes when the CLI reports it ended.
+    case accepted
+    case refused
+    case timeout
+    /// The CLI predates stopping tasks.
+    case unsupported
+    /// The task is unknown or already ended.
+    case notRunning
+    case unknown(String)
+
+    public init(wire raw: String) {
+        switch raw {
+        case "accepted": self = .accepted
+        case "refused": self = .refused
+        case "timeout": self = .timeout
+        case "unsupported": self = .unsupported
+        case "not_running": self = .notRunning
+        default: self = .unknown(raw)
+        }
+    }
+}
+
+/// How an output read ended (`TaskOutputOutcome`).
+public enum TaskOutputOutcomeWire: Equatable {
+    case ok
+    case unavailable
+    case refused
+    case error
+    case unknown(String)
+
+    public init(wire raw: String) {
+        switch raw {
+        case "ok": self = .ok
+        case "unavailable": self = .unavailable
+        case "refused": self = .refused
+        case "error": self = .error
+        default: self = .unknown(raw)
+        }
+    }
+}
+
+/// Where an output read's text came from (`TaskOutputSource`).
+public enum TaskOutputSourceWire: Equatable {
+    /// The task's output file: ranged, up to the whole output.
+    case file
+    /// The CLI's own tail: at most the last 8 KiB.
+    case cliTail
+    case unknown(String)
+
+    public init(wire raw: String) {
+        switch raw {
+        case "file": self = .file
+        case "cli_tail": self = .cliTail
+        default: self = .unknown(raw)
+        }
+    }
+}
+
+extension TaskStopOutcomeWire: Decodable {
+    public init(from decoder: Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
+        self.init(wire: raw)
+    }
+}
+
+extension TaskOutputOutcomeWire: Decodable {
+    public init(from decoder: Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
+        self.init(wire: raw)
+    }
+}
+
+extension TaskOutputSourceWire: Decodable {
+    public init(from decoder: Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
+        self.init(wire: raw)
     }
 }
 
@@ -245,5 +329,70 @@ public struct SessionTaskDetailWire: Decodable, Equatable {
         case taskId = "task_id"
         case progressSummary = "progress_summary"
         case completionSummary = "completion_summary"
+    }
+}
+
+/// `session_task_stop_result`: the answer to a `session_task_stop` of this
+/// connection. Local clients only.
+public struct SessionTaskStopResultWire: Decodable, Equatable {
+    public let requestId: String
+    public let tag: String
+    public let taskId: String
+    public let outcome: TaskStopOutcomeWire
+    /// The CLI's reason, or why nothing was sent.
+    public let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tag, outcome, message
+        case requestId = "request_id"
+        case taskId = "task_id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try c.decode(String.self, forKey: .requestId)
+        tag = try c.decode(String.self, forKey: .tag)
+        taskId = try c.decode(String.self, forKey: .taskId)
+        outcome = try c.decode(TaskStopOutcomeWire.self, forKey: .outcome)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+    }
+}
+
+/// `session_task_output_result`: the answer to a `session_task_output` of this
+/// connection. `text` is sanitised output for the raw byte range
+/// `[startOffset, endOffset)` of an output of `totalBytes`. Local clients only.
+public struct SessionTaskOutputResultWire: Decodable, Equatable {
+    public let requestId: String
+    public let tag: String
+    public let taskId: String
+    public let outcome: TaskOutputOutcomeWire
+    public let text: String
+    public let startOffset: UInt64
+    public let endOffset: UInt64
+    public let totalBytes: UInt64
+    public let source: TaskOutputSourceWire?
+    public let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tag, outcome, text, source, message
+        case requestId = "request_id"
+        case taskId = "task_id"
+        case startOffset = "start_offset"
+        case endOffset = "end_offset"
+        case totalBytes = "total_bytes"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try c.decode(String.self, forKey: .requestId)
+        tag = try c.decode(String.self, forKey: .tag)
+        taskId = try c.decode(String.self, forKey: .taskId)
+        outcome = try c.decode(TaskOutputOutcomeWire.self, forKey: .outcome)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        startOffset = try c.decodeIfPresent(UInt64.self, forKey: .startOffset) ?? 0
+        endOffset = try c.decodeIfPresent(UInt64.self, forKey: .endOffset) ?? 0
+        totalBytes = try c.decodeIfPresent(UInt64.self, forKey: .totalBytes) ?? 0
+        source = try c.decodeIfPresent(TaskOutputSourceWire.self, forKey: .source)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
     }
 }

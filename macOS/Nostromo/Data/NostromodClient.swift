@@ -262,6 +262,10 @@ enum ServerMsg {
     case sessionTasks(SessionTasksWire)
     /// Output- or conversation-derived text of one task. Local clients only.
     case sessionTaskDetail(SessionTaskDetailWire)
+    /// The answer to a `session_task_stop` of this connection. Local only.
+    case sessionTaskStopResult(SessionTaskStopResultWire)
+    /// The answer to a `session_task_output` of this connection. Local only.
+    case sessionTaskOutputResult(SessionTaskOutputResultWire)
 
     // ── agent tracker ─────────────────────────────────────────────────────────
     /// The whole board of one focus (full snapshot). Local clients only.
@@ -896,6 +900,22 @@ class NostromodClient {
              type: "model_default_set")
     }
 
+    // MARK: - Background task commands
+
+    /// Stop a background task; answered with `ServerMsg.sessionTaskStopResult`.
+    func sendTaskStop(requestId: String, tag: String, taskId: String) {
+        send(ClientSessionTaskStop(requestId: requestId, tag: tag, taskId: taskId),
+             type: "session_task_stop", tag: tag)
+    }
+
+    /// Read a shell or monitor task's output (`offset` nil: the tail); answered with
+    /// `ServerMsg.sessionTaskOutputResult`.
+    func sendTaskOutput(requestId: String, tag: String, taskId: String, offset: UInt64?, maxBytes: UInt32) {
+        send(ClientSessionTaskOutput(requestId: requestId, tag: tag, taskId: taskId,
+                                     offset: offset, maxBytes: maxBytes),
+             type: "session_task_output", tag: tag)
+    }
+
     // MARK: - Decision modal commands
 
     /// Answer a `decision_request` by `requestId`. `choiceId: nil` means
@@ -1456,6 +1476,20 @@ class NostromodClient {
         case "session_task_detail":
             if let m = try? decoder.decode(SessionTaskDetailWire.self, from: raw) {
                 return .sessionTaskDetail(m)
+            }
+
+        case "session_task_stop_result":
+            if let m = try? decoder.decode(SessionTaskStopResultWire.self, from: raw) {
+                return .sessionTaskStopResult(m)
+            } else {
+                log.error("failed to decode session_task_stop_result")
+            }
+
+        case "session_task_output_result":
+            if let m = try? decoder.decode(SessionTaskOutputResultWire.self, from: raw) {
+                return .sessionTaskOutputResult(m)
+            } else {
+                log.error("failed to decode session_task_output_result")
             }
 
         case "tracker_board":

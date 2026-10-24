@@ -76,8 +76,10 @@ mod task_runtime;
 pub use control::CONTROL_TIMEOUT;
 pub use login::{ResendOutcome, ResendTrigger};
 use control::ControlReply;
+pub use task_runtime::{OutputReply, StopReport, TaskIoConfig};
 use task_runtime::{
-    detail_msg, drive_timer, ensure_poller, forward_session_events, tasks_msg, TaskRuntime,
+    detail_msg, drive_timer, ensure_poller, ensure_probe, forward_session_events, read_output,
+    stop_task, tasks_msg, TaskRuntime,
 };
 pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket};
 use model_switch::{
@@ -531,6 +533,8 @@ pub struct SessionManager {
     login: Option<Arc<LoginCoordinator>>,
     /// Where `claude` was last found (`login_snapshot`); see `claude_bin`.
     claude_bin_cache: Mutex<Option<(Option<PathBuf>, Instant)>>,
+    /// How new sessions read and control their background tasks.
+    task_io: TaskIoConfig,
 }
 
 impl SessionManager {
@@ -595,6 +599,7 @@ impl SessionManager {
             omit_guard_hook: false,
             login: None,
             claude_bin_cache: Mutex::new(None),
+            task_io: TaskIoConfig::default(),
         }
     }
 
@@ -1072,6 +1077,7 @@ impl SessionManager {
             Arc::clone(&transcript),
             Some(session_id.clone()),
             task_dir.clone(),
+            &self.task_io,
         );
         let shared = Shared {
             transcript,
@@ -1828,6 +1834,53 @@ impl SessionManager {
 
     // ── list ──────────────────────────────────────────────────────────────────
 
+    /// Change how sessions started from now on read and control their tasks
+    /// (a test hook: the daemon uses the defaults).
+    pub fn set_task_io(&mut self, config: TaskIoConfig) {
+        self.task_io = config;
+    }
+
+    /// Stop one of `tag`'s background tasks. The returned future owns what it
+    /// needs, so it can be awaited without the manager's lock. Nothing is sent
+    /// to the CLI for a session or task that is not there or has ended.
+    pub fn task_stop(
+        &self,
+        tag: &str,
+        task_id: &str,
+    ) -> impl std::future::Future<Output = StopReport> + Send + 'static {
+        let shared = self.sessions.get(tag).map(|s| s.shared.clone());
+        let task_id = task_id.to_owned();
+        async move {
+            match shared {
+                Some(shared) => stop_task(&shared, &task_id).await,
+                None => StopReport::not_running("the session is not running"),
+            }
+        }
+    }
+
+    /// Read a range of one of `tag`'s tasks' output (see
+    /// `ClientMsg::SessionTaskOutput`). Owns what it needs, like
+    /// [`Self::task_stop`].
+    pub fn task_output(
+        &self,
+        tag: &str,
+        task_id: &str,
+        offset: Option<u64>,
+        max_bytes: u32,
+    ) -> impl std::future::Future<Output = OutputReply> + Send + 'static {
+        let shared = self.sessions.get(tag).map(|s| s.shared.clone());
+        let task_id = task_id.to_owned();
+        async move {
+            match shared {
+                Some(shared) => read_output(&shared, &task_id, offset, max_bytes).await,
+                None => OutputReply::without_text(
+                    crate::ipc::protocol::TaskOutputOutcome::Error,
+                    "the session is not running",
+                ),
+            }
+        }
+    }
+
     pub fn list(&self) -> Vec<SessionInfo> {
         self.sessions.values().map(|s| s.info()).collect()
     }
@@ -2375,6 +2428,7 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
             ParsedLine::Task(event) => {
                 shared.tasks.on_event(&shared.event_tx, event);
                 ensure_poller(&shared);
+                ensure_probe(&shared);
             }
             _ => {}
         }

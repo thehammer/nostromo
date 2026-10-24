@@ -130,6 +130,10 @@ public enum ServerMsg {
     /// The text derived from one task's output or the conversation. Local
     /// clients only: the daemon never sends it to a network peer.
     case sessionTaskDetail(SessionTaskDetailWire)
+    /// The answer to a `session_task_stop`. Local clients only.
+    case sessionTaskStopResult(SessionTaskStopResultWire)
+    /// The answer to a `session_task_output`. Local clients only.
+    case sessionTaskOutputResult(SessionTaskOutputResultWire)
 
     // ── agent tracker ─────────────────────────────────────────────────────────
 
@@ -777,6 +781,16 @@ extension ServerMsg {
         case "session_task_detail":
             if let m = try? dec.decode(SessionTaskDetailWire.self, from: data) {
                 return .sessionTaskDetail(m)
+            }
+
+        case "session_task_stop_result":
+            if let m = try? dec.decode(SessionTaskStopResultWire.self, from: data) {
+                return .sessionTaskStopResult(m)
+            }
+
+        case "session_task_output_result":
+            if let m = try? dec.decode(SessionTaskOutputResultWire.self, from: data) {
+                return .sessionTaskOutputResult(m)
             }
 
         case "tracker_board":

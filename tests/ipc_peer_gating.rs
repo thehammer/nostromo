@@ -1010,6 +1010,19 @@ async fn work_source_statuses_for_different_sources_are_retained_separately() {
 /// task output files live under `/tmp/claude-<uid>/<cwd, "/" -> "-">/
 /// <session id>/tasks/<task id>.output`, the layout of the real CLI's temp root
 /// (the daemon only learns a root of that shape; the cwd is unique to the test run).
+///
+/// **Task I/O mode** (BA1; a view name starting with `tio-`). Nothing is emitted until a message
+/// carries a cue, and every `control_request` is answered (or deliberately not) instead of getting
+/// a turn. Cues, each `BA1-<WHAT>:<task id>` inside a `session_send` text: `SHELL` (a backgrounded
+/// shell task starts), `BGSHELL` (the same, after a Bash call whose tool result names the output path
+/// in `<view>.path.<id>`), `MON` (a monitor), `AGENT`, `AMBIENT` (a housekeeping watcher), `KILL`
+/// (`task_updated` killed), `STOPPED` (a `stopped` notification), `DONE` (`task_updated` completed)
+/// and `NOTIFY` (a `completed` notification whose `output_file` is in `<view>.path.<id>`). The files
+/// `<view>.stopmode` (`modern` default | `refuse` | `silent` | `legacy`) and `<view>.outmode`
+/// (`tail` default | `empty` | `silent` | `legacy`) say how `stop_task` and `get_task_output` are
+/// answered; they are read at each request, so a test may change them mid-way. A modern CLI answers
+/// the daemon's capability probe (`__nostromo_capability_probe__`) with "No task found". Every line
+/// the fake receives is in its stdin log, so a test can see exactly which control requests arrived.
 const FAKE_CLAUDE_SCRIPT: &str = r#"#!/bin/sh
 name=""
 sid=""
@@ -1022,6 +1035,67 @@ log="@LOGDIR@/$name.stdin"
 echo START >> "$log"
 tasks=""
 case "$name" in tasks-*) tasks=1 ;; esac
+tio=""
+case "$name" in tio-*) tio=1 ;; esac
+
+tio_mode() { cat "@LOGDIR@/$name.$1" 2>/dev/null || printf '%s' "$2"; }
+tio_error() {
+  printf '{"type":"control_response","response":{"subtype":"error","request_id":"%s","error":"%s"}}\n' "$1" "$2"
+}
+tio_ok() {
+  printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":%s}}\n' "$1" "$2"
+}
+answer_tio() {
+  rid=$(printf '%s' "$1" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  tid=$(printf '%s' "$1" | sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
+  case "$1" in
+    *'"stop_task"'*)
+      mode=$(tio_mode stopmode modern)
+      case "$mode" in
+        silent) ;;
+        legacy) tio_error "$rid" "Unsupported control request subtype: stop_task" ;;
+        *)
+          if [ "$tid" = "__nostromo_capability_probe__" ]; then tio_error "$rid" "No task found with ID: $tid"
+          elif [ "$mode" = "refuse" ]; then tio_error "$rid" "StopTask: the task cannot be stopped right now"
+          else tio_ok "$rid" '{}'
+          fi ;;
+      esac ;;
+    *'"get_task_output"'*)
+      case "$(tio_mode outmode tail)" in
+        silent) ;;
+        legacy) tio_error "$rid" "Unsupported control request subtype: get_task_output" ;;
+        empty) tio_ok "$rid" '{"output":"","total_bytes":0,"truncated":false}' ;;
+        *) tio_ok "$rid" '{"output":"SECRET-OUTPUT-CLI-1\nSECRET-OUTPUT-CLI-2\n","total_bytes":1000,"truncated":true}' ;;
+      esac ;;
+    *) tio_error "$rid" "Unsupported control request subtype" ;;
+  esac
+}
+cue_id() { printf '%s' "$line" | sed -n "s/.*$1:\([A-Za-z0-9_-]*\).*/\1/p"; }
+path_of() { cat "@LOGDIR@/$name.path.$1" 2>/dev/null; }
+started_line() {
+  printf '{"type":"system","subtype":"task_started","task_id":"%s","description":"%s %s","task_type":"%s"%s}\n' "$1" "$2" "$1" "$3" "$4"
+}
+emit_tio() {
+  case "$line" in
+    *BA1-SHELL:*) id=$(cue_id BA1-SHELL); started_line "$id" shell local_bash ',"is_backgrounded":true' ;;
+    *BA1-MON:*) id=$(cue_id BA1-MON); started_line "$id" monitor monitor_mcp ',"is_backgrounded":true' ;;
+    *BA1-AGENT:*) id=$(cue_id BA1-AGENT); started_line "$id" agent local_agent ',"subagent_type":"reviewer"' ;;
+    *BA1-AMBIENT:*) id=$(cue_id BA1-AMBIENT); started_line "$id" watcher monitor_ws ',"ambient":true' ;;
+    *BA1-BGSHELL:*)
+      id=$(cue_id BA1-BGSHELL)
+      printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_%s","name":"Bash","input":{"command":"sleep 99","run_in_background":true}}]}}\n' "$id"
+      printf '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_%s","content":"Command running in background with ID: %s. Output is being written to: %s."}]}}\n' "$id" "$id" "$(path_of "$id")"
+      started_line "$id" shell local_bash ",\"is_backgrounded\":true,\"tool_use_id\":\"toolu_$id\"" ;;
+    *BA1-KILL:*) id=$(cue_id BA1-KILL)
+      printf '{"type":"system","subtype":"task_updated","task_id":"%s","patch":{"status":"killed"}}\n' "$id" ;;
+    *BA1-DONE:*) id=$(cue_id BA1-DONE)
+      printf '{"type":"system","subtype":"task_updated","task_id":"%s","patch":{"status":"completed"}}\n' "$id" ;;
+    *BA1-STOPPED:*) id=$(cue_id BA1-STOPPED)
+      printf '{"type":"system","subtype":"task_notification","task_id":"%s","status":"stopped","summary":"stopped"}\n' "$id" ;;
+    *BA1-NOTIFY:*) id=$(cue_id BA1-NOTIFY)
+      printf '{"type":"system","subtype":"task_notification","task_id":"%s","status":"completed","output_file":"%s","summary":"done"}\n' "$id" "$(path_of "$id")" ;;
+  esac
+}
 
 answer_control() {
   rid=$(printf '%s' "$1" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
@@ -1063,12 +1137,18 @@ while IFS= read -r line; do
       *'"control_request"'*) answer_control "$line"; continue ;;
     esac
   fi
+  if [ -n "$tio" ]; then
+    case "$line" in
+      *'"control_request"'*) answer_tio "$line"; continue ;;
+    esac
+  fi
   printf '%s\n' '{"type":"user","message":{"role":"user","content":"echoed"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'
   if [ -n "$tasks" ]; then
     case "$line" in
       *GO-TASKS*) emit_tasks ;;
     esac
   fi
+  if [ -n "$tio" ]; then emit_tio; fi
 done
 "#;
 
@@ -4864,7 +4944,7 @@ mod model_switching {
 
     /// The activity log, redirected once per test process: a refused request may be audited and
     /// no test here may append to the operator's real `~/.claude/activity.jsonl`.
-    fn isolated_activity_log() -> PathBuf {
+    pub(crate) fn isolated_activity_log() -> PathBuf {
         static LOG: OnceLock<PathBuf> = OnceLock::new();
         LOG.get_or_init(|| {
             let path = std::env::temp_dir().join(format!("nostromo-peer-gating-activity-{}.jsonl", std::process::id()));
@@ -6020,6 +6100,1084 @@ mod background_tasks {
         assert_eq!(count_type(&tcp.frames, "session_task_detail"), 0, "{}", summarize(&tcp.frames));
         assert!(unix.text().contains("SECRET-OUTPUT-PROMPT"), "the control: the local peer saw the texts");
         assert_no_task_text_or_paths(&tcp.text(), &s, "the network peer");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // BA1: stopping a background task and reading its output
+    //
+    // Both verbs are for local peers only. A network peer is answered with a typed refusal, the
+    // CLI never hears of it, and one audit line says who tried. A local peer's stop reaches the CLI
+    // (`stop_task`), is audited once before the reply, and changes no task status itself; its
+    // output read is served from a validated file under an injected temp root or, failing that, the
+    // CLI's own tail. The fake claude's task I/O mode (`tio-` views; see `FAKE_CLAUDE_SCRIPT`)
+    // plays the CLI.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    mod task_verbs {
+        use super::*;
+
+        use nostromo::ipc::protocol::MAX_FRAME_LEN;
+        use nostromo::ipc::session_manager::TaskIoConfig;
+        use std::path::Path;
+        use std::sync::atomic::AtomicUsize;
+
+        const MIB: u32 = 1024 * 1024;
+        const PROBE_ID: &str = "__nostromo_capability_probe__";
+
+        // ── the session under test ───────────────────────────────────────────
+
+        /// A fake-claude session in task I/O mode, with its own output root, cwd and open counter.
+        struct Io {
+            tag: String,
+            view: String,
+            cwd: PathBuf,
+            root: PathBuf,
+            outside: PathBuf,
+            opens: Arc<AtomicUsize>,
+        }
+
+        impl Io {
+            fn sid(&self) -> String {
+                format!("sid-{}", self.view)
+            }
+
+            /// Where the CLI keeps task `id`'s output: `<root>/<cwd, "/" -> "-">/<session>/tasks/<id>.output`.
+            fn derived_path(&self, id: &str) -> PathBuf {
+                self.root
+                    .join(self.cwd.to_str().expect("utf8 cwd").replace('/', "-"))
+                    .join(self.sid())
+                    .join("tasks")
+                    .join(format!("{id}.output"))
+            }
+
+            fn write_at(&self, path: &Path, bytes: &[u8]) {
+                std::fs::create_dir_all(path.parent().unwrap()).expect("output dir");
+                std::fs::write(path, bytes).expect("write output");
+            }
+
+            fn write_output(&self, id: &str, bytes: &[u8]) -> PathBuf {
+                let path = self.derived_path(id);
+                self.write_at(&path, bytes);
+                path
+            }
+
+            /// A path the fake will report for task `id` (`BGSHELL`'s tool result, `NOTIFY`'s `output_file`).
+            fn report_path(&self, id: &str, path: &Path) {
+                self.fake_file(&format!("path.{id}"), path.to_str().expect("utf8 path"));
+            }
+
+            /// How the fake answers `stop_task`: `modern`, `refuse`, `silent` or `legacy`.
+            fn stopmode(&self, mode: &str) {
+                self.fake_file("stopmode", mode);
+            }
+
+            /// How the fake answers `get_task_output`: `tail`, `empty`, `silent` or `legacy`.
+            fn outmode(&self, mode: &str) {
+                self.fake_file("outmode", mode);
+            }
+
+            fn fake_file(&self, suffix: &str, text: &str) {
+                let dir = FAKE_CLAUDE_DIR.get().expect("install_fake_claude ran");
+                std::fs::write(dir.join(format!("{}.{suffix}", self.view)), text).expect("fake control file");
+            }
+
+            /// Every control request of `subtype` the fake received, as its log lines.
+            fn requests(&self, subtype: &str) -> Vec<String> {
+                fake_log(&self.view)
+                    .lines()
+                    .filter(|l| l.contains("control_request") && l.contains(&format!("\"{subtype}\"")))
+                    .map(str::to_owned)
+                    .collect()
+            }
+
+            /// The `stop_task` requests naming `id`.
+            fn stops_of(&self, id: &str) -> Vec<String> {
+                self.requests("stop_task").into_iter().filter(|l| l.contains(&format!("\"task_id\":\"{id}\""))).collect()
+            }
+
+            fn probes(&self) -> usize {
+                self.stops_of(PROBE_ID).len()
+            }
+        }
+
+        /// A daemon with one `tio-` session. Task I/O is injected before the session is spawned.
+        async fn start_io(
+            h: &Harness,
+            driver: &mut UnixStream,
+            name: &str,
+            control_timeout: Option<Duration>,
+        ) -> Io {
+            // Audit lines are appended to this process's temp log, never the operator's.
+            let _ = crate::model_switching::isolated_activity_log();
+            let (tag, view) = (format!("cody-{name}"), format!("tio-{name}"));
+            let root = h._tmp.path().join("claude-root");
+            let outside = h._tmp.path().join("outside");
+            let cwd = h._tmp.path().join("cwd");
+            for dir in [&root, &outside, &cwd] {
+                std::fs::create_dir_all(dir).expect("temp dir");
+            }
+            let opens = Arc::new(AtomicUsize::new(0));
+            h.session_mgr.lock().unwrap().set_task_io(TaskIoConfig {
+                control_timeout,
+                output_root: Some(root.clone()),
+                open_counter: Some(Arc::clone(&opens)),
+            });
+            send(
+                driver,
+                &ClientMsg::SessionSpawn {
+                    tag: tag.clone(),
+                    agent_name: "cody".into(),
+                    view_name: view.clone(),
+                    cwd: Some(cwd.clone()),
+                    session_id: Some(format!("sid-{view}")),
+                    remote_control: false,
+                },
+            )
+            .await;
+            let frames =
+                recv_until(driver, |m| matches!(m, ServerMsg::SessionSpawned { .. } | ServerMsg::Error { .. })).await;
+            assert!(matches!(frames.last(), Some(ServerMsg::SessionSpawned { .. })), "spawn `{tag}`: {frames:?}");
+            wait_for_log(&view, "START", |l| l.contains("START")).await;
+            Io { tag, view, cwd, root, outside, opens }
+        }
+
+        /// A daemon, a session, and a local peer attached to it.
+        struct Live {
+            h: Harness,
+            io: Io,
+            tap: Tap<UnixStream>,
+            #[allow(dead_code)]
+            driver: UnixStream,
+        }
+
+        async fn live(name: &str, control_timeout: Option<Duration>) -> Live {
+            let h = spawn_server().await;
+            let (mut driver, _) = h.unix(vec![]).await;
+            let io = start_io(&h, &mut driver, name, control_timeout).await;
+            let mut tap = unix_tap(&h).await;
+            attach(&mut tap, &io.tag).await;
+            Live { h, io, tap, driver }
+        }
+
+        impl Live {
+            /// Send the fake a message carrying `cue` and wait until it has it.
+            async fn cue(&mut self, cue: &str) {
+                self.tap.send(&ClientMsg::SessionSend { tag: self.io.tag.clone(), text: cue.into(), images: vec![] }).await;
+                wait_for_log(&self.io.view, cue, |l| l.contains(cue)).await;
+            }
+
+            /// Wait until the newest task list shows task `id` with `status`.
+            async fn wait_status(&mut self, id: &str, status: &str) {
+                let (tag, id2, status2) = (self.io.tag.clone(), id.to_owned(), status.to_owned());
+                self.tap
+                    .wait_until(&format!("task {id} to be {status}"), move |f| task_has_status(f, &tag, &id2, &status2))
+                    .await;
+            }
+
+            /// The task as the newest snapshot shows it.
+            fn task(&self, id: &str) -> Value {
+                let snapshot = latest_tasks(&self.tap.frames, &self.io.tag).expect("a task list");
+                task_in(snapshot, id).unwrap_or_else(|| panic!("task {id} missing from {snapshot}")).clone()
+            }
+
+            /// `stop_supported` in the newest snapshot (`Null` when the key is absent).
+            fn stop_supported(&self) -> Value {
+                latest_tasks(&self.tap.frames, &self.io.tag).expect("a task list")["stop_supported"].clone()
+            }
+
+            async fn stop(&mut self, rid: &str, task: &str) -> Value {
+                self.tap
+                    .send(&ClientMsg::SessionTaskStop { request_id: rid.into(), tag: self.io.tag.clone(), task_id: task.into() })
+                    .await;
+                expect_result(&mut self.tap, "session_task_stop_result", rid).await
+            }
+
+            async fn read(&mut self, rid: &str, task: &str, offset: Option<u64>, max_bytes: u32) -> Value {
+                self.tap
+                    .send(&ClientMsg::SessionTaskOutput {
+                        request_id: rid.into(),
+                        tag: self.io.tag.clone(),
+                        task_id: task.into(),
+                        offset,
+                        max_bytes,
+                    })
+                    .await;
+                expect_result(&mut self.tap, "session_task_output_result", rid).await
+            }
+        }
+
+        fn find_result<'a>(frames: &'a [Value], ty: &str, rid: &str) -> Option<&'a Value> {
+            frames.iter().find(|f| f["type"] == ty && f["request_id"] == rid)
+        }
+
+        async fn expect_result<S: AsyncRead + AsyncWrite + Unpin>(tap: &mut Tap<S>, ty: &str, rid: &str) -> Value {
+            let (ty2, rid2) = (ty.to_owned(), rid.to_owned());
+            tap.wait_until(&format!("`{ty}` for `{rid}`"), move |f| find_result(f, &ty2, &rid2).is_some()).await;
+            find_result(&tap.frames, ty, rid).expect("found").clone()
+        }
+
+        fn mark_sensitive(h: &Harness, tag: &str) {
+            h.session_mgr.lock().unwrap().sensitive_tags().mark_tag(tag);
+        }
+
+        // ── the audit log ────────────────────────────────────────────────────
+
+        /// Every task audit line (`task_stop` / `task_output`) for `focus_tag` in this process's log.
+        fn audit_lines(focus_tag: &str) -> Vec<Value> {
+            let path = crate::model_switching::isolated_activity_log();
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|l| l["focus_tag"] == focus_tag && matches!(l["kind"].as_str(), Some("task_stop" | "task_output")))
+                .collect()
+        }
+
+        /// Task audit lines by `actor` whose focus is a stand-in id: every real tag in these tests
+        /// starts with `cody-`, so a tag that does not is the opaque id of a sensitive focus (the
+        /// id itself is private to the daemon, and only one test of each actor uses a sensitive tag).
+        fn opaque_audit_lines(actor: &str) -> Vec<Value> {
+            let path = crate::model_switching::isolated_activity_log();
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|l| matches!(l["kind"].as_str(), Some("task_stop" | "task_output")) && l["actor"] == actor)
+                .filter(|l| l["focus_tag"].as_str().is_some_and(|t| !t.starts_with("cody-")))
+                .collect()
+        }
+
+        /// The whole log as text (to prove something never appears in it).
+        fn audit_text() -> String {
+            std::fs::read_to_string(crate::model_switching::isolated_activity_log()).unwrap_or_default()
+        }
+
+        // ── bytes on the wire ────────────────────────────────────────────────
+
+        /// The size of the largest frame in a peer's raw byte stream.
+        fn largest_frame(raw: &[u8]) -> usize {
+            let (mut at, mut largest) = (0usize, 0usize);
+            while at + 4 <= raw.len() {
+                let len = u32::from_be_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]) as usize;
+                largest = largest.max(len);
+                at += 4 + len;
+            }
+            largest
+        }
+
+        fn is_refusal_message(v: &Value) -> bool {
+            v["message"].as_str().is_some_and(|m| m.starts_with("requires_secure_connection"))
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // A network peer: refused, silently as far as the CLI and the task go
+        // ═════════════════════════════════════════════════════════════════════
+
+        /// A session with a running task and no client attached (so nothing polls the CLI or the
+        /// output files on its behalf: every request the CLI sees is one a verb caused).
+        async fn unattended_task(h: &Harness, name: &str, id: &str) -> (Io, UnixStream) {
+            let (mut driver, _) = h.unix(vec![]).await;
+            let io = start_io(h, &mut driver, name, None).await;
+            send(&mut driver, &ClientMsg::SessionSend { tag: io.tag.clone(), text: format!("BA1-SHELL:{id}"), images: vec![] }).await;
+            // The daemon asks the CLI whether it can stop tasks once a task exists: it knows the task.
+            wait_for_log(&io.view, "the capability probe", |l| l.contains(PROBE_ID)).await;
+            (io, driver)
+        }
+
+        #[tokio::test]
+        async fn a_tcp_peer_s_stop_gets_a_typed_refusal_while_the_cli_hears_nothing_and_the_task_keeps_running() {
+            let h = spawn_server().await;
+            let (io, _driver) = unattended_task(&h, "tcp-stop", "bgsh1").await;
+            let mut tcp = tcp_tap(&h).await;
+
+            tcp.send(&ClientMsg::SessionTaskStop { request_id: "net-1".into(), tag: io.tag.clone(), task_id: "bgsh1".into() }).await;
+            let reply = expect_result(&mut tcp, "session_task_stop_result", "net-1").await;
+            tcp.sync().await;
+
+            assert_eq!(reply["outcome"], "refused", "{reply}");
+            assert!(is_refusal_message(&reply), "{reply}");
+            assert_eq!((reply["tag"].as_str(), reply["task_id"].as_str()), (Some(io.tag.as_str()), Some("bgsh1")), "{reply}");
+            assert_eq!(io.stops_of("bgsh1").len(), 0, "the CLI was asked to stop a task for a network peer: {:?}", io.requests("stop_task"));
+            assert_eq!(io.probes(), 1, "the only stop_task the CLI saw is the daemon's own capability probe");
+
+            // The task's next snapshot, read by a local peer, still says running.
+            let mut unix = unix_tap(&h).await;
+            attach(&mut unix, &io.tag).await;
+            let tag = io.tag.clone();
+            unix.wait_until("the task list", move |f| task_has_status(f, &tag, "bgsh1", "running")).await;
+            let task = task_in(latest_tasks(&unix.frames, &io.tag).unwrap(), "bgsh1").unwrap().clone();
+            assert!(task["end_reason"].is_null(), "{task}");
+
+            // The audit trail: one refusal line from the network, and no line that says a stop happened.
+            let lines = audit_lines(&io.tag);
+            assert_eq!(lines.len(), 1, "one refusal line (the daemon-wide limiter allows 20 a minute): {lines:?}");
+            let line = &lines[0];
+            assert_eq!(
+                (line["kind"].as_str(), line["actor"].as_str(), line["outcome"].as_str(), line["reason"].as_str()),
+                (Some("task_stop"), Some("network"), Some("refused"), Some("requires_secure_connection")),
+                "{line}"
+            );
+            let text = line.to_string();
+            assert!(!text.contains("bgsh1") && !text.contains("shell"), "the refusal line names no task: {text}");
+            assert!(line["description"].is_null() && line["task_kind"].is_null(), "{line}");
+        }
+
+        #[tokio::test]
+        async fn a_tcp_peer_s_stop_for_a_tag_nobody_has_is_refused_and_the_tag_it_made_up_is_not_logged() {
+            let h = spawn_server().await;
+            let _ = crate::model_switching::isolated_activity_log();
+            let mut tcp = tcp_tap(&h).await;
+            let hostile = "SECRET-OUTPUT-MADE-UP-TAG";
+
+            tcp.send(&ClientMsg::SessionTaskStop { request_id: "net-9".into(), tag: hostile.into(), task_id: "SECRET-OUTPUT-MADE-UP-TASK".into() }).await;
+            let reply = expect_result(&mut tcp, "session_task_stop_result", "net-9").await;
+
+            assert_eq!((reply["outcome"].as_str(), is_refusal_message(&reply)), (Some("refused"), true), "{reply}");
+            let log = audit_text();
+            assert!(!log.contains(hostile), "a tag only the network peer named reached the activity log");
+            assert!(!log.contains("SECRET-OUTPUT-MADE-UP-TASK"), "a task id only the network peer named reached the activity log");
+        }
+
+        #[tokio::test]
+        async fn a_tcp_peer_s_output_read_gets_a_typed_refusal_with_no_text_and_nothing_is_opened_or_asked() {
+            let h = spawn_server().await;
+            let (io, _driver) = unattended_task(&h, "tcp-out", "bgsh1").await;
+            io.write_output("bgsh1", b"SECRET-OUTPUT-FILE-1\nSECRET-OUTPUT-FILE-2\n");
+            let mut tcp = tcp_tap(&h).await;
+
+            for (rid, offset) in [("net-o1", None), ("net-o2", Some(0u64))] {
+                tcp.send(&ClientMsg::SessionTaskOutput { request_id: rid.into(), tag: io.tag.clone(), task_id: "bgsh1".into(), offset, max_bytes: 4096 }).await;
+                let reply = expect_result(&mut tcp, "session_task_output_result", rid).await;
+                assert_eq!(reply["outcome"], "refused", "{reply}");
+                assert!(is_refusal_message(&reply), "{reply}");
+                assert_eq!(reply["text"], "", "a refusal carries no output: {reply}");
+                assert_eq!((reply["start_offset"].as_u64(), reply["end_offset"].as_u64(), reply["total_bytes"].as_u64()), (Some(0), Some(0), Some(0)), "{reply}");
+                assert!(reply["source"].is_null(), "{reply}");
+            }
+            tcp.sync().await;
+
+            assert_eq!(io.opens.load(Ordering::SeqCst), 0, "the daemon never tried to open an output file for a network peer");
+            assert_eq!(io.requests("get_task_output").len(), 0, "the CLI was asked for output on behalf of a network peer");
+            assert_no_task_text_or_paths_io(&tcp.text(), &io, "the network peer");
+            let lines = audit_lines(&io.tag);
+            assert_eq!(lines.len(), 2, "one refusal line per refused request: {lines:?}");
+            for line in &lines {
+                assert_eq!(
+                    (line["kind"].as_str(), line["actor"].as_str(), line["outcome"].as_str(), line["reason"].as_str()),
+                    (Some("task_output"), Some("network"), Some("refused"), Some("requires_secure_connection")),
+                    "{line}"
+                );
+                assert!(!line.to_string().contains("bgsh1"), "{line}");
+            }
+        }
+
+        /// What a network peer must never be able to read: output text, and where output lives.
+        fn assert_no_task_text_or_paths_io(text: &str, io: &Io, who: &str) {
+            for needle in [
+                "SECRET-OUTPUT-".to_owned(),
+                io.root.display().to_string(),
+                io.derived_path("bgsh1").display().to_string(),
+                io.cwd.display().to_string(),
+                ".output".to_owned(),
+                "nostromo-fake-claude-".to_owned(),
+            ] {
+                assert!(!text.contains(&needle), "{who} received `{needle}` in its byte stream");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_tcp_peer_never_sees_output_text_or_a_path_while_a_local_peer_reads_that_output() {
+            let mut t = live("tcp-leak", None).await;
+            t.io.write_output("bgsh1", b"SECRET-OUTPUT-FILE-1\n\x1b[31mSECRET-OUTPUT-FILE-2\x1b[0m\n");
+            let mut tcp = tcp_tap(&t.h).await;
+            attach(&mut tcp, &t.io.tag).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            // The local peer reads the output (and the poller previews it): the leak window is real.
+            let local = t.read("loc-1", "bgsh1", Some(0), 4096).await;
+            let tag = t.io.tag.clone();
+            t.tap.wait_until("a preview", move |f| !frames_of(f, "session_task_detail", &tag).is_empty()).await;
+            tcp.send(&ClientMsg::SessionTaskOutput { request_id: "net-1".into(), tag: t.io.tag.clone(), task_id: "bgsh1".into(), offset: Some(0), max_bytes: 4096 }).await;
+            expect_result(&mut tcp, "session_task_output_result", "net-1").await;
+            let tag = t.io.tag.clone();
+            tcp.wait_until("the task list", move |f| task_has_status(f, &tag, "bgsh1", "running")).await;
+            tcp.drain(QUIET).await;
+            tcp.sync().await;
+            tcp.drain(QUIET).await;
+
+            assert!(local["text"].as_str().unwrap().contains("SECRET-OUTPUT-FILE-2"), "the control: the local peer was given the output: {local}");
+            assert_eq!(count_type(&tcp.frames, "session_task_detail"), 0, "{}", summarize(&tcp.frames));
+            let results: Vec<&Value> = tcp.frames.iter().filter(|f| f["type"] == "session_task_output_result").collect();
+            assert_eq!(results.len(), 1, "the network peer got only its own refusal: {results:?}");
+            assert_no_task_text_or_paths_io(&tcp.text(), &t.io, "the network peer");
+            assert_eq!(count_type(&tcp.frames, "session_task_stop_result"), 0);
+        }
+
+        #[tokio::test]
+        async fn a_tcp_peer_is_refused_the_same_way_for_a_sensitive_tag_and_only_the_opaque_id_is_logged() {
+            let h = spawn_server().await;
+            let (io, _driver) = unattended_task(&h, "tcp-sens", "bgsh1").await;
+            mark_sensitive(&h, &io.tag);
+            io.write_output("bgsh1", b"SECRET-OUTPUT-FILE-1\n");
+            let mut tcp = tcp_tap(&h).await;
+
+            tcp.send(&ClientMsg::SessionTaskStop { request_id: "s-1".into(), tag: io.tag.clone(), task_id: "bgsh1".into() }).await;
+            let stop = expect_result(&mut tcp, "session_task_stop_result", "s-1").await;
+            tcp.send(&ClientMsg::SessionTaskOutput { request_id: "s-2".into(), tag: io.tag.clone(), task_id: "bgsh1".into(), offset: None, max_bytes: 4096 }).await;
+            let output = expect_result(&mut tcp, "session_task_output_result", "s-2").await;
+            tcp.sync().await;
+
+            assert_eq!((stop["outcome"].as_str(), is_refusal_message(&stop)), (Some("refused"), true), "{stop}");
+            assert_eq!((output["outcome"].as_str(), is_refusal_message(&output), output["text"].as_str()), (Some("refused"), true, Some("")), "{output}");
+            assert_eq!(io.stops_of("bgsh1").len(), 0);
+            assert_eq!(io.requests("get_task_output").len(), 0);
+            assert_eq!(io.opens.load(Ordering::SeqCst), 0);
+            let log = audit_text();
+            assert!(!log.contains(&io.tag), "the sensitive tag `{}` is in the activity log", io.tag);
+            let lines = opaque_audit_lines("network");
+            assert_eq!(lines.len(), 2, "one line per refusal, under an opaque id: {lines:?}");
+            assert!(lines.iter().all(|l| l["outcome"] == "refused"), "{lines:?}");
+            assert_eq!(lines[0]["focus_tag"], lines[1]["focus_tag"], "the same stand-in for the same focus: {lines:?}");
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // Stop over a local connection
+        // ═════════════════════════════════════════════════════════════════════
+
+        #[tokio::test]
+        async fn an_accepted_stop_changes_nothing_until_the_cli_reports_the_end_and_then_says_user_stop() {
+            let mut t = live("stop-ok", None).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+            let mut bystander = unix_tap(&t.h).await;
+            attach(&mut bystander, &t.io.tag).await;
+
+            let reply = t.stop("stop-1", "bgsh1").await;
+
+            assert_eq!(reply["outcome"], "accepted", "{reply}");
+            assert!(reply["message"].is_null(), "{reply}");
+            assert_eq!((reply["tag"].as_str(), reply["task_id"].as_str()), (Some(t.io.tag.as_str()), Some("bgsh1")));
+            assert_eq!(t.io.stops_of("bgsh1").len(), 1, "exactly one stop_task for the task: {:?}", t.io.requests("stop_task"));
+            // The ack alone does not end the task: nothing changed, however long we look.
+            t.tap.drain(QUIET).await;
+            let task = t.task("bgsh1");
+            assert_eq!((task["status"].as_str(), task["end_reason"].is_null()), (Some("running"), true), "{task}");
+
+            t.cue("BA1-KILL:bgsh1").await;
+            t.wait_status("bgsh1", "stopped").await;
+            let task = t.task("bgsh1");
+            assert_eq!(task["end_reason"], "user_stop", "{task}");
+
+            // Only the client that asked heard the result.
+            bystander.drain(QUIET).await;
+            assert_eq!(count_type(&bystander.frames, "session_task_stop_result"), 0, "{}", summarize(&bystander.frames));
+        }
+
+        #[tokio::test]
+        async fn an_accepted_stop_that_ends_with_a_stopped_notification_also_says_user_stop() {
+            let mut t = live("stop-notified", None).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let reply = t.stop("stop-1", "bgsh1").await;
+            assert_eq!(reply["outcome"], "accepted", "{reply}");
+            t.cue("BA1-STOPPED:bgsh1").await;
+            t.wait_status("bgsh1", "stopped").await;
+
+            assert_eq!(t.task("bgsh1")["end_reason"], "user_stop");
+        }
+
+        #[tokio::test]
+        async fn a_task_that_completes_after_an_accepted_stop_is_completed_with_no_user_stop() {
+            let mut t = live("stop-then-done", None).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            assert_eq!(t.stop("stop-1", "bgsh1").await["outcome"], "accepted");
+            t.cue("BA1-DONE:bgsh1").await;
+            t.wait_status("bgsh1", "completed").await;
+
+            assert!(t.task("bgsh1")["end_reason"].is_null());
+        }
+
+        #[tokio::test]
+        async fn a_stop_the_cli_refuses_is_reported_with_its_message_and_withdrawn() {
+            let mut t = live("stop-refused", None).await;
+            t.io.stopmode("refuse");
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let reply = t.stop("stop-1", "bgsh1").await;
+
+            assert_eq!(reply["outcome"], "refused", "{reply}");
+            assert_eq!(reply["message"], "StopTask: the task cannot be stopped right now", "the CLI's own words: {reply}");
+            t.tap.drain(QUIET).await;
+            assert_eq!(t.task("bgsh1")["status"], "running", "a refused stop changes nothing");
+
+            // The mark is withdrawn: a later end is nobody's stop.
+            t.cue("BA1-KILL:bgsh1").await;
+            t.wait_status("bgsh1", "stopped").await;
+            let task = t.task("bgsh1");
+            assert!(task["end_reason"].is_null(), "a refused stop must not be remembered as a user stop: {task}");
+
+            let lines = audit_lines(&t.io.tag);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(
+                (lines[0]["outcome"].as_str(), lines[0]["actor"].as_str(), lines[0]["reason"].as_str()),
+                (Some("refused"), Some("user"), Some("StopTask: the task cannot be stopped right now")),
+                "{}",
+                lines[0]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_stop_the_cli_never_answers_times_out_with_the_status_unchanged_and_the_support_unknown() {
+            let mut t = live("stop-silent", Some(Duration::from_millis(600))).await;
+            t.io.stopmode("silent");
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let reply = t.stop("stop-1", "bgsh1").await;
+
+            assert_eq!(reply["outcome"], "timeout", "{reply}");
+            assert_eq!(t.io.stops_of("bgsh1").len(), 1, "the stop was sent");
+            t.tap.drain(QUIET).await;
+            assert_eq!(t.task("bgsh1")["status"], "running");
+            // The probe (sent first, same wait) got no answer either: support stays unknown, not false.
+            assert!(t.stop_supported().is_null(), "{:?}", latest_tasks(&t.tap.frames, &t.io.tag));
+            let lines = audit_lines(&t.io.tag);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!((lines[0]["outcome"].as_str(), lines[0]["reason"].as_str()), (Some("failed"), Some("timeout")), "{}", lines[0]);
+        }
+
+        #[tokio::test]
+        async fn a_cli_that_predates_stopping_says_unsupported_and_the_snapshot_says_stop_is_not_supported() {
+            let mut t = live("stop-legacy", None).await;
+            t.io.stopmode("legacy");
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let reply = t.stop("stop-1", "bgsh1").await;
+
+            assert_eq!(reply["outcome"], "unsupported", "{reply}");
+            let tag = t.io.tag.clone();
+            t.tap
+                .wait_until("a snapshot that says stop is not supported", move |f| {
+                    latest_tasks(f, &tag).is_some_and(|s| s["stop_supported"] == false)
+                })
+                .await;
+            assert_eq!(t.task("bgsh1")["status"], "running");
+            let lines = audit_lines(&t.io.tag);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!((lines[0]["outcome"].as_str(), lines[0]["reason"].as_str()), (Some("failed"), Some("unsupported")), "{}", lines[0]);
+        }
+
+        #[tokio::test]
+        async fn a_stop_for_an_unknown_or_ended_task_is_not_running_and_nothing_is_sent_to_the_cli() {
+            let mut t = live("stop-gone", None).await;
+            t.cue("BA1-SHELL:ended1").await;
+            t.cue("BA1-DONE:ended1").await;
+            t.wait_status("ended1", "completed").await;
+
+            for (rid, id) in [("n-1", "ended1"), ("n-2", "never-heard-of-it"), ("n-3", "../etc/passwd")] {
+                let reply = t.stop(rid, id).await;
+                assert_eq!(reply["outcome"], "not_running", "{id}: {reply}");
+                assert_eq!(t.io.stops_of(id).len(), 0, "{id}: a stop for a task that is not running reached the CLI");
+            }
+            let lines = audit_lines(&t.io.tag);
+            assert_eq!(lines.len(), 3, "each local stop writes one line, even when nothing was sent: {lines:?}");
+            assert!(lines.iter().all(|l| l["actor"] == "user" && l["outcome"] == "refused" && l["reason"] == "not_running"), "{lines:?}");
+        }
+
+        #[tokio::test]
+        async fn a_stop_for_a_session_that_does_not_exist_is_not_running() {
+            let mut t = live("stop-nosession", None).await;
+            t.tap.send(&ClientMsg::SessionTaskStop { request_id: "g-1".into(), tag: "cody-no-such-session".into(), task_id: "x".into() }).await;
+            let reply = expect_result(&mut t.tap, "session_task_stop_result", "g-1").await;
+            assert_eq!(reply["outcome"], "not_running", "{reply}");
+            assert_eq!(t.io.requests("stop_task").len(), 0);
+        }
+
+        #[tokio::test]
+        async fn every_local_stop_writes_one_audit_line_before_the_reply_with_the_task_kind_and_description() {
+            let mut t = live("stop-audit", None).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.cue("BA1-MON:mon1").await;
+            t.cue("BA1-AGENT:agent1").await;
+            for id in ["bgsh1", "mon1", "agent1"] {
+                t.wait_status(id, "running").await;
+            }
+
+            for (rid, id, kind, description) in [
+                ("a-1", "bgsh1", "shell", "shell bgsh1"),
+                ("a-2", "mon1", "monitor", "monitor mon1"),
+                ("a-3", "agent1", "agent", "agent agent1"),
+            ] {
+                let before = audit_lines(&t.io.tag).len();
+                t.stop(rid, id).await;
+                // The reply is in hand, so the line is already on disk.
+                let lines = audit_lines(&t.io.tag);
+                assert_eq!(lines.len(), before + 1, "{id}: exactly one new line per stop: {lines:?}");
+                let line = lines.last().unwrap();
+                assert_eq!(line["kind"], "task_stop", "{line}");
+                assert_eq!(line["actor"], "user", "{line}");
+                assert_eq!(line["task_kind"], kind, "{line}");
+                assert_eq!(line["description"], description, "{line}");
+                assert_eq!(line["outcome"], "applied", "{line}");
+                assert!(line["ts"].as_str().is_some(), "{line}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_local_stop_of_a_sensitive_tag_is_logged_under_the_opaque_id_never_the_tag() {
+            let mut t = live("stop-sens", None).await;
+            mark_sensitive(&t.h, &t.io.tag);
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let reply = t.stop("sens-1", "bgsh1").await;
+
+            assert_eq!(reply["outcome"], "accepted", "a local peer may stop a sensitive session's task: {reply}");
+            let lines = opaque_audit_lines("user");
+            assert_eq!(lines.len(), 1, "one line, under an opaque id: {lines:?}");
+            assert_eq!(lines[0]["outcome"], "applied", "{}", lines[0]);
+            assert_eq!(lines[0]["session_id"], t.io.sid(), "{}", lines[0]);
+            assert!(!audit_text().contains(&t.io.tag), "the sensitive tag `{}` is in the activity log", t.io.tag);
+        }
+
+        #[tokio::test]
+        async fn a_successful_stop_teaches_that_stopping_is_supported_when_the_probe_got_no_answer() {
+            let mut t = live("stop-learns", Some(Duration::from_millis(600))).await;
+            t.io.stopmode("silent");
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+            wait_for_log(&t.io.view, "the probe", |l| l.contains(PROBE_ID)).await;
+            // The probe's wait is over once a second stop (silent too) has timed out after it.
+            assert_eq!(t.stop("first", "bgsh1").await["outcome"], "timeout");
+            assert!(t.stop_supported().is_null());
+
+            t.io.stopmode("modern");
+            assert_eq!(t.stop("second", "bgsh1").await["outcome"], "accepted");
+
+            let tag = t.io.tag.clone();
+            t.tap
+                .wait_until("a snapshot that says stop is supported", move |f| {
+                    latest_tasks(f, &tag).is_some_and(|s| s["stop_supported"] == true)
+                })
+                .await;
+        }
+
+        #[tokio::test]
+        async fn a_supported_answer_never_flips_a_known_unsupported_back() {
+            let mut t = live("stop-sticky", None).await;
+            t.io.stopmode("legacy");
+            t.cue("BA1-SHELL:bgsh1").await;
+            let tag = t.io.tag.clone();
+            t.tap
+                .wait_until("the probe to say unsupported", move |f| latest_tasks(f, &tag).is_some_and(|s| s["stop_supported"] == false))
+                .await;
+
+            t.io.stopmode("modern");
+            assert_eq!(t.stop("again", "bgsh1").await["outcome"], "accepted");
+            t.tap.drain(QUIET).await;
+
+            assert_eq!(t.stop_supported(), false, "a `false` is never flipped back by a later success");
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // The capability probe
+        // ═════════════════════════════════════════════════════════════════════
+
+        #[tokio::test]
+        async fn the_probe_is_sent_once_after_the_first_stoppable_task_and_never_for_housekeeping_alone() {
+            let mut t = live("probe-modern", None).await;
+            t.cue("hello-before-any-task").await;
+            assert_eq!(t.io.requests("stop_task").len(), 0, "no task, no probe: {:?}", fake_log(&t.io.view));
+
+            // A housekeeping watcher is not a stoppable task.
+            t.cue("BA1-AMBIENT:hk1").await;
+            let tag = t.io.tag.clone();
+            t.tap.wait_until("the watcher in the list", move |f| latest_tasks(f, &tag).and_then(|s| task_in(s, "hk1")).is_some()).await;
+            assert_eq!(t.io.requests("stop_task").len(), 0, "a housekeeping task started a probe: {:?}", fake_log(&t.io.view));
+            assert!(t.stop_supported().is_null(), "nothing is known yet");
+
+            t.cue("BA1-SHELL:bgsh1").await;
+            wait_for_log(&t.io.view, "the probe", |l| l.contains(PROBE_ID)).await;
+            let tag = t.io.tag.clone();
+            t.tap.wait_until("a snapshot that says stop is supported", move |f| latest_tasks(f, &tag).is_some_and(|s| s["stop_supported"] == true)).await;
+
+            // More tasks: no second probe.
+            t.cue("BA1-SHELL:bgsh2").await;
+            t.cue("BA1-AGENT:agent1").await;
+            for id in ["bgsh2", "agent1"] {
+                t.wait_status(id, "running").await;
+            }
+            t.tap.drain(QUIET).await;
+            assert_eq!(t.io.probes(), 1, "one probe per CLI process: {:?}", t.io.requests("stop_task"));
+            assert_eq!(t.io.requests("stop_task").len(), 1);
+            let log = fake_log(&t.io.view);
+            let at = |needle: &str| log.find(needle).unwrap_or_else(|| panic!("{needle} not in {log:?}"));
+            assert!(at("BA1-SHELL:bgsh1") < at(PROBE_ID), "the probe follows the first stoppable task");
+        }
+
+        #[tokio::test]
+        async fn a_cli_that_does_not_know_stop_task_makes_the_probe_say_stop_is_not_supported() {
+            let mut t = live("probe-legacy", None).await;
+            t.io.stopmode("legacy");
+
+            t.cue("BA1-SHELL:bgsh1").await;
+
+            let tag = t.io.tag.clone();
+            t.tap
+                .wait_until("a snapshot that says stop is not supported", move |f| {
+                    latest_tasks(f, &tag).is_some_and(|s| s["stop_supported"] == false)
+                })
+                .await;
+            assert_eq!(t.io.probes(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_probe_nobody_answers_leaves_the_support_unknown() {
+            let mut t = live("probe-silent", Some(Duration::from_millis(500))).await;
+            t.io.stopmode("silent");
+            t.cue("BA1-SHELL:bgsh1").await;
+            wait_for_log(&t.io.view, "the probe", |l| l.contains(PROBE_ID)).await;
+            // A real stop, sent after the probe with the same wait, answers only when the probe's is over.
+            assert_eq!(t.stop("sync", "bgsh1").await["outcome"], "timeout");
+
+            t.tap.drain(QUIET).await;
+
+            assert!(t.stop_supported().is_null(), "unknown, not false: {:?}", latest_tasks(&t.tap.frames, &t.io.tag));
+            assert_eq!(t.io.probes(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_restarted_cli_is_probed_again_when_it_has_a_task() {
+            let mut t = live("probe-restart", None).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            wait_for_log(&t.io.view, "the first probe", |l| l.contains(PROBE_ID)).await;
+            assert_eq!(t.io.probes(), 1);
+
+            t.tap.send(&ClientMsg::SessionControl { tag: t.io.tag.clone(), action: SessionAction::Restart }).await;
+            for _ in 0..400 {
+                if fake_starts(&t.io.view) >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert_eq!(fake_starts(&t.io.view), 2, "the CLI process was replaced");
+            t.cue("BA1-SHELL:bgsh2").await;
+            for _ in 0..200 {
+                if t.io.probes() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            assert_eq!(t.io.probes(), 2, "a new CLI process is probed once more: {:?}", t.io.requests("stop_task"));
+        }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // Output over a local connection
+        // ═════════════════════════════════════════════════════════════════════
+
+        #[tokio::test]
+        async fn output_is_read_from_the_derived_file_sanitised_with_offsets_and_no_path_on_the_wire() {
+            let mut t = live("out-file", None).await;
+            let content = "SECRET-OUTPUT-1\n\x1b[31mred SECRET-OUTPUT-2\x1b[0m\n\x1b]0;title\x07SECRET-OUTPUT-3\n";
+            t.io.write_output("bgsh1", content.as_bytes());
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let r = t.read("o-1", "bgsh1", Some(0), MIB).await;
+
+            assert_eq!(r["outcome"], "ok", "{r}");
+            assert_eq!(r["source"], "file", "{r}");
+            assert_eq!(r["text"], "SECRET-OUTPUT-1\nred SECRET-OUTPUT-2\nSECRET-OUTPUT-3\n", "{r}");
+            assert_eq!(
+                (r["start_offset"].as_u64(), r["end_offset"].as_u64(), r["total_bytes"].as_u64()),
+                (Some(0), Some(content.len() as u64), Some(content.len() as u64)),
+                "offsets are raw byte offsets into the file: {r}"
+            );
+            assert!(r["message"].is_null(), "{r}");
+            let wire = t.tap.text();
+            for needle in [t.io.root.display().to_string(), t.io.cwd.display().to_string(), ".output".to_owned()] {
+                assert!(!wire.contains(&needle), "an output location `{needle}` reached even a local peer");
+            }
+            assert!(!wire.contains('\u{1b}'), "an escape byte reached the client");
+            assert_eq!(audit_lines(&t.io.tag).len(), 0, "a local read is not audited: {:?}", audit_lines(&t.io.tag));
+        }
+
+        #[tokio::test]
+        async fn successive_requests_from_the_previous_end_reassemble_the_sanitised_output() {
+            let mut t = live("out-ranges", None).await;
+            let mut raw = String::new();
+            let mut clean = String::new();
+            for i in 0..400 {
+                clean.push_str(&format!("line {i:03} caf\u{e9} SECRET-OUTPUT-{i}\n"));
+                raw.push_str(&format!("\x1b[3{}mline {i:03} caf\u{e9} SECRET-OUTPUT-{i}\x1b[0m\n", i % 8));
+            }
+            t.io.write_output("bgsh1", raw.as_bytes());
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let (mut offset, mut text, mut reads) = (0u64, String::new(), 0);
+            loop {
+                reads += 1;
+                let r = t.read(&format!("range-{reads}"), "bgsh1", Some(offset), 1000).await;
+                assert_eq!((r["outcome"].as_str(), r["source"].as_str()), (Some("ok"), Some("file")), "{r}");
+                let (start, end, total) = (r["start_offset"].as_u64().unwrap(), r["end_offset"].as_u64().unwrap(), r["total_bytes"].as_u64().unwrap());
+                assert_eq!(start, offset, "contiguous: {r}");
+                assert!(end - start <= 1000, "a request asked for 1000 bytes: {r}");
+                assert_eq!(total, raw.len() as u64);
+                text.push_str(r["text"].as_str().unwrap());
+                if end >= total {
+                    break;
+                }
+                assert!(end > start, "no progress: {r}");
+                offset = end;
+                assert!(reads < 500);
+            }
+
+            assert!(reads > 5, "the output needed several requests ({reads})");
+            assert_eq!(text, clean);
+        }
+
+        #[tokio::test]
+        async fn a_read_without_an_offset_is_the_tail_ending_at_the_end_of_the_output() {
+            let mut t = live("out-tail", None).await;
+            let content: String = (0..500).map(|i| format!("line {i:03}\n")).collect();
+            t.io.write_output("bgsh1", content.as_bytes());
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let r = t.read("tail-1", "bgsh1", None, 300).await;
+
+            assert_eq!((r["outcome"].as_str(), r["source"].as_str()), (Some("ok"), Some("file")), "{r}");
+            let text = r["text"].as_str().unwrap();
+            assert!(text.len() <= 300 && !text.is_empty(), "{} bytes", text.len());
+            assert_eq!(r["end_offset"].as_u64(), Some(content.len() as u64), "{r}");
+            assert_eq!(r["total_bytes"].as_u64(), Some(content.len() as u64), "{r}");
+            assert!(text.starts_with("line "), "a tail starts on a line: {text:?}");
+            assert!(content.ends_with(text));
+            assert_eq!(r["start_offset"].as_u64().unwrap() + text.len() as u64, content.len() as u64);
+        }
+
+        #[tokio::test]
+        async fn output_that_grows_between_requests_is_returned_from_the_previous_end() {
+            let mut t = live("out-growth", None).await;
+            let path = t.io.write_output("bgsh1", b"one\ntwo\n");
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let first = t.read("g-1", "bgsh1", Some(0), 4096).await;
+            assert_eq!((first["text"].as_str(), first["end_offset"].as_u64(), first["total_bytes"].as_u64()), (Some("one\ntwo\n"), Some(8), Some(8)), "{first}");
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            std::io::Write::write_all(&mut file, b"three\n").unwrap();
+            let second = t.read("g-2", "bgsh1", Some(8), 4096).await;
+            let none = t.read("g-3", "bgsh1", Some(14), 4096).await;
+
+            assert_eq!(
+                (second["text"].as_str(), second["start_offset"].as_u64(), second["end_offset"].as_u64(), second["total_bytes"].as_u64()),
+                (Some("three\n"), Some(8), Some(14), Some(14)),
+                "{second}"
+            );
+            assert_eq!(
+                (none["text"].as_str(), none["start_offset"].as_u64(), none["end_offset"].as_u64()),
+                (Some(""), Some(14), Some(14)),
+                "nothing new: an empty range at the end: {none}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_deleted_output_file_falls_back_to_the_clis_tail_with_offsets_from_its_total() {
+            let mut t = live("out-deleted", None).await;
+            let path = t.io.write_output("bgsh1", b"SECRET-OUTPUT-FILE-1\n");
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+            let first = t.read("d-1", "bgsh1", Some(0), 4096).await;
+            assert_eq!(first["source"], "file", "control: the file was read first: {first}");
+
+            std::fs::remove_file(&path).unwrap();
+            let r = t.read("d-2", "bgsh1", Some(0), 4096).await;
+
+            let tail = "SECRET-OUTPUT-CLI-1\nSECRET-OUTPUT-CLI-2\n";
+            assert_eq!((r["outcome"].as_str(), r["source"].as_str()), (Some("ok"), Some("cli_tail")), "{r}");
+            assert_eq!(r["text"], tail, "{r}");
+            assert_eq!(
+                (r["start_offset"].as_u64(), r["end_offset"].as_u64(), r["total_bytes"].as_u64()),
+                (Some(1000 - tail.len() as u64), Some(1000), Some(1000)),
+                "start = total - the length of the tail: {r}"
+            );
+            assert!(!t.io.requests("get_task_output").is_empty(), "the CLI was asked");
+        }
+
+        #[tokio::test]
+        async fn an_ended_task_with_no_file_and_nothing_from_the_cli_has_unavailable_output() {
+            let mut t = live("out-none", Some(Duration::from_millis(600))).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.cue("BA1-DONE:bgsh1").await;
+            t.wait_status("bgsh1", "completed").await;
+
+            // The CLI says it holds nothing for an ended task whose file is gone.
+            t.io.outmode("empty");
+            let empty = t.read("n-1", "bgsh1", Some(0), 4096).await;
+            // It does not answer at all.
+            t.io.outmode("silent");
+            let silent = t.read("n-2", "bgsh1", Some(0), 4096).await;
+            // It does not know the request.
+            t.io.outmode("legacy");
+            let legacy = t.read("n-3", "bgsh1", Some(0), 4096).await;
+
+            for (what, r) in [("an empty answer", &empty), ("no answer", &silent), ("an unsupported request", &legacy)] {
+                assert_eq!(r["outcome"], "unavailable", "{what}: {r}");
+                assert_eq!(r["text"], "", "{what}: {r}");
+                assert!(r["source"].is_null(), "{what}: {r}");
+                assert_eq!((r["start_offset"].as_u64(), r["end_offset"].as_u64(), r["total_bytes"].as_u64()), (Some(0), Some(0), Some(0)), "{what}: {r}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_path_the_cli_reports_in_a_notification_is_read_when_it_is_under_the_root() {
+            let mut t = live("out-notify", None).await;
+            let odd = t.io.root.join("somewhere-else").join("bgsh1.output");
+            t.io.write_at(&odd, b"SECRET-OUTPUT-NOTIFIED\n");
+            t.io.report_path("bgsh1", &odd);
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.cue("BA1-NOTIFY:bgsh1").await;
+            t.wait_status("bgsh1", "completed").await;
+
+            let r = t.read("p-1", "bgsh1", Some(0), 4096).await;
+
+            assert_eq!((r["outcome"].as_str(), r["source"].as_str(), r["text"].as_str()), (Some("ok"), Some("file"), Some("SECRET-OUTPUT-NOTIFIED\n")), "{r}");
+        }
+
+        #[tokio::test]
+        async fn a_path_in_a_background_tool_result_is_read_when_it_is_under_the_root() {
+            let mut t = live("out-toolresult", None).await;
+            let odd = t.io.root.join("from-the-tool").join("bgsh1.output");
+            t.io.write_at(&odd, b"SECRET-OUTPUT-FROM-TOOL\n");
+            t.io.report_path("bgsh1", &odd);
+            t.cue("BA1-BGSHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let r = t.read("p-1", "bgsh1", Some(0), 4096).await;
+
+            assert_eq!((r["outcome"].as_str(), r["source"].as_str(), r["text"].as_str()), (Some("ok"), Some("file"), Some("SECRET-OUTPUT-FROM-TOOL\n")), "{r}");
+        }
+
+        #[tokio::test]
+        async fn a_reported_path_outside_the_root_a_symlink_or_a_mismatched_name_is_never_read() {
+            let mut t = live("out-hostile", None).await;
+            let cli_tail = "SECRET-OUTPUT-CLI-1\nSECRET-OUTPUT-CLI-2\n";
+            // outside: a real file named right, but not under the root.
+            let outside = t.io.outside.join("outside1.output");
+            t.io.write_at(&outside, b"SECRET-OUTPUT-OUTSIDE\n");
+            // link: named right, under the root, but a symlink to a file under the root.
+            let real = t.io.root.join("odd").join("real.txt");
+            t.io.write_at(&real, b"SECRET-OUTPUT-LINKED\n");
+            let link = t.io.root.join("odd").join("link1.output");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            // name: under the root, a regular file, but not called `<task id>.output`.
+            let misnamed = t.io.root.join("odd").join("other.output");
+            t.io.write_at(&misnamed, b"SECRET-OUTPUT-MISNAMED\n");
+            for (id, path) in [("outside1", &outside), ("link1", &link), ("name1", &misnamed)] {
+                t.io.report_path(id, path);
+                t.cue(&format!("BA1-SHELL:{id}")).await;
+                t.cue(&format!("BA1-NOTIFY:{id}")).await;
+                t.wait_status(id, "completed").await;
+            }
+
+            for (n, id) in ["outside1", "link1", "name1"].into_iter().enumerate() {
+                let r = t.read(&format!("h-{n}"), id, Some(0), 4096).await;
+                assert_eq!((r["outcome"].as_str(), r["source"].as_str(), r["text"].as_str()), (Some("ok"), Some("cli_tail"), Some(cli_tail)), "{id}: the unsafe path was not read: {r}");
+            }
+            // A client cannot name a file either: an extra `path` member is not a thing.
+            let raw = json!({"type": "session_task_output", "request_id": "h-raw", "tag": t.io.tag, "task_id": "outside1",
+                "path": outside.display().to_string(), "offset": 0, "max_bytes": 4096});
+            write_frame(&mut t.tap.stream, &serde_json::to_vec(&raw).unwrap()).await.expect("write frame");
+            let r = expect_result(&mut t.tap, "session_task_output_result", "h-raw").await;
+            assert_eq!(r["source"], "cli_tail", "{r}");
+            let wire = t.tap.text();
+            for secret in ["SECRET-OUTPUT-OUTSIDE", "SECRET-OUTPUT-LINKED", "SECRET-OUTPUT-MISNAMED"] {
+                assert!(!wire.contains(secret), "{secret} was read through an unsafe path");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_request_for_more_than_a_mebibyte_is_clamped_and_a_request_for_less_than_four_bytes_still_advances() {
+            let mut t = live("out-clamp", None).await;
+            let content: String = (0..40_000).map(|i| format!("line {i:05} {}\n", "x".repeat(70))).collect();
+            assert!(content.len() > 3 * MIB as usize);
+            t.io.write_output("bgsh1", content.as_bytes());
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            for (rid, max) in [("c-big", u32::MAX), ("c-mib", MIB), ("c-over", MIB + 1)] {
+                let r = t.read(rid, "bgsh1", Some(0), max).await;
+                assert_eq!(r["outcome"], "ok", "{r}");
+                let (start, end) = (r["start_offset"].as_u64().unwrap(), r["end_offset"].as_u64().unwrap());
+                assert!(end > start && end - start <= MIB as u64, "max_bytes {max}: [{start}, {end})");
+                assert!(r["text"].as_str().unwrap().len() <= MIB as usize, "max_bytes {max}");
+                assert_eq!(r["total_bytes"].as_u64(), Some(content.len() as u64));
+            }
+            for (rid, max) in [("c-zero", 0u32), ("c-one", 1), ("c-four", 4)] {
+                let r = t.read(rid, "bgsh1", Some(0), max).await;
+                assert_eq!(r["outcome"], "ok", "{r}");
+                assert_eq!((r["start_offset"].as_u64(), r["end_offset"].as_u64()), (Some(0), Some(4)), "max_bytes {max}: a reader asking for less than four bytes is given four: {r}");
+            }
+            assert!(largest_frame(&t.tap.raw) < MAX_FRAME_LEN, "a result frame of {} bytes", largest_frame(&t.tap.raw));
+        }
+
+        #[tokio::test]
+        async fn the_worst_case_result_frames_fit_under_the_frame_cap() {
+            let mut t = live("out-worst", None).await;
+            let mut content = vec![0xFFu8; MIB as usize];
+            content.extend(std::iter::repeat_n(b'"', MIB as usize));
+            content.extend(std::iter::repeat_n(b'\n', 1024));
+            t.io.write_output("bgsh1", &content);
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let invalid = t.read("w-1", "bgsh1", Some(0), u32::MAX).await;
+            let quotes = t.read("w-2", "bgsh1", Some(MIB as u64), u32::MAX).await;
+
+            for (what, r) in [("1 MiB of invalid bytes", &invalid), ("1 MiB of quotes", &quotes)] {
+                assert_eq!((r["outcome"].as_str(), r["source"].as_str()), (Some("ok"), Some("file")), "{what}");
+                assert!(r["end_offset"].as_u64().unwrap() > r["start_offset"].as_u64().unwrap(), "{what}");
+            }
+            assert!(
+                largest_frame(&t.tap.raw) < MAX_FRAME_LEN,
+                "the largest result frame is {} bytes; the cap is {MAX_FRAME_LEN}",
+                largest_frame(&t.tap.raw)
+            );
+            assert!(largest_frame(&t.tap.raw) > 2 * MIB as usize, "control: the worst case really produced a big frame");
+        }
+
+        #[tokio::test]
+        async fn a_task_the_session_does_not_hold_is_an_error_and_an_agent_task_has_no_output() {
+            let mut t = live("out-errors", None).await;
+            t.io.write_output("agent1", b"SECRET-OUTPUT-AGENT-TRANSCRIPT\n");
+            t.cue("BA1-AGENT:agent1").await;
+            t.wait_status("agent1", "running").await;
+
+            for (rid, id) in [("e-1", "never-heard-of-it"), ("e-2", "../etc/passwd"), ("e-3", ""), ("e-4", "a b")] {
+                let r = t.read(rid, id, Some(0), 4096).await;
+                assert_eq!(r["outcome"], "error", "{id:?}: {r}");
+                assert_eq!(r["text"], "", "{id:?}: {r}");
+            }
+            t.tap.send(&ClientMsg::SessionTaskOutput { request_id: "e-5".into(), tag: "no-such-session".into(), task_id: "x".into(), offset: None, max_bytes: 100 }).await;
+            let ghost = expect_result(&mut t.tap, "session_task_output_result", "e-5").await;
+            assert_eq!(ghost["outcome"], "error", "{ghost}");
+
+            let agent = t.read("e-6", "agent1", Some(0), 4096).await;
+            assert_eq!(agent["outcome"], "unavailable", "{agent}");
+            assert_eq!(agent["text"], "", "{agent}");
+            assert!(!t.tap.text().contains("SECRET-OUTPUT-AGENT-TRANSCRIPT"), "an agent's transcript file was read");
+            let log = fake_log(&t.io.view);
+            assert!(!log.contains("\"task_id\":\"agent1\""), "the CLI was asked about an agent task: {log:?}");
+        }
     }
 }
 

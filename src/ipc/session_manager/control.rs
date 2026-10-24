@@ -27,6 +27,8 @@ pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) struct ControlFailure {
     pub(super) reason: String,
     pub(super) refused: bool,
+    /// The CLI did not answer in time (the request may still take effect).
+    pub(super) timed_out: bool,
 }
 
 impl From<ControlFailure> for String {
@@ -40,7 +42,25 @@ pub(super) async fn control(
     shared: &Shared,
     request: serde_json::Value,
 ) -> std::result::Result<ControlReply, ControlFailure> {
-    let failure = |reason: String, refused: bool| ControlFailure { reason, refused };
+    control_within(shared, request, CONTROL_TIMEOUT).await
+}
+
+/// `true` when a CLI's error says it does not know the request (an older CLI)
+/// rather than that it refused this one.
+pub(super) fn says_unsupported(reason: &str) -> bool {
+    let reason = reason.to_lowercase();
+    reason.contains("unsupported")
+        || reason.contains("not supported")
+        || (reason.contains("unknown") && reason.contains("subtype"))
+}
+
+/// [`control`] with the wait given (tests shorten it).
+pub(super) async fn control_within(
+    shared: &Shared,
+    request: serde_json::Value,
+    timeout: Duration,
+) -> std::result::Result<ControlReply, ControlFailure> {
+    let failure = |reason: String, refused: bool| ControlFailure { reason, refused, timed_out: false };
     const EXITED: &str = "the session exited";
     let id = format!("model-{}", Uuid::new_v4());
     let (tx, rx) = oneshot::channel();
@@ -53,7 +73,7 @@ pub(super) async fn control(
         shared.waiters.lock().unwrap().remove(&id);
         return Err(failure(EXITED.to_owned(), false));
     }
-    match tokio::time::timeout(CONTROL_TIMEOUT, rx).await {
+    match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(reply)) if reply.ok => Ok(reply),
         Ok(Ok(reply)) => Err(failure(
             reply
@@ -65,13 +85,11 @@ pub(super) async fn control(
         Ok(Err(_)) => Err(failure(EXITED.to_owned(), false)),
         Err(_) => {
             shared.waiters.lock().unwrap().remove(&id);
-            Err(failure(
-                format!(
-                    "the session did not answer within {} s",
-                    CONTROL_TIMEOUT.as_secs()
-                ),
-                false,
-            ))
+            Err(ControlFailure {
+                reason: format!("the session did not answer within {} s", timeout.as_secs().max(1)),
+                refused: false,
+                timed_out: true,
+            })
         }
     }
 }
