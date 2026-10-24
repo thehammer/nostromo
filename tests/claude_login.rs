@@ -15,7 +15,10 @@
 //! - nothing is ever sent twice (racing triggers, an old `hold_id`, a restart);
 //! - what is not resendable (the turn did real work), too old, or beyond the attempt cap is
 //!   only ever resent by hand;
-//! - the poller runs only while a hold exists;
+//! - the poller runs only while a hold exists, and a stopped or given-up session holds nothing;
+//! - Stop on a session waiting for a sign-in discards the hold and the queue behind it;
+//! - the credential probe never runs on a session's stdout reader;
+//! - a resend that was written is never written again on its own after a crash or restart;
 //! - no message text, error text or stamp reaches a log line, a broadcast frame or a file.
 //!
 //! Environment variables are process-wide and tests run on parallel threads, so every test
@@ -31,7 +34,7 @@
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -40,7 +43,9 @@ use nostromo::ipc::claude_login::{
     MAX_AUTO_RESENDS, POLL_INTERVAL, SECURITY_ARGS, SECURITY_PROGRAM,
 };
 use nostromo::ipc::protocol::{ClaudeLoginPhase, ClaudeLoginSession, ClaudeLoginWatch, ServerMsg};
-use nostromo::ipc::session_manager::{ResendOutcome, ResendTrigger, SessionManager, CLAUDE_BIN_ENV};
+use nostromo::ipc::session_manager::{
+    InterruptOutcome, ResendOutcome, ResendTrigger, SessionManager, CLAUDE_BIN_ENV,
+};
 use nostromo::ipc::stream_json::SessionState;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -110,11 +115,18 @@ fn all_logs() -> Vec<String> {
 struct FakeWatch {
     stamp: Mutex<CredentialStamp>,
     calls: AtomicUsize,
+    /// Real time every look takes (a slow keychain probe); zero by default.
+    delay_ms: AtomicU64,
 }
 
 impl FakeWatch {
     fn new(stamp: CredentialStamp) -> Self {
-        Self { stamp: Mutex::new(stamp), calls: AtomicUsize::new(0) }
+        Self { stamp: Mutex::new(stamp), calls: AtomicUsize::new(0), delay_ms: AtomicU64::new(0) }
+    }
+
+    /// Make every look at the credential take `delay` of real time (`std::thread::sleep`).
+    fn set_delay(&self, delay: Duration) {
+        self.delay_ms.store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
     fn set(&self, stamp: CredentialStamp) {
@@ -133,7 +145,12 @@ impl FakeWatch {
 impl CredentialWatch for FakeWatch {
     fn stamp(&self) -> CredentialStamp {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.stamp.lock().unwrap().clone()
+        let stamp = self.stamp.lock().unwrap().clone();
+        let delay = self.delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        stamp
     }
 }
 
@@ -262,6 +279,7 @@ impl World {
             &wrapper,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/spawns.log'\n\
+                 printf '%s\\n' $$ >> '{dir}/pids.log'\n\
                  FAKE_CLAUDE_LOG_DIR='{dir}' FAKE_CLAUDE_AUTH_FILE='{auth}' {sticky_env} \
                  exec python3 -I '{FAKE_CLI}' \"$@\"\n",
                 dir = dir.display(),
@@ -314,6 +332,70 @@ impl World {
 
     fn pic(&self) -> Pic {
         pic_of(&self.mgr.lock().unwrap().login_snapshot())
+    }
+
+    /// Does any session of the manager hold a message for a sign-in?
+    fn has_hold(&self) -> bool {
+        self.mgr.lock().unwrap().has_login_hold()
+    }
+
+    fn stop(&self, tag: &str) {
+        self.mgr.lock().unwrap().stop(tag);
+    }
+
+    fn restart(&self, tag: &str) {
+        self.mgr.lock().unwrap().restart(tag).expect("restart");
+    }
+
+    fn interrupt(&self, tag: &str) -> InterruptOutcome {
+        self.mgr.lock().unwrap().interrupt(tag).expect("interrupt")
+    }
+
+    /// Has the manager given up on `tag` (stopped by the user or by the crash-loop guard)?
+    fn is_stopped(&self, tag: &str) -> bool {
+        self.mgr
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .find(|s| s.tag == tag)
+            .is_some_and(|s| s.stop_reason.is_some())
+    }
+
+    /// Kill the process most recently started for `fake` the way a crash does (SIGKILL: no exit
+    /// code, so the supervisor restarts it at once), then run the supervisor until it has either
+    /// started a new process or given up on the session.
+    async fn crash_and_recover(&self, tag: &str, fake: &Fake) {
+        let before = fake.pids();
+        let pid = *before.last().expect("a process was started");
+        // SAFETY: `pid` is the fake the manager started (its wrapper `exec`s into it).
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0, "the fake is alive to be killed");
+        wait_until("the supervisor to restart the session or give up on it", || {
+            self.mgr.lock().unwrap().reap_and_recover();
+            (fake.pids().len() > before.len() || self.is_stopped(tag)).then_some(())
+        })
+        .await;
+    }
+
+    /// Crash `tag` over and over until the crash-loop guard gives up on it.
+    async fn crash_until_the_guard_trips(&self, tag: &str, fake: &Fake) {
+        let mut crashes = 0;
+        while !self.is_stopped(tag) {
+            assert!(crashes < 8, "the crash-loop guard never tripped");
+            self.crash_and_recover(tag, fake).await;
+            crashes += 1;
+        }
+        assert!(crashes >= 2, "the guard tripped on crashes, not on the first one: {crashes}");
+    }
+
+    /// Nothing looks at the credential any more: the count stays put over several intervals.
+    async fn assert_poller_stopped(&self) {
+        self.ticks(2).await; // let an in-flight look finish
+        settle().await;
+        let after = self.watch.calls();
+        self.ticks(6).await;
+        settle().await;
+        assert_eq!(self.watch.calls(), after, "the poller keeps looking at the credential");
     }
 
     /// Everything broadcast so far.
@@ -420,6 +502,15 @@ impl Fake {
         self.user_frames()
             .iter()
             .map(|f| f["message"]["content"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// The pid of every process started, oldest first (the wrapper `exec`s into the fake).
+    fn pids(&self) -> Vec<i32> {
+        std::fs::read_to_string(self.dir.join("pids.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
             .collect()
     }
 
@@ -1109,6 +1200,359 @@ fn with_an_unavailable_watch_nothing_is_resent_by_itself_but_a_manual_retry_work
         assert_eq!(w.resend(tag, &id, ResendTrigger::Manual), ResendOutcome::Resent);
         w.wait_user_texts(&fake, 2).await;
         w.drive_until("the picture to clear", || (!w.pic().needs_login).then_some(())).await;
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════
+// 13. a session the manager gave up on holds nothing, is not polled and resends nothing
+// ═════════════════════════════════════════════════════════════════════════════════
+
+/// A session that waits for a sign-in with one message held.
+async fn hold_one(w: &mut World, tag: &str, text: &str) -> Fake {
+    let fake = w.spawn(tag, false);
+    w.set_login("expired");
+    w.say(tag, text);
+    w.wait_hold(tag).await;
+    w.wait_idle(tag).await;
+    fake
+}
+
+#[test]
+fn stopping_a_session_waiting_for_sign_in_drops_its_hold_and_the_credential_is_no_longer_polled() {
+    run(|mut w| async move {
+        let tag = "cody-stop-hold";
+        let _fake = hold_one(&mut w, tag, "HELD-STOPHOLD").await;
+        let at_failure = w.watch.calls();
+        w.ticks(4).await;
+        assert!(w.watch.calls() >= at_failure + 2, "the poller runs while the hold exists");
+        assert!(w.has_hold());
+
+        w.stop(tag);
+
+        assert!(!w.has_hold(), "a stopped session holds no message for a sign-in");
+        let pic = w.pic();
+        assert!(!pic.needs_login && pic.sessions.is_empty(), "{pic:?}");
+        w.assert_poller_stopped().await;
+    });
+}
+
+#[test]
+fn a_message_held_by_a_stopped_session_is_never_sent_when_the_session_is_started_again() {
+    run(|mut w| async move {
+        let tag = "cody-stop-restart";
+        let fake = hold_one(&mut w, tag, "HELD-STOPRESTART").await;
+
+        w.stop(tag);
+        w.restart(tag);
+        settle().await;
+        assert_eq!(fake.user_texts(), vec!["HELD-STOPRESTART"], "the new process was sent nothing");
+        assert!(w.pic().sessions.is_empty(), "the started-again session is not waiting for anything");
+
+        // The user signs in later: there is nothing to resend, and nothing is paused.
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(texts, vec!["HELD-STOPRESTART"], "the old message is not written to the new process");
+        assert!(!w.has_hold());
+        assert!(!w.pic().needs_login);
+
+        // And the session is usable, not paused.
+        w.say(tag, "AFTER-STOPRESTART");
+        let texts = w.wait_user_texts(&fake, 2).await;
+        assert_eq!(texts, vec!["HELD-STOPRESTART", "AFTER-STOPRESTART"]);
+    });
+}
+
+#[test]
+fn a_session_the_crash_loop_guard_gave_up_on_holds_nothing_and_is_not_polled() {
+    run(|mut w| async move {
+        let tag = "cody-guard-hold";
+        let fake = hold_one(&mut w, tag, "HELD-GUARD").await;
+
+        w.crash_until_the_guard_trips(tag, &fake).await;
+
+        assert!(!w.has_hold(), "a session the guard gave up on holds no message for a sign-in");
+        let pic = w.pic();
+        assert!(!pic.needs_login && pic.sessions.is_empty(), "{pic:?}");
+        w.assert_poller_stopped().await;
+
+        // A credential change has nobody to resend to.
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(texts, vec!["HELD-GUARD"], "nothing is written");
+    });
+}
+
+#[test]
+fn a_message_held_by_a_session_the_guard_gave_up_on_is_never_sent_when_it_is_restarted() {
+    run(|mut w| async move {
+        let tag = "cody-guard-restart";
+        let fake = hold_one(&mut w, tag, "HELD-GUARDRESTART").await;
+        w.crash_until_the_guard_trips(tag, &fake).await;
+
+        w.restart(tag);
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(texts, vec!["HELD-GUARDRESTART"], "the old message is not written to the new process");
+        assert!(!w.has_hold());
+        assert!(w.pic().sessions.is_empty());
+    });
+}
+
+#[test]
+fn the_credential_is_polled_until_the_last_session_holding_a_message_is_gone() {
+    run(|mut w| async move {
+        let (a, b) = ("cody-two-a", "cody-two-b");
+        let _fa = hold_one(&mut w, a, "HELD-TWO-A").await;
+        let _fb = hold_one(&mut w, b, "HELD-TWO-B").await;
+        assert_eq!(w.pic().sessions.len(), 2);
+
+        w.stop(a);
+        assert!(w.has_hold(), "the other session still holds its message");
+        let pic = w.pic();
+        assert!(pic.entry(a).is_none() && pic.entry(b).is_some(), "{pic:?}");
+        let before = w.watch.calls();
+        w.ticks(4).await;
+        assert!(w.watch.calls() >= before + 2, "still polled while one session waits");
+
+        w.stop(b);
+        assert!(!w.has_hold());
+        assert!(w.pic().sessions.is_empty());
+        w.assert_poller_stopped().await;
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════
+// 17. Stop on a session waiting for a sign-in
+// ═════════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn stop_on_an_idle_session_waiting_for_sign_in_discards_the_hold_and_the_queue() {
+    run(|mut w| async move {
+        let tag = "cody-stopwait";
+        let fake = hold_one(&mut w, tag, "HELD-STOPWAIT").await;
+        for i in 1..=3 {
+            w.say(tag, &format!("QUEUED-STOPWAIT-{i}"));
+        }
+        assert_eq!(w.pic().held(tag).queued, 3);
+
+        assert_eq!(w.interrupt(tag), InterruptOutcome::DiscardedHold);
+
+        assert!(!w.has_hold());
+        let pic = w.pic();
+        assert!(!pic.needs_login && pic.sessions.is_empty(), "{pic:?}");
+        w.drive_until("the picture to clear on the wire", || {
+            let last = w.broadcasts().iter().rev().find(|m| matches!(m, ServerMsg::ClaudeLoginState { .. })).map(pic_of);
+            last.filter(|p| !p.needs_login && p.sessions.is_empty()).map(|_| ())
+        })
+        .await;
+
+        // The user signs in: neither the held message nor the queue comes back.
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(texts, vec!["HELD-STOPWAIT"], "nothing more is written after the sign-in");
+        w.wait_idle(tag).await;
+
+        // The session is not paused any more, and the queue is gone: the next message is the next write.
+        w.say(tag, "AFTER-STOPWAIT");
+        let texts = w.wait_user_texts(&fake, 2).await;
+        assert_eq!(texts, vec!["HELD-STOPWAIT", "AFTER-STOPWAIT"]);
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(texts, vec!["HELD-STOPWAIT", "AFTER-STOPWAIT"], "the discarded queue was not written");
+    });
+}
+
+#[test]
+fn stop_on_an_idle_session_that_is_not_waiting_for_anything_still_has_nothing_to_stop() {
+    run(|mut w| async move {
+        let tag = "cody-stopidle";
+        let fake = w.spawn(tag, false);
+        w.say(tag, "FINE-STOPIDLE");
+        w.wait_user_texts(&fake, 1).await;
+        w.wait_idle(tag).await;
+
+        assert_eq!(w.interrupt(tag), InterruptOutcome::NotRunning);
+        assert!(w.pic().sessions.is_empty());
+    });
+}
+
+#[test]
+fn stop_while_a_held_message_is_being_resent_stops_that_turn_as_it_always_did() {
+    run(|mut w| async move {
+        let tag = "cody-stopresend";
+        let fake = hold_one(&mut w, tag, "HELD-STOPRESEND HANG_MIDTURN").await;
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+        w.wait_user_texts(&fake, 2).await; // the resend; the fake takes it and never finishes the turn
+        w.drive_until("the hold to be resending", || {
+            w.pic().entry(tag).filter(|e| e.phase == ClaudeLoginPhase::Resending).map(|_| ())
+        })
+        .await;
+
+        assert_eq!(w.interrupt(tag), InterruptOutcome::Requested);
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════
+// 18. the credential probe never runs on a session's stdout reader
+// ═════════════════════════════════════════════════════════════════════════════════
+
+/// A look at the credential takes this long of real time in the slow-probe test.
+const SLOW_PROBE: Duration = Duration::from_secs(3);
+/// What a session may take to react, well under `SLOW_PROBE`.
+const REACTS_WITHIN: Duration = Duration::from_millis(1500);
+
+#[test]
+fn a_slow_credential_probe_does_not_delay_the_hold_the_idle_state_or_the_next_turns() {
+    run(|mut w| async move {
+        let tag = "cody-slowprobe";
+        let fake = w.spawn(tag, false);
+        w.watch.set_delay(SLOW_PROBE);
+        w.set_login("expired");
+
+        // The failure is held and the session goes idle without waiting for the probe.
+        let started = Instant::now();
+        w.say(tag, "HELD-SLOWPROBE");
+        let first = w.wait_hold(tag).await.hold_id.unwrap();
+        w.wait_idle(tag).await;
+        assert!(started.elapsed() < REACTS_WITHIN, "the failure took {:?} to be held", started.elapsed());
+        w.say(tag, "QUEUED-SLOWPROBE");
+
+        // A resend that fails again is held again just as fast.
+        let started = Instant::now();
+        assert_eq!(w.resend(tag, &first, ResendTrigger::Manual), ResendOutcome::Resent);
+        let second = wait_until("a new hold", || {
+            w.pic()
+                .entry(tag)
+                .filter(|e| e.hold_id.as_deref().is_some_and(|id| id != first) && e.phase == ClaudeLoginPhase::Waiting)
+                .and_then(|e| e.hold_id.clone())
+        })
+        .await;
+        w.wait_idle(tag).await;
+        assert!(started.elapsed() < REACTS_WITHIN, "the second failure took {:?} to be held", started.elapsed());
+
+        // The session carries on: the queued message is written and its turn completes, with
+        // the probe still running somewhere else.
+        w.set_login("ok");
+        let started = Instant::now();
+        assert!(w.discard(tag, Some(&second)));
+        wait_until("the queued message to be written", || (fake.user_texts().len() >= 3).then_some(())).await;
+        w.wait_idle(tag).await;
+        assert!(started.elapsed() < REACTS_WITHIN, "the next turn took {:?} to complete", started.elapsed());
+        assert_eq!(fake.user_texts(), vec!["HELD-SLOWPROBE", "HELD-SLOWPROBE", "QUEUED-SLOWPROBE"]);
+        assert!(w.pic().sessions.is_empty());
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════
+// 19. a resend that was written is never written again on its own
+// ═════════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn a_resend_whose_process_died_mid_turn_is_never_written_again_on_its_own() {
+    run(|mut w| async move {
+        let tag = "cody-crashresend";
+        let fake = w.spawn(tag, false);
+        w.set_login("expired");
+        w.say(tag, "HELD-CRASHRESEND DIE_MIDTURN");
+        w.wait_hold(tag).await;
+        w.wait_idle(tag).await;
+        assert_eq!(w.pic().held(tag).phase, ClaudeLoginPhase::Waiting, "nothing ran: resendable");
+
+        // The user signs in: the daemon resends once, and the process dies in the middle of it.
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+        w.wait_user_texts(&fake, 2).await;
+        wait_until("the process to die", || {
+            let mgr = w.mgr.lock().unwrap();
+            mgr.list().iter().all(|s| s.tag != tag || !s.alive).then_some(())
+        })
+        .await;
+
+        // The supervisor restarts it, carrying the hold.
+        let before = fake.pids().len();
+        wait_until("the supervisor to restart the session", || {
+            w.mgr.lock().unwrap().reap_and_recover();
+            (fake.pids().len() > before).then_some(())
+        })
+        .await;
+        w.wait_idle(tag).await;
+        let entry = w.pic().held(tag);
+        assert!(entry.hold_id.is_some(), "the message is still held");
+        assert_eq!(
+            entry.phase,
+            ClaudeLoginPhase::NotResendable,
+            "it was written once already and may have run: it needs the user's attention"
+        );
+
+        // Credential changes (this session's own, then other sessions' refreshes): nothing is written.
+        for i in 2..6 {
+            w.watch.set_stamp(&format!("stamp-{i}"));
+            w.ticks(3).await;
+        }
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(
+            count(&texts, "HELD-CRASHRESEND"),
+            2,
+            "the original and the one resend, never a third: {texts:?}"
+        );
+        assert_eq!(fake.spawn_lines().len(), 2, "no further restarts either");
+        let entry = w.pic().held(tag);
+        assert_eq!(entry.phase, ClaudeLoginPhase::NotResendable);
+
+        // The human still can.
+        let id = entry.hold_id.unwrap();
+        assert_eq!(w.resend(tag, &id, ResendTrigger::Manual), ResendOutcome::Resent);
+        let texts = w.wait_user_texts(&fake, 3).await;
+        assert_eq!(count(&texts, "HELD-CRASHRESEND"), 3);
+    });
+}
+
+#[test]
+fn a_restart_while_the_held_message_is_being_resent_never_writes_it_again_on_its_own() {
+    run(|mut w| async move {
+        let tag = "cody-restartresend";
+        let fake = hold_one(&mut w, tag, "HELD-RESTARTRESEND HANG_MIDTURN").await;
+        assert_eq!(w.pic().held(tag).phase, ClaudeLoginPhase::Waiting);
+
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+        w.wait_user_texts(&fake, 2).await; // the resend; the fake takes it and never finishes the turn
+        w.drive_until("the hold to be resending", || {
+            w.pic().entry(tag).filter(|e| e.phase == ClaudeLoginPhase::Resending).map(|_| ())
+        })
+        .await;
+
+        w.restart(tag);
+        settle().await;
+        let entry = w.pic().held(tag);
+        assert!(entry.hold_id.is_some(), "the message is still held");
+        assert_eq!(
+            entry.phase,
+            ClaudeLoginPhase::NotResendable,
+            "it was written once already and may have run: it needs the user's attention"
+        );
+
+        for i in 2..6 {
+            w.watch.set_stamp(&format!("stamp-{i}"));
+            w.ticks(3).await;
+        }
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(
+            count(&texts, "HELD-RESTARTRESEND"),
+            2,
+            "the original and the one resend, never a third: {texts:?}"
+        );
+
+        // The human still can.
+        w.wait_idle(tag).await;
+        let id = w.pic().held(tag).hold_id.unwrap();
+        assert_eq!(w.resend(tag, &id, ResendTrigger::Manual), ResendOutcome::Resent);
+        let texts = w.wait_user_texts(&fake, 3).await;
+        assert_eq!(count(&texts, "HELD-RESTARTRESEND"), 3);
     });
 }
 

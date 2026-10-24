@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -938,6 +939,33 @@ class AuthModeTest(unittest.TestCase):
         fake.send(sent[-1])
         fake.until_result()
         self.assertEqual(fake.jsonl("stdin.jsonl"), sent)
+
+    def test_die_cue_while_ok_echoes_the_message_then_the_process_dies_without_a_result(self):
+        fake = self.fake(self.auth_file("ok"))
+        echo = fake.cue("please DIE_MIDTURN now")
+        self.assertEqual(echo["message"]["content"], "please DIE_MIDTURN now")
+        self.assertIsNone(fake.frames.get(timeout=TIMEOUT), "nothing after the echo, then EOF")
+        self.assertEqual(fake.proc.wait(timeout=TIMEOUT), -signal.SIGKILL)
+
+    def test_die_cue_while_expired_is_an_ordinary_auth_failure_and_the_process_lives(self):
+        fake = self.fake(self.auth_file("expired"))
+        self.assert_failed_turn(self.turn(fake, "please DIE_MIDTURN now"))
+        self.assertIsNone(fake.proc.poll())
+
+    def test_hang_cue_while_ok_echoes_the_message_and_never_ends_the_turn(self):
+        fake = self.fake(self.auth_file("ok"))
+        fake.cue("please HANG_MIDTURN now")
+        self.assertTrue(fake.no_more_frames(grace=0.5))
+        self.assertIsNone(fake.proc.poll(), "still alive")
+
+    def test_hang_cue_while_expired_is_an_ordinary_auth_failure(self):
+        fake = self.fake(self.auth_file("expired"))
+        self.assert_failed_turn(self.turn(fake, "please HANG_MIDTURN now"))
+
+    def test_a_process_that_hung_still_answers_the_next_message(self):
+        fake = self.fake(self.auth_file("ok"))
+        fake.cue("HANG_MIDTURN")
+        self.assert_normal_turn(self.turn(fake, "next"))
 
     def test_the_auth_file_is_never_written_by_the_fake(self):
         path = self.auth_file("expired")

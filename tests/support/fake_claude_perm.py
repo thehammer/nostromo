@@ -45,6 +45,13 @@ AUTH MODE (an expired Claude login, for the daemon's sign-in handling):
   before failing: a turn that did real work. With the login `ok`, AUTH_MIDTURN
   is ignored. Nothing is ever read from `~` and no network is touched.
 
+  Two more cues act only while the login is `ok` (while `expired` they are ignored
+  and the turn fails as above), for a message that was written again after a failure:
+    DIE_MIDTURN   echo the message, then die abruptly: SIGKILL to itself, so no
+                  `result` frame, no exit code, nothing flushed after the echo;
+    HANG_MIDTURN  echo the message, then never end the turn (no further frame for
+                  it), while staying alive and answering later control traffic.
+
 RAW CUES (hand-built lines, concatenated as text so nothing here recurses or
 overflows the way a naive json.dumps of a deeply nested value would):
 
@@ -80,6 +87,7 @@ in any order.
 import json
 import os
 import re
+import signal
 import sys
 import time
 import uuid
@@ -101,6 +109,8 @@ USER_REJECTED = (
 INTERRUPTED_TEXT = "[Request interrupted by user for tool use]"
 AUTH_FAILURE_TEXT = "Failed to authenticate: OAuth session expired and could not be refreshed"
 AUTH_MIDTURN_CUE = "AUTH_MIDTURN"
+DIE_MIDTURN_CUE = "DIE_MIDTURN"
+HANG_MIDTURN_CUE = "HANG_MIDTURN"
 
 
 def now_iso():
@@ -418,6 +428,12 @@ class FakeClaude:
         text = self.message_text(frame)
         if self.login_expired():
             self.emit_auth_failure(AUTH_MIDTURN_CUE in text)
+            return
+        if DIE_MIDTURN_CUE in text:
+            # Abrupt death mid-turn: the echo is out, the turn never ends.
+            self.out.flush()
+            os.kill(os.getpid(), signal.SIGKILL)
+        if HANG_MIDTURN_CUE in text:
             return
         cue = CUE_RE.search(text)
         raw = RAW_RE.search(text)

@@ -330,6 +330,13 @@ impl ManagedSession {
         !self.shared.exited.load(Ordering::SeqCst)
     }
 
+    /// Can a held message of this session still be resent? Not once it is
+    /// stopped (by the user or the crash-loop guard) or while its process is down
+    /// (a respawn takes the hold along, see `take_carry`).
+    fn waits_for_login(&self) -> bool {
+        self.alive() && self.stop_reason.is_none()
+    }
+
     /// Kill the child, and its whole process group when it leads one.
     fn kill(&mut self) {
         self.signal_kill();
@@ -522,6 +529,8 @@ pub struct SessionManager {
     /// credential; `None` in tests and non-daemon use, where a session still
     /// holds a failed message but nothing is published and nothing resends it.
     login: Option<Arc<LoginCoordinator>>,
+    /// Where `claude` was last found (`login_snapshot`); see `claude_bin`.
+    claude_bin_cache: Mutex<Option<(Option<PathBuf>, Instant)>>,
 }
 
 impl SessionManager {
@@ -585,6 +594,7 @@ impl SessionManager {
             approvals: None,
             omit_guard_hook: false,
             login: None,
+            claude_bin_cache: Mutex::new(None),
         }
     }
 
@@ -1272,6 +1282,10 @@ impl SessionManager {
     /// immediately starting the next queued message. The transcript is told, so
     /// the result that ends this turn renders as "Interrupted", not a failure.
     ///
+    /// A session that waits for a sign-in is Stop's too: the held message and the
+    /// queue behind it are discarded, so nothing is sent after the sign-in
+    /// ([`InterruptOutcome::DiscardedHold`], unless a turn was running too).
+    ///
     /// A no-op ([`InterruptOutcome::NotRunning`]) when the session is idle.
     pub fn interrupt(&mut self, tag: &str) -> Result<InterruptOutcome> {
         let session = self
@@ -1290,7 +1304,7 @@ impl SessionManager {
         // that same hold, so a writer that pops after it finds nothing. The
         // wait is bounded like `take_carry`'s.
         let deadline = std::time::Instant::now() + WRITE_WAIT_LIMIT;
-        let running = loop {
+        let (running, discarded) = loop {
             let state = lock_recover(&session.shared.state);
             if session.shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
                 drop(state);
@@ -1298,13 +1312,18 @@ impl SessionManager {
                 continue;
             }
             let running = matches!(*state, SessionState::MidTurn | SessionState::AwaitingPermission);
-            if running {
+            let discarded = session.shared.login.discard_for_stop();
+            if running || discarded {
                 lock_recover(&session.shared.pending).clear();
             }
-            break running;
+            break (running, discarded);
         };
+        if discarded {
+            info!(tag, "held message discarded: stopped by the user");
+            session.shared.login.notify();
+        }
         if !running {
-            return Ok(InterruptOutcome::NotRunning);
+            return Ok(if discarded { InterruptOutcome::DiscardedHold } else { InterruptOutcome::NotRunning });
         }
 
         lock_recover(&session.shared.transcript).mark_interrupt_requested();
@@ -1460,6 +1479,8 @@ impl SessionManager {
             }
             session.intentional_stop.store(true, Ordering::SeqCst);
             session.stop_reason = Some(StopReason::User);
+            // A stopped session waits for no sign-in: its held message is dropped.
+            session.shared.login.clear();
             session.kill();
             session.shared.exited.store(true, Ordering::SeqCst);
             // The forwarders are aborted below, before the reader reaches
@@ -1751,10 +1772,13 @@ impl SessionManager {
                 if let Some(s) = self.sessions.get_mut(&tag) {
                     s.intentional_stop.store(true, Ordering::SeqCst);
                     s.stop_reason = Some(StopReason::CrashLoopGuard);
+                    // Given up on: it waits for no sign-in, and its held message is dropped.
+                    s.shared.login.clear();
                     s.shared.broadcast(SessionEvent::PermanentlyDown {
                         reason: StopReason::CrashLoopGuard,
                     });
                 }
+                self.login_changed();
                 // The session will not auto-restart — cancel any decision
                 // pending for this tag rather than leaving its caller blocked
                 // on a session that is never coming back on its own.
@@ -2733,6 +2757,9 @@ pub enum InterruptOutcome {
     Requested,
     /// The session was idle: nothing to interrupt.
     NotRunning,
+    /// The session was waiting for a sign-in: Stop discarded the held message
+    /// and the queue behind it, so nothing is sent after the sign-in.
+    DiscardedHold,
 }
 
 /// Write one stream-json `control_request` frame (`request` is the body, e.g.

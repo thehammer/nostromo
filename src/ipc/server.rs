@@ -1174,11 +1174,22 @@ fn handle_client_msg(
 
         ClientMsg::SessionInterrupt { tag } => {
             let mut mgr = session_mgr.lock().unwrap();
-            if let Err(e) = mgr.interrupt(&tag) {
-                warn!(conn_key, %tag, "SessionInterrupt error: {e}");
-                let _ = targeted_tx.send(ServerMsg::Error {
-                    message: format!("SessionInterrupt failed: {e}"),
-                });
+            match mgr.interrupt(&tag) {
+                Ok(crate::ipc::session_manager::InterruptOutcome::DiscardedHold) => {
+                    // Said without content: what was held is gone, and nothing is sent after the sign-in.
+                    let _ = targeted_tx.send(ServerMsg::Notification {
+                        tag: tag.clone(),
+                        level: crate::ipc::protocol::NotificationLevel::Info,
+                        message: "Stopped: the message waiting for sign-in was discarded.".to_string(),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(conn_key, %tag, "SessionInterrupt error: {e}");
+                    let _ = targeted_tx.send(ServerMsg::Error {
+                        message: format!("SessionInterrupt failed: {e}"),
+                    });
+                }
             }
         }
 
