@@ -23,6 +23,10 @@ name = "nostromo-activity-hook"
 path = "src/bin/nostromo_activity_hook.rs"
 
 [[bin]]
+name = "nostromo-google-auth"
+path = "src/bin/nostromo_google_auth.rs"
+
+[[bin]]
 name = "nostromo-guard"
 path = "src/bin/nostromo_guard.rs"
 
