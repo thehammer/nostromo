@@ -377,6 +377,7 @@ impl Rig {
                 renders_decisions: false,
                 renders_approvals: renders,
                 capabilities: vec![],
+                operator_nonce: None,
             })
             .unwrap(),
         )
@@ -399,6 +400,7 @@ impl Rig {
                 renders_decisions: false,
                 renders_approvals: true,
                 capabilities: vec![],
+                operator_nonce: None,
             })
             .unwrap(),
         )
@@ -419,6 +421,7 @@ impl Rig {
                     renders_decisions: false,
                     renders_approvals: true,
                     capabilities: vec![],
+                    operator_nonce: None,
                 })
                 .unwrap(),
             )
@@ -1018,6 +1021,7 @@ fn a_connection_that_resubscribes_with_renders_approvals_becomes_a_presenter() {
             renders_decisions: false,
             renders_approvals: true,
             capabilities: vec![],
+            operator_nonce: None,
         })
         .await;
         let snapshot = app.next("the snapshot", is_snapshot).await;

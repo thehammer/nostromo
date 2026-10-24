@@ -146,6 +146,7 @@ async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;

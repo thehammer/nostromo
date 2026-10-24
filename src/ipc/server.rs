@@ -178,7 +178,7 @@ impl Server {
         }
 
         // And the terminal manager (layout, pane content and terminal metadata).
-        terminals.lock().unwrap().configure_broadcast(tx.clone());
+        lock_terminals(&terminals).configure_broadcast(tx.clone());
 
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
@@ -629,8 +629,12 @@ where
     // in every `DecisionAnswer`: bytes written before verification (say, by a
     // process that then `exec`s the app) cannot contain it.
     let operator_nonce = (trust == PeerTrust::OperatorApp).then(new_operator_nonce);
-    // The only way to a terminal's input, output, size, close or restart.
-    let cap = access::mint(trust);
+    // The only way to a terminal's input, output, size, close or restart. It
+    // is held back until a `Subscribe` echoes the operator nonce and a fresh
+    // look at the peer still sees the verified app (see `activate`, below):
+    // frames a process buffered before `exec`ing the app cannot hold the nonce.
+    let mut pending_cap = access::mint(trust);
+    let mut cap: Option<OperatorCap> = None;
 
     let welcome = welcome_msg(&session_mgr.lock().unwrap(), operator_nonce.clone());
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
@@ -664,21 +668,29 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (mut topics, renders_decisions, renders_approvals, capabilities): (
+    let (mut topics, renders_decisions, renders_approvals, capabilities, sub_nonce): (
         Vec<Topic>,
         bool,
         bool,
         Vec<String>,
+        Option<String>,
     ) = match sub {
         ClientMsg::Subscribe {
             topics,
             renders_decisions,
             renders_approvals,
             capabilities,
-        } => (topics, renders_decisions, renders_approvals, capabilities),
+            operator_nonce,
+        } => (
+            topics,
+            renders_decisions,
+            renders_approvals,
+            capabilities,
+            operator_nonce,
+        ),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
-            (vec![], false, false, vec![])
+            (vec![], false, false, vec![], None)
         }
         _ => {
             // The frame's type only: its content is never logged.
@@ -761,16 +773,30 @@ where
     // one. (Keeping the sender here keeps the receiver open for everyone.)
     let (terminal_stream_tx, mut terminal_stream_rx) =
         mpsc::channel::<terminal::StreamBatch>(terminal::STREAM_CAPACITY);
-    if let Some(cap) = &cap {
-        terminals.lock().unwrap().register_conn(
-            cap,
-            &conn_key,
-            terminal::OperatorConn {
-                targeted: targeted_tx.clone(),
-                stream: terminal_stream_tx.clone(),
-                capabilities,
-            },
-        );
+    // Activate the cap (and register the connection with the terminal
+    // manager) once a `Subscribe` echoes the nonce and the peer re-checks.
+    let activate = |pending: &mut Option<OperatorCap>,
+                    cap: &mut Option<OperatorCap>,
+                    capabilities: Vec<String>| {
+        if let Some(granted) = pending.take() {
+            lock_terminals(&terminals).register_conn(
+                &granted,
+                &conn_key,
+                terminal::OperatorConn {
+                    targeted: targeted_tx.clone(),
+                    stream: terminal_stream_tx.clone(),
+                    capabilities,
+                },
+            );
+            *cap = Some(granted);
+        }
+    };
+    if pending_cap.is_some() {
+        match check_operator_answer(&origin, operator_nonce.as_deref(), sub_nonce.as_deref()).await
+        {
+            Ok(()) => activate(&mut pending_cap, &mut cap, capabilities),
+            Err(e) => debug!(conn_key, "terminal verbs not enabled yet: {e}"),
+        }
     }
 
     // The requests already held, for a connection that just became a presenter
@@ -845,7 +871,7 @@ where
     // ── Terminal list — every terminal's metadata, local clients only ─────────
     // After the layout replay, so the panes the terminals live in are known.
     if !trust.is_network() {
-        let list = terminals.lock().unwrap().terminal_list_msg();
+        let list = lock_terminals(&terminals).terminal_list_msg();
         replay_messages(&mut writer, [list]).await;
     }
 
@@ -1058,9 +1084,14 @@ where
                         // A later `Subscribe` replaces the topic list: a client
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
-                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities } = msg {
+                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities, operator_nonce: sent } = msg {
                             if let Some(cap) = &cap {
-                                terminals.lock().unwrap().set_capabilities(cap, &conn_key, capabilities);
+                                lock_terminals(&terminals).set_capabilities(cap, &conn_key, capabilities);
+                            } else if pending_cap.is_some() {
+                                match check_operator_answer(&origin, operator_nonce.as_deref(), sent.as_deref()).await {
+                                    Ok(()) => activate(&mut pending_cap, &mut cap, capabilities),
+                                    Err(e) => debug!(conn_key, "terminal verbs not enabled yet: {e}"),
+                                }
                             }
                             if can_answer && !is_operator && (new_topics.contains(&Topic::Decision) || renders_decisions) {
                                 decisions.lock().unwrap().add_operator(&conn_key);
@@ -1114,7 +1145,28 @@ where
                             }
                             _ => None,
                         };
-                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions, &held_mother_jobs, cap.as_ref(), &terminals);
+                        // Opening, attaching, closing and restarting a terminal
+                        // also re-check the peer (a code-signing check, too
+                        // slow for every keystroke): a process that took over
+                        // the app's socket gets no cap for them.
+                        let terminal_cap = match &msg {
+                            ClientMsg::TerminalOpenLocal { .. }
+                            | ClientMsg::TerminalAttach { .. }
+                            | ClientMsg::TerminalClose { .. }
+                            | ClientMsg::TerminalRestart { .. }
+                                if cap.is_some() =>
+                            {
+                                match origin.still_the_operator().await {
+                                    Ok(()) => cap.as_ref(),
+                                    Err(e) => {
+                                        warn!(conn_key, "terminal verb refused: {e}");
+                                        None
+                                    }
+                                }
+                            }
+                            _ => cap.as_ref(),
+                        };
+                        handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions, &held_mother_jobs, terminal_cap, &terminals);
                     }
                     Err(_) => {
                         // Client disconnected.
@@ -1143,7 +1195,7 @@ where
         broker.app_disconnected(&conn_key);
     }
     if let Some(cap) = &cap {
-        terminals.lock().unwrap().unregister_conn(cap, &conn_key);
+        lock_terminals(&terminals).unregister_conn(cap, &conn_key);
     }
     drop(terminal_stream_tx);
 
@@ -1250,7 +1302,7 @@ fn handle_client_msg(
         log_network_task_refusal(&msg, session_mgr, sensitive);
         // A terminal verb over the network is audited too (before the reply).
         if let Some(op) = terminal::op_of(&msg) {
-            terminals.lock().unwrap().audit_refused(
+            lock_terminals(terminals).audit_refused(
                 TerminalRefusalChannel::Tcp,
                 op,
                 Some("requires_secure_connection"),
@@ -2191,6 +2243,14 @@ fn handle_client_msg(
 
 /// `tag` as an activity line may name it: a sensitive focus's tag can embed a
 /// work item's title, so it is logged as its opaque id.
+/// The terminal manager, even if a panic poisoned its lock: a local
+/// handshake must not fail because of an earlier panic elsewhere.
+fn lock_terminals(
+    terminals: &Mutex<TerminalManager>,
+) -> std::sync::MutexGuard<'_, TerminalManager> {
+    terminals.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A terminal verb from a local peer. Without an [`OperatorCap`] it changes
 /// nothing: the peer gets `terminal_refused` and the attempt is audited (a
 /// refusal report from a non-operator is only logged). With one, the verb
@@ -2229,7 +2289,7 @@ fn handle_terminal_msg(
             _ => {
                 let code = terminal::forbidden_code(op);
                 // Audited before the peer is told no.
-                terminals.lock().unwrap().audit_refused(
+                lock_terminals(terminals).audit_refused(
                     TerminalRefusalChannel::Ipc,
                     op,
                     Some(code),
@@ -2243,7 +2303,7 @@ fn handle_terminal_msg(
         return;
     };
 
-    let mut mgr = terminals.lock().unwrap();
+    let mut mgr = lock_terminals(terminals);
     let result = match msg {
         ClientMsg::TerminalOpenLocal {
             tag,

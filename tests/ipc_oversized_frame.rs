@@ -117,6 +117,7 @@ async fn connect(d: &Daemon, topics: Vec<Topic>) -> (UnixStream, Vec<ServerMsg>)
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;

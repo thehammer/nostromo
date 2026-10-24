@@ -1611,6 +1611,7 @@ mod tests {
                 renders_decisions: false,
                 renders_approvals: false,
                 capabilities: vec![],
+                operator_nonce: None,
             },
             ClientMsg::Ping,
             ClientMsg::PtySpawn {

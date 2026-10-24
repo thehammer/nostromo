@@ -60,8 +60,9 @@ pub const DEFAULT_POSITION: &str = "split_below";
 pub const PANE_PREFIX: &str = "terminal-";
 const LOCAL_LABEL: &str = "Terminal";
 /// At most this many `refused` audit lines per channel per [`REFUSAL_WINDOW`]:
-/// a peer that floods refused frames must not rotate the real entries away,
-/// and a network flood must not use up the budget of local refusals.
+/// it bounds how fast a flood of refused frames can rotate real entries away
+/// (a same-user process could delete the file anyway), and a network flood
+/// cannot use up the budget of local refusals.
 pub const MAX_REFUSALS_PER_WINDOW: u32 = 120;
 pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
 
@@ -83,6 +84,10 @@ pub enum TerminalError {
     NotEnded,
     /// Input to a terminal whose process has ended.
     NotRunning,
+    /// The process is not reading its input and its queue is full.
+    InputBusy,
+    /// The daemon is stopping.
+    ShuttingDown,
     InvalidWorkingDirectory,
     InvalidSize,
     /// The bytes were not valid base64.
@@ -98,6 +103,8 @@ impl TerminalError {
             TerminalError::UnknownTerminal => "unknown_terminal",
             TerminalError::NotEnded => "terminal_not_ended",
             TerminalError::NotRunning => "terminal_not_running",
+            TerminalError::InputBusy => "terminal_input_busy",
+            TerminalError::ShuttingDown => "daemon_shutting_down",
             TerminalError::InvalidWorkingDirectory => "invalid_working_directory",
             TerminalError::InvalidSize => "invalid_size",
             TerminalError::InvalidBytes => "invalid_bytes",
@@ -311,6 +318,9 @@ impl TerminalManager {
         req: OpenLocal,
         requested_by: TerminalRequester,
     ) -> Result<TerminalInfo, TerminalError> {
+        if self.shutting_down {
+            return Err(TerminalError::ShuttingDown);
+        }
         let cwd = resolve_cwd(req.cwd.as_deref())?;
         let position = SplitPosition::parse(req.position.as_deref().unwrap_or(DEFAULT_POSITION))
             .map_err(TerminalError::Pane)?;
@@ -481,9 +491,9 @@ impl TerminalManager {
             .filter(|s| t.info.status == TerminalStatus::Running && !s.is_exited())
             .ok_or(TerminalError::NotRunning)?;
         t.fanout.input_received();
-        session.write(bytes).map_err(|e| {
-            warn!("terminal write failed: {e}");
-            TerminalError::NotRunning
+        session.write(bytes).map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock => TerminalError::InputBusy,
+            _ => TerminalError::NotRunning,
         })
     }
 
@@ -494,7 +504,7 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
     ) -> Result<(), TerminalError> {
-        if cols == 0 || rows == 0 {
+        if cols == 0 || rows == 0 || cols > session::MAX_COLS || rows > session::MAX_ROWS {
             return Err(TerminalError::InvalidSize);
         }
         let t = self
@@ -539,6 +549,9 @@ impl TerminalManager {
         _cap: &OperatorCap,
         terminal_id: &str,
     ) -> Result<TerminalInfo, TerminalError> {
+        if self.shutting_down {
+            return Err(TerminalError::ShuttingDown);
+        }
         let old = self
             .terminals
             .get(terminal_id)

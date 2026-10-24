@@ -273,6 +273,7 @@ async fn handshake_with_nonce<S: AsyncRead + AsyncWrite + Unpin>(
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -3037,6 +3038,7 @@ async fn a_unix_client_that_subscribed_to_everything_is_not_replayed_retained_fr
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -3555,6 +3557,7 @@ async fn a_unix_client_that_adds_the_work_topic_with_a_second_subscribe_is_repla
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -3621,6 +3624,7 @@ async fn a_tcp_client_that_adds_the_work_topic_with_a_second_subscribe_is_still_
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -6733,6 +6737,7 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
                 renders_decisions: false,
                 renders_approvals: false,
                 capabilities: vec![],
+                operator_nonce: None,
             },
         )
         .await,
@@ -7646,6 +7651,7 @@ mod background_tasks {
                 renders_decisions: false,
                 renders_approvals: false,
                 capabilities: vec![],
+                operator_nonce: None,
             })
             .await;
             tap.sync().await;

@@ -83,6 +83,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;

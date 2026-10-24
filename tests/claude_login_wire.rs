@@ -346,6 +346,7 @@ fn subscribe(topics: Vec<Topic>) -> Value {
         renders_decisions: false,
         renders_approvals: false,
         capabilities: vec![],
+        operator_nonce: None,
     })
     .unwrap()
 }

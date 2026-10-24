@@ -1189,6 +1189,12 @@ pub enum ClientMsg {
         /// `#[serde(default)]`: an older client sends none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
+        /// The `operator_nonce` from this connection's `Welcome`. A verified
+        /// app's terminal verbs are honoured only after a `Subscribe` that
+        /// echoes it (and a fresh look at the peer): bytes a process wrote
+        /// before `exec`ing the genuine app cannot contain it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
     },
     Ping,
 
@@ -2680,6 +2686,7 @@ mod tests {
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
@@ -2687,6 +2694,7 @@ mod tests {
             renders_decisions: false,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         })
         .unwrap();
         assert_eq!(v["type"], "subscribe");
@@ -2704,6 +2712,7 @@ mod tests {
             renders_decisions: true,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
@@ -2711,6 +2720,7 @@ mod tests {
             renders_decisions: true,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         })
         .unwrap();
         assert_eq!(v["renders_decisions"], true);
@@ -6443,6 +6453,7 @@ mod work_wire_tests {
                 renders_decisions: false,
                 renders_approvals: value,
                 capabilities: vec![],
+                operator_nonce: None,
             };
             round_trip_client(msg.clone());
             assert_client_golden(

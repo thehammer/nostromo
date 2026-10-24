@@ -270,6 +270,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
             renders_decisions: false,
             renders_approvals: false,
             capabilities: caps.iter().map(|s| s.to_string()).collect(),
+            // Echo the Welcome's nonce, as the app does: only then are a
+            // verified app's terminal verbs honoured.
+            operator_nonce: c.nonce.clone(),
         })
         .await;
         c.sync().await;
@@ -2611,4 +2614,163 @@ async fn typing_a_byte_comes_back_as_output_in_under_five_milliseconds_at_p95() 
         p95 < Duration::from_millis(5),
         "p95 {p95:?} must be under 5ms"
     );
+}
+
+// ── review hardening (Cody): the nonce gate, a stuck shell, absurd sizes ─────
+
+/// A process can write `Hello` + `Subscribe` + terminal verbs and then `exec`
+/// the genuine app, so the verification at `Hello` passes for bytes the app
+/// never wrote. Those bytes cannot hold the Welcome's nonce: until a
+/// `Subscribe` echoes it, the verified app's terminal verbs are refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn frames_written_before_the_nonce_was_seen_are_refused_until_a_subscribe_echoes_it() {
+    let d = Daemon::start(&[Peer::App]).await;
+    let (_dir, cwd) = canonical_tmp();
+    let stream = UnixStream::connect(&d.socket_path)
+        .await
+        .expect("unix connect");
+    let mut c: Unix = Client::new(stream);
+    // All buffered before the Welcome is read: no nonce anywhere.
+    c.send(&ClientMsg::Hello {
+        client_id: "pre-exec".into(),
+        protocol_version: PROTOCOL_VERSION,
+        client_kind: Some("mac_app".into()),
+    })
+    .await;
+    c.send(&ClientMsg::Subscribe {
+        topics: vec![],
+        renders_decisions: false,
+        renders_approvals: false,
+        capabilities: vec!["terminal_ui".into()],
+        operator_nonce: None,
+    })
+    .await;
+    c.send(&open_msg(TAG, Some(&cwd), "buffered")).await;
+    let (_, refused) = c
+        .wait_since(0, "the refusal of the buffered open", |m| {
+            matches!(m, ServerMsg::TerminalRefused { .. })
+        })
+        .await;
+    match refused {
+        ServerMsg::TerminalRefused { op, code, .. } => {
+            assert_eq!(normalize_op(&op), "open");
+            assert_eq!(code, "terminal_control_forbidden");
+        }
+        _ => unreachable!(),
+    }
+    assert!(d.list().is_empty(), "the buffered open must start nothing");
+
+    let nonce = c
+        .log
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::Welcome { operator_nonce, .. } => operator_nonce.clone(),
+            _ => None,
+        })
+        .expect("the verified app's Welcome carries a nonce");
+
+    // A wrong nonce does not enable anything either.
+    let resubscribe = |nonce: Option<String>| ClientMsg::Subscribe {
+        topics: vec![],
+        renders_decisions: false,
+        renders_approvals: false,
+        capabilities: vec!["terminal_ui".into()],
+        operator_nonce: nonce,
+    };
+    c.send(&resubscribe(Some("0".repeat(64)))).await;
+    let from = c.mark();
+    c.send(&open_msg(TAG, Some(&cwd), "wrong-nonce")).await;
+    c.wait_since(from, "the refusal after a wrong nonce", |m| {
+        matches!(m, ServerMsg::TerminalRefused { .. })
+    })
+    .await;
+    assert!(d.list().is_empty());
+
+    // The app's own Subscribe, echoing the nonce, enables the verbs.
+    c.send(&resubscribe(Some(nonce))).await;
+    let info = c.open(TAG, Some(&cwd), "after-nonce").await;
+    assert_eq!(info.status, TerminalStatus::Running);
+    assert_eq!(d.list().len(), 1);
+}
+
+/// A shell that is not reading its input (here: `sleep`) must not stall the
+/// daemon when a large paste arrives: input is queued, a full queue is
+/// refused `terminal_input_busy`, and other connections are served meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paste_into_a_shell_that_is_not_reading_never_blocks_the_daemon() {
+    let d = Daemon::start(&[Peer::App, Peer::Script]).await;
+    let (_dir, cwd) = canonical_tmp();
+    let mut app = d.app(vec![]).await;
+    let info = app.open_ready(&cwd).await;
+    let tid = info.terminal_id.clone();
+    app.type_line(&tid, "sleep 30").await;
+
+    let from = app.mark();
+    let chunk = vec![b'x'; 4096];
+    for _ in 0..400 {
+        app.input(&tid, &chunk).await;
+    }
+    app.wait_since(
+        from,
+        "a terminal_input_busy refusal",
+        |m| matches!(m, ServerMsg::TerminalRefused { code, .. } if code == "terminal_input_busy"),
+    )
+    .await;
+
+    // Another connection's handshake (which reads the terminal list) completes.
+    let started = Instant::now();
+    let mut other = d.script(vec![]).await;
+    other
+        .wait_since(0, "the terminal list", |m| {
+            matches!(m, ServerMsg::TerminalList { .. })
+        })
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a stuck shell held up another connection for {:?}",
+        started.elapsed()
+    );
+
+    let from = app.mark();
+    app.send(&ClientMsg::TerminalClose {
+        terminal_id: tid.clone(),
+    })
+    .await;
+    app.wait_since(
+        from,
+        "the close",
+        |m| matches!(m, ServerMsg::TerminalClosed(c) if c.terminal_id == tid),
+    )
+    .await;
+}
+
+/// The screen model allocates rows x cols cells: a size far beyond any real
+/// window is refused and the terminal keeps its size.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_absurd_resize_is_refused_and_changes_nothing() {
+    let d = Daemon::start(&[Peer::App]).await;
+    let (_dir, cwd) = canonical_tmp();
+    let mut app = d.app(vec![]).await;
+    let info = app.open(TAG, Some(&cwd), "req-big").await;
+    let from = app.mark();
+    app.send(&ClientMsg::TerminalResize {
+        terminal_id: info.terminal_id.clone(),
+        cols: u16::MAX,
+        rows: u16::MAX,
+    })
+    .await;
+    let (_, refused) = app
+        .wait_since(from, "the resize refusal", |m| {
+            matches!(m, ServerMsg::TerminalRefused { .. })
+        })
+        .await;
+    match refused {
+        ServerMsg::TerminalRefused { op, code, .. } => {
+            assert_eq!(op, "resize");
+            assert_eq!(code, "invalid_size");
+        }
+        _ => unreachable!(),
+    }
+    let now = d.info(&info.terminal_id).expect("still there");
+    assert_eq!((now.cols, now.rows), (info.cols, info.rows));
 }

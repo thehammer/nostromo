@@ -4,11 +4,15 @@
 //! through `TerminalManager`, never through the retired `pty_*` verbs.
 //!
 //! Threads per session: a blocking **reader** (feeds the ring and the
-//! `vt100` parser under one lock, then the reader hooks), and a **waiter**
-//! (`child.wait()`, then the real exit code once the reader has drained).
+//! `vt100` parser under one lock, then the reader hooks), a **writer** (drains
+//! a bounded input queue into the PTY, so a child that stops reading its
+//! input never blocks the caller), and a **waiter** (`child.wait()`, then the
+//! real exit code once the reader has drained).
 
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -31,6 +35,11 @@ const READ_CHUNK: usize = 4096;
 const KILL_GRACE: Duration = Duration::from_secs(2);
 /// How long the waiter lets the reader drain after the child exited.
 const DRAIN_WAIT: Duration = Duration::from_secs(1);
+/// Writes queued for the child before `write` reports it busy.
+const INPUT_QUEUE: usize = 256;
+/// The largest size a terminal may be given.
+pub const MAX_COLS: u16 = 1000;
+pub const MAX_ROWS: u16 = 500;
 
 /// Variables a shell inside a terminal must not inherit: they would let a
 /// `claude` (or anything else) started there impersonate the focus, reach
@@ -71,10 +80,12 @@ struct ExitState {
 /// A running (or ended) PTY child.
 pub struct TerminalSession {
     screen: Mutex<Screen>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    input: SyncSender<Vec<u8>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pid: Option<u32>,
+    /// Set as soon as `wait()` reaped the child: its pid may be reused.
+    reaped: AtomicBool,
     exit: Mutex<ExitState>,
     exit_cv: Condvar,
     reader_done: Mutex<bool>,
@@ -139,6 +150,7 @@ impl TerminalSession {
         let reader = pair.master.try_clone_reader().context("pty reader")?;
         let writer = pair.master.take_writer().context("pty writer")?;
         let pid = child.process_id();
+        let (input, queued) = sync_channel(INPUT_QUEUE);
 
         let session = Arc::new(Self {
             screen: Mutex::new(Screen {
@@ -146,10 +158,11 @@ impl TerminalSession {
                 parser: vt100::Parser::new(rows, cols, PARSER_SCROLLBACK_ROWS),
                 hooks: Vec::new(),
             }),
-            writer: Mutex::new(writer),
+            input,
             master: Mutex::new(pair.master),
             killer: Mutex::new(child.clone_killer()),
             pid,
+            reaped: AtomicBool::new(false),
             exit: Mutex::new(ExitState::default()),
             exit_cv: Condvar::new(),
             reader_done: Mutex::new(false),
@@ -162,6 +175,11 @@ impl TerminalSession {
             .spawn(move || for_reader.read_loop(reader))
             .context("reader thread")?;
 
+        std::thread::Builder::new()
+            .name("terminal-writer".into())
+            .spawn(move || write_loop(writer, queued))
+            .context("writer thread")?;
+
         let for_waiter = Arc::clone(&session);
         std::thread::Builder::new()
             .name("terminal-waiter".into())
@@ -173,6 +191,7 @@ impl TerminalSession {
                         None
                     }
                 };
+                for_waiter.reaped.store(true, Ordering::SeqCst);
                 for_waiter.wait_reader_drained(DRAIN_WAIT);
                 for_waiter.finish(code);
             })
@@ -231,11 +250,15 @@ impl TerminalSession {
         self.pid
     }
 
-    /// Write bytes to the child's terminal.
+    /// Queue bytes for the child's terminal. Never blocks: `WouldBlock` when
+    /// the queue is full (the child is not reading its input),
+    /// `BrokenPipe` once the terminal is gone.
     pub fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        w.write_all(bytes)?;
-        w.flush()
+        match self.input.try_send(bytes.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(std::io::ErrorKind::WouldBlock.into()),
+            Err(TrySendError::Disconnected(_)) => Err(std::io::ErrorKind::BrokenPipe.into()),
+        }
     }
 
     /// Resize the PTY and the screen model.
@@ -280,7 +303,8 @@ impl TerminalSession {
         let _ = std::thread::Builder::new()
             .name("terminal-kill".into())
             .spawn(move || {
-                if this.wait_exit(KILL_GRACE).is_none() {
+                // Not once reaped: the pid may already name another process.
+                if this.wait_exit(KILL_GRACE).is_none() && !this.reaped.load(Ordering::SeqCst) {
                     // SAFETY: plain kill(2) on the pid we spawned and have not reaped.
                     unsafe {
                         libc::kill(pid as libc::pid_t, libc::SIGKILL);
@@ -361,6 +385,17 @@ impl TerminalSession {
     /// What an attaching client is fed: the ring, then the repaint.
     pub fn replay_bytes(&self) -> Vec<u8> {
         self.with_replay(|bytes, _| bytes)
+    }
+}
+
+/// Feed queued input to the PTY until the session (the sender) is gone or
+/// the terminal stops taking writes.
+fn write_loop(mut writer: Box<dyn Write + Send>, queued: Receiver<Vec<u8>>) {
+    for bytes in queued {
+        if let Err(e) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+            debug!("terminal writer ended: {e}");
+            return;
+        }
     }
 }
 

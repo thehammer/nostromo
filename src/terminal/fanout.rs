@@ -103,7 +103,8 @@ impl Fanout {
     /// A chunk from the PTY (reader thread, under the screen lock).
     fn on_output(&self, chunk: &[u8]) {
         let mut st = self.lock();
-        if st.attached.is_empty() {
+        // Closed: the terminal is gone (or ended) as far as clients know.
+        if st.closed || st.attached.is_empty() {
             st.input_at = None;
             return;
         }
@@ -191,12 +192,13 @@ impl Fanout {
         self.lock().attached.contains_key(conn_key)
     }
 
-    /// Stop the flusher (after a final flush). Attachments stay, so an ended
-    /// terminal can still be detached cleanly.
+    /// Send what is waiting, then nothing more: stop streaming and the
+    /// flusher. (A later `attach` still gets a replay.)
     pub(crate) fn close(&self) {
         let mut st = self.lock();
         self.flush(&mut st);
         st.closed = true;
+        st.attached.clear();
         self.cv.notify_all();
     }
 
@@ -229,6 +231,15 @@ impl Fanout {
                 if st.closed || !st.pending.is_empty() {
                     continue;
                 }
+                // Build a replay (a copy of the whole ring) only for a stream
+                // that has room for it now.
+                let room = st
+                    .attached
+                    .values()
+                    .any(|a| a.lagged && a.stream.capacity() > 0);
+                if !room {
+                    continue;
+                }
                 // Lock order: the screen first, so release ours.
                 drop(st);
                 let Some(session) = session.upgrade() else {
@@ -249,7 +260,7 @@ impl Fanout {
         self.flush(&mut st);
         let terminal_id = self.terminal_id.clone();
         st.attached.retain(|_, a| {
-            if !a.lagged {
+            if !a.lagged || a.stream.capacity() == 0 {
                 return true;
             }
             a.lagged = false;

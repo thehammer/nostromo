@@ -8,6 +8,8 @@ Only the verified Mac app can type into, read, resize, close or restart a termin
 
 - A connection is the operator app when AP1's verifier says so (`PeerTrust::OperatorApp`: the `mac_app` claim plus a verified bundle; see `src/ipc/peer_verify.rs`).
 - `src/terminal/access.rs` mints an `OperatorCap` from that trust and nothing else. `src/ipc/server.rs` mints it once per connection, after `Hello`.
+- The cap is held back until a `Subscribe` echoes the `operator_nonce` from that connection's `Welcome` and a fresh inspection still sees the verified app. A process can write `Hello` plus terminal verbs and then `exec` the real app, which passes the check at `Hello`. Those bytes cannot contain the nonce, which is issued only after verification. The app sends the nonce in `Subscribe` (or in a later re-`Subscribe`).
+- Open, attach, close and restart inspect the peer again. Input and resize do not: the inspection is a code-signing check, too slow for every keystroke.
 - Every `TerminalManager` method that writes input, resizes, attaches (reads output), closes or restarts takes `&OperatorCap`. The MCP side has no `PeerTrust` and so can never get one.
 - The one cap-less way in is `TerminalManager::open_local_for_agent(tag, cwd)`. It can only start a shell in the agent's focus; the agent never gets its input, output or close.
 - Any other local peer's terminal verb is answered with `terminal_refused` and changes nothing.
@@ -31,7 +33,9 @@ Additive; `PROTOCOL_VERSION` is unchanged. Byte fields are base64. `*` means ope
 | `terminal_restart`* | `terminal_id` (a local terminal that has `ended`) |
 | `terminal_refusal_report`* | `terminal_id?, op, channel` (audited; ignored from anyone else) |
 
-`Subscribe` also takes `capabilities: [String]` (default empty). It is recorded only for the operator app.
+`Subscribe` also takes `capabilities: [String]` (default empty, recorded only for the operator app) and `operator_nonce?` (the `Welcome`'s; required before any `*` verb is honoured).
+
+Other `terminal_refused` codes: `unknown_terminal`, `terminal_not_ended`, `terminal_not_running`, `terminal_input_busy` (the process is not reading its input and the queue is full), `invalid_size` (above 1000×500), `invalid_working_directory`, `invalid_bytes`, `terminal_open_failed`, and a pane error code (`unknown_pane`, `invalid_position`).
 
 | Daemon → client | Routing | Fields |
 |---|---|---|
@@ -63,4 +67,6 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 ## Audit
 
-`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `restarted`, `refused`. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `restarted`, `refused`, plus `refusal_limit_reached` and `refusals_suppressed`. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+
+Refused lines are capped at 120 a minute per channel, so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.

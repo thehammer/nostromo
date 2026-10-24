@@ -650,6 +650,7 @@ async fn raw_handshake(
             renders_decisions,
             renders_approvals: false,
             capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
