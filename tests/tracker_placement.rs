@@ -616,6 +616,54 @@ async fn open_says_why_the_pane_is_not_visible_when_the_layout_has_no_place_for_
 }
 
 #[tokio::test]
+async fn open_says_why_the_pane_is_not_visible_when_the_layout_rejects_the_tracker() {
+    // A layout from an older daemon's store that the registry would not accept
+    // today (the same pane id twice; stored layouts are not re-validated on
+    // load). It has a `repl` to sit beside, so the tracker is offered a place,
+    // but the registry refuses the tree it would be in.
+    let fx = Fx::with_panes(|dir| {
+        let store = dir.join("panes.json");
+        let tree = json!({
+            "kind": "split",
+            "direction": "vertical",
+            "children": [
+                {"kind": "leaf", "pane_id": "notes"},
+                {"kind": "leaf", "pane_id": "notes"},
+                {"kind": "leaf", "pane_id": "repl"},
+            ],
+            "ratios": [0.3, 0.3, 0.4],
+        });
+        std::fs::write(
+            &store,
+            json!({"version": 3, "trees": {TAG_A: tree}, "bindings": {}}).to_string(),
+        )
+        .unwrap();
+        PaneRegistry::with_store_path(store)
+    });
+    fx.seat(TAG_A, "sess-a");
+    let before = fx.tree(TAG_A);
+    assert_eq!(
+        ids(&before),
+        vec!["notes", "notes", "repl"],
+        "setup: the stored layout is the one the registry will refuse to extend"
+    );
+
+    let opened = fx.open(TAG_A, "triage").await;
+
+    assert_eq!(opened["visible"], json!(false), "{opened}");
+    assert_eq!(
+        opened["reason"],
+        json!("layout_rejected"),
+        "the agent is told why: {opened}"
+    );
+    assert!(
+        !any_focus_layout(&fx.drain()),
+        "nothing was placed, so nothing was announced"
+    );
+    assert_eq!(fx.tree(TAG_A), before, "the layout is untouched");
+}
+
+#[tokio::test]
 async fn visible_is_per_focus() {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");

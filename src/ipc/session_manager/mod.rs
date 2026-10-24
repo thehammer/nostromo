@@ -279,6 +279,13 @@ struct ManagedSession {
     /// Resolved `claude` session id (persisted in the id store).
     session_id: Option<String>,
     child: Child,
+    /// Set the moment this manager reaps `child` (`try_reap`). A reaped child's
+    /// pid is free to be given to a stranger, so nothing may be signalled by
+    /// that pid afterwards; `stop_target` checks this before it asks the OS.
+    reaped: bool,
+    /// Whether the child's pid is still an unreaped child of ours. Always
+    /// [`child_unreaped`]; a field so tests can simulate a reused pid.
+    unreaped_probe: fn(u32) -> bool,
     shared: Shared,
     /// How to respawn on restart. `None` → a real `claude` session (rebuild
     /// args with `--resume`). `Some((program, args))` → replay this exact
@@ -342,6 +349,18 @@ impl ManagedSession {
         self.alive() && self.stop_reason.is_none()
     }
 
+    /// Non-blocking reap of the child. The one place this manager waits for it:
+    /// a `Some` records that the pid is no longer ours (`reaped`).
+    fn try_reap(&mut self) -> Option<std::process::ExitStatus> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.reaped = true;
+                Some(status)
+            }
+            _ => None,
+        }
+    }
+
     /// Kill the child, and its whole process group when it leads one.
     fn kill(&mut self) {
         self.signal_kill();
@@ -372,11 +391,15 @@ impl ManagedSession {
     /// the child. `None` once the child has been reaped: its pid may since have
     /// been given to something else, and a signal to it would hit a stranger.
     ///
-    /// The probe does not reap: an exited CLI nobody has waited for yet still
-    /// holds its pid, so its group (the subagents and servers it left) is still
-    /// ours to signal, and asking must not be what frees the pid.
+    /// A child this manager has reaped is never probed: once its pid is free,
+    /// another child of the daemon may hold it, and a probe that only asks
+    /// "is this pid one of my unreaped children?" would say yes for that
+    /// stranger. Only an unreaped child is then checked, without reaping: an
+    /// exited CLI nobody has waited for yet still holds its pid, so its group
+    /// (the subagents and servers it left) is still ours to signal, and asking
+    /// must not be what frees the pid.
     fn stop_target(&mut self) -> Option<Target> {
-        if !child_unreaped(self.child.id()) {
+        if self.reaped || !(self.unreaped_probe)(self.child.id()) {
             return None;
         }
         Some(if self.own_process_group {
@@ -1207,6 +1230,8 @@ impl SessionManager {
             remote_control,
             session_id: Some(session_id),
             child,
+            reaped: false,
+            unreaped_probe: child_unreaped,
             shared,
             respawn_fixed,
             intentional_stop: Arc::new(AtomicBool::new(false)),
@@ -1760,13 +1785,13 @@ impl SessionManager {
 
                 // Capture the real exit code (non-blocking; child has already
                 // closed stdout before the reader sets exited).
-                let code = capture_exit_code(&mut s.child);
+                let code = s.try_reap().and_then(|status| status.code());
                 s.last_exit_code = code;
                 // Reaped: nothing is left of this CLI to sweep (its pid is free
                 // for reuse), so the ledger drops it now instead of carrying it
                 // through the backoff, and a guard-tripped session never leaves
                 // it behind.
-                if matches!(s.child.try_wait(), Ok(Some(_))) {
+                if s.reaped {
                     s.ledger.forget(s.child.id());
                 }
 
@@ -2331,7 +2356,7 @@ impl SessionManager {
         let stragglers = orphans::terminate(&live, grace, || {
             // Reap exited CLIs so a zombie does not look like a live group member.
             for session in self.sessions.values_mut() {
-                let _ = session.child.try_wait();
+                session.try_reap();
             }
         });
         if !stragglers.is_empty() {
@@ -3148,17 +3173,6 @@ fn backoff_delay(crash_count: u32) -> Duration {
         .saturating_mul(1u64 << exp)
         .min(BACKOFF_MAX_SECS);
     Duration::from_secs(secs)
-}
-
-/// Non-blocking reap of a crashed child's exit code. Safe to call under the
-/// manager mutex: `try_wait()` never blocks. Returns the numeric exit code if
-/// the child exited with one, else `None` (killed by signal, already reaped,
-/// or still winding down — by the time `exited` is set this is rare).
-fn capture_exit_code(child: &mut Child) -> Option<i32> {
-    match child.try_wait() {
-        Ok(Some(status)) => status.code(),
-        _ => None,
-    }
 }
 
 /// Build the `claude` argument vector for a persistent stream-json session. An
@@ -7816,6 +7830,83 @@ mod orphan_tests {
             !is_gone(bg),
             "the old pid is free to be reused, so nothing in its group may be signalled"
         );
+    }
+
+    // A reaped child's pid can be handed to another child of the daemon. `waitid`
+    // then succeeds for that stranger, so the OS-level probe alone would call the
+    // pid "ours and unreaped". These tests make the probe say exactly that
+    // (`|_| true`): a session this manager has reaped must still signal nothing.
+
+    #[tokio::test]
+    async fn stopping_a_reaped_session_signals_nothing_even_if_its_pid_looks_live_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+        mgr.sessions.get_mut("t").unwrap().unreaped_probe = |_| true;
+
+        mgr.stop("t");
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !is_gone(bg),
+            "a reaped pid may now belong to a stranger, so nothing in its group may be signalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn restarting_a_reaped_session_signals_nothing_even_if_its_pid_looks_live_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+        mgr.sessions.get_mut("t").unwrap().unreaped_probe = |_| true;
+
+        mgr.restart("t").expect("restart");
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !is_gone(bg),
+            "a reaped pid may now belong to a stranger, so nothing in its group may be signalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reaped_session_has_no_stop_target_even_if_its_pid_looks_live_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, _bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+        let s = mgr.sessions.get_mut("t").unwrap();
+        s.unreaped_probe = |_| true;
+
+        assert!(s.stop_target().is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_live_session_ends_its_background_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let ready = dir.path().join("ready");
+        let _cleanup = KillListed(bg_file.clone());
+        let script = format!(
+            "sleep 300 &\necho $! >> {}\necho ready > {}\nwait\n",
+            bg_file.display(),
+            ready.display()
+        );
+        let cli = start(&mut mgr, "t", &script);
+        wait_until("the CLI to be up", || ready.exists());
+        let bg = read_pids(&bg_file)[0];
+        assert!(!is_gone(bg));
+
+        mgr.stop("t");
+
+        wait_until("the CLI to be gone", || is_gone(cli));
+        wait_until("the CLI's background child to be gone", || is_gone(bg));
     }
 
     #[tokio::test]

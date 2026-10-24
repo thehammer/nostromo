@@ -183,8 +183,11 @@ fn is_tracker(node: &PaneTree) -> bool {
 /// Removes the `tracker` leaf from wherever it sits: a split's child, a tab, or
 /// any of those nested in any of those. A node left with nothing goes too, a
 /// split left with one child collapses into it, and its ratios are renormalised.
+/// A root that holds nothing but the tracker would be emptied: that is not a
+/// removal (`false`), matching `remove_tracker`'s "would leave nothing". The
+/// caller works on a copy it drops then, so no half-emptied tree escapes.
 fn remove_split_leaf(node: &mut PaneTree) -> bool {
-    !matches!(remove_leaf(node), Gone::NotFound)
+    matches!(remove_leaf(node), Gone::Removed)
 }
 
 fn remove_leaf(node: &mut PaneTree) -> Gone {
@@ -734,6 +737,38 @@ mod tests {
     fn removing_from_a_tree_without_a_tracker_changes_nothing() {
         assert_eq!(remove_tracker(&PaneTree::repl_leaf()), None);
         assert_eq!(remove_tracker(&curated(&[("queue", "Queue")], 0)), None);
+    }
+
+    #[test]
+    fn a_root_split_holding_only_the_tracker_has_nothing_to_remove_it_into() {
+        let tree = split(SplitDirection::Horizontal, vec![leaf("tracker")], vec![1.0]);
+        let before = tree.clone();
+
+        assert_eq!(remove_tracker(&tree), None);
+        assert_eq!(tree, before, "the caller's tree is left as it was");
+    }
+
+    #[test]
+    fn a_root_tabs_node_holding_only_the_tracker_has_nothing_to_remove_it_into() {
+        let tree = detail(&[("tracker", "Tracker")], 0);
+        let before = tree.clone();
+
+        assert_eq!(remove_tracker(&tree), None);
+        assert_eq!(tree, before, "the caller's tree is left as it was");
+    }
+
+    #[test]
+    fn a_split_holding_only_the_tracker_inside_another_split_goes_and_the_outer_collapses() {
+        let tree = split(
+            SplitDirection::Vertical,
+            vec![
+                split(SplitDirection::Horizontal, vec![leaf("tracker")], vec![1.0]),
+                leaf("repl"),
+            ],
+            vec![0.4, 0.6],
+        );
+
+        assert_eq!(remove_tracker(&tree), Some(PaneTree::repl_leaf()));
     }
 
     #[test]

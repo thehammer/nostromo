@@ -380,9 +380,12 @@ pub fn terminate(targets: &[Target], grace: Duration, mut reap: impl FnMut()) ->
         std::thread::sleep(POLL);
     }
     // Re-signals `Group(g)` stragglers after the grace, guarded only by `exists()`.
-    // That is safe: a group id is the leader's pid, and a group that still has a
-    // member keeps that id from being reused, so a hit is a real straggler (a
-    // group that emptied has `exists() == false` and is skipped, never re-signalled).
+    // A group id is the leader's pid, and a group that still has a member keeps
+    // that id from being reused, so a hit is a real straggler; a group that
+    // emptied has `exists() == false` and is skipped. Not airtight, but
+    // vanishingly unlikely to go wrong: the window is a group that empties
+    // during the grace period and whose id is recycled into a new group leader
+    // before this check runs.
     let stragglers: Vec<Target> = targets.iter().copied().filter(|t| t.exists()).collect();
     for t in &stragglers {
         t.signal(libc::SIGKILL);

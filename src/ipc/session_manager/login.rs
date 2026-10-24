@@ -110,6 +110,11 @@ const BEFORE_ANY_STAMP: &str = "";
 /// poller got to look: adopting that stamp would hide the sign-in forever, so the
 /// baseline is [`BEFORE_ANY_STAMP`] instead and the change is acted on. A stamp
 /// that is not a timestamp, or is not later (to the second), is adopted as is.
+///
+/// The comparison is to the second: a sign-in in the same second as the failure
+/// is not told apart from the credential the turn failed under, so that one
+/// sign-in is missed (the hold waits for the next change). The credential's
+/// stamp has no finer grain to compare against.
 fn baseline_for(seen: &str, failed_at: DateTime<Utc>) -> String {
     let written = chrono::NaiveDateTime::parse_from_str(seen, "%Y%m%d%H%M%SZ").map(|t| t.and_utc());
     match written {
@@ -720,5 +725,49 @@ impl SessionManager {
         }
         shared.login.notify();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    /// A failure at 20:04:18 UTC with a sub-second part, as `Utc::now()` gives.
+    fn failed_at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 18, 20, 4, 18).unwrap()
+            + chrono::Duration::nanoseconds(600_000_000)
+    }
+
+    #[test]
+    fn a_credential_written_seconds_after_the_failure_is_acted_on() {
+        assert_eq!(
+            baseline_for("20261018200420Z", failed_at()),
+            BEFORE_ANY_STAMP
+        );
+    }
+
+    #[test]
+    fn a_credential_written_in_the_failure_second_is_adopted_as_the_one_it_failed_under() {
+        // Documented limitation: the stamp has no finer grain than a second.
+        assert_eq!(
+            baseline_for("20261018200418Z", failed_at()),
+            "20261018200418Z"
+        );
+    }
+
+    #[test]
+    fn a_credential_written_before_the_failure_is_adopted_as_is() {
+        assert_eq!(
+            baseline_for("20261018200000Z", failed_at()),
+            "20261018200000Z"
+        );
+    }
+
+    #[test]
+    fn a_stamp_that_is_not_a_timestamp_is_adopted_as_is() {
+        assert_eq!(baseline_for("not-a-time", failed_at()), "not-a-time");
+        assert_eq!(baseline_for("", failed_at()), "");
     }
 }
