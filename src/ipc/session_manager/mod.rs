@@ -1588,6 +1588,7 @@ impl SessionManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn respawn(
         &mut self,
         tag: &str,
