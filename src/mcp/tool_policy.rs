@@ -48,6 +48,13 @@ use serde_json::Value;
 
 use crate::mcp::state::McpSharedState;
 
+/// Tools no policy can withdraw: the agent tracker is how every agent shows
+/// the user where its work stands, and the discoverability text tells every
+/// Nostromo session to use it, so a policy entry naming it is ignored by both
+/// [`filter_descriptors`] and [`ToolPolicy::denies`]. Deliberately narrow: one
+/// tool, not a category.
+pub const ALWAYS_AVAILABLE: &[&str] = &["nostromo.tracker"];
+
 /// The whole policy: agent name → what that agent may not reach.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ToolPolicy {
@@ -80,9 +87,10 @@ impl ToolPolicy {
             .unwrap_or(&[])
     }
 
-    /// Whether `agent_name` is denied `tool`.
+    /// Whether `agent_name` is denied `tool`. Never true for an
+    /// [`ALWAYS_AVAILABLE`] tool, even one the policy lists.
     pub fn denies(&self, agent_name: Option<&str>, tool: &str) -> bool {
-        self.denied_for(agent_name).iter().any(|t| t == tool)
+        !ALWAYS_AVAILABLE.contains(&tool) && self.denied_for(agent_name).iter().any(|t| t == tool)
     }
 }
 
@@ -149,7 +157,7 @@ pub fn filter_descriptors(descriptors: Vec<Value>, denied: &[String]) -> Vec<Val
         .filter(|d| {
             d.get("name")
                 .and_then(|v| v.as_str())
-                .map(|name| !denied.iter().any(|t| t == name))
+                .map(|name| ALWAYS_AVAILABLE.contains(&name) || !denied.iter().any(|t| t == name))
                 .unwrap_or(true)
         })
         .collect()
@@ -292,6 +300,16 @@ mod tests {
             .map(|d| d["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["nostromo.get_self", "nostromo.show"]);
+    }
+
+    #[test]
+    fn the_tracker_is_never_filtered_or_denied_even_when_a_policy_lists_it() {
+        let policy = parse("agents:\n  perri:\n    deny:\n      - nostromo.tracker\n      - nostromo.show\n");
+        assert!(!policy.denies(Some("perri"), "nostromo.tracker"));
+        assert!(policy.denies(Some("perri"), "nostromo.show"));
+        let list = vec![json!({"name": "nostromo.tracker"}), json!({"name": "nostromo.show"})];
+        let filtered = filter_descriptors(list, policy.denied_for(Some("perri")));
+        assert_eq!(filtered, vec![json!({"name": "nostromo.tracker"})]);
     }
 
     #[test]

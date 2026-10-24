@@ -225,6 +225,40 @@ attach (the board frame to local clients only). Golden JSON for both is in
 `tests/fixtures/tracker/` and is decoded by the Rust tests and by
 `TrackerWireTests.swift`.
 
+## Discoverability
+
+Every Nostromo tool is deferred in a session, so an agent sees tool names only
+after a ToolSearch. Claude Code still puts a connected MCP server's
+`initialize` `instructions` into the system prompt while its tools are
+deferred, so that is the vehicle:
+
+- `src/mcp/instructions.rs` (`nostromo_instructions`) holds the text (at most
+  1,200 characters): where the tracker is, how to load it
+  (`select:mcp__nostromo__nostromo_tracker`), when to offer or open one, to
+  refer to things by id and never put resident or patient data on a board, that
+  staged commands are display-only, and to update one item at a time. When the
+  caller's focus has a bound board, one more line names its topic.
+- `server::handle_initialize` adds `instructions` only when the Hello `pty_id`
+  is a focus the daemon knows, the server is daemon-hosted, and the caller is
+  not the picks session. Everyone else (no `pty_id`, unknown tag, the TUI-hosted
+  server) gets the response it always did. Every CLI start re-runs
+  `initialize`, so fresh and resumed Nostromo sessions both get it.
+- The tool description opens with "Tracker (status board / todo list /
+  checklist) pane: keep track of tasks…" so a search finds it;
+  `tests/tracker_tool_search.rs` ranks it top-3 by a BM25 proxy.
+- `nostromo.tracker` is in `tool_policy::ALWAYS_AVAILABLE`: no policy can
+  withdraw it.
+
+Live check (user-run, never CI or a job):
+`scripts/qa/tracker-discoverability.sh [--dry-run] [--runs N]` runs, against the
+isolated QA instance, N (default 10) fresh `qa-tracker-<n>` focuses per agent
+(a generic agent and Claudia) on a cheap model, sends "keep a tracker of what
+we're doing", waits for the turn, then checks that a board exists under the
+focus's `.claude/wip/*/index.md` and that the transcript has at most one
+ToolSearch call before the tracker call. It prints `n/10` per agent (the PRD
+target is 9 of 10) and removes the QA focuses. `--dry-run` prints the plan and
+starts nothing.
+
 ## Token benchmark
 
 `cargo test --test tracker_token_bench` asserts the PRD's token targets against
