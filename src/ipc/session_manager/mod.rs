@@ -54,7 +54,7 @@ use crate::approvals::broker::{
 use super::auth_failure::{classify_line, TurnAuthTracker};
 use super::claude_login::{LoginCoordinator, LOGIN_QUEUE_CAP};
 use super::decisions::DecisionRegistry;
-use super::orphans::{self, ledger_path_beside, ChildLedger, Target, MARKER_ENV, SESSIONS_LEAD_OWN_GROUP, SHUTDOWN_GRACE};
+use super::orphans::{self, child_unreaped, ledger_path_beside, ChildLedger, Target, MARKER_ENV, SESSIONS_LEAD_OWN_GROUP, SHUTDOWN_GRACE};
 use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
 use super::pane_registry::{
     PaneContentProvider, PaneRegistry, PerriStateProvider, TrackerFrameProvider,
@@ -347,8 +347,8 @@ impl ManagedSession {
 
     /// SIGKILL the child and its group, leaving the ledger as it is.
     ///
-    /// The group is signalled only while the child is still unreaped
-    /// (`stop_target`'s rule): the group id is the child's pid, and once the
+    /// The group is signalled only while the child is still unreaped, running
+    /// or exited and not yet waited for (`stop_target`'s rule): the group id is the child's pid, and once the
     /// child has been reaped (`reap_and_recover` does so for a crashed CLI)
     /// that pid is free to be given to a stranger who leads a group of its
     /// own. A reaped child gets `Child::kill`, which sends nothing for a
@@ -368,8 +368,12 @@ impl ManagedSession {
     /// What a graceful stop aims at: the child's group when it leads one, else
     /// the child. `None` once the child has been reaped: its pid may since have
     /// been given to something else, and a signal to it would hit a stranger.
+    ///
+    /// The probe does not reap: an exited CLI nobody has waited for yet still
+    /// holds its pid, so its group (the subagents and servers it left) is still
+    /// ours to signal, and asking must not be what frees the pid.
     fn stop_target(&mut self) -> Option<Target> {
-        if !matches!(self.child.try_wait(), Ok(None)) {
+        if !child_unreaped(self.child.id()) {
             return None;
         }
         Some(if self.own_process_group {
@@ -6868,6 +6872,27 @@ mod orphan_tests {
         // A kill is delivered at once, but give a wrongly-sent one time to show.
         std::thread::sleep(Duration::from_millis(300));
         assert!(!is_gone(bg), "the old pid is free to be reused, so nothing in its group may be signalled");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_session_whose_cli_exited_but_was_not_reaped_still_kills_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let cli = start(&mut mgr, "t", &cli_that_exits_leaving_a_sleeper(&bg_file, 1));
+        wait_until("the background child to be started", || read_pid(&bg_file).is_some());
+        let bg = read_pid(&bg_file).unwrap();
+        // The reader has seen the CLI's exit; nothing has waited for it, so it is a zombie.
+        wait_until("the manager to notice the exit", || {
+            mgr.sessions.get("t").is_some_and(|s| s.shared.exited.load(Ordering::SeqCst))
+        });
+        assert!(child_unreaped(cli), "setup: the exited CLI has not been reaped");
+        assert!(!is_gone(bg), "setup: the CLI's background child outlives it");
+
+        mgr.stop("t");
+
+        wait_until("the background child to be killed with the CLI's group", || is_gone(bg));
     }
 
     #[tokio::test]

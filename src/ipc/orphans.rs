@@ -40,6 +40,12 @@ pub const START_TIME_TOLERANCE_SECS: u64 = 5;
 pub const REAP_WAIT: Duration = Duration::from_millis(500);
 
 const POLL: Duration = Duration::from_millis(20);
+/// The longest a ledger write waits for the ledger lock. Writers hold the
+/// session manager's `entries` mutex while they wait, so a wedged holder (a
+/// stuck daemon on the other end of the lock) must cost one bounded pause, not
+/// a stalled session manager; after it the write goes ahead without the lock.
+pub const LEDGER_LOCK_WAIT: Duration = Duration::from_secs(1);
+const LOCK_RETRY: Duration = Duration::from_millis(10);
 const LEDGER_VERSION: u32 = 1;
 /// Env var each CLI inherits, so a human can tell which daemon boot owns it.
 pub const MARKER_ENV: &str = "NOSTROMO_DAEMON_BOOT";
@@ -197,7 +203,8 @@ impl ChildLedger {
     /// Every ledger takes it around its check-and-write and check-and-remove,
     /// so another daemon's takeover cannot land between a ledger's "is this
     /// still mine?" check and its write or removal. Best effort: if the lock
-    /// cannot be taken the caller carries on without it, as it did before.
+    /// cannot be taken within [`LEDGER_LOCK_WAIT`] the caller carries on without
+    /// it, as it did before.
     fn lock_file(&self) -> Option<std::fs::File> {
         use std::os::fd::AsRawFd as _;
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -213,13 +220,21 @@ impl ChildLedger {
             .open(lock_path_for(&self.path))
             .map_err(|e| warn!("could not open the child ledger lock: {e}"))
             .ok()?;
-        // SAFETY: plain syscall on a descriptor this function owns.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            warn!("could not lock the child ledger: {}", std::io::Error::last_os_error());
-            return None;
+        let deadline = std::time::Instant::now() + LEDGER_LOCK_WAIT;
+        loop {
+            // SAFETY: plain syscall on a descriptor this function owns.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                return Some(file);
+            }
+            let err = std::io::Error::last_os_error();
+            let contended = err.raw_os_error() == Some(libc::EWOULDBLOCK);
+            if !contended || std::time::Instant::now() >= deadline {
+                warn!("could not lock the child ledger: {err}");
+                return None;
+            }
+            std::thread::sleep(LOCK_RETRY);
         }
-        Some(file)
     }
 
     fn persist(&self, entries: &[ChildRecord]) {
@@ -318,6 +333,24 @@ impl Target {
     }
 }
 
+/// Is `pid` a child of this process that has not been reaped yet: still
+/// running, or exited and waiting to be waited for? Unlike `Child::try_wait`
+/// this never reaps (`waitid` with `WNOWAIT`), so asking does not turn a
+/// zombie into a freed pid. `false` once it has been reaped (or was never ours).
+pub fn child_unreaped(pid: u32) -> bool {
+    // SAFETY: `waitid` fills a zeroed `siginfo_t` we own; `WNOWAIT | WNOHANG`
+    // leaves the child's state untouched and never blocks.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        ) == 0
+    }
+}
+
 /// A group id that is safe to hand to `killpg`: not 0/1 and not the daemon's own group.
 fn valid_group(g: u32) -> bool {
     // SAFETY: getpgrp has no failure mode.
@@ -346,6 +379,10 @@ pub fn terminate(targets: &[Target], grace: Duration, mut reap: impl FnMut()) ->
         }
         std::thread::sleep(POLL);
     }
+    // Re-signals `Group(g)` stragglers after the grace, guarded only by `exists()`.
+    // That is safe: a group id is the leader's pid, and a group that still has a
+    // member keeps that id from being reused, so a hit is a real straggler (a
+    // group that emptied has `exists() == false` and is skipped, never re-signalled).
     let stragglers: Vec<Target> = targets.iter().copied().filter(|t| t.exists()).collect();
     for t in &stragglers {
         t.signal(libc::SIGKILL);
@@ -642,6 +679,21 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .unwrap_or_else(|_| panic!("{what} never finished after the lock was released"));
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_ledger_write_gives_up_on_a_wedged_lock_holder_after_a_bounded_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child-processes.json");
+        let ledger = ChildLedger::new(path.clone());
+        let _wedged = hold_ledger_lock(&path); // never let go
+        let started = std::time::Instant::now();
+        ledger.record(4003, true, Path::new(SH));
+        let took = started.elapsed();
+        assert!(took >= LEDGER_LOCK_WAIT, "it waited for the lock first: {took:?}");
+        assert!(took < LEDGER_LOCK_WAIT + Duration::from_secs(5), "the wait is bounded: {took:?}");
+        let recorded = read_ledger_file(&path).expect("the write went ahead without the lock");
+        assert!(recorded.children.iter().any(|c| c.pid == 4003));
     }
 
     #[test]
