@@ -79,7 +79,7 @@ pub enum AuditEvent {
         pane_id: String,
         tag: String,
         kind: TerminalKind,
-        /// `exited`, `user_closed`, `daemon_stopped`.
+        /// `exited`, `user_closed`, `daemon_stopped`, `pane_missing`.
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
@@ -91,6 +91,15 @@ pub enum AuditEvent {
         kind: TerminalKind,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+    },
+    /// A local terminal's shell ended because the daemon stopped under it
+    /// (written when the next daemon settles the records); its pane stays,
+    /// `ended`. A remote terminal's pane goes: that is a `closed` line.
+    DaemonStopped {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        kind: TerminalKind,
     },
     Restarted {
         terminal_id: String,
@@ -138,6 +147,9 @@ pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
 pub struct AuditLog {
     path: Option<PathBuf>,
+    /// The sink was meant to exist but could not be opened: terminals must
+    /// not be opened (see [`AuditLog::check`]).
+    unavailable: bool,
     clock: Clock,
     rotate_bytes: u64,
     keep: usize,
@@ -163,16 +175,42 @@ impl AuditLog {
             .mode(0o700)
             .create(dir)?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-        Ok(Self {
+        let log = Self {
             path: Some(path.to_path_buf()),
             ..Self::disabled()
-        })
+        };
+        log.check()?;
+        Ok(log)
+    }
+
+    /// The stand-in for a log that could not be opened: it records nothing
+    /// and [`AuditLog::check`] always fails, so no terminal is opened.
+    pub fn unavailable() -> Self {
+        Self {
+            unavailable: true,
+            ..Self::disabled()
+        }
+    }
+
+    /// Can an event be appended right now? A terminal is opened only when
+    /// this says yes: an action nobody can audit must not happen. A disabled
+    /// log (tests, no home) passes; an [`AuditLog::unavailable`] one never does.
+    pub fn check(&self) -> io::Result<()> {
+        if self.unavailable {
+            return Err(io::Error::other("audit log unavailable"));
+        }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        open_live(path).map(drop)
     }
 
     /// A log that records nothing (tests and daemons without a home).
     pub fn disabled() -> Self {
         Self {
             path: None,
+            unavailable: false,
             clock: Arc::new(Utc::now),
             rotate_bytes: ROTATE_BYTES,
             keep: KEEP_ROTATED,
@@ -199,6 +237,9 @@ impl AuditLog {
     /// Append one event as one line, rotating first if the line would push
     /// the live file past the threshold.
     pub fn append(&self, event: &AuditEvent) -> io::Result<()> {
+        if self.unavailable {
+            return Err(io::Error::other("audit log unavailable"));
+        }
         let Some(path) = &self.path else {
             return Ok(());
         };
@@ -215,15 +256,7 @@ impl AuditLog {
         if current > 0 && current + line.len() as u64 > self.rotate_bytes {
             self.rotate(path, now)?;
         }
-        // O_NOFOLLOW: a symlink planted at the live path must not redirect it.
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
-        // The umask can only narrow the mode; this keeps an older file private too.
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let mut file = open_live(path)?;
         file.write_all(&line)
     }
 
@@ -255,6 +288,20 @@ impl AuditLog {
         }
         Ok(())
     }
+}
+
+/// The live file, opened for appending (created `0600`).
+fn open_live(path: &Path) -> io::Result<fs::File> {
+    // O_NOFOLLOW: a symlink planted at the live path must not redirect it.
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    // The umask can only narrow the mode; this keeps an older file private too.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 /// `terminal-<stamp>[-N].jsonl` → `(stamp, N)` (0 without a suffix); `None`

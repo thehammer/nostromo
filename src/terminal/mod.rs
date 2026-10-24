@@ -33,10 +33,11 @@ use uuid::Uuid;
 pub use access::OperatorCap;
 use audit::{AuditEvent, AuditLog, RefusalChannel};
 use fanout::Fanout;
-use session::TerminalSession;
+use session::{InputError, SignalOps, TerminalSession};
 use store::{TerminalRecord, TerminalStore};
 
 use crate::ipc::pane_registry::{PaneError, PaneRegistry, SplitPosition};
+use crate::ipc::peer::SensitiveTags;
 use crate::ipc::protocol::{
     ClientMsg, PaneContentWire, PaneTree, ServerMsg, TerminalClosedInfo, TerminalInfo,
     TerminalKind, TerminalRequester, TerminalStatus,
@@ -66,10 +67,14 @@ const LOCAL_LABEL: &str = "Terminal";
 pub const MAX_REFUSALS_PER_WINDOW: u32 = 120;
 pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
 
+/// Terminals one focus may have at once (live or ended). Each costs four
+/// threads, a 4 MiB replay ring and a 10,000-row screen model.
+pub const MAX_TERMINALS_PER_FOCUS: usize = 8;
+/// Terminals the daemon may have at once, across all focuses.
+pub const MAX_TERMINALS: usize = 32;
+
 /// A verified operator-app connection, as the terminal manager knows it.
 pub struct OperatorConn {
-    /// The connection's targeted channel (replies, refusals).
-    pub targeted: mpsc::UnboundedSender<ServerMsg>,
     /// The connection's bounded terminal stream (replay and output).
     pub stream: mpsc::Sender<StreamBatch>,
     /// What the client said it can do (`Subscribe.capabilities`).
@@ -86,6 +91,13 @@ pub enum TerminalError {
     NotRunning,
     /// The process is not reading its input and its queue is full.
     InputBusy,
+    /// One `terminal_input` frame carried more than
+    /// [`session::MAX_INPUT_FRAME_BYTES`] bytes.
+    InputTooLarge,
+    /// [`MAX_TERMINALS_PER_FOCUS`] or [`MAX_TERMINALS`] terminals exist already.
+    TooManyTerminals,
+    /// The audit trail cannot be written, so no terminal is opened.
+    AuditUnavailable,
     /// The daemon is stopping.
     ShuttingDown,
     InvalidWorkingDirectory,
@@ -104,6 +116,9 @@ impl TerminalError {
             TerminalError::NotEnded => "terminal_not_ended",
             TerminalError::NotRunning => "terminal_not_running",
             TerminalError::InputBusy => "terminal_input_busy",
+            TerminalError::InputTooLarge => "terminal_input_too_large",
+            TerminalError::TooManyTerminals => "terminal_limit_reached",
+            TerminalError::AuditUnavailable => "terminal_audit_unavailable",
             TerminalError::ShuttingDown => "daemon_shutting_down",
             TerminalError::InvalidWorkingDirectory => "invalid_working_directory",
             TerminalError::InvalidSize => "invalid_size",
@@ -159,8 +174,11 @@ pub struct TerminalManager {
     panes: Option<Arc<Mutex<PaneRegistry>>>,
     broadcast: Option<broadcast::Sender<ServerMsg>>,
     audit: AuditLog,
+    sensitive: SensitiveTags,
     store: TerminalStore,
     probe: Arc<Mutex<Option<LatencyProbe>>>,
+    /// How sessions signal their children (replaced only by tests).
+    signals: SignalOps,
     shutting_down: bool,
     refusal_budgets: Mutex<HashMap<RefusalChannel, RefusalBudget>>,
 }
@@ -183,8 +201,10 @@ impl TerminalManager {
                 panes: cfg.pane_registry,
                 broadcast: None,
                 audit: cfg.audit,
+                sensitive: SensitiveTags::in_memory(),
                 store: cfg.store,
                 probe: Arc::new(Mutex::new(None)),
+                signals: SignalOps::real(),
                 shutting_down: false,
                 refusal_budgets: Mutex::new(HashMap::new()),
             })
@@ -200,6 +220,12 @@ impl TerminalManager {
     /// `TerminalClosed` go out on (the IPC server's broadcast).
     pub fn configure_broadcast(&mut self, tx: broadcast::Sender<ServerMsg>) {
         self.broadcast = Some(tx);
+    }
+
+    /// Which focus tags are sensitive: they appear in the audit trail in
+    /// their opaque form, never by name.
+    pub fn set_sensitive_tags(&mut self, sensitive: SensitiveTags) {
+        self.sensitive = sensitive;
     }
 
     /// Test hook; see [`LatencyProbe`].
@@ -218,6 +244,24 @@ impl TerminalManager {
         let mut panes = self.lock_panes();
         let reconciled = store::reconcile(records, panes.as_deref_mut());
         drop(panes);
+        for info in &reconciled.ended {
+            self.record(AuditEvent::DaemonStopped {
+                terminal_id: info.terminal_id.clone(),
+                pane_id: info.pane_id.clone(),
+                tag: self.audit_tag(&info.tag),
+                kind: info.kind,
+            });
+        }
+        for closed in &reconciled.closed {
+            self.record(AuditEvent::Closed {
+                terminal_id: closed.terminal_id.clone(),
+                pane_id: closed.pane_id.clone(),
+                tag: self.audit_tag(&closed.tag),
+                kind: closed.kind,
+                reason: closed.reason.clone(),
+                exit_code: None,
+            });
+        }
         for info in reconciled.ended {
             let fanout = Fanout::idle(&info.terminal_id, Arc::clone(&self.probe));
             self.terminals.insert(
@@ -321,6 +365,21 @@ impl TerminalManager {
         if self.shutting_down {
             return Err(TerminalError::ShuttingDown);
         }
+        // Nothing starts that cannot be audited.
+        if let Err(e) = self.audit.check() {
+            warn!("terminal not opened, audit log unavailable: {e}");
+            return Err(TerminalError::AuditUnavailable);
+        }
+        if self.terminals.len() >= MAX_TERMINALS
+            || self
+                .terminals
+                .values()
+                .filter(|t| t.info.tag == req.tag)
+                .count()
+                >= MAX_TERMINALS_PER_FOCUS
+        {
+            return Err(TerminalError::TooManyTerminals);
+        }
         let cwd = resolve_cwd(req.cwd.as_deref())?;
         let position = SplitPosition::parse(req.position.as_deref().unwrap_or(DEFAULT_POSITION))
             .map_err(TerminalError::Pane)?;
@@ -337,7 +396,7 @@ impl TerminalManager {
             ),
             None => None,
         };
-        let session = match TerminalSession::spawn_local(&cwd, cols, rows) {
+        let session = match TerminalSession::spawn_local(&cwd, cols, rows, self.signals.clone()) {
             Ok(s) => s,
             Err(e) => {
                 warn!(tag = %req.tag, "terminal spawn failed: {e:#}");
@@ -371,7 +430,7 @@ impl TerminalManager {
         self.record(AuditEvent::Opened {
             terminal_id: info.terminal_id.clone(),
             pane_id: info.pane_id.clone(),
-            tag: info.tag.clone(),
+            tag: self.audit_tag(&info.tag),
             kind: info.kind,
             requested_by: info.requested_by.kind.clone(),
             cwd: info.cwd.clone(),
@@ -491,9 +550,10 @@ impl TerminalManager {
             .filter(|s| t.info.status == TerminalStatus::Running && !s.is_exited())
             .ok_or(TerminalError::NotRunning)?;
         t.fanout.input_received();
-        session.write(bytes).map_err(|e| match e.kind() {
-            std::io::ErrorKind::WouldBlock => TerminalError::InputBusy,
-            _ => TerminalError::NotRunning,
+        session.write(bytes).map_err(|e| match e {
+            InputError::TooLarge => TerminalError::InputTooLarge,
+            InputError::Busy => TerminalError::InputBusy,
+            InputError::Gone => TerminalError::NotRunning,
         })
     }
 
@@ -567,11 +627,16 @@ impl TerminalManager {
             .filter(|p| p.is_dir())
             .unwrap_or_else(home_dir);
         let (cols, rows) = (old.info.cols, old.info.rows);
-        let session = TerminalSession::spawn_local(&cwd, cols, rows).map_err(|e| {
-            warn!("terminal restart failed: {e:#}");
-            TerminalError::OpenFailed
-        })?;
+        let session = TerminalSession::spawn_local(&cwd, cols, rows, self.signals.clone())
+            .map_err(|e| {
+                warn!("terminal restart failed: {e:#}");
+                TerminalError::OpenFailed
+            })?;
         let old = self.terminals.remove(terminal_id).expect("checked above");
+        if let Some(old_session) = &old.session {
+            // Already exited: this signals nothing, it ends the old reader.
+            old_session.kill();
+        }
         old.fanout.close();
         let info = TerminalInfo {
             terminal_id: Uuid::new_v4().to_string(),
@@ -588,7 +653,7 @@ impl TerminalManager {
             terminal_id: info.terminal_id.clone(),
             previous_terminal_id: terminal_id.to_string(),
             pane_id: info.pane_id.clone(),
-            tag: info.tag.clone(),
+            tag: self.audit_tag(&info.tag),
             kind: info.kind,
         });
         self.send_pane_content(&info);
@@ -670,6 +735,16 @@ impl TerminalManager {
         false
     }
 
+    /// `tag` as the audit trail names it: the opaque stand-in for a
+    /// sensitive focus (as `audit_focus_tag` does for the other audits).
+    fn audit_tag(&self, tag: &str) -> String {
+        if self.sensitive.tag_is_sensitive(tag) {
+            self.sensitive.opaque_tag(tag)
+        } else {
+            tag.to_owned()
+        }
+    }
+
     fn record(&self, event: AuditEvent) {
         if let Err(e) = self.audit.append(&event) {
             warn!("terminal audit append failed: {e}");
@@ -704,7 +779,7 @@ impl TerminalManager {
         self.record(AuditEvent::Ended {
             terminal_id: info.terminal_id.clone(),
             pane_id: info.pane_id.clone(),
-            tag: info.tag.clone(),
+            tag: self.audit_tag(&info.tag),
             kind: info.kind,
             exit_code: code,
         });
@@ -718,7 +793,7 @@ impl TerminalManager {
         self.record(AuditEvent::Closed {
             terminal_id: info.terminal_id.clone(),
             pane_id: info.pane_id.clone(),
-            tag: info.tag.clone(),
+            tag: self.audit_tag(&info.tag),
             kind: info.kind,
             reason: reason.to_string(),
             exit_code,

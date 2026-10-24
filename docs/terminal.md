@@ -35,7 +35,7 @@ Additive; `PROTOCOL_VERSION` is unchanged. Byte fields are base64. `*` means ope
 
 `Subscribe` also takes `capabilities: [String]` (default empty, recorded only for the operator app) and `operator_nonce?` (the `Welcome`'s; required before any `*` verb is honoured).
 
-Other `terminal_refused` codes: `unknown_terminal`, `terminal_not_ended`, `terminal_not_running`, `terminal_input_busy` (the process is not reading its input and the queue is full), `invalid_size` (above 1000×500), `invalid_working_directory`, `invalid_bytes`, `terminal_open_failed`, and a pane error code (`unknown_pane`, `invalid_position`).
+Other `terminal_refused` codes: `unknown_terminal`, `terminal_not_ended`, `terminal_not_running`, `terminal_input_busy` (the process is not reading its input and the queue is full, by count or by bytes), `terminal_input_too_large` (one frame over 256 KiB of raw bytes), `terminal_limit_reached` (too many terminals, see Limits), `terminal_audit_unavailable` (see Audit), `invalid_size` (above 1000×500), `invalid_working_directory`, `invalid_bytes`, `terminal_open_failed`, and a pane error code (`unknown_pane`, `invalid_position`). Refusals carry the op, the terminal id and the code, never any input bytes.
 
 | Daemon → client | Routing | Fields |
 |---|---|---|
@@ -55,9 +55,23 @@ Every `terminal_*` client frame is `NetworkPolicy::Refused` (`src/ipc/peer.rs`):
 ## Lifecycle
 
 - Exit 0 closes a local pane (`terminal_closed`, reason `exited`). A non-zero exit leaves it `ended` with its `exit_code`, ready for `terminal_restart` (same pane, new `terminal_id`).
-- `terminal_close` kills the process (SIGHUP, then SIGKILL after 2 s) and removes the pane (reason `user_closed`).
+- `terminal_close` ends the terminal and removes the pane (reason `user_closed`): SIGHUP to the shell and its process group, SIGKILL after 2 s if the shell is still running, and SIGKILL to whatever the shell left in its group once it exits (a `nohup` job). The reader thread is then stopped even if a job that left the group still holds the tty, so the ring, the screen model and the PTY are freed with the pane. Shutdown and restart use the same path.
+- **Nothing is signalled once the shell has been reaped.** Its pid may belong to another process by then. The waiter waits for the exit without reaping, then reaps under a lock; every signal takes that lock, checks the reaped flag first and only then probes with a non-reaping `waitid`. A close that lands after the reap signals nothing (a job still holding the tty is then ended only by the reader stop above).
 - `~/.nostromo/daemon-terminals.json` records each terminal's identity, place and kind (no bytes). At daemon start a local record becomes `ended` with `ended_reason: "daemon_stopped"` and keeps its pane. A remote (`ecs`) record loses its pane and is reported closed in `terminal_list.closed`.
+- The pane tree and that file are written one after the other, so a crash can leave them disagreeing. At start the records are checked against the tree: a record whose leaf is gone is closed with reason `pane_missing` (reported in `terminal_list.closed`, audited), and a `terminal-<8 hex>` leaf that no record claims is removed from the tree.
 - The shell's environment drops the variables that would let something inside it act as the focus (`NOSTROMO_PTY_ID`, `NOSTROMO_FOCUS_TAG`, `NOSTROMO_MCP_SOCKET`, `NOSTROMO_GUARD_BIN`, `NOSTROMO_APPROVALS_DIR`, `CLAUDECODE`, …). It sets `TERM=xterm-256color`, `COLORTERM=truecolor` and `TERM_PROGRAM=Nostromo`.
+
+## Limits
+
+| Limit | Value | Refusal |
+|---|---|---|
+| Raw bytes in one `terminal_input` frame | 256 KiB | `terminal_input_too_large` |
+| Input writes queued for a child that is not reading | 256 | `terminal_input_busy` |
+| Input bytes queued for such a child | 1 MiB | `terminal_input_busy` |
+| Terminals per focus (live or ended) | 8 | `terminal_limit_reached` |
+| Terminals in the daemon | 32 | `terminal_limit_reached` |
+
+Each terminal costs four threads, a replay ring of up to 4 MiB and a 10,000-row screen model, so the caps bound what a stuck or runaway client can pin. The input caps bound a stuck terminal's queue to about 1 MiB plus the one frame the writer holds. A client that needs to paste more sends it in frames of at most 256 KiB, waiting out `terminal_input_busy`.
 
 ## Output
 
@@ -67,6 +81,8 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 ## Audit
 
-`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `restarted`, `refused`, plus `refusal_limit_reached` and `refusals_suppressed`. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
 
 Refused lines are capped at 120 a minute per channel, so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
+
+**The audit trail fails closed.** `AuditLog::open` creates the file at once, and each open checks the file can still be appended to. If it cannot (at start `nostromd` logs an error and runs with an unavailable log), `terminal_open_local` is refused with `terminal_audit_unavailable` and no process, pane or record is created. Terminals that already exist keep running.

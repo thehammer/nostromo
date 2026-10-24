@@ -177,8 +177,13 @@ async fn main() -> Result<()> {
     let terminal_audit = {
         let path = nostromo::terminal::audit::default_path();
         nostromo::terminal::audit::AuditLog::open(&path).unwrap_or_else(|e| {
-            error!(path = %path.display(), "terminal audit log unavailable: {e}");
-            nostromo::terminal::audit::AuditLog::disabled()
+            // Fail closed: with no audit trail no terminal is opened
+            // (`terminal_audit_unavailable`), instead of running unaudited.
+            error!(
+                path = %path.display(),
+                "terminal audit log unavailable, terminals are DISABLED until the daemon restarts with a writable audit log: {e}"
+            );
+            nostromo::terminal::audit::AuditLog::unavailable()
         })
     };
     let terminals = nostromo::terminal::TerminalManager::new(nostromo::terminal::TerminalConfig {
@@ -188,7 +193,11 @@ async fn main() -> Result<()> {
         ),
         pane_registry: Some(Arc::clone(&pane_registry)),
     });
-    terminals.lock().unwrap().reconcile();
+    {
+        let mut terminals = terminals.lock().unwrap();
+        terminals.set_sensitive_tags(session_mgr.lock().unwrap().sensitive_tags());
+        terminals.reconcile();
+    }
 
     // ── Decision registry (W6 decision modals) ─────────────────────────────────
     // Shared between the IPC server (routes ClientMsg::DecisionAnswer, tracks

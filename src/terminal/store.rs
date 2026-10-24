@@ -6,6 +6,11 @@
 //! daemon stop: a **local** terminal's shell is gone but its pane stays,
 //! `ended` with `ended_reason = "daemon_stopped"` (Restart works); a **remote**
 //! (`ecs`) terminal's pane is removed and reported closed `daemon_stopped`.
+//!
+//! The pane tree and this file are written one after the other, so a crash
+//! can leave them disagreeing; [`reconcile`] settles that against the tree: a
+//! record whose leaf is gone is closed (`pane_missing`), and a terminal-shaped
+//! leaf no record claims is removed.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +25,8 @@ use crate::ipc::protocol::{
 
 /// Why a terminal ended or closed when the daemon stopped under it.
 pub const DAEMON_STOPPED: &str = "daemon_stopped";
+/// Why a terminal was closed at start: its record survived but its pane did not.
+pub const PANE_MISSING: &str = "pane_missing";
 
 /// The size an ended terminal reports until someone resizes it.
 pub const DEFAULT_COLS: u16 = 80;
@@ -138,15 +145,39 @@ fn write_atomic(path: &Path, file: &StoreFile) -> std::io::Result<()> {
 pub struct Reconciled {
     /// Local terminals: their panes stay, `ended / daemon_stopped`.
     pub ended: Vec<TerminalInfo>,
-    /// Remote terminals: their panes are gone, closed `daemon_stopped`.
+    /// Remote terminals: their panes are gone, closed `daemon_stopped`; and,
+    /// whatever their kind, terminals whose pane was already gone (`pane_missing`).
     pub closed: Vec<TerminalClosedInfo>,
 }
 
 /// Settle the records a previous daemon left. Local records keep their leaf
-/// (registered as a terminal leaf); remote records lose theirs.
+/// (registered as a terminal leaf); remote records lose theirs. With a pane
+/// registry the records are also checked against the pane tree, both ways: a
+/// record with no leaf is closed `pane_missing`, and a terminal-shaped leaf
+/// with no record is removed from the tree.
 pub fn reconcile(records: Vec<TerminalRecord>, mut panes: Option<&mut PaneRegistry>) -> Reconciled {
     let mut out = Reconciled::default();
+    if let Some(panes) = panes.as_deref_mut() {
+        remove_unclaimed_leaves(panes, &records);
+    }
     for r in records {
+        let leaf_gone = panes
+            .as_deref()
+            .is_some_and(|p| !p.pane_ids(&r.tag).contains(&r.pane_id));
+        if leaf_gone {
+            warn!(pane_id = %r.pane_id, "terminal record without a pane; closing it");
+            out.closed.push(TerminalClosedInfo {
+                terminal_id: r.terminal_id,
+                tag: r.tag,
+                pane_id: r.pane_id,
+                label: r.label,
+                kind: r.kind,
+                reason: PANE_MISSING.into(),
+                exit_code: None,
+                target: r.target,
+            });
+            continue;
+        }
         match r.kind {
             TerminalKind::Local => {
                 if let Some(panes) = panes.as_deref_mut() {
@@ -188,4 +219,30 @@ pub fn reconcile(records: Vec<TerminalRecord>, mut panes: Option<&mut PaneRegist
         }
     }
     out
+}
+
+/// Remove every leaf shaped like a terminal's (`terminal-<8 hex>`) that no
+/// record names: the daemon crashed after placing it and before saving.
+fn remove_unclaimed_leaves(panes: &mut PaneRegistry, records: &[TerminalRecord]) {
+    let tags: Vec<String> = panes
+        .all_layouts()
+        .into_iter()
+        .map(|(tag, _, _)| tag)
+        .collect();
+    for tag in tags {
+        for pane_id in panes.pane_ids(&tag) {
+            let claimed = records.iter().any(|r| r.tag == tag && r.pane_id == pane_id);
+            if !claimed && is_terminal_pane_id(&pane_id) {
+                warn!(%pane_id, "terminal pane without a record; removing it");
+                panes.unregister_terminal_leaf(&tag, &pane_id);
+                panes.remove_terminal_leaf(&tag, &pane_id);
+            }
+        }
+    }
+}
+
+/// `terminal-` followed by 8 hex digits: the ids `TerminalManager` mints.
+fn is_terminal_pane_id(id: &str) -> bool {
+    id.strip_prefix(super::PANE_PREFIX)
+        .is_some_and(|hex| hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }

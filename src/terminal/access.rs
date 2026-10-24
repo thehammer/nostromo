@@ -25,9 +25,15 @@ pub(crate) fn mint(trust: PeerTrust) -> Option<OperatorCap> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::mint;
+pub(crate) mod tests {
+    use super::{mint, OperatorCap};
     use crate::ipc::peer::PeerTrust;
+
+    /// A cap for crate tests that drive a `TerminalManager` directly (the
+    /// verified-peer path itself is covered over real sockets).
+    pub(crate) fn cap() -> OperatorCap {
+        mint(PeerTrust::OperatorApp).expect("the operator app gets a cap")
+    }
 
     #[test]
     fn the_operator_app_gets_a_cap() {

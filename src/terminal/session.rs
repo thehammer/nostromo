@@ -3,23 +3,33 @@
 //! Separate from any other PTY code on purpose: a terminal is reachable only
 //! through `TerminalManager`, never through the retired `pty_*` verbs.
 //!
-//! Threads per session: a blocking **reader** (feeds the ring and the
-//! `vt100` parser under one lock, then the reader hooks), a **writer** (drains
-//! a bounded input queue into the PTY, so a child that stops reading its
-//! input never blocks the caller), and a **waiter** (`child.wait()`, then the
-//! real exit code once the reader has drained).
+//! Threads per session: a **reader** (feeds the ring and the `vt100` parser
+//! under one lock, then the reader hooks; it polls so a closed terminal can
+//! stop it even while a stray background job still holds the tty), a
+//! **writer** (drains a bounded input queue into the PTY, so a child that stops
+//! reading its input never blocks the caller), and a **waiter** (waits for the
+//! child to exit, reaps it, then reports the real exit code once the reader
+//! has drained).
+//!
+//! **Signals.** Nothing is ever sent to a reaped child's pid or group: the
+//! kernel may have given that pid to a stranger. `signal_lock` is held across
+//! "still unreaped?" + the signal, and across the waiter's reap, so a signal
+//! cannot land between the kernel freeing the pid and `reaped` being set. The
+//! reaped flag is checked first, then the non-reaping `waitid` probe.
 
 use std::io::{Read, Write};
+use std::os::fd::RawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tracing::{debug, warn};
 
+use crate::ipc::orphans::{child_unreaped, Target};
 use crate::ipc::scrollback::ScrollbackBuf;
 
 /// The replay ring keeps at least this many lines (it evicts whole read
@@ -35,8 +45,17 @@ const READ_CHUNK: usize = 4096;
 const KILL_GRACE: Duration = Duration::from_secs(2);
 /// How long the waiter lets the reader drain after the child exited.
 const DRAIN_WAIT: Duration = Duration::from_secs(1);
+/// How long the reader waits for output before it checks whether it was told
+/// to stop.
+const READER_POLL: Duration = Duration::from_millis(200);
 /// Writes queued for the child before `write` reports it busy.
 const INPUT_QUEUE: usize = 256;
+/// The most bytes one `write` may carry; a larger one is refused outright.
+pub const MAX_INPUT_FRAME_BYTES: usize = 256 * 1024;
+/// The most input bytes queued for a child that is not reading (a write
+/// that would pass this reports it busy). Bounds a stuck terminal's memory
+/// at about this plus the one frame the writer thread holds.
+pub const MAX_INPUT_QUEUED_BYTES: usize = 1024 * 1024;
 /// The largest size a terminal may be given.
 pub const MAX_COLS: u16 = 1000;
 pub const MAX_ROWS: u16 = 500;
@@ -64,6 +83,50 @@ pub type ReaderHook = Box<dyn FnMut(&[u8]) + Send>;
 /// Called once with the exit code (`None` if it could not be read).
 pub type ExitHook = Box<dyn FnOnce(Option<i32>) + Send>;
 
+/// Why `write` did not queue its bytes. Nothing was queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputError {
+    /// One write over [`MAX_INPUT_FRAME_BYTES`].
+    TooLarge,
+    /// The child is not reading: [`INPUT_QUEUE`] writes or
+    /// [`MAX_INPUT_QUEUED_BYTES`] bytes are already waiting.
+    Busy,
+    /// The terminal is gone.
+    Gone,
+}
+
+/// How a session reaches its child. A seam so tests can simulate a reused pid
+/// (a probe that says "still ours" after the reap, a recorder in place of
+/// `kill(2)`); production always uses [`SignalOps::real`].
+#[derive(Clone)]
+pub struct SignalOps {
+    /// Is `pid` still an unreaped child of ours? Never reaps.
+    unreaped: fn(u32) -> bool,
+    /// Deliver `sig` to the process or group.
+    send: Arc<dyn Fn(Target, i32) + Send + Sync>,
+}
+
+impl SignalOps {
+    pub fn real() -> Self {
+        Self {
+            unreaped: child_unreaped,
+            send: Arc::new(|target, sig| target.signal(sig)),
+        }
+    }
+
+    /// Custom probe and delivery (tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with(
+        unreaped: fn(u32) -> bool,
+        send: impl Fn(Target, i32) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            unreaped,
+            send: Arc::new(send),
+        }
+    }
+}
+
 struct Screen {
     ring: ScrollbackBuf,
     parser: vt100::Parser,
@@ -82,10 +145,24 @@ pub struct TerminalSession {
     screen: Mutex<Screen>,
     input: SyncSender<Vec<u8>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
-    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// The master's fd, for the reader's poll. Valid while the reader runs:
+    /// the reader holds an `Arc` of the session, which owns the master.
+    master_fd: Option<RawFd>,
     pid: Option<u32>,
-    /// Set as soon as `wait()` reaped the child: its pid may be reused.
+    ops: SignalOps,
+    /// Held while checking `reaped` and signalling, and by the waiter while it
+    /// reaps and sets `reaped`: see the module docs.
+    signal_lock: Mutex<()>,
+    /// Set (under `signal_lock`) as soon as the child was reaped: its pid may
+    /// be reused, so nothing is signalled from then on.
     reaped: AtomicBool,
+    /// `kill` was called: whatever the shell leaves in its group when it exits
+    /// is SIGKILLed before the shell is reaped.
+    closing: AtomicBool,
+    /// Tells the reader to stop (the terminal was closed).
+    stop_reader: AtomicBool,
+    /// Input bytes queued and not yet written.
+    queued_bytes: Arc<AtomicUsize>,
     exit: Mutex<ExitState>,
     exit_cv: Condvar,
     reader_done: Mutex<bool>,
@@ -94,8 +171,15 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     /// The user's login shell (argv0 `-<shell>`) in `cwd`.
-    pub fn spawn_local(cwd: &Path, cols: u16, rows: u16) -> Result<Arc<Self>> {
-        Self::spawn(CommandBuilder::new_default_prog(), cwd, &[], cols, rows)
+    pub fn spawn_local(cwd: &Path, cols: u16, rows: u16, ops: SignalOps) -> Result<Arc<Self>> {
+        Self::spawn(
+            CommandBuilder::new_default_prog(),
+            cwd,
+            &[],
+            cols,
+            rows,
+            ops,
+        )
     }
 
     /// `argv` (no shell) in `cwd`, with `env` on top of the scrubbed daemon
@@ -108,10 +192,23 @@ impl TerminalSession {
         cols: u16,
         rows: u16,
     ) -> Result<Arc<Self>> {
+        Self::spawn_argv_with(argv, cwd, env, cols, rows, SignalOps::real())
+    }
+
+    /// [`Self::spawn_argv`] with its signals going through `ops`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn spawn_argv_with(
+        argv: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+        cols: u16,
+        rows: u16,
+        ops: SignalOps,
+    ) -> Result<Arc<Self>> {
         let (program, args) = argv.split_first().context("empty argv")?;
         let mut cmd = CommandBuilder::new(program);
         cmd.args(args);
-        Self::spawn(cmd, cwd, env, cols, rows)
+        Self::spawn(cmd, cwd, env, cols, rows, ops)
     }
 
     fn spawn(
@@ -120,6 +217,7 @@ impl TerminalSession {
         env: &[(String, String)],
         cols: u16,
         rows: u16,
+        ops: SignalOps,
     ) -> Result<Arc<Self>> {
         for key in SCRUBBED_ENV {
             cmd.env_remove(key);
@@ -150,7 +248,9 @@ impl TerminalSession {
         let reader = pair.master.try_clone_reader().context("pty reader")?;
         let writer = pair.master.take_writer().context("pty writer")?;
         let pid = child.process_id();
+        let master_fd = pair.master.as_raw_fd();
         let (input, queued) = sync_channel(INPUT_QUEUE);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
 
         let session = Arc::new(Self {
             screen: Mutex::new(Screen {
@@ -160,9 +260,14 @@ impl TerminalSession {
             }),
             input,
             master: Mutex::new(pair.master),
-            killer: Mutex::new(child.clone_killer()),
+            master_fd,
             pid,
+            ops,
+            signal_lock: Mutex::new(()),
             reaped: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            stop_reader: AtomicBool::new(false),
+            queued_bytes: Arc::clone(&queued_bytes),
             exit: Mutex::new(ExitState::default()),
             exit_cv: Condvar::new(),
             reader_done: Mutex::new(false),
@@ -177,21 +282,40 @@ impl TerminalSession {
 
         std::thread::Builder::new()
             .name("terminal-writer".into())
-            .spawn(move || write_loop(writer, queued))
+            .spawn(move || write_loop(writer, queued, queued_bytes))
             .context("writer thread")?;
 
         let for_waiter = Arc::clone(&session);
         std::thread::Builder::new()
             .name("terminal-waiter".into())
             .spawn(move || {
-                let code = match child.wait() {
+                // Learn of the exit without reaping, so the reap below can
+                // happen under `signal_lock`.
+                if let Some(pid) = pid {
+                    wait_until_exited(pid);
+                }
+                let waited = {
+                    let _guard = for_waiter
+                        .signal_lock
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if for_waiter.closing.load(Ordering::SeqCst) {
+                        // Closed: nothing the shell left in its group outlives it.
+                        // The shell is a zombie, not reaped, so its pid and group
+                        // are still ours.
+                        for_waiter.signal_locked(libc::SIGKILL);
+                    }
+                    let waited = child.wait();
+                    for_waiter.reaped.store(true, Ordering::SeqCst);
+                    waited
+                };
+                let code = match waited {
                     Ok(status) => i32::try_from(status.exit_code()).ok(),
                     Err(e) => {
                         warn!("terminal child wait failed: {e}");
                         None
                     }
                 };
-                for_waiter.reaped.store(true, Ordering::SeqCst);
                 for_waiter.wait_reader_drained(DRAIN_WAIT);
                 for_waiter.finish(code);
             })
@@ -203,6 +327,14 @@ impl TerminalSession {
     fn read_loop(&self, mut reader: Box<dyn Read + Send>) {
         let mut buf = vec![0u8; READ_CHUNK];
         loop {
+            if self.stop_reader.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(fd) = self.master_fd {
+                if !readable(fd, READER_POLL) {
+                    continue;
+                }
+            }
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -250,14 +382,28 @@ impl TerminalSession {
         self.pid
     }
 
-    /// Queue bytes for the child's terminal. Never blocks: `WouldBlock` when
-    /// the queue is full (the child is not reading its input),
-    /// `BrokenPipe` once the terminal is gone.
-    pub fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+    /// Queue bytes for the child's terminal. Never blocks: [`InputError::TooLarge`]
+    /// for a write over [`MAX_INPUT_FRAME_BYTES`], [`InputError::Busy`] when the
+    /// queue is full by count or by [`MAX_INPUT_QUEUED_BYTES`] (the child is not
+    /// reading its input), [`InputError::Gone`] once the terminal is gone.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), InputError> {
+        if bytes.len() > MAX_INPUT_FRAME_BYTES {
+            return Err(InputError::TooLarge);
+        }
+        let queued = self.queued_bytes.fetch_add(bytes.len(), Ordering::SeqCst) + bytes.len();
+        if queued > MAX_INPUT_QUEUED_BYTES {
+            self.queued_bytes.fetch_sub(bytes.len(), Ordering::SeqCst);
+            return Err(InputError::Busy);
+        }
         match self.input.try_send(bytes.to_vec()) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(std::io::ErrorKind::WouldBlock.into()),
-            Err(TrySendError::Disconnected(_)) => Err(std::io::ErrorKind::BrokenPipe.into()),
+            Err(e) => {
+                self.queued_bytes.fetch_sub(bytes.len(), Ordering::SeqCst);
+                Err(match e {
+                    TrySendError::Full(_) => InputError::Busy,
+                    TrySendError::Disconnected(_) => InputError::Gone,
+                })
+            }
         }
     }
 
@@ -289,28 +435,67 @@ impl TerminalSession {
         (cols, rows)
     }
 
-    /// SIGHUP the child; SIGKILL it if it is still running after a grace.
+    /// Close the terminal: SIGHUP the shell and its process group, SIGKILL
+    /// them if the shell is still running after a grace (and, once the shell
+    /// exits, whatever it left in its group), then stop the reader so the
+    /// ring, the screen model and the PTY go with the pane. Nothing is
+    /// signalled once the child has been reaped.
     pub fn kill(self: &Arc<Self>) {
-        if self.is_exited() {
-            return;
-        }
-        if let Err(e) = self.killer.lock().unwrap_or_else(|e| e.into_inner()).kill() {
-            debug!("terminal SIGHUP failed: {e}");
-        }
-        let (Some(pid), this) = (self.pid, Arc::clone(self)) else {
-            return;
-        };
-        let _ = std::thread::Builder::new()
+        self.hang_up();
+        let this = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
             .name("terminal-kill".into())
             .spawn(move || {
-                // Not once reaped: the pid may already name another process.
-                if this.wait_exit(KILL_GRACE).is_none() && !this.reaped.load(Ordering::SeqCst) {
-                    // SAFETY: plain kill(2) on the pid we spawned and have not reaped.
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                    }
+                if this.wait_exit(KILL_GRACE).is_none() {
+                    this.signal(libc::SIGKILL);
+                    let _ = this.wait_exit(KILL_GRACE);
                 }
+                this.stop_reader.store(true, Ordering::SeqCst);
             });
+        if spawned.is_err() {
+            self.stop_reader.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Mark the session closing and send SIGHUP (unless the child was reaped).
+    fn hang_up(&self) {
+        let _guard = self.signal_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.closing.store(true, Ordering::SeqCst);
+        self.signal_locked(libc::SIGHUP);
+    }
+
+    /// Signal the child's group and the child, unless it was reaped.
+    fn signal(&self, sig: i32) {
+        let _guard = self.signal_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.signal_locked(sig);
+    }
+
+    /// `signal` for a caller holding `signal_lock`. The reaped flag is read
+    /// first; only an unreaped child is then probed (a reaped pid may name a
+    /// stranger that the probe would also call "ours").
+    fn signal_locked(&self, sig: i32) {
+        let Some(pid) = self.pid else {
+            return;
+        };
+        if self.reaped.load(Ordering::SeqCst) || !(self.ops.unreaped)(pid) {
+            return;
+        }
+        // The shell is the session leader (portable-pty `setsid`s the child),
+        // so its pid is also its group's id.
+        (self.ops.send)(Target::Group(pid), sig);
+        (self.ops.send)(Target::Pid(pid), sig);
+    }
+
+    /// Has the child been reaped (its pid is no longer ours)?
+    #[cfg(test)]
+    pub(crate) fn is_reaped(&self) -> bool {
+        self.reaped.load(Ordering::SeqCst)
+    }
+
+    /// Has the reader thread finished (EOF, or told to stop)?
+    #[cfg(test)]
+    pub(crate) fn reader_finished(&self) -> bool {
+        *self.reader_done.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Has the child exited (and its output drained)?
@@ -390,12 +575,57 @@ impl TerminalSession {
 
 /// Feed queued input to the PTY until the session (the sender) is gone or
 /// the terminal stops taking writes.
-fn write_loop(mut writer: Box<dyn Write + Send>, queued: Receiver<Vec<u8>>) {
+fn write_loop(
+    mut writer: Box<dyn Write + Send>,
+    queued: Receiver<Vec<u8>>,
+    queued_bytes: Arc<AtomicUsize>,
+) {
     for bytes in queued {
-        if let Err(e) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+        let result = writer.write_all(&bytes).and_then(|()| writer.flush());
+        queued_bytes.fetch_sub(bytes.len(), Ordering::SeqCst);
+        if let Err(e) = result {
             debug!("terminal writer ended: {e}");
             return;
         }
+    }
+}
+
+/// Block until `pid` (our child) has exited, without reaping it.
+fn wait_until_exited(pid: u32) {
+    loop {
+        // SAFETY: `waitid` fills a zeroed `siginfo_t` we own; `WNOWAIT` leaves
+        // the child's state untouched, so it can still be waited for.
+        let rc = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        // Done, or not waitable at all (the caller's `wait` then decides).
+        if rc == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+/// Is there something to read on `fd` (data, hangup or an error: `read` then
+/// says which), after waiting up to `timeout`? `false` on timeout.
+fn readable(fd: RawFd, timeout: Duration) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: one valid `pollfd` that we own.
+    let rc = unsafe { libc::poll(&mut p, 1, ms) };
+    match rc {
+        0 => false,
+        n if n < 0 => std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted,
+        _ => true,
     }
 }
 

@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -212,6 +212,8 @@ struct Client<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> {
     view: HashMap<String, Vec<u8>>,
     nonce: Option<String>,
     closed: bool,
+    /// While set, the background reader takes no more frames off the socket.
+    read_gate: Arc<AtomicBool>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Drop for Client<S> {
@@ -226,8 +228,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
     fn new(stream: S) -> Self {
         let (mut read_half, writer) = tokio::io::split(stream);
         let (tx, rx) = mpsc::unbounded_channel();
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let gate = Arc::clone(&read_gate);
         let reader = tokio::spawn(async move {
-            while let Ok(bytes) = read_frame(&mut read_half).await {
+            loop {
+                while gate.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let Ok(bytes) = read_frame(&mut read_half).await else {
+                    break;
+                };
                 let parsed = serde_json::from_slice::<ServerMsg>(&bytes).map_err(|e| {
                     format!(
                         "{e}: {}",
@@ -247,7 +257,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
             view: HashMap::new(),
             nonce: None,
             closed: false,
+            read_gate,
         }
+    }
+
+    /// Stop taking frames off the socket (at most one more is read), so what
+    /// the daemon writes piles up in the socket buffers and its own queues.
+    fn stop_reading(&self) {
+        self.read_gate.store(true, Ordering::SeqCst);
+    }
+
+    fn resume_reading(&self) {
+        self.read_gate.store(false, Ordering::SeqCst);
     }
 
     /// Hello (with `claim` as `client_kind`) -> Welcome -> Subscribe -> synced.
@@ -2862,5 +2883,119 @@ async fn a_failed_re_check_of_the_peer_revokes_terminal_access_for_good() {
     assert!(
         !app.log.iter().any(is_terminal_bytes_frame),
         "no terminal bytes after the failed re-check"
+    );
+}
+
+/// One `terminal_input` frame over the size limit is refused whole, with a
+/// code that says nothing about what was typed; none of it reaches the shell
+/// and the terminal keeps working.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_terminal_input_frame_is_refused_without_echoing_it_and_nothing_reaches_the_shell(
+) {
+    let d = Daemon::start(&[Peer::App]).await;
+    let (_dir, cwd) = canonical_tmp();
+    let mut app = d.app(vec![]).await;
+    let info = app.open_ready(&cwd).await;
+    let tid = info.terminal_id.clone();
+
+    // Just over 256 KiB of something recognisable.
+    let secret: Vec<u8> = b"SECRET-INPUT-"
+        .iter()
+        .copied()
+        .cycle()
+        .take(256 * 1024 + 1)
+        .collect();
+    let from = app.mark();
+    app.input(&tid, &secret).await;
+    let (_, refused) = app
+        .wait_since(from, "the oversized input refusal", |m| {
+            matches!(m, ServerMsg::TerminalRefused { .. })
+        })
+        .await;
+    match &refused {
+        ServerMsg::TerminalRefused {
+            op,
+            terminal_id,
+            code,
+        } => {
+            assert_eq!(op, "input");
+            assert_eq!(terminal_id.as_deref(), Some(tid.as_str()));
+            assert_eq!(code, "terminal_input_too_large");
+        }
+        _ => unreachable!(),
+    }
+    let shown = serde_json::to_string(&refused).unwrap();
+    assert!(
+        !shown.contains("SECRET-INPUT") && !shown.contains(&b64(b"SECRET-INPUT-")[..12]),
+        "the refusal must not carry the input: {shown}"
+    );
+
+    // Still usable, and the shell never saw a byte of the refused frame.
+    let out = app.run(&tid, "echo STILL-WORKING-$((40+2))").await;
+    assert!(out.contains("STILL-WORKING-42"), "{out:?}");
+    assert!(
+        !lossy(app.view(&tid)).contains("SECRET-INPUT"),
+        "no byte of a refused frame may reach the shell"
+    );
+}
+
+/// The cap is revoked by a failed 5 s re-check while output is piled up for
+/// the connection (the app stopped reading, so the daemon's queues for it are
+/// full). Nothing more is written to that connection afterwards: not a byte of
+/// what was queued.
+#[tokio::test(flavor = "multi_thread")]
+async fn after_the_cap_is_revoked_not_one_more_terminal_byte_is_written_to_the_connection() {
+    // Re-inspections: the Subscribe's activation, the open and the attach see
+    // the app; the first input after the 5 s interval sees someone else.
+    let verifier = peer_verifier(&[Peer::App]).with_reinspect(vec![
+        Some(app_info()),
+        Some(app_info()),
+        Some(app_info()),
+        None,
+    ]);
+    let d = Daemon::start_with(verifier).await;
+    let (_dir, cwd) = canonical_tmp();
+    let mut app = d.app(vec![]).await;
+    let info = app.open(TAG, Some(&cwd), "req-flood").await;
+    let tid = info.terminal_id.clone();
+    app.attach(&tid).await;
+    app.shell_ready(&tid).await;
+
+    // A flood of output, then the app stops reading: the daemon's writes to it
+    // back up until its own per-connection queue for the terminal is full.
+    app.type_line(&tid, "yes 0123456789abcdef0123456789abcdef")
+        .await;
+    assert!(
+        app.wait_view_from(&tid, 0, "0123456789abcdef", WAIT).await,
+        "the flood never started"
+    );
+    let from = app.mark();
+    app.stop_reading();
+    // Past the re-check interval (5 s); the daemon is blocked writing to us.
+    tokio::time::sleep(Duration::from_millis(5600)).await;
+    app.input(&tid, b"x").await;
+    app.resume_reading();
+
+    let (revoked_at, refused) = app
+        .wait_since(from, "the refusal after the failed re-check", |m| {
+            matches!(m, ServerMsg::TerminalRefused { .. })
+        })
+        .await;
+    assert!(
+        matches!(&refused, ServerMsg::TerminalRefused { code, .. } if code == "terminal_input_forbidden"),
+        "{refused:?}"
+    );
+
+    // The ordering marker: a Pong is answered after everything the connection
+    // was going to be sent, then give any straggler a moment to show up.
+    app.sync().await;
+    app.settle_ms(500).await;
+    let stray = app.log[revoked_at + 1..]
+        .iter()
+        .filter(|m| is_terminal_bytes_frame(m))
+        .count();
+    assert_eq!(
+        stray, 0,
+        "{stray} terminal byte frames were written after the cap was revoked"
     );
 }

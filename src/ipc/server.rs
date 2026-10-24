@@ -789,7 +789,6 @@ where
                 &granted,
                 &conn_key,
                 terminal::OperatorConn {
-                    targeted: targeted_tx.clone(),
                     stream: terminal_stream_tx.clone(),
                     capabilities,
                 },
@@ -1039,7 +1038,9 @@ where
 
             // Terminal replay/output for the terminals this connection is
             // attached to (operator app only; see the terminal stream above).
-            Some(batch) = terminal_stream_rx.recv() => {
+            // Only while the cap stands: once a re-check failed, what was
+            // already queued is never written to that peer.
+            Some(batch) = terminal_stream_rx.recv(), if cap.is_some() => {
                 let mut failed = false;
                 for msg in batch {
                     let Some(msg) = outbound(trust, msg, &sensitive) else {
@@ -1181,6 +1182,8 @@ where
                                     warn!(conn_key, "terminal access revoked: {e}");
                                     if let Some(revoked) = cap.take() {
                                         lock_terminals(&terminals).unregister_conn(&revoked, &conn_key);
+                                        // Drop what was queued for the peer that failed.
+                                        while terminal_stream_rx.try_recv().is_ok() {}
                                     }
                                 }
                             }
