@@ -24,7 +24,7 @@ mod tests;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
@@ -59,6 +59,10 @@ pub const DEFAULT_POSITION: &str = "split_below";
 /// Every terminal leaf's pane id starts with this.
 pub const PANE_PREFIX: &str = "terminal-";
 const LOCAL_LABEL: &str = "Terminal";
+/// At most this many `refused` audit lines per [`REFUSAL_WINDOW`]: a peer
+/// that floods refused frames must not rotate the real entries away.
+pub const MAX_REFUSALS_PER_WINDOW: u32 = 120;
+pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
 
 /// A verified operator-app connection, as the terminal manager knows it.
 pub struct OperatorConn {
@@ -150,6 +154,8 @@ pub struct TerminalManager {
     store: TerminalStore,
     probe: Arc<Mutex<Option<LatencyProbe>>>,
     shutting_down: bool,
+    /// `(window start, refusals audited in it, refusals dropped in it)`.
+    refusals: Mutex<(Instant, u32, u32)>,
 }
 
 impl TerminalManager {
@@ -166,6 +172,7 @@ impl TerminalManager {
                 store: cfg.store,
                 probe: Arc::new(Mutex::new(None)),
                 shutting_down: false,
+                refusals: Mutex::new((Instant::now(), 0, 0)),
             })
         })
     }
@@ -577,7 +584,9 @@ impl TerminalManager {
     // ── audit ────────────────────────────────────────────────────────────────
 
     /// Record a refused terminal request (no cap: refusals come from anyone).
-    #[allow(clippy::too_many_arguments)]
+    /// `terminal_id` is whatever the peer sent, so it is kept only when it is
+    /// shaped like an id; and past [`MAX_REFUSALS_PER_WINDOW`] lines in a
+    /// window the rest are counted, not written.
     pub fn audit_refused(
         &self,
         channel: RefusalChannel,
@@ -587,16 +596,38 @@ impl TerminalManager {
         peer_pid: Option<i32>,
         peer_exe: Option<String>,
     ) {
+        if !self.take_refusal_budget() {
+            return;
+        }
         self.record(AuditEvent::Refused {
             channel,
             op: op.to_string(),
             code: code.map(str::to_string),
-            terminal_id: terminal_id.map(str::to_string),
+            terminal_id: terminal_id.filter(|id| is_id_shaped(id)).map(str::to_string),
             focus: None,
             peer_pid,
             peer_exe,
             tool: None,
         });
+    }
+
+    /// May one more `refused` line be written in the current window?
+    fn take_refusal_budget(&self) -> bool {
+        let mut budget = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        let (start, written, dropped) = &mut *budget;
+        if start.elapsed() >= REFUSAL_WINDOW {
+            if *dropped > 0 {
+                warn!(dropped = *dropped, "terminal refusals not audited (rate limit)");
+            }
+            (*start, *written, *dropped) = (Instant::now(), 0, 0);
+        }
+        if *written < MAX_REFUSALS_PER_WINDOW {
+            *written += 1;
+            true
+        } else {
+            *dropped += 1;
+            false
+        }
     }
 
     fn record(&self, event: AuditEvent) {
@@ -772,6 +803,11 @@ pub fn forbidden_code(op: &str) -> &'static str {
         "close" => "terminal_close_forbidden",
         _ => "terminal_control_forbidden",
     }
+}
+
+/// A terminal id as the daemon mints them (a UUID): short, hex and dashes.
+fn is_id_shaped(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 fn home_dir() -> PathBuf {
