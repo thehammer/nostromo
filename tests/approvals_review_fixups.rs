@@ -91,7 +91,10 @@ impl SessionSink for Sink {
 
     fn respond(&self, cli_request_id: &str, response: &Value) -> io::Result<()> {
         if self.fail.load(Ordering::SeqCst) {
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the pipe is full or closed"));
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the pipe is full or closed",
+            ));
         }
         self.writes
             .lock()
@@ -188,7 +191,10 @@ impl Rig {
             cli_request_id: cli_request_id.into(),
             value,
         });
-        assert!(accepted.is_ok(), "the broker takes a request without waiting");
+        assert!(
+            accepted.is_ok(),
+            "the broker takes a request without waiting"
+        );
     }
 
     fn entries(&self) -> Vec<Entry> {
@@ -316,7 +322,8 @@ async fn a_request_that_cannot_be_read_also_keeps_its_input_once() {
 // ── N2b: display_text is sanitized and bounded like every recorded string ─────
 
 #[tokio::test(start_paused = true)]
-async fn display_text_of_a_huge_command_is_cut_at_the_recorded_string_limit_but_input_stays_whole() {
+async fn display_text_of_a_huge_command_is_cut_at_the_recorded_string_limit_but_input_stays_whole()
+{
     let rig = Rig::new();
     // Over the recorded-string limit, under the display cap (32 KiB), so it is
     // displayed in full and the log cuts the text.
@@ -341,7 +348,10 @@ async fn display_text_of_a_huge_command_is_cut_at_the_recorded_string_limit_but_
         "display_text is bounded like every recorded string: {} bytes",
         display_text.len()
     );
-    assert!(display_text.starts_with("echo hello world"), "{display_text:.80}");
+    assert!(
+        display_text.starts_with("echo hello world"),
+        "{display_text:.80}"
+    );
     assert!(
         display_text.contains("truncated"),
         "and says it was cut: ...{}",
@@ -465,7 +475,9 @@ fn a_64_mib_line_of_junk_in_the_audit_file_does_not_stop_an_open_request_being_r
         .read(everything(), &AuditFilter::default())
         .unwrap()
         .into_iter()
-        .filter(|e| matches!(&e.event, Event::Outcome { outcome, .. } if outcome == "restart_crash"))
+        .filter(
+            |e| matches!(&e.event, Event::Outcome { outcome, .. } if outcome == "restart_crash"),
+        )
         .filter_map(|e| e.request_id)
         .collect();
     assert_eq!(ended, ["req-open"]);
@@ -481,7 +493,11 @@ fn a_corrupt_line_that_is_not_text_does_not_stop_an_open_request_being_reconcile
     let dir = tempfile::tempdir().unwrap();
     let log = AuditLog::open(dir.path()).unwrap();
     let asked_at = Utc::now() - ChronoDuration::minutes(5);
-    append_raw_line(&log, asked_at, &[0xff, 0xfe, 0x80, b'{', 0xc3, 0x28, 0xa0, 0xa1]);
+    append_raw_line(
+        &log,
+        asked_at,
+        &[0xff, 0xfe, 0x80, b'{', 0xc3, 0x28, 0xa0, 0xa1],
+    );
     log.append(&pending_request_entry("req-open", asked_at))
         .unwrap();
     append_raw_line(&log, asked_at, &[0xf0, 0x28, 0x8c, 0xbc]);
@@ -538,7 +554,8 @@ fn sweeping_carries_on_past_a_file_that_cannot_be_deleted_and_reports_the_failur
         }
     }
     stuck.push(stuck_dir(140));
-    log.append(&pending_request_entry("recent", old(89))).unwrap();
+    log.append(&pending_request_entry("recent", old(89)))
+        .unwrap();
     log.append(&pending_request_entry("today", now)).unwrap();
 
     let result = log.sweep(now);
@@ -557,7 +574,10 @@ fn sweeping_carries_on_past_a_file_that_cannot_be_deleted_and_reports_the_failur
     for path in &stuck {
         assert!(path.exists(), "{} is still there", path.display());
     }
-    assert!(log.file_for(old(89)).exists(), "89 days old is within retention");
+    assert!(
+        log.file_for(old(89)).exists(),
+        "89 days old is within retention"
+    );
     assert!(log.file_for(now).exists(), "today's file is untouched");
 }
 

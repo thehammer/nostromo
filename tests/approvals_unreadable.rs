@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event};
 use nostromo::approvals::broker::{
-    ApprovalBroker, BrokerParts, Incoming, Presenter, SessionInfo, SessionSink,
-    INVALID_REQUEST_MESSAGE, APPROVAL_TIMEOUT,
+    ApprovalBroker, BrokerParts, Incoming, Presenter, SessionInfo, SessionSink, APPROVAL_TIMEOUT,
+    INVALID_REQUEST_MESSAGE,
 };
 use nostromo::approvals::guard::{
     self, hook_settings_json, PaneInfo, PaneProbe, ProbeError, TmuxSocket,
@@ -595,11 +595,7 @@ async fn expect_session_still_flows(w: &mut World, fake: &Fake, answers_before: 
         1,
         "one outcome for the prompt after it"
     );
-    assert_eq!(
-        fake.responses().len(),
-        answers_before + 1,
-        "and one answer"
-    );
+    assert_eq!(fake.responses().len(), answers_before + 1, "and one answer");
     fake.assert_never_allowed();
 }
 
@@ -790,7 +786,10 @@ fn a_deep_request_with_a_numeric_id_is_denied_with_that_same_number() {
             DENY_WITHIN,
         )
         .await;
-        assert!(fake.raw_stdin().iter().any(|l| l.contains("\"request_id\":7")));
+        assert!(fake
+            .raw_stdin()
+            .iter()
+            .any(|l| l.contains("\"request_id\":7")));
         expect_session_still_flows(&mut w, &fake, 1).await;
     });
 }
@@ -865,7 +864,8 @@ fn an_id_full_of_json_escapes_comes_back_exactly_as_the_cli_sent_it() {
         )
         .await;
         assert_eq!(
-            fake.responses()[0]["tool_use_id"], "toolu_escaped_id_0",
+            fake.responses()[0]["tool_use_id"],
+            "toolu_escaped_id_0",
             "the CLI recognised the id as its own"
         );
     });
@@ -962,7 +962,10 @@ fn lines_that_are_not_control_requests_are_ignored_exactly_as_before() {
             assert!(!transcript.to_string().contains(MARK), "{cue}");
         }
         assert_eq!(
-            w.entries().iter().filter(|e| e.tag.as_deref() != Some(BARRIER)).count(),
+            w.entries()
+                .iter()
+                .filter(|e| e.tag.as_deref() != Some(BARRIER))
+                .count(),
             0
         );
         expect_session_still_flows(&mut w, &fake, 0).await;
@@ -971,30 +974,27 @@ fn lines_that_are_not_control_requests_are_ignored_exactly_as_before() {
 
 #[test]
 fn an_unreadable_request_is_denied_at_once_and_never_put_in_front_of_anyone() {
-    run(
-        Opts { hold: true },
-        |mut w| async move {
-            let fake = w.spawn(FOCUS);
+    run(Opts { hold: true }, |mut w| async move {
+        let fake = w.spawn(FOCUS);
 
-            w.say(FOCUS, "RAW:deep:500");
+        w.say(FOCUS, "RAW:deep:500");
 
-            expect_unreadable_denied(
-                &mut w,
-                &fake,
-                1,
-                None,
-                "toolu_deep_500",
-                "Bash",
-                DENY_WITHIN,
-            )
-            .await;
-            assert_eq!(
+        expect_unreadable_denied(
+            &mut w,
+            &fake,
+            1,
+            None,
+            "toolu_deep_500",
+            "Bash",
+            DENY_WITHIN,
+        )
+        .await;
+        assert_eq!(
                 w.presenter.asked.load(Ordering::SeqCst),
                 0,
                 "a request nobody can read is never put in front of a person, even when someone could be asked"
             );
-        },
-    );
+    });
 }
 
 // ── N3: any other kind of control request gets an error answer ────────────────
@@ -1047,7 +1047,9 @@ fn a_control_request_that_is_not_a_permission_prompt_gets_one_error_answer_and_n
 
         assert_eq!(first, second, "the same fixed text for every subtype");
         assert!(
-            fake.control_frames().iter().all(|f| f["response"]["subtype"] == "error"),
+            fake.control_frames()
+                .iter()
+                .all(|f| f["response"]["subtype"] == "error"),
             "{:?}",
             fake.control_frames()
         );
@@ -1065,7 +1067,8 @@ fn an_unreadable_request_of_another_subtype_gets_the_same_error_answer() {
         w.say(FOCUS, "FIXTURE:non_can_use_tool");
         let readable = expect_error_answer(&mut w, &fake, 1, "toolu_non_can_use_tool_0").await;
         w.say(FOCUS, "RAW:other_deep:elicitation");
-        let unreadable = expect_error_answer(&mut w, &fake, 2, "toolu_other_deep_elicitation").await;
+        let unreadable =
+            expect_error_answer(&mut w, &fake, 2, "toolu_other_deep_elicitation").await;
 
         assert_eq!(
             readable, unreadable,
@@ -1106,12 +1109,18 @@ fn every_answer_written_for_an_unreadable_or_unsupported_request_is_a_deny_or_an
             .iter()
             .filter(|f| f["response"]["subtype"] == "error")
             .count();
-        assert_eq!(frames.len(), 6, "one answer per request that had an id: {frames:?}");
+        assert_eq!(
+            frames.len(),
+            6,
+            "one answer per request that had an id: {frames:?}"
+        );
         assert_eq!((frames.len() - errors, errors), (4, 2));
         fake.assert_never_allowed();
         for e in w.entries() {
             assert!(
-                !serde_json::to_string(&e).unwrap().contains("\"behavior\":\"allow\""),
+                !serde_json::to_string(&e)
+                    .unwrap()
+                    .contains("\"behavior\":\"allow\""),
                 "{e:?}"
             );
             if let Event::Outcome { outcome, .. } = &e.event {
@@ -1141,7 +1150,10 @@ fn no_allow_answer_exists_anywhere_in_the_broker_or_the_reader_path() {
             "src/ipc/session_manager/mod.rs",
             include_str!("../src/ipc/session_manager/mod.rs"),
         ),
-        ("src/ipc/stream_json.rs", include_str!("../src/ipc/stream_json.rs")),
+        (
+            "src/ipc/stream_json.rs",
+            include_str!("../src/ipc/stream_json.rs"),
+        ),
     ] {
         for (n, line) in code_lines(src) {
             assert!(
@@ -1154,12 +1166,20 @@ fn no_allow_answer_exists_anywhere_in_the_broker_or_the_reader_path() {
     let spells: Vec<_> = code_lines(broker)
         .filter(|(_, l)| l.contains("\"allow\"") || l.contains("\\\"allow\\\""))
         .collect();
-    assert_eq!(spells.len(), 1, "exactly one allow answer in the broker: {spells:?}");
+    assert_eq!(
+        spells.len(),
+        1,
+        "exactly one allow answer in the broker: {spells:?}"
+    );
     assert!(spells[0].1.contains("\"updatedInput\""), "{spells:?}");
     let constructors: Vec<_> = code_lines(broker)
         .filter(|(_, l)| l.contains("Ending::allow_once(") && !l.contains("fn "))
         .collect();
-    assert_eq!(constructors.len(), 1, "one place builds the allow ending: {constructors:?}");
+    assert_eq!(
+        constructors.len(),
+        1,
+        "one place builds the allow ending: {constructors:?}"
+    );
 }
 
 // ── N8: the restart (resume) arm of the real argv builder, end to end ─────────
@@ -1195,12 +1215,18 @@ fn a_restarted_session_is_resumed_with_the_prompt_flag_and_the_guard_settings() 
         let guard_settings = hook_settings_json(w.mgr.guard_path());
         flag_follows_guard_settings(&argv, &guard_settings);
         assert_eq!(
-            argv.iter().filter(|a| *a == "--permission-prompt-tool").count(),
+            argv.iter()
+                .filter(|a| *a == "--permission-prompt-tool")
+                .count(),
             1,
             "{argv:?}"
         );
         let at = argv.iter().position(|a| a == "--resume").unwrap();
-        assert_eq!(argv[at + 1], fake.session_id, "it resumes the same conversation");
+        assert_eq!(
+            argv[at + 1],
+            fake.session_id,
+            "it resumes the same conversation"
+        );
         assert!(!argv.iter().any(|a| a == "--session-id"), "{argv:?}");
 
         // And the resumed process really does send its prompts to the daemon.
@@ -1245,7 +1271,10 @@ fn a_restarted_restricted_session_still_never_gets_the_prompt_flag() {
             ),
             "the restricted resume arm is what the builder gives without approvals"
         );
-        assert!(!argv.iter().any(|a| a == "--permission-prompt-tool"), "{argv:?}");
+        assert!(
+            !argv.iter().any(|a| a == "--permission-prompt-tool"),
+            "{argv:?}"
+        );
         assert!(!argv.iter().any(|a| a == "stdio"), "{argv:?}");
     });
 }

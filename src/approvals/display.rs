@@ -340,7 +340,8 @@ impl Builder {
             .map(|s| s.span.clone())
             .collect();
         seps.sort_by_key(|s| s.start);
-        let mut heredocs: Vec<&Range<usize>> = parsed.heredocs.iter().map(|hd| &hd.body_span).collect();
+        let mut heredocs: Vec<&Range<usize>> =
+            parsed.heredocs.iter().map(|hd| &hd.body_span).collect();
         heredocs.sort_by_key(|span| span.start);
         let (mut next_sep, mut first_open_heredoc) = (0, 0);
         let mut ls = 0;

@@ -65,7 +65,9 @@ async fn make_harness() -> Harness {
         Arc::clone(&session_mgr),
         dir.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(dir.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            dir.path().join("operator-app.pin"),
+        )),
         false,
     )
     .expect("raw server should bind");
@@ -109,27 +111,40 @@ fn seed_tree(pane_registry: &Arc<Mutex<PaneRegistry>>, tag: &str, extra_panes: &
 
 async fn raw_send(stream: &mut UnixStream, msg: &ClientMsg) {
     let bytes = serde_json::to_vec(msg).unwrap();
-    nostromo::ipc::codec::write_frame(stream, &bytes).await.unwrap();
+    nostromo::ipc::codec::write_frame(stream, &bytes)
+        .await
+        .unwrap();
 }
 
 async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
-    let bytes = tokio::time::timeout(Duration::from_secs(5), nostromo::ipc::codec::read_frame(stream))
-        .await
-        .expect("timed out waiting for a server frame")
-        .expect("read frame");
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(5),
+        nostromo::ipc::codec::read_frame(stream),
+    )
+    .await
+    .expect("timed out waiting for a server frame")
+    .expect("read frame");
     serde_json::from_slice(&bytes).unwrap()
 }
 
 async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
     raw_send(
         stream,
-        &ClientMsg::Hello { client_id: client_id.into(), protocol_version: 4, client_kind: None },
+        &ClientMsg::Hello {
+            client_id: client_id.into(),
+            protocol_version: 4,
+            client_kind: None,
+        },
     )
     .await;
     assert!(matches!(raw_recv(stream).await, ServerMsg::Welcome { .. }));
     raw_send(
         stream,
-        &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false, renders_approvals: false },
+        &ClientMsg::Subscribe {
+            topics: vec![Topic::Layout],
+            renders_decisions: false,
+            renders_approvals: false,
+        },
     )
     .await;
     // Give the server a moment to finish registering this connection before
@@ -155,7 +170,10 @@ async fn read_mcp_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut BufReader<R>) -
 async fn connect_mcp(
     socket_path: &std::path::Path,
     tag: &str,
-) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
     let stream = UnixStream::connect(socket_path).await.unwrap();
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -205,7 +223,14 @@ async fn no_window_has_reported_returns_null_not_true() {
     seed_tree(&harness.pane_registry, "perri", &["queue"]);
 
     let (mut reader, mut writer) = connect_mcp(&harness.mcp_socket_path, "perri").await;
-    let result = call_tool(&mut reader, &mut writer, 2, "nostromo.get_render_state", json!({})).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.get_render_state",
+        json!({}),
+    )
+    .await;
 
     assert_eq!(result["windows"], json!([]));
     assert_eq!(
@@ -219,7 +244,11 @@ async fn no_window_has_reported_returns_null_not_true() {
 #[tokio::test]
 async fn two_windows_report_one_agreeing_one_missing_a_region() {
     let harness = make_harness().await;
-    seed_tree(&harness.pane_registry, "perri", &["queue", "detail.0", "detail.1"]);
+    seed_tree(
+        &harness.pane_registry,
+        "perri",
+        &["queue", "detail.0", "detail.1"],
+    );
 
     let mut window0 = UnixStream::connect(&harness.raw_socket_path).await.unwrap();
     raw_handshake(&mut window0, "macos-window-0").await;
@@ -231,7 +260,12 @@ async fn two_windows_report_one_agreeing_one_missing_a_region() {
         &ClientMsg::RenderedShape {
             tag: "perri".into(),
             window_id: "0".into(),
-            pane_ids: vec!["repl".into(), "queue".into(), "detail.0".into(), "detail.1".into()],
+            pane_ids: vec![
+                "repl".into(),
+                "queue".into(),
+                "detail.0".into(),
+                "detail.1".into(),
+            ],
             rendered_at: chrono::Utc::now(),
         },
     )
@@ -249,7 +283,14 @@ async fn two_windows_report_one_agreeing_one_missing_a_region() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut reader, mut writer) = connect_mcp(&harness.mcp_socket_path, "perri").await;
-    let result = call_tool(&mut reader, &mut writer, 2, "nostromo.get_render_state", json!({})).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.get_render_state",
+        json!({}),
+    )
+    .await;
 
     assert_eq!(result["windows_reporting"], 2);
     assert_eq!(result["agrees_everywhere"], false);
@@ -269,7 +310,14 @@ async fn two_windows_report_one_agreeing_one_missing_a_region() {
     drop(window2);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let result = call_tool(&mut reader, &mut writer, 3, "nostromo.get_render_state", json!({})).await;
+    let result = call_tool(
+        &mut reader,
+        &mut writer,
+        3,
+        "nostromo.get_render_state",
+        json!({}),
+    )
+    .await;
     assert_eq!(result["windows_reporting"], 1);
     assert_eq!(
         result["agrees_everywhere"], true,

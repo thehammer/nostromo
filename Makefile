@@ -1,4 +1,4 @@
-.PHONY: build release install test python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
+.PHONY: build release install test fmt-check python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
 
 build:
 	cargo build
@@ -15,6 +15,11 @@ install: release
 
 test:
 	cargo test
+
+## The formatting gate CI runs (`cargo fmt` fixes it). Run it in the RWX sandbox
+## from a worktree that has one: `rwx sandbox exec -- cargo fmt --check`.
+fmt-check:
+	cargo fmt --check
 
 ## Run the Python tooling test suites (load-test report script, doctor, shell
 ## driver checks, iOS source-scanning policy checks). One command so CI and a

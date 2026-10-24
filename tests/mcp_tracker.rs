@@ -178,7 +178,10 @@ impl Fx {
         git(&repo, &["init", "-q"]);
         let excludes = base.join("global-excludes");
         std::fs::write(&excludes, "").unwrap();
-        git(&repo, &["config", "core.excludesFile", excludes.to_str().unwrap()]);
+        git(
+            &repo,
+            &["config", "core.excludesFile", excludes.to_str().unwrap()],
+        );
 
         let clock = Arc::new(FakeClock::at_secs(1_760_540_000));
         let mut parts = RegistryParts::hermetic(state_root, home.clone(), clock.clone());
@@ -193,7 +196,9 @@ impl Fx {
             session_mgr: Arc::clone(&session_mgr),
             broadcast_tx: tx.clone(),
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                nostromo::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
             tracker: Arc::clone(&registry),
         });
@@ -229,7 +234,8 @@ impl Fx {
         match dispatch("nostromo.tracker", Some(&args), state, tag).await {
             ToolResult::Ok(content) => {
                 let text = content[0]["text"].as_str().expect("text content");
-                serde_json::from_str(text).unwrap_or_else(|e| panic!("tool text is JSON ({e}): {text}"))
+                serde_json::from_str(text)
+                    .unwrap_or_else(|e| panic!("tool text is JSON ({e}): {text}"))
             }
             ToolResult::UnknownTool(n) => panic!("unknown tool {n}"),
             ToolResult::Forbidden(n) => panic!("forbidden tool {n}"),
@@ -361,7 +367,9 @@ fn is_err(res: &Value, code: &str) {
 }
 
 fn dir_is_empty(dir: &Path) -> bool {
-    std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true)
+    std::fs::read_dir(dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -391,11 +399,22 @@ async fn opening_a_new_topic_creates_the_template_board_and_reports_counts_and_v
     }
 
     let text = fx.file_str("sentry-triage");
-    assert!(text.starts_with("# "), "the board starts with a title: {text:?}");
+    assert!(
+        text.starts_with("# "),
+        "the board starts with a title: {text:?}"
+    );
     let headings: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("## ")).collect();
     assert_eq!(
         headings,
-        ["Now", "Next", "Waiting on you", "Done", "Findings", "Loose ends", "Log"],
+        [
+            "Now",
+            "Next",
+            "Waiting on you",
+            "Done",
+            "Findings",
+            "Loose ends",
+            "Log"
+        ],
         "template sections, in order: {text:?}"
     );
 }
@@ -420,13 +439,16 @@ async fn a_given_title_becomes_the_boards_first_line_and_given_sections_replace_
 }
 
 #[tokio::test]
-async fn the_first_open_of_a_session_returns_the_board_and_a_repeat_open_changes_nothing_and_adds_no_pane() {
+async fn the_first_open_of_a_session_returns_the_board_and_a_repeat_open_changes_nothing_and_adds_no_pane(
+) {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
 
     let first = fx.open(TAG_A, "sentry-triage").await;
     assert!(
-        first["board"].as_str().is_some_and(|b| b.contains("## Now")),
+        first["board"]
+            .as_str()
+            .is_some_and(|b| b.contains("## Now")),
         "the session's first open carries the compact board: {first}"
     );
     let before = fx.file("sentry-triage");
@@ -435,14 +457,20 @@ async fn the_first_open_of_a_session_returns_the_board_and_a_repeat_open_changes
     let second = fx.open(TAG_A, "sentry-triage").await;
 
     assert_eq!(second["created"], json!(false), "{second}");
-    assert_eq!(fx.file("sentry-triage"), before, "a repeat open must not touch the file");
+    assert_eq!(
+        fx.file("sentry-triage"),
+        before,
+        "a repeat open must not touch the file"
+    );
     assert!(
         second.get("board").is_none(),
         "only the session's first open carries the board: {second}"
     );
     let frames = fx.drain();
     assert!(
-        !frames.iter().any(|m| matches!(m, ServerMsg::FocusLayout { .. })),
+        !frames
+            .iter()
+            .any(|m| matches!(m, ServerMsg::FocusLayout { .. })),
         "a repeat open must not send a focus_layout frame: {frames:?}"
     );
 }
@@ -459,9 +487,18 @@ async fn opening_an_existing_board_from_a_second_focus_binds_it_and_hands_that_s
     let res = fx.open(TAG_B, "shared").await;
 
     assert_eq!(res["created"], json!(false), "{res}");
-    assert_eq!(fx.file("shared"), before, "opening an existing board writes nothing");
-    let board = res["board"].as_str().expect("first open of session sess-b carries the board");
-    assert!(board.contains("ship-it") && board.contains("Ship the thing"), "{board}");
+    assert_eq!(
+        fx.file("shared"),
+        before,
+        "opening an existing board writes nothing"
+    );
+    let board = res["board"]
+        .as_str()
+        .expect("first open of session sess-b carries the board");
+    assert!(
+        board.contains("ship-it") && board.contains("Ship the thing"),
+        "{board}"
+    );
     assert_eq!(
         fx.registry.bound_tags_for(&fx.board_path("shared")),
         vec![TAG_A.to_string(), TAG_B.to_string()]
@@ -483,7 +520,11 @@ async fn opening_a_hand_written_board_adopts_it_and_only_adds_id_markers_to_task
 
     let res = fx.open(TAG_A, "notes").await;
 
-    assert_eq!(res["created"], json!(false), "an existing file is adopted, not created: {res}");
+    assert_eq!(
+        res["created"],
+        json!(false),
+        "an existing file is adopted, not created: {res}"
+    );
     let after = fx.file_str("notes");
     let original_str = String::from_utf8(original.clone()).unwrap();
 
@@ -512,7 +553,10 @@ async fn opening_a_hand_written_board_adopts_it_and_only_adds_id_markers_to_task
             "a non-task line was changed: {b:?} -> {a:?}"
         );
     }
-    assert_eq!(marked, 10, "ten column-0 task items in the fixture:\n{after}");
+    assert_eq!(
+        marked, 10,
+        "ten column-0 task items in the fixture:\n{after}"
+    );
     assert!(
         after_lines.contains(&"- [ ] not an item"),
         "a task-looking line inside a fenced block is prose and stays as it was"
@@ -571,17 +615,30 @@ async fn a_path_outside_the_repo_and_the_homes_wip_dir_is_refused_and_creates_no
         // Not a markdown file.
         fx.repo.join("notes.txt").display().to_string(),
         "notes.txt".to_string(),
-        fx.repo.join(".claude/wip/t/index.markdown").display().to_string(),
+        fx.repo
+            .join(".claude/wip/t/index.markdown")
+            .display()
+            .to_string(),
     ];
     for path in &attempts {
         let res = fx.call(TAG_A, json!({"op": "open", "path": path})).await;
         assert_eq!(res["ok"], json!(false), "{path}: {res}");
         assert_eq!(res["error"], json!("path_not_allowed"), "{path}: {res}");
     }
-    assert!(dir_is_empty(&outside), "nothing may be created outside: {:?}", std::fs::read_dir(&outside).map(|d| d.count()));
+    assert!(
+        dir_is_empty(&outside),
+        "nothing may be created outside: {:?}",
+        std::fs::read_dir(&outside).map(|d| d.count())
+    );
     assert!(!fx.repo.join("notes.txt").exists());
-    assert!(!fx.repo.join("docs").exists(), "no directories are created for a refused path");
-    assert!(!fx.repo.join(".claude").exists(), "no directories are created for a refused path");
+    assert!(
+        !fx.repo.join("docs").exists(),
+        "no directories are created for a refused path"
+    );
+    assert!(
+        !fx.repo.join(".claude").exists(),
+        "no directories are created for a refused path"
+    );
     assert!(!fx.home.join("notes.md").exists());
     assert!(!fx.home.join(".claude").exists());
 }
@@ -612,20 +669,31 @@ async fn a_symlink_that_escapes_the_repo_is_refused_and_writes_nothing_through_i
         fx.repo.join("dangling.md"),
     ] {
         let res = fx
-            .call(TAG_A, json!({"op": "open", "path": path.display().to_string()}))
+            .call(
+                TAG_A,
+                json!({"op": "open", "path": path.display().to_string()}),
+            )
             .await;
         assert_eq!(res["ok"], json!(false), "{path:?}: {res}");
         assert_eq!(res["error"], json!("path_not_allowed"), "{path:?}: {res}");
     }
 
-    assert_eq!(std::fs::read(&victim).unwrap(), victim_bytes, "the outside file was touched");
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        victim_bytes,
+        "the outside file was touched"
+    );
     assert!(!outside.join("x.md").exists());
     assert!(!outside.join("dangling.md").exists());
     let names: BTreeSet<String> = std::fs::read_dir(&outside)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, set(&["victim.md"]), "nothing new appeared outside the repo");
+    assert_eq!(
+        names,
+        set(&["victim.md"]),
+        "nothing new appeared outside the repo"
+    );
 }
 
 #[tokio::test]
@@ -633,7 +701,9 @@ async fn an_explicit_md_path_in_the_repo_or_under_the_homes_claude_wip_is_allowe
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
 
-    let in_repo = fx.call(TAG_A, json!({"op": "open", "path": "docs/plan.md"})).await;
+    let in_repo = fx
+        .call(TAG_A, json!({"op": "open", "path": "docs/plan.md"}))
+        .await;
     assert_eq!(in_repo["ok"], json!(true), "{in_repo}");
     assert_eq!(in_repo["created"], json!(true), "{in_repo}");
     assert!(fx.repo.join("docs/plan.md").is_file());
@@ -647,7 +717,10 @@ async fn an_explicit_md_path_in_the_repo_or_under_the_homes_claude_wip_is_allowe
         .await;
     assert_eq!(in_home["ok"], json!(true), "{in_home}");
     assert_eq!(in_home["created"], json!(true), "{in_home}");
-    assert!(home_board.is_file(), "the board was created under the injected home");
+    assert!(
+        home_board.is_file(),
+        "the board was created under the injected home"
+    );
 }
 
 #[tokio::test]
@@ -676,11 +749,17 @@ async fn a_status_op_changes_only_that_items_line() {
     let before = fx.file_str("t4");
 
     let res = fx
-        .call(TAG_A, json!({"op": "status", "id": "second-2", "status": "in-progress"}))
+        .call(
+            TAG_A,
+            json!({"op": "status", "id": "second-2", "status": "in-progress"}),
+        )
         .await;
 
     assert_eq!(res["ok"], json!(true), "{res}");
-    assert!(res["version"].is_u64() && res["visible"].is_boolean() && res["user_changes"].is_u64(), "{res}");
+    assert!(
+        res["version"].is_u64() && res["visible"].is_boolean() && res["user_changes"].is_u64(),
+        "{res}"
+    );
     let after = fx.file_str("t4");
     let diff = changed_lines(&before, &after);
     assert_eq!(diff.len(), 1, "exactly one line may change: {diff:?}");
@@ -701,13 +780,19 @@ async fn an_upsert_that_changes_one_field_changes_only_that_items_line() {
     let before = fx.file_str("t4b");
 
     let res = fx
-        .call(TAG_A, json!({"op": "upsert", "id": "first-1", "text": "First thing, reworded"}))
+        .call(
+            TAG_A,
+            json!({"op": "upsert", "id": "first-1", "text": "First thing, reworded"}),
+        )
         .await;
 
     assert_eq!(res["ok"], json!(true), "{res}");
     let diff = changed_lines(&before, &fx.file_str("t4b"));
     assert_eq!(diff.len(), 1, "{diff:?}");
-    assert!(diff[0].2.contains("First thing, reworded") && diff[0].2.contains("#first-1 "), "{diff:?}");
+    assert!(
+        diff[0].2.contains("First thing, reworded") && diff[0].2.contains("#first-1 "),
+        "{diff:?}"
+    );
 }
 
 #[tokio::test]
@@ -734,7 +819,11 @@ async fn a_five_op_batch_with_one_unknown_id_writes_nothing_and_names_the_failin
 
     is_err(&res, "unknown_item");
     assert_eq!(res["index"], json!(3), "{res}");
-    assert_eq!(fx.file("t5"), before, "an atomic batch that fails writes nothing");
+    assert_eq!(
+        fx.file("t5"),
+        before,
+        "an atomic batch that fails writes nothing"
+    );
 }
 
 #[tokio::test]
@@ -771,7 +860,10 @@ async fn an_invalid_status_is_refused_naming_the_op_and_changes_nothing() {
     let before = fx.file("t5s");
 
     let res = fx
-        .call(TAG_A, json!({"op": "status", "id": "a-1", "status": "almost-done"}))
+        .call(
+            TAG_A,
+            json!({"op": "status", "id": "a-1", "status": "almost-done"}),
+        )
         .await;
 
     is_err(&res, "invalid_status");
@@ -783,7 +875,10 @@ async fn a_write_with_no_tracker_open_for_the_focus_is_refused_no_tracker() {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     let res = fx
-        .call(TAG_A, json!({"op": "status", "id": "a-1", "status": "done"}))
+        .call(
+            TAG_A,
+            json!({"op": "status", "id": "a-1", "status": "done"}),
+        )
         .await;
     is_err(&res, "no_tracker");
     let res = fx.call(TAG_A, json!({"op": "read"})).await;
@@ -799,14 +894,20 @@ async fn a_new_sessions_first_read_is_the_board_and_a_second_read_is_empty() {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.open(TAG_A, "t8").await;
-    fx.add_item(TAG_A, "x-1", "now", "Investigate the thing").await;
+    fx.add_item(TAG_A, "x-1", "now", "Investigate the thing")
+        .await;
     // The same focus, resumed as a different Claude session: no cursor yet.
     fx.seat(TAG_A, "sess-a2");
 
     let first = fx.call(TAG_A, json!({"op": "read"})).await;
     assert!(first["version"].is_u64(), "{first}");
-    let board = first["board"].as_str().unwrap_or_else(|| panic!("a first read returns the board: {first}"));
-    assert!(board.contains("x-1") && board.contains("Investigate the thing"), "{board}");
+    let board = first["board"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a first read returns the board: {first}"));
+    assert!(
+        board.contains("x-1") && board.contains("Investigate the thing"),
+        "{board}"
+    );
     assert!(first.get("changes").is_none(), "{first}");
 
     let second = fx.call(TAG_A, json!({"op": "read"})).await;
@@ -823,11 +924,15 @@ async fn a_sessions_own_write_is_not_echoed_back_to_it_but_another_session_sees_
     fx.seat(TAG_A, "sess-a");
     fx.seat(TAG_B, "sess-b");
     fx.open(TAG_A, "t8b").await;
-    fx.add_item(TAG_A, "x-1", "now", "Investigate the thing").await;
+    fx.add_item(TAG_A, "x-1", "now", "Investigate the thing")
+        .await;
     fx.open(TAG_B, "t8b").await;
 
     let write = fx
-        .call(TAG_A, json!({"op": "status", "id": "x-1", "status": "done"}))
+        .call(
+            TAG_A,
+            json!({"op": "status", "id": "x-1", "status": "done"}),
+        )
         .await;
     assert_eq!(write["ok"], json!(true), "{write}");
 
@@ -840,17 +945,25 @@ async fn a_sessions_own_write_is_not_echoed_back_to_it_but_another_session_sees_
     assert_eq!(own["version"], write["version"], "{own} vs {write}");
 
     let other = fx.call(TAG_B, json!({"op": "read"})).await;
-    let changes = other["changes"].as_array().unwrap_or_else(|| panic!("a delta: {other}"));
+    let changes = other["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a delta: {other}"));
     assert_eq!(changes.len(), 1, "{other}");
     assert_eq!(changes[0]["id"], json!("x-1"), "{other}");
     assert!(
-        changes[0]["by"].as_str().is_some_and(|b| b.starts_with("agent ")),
+        changes[0]["by"]
+            .as_str()
+            .is_some_and(|b| b.starts_with("agent ")),
         "another agent's change is attributed to an agent: {other}"
     );
     assert_eq!(changes[0]["status"][1], json!("done"), "{other}");
 
     let again = fx.call(TAG_B, json!({"op": "read"})).await;
-    assert_eq!(again["changes"], json!([]), "a read advances the cursor: {again}");
+    assert_eq!(
+        again["changes"],
+        json!([]),
+        "a read advances the cursor: {again}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -863,7 +976,8 @@ async fn a_malformed_file_keeps_the_last_good_view_and_refuses_writes(fixture: &
     let opened = fx.open(TAG_A, "m9").await;
     let path = PathBuf::from(opened["path"].as_str().unwrap());
     fx.add_item(TAG_A, "good-1", "now", "A good item").await;
-    fx.add_item(TAG_A, "other-2", "next", "Another good item").await;
+    fx.add_item(TAG_A, "other-2", "next", "Another good item")
+        .await;
     let good_bytes = fx.file("m9");
     let good_view = fx.registry.board_view(TAG_A).expect("a board view");
     fx.drain();
@@ -871,22 +985,36 @@ async fn a_malformed_file_keeps_the_last_good_view_and_refuses_writes(fixture: &
     // Someone saves a broken file over the board.
     let bad = fixture_bytes(fixture);
     std::fs::write(&path, &bad).unwrap();
-    assert!(fx.file_changed("m9"), "{fixture}: ingesting an unreadable file changes what the pane shows");
+    assert!(
+        fx.file_changed("m9"),
+        "{fixture}: ingesting an unreadable file changes what the pane shows"
+    );
 
     let view = fx.registry.board_view(TAG_A).expect("the view is kept");
     match &view.banner {
-        Some(Banner::Unreadable { line: l, reason, .. }) => {
+        Some(Banner::Unreadable {
+            line: l, reason, ..
+        }) => {
             assert_eq!(*l, line, "{fixture}: the banner names the offending line");
             assert!(!reason.is_empty(), "{fixture}: the banner carries a reason");
         }
         other => panic!("{fixture}: expected an unreadable banner, got {other:?}"),
     }
     assert_eq!(view.title, good_view.title, "{fixture}");
-    assert_eq!(view.nodes, good_view.nodes, "{fixture}: the pane keeps the last good board");
+    assert_eq!(
+        view.nodes, good_view.nodes,
+        "{fixture}: the pane keeps the last good board"
+    );
     let frames = fx.drain();
     let sent = board_frames(&frames, TAG_A);
-    let last = sent.last().and_then(|b| b.as_ref()).unwrap_or_else(|| panic!("{fixture}: a tracker_board frame: {frames:?}"));
-    assert!(matches!(last.banner, Some(Banner::Unreadable { line: l, .. }) if l == line), "{fixture}");
+    let last = sent
+        .last()
+        .and_then(|b| b.as_ref())
+        .unwrap_or_else(|| panic!("{fixture}: a tracker_board frame: {frames:?}"));
+    assert!(
+        matches!(last.banner, Some(Banner::Unreadable { line: l, .. }) if l == line),
+        "{fixture}"
+    );
     assert_eq!(last.nodes, good_view.nodes, "{fixture}");
 
     // Every write is refused with the line, and the file is never touched.
@@ -904,20 +1032,43 @@ async fn a_malformed_file_keeps_the_last_good_view_and_refuses_writes(fixture: &
     for args in writes {
         let res = fx.call(TAG_A, args.clone()).await;
         assert_eq!(res["ok"], json!(false), "{fixture}: {args} => {res}");
-        assert_eq!(res["error"], json!("board_unreadable"), "{fixture}: {args} => {res}");
+        assert_eq!(
+            res["error"],
+            json!("board_unreadable"),
+            "{fixture}: {args} => {res}"
+        );
         assert_eq!(res["line"], json!(line), "{fixture}: {args} => {res}");
-        assert_eq!(fx.file("m9"), bad, "{fixture}: {args} must not touch the file");
+        assert_eq!(
+            fx.file("m9"),
+            bad,
+            "{fixture}: {args} must not touch the file"
+        );
     }
     // Neither does an open or a read.
     let _ = fx.call(TAG_A, json!({"op": "open", "topic": "m9"})).await;
-    assert_eq!(fx.file("m9"), bad, "{fixture}: open must not touch an unreadable file");
+    assert_eq!(
+        fx.file("m9"),
+        bad,
+        "{fixture}: open must not touch an unreadable file"
+    );
     let _ = fx.call(TAG_A, json!({"op": "read"})).await;
-    assert_eq!(fx.file("m9"), bad, "{fixture}: read must not touch an unreadable file");
+    assert_eq!(
+        fx.file("m9"),
+        bad,
+        "{fixture}: read must not touch an unreadable file"
+    );
 
     // Restoring the last good bytes clears the banner.
     std::fs::write(&path, &good_bytes).unwrap();
-    assert!(fx.file_changed("m9"), "{fixture}: the banner clears on the next ingest");
-    assert_eq!(fx.registry.board_view(TAG_A).unwrap().banner, None, "{fixture}");
+    assert!(
+        fx.file_changed("m9"),
+        "{fixture}: the banner clears on the next ingest"
+    );
+    assert_eq!(
+        fx.registry.board_view(TAG_A).unwrap().banner,
+        None,
+        "{fixture}"
+    );
 
     // So does writing a different valid board, whose edit is then ingested.
     std::fs::write(&path, &bad).unwrap();
@@ -928,7 +1079,10 @@ async fn a_malformed_file_keeps_the_last_good_view_and_refuses_writes(fixture: &
     std::fs::write(&path, &fixed).unwrap();
     assert!(fx.file_changed("m9"), "{fixture}");
     let view = fx.registry.board_view(TAG_A).unwrap();
-    assert_eq!(view.banner, None, "{fixture}: a fixed file clears the banner");
+    assert_eq!(
+        view.banner, None,
+        "{fixture}: a fixed file clears the banner"
+    );
     assert!(
         view_items(&view)
             .iter()
@@ -936,18 +1090,22 @@ async fn a_malformed_file_keeps_the_last_good_view_and_refuses_writes(fixture: &
         "{fixture}: the fixed content is what the pane shows"
     );
     // And writes work again.
-    let res = fx.call(TAG_A, json!({"op": "log", "text": "back to normal"})).await;
+    let res = fx
+        .call(TAG_A, json!({"op": "log", "text": "back to normal"}))
+        .await;
     assert_eq!(res["ok"], json!(true), "{fixture}: {res}");
 }
 
 #[tokio::test]
 async fn a_duplicate_id_file_shows_the_last_good_board_with_a_banner_and_refuses_writes() {
-    a_malformed_file_keeps_the_last_good_view_and_refuses_writes("malformed-duplicate-id.md", 8).await;
+    a_malformed_file_keeps_the_last_good_view_and_refuses_writes("malformed-duplicate-id.md", 8)
+        .await;
 }
 
 #[tokio::test]
 async fn a_garbled_marker_file_shows_the_last_good_board_with_a_banner_and_refuses_writes() {
-    a_malformed_file_keeps_the_last_good_view_and_refuses_writes("malformed-garbled-marker.md", 5).await;
+    a_malformed_file_keeps_the_last_good_view_and_refuses_writes("malformed-garbled-marker.md", 5)
+        .await;
 }
 
 #[tokio::test]
@@ -960,7 +1118,8 @@ async fn a_bad_utf8_file_shows_the_last_good_board_with_a_banner_and_refuses_wri
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_deleted_board_file_shows_a_missing_banner_refuses_writes_and_open_recreates_it_from_last_good() {
+async fn a_deleted_board_file_shows_a_missing_banner_refuses_writes_and_open_recreates_it_from_last_good(
+) {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     let opened = fx.open(TAG_A, "t10").await;
@@ -974,8 +1133,15 @@ async fn a_deleted_board_file_shows_a_missing_banner_refuses_writes_and_open_rec
     assert!(fx.file_changed("t10"));
 
     let view = fx.registry.board_view(TAG_A).expect("the view is kept");
-    assert!(matches!(view.banner, Some(Banner::Missing { .. })), "{:?}", view.banner);
-    assert_eq!(view.nodes, good_view.nodes, "the pane keeps the last good board");
+    assert!(
+        matches!(view.banner, Some(Banner::Missing { .. })),
+        "{:?}",
+        view.banner
+    );
+    assert_eq!(
+        view.nodes, good_view.nodes,
+        "the pane keeps the last good board"
+    );
 
     for args in [
         json!({"op": "status", "id": "keep-1", "status": "done"}),
@@ -985,13 +1151,20 @@ async fn a_deleted_board_file_shows_a_missing_banner_refuses_writes_and_open_rec
         let res = fx.call(TAG_A, args.clone()).await;
         assert_eq!(res["ok"], json!(false), "{args} => {res}");
         assert_eq!(res["error"], json!("board_missing"), "{args} => {res}");
-        assert!(!path.exists(), "a refused write must not recreate the file ({args})");
+        assert!(
+            !path.exists(),
+            "a refused write must not recreate the file ({args})"
+        );
     }
 
     let res = fx.open(TAG_A, "t10").await;
     assert_eq!(res["recreated"], json!(true), "{res}");
     assert_eq!(res["created"], json!(false), "{res}");
-    assert_eq!(std::fs::read(&path).unwrap(), last_good, "recreated from the last good copy");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        last_good,
+        "recreated from the last good copy"
+    );
     assert_eq!(fx.registry.board_view(TAG_A).unwrap().banner, None);
     let res = fx.call(TAG_A, json!({"op": "log", "text": "back"})).await;
     assert_eq!(res["ok"], json!(true), "{res}");
@@ -1002,7 +1175,8 @@ async fn a_deleted_board_file_shows_a_missing_banner_refuses_writes_and_open_rec
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn growing_past_five_hundred_items_is_refused_board_too_large_while_reads_and_shrinking_work() {
+async fn growing_past_five_hundred_items_is_refused_board_too_large_while_reads_and_shrinking_work()
+{
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.open(TAG_A, "t11a").await;
@@ -1024,17 +1198,31 @@ async fn growing_past_five_hundred_items_is_refused_board_too_large_while_reads_
     let before = fx.file("t11a");
 
     let res = fx
-        .call(TAG_A, json!({"op": "upsert", "id": "one-too-many", "section": "now", "text": "Over the cap"}))
+        .call(
+            TAG_A,
+            json!({"op": "upsert", "id": "one-too-many", "section": "now", "text": "Over the cap"}),
+        )
         .await;
     is_err(&res, "board_too_large");
-    assert_eq!(fx.file("t11a"), before, "a refused growing write changes nothing");
+    assert_eq!(
+        fx.file("t11a"),
+        before,
+        "a refused growing write changes nothing"
+    );
 
     let read = fx.call(TAG_A, json!({"op": "read"})).await;
     assert!(read["version"].is_u64(), "reads still work: {read}");
 
-    let res = fx.call(TAG_A, json!({"op": "remove", "id": "item-0"})).await;
+    let res = fx
+        .call(TAG_A, json!({"op": "remove", "id": "item-0"}))
+        .await;
     assert_eq!(res["ok"], json!(true), "shrinking still works: {res}");
-    let res = fx.call(TAG_A, json!({"op": "upsert", "id": "fits-now", "section": "now", "text": "Room again"})).await;
+    let res = fx
+        .call(
+            TAG_A,
+            json!({"op": "upsert", "id": "fits-now", "section": "now", "text": "Room again"}),
+        )
+        .await;
     assert_eq!(res["ok"], json!(true), "{res}");
 }
 
@@ -1063,7 +1251,10 @@ async fn growing_a_board_past_256_kib_is_refused_board_too_large_while_reads_and
     }
     let refused = refused.expect("the byte cap must stop growth before 80 items of ~8 KB");
     assert_eq!(refused["error"], json!("board_too_large"), "{refused}");
-    assert!(accepted >= 20, "only {accepted} items accepted before the cap");
+    assert!(
+        accepted >= 20,
+        "only {accepted} items accepted before the cap"
+    );
     let size = fx.file("t11b").len();
     assert!(size <= 256 * 1024, "the file stays within the cap: {size}");
 
@@ -1088,10 +1279,18 @@ async fn growing_a_board_past_256_kib_is_refused_board_too_large_while_reads_and
 fn request_with(field: &str, text: &str) -> Value {
     match field {
         "text" => json!({"op": "upsert", "id": "guard-1", "section": "now", "text": text}),
-        "note" => json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "note": text}),
-        "owner" => json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "owner": text}),
-        "links" => json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "links": [text]}),
-        "command" => json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "kind": "command", "command": text}),
+        "note" => {
+            json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "note": text})
+        }
+        "owner" => {
+            json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "owner": text})
+        }
+        "links" => {
+            json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "links": [text]})
+        }
+        "command" => {
+            json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "kind": "command", "command": text})
+        }
         "log" => json!({"op": "log", "text": text}),
         other => panic!("unknown field {other}"),
     }
@@ -1122,16 +1321,22 @@ fn residual(res: &Value) -> String {
 }
 
 #[tokio::test]
-async fn every_sensitive_corpus_line_is_refused_in_every_text_field_naming_the_field_and_class_and_never_echoing_it() {
+async fn every_sensitive_corpus_line_is_refused_in_every_text_field_naming_the_field_and_class_and_never_echoing_it(
+) {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.open(TAG_A, "t33").await;
-    fx.add_item(TAG_A, "baseline-1", "now", "A plain item").await;
+    fx.add_item(TAG_A, "baseline-1", "now", "A plain item")
+        .await;
     let before = fx.file("t33");
     fx.drain();
 
     let lines = positives();
-    assert!(lines.len() >= 100, "the corpus loaded: {} lines", lines.len());
+    assert!(
+        lines.len() >= 100,
+        "the corpus loaded: {} lines",
+        lines.len()
+    );
     let mut failures: Vec<String> = Vec::new();
     for (class, text) in &lines {
         let windows = matched_windows(text);
@@ -1150,16 +1355,29 @@ async fn every_sensitive_corpus_line_is_refused_in_every_text_field_naming_the_f
             }
             let rest = residual(&res);
             if let Some(w) = windows.iter().find(|w| rest.contains(w.as_str())) {
-                failures.push(format!("{label}: the response echoes part of the matched value ({w:?}): {res}"));
+                failures.push(format!(
+                    "{label}: the response echoes part of the matched value ({w:?}): {res}"
+                ));
             }
         }
     }
-    assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 
-    assert_eq!(fx.file("t33"), before, "a refused call must not touch the file");
+    assert_eq!(
+        fx.file("t33"),
+        before,
+        "a refused call must not touch the file"
+    );
     let frames = fx.drain();
     assert!(
-        !frames.iter().any(|m| matches!(m, ServerMsg::TrackerBoard { .. })),
+        !frames
+            .iter()
+            .any(|m| matches!(m, ServerMsg::TrackerBoard { .. })),
         "a refused call must not broadcast a tracker_board frame"
     );
 }
@@ -1187,11 +1405,16 @@ async fn a_sensitive_value_anywhere_in_a_batch_refuses_the_whole_batch_naming_th
     assert_eq!(res["class"], json!("ssn"), "{res}");
     assert_eq!(res["index"], json!(1), "{res}");
     assert!(!res.to_string().contains("9999"), "{res}");
-    assert_eq!(fx.file("t33b"), before, "the first op of the batch must not have been applied");
+    assert_eq!(
+        fx.file("t33b"),
+        before,
+        "the first op of the batch must not have been applied"
+    );
 }
 
 #[tokio::test]
-async fn sensitive_text_in_a_boards_title_or_topic_arguments_is_refused_before_anything_is_created() {
+async fn sensitive_text_in_a_boards_title_or_topic_arguments_is_refused_before_anything_is_created()
+{
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
 
@@ -1204,7 +1427,10 @@ async fn sensitive_text_in_a_boards_title_or_topic_arguments_is_refused_before_a
 
     is_err(&res, "possible_sensitive_data");
     assert_eq!(res["field"], json!("title"), "{res}");
-    assert!(!fx.repo.join(".claude").exists(), "nothing is created for a refused open");
+    assert!(
+        !fx.repo.join(".claude").exists(),
+        "nothing is created for a refused open"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,14 +1443,22 @@ async fn a_board_git_would_commit_warns_committable_and_shows_the_remote_without
     fx.seat(TAG_A, "sess-a");
     git(
         &fx.repo,
-        &["remote", "add", "origin", "https://uzer-cred:tokSECRETcred@github.com/o/r.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://uzer-cred:tokSECRETcred@github.com/o/r.git",
+        ],
     );
 
     let res = fx.open(TAG_A, "t35").await;
 
     assert_eq!(res["warnings"], json!(["committable"]), "{res}");
     let view = fx.registry.board_view(TAG_A).expect("a view");
-    let committable = view.committable.clone().expect("the view carries committable");
+    let committable = view
+        .committable
+        .clone()
+        .expect("the view carries committable");
     assert_eq!(committable.remote.as_deref(), Some("github.com/o/r"));
 
     let everything = format!(
@@ -1233,7 +1467,10 @@ async fn a_board_git_would_commit_warns_committable_and_shows_the_remote_without
         serde_json::to_string(&fx.registry.frames_for_tag(TAG_A)).unwrap()
     );
     for secret in ["uzer-cred", "tokSECRETcred"] {
-        assert!(!everything.contains(secret), "{secret} leaked: {everything}");
+        assert!(
+            !everything.contains(secret),
+            "{secret} leaked: {everything}"
+        );
     }
     // The probe is read-only: it staged nothing and committed nothing.
     let status = Command::new("git")
@@ -1243,7 +1480,11 @@ async fn a_board_git_would_commit_warns_committable_and_shows_the_remote_without
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
         .unwrap();
-    assert!(status.stdout.is_empty(), "nothing may be staged: {:?}", String::from_utf8_lossy(&status.stdout));
+    assert!(
+        status.stdout.is_empty(),
+        "nothing may be staged: {:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
 }
 
 #[tokio::test]
@@ -1266,11 +1507,17 @@ async fn a_board_in_a_gitignored_directory_has_neither_the_warning_nor_committab
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     std::fs::write(fx.repo.join(".gitignore"), ".claude/wip/\n").unwrap();
-    git(&fx.repo, &["remote", "add", "origin", "https://github.com/o/r.git"]);
+    git(
+        &fx.repo,
+        &["remote", "add", "origin", "https://github.com/o/r.git"],
+    );
 
     let res = fx.open(TAG_A, "t35i").await;
 
-    assert!(res.get("warnings").is_none(), "an ignored board is not committable: {res}");
+    assert!(
+        res.get("warnings").is_none(),
+        "an ignored board is not committable: {res}"
+    );
     let view = fx.registry.board_view(TAG_A).unwrap();
     assert!(view.committable.is_none(), "{:?}", view.committable);
     let wire = serde_json::to_value(&view).unwrap();
@@ -1289,7 +1536,11 @@ async fn an_ignored_board_that_is_nevertheless_tracked_is_committable() {
     fx.seat(TAG_B, "sess-b");
     let res = fx.open(TAG_B, "t35t").await;
 
-    assert_eq!(res["warnings"], json!(["committable"]), "a tracked board is committable whatever .gitignore says: {res}");
+    assert_eq!(
+        res["warnings"],
+        json!(["committable"]),
+        "a tracked board is committable whatever .gitignore says: {res}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,13 +1552,23 @@ fn command_item(command: &str) -> Value {
 }
 
 #[tokio::test]
-async fn command_text_with_control_escape_bidi_or_zero_width_characters_is_refused_invalid_command_text() {
+async fn command_text_with_control_escape_bidi_or_zero_width_characters_is_refused_invalid_command_text(
+) {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.open(TAG_A, "tcmd").await;
     let before = fx.file("tcmd");
 
-    for name in ["bidi_rlo", "zero_width", "bom", "ansi_csi", "osc_bel", "osc_st", "bare_cr", "c1_csi"] {
+    for name in [
+        "bidi_rlo",
+        "zero_width",
+        "bom",
+        "ansi_csi",
+        "osc_bel",
+        "osc_st",
+        "bare_cr",
+        "c1_csi",
+    ] {
         let res = fx.call(TAG_A, command_item(&hostile(name))).await;
         assert_eq!(res["ok"], json!(false), "{name}: {res}");
         assert_eq!(res["error"], json!("invalid_command_text"), "{name}: {res}");
@@ -1338,7 +1599,11 @@ async fn plain_and_note_closing_command_text_is_valid_and_reads_back_quoted() {
                 json!({"op": "upsert", "id": format!("c-{name}").replace('_', "-"), "section": "now", "text": "Stage it", "kind": "command", "command": payload}),
             )
             .await;
-        assert_eq!(res["ok"], json!(true), "{name} is plain text, not invalid command text: {res}");
+        assert_eq!(
+            res["ok"],
+            json!(true),
+            "{name} is plain text, not invalid command text: {res}"
+        );
     }
     let long = hostile("long_10k");
     let res = fx.call(TAG_A, command_item(&long)).await;
@@ -1358,7 +1623,11 @@ async fn plain_and_note_closing_command_text_is_valid_and_reads_back_quoted() {
             .into_iter()
             .find(|i| i.id == id)
             .unwrap_or_else(|| panic!("{id} is on the board"));
-        assert_eq!(item.command.as_deref(), Some(hostile(name).as_str()), "{id}");
+        assert_eq!(
+            item.command.as_deref(),
+            Some(hostile(name).as_str()),
+            "{id}"
+        );
     }
 
     // What another agent reads is quoted: it can never close the note.
@@ -1387,8 +1656,14 @@ async fn a_valid_command_item_can_be_created_and_read_back() {
     assert_eq!(res["ok"], json!(true), "{res}");
 
     let view = fx.registry.board_view(TAG_A).unwrap();
-    let item = view_items(&view).into_iter().find(|i| i.id == "retry-1").expect("item");
-    assert_eq!(item.command.as_deref(), Some("php artisan queue:retry 8812"));
+    let item = view_items(&view)
+        .into_iter()
+        .find(|i| i.id == "retry-1")
+        .expect("item");
+    assert_eq!(
+        item.command.as_deref(),
+        Some("php artisan queue:retry 8812")
+    );
     assert!(item.owner.is_none());
     let text = fx.file_str("tcmd3");
     assert!(text.contains("php artisan queue:retry 8812"), "{text}");
@@ -1406,7 +1681,9 @@ async fn an_agent_cannot_mark_a_command_item_done_by_status_or_upsert_or_in_a_ba
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.open(TAG_A, "tcmd4").await;
-    let res = fx.call(TAG_A, command_item("php artisan queue:retry 8812")).await;
+    let res = fx
+        .call(TAG_A, command_item("php artisan queue:retry 8812"))
+        .await;
     assert_eq!(res["ok"], json!(true), "{res}");
     fx.add_item(TAG_A, "plain-1", "now", "A plain item").await;
     let before = fx.file("tcmd4");
@@ -1427,13 +1704,27 @@ async fn an_agent_cannot_mark_a_command_item_done_by_status_or_upsert_or_in_a_ba
         let res = fx.call(TAG_A, args.clone()).await;
         assert_eq!(res["ok"], json!(false), "{args} => {res}");
         assert_eq!(res["error"], json!("not_permitted"), "{args} => {res}");
-        assert_eq!(fx.file("tcmd4"), before, "{args}: nothing is written, not even the batch's other ops");
+        assert_eq!(
+            fx.file("tcmd4"),
+            before,
+            "{args}: nothing is written, not even the batch's other ops"
+        );
     }
 
     // Controls: other statuses on a command item, and done on a plain item, are fine.
-    let ok = fx.call(TAG_A, json!({"op": "status", "id": "cmd-1", "status": "blocked"})).await;
+    let ok = fx
+        .call(
+            TAG_A,
+            json!({"op": "status", "id": "cmd-1", "status": "blocked"}),
+        )
+        .await;
     assert_eq!(ok["ok"], json!(true), "{ok}");
-    let ok = fx.call(TAG_A, json!({"op": "status", "id": "plain-1", "status": "done"})).await;
+    let ok = fx
+        .call(
+            TAG_A,
+            json!({"op": "status", "id": "plain-1", "status": "done"}),
+        )
+        .await;
     assert_eq!(ok["ok"], json!(true), "{ok}");
 }
 
@@ -1450,7 +1741,11 @@ async fn a_network_driven_session_is_refused_requires_secure_connection_and_noth
     fx.add_item(TAG_A, "a-1", "now", "Alpha").await;
     let before = fx.file("tnet");
     fx.drain();
-    fx.session_mgr.lock().unwrap().sensitive_tags().mark_network_driven(TAG_A);
+    fx.session_mgr
+        .lock()
+        .unwrap()
+        .sensitive_tags()
+        .mark_network_driven(TAG_A);
 
     for args in [
         json!({"op": "status", "id": "a-1", "status": "done"}),
@@ -1459,18 +1754,32 @@ async fn a_network_driven_session_is_refused_requires_secure_connection_and_noth
         json!({"ops": [{"op": "log", "text": "x"}]}),
     ] {
         let res = fx.call(TAG_A, args.clone()).await;
-        assert_eq!(res, json!({"ok": false, "error": "requires_secure_connection"}), "{args}");
+        assert_eq!(
+            res,
+            json!({"ok": false, "error": "requires_secure_connection"}),
+            "{args}"
+        );
     }
     assert_eq!(fx.file("tnet"), before);
-    assert!(!fx.board_path("tnet-new").exists(), "a refused open creates nothing");
     assert!(
-        !fx.drain().iter().any(|m| matches!(m, ServerMsg::TrackerBoard { .. })),
+        !fx.board_path("tnet-new").exists(),
+        "a refused open creates nothing"
+    );
+    assert!(
+        !fx.drain()
+            .iter()
+            .any(|m| matches!(m, ServerMsg::TrackerBoard { .. })),
         "a refused call broadcasts nothing"
     );
 
     // Control: another session still has the tool.
     fx.open(TAG_B, "tnet").await;
-    let res = fx.call(TAG_B, json!({"op": "status", "id": "a-1", "status": "done"})).await;
+    let res = fx
+        .call(
+            TAG_B,
+            json!({"op": "status", "id": "a-1", "status": "done"}),
+        )
+        .await;
     assert_eq!(res["ok"], json!(true), "{res}");
 }
 
@@ -1496,7 +1805,9 @@ async fn an_open_from_a_focus_with_no_known_working_directory_is_refused_and_cre
             session_id: Some("sess-a".to_string()),
         },
     );
-    let res = fx.call(TAG_A, json!({"op": "open", "topic": "nocwd"})).await;
+    let res = fx
+        .call(TAG_A, json!({"op": "open", "topic": "nocwd"}))
+        .await;
     is_err(&res, "unidentified_caller");
     assert!(!fx.repo.join(".claude").exists());
 }
@@ -1507,7 +1818,11 @@ async fn a_tui_hosted_server_without_the_daemon_answers_not_supported() {
     assert!(state.daemon.is_none());
     let fx = Fx::new();
     let res = fx
-        .call_as(Some("cody-a"), &state, json!({"op": "open", "topic": "nowhere"}))
+        .call_as(
+            Some("cody-a"),
+            &state,
+            json!({"op": "open", "topic": "nowhere"}),
+        )
         .await;
     is_err(&res, "not_supported");
 }
@@ -1541,7 +1856,9 @@ async fn a_batch_of_more_than_200_ops_is_refused_invalid_args_before_any_op_runs
     fx.open(TAG_A, "t200").await;
     let before = fx.file("t200");
 
-    let ops: Vec<Value> = (0..201).map(|i| json!({"op": "log", "text": format!("line {i}")})).collect();
+    let ops: Vec<Value> = (0..201)
+        .map(|i| json!({"op": "log", "text": format!("line {i}")}))
+        .collect();
     let res = fx.call(TAG_A, json!({"ops": ops})).await;
 
     is_err(&res, "invalid_args");
@@ -1549,7 +1866,9 @@ async fn a_batch_of_more_than_200_ops_is_refused_invalid_args_before_any_op_runs
     assert_eq!(fx.file("t200"), before, "no op ran");
 
     // The cap itself is allowed.
-    let ops: Vec<Value> = (0..200).map(|i| json!({"op": "log", "text": format!("line {i}")})).collect();
+    let ops: Vec<Value> = (0..200)
+        .map(|i| json!({"op": "log", "text": format!("line {i}")}))
+        .collect();
     let res = fx.call(TAG_A, json!({"ops": ops})).await;
     assert_eq!(res["ok"], json!(true), "{res}");
 }
@@ -1561,10 +1880,15 @@ fn the_tracker_tool_is_listed_and_its_descriptor_fits_the_schema_budget() {
         .iter()
         .find(|d| d["name"] == json!("nostromo.tracker"))
         .expect("nostromo.tracker is in tool_descriptors()");
-    assert!(tracker["description"].as_str().is_some_and(|d| !d.is_empty()));
+    assert!(tracker["description"]
+        .as_str()
+        .is_some_and(|d| !d.is_empty()));
     assert_eq!(tracker["inputSchema"]["type"], json!("object"));
     let bytes = serde_json::to_string(tracker).unwrap().len();
-    assert!(bytes <= 3_600, "descriptor is {bytes} bytes of compact JSON, budget 3,600");
+    assert!(
+        bytes <= 3_600,
+        "descriptor is {bytes} bytes of compact JSON, budget 3,600"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1584,7 +1908,10 @@ async fn a_write_broadcasts_a_board_and_a_summary_frame_for_every_focus_bound_to
     fx.drain();
 
     let res = fx
-        .call(TAG_A, json!({"op": "status", "id": "a-1", "status": "in-progress"}))
+        .call(
+            TAG_A,
+            json!({"op": "status", "id": "a-1", "status": "in-progress"}),
+        )
         .await;
     assert_eq!(res["ok"], json!(true), "{res}");
     let frames = fx.drain();
@@ -1597,17 +1924,27 @@ async fn a_write_broadcasts_a_board_and_a_summary_frame_for_every_focus_bound_to
             .as_ref()
             .unwrap_or_else(|| panic!("the board frame for {tag} carries a board"));
         assert_eq!(board.version, res["version"].as_u64().unwrap(), "{tag}");
-        let item = view_items(board).into_iter().find(|i| i.id == "a-1").expect("a-1");
-        assert_eq!(format!("{:?}", item.status).to_lowercase().replace('_', ""), "inprogress", "{tag}");
+        let item = view_items(board)
+            .into_iter()
+            .find(|i| i.id == "a-1")
+            .expect("a-1");
+        assert_eq!(
+            format!("{:?}", item.status).to_lowercase().replace('_', ""),
+            "inprogress",
+            "{tag}"
+        );
 
         let summaries = summary_frames(&frames, tag);
-        let (has_tracker, counts) = summaries.last().unwrap_or_else(|| panic!("no tracker_summary for {tag}: {frames:?}"));
+        let (has_tracker, counts) = summaries
+            .last()
+            .unwrap_or_else(|| panic!("no tracker_summary for {tag}: {frames:?}"));
         assert!(*has_tracker, "{tag}");
         assert_eq!(counts.in_progress, 1, "{tag}");
         assert_eq!(counts.todo, 0, "{tag}");
     }
     assert!(
-        board_frames(&frames, "cody-other").is_empty() && summary_frames(&frames, "cody-other").is_empty(),
+        board_frames(&frames, "cody-other").is_empty()
+            && summary_frames(&frames, "cody-other").is_empty(),
         "a focus bound to another board gets nothing: {frames:?}"
     );
 }
@@ -1684,7 +2021,10 @@ async fn f1_instruction_files_cannot_be_adopted_or_created() {
         for requested in [rel.to_string(), fx.repo.join(rel).display().to_string()] {
             let res = open_path(&fx, TAG_A, &requested).await;
             is_err(&res, "path_not_allowed");
-            assert!(res.get("board").is_none(), "{rel}: nothing of the file is echoed: {res}");
+            assert!(
+                res.get("board").is_none(),
+                "{rel}: nothing of the file is echoed: {res}"
+            );
         }
     }
     // Lower-case spelling of a refused name.
@@ -1694,12 +2034,20 @@ async fn f1_instruction_files_cannot_be_adopted_or_created() {
     is_err(&res, "path_not_allowed");
 
     for (path, bytes) in &victims {
-        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{path:?} was modified");
+        assert_eq!(
+            &std::fs::read(path).unwrap(),
+            bytes,
+            "{path:?} was modified"
+        );
     }
     for (rel, parent) in absent.iter().zip(parent_existed) {
         let path = fx.repo.join(rel);
         assert!(!path.exists(), "{path:?} was created");
-        assert_eq!(path.parent().unwrap().exists(), parent, "{path:?}: a directory was created");
+        assert_eq!(
+            path.parent().unwrap().exists(),
+            parent,
+            "{path:?}: a directory was created"
+        );
     }
     assert!(!fx.repo.join("docs/claude.md").exists());
 }
@@ -1708,12 +2056,22 @@ async fn f1_instruction_files_cannot_be_adopted_or_created() {
 async fn f1_default_board_locations_and_ordinary_markdown_stay_allowed() {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
-    let res = fx.call(TAG_A, json!({"op": "open", "topic": "plain"})).await;
+    let res = fx
+        .call(TAG_A, json!({"op": "open", "topic": "plain"}))
+        .await;
     assert_eq!(res["ok"], json!(true), "{res}");
     assert!(fx.board_path("plain").is_file());
 
-    let home_board = fx.home.join(".claude/wip/shared/index.md").display().to_string();
-    for path in [".claude/wip/x/board.md", "docs/plan.md", home_board.as_str()] {
+    let home_board = fx
+        .home
+        .join(".claude/wip/shared/index.md")
+        .display()
+        .to_string();
+    for path in [
+        ".claude/wip/x/board.md",
+        "docs/plan.md",
+        home_board.as_str(),
+    ] {
         let res = open_path(&fx, TAG_A, path).await;
         assert_eq!(res["ok"], json!(true), "{path}: {res}");
     }
@@ -1733,12 +2091,19 @@ async fn f1_instruction_file_behind_a_symlink_is_refused() {
     std::os::unix::fs::symlink(&claude_md, fx.repo.join(".claude/wip/x/board.md")).unwrap();
     std::os::unix::fs::symlink(&commands, fx.repo.join(".claude/wip/link")).unwrap();
 
-    for path in [".claude/wip/x/board.md", ".claude/wip/link/x.md", ".claude/wip/link/new.md"] {
+    for path in [
+        ".claude/wip/x/board.md",
+        ".claude/wip/link/x.md",
+        ".claude/wip/link/new.md",
+    ] {
         let res = open_path(&fx, TAG_A, path).await;
         is_err(&res, "path_not_allowed");
     }
     assert_eq!(std::fs::read(&claude_md).unwrap(), PARSEABLE.as_bytes());
-    assert_eq!(std::fs::read(commands.join("x.md")).unwrap(), PARSEABLE.as_bytes());
+    assert_eq!(
+        std::fs::read(commands.join("x.md")).unwrap(),
+        PARSEABLE.as_bytes()
+    );
     assert!(!commands.join("new.md").exists());
 }
 
@@ -1753,19 +2118,33 @@ async fn f1_without_a_git_root_only_the_cwd_wip_dir_is_allowed() {
     std::fs::write(plain.join("Documents/x.md"), PARSEABLE).unwrap();
     fx.registry.set_caller_facts(
         "cody-plain",
-        CallerFacts { cwd: Some(plain.clone()), session_id: Some("sess-p".into()) },
+        CallerFacts {
+            cwd: Some(plain.clone()),
+            session_id: Some("sess-p".into()),
+        },
     );
 
     for path in ["notes.md", "Documents/x.md", "new.md"] {
-        is_err(&open_path(&fx, "cody-plain", path).await, "path_not_allowed");
+        is_err(
+            &open_path(&fx, "cody-plain", path).await,
+            "path_not_allowed",
+        );
     }
-    assert_eq!(std::fs::read(plain.join("notes.md")).unwrap(), PARSEABLE.as_bytes());
-    assert_eq!(std::fs::read(plain.join("Documents/x.md")).unwrap(), PARSEABLE.as_bytes());
+    assert_eq!(
+        std::fs::read(plain.join("notes.md")).unwrap(),
+        PARSEABLE.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(plain.join("Documents/x.md")).unwrap(),
+        PARSEABLE.as_bytes()
+    );
     assert!(!plain.join("new.md").exists());
 
     let res = open_path(&fx, "cody-plain", ".claude/wip/t/index.md").await;
     assert_eq!(res["ok"], json!(true), "{res}");
-    let res = fx.call("cody-plain", json!({"op": "open", "topic": "tp"})).await;
+    let res = fx
+        .call("cody-plain", json!({"op": "open", "topic": "tp"}))
+        .await;
     assert_eq!(res["ok"], json!(true), "{res}");
     assert!(plain.join(".claude/wip/tp/index.md").is_file());
 
@@ -1774,11 +2153,22 @@ async fn f1_without_a_git_root_only_the_cwd_wip_dir_is_allowed() {
     std::fs::write(fx.home.join("notes.md"), PARSEABLE).unwrap();
     fx.registry.set_caller_facts(
         "cody-home",
-        CallerFacts { cwd: Some(fx.home.clone()), session_id: Some("sess-h".into()) },
+        CallerFacts {
+            cwd: Some(fx.home.clone()),
+            session_id: Some("sess-h".into()),
+        },
     );
-    is_err(&open_path(&fx, "cody-home", "notes.md").await, "path_not_allowed");
-    assert_eq!(std::fs::read(fx.home.join("notes.md")).unwrap(), PARSEABLE.as_bytes());
-    let res = fx.call("cody-home", json!({"op": "open", "topic": "ht"})).await;
+    is_err(
+        &open_path(&fx, "cody-home", "notes.md").await,
+        "path_not_allowed",
+    );
+    assert_eq!(
+        std::fs::read(fx.home.join("notes.md")).unwrap(),
+        PARSEABLE.as_bytes()
+    );
+    let res = fx
+        .call("cody-home", json!({"op": "open", "topic": "ht"}))
+        .await;
     assert_eq!(res["ok"], json!(true), "{res}");
     assert!(fx.home.join(".claude/wip/ht/index.md").is_file());
 }
@@ -1792,21 +2182,32 @@ async fn f2_agent_cannot_change_the_command_of_an_item_the_user_ran() {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.open(TAG_A, "f2").await;
-    let res = fx.call(TAG_A, command_item("php artisan queue:retry 8812")).await;
+    let res = fx
+        .call(TAG_A, command_item("php artisan queue:retry 8812"))
+        .await;
     assert_eq!(res["ok"], json!(true), "{res}");
 
     // The user ticks it in the file.
     let ticked: Vec<String> = fx
         .file_str("f2")
         .split('\n')
-        .map(|l| if l.contains("#cmd-1") { l.replacen("- [ ]", "- [x]", 1) } else { l.to_string() })
+        .map(|l| {
+            if l.contains("#cmd-1") {
+                l.replacen("- [ ]", "- [x]", 1)
+            } else {
+                l.to_string()
+            }
+        })
         .collect();
     std::fs::write(fx.board_path("f2"), ticked.join("\n")).unwrap();
     assert!(fx.file_changed("f2"));
     let before = fx.file("f2");
     let command_and_status = |fx: &Fx| {
         let view = fx.registry.board_view(TAG_A).unwrap();
-        let item = view_items(&view).into_iter().find(|i| i.id == "cmd-1").unwrap();
+        let item = view_items(&view)
+            .into_iter()
+            .find(|i| i.id == "cmd-1")
+            .unwrap();
         (item.command.clone(), item.status)
     };
     let (command, status) = command_and_status(&fx);
@@ -1821,7 +2222,10 @@ async fn f2_agent_cannot_change_the_command_of_an_item_the_user_ran() {
         is_err(&res, "not_permitted");
         assert_eq!(res["id"], json!("cmd-1"), "{res}");
         assert_eq!(fx.file("f2"), before, "{args}: nothing is written");
-        assert_eq!(command_and_status(&fx).0.as_deref(), Some("php artisan queue:retry 8812"));
+        assert_eq!(
+            command_and_status(&fx).0.as_deref(),
+            Some("php artisan queue:retry 8812")
+        );
     }
 
     // The same command with a changed note is fine, and stays done.
@@ -1861,7 +2265,10 @@ struct HookFs {
 
 impl HookFs {
     fn new() -> Arc<HookFs> {
-        Arc::new(HookFs { inner: RealBoardFs, hook: Mutex::new(Box::new(|_| {})) })
+        Arc::new(HookFs {
+            inner: RealBoardFs,
+            hook: Mutex::new(Box::new(|_| {})),
+        })
     }
     fn set(&self, hook: impl FnMut(&Path) + Send + 'static) {
         *self.hook.lock().unwrap() = Box::new(hook);
@@ -1927,22 +2334,39 @@ async fn f3_a_user_save_between_read_and_rename_is_not_lost() {
         }
     });
     let res = fx
-        .call(TAG_A, json!({"op": "upsert", "id": "agent-1", "section": "next", "text": "Agent thing"}))
+        .call(
+            TAG_A,
+            json!({"op": "upsert", "id": "agent-1", "section": "next", "text": "Agent thing"}),
+        )
         .await;
     assert_eq!(res["ok"], json!(true), "{res}");
 
     let text = fx.file_str("f3");
-    let first = text.lines().find(|l| l.contains("#first-1")).expect("first-1");
-    assert!(first.starts_with("- [x]"), "the user's save was lost:\n{text}");
-    assert!(text.contains("Agent thing"), "the agent's change is missing:\n{text}");
+    let first = text
+        .lines()
+        .find(|l| l.contains("#first-1"))
+        .expect("first-1");
+    assert!(
+        first.starts_with("- [x]"),
+        "the user's save was lost:\n{text}"
+    );
+    assert!(
+        text.contains("Agent thing"),
+        "the agent's change is missing:\n{text}"
+    );
 
     let other = fx.call(TAG_B, json!({"op": "read"})).await;
-    let changes = other["changes"].as_array().unwrap_or_else(|| panic!("a delta: {other}"));
+    let changes = other["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a delta: {other}"));
     let user = changes
         .iter()
         .find(|c| c["id"] == json!("first-1"))
         .unwrap_or_else(|| panic!("the user's change is reported: {other}"));
-    assert!(user["by"].as_str().is_some_and(|b| b.starts_with("file")), "attributed to the file: {other}");
+    assert!(
+        user["by"].as_str().is_some_and(|b| b.starts_with("file")),
+        "attributed to the file: {other}"
+    );
     assert_eq!(user["status"][1], json!("done"), "{other}");
 }
 
@@ -1958,14 +2382,21 @@ async fn f3_a_file_that_keeps_changing_ends_in_io_error_concurrent_edit() {
     let sink = latest.clone();
     hooks.set(move |path| *sink.lock().unwrap() = user_flips_first(path));
     let res = fx
-        .call(TAG_A, json!({"op": "upsert", "id": "agent-1", "section": "next", "text": "Agent thing"}))
+        .call(
+            TAG_A,
+            json!({"op": "upsert", "id": "agent-1", "section": "next", "text": "Agent thing"}),
+        )
         .await;
     is_err(&res, "io_error");
     assert_eq!(res["reason"], json!("concurrent_edit"), "{res}");
 
     let bytes = latest.lock().unwrap().clone();
     assert!(!bytes.is_empty(), "the hook ran");
-    assert_eq!(fx.file("f3b"), bytes, "the file holds the user's latest save");
+    assert_eq!(
+        fx.file("f3b"),
+        bytes,
+        "the file holds the user's latest save"
+    );
     assert!(!fx.file_str("f3b").contains("Agent thing"));
     let strays: Vec<_> = std::fs::read_dir(fx.board_path("f3b").parent().unwrap())
         .unwrap()
@@ -1994,13 +2425,23 @@ async fn f4_board_directory_swapped_for_a_symlink_after_open_is_refused_on_write
     std::os::unix::fs::symlink(&outside, &dir).unwrap();
 
     let res = fx
-        .call(TAG_A, json!({"op": "upsert", "id": "x-1", "section": "now", "text": "Sneaky"}))
+        .call(
+            TAG_A,
+            json!({"op": "upsert", "id": "x-1", "section": "now", "text": "Sneaky"}),
+        )
         .await;
     is_err(&res, "path_not_allowed");
     let res = fx.call(TAG_A, json!({"op": "read"})).await;
     is_err(&res, "path_not_allowed");
-    assert_eq!(std::fs::read(outside.join("index.md")).unwrap(), PARSEABLE.as_bytes());
-    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1, "nothing new outside");
+    assert_eq!(
+        std::fs::read(outside.join("index.md")).unwrap(),
+        PARSEABLE.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        1,
+        "nothing new outside"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2014,7 +2455,12 @@ async fn f5_stale_tracker_temp_files_are_cleaned_on_the_next_ingest() {
     fx.open(TAG_A, "f5").await;
     let dir = fx.board_path("f5").parent().unwrap().to_path_buf();
 
-    for name in [".tracker-abc123.tmp", ".tracker-fresh.tmp", "notes.tmp", ".tracker-x.txt"] {
+    for name in [
+        ".tracker-abc123.tmp",
+        ".tracker-fresh.tmp",
+        "notes.tmp",
+        ".tracker-x.txt",
+    ] {
         std::fs::write(dir.join(name), "x").unwrap();
     }
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
@@ -2031,8 +2477,16 @@ async fn f5_stale_tracker_temp_files_are_cleaned_on_the_next_ingest() {
 
     fx.registry.ingest_file_change(&fx.board_path("f5"));
 
-    assert!(!dir.join(".tracker-abc123.tmp").exists(), "the stale temp file is removed");
-    for name in [".tracker-fresh.tmp", "notes.tmp", ".tracker-x.txt", "index.md"] {
+    assert!(
+        !dir.join(".tracker-abc123.tmp").exists(),
+        "the stale temp file is removed"
+    );
+    for name in [
+        ".tracker-fresh.tmp",
+        "notes.tmp",
+        ".tracker-x.txt",
+        "index.md",
+    ] {
         assert!(dir.join(name).exists(), "{name} must stay");
     }
 }

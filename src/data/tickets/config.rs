@@ -88,9 +88,12 @@ mod tests {
     #[test]
     fn compiled_in_default_resolves_every_documented_variant_to_acceptance_criteria() {
         let table = compiled_in();
-        for variant in
-            ["Acceptance Criteria", "Acceptance criterion", "AC", "Definition of Done"]
-        {
+        for variant in [
+            "Acceptance Criteria",
+            "Acceptance criterion",
+            "AC",
+            "Definition of Done",
+        ] {
             let normalized = super::super::canonical_section_name(variant, &table);
             assert_eq!(
                 normalized, "acceptance_criteria",
@@ -167,8 +170,14 @@ aliases:
         .unwrap();
 
         let first = load_from_dir(dir.path());
-        assert_eq!(super::super::canonical_section_name("Risks", &first), "risks");
-        assert_eq!(super::super::canonical_section_name("Blockers", &first), "blockers");
+        assert_eq!(
+            super::super::canonical_section_name("Risks", &first),
+            "risks"
+        );
+        assert_eq!(
+            super::super::canonical_section_name("Blockers", &first),
+            "blockers"
+        );
 
         // Rewrite the file with a different alias set after the first load.
         std::fs::write(

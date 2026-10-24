@@ -523,8 +523,14 @@ mod tests {
         for bad in ["../x", "x/..", "./x", "x/.", "../..", "./."] {
             assert!(validate_repo_slug(bad).is_err(), "{bad:?} must be rejected");
         }
-        assert!(validate_repo_slug("a.b/c.d").is_ok(), "dots inside a name are fine");
-        assert!(validate_repo_slug(".github/x").is_ok(), "a leading dot is a real repo name");
+        assert!(
+            validate_repo_slug("a.b/c.d").is_ok(),
+            "dots inside a name are fine"
+        );
+        assert!(
+            validate_repo_slug(".github/x").is_ok(),
+            "a leading dot is a real repo name"
+        );
     }
 
     #[test]
@@ -669,7 +675,14 @@ mod tests {
     fn a_pin_whose_focus_no_longer_exists_is_dropped_and_named() {
         let dir = TempDir::new().unwrap();
         write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
-        write_pointer(dir.path(), "cody-core-1234", 42, "Carefeed/operations", None).unwrap();
+        write_pointer(
+            dir.path(),
+            "cody-core-1234",
+            42,
+            "Carefeed/operations",
+            None,
+        )
+        .unwrap();
 
         let sweep = retain_pins(dir.path(), &live(&["perri"]));
 
@@ -742,7 +755,14 @@ mod tests {
     fn a_sweep_that_dropped_a_pin_wakes_the_watcher() {
         let dir = TempDir::new().unwrap();
         write_pointer(dir.path(), "perri", 4526, "Carefeed/admin-portal", None).unwrap();
-        write_pointer(dir.path(), "cody-core-1234", 42, "Carefeed/operations", None).unwrap();
+        write_pointer(
+            dir.path(),
+            "cody-core-1234",
+            42,
+            "Carefeed/operations",
+            None,
+        )
+        .unwrap();
         // The writes above touched the sentinel; clear it so this observes the
         // sweep's own signal and not theirs.
         std::fs::remove_file(dir.path().join("current-pr.dirty")).unwrap();

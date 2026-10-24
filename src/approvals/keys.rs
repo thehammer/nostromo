@@ -71,7 +71,14 @@ struct SendKeysArgs<'a> {
 pub const MAX_TYPED: usize = 100_000;
 
 fn parse_send_keys(args: &[Word]) -> SendKeysArgs<'_> {
-    let mut out = SendKeysArgs { literal: false, hex: false, not_keys: false, format: false, repeat: 1, keys: Vec::new() };
+    let mut out = SendKeysArgs {
+        literal: false,
+        hex: false,
+        not_keys: false,
+        format: false,
+        repeat: 1,
+        keys: Vec::new(),
+    };
     let mut i = 0;
     while i < args.len() {
         let w = args[i].text.as_str();
@@ -158,7 +165,11 @@ fn push_arg(arg: &str, out: &mut Vec<Key>) {
         // anything after the digits is ignored). Only `0x` and hex digits is taken as
         // written; anything else can't be told (and its text is kept).
         match hex_number(hex) {
-            Some((value, true)) => out.extend(char::from_u32(value).map(key_for_char).or(Some(Key::Unknown))),
+            Some((value, true)) => out.extend(
+                char::from_u32(value)
+                    .map(key_for_char)
+                    .or(Some(Key::Unknown)),
+            ),
             _ => {
                 out.push(Key::Unknown);
                 out.extend(arg.chars().map(key_for_char));
@@ -191,11 +202,17 @@ fn hex_number(digits: &str) -> Option<(u32, bool)> {
 fn hex_byte(arg: &str) -> Option<char> {
     let s = arg.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
     let s = s.strip_prefix('+').unwrap_or(s);
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    u32::from_str_radix(s, 16).ok().filter(|v| *v <= 0xff).and_then(char::from_u32)
+    u32::from_str_radix(s, 16)
+        .ok()
+        .filter(|v| *v <= 0xff)
+        .and_then(char::from_u32)
 }
 
 /// The key a name stands for, `None` when the argument is plain text.
@@ -225,7 +242,8 @@ fn key_named(name: &str) -> Option<Key> {
         "c-w" => Key::KillWord,
         // History recall and escape sequences (`Escape b` is `M-b`).
         "escape" | "up" | "down" => Key::Inexact,
-        "btab" | "ppage" | "npage" | "pageup" | "pagedown" | "pgup" | "pgdn" | "ic" | "insert" | "any" => Key::Inert,
+        "btab" | "ppage" | "npage" | "pageup" | "pagedown" | "pgup" | "pgdn" | "ic" | "insert"
+        | "any" => Key::Inert,
         _ => return modified_key(&lower),
     })
 }
@@ -262,17 +280,39 @@ fn no_text_key(lower: &str) -> bool {
 fn modified_key(lower: &str) -> Option<Key> {
     let mut base = lower;
     let mut modified = false;
-    while let Some(rest) = base.strip_prefix("c-").or_else(|| base.strip_prefix("m-")).or_else(|| base.strip_prefix("s-")) {
+    while let Some(rest) = base
+        .strip_prefix("c-")
+        .or_else(|| base.strip_prefix("m-"))
+        .or_else(|| base.strip_prefix("s-"))
+    {
         base = rest;
         modified = true;
     }
     let single = base.chars().count() == 1;
     let named = matches!(
         base,
-        "up" | "down" | "left" | "right" | "home" | "end" | "bspace" | "dc" | "delete" | "ic" | "insert" | "tab"
-            | "btab" | "enter" | "escape" | "space" | "ppage" | "npage" | "pageup" | "pagedown"
+        "up" | "down"
+            | "left"
+            | "right"
+            | "home"
+            | "end"
+            | "bspace"
+            | "dc"
+            | "delete"
+            | "ic"
+            | "insert"
+            | "tab"
+            | "btab"
+            | "enter"
+            | "escape"
+            | "space"
+            | "ppage"
+            | "npage"
+            | "pageup"
+            | "pagedown"
     );
-    let function = base.len() > 1 && base.starts_with('f') && base[1..].bytes().all(|b| b.is_ascii_digit());
+    let function =
+        base.len() > 1 && base.starts_with('f') && base[1..].bytes().all(|b| b.is_ascii_digit());
     let keypad = keypad_key(base).is_some();
     if !modified {
         return (function || no_text_key(base)).then_some(Key::Inert);
@@ -360,9 +400,9 @@ impl Typed {
 /// distinct letter of a marker (a yank can repeat text, so counts don't matter).
 pub fn could_spell_marker(typed: &str, markers: &[&str]) -> bool {
     let typed = typed.to_ascii_lowercase();
-    markers.iter().any(|m| {
-        typed.contains(&m[..m.len().min(4)]) || m.chars().all(|c| typed.contains(c))
-    })
+    markers
+        .iter()
+        .any(|m| typed.contains(&m[..m.len().min(4)]) || m.chars().all(|c| typed.contains(c)))
 }
 
 /// Run `keys` through the line editor.
@@ -392,7 +432,13 @@ pub fn type_keys(keys: &[Key]) -> Typed {
             }
             Key::Tab => {
                 let before: String = line[..cursor].iter().collect();
-                typed.tab_words.push(before.rsplit(char::is_whitespace).next().unwrap_or_default().to_owned());
+                typed.tab_words.push(
+                    before
+                        .rsplit(char::is_whitespace)
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
                 typed.spaced.push(' ');
             }
             Key::Backspace => {
@@ -511,11 +557,15 @@ impl Buffers {
                 }
             }
         }
-        let Some(data) = args.get(i).map(|w| w.text.as_str()) else { return };
-        let name = name.or_else(|| append.then(|| self.top.clone()).flatten()).unwrap_or_else(|| {
-            self.automatic += 1;
-            format!("buffer{:04}", self.automatic)
-        });
+        let Some(data) = args.get(i).map(|w| w.text.as_str()) else {
+            return;
+        };
+        let name = name
+            .or_else(|| append.then(|| self.top.clone()).flatten())
+            .unwrap_or_else(|| {
+                self.automatic += 1;
+                format!("buffer{:04}", self.automatic)
+            });
         let slot = self.named.entry(name.clone()).or_default();
         if !append {
             slot.clear();
@@ -561,7 +611,12 @@ mod tests {
 
     fn words(args: &[&str]) -> Vec<Word> {
         args.iter()
-            .map(|a| Word { text: (*a).to_owned(), span: 0..0, dynamic: false, pattern: (*a).to_owned() })
+            .map(|a| Word {
+                text: (*a).to_owned(),
+                span: 0..0,
+                dynamic: false,
+                pattern: (*a).to_owned(),
+            })
             .collect()
     }
 
@@ -571,7 +626,10 @@ mod tests {
 
     #[test]
     fn joins_arguments_and_maps_names() {
-        assert_eq!(typed(&["-t", "%0", "ecs_c", "onnect", "Space", "ap", "Enter"]).edited, "ecs_connect ap\n");
+        assert_eq!(
+            typed(&["-t", "%0", "ecs_c", "onnect", "Space", "ap", "Enter"]).edited,
+            "ecs_connect ap\n"
+        );
         assert_eq!(typed(&["a b", "Space", "c"]).edited, "a b c");
         assert_eq!(typed(&["-l", "Space", "Enter"]).edited, "SpaceEnter");
         assert_eq!(typed(&["-H", "65", "63", "73"]).edited, "ecs");
@@ -603,7 +661,16 @@ mod tests {
         ] {
             assert!(typed(keys).inexact, "{keys:?}");
         }
-        for keys in [&["M-b"][..], &["Up", "Enter"], &["C-y"], &["ls", "C-c"], &["ls", "C-l", "Enter"], &["ls", "F5"], &["a c-note"], &["m-ecs_", "connect"]] {
+        for keys in [
+            &["M-b"][..],
+            &["Up", "Enter"],
+            &["C-y"],
+            &["ls", "C-c"],
+            &["ls", "C-l", "Enter"],
+            &["ls", "F5"],
+            &["a c-note"],
+            &["m-ecs_", "connect"],
+        ] {
             assert!(!typed(keys).inexact, "{keys:?}");
         }
         // `m-ecs_` is not a key: the text is typed.
@@ -630,7 +697,10 @@ mod tests {
         let mut b = Buffers::default();
         b.set(&words(&["-b", "a", "ecs_"]));
         b.set(&words(&["-a", "-b", "a", "connect"]));
-        assert_eq!(b.pasted(&words(&["-b", "a", "-t", "%0"])), Some("ecs_connect"));
+        assert_eq!(
+            b.pasted(&words(&["-b", "a", "-t", "%0"])),
+            Some("ecs_connect")
+        );
         assert_eq!(b.pasted(&words(&["-t", "%0"])), Some("ecs_connect"));
     }
 
@@ -639,14 +709,20 @@ mod tests {
     /// The keys of several `send-keys` calls, one after another (what a command string of
     /// `send-keys …; send-keys …` types).
     fn typed_calls(calls: &[&[&str]]) -> Typed {
-        let keys: Vec<Key> = calls.iter().flat_map(|args| send_keys(&words(args))).collect();
+        let keys: Vec<Key> = calls
+            .iter()
+            .flat_map(|args| send_keys(&words(args)))
+            .collect();
         type_keys(&keys)
     }
 
     #[test]
     fn hex_key_names_type_the_character_they_name() {
         assert_eq!(typed(&["0x65", "0x63", "0x73"]).edited, "ecs");
-        assert_eq!(typed(&["0x65", "cs_", "0x63", "onnect"]).edited, "ecs_connect");
+        assert_eq!(
+            typed(&["0x65", "cs_", "0x63", "onnect"]).edited,
+            "ecs_connect"
+        );
         // `0x01` is C-a (Home), `0x0d` is Enter
         assert_eq!(typed(&["connect", "0x01", "ecs_"]).edited, "ecs_connect");
         assert_eq!(typed(&["ls", "0x0d"]).edited, "ls\n");
@@ -665,8 +741,14 @@ mod tests {
 
     #[test]
     fn keypad_keys_type_their_character() {
-        assert_eq!(typed(&["execute", "KP-", "command"]).edited, "execute-command");
-        assert_eq!(typed(&["KP+", "KP*", "KP/", "KP.", "KP0", "KP5", "KP9"]).edited, "+*/.059");
+        assert_eq!(
+            typed(&["execute", "KP-", "command"]).edited,
+            "execute-command"
+        );
+        assert_eq!(
+            typed(&["KP+", "KP*", "KP/", "KP.", "KP0", "KP5", "KP9"]).edited,
+            "+*/.059"
+        );
         assert_eq!(typed(&["ls", "KPEnter"]).edited, "ls\n");
         assert!(!typed(&["KP-", "KP5"]).cant_tell());
     }
@@ -685,7 +767,13 @@ mod tests {
         // leading white space, `0x` and `0X` are fine
         assert_eq!(typed(&["-H", "65", "63", "73"]).edited, "ecs");
         assert_eq!(typed(&["-H", "0x65", "0X63", " 73"]).edited, "ecs");
-        assert_eq!(typed(&["-H", " 65", " 63", " 73", " 5f", " 63", " 6f", " 6e", " 6e", " 65", " 63", " 74"]).edited, "ecs_connect");
+        assert_eq!(
+            typed(&[
+                "-H", " 65", " 63", " 73", " 5f", " 63", " 6f", " 6e", " 6e", " 65", " 63", " 74"
+            ])
+            .edited,
+            "ecs_connect"
+        );
         assert!(!typed(&["-H", "0X65", " 63"]).cant_tell());
         // anything after the number, or no number, is not a key the guard can read
         for arg in ["65zz", "zz", ""] {
@@ -701,13 +789,19 @@ mod tests {
         assert_eq!(t.edited, "");
         assert!(!t.cant_tell());
         // …and 99 leave one
-        assert_eq!(typed_calls(&[&[x.as_str()], &["-N", "99", "BSpace"]]).edited, "X");
+        assert_eq!(
+            typed_calls(&[&[x.as_str()], &["-N", "99", "BSpace"]]).edited,
+            "X"
+        );
         // `ecs_`, 100 characters, 100 BSpace, `connect`: a marker
         let first = format!("ecs_{x}");
         let t = typed_calls(&[&[first.as_str()], &["-N", "100", "BSpace"], &["connect"]]);
         assert_eq!(t.edited, "ecs_connect");
         // the count may be attached to the flag
-        assert_eq!(typed_calls(&[&[x.as_str()], &["-N100", "BSpace"]]).edited, "");
+        assert_eq!(
+            typed_calls(&[&[x.as_str()], &["-N100", "BSpace"]]).edited,
+            ""
+        );
         assert_eq!(typed(&["-N", "3", "ab"]).edited, "ababab");
     }
 
@@ -722,7 +816,11 @@ mod tests {
             assert!(past.unknown, "-N {count}");
             assert!(past.cant_tell(), "-N {count}");
             // nothing like `count` characters was built for it
-            assert!(past.joined.len() <= MAX_TYPED + 1, "-N {count}: {} characters", past.joined.len());
+            assert!(
+                past.joined.len() <= MAX_TYPED + 1,
+                "-N {count}: {} characters",
+                past.joined.len()
+            );
         }
     }
 }

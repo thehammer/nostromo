@@ -77,7 +77,9 @@ pub fn group(items: &[WorkItem], source: WorkSource, sort: SortKey) -> Vec<WorkG
     }
     match source {
         WorkSource::Todos => vec![flat(items, cmp_todos)],
-        WorkSource::Sentry => vec![flat(items, |a, b| cmp_date_desc(a.updated_at, b.updated_at))],
+        WorkSource::Sentry => vec![flat(items, |a, b| {
+            cmp_date_desc(a.updated_at, b.updated_at)
+        })],
         WorkSource::Jira => group_jira(items),
         WorkSource::RepoDocs => group_repo_docs(items, sort),
     }
@@ -120,7 +122,10 @@ pub fn facet_counts(items: &[WorkItem], f: &WorkFilter, facet: Facet) -> BTreeMa
 /// The default order of a source's items (all groups, flattened). Used by the
 /// hub and the MCP tools so they list items as the UI does.
 pub fn default_order(items: &[WorkItem], source: WorkSource) -> Vec<WorkItem> {
-    group(items, source, SortKey::Newest).into_iter().flat_map(|g| g.items).collect()
+    group(items, source, SortKey::Newest)
+        .into_iter()
+        .flat_map(|g| g.items)
+        .collect()
 }
 
 // ── matching ──────────────────────────────────────────────────────────────────
@@ -139,7 +144,8 @@ fn matches_fields(item: &WorkItem, f: &WorkFilter) -> bool {
         && one_of(&f.projects, item.project.as_deref())
         && one_of(&f.statuses, item.status.as_deref())
         && one_of(&f.environments, item.environment.as_deref())
-        && f.has_severity.is_none_or(|want| item.severity.is_some() == want)
+        && f.has_severity
+            .is_none_or(|want| item.severity.is_some() == want)
 }
 
 fn search_terms(query: &str) -> Vec<String> {
@@ -152,7 +158,9 @@ fn matches_terms(item: &WorkItem, terms: &[String]) -> bool {
     }
     let title = fold(&item.title);
     let body = fold(&item.search_text);
-    terms.iter().all(|t| title.contains(t.as_str()) || body.contains(t.as_str()))
+    terms
+        .iter()
+        .all(|t| title.contains(t.as_str()) || body.contains(t.as_str()))
 }
 
 /// Case- and diacritic-insensitive form of `s`.
@@ -197,7 +205,10 @@ fn strip_accent(c: char) -> char {
 fn flat(items: &[WorkItem], cmp: impl Fn(&WorkItem, &WorkItem) -> Ordering) -> WorkGroup {
     let mut sorted = items.to_vec();
     sorted.sort_by(cmp);
-    WorkGroup { key: None, items: sorted }
+    WorkGroup {
+        key: None,
+        items: sorted,
+    }
 }
 
 /// Rank ascending, items with no priority last.
@@ -245,8 +256,11 @@ fn group_jira(items: &[WorkItem]) -> Vec<WorkGroup> {
     ORDER
         .iter()
         .filter_map(|key| {
-            let members: Vec<WorkItem> =
-                items.iter().filter(|i| category(i) == *key).cloned().collect();
+            let members: Vec<WorkItem> = items
+                .iter()
+                .filter(|i| category(i) == *key)
+                .cloned()
+                .collect();
             if members.is_empty() {
                 return None;
             }
@@ -262,7 +276,10 @@ fn group_jira(items: &[WorkItem]) -> Vec<WorkGroup> {
 fn group_repo_docs(items: &[WorkItem], sort: SortKey) -> Vec<WorkGroup> {
     let mut by_repo: BTreeMap<String, Vec<WorkItem>> = BTreeMap::new();
     for item in items {
-        by_repo.entry(item.repo.clone().unwrap_or_default()).or_default().push(item.clone());
+        by_repo
+            .entry(item.repo.clone().unwrap_or_default())
+            .or_default()
+            .push(item.clone());
     }
     let mut groups: Vec<WorkGroup> = by_repo
         .into_iter()

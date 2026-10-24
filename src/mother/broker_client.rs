@@ -35,8 +35,8 @@ use tracing::{debug, info, warn};
 
 use super::{
     protocol::{
-        cmd_subscribe, AckData, BrokerErrorCode, Envelope, FoldResult, HelloData,
-        SnapshotData, PROTOCOL_VERSION,
+        cmd_subscribe, AckData, BrokerErrorCode, Envelope, FoldResult, HelloData, SnapshotData,
+        PROTOCOL_VERSION,
     },
     MotherJob,
 };
@@ -69,7 +69,11 @@ pub enum BrokerEvent {
         capabilities: Vec<String>,
     },
     /// Broker sent a `snapshot` in response to `subscribe`.
-    Snapshot { sub: String, jobs: Vec<MotherJob>, skipped: usize },
+    Snapshot {
+        sub: String,
+        jobs: Vec<MotherJob>,
+        skipped: usize,
+    },
     /// A job's state changed (includes awaiting transitions).
     StateChange {
         job_id: String,
@@ -425,7 +429,11 @@ async fn handshake(
         let env: Envelope = match serde_json::from_str(line.trim()) {
             Ok(e) => e,
             Err(e) => {
-                debug!("broker: unparseable line during handshake (class={:?}, {} bytes)", e.classify(), line.len());
+                debug!(
+                    "broker: unparseable line during handshake (class={:?}, {} bytes)",
+                    e.classify(),
+                    line.len()
+                );
                 continue;
             }
         };
@@ -517,7 +525,11 @@ fn dispatch_inbound(inner: &Arc<Inner>, line: &str, events_tx: &broadcast::Sende
     let env: Envelope = match serde_json::from_str(line) {
         Ok(e) => e,
         Err(e) => {
-            warn!("broker: failed to parse inbound line (class={:?}, {} bytes)", e.classify(), line.len());
+            warn!(
+                "broker: failed to parse inbound line (class={:?}, {} bytes)",
+                e.classify(),
+                line.len()
+            );
             return;
         }
     };
@@ -682,14 +694,21 @@ mod tests {
     fn snapshot_with_one_unreadable_job_keeps_the_others() {
         let (tx, mut rx) = broadcast::channel(8);
         let ok = |id: &str| serde_json::json!({"id": id, "state": "queued"});
-        let bad = serde_json::json!({"id": "snap-bad", "state": "queued", "created_at": "yesterday"});
+        let bad =
+            serde_json::json!({"id": "snap-bad", "state": "queued", "created_at": "yesterday"});
         dispatch_event(
-            event_env("snapshot", serde_json::json!({"sub": "s", "jobs": [ok("snap-a"), bad, ok("snap-c")]})),
+            event_env(
+                "snapshot",
+                serde_json::json!({"sub": "s", "jobs": [ok("snap-a"), bad, ok("snap-c")]}),
+            ),
             &tx,
         );
         match rx.try_recv().unwrap() {
             BrokerEvent::Snapshot { jobs, skipped, .. } => {
-                assert_eq!(jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["snap-a", "snap-c"]);
+                assert_eq!(
+                    jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+                    ["snap-a", "snap-c"]
+                );
                 assert_eq!(skipped, 1);
             }
             other => panic!("expected Snapshot, got {other:?}"),
@@ -699,22 +718,43 @@ mod tests {
     #[test]
     fn snapshot_with_non_array_jobs_is_dropped_as_before() {
         let (tx, mut rx) = broadcast::channel(8);
-        dispatch_event(event_env("snapshot", serde_json::json!({"sub": "s", "jobs": {"id": "x"}})), &tx);
+        dispatch_event(
+            event_env(
+                "snapshot",
+                serde_json::json!({"sub": "s", "jobs": {"id": "x"}}),
+            ),
+            &tx,
+        );
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
     fn unreadable_event_is_skipped_and_the_next_one_still_flows() {
         let (tx, mut rx) = broadcast::channel(8);
-        dispatch_event(event_env("state_changed", serde_json::json!({"job": "ev-x", "state": 5})), &tx);
-        assert!(rx.try_recv().is_err());
         dispatch_event(
-            event_env("current_activity", serde_json::json!({"job": "ev-y", "activity": "a", "new_key": {}})),
+            event_env(
+                "state_changed",
+                serde_json::json!({"job": "ev-x", "state": 5}),
+            ),
             &tx,
         );
-        assert!(matches!(rx.try_recv().unwrap(), BrokerEvent::CurrentActivity { .. }));
+        assert!(rx.try_recv().is_err());
+        dispatch_event(
+            event_env(
+                "current_activity",
+                serde_json::json!({"job": "ev-y", "activity": "a", "new_key": {}}),
+            ),
+            &tx,
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BrokerEvent::CurrentActivity { .. }
+        ));
         // Unknown kinds still pass through the generic path without panicking.
-        dispatch_event(event_env("brand_new_kind", serde_json::json!({"job": "ev-z"})), &tx);
+        dispatch_event(
+            event_env("brand_new_kind", serde_json::json!({"job": "ev-z"})),
+            &tx,
+        );
         assert!(rx.try_recv().is_err());
     }
 

@@ -174,7 +174,9 @@ mod tests {
         std::fs::read_to_string(path)
             .unwrap()
             .lines()
-            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not a JSON line ({e}): {l}")))
+            .map(|l| {
+                serde_json::from_str(l).unwrap_or_else(|e| panic!("not a JSON line ({e}): {l}"))
+            })
             .collect()
     }
 
@@ -200,7 +202,10 @@ mod tests {
         let lines = lines_of(&log);
         assert_eq!(lines.len(), 1);
         let line = &lines[0];
-        assert!(line["ts"].as_str().is_some_and(|t| t.ends_with('Z')), "a UTC timestamp: {line}");
+        assert!(
+            line["ts"].as_str().is_some_and(|t| t.ends_with('Z')),
+            "a UTC timestamp: {line}"
+        );
         assert_eq!(line["kind"], "task_stop");
         assert_eq!(line["actor"], "user");
         assert_eq!(line["agent"], "cody");
@@ -228,18 +233,29 @@ mod tests {
         assert_eq!(line["actor"], "network");
         assert_eq!(line["outcome"], "refused");
         assert_eq!(line["reason"], "requires_secure_connection");
-        assert!(line["description"].is_null() && line["task_kind"].is_null(), "{line}");
+        assert!(
+            line["description"].is_null() && line["task_kind"].is_null(),
+            "{line}"
+        );
     }
 
     #[test]
     fn every_outcome_is_written_by_its_snake_case_name() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("activity.jsonl");
-        for outcome in [Outcome::Applied, Outcome::Failed, Outcome::Denied, Outcome::Expired, Outcome::Refused] {
+        for outcome in [
+            Outcome::Applied,
+            Outcome::Failed,
+            Outcome::Denied,
+            Outcome::Expired,
+            Outcome::Refused,
+        ] {
             append_task(&log, &stop_line(outcome, None));
         }
-        let names: Vec<String> =
-            lines_of(&log).iter().map(|l| l["outcome"].as_str().unwrap().to_owned()).collect();
+        let names: Vec<String> = lines_of(&log)
+            .iter()
+            .map(|l| l["outcome"].as_str().unwrap().to_owned())
+            .collect();
         assert_eq!(names, ["applied", "failed", "denied", "expired", "refused"]);
     }
 
@@ -267,7 +283,10 @@ mod tests {
         );
         append_task(&log, &stop_line(Outcome::Failed, Some("timeout")));
 
-        let kinds: Vec<String> = lines_of(&log).iter().map(|l| l["kind"].as_str().unwrap().to_owned()).collect();
+        let kinds: Vec<String> = lines_of(&log)
+            .iter()
+            .map(|l| l["kind"].as_str().unwrap().to_owned())
+            .collect();
         assert_eq!(kinds, ["task_stop", "model_switch", "task_stop"]);
     }
 }

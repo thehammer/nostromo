@@ -165,7 +165,9 @@ pub(crate) fn broadcast_loading_if_first_paint(
 /// fall back to in this stateless snapshot; the broadcaster's own on-change
 /// path will pick it up once the source recovers.
 pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
-    bound_pane_contents_with(state, |tag, source, params| fetch_bound_content(state, tag, source, params))
+    bound_pane_contents_with(state, |tag, source, params| {
+        fetch_bound_content(state, tag, source, params)
+    })
 }
 
 /// [`bound_pane_contents`] with the fetch injected, so a test can prove which
@@ -173,7 +175,11 @@ pub fn bound_pane_contents(state: &McpSharedState) -> Vec<ServerMsg> {
 /// *before* `fetch` is called.
 fn bound_pane_contents_with(
     state: &McpSharedState,
-    fetch: impl Fn(&str, &str, Option<&serde_json::Value>) -> Option<(PaneContentWire, Option<PaneAddress>)>,
+    fetch: impl Fn(
+        &str,
+        &str,
+        Option<&serde_json::Value>,
+    ) -> Option<(PaneContentWire, Option<PaneAddress>)>,
 ) -> Vec<ServerMsg> {
     let Some(daemon) = &state.daemon else {
         return Vec::new();
@@ -187,8 +193,7 @@ fn bound_pane_contents_with(
             if !state.source_available(&binding.source) {
                 return None;
             }
-            let (content, address) =
-                fetch(&tag, &binding.source, binding.params.as_ref())?;
+            let (content, address) = fetch(&tag, &binding.source, binding.params.as_ref())?;
             let fr = apply_layout::freshness(&binding.source, state, Some(&tag));
             Some(ServerMsg::PaneContent {
                 tag,
@@ -548,7 +553,10 @@ mod tests {
                 assert_eq!(pane_id, "queue");
                 assert!(matches!(content, PaneContentWire::Text { text } if text == "hi"));
                 assert!(freshness.is_none());
-                assert!(address.is_none(), "broadcast_pane_content must default address to None");
+                assert!(
+                    address.is_none(),
+                    "broadcast_pane_content must default address to None"
+                );
             }
             other => panic!("expected PaneContent, got {other:?}"),
         }
@@ -610,7 +618,9 @@ mod tests {
             daemon,
             "perri",
             "ticket",
-            PaneContentWire::Text { text: "CORE-1234".into() },
+            PaneContentWire::Text {
+                text: "CORE-1234".into(),
+            },
             None,
             Some(address.clone()),
         );
@@ -717,8 +727,15 @@ mod tests {
         let (mut state, _bcast, _qtx, _ptx) = make_state();
         bind_pane(&state, "perri", "queue", "perri.list_pr_queue");
         bind_pane(&state, "perri", "diff", "perri.get_pr_diff");
-        assert!(!bound_pane_contents(&state).is_empty(), "control: enabled agent replays");
-        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        assert!(
+            !bound_pane_contents(&state).is_empty(),
+            "control: enabled agent replays"
+        );
+        state.enabled_agents = crate::agents::EnabledAgents {
+            fred: true,
+            perri: false,
+            teri: true,
+        };
         assert!(
             bound_pane_contents(&state).is_empty(),
             "bindings persisted before perri was disabled must not be fetched or replayed"
@@ -733,13 +750,21 @@ mod tests {
         bind_pane(&state, "perri", "diff", "perri.get_pr_diff");
         bind_pane(&state, "perri", "conv", "perri.get_pr_conversation");
         bind_pane(&state, "perri", "file", "nostromo.get_file");
-        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        state.enabled_agents = crate::agents::EnabledAgents {
+            fred: true,
+            perri: false,
+            teri: true,
+        };
         let fetched: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let msgs = bound_pane_contents_with(&state, |_tag, source, _params| {
             fetched.borrow_mut().push(source.to_string());
             Some((PaneContentWire::Loading, None))
         });
-        assert_eq!(*fetched.borrow(), ["nostromo.get_file"], "only the enabled agent's source is fetched");
+        assert_eq!(
+            *fetched.borrow(),
+            ["nostromo.get_file"],
+            "only the enabled agent's source is fetched"
+        );
         assert_eq!(msgs.len(), 1);
     }
 
@@ -1010,7 +1035,8 @@ mod tests {
             } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(pane_id, "queue");
-                let freshness = freshness.expect("freshness must be attached once data is known-stale");
+                let freshness =
+                    freshness.expect("freshness must be attached once data is known-stale");
                 assert!(freshness.badly_stale);
             }
             other => panic!("expected PaneContent, got {other:?}"),
@@ -1064,8 +1090,7 @@ mod tests {
         }
 
         let mut saw_badly_stale = false;
-        while let Ok(Ok(msg)) =
-            tokio::time::timeout(Duration::from_millis(200), bcast.recv()).await
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(200), bcast.recv()).await
         {
             match msg {
                 ServerMsg::PaneContent {
@@ -1216,8 +1241,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
 
         let mut saw_any = false;
-        while let Ok(Ok(msg)) =
-            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             saw_any = true;
             if let ServerMsg::PaneContent {
@@ -1270,8 +1294,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
 
         let mut checked_any = false;
-        while let Ok(Ok(msg)) =
-            tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
+        while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), bcast.recv()).await
         {
             if let ServerMsg::PaneContent { content, .. } = msg {
                 checked_any = true;
@@ -1292,7 +1315,8 @@ mod tests {
     // ── perri.get_pr_conversation (W3 — curated-agent-views) ─────────────────
 
     #[tokio::test]
-    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation() {
+    async fn pr_channel_change_pushes_exactly_one_pane_content_to_a_pane_bound_to_pr_conversation()
+    {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "conversation", SOURCE_PR_CONVERSATION);
 
@@ -1328,7 +1352,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound() {
+    async fn a_single_pr_watch_change_pushes_all_three_pr_backed_sources_when_all_three_are_bound()
+    {
         let (state, mut bcast, _qtx, pr_tx) = make_state();
         bind_pane(&state, "perri", "diff_text", SOURCE_CURRENT_PR);
         bind_pane(&state, "perri", "diff_structured", SOURCE_PR_DIFF);
@@ -1360,9 +1385,13 @@ mod tests {
         }
         assert_eq!(
             seen_panes,
-            ["diff_text".to_string(), "diff_structured".to_string(), "conversation".to_string()]
-                .into_iter()
-                .collect(),
+            [
+                "diff_text".to_string(),
+                "diff_structured".to_string(),
+                "conversation".to_string()
+            ]
+            .into_iter()
+            .collect(),
             "one PR-watch change must push all three PR-backed sources, each exactly once"
         );
 

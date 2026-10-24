@@ -357,7 +357,8 @@ async fn mount_401_then(server: &MockServer, p: &str, status: u16, retry_after: 
 }
 
 fn http_status(err: &anyhow::Error) -> Option<u16> {
-    err.downcast_ref::<GraphHttpError>().map(|e| e.status.as_u16())
+    err.downcast_ref::<GraphHttpError>()
+        .map(|e| e.status.as_u16())
 }
 
 /// (status, Retry-After) of the retried request.
@@ -376,7 +377,11 @@ async fn get_json_fails_when_the_request_retried_after_a_401_refresh_is_throttle
             Ok(v) => panic!("retried {status} must be an error, got Ok({v})"),
             Err(e) => e,
         };
-        assert_eq!(http_status(&err), Some(status), "same typed error as a first-try {status}: {err:#}");
+        assert_eq!(
+            http_status(&err),
+            Some(status),
+            "same typed error as a first-try {status}: {err:#}"
+        );
     }
 }
 
@@ -390,7 +395,10 @@ async fn get_paged_fails_when_the_request_retried_after_a_401_refresh_is_throttl
 
         let result = client.get_paged::<Value>(THINGS).await;
         let err = match result {
-            Ok(items) => panic!("retried {status} must be an error, got Ok({} items)", items.len()),
+            Ok(items) => panic!(
+                "retried {status} must be an error, got Ok({} items)",
+                items.len()
+            ),
             Err(e) => e,
         };
         assert_eq!(http_status(&err), Some(status), "{err:#}");
@@ -415,7 +423,10 @@ async fn delta_fails_when_the_request_retried_after_a_401_refresh_is_throttled_o
             Err(e) => e,
         };
         assert_eq!(http_status(&err), Some(status), "{err:#}");
-        assert!(!delta_file.exists(), "no delta link may be saved from a failed fetch");
+        assert!(
+            !delta_file.exists(),
+            "no delta link may be saved from a failed fetch"
+        );
     }
 }
 
@@ -448,7 +459,8 @@ async fn mount_two_pages_second_throttled_after_refresh(server: &MockServer, bas
 }
 
 #[tokio::test]
-async fn get_paged_does_not_return_the_first_page_as_complete_when_a_later_page_fails_after_a_refresh() {
+async fn get_paged_does_not_return_the_first_page_as_complete_when_a_later_page_fails_after_a_refresh(
+) {
     let server = MockServer::start().await;
     let dir = TempDir::new().unwrap();
     mount_two_pages_second_throttled_after_refresh(&server, &server.uri()).await;
@@ -456,13 +468,17 @@ async fn get_paged_does_not_return_the_first_page_as_complete_when_a_later_page_
 
     let result = client.get_paged::<Value>(THINGS).await;
     match result {
-        Ok(items) => panic!("a throttled second page must be an error, got Ok({} items)", items.len()),
+        Ok(items) => panic!(
+            "a throttled second page must be an error, got Ok({} items)",
+            items.len()
+        ),
         Err(e) => assert_eq!(http_status(&e), Some(429), "{e:#}"),
     }
 }
 
 #[tokio::test]
-async fn delta_does_not_return_the_first_page_as_complete_when_a_later_page_fails_after_a_refresh() {
+async fn delta_does_not_return_the_first_page_as_complete_when_a_later_page_fails_after_a_refresh()
+{
     let server = MockServer::start().await;
     let dir = TempDir::new().unwrap();
     let delta_file = dir.path().join("things.delta");
@@ -471,7 +487,10 @@ async fn delta_does_not_return_the_first_page_as_complete_when_a_later_page_fail
 
     let result = client.delta::<Value>(THINGS, &delta_file).await;
     match result {
-        Ok((items, _)) => panic!("a throttled second page must be an error, got Ok({} items)", items.len()),
+        Ok((items, _)) => panic!(
+            "a throttled second page must be an error, got Ok({} items)",
+            items.len()
+        ),
         Err(e) => assert_eq!(http_status(&e), Some(429), "{e:#}"),
     }
     assert!(!delta_file.exists());
@@ -495,7 +514,10 @@ async fn get_paged_treats_a_200_error_object_without_value_as_an_error() {
     let client = client_for(&server, &dir).await;
 
     match client.get_paged::<Value>(THINGS).await {
-        Ok(items) => panic!("an error object is not an empty collection; got Ok({} items)", items.len()),
+        Ok(items) => panic!(
+            "an error object is not an empty collection; got Ok({} items)",
+            items.len()
+        ),
         Err(e) => assert!(!format!("{e:#}").is_empty()),
     }
 }
@@ -529,7 +551,10 @@ async fn a_genuinely_empty_collection_is_still_an_empty_success() {
         .await;
     let client = client_for(&server, &dir).await;
 
-    let items = client.get_paged::<Value>(THINGS).await.expect("empty is fine");
+    let items = client
+        .get_paged::<Value>(THINGS)
+        .await
+        .expect("empty is fine");
     assert!(items.is_empty());
 }
 
@@ -542,7 +567,10 @@ fn at(s: &str) -> DateTime<Utc> {
 #[test]
 fn retry_after_in_whole_seconds_is_that_many_seconds() {
     let now = at("2026-10-21 07:26:00");
-    assert_eq!(parse_retry_after("120", now), Some(Duration::from_secs(120)));
+    assert_eq!(
+        parse_retry_after("120", now),
+        Some(Duration::from_secs(120))
+    );
     assert_eq!(parse_retry_after("1", now), Some(Duration::from_secs(1)));
     assert_eq!(parse_retry_after("0", now), Some(Duration::ZERO));
 }
@@ -563,8 +591,14 @@ fn retry_after_as_an_http_date_is_measured_from_now() {
 #[test]
 fn retry_after_date_in_the_past_means_no_wait() {
     let now = at("2026-10-21 07:26:00");
-    assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:20:00 GMT", now), Some(Duration::ZERO));
-    assert_eq!(parse_retry_after("Thu, 01 Jan 1970 00:00:00 GMT", now), Some(Duration::ZERO));
+    assert_eq!(
+        parse_retry_after("Wed, 21 Oct 2026 07:20:00 GMT", now),
+        Some(Duration::ZERO)
+    );
+    assert_eq!(
+        parse_retry_after("Thu, 01 Jan 1970 00:00:00 GMT", now),
+        Some(Duration::ZERO)
+    );
 }
 
 #[test]
@@ -574,13 +608,22 @@ fn retry_after_is_capped_at_fifteen_minutes() {
     assert_eq!(parse_retry_after("900", now), Some(MAX_RETRY_AFTER));
     assert_eq!(parse_retry_after("901", now), Some(MAX_RETRY_AFTER));
     assert_eq!(parse_retry_after("86400", now), Some(MAX_RETRY_AFTER));
-    assert_eq!(parse_retry_after("Thu, 22 Oct 2026 07:26:00 GMT", now), Some(MAX_RETRY_AFTER));
+    assert_eq!(
+        parse_retry_after("Thu, 22 Oct 2026 07:26:00 GMT", now),
+        Some(MAX_RETRY_AFTER)
+    );
 }
 
 #[test]
 fn retry_after_that_is_neither_seconds_nor_a_date_is_ignored() {
     let now = at("2026-10-21 07:26:00");
-    for garbage in ["", "soon", "12abc", "Wed, 99 Foo 2026 07:28:00 GMT", "tomorrow at noon"] {
+    for garbage in [
+        "",
+        "soon",
+        "12abc",
+        "Wed, 99 Foo 2026 07:28:00 GMT",
+        "tomorrow at noon",
+    ] {
         assert_eq!(parse_retry_after(garbage, now), None, "{garbage:?}");
     }
 }

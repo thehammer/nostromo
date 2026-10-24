@@ -29,15 +29,10 @@ use nostromo::{
     agent_bus::{tail_activity_jsonl, ActivityEvent},
     config::Config,
     data::{
-        fred_calendar::CalendarSnapshot,
-        fred_calendar_native::FredCalendarNativeSource,
-        fred_mailbox::MailboxSnapshot,
-        fred_mailbox_native::FredMailboxNativeSource,
-        perri_pr::PrSnapshots,
-        perri_pr_native::PerriPrNativeSource,
-        perri_queue::PrQueueSnapshot,
-        perri_queue_native::PerriQueueNativeSource,
-        teri_todos::TeriTodosNativeSource,
+        fred_calendar::CalendarSnapshot, fred_calendar_native::FredCalendarNativeSource,
+        fred_mailbox::MailboxSnapshot, fred_mailbox_native::FredMailboxNativeSource,
+        perri_pr::PrSnapshots, perri_pr_native::PerriPrNativeSource, perri_queue::PrQueueSnapshot,
+        perri_queue_native::PerriQueueNativeSource, teri_todos::TeriTodosNativeSource,
         tickets::TicketProvider,
     },
     ipc::{
@@ -47,7 +42,9 @@ use nostromo::{
         protocol::ServerMsg,
         Server, SessionManager,
     },
-    mcp::{daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState},
+    mcp::{
+        daemon_socket_path, write_bridge_mcp_config, DaemonMcpBackend, McpServer, McpSharedState,
+    },
     mother::{self, statusline_cache_path, MotherStatus},
 };
 
@@ -90,14 +87,20 @@ async fn main() -> Result<()> {
     // running when it died without cleaning up. Runs before this daemon spawns
     // anything, and only touches processes the ledger proves are the same ones.
     {
-        let ledger_path = nostromo::ipc::orphans::ledger_path_beside(&nostromo::ipc::session_manager::default_store_path());
+        let ledger_path = nostromo::ipc::orphans::ledger_path_beside(
+            &nostromo::ipc::session_manager::default_store_path(),
+        );
         let swept = tokio::task::spawn_blocking(move || {
             nostromo::ipc::orphans::sweep(&ledger_path, nostromo::ipc::orphans::SHUTDOWN_GRACE)
         })
         .await;
         match swept {
             Ok(r) if !r.terminated.is_empty() || r.dropped > 0 => {
-                info!(stopped = r.terminated.len(), dropped = r.dropped, "orphan sweep done");
+                info!(
+                    stopped = r.terminated.len(),
+                    dropped = r.dropped,
+                    "orphan sweep done"
+                );
             }
             Ok(_) => {}
             Err(e) => warn!("orphan sweep failed: {e}"),
@@ -123,18 +126,26 @@ async fn main() -> Result<()> {
         nostromo::ipc::claude_login::KeychainItemDate,
     ))
     .attach(&session_mgr);
-    session_mgr.lock().unwrap().configure_enabled_agents(enabled_agents);
+    session_mgr
+        .lock()
+        .unwrap()
+        .configure_enabled_agents(enabled_agents);
     // The approval broker: hears every permission request of an approval-capable
     // session, logs it and always answers it. A request found unresolved in the
     // log was pending when the last daemon died; it ends as `restart_crash` before
     // any session can start. Without a broker (the directory can't be made) the
     // sessions' readers deny every request themselves.
-    match nostromo::approvals::broker::ApprovalBroker::open(&nostromo::approvals::ApprovalsPaths::resolve()) {
+    match nostromo::approvals::broker::ApprovalBroker::open(
+        &nostromo::approvals::ApprovalsPaths::resolve(),
+    ) {
         Ok(broker) => {
             let now = chrono::Utc::now();
             match broker.startup_reconcile(now) {
                 Ok(0) => {}
-                Ok(n) => warn!(count = n, "permission requests were pending when the daemon last stopped"),
+                Ok(n) => warn!(
+                    count = n,
+                    "permission requests were pending when the daemon last stopped"
+                ),
                 Err(e) => warn!("approval log reconcile failed: {e}"),
             }
             if let Err(e) = broker.sweep(now) {
@@ -205,7 +216,9 @@ async fn main() -> Result<()> {
     // The operator app must run from the installed path, not just match the
     // pin (the pin file is user-writable). `NOSTROMO_OPERATOR_APP_PATH`, read
     // from THIS process's environment only, overrides it for a dev install.
-    let verifier = match std::env::var_os(nostromo::ipc::peer_verify::APP_PATH_ENV).filter(|v| !v.is_empty()) {
+    let verifier = match std::env::var_os(nostromo::ipc::peer_verify::APP_PATH_ENV)
+        .filter(|v| !v.is_empty())
+    {
         Some(path) => {
             warn!(
                 path = ?path,
@@ -262,7 +275,10 @@ async fn main() -> Result<()> {
     // environments block multicast.  The guard MUST outlive the select! below.
     let _mdns_guard = match mdns::advertise(bound_tcp_addr.port()) {
         Ok(guard) => {
-            info!(port = bound_tcp_addr.port(), "mDNS advertising started (_nostromo._tcp.local.)");
+            info!(
+                port = bound_tcp_addr.port(),
+                "mDNS advertising started (_nostromo._tcp.local.)"
+            );
             Some(guard)
         }
         Err(e) => {
@@ -282,7 +298,8 @@ async fn main() -> Result<()> {
                 interval.tick().await;
                 // The approval log keeps 90 days; the daemon sweeps it at start
                 // and then once a day.
-                let sweep_due = last_sweep.elapsed() >= std::time::Duration::from_secs(24 * 60 * 60);
+                let sweep_due =
+                    last_sweep.elapsed() >= std::time::Duration::from_secs(24 * 60 * 60);
                 let sweeper = {
                     let mgr = &mut *session_mgr.lock().unwrap();
                     mgr.reap_and_recover();
@@ -311,7 +328,10 @@ async fn main() -> Result<()> {
     // not just the one the operator actually used — learns a request is done
     // (multi-window decision-sheet fix). Must happen here, after `server.tx`
     // exists, not in the registry-construction block above.
-    decisions.lock().unwrap().configure_broadcast(broadcast_tx.clone());
+    decisions
+        .lock()
+        .unwrap()
+        .configure_broadcast(broadcast_tx.clone());
 
     // ── Model switching ───────────────────────────────────────────────────────
     // Learn which models the installed CLI offers, now and every 6 h.
@@ -329,7 +349,10 @@ async fn main() -> Result<()> {
             let _ = nostromo::model::hub::refresh_catalog(&model_hub).await;
             // Forget the model state of focuses long gone (a no-op until the
             // Mac has pushed its focus registry).
-            sweep_mgr.lock().unwrap().sweep_model_state(chrono::Utc::now());
+            sweep_mgr
+                .lock()
+                .unwrap()
+                .sweep_model_state(chrono::Utc::now());
         }
     });
 
@@ -413,7 +436,10 @@ async fn main() -> Result<()> {
             // ATLASSIAN_* can tell why `ticket` shows are refused, without
             // ever logging the token itself.
             let jira_provider = Arc::new(nostromo::data::tickets::jira::JiraProvider::new(&config));
-            info!(configured = jira_provider.is_configured(), "jira ticket provider");
+            info!(
+                configured = jira_provider.is_configured(),
+                "jira ticket provider"
+            );
             let mut ticket_registry = nostromo::data::tickets::TicketRegistry::new();
             ticket_registry.register(jira_provider);
             let tickets = nostromo::mcp::TicketRegistryState {
@@ -543,11 +569,19 @@ async fn main() -> Result<()> {
     // (`jobs_feed` was created earlier so the MCP state shares the poller's channel.)
     let btx_mother = broadcast_tx.clone();
     let sensitive_tags = session_mgr.lock().unwrap().sensitive_tags();
-    tokio::spawn(run_mother_pollers(btx_mother, jobs_feed.clone(), sensitive_tags.clone()));
+    tokio::spawn(run_mother_pollers(
+        btx_mother,
+        jobs_feed.clone(),
+        sensitive_tags.clone(),
+    ));
 
     // ── Mother peek poller ────────────────────────────────────────────────────
     let btx_peek = broadcast_tx.clone();
-    tokio::spawn(run_peek_poller(btx_peek, jobs_feed.jobs_rx(), sensitive_tags));
+    tokio::spawn(run_peek_poller(
+        btx_peek,
+        jobs_feed.jobs_rx(),
+        sensitive_tags,
+    ));
 
     // ── SIGTERM / SIGINT ──────────────────────────────────────────────────────
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -569,8 +603,9 @@ async fn main() -> Result<()> {
         mgr.prepare_shutdown(std::time::Duration::from_secs(2));
         // Sessions get SIGTERM, then SIGKILL after the grace. The whole shutdown
         // stays within SHUTDOWN_BUDGET: the grace is what the denials left over.
-        let grace = nostromo::ipc::orphans::SHUTDOWN_GRACE
-            .min(SHUTDOWN_BUDGET.saturating_sub(started.elapsed() + nostromo::ipc::orphans::REAP_WAIT));
+        let grace = nostromo::ipc::orphans::SHUTDOWN_GRACE.min(
+            SHUTDOWN_BUDGET.saturating_sub(started.elapsed() + nostromo::ipc::orphans::REAP_WAIT),
+        );
         mgr.kill_all_on_shutdown_with_grace(grace);
     }
 
@@ -587,7 +622,10 @@ async fn run_mother_pollers(
     sensitive: nostromo::ipc::peer::SensitiveTags,
 ) {
     let tx2 = tx.clone();
-    tokio::join!(run_statusline_watcher(tx), run_job_poller(tx2, jobs_feed, sensitive),);
+    tokio::join!(
+        run_statusline_watcher(tx),
+        run_job_poller(tx2, jobs_feed, sensitive),
+    );
 }
 
 async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
@@ -685,7 +723,9 @@ async fn run_job_poller(
                 // newer list (e.g. a mutator's refresh) already landed; then do not
                 // re-broadcast the older state either.
                 if !jobs_feed.publish_jobs_counted_at(ticket, jobs.clone(), skipped) {
-                    tracing::debug!("mother poll result superseded by a newer list; skipping publish");
+                    tracing::debug!(
+                        "mother poll result superseded by a newer list; skipping publish"
+                    );
                     continue;
                 }
 
@@ -741,10 +781,10 @@ async fn run_peek_poller(
         // Send a terminal-clear for jobs that just left the active set.
         for id in active.difference(&currently_active) {
             let _ = tx.send(ServerMsg::MotherPeek {
-                job_id:     id.clone(),
-                todos:      vec![],
+                job_id: id.clone(),
+                todos: vec![],
                 tool_trail: vec![],
-                last_text:  String::new(),
+                last_text: String::new(),
             });
         }
 
@@ -755,10 +795,10 @@ async fn run_peek_poller(
             match mother::peek(id).await {
                 Ok(snap) => {
                     let _ = tx.send(ServerMsg::MotherPeek {
-                        job_id:     id.clone(),
-                        todos:      snap.todos,
+                        job_id: id.clone(),
+                        todos: snap.todos,
                         tool_trail: snap.tool_trail,
-                        last_text:  snap.last_text.chars().take(200).collect(),
+                        last_text: snap.last_text.chars().take(200).collect(),
                     });
                 }
                 Err(e) => {
@@ -801,7 +841,8 @@ struct RealAgentSpawner {
 
 impl nostromo::agents::AgentSpawner for RealAgentSpawner {
     fn start_perri(&mut self) -> nostromo::agents::PerriSources {
-        let (queue_rx, queue_refresh_tx, queue_relay_tx) = PerriQueueNativeSource::spawn(self.config.clone());
+        let (queue_rx, queue_refresh_tx, queue_relay_tx) =
+            PerriQueueNativeSource::spawn(self.config.clone());
         // W7 — D8 backstop. The PR source serves a pin only while its focus still
         // exists, so a missed eviction cannot resurrect one. `None` until a client
         // has actually pushed a registry: an empty registry means "nobody has told
@@ -811,7 +852,8 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
             let session_mgr = Arc::clone(&self.session_mgr);
             Arc::new(move || session_mgr.lock().unwrap().live_focus_tags())
         };
-        let (pr_rx, pr_refresh_tx) = PerriPrNativeSource::spawn(self.config.clone(), Some(live_focuses));
+        let (pr_rx, pr_refresh_tx) =
+            PerriPrNativeSource::spawn(self.config.clone(), Some(live_focuses));
 
         // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
         // Registered here, not inside the `write_bridge_mcp_config()` success arm:
@@ -823,7 +865,13 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
                 queue_rx.clone(),
                 pr_rx.clone(),
             )));
-        nostromo::agents::PerriSources { queue_rx, queue_refresh_tx, queue_relay_tx, pr_rx, pr_refresh_tx }
+        nostromo::agents::PerriSources {
+            queue_rx,
+            queue_refresh_tx,
+            queue_relay_tx,
+            pr_rx,
+            pr_refresh_tx,
+        }
     }
 
     fn start_fred(&mut self) -> (nostromo::agents::MailboxRx, nostromo::agents::CalendarRx) {
@@ -841,24 +889,34 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
         // and Sentry as they land), broadcasts changes and answers `WorkService`
         // requests from the Mac. It is built after the Teri source and before the
         // MCP state so the MCP tools read the same hub.
-        let work_hub = nostromo::data::work::hub::WorkHub::spawn(nostromo::data::work::hub::HubDeps {
-            broadcast_tx: self.broadcast_tx.clone(),
-            todos_rx: todos_rx.clone(),
-            session_mgr: Some(Arc::clone(&self.session_mgr)),
-            republish_rx: Some(self.republish_rx.clone()),
-            jira_site: nostromo::data::work::credentials::JiraSite::from_config(&self.config),
-            todos_refresh: Some(todos_refresh),
-            jira: Some(Arc::new(nostromo::data::work::jira::JiraWorkSource::from_config(&self.config))),
-            sentry: Some(nostromo::data::work::sentry::SentryConfig::from_environment()),
-            repo_docs_root: Some(self.config.code_root_dir()),
-            picks_path: Some(nostromo::data::work::picks::default_path()),
-            picks_host: None,
-            picks_timeout: None,
-        });
-        nostromo::agents::TeriSources { todos_rx, work_hub: Some(work_hub) }
+        let work_hub =
+            nostromo::data::work::hub::WorkHub::spawn(nostromo::data::work::hub::HubDeps {
+                broadcast_tx: self.broadcast_tx.clone(),
+                todos_rx: todos_rx.clone(),
+                session_mgr: Some(Arc::clone(&self.session_mgr)),
+                republish_rx: Some(self.republish_rx.clone()),
+                jira_site: nostromo::data::work::credentials::JiraSite::from_config(&self.config),
+                todos_refresh: Some(todos_refresh),
+                jira: Some(Arc::new(
+                    nostromo::data::work::jira::JiraWorkSource::from_config(&self.config),
+                )),
+                sentry: Some(nostromo::data::work::sentry::SentryConfig::from_environment()),
+                repo_docs_root: Some(self.config.code_root_dir()),
+                picks_path: Some(nostromo::data::work::picks::default_path()),
+                picks_host: None,
+                picks_timeout: None,
+            });
+        nostromo::agents::TeriSources {
+            todos_rx,
+            work_hub: Some(work_hub),
+        }
     }
 
-    fn start_perri_broadcaster(&mut self, queue_rx: nostromo::agents::PerriQueueRx, pr_rx: nostromo::agents::PerriPrRx) {
+    fn start_perri_broadcaster(
+        &mut self,
+        queue_rx: nostromo::agents::PerriQueueRx,
+        pr_rx: nostromo::agents::PerriPrRx,
+    ) {
         tokio::spawn(run_perri_broadcaster(
             self.broadcast_tx.clone(),
             Arc::clone(&self.session_mgr),
@@ -867,7 +925,11 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
         ));
     }
 
-    fn start_fred_broadcaster(&mut self, mailbox_rx: nostromo::agents::MailboxRx, calendar_rx: nostromo::agents::CalendarRx) {
+    fn start_fred_broadcaster(
+        &mut self,
+        mailbox_rx: nostromo::agents::MailboxRx,
+        calendar_rx: nostromo::agents::CalendarRx,
+    ) {
         tokio::spawn(run_fred_broadcaster(
             self.broadcast_tx.clone(),
             mailbox_rx,
@@ -877,10 +939,13 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
     }
 
     fn start_teri_broadcaster(&mut self, todos_rx: nostromo::agents::TodosRx) {
-        tokio::spawn(run_teri_broadcaster(todos_rx, self.broadcast_tx.clone(), self.republish_rx.clone()));
+        tokio::spawn(run_teri_broadcaster(
+            todos_rx,
+            self.broadcast_tx.clone(),
+            self.republish_rx.clone(),
+        ));
     }
 }
-
 
 /// Watch the Perri native sources and broadcast `PerriState` per focus (W7 — D7).
 ///
@@ -981,7 +1046,7 @@ fn build_fred_state(
     mailbox_rx: &tokio::sync::watch::Receiver<Option<MailboxSnapshot>>,
     calendar_rx: &tokio::sync::watch::Receiver<Option<CalendarSnapshot>>,
 ) -> ServerMsg {
-    let mailbox  = mailbox_rx.borrow().clone().unwrap_or_default();
+    let mailbox = mailbox_rx.borrow().clone().unwrap_or_default();
     let calendar = calendar_rx.borrow().clone().unwrap_or_default();
     ServerMsg::FredState { mailbox, calendar }
 }
@@ -1003,7 +1068,9 @@ async fn run_teri_broadcaster(
         // for the next change before emitting again.
         if let Some(snap) = rx.borrow_and_update().clone() {
             // Bodies are bounded for the wire; the hub reads the full ones from `rx`.
-            let _ = tx.send(ServerMsg::TeriState { todos: snap.for_wire() });
+            let _ = tx.send(ServerMsg::TeriState {
+                todos: snap.for_wire(),
+            });
         }
         tokio::select! {
             r = rx.changed() => {
@@ -1062,7 +1129,9 @@ mod tests {
 
     async fn nothing_for_a_moment(rx: &mut broadcast::Receiver<ServerMsg>) {
         assert!(
-            tokio::time::timeout(Duration::from_millis(150), rx.recv()).await.is_err(),
+            tokio::time::timeout(Duration::from_millis(150), rx.recv())
+                .await
+                .is_err(),
             "no frame was expected"
         );
     }
@@ -1070,13 +1139,22 @@ mod tests {
     #[tokio::test]
     async fn the_fred_broadcaster_publishes_its_current_state_again_when_asked_to_republish() {
         let (tx, mut rx) = broadcast::channel(16);
-        let (_mailbox_tx, mailbox_rx) =
-            watch::channel(Some(MailboxSnapshot { unread_count: 3, ..Default::default() }));
+        let (_mailbox_tx, mailbox_rx) = watch::channel(Some(MailboxSnapshot {
+            unread_count: 3,
+            ..Default::default()
+        }));
         let (_calendar_tx, calendar_rx) = watch::channel(None::<CalendarSnapshot>);
         let (republish_tx, republish_rx) = watch::channel(0u64);
-        tokio::spawn(run_fred_broadcaster(tx, mailbox_rx, calendar_rx, republish_rx));
+        tokio::spawn(run_fred_broadcaster(
+            tx,
+            mailbox_rx,
+            calendar_rx,
+            republish_rx,
+        ));
 
-        assert!(matches!(next_frame(&mut rx).await, ServerMsg::FredState { mailbox, .. } if mailbox.unread_count == 3));
+        assert!(
+            matches!(next_frame(&mut rx).await, ServerMsg::FredState { mailbox, .. } if mailbox.unread_count == 3)
+        );
         nothing_for_a_moment(&mut rx).await;
 
         republish_tx.send_modify(|g| *g += 1);
@@ -1090,8 +1168,10 @@ mod tests {
     async fn the_teri_broadcaster_publishes_its_current_state_again_when_asked_to_republish() {
         use nostromo::data::teri_todos::TeriTodosSnapshot;
         let (tx, mut rx) = broadcast::channel(16);
-        let (_todos_tx, todos_rx) =
-            watch::channel(Some(TeriTodosSnapshot { stale: true, ..Default::default() }));
+        let (_todos_tx, todos_rx) = watch::channel(Some(TeriTodosSnapshot {
+            stale: true,
+            ..Default::default()
+        }));
         let (republish_tx, republish_rx) = watch::channel(0u64);
         tokio::spawn(run_teri_broadcaster(todos_rx, tx, republish_rx));
 
@@ -1137,16 +1217,26 @@ mod tests {
         };
         let first = next_frame(&mut rx).await;
         let len = frame_len(&first);
-        assert!(len < MAX_FRAME_LEN, "initial TeriState frame is {len} bytes, over MAX_FRAME_LEN {MAX_FRAME_LEN}");
+        assert!(
+            len < MAX_FRAME_LEN,
+            "initial TeriState frame is {len} bytes, over MAX_FRAME_LEN {MAX_FRAME_LEN}"
+        );
 
         republish_tx.send_modify(|g| *g += 1);
         let again = next_frame(&mut rx).await;
         let len = frame_len(&again);
-        assert!(len < MAX_FRAME_LEN, "republished TeriState frame is {len} bytes, over MAX_FRAME_LEN");
+        assert!(
+            len < MAX_FRAME_LEN,
+            "republished TeriState frame is {len} bytes, over MAX_FRAME_LEN"
+        );
 
         // The value the hub reads is untouched: full bodies.
         let hub_side = todos_tx.borrow();
         let body = hub_side.as_ref().unwrap().items[0].body.as_deref().unwrap();
-        assert_eq!(body.len(), "body 1: ".len() + 10 * 1024, "the watch value keeps the full body");
+        assert_eq!(
+            body.len(),
+            "body 1: ".len() + 10 * 1024,
+            "the watch value keeps the full body"
+        );
     }
 }

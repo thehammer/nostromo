@@ -171,7 +171,11 @@ impl DecisionRegistry {
         detail: Option<String>,
         choices: Vec<DecisionChoice>,
         context_pane_id: Option<String>,
-    ) -> (String, oneshot::Receiver<DecisionOutcome>, Option<ServerMsg>) {
+    ) -> (
+        String,
+        oneshot::Receiver<DecisionOutcome>,
+        Option<ServerMsg>,
+    ) {
         let request_id = Uuid::new_v4().to_string();
         let (reply, rx) = oneshot::channel();
         let choice_ids = choices.iter().map(|c| c.id.clone()).collect();
@@ -192,7 +196,14 @@ impl DecisionRegistry {
             (request_id, rx, None)
         } else {
             self.active_by_tag.insert(tag.clone(), request_id.clone());
-            self.active.insert(request_id.clone(), ActiveEntry { tag, choice_ids, reply });
+            self.active.insert(
+                request_id.clone(),
+                ActiveEntry {
+                    tag,
+                    choice_ids,
+                    reply,
+                },
+            );
             (request_id, rx, Some(msg))
         }
     }
@@ -275,7 +286,9 @@ impl DecisionRegistry {
         let _ = entry.reply.send(outcome);
 
         let promoted = self.promote_next(&entry.tag);
-        ResolveResult::Resolved { promoted: promoted.map(Box::new) }
+        ResolveResult::Resolved {
+            promoted: promoted.map(Box::new),
+        }
     }
 
     /// Broadcast a `ServerMsg::DecisionResolved` for `request_id`, if a
@@ -310,12 +323,18 @@ impl DecisionRegistry {
             self.queues.remove(tag);
         }
         let (request_id, choice_ids) = match &next.msg {
-            ServerMsg::DecisionRequest { request_id, choices, .. } => {
-                (request_id.clone(), choices.iter().map(|c| c.id.clone()).collect())
-            }
+            ServerMsg::DecisionRequest {
+                request_id,
+                choices,
+                ..
+            } => (
+                request_id.clone(),
+                choices.iter().map(|c| c.id.clone()).collect(),
+            ),
             _ => unreachable!("QueuedEntry::msg is always a DecisionRequest"),
         };
-        self.active_by_tag.insert(tag.to_string(), request_id.clone());
+        self.active_by_tag
+            .insert(tag.to_string(), request_id.clone());
         self.active.insert(
             request_id,
             ActiveEntry {
@@ -407,7 +426,11 @@ mod tests {
         registry: &mut DecisionRegistry,
         tag: &str,
         prompt: &str,
-    ) -> (String, oneshot::Receiver<DecisionOutcome>, Option<ServerMsg>) {
+    ) -> (
+        String,
+        oneshot::Receiver<DecisionOutcome>,
+        Option<ServerMsg>,
+    ) {
         registry.submit(
             tag.to_string(),
             prompt.to_string(),
@@ -435,7 +458,9 @@ mod tests {
     /// outcome, panicking (with `context`) on every other shape.
     fn expect_promoted(outcome: AnswerOutcome, context: &str) -> ServerMsg {
         match outcome {
-            AnswerOutcome::Answered { promoted: Some(msg) } => *msg,
+            AnswerOutcome::Answered {
+                promoted: Some(msg),
+            } => *msg,
             AnswerOutcome::Answered { promoted: None } => {
                 panic!("{context}: expected a promoted request, got Answered {{ promoted: None }}")
             }
@@ -560,7 +585,10 @@ mod tests {
         let outcome = registry.answer(&id, Some("approve".into()));
         expect_answered_with_no_promotion(outcome, "answering the only outstanding request");
 
-        assert_eq!(rx.try_recv(), Ok(DecisionOutcome::Answered("approve".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(DecisionOutcome::Answered("approve".into()))
+        );
     }
 
     #[test]
@@ -591,7 +619,10 @@ mod tests {
 
         let (tag, wire_id, prompt) = as_decision_request(&promoted, "promoted request");
         assert_eq!(tag, "mother");
-        assert_eq!(wire_id, b_id, "the promoted request must be the QUEUED one, not the answered one");
+        assert_eq!(
+            wire_id, b_id,
+            "the promoted request must be the QUEUED one, not the answered one"
+        );
         assert_eq!(prompt, "B?");
 
         assert_eq!(registry.active_request_id("mother"), Some(b_id));
@@ -622,10 +653,14 @@ mod tests {
         match second {
             AnswerOutcome::AlreadyAnswered => {}
             AnswerOutcome::Answered { .. } => {
-                panic!("a second answer to an already-resolved request must not re-fire as Answered")
+                panic!(
+                    "a second answer to an already-resolved request must not re-fire as Answered"
+                )
             }
             AnswerOutcome::UnknownRequest => {
-                panic!("a known-but-resolved request_id must be AlreadyAnswered, not UnknownRequest")
+                panic!(
+                    "a known-but-resolved request_id must be AlreadyAnswered, not UnknownRequest"
+                )
             }
             AnswerOutcome::UnknownChoice => {
                 panic!("a resolved request_id must be AlreadyAnswered, not UnknownChoice")
@@ -634,7 +669,10 @@ mod tests {
 
         // The oneshot must carry the FIRST answer exactly once, unaffected by
         // the rejected second one.
-        assert_eq!(rx.try_recv(), Ok(DecisionOutcome::Answered("approve".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(DecisionOutcome::Answered("approve".into()))
+        );
         assert!(
             rx.try_recv().is_err(),
             "the receiver must not carry a second value — it is spent after one resolution"
@@ -718,7 +756,10 @@ mod tests {
         );
 
         // The original answer resolution must be untouched by the no-op.
-        assert_eq!(rx.try_recv(), Ok(DecisionOutcome::Answered("approve".into())));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(DecisionOutcome::Answered("approve".into()))
+        );
     }
 
     // ── 4. cancel_tag ───────────────────────────────────────────────────────────────
@@ -809,22 +850,40 @@ mod tests {
         assert_eq!(registry.queued_count("mother"), 3);
 
         // Answer A → must promote B (the FIRST queued), never C or D.
-        let promoted = expect_promoted(registry.answer(&a_id, Some("approve".into())), "answering A");
+        let promoted = expect_promoted(
+            registry.answer(&a_id, Some("approve".into())),
+            "answering A",
+        );
         let (_, wire_id, prompt) = as_decision_request(&promoted, "promoted after A");
-        assert_eq!(prompt, "B?", "A's promotion must be B — the first-queued request");
+        assert_eq!(
+            prompt, "B?",
+            "A's promotion must be B — the first-queued request"
+        );
         let b_id = wire_id.to_string();
 
         // Answer B (using the id straight off the wire message, not a locally
         // cached one) → must promote C.
-        let promoted = expect_promoted(registry.answer(&b_id, Some("approve".into())), "answering B");
+        let promoted = expect_promoted(
+            registry.answer(&b_id, Some("approve".into())),
+            "answering B",
+        );
         let (_, wire_id, prompt) = as_decision_request(&promoted, "promoted after B");
-        assert_eq!(prompt, "C?", "B's promotion must be C, preserving arrival order");
+        assert_eq!(
+            prompt, "C?",
+            "B's promotion must be C, preserving arrival order"
+        );
         let c_id = wire_id.to_string();
 
         // Answer C → must promote D, the last one queued.
-        let promoted = expect_promoted(registry.answer(&c_id, Some("approve".into())), "answering C");
+        let promoted = expect_promoted(
+            registry.answer(&c_id, Some("approve".into())),
+            "answering C",
+        );
         let (_, _wire_id, prompt) = as_decision_request(&promoted, "promoted after C");
-        assert_eq!(prompt, "D?", "C's promotion must be D — the last-queued request, in order");
+        assert_eq!(
+            prompt, "D?",
+            "C's promotion must be D — the last-queued request, in order"
+        );
 
         assert_eq!(registry.queued_count("mother"), 0);
     }
@@ -858,7 +917,8 @@ mod tests {
     }
 
     #[test]
-    fn answering_with_a_choice_broadcasts_exactly_one_answered_resolved_notice_with_that_choice_id() {
+    fn answering_with_a_choice_broadcasts_exactly_one_answered_resolved_notice_with_that_choice_id()
+    {
         let mut registry = DecisionRegistry::new();
         let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
         registry.configure_broadcast(tx);
@@ -866,7 +926,9 @@ mod tests {
 
         registry.answer(&id, Some("approve".into()));
 
-        let notice = rx.try_recv().expect("answer() must broadcast a DecisionResolved notice");
+        let notice = rx
+            .try_recv()
+            .expect("answer() must broadcast a DecisionResolved notice");
         let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "answered notice");
         assert_eq!(wire_id, id);
         assert_eq!(resolution, &DecisionResolution::Answered);
@@ -879,7 +941,8 @@ mod tests {
     }
 
     #[test]
-    fn answering_with_no_choice_broadcasts_exactly_one_dismissed_resolved_notice_with_no_choice_id() {
+    fn answering_with_no_choice_broadcasts_exactly_one_dismissed_resolved_notice_with_no_choice_id()
+    {
         let mut registry = DecisionRegistry::new();
         let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
         registry.configure_broadcast(tx);
@@ -887,7 +950,9 @@ mod tests {
 
         registry.answer(&id, None);
 
-        let notice = rx.try_recv().expect("answer(None) must broadcast a DecisionResolved notice");
+        let notice = rx
+            .try_recv()
+            .expect("answer(None) must broadcast a DecisionResolved notice");
         let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "dismissed notice");
         assert_eq!(wire_id, id);
         assert_eq!(resolution, &DecisionResolution::Dismissed);
@@ -905,7 +970,9 @@ mod tests {
 
         registry.timeout_request(&id);
 
-        let notice = rx.try_recv().expect("timeout_request() must broadcast a DecisionResolved notice");
+        let notice = rx
+            .try_recv()
+            .expect("timeout_request() must broadcast a DecisionResolved notice");
         let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "timeout notice");
         assert_eq!(wire_id, id);
         assert_eq!(resolution, &DecisionResolution::Timeout);
@@ -915,7 +982,8 @@ mod tests {
     }
 
     #[test]
-    fn cancel_tag_broadcasts_one_cancelled_resolved_notice_per_resolved_request_and_none_for_an_unrelated_tag() {
+    fn cancel_tag_broadcasts_one_cancelled_resolved_notice_per_resolved_request_and_none_for_an_unrelated_tag(
+    ) {
         let mut registry = DecisionRegistry::new();
         let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
         registry.configure_broadcast(tx);
@@ -945,10 +1013,11 @@ mod tests {
 
         let mut resolved_ids = Vec::new();
         for _ in 0..3 {
-            let notice = rx
-                .try_recv()
-                .expect("cancel_tag must broadcast one notice per resolved request (active + queued)");
-            let (wire_id, resolution, _choice_id) = as_decision_resolved(&notice, "cancelled notice");
+            let notice = rx.try_recv().expect(
+                "cancel_tag must broadcast one notice per resolved request (active + queued)",
+            );
+            let (wire_id, resolution, _choice_id) =
+                as_decision_resolved(&notice, "cancelled notice");
             assert_eq!(resolution, &DecisionResolution::Cancelled);
             resolved_ids.push(wire_id.to_string());
         }
@@ -982,7 +1051,8 @@ mod tests {
         let (id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
 
         registry.answer(&id, Some("approve".into()));
-        rx.try_recv().expect("the first, legitimate answer must broadcast its own notice");
+        rx.try_recv()
+            .expect("the first, legitimate answer must broadcast its own notice");
 
         let second = registry.answer(&id, Some("reject".into()));
         match second {
@@ -1024,7 +1094,9 @@ mod tests {
         let (id, _rx_outcome, _bcast) = submit_simple(&mut registry, "mother", "Ship it?");
 
         registry.answer(&id, Some("approve".into()));
-        let notice = rx.try_recv().expect("the answer must broadcast its own notice");
+        let notice = rx
+            .try_recv()
+            .expect("the answer must broadcast its own notice");
         let (_, resolution, _) = as_decision_resolved(&notice, "the original answer notice");
         assert_eq!(resolution, &DecisionResolution::Answered);
 
@@ -1041,7 +1113,8 @@ mod tests {
     }
 
     #[test]
-    fn answering_while_another_is_queued_produces_both_a_resolved_notice_and_a_distinct_promoted_request() {
+    fn answering_while_another_is_queued_produces_both_a_resolved_notice_and_a_distinct_promoted_request(
+    ) {
         let mut registry = DecisionRegistry::new();
         let (tx, mut rx) = broadcast::channel::<ServerMsg>(16);
         registry.configure_broadcast(tx);
@@ -1060,7 +1133,9 @@ mod tests {
 
         // Exactly one DecisionResolved notice was broadcast on the channel —
         // for A's answer — and it is not folded together with B's promotion.
-        let notice = rx.try_recv().expect("answering A must broadcast its own DecisionResolved notice");
+        let notice = rx
+            .try_recv()
+            .expect("answering A must broadcast its own DecisionResolved notice");
         let (wire_id, resolution, choice_id) = as_decision_resolved(&notice, "A's resolved notice");
         assert_eq!(wire_id, a_id);
         assert_eq!(resolution, &DecisionResolution::Answered);
@@ -1073,8 +1148,8 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_that_never_configures_a_broadcast_sender_still_resolves_requests_normally_with_no_panic()
-    {
+    fn a_registry_that_never_configures_a_broadcast_sender_still_resolves_requests_normally_with_no_panic(
+    ) {
         let mut registry = DecisionRegistry::new();
         let (a_id, mut rx_a, bcast_a) = submit_simple(&mut registry, "mother", "A?");
         assert!(bcast_a.is_some());
@@ -1085,8 +1160,12 @@ mod tests {
         // must still resolve/promote exactly as it does when configured.
         let outcome = registry.answer(&a_id, Some("approve".into()));
         let promoted = expect_promoted(outcome, "answering with no broadcast sender configured");
-        let (_, b_wire_id, _) = as_decision_request(&promoted, "promotion with no sender configured");
-        assert_eq!(rx_a.try_recv(), Ok(DecisionOutcome::Answered("approve".into())));
+        let (_, b_wire_id, _) =
+            as_decision_request(&promoted, "promotion with no sender configured");
+        assert_eq!(
+            rx_a.try_recv(),
+            Ok(DecisionOutcome::Answered("approve".into()))
+        );
 
         // timeout_request() with no sender configured: same — no panic, normal
         // resolution.
@@ -1155,7 +1234,10 @@ mod tests {
         let (a, _rx_a, _) = submit_simple(&mut registry, "mother", "A?");
         let (b, _rx_b, _) = submit_simple(&mut registry, "cody", "B?");
         assert!(registry.first_refusal(&a));
-        assert!(registry.first_refusal(&b), "refusing A's answer must not use up B's");
+        assert!(
+            registry.first_refusal(&b),
+            "refusing A's answer must not use up B's"
+        );
         assert!(!registry.first_refusal(&a));
         assert!(!registry.first_refusal(&b));
     }
@@ -1166,14 +1248,20 @@ mod tests {
         assert!(!registry.first_refusal("no-such-request"));
         let (request_id, _rx, _) = submit_simple(&mut registry, "mother", "Ship it?");
         assert!(!registry.first_refusal("no-such-request"));
-        assert!(registry.first_refusal(&request_id), "an unknown id must not disturb a real one");
+        assert!(
+            registry.first_refusal(&request_id),
+            "an unknown id must not disturb a real one"
+        );
     }
 
     #[test]
     fn a_refusal_for_a_decision_that_is_already_resolved_is_not_reported() {
         let mut registry = DecisionRegistry::new();
         let (answered, _rx1, _) = submit_simple(&mut registry, "mother", "Answered?");
-        expect_answered_with_no_promotion(registry.answer(&answered, Some("approve".into())), "answering");
+        expect_answered_with_no_promotion(
+            registry.answer(&answered, Some("approve".into())),
+            "answering",
+        );
         assert!(!registry.first_refusal(&answered));
 
         let (timed_out, _rx2, _) = submit_simple(&mut registry, "cody", "Timed out?");
@@ -1190,9 +1278,15 @@ mod tests {
         let mut registry = DecisionRegistry::new();
         let (first, _rx1, _) = submit_simple(&mut registry, "mother", "First?");
         let (second, _rx2, _) = submit_simple(&mut registry, "mother", "Second?");
-        assert!(!registry.first_refusal(&second), "nobody was shown the queued decision, so nothing was refused for it");
+        assert!(
+            !registry.first_refusal(&second),
+            "nobody was shown the queued decision, so nothing was refused for it"
+        );
 
-        expect_promoted(registry.answer(&first, Some("approve".into())), "answering the first promotes the second");
+        expect_promoted(
+            registry.answer(&first, Some("approve".into())),
+            "answering the first promotes the second",
+        );
         assert!(registry.first_refusal(&second));
     }
 
@@ -1201,8 +1295,14 @@ mod tests {
         let mut registry = DecisionRegistry::new();
         let (request_id, mut rx, _) = submit_simple(&mut registry, "mother", "Ship it?");
         assert!(registry.first_refusal(&request_id));
-        assert!(rx.try_recv().is_err(), "reporting a refusal must not resolve the decision");
-        expect_answered_with_no_promotion(registry.answer(&request_id, Some("approve".into())), "a later genuine answer");
+        assert!(
+            rx.try_recv().is_err(),
+            "reporting a refusal must not resolve the decision"
+        );
+        expect_answered_with_no_promotion(
+            registry.answer(&request_id, Some("approve".into())),
+            "a later genuine answer",
+        );
         assert!(matches!(rx.try_recv(), Ok(DecisionOutcome::Answered(id)) if id == "approve"));
     }
 }

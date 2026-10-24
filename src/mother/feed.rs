@@ -23,7 +23,10 @@ pub enum MotherSourceState {
     /// The latest `mother list` succeeded.
     Fresh { updated_at: DateTime<Utc> },
     /// The latest `mother list` failed; the jobs are from an earlier success.
-    Stale { reason: String, updated_at: DateTime<Utc> },
+    Stale {
+        reason: String,
+        updated_at: DateTime<Utc>,
+    },
     /// `mother list` has never succeeded.
     Error { reason: String },
 }
@@ -101,7 +104,10 @@ impl JobsFeed {
             if ticket <= current {
                 return false;
             }
-            match self.applied.compare_exchange(current, ticket, Ordering::SeqCst, Ordering::SeqCst) {
+            match self
+                .applied
+                .compare_exchange(current, ticket, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 Ok(_) => return true,
                 Err(seen) => current = seen,
             }
@@ -116,7 +122,12 @@ impl JobsFeed {
 
     /// [`JobsFeed::publish_jobs_at`], also recording how many jobs of that
     /// list could not be read.
-    pub fn publish_jobs_counted_at(&self, ticket: u64, jobs: Vec<MotherJob>, skipped: usize) -> bool {
+    pub fn publish_jobs_counted_at(
+        &self,
+        ticket: u64,
+        jobs: Vec<MotherJob>,
+        skipped: usize,
+    ) -> bool {
         if !self.claim(ticket) {
             return false;
         }
@@ -150,8 +161,9 @@ impl JobsFeed {
     /// Publish a successful `mother list`.
     pub fn publish_jobs(&self, jobs: Vec<MotherJob>) {
         self.jobs_tx.send_replace(jobs);
-        self.source_tx
-            .send_replace(MotherSourceState::Fresh { updated_at: Utc::now() });
+        self.source_tx.send_replace(MotherSourceState::Fresh {
+            updated_at: Utc::now(),
+        });
     }
 
     /// Record a failed `mother list`. The previous jobs stay readable but the
@@ -195,7 +207,7 @@ mod ticket_tests {
         let feed = JobsFeed::new();
         let poller = feed.begin(); // the 2 s poller starts a `mother list` ...
         let mutator = feed.begin(); // ... then a mutator starts its refresh
-        // The mutator's (post-mutation) list lands first.
+                                    // The mutator's (post-mutation) list lands first.
         assert!(feed.publish_jobs_at(mutator, vec![job("j", "cancelled")]));
         // The poller's older (pre-mutation) list finishes later: it must be discarded.
         assert!(!feed.publish_jobs_at(poller, vec![job("j", "running")]));

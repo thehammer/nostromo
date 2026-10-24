@@ -31,9 +31,10 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nostromo::approvals::audit::{AuditFilter, AuditLog, Entry, Event, RETENTION_DAYS};
 use nostromo::approvals::broker::{
-    restart_note_text, ApprovalBroker, BrokerParts, Incoming, Outcome, Presenter, SessionInfo, SessionSink,
-    ARRIVAL_WATCHDOG, INVALID_REQUEST_MESSAGE, APPROVAL_UNAVAILABLE_MESSAGE, NO_APP_MESSAGE, APPROVAL_TIMEOUT, RESTART_MESSAGE,
-    RESTART_NOTES_FILE, TIMED_OUT_MESSAGE, WATCHDOG_GRACE,
+    restart_note_text, ApprovalBroker, BrokerParts, Incoming, Outcome, Presenter, SessionInfo,
+    SessionSink, APPROVAL_TIMEOUT, APPROVAL_UNAVAILABLE_MESSAGE, ARRIVAL_WATCHDOG,
+    INVALID_REQUEST_MESSAGE, NO_APP_MESSAGE, RESTART_MESSAGE, RESTART_NOTES_FILE,
+    TIMED_OUT_MESSAGE, WATCHDOG_GRACE,
 };
 use nostromo::approvals::guard::{
     self, PaneInfo, PaneProbe, ProbeError, TmuxSocket, GUARD_MESSAGE,
@@ -519,7 +520,10 @@ async fn a_request_with_nobody_to_ask_is_denied_with_the_approval_unavailable_wo
     rig.submit("cli-1", value.clone());
     let outcome = rig.wait_outcome("toolu_1").await;
 
-    assert_eq!(rig.writes(), [("cli-1".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))]);
+    assert_eq!(
+        rig.writes(),
+        [("cli-1".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))]
+    );
     assert_eq!(
         APPROVAL_UNAVAILABLE_MESSAGE,
         "Nostromo's approval screen isn't available yet, so this was denied. Tell the user what you wanted to run and give them the exact command; do not retry it.",
@@ -599,7 +603,11 @@ async fn ask_user_question_and_exit_plan_mode_requests_get_the_same_approval_una
     );
 
     for id in ["toolu_q", "toolu_p"] {
-        assert_eq!(outcome_name(&rig.wait_outcome(id).await), "approval_unavailable", "{id}");
+        assert_eq!(
+            outcome_name(&rig.wait_outcome(id).await),
+            "approval_unavailable",
+            "{id}"
+        );
     }
 
     let mut writes = rig.writes();
@@ -614,7 +622,8 @@ async fn ask_user_question_and_exit_plan_mode_requests_get_the_same_approval_una
 }
 
 #[tokio::test(start_paused = true)]
-async fn every_ordinary_fixture_is_denied_approval_unavailable_with_one_response_and_one_outcome_each() {
+async fn every_ordinary_fixture_is_denied_approval_unavailable_with_one_response_and_one_outcome_each(
+) {
     let rig = Rig::new(Opts::default());
     let start = tokio::time::Instant::now();
 
@@ -1139,7 +1148,10 @@ async fn a_request_the_worker_never_got_to_is_denied_by_the_watchdog_and_the_wor
             watchdog_flag(&outcome),
             "and the log says the watchdog did it"
         );
-        assert_eq!(rig.writes(), [("cli-1".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))]);
+        assert_eq!(
+            rig.writes(),
+            [("cli-1".to_owned(), deny(APPROVAL_UNAVAILABLE_MESSAGE))]
+        );
 
         // The worker comes back: it finds nothing left to do.
         gate.release();
@@ -1460,7 +1472,10 @@ async fn withdrawing_something_unknown_or_already_ended_does_nothing() {
     rig.broker.on_cancel("nobody", "cli-1");
     rig.barrier().await;
 
-    assert_eq!(outcome_name(&rig.outcomes("toolu_1")[0]), "approval_unavailable");
+    assert_eq!(
+        outcome_name(&rig.outcomes("toolu_1")[0]),
+        "approval_unavailable"
+    );
     assert_eq!(rig.outcomes("toolu_1").len(), 1);
     assert_eq!(rig.writes().len(), 1);
 }
@@ -1846,13 +1861,21 @@ async fn a_request_the_caller_had_to_deny_itself_is_still_on_record_as_approval_
 fn counts_for_tag(rig: &Rig, tag: &str) -> (usize, usize) {
     let entries = rig.entries();
     let mine = entries.iter().filter(|e| e.tag.as_deref() == Some(tag));
-    let requests = mine.clone().filter(|e| matches!(e.event, Event::Request { .. })).count();
-    let outcomes = mine.filter(|e| matches!(e.event, Event::Outcome { .. })).count();
+    let requests = mine
+        .clone()
+        .filter(|e| matches!(e.event, Event::Request { .. }))
+        .count();
+    let outcomes = mine
+        .filter(|e| matches!(e.event, Event::Outcome { .. }))
+        .count();
     (requests, outcomes)
 }
 
 fn write_failed() -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::BrokenPipe, "the pipe is closed"))
+    Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "the pipe is closed",
+    ))
 }
 
 #[tokio::test(start_paused = true)]
@@ -1863,11 +1886,12 @@ async fn the_readers_own_deny_is_logged_as_request_then_answer_then_outcome() {
     let seen = std::cell::Cell::new(None);
     let calls = std::cell::Cell::new(0);
 
-    rig.broker.record_unqueued_denial(T, rig.generation, &value, || {
-        calls.set(calls.get() + 1);
-        seen.set(Some(counts_for_tag(&rig, T)));
-        Ok(())
-    });
+    rig.broker
+        .record_unqueued_denial(T, rig.generation, &value, || {
+            calls.set(calls.get() + 1);
+            seen.set(Some(counts_for_tag(&rig, T)));
+            Ok(())
+        });
 
     assert_eq!(calls.get(), 1, "the answer is written exactly once");
     assert_eq!(
@@ -1899,7 +1923,8 @@ async fn a_readers_own_deny_that_could_not_be_written_is_logged_deny_write_faile
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unreadable_request_the_reader_denies_is_logged_as_request_then_answer_then_invalid_request() {
+async fn an_unreadable_request_the_reader_denies_is_logged_as_request_then_answer_then_invalid_request(
+) {
     let rig = Rig::new(Opts::default());
     let seen = std::cell::Cell::new(None);
     let calls = std::cell::Cell::new(0);
@@ -1912,7 +1937,11 @@ async fn an_unreadable_request_the_reader_denies_is_logged_as_request_then_answe
         });
 
     assert_eq!(calls.get(), 1, "one answer");
-    assert_eq!(seen.get(), Some((1, 0)), "request first, outcome after the answer");
+    assert_eq!(
+        seen.get(),
+        Some((1, 0)),
+        "request first, outcome after the answer"
+    );
     let entries: Vec<Entry> = rig
         .entries()
         .into_iter()
@@ -1931,11 +1960,17 @@ async fn an_unreadable_request_the_reader_denies_is_logged_as_request_then_answe
     let Event::Request { tool_name, .. } = &requests[0].event else {
         unreachable!()
     };
-    assert_eq!(tool_name, "Bash", "the tool name the reader could still read");
+    assert_eq!(
+        tool_name, "Bash",
+        "the tool name the reader could still read"
+    );
     assert_eq!(requests[0].session_id.as_deref(), Some("sid-t1"));
     assert_eq!(requests[0].agent.as_deref(), Some("cody"));
     assert!(requests[0].ts <= outcomes[0].ts);
-    assert!(rig.writes().is_empty(), "the caller writes the deny; the broker only records it");
+    assert!(
+        rig.writes().is_empty(),
+        "the caller writes the deny; the broker only records it"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1976,7 +2011,8 @@ async fn an_unreadable_request_whose_deny_could_not_be_written_is_logged_deny_wr
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_request_whose_id_could_not_be_read_leaves_one_request_unparseable_entry_and_nothing_else() {
+async fn a_request_whose_id_could_not_be_read_leaves_one_request_unparseable_entry_and_nothing_else(
+) {
     let rig = Rig::new(Opts::default());
 
     rig.broker.record_unparseable(T, rig.generation);
@@ -1988,7 +2024,10 @@ async fn a_request_whose_id_could_not_be_read_leaves_one_request_unparseable_ent
     assert_eq!(entry.tag.as_deref(), Some(T));
     assert_eq!(entry.request_id, None, "there is no request id to record");
     assert_eq!(entry.tool_use_id, None);
-    assert!(rig.writes().is_empty(), "nothing can be written: there is no id to answer under");
+    assert!(
+        rig.writes().is_empty(),
+        "nothing can be written: there is no id to answer under"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -2331,14 +2370,22 @@ async fn drive(ending: &str) -> Run {
 async fn every_ending_writes_the_right_deny_or_nothing_logs_one_outcome_and_never_allows() {
     // (ending, the outcome entry it leaves, what the agent is told, if anything)
     let table: [(&str, &str, Option<&str>); 9] = [
-        ("approval_unavailable", "approval_unavailable", Some(APPROVAL_UNAVAILABLE_MESSAGE)),
+        (
+            "approval_unavailable",
+            "approval_unavailable",
+            Some(APPROVAL_UNAVAILABLE_MESSAGE),
+        ),
         ("timed_out", "timed_out", Some(TIMED_OUT_MESSAGE)),
         ("restart", "restart", Some(RESTART_MESSAGE)),
         ("restart_crash", "restart_crash", None),
         ("withdrawn", "withdrawn", None),
         ("cancelled", "cancelled", None),
         ("guard_blocked", "guard_blocked", Some(GUARD_MESSAGE)),
-        ("watchdog", "approval_unavailable", Some(APPROVAL_UNAVAILABLE_MESSAGE)),
+        (
+            "watchdog",
+            "approval_unavailable",
+            Some(APPROVAL_UNAVAILABLE_MESSAGE),
+        ),
         (
             "invalid_request",
             "invalid_request",

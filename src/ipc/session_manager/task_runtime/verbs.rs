@@ -20,7 +20,9 @@ use super::TaskRuntime;
 use crate::ipc::protocol::{
     TaskOutputOutcome, TaskOutputSource, TaskStopOutcome, TASK_OUTPUT_MAX_BYTES,
 };
-use crate::ipc::task_output::{is_valid_task_id, sanitize, OutputFileError, OutputFileValidator, RangeRead};
+use crate::ipc::task_output::{
+    is_valid_task_id, sanitize, OutputFileError, OutputFileValidator, RangeRead,
+};
 use crate::ipc::tasks::{PreviewTarget, TaskLabel};
 
 /// The id of the `stop_task` the probe sends. No task has it: a CLI that can
@@ -90,7 +92,10 @@ impl OutputReply {
 
 /// Ask the CLI to stop `task_id`. The task's status does not change here: it
 /// changes when the CLI reports the task ended.
-pub(in crate::ipc::session_manager) async fn stop_task(shared: &Shared, task_id: &str) -> StopReport {
+pub(in crate::ipc::session_manager) async fn stop_task(
+    shared: &Shared,
+    task_id: &str,
+) -> StopReport {
     let runtime = &shared.tasks;
     let label = {
         let lookup = runtime.tool_lookup();
@@ -104,7 +109,11 @@ pub(in crate::ipc::session_manager) async fn stop_task(shared: &Shared, task_id:
         session_id: Some(shared.ctx.session_id.clone()).filter(|s| !s.is_empty()),
     };
     let Some(label) = label else {
-        return report(TaskStopOutcome::NotRunning, Some("the task is not running".to_owned()), None);
+        return report(
+            TaskStopOutcome::NotRunning,
+            Some("the task is not running".to_owned()),
+            None,
+        );
     };
 
     let reply = control_within(
@@ -119,7 +128,9 @@ pub(in crate::ipc::session_manager) async fn stop_task(shared: &Shared, task_id:
             return report(TaskStopOutcome::Accepted, None, Some(label));
         }
         // The stop may still land: the mark stays for the end it explains.
-        Err(f) if f.timed_out => return report(TaskStopOutcome::Timeout, Some(f.reason), Some(label)),
+        Err(f) if f.timed_out => {
+            return report(TaskStopOutcome::Timeout, Some(f.reason), Some(label))
+        }
         Err(f) => f,
     };
     // Every other failure means no stop is under way.
@@ -198,7 +209,9 @@ pub(in crate::ipc::session_manager) async fn read_output(
     let max = (max_bytes.min(TASK_OUTPUT_MAX_BYTES) as usize).max(MIN_READ_BYTES);
     let target = if is_valid_task_id(task_id) {
         let lookup = runtime.tool_lookup();
-        lock_recover(&runtime.hub).registry().output_target(task_id, &lookup)
+        lock_recover(&runtime.hub)
+            .registry()
+            .output_target(task_id, &lookup)
     } else {
         None
     };
@@ -206,7 +219,10 @@ pub(in crate::ipc::session_manager) async fn read_output(
         return OutputReply::without_text(TaskOutputOutcome::Error, "the session has no such task");
     };
     if !kind.has_output() {
-        return OutputReply::without_text(TaskOutputOutcome::Unavailable, "this kind of task has no output");
+        return OutputReply::without_text(
+            TaskOutputOutcome::Unavailable,
+            "this kind of task has no output",
+        );
     }
 
     let finished = target.terminal;
@@ -222,7 +238,10 @@ pub(in crate::ipc::session_manager) async fn read_output(
     if let Some(reply) = cli_tail_reply(shared, &target, offset, max).await {
         return reply;
     }
-    OutputReply::without_text(TaskOutputOutcome::Unavailable, "the output is no longer available")
+    OutputReply::without_text(
+        TaskOutputOutcome::Unavailable,
+        "the output is no longer available",
+    )
 }
 
 fn file_reply(range: RangeRead) -> OutputReply {
@@ -316,14 +335,18 @@ impl TaskRuntime {
     pub(super) async fn first_readable<T: Send + 'static>(
         &self,
         target: &PreviewTarget,
-        read: impl Fn(&OutputFileValidator, &Path, &str) -> Result<T, OutputFileError> + Clone + Send + 'static,
+        read: impl Fn(&OutputFileValidator, &Path, &str) -> Result<T, OutputFileError>
+            + Clone
+            + Send
+            + 'static,
     ) -> Option<T> {
         for path in self.candidate_paths(target) {
             let validator = lock_recover(&self.files).validator.clone();
             let id = target.task_id.clone();
             let read_path = path.clone();
             let read = read.clone();
-            let result = tokio::task::spawn_blocking(move || read(&validator, &read_path, &id)).await;
+            let result =
+                tokio::task::spawn_blocking(move || read(&validator, &read_path, &id)).await;
             if let Ok(Ok(value)) = result {
                 if let Some(dir) = path.parent() {
                     lock_recover(&self.files).known_dir = Some(dir.to_path_buf());
@@ -337,7 +360,11 @@ impl TaskRuntime {
     /// What the CLI's answers say about stopping tasks. A `true` never
     /// overrides what is known; a `false` (the CLI said it does not know the
     /// request) always does. A change is published as a new snapshot.
-    fn learn_stop_supported(&self, tx: &tokio::sync::broadcast::Sender<super::super::SessionEvent>, supported: bool) {
+    fn learn_stop_supported(
+        &self,
+        tx: &tokio::sync::broadcast::Sender<super::super::SessionEvent>,
+        supported: bool,
+    ) {
         {
             let mut known = lock_recover(&self.stop_supported);
             let next = match (*known, supported) {

@@ -107,7 +107,9 @@ impl FredCalendarNativeSource {
                     return;
                 }
             };
-            let source = FredCalendarNativeSource { timing: FredTiming::default() };
+            let source = FredCalendarNativeSource {
+                timing: FredTiming::default(),
+            };
             source.run(graph, tx, &mut dirty_rx).await;
         });
 
@@ -189,7 +191,10 @@ impl FredCalendarNativeSource {
                 Some(wait) => {
                     let wait = wait.max(poll);
                     let retry_at = Utc::now() + ChronoDuration::from_std(wait).unwrap_or_default();
-                    (CalendarSnapshot::rate_limited(previous, reason, retry_at), Some(wait))
+                    (
+                        CalendarSnapshot::rate_limited(previous, reason, retry_at),
+                        Some(wait),
+                    )
                 }
                 None => (CalendarSnapshot::failed(previous, reason), None),
             }
@@ -212,7 +217,10 @@ impl FredCalendarNativeSource {
             Ok(events) => {
                 debug!(count = events.len(), "calendar fetch received");
                 backoff.succeeded();
-                (build_snapshot(events, Utc::now(), (window_start, window_end)), None)
+                (
+                    build_snapshot(events, Utc::now(), (window_start, window_end)),
+                    None,
+                )
             }
             Err(e) => {
                 warn!("calendar fetch failed: {e:#}");
@@ -237,14 +245,23 @@ impl FredCalendarNativeSource {
 pub fn today_window<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> (DateTime<Utc>, DateTime<Utc>) {
     let today = now.with_timezone(tz).date_naive();
     let tomorrow = today.succ_opt().unwrap_or(today);
-    (local_midnight(today, tz, now), local_midnight(tomorrow, tz, now + ChronoDuration::hours(24)))
+    (
+        local_midnight(today, tz, now),
+        local_midnight(tomorrow, tz, now + ChronoDuration::hours(24)),
+    )
 }
 
 /// Midnight starting `date` in `tz`. A zone where midnight does not exist (a
 /// DST jump at 00:00) starts the day at the first valid instant after it.
-fn local_midnight<Tz: TimeZone>(date: NaiveDate, tz: &Tz, fallback: DateTime<Utc>) -> DateTime<Utc> {
+fn local_midnight<Tz: TimeZone>(
+    date: NaiveDate,
+    tz: &Tz,
+    fallback: DateTime<Utc>,
+) -> DateTime<Utc> {
     for hour in 0..4 {
-        let Some(naive) = date.and_hms_opt(hour, 0, 0) else { continue };
+        let Some(naive) = date.and_hms_opt(hour, 0, 0) else {
+            continue;
+        };
         if let Some(local) = tz.from_local_datetime(&naive).earliest() {
             return local.with_timezone(&Utc);
         }
@@ -329,7 +346,11 @@ fn build_snapshot(
                 .unwrap_or_default();
 
             let is_cancelled = forced_cancelled || ev.is_cancelled == Some(true);
-            let status = if is_cancelled { "cancelled".to_owned() } else { response.clone() };
+            let status = if is_cancelled {
+                "cancelled".to_owned()
+            } else {
+                response.clone()
+            };
 
             let is_now = !is_all_day
                 && status != "cancelled"
@@ -386,7 +407,11 @@ fn build_snapshot(
         None => (None, "sage".to_owned()),
     };
 
-    let state = if events.is_empty() { SourceState::Empty } else { SourceState::Fresh };
+    let state = if events.is_empty() {
+        SourceState::Empty
+    } else {
+        SourceState::Fresh
+    };
     CalendarSnapshot {
         events,
         next: next_event,

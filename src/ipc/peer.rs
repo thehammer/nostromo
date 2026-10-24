@@ -191,23 +191,30 @@ impl SensitiveTags {
     fn open(path: PathBuf, writer: RegistryWriter, has_stored_sessions: bool) -> Self {
         let unreadable = |why: &dyn std::fmt::Display| {
             warn!(path = %path.display(), "sensitive-tag registry unreadable ({why}); treating every tag as sensitive");
-            Registered { unreadable: true, ..Registered::default() }
+            Registered {
+                unreadable: true,
+                ..Registered::default()
+            }
         };
         let stale_path = stale_path_beside(&path);
         let mut from_stale = false;
         let read = match std::fs::read(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::fs::read(&stale_path) {
-                Ok(bytes) => {
-                    from_stale = true;
-                    Ok(bytes)
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::read(&stale_path) {
+                    Ok(bytes) => {
+                        from_stale = true;
+                        Ok(bytes)
+                    }
+                    Err(_) => Err(e),
                 }
-                Err(_) => Err(e),
-            },
+            }
             other => other,
         };
         let mut registry_missing = false;
         let mut registered = match read {
-            Ok(bytes) => serde_json::from_slice::<Registered>(&bytes).unwrap_or_else(|e| unreadable(&e)),
+            Ok(bytes) => {
+                serde_json::from_slice::<Registered>(&bytes).unwrap_or_else(|e| unreadable(&e))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 registry_missing = true;
                 Registered::default()
@@ -341,7 +348,11 @@ impl SensitiveTags {
     /// the marking still propagates (a focus a driven session creates is driven
     /// too) and covers any future path that lets a network peer write.
     pub fn mark_network_driven(&self, tag: &str) {
-        self.inner.write().unwrap().network_driven.insert(tag.to_string());
+        self.inner
+            .write()
+            .unwrap()
+            .network_driven
+            .insert(tag.to_string());
     }
 
     pub fn is_network_driven(&self, tag: &str) -> bool {
@@ -378,7 +389,9 @@ impl SensitiveTags {
             registered.ephemeral_bytes = 0;
         }
         registered.ephemeral_bytes += entry_bytes;
-        registered.ephemeral.insert(key.into_owned(), opaque.clone());
+        registered
+            .ephemeral
+            .insert(key.into_owned(), opaque.clone());
         opaque
     }
 
@@ -421,8 +434,13 @@ impl SensitiveTags {
 
     /// Leave the degraded sentinel; `false` when it could not be written.
     fn write_sentinel(&self) -> bool {
-        let Some(sentinel) = self.sentinel_path() else { return true };
-        match std::fs::write(&sentinel, b"registrations may be missing from sensitive-tags.json\n") {
+        let Some(sentinel) = self.sentinel_path() else {
+            return true;
+        };
+        match std::fs::write(
+            &sentinel,
+            b"registrations may be missing from sensitive-tags.json\n",
+        ) {
             Ok(()) => true,
             Err(e) => {
                 warn!(path = %sentinel.display(), "sensitive-tag registry: could not write the degraded sentinel: {e}");
@@ -478,7 +496,9 @@ impl SensitiveTags {
     }
 
     fn sentinel_path(&self) -> Option<PathBuf> {
-        self.path.as_ref().map(|p| p.with_file_name("sensitive-tags.dirty"))
+        self.path
+            .as_ref()
+            .map(|p| p.with_file_name("sensitive-tags.dirty"))
     }
 }
 
@@ -750,13 +770,22 @@ pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
 pub fn is_refusal(msg: &ServerMsg) -> bool {
     let is_secure_refusal = |code: &str| code == "requires_secure_connection";
     match msg {
-        ServerMsg::WorkDetail { result: WorkResult::Err(e), .. }
-        | ServerMsg::WorkSendPreview { result: WorkResult::Err(e), .. }
-        | ServerMsg::WorkSendResult { result: WorkResult::Err(e), .. } => {
-            is_secure_refusal(&e.code)
+        ServerMsg::WorkDetail {
+            result: WorkResult::Err(e),
+            ..
         }
+        | ServerMsg::WorkSendPreview {
+            result: WorkResult::Err(e),
+            ..
+        }
+        | ServerMsg::WorkSendResult {
+            result: WorkResult::Err(e),
+            ..
+        } => is_secure_refusal(&e.code),
         ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),
-        ServerMsg::ModelRequestResult { code: Some(code), .. } => is_secure_refusal(code),
+        ServerMsg::ModelRequestResult {
+            code: Some(code), ..
+        } => is_secure_refusal(code),
         // The typed refusals of the two task verbs: a refusal with no text.
         ServerMsg::SessionTaskStopResult {
             outcome: TaskStopOutcome::Refused,
@@ -799,7 +828,11 @@ pub fn outbound(trust: PeerTrust, msg: ServerMsg, tags: &SensitiveTags) -> Optio
     if !may_receive(trust, &msg, tags) {
         return None;
     }
-    Some(if trust.is_network() { redact_for_network(msg, tags) } else { msg })
+    Some(if trust.is_network() {
+        redact_for_network(msg, tags)
+    } else {
+        msg
+    })
 }
 
 // ── client → server classification ───────────────────────────────────────────
@@ -1015,12 +1048,12 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
         metas
     }
     match msg {
-        ServerMsg::FocusListResp { focuses } => {
-            ServerMsg::FocusListResp { focuses: redact_all(focuses, tags) }
-        }
-        ServerMsg::FocusRegistryUpdated { focuses } => {
-            ServerMsg::FocusRegistryUpdated { focuses: redact_all(focuses, tags) }
-        }
+        ServerMsg::FocusListResp { focuses } => ServerMsg::FocusListResp {
+            focuses: redact_all(focuses, tags),
+        },
+        ServerMsg::FocusRegistryUpdated { focuses } => ServerMsg::FocusRegistryUpdated {
+            focuses: redact_all(focuses, tags),
+        },
         ServerMsg::FocusCreated { mut meta } => {
             redact_meta(&mut meta, tags);
             ServerMsg::FocusCreated { meta }
@@ -1078,13 +1111,14 @@ pub fn withheld_msg() -> ServerMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::work::{
-        PicksSnapshot, SourceState, SourceStatus, WorkResult, WorkSource,
-    };
+    use crate::data::work::{PicksSnapshot, SourceState, SourceStatus, WorkResult, WorkSource};
 
     #[test]
     fn unix_peers_are_local_and_tcp_peers_are_network() {
-        assert_eq!(PeerTrust::from_transport(Transport::Unix), PeerTrust::LocalOther);
+        assert_eq!(
+            PeerTrust::from_transport(Transport::Unix),
+            PeerTrust::LocalOther
+        );
         assert_eq!(PeerTrust::from_transport(Transport::Tcp), PeerTrust::Tcp);
         assert!(!PeerTrust::LocalOther.is_network());
         assert!(!PeerTrust::OperatorApp.is_network());
@@ -1104,14 +1138,34 @@ mod tests {
             complete: false,
         };
         let sensitive = [
-            ServerMsg::TeriState { todos: Default::default() },
-            ServerMsg::FredState { mailbox: Default::default(), calendar: Default::default() },
+            ServerMsg::TeriState {
+                todos: Default::default(),
+            },
+            ServerMsg::FredState {
+                mailbox: Default::default(),
+                calendar: Default::default(),
+            },
             ServerMsg::WorkSourceStatus { status },
-            ServerMsg::WorkSnapshot { source: WorkSource::Todos, group: None, items: vec![] },
-            ServerMsg::TeriPicks { picks: PicksSnapshot::default() },
-            ServerMsg::WorkDetail { request_id: "r".into(), result: WorkResult::err("x", "y") },
-            ServerMsg::WorkSendPreview { request_id: "r".into(), result: WorkResult::err("x", "y") },
-            ServerMsg::WorkSendResult { request_id: "r".into(), result: WorkResult::err("x", "y") },
+            ServerMsg::WorkSnapshot {
+                source: WorkSource::Todos,
+                group: None,
+                items: vec![],
+            },
+            ServerMsg::TeriPicks {
+                picks: PicksSnapshot::default(),
+            },
+            ServerMsg::WorkDetail {
+                request_id: "r".into(),
+                result: WorkResult::err("x", "y"),
+            },
+            ServerMsg::WorkSendPreview {
+                request_id: "r".into(),
+                result: WorkResult::err("x", "y"),
+            },
+            ServerMsg::WorkSendResult {
+                request_id: "r".into(),
+                result: WorkResult::err("x", "y"),
+            },
         ];
         for msg in &sensitive {
             assert!(is_sensitive_server_msg(msg).is_sensitive(), "{msg:?}");
@@ -1133,10 +1187,21 @@ mod tests {
     #[test]
     fn the_new_client_requests_are_all_sensitive() {
         let sensitive = [
-            ClientMsg::WorkDetailRequest { request_id: "r".into(), item_id: "i".into() },
-            ClientMsg::WorkRefresh { source: None, fred: false },
-            ClientMsg::PicksRefresh { reason: "manual".into() },
-            ClientMsg::WorkSendPreviewRequest { request_id: "r".into(), item_id: "i".into() },
+            ClientMsg::WorkDetailRequest {
+                request_id: "r".into(),
+                item_id: "i".into(),
+            },
+            ClientMsg::WorkRefresh {
+                source: None,
+                fred: false,
+            },
+            ClientMsg::PicksRefresh {
+                reason: "manual".into(),
+            },
+            ClientMsg::WorkSendPreviewRequest {
+                request_id: "r".into(),
+                item_id: "i".into(),
+            },
             ClientMsg::WorkSend {
                 request_id: "r".into(),
                 item_id: "i".into(),
@@ -1147,7 +1212,10 @@ mod tests {
                 instruction: "c".into(),
                 allow_duplicate: false,
             },
-            ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },
+            ClientMsg::FredSeed {
+                request_id: "r".into(),
+                text: "t".into(),
+            },
         ];
         for msg in &sensitive {
             assert!(refused_for_network(msg), "{msg:?}");
@@ -1184,11 +1252,15 @@ mod tests {
         };
         for msg in [
             ServerMsg::FocusCreated { meta: meta.clone() },
-            ServerMsg::FocusRegistryUpdated { focuses: vec![meta.clone()] },
-            ServerMsg::FocusListResp { focuses: vec![meta.clone()] },
+            ServerMsg::FocusRegistryUpdated {
+                focuses: vec![meta.clone()],
+            },
+            ServerMsg::FocusListResp {
+                focuses: vec![meta.clone()],
+            },
         ] {
-            let json =
-                serde_json::to_string(&redact_for_network(msg, &SensitiveTags::in_memory())).unwrap();
+            let json = serde_json::to_string(&redact_for_network(msg, &SensitiveTags::in_memory()))
+                .unwrap();
             assert!(!json.contains("/Users/x/repo"), "path leaked: {json}");
             // The label is withheld from network peers too (it can be a Jira
             // key or doc title); an ordinary focus's identity is kept.
@@ -1253,7 +1325,10 @@ mod tests {
         // proxy to the Teri/Fred tools (see `refused_for_network`).
         assert!(refuse_for_network(&spawn("anything", "cody"), &tags));
         // Detaching only releases the peer's own attachment.
-        assert!(!refuse_for_network(&ClientMsg::SessionDetach { tag: "fred".into() }, &tags));
+        assert!(!refuse_for_network(
+            &ClientMsg::SessionDetach { tag: "fred".into() },
+            &tags
+        ));
     }
 
     #[test]
@@ -1265,9 +1340,21 @@ mod tests {
             message: "m".into(),
         };
         assert!(!may_receive(PeerTrust::Tcp, &notification("fred"), &tags));
-        assert!(!may_receive(PeerTrust::Tcp, &notification("cody-core-1"), &tags));
-        assert!(may_receive(PeerTrust::Tcp, &notification("cody-other"), &tags));
-        assert!(may_receive(PeerTrust::LocalOther, &notification("fred"), &tags));
+        assert!(!may_receive(
+            PeerTrust::Tcp,
+            &notification("cody-core-1"),
+            &tags
+        ));
+        assert!(may_receive(
+            PeerTrust::Tcp,
+            &notification("cody-other"),
+            &tags
+        ));
+        assert!(may_receive(
+            PeerTrust::LocalOther,
+            &notification("fred"),
+            &tags
+        ));
 
         let event = |focus_tag: Option<&str>| {
             ServerMsg::Activity(crate::agent_bus::ActivityEvent {
@@ -1286,7 +1373,11 @@ mod tests {
                 seq: None,
             })
         };
-        assert!(may_receive(PeerTrust::Tcp, &event(Some("cody-other")), &tags));
+        assert!(may_receive(
+            PeerTrust::Tcp,
+            &event(Some("cody-other")),
+            &tags
+        ));
         assert!(!may_receive(PeerTrust::Tcp, &event(Some("teri")), &tags));
         assert!(!may_receive(PeerTrust::Tcp, &event(None), &tags));
         assert!(may_receive(PeerTrust::LocalOther, &event(None), &tags));
@@ -1298,7 +1389,11 @@ mod tests {
             request_id: "r".into(),
             result: WorkResult::Err(crate::data::work::WorkError::requires_secure_connection()),
         };
-        assert!(may_receive(PeerTrust::Tcp, &refusal, &SensitiveTags::in_memory()));
+        assert!(may_receive(
+            PeerTrust::Tcp,
+            &refusal,
+            &SensitiveTags::in_memory()
+        ));
     }
 
     #[test]
@@ -1319,7 +1414,9 @@ mod tests {
             select_for_client: None,
         };
         let ServerMsg::FocusCreated { meta: derived } = redact_for_network(
-            ServerMsg::FocusCreated { meta: meta("cody-secret-jira-title", "cody") },
+            ServerMsg::FocusCreated {
+                meta: meta("cody-secret-jira-title", "cody"),
+            },
             &tags,
         ) else {
             panic!("expected FocusCreated");
@@ -1330,13 +1427,21 @@ mod tests {
         assert_eq!(derived.tag, tags.opaque_tag("cody-secret-jira-title"));
         assert_ne!(derived.tag, tags.opaque_tag("cody-other"));
 
-        let ServerMsg::FocusCreated { meta: fred } =
-            redact_for_network(ServerMsg::FocusCreated { meta: meta("fred", "fred") }, &tags)
-        else {
+        let ServerMsg::FocusCreated { meta: fred } = redact_for_network(
+            ServerMsg::FocusCreated {
+                meta: meta("fred", "fred"),
+            },
+            &tags,
+        ) else {
             panic!("expected FocusCreated");
         };
-        assert_eq!((fred.tag.as_str(), fred.display_name.as_str()), ("fred", "fred"));
-        assert!(fred.label.is_none() && fred.session_summary.is_none() && fred.project_path.is_none());
+        assert_eq!(
+            (fred.tag.as_str(), fred.display_name.as_str()),
+            ("fred", "fred")
+        );
+        assert!(
+            fred.label.is_none() && fred.session_summary.is_none() && fred.project_path.is_none()
+        );
     }
 
     #[test]
@@ -1367,7 +1472,10 @@ mod tests {
         ) else {
             panic!("expected SessionListResp");
         };
-        assert_eq!(sessions.iter().map(|s| s.tag.as_str()).collect::<Vec<_>>(), vec!["cody-ok"]);
+        assert_eq!(
+            sessions.iter().map(|s| s.tag.as_str()).collect::<Vec<_>>(),
+            vec!["cody-ok"]
+        );
     }
 
     #[test]
@@ -1380,7 +1488,11 @@ mod tests {
         assert!(tags.tag_is_sensitive("cody-anything"));
         assert!(tags.job_is_sensitive("any-job"));
         tags.mark_tag("cody-x");
-        assert_eq!(std::fs::read(&path).unwrap(), b"{not json", "must not overwrite the evidence");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{not json",
+            "must not overwrite the evidence"
+        );
     }
 
     #[test]
@@ -1389,7 +1501,11 @@ mod tests {
         let path = registry_path_beside(&dir.path().join("daemon-sessions.json"));
         std::fs::write(&path, b"{not json").unwrap(); // unreadable: every tag is sensitive
         for tags in [SensitiveTags::persisted(path), SensitiveTags::in_memory()] {
-            for (tag, agent) in [("cody-secret-title", "cody"), ("x:fred", "cody"), ("anything", "teri:teri")] {
+            for (tag, agent) in [
+                ("cody-secret-title", "cody"),
+                ("x:fred", "cody"),
+                ("anything", "teri:teri"),
+            ] {
                 let meta = FocusMeta {
                     initial_model: None,
                     initial_effort: None,
@@ -1412,7 +1528,11 @@ mod tests {
                 let sensitive = tags.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent);
                 if sensitive {
                     assert_ne!(meta.tag, tag, "{tag} passed through");
-                    assert!(!meta.tag.contains("secret") && !meta.tag.contains("fred"), "{}", meta.tag);
+                    assert!(
+                        !meta.tag.contains("secret") && !meta.tag.contains("fred"),
+                        "{}",
+                        meta.tag
+                    );
                     assert_eq!(meta.display_name, agent);
                 } else {
                     assert_eq!(meta.tag, tag);
@@ -1429,7 +1549,10 @@ mod tests {
             job_id: id.into(),
             action: crate::ipc::protocol::MotherActionKind::Cancel,
         };
-        let resume = |id: &str| ClientMsg::MotherResume { job_id: id.into(), answer: "a".into() };
+        let resume = |id: &str| ClientMsg::MotherResume {
+            job_id: id.into(),
+            answer: "a".into(),
+        };
         assert!(refuse_for_network(&action("job-work"), &tags));
         assert!(refuse_for_network(&resume("job-work"), &tags));
         // Default-deny: an ordinary job is refused too (resume feeds the job's
@@ -1446,8 +1569,16 @@ mod tests {
     /// One of every `ClientMsg` variant, for exhaustive classification checks.
     fn every_client_msg() -> Vec<ClientMsg> {
         vec![
-            ClientMsg::Hello { client_id: "c".into(), protocol_version: 4, client_kind: None },
-            ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false },
+            ClientMsg::Hello {
+                client_id: "c".into(),
+                protocol_version: 4,
+                client_kind: None,
+            },
+            ClientMsg::Subscribe {
+                topics: vec![],
+                renders_decisions: false,
+                renders_approvals: false,
+            },
             ClientMsg::Ping,
             ClientMsg::PtySpawn {
                 pty_id: "p".into(),
@@ -1460,8 +1591,15 @@ mod tests {
             },
             ClientMsg::PtyAttach { pty_id: "p".into() },
             ClientMsg::PtyDetach { pty_id: "p".into() },
-            ClientMsg::PtyInput { pty_id: "p".into(), bytes: b"ls\n".to_vec() },
-            ClientMsg::PtyResize { pty_id: "p".into(), cols: 80, rows: 24 },
+            ClientMsg::PtyInput {
+                pty_id: "p".into(),
+                bytes: b"ls\n".to_vec(),
+            },
+            ClientMsg::PtyResize {
+                pty_id: "p".into(),
+                cols: 80,
+                rows: 24,
+            },
             ClientMsg::PtyKill { pty_id: "p".into() },
             ClientMsg::PtyList,
             ClientMsg::SessionSpawn {
@@ -1474,10 +1612,20 @@ mod tests {
             },
             ClientMsg::SessionAttach { tag: "x1".into() },
             ClientMsg::SessionDetach { tag: "x1".into() },
-            ClientMsg::SessionSend { tag: "x1".into(), text: "t".into(), images: vec![] },
-            ClientMsg::ClosePane { tag: "x1".into(), pane_id: "p".into() },
+            ClientMsg::SessionSend {
+                tag: "x1".into(),
+                text: "t".into(),
+                images: vec![],
+            },
+            ClientMsg::ClosePane {
+                tag: "x1".into(),
+                pane_id: "p".into(),
+            },
             ClientMsg::SessionInterrupt { tag: "x1".into() },
-            ClientMsg::SessionControl { tag: "x1".into(), action: SessionAction::Stop },
+            ClientMsg::SessionControl {
+                tag: "x1".into(),
+                action: SessionAction::Stop,
+            },
             ClientMsg::SessionAnswerPermission {
                 tag: "x1".into(),
                 request_id: "r".into(),
@@ -1486,10 +1634,25 @@ mod tests {
             ClientMsg::SessionList,
             ClientMsg::FocusRegistryPush { focuses: vec![] },
             ClientMsg::FocusList,
-            ClientMsg::MotherAction { job_id: "j".into(), action: MotherActionKind::Cancel },
-            ClientMsg::MotherResume { job_id: "j".into(), answer: "a".into() },
-            ClientMsg::PerriAction { action: "clear".into(), pr_number: None, repo: None, tag: None },
-            ClientMsg::DecisionAnswer { request_id: "r".into(), choice_id: None, operator_nonce: None },
+            ClientMsg::MotherAction {
+                job_id: "j".into(),
+                action: MotherActionKind::Cancel,
+            },
+            ClientMsg::MotherResume {
+                job_id: "j".into(),
+                answer: "a".into(),
+            },
+            ClientMsg::PerriAction {
+                action: "clear".into(),
+                pr_number: None,
+                repo: None,
+                tag: None,
+            },
+            ClientMsg::DecisionAnswer {
+                request_id: "r".into(),
+                choice_id: None,
+                operator_nonce: None,
+            },
             ClientMsg::ActivitySnapshotRequest { tag: "x1".into() },
             ClientMsg::RenderedShape {
                 tag: "x1".into(),
@@ -1497,10 +1660,21 @@ mod tests {
                 pane_ids: vec![],
                 rendered_at: chrono::Utc::now(),
             },
-            ClientMsg::WorkDetailRequest { request_id: "r".into(), item_id: "i".into() },
-            ClientMsg::WorkRefresh { source: None, fred: false },
-            ClientMsg::PicksRefresh { reason: "manual".into() },
-            ClientMsg::WorkSendPreviewRequest { request_id: "r".into(), item_id: "i".into() },
+            ClientMsg::WorkDetailRequest {
+                request_id: "r".into(),
+                item_id: "i".into(),
+            },
+            ClientMsg::WorkRefresh {
+                source: None,
+                fred: false,
+            },
+            ClientMsg::PicksRefresh {
+                reason: "manual".into(),
+            },
+            ClientMsg::WorkSendPreviewRequest {
+                request_id: "r".into(),
+                item_id: "i".into(),
+            },
             ClientMsg::WorkSend {
                 request_id: "r".into(),
                 item_id: "i".into(),
@@ -1511,7 +1685,10 @@ mod tests {
                 instruction: "c".into(),
                 allow_duplicate: false,
             },
-            ClientMsg::FredSeed { request_id: "r".into(), text: "t".into() },
+            ClientMsg::FredSeed {
+                request_id: "r".into(),
+                text: "t".into(),
+            },
             ClientMsg::ModelCatalogRequest {},
             ClientMsg::ModelCatalogRefresh {},
             ClientMsg::SessionModelGet { tag: "x1".into() },
@@ -1592,9 +1769,11 @@ mod tests {
     /// use the Debug name, which is the variant identifier).
     fn variant_name(msg: &ClientMsg) -> String {
         let dbg = format!("{msg:?}");
-        dbg.split(|c: char| !c.is_alphanumeric()).next().unwrap_or_default().to_string()
+        dbg.split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap_or_default()
+            .to_string()
     }
-
 
     /// Number of `ClientMsg` variants. Adding a variant: add an arm to `ordinal` with the next
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
@@ -1699,7 +1878,10 @@ mod tests {
         allowed.sort();
         let mut expected: Vec<String> = NETWORK_ALLOWED.iter().map(|s| s.to_string()).collect();
         expected.sort();
-        assert_eq!(allowed, expected, "a new verb must default to refused: classify it deliberately");
+        assert_eq!(
+            allowed, expected,
+            "a new verb must default to refused: classify it deliberately"
+        );
     }
 
     #[test]
@@ -1712,7 +1894,10 @@ mod tests {
         // The fixture list must name every allowed verb (so the exactness test
         // above cannot pass vacuously because a fixture is missing).
         for allowed in NETWORK_ALLOWED {
-            assert!(names.iter().any(|n| n == allowed), "no fixture for allowed verb {allowed}");
+            assert!(
+                names.iter().any(|n| n == allowed),
+                "no fixture for allowed verb {allowed}"
+            );
         }
     }
 
@@ -1739,8 +1924,12 @@ mod tests {
     fn a_network_peer_may_still_attach_detach_and_list_for_an_ordinary_session() {
         let tags = SensitiveTags::in_memory();
         for msg in [
-            ClientMsg::SessionAttach { tag: "cody-x".into() },
-            ClientMsg::SessionDetach { tag: "cody-x".into() },
+            ClientMsg::SessionAttach {
+                tag: "cody-x".into(),
+            },
+            ClientMsg::SessionDetach {
+                tag: "cody-x".into(),
+            },
             ClientMsg::SessionList,
             ClientMsg::Ping,
         ] {
@@ -1748,18 +1937,36 @@ mod tests {
         }
         // Allowed verbs stay refused for a sensitive tag.
         let sensitive = tags_with("cody-x");
-        assert!(refuse_for_network(&ClientMsg::SessionAttach { tag: "cody-x".into() }, &sensitive));
-        assert!(refuse_for_network(&ClientMsg::ActivitySnapshotRequest { tag: "cody-x".into() }, &sensitive));
+        assert!(refuse_for_network(
+            &ClientMsg::SessionAttach {
+                tag: "cody-x".into()
+            },
+            &sensitive
+        ));
+        assert!(refuse_for_network(
+            &ClientMsg::ActivitySnapshotRequest {
+                tag: "cody-x".into()
+            },
+            &sensitive
+        ));
     }
 
     #[test]
-    fn a_network_peer_cannot_write_to_interrupt_or_answer_a_permission_for_any_session_whatever_its_tag() {
+    fn a_network_peer_cannot_write_to_interrupt_or_answer_a_permission_for_any_session_whatever_its_tag(
+    ) {
         let tags = SensitiveTags::in_memory();
         for tag in ["cody-x", "x1", "", "ghost", "claudia"] {
             for msg in [
-                ClientMsg::SessionSend { tag: tag.into(), text: "hi".into(), images: vec![] },
+                ClientMsg::SessionSend {
+                    tag: tag.into(),
+                    text: "hi".into(),
+                    images: vec![],
+                },
                 ClientMsg::SessionInterrupt { tag: tag.into() },
-                ClientMsg::SessionControl { tag: tag.into(), action: SessionAction::Stop },
+                ClientMsg::SessionControl {
+                    tag: tag.into(),
+                    action: SessionAction::Stop,
+                },
                 ClientMsg::SessionAnswerPermission {
                     tag: tag.into(),
                     request_id: "r".into(),
@@ -1877,8 +2084,11 @@ mod tests {
                 fail_next: Arc::new(AtomicUsize::new(0)),
                 attempts: Arc::new(AtomicUsize::new(0)),
             };
-            let (always, next, attempts) =
-                (Arc::clone(&disk.fail_always), Arc::clone(&disk.fail_next), Arc::clone(&disk.attempts));
+            let (always, next, attempts) = (
+                Arc::clone(&disk.fail_always),
+                Arc::clone(&disk.fail_next),
+                Arc::clone(&disk.attempts),
+            );
             let writer: RegistryWriter = Arc::new(move |path: &Path, bytes: &[u8]| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 if always.load(Ordering::SeqCst) {
@@ -1912,27 +2122,41 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_that_cannot_be_written_still_protects_the_tag_retries_a_bounded_number_of_times_and_goes_degraded_with_a_sentinel() {
+    fn a_registry_that_cannot_be_written_still_protects_the_tag_retries_a_bounded_number_of_times_and_goes_degraded_with_a_sentinel(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let path = registry_in(dir.path());
         let (disk, writer) = ScriptedDisk::new();
         let tags = SensitiveTags::persisted_with_writer(path.clone(), writer);
-        assert!(!tags.is_degraded(), "a registry on a healthy disk starts healthy");
+        assert!(
+            !tags.is_degraded(),
+            "a registry on a healthy disk starts healthy"
+        );
         assert!(!sentinel_beside(&path).exists());
 
         disk.fail_always.store(true, Ordering::SeqCst);
         let before = disk.attempts();
         tags.mark_tag("cody-x");
 
-        assert!(tags.tag_is_sensitive("cody-x"), "a failed write must not un-protect the tag in memory");
+        assert!(
+            tags.tag_is_sensitive("cody-x"),
+            "a failed write must not un-protect the tag in memory"
+        );
         let used = disk.attempts() - before;
-        assert!((2..=5).contains(&used), "a failing write is retried a bounded number of times, used {used}");
+        assert!(
+            (2..=5).contains(&used),
+            "a failing write is retried a bounded number of times, used {used}"
+        );
         assert!(tags.is_degraded());
-        assert!(sentinel_beside(&path).exists(), "the sentinel must record that the registry is incomplete");
+        assert!(
+            sentinel_beside(&path).exists(),
+            "the sentinel must record that the registry is incomplete"
+        );
     }
 
     #[test]
-    fn a_job_registration_that_cannot_be_persisted_is_kept_in_memory_and_degrades_the_registry_too() {
+    fn a_job_registration_that_cannot_be_persisted_is_kept_in_memory_and_degrades_the_registry_too()
+    {
         let dir = tempfile::tempdir().unwrap();
         let path = registry_in(dir.path());
         let (disk, writer) = ScriptedDisk::new();
@@ -1957,7 +2181,10 @@ mod tests {
         let before = disk.attempts();
         tags.mark_tag("cody-x");
 
-        assert!(disk.attempts() - before >= 2, "the failed write must have been retried");
+        assert!(
+            disk.attempts() - before >= 2,
+            "the failed write must have been retried"
+        );
         assert!(!tags.is_degraded());
         assert!(!sentinel_beside(&path).exists());
         assert!(
@@ -1982,7 +2209,10 @@ mod tests {
         tags.mark_tag("cody-y");
 
         assert!(!tags.is_degraded());
-        assert!(!sentinel_beside(&path).exists(), "a healthy write must remove the sentinel");
+        assert!(
+            !sentinel_beside(&path).exists(),
+            "a healthy write must remove the sentinel"
+        );
         assert!(tags.tag_is_sensitive("cody-x") && tags.tag_is_sensitive("cody-y"));
     }
 
@@ -2002,11 +2232,20 @@ mod tests {
         assert!(sentinel_beside(&path).exists());
 
         let restarted = SensitiveTags::persisted(path.clone());
-        assert!(restarted.is_degraded(), "a present sentinel means the registry may be missing entries");
+        assert!(
+            restarted.is_degraded(),
+            "a present sentinel means the registry may be missing entries"
+        );
 
         restarted.note_resumed("cody-x");
-        assert!(restarted.tag_is_sensitive("cody-x"), "a resumed session of a degraded registry fails closed");
-        assert!(!restarted.tag_is_sensitive("cody-fresh"), "a session that was not resumed is unaffected");
+        assert!(
+            restarted.tag_is_sensitive("cody-x"),
+            "a resumed session of a degraded registry fails closed"
+        );
+        assert!(
+            !restarted.tag_is_sensitive("cody-fresh"),
+            "a session that was not resumed is unaffected"
+        );
     }
 
     #[test]
@@ -2036,7 +2275,10 @@ mod tests {
 
         let tags = SensitiveTags::persisted_with_writer(path, writer);
 
-        assert!(tags.is_degraded(), "a registry that cannot be written at startup cannot be trusted");
+        assert!(
+            tags.is_degraded(),
+            "a registry that cannot be written at startup cannot be trusted"
+        );
         tags.note_resumed("cody-x");
         assert!(tags.tag_is_sensitive("cody-x"));
         assert!(!tags.tag_is_sensitive("cody-fresh"));
@@ -2053,7 +2295,10 @@ mod tests {
         restarted.note_resumed("cody-ordinary");
 
         assert!(!restarted.tag_is_sensitive("cody-ordinary"));
-        assert!(restarted.tag_is_sensitive("cody-x"), "registered tags survive the restart");
+        assert!(
+            restarted.tag_is_sensitive("cody-x"),
+            "registered tags survive the restart"
+        );
         assert!(!sentinel_beside(&path).exists());
     }
 
@@ -2070,9 +2315,15 @@ mod tests {
         assert!(!path.exists());
 
         let tags = SensitiveTags::persisted_for_sessions(path.clone(), true);
-        assert!(tags.is_degraded(), "sessions exist but the registry that classified them is gone");
+        assert!(
+            tags.is_degraded(),
+            "sessions exist but the registry that classified them is gone"
+        );
         tags.note_resumed("cody-old");
-        assert!(tags.tag_is_sensitive("cody-old"), "an unregistered resumed session fails closed");
+        assert!(
+            tags.tag_is_sensitive("cody-old"),
+            "an unregistered resumed session fails closed"
+        );
         assert!(!tags.tag_is_sensitive("cody-fresh"));
         assert!(
             sentinel_beside(&path).exists(),
@@ -2080,7 +2331,10 @@ mod tests {
         );
 
         tags.settle_lost_history();
-        assert!(!tags.is_degraded(), "once every stored session is registered the registry is current");
+        assert!(
+            !tags.is_degraded(),
+            "once every stored session is registered the registry is current"
+        );
         assert!(!sentinel_beside(&path).exists());
         assert!(SensitiveTags::persisted(path).tag_is_sensitive("cody-old"));
     }
@@ -2111,7 +2365,8 @@ mod tests {
     }
 
     #[test]
-    fn when_neither_the_registry_nor_the_sentinel_can_be_written_the_registry_is_moved_aside_so_a_restart_is_degraded() {
+    fn when_neither_the_registry_nor_the_sentinel_can_be_written_the_registry_is_moved_aside_so_a_restart_is_degraded(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let path = registry_in(dir.path());
         let (disk, writer) = ScriptedDisk::new();
@@ -2127,21 +2382,36 @@ mod tests {
 
         assert!(tags.is_degraded());
         assert!(tags.tag_is_sensitive("cody-b"), "still protected in memory");
-        assert!(!path.exists() && stale_beside(&path).exists(), "the registry was moved aside");
+        assert!(
+            !path.exists() && stale_beside(&path).exists(),
+            "the registry was moved aside"
+        );
         drop(tags);
         std::fs::remove_dir(sentinel_beside(&path)).unwrap();
 
         // The disk has recovered; no sentinel exists; the probe write works.
         let restarted = SensitiveTags::persisted_for_sessions(path.clone(), false);
-        assert!(restarted.is_degraded(), "a moved-aside registry must not look healthy");
-        assert!(restarted.tag_is_sensitive("cody-a"), "what the stale registry knew is kept");
+        assert!(
+            restarted.is_degraded(),
+            "a moved-aside registry must not look healthy"
+        );
+        assert!(
+            restarted.tag_is_sensitive("cody-a"),
+            "what the stale registry knew is kept"
+        );
         assert!(restarted.job_is_sensitive("job-a"));
         restarted.note_resumed("cody-b");
-        assert!(restarted.tag_is_sensitive("cody-b"), "the registration that was lost is covered by the resume rule");
+        assert!(
+            restarted.tag_is_sensitive("cody-b"),
+            "the registration that was lost is covered by the resume rule"
+        );
 
         restarted.settle_lost_history();
         assert!(!restarted.is_degraded());
-        assert!(!stale_beside(&path).exists(), "a healthy write removes the stale copy");
+        assert!(
+            !stale_beside(&path).exists(),
+            "a healthy write removes the stale copy"
+        );
         assert!(path.exists());
     }
 
@@ -2161,7 +2431,10 @@ mod tests {
         tags.mark_tag("cody-x");
         tags.note_resumed("cody-x");
         assert!(tags.tag_is_sensitive("cody-x"));
-        assert!(!tags.is_degraded(), "an in-memory registry is never degraded");
+        assert!(
+            !tags.is_degraded(),
+            "an in-memory registry is never degraded"
+        );
     }
 
     // ── model frames over the network ─────────────────────────────────────────
@@ -2175,10 +2448,20 @@ mod tests {
     fn full_model_state(tag: &str) -> SessionModelState {
         SessionModelState {
             tag: tag.into(),
-            recorded: Some(RecordedModel { model: "opus".into(), effort: Some("high".into()), source: ModelSource::Focus }),
-            reported: Some(ReportedModel { model: "claude-opus-5-5".into(), family: Some("opus".into()) }),
+            recorded: Some(RecordedModel {
+                model: "opus".into(),
+                effort: Some("high".into()),
+                source: ModelSource::Focus,
+            }),
+            reported: Some(ReportedModel {
+                model: "claude-opus-5-5".into(),
+                family: Some("opus".into()),
+            }),
             effective_effort: Some("high".into()),
-            pending: Some(PendingModel { model: "haiku".into(), effort: None }),
+            pending: Some(PendingModel {
+                model: "haiku".into(),
+                effort: None,
+            }),
             phase: SwitchPhase::Waiting,
             running: true,
             warnings: vec![],
@@ -2195,8 +2478,17 @@ mod tests {
 
     fn model_defaults_msg() -> ServerMsg {
         ServerMsg::ModelDefaults {
-            defaults: BTreeMap::from([("cody".to_owned(), AgentModelDefault { model: "haiku".into(), effort: None })]),
-            declared: BTreeMap::from([("archie".to_owned(), "opus".to_owned()), ("fred".to_owned(), "haiku".to_owned())]),
+            defaults: BTreeMap::from([(
+                "cody".to_owned(),
+                AgentModelDefault {
+                    model: "haiku".into(),
+                    effort: None,
+                },
+            )]),
+            declared: BTreeMap::from([
+                ("archie".to_owned(), "opus".to_owned()),
+                ("fred".to_owned(), "haiku".to_owned()),
+            ]),
         }
     }
 
@@ -2204,16 +2496,27 @@ mod tests {
     fn a_network_peer_is_not_told_the_budget_posture_or_the_last_request_of_a_focus() {
         let original = full_model_state("cody-x");
 
-        let ServerMsg::SessionModelState(seen) =
-            redact_for_network(ServerMsg::SessionModelState(original.clone()), &SensitiveTags::in_memory())
-        else {
+        let ServerMsg::SessionModelState(seen) = redact_for_network(
+            ServerMsg::SessionModelState(original.clone()),
+            &SensitiveTags::in_memory(),
+        ) else {
             panic!("still a SessionModelState");
         };
 
-        assert_eq!(seen.posture, None, "the posture says how much budget the operator has left");
-        assert_eq!(seen.last_request, None, "who asked for what, and why, is the operator's business");
         assert_eq!(
-            SessionModelState { posture: None, last_request: None, ..original },
+            seen.posture, None,
+            "the posture says how much budget the operator has left"
+        );
+        assert_eq!(
+            seen.last_request, None,
+            "who asked for what, and why, is the operator's business"
+        );
+        assert_eq!(
+            SessionModelState {
+                posture: None,
+                last_request: None,
+                ..original
+            },
             seen,
             "everything else about the focus's model is intact"
         );
@@ -2227,7 +2530,10 @@ mod tests {
             panic!("still a ModelDefaults");
         };
 
-        assert!(declared.is_empty(), "the agents installed on this machine are not a network peer's to list: {declared:?}");
+        assert!(
+            declared.is_empty(),
+            "the agents installed on this machine are not a network peer's to list: {declared:?}"
+        );
     }
 
     #[test]
@@ -2238,7 +2544,10 @@ mod tests {
             panic!("still a ModelDefaults");
         };
 
-        assert!(defaults.is_empty(), "the keys of the defaults are agent names the user set up: {defaults:?}");
+        assert!(
+            defaults.is_empty(),
+            "the keys of the defaults are agent names the user set up: {defaults:?}"
+        );
         assert!(declared.is_empty(), "{declared:?}");
         let wire = serde_json::to_string(&ServerMsg::ModelDefaults { defaults, declared }).unwrap();
         assert!(!wire.contains("cody") && !wire.contains("haiku"), "{wire}");
@@ -2248,7 +2557,10 @@ mod tests {
     fn a_local_peer_gets_the_model_frames_exactly_as_they_are() {
         let tags = SensitiveTags::in_memory();
         for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
-            for msg in [ServerMsg::SessionModelState(full_model_state("cody-x")), model_defaults_msg()] {
+            for msg in [
+                ServerMsg::SessionModelState(full_model_state("cody-x")),
+                model_defaults_msg(),
+            ] {
                 let sent = outbound(trust, msg.clone(), &tags).expect("a local peer receives it");
                 assert_eq!(
                     serde_json::to_string(&sent).unwrap(),
@@ -2263,10 +2575,16 @@ mod tests {
     fn a_network_peer_is_still_sent_the_redacted_model_frames_of_an_ordinary_focus() {
         let tags = SensitiveTags::in_memory();
 
-        let state = outbound(PeerTrust::Tcp, ServerMsg::SessionModelState(full_model_state("cody-x")), &tags);
+        let state = outbound(
+            PeerTrust::Tcp,
+            ServerMsg::SessionModelState(full_model_state("cody-x")),
+            &tags,
+        );
         let defaults = outbound(PeerTrust::Tcp, model_defaults_msg(), &tags);
 
-        assert!(matches!(state, Some(ServerMsg::SessionModelState(ref s)) if s.posture.is_none() && s.last_request.is_none()));
+        assert!(
+            matches!(state, Some(ServerMsg::SessionModelState(ref s)) if s.posture.is_none() && s.last_request.is_none())
+        );
         assert!(
             matches!(defaults, Some(ServerMsg::ModelDefaults { ref declared, ref defaults }) if declared.is_empty() && defaults.is_empty())
         );
@@ -2331,10 +2649,19 @@ mod tests {
 
     #[test]
     fn the_task_list_is_classified_with_its_focus_and_the_task_detail_is_local_only() {
-        assert_eq!(classify_server_msg(&session_tasks_msg("cody-x")), ServerClass::Focus("cody-x"));
-        assert_eq!(classify_server_msg(&session_task_detail_msg("cody-x")), ServerClass::LocalOnly);
+        assert_eq!(
+            classify_server_msg(&session_tasks_msg("cody-x")),
+            ServerClass::Focus("cody-x")
+        );
+        assert_eq!(
+            classify_server_msg(&session_task_detail_msg("cody-x")),
+            ServerClass::LocalOnly
+        );
         // The class does not depend on the tag.
-        assert_eq!(classify_server_msg(&session_task_detail_msg("fred")), ServerClass::LocalOnly);
+        assert_eq!(
+            classify_server_msg(&session_task_detail_msg("fred")),
+            ServerClass::LocalOnly
+        );
     }
 
     #[test]
@@ -2369,7 +2696,11 @@ mod tests {
         let sent = outbound(PeerTrust::Tcp, msg.clone(), &tags).expect("delivered");
 
         assert_eq!(wire(&sent), wire(&msg));
-        assert_eq!(wire(&redact_for_network(msg.clone(), &tags)), wire(&msg), "redaction leaves it as it is");
+        assert_eq!(
+            wire(&redact_for_network(msg.clone(), &tags)),
+            wire(&msg),
+            "redaction leaves it as it is"
+        );
     }
 
     #[test]
@@ -2387,7 +2718,10 @@ mod tests {
         let tags = tags_with("cody-sensitive");
         for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
             for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
-                assert!(may_receive(trust, &session_tasks_msg(tag), &tags), "{trust:?} {tag}");
+                assert!(
+                    may_receive(trust, &session_tasks_msg(tag), &tags),
+                    "{trust:?} {tag}"
+                );
             }
         }
     }
@@ -2417,22 +2751,41 @@ mod tests {
         ServerMsg::TrackerSummary {
             tag: tag.into(),
             has_tracker: true,
-            counts: TrackerCounts { todo: 1, in_progress: 2, blocked: 3, needs_you: 4, done: 5 },
+            counts: TrackerCounts {
+                todo: 1,
+                in_progress: 2,
+                blocked: 3,
+                needs_you: 4,
+                done: 5,
+            },
         }
     }
 
     #[test]
     fn the_tracker_board_is_local_only_and_the_tracker_summary_is_classified_with_its_focus() {
         for tag in ["cody-x", "fred", "teri"] {
-            assert_eq!(classify_server_msg(&tracker_board_msg(tag)), ServerClass::LocalOnly, "{tag}");
+            assert_eq!(
+                classify_server_msg(&tracker_board_msg(tag)),
+                ServerClass::LocalOnly,
+                "{tag}"
+            );
         }
         assert_eq!(
-            classify_server_msg(&ServerMsg::TrackerBoard { tag: "cody-x".into(), board: None }),
+            classify_server_msg(&ServerMsg::TrackerBoard {
+                tag: "cody-x".into(),
+                board: None
+            }),
             ServerClass::LocalOnly,
             "an empty board frame is as local as a full one"
         );
-        assert_eq!(classify_server_msg(&tracker_summary_msg("cody-x")), ServerClass::Focus("cody-x"));
-        assert_eq!(classify_server_msg(&tracker_summary_msg("fred")), ServerClass::Focus("fred"));
+        assert_eq!(
+            classify_server_msg(&tracker_summary_msg("cody-x")),
+            ServerClass::Focus("cody-x")
+        );
+        assert_eq!(
+            classify_server_msg(&tracker_summary_msg("fred")),
+            ServerClass::Focus("fred")
+        );
     }
 
     #[test]
@@ -2453,7 +2806,11 @@ mod tests {
         assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
         let sent = outbound(PeerTrust::Tcp, msg.clone(), &tags).expect("delivered");
         assert_eq!(wire(&sent), wire(&msg));
-        assert_eq!(wire(&redact_for_network(msg.clone(), &tags)), wire(&msg), "redaction leaves it as it is");
+        assert_eq!(
+            wire(&redact_for_network(msg.clone(), &tags)),
+            wire(&msg),
+            "redaction leaves it as it is"
+        );
 
         for tag in ["cody-sensitive", "fred", "teri", "FRED"] {
             let msg = tracker_summary_msg(tag);
@@ -2482,15 +2839,33 @@ mod tests {
     #[test]
     fn a_tracker_summary_carries_only_the_tag_a_flag_and_five_counts() {
         let value = serde_json::to_value(tracker_summary_msg("cody-ordinary")).unwrap();
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["counts", "has_tracker", "tag", "type"]);
 
-        let mut count_keys: Vec<&str> =
-            value["counts"].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut count_keys: Vec<&str> = value["counts"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         count_keys.sort_unstable();
-        assert_eq!(count_keys, ["blocked", "done", "in_progress", "needs_you", "todo"]);
-        for (key, n) in [("todo", 1), ("in_progress", 2), ("blocked", 3), ("needs_you", 4), ("done", 5)] {
+        assert_eq!(
+            count_keys,
+            ["blocked", "done", "in_progress", "needs_you", "todo"]
+        );
+        for (key, n) in [
+            ("todo", 1),
+            ("in_progress", 2),
+            ("blocked", 3),
+            ("needs_you", 4),
+            ("done", 5),
+        ] {
             assert_eq!(value["counts"][key], n, "{key}");
         }
     }
@@ -2503,7 +2878,9 @@ mod tests {
             let board_wire = wire(&tracker_board_msg(tag));
             for n in 1..=7 {
                 assert!(
-                    board_wire.to_lowercase().contains(&format!("secret-tracker-{n}")),
+                    board_wire
+                        .to_lowercase()
+                        .contains(&format!("secret-tracker-{n}")),
                     "control: sentinel {n} is in the board frame: {board_wire}"
                 );
             }
@@ -2515,7 +2892,11 @@ mod tests {
             }
             let json = received.join("\n").to_lowercase();
             assert!(!json.contains("secret-tracker"), "{tag}: {json}");
-            assert_eq!(received.len(), usize::from(tag == "cody-ordinary"), "{tag}: {received:?}");
+            assert_eq!(
+                received.len(),
+                usize::from(tag == "cody-ordinary"),
+                "{tag}: {received:?}"
+            );
         }
     }
 
@@ -2536,16 +2917,36 @@ mod tests {
             now += 1;
             hub.on_event(&event, now, &lookup);
         };
-        feed("task_started", serde_json::json!({"task_id": "agent1", "description": "review the diff", "task_type": "local_agent", "prompt": "SECRET-OUTPUT-PROMPT review the confidential diff"}));
-        feed("task_progress", serde_json::json!({"task_id": "agent1", "summary": "SECRET-OUTPUT-PROGRESS reading the changed files", "usage": {"total_tokens": 7}}));
-        feed("task_started", serde_json::json!({"task_id": "shell1", "description": "build watcher", "task_type": "local_bash", "is_backgrounded": true}));
-        feed("task_started", serde_json::json!({"task_id": "done1", "description": "quick job", "task_type": "local_bash"}));
-        feed("task_notification", serde_json::json!({
-            "task_id": "done1", "status": "completed",
-            "summary": "SECRET-OUTPUT-DONE the job finished",
-            "output_file": "/private/tmp/claude-501/SECRET-OUTPUT-PATH/-work-repo/sess-1/tasks/done1.output",
-        }));
-        hub.set_preview("shell1", Some("SECRET-OUTPUT-PREVIEW last output line".into()), now + 1, &lookup);
+        feed(
+            "task_started",
+            serde_json::json!({"task_id": "agent1", "description": "review the diff", "task_type": "local_agent", "prompt": "SECRET-OUTPUT-PROMPT review the confidential diff"}),
+        );
+        feed(
+            "task_progress",
+            serde_json::json!({"task_id": "agent1", "summary": "SECRET-OUTPUT-PROGRESS reading the changed files", "usage": {"total_tokens": 7}}),
+        );
+        feed(
+            "task_started",
+            serde_json::json!({"task_id": "shell1", "description": "build watcher", "task_type": "local_bash", "is_backgrounded": true}),
+        );
+        feed(
+            "task_started",
+            serde_json::json!({"task_id": "done1", "description": "quick job", "task_type": "local_bash"}),
+        );
+        feed(
+            "task_notification",
+            serde_json::json!({
+                "task_id": "done1", "status": "completed",
+                "summary": "SECRET-OUTPUT-DONE the job finished",
+                "output_file": "/private/tmp/claude-501/SECRET-OUTPUT-PATH/-work-repo/sess-1/tasks/done1.output",
+            }),
+        );
+        hub.set_preview(
+            "shell1",
+            Some("SECRET-OUTPUT-PREVIEW last output line".into()),
+            now + 1,
+            &lookup,
+        );
         hub
     }
 
@@ -2574,7 +2975,12 @@ mod tests {
         (list, details)
     }
 
-    const SECRET_TEXTS: [&str; 4] = ["SECRET-OUTPUT-PROMPT", "SECRET-OUTPUT-PROGRESS", "SECRET-OUTPUT-DONE", "SECRET-OUTPUT-PREVIEW"];
+    const SECRET_TEXTS: [&str; 4] = [
+        "SECRET-OUTPUT-PROMPT",
+        "SECRET-OUTPUT-PROGRESS",
+        "SECRET-OUTPUT-DONE",
+        "SECRET-OUTPUT-PREVIEW",
+    ];
 
     #[test]
     fn nothing_a_network_peer_can_receive_carries_task_text_or_a_path() {
@@ -2584,7 +2990,10 @@ mod tests {
             // Positive control: the registry really holds the secrets and the detail frames carry them.
             let detail_wire = details.iter().map(wire).collect::<Vec<_>>().join("\n");
             for secret in SECRET_TEXTS {
-                assert!(detail_wire.contains(secret), "the control: {secret} is not in the details of {tag}: {detail_wire}");
+                assert!(
+                    detail_wire.contains(secret),
+                    "the control: {secret} is not in the details of {tag}: {detail_wire}"
+                );
             }
 
             let mut received = vec![];
@@ -2598,12 +3007,22 @@ mod tests {
             let expected_frames = usize::from(tag == "cody-ordinary");
             assert_eq!(received.len(), expected_frames, "{tag}: {received:?}");
             let json = received.iter().map(wire).collect::<Vec<_>>().join("\n");
-            for forbidden in ["SECRET-OUTPUT", "preview", "summary", "prompt", "output_file", "/private/tmp"] {
+            for forbidden in [
+                "SECRET-OUTPUT",
+                "preview",
+                "summary",
+                "prompt",
+                "output_file",
+                "/private/tmp",
+            ] {
                 assert!(!json.contains(forbidden), "{forbidden} in {json}");
             }
             if tag == "cody-ordinary" {
                 for id in ["agent1", "shell1", "done1"] {
-                    assert!(json.contains(id), "the delivered list is a real one: {json}");
+                    assert!(
+                        json.contains(id),
+                        "the delivered list is a real one: {json}"
+                    );
                 }
             }
         }
@@ -2616,13 +3035,21 @@ mod tests {
             let (_, details) = frames_from_a_registry_told_secrets(tag);
             let sent: Vec<String> = details
                 .into_iter()
-                .map(|d| wire(&outbound(PeerTrust::LocalOther, d, &tags).expect("a local peer receives details")))
+                .map(|d| {
+                    wire(
+                        &outbound(PeerTrust::LocalOther, d, &tags)
+                            .expect("a local peer receives details"),
+                    )
+                })
                 .collect();
             let wire = sent.join("\n");
             for secret in SECRET_TEXTS {
                 assert!(wire.contains(secret), "{tag}: {secret}");
             }
-            assert!(!wire.contains("/private/tmp"), "no output path, not even for a local peer: {wire}");
+            assert!(
+                !wire.contains("/private/tmp"),
+                "no output path, not even for a local peer: {wire}"
+            );
         }
     }
 
@@ -2712,9 +3139,14 @@ mod tests {
     fn a_task_meta_with_every_optional_field_set_has_exactly_the_approved_keys() {
         assert_every_optional_field_is_set(full_task_meta());
         let value = serde_json::to_value(full_task_meta()).unwrap();
-        let keys: std::collections::BTreeSet<&str> =
-            value.as_object().unwrap().keys().map(String::as_str).collect();
-        let allowed: std::collections::BTreeSet<&str> = TASK_META_ALLOWED_KEYS.iter().copied().collect();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let allowed: std::collections::BTreeSet<&str> =
+            TASK_META_ALLOWED_KEYS.iter().copied().collect();
 
         assert_eq!(
             keys, allowed,
@@ -2727,10 +3159,22 @@ mod tests {
     #[test]
     fn the_task_list_frame_has_exactly_the_approved_top_level_keys() {
         let value = serde_json::to_value(session_tasks_msg("cody-x")).unwrap();
-        let keys: std::collections::BTreeSet<&str> =
-            value.as_object().unwrap().keys().map(String::as_str).collect();
-        let allowed: std::collections::BTreeSet<&str> =
-            ["type", "tag", "session_id", "daemon_epoch", "stop_supported", "tasks"].into_iter().collect();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let allowed: std::collections::BTreeSet<&str> = [
+            "type",
+            "tag",
+            "session_id",
+            "daemon_epoch",
+            "stop_supported",
+            "tasks",
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(keys, allowed);
     }
 
@@ -2741,7 +3185,10 @@ mod tests {
         // Positive control: the same registry's detail frames carry every secret.
         let detail_wire = details.iter().map(wire).collect::<Vec<_>>().join("\n");
         for secret in SECRET_TEXTS {
-            assert!(detail_wire.contains(secret), "the control: {secret} is not in {detail_wire}");
+            assert!(
+                detail_wire.contains(secret),
+                "the control: {secret} is not in {detail_wire}"
+            );
         }
         // The list is a real one: it names the tasks the registry was told about...
         let json = wire(&list);
@@ -2760,20 +3207,35 @@ mod tests {
     fn approval_content_frames() -> Vec<(&'static str, ServerMsg)> {
         use crate::approvals::display::ApprovalDisplay;
         use crate::approvals::request::{Reason, ReasonKind, ToolKind};
-        use crate::approvals::wire::{AgentWire, AnswerRefusal, ApprovalFlags, ApprovalRequestWire};
+        use crate::approvals::wire::{
+            AgentWire, AnswerRefusal, ApprovalFlags, ApprovalRequestWire,
+        };
         let wire = ApprovalRequestWire {
             request_id: "r1".into(),
             tag: "cody-plain".into(),
             tool_use_id: "toolu_1".into(),
-            agent: AgentWire { name: "cody".into(), subagent: None },
+            agent: AgentWire {
+                name: "cody".into(),
+                subagent: None,
+            },
             tool_name: "Bash".into(),
             display_name: "Bash".into(),
             tool_kind: ToolKind::Bash,
             mcp: None,
             input: serde_json::json!({ "command": "rm -rf /tmp/SECRET-COMMAND" }),
-            display: ApprovalDisplay { lines: vec![], command_count: None, invisible_count: 0, non_ascii_count: 0, unparsed: false },
+            display: ApprovalDisplay {
+                lines: vec![],
+                command_count: None,
+                invisible_count: 0,
+                non_ascii_count: 0,
+                unparsed: false,
+            },
             cwd: Some("/SECRET/cwd".into()),
-            reason: Reason { kind: ReasonKind::Other, text: "SECRET-REASON".into(), rule: None },
+            reason: Reason {
+                kind: ReasonKind::Other,
+                text: "SECRET-REASON".into(),
+                rule: None,
+            },
             flags: ApprovalFlags::default(),
             description: None,
             options: vec![],
@@ -2782,8 +3244,19 @@ mod tests {
             deadline_at_ms: 2,
         };
         vec![
-            ("approval_request", ServerMsg::ApprovalRequest { tag: "cody-plain".into(), request: wire.clone() }),
-            ("approvals_snapshot", ServerMsg::ApprovalsSnapshot { requests: vec![wire] }),
+            (
+                "approval_request",
+                ServerMsg::ApprovalRequest {
+                    tag: "cody-plain".into(),
+                    request: wire.clone(),
+                },
+            ),
+            (
+                "approvals_snapshot",
+                ServerMsg::ApprovalsSnapshot {
+                    requests: vec![wire],
+                },
+            ),
             (
                 "approval_resolved",
                 ServerMsg::ApprovalResolved {
@@ -2825,14 +3298,21 @@ mod tests {
     }
 
     fn approval_pending(tag: &str) -> ServerMsg {
-        ServerMsg::ApprovalPending { tag: tag.into(), count: 3 }
+        ServerMsg::ApprovalPending {
+            tag: tag.into(),
+            count: 3,
+        }
     }
 
     #[test]
     fn every_approval_frame_that_carries_content_is_local_only() {
         for (name, msg) in approval_content_frames() {
             assert_eq!(classify_server_msg(&msg), ServerClass::LocalOnly, "{name}");
-            assert_eq!(is_sensitive_server_msg(&msg), SensitiveClass::NotSensitive, "{name}: LocalOnly is not Teri/Fred data");
+            assert_eq!(
+                is_sensitive_server_msg(&msg),
+                SensitiveClass::NotSensitive,
+                "{name}: LocalOnly is not Teri/Fred data"
+            );
         }
     }
 
@@ -2876,7 +3356,10 @@ mod tests {
             hold_id: Some("h1".into()),
             operator_nonce: None,
         };
-        assert_eq!(network_policy(&action("cody-plain")), NetworkPolicy::Refused);
+        assert_eq!(
+            network_policy(&action("cody-plain")),
+            NetworkPolicy::Refused
+        );
         let tags = tags_with("cody-work");
         assert!(targets_sensitive_session(&action("cody-work"), &tags));
         assert!(!targets_sensitive_session(&action("cody-plain"), &tags));
@@ -2885,8 +3368,14 @@ mod tests {
 
     #[test]
     fn the_approval_count_is_scoped_to_its_focus_and_is_the_only_approval_frame_that_is() {
-        assert_eq!(classify_server_msg(&approval_pending("cody-plain")), ServerClass::Focus("cody-plain"));
-        assert_eq!(classify_server_msg(&approval_pending("fred")), ServerClass::Focus("fred"));
+        assert_eq!(
+            classify_server_msg(&approval_pending("cody-plain")),
+            ServerClass::Focus("cody-plain")
+        );
+        assert_eq!(
+            classify_server_msg(&approval_pending("fred")),
+            ServerClass::Focus("fred")
+        );
     }
 
     #[test]
@@ -2894,22 +3383,32 @@ mod tests {
         let tags = SensitiveTags::in_memory();
         for (name, msg) in approval_content_frames() {
             assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{name}");
-            assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(), "{name}");
+            assert!(
+                outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(),
+                "{name}"
+            );
             for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
-                assert!(may_receive(trust, &msg, &tags), "{name}: a local peer is not filtered here (routing decides)");
+                assert!(
+                    may_receive(trust, &msg, &tags),
+                    "{name}: a local peer is not filtered here (routing decides)"
+                );
             }
         }
     }
 
     #[test]
-    fn a_network_peer_is_sent_the_approval_count_for_a_non_sensitive_tag_and_not_for_a_sensitive_one() {
+    fn a_network_peer_is_sent_the_approval_count_for_a_non_sensitive_tag_and_not_for_a_sensitive_one(
+    ) {
         let tags = SensitiveTags::in_memory();
         tags.mark_tag("cody-work");
 
         let plain = approval_pending("cody-plain");
         assert!(may_receive(PeerTrust::Tcp, &plain, &tags));
         assert_eq!(
-            serde_json::to_value(outbound(PeerTrust::Tcp, plain.clone(), &tags).expect("delivered")).unwrap(),
+            serde_json::to_value(
+                outbound(PeerTrust::Tcp, plain.clone(), &tags).expect("delivered")
+            )
+            .unwrap(),
             serde_json::to_value(&plain).unwrap(),
             "redaction leaves the count exactly as it is"
         );
@@ -2943,11 +3442,15 @@ mod tests {
 
         let redacted = redact_for_network(msg.clone(), &tags);
 
-        assert_eq!(serde_json::to_value(&redacted).unwrap(), serde_json::to_value(&msg).unwrap());
+        assert_eq!(
+            serde_json::to_value(&redacted).unwrap(),
+            serde_json::to_value(&msg).unwrap()
+        );
     }
 
     #[test]
-    fn the_approval_client_messages_and_the_superseded_permission_answer_are_refused_for_network_peers() {
+    fn the_approval_client_messages_and_the_superseded_permission_answer_are_refused_for_network_peers(
+    ) {
         let tags = SensitiveTags::in_memory();
         let msgs = vec![
             ClientMsg::ApprovalAnswer {
@@ -2998,7 +3501,11 @@ mod tests {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         rust_files(&src, &mut files);
-        assert!(files.len() > 50, "the source tree was found: {} files", files.len());
+        assert!(
+            files.len() > 50,
+            "the source tree was found: {} files",
+            files.len()
+        );
 
         let mut offenders = Vec::new();
         let mut mentions = 0;
@@ -3012,15 +3519,23 @@ mod tests {
                 mentions += 1;
                 let t = line.trim();
                 let is_comment = t.starts_with("//");
-                let is_definition = file.ends_with("ipc/protocol.rs") && t == "SessionPermissionRequest {";
+                let is_definition =
+                    file.ends_with("ipc/protocol.rs") && t == "SessionPermissionRequest {";
                 let is_pattern = t.contains("SessionPermissionRequest { .. }");
                 if !(is_comment || is_definition || is_pattern) {
                     offenders.push(format!("{}:{}: {t}", file.display(), n + 1));
                 }
             }
         }
-        assert!(mentions >= 3, "the scan finds the definition and the classification arms: {mentions}");
-        assert!(offenders.is_empty(), "something constructs (or destructures) SessionPermissionRequest:\n{}", offenders.join("\n"));
+        assert!(
+            mentions >= 3,
+            "the scan finds the definition and the classification arms: {mentions}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "something constructs (or destructures) SessionPermissionRequest:\n{}",
+            offenders.join("\n")
+        );
     }
 
     // ── BA1: stopping a task and reading its output ───────────────────────────
@@ -3052,7 +3567,12 @@ mod tests {
         }
     }
 
-    fn output_result(tag: &str, outcome: TaskOutputOutcome, text: &str, message: Option<&str>) -> ServerMsg {
+    fn output_result(
+        tag: &str,
+        outcome: TaskOutputOutcome,
+        text: &str,
+        message: Option<&str>,
+    ) -> ServerMsg {
         ServerMsg::SessionTaskOutputResult {
             request_id: "r".into(),
             tag: tag.into(),
@@ -3073,7 +3593,11 @@ mod tests {
     fn both_task_results_are_local_only_whatever_the_tag_and_outcome() {
         for tag in ["cody-ordinary", "cody-sensitive", "fred", "teri", ""] {
             for outcome in STOP_OUTCOMES {
-                assert_eq!(classify_server_msg(&stop_result(tag, outcome, None)), ServerClass::LocalOnly, "{tag} {outcome:?}");
+                assert_eq!(
+                    classify_server_msg(&stop_result(tag, outcome, None)),
+                    ServerClass::LocalOnly,
+                    "{tag} {outcome:?}"
+                );
             }
             for outcome in OUTPUT_OUTCOMES {
                 assert_eq!(
@@ -3087,7 +3611,10 @@ mod tests {
 
     #[test]
     fn the_task_results_are_not_teri_or_fred_data_themselves() {
-        assert_eq!(is_sensitive_server_msg(&stop_result("x", TaskStopOutcome::Accepted, None)), SensitiveClass::NotSensitive);
+        assert_eq!(
+            is_sensitive_server_msg(&stop_result("x", TaskStopOutcome::Accepted, None)),
+            SensitiveClass::NotSensitive
+        );
         assert_eq!(
             is_sensitive_server_msg(&output_result("x", TaskOutputOutcome::Ok, "t", None)),
             SensitiveClass::NotSensitive
@@ -3105,17 +3632,49 @@ mod tests {
             }
             for outcome in OUTPUT_OUTCOMES {
                 frames.push(output_result(tag, outcome, "SECRET-OUTPUT-1\n", None));
-                frames.push(output_result(tag, outcome, "SECRET-OUTPUT-2\n", Some("a note")));
+                frames.push(output_result(
+                    tag,
+                    outcome,
+                    "SECRET-OUTPUT-2\n",
+                    Some("a note"),
+                ));
                 frames.push(output_result(tag, outcome, "", Some("a note")));
             }
             // Dressed up as the refusal: wrong outcome, wrong message, or carrying text.
-            frames.push(stop_result(tag, TaskStopOutcome::Accepted, Some(REFUSAL_MESSAGE)));
-            frames.push(stop_result(tag, TaskStopOutcome::NotRunning, Some(REFUSAL_MESSAGE)));
-            frames.push(stop_result(tag, TaskStopOutcome::Refused, Some("not requires_secure_connection")));
+            frames.push(stop_result(
+                tag,
+                TaskStopOutcome::Accepted,
+                Some(REFUSAL_MESSAGE),
+            ));
+            frames.push(stop_result(
+                tag,
+                TaskStopOutcome::NotRunning,
+                Some(REFUSAL_MESSAGE),
+            ));
+            frames.push(stop_result(
+                tag,
+                TaskStopOutcome::Refused,
+                Some("not requires_secure_connection"),
+            ));
             frames.push(stop_result(tag, TaskStopOutcome::Refused, None));
-            frames.push(output_result(tag, TaskOutputOutcome::Ok, "", Some(REFUSAL_MESSAGE)));
-            frames.push(output_result(tag, TaskOutputOutcome::Refused, "SECRET-OUTPUT-3", Some(REFUSAL_MESSAGE)));
-            frames.push(output_result(tag, TaskOutputOutcome::Refused, "", Some("a reason")));
+            frames.push(output_result(
+                tag,
+                TaskOutputOutcome::Ok,
+                "",
+                Some(REFUSAL_MESSAGE),
+            ));
+            frames.push(output_result(
+                tag,
+                TaskOutputOutcome::Refused,
+                "SECRET-OUTPUT-3",
+                Some(REFUSAL_MESSAGE),
+            ));
+            frames.push(output_result(
+                tag,
+                TaskOutputOutcome::Refused,
+                "",
+                Some("a reason"),
+            ));
             frames.push(output_result(tag, TaskOutputOutcome::Refused, "", None));
 
             for msg in frames {
@@ -3131,7 +3690,11 @@ mod tests {
                 );
                 assert_eq!(delivered, is_the_refusal, "{tag}: {}", wire(&msg));
                 if !is_the_refusal {
-                    assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(), "{tag}: {}", wire(&msg));
+                    assert!(
+                        outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(),
+                        "{tag}: {}",
+                        wire(&msg)
+                    );
                 }
             }
         }
@@ -3145,9 +3708,18 @@ mod tests {
             let output = output_result(tag, TaskOutputOutcome::Refused, "", Some(REFUSAL_MESSAGE));
             for msg in [stop, output] {
                 assert!(is_refusal(&msg), "{}", wire(&msg));
-                assert!(may_receive(PeerTrust::Tcp, &msg, &tags), "{tag}: {}", wire(&msg));
-                let sent = outbound(PeerTrust::Tcp, msg.clone(), &tags).expect("the refusal is delivered");
-                assert_eq!(wire(&sent), wire(&msg), "{tag}: nothing in the refusal is redacted away or added");
+                assert!(
+                    may_receive(PeerTrust::Tcp, &msg, &tags),
+                    "{tag}: {}",
+                    wire(&msg)
+                );
+                let sent =
+                    outbound(PeerTrust::Tcp, msg.clone(), &tags).expect("the refusal is delivered");
+                assert_eq!(
+                    wire(&sent),
+                    wire(&msg),
+                    "{tag}: nothing in the refusal is redacted away or added"
+                );
             }
         }
     }
@@ -3175,7 +3747,11 @@ mod tests {
         let tags = SensitiveTags::in_memory();
         for tag in ["cody-ordinary", "x1", "", "ghost", "fred"] {
             for msg in [
-                ClientMsg::SessionTaskStop { request_id: "r".into(), tag: tag.into(), task_id: "t1".into() },
+                ClientMsg::SessionTaskStop {
+                    request_id: "r".into(),
+                    tag: tag.into(),
+                    task_id: "t1".into(),
+                },
                 ClientMsg::SessionTaskOutput {
                     request_id: "r".into(),
                     tag: tag.into(),
@@ -3203,14 +3779,24 @@ mod tests {
         assert!(!NETWORK_ALLOWED.contains(&"SessionTaskStop"));
         assert!(!NETWORK_ALLOWED.contains(&"SessionTaskOutput"));
         let names: Vec<String> = every_client_msg().iter().map(variant_name).collect();
-        assert!(names.iter().any(|n| n == "SessionTaskStop"), "the fixture list names the stop verb");
-        assert!(names.iter().any(|n| n == "SessionTaskOutput"), "the fixture list names the output verb");
+        assert!(
+            names.iter().any(|n| n == "SessionTaskStop"),
+            "the fixture list names the stop verb"
+        );
+        assert!(
+            names.iter().any(|n| n == "SessionTaskOutput"),
+            "the fixture list names the output verb"
+        );
     }
 
     #[test]
     fn both_task_verbs_are_listed_as_targeting_a_sensitive_session_by_their_tag() {
         let tags = tags_with("cody-sensitive");
-        let stop = |tag: &str| ClientMsg::SessionTaskStop { request_id: "r".into(), tag: tag.into(), task_id: "t1".into() };
+        let stop = |tag: &str| ClientMsg::SessionTaskStop {
+            request_id: "r".into(),
+            tag: tag.into(),
+            task_id: "t1".into(),
+        };
         let output = |tag: &str| ClientMsg::SessionTaskOutput {
             request_id: "r".into(),
             tag: tag.into(),
@@ -3220,11 +3806,17 @@ mod tests {
         };
         for tag in ["cody-sensitive", "fred", "teri", "FRED"] {
             assert!(targets_sensitive_session(&stop(tag), &tags), "stop {tag}");
-            assert!(targets_sensitive_session(&output(tag), &tags), "output {tag}");
+            assert!(
+                targets_sensitive_session(&output(tag), &tags),
+                "output {tag}"
+            );
         }
         for tag in ["cody-ordinary", "x1"] {
             assert!(!targets_sensitive_session(&stop(tag), &tags), "stop {tag}");
-            assert!(!targets_sensitive_session(&output(tag), &tags), "output {tag}");
+            assert!(
+                !targets_sensitive_session(&output(tag), &tags),
+                "output {tag}"
+            );
         }
     }
 }

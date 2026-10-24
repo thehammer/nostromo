@@ -19,9 +19,7 @@ use nostromo::data::teri_todos::TeriTodosSnapshot;
 use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::protocol::ServerMsg;
 use nostromo::ipc::SessionManager;
-use nostromo::mcp::{
-    DaemonMcpBackend, DaemonSources, McpServer, McpSharedState, PerriDaemonState,
-};
+use nostromo::mcp::{DaemonMcpBackend, DaemonSources, McpServer, McpSharedState, PerriDaemonState};
 use nostromo::mother::{JobsFeed, MotherJob, MotherSourceState};
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -150,14 +148,21 @@ impl Client {
     async fn tools_list(&mut self) -> Value {
         let id = self.next_id;
         self.next_id += 1;
-        send(&mut self.writer, &json!({"jsonrpc":"2.0","id":id,"method":"tools/list"})).await;
+        send(
+            &mut self.writer,
+            &json!({"jsonrpc":"2.0","id":id,"method":"tools/list"}),
+        )
+        .await;
         let mut line = String::new();
         tokio::time::timeout(BOUND, self.reader.read_line(&mut line))
             .await
             .unwrap_or_else(|_| panic!("tools/list did not respond within {BOUND:?}"))
             .unwrap();
         let resp: Value = serde_json::from_str(line.trim()).expect("response is JSON");
-        assert!(resp.get("error").is_none(), "tools/list JSON-RPC error: {resp}");
+        assert!(
+            resp.get("error").is_none(),
+            "tools/list JSON-RPC error: {resp}"
+        );
         resp["result"]["tools"].clone()
     }
 
@@ -296,7 +301,10 @@ async fn teri_list_todos_with_items_is_fresh_and_carries_the_items_and_timestamp
     assert_eq!(res["items"].as_array().map(Vec::len), Some(2), "{res}");
     assert_eq!(res["updated_at"], res["generated_at"], "{res}");
     assert!(res["updated_at"].is_string(), "{res}");
-    assert!(res.get("reason").is_none() || res["reason"].is_null(), "{res}");
+    assert!(
+        res.get("reason").is_none() || res["reason"].is_null(),
+        "{res}"
+    );
 }
 
 #[tokio::test]
@@ -331,7 +339,10 @@ async fn teri_list_todos_bounds_every_body_and_the_whole_reply_for_huge_todo_bod
             body.len()
         );
         let id = item["id"].as_i64().unwrap();
-        assert!(body.starts_with(&format!("body-of-todo-{id}: é")), "keeps the start of the body");
+        assert!(
+            body.starts_with(&format!("body-of-todo-{id}: é")),
+            "keeps the start of the body"
+        );
     }
     let total = res.to_string().len();
     assert!(total < 4 * 1024 * 1024, "reply is {total} bytes");
@@ -376,14 +387,18 @@ async fn teri_list_todos_serving_old_data_after_a_failed_refresh_is_stale() {
 async fn teri_list_todos_reflects_a_later_snapshot_on_the_same_connection() {
     let h = harness().await;
     let mut c = Client::connect(&h).await;
-    assert_eq!(c.call("teri.list_todos", json!({})).await["state"], "loading");
+    assert_eq!(
+        c.call("teri.list_todos", json!({})).await["state"],
+        "loading"
+    );
     h.todos_tx.send(Some(todos(1, false, None))).unwrap();
     let res = c.call("teri.list_todos", json!({})).await;
     assert_eq!(res["state"], "fresh", "{res}");
 }
 
 #[tokio::test]
-async fn teri_list_todos_for_a_user_without_a_teri_database_is_not_configured_with_a_path_free_reason() {
+async fn teri_list_todos_for_a_user_without_a_teri_database_is_not_configured_with_a_path_free_reason(
+) {
     let h = harness().await;
     h.todos_tx.send(Some(todos_not_configured())).unwrap();
     let mut c = Client::connect(&h).await;
@@ -393,9 +408,15 @@ async fn teri_list_todos_for_a_user_without_a_teri_database_is_not_configured_wi
     assert_eq!(res["items"].as_array().map(Vec::len), Some(0), "{res}");
     assert_eq!(res["reason"], "Teri has no database yet", "{res}");
     let reason = res["reason"].as_str().unwrap();
-    assert!(!reason.contains('/'), "reason must not leak a path: {reason}");
+    assert!(
+        !reason.contains('/'),
+        "reason must not leak a path: {reason}"
+    );
     if let Ok(home) = std::env::var("HOME") {
-        assert!(!res.to_string().contains(&home), "no $HOME in output: {res}");
+        assert!(
+            !res.to_string().contains(&home),
+            "no $HOME in output: {res}"
+        );
     }
 
     let views = c.call("nostromo.list_views", json!({})).await;
@@ -412,11 +433,17 @@ async fn fred_tools_before_any_snapshot_say_loading_never_a_bare_zero_or_empty_a
     let mut c = Client::connect(&h).await;
 
     let unread = c.call("fred.list_unread_emails", json!({})).await;
-    assert!(unread.is_object(), "must be an object, not a bare array: {unread}");
+    assert!(
+        unread.is_object(),
+        "must be an object, not a bare array: {unread}"
+    );
     assert_eq!(unread["state"], "loading", "{unread}");
 
     let cal = c.call("fred.list_calendar_events", json!({})).await;
-    assert!(cal.is_object(), "must be an object, not a bare array: {cal}");
+    assert!(
+        cal.is_object(),
+        "must be an object, not a bare array: {cal}"
+    );
     assert_eq!(cal["state"], "loading", "{cal}");
 
     let st = c.call("fred.get_state", json!({})).await;
@@ -428,7 +455,9 @@ async fn fred_tools_before_any_snapshot_say_loading_never_a_bare_zero_or_empty_a
 #[tokio::test]
 async fn fred_list_unread_emails_returns_state_count_and_items() {
     let h = harness().await;
-    h.mailbox_tx.send(Some(mailbox(3, false, None, false))).unwrap();
+    h.mailbox_tx
+        .send(Some(mailbox(3, false, None, false)))
+        .unwrap();
     let mut c = Client::connect(&h).await;
     let res = c.call("fred.list_unread_emails", json!({})).await;
     assert_eq!(res["state"], "fresh", "{res}");
@@ -458,14 +487,19 @@ async fn fred_mailbox_error_with_no_items_is_an_error_not_unread_zero_alone() {
 #[tokio::test]
 async fn fred_mailbox_needing_sign_in_is_unauthenticated_with_the_device_code_prompt() {
     let h = harness().await;
-    h.mailbox_tx.send(Some(mailbox(0, false, None, true))).unwrap();
+    h.mailbox_tx
+        .send(Some(mailbox(0, false, None, true)))
+        .unwrap();
     h.calendar_tx.send(Some(calendar(1, false, None))).unwrap();
     let mut c = Client::connect(&h).await;
 
     let st = c.call("fred.get_state", json!({})).await;
     assert_eq!(st["state"], "unauthenticated", "{st}");
     assert_eq!(st["mailbox_state"], "unauthenticated", "{st}");
-    assert_eq!(st["auth"]["verification_uri"], "https://microsoft.com/devicelogin");
+    assert_eq!(
+        st["auth"]["verification_uri"],
+        "https://microsoft.com/devicelogin"
+    );
     assert_eq!(st["auth"]["user_code"], "ABCD-1234");
     assert!(st["auth"]["expires_at"].is_string(), "{st}");
 
@@ -478,7 +512,11 @@ async fn fred_mailbox_needing_sign_in_is_unauthenticated_with_the_device_code_pr
 async fn fred_overall_state_is_the_worst_of_mailbox_and_calendar() {
     // (mailbox, calendar, expected overall) — rank: unauthenticated > error >
     // stale > loading > fresh/empty.
-    type Case = (Option<MailboxSnapshot>, Option<CalendarSnapshot>, &'static str);
+    type Case = (
+        Option<MailboxSnapshot>,
+        Option<CalendarSnapshot>,
+        &'static str,
+    );
     let cases: Vec<Case> = vec![
         (
             Some(mailbox(1, false, None, false)),
@@ -515,7 +553,9 @@ async fn fred_overall_state_is_the_worst_of_mailbox_and_calendar() {
 #[tokio::test]
 async fn fred_get_state_reports_counts_and_both_channels() {
     let h = harness().await;
-    h.mailbox_tx.send(Some(mailbox(4, false, None, false))).unwrap();
+    h.mailbox_tx
+        .send(Some(mailbox(4, false, None, false)))
+        .unwrap();
     h.calendar_tx.send(Some(calendar(2, false, None))).unwrap();
     let mut c = Client::connect(&h).await;
     let st = c.call("fred.get_state", json!({})).await;
@@ -542,7 +582,11 @@ async fn fred_list_calendar_events_wraps_events_with_state_and_filters_by_date()
     let other_day = c
         .call("fred.list_calendar_events", json!({ "date": "2026-10-10" }))
         .await;
-    assert_eq!(other_day["events"].as_array().map(Vec::len), Some(0), "{other_day}");
+    assert_eq!(
+        other_day["events"].as_array().map(Vec::len),
+        Some(0),
+        "{other_day}"
+    );
 
     let bad = c
         .call("fred.list_calendar_events", json!({ "date": "not-a-date" }))
@@ -594,9 +638,12 @@ async fn fred_get_state_has_an_updated_at_even_when_the_calendar_is_the_worst_so
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn sign_in_prompt_exposes_only_the_device_code_fields_and_no_tool_output_carries_token_material() {
+async fn sign_in_prompt_exposes_only_the_device_code_fields_and_no_tool_output_carries_token_material(
+) {
     let h = harness().await;
-    h.mailbox_tx.send(Some(mailbox(1, false, None, true))).unwrap();
+    h.mailbox_tx
+        .send(Some(mailbox(1, false, None, true)))
+        .unwrap();
     h.calendar_tx
         .send(Some(calendar(1, false, Some("cal down"))))
         .unwrap();
@@ -634,7 +681,10 @@ async fn sign_in_prompt_exposes_only_the_device_code_fields_and_no_tool_output_c
         all.push_str(&c.call(name, args).await.to_string());
     }
     for needle in ["access_token", "refresh_token"] {
-        assert!(!all.contains(needle), "a tool output mentions {needle}: {all}");
+        assert!(
+            !all.contains(needle),
+            "a tool output mentions {needle}: {all}"
+        );
     }
 }
 
@@ -655,7 +705,9 @@ fn view<'a>(views: &'a Value, name: &str) -> &'a Value {
 async fn list_views_in_the_daemon_reports_live_counts_for_every_channel() {
     let h = harness().await;
     h.todos_tx.send(Some(todos(3, false, None))).unwrap();
-    h.mailbox_tx.send(Some(mailbox(5, false, None, false))).unwrap();
+    h.mailbox_tx
+        .send(Some(mailbox(5, false, None, false)))
+        .unwrap();
     h.calendar_tx.send(Some(calendar(2, false, None))).unwrap();
     h.queue_tx
         .send(Some(
@@ -670,13 +722,13 @@ async fn list_views_in_the_daemon_reports_live_counts_for_every_channel() {
         ))
         .unwrap();
     h.feed.publish_jobs(vec![
-            job("r1", "running"),
-            job("r2", "running"),
-            job("q1", "queued"),
-            job("a1", "awaiting"),
-            job("f1", "failed"),
-            job("d1", "done"),
-        ]);
+        job("r1", "running"),
+        job("r2", "running"),
+        job("q1", "queued"),
+        job("a1", "awaiting"),
+        job("f1", "failed"),
+        job("d1", "done"),
+    ]);
 
     let mut c = Client::connect(&h).await;
     let views = c.call("nostromo.list_views", json!({})).await;
@@ -692,7 +744,10 @@ async fn list_views_in_the_daemon_reports_live_counts_for_every_channel() {
     assert_eq!(m["failed"], 1, "{views}");
 
     for name in ["teri", "fred", "perri", "mother"] {
-        assert!(view(&views, name)["state"].is_string(), "{name} needs a state: {views}");
+        assert!(
+            view(&views, name)["state"].is_string(),
+            "{name} needs a state: {views}"
+        );
     }
 }
 
@@ -733,14 +788,14 @@ async fn list_views_mother_state_follows_the_job_feed_including_failures() {
 async fn mother_get_status_in_the_daemon_is_derived_from_the_job_list() {
     let h = harness().await;
     h.feed.publish_jobs(vec![
-            job("r1", "running"),
-            job("q1", "queued"),
-            job("q2", "ready"),
-            job("a1", "awaiting"),
-            job("f1", "failed"),
-            job("f2", "failed"),
-            job("f3", "failed"),
-        ]);
+        job("r1", "running"),
+        job("q1", "queued"),
+        job("q2", "ready"),
+        job("a1", "awaiting"),
+        job("f1", "failed"),
+        job("f2", "failed"),
+        job("f3", "failed"),
+    ]);
     let mut c = Client::connect(&h).await;
     let st = c.call("mother.get_status", json!({})).await;
     assert!(!st.is_null(), "daemon get_status must not be null");
@@ -795,7 +850,8 @@ async fn mother_get_status_is_error_when_the_list_has_never_succeeded() {
 #[tokio::test]
 async fn mother_get_status_is_stale_after_a_failure_following_a_success_and_keeps_the_jobs() {
     let h = harness().await;
-    h.feed.publish_jobs(vec![job("r1", "running"), job("f1", "failed")]);
+    h.feed
+        .publish_jobs(vec![job("r1", "running"), job("f1", "failed")]);
     h.feed.publish_failure("broker down");
     let mut c = Client::connect(&h).await;
 
@@ -1176,7 +1232,9 @@ impl Drop for FakeMother {
         // Don't leave a sleeper behind when a test failed before it was reaped.
         for sub in ["add", "cancel", "retry", "list", "archive", "resume"] {
             if let Some(pid) = self.sleeper_pid(sub) {
-                let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .output();
             }
         }
     }
@@ -1199,8 +1257,14 @@ fn plan_file(dir: &Path) -> PathBuf {
 
 /// Run the fake directly; returns (exit success, stderr).
 fn run_fake(fake: &FakeMother, args: &[&str]) -> (bool, String) {
-    let out = std::process::Command::new(fake.path()).args(args).output().unwrap();
-    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    let out = std::process::Command::new(fake.path())
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 // ── the fake itself must enforce the real grammar (else the tests below are vacuous)
@@ -1212,18 +1276,30 @@ async fn the_fake_mother_rejects_what_the_real_cli_rejects() {
         (vec!["cancel", "--", "x"], "no such job: --"),
         (vec!["retry", "--", "x"], "retry: unknown flag: --"),
         (vec!["resume", "--", "x", "ans"], "resume: <id> required"),
-        (vec!["force-start", "--yes", "--", "x"], "force-start: <id> required"),
+        (
+            vec!["force-start", "--yes", "--", "x"],
+            "force-start: <id> required",
+        ),
         (vec!["cancel"], "<id> required"),
         (vec!["retry", "--bogus", "x"], "unknown flag"),
         (vec!["resume", "j"], "exactly one of"),
         (vec!["resume", "j", "a", "b"], "unexpected argument"),
         (vec!["resume", "j", "-x"], "unknown flag"),
-        (vec!["resume", "j", "ans", "--from-file", "/x"], "exactly one of"),
-        (vec!["add", "--repo", "r", "--branch", "b"], "--plan-file is required"),
+        (
+            vec!["resume", "j", "ans", "--from-file", "/x"],
+            "exactly one of",
+        ),
+        (
+            vec!["add", "--repo", "r", "--branch", "b"],
+            "--plan-file is required",
+        ),
     ] {
         let (ok, stderr) = run_fake(&fake, &args);
         assert!(!ok, "{args:?} must be rejected");
-        assert!(stderr.contains(want), "{args:?}: stderr {stderr:?} lacks {want:?}");
+        assert!(
+            stderr.contains(want),
+            "{args:?}: stderr {stderr:?} lacks {want:?}"
+        );
     }
     for args in [
         vec!["cancel", "j"],
@@ -1250,7 +1326,10 @@ fn grammar_usage_lines_match_the_installed_mother_help() {
         return;
     };
     // `--help` is read-only.
-    let out = std::process::Command::new(&real).arg("--help").output().unwrap();
+    let out = std::process::Command::new(&real)
+        .arg("--help")
+        .output()
+        .unwrap();
     let help = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1291,7 +1370,10 @@ async fn enqueue_job_runs_mother_add_and_returns_the_new_job_id() {
         .await;
 
     assert!(res.get("error").is_none(), "{res}");
-    assert!(res.to_string().contains("abc123"), "result must carry the job id: {res}");
+    assert!(
+        res.to_string().contains("abc123"),
+        "result must carry the job id: {res}"
+    );
 
     let argv = fake.call_of("add");
     let prefix = format!(
@@ -1331,20 +1413,32 @@ async fn enqueue_job_without_repo_or_branch_is_invalid_args_and_never_runs_mothe
     let mut c = Client::connect(&h).await;
 
     let missing_repo = c
-        .call("mother.enqueue_job", json!({ "plan_path": plan, "branch": "b" }))
+        .call(
+            "mother.enqueue_job",
+            json!({ "plan_path": plan, "branch": "b" }),
+        )
         .await;
     assert_eq!(missing_repo["error"], "invalid_args", "{missing_repo}");
     assert!(
-        missing_repo["detail"].as_str().unwrap_or("").contains("required"),
+        missing_repo["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("required"),
         "{missing_repo}"
     );
 
     let missing_branch = c
-        .call("mother.enqueue_job", json!({ "plan_path": plan, "repo": "r" }))
+        .call(
+            "mother.enqueue_job",
+            json!({ "plan_path": plan, "repo": "r" }),
+        )
         .await;
     assert_eq!(missing_branch["error"], "invalid_args", "{missing_branch}");
     assert!(
-        missing_branch["detail"].as_str().unwrap_or("").contains("required"),
+        missing_branch["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("required"),
         "{missing_branch}"
     );
 
@@ -1372,7 +1466,10 @@ async fn enqueue_job_rejects_option_looking_values_and_never_runs_mother() {
         ("base", with("base", json!("--yes"))),
         ("label", with("label", json!("-x"))),
         ("repo_path", with("repo_path", json!("--yes"))),
-        ("depends_on first", with("depends_on", json!(["--yes", "ok"]))),
+        (
+            "depends_on first",
+            with("depends_on", json!(["--yes", "ok"])),
+        ),
         ("depends_on later", with("depends_on", json!(["ok", "-x"]))),
     ] {
         let res = c.call("mother.enqueue_job", args).await;
@@ -1382,7 +1479,11 @@ async fn enqueue_job_rejects_option_looking_values_and_never_runs_mother() {
             "{what} needs a detail: {res}"
         );
     }
-    assert!(fake.calls().is_empty(), "no CLI call for invalid args: {:?}", fake.calls());
+    assert!(
+        fake.calls().is_empty(),
+        "no CLI call for invalid args: {:?}",
+        fake.calls()
+    );
 }
 
 #[tokio::test]
@@ -1398,7 +1499,10 @@ async fn enqueue_job_requires_an_absolute_plan_path_and_still_reports_a_missing_
         )
         .await;
     assert_eq!(rel["error"], "invalid_args", "{rel}");
-    assert!(rel["detail"].as_str().unwrap_or("").contains("absolute"), "{rel}");
+    assert!(
+        rel["detail"].as_str().unwrap_or("").contains("absolute"),
+        "{rel}"
+    );
 
     let missing = c
         .call(
@@ -1408,7 +1512,11 @@ async fn enqueue_job_requires_an_absolute_plan_path_and_still_reports_a_missing_
         .await;
     assert_eq!(missing["error"], "plan_not_found", "{missing}");
 
-    assert!(fake.calls().is_empty(), "no CLI call for either: {:?}", fake.calls());
+    assert!(
+        fake.calls().is_empty(),
+        "no CLI call for either: {:?}",
+        fake.calls()
+    );
 }
 
 #[tokio::test]
@@ -1500,10 +1608,21 @@ async fn resume_job_hands_the_answer_to_the_cli_in_a_file_never_in_argv() {
         let argv = fake.last_call_of("resume");
         let parts: Vec<&str> = argv.split_whitespace().collect();
         assert_eq!(parts.len(), 4, "argv was: {argv}");
-        assert_eq!(&parts[..3], ["resume", "j3", "--from-file"], "argv was: {argv}");
-        assert!(!argv.contains(answer), "the answer must not be in argv: {argv}");
+        assert_eq!(
+            &parts[..3],
+            ["resume", "j3", "--from-file"],
+            "argv was: {argv}"
+        );
+        assert!(
+            !argv.contains(answer),
+            "the answer must not be in argv: {argv}"
+        );
 
-        assert_eq!(fake.last_answer(), answer, "file contents must be the answer exactly");
+        assert_eq!(
+            fake.last_answer(),
+            answer,
+            "file contents must be the answer exactly"
+        );
 
         // The daemon cleans up the temp file once the CLI has returned.
         assert!(
@@ -1516,7 +1635,8 @@ async fn resume_job_hands_the_answer_to_the_cli_in_a_file_never_in_argv() {
 
 // ── MC3: a structured hold is the operator's choice, never an agent's ────────
 
-const HOLD_NEEDS_OPERATOR: &str = "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
+const HOLD_NEEDS_OPERATOR: &str =
+    "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
 
 /// A job as the broker lists it. `decision`: None = no hold, Some(false) = an
 /// open hold, Some(true) = a hold the operator has already answered.
@@ -1548,7 +1668,10 @@ fn held_job(id: &str, decision: Option<bool>) -> MotherJob {
 }
 
 fn resume_calls(fake: &FakeMother) -> Vec<String> {
-    fake.calls().into_iter().filter(|l| l.split_whitespace().next() == Some("resume")).collect()
+    fake.calls()
+        .into_iter()
+        .filter(|l| l.split_whitespace().next() == Some("resume"))
+        .collect()
 }
 
 #[tokio::test]
@@ -1559,7 +1682,10 @@ async fn resume_job_refuses_a_job_with_an_open_decision_and_never_runs_the_cli()
     let mut c = Client::connect(&h).await;
 
     let res = c
-        .call("mother.resume_job", json!({ "id": "hold-1", "answer": "AGENT-SELF-ANSWER" }))
+        .call(
+            "mother.resume_job",
+            json!({ "id": "hold-1", "answer": "AGENT-SELF-ANSWER" }),
+        )
         .await;
 
     assert_eq!(
@@ -1567,10 +1693,21 @@ async fn resume_job_refuses_a_job_with_an_open_decision_and_never_runs_the_cli()
         json!({ "error": "needs_operator_choice", "detail": HOLD_NEEDS_OPERATOR }),
         "an agent must not answer a structured hold"
     );
-    assert!(resume_calls(&fake).is_empty(), "the CLI must not be called: {:?}", fake.calls());
+    assert!(
+        resume_calls(&fake).is_empty(),
+        "the CLI must not be called: {:?}",
+        fake.calls()
+    );
     let text = res.to_string();
-    for secret in ["SECRET-TITLE-OF-THE-HELD-JOB", "SECRET-QUESTION-FOR-THE-OPERATOR", "SECRET-CONSEQUENCE-TEXT"] {
-        assert!(!text.contains(secret), "the refusal must not carry job content ({secret}): {text}");
+    for secret in [
+        "SECRET-TITLE-OF-THE-HELD-JOB",
+        "SECRET-QUESTION-FOR-THE-OPERATOR",
+        "SECRET-CONSEQUENCE-TEXT",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "the refusal must not carry job content ({secret}): {text}"
+        );
     }
 }
 
@@ -1590,7 +1727,12 @@ async fn resume_job_still_resumes_a_job_without_an_open_decision() {
             // Another job's open hold must not block a different id.
             held_job("hold-elsewhere", Some(false)),
         ]);
-        let res = c.call("mother.resume_job", json!({ "id": id, "answer": "go ahead" })).await;
+        let res = c
+            .call(
+                "mother.resume_job",
+                json!({ "id": id, "answer": "go ahead" }),
+            )
+            .await;
         assert_eq!(res, json!({ "ok": true }), "{id}: {res}");
         let argv = fake.last_call_of("resume");
         assert!(
@@ -1608,11 +1750,21 @@ async fn resume_job_follows_the_feed_once_the_operator_has_answered_the_hold() {
     h.feed.publish_jobs(vec![held_job("hold-2", Some(false))]);
     let mut c = Client::connect(&h).await;
 
-    let res = c.call("mother.resume_job", json!({ "id": "hold-2", "answer": "x" })).await;
+    let res = c
+        .call(
+            "mother.resume_job",
+            json!({ "id": "hold-2", "answer": "x" }),
+        )
+        .await;
     assert_eq!(res["error"], "needs_operator_choice", "{res}");
 
     h.feed.publish_jobs(vec![held_job("hold-2", Some(true))]);
-    let res = c.call("mother.resume_job", json!({ "id": "hold-2", "answer": "x" })).await;
+    let res = c
+        .call(
+            "mother.resume_job",
+            json!({ "id": "hold-2", "answer": "x" }),
+        )
+        .await;
     assert_eq!(res, json!({ "ok": true }), "{res}");
     assert_eq!(resume_calls(&fake).len(), 1, "{:?}", fake.calls());
 }
@@ -1636,7 +1788,9 @@ async fn the_resume_job_tool_description_says_a_structured_hold_is_the_operators
 #[tokio::test]
 async fn force_start_uses_the_real_cli_argv() {
     let fake = FakeMother::install().await;
-    nostromo::mother::force_start("jid").await.expect("force_start should succeed");
+    nostromo::mother::force_start("jid")
+        .await
+        .expect("force_start should succeed");
     assert_eq!(fake.call_of("force-start"), "force-start --yes jid");
 }
 
@@ -1698,7 +1852,8 @@ async fn enqueue_job_makes_the_new_job_visible_immediately() {
 
     let jobs = c.call("mother.list_jobs", json!({})).await;
     assert!(
-        jobs.as_array().is_some_and(|a| a.iter().any(|j| j["id"] == "abc123")),
+        jobs.as_array()
+            .is_some_and(|a| a.iter().any(|j| j["id"] == "abc123")),
         "the new job must be listed right away: {jobs}"
     );
 }
@@ -1751,11 +1906,19 @@ async fn enqueue_job_times_out_a_hung_cli_and_kills_it() {
             json!({ "plan_path": plan, "repo": "nostromo", "branch": "feat/x" }),
         )
         .await;
-    assert!(res.get("error").is_some(), "a hung CLI must be an error: {res}");
+    assert!(
+        res.get("error").is_some(),
+        "a hung CLI must be an error: {res}"
+    );
     assert!(res.to_string().contains("timed out"), "{res}");
 
-    let pid = fake.sleeper_pid("add").expect("the fake add should have started");
-    assert!(dies_within_two_seconds(pid).await, "the hung CLI (pid {pid}) must be killed");
+    let pid = fake
+        .sleeper_pid("add")
+        .expect("the fake add should have started");
+    assert!(
+        dies_within_two_seconds(pid).await,
+        "the hung CLI (pid {pid}) must be killed"
+    );
 }
 
 #[tokio::test]
@@ -1767,11 +1930,19 @@ async fn a_job_mutator_times_out_a_hung_cli_and_kills_it() {
     let mut c = Client::connect(&h).await;
 
     let res = c.call("mother.cancel_job", json!({ "id": "job-9" })).await;
-    assert!(res.get("error").is_some(), "a hung CLI must be an error: {res}");
+    assert!(
+        res.get("error").is_some(),
+        "a hung CLI must be an error: {res}"
+    );
     assert!(res.to_string().contains("timed out"), "{res}");
 
-    let pid = fake.sleeper_pid("cancel").expect("the fake cancel should have started");
-    assert!(dies_within_two_seconds(pid).await, "the hung CLI (pid {pid}) must be killed");
+    let pid = fake
+        .sleeper_pid("cancel")
+        .expect("the fake cancel should have started");
+    assert!(
+        dies_within_two_seconds(pid).await,
+        "the hung CLI (pid {pid}) must be killed"
+    );
 }
 
 #[tokio::test]
@@ -1784,7 +1955,10 @@ async fn retry_of_a_job_whose_branch_has_an_open_pr_is_a_distinct_error_with_a_r
     let res = c.call("mother.retry_job", json!({ "id": "j1" })).await;
     assert_eq!(res["error"], "mother_job_has_open_pr", "{res}");
     assert!(
-        res["detail"].as_str().unwrap_or("").contains("open pull request"),
+        res["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("open pull request"),
         "detail must carry the CLI's stderr: {res}"
     );
     assert!(
@@ -1804,7 +1978,11 @@ async fn retry_does_not_pass_yes_so_the_open_pr_guard_stays_on() {
 
     let res = c.call("mother.retry_job", json!({ "id": "j1" })).await;
     assert_eq!(res["error"], "mother_job_has_open_pr", "{res}");
-    assert_eq!(fake.call_of("retry"), "retry j1", "retry must not pass --yes");
+    assert_eq!(
+        fake.call_of("retry"),
+        "retry j1",
+        "retry must not pass --yes"
+    );
 }
 
 #[tokio::test]
@@ -1872,7 +2050,10 @@ async fn feed_refresh_publishes_fresh_on_success_then_stale_on_failure() {
 
     let jobs = feed.refresh().await.expect("refresh should succeed");
     assert_eq!(jobs.len(), 1);
-    assert!(matches!(*feed.source_rx().borrow(), MotherSourceState::Fresh { .. }));
+    assert!(matches!(
+        *feed.source_rx().borrow(),
+        MotherSourceState::Fresh { .. }
+    ));
     assert_eq!(feed.jobs_rx().borrow().len(), 1);
 
     fake.mode("list_fail");

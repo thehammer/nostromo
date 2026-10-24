@@ -62,7 +62,12 @@ pub(super) async fn control_within(
     request: serde_json::Value,
     timeout: Duration,
 ) -> std::result::Result<ControlReply, ControlFailure> {
-    let failure = |reason: String, refused: bool| ControlFailure { reason, refused, code: None, timed_out: false };
+    let failure = |reason: String, refused: bool| ControlFailure {
+        reason,
+        refused,
+        code: None,
+        timed_out: false,
+    };
     const EXITED: &str = "the session exited";
     let id = format!("model-{}", Uuid::new_v4());
     let (tx, rx) = oneshot::channel();
@@ -90,7 +95,10 @@ pub(super) async fn control_within(
         Err(_) => {
             shared.waiters.lock().unwrap().remove(&id);
             Err(ControlFailure {
-                reason: format!("the session did not answer within {} s", timeout.as_secs().max(1)),
+                reason: format!(
+                    "the session did not answer within {} s",
+                    timeout.as_secs().max(1)
+                ),
                 refused: false,
                 code: None,
                 timed_out: true,

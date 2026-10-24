@@ -107,8 +107,12 @@ pub struct PeerInfo {
 pub enum CodeIdentity {
     /// The running code satisfies the pin's requirement, under the hardened
     /// runtime, not debuggable and not being debugged.
-    Pinned { identifier: String },
-    Unverified { reason: UnverifiedReason },
+    Pinned {
+        identifier: String,
+    },
+    Unverified {
+        reason: UnverifiedReason,
+    },
 }
 
 /// Why a peer's code is not [`CodeIdentity::Pinned`].
@@ -194,7 +198,10 @@ impl MacPeerVerifier {
     /// install) and for tests. Never feed this anything the peer or an
     /// agent-writable file chose.
     pub fn with_app_exe(pin_path: impl Into<PathBuf>, app_exe: impl Into<PathBuf>) -> Self {
-        Self { pin_path: pin_path.into(), app_exe: app_exe.into() }
+        Self {
+            pin_path: pin_path.into(),
+            app_exe: app_exe.into(),
+        }
     }
 
     pub fn pin_path(&self) -> &Path {
@@ -222,15 +229,27 @@ impl PeerVerifier for MacPeerVerifier {
         let image = peer_image(pid)?;
         let path_bundle_id = bundle_id_for_exe(&image.path);
         let code = if !verify {
-            CodeIdentity::Unverified { reason: UnverifiedReason::NotChecked }
+            CodeIdentity::Unverified {
+                reason: UnverifiedReason::NotChecked,
+            }
         } else {
             match (&token, OperatorPin::load(&self.pin_path)) {
                 (_, Err(reason)) => CodeIdentity::Unverified { reason },
-                (None, Ok(_)) => CodeIdentity::Unverified { reason: no_token_reason() },
-                (Some(token), Ok(pin)) => self.bind_to_installed_app(verify_code(token, &pin), &image),
+                (None, Ok(_)) => CodeIdentity::Unverified {
+                    reason: no_token_reason(),
+                },
+                (Some(token), Ok(pin)) => {
+                    self.bind_to_installed_app(verify_code(token, &pin), &image)
+                }
             }
         };
-        Some(PeerInfo { pid, pidversion, exe: image.path, path_bundle_id, code })
+        Some(PeerInfo {
+            pid,
+            pidversion,
+            exe: image.path,
+            path_bundle_id,
+            code,
+        })
     }
 }
 
@@ -244,7 +263,10 @@ impl MacPeerVerifier {
             return code;
         }
         let installed = installed_app(&self.app_exe);
-        if installed.as_ref().is_some_and(|installed| is_installed_app(image, installed)) {
+        if installed
+            .as_ref()
+            .is_some_and(|installed| is_installed_app(image, installed))
+        {
             return code;
         }
         warn!(
@@ -252,7 +274,9 @@ impl MacPeerVerifier {
             expected = %self.app_exe.display(),
             "pinned code is not the installed app (not at its path, or not that file): refused (WrongPath)"
         );
-        CodeIdentity::Unverified { reason: UnverifiedReason::WrongPath }
+        CodeIdentity::Unverified {
+            reason: UnverifiedReason::WrongPath,
+        }
     }
 }
 
@@ -306,7 +330,13 @@ fn installed_app(app_exe: &Path) -> Option<InstalledApp> {
     if !meta.is_file() {
         return None;
     }
-    Some(InstalledApp { path: path_of_open_file(&file)?, id: FileId { dev: device_of(&meta), ino: meta.ino() } })
+    Some(InstalledApp {
+        path: path_of_open_file(&file)?,
+        id: FileId {
+            dev: device_of(&meta),
+            ino: meta.ino(),
+        },
+    })
 }
 
 /// `st_dev` as the kernel's region table spells it: on macOS a `u32` (`stat`
@@ -364,7 +394,11 @@ fn no_token_reason() -> UnverifiedReason {
 pub fn bundle_id_for_exe(exe: &Path) -> Option<String> {
     let info = app_bundle_of(exe)?.join("Contents").join("Info.plist");
     let plist = plist::Value::from_file(info).ok()?;
-    plist.as_dictionary()?.get("CFBundleIdentifier")?.as_string().map(str::to_owned)
+    plist
+        .as_dictionary()?
+        .get("CFBundleIdentifier")?
+        .as_string()
+        .map(str::to_owned)
 }
 
 /// The trust of a Unix connection after its `Hello`. Pure: `info` is what the
@@ -374,7 +408,11 @@ pub fn bundle_id_for_exe(exe: &Path) -> Option<String> {
 /// `OperatorApp` iff the Hello claimed [`MAC_APP_CLIENT_KIND`] **and** the
 /// peer's code is [`CodeIdentity::Pinned`] with identifier [`APP_BUNDLE_ID`]
 /// (or [`QA_BUNDLE_ID`] in QA mode). Everything else is `LocalOther`.
-pub fn classify_peer(info: Option<&PeerInfo>, client_kind: Option<&str>, qa_mode: bool) -> PeerTrust {
+pub fn classify_peer(
+    info: Option<&PeerInfo>,
+    client_kind: Option<&str>,
+    qa_mode: bool,
+) -> PeerTrust {
     let claims_app = client_kind == Some(MAC_APP_CLIENT_KIND);
     let is_app = info.is_some_and(|info| match &info.code {
         CodeIdentity::Pinned { identifier } => accepted_identifier(identifier, qa_mode),
@@ -432,31 +470,42 @@ pub fn still_same_operator(accepted: &PeerInfo, now: Option<&PeerInfo>) -> bool 
 /// - a `mac_app` claim that was refused: why, and how to fix it.
 ///
 /// `None` for an operator (logged at info) and for ordinary peers.
-pub fn claim_diagnostic(info: Option<&PeerInfo>, client_kind: Option<&str>, trust: PeerTrust) -> Option<String> {
+pub fn claim_diagnostic(
+    info: Option<&PeerInfo>,
+    client_kind: Option<&str>,
+    trust: PeerTrust,
+) -> Option<String> {
     if trust == PeerTrust::OperatorApp {
         return None;
     }
     const FIX: &str = "run make mac-install (installs, signs and pins the app)";
     const NOT_ENFORCED: &str = "SIP disabled or runtime not enforced: operator app cannot answer";
     match client_kind {
-        None if info.is_some_and(|i| i.path_bundle_id.as_deref() == Some(APP_BUNDLE_ID)) => {
-            Some("genuine bundle, no mac_app claim: old app? reinstall app and daemon together".to_string())
-        }
+        None if info.is_some_and(|i| i.path_bundle_id.as_deref() == Some(APP_BUNDLE_ID)) => Some(
+            "genuine bundle, no mac_app claim: old app? reinstall app and daemon together"
+                .to_string(),
+        ),
         Some(MAC_APP_CLIENT_KIND) => Some(match info.map(|i| &i.code) {
             None => format!("mac_app claim refused: the peer could not be identified; {FIX}"),
             // Reinstalling cannot help here: the host itself does not enforce
             // the runtime.
-            Some(CodeIdentity::Unverified { reason: reason @ UnverifiedReason::RuntimeNotEnforced }) => {
+            Some(CodeIdentity::Unverified {
+                reason: reason @ UnverifiedReason::RuntimeNotEnforced,
+            }) => {
                 format!("mac_app claim refused: {reason}; {NOT_ENFORCED}")
             }
-            Some(CodeIdentity::Unverified { reason: reason @ UnverifiedReason::WrongPath }) => {
+            Some(CodeIdentity::Unverified {
+                reason: reason @ UnverifiedReason::WrongPath,
+            }) => {
                 format!(
                     "mac_app claim refused: {reason}; pinned code must run from {INSTALLED_APP_EXE} \
                      (or the daemon's {APP_PATH_ENV}); it ran from {}",
                     info.map_or_else(String::new, |i| i.exe.display().to_string())
                 )
             }
-            Some(CodeIdentity::Unverified { reason }) => format!("mac_app claim refused: {reason}; {FIX}"),
+            Some(CodeIdentity::Unverified { reason }) => {
+                format!("mac_app claim refused: {reason}; {FIX}")
+            }
             Some(CodeIdentity::Pinned { identifier }) => {
                 format!("mac_app claim refused: identifier {identifier} is not accepted by this daemon; {FIX}")
             }
@@ -503,7 +552,9 @@ impl OperatorPin {
             };
             match key {
                 "identifier" => {
-                    let valid = value.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+                    let valid = value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
                     if identifier.is_some() || !valid {
                         return Err(bad);
                     }
@@ -519,7 +570,10 @@ impl OperatorPin {
             }
         }
         match identifier {
-            Some(identifier) if !cdhashes.is_empty() => Ok(Self { identifier, cdhashes }),
+            Some(identifier) if !cdhashes.is_empty() => Ok(Self {
+                identifier,
+                cdhashes,
+            }),
             _ => Err(bad),
         }
     }
@@ -536,7 +590,9 @@ impl OperatorPin {
 
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(UnverifiedReason::NoPin),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(UnverifiedReason::NoPin)
+            }
             Err(_) => return Err(UnverifiedReason::BadPin),
         };
         let meta = file.metadata().map_err(|_| UnverifiedReason::BadPin)?;
@@ -546,7 +602,9 @@ impl OperatorPin {
             return Err(UnverifiedReason::BadPin);
         }
         let mut text = String::new();
-        file.take(MAX_PIN_LEN).read_to_string(&mut text).map_err(|_| UnverifiedReason::BadPin)?;
+        file.take(MAX_PIN_LEN)
+            .read_to_string(&mut text)
+            .map_err(|_| UnverifiedReason::BadPin)?;
         Self::parse(&text)
     }
 
@@ -563,8 +621,16 @@ impl OperatorPin {
     /// identifier and hashes were validated by [`OperatorPin::parse`], so
     /// nothing in them can break out of the quotes.
     pub fn requirement(&self) -> String {
-        let hashes: Vec<String> = self.cdhashes.iter().map(|h| format!("cdhash H\"{h}\"")).collect();
-        format!("identifier \"{}\" and ({})", self.identifier, hashes.join(" or "))
+        let hashes: Vec<String> = self
+            .cdhashes
+            .iter()
+            .map(|h| format!("cdhash H\"{h}\""))
+            .collect();
+        format!(
+            "identifier \"{}\" and ({})",
+            self.identifier,
+            hashes.join(" or ")
+        )
     }
 }
 
@@ -664,39 +730,49 @@ fn check_status_flags(status: u32) -> Result<(), UnverifiedReason> {
 #[cfg(target_os = "macos")]
 pub fn verify_code(token: &AuditToken, pin: &OperatorPin) -> CodeIdentity {
     match check_code(token, pin) {
-        Ok(()) => CodeIdentity::Pinned { identifier: pin.identifier().to_string() },
+        Ok(()) => CodeIdentity::Pinned {
+            identifier: pin.identifier().to_string(),
+        },
         Err(reason) => CodeIdentity::Unverified { reason },
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn verify_code(_token: &AuditToken, _pin: &OperatorPin) -> CodeIdentity {
-    CodeIdentity::Unverified { reason: UnverifiedReason::Unsupported }
+    CodeIdentity::Unverified {
+        reason: UnverifiedReason::Unsupported,
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn check_code(token: &AuditToken, pin: &OperatorPin) -> Result<(), UnverifiedReason> {
     use core_foundation::base::TCFType;
     use core_foundation::data::CFData;
-    use security_framework::os::macos::code_signing::{Flags, GuestAttributes, SecCode, SecRequirement};
+    use security_framework::os::macos::code_signing::{
+        Flags, GuestAttributes, SecCode, SecRequirement,
+    };
 
     /// `errSecCSReqFailed`: the code does not satisfy the requirement.
     const ERR_REQ_FAILED: i32 = -67050;
 
-    let requirement: SecRequirement = pin.requirement().parse().map_err(|_| UnverifiedReason::BadPin)?;
+    let requirement: SecRequirement = pin
+        .requirement()
+        .parse()
+        .map_err(|_| UnverifiedReason::BadPin)?;
     let bytes: Vec<u8> = token.0.iter().flat_map(|v| v.to_ne_bytes()).collect();
     let token_data = CFData::from_buffer(&bytes);
     let mut attrs = GuestAttributes::new();
     attrs.set_audit_token(token_data.as_concrete_TypeRef());
     let code = SecCode::copy_guest_with_attribues(None, &attrs, Flags::NONE)
         .map_err(|_| UnverifiedReason::NoSuchCode)?;
-    code.check_validity(Flags::NONE, &requirement).map_err(|e| {
-        if e.code() == ERR_REQ_FAILED {
-            UnverifiedReason::RequirementFailed
-        } else {
-            UnverifiedReason::NotValid
-        }
-    })?;
+    code.check_validity(Flags::NONE, &requirement)
+        .map_err(|e| {
+            if e.code() == ERR_REQ_FAILED {
+                UnverifiedReason::RequirementFailed
+            } else {
+                UnverifiedReason::NotValid
+            }
+        })?;
     let status = dynamic_status(&code).ok_or(UnverifiedReason::NotValid)?;
     check_status_flags(status)
 }
@@ -717,19 +793,26 @@ fn dynamic_status(code: &security_framework::os::macos::code_signing::SecCode) -
 
     #[link(name = "Security", kind = "framework")]
     extern "C" {
-        fn SecCodeCopySigningInformation(code: *const c_void, flags: u32, information: *mut CFDictionaryRef) -> i32;
+        fn SecCodeCopySigningInformation(
+            code: *const c_void,
+            flags: u32,
+            information: *mut CFDictionaryRef,
+        ) -> i32;
         static kSecCodeInfoStatus: CFStringRef;
     }
 
     let mut info: CFDictionaryRef = std::ptr::null();
     // SAFETY: a `SecCodeRef` is a valid `SecStaticCodeRef` argument (the
     // Security framework documents this), and `info` is valid for one write.
-    let rc = unsafe { SecCodeCopySigningInformation(code.as_CFTypeRef(), DYNAMIC_INFORMATION, &mut info) };
+    let rc = unsafe {
+        SecCodeCopySigningInformation(code.as_CFTypeRef(), DYNAMIC_INFORMATION, &mut info)
+    };
     if rc != 0 || info.is_null() {
         return None;
     }
     // SAFETY: on success `info` is a +1 CFDictionary we now own.
-    let info: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_create_rule(info) };
+    let info: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_create_rule(info) };
     // SAFETY: a constant CFString exported by the Security framework.
     let key = unsafe { CFString::wrap_under_get_rule(kSecCodeInfoStatus) };
     let status = info.find(&key)?.downcast::<CFNumber>()?.to_i64()?;
@@ -765,7 +848,11 @@ fn peer_pid(fd: BorrowedFd<'_>) -> Option<i32> {
 fn peer_pid(fd: BorrowedFd<'_>) -> Option<i32> {
     use std::os::fd::AsRawFd;
 
-    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     // SAFETY: `cred` and `len` are valid for writes of the sizes passed, and
     // `fd` is borrowed for the duration of the call.
@@ -812,7 +899,10 @@ fn peer_image(pid: i32) -> Option<PeerImage> {
     }
     buf.truncate(len as usize);
     let id = mapped_file_id(pid, &buf);
-    Some(PeerImage { path: PathBuf::from(std::ffi::OsString::from_vec(buf)), id })
+    Some(PeerImage {
+        path: PathBuf::from(std::ffi::OsString::from_vec(buf)),
+        id,
+    })
 }
 
 /// `struct proc_regionwithpathinfo` (`<sys/proc_info.h>`): a `proc_regioninfo`
@@ -845,18 +935,32 @@ fn mapped_file_id(pid: i32, path: &[u8]) -> Option<FileId> {
         let mut info: RegionWithPath = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<RegionWithPath>() as libc::c_int;
         // SAFETY: `info` is valid for writes of `size` bytes.
-        let got = unsafe { libc::proc_pidinfo(pid, FLAVOR, address, (&mut info as *mut RegionWithPath).cast(), size) };
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                FLAVOR,
+                address,
+                (&mut info as *mut RegionWithPath).cast(),
+                size,
+            )
+        };
         if got != size || info.size == 0 {
             return None;
         }
         // SAFETY: vip_path is MAXPATHLEN bytes; reading them as `u8` is fine.
         let raw: &[u8] = unsafe {
-            std::slice::from_raw_parts(info.vnode.vip_path.as_ptr().cast::<u8>(), std::mem::size_of_val(&info.vnode.vip_path))
+            std::slice::from_raw_parts(
+                info.vnode.vip_path.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(&info.vnode.vip_path),
+            )
         };
         let region_path = raw.split(|&b| b == 0).next().unwrap_or_default();
         if region_path == path {
             let stat = &info.vnode.vip_vi.vi_stat;
-            return Some(FileId { dev: u64::from(stat.vst_dev), ino: stat.vst_ino });
+            return Some(FileId {
+                dev: u64::from(stat.vst_dev),
+                ino: stat.vst_ino,
+            });
         }
         address = info.address.checked_add(info.size)?;
     }
@@ -871,7 +975,10 @@ fn peer_image(pid: i32) -> Option<PeerImage> {
 
     let link = format!("/proc/{pid}/exe");
     let path = std::fs::read_link(&link).ok()?;
-    let id = std::fs::metadata(&link).ok().map(|m| FileId { dev: device_of(&m), ino: m.ino() });
+    let id = std::fs::metadata(&link).ok().map(|m| FileId {
+        dev: device_of(&m),
+        ino: m.ino(),
+    });
     Some(PeerImage { path, id })
 }
 
@@ -896,7 +1003,9 @@ pub mod testing {
             pidversion: 1,
             exe: PathBuf::from("/Applications/Nostromo.app/Contents/MacOS/Nostromo"),
             path_bundle_id: Some(APP_BUNDLE_ID.to_string()),
-            code: CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() },
+            code: CodeIdentity::Pinned {
+                identifier: APP_BUNDLE_ID.to_string(),
+            },
         }
     }
 
@@ -907,7 +1016,9 @@ pub mod testing {
             pidversion: 1,
             exe: PathBuf::from("/usr/bin/python3"),
             path_bundle_id: None,
-            code: CodeIdentity::Unverified { reason: UnverifiedReason::RequirementFailed },
+            code: CodeIdentity::Unverified {
+                reason: UnverifiedReason::RequirementFailed,
+            },
         }
     }
 
@@ -991,7 +1102,9 @@ pub mod testing {
             let next = self.script.lock().unwrap().pop_front();
             let mut info = next.unwrap_or_else(|| self.fallback.clone())?;
             if !verify_code {
-                info.code = CodeIdentity::Unverified { reason: UnverifiedReason::NotChecked };
+                info.code = CodeIdentity::Unverified {
+                    reason: UnverifiedReason::NotChecked,
+                };
             }
             Some(info)
         }
@@ -1039,7 +1152,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = make_app(
             dir.path(),
-            Some(&xml_plist("<key>CFBundleIdentifier</key><string>com.example.fake</string>")),
+            Some(&xml_plist(
+                "<key>CFBundleIdentifier</key><string>com.example.fake</string>",
+            )),
         );
         assert_eq!(bundle_id_for_exe(&exe).as_deref(), Some("com.example.fake"));
     }
@@ -1049,11 +1164,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = make_app(dir.path(), None);
         let mut d = plist::Dictionary::new();
-        d.insert("CFBundleIdentifier".into(), plist::Value::String("com.example.binary".into()));
+        d.insert(
+            "CFBundleIdentifier".into(),
+            plist::Value::String("com.example.binary".into()),
+        );
         plist::Value::Dictionary(d)
             .to_file_binary(dir.path().join("Fake.app/Contents/Info.plist"))
             .unwrap();
-        assert_eq!(bundle_id_for_exe(&exe).as_deref(), Some("com.example.binary"));
+        assert_eq!(
+            bundle_id_for_exe(&exe).as_deref(),
+            Some("com.example.binary")
+        );
     }
 
     #[test]
@@ -1089,14 +1210,22 @@ mod tests {
     #[test]
     fn an_info_plist_without_a_bundle_identifier_yields_none() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = make_app(dir.path(), Some(&xml_plist("<key>CFBundleName</key><string>Fake</string>")));
+        let exe = make_app(
+            dir.path(),
+            Some(&xml_plist("<key>CFBundleName</key><string>Fake</string>")),
+        );
         assert_eq!(bundle_id_for_exe(&exe), None);
     }
 
     #[test]
     fn an_info_plist_whose_bundle_identifier_is_not_a_string_yields_none() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = make_app(dir.path(), Some(&xml_plist("<key>CFBundleIdentifier</key><integer>7</integer>")));
+        let exe = make_app(
+            dir.path(),
+            Some(&xml_plist(
+                "<key>CFBundleIdentifier</key><integer>7</integer>",
+            )),
+        );
         assert_eq!(bundle_id_for_exe(&exe), None);
     }
 
@@ -1105,7 +1234,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         make_app(
             dir.path(),
-            Some(&xml_plist("<key>CFBundleIdentifier</key><string>com.hammer.nostromo</string>")),
+            Some(&xml_plist(
+                "<key>CFBundleIdentifier</key><string>com.hammer.nostromo</string>",
+            )),
         );
         let helper = dir.path().join("Fake.app/Contents/Resources/tool");
         fs::create_dir_all(helper.parent().unwrap()).unwrap();
@@ -1142,7 +1273,9 @@ mod tests {
     }
 
     fn pinned(identifier: &str) -> CodeIdentity {
-        CodeIdentity::Pinned { identifier: identifier.to_string() }
+        CodeIdentity::Pinned {
+            identifier: identifier.to_string(),
+        }
     }
 
     fn unverified(reason: UnverifiedReason) -> CodeIdentity {
@@ -1156,15 +1289,32 @@ mod tests {
             ("pinned app".into(), Some(pinned(APP_BUNDLE_ID))),
             ("pinned qa".into(), Some(pinned(QA_BUNDLE_ID))),
             ("pinned other".into(), Some(pinned("com.example.other"))),
-            ("pinned app-prefixed".into(), Some(pinned("com.hammer.nostromo.evil"))),
-            ("pinned app-suffix".into(), Some(pinned("xcom.hammer.nostromo"))),
-            ("pinned upper-cased app".into(), Some(pinned("COM.HAMMER.NOSTROMO"))),
+            (
+                "pinned app-prefixed".into(),
+                Some(pinned("com.hammer.nostromo.evil")),
+            ),
+            (
+                "pinned app-suffix".into(),
+                Some(pinned("xcom.hammer.nostromo")),
+            ),
+            (
+                "pinned upper-cased app".into(),
+                Some(pinned("COM.HAMMER.NOSTROMO")),
+            ),
             ("pinned empty".into(), Some(pinned(""))),
         ];
         for reason in ALL_REASONS {
             codes.push((format!("unverified {reason}"), Some(unverified(reason))));
         }
-        let claims = [None, Some("mac_app"), Some("MAC_APP"), Some("mac_app "), Some(""), Some("ios_app"), Some("cli")];
+        let claims = [
+            None,
+            Some("mac_app"),
+            Some("MAC_APP"),
+            Some("mac_app "),
+            Some(""),
+            Some("ios_app"),
+            Some("cli"),
+        ];
 
         let mut operators = Vec::new();
         for (name, code) in &codes {
@@ -1174,7 +1324,10 @@ mod tests {
                     if classify_peer(info.as_ref(), claim, qa_mode) == PeerTrust::OperatorApp {
                         operators.push((name.as_str(), claim, qa_mode));
                     } else {
-                        assert_eq!(classify_peer(info.as_ref(), claim, qa_mode), PeerTrust::LocalOther);
+                        assert_eq!(
+                            classify_peer(info.as_ref(), claim, qa_mode),
+                            PeerTrust::LocalOther
+                        );
                     }
                 }
             }
@@ -1200,8 +1353,14 @@ mod tests {
             path_bundle_id: Some(APP_BUNDLE_ID.to_string()),
             code: unverified(UnverifiedReason::RequirementFailed),
         };
-        assert_eq!(classify_peer(Some(&fake), Some(MAC_APP_CLIENT_KIND), false), PeerTrust::LocalOther);
-        assert_eq!(classify_peer(Some(&fake), Some(MAC_APP_CLIENT_KIND), true), PeerTrust::LocalOther);
+        assert_eq!(
+            classify_peer(Some(&fake), Some(MAC_APP_CLIENT_KIND), false),
+            PeerTrust::LocalOther
+        );
+        assert_eq!(
+            classify_peer(Some(&fake), Some(MAC_APP_CLIENT_KIND), true),
+            PeerTrust::LocalOther
+        );
 
         // The pinned code, run from anywhere and with no bundle around it. (`classify_peer`
         // trusts the code identity it is given; binding pinned code to the installed path
@@ -1213,9 +1372,18 @@ mod tests {
             path_bundle_id: None,
             code: pinned(APP_BUNDLE_ID),
         };
-        assert!(matches!(classify_peer(Some(&moved), Some(MAC_APP_CLIENT_KIND), false), PeerTrust::OperatorApp));
-        let odd = PeerInfo { path_bundle_id: Some("com.example.other".into()), ..moved };
-        assert!(matches!(classify_peer(Some(&odd), Some(MAC_APP_CLIENT_KIND), false), PeerTrust::OperatorApp));
+        assert!(matches!(
+            classify_peer(Some(&moved), Some(MAC_APP_CLIENT_KIND), false),
+            PeerTrust::OperatorApp
+        ));
+        let odd = PeerInfo {
+            path_bundle_id: Some("com.example.other".into()),
+            ..moved
+        };
+        assert!(matches!(
+            classify_peer(Some(&odd), Some(MAC_APP_CLIENT_KIND), false),
+            PeerTrust::OperatorApp
+        ));
     }
 
     #[test]
@@ -1224,8 +1392,19 @@ mod tests {
         assert_eq!(
             names,
             [
-                "NotChecked", "NoPin", "BadPin", "NoToken", "NoSuchCode", "RequirementFailed", "WrongPath",
-                "NoRuntime", "RuntimeNotEnforced", "GetTaskAllow", "Debugged", "NotValid", "Unsupported",
+                "NotChecked",
+                "NoPin",
+                "BadPin",
+                "NoToken",
+                "NoSuchCode",
+                "RequirementFailed",
+                "WrongPath",
+                "NoRuntime",
+                "RuntimeNotEnforced",
+                "GetTaskAllow",
+                "Debugged",
+                "NotValid",
+                "Unsupported",
             ]
         );
     }
@@ -1237,7 +1416,11 @@ mod tests {
         let accepted = peer(pinned(APP_BUNDLE_ID));
         assert!(still_same_operator(&accepted, Some(&accepted.clone())));
         // The path and the plist are diagnostics; they do not take part.
-        let now = PeerInfo { exe: PathBuf::from("/elsewhere"), path_bundle_id: None, ..accepted.clone() };
+        let now = PeerInfo {
+            exe: PathBuf::from("/elsewhere"),
+            path_bundle_id: None,
+            ..accepted.clone()
+        };
         assert!(still_same_operator(&accepted, Some(&now)));
         // A QA-mode operator stays itself too.
         let qa = peer(pinned(QA_BUNDLE_ID));
@@ -1249,27 +1432,73 @@ mod tests {
         let accepted = peer(pinned(APP_BUNDLE_ID));
         let mut cases: Vec<(String, Option<PeerInfo>)> = vec![
             ("nobody found".into(), None),
-            ("another pid (an fd sharer)".into(), Some(PeerInfo { pid: accepted.pid + 1, ..accepted.clone() })),
-            ("a new pidversion (exec)".into(), Some(PeerInfo { pidversion: accepted.pidversion + 1, ..accepted.clone() })),
-            ("pidversion 0 (no token)".into(), Some(PeerInfo { pidversion: 0, ..accepted.clone() })),
-            ("another identifier".into(), Some(PeerInfo { code: pinned(QA_BUNDLE_ID), ..accepted.clone() })),
+            (
+                "another pid (an fd sharer)".into(),
+                Some(PeerInfo {
+                    pid: accepted.pid + 1,
+                    ..accepted.clone()
+                }),
+            ),
+            (
+                "a new pidversion (exec)".into(),
+                Some(PeerInfo {
+                    pidversion: accepted.pidversion + 1,
+                    ..accepted.clone()
+                }),
+            ),
+            (
+                "pidversion 0 (no token)".into(),
+                Some(PeerInfo {
+                    pidversion: 0,
+                    ..accepted.clone()
+                }),
+            ),
+            (
+                "another identifier".into(),
+                Some(PeerInfo {
+                    code: pinned(QA_BUNDLE_ID),
+                    ..accepted.clone()
+                }),
+            ),
             (
                 "another pid and pidversion".into(),
-                Some(PeerInfo { pid: accepted.pid + 1, pidversion: accepted.pidversion + 1, ..accepted.clone() }),
+                Some(PeerInfo {
+                    pid: accepted.pid + 1,
+                    pidversion: accepted.pidversion + 1,
+                    ..accepted.clone()
+                }),
             ),
         ];
         for reason in ALL_REASONS {
-            cases.push((format!("now {reason}"), Some(PeerInfo { code: unverified(reason), ..accepted.clone() })));
+            cases.push((
+                format!("now {reason}"),
+                Some(PeerInfo {
+                    code: unverified(reason),
+                    ..accepted.clone()
+                }),
+            ));
         }
         for (what, now) in &cases {
-            assert!(!still_same_operator(&accepted, now.as_ref()), "{what} must not still be the operator");
+            assert!(
+                !still_same_operator(&accepted, now.as_ref()),
+                "{what} must not still be the operator"
+            );
         }
 
         // An accepted peer that was never pinned can never be "still" it.
         for reason in ALL_REASONS {
-            let was = PeerInfo { code: unverified(reason), ..accepted.clone() };
-            assert!(!still_same_operator(&was, Some(&accepted)), "accepted as {reason}");
-            assert!(!still_same_operator(&was, Some(&was.clone())), "accepted and now {reason}");
+            let was = PeerInfo {
+                code: unverified(reason),
+                ..accepted.clone()
+            };
+            assert!(
+                !still_same_operator(&was, Some(&accepted)),
+                "accepted as {reason}"
+            );
+            assert!(
+                !still_same_operator(&was, Some(&was.clone())),
+                "accepted and now {reason}"
+            );
         }
     }
 
@@ -1279,7 +1508,10 @@ mod tests {
 
     #[test]
     fn a_genuine_bundle_without_a_claim_is_diagnosed_as_an_old_app() {
-        let info = PeerInfo { path_bundle_id: Some(APP_BUNDLE_ID.into()), ..peer(unverified(UnverifiedReason::NotChecked)) };
+        let info = PeerInfo {
+            path_bundle_id: Some(APP_BUNDLE_ID.into()),
+            ..peer(unverified(UnverifiedReason::NotChecked))
+        };
         let trust = classify_peer(Some(&info), None, false);
         assert_eq!(
             claim_diagnostic(Some(&info), None, trust).as_deref(),
@@ -1289,7 +1521,10 @@ mod tests {
 
     #[test]
     fn a_refused_mac_app_claim_is_diagnosed_with_its_reason_and_the_fix() {
-        let special = [UnverifiedReason::RuntimeNotEnforced, UnverifiedReason::WrongPath];
+        let special = [
+            UnverifiedReason::RuntimeNotEnforced,
+            UnverifiedReason::WrongPath,
+        ];
         for reason in ALL_REASONS.into_iter().filter(|r| !special.contains(r)) {
             let info = peer(unverified(reason));
             let trust = classify_peer(Some(&info), Some(MAC_APP_CLIENT_KIND), false);
@@ -1301,12 +1536,21 @@ mod tests {
 
         // Nobody identifiable, or pinned under an identifier this daemon does
         // not accept: still refused, still told how to fix it.
-        let none = claim_diagnostic(None, Some(MAC_APP_CLIENT_KIND), PeerTrust::LocalOther).unwrap();
-        assert!(none.starts_with("mac_app claim refused: ") && none.ends_with(FIX), "{none}");
+        let none =
+            claim_diagnostic(None, Some(MAC_APP_CLIENT_KIND), PeerTrust::LocalOther).unwrap();
+        assert!(
+            none.starts_with("mac_app claim refused: ") && none.ends_with(FIX),
+            "{none}"
+        );
         let qa = peer(pinned(QA_BUNDLE_ID));
         let trust = classify_peer(Some(&qa), Some(MAC_APP_CLIENT_KIND), false);
         let text = claim_diagnostic(Some(&qa), Some(MAC_APP_CLIENT_KIND), trust).unwrap();
-        assert!(text.starts_with("mac_app claim refused: ") && text.contains(QA_BUNDLE_ID) && text.ends_with(FIX), "{text}");
+        assert!(
+            text.starts_with("mac_app claim refused: ")
+                && text.contains(QA_BUNDLE_ID)
+                && text.ends_with(FIX),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1323,7 +1567,8 @@ mod tests {
     }
 
     #[test]
-    fn pinned_code_at_the_wrong_path_is_diagnosed_with_the_expected_path_the_override_and_where_it_ran() {
+    fn pinned_code_at_the_wrong_path_is_diagnosed_with_the_expected_path_the_override_and_where_it_ran(
+    ) {
         let info = PeerInfo {
             exe: PathBuf::from("/tmp/evil/Nostromo"),
             path_bundle_id: None,
@@ -1332,10 +1577,22 @@ mod tests {
         let trust = classify_peer(Some(&info), Some(MAC_APP_CLIENT_KIND), false);
         assert_eq!(trust, PeerTrust::LocalOther);
         let text = claim_diagnostic(Some(&info), Some(MAC_APP_CLIENT_KIND), trust).unwrap();
-        assert!(text.starts_with("mac_app claim refused: WrongPath"), "{text}");
-        assert!(text.contains(INSTALLED_APP_EXE), "names the installed path: {text}");
-        assert!(text.contains(APP_PATH_ENV), "names the override variable: {text}");
-        assert!(text.contains("/tmp/evil/Nostromo"), "names where the peer actually ran: {text}");
+        assert!(
+            text.starts_with("mac_app claim refused: WrongPath"),
+            "{text}"
+        );
+        assert!(
+            text.contains(INSTALLED_APP_EXE),
+            "names the installed path: {text}"
+        );
+        assert!(
+            text.contains(APP_PATH_ENV),
+            "names the override variable: {text}"
+        );
+        assert!(
+            text.contains("/tmp/evil/Nostromo"),
+            "names where the peer actually ran: {text}"
+        );
     }
 
     // ── check_status_flags ────────────────────────────────────────────────────
@@ -1354,7 +1611,10 @@ mod tests {
 
     #[test]
     fn a_runtime_the_host_does_not_enforce_is_refused() {
-        assert_eq!(check_status_flags(UNENFORCED_RUNTIME), Err(UnverifiedReason::RuntimeNotEnforced));
+        assert_eq!(
+            check_status_flags(UNENFORCED_RUNTIME),
+            Err(UnverifiedReason::RuntimeNotEnforced)
+        );
         for missing in [cs::HARD, cs::KILL, cs::ENFORCEMENT] {
             assert_eq!(
                 check_status_flags(ENFORCED_RUNTIME & !missing),
@@ -1366,12 +1626,24 @@ mod tests {
 
     #[test]
     fn the_other_status_refusals_still_hold() {
-        assert_eq!(check_status_flags(ENFORCED_RUNTIME & !cs::VALID), Err(UnverifiedReason::NotValid));
+        assert_eq!(
+            check_status_flags(ENFORCED_RUNTIME & !cs::VALID),
+            Err(UnverifiedReason::NotValid)
+        );
         // Ad-hoc without the runtime (spike: 0x22000201).
-        assert_eq!(check_status_flags(0x2200_0201), Err(UnverifiedReason::NoRuntime));
+        assert_eq!(
+            check_status_flags(0x2200_0201),
+            Err(UnverifiedReason::NoRuntime)
+        );
         // The runtime with get-task-allow (spike: 0x22011315).
-        assert_eq!(check_status_flags(0x2201_1315), Err(UnverifiedReason::GetTaskAllow));
-        assert_eq!(check_status_flags(ENFORCED_RUNTIME | cs::DEBUGGED), Err(UnverifiedReason::Debugged));
+        assert_eq!(
+            check_status_flags(0x2201_1315),
+            Err(UnverifiedReason::GetTaskAllow)
+        );
+        assert_eq!(
+            check_status_flags(ENFORCED_RUNTIME | cs::DEBUGGED),
+            Err(UnverifiedReason::Debugged)
+        );
     }
 
     #[test]
@@ -1379,16 +1651,25 @@ mod tests {
         let app = peer(pinned(APP_BUNDLE_ID));
         let trust = classify_peer(Some(&app), Some(MAC_APP_CLIENT_KIND), false);
         assert!(matches!(trust, PeerTrust::OperatorApp));
-        assert_eq!(claim_diagnostic(Some(&app), Some(MAC_APP_CLIENT_KIND), trust), None);
+        assert_eq!(
+            claim_diagnostic(Some(&app), Some(MAC_APP_CLIENT_KIND), trust),
+            None
+        );
 
         let script = PeerInfo {
             exe: PathBuf::from("/usr/bin/python3"),
             path_bundle_id: None,
             ..peer(unverified(UnverifiedReason::NotChecked))
         };
-        assert_eq!(claim_diagnostic(Some(&script), None, PeerTrust::LocalOther), None);
+        assert_eq!(
+            claim_diagnostic(Some(&script), None, PeerTrust::LocalOther),
+            None
+        );
         assert_eq!(claim_diagnostic(None, None, PeerTrust::LocalOther), None);
-        assert_eq!(claim_diagnostic(Some(&script), Some("cli"), PeerTrust::LocalOther), None);
+        assert_eq!(
+            claim_diagnostic(Some(&script), Some("cli"), PeerTrust::LocalOther),
+            None
+        );
     }
 
     // ── the installed-path binding ────────────────────────────────────────────
@@ -1402,7 +1683,10 @@ mod tests {
 
     /// The peer image the kernel would report for a process running `installed`.
     fn image_of(installed: &InstalledApp) -> PeerImage {
-        PeerImage { path: installed.path.clone(), id: Some(installed.id) }
+        PeerImage {
+            path: installed.path.clone(),
+            id: Some(installed.id),
+        }
     }
 
     #[test]
@@ -1412,14 +1696,28 @@ mod tests {
         let exe = file(dir.path(), "app", "x");
         let meta = fs::metadata(&exe).unwrap();
         let known = installed_app(&exe).unwrap();
-        assert_eq!(known.id, FileId { dev: device_of(&meta), ino: meta.ino() });
-        assert_eq!(known.path, fs::canonicalize(&exe).unwrap(), "the kernel's spelling names no symlink");
+        assert_eq!(
+            known.id,
+            FileId {
+                dev: device_of(&meta),
+                ino: meta.ino()
+            }
+        );
+        assert_eq!(
+            known.path,
+            fs::canonicalize(&exe).unwrap(),
+            "the kernel's spelling names no symlink"
+        );
 
         // Named through a symlink or a `..` spelling: the same installed app.
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&exe, &link).unwrap();
         assert_eq!(installed_app(&link), Some(known.clone()));
-        let dotted = dir.path().join("../").join(dir.path().file_name().unwrap()).join("app");
+        let dotted = dir
+            .path()
+            .join("../")
+            .join(dir.path().file_name().unwrap())
+            .join("app");
         assert_eq!(installed_app(&dotted), Some(known));
     }
 
@@ -1441,7 +1739,11 @@ mod tests {
         let dangling = dir.path().join("dangling");
         std::os::unix::fs::symlink(&missing, &dangling).unwrap();
         assert_eq!(installed_app(&dangling), None);
-        assert_eq!(installed_app(dir.path()), None, "a directory is not an executable");
+        assert_eq!(
+            installed_app(dir.path()),
+            None,
+            "a directory is not an executable"
+        );
     }
 
     #[test]
@@ -1452,11 +1754,29 @@ mod tests {
 
         assert!(is_installed_app(&image_of(&installed), &installed));
         // The right path, another file (the installed file was replaced, or the path lies).
-        assert!(!is_installed_app(&PeerImage { path: installed.path.clone(), id: Some(other.id) }, &installed));
+        assert!(!is_installed_app(
+            &PeerImage {
+                path: installed.path.clone(),
+                id: Some(other.id)
+            },
+            &installed
+        ));
         // The right path, identity unknown: a path alone never decides.
-        assert!(!is_installed_app(&PeerImage { path: installed.path.clone(), id: None }, &installed));
+        assert!(!is_installed_app(
+            &PeerImage {
+                path: installed.path.clone(),
+                id: None
+            },
+            &installed
+        ));
         // The installed file's identity, another path (a hard link, a symlink spelling).
-        assert!(!is_installed_app(&PeerImage { path: other.path.clone(), id: Some(installed.id) }, &installed));
+        assert!(!is_installed_app(
+            &PeerImage {
+                path: other.path.clone(),
+                id: Some(installed.id)
+            },
+            &installed
+        ));
     }
 
     #[test]
@@ -1468,10 +1788,21 @@ mod tests {
         let installed = installed_app(&file(dir.path(), "installed", "app")).unwrap();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&installed.path, &link).unwrap();
-        let dotted = dir.path().join("../").join(dir.path().file_name().unwrap()).join("installed");
+        let dotted = dir
+            .path()
+            .join("../")
+            .join(dir.path().file_name().unwrap())
+            .join("installed");
         for peer_path in [link, dotted] {
-            let image = PeerImage { path: peer_path.clone(), id: Some(installed.id) };
-            assert!(!is_installed_app(&image, &installed), "{}", peer_path.display());
+            let image = PeerImage {
+                path: peer_path.clone(),
+                id: Some(installed.id),
+            };
+            assert!(
+                !is_installed_app(&image, &installed),
+                "{}",
+                peer_path.display()
+            );
         }
     }
 
@@ -1484,12 +1815,18 @@ mod tests {
         let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &exe);
         assert_eq!(verifier.app_exe(), exe.as_path());
 
-        assert_eq!(verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&installed)), pinned(APP_BUNDLE_ID));
+        assert_eq!(
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&installed)),
+            pinned(APP_BUNDLE_ID)
+        );
         assert_eq!(
             verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&elsewhere)),
             unverified(UnverifiedReason::WrongPath)
         );
-        let right_path_wrong_file = PeerImage { path: installed.path.clone(), id: Some(elsewhere.id) };
+        let right_path_wrong_file = PeerImage {
+            path: installed.path.clone(),
+            id: Some(elsewhere.id),
+        };
         assert_eq!(
             verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &right_path_wrong_file),
             unverified(UnverifiedReason::WrongPath)
@@ -1507,7 +1844,10 @@ mod tests {
         let exe = file(dir.path(), "installed", "app");
         let before = installed_app(&exe).unwrap();
         let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), &exe);
-        assert_eq!(verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&before)), pinned(APP_BUNDLE_ID));
+        assert_eq!(
+            verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&before)),
+            pinned(APP_BUNDLE_ID)
+        );
 
         // The installed file is replaced by another one at the same path: the image that
         // was the app a moment ago is not any more. The replacement is created FIRST and
@@ -1517,7 +1857,11 @@ mod tests {
         // then be unchanged and the binding rightly could not tell them apart.)
         let replacement = file(dir.path(), "replacement", "replacement");
         fs::rename(&replacement, &exe).unwrap();
-        assert_ne!(installed_app(&exe).unwrap().id, before.id, "the replacement must be a different file");
+        assert_ne!(
+            installed_app(&exe).unwrap().id,
+            before.id,
+            "the replacement must be a different file"
+        );
         assert_eq!(
             verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&before)),
             unverified(UnverifiedReason::WrongPath)
@@ -1547,7 +1891,8 @@ mod tests {
         fs::create_dir(&attacker_dir).unwrap();
         let installed_exe = file(&installed_dir, "Nostromo", "same bytes");
         let attacker_exe = file(&attacker_dir, "Nostromo", "same bytes");
-        let verifier = MacPeerVerifier::with_app_exe(root.path().join(PIN_FILE_NAME), &installed_exe);
+        let verifier =
+            MacPeerVerifier::with_app_exe(root.path().join(PIN_FILE_NAME), &installed_exe);
         let installed = installed_app(&installed_exe).unwrap();
 
         // Step 1, "inspect": the kernel's one report of the attacker's running image (read
@@ -1590,7 +1935,10 @@ mod tests {
     fn pinned_code_whose_installed_app_is_missing_is_refused_as_wrong_path() {
         let dir = tempfile::tempdir().unwrap();
         let somewhere = installed_app(&file(dir.path(), "peer", "x")).unwrap();
-        let verifier = MacPeerVerifier::with_app_exe(dir.path().join(PIN_FILE_NAME), dir.path().join("not-installed"));
+        let verifier = MacPeerVerifier::with_app_exe(
+            dir.path().join(PIN_FILE_NAME),
+            dir.path().join("not-installed"),
+        );
         assert_eq!(
             verifier.bind_to_installed_app(pinned(APP_BUNDLE_ID), &image_of(&somewhere)),
             unverified(UnverifiedReason::WrongPath)
@@ -1621,8 +1969,14 @@ mod tests {
     fn by_default_the_app_must_run_from_the_installed_applications_path() {
         let verifier = MacPeerVerifier::new("/nonexistent/operator-app.pin");
         assert_eq!(verifier.app_exe(), Path::new(INSTALLED_APP_EXE));
-        assert_eq!(INSTALLED_APP_EXE, "/Applications/Nostromo.app/Contents/MacOS/Nostromo");
-        assert_eq!(verifier.pin_path(), Path::new("/nonexistent/operator-app.pin"));
+        assert_eq!(
+            INSTALLED_APP_EXE,
+            "/Applications/Nostromo.app/Contents/MacOS/Nostromo"
+        );
+        assert_eq!(
+            verifier.pin_path(),
+            Path::new("/nonexistent/operator-app.pin")
+        );
         assert_eq!(APP_PATH_ENV, "NOSTROMO_OPERATOR_APP_PATH");
     }
 
@@ -1650,7 +2004,10 @@ mod tests {
 
     #[test]
     fn a_pin_with_two_cdhashes_keeps_both_in_order_and_lower_cases_them() {
-        let text = format!("cdhash {}\nidentifier com.hammer.nostromo.qa\ncdhash {H2}\n", H1.to_ascii_uppercase());
+        let text = format!(
+            "cdhash {}\nidentifier com.hammer.nostromo.qa\ncdhash {H2}\n",
+            H1.to_ascii_uppercase()
+        );
         let pin = OperatorPin::parse(&text).unwrap();
         assert_eq!(pin.identifier(), "com.hammer.nostromo.qa");
         assert_eq!(pin.cdhashes(), [H1.to_string(), H2.to_string()]);
@@ -1667,34 +2024,72 @@ mod tests {
             ("no cdhash", format!("{id}\n")),
             ("no identifier", format!("{ok}\n")),
             ("duplicate identifier", format!("{id}\n{id}\n{ok}\n")),
-            ("two different identifiers", format!("{id}\nidentifier com.example.other\n{ok}\n")),
+            (
+                "two different identifiers",
+                format!("{id}\nidentifier com.example.other\n{ok}\n"),
+            ),
             ("bad hex", format!("{id}\ncdhash {}g\n", &H1[..39])),
             ("cdhash too short", format!("{id}\ncdhash {}\n", &H1[..39])),
             ("cdhash too long", format!("{id}\ncdhash {H1}0\n")),
             ("a full sha256", format!("{id}\ncdhash {H1}{}\n", &H2[..24])),
-            ("a good and a bad cdhash", format!("{id}\n{ok}\ncdhash xyz\n")),
+            (
+                "a good and a bad cdhash",
+                format!("{id}\n{ok}\ncdhash xyz\n"),
+            ),
             ("unknown key", format!("{id}\n{ok}\nteam ABCDE12345\n")),
             ("key without value", format!("{id}\n{ok}\ncdhash\n")),
             ("identifier without value", format!("identifier\n{ok}\n")),
-            ("extra token after identifier", format!("{id} extra\n{ok}\n")),
+            (
+                "extra token after identifier",
+                format!("{id} extra\n{ok}\n"),
+            ),
             ("extra token after cdhash", format!("{id}\n{ok} extra\n")),
-            ("trailing comment on a line", format!("{id}\n{ok} # arm64\n")),
-            ("identifier with a quote", format!("identifier com.hammer\"nostromo\n{ok}\n")),
-            ("identifier closing the quote", format!("identifier com.hammer.nostromo\")or(anchor\n{ok}\n")),
-            ("quoted identifier with a space", format!("identifier \"com.hammer nostromo\"\n{ok}\n")),
-            ("identifier with a backslash", format!("identifier com\\hammer\n{ok}\n")),
-            ("identifier with parentheses", format!("identifier com.hammer.(nostromo)\n{ok}\n")),
-            ("key upper-cased", format!("IDENTIFIER com.hammer.nostromo\n{ok}\n")),
+            (
+                "trailing comment on a line",
+                format!("{id}\n{ok} # arm64\n"),
+            ),
+            (
+                "identifier with a quote",
+                format!("identifier com.hammer\"nostromo\n{ok}\n"),
+            ),
+            (
+                "identifier closing the quote",
+                format!("identifier com.hammer.nostromo\")or(anchor\n{ok}\n"),
+            ),
+            (
+                "quoted identifier with a space",
+                format!("identifier \"com.hammer nostromo\"\n{ok}\n"),
+            ),
+            (
+                "identifier with a backslash",
+                format!("identifier com\\hammer\n{ok}\n"),
+            ),
+            (
+                "identifier with parentheses",
+                format!("identifier com.hammer.(nostromo)\n{ok}\n"),
+            ),
+            (
+                "key upper-cased",
+                format!("IDENTIFIER com.hammer.nostromo\n{ok}\n"),
+            ),
         ];
         for (what, text) in cases {
-            assert_eq!(OperatorPin::parse(&text), Err(UnverifiedReason::BadPin), "{what}: {text:?}");
+            assert_eq!(
+                OperatorPin::parse(&text),
+                Err(UnverifiedReason::BadPin),
+                "{what}: {text:?}"
+            );
         }
     }
 
     #[test]
     fn a_pins_requirement_names_the_identifier_and_every_cdhash() {
-        let one = OperatorPin::parse(&format!("identifier com.hammer.nostromo\ncdhash {H1}\n")).unwrap();
-        assert_eq!(one.requirement(), format!("identifier \"com.hammer.nostromo\" and (cdhash H\"{H1}\")"));
+        let one =
+            OperatorPin::parse(&format!("identifier com.hammer.nostromo\ncdhash {H1}\n")).unwrap();
+        assert_eq!(
+            one.requirement(),
+            format!("identifier \"com.hammer.nostromo\" and (cdhash H\"{H1}\")")
+        );
 
         let two = OperatorPin::parse(&format!(
             "identifier com.hammer.nostromo\ncdhash {}\ncdhash {H2}\n",
@@ -1703,7 +2098,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             two.requirement(),
-            format!("identifier \"com.hammer.nostromo\" and (cdhash H\"{H1}\" or cdhash H\"{H2}\")")
+            format!(
+                "identifier \"com.hammer.nostromo\" and (cdhash H\"{H1}\" or cdhash H\"{H2}\")"
+            )
         );
     }
 
@@ -1716,7 +2113,10 @@ mod tests {
             format!("identifier com.hammer.nostromo.qa\ncdhash {H1}\ncdhash {H2}\n"),
         ] {
             let req = OperatorPin::parse(&text).unwrap().requirement();
-            assert!(req.parse::<SecRequirement>().is_ok(), "the Security framework must accept {req:?}");
+            assert!(
+                req.parse::<SecRequirement>().is_ok(),
+                "the Security framework must accept {req:?}"
+            );
         }
     }
 
@@ -1735,7 +2135,10 @@ mod tests {
     #[test]
     fn loading_a_missing_pin_is_no_pin() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(OperatorPin::load(&dir.path().join(PIN_FILE_NAME)), Err(UnverifiedReason::NoPin));
+        assert_eq!(
+            OperatorPin::load(&dir.path().join(PIN_FILE_NAME)),
+            Err(UnverifiedReason::NoPin)
+        );
     }
 
     #[test]
@@ -1754,7 +2157,11 @@ mod tests {
         for mode in [0o620, 0o602, 0o622, 0o666, 0o777] {
             let dir = tempfile::tempdir().unwrap();
             let path = write_pin(dir.path(), mode, &good_pin_text());
-            assert_eq!(OperatorPin::load(&path), Err(UnverifiedReason::BadPin), "mode {mode:o}");
+            assert_eq!(
+                OperatorPin::load(&path),
+                Err(UnverifiedReason::BadPin),
+                "mode {mode:o}"
+            );
         }
     }
 
@@ -1766,13 +2173,21 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join(PIN_FILE_NAME)).unwrap();
-        assert_eq!(OperatorPin::load(&dir.path().join(PIN_FILE_NAME)), Err(UnverifiedReason::BadPin), "a directory");
+        assert_eq!(
+            OperatorPin::load(&dir.path().join(PIN_FILE_NAME)),
+            Err(UnverifiedReason::BadPin),
+            "a directory"
+        );
 
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             let dir = tempfile::tempdir().unwrap();
             let unreadable = write_pin(dir.path(), 0o000, &good_pin_text());
-            assert_eq!(OperatorPin::load(&unreadable), Err(UnverifiedReason::BadPin), "mode 000");
+            assert_eq!(
+                OperatorPin::load(&unreadable),
+                Err(UnverifiedReason::BadPin),
+                "mode 000"
+            );
         }
     }
 
@@ -1781,14 +2196,22 @@ mod tests {
         // A root-owned, world-readable, not-writable system file. (Its content
         // is not a pin either, so run as root this still holds, by the parse;
         // a same-content foreign-owned file cannot be made without root.)
-        assert_eq!(OperatorPin::load(Path::new("/etc/hosts")), Err(UnverifiedReason::BadPin));
+        assert_eq!(
+            OperatorPin::load(Path::new("/etc/hosts")),
+            Err(UnverifiedReason::BadPin)
+        );
     }
 
     // ── the audit token and the real verifier, on a self-connection ───────────
 
     /// A connected pair over a real listening socket: (accepted end, client end).
     #[cfg(target_os = "macos")]
-    fn self_connection(dir: &Path) -> (std::os::unix::net::UnixStream, std::os::unix::net::UnixStream) {
+    fn self_connection(
+        dir: &Path,
+    ) -> (
+        std::os::unix::net::UnixStream,
+        std::os::unix::net::UnixStream,
+    ) {
         let path = dir.join("s.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let client = std::os::unix::net::UnixStream::connect(&path).unwrap();
@@ -1802,9 +2225,14 @@ mod tests {
         use std::os::fd::AsFd;
         let dir = tempfile::tempdir().unwrap();
         let (accepted, _client) = self_connection(dir.path());
-        let token = audit_token(accepted.as_fd()).expect("LOCAL_PEERTOKEN must answer for a live peer");
+        let token =
+            audit_token(accepted.as_fd()).expect("LOCAL_PEERTOKEN must answer for a live peer");
         assert_eq!(token.pid(), std::process::id() as i32);
-        assert_ne!(token.pidversion(), 0, "a live process has a nonzero pidversion");
+        assert_ne!(
+            token.pidversion(),
+            0,
+            "a live process has a nonzero pidversion"
+        );
         assert_eq!(token.pid(), token.0[5] as i32);
         assert_eq!(token.pidversion(), token.0[7]);
     }
@@ -1818,7 +2246,13 @@ mod tests {
 
         let image = peer_image(std::process::id() as i32).expect("this process has an image");
         assert_eq!(image.path, exe, "proc_pidpath names no symlink");
-        assert_eq!(image.id, Some(FileId { dev: device_of(&meta), ino: meta.ino() }));
+        assert_eq!(
+            image.id,
+            Some(FileId {
+                dev: device_of(&meta),
+                ino: meta.ino()
+            })
+        );
         // ...and the installed-app side speaks the same spelling for the same file.
         let known = installed_app(&exe).unwrap();
         assert!(is_installed_app(&image, &known));
@@ -1835,23 +2269,46 @@ mod tests {
         let verifier = MacPeerVerifier::new(dir.path().join(PIN_FILE_NAME));
         let token = audit_token(accepted.as_fd()).unwrap();
 
-        let unchecked = verifier.inspect(accepted.as_fd(), false).expect("the peer is this process");
+        let unchecked = verifier
+            .inspect(accepted.as_fd(), false)
+            .expect("the peer is this process");
         assert_eq!(unchecked.pid, std::process::id() as i32);
         assert_eq!(unchecked.pidversion, token.pidversion());
-        assert_eq!(unchecked.code, CodeIdentity::Unverified { reason: UnverifiedReason::NotChecked });
-        assert_eq!(unchecked.path_bundle_id, None, "the test binary is in no app bundle");
+        assert_eq!(
+            unchecked.code,
+            CodeIdentity::Unverified {
+                reason: UnverifiedReason::NotChecked
+            }
+        );
+        assert_eq!(
+            unchecked.path_bundle_id, None,
+            "the test binary is in no app bundle"
+        );
         assert_eq!(
             fs::canonicalize(&unchecked.exe).unwrap(),
             fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
         );
 
         let checked = verifier.inspect(accepted.as_fd(), true).unwrap();
-        assert_eq!(checked.code, CodeIdentity::Unverified { reason: UnverifiedReason::NoPin });
-        assert_eq!((checked.pid, checked.pidversion), (unchecked.pid, unchecked.pidversion));
+        assert_eq!(
+            checked.code,
+            CodeIdentity::Unverified {
+                reason: UnverifiedReason::NoPin
+            }
+        );
+        assert_eq!(
+            (checked.pid, checked.pidversion),
+            (unchecked.pid, unchecked.pidversion)
+        );
 
         // The default re-inspection is a full check.
         let again = verifier.reinspect(accepted.as_fd(), &checked).unwrap();
-        assert_eq!(again.code, CodeIdentity::Unverified { reason: UnverifiedReason::NoPin });
+        assert_eq!(
+            again.code,
+            CodeIdentity::Unverified {
+                reason: UnverifiedReason::NoPin
+            }
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1870,7 +2327,10 @@ mod tests {
         // Fixed: now the check runs, and this test binary is not the pinned app.
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(code(&verifier), unverified(UnverifiedReason::RequirementFailed));
+        assert_eq!(
+            code(&verifier),
+            unverified(UnverifiedReason::RequirementFailed)
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1881,7 +2341,10 @@ mod tests {
         let (accepted, _client) = self_connection(dir.path());
         let token = audit_token(accepted.as_fd()).unwrap();
         let pin = OperatorPin::parse(&good_pin_text()).unwrap();
-        assert_eq!(verify_code(&token, &pin), unverified(UnverifiedReason::RequirementFailed));
+        assert_eq!(
+            verify_code(&token, &pin),
+            unverified(UnverifiedReason::RequirementFailed)
+        );
     }
 
     // ── T-AP1-1: only classify_peer may mint the operator ────────────────────
@@ -1902,7 +2365,9 @@ mod tests {
     /// construction?
     fn is_pattern_use(line: &str, token: &str) -> bool {
         let trimmed = line.trim();
-        let Some(at) = line.find(token) else { return true };
+        let Some(at) = line.find(token) else {
+            return true;
+        };
         if line.contains("matches!") {
             return true;
         }
@@ -1931,7 +2396,10 @@ mod tests {
         let own = src.join("ipc/peer_verify.rs");
         let mut files = Vec::new();
         rust_files(&src, &mut files);
-        assert!(files.len() > 20, "sanity: the walk must find the crate's sources");
+        assert!(
+            files.len() > 20,
+            "sanity: the walk must find the crate's sources"
+        );
 
         let mut offenders = Vec::new();
         for file in files.into_iter().filter(|f| *f != own) {
@@ -1964,7 +2432,10 @@ mod tests {
             "        assert!(matches!(trust, PeerTrust::OperatorApp));",
             "            | PeerTrust::OperatorApp",
         ] {
-            assert!(is_pattern_use(pattern, T), "should be a pattern use: {pattern}");
+            assert!(
+                is_pattern_use(pattern, T),
+                "should be a pattern use: {pattern}"
+            );
         }
         for construction in [
             "        PeerTrust::OperatorApp",
@@ -1973,7 +2444,10 @@ mod tests {
             "            Some(_) => PeerTrust::OperatorApp,",
             "        return PeerTrust::OperatorApp;",
         ] {
-            assert!(!is_pattern_use(construction, T), "should be a construction: {construction}");
+            assert!(
+                !is_pattern_use(construction, T),
+                "should be a construction: {construction}"
+            );
         }
     }
 }

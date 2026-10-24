@@ -70,7 +70,11 @@ fn a_4_mib_command_of_a_million_short_lines_is_shown_as_too_large_at_once() {
         let d = timed_bash(&format!("4 MiB of {unit:?}"), &command);
 
         let shown = d.shown_text();
-        assert!(shown.contains(COMMAND_TOO_LARGE_LINE), "{unit:?}: {:.200}", shown);
+        assert!(
+            shown.contains(COMMAND_TOO_LARGE_LINE),
+            "{unit:?}: {:.200}",
+            shown
+        );
         assert!(
             shown.len() < 1024,
             "{unit:?}: the command is not shown, only the line that says so: {} bytes",
@@ -90,8 +94,11 @@ fn a_command_over_the_cap_is_shown_as_too_large_whatever_it_looks_like() {
     for command in [
         "x".repeat(MAX_DISPLAY_COMMAND_BYTES + 1), // one enormous line
         "echo hello world\n".repeat(MAX_DISPLAY_COMMAND_BYTES / 16), // many plain lines
-        format!("cat <<'EOF'\n{}EOF\n", "body line\n".repeat(MAX_DISPLAY_COMMAND_BYTES / 8)), // a huge here-doc
-        "é".repeat(MAX_DISPLAY_COMMAND_BYTES), // multi-byte text
+        format!(
+            "cat <<'EOF'\n{}EOF\n",
+            "body line\n".repeat(MAX_DISPLAY_COMMAND_BYTES / 8)
+        ), // a huge here-doc
+        "é".repeat(MAX_DISPLAY_COMMAND_BYTES),     // multi-byte text
     ] {
         assert!(command.len() > MAX_DISPLAY_COMMAND_BYTES);
 
@@ -160,12 +167,18 @@ fn a_short_command_is_displayed_exactly_as_before() {
 fn a_command_of_exactly_the_cap_is_displayed_and_one_byte_over_is_replaced() {
     let at = command_of("x", MAX_DISPLAY_COMMAND_BYTES);
     let d = timed_bash("exactly at the cap", &at);
-    assert!(!d.shown_text().contains(COMMAND_TOO_LARGE_LINE), "at the cap it is shown, not replaced");
+    assert!(
+        !d.shown_text().contains(COMMAND_TOO_LARGE_LINE),
+        "at the cap it is shown, not replaced"
+    );
     assert_eq!(d.reassemble(), at);
 
     let over = command_of("x", MAX_DISPLAY_COMMAND_BYTES + 1);
     let d = timed_bash("one byte over the cap", &over);
-    assert!(d.shown_text().contains(COMMAND_TOO_LARGE_LINE), "one byte over, it is not");
+    assert!(
+        d.shown_text().contains(COMMAND_TOO_LARGE_LINE),
+        "one byte over, it is not"
+    );
     assert_ne!(d.reassemble(), over);
 }
 
@@ -182,4 +195,3 @@ fn a_command_the_tokenizer_cannot_finish_reading_is_still_displayed_in_full_unde
     assert!(!d.shown_text().contains(COMMAND_TOO_LARGE_LINE));
     assert_eq!(d.reassemble(), command, "everything is shown");
 }
-

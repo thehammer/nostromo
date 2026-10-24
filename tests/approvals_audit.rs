@@ -11,7 +11,8 @@ use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use nostromo::approvals::audit::{
-    sanitize_recorded, AuditFilter, AuditLog, Entry, Event, MAX_RECORDED_STRING_BYTES, RETENTION_DAYS,
+    sanitize_recorded, AuditFilter, AuditLog, Entry, Event, MAX_RECORDED_STRING_BYTES,
+    RETENTION_DAYS,
 };
 use nostromo::data::work::is_invisible;
 use serde_json::{json, Value};
@@ -55,8 +56,10 @@ fn request(ts: DateTime<Utc>, tag: Option<&str>) -> Entry {
 }
 
 fn file_names(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> =
-        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
     names.sort();
     names
 }
@@ -94,9 +97,18 @@ fn an_entry_goes_to_the_daily_file_of_its_utc_date_with_mode_0600() {
     log.append(&late).unwrap();
     log.append(&early).unwrap();
 
-    assert_eq!(file_names(log.dir()), ["audit-2026-03-04.jsonl", "audit-2026-03-05.jsonl"]);
-    assert_eq!(log.file_for(late.ts), log.dir().join("audit-2026-03-04.jsonl"));
-    assert_eq!(log.file_for(early.ts), log.dir().join("audit-2026-03-05.jsonl"));
+    assert_eq!(
+        file_names(log.dir()),
+        ["audit-2026-03-04.jsonl", "audit-2026-03-05.jsonl"]
+    );
+    assert_eq!(
+        log.file_for(late.ts),
+        log.dir().join("audit-2026-03-04.jsonl")
+    );
+    assert_eq!(
+        log.file_for(early.ts),
+        log.dir().join("audit-2026-03-05.jsonl")
+    );
     for name in file_names(log.dir()) {
         assert_eq!(mode_of(&log.dir().join(&name)), 0o600, "{name}");
     }
@@ -108,15 +120,21 @@ fn every_entry_is_one_line_and_earlier_lines_are_never_rewritten() {
     let log = AuditLog::open(&root.path().join("a")).unwrap();
     let path = log.file_for(at(2026, 3, 4, 12, 0, 0));
 
-    log.append(&blocked(at(2026, 3, 4, 10, 0, 0), None)).unwrap();
+    log.append(&blocked(at(2026, 3, 4, 10, 0, 0), None))
+        .unwrap();
     let after_one = std::fs::read_to_string(&path).unwrap();
-    log.append(&blocked(at(2026, 3, 4, 11, 0, 0), None)).unwrap();
-    log.append(&request(at(2026, 3, 4, 12, 0, 0), None)).unwrap();
+    log.append(&blocked(at(2026, 3, 4, 11, 0, 0), None))
+        .unwrap();
+    log.append(&request(at(2026, 3, 4, 12, 0, 0), None))
+        .unwrap();
     let after_three = std::fs::read_to_string(&path).unwrap();
 
     assert_eq!(after_one.lines().count(), 1);
     assert_eq!(after_three.lines().count(), 3);
-    assert!(after_three.starts_with(&after_one), "the first line is untouched");
+    assert!(
+        after_three.starts_with(&after_one),
+        "the first line is untouched"
+    );
     assert!(after_three.ends_with('\n'));
     for line in after_three.lines() {
         serde_json::from_str::<Entry>(line).expect("every line is an entry");
@@ -136,7 +154,17 @@ fn a_new_entry_is_v1_stamped_now_with_a_fresh_id_and_no_identity() {
     assert_eq!(a.ts, now);
     assert!(!a.id.is_empty());
     assert_ne!(a.id, b.id);
-    assert_eq!((a.request_id, a.tag, a.session_id, a.tool_use_id, a.agent, a.subagent), (None, None, None, None, None, None));
+    assert_eq!(
+        (
+            a.request_id,
+            a.tag,
+            a.session_id,
+            a.tool_use_id,
+            a.agent,
+            a.subagent
+        ),
+        (None, None, None, None, None, None)
+    );
 }
 
 #[test]
@@ -149,15 +177,24 @@ fn a_guard_blocked_entry_serializes_with_the_event_beside_the_common_fields() {
     assert_eq!(v["id"], json!(e.id));
     assert_eq!(v["event"], json!("guard_blocked"));
     assert_eq!(v["tool_name"], json!("Bash"));
-    assert_eq!(v["input"], json!({ "command": "ecs_connect ap production portal", "description": "d" }));
+    assert_eq!(
+        v["input"],
+        json!({ "command": "ecs_connect ap production portal", "description": "d" })
+    );
     assert_eq!(v["rule"], json!("command"));
     assert_eq!(v["tag"], json!("focus-x"));
     assert_eq!(v["session_id"], json!("s-1"));
     assert_eq!(v["tool_use_id"], json!("toolu_1"));
-    let ts = DateTime::parse_from_rfc3339(v["ts"].as_str().expect("ts is a string")).expect("ts is RFC 3339");
+    let ts = DateTime::parse_from_rfc3339(v["ts"].as_str().expect("ts is a string"))
+        .expect("ts is RFC 3339");
     assert_eq!(ts.with_timezone(&Utc), e.ts);
     let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
-    assert!(!keys.iter().any(|k| *k == "request_id" || *k == "agent" || *k == "subagent"), "absent fields are omitted: {keys:?}");
+    assert!(
+        !keys
+            .iter()
+            .any(|k| *k == "request_id" || *k == "agent" || *k == "subagent"),
+        "absent fields are omitted: {keys:?}"
+    );
 }
 
 fn every_event() -> Vec<(&'static str, Event)> {
@@ -176,14 +213,48 @@ fn every_event() -> Vec<(&'static str, Event)> {
         ),
         (
             "outcome",
-            Event::Outcome { outcome: "allow_once".into(), rule: Some(json!({ "tool": "Bash" })), by_window: Some("w1".into()), latency_ms: Some(1234), watchdog: false },
+            Event::Outcome {
+                outcome: "allow_once".into(),
+                rule: Some(json!({ "tool": "Bash" })),
+                by_window: Some("w1".into()),
+                latency_ms: Some(1234),
+                watchdog: false,
+            },
         ),
-        ("refusal", Event::Refusal { refusal_code: "not_operator".into(), peer: Some(json!({ "trust": "local_other", "pid": 7 })), channel: None, control: None }),
+        (
+            "refusal",
+            Event::Refusal {
+                refusal_code: "not_operator".into(),
+                peer: Some(json!({ "trust": "local_other", "pid": 7 })),
+                channel: None,
+                control: None,
+            },
+        ),
         ("guard_blocked", blocked_event("ecs_connect")),
-        ("session_rule_granted", Event::SessionRuleGranted { rule: json!({ "tool": "Bash" }) }),
-        ("session_rule_revoked", Event::SessionRuleRevoked { rule: json!({ "tool": "Bash" }) }),
-        ("rule_written", Event::RuleWritten { rule: json!({ "tool": "Bash" }) }),
-        ("rule_removed", Event::RuleRemoved { rule: json!({ "tool": "Bash" }) }),
+        (
+            "session_rule_granted",
+            Event::SessionRuleGranted {
+                rule: json!({ "tool": "Bash" }),
+            },
+        ),
+        (
+            "session_rule_revoked",
+            Event::SessionRuleRevoked {
+                rule: json!({ "tool": "Bash" }),
+            },
+        ),
+        (
+            "rule_written",
+            Event::RuleWritten {
+                rule: json!({ "tool": "Bash" }),
+            },
+        ),
+        (
+            "rule_removed",
+            Event::RuleRemoved {
+                rule: json!({ "tool": "Bash" }),
+            },
+        ),
     ]
 }
 
@@ -195,7 +266,8 @@ fn every_event_kind_round_trips_through_json_under_its_snake_case_name() {
 
         let json = serde_json::to_string(&entry).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
-        let back: Entry = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{name}: {e}: {json}"));
+        let back: Entry =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{name}: {e}: {json}"));
 
         assert_eq!(value["event"], json!(name), "{json}");
         assert_eq!(back, entry, "{name}");
@@ -204,13 +276,25 @@ fn every_event_kind_round_trips_through_json_under_its_snake_case_name() {
 
 #[test]
 fn a_minimal_event_leaves_its_optional_fields_out() {
-    let e = Entry::new(Event::Outcome { outcome: "deny".into(), rule: None, by_window: None, latency_ms: None, watchdog: false }, at(2026, 3, 4, 10, 0, 0));
+    let e = Entry::new(
+        Event::Outcome {
+            outcome: "deny".into(),
+            rule: None,
+            by_window: None,
+            latency_ms: None,
+            watchdog: false,
+        },
+        at(2026, 3, 4, 10, 0, 0),
+    );
 
     let v: Value = serde_json::to_value(&e).unwrap();
 
     assert_eq!(v["event"], json!("outcome"));
     assert_eq!(v["outcome"], json!("deny"));
-    assert!(v.get("by_window").is_none() && v.get("latency_ms").is_none(), "{v}");
+    assert!(
+        v.get("by_window").is_none() && v.get("latency_ms").is_none(),
+        "{v}"
+    );
 }
 
 // ── reading ──────────────────────────────────────────────────────────────────────────────
@@ -228,14 +312,35 @@ fn reading_returns_the_entries_in_a_half_open_time_range_oldest_first() {
         log.append(&blocked(t, None)).unwrap();
     }
 
-    let all = log.read(t0..t3 + Duration::seconds(1), &AuditFilter::default()).unwrap();
-    assert_eq!(all.iter().map(|e| e.ts).collect::<Vec<_>>(), [t0, t1, t2, t3], "oldest first, across files");
+    let all = log
+        .read(t0..t3 + Duration::seconds(1), &AuditFilter::default())
+        .unwrap();
+    assert_eq!(
+        all.iter().map(|e| e.ts).collect::<Vec<_>>(),
+        [t0, t1, t2, t3],
+        "oldest first, across files"
+    );
 
     let half_open = log.read(t1..t3, &AuditFilter::default()).unwrap();
-    assert_eq!(half_open.iter().map(|e| e.ts).collect::<Vec<_>>(), [t1, t2], "start is included, end is not");
+    assert_eq!(
+        half_open.iter().map(|e| e.ts).collect::<Vec<_>>(),
+        [t1, t2],
+        "start is included, end is not"
+    );
 
-    assert!(log.read(t1..t1, &AuditFilter::default()).unwrap().is_empty(), "an empty range is empty");
-    assert!(log.read(at(2027, 1, 1, 0, 0, 0)..at(2027, 2, 1, 0, 0, 0), &AuditFilter::default()).unwrap().is_empty());
+    assert!(
+        log.read(t1..t1, &AuditFilter::default())
+            .unwrap()
+            .is_empty(),
+        "an empty range is empty"
+    );
+    assert!(log
+        .read(
+            at(2027, 1, 1, 0, 0, 0)..at(2027, 2, 1, 0, 0, 0),
+            &AuditFilter::default()
+        )
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -244,23 +349,56 @@ fn reading_can_be_filtered_by_focus_tag_and_by_event_kind() {
     let log = AuditLog::open(&root.path().join("a")).unwrap();
     let base = at(2026, 3, 4, 10, 0, 0);
     log.append(&blocked(base, Some("focus-x"))).unwrap();
-    log.append(&blocked(base + Duration::minutes(1), Some("focus-y"))).unwrap();
-    log.append(&request(base + Duration::minutes(2), Some("focus-x"))).unwrap();
-    log.append(&request(base + Duration::minutes(3), None)).unwrap();
+    log.append(&blocked(base + Duration::minutes(1), Some("focus-y")))
+        .unwrap();
+    log.append(&request(base + Duration::minutes(2), Some("focus-x")))
+        .unwrap();
+    log.append(&request(base + Duration::minutes(3), None))
+        .unwrap();
 
-    let by_tag = log.read(everything(), &AuditFilter { tag: Some("focus-x".into()), event: None }).unwrap();
+    let by_tag = log
+        .read(
+            everything(),
+            &AuditFilter {
+                tag: Some("focus-x".into()),
+                event: None,
+            },
+        )
+        .unwrap();
     assert_eq!(by_tag.len(), 2);
     assert!(by_tag.iter().all(|e| e.tag.as_deref() == Some("focus-x")));
 
-    let by_kind = log.read(everything(), &AuditFilter { tag: None, event: Some("guard_blocked".into()) }).unwrap();
+    let by_kind = log
+        .read(
+            everything(),
+            &AuditFilter {
+                tag: None,
+                event: Some("guard_blocked".into()),
+            },
+        )
+        .unwrap();
     assert_eq!(by_kind.len(), 2);
     assert!(by_kind.iter().all(|e| e.event.kind() == "guard_blocked"));
 
-    let both = log.read(everything(), &AuditFilter { tag: Some("focus-x".into()), event: Some("guard_blocked".into()) }).unwrap();
+    let both = log
+        .read(
+            everything(),
+            &AuditFilter {
+                tag: Some("focus-x".into()),
+                event: Some("guard_blocked".into()),
+            },
+        )
+        .unwrap();
     assert_eq!(both.len(), 1);
     assert_eq!(both[0].ts, base);
 
-    assert_eq!(log.read(everything(), &AuditFilter::default()).unwrap().len(), 4, "an empty filter matches everything");
+    assert_eq!(
+        log.read(everything(), &AuditFilter::default())
+            .unwrap()
+            .len(),
+        4,
+        "an empty filter matches everything"
+    );
 }
 
 #[test]
@@ -299,7 +437,10 @@ fn a_damaged_line_is_skipped_and_does_not_hide_the_good_ones() {
 fn reading_an_empty_store_returns_nothing() {
     let root = tempfile::tempdir().unwrap();
     let log = AuditLog::open(&root.path().join("a")).unwrap();
-    assert!(log.read(everything(), &AuditFilter::default()).unwrap().is_empty());
+    assert!(log
+        .read(everything(), &AuditFilter::default())
+        .unwrap()
+        .is_empty());
 }
 
 // ── concurrent appenders ─────────────────────────────────────────────────────────────────
@@ -361,16 +502,29 @@ fn the_daemon_and_the_guard_hook_can_append_at_the_same_time_without_corrupting_
     let mut lines = 0;
     let mut ids = std::collections::HashSet::new();
     for name in file_names(&dir) {
-        assert!(name.starts_with("audit-") && name.ends_with(".jsonl"), "{name}");
+        assert!(
+            name.starts_with("audit-") && name.ends_with(".jsonl"),
+            "{name}"
+        );
         for line in std::fs::read_to_string(dir.join(&name)).unwrap().lines() {
-            let e: Entry = serde_json::from_str(line).unwrap_or_else(|err| panic!("a corrupted line ({err}): {}", &line[..line.len().min(120)]));
+            let e: Entry = serde_json::from_str(line).unwrap_or_else(|err| {
+                panic!("a corrupted line ({err}): {}", &line[..line.len().min(120)])
+            });
             ids.insert(e.id);
             lines += 1;
         }
     }
     assert_eq!(lines, 2 * EACH + 1, "no entry lost or merged");
     assert_eq!(ids.len(), lines, "every entry kept its own id");
-    let from_guard = log.read(everything(), &AuditFilter { tag: Some("from-guard".into()), event: None }).unwrap();
+    let from_guard = log
+        .read(
+            everything(),
+            &AuditFilter {
+                tag: Some("from-guard".into()),
+                event: None,
+            },
+        )
+        .unwrap();
     assert_eq!(from_guard.len(), 1);
 }
 
@@ -383,22 +537,43 @@ fn sweeping_deletes_exactly_the_daily_files_dated_more_than_ninety_days_before_n
     let log = AuditLog::open(&root.path().join("a")).unwrap();
     let now = at(2026, 10, 15, 12, 0, 0);
     for days in [0, 89, 90, 91, 200] {
-        log.append(&blocked(now - Duration::days(days), None)).unwrap();
+        log.append(&blocked(now - Duration::days(days), None))
+            .unwrap();
     }
     let unrelated = log.dir().join("notes.txt");
     std::fs::write(&unrelated, "keep me").unwrap();
-    let name_of = |days: i64| format!("audit-{}.jsonl", (now - Duration::days(days)).format("%Y-%m-%d"));
+    let name_of = |days: i64| {
+        format!(
+            "audit-{}.jsonl",
+            (now - Duration::days(days)).format("%Y-%m-%d")
+        )
+    };
     assert_eq!(file_names(log.dir()).len(), 6);
 
     let deleted = log.sweep(now).unwrap();
 
     assert_eq!(deleted, 2);
-    let mut expected = vec![name_of(0), name_of(89), name_of(90), "notes.txt".to_string()];
+    let mut expected = vec![
+        name_of(0),
+        name_of(89),
+        name_of(90),
+        "notes.txt".to_string(),
+    ];
     expected.sort();
-    assert_eq!(file_names(log.dir()), expected, "91 and 200 days old are gone; 90 days old is kept");
+    assert_eq!(
+        file_names(log.dir()),
+        expected,
+        "91 and 200 days old are gone; 90 days old is kept"
+    );
     assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "keep me");
     assert_eq!(log.sweep(now).unwrap(), 0, "nothing more to delete");
-    assert_eq!(log.read(everything(), &AuditFilter::default()).unwrap().len(), 3, "recent entries are intact");
+    assert_eq!(
+        log.read(everything(), &AuditFilter::default())
+            .unwrap()
+            .len(),
+        3,
+        "recent entries are intact"
+    );
 }
 
 #[test]
@@ -431,9 +606,18 @@ fn bypass_invisible_and_bidi_characters_are_shown_as_their_code_point() {
         ('\u{0007}', "\u{27E8}U+0007\u{27E9}"),
         ('\u{E0041}', "\u{27E8}U+E0041\u{27E9}"),
     ] {
-        assert_eq!(sanitized(&format!("ecs{c}_connect")), format!("ecs{shown}_connect"), "U+{:04X}", c as u32);
+        assert_eq!(
+            sanitized(&format!("ecs{c}_connect")),
+            format!("ecs{shown}_connect"),
+            "U+{:04X}",
+            c as u32
+        );
     }
-    assert_eq!(sanitized("a\u{202E}b\u{202E}c"), "a\u{27E8}U+202E\u{27E9}b\u{27E8}U+202E\u{27E9}c", "every occurrence");
+    assert_eq!(
+        sanitized("a\u{202E}b\u{202E}c"),
+        "a\u{27E8}U+202E\u{27E9}b\u{27E8}U+202E\u{27E9}c",
+        "every occurrence"
+    );
 }
 
 #[test]
@@ -444,11 +628,21 @@ fn bypass_no_invisible_character_survives_sanitizing() {
         .filter_map(char::from_u32)
         .filter(|c| is_invisible(*c) && !matches!(c, '\n' | '\t' | '\r'))
         .collect();
-    assert!(hidden.len() > 100, "the predicate covers many code points: {}", hidden.len());
+    assert!(
+        hidden.len() > 100,
+        "the predicate covers many code points: {}",
+        hidden.len()
+    );
     let input: String = hidden.iter().map(|c| format!("[{c}]")).collect();
-    let expected: String = hidden.iter().map(|c| format!("[\u{27E8}U+{:04X}\u{27E9}]", *c as u32)).collect();
+    let expected: String = hidden
+        .iter()
+        .map(|c| format!("[\u{27E8}U+{:04X}\u{27E9}]", *c as u32))
+        .collect();
 
-    assert!(input.len() < MAX_RECORDED_STRING_BYTES && expected.len() < MAX_RECORDED_STRING_BYTES, "the cap is not in play here");
+    assert!(
+        input.len() < MAX_RECORDED_STRING_BYTES && expected.len() < MAX_RECORDED_STRING_BYTES,
+        "the cap is not in play here"
+    );
 
     let out = sanitized(&input);
 
@@ -501,11 +695,23 @@ fn a_string_of_exactly_the_cap_is_unchanged_and_one_byte_more_is_cut_with_a_note
     let over = "a".repeat(MAX_RECORDED_STRING_BYTES + 1);
     let out = sanitized(&over);
     assert_ne!(out, over);
-    let note_at = out.find("\u{2026}[truncated").expect("a note starting `\u{2026}[truncated`");
+    let note_at = out
+        .find("\u{2026}[truncated")
+        .expect("a note starting `\u{2026}[truncated`");
     assert!(out[..note_at].chars().all(|c| c == 'a'));
-    assert!(note_at <= MAX_RECORDED_STRING_BYTES, "at most the cap is kept: {note_at}");
-    assert!(note_at > MAX_RECORDED_STRING_BYTES / 2, "the text is kept, not just a note: {note_at}");
-    assert!(out.len() <= MAX_RECORDED_STRING_BYTES + 64, "the note is short: {} bytes", out.len());
+    assert!(
+        note_at <= MAX_RECORDED_STRING_BYTES,
+        "at most the cap is kept: {note_at}"
+    );
+    assert!(
+        note_at > MAX_RECORDED_STRING_BYTES / 2,
+        "the text is kept, not just a note: {note_at}"
+    );
+    assert!(
+        out.len() <= MAX_RECORDED_STRING_BYTES + 64,
+        "the note is short: {} bytes",
+        out.len()
+    );
 }
 
 #[test]
@@ -523,13 +729,26 @@ fn cutting_never_splits_a_multibyte_character() {
     // 3-byte and 4-byte characters, with the cap landing inside one of them.
     for c in ['\u{65e5}', '\u{1F680}', '\u{e9}'] {
         for lead in 0..4 {
-            let text = format!("{}{}", "a".repeat(lead), c.to_string().repeat(MAX_RECORDED_STRING_BYTES));
+            let text = format!(
+                "{}{}",
+                "a".repeat(lead),
+                c.to_string().repeat(MAX_RECORDED_STRING_BYTES)
+            );
             let out = sanitized(&text);
-            let note_at = out.find("\u{2026}[truncated").unwrap_or_else(|| panic!("{c:?}+{lead}: no note"));
+            let note_at = out
+                .find("\u{2026}[truncated")
+                .unwrap_or_else(|| panic!("{c:?}+{lead}: no note"));
             let kept = &out[..note_at];
-            assert!(kept.len() <= MAX_RECORDED_STRING_BYTES, "{c:?}+{lead}: {} bytes kept", kept.len());
+            assert!(
+                kept.len() <= MAX_RECORDED_STRING_BYTES,
+                "{c:?}+{lead}: {} bytes kept",
+                kept.len()
+            );
             assert!(kept.len() > MAX_RECORDED_STRING_BYTES / 2, "{c:?}+{lead}");
-            assert!(kept.chars().skip(lead).all(|k| k == c), "{c:?}+{lead}: whole characters only");
+            assert!(
+                kept.chars().skip(lead).all(|k| k == c),
+                "{c:?}+{lead}: whole characters only"
+            );
             assert!(out.len() <= MAX_RECORDED_STRING_BYTES + 64, "{c:?}+{lead}");
         }
     }
@@ -541,7 +760,11 @@ fn a_long_run_of_hidden_characters_is_shown_and_cut_not_passed_through() {
     let out = sanitized(&"\u{202E}".repeat(MAX_RECORDED_STRING_BYTES));
     assert!(!out.contains('\u{202E}'), "no raw U+202E survives");
     assert!(out.contains("\u{27E8}U+202E\u{27E9}"));
-    assert!(out.len() <= MAX_RECORDED_STRING_BYTES + 64, "{} bytes", out.len());
+    assert!(
+        out.len() <= MAX_RECORDED_STRING_BYTES + 64,
+        "{} bytes",
+        out.len()
+    );
     assert!(out.contains("\u{2026}[truncated"));
 }
 
@@ -557,16 +780,27 @@ fn bypass_appending_through_a_symlinked_daily_file_fails_and_leaves_the_target_a
     let victim = root.path().join("victim.txt");
     std::fs::write(&victim, "keep me\n").unwrap();
     std::os::unix::fs::symlink(&victim, log.file_for(entry.ts)).unwrap();
-    assert!(log.append(&entry).is_err(), "appending through a symlink must fail");
-    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n", "the target is untouched");
+    assert!(
+        log.append(&entry).is_err(),
+        "appending through a symlink must fail"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "keep me\n",
+        "the target is untouched"
+    );
 
     // The link dangles: the target must not be created through it either.
     let entry = blocked(at(2026, 10, 17, 12, 0, 0), None);
     let missing = root.path().join("not-created.txt");
     std::os::unix::fs::symlink(&missing, log.file_for(entry.ts)).unwrap();
-    assert!(log.append(&entry).is_err(), "a dangling symlink is refused too");
+    assert!(
+        log.append(&entry).is_err(),
+        "a dangling symlink is refused too"
+    );
     assert!(!missing.exists(), "nothing was created through the link");
 
     // Other days are unaffected.
-    log.append(&blocked(at(2026, 10, 18, 12, 0, 0), None)).expect("a normal file still works");
+    log.append(&blocked(at(2026, 10, 18, 12, 0, 0), None))
+        .expect("a normal file still works");
 }

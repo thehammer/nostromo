@@ -46,8 +46,8 @@ use crate::mcp::tools::apply_layout::{
     SOURCE_FILE, SOURCE_PR_CONVERSATION, SOURCE_PR_DIFF, SOURCE_PR_QUEUE, SOURCE_TICKET,
 };
 use crate::mcp::views::{
-    self, config as views_config, derive, placement, tree as view_tree, PlacementError, ShowRequest,
-    ViewIdentity, ViewType,
+    self, config as views_config, derive, placement, tree as view_tree, PlacementError,
+    ShowRequest, ViewIdentity, ViewType,
 };
 
 /// Handle `nostromo.show`.
@@ -77,7 +77,9 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
     // A view served by a disabled agent does not exist (checked before the
     // target is looked at, so the refusal is the same whatever was passed).
     if !state.source_available(source_for(view_type)) {
-        return refusal(&PlacementError::UnknownViewType(view_type.as_str().to_string()));
+        return refusal(&PlacementError::UnknownViewType(
+            view_type.as_str().to_string(),
+        ));
     }
 
     let identity = match identity_from_target(view_type, args.get("target")) {
@@ -286,7 +288,11 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
 /// Returns the pane ids that were closed, empty when this was a no-op (no
 /// curated regions for `tag`, or nothing stale) — so a caller like
 /// `perri.clear_current_pr` can report truthfully what it tore down.
-pub fn reset_for_pr_change(daemon: &DaemonMcpBackend, tag: &str, new_pr: Option<(&str, u64)>) -> Vec<String> {
+pub fn reset_for_pr_change(
+    daemon: &DaemonMcpBackend,
+    tag: &str,
+    new_pr: Option<(&str, u64)>,
+) -> Vec<String> {
     let Ok(cfg) = views_config::load() else {
         return Vec::new();
     };
@@ -437,7 +443,12 @@ pub fn has_review_tabs(daemon: &DaemonMcpBackend, tag: &str) -> bool {
 /// Held under one lock acquisition per placed view (no `.await` anywhere in
 /// this function), so unlike `show()` there is no decide/mutate race window
 /// to guard against.
-pub fn recreate_detail_region_for_pr(daemon: &DaemonMcpBackend, tag: &str, repo: &str, number: u64) {
+pub fn recreate_detail_region_for_pr(
+    daemon: &DaemonMcpBackend,
+    tag: &str,
+    repo: &str,
+    number: u64,
+) {
     let Ok(cfg) = views_config::load() else {
         return;
     };
@@ -518,10 +529,7 @@ fn identity_from_target(
     target: Option<&Value>,
 ) -> Result<ViewIdentity, PlacementError> {
     let bad = |what: &str| {
-        PlacementError::InvalidTarget(format!(
-            "`{}` needs target {what}",
-            view_type.as_str()
-        ))
+        PlacementError::InvalidTarget(format!("`{}` needs target {what}", view_type.as_str()))
     };
 
     if view_type == ViewType::ReviewQueue {
@@ -629,7 +637,11 @@ fn source_params(
             params.insert("repo".into(), json!(repo));
             params.insert("number".into(), json!(number));
         }
-        ViewIdentity::File { repo, path, revision } => {
+        ViewIdentity::File {
+            repo,
+            path,
+            revision,
+        } => {
             params.insert("path".into(), json!(path));
             if let Some(repo) = repo {
                 params.insert("repo".into(), json!(repo));
@@ -653,11 +665,9 @@ fn source_params(
     }
 
     let anchor = match args.get("anchor").filter(|v| !v.is_null()) {
-        Some(v) => Some(
-            serde_json::from_value::<Anchor>(v.clone()).map_err(|e| {
-                PlacementError::InvalidAnchor(format!("`anchor` is not a valid anchor: {e}"))
-            })?,
-        ),
+        Some(v) => Some(serde_json::from_value::<Anchor>(v.clone()).map_err(|e| {
+            PlacementError::InvalidAnchor(format!("`anchor` is not a valid anchor: {e}"))
+        })?),
         None => None,
     };
 
@@ -893,20 +903,20 @@ pub fn descriptor() -> Value {
     json!({
         "name": "nostromo.show",
         "description": "\
-Show one curated view in the operator's window and bring it to front. This is the \
-deliberate attention-directing surface: name a view type from the closed vocabulary, \
-say which one, optionally say where to look and why, and the placement engine decides \
-where it lands. Returns where it landed so you can refer to it in conversation \
-(\"the File tab\") rather than guessing.\n\n\
-Types and their targets:\n\
-  review_queue    — the PR review queue. No target. anchor/emphasis: a queue row.\n\
-  pr_conversation — a PR's description and comment threads. target {repo, number}.\n\
-  pr_diff         — a PR's change, line-addressable. target {repo, number}.\n\
-  file            — a file at a revision, line-addressable. target {path, repo?, revision?}. Pass `repo` (owner/name) to show a file that lives in the PR's repo when your own working directory is NOT a checkout of it (the usual case for a reviewer): it is read from GitHub at `revision`, defaulting to the pinned PR's head when that PR is in the same repo.\n\
-  ticket          — an issue-tracker ticket. target {provider, key}.\n\n\
-Showing the same (type, target) twice reuses one tab and re-anchors it — showing the \
-same file at a different line is the same view, not a second tab. `activity` is not \
-showable: the ambient activity stream is populated only by what actually happened.",
+    Show one curated view in the operator's window and bring it to front. This is the \
+    deliberate attention-directing surface: name a view type from the closed vocabulary, \
+    say which one, optionally say where to look and why, and the placement engine decides \
+    where it lands. Returns where it landed so you can refer to it in conversation \
+    (\"the File tab\") rather than guessing.\n\n\
+    Types and their targets:\n\
+    review_queue    — the PR review queue. No target. anchor/emphasis: a queue row.\n\
+    pr_conversation — a PR's description and comment threads. target {repo, number}.\n\
+    pr_diff         — a PR's change, line-addressable. target {repo, number}.\n\
+    file            — a file at a revision, line-addressable. target {path, repo?, revision?}. Pass `repo` (owner/name) to show a file that lives in the PR's repo when your own working directory is NOT a checkout of it (the usual case for a reviewer): it is read from GitHub at `revision`, defaulting to the pinned PR's head when that PR is in the same repo.\n\
+    ticket          — an issue-tracker ticket. target {provider, key}.\n\n\
+    Showing the same (type, target) twice reuses one tab and re-anchors it — showing the \
+    same file at a different line is the same view, not a second tab. `activity` is not \
+    showable: the ambient activity stream is populated only by what actually happened.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -985,12 +995,21 @@ mod tests {
     #[tokio::test]
     async fn pr_views_are_refused_when_perri_is_disabled_but_files_are_not() {
         let (mut state, _rx) = make_state();
-        state.enabled_agents = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        state.enabled_agents = crate::agents::EnabledAgents {
+            fred: true,
+            perri: false,
+            teri: true,
+        };
         for ty in ["review_queue", "pr_diff", "pr_conversation"] {
             let out = show(&state, &json!({ "type": ty }), Some("perri")).await;
             assert_eq!(out["error"], "unknown_view_type", "for {ty}");
         }
-        let out = show(&state, &json!({ "type": "file", "target": { "path": "" } }), Some("perri")).await;
+        let out = show(
+            &state,
+            &json!({ "type": "file", "target": { "path": "" } }),
+            Some("perri"),
+        )
+        .await;
         assert_ne!(out["error"], "unknown_view_type");
     }
     use crate::ipc::pane_registry::PaneRegistry;
@@ -1015,7 +1034,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: TicketRegistryState::default(),
             tracker: Default::default(),
         };
@@ -1036,7 +1057,8 @@ mod tests {
         let reg = registry(state);
         let mut reg = reg.lock().unwrap();
         reg.get_or_init(tag);
-        reg.set_layout(tag, &json!({ "tree": view_tree::default_review_tree() })).unwrap();
+        reg.set_layout(tag, &json!({ "tree": view_tree::default_review_tree() }))
+            .unwrap();
         reg.bind_source(tag, "queue", SOURCE_PR_QUEUE);
     }
 
@@ -1052,18 +1074,27 @@ mod tests {
                 PaneTree::Split {
                     direction: SplitDirection::Horizontal,
                     children: vec![
-                        PaneTree::Leaf { pane_id: "queue".into() },
+                        PaneTree::Leaf {
+                            pane_id: "queue".into(),
+                        },
                         view_tree::build_tabs("detail", &[("detail.0".into(), "Diff".into())], 0),
                     ],
                     ratios: vec![0.5, 0.5],
                 },
-                PaneTree::Leaf { pane_id: "repl".into() },
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
             ],
             ratios: vec![0.6, 0.4],
         };
         reg.set_layout(tag, &json!({ "tree": old })).unwrap();
         reg.bind_source(tag, "queue", SOURCE_PR_QUEUE);
-        reg.bind_source_with_params(tag, "detail.0", SOURCE_PR_DIFF, Some(json!({"repo": "thehammer/nostromo", "number": 94})));
+        reg.bind_source_with_params(
+            tag,
+            "detail.0",
+            SOURCE_PR_DIFF,
+            Some(json!({"repo": "thehammer/nostromo", "number": 94})),
+        );
     }
 
     // ── 1. the closed vocabulary ──────────────────────────────────────────────
@@ -1187,11 +1218,17 @@ mod tests {
 
         let out = show(&state, &json!({ "type": "review_queue" }), Some("perri")).await;
         assert_eq!(out["ok"], true);
-        assert_eq!(out["region"], "detail", "the queue is a tab of the detail region now");
+        assert_eq!(
+            out["region"], "detail",
+            "the queue is a tab of the detail region now"
+        );
         assert_eq!(out["pane_id"], "queue");
         assert_eq!(out["label"], "Queue");
         assert_eq!(out["tab_index"], 0);
-        assert_eq!(out["reused"], true, "the queue pane was already the queue view");
+        assert_eq!(
+            out["reused"], true,
+            "the queue pane was already the queue view"
+        );
         assert_eq!(out["frontmost"], true);
         assert_eq!(out["evicted"], Value::Null);
 
@@ -1278,10 +1315,35 @@ mod tests {
         );
 
         for (view_type, identity) in [
-            (ViewType::PrDiff, ViewIdentity::Pr { repo: "o/r".into(), number: 1 }),
-            (ViewType::PrConversation, ViewIdentity::Pr { repo: "o/r".into(), number: 1 }),
-            (ViewType::File, ViewIdentity::File { repo: None, path: "a.rs".into(), revision: None }),
-            (ViewType::Ticket, ViewIdentity::Ticket { provider: "jira".into(), key: "C-1".into() }),
+            (
+                ViewType::PrDiff,
+                ViewIdentity::Pr {
+                    repo: "o/r".into(),
+                    number: 1,
+                },
+            ),
+            (
+                ViewType::PrConversation,
+                ViewIdentity::Pr {
+                    repo: "o/r".into(),
+                    number: 1,
+                },
+            ),
+            (
+                ViewType::File,
+                ViewIdentity::File {
+                    repo: None,
+                    path: "a.rs".into(),
+                    revision: None,
+                },
+            ),
+            (
+                ViewType::Ticket,
+                ViewIdentity::Ticket {
+                    provider: "jira".into(),
+                    key: "C-1".into(),
+                },
+            ),
         ] {
             let params =
                 source_params(view_type, &identity, &json!({ "reason": "because" })).unwrap();
@@ -1296,7 +1358,8 @@ mod tests {
         let params = source_params(
             ViewType::File,
             &ViewIdentity::File {
-                repo: None, path: "src/a.rs".into(),
+                repo: None,
+                path: "src/a.rs".into(),
                 revision: None,
             },
             &json!({
@@ -1375,14 +1438,16 @@ mod tests {
             )
             .unwrap(),
             ViewIdentity::File {
-                repo: None, path: "a.rs".into(),
+                repo: None,
+                path: "a.rs".into(),
                 revision: Some("abc".into())
             }
         );
         assert_eq!(
             identity_from_target(ViewType::File, Some(&json!({ "path": "a.rs" }))).unwrap(),
             ViewIdentity::File {
-                repo: None, path: "a.rs".into(),
+                repo: None,
+                path: "a.rs".into(),
                 revision: None
             }
         );
@@ -1412,7 +1477,10 @@ mod tests {
                 Some(&json!({ "path": "a.rs", "repo": repo.clone() })),
             )
             .unwrap_err();
-            assert!(matches!(err, PlacementError::InvalidTarget(_)), "repo {repo} must be refused: {err:?}");
+            assert!(
+                matches!(err, PlacementError::InvalidTarget(_)),
+                "repo {repo} must be refused: {err:?}"
+            );
         }
     }
 
@@ -1457,7 +1525,10 @@ mod tests {
         assert_eq!(tree_of(&state, "perri"), Some(PaneTree::repl_leaf()));
 
         let queue = show_ok(&state, json!({ "type": "review_queue" })).await;
-        assert_eq!(queue["region"], "detail", "the queue is the first tab of the detail region");
+        assert_eq!(
+            queue["region"], "detail",
+            "the queue is the first tab of the detail region"
+        );
         assert_eq!(queue["pane_id"], "queue");
         assert_eq!(queue["tab_index"], 0);
 
@@ -1480,7 +1551,11 @@ mod tests {
         let region = view_tree::tabs_region(&tree, "detail").expect("a detail region");
         match region {
             PaneTree::Tabs { children, .. } => {
-                assert_eq!(children[0].pane_ids(), vec!["queue".to_string()], "the queue is the first tab");
+                assert_eq!(
+                    children[0].pane_ids(),
+                    vec!["queue".to_string()],
+                    "the queue is the first tab"
+                );
                 assert_eq!(children.len(), 2, "queue + diff");
             }
             other => panic!("{other:?}"),
@@ -1492,13 +1567,27 @@ mod tests {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
         let before = tree_of(&state, "perri").unwrap();
-        assert!(view_tree::tabs_region(&before, "detail").is_some(), "the region exists from the start");
+        assert!(
+            view_tree::tabs_region(&before, "detail").is_some(),
+            "the region exists from the start"
+        );
 
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
 
         let after = tree_of(&state, "perri").unwrap();
         let ids = after.pane_ids();
-        assert_eq!(ids, vec!["queue".to_string(), "detail.0".to_string(), "repl".to_string()]);
+        assert_eq!(
+            ids,
+            vec![
+                "queue".to_string(),
+                "detail.0".to_string(),
+                "repl".to_string()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1507,7 +1596,11 @@ mod tests {
         seed_curated(&state, "perri");
         let before = tree_of(&state, "perri").unwrap();
 
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         show_ok(
             &state,
             json!({ "type": "pr_conversation", "target": pr_target(94) }),
@@ -1519,12 +1612,24 @@ mod tests {
         // belongs to no PR: it stays, as the way back.
         let daemon = state.daemon.as_ref().unwrap();
         let closed = reset_for_pr_change(daemon, "perri", None);
-        assert!(!closed.contains(&"queue".to_string()), "closed the queue: {closed:?}");
+        assert!(
+            !closed.contains(&"queue".to_string()),
+            "closed the queue: {closed:?}"
+        );
 
         let after = tree_of(&state, "perri").unwrap();
-        assert!(view_tree::tabs_region(&after, "detail").is_some(), "the region survives: it still holds the queue");
-        assert_eq!(after, before, "back to exactly the pre-show tree: the queue as the only tab");
-        assert_eq!(after.pane_ids().iter().filter(|id| *id == "repl").count(), 1);
+        assert!(
+            view_tree::tabs_region(&after, "detail").is_some(),
+            "the region survives: it still holds the queue"
+        );
+        assert_eq!(
+            after, before,
+            "back to exactly the pre-show tree: the queue as the only tab"
+        );
+        assert_eq!(
+            after.pane_ids().iter().filter(|id| *id == "repl").count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1540,10 +1645,17 @@ mod tests {
         assert_eq!(out["region"], "detail");
         assert_eq!(out["pane_id"], "queue");
         let tree = tree_of(&state, "perri").unwrap();
-        assert!(!view_tree::has_bare_queue(&tree), "the queue is a tab now: {tree:?}");
+        assert!(
+            !view_tree::has_bare_queue(&tree),
+            "the queue is a tab now: {tree:?}"
+        );
         assert_eq!(
             tree.pane_ids(),
-            vec!["queue".to_string(), "detail.0".to_string(), "repl".to_string()]
+            vec![
+                "queue".to_string(),
+                "detail.0".to_string(),
+                "repl".to_string()
+            ]
         );
         // The migration itself was announced before the show's own layout.
         let first = rx.recv().await.unwrap();
@@ -1554,7 +1666,11 @@ mod tests {
     async fn changing_the_pr_under_review_closes_the_previous_prs_tabs() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         show_ok(
             &state,
             json!({ "type": "pr_conversation", "target": pr_target(94) }),
@@ -1577,7 +1693,10 @@ mod tests {
         let reg = registry(&state);
         let reg = reg.lock().unwrap();
         for gone in old_ids.iter().filter(|id| id.starts_with("detail.")) {
-            assert!(reg.binding_for("perri", gone).is_none(), "{gone} still bound");
+            assert!(
+                reg.binding_for("perri", gone).is_none(),
+                "{gone} still bound"
+            );
         }
     }
 
@@ -1622,7 +1741,10 @@ mod tests {
         {
             let reg = registry(&state);
             let reg = reg.lock().unwrap();
-            assert!(reg.binding_for("perri", "diff").is_some(), "the diff pane keeps its binding");
+            assert!(
+                reg.binding_for("perri", "diff").is_some(),
+                "the diff pane keeps its binding"
+            );
             assert!(reg.binding_for("perri", "queue").is_some());
         }
         assert!(
@@ -1637,7 +1759,11 @@ mod tests {
     async fn showing_the_same_view_twice_reuses_one_tab_and_re_addresses_it() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        let first = show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        let first = show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         let second = show_ok(
             &state,
             json!({
@@ -1651,8 +1777,12 @@ mod tests {
         assert_eq!(second["pane_id"], first["pane_id"]);
         assert_eq!(second["reused"], true);
         assert_eq!(
-            tree_of(&state, "perri").unwrap().pane_ids().iter()
-                .filter(|id| id.starts_with("detail.")).count(),
+            tree_of(&state, "perri")
+                .unwrap()
+                .pane_ids()
+                .iter()
+                .filter(|id| id.starts_with("detail."))
+                .count(),
             1,
             "one tab, not two"
         );
@@ -1662,7 +1792,11 @@ mod tests {
     async fn a_reused_show_re_binds_the_pane_with_the_new_address_params() {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
-        show_ok(&state, json!({ "type": "pr_diff", "target": pr_target(94) })).await;
+        show_ok(
+            &state,
+            json!({ "type": "pr_diff", "target": pr_target(94) }),
+        )
+        .await;
         let out = show_ok(
             &state,
             json!({
@@ -1706,7 +1840,9 @@ mod tests {
     #[test]
     fn tree_changed_since_decide_is_false_for_two_equal_trees_including_none_and_none() {
         assert!(!tree_changed_since_decide(None, &None));
-        let t = PaneTree::Leaf { pane_id: "repl".into() };
+        let t = PaneTree::Leaf {
+            pane_id: "repl".into(),
+        };
         assert!(!tree_changed_since_decide(Some(&t), &Some(t.clone())));
     }
 
@@ -1722,9 +1858,15 @@ mod tests {
             direction: SplitDirection::Vertical,
             children: vec![PaneTree::Tabs {
                 children: vec![
-                    PaneTree::Leaf { pane_id: "detail.0".into() },
-                    PaneTree::Leaf { pane_id: "detail.1".into() },
-                    PaneTree::Leaf { pane_id: "detail.2".into() },
+                    PaneTree::Leaf {
+                        pane_id: "detail.0".into(),
+                    },
+                    PaneTree::Leaf {
+                        pane_id: "detail.1".into(),
+                    },
+                    PaneTree::Leaf {
+                        pane_id: "detail.2".into(),
+                    },
                 ],
                 labels: vec!["A".into(), "B".into(), "C".into()],
                 active: 0,
@@ -1736,8 +1878,12 @@ mod tests {
             direction: SplitDirection::Vertical,
             children: vec![PaneTree::Tabs {
                 children: vec![
-                    PaneTree::Leaf { pane_id: "detail.0".into() },
-                    PaneTree::Leaf { pane_id: "detail.2".into() },
+                    PaneTree::Leaf {
+                        pane_id: "detail.0".into(),
+                    },
+                    PaneTree::Leaf {
+                        pane_id: "detail.2".into(),
+                    },
                 ],
                 labels: vec!["A".into(), "C".into()],
                 active: 0,
@@ -1745,7 +1891,10 @@ mod tests {
             }],
             ratios: vec![1.0],
         };
-        assert!(tree_changed_since_decide(Some(&two_tabs), &Some(three_tabs)));
+        assert!(tree_changed_since_decide(
+            Some(&two_tabs),
+            &Some(three_tabs)
+        ));
     }
 
     #[test]
@@ -1778,7 +1927,10 @@ mod tests {
         // channel and the vocabulary has stopped being closed.
         let props = descriptor()["inputSchema"]["properties"].clone();
         for forbidden in ["content", "text", "html", "body", "modal", "payload"] {
-            assert!(props.get(forbidden).is_none(), "`{forbidden}` must not exist");
+            assert!(
+                props.get(forbidden).is_none(),
+                "`{forbidden}` must not exist"
+            );
         }
         assert!(!descriptor().to_string().contains("\"modal\""));
     }
@@ -1808,7 +1960,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failing_file_show_with_an_implicit_revision_carries_the_current_pin_when_one_exists() {
+    async fn a_failing_file_show_with_an_implicit_revision_carries_the_current_pin_when_one_exists()
+    {
         let (state, _rx) = make_state();
         seed_curated(&state, "perri");
         seed_pin(&state, "perri", "acme/web", 42);

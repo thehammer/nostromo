@@ -26,7 +26,9 @@ use nostromo::ipc::SessionManager;
 use nostromo::mcp::server::TOOL_FORBIDDEN_CODE;
 use nostromo::mcp::tool_policy::INTENDED_PERRI_POLICY;
 use nostromo::mcp::tools::tool_descriptors;
-use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState, TicketRegistryState};
+use nostromo::mcp::{
+    DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState, TicketRegistryState,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -79,8 +81,11 @@ impl HomeOverride {
     }
 
     fn write_tool_policy(&self, yaml: &str) {
-        std::fs::write(self.dir.path().join(".nostromo").join("tool-policy.yaml"), yaml)
-            .expect("write tool-policy.yaml");
+        std::fs::write(
+            self.dir.path().join(".nostromo").join("tool-policy.yaml"),
+            yaml,
+        )
+        .expect("write tool-policy.yaml");
     }
 }
 
@@ -157,7 +162,11 @@ fn register_focuses(harness: &Harness, tags: &[&str]) {
             select_for_client: None,
         })
         .collect();
-    harness.session_mgr.lock().unwrap().set_focus_registry(metas);
+    harness
+        .session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(metas);
 }
 
 // ── wire helpers ──────────────────────────────────────────────────────────────
@@ -333,7 +342,13 @@ async fn nostromo_show_is_listed_with_exactly_the_five_v1_types_and_no_activity(
         .collect();
     assert_eq!(
         types,
-        vec!["review_queue", "pr_conversation", "pr_diff", "file", "ticket"]
+        vec![
+            "review_queue",
+            "pr_conversation",
+            "pr_diff",
+            "file",
+            "ticket"
+        ]
     );
     assert!(!types.contains(&"activity"), "activity is not showable");
 }
@@ -366,7 +381,10 @@ async fn a_bare_focus_can_show_the_review_queue_through_show_alone_and_the_resul
     .await;
 
     assert_eq!(res["ok"], true);
-    assert_eq!(res["region"], "detail", "the queue is a tab of the detail region");
+    assert_eq!(
+        res["region"], "detail",
+        "the queue is a tab of the detail region"
+    );
     assert_eq!(res["pane_id"], "queue");
     assert_eq!(res["label"], "Queue");
     assert_eq!(res["tab_index"], 0);
@@ -444,12 +462,18 @@ async fn showing_the_same_file_at_a_different_line_reuses_one_tab_and_re_anchors
     )
     .await;
     assert_eq!(second["ok"], true);
-    assert_eq!(second["reused"], true, "the same file is the same view (R2)");
+    assert_eq!(
+        second["reused"], true,
+        "the same file is the same view (R2)"
+    );
     assert_eq!(second["pane_id"], pane_id, "reused onto the same pane");
 
     // Still one tab, not two.
     let info = get_self(&mut reader, &mut writer, 4).await;
-    let count = pane_ids(&info).iter().filter(|p| p.starts_with("detail.")).count();
+    let count = pane_ids(&info)
+        .iter()
+        .filter(|p| p.starts_with("detail."))
+        .count();
     assert_eq!(count, 1, "one tab, not two: {info}");
 
     // The re-anchor reached the wire.
@@ -457,10 +481,15 @@ async fn showing_the_same_file_at_a_different_line_reuses_one_tab_and_re_anchors
     let ServerMsg::PaneContent { address, .. } = bcast.recv().await.unwrap() else {
         panic!("expected PaneContent")
     };
-    let anchor = address.expect("a re-anchored show still addresses the pane").anchor;
+    let anchor = address
+        .expect("a re-anchored show still addresses the pane")
+        .anchor;
     assert_eq!(
         anchor,
-        Some(nostromo::ipc::protocol::Anchor::Line { path: None, line: 3 })
+        Some(nostromo::ipc::protocol::Anchor::Line {
+            path: None,
+            line: 3
+        })
     );
 }
 
@@ -488,7 +517,13 @@ async fn a_type_outside_the_vocabulary_is_refused_and_leaves_the_tree_untouched(
     )
     .await;
     assert_eq!(res["error"], "unknown_view_type");
-    for t in ["review_queue", "pr_conversation", "pr_diff", "file", "ticket"] {
+    for t in [
+        "review_queue",
+        "pr_conversation",
+        "pr_diff",
+        "file",
+        "ticket",
+    ] {
         assert!(res["detail"].as_str().unwrap().contains(t));
     }
 
@@ -740,13 +775,20 @@ async fn the_seventh_tab_in_the_detail_region_evicts_the_least_recently_focused_
         )
         .await;
         assert_eq!(res["ok"], true, "f{n}: {res}");
-        assert_eq!(res["evicted"], Value::Null, "no eviction until the cap is hit");
+        assert_eq!(
+            res["evicted"],
+            Value::Null,
+            "no eviction until the cap is hit"
+        );
         pane_id_of.push(res["pane_id"].as_str().unwrap().to_string());
     }
 
     let info = get_self(&mut reader, &mut writer, 20).await;
     assert_eq!(
-        pane_ids(&info).iter().filter(|p| p.starts_with("detail.")).count(),
+        pane_ids(&info)
+            .iter()
+            .filter(|p| p.starts_with("detail."))
+            .count(),
         6
     );
 
@@ -951,7 +993,10 @@ async fn a_policy_denying_perri_removes_the_six_raw_tools_from_her_list_and_refu
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     for denied in RAW_PANE_TOOLS {
-        assert!(!names.contains(&denied), "{denied} must not be listed for perri");
+        assert!(
+            !names.contains(&denied),
+            "{denied} must not be listed for perri"
+        );
     }
     assert!(
         names.contains(&"nostromo.show"),
@@ -967,7 +1012,10 @@ async fn a_policy_denying_perri_removes_the_six_raw_tools_from_her_list_and_refu
         let resp = call_tool_raw(&mut reader, &mut writer, 10 + i as i64, denied, json!({})).await;
         let code = resp["error"]["code"].as_i64().expect("a JSON-RPC error");
         assert_eq!(code, TOOL_FORBIDDEN_CODE, "{denied}: {resp}");
-        assert_ne!(code, -32601, "{denied}: must not look like Method not found");
+        assert_ne!(
+            code, -32601,
+            "{denied}: must not look like Method not found"
+        );
         let message = resp["error"]["message"].as_str().unwrap_or("");
         assert!(
             !message.to_lowercase().contains("method not found"),
@@ -977,7 +1025,14 @@ async fn a_policy_denying_perri_removes_the_six_raw_tools_from_her_list_and_refu
 
     // An unknown tool name still gets the ordinary -32601, so the two really
     // are distinguishable at the wire.
-    let resp = call_tool_raw(&mut reader, &mut writer, 99, "nostromo.not_a_real_tool", json!({})).await;
+    let resp = call_tool_raw(
+        &mut reader,
+        &mut writer,
+        99,
+        "nostromo.not_a_real_tool",
+        json!({}),
+    )
+    .await;
     assert_eq!(resp["error"]["code"], -32601);
     assert_ne!(resp["error"]["code"], TOOL_FORBIDDEN_CODE);
 }
@@ -1002,7 +1057,10 @@ async fn the_same_policy_that_denies_perri_leaves_mother_fred_and_teris_tool_lis
     for agent in ["mother", "fred", "teri"] {
         let (mut reader, mut writer) = connect(&socket_path, agent).await;
         let tools = list_tools(&mut reader, &mut writer, 2).await;
-        assert_eq!(tools, unfiltered, "{agent}'s list must be byte-for-byte unchanged");
+        assert_eq!(
+            tools, unfiltered,
+            "{agent}'s list must be byte-for-byte unchanged"
+        );
 
         // And the raw tools they were never denied still work.
         let res = call_tool(
@@ -1014,7 +1072,10 @@ async fn the_same_policy_that_denies_perri_leaves_mother_fred_and_teris_tool_lis
         )
         .await;
         if agent == "mother" {
-            assert_eq!(res["ok"], true, "{agent} must still be able to call it: {res}");
+            assert_eq!(
+                res["ok"], true,
+                "{agent} must still be able to call it: {res}"
+            );
         } else {
             // Teri and Fred own a native pane (FND-3): perri-standard has no
             // such pane, so the tool RAN and refused it — proof the call was
@@ -1110,7 +1171,10 @@ async fn with_no_policy_file_present_every_caller_including_perri_sees_the_unfil
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&tool), "{tool} must still be listed for perri");
+        assert!(
+            names.contains(&tool),
+            "{tool} must still be listed for perri"
+        );
     }
 }
 
@@ -1120,10 +1184,15 @@ async fn with_no_policy_file_present_every_caller_including_perri_sees_the_unfil
 // keeps its literal `Tracker` label when `show` rebuilds the region; a
 // `repl | tracker` split with no detail region still lets `show` create one.
 
-fn tracker_label_and_position(tree: &nostromo::ipc::protocol::PaneTree) -> (Vec<String>, Vec<String>) {
+fn tracker_label_and_position(
+    tree: &nostromo::ipc::protocol::PaneTree,
+) -> (Vec<String>, Vec<String>) {
     let region = nostromo::mcp::views::tree::tabs_region(tree, "detail")
         .unwrap_or_else(|| panic!("no detail region in {tree:?}"));
-    let nostromo::ipc::protocol::PaneTree::Tabs { children, labels, .. } = region else {
+    let nostromo::ipc::protocol::PaneTree::Tabs {
+        children, labels, ..
+    } = region
+    else {
         panic!("detail is a tabs node")
     };
     (
@@ -1145,7 +1214,14 @@ async fn the_tracker_tab_survives_the_cap_keeps_its_label_and_is_never_reused() 
     let root = temp_file_root();
 
     // queue + four files, through show alone...
-    let res = call_tool(&mut reader, &mut writer, 2, "nostromo.show", json!({ "type": "review_queue" })).await;
+    let res = call_tool(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.show",
+        json!({ "type": "review_queue" }),
+    )
+    .await;
     assert_eq!(res["ok"], true, "{res}");
     let mut file_panes = Vec::new();
     for n in 0..4 {
@@ -1167,9 +1243,12 @@ async fn the_tracker_tab_survives_the_cap_keeps_its_label_and_is_never_reused() 
         let mut panes = harness.panes.lock().unwrap();
         let tree = panes.get("perri").cloned().expect("perri has a tree");
         let placed = nostromo::tracker::placement::place_tracker(&tree).expect("tracker placed");
-        panes.set_layout("perri", &json!({ "tree": placed })).unwrap();
+        panes
+            .set_layout("perri", &json!({ "tree": placed }))
+            .unwrap();
     }
-    let (order, labels) = tracker_label_and_position(&harness.panes.lock().unwrap().get("perri").cloned().unwrap());
+    let (order, labels) =
+        tracker_label_and_position(&harness.panes.lock().unwrap().get("perri").cloned().unwrap());
     assert_eq!(order.len(), 6, "{order:?}");
     assert_eq!(order[1], "tracker", "right after the queue: {order:?}");
     assert_eq!(labels[1], "Tracker");
@@ -1202,20 +1281,39 @@ async fn the_tracker_tab_survives_the_cap_keeps_its_label_and_is_never_reused() 
         )
         .await;
         assert_eq!(res["ok"], true, "f{n}: {res}");
-        assert_ne!(res["evicted"], json!("tracker"), "the tracker tab is pinned: {res}");
-        assert_ne!(res["pane_id"], json!("tracker"), "show never reuses the tracker tab: {res}");
-        assert_ne!(res["evicted"], Value::Null, "the cap is full, something leaves: {res}");
+        assert_ne!(
+            res["evicted"],
+            json!("tracker"),
+            "the tracker tab is pinned: {res}"
+        );
+        assert_ne!(
+            res["pane_id"],
+            json!("tracker"),
+            "show never reuses the tracker tab: {res}"
+        );
+        assert_ne!(
+            res["evicted"],
+            Value::Null,
+            "the cap is full, something leaves: {res}"
+        );
 
         let tree: PaneTree = harness.panes.lock().unwrap().get("perri").cloned().unwrap();
         let (order, labels) = tracker_label_and_position(&tree);
-        let at = order.iter().position(|p| p == "tracker").expect("the tracker tab is still there");
-        assert_eq!(labels[at], "Tracker", "label survives show rebuilding the region: {labels:?}");
+        let at = order
+            .iter()
+            .position(|p| p == "tracker")
+            .expect("the tracker tab is still there");
+        assert_eq!(
+            labels[at], "Tracker",
+            "label survives show rebuilding the region: {labels:?}"
+        );
         assert_eq!(order.iter().filter(|p| *p == "tracker").count(), 1);
     }
 }
 
 #[tokio::test]
-async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_repl_inside_the_split() {
+async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_repl_inside_the_split(
+) {
     use nostromo::ipc::protocol::{PaneTree, SplitDirection};
     let _home = HomeOverride::new();
     let harness = make_daemon_state();
@@ -1230,8 +1328,12 @@ async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_
     let split = PaneTree::Split {
         direction: SplitDirection::Horizontal,
         children: vec![
-            PaneTree::Leaf { pane_id: "repl".into() },
-            PaneTree::Leaf { pane_id: "tracker".into() },
+            PaneTree::Leaf {
+                pane_id: "repl".into(),
+            },
+            PaneTree::Leaf {
+                pane_id: "tracker".into(),
+            },
         ],
         ratios: vec![0.66, 0.34],
     };
@@ -1257,14 +1359,34 @@ async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_
     let tree = harness.panes.lock().unwrap().get("perri").cloned().unwrap();
     // The tracker is still a direct sibling at the top, at its original ratios;
     // the REPL's side now holds a vertical [detail, repl] group.
-    let PaneTree::Split { direction, children, ratios } = &tree else {
+    let PaneTree::Split {
+        direction,
+        children,
+        ratios,
+    } = &tree
+    else {
         panic!("top is still a split: {tree:?}")
     };
     assert_eq!(*direction, SplitDirection::Horizontal, "{tree:?}");
-    assert_eq!(ratios, &vec![0.66, 0.34], "the tracker keeps its ratio position: {tree:?}");
+    assert_eq!(
+        ratios,
+        &vec![0.66, 0.34],
+        "the tracker keeps its ratio position: {tree:?}"
+    );
     assert_eq!(children.len(), 2, "{tree:?}");
-    assert_eq!(children[1], PaneTree::Leaf { pane_id: "tracker".into() }, "{tree:?}");
-    let PaneTree::Split { direction, children: inner, .. } = &children[0] else {
+    assert_eq!(
+        children[1],
+        PaneTree::Leaf {
+            pane_id: "tracker".into()
+        },
+        "{tree:?}"
+    );
+    let PaneTree::Split {
+        direction,
+        children: inner,
+        ..
+    } = &children[0]
+    else {
         panic!("the repl side is a group: {tree:?}")
     };
     assert_eq!(*direction, SplitDirection::Vertical, "{tree:?}");
@@ -1272,13 +1394,20 @@ async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_
         matches!(&inner[0], PaneTree::Tabs { region: Some(r), .. } if r == "detail"),
         "detail above: {tree:?}"
     );
-    assert_eq!(inner[1], PaneTree::Leaf { pane_id: "repl".into() }, "{tree:?}");
+    assert_eq!(
+        inner[1],
+        PaneTree::Leaf {
+            pane_id: "repl".into()
+        },
+        "{tree:?}"
+    );
 }
 
 // ── the tracker is exempt from the tool policy (PRD 29) ──────────────────────
 
 #[tokio::test]
-async fn the_tracker_stays_listed_and_callable_for_perri_under_the_intended_policy_and_an_explicit_deny() {
+async fn the_tracker_stays_listed_and_callable_for_perri_under_the_intended_policy_and_an_explicit_deny(
+) {
     for policy in [
         INTENDED_PERRI_POLICY.to_string(),
         format!("{INTENDED_PERRI_POLICY}      - nostromo.tracker\n"),
@@ -1288,15 +1417,28 @@ async fn the_tracker_stays_listed_and_callable_for_perri_under_the_intended_poli
         let harness = make_daemon_state();
         register_focuses(&harness, &["perri"]);
         let socket_path = harness.dir.path().join("mcp-tracker-exempt.sock");
-        let _server = McpServer::bind(socket_path.clone(), harness.state.clone()).await.unwrap();
+        let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
+            .await
+            .unwrap();
         let (mut reader, mut writer) = connect(&socket_path, "perri").await;
 
         let tools = list_tools(&mut reader, &mut writer, 2).await;
         assert!(
-            tools.as_array().unwrap().iter().any(|t| t["name"] == "nostromo.tracker"),
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "nostromo.tracker"),
             "nostromo.tracker must be listed for perri"
         );
-        let resp = call_tool_raw(&mut reader, &mut writer, 3, "nostromo.tracker", json!({"op":"read"})).await;
+        let resp = call_tool_raw(
+            &mut reader,
+            &mut writer,
+            3,
+            "nostromo.tracker",
+            json!({"op":"read"}),
+        )
+        .await;
         assert_ne!(
             resp["error"]["code"].as_i64(),
             Some(TOOL_FORBIDDEN_CODE),

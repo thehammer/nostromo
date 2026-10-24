@@ -144,7 +144,12 @@ impl SentLedger {
 
     /// Every marker for `item_id`, live or not.
     pub fn markers(&self, item_id: &str) -> Vec<SentMarker> {
-        self.markers.lock().unwrap().get(item_id).cloned().unwrap_or_default()
+        self.markers
+            .lock()
+            .unwrap()
+            .get(item_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The markers for `item_id` that `is_live` accepts.
@@ -153,7 +158,10 @@ impl SentLedger {
         item_id: &str,
         is_live: &dyn Fn(&SentMarker) -> bool,
     ) -> Vec<SentMarker> {
-        self.markers(item_id).into_iter().filter(|m| is_live(m)).collect()
+        self.markers(item_id)
+            .into_iter()
+            .filter(|m| is_live(m))
+            .collect()
     }
 
     /// Item ids that have at least one marker.
@@ -194,7 +202,9 @@ const FOCUS_KIND: &str = "focus";
 fn supersede(markers: &mut BTreeMap<String, Vec<SentMarker>>, tag: &str, nonce: &str) -> bool {
     let before: usize = markers.values().map(Vec::len).sum();
     markers.retain(|_, list| {
-        list.retain(|m| !(m.kind == FOCUS_KIND && m.target_id == tag && m.nonce.as_deref() != Some(nonce)));
+        list.retain(|m| {
+            !(m.kind == FOCUS_KIND && m.target_id == tag && m.nonce.as_deref() != Some(nonce))
+        });
         !list.is_empty()
     });
     markers.values().map(Vec::len).sum::<usize>() != before
@@ -216,7 +226,10 @@ fn load(path: &Path) -> Loaded {
 
 /// Move `path` aside to `<file>.corrupt-<n>` (first unused n) and start empty.
 fn quarantine(path: &Path, why: &str) -> Loaded {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     for n in 1..=1000 {
         let dest = path.with_file_name(format!("{name}.corrupt-{n}"));
         if dest.symlink_metadata().is_ok() {
@@ -225,22 +238,38 @@ fn quarantine(path: &Path, why: &str) -> Loaded {
         return match std::fs::rename(path, &dest) {
             Ok(()) => {
                 sync_dir(path);
-                warn!("sent ledger: {} was {why}; moved to {}", path.display(), dest.display());
+                warn!(
+                    "sent ledger: {} was {why}; moved to {}",
+                    path.display(),
+                    dest.display()
+                );
                 (BTreeMap::new(), None)
             }
             Err(e) => {
-                warn!("sent ledger: {} was {why} and could not be moved aside: {e}", path.display());
+                warn!(
+                    "sent ledger: {} was {why} and could not be moved aside: {e}",
+                    path.display()
+                );
                 (BTreeMap::new(), Some(format!("{why}; rename failed: {e}")))
             }
         };
     }
-    warn!("sent ledger: {} was {why} and every .corrupt-<n> name is taken", path.display());
-    (BTreeMap::new(), Some(format!("{why}; no free .corrupt-<n> name")))
+    warn!(
+        "sent ledger: {} was {why} and every .corrupt-<n> name is taken",
+        path.display()
+    );
+    (
+        BTreeMap::new(),
+        Some(format!("{why}; no free .corrupt-<n> name")),
+    )
 }
 
 /// fsync the directory holding `path` so a rename in it survives a crash (best effort).
 fn sync_dir(path: &Path) {
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     if let Ok(dir) = std::fs::File::open(dir) {
         let _ = dir.sync_all();
     }
@@ -376,7 +405,10 @@ pub fn ledger() -> Arc<SentLedger> {
 /// other than the ledger (which has its own check in [`ledger`]).
 pub(crate) fn forbid_real_teri_dir_in_tests(what: &str) {
     if reaches_real_teri_dir_from_a_test(teri_dir_overridden()) {
-        panic!("a test would write {what} under the real teri dir ({}): set NOSTROMO_TERI_DIR", teri_dir().display());
+        panic!(
+            "a test would write {what} under the real teri dir ({}): set NOSTROMO_TERI_DIR",
+            teri_dir().display()
+        );
     }
 }
 
@@ -423,7 +455,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("teri").join("sent.json");
         let ledger = SentLedger::new(&path);
-        ledger.record("doc:nostromo:ideas/x.md", marker("focus", "claudia-x")).unwrap();
+        ledger
+            .record("doc:nostromo:ideas/x.md", marker("focus", "claudia-x"))
+            .unwrap();
 
         let reopened = SentLedger::new(&path);
         let got = reopened.markers("doc:nostromo:ideas/x.md");
@@ -436,16 +470,32 @@ mod tests {
     fn recording_the_same_target_again_replaces_its_marker() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = SentLedger::new(dir.path().join("sent.json"));
-        ledger.record("jira:A-1", marker("focus", "cody-a-1")).unwrap();
-        ledger.record("jira:A-1", marker("focus", "cody-a-1")).unwrap();
-        ledger.record("jira:A-1", marker("mother_job", "cody-a-1")).unwrap();
-        assert_eq!(ledger.markers("jira:A-1").len(), 2, "same kind+target collapses; other kinds do not");
+        ledger
+            .record("jira:A-1", marker("focus", "cody-a-1"))
+            .unwrap();
+        ledger
+            .record("jira:A-1", marker("focus", "cody-a-1"))
+            .unwrap();
+        ledger
+            .record("jira:A-1", marker("mother_job", "cody-a-1"))
+            .unwrap();
+        assert_eq!(
+            ledger.markers("jira:A-1").len(),
+            2,
+            "same kind+target collapses; other kinds do not"
+        );
     }
 
     #[test]
     fn a_debug_test_binary_without_the_teri_dir_override_would_reach_the_real_dir() {
-        assert!(reaches_real_teri_dir_from_a_test(false), "this unit test binary is a debug test binary");
-        assert!(!reaches_real_teri_dir_from_a_test(true), "an override makes it safe");
+        assert!(
+            reaches_real_teri_dir_from_a_test(false),
+            "this unit test binary is a debug test binary"
+        );
+        assert!(
+            !reaches_real_teri_dir_from_a_test(true),
+            "an override makes it safe"
+        );
     }
 
     #[test]
@@ -453,12 +503,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ledger = SentLedger::new(dir.path().join("sent.json"));
         ledger.record("jira:A-1", marker("focus", "dead")).unwrap();
-        ledger.record("jira:A-1", marker("mother_job", "alive")).unwrap();
+        ledger
+            .record("jira:A-1", marker("mother_job", "alive"))
+            .unwrap();
 
         let live = ledger.live_markers("jira:A-1", &|m| m.target_id == "alive");
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].target_id, "alive");
-        assert_eq!(ledger.markers("jira:A-1").len(), 2, "filtering never deletes");
+        assert_eq!(
+            ledger.markers("jira:A-1").len(),
+            2,
+            "filtering never deletes"
+        );
     }
 
     #[test]
@@ -508,7 +564,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let teri = dir.path().join("teri");
         let path = teri.join("sent.json");
-        SentLedger::new(&path).record("jira:A-1", marker("focus", "t")).unwrap();
+        SentLedger::new(&path)
+            .record("jira:A-1", marker("focus", "t"))
+            .unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&teri), 0o700);
         assert_eq!(mode(&path), 0o600);

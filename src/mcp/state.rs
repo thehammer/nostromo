@@ -22,7 +22,10 @@ use crate::{
         tickets::{TicketCache, TicketRegistry},
         work::hub::WorkHub,
     },
-    ipc::{decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg, SessionManager},
+    ipc::{
+        decisions::DecisionRegistry, pane_registry::PaneRegistry, protocol::ServerMsg,
+        SessionManager,
+    },
     mcp::tool_stats::ToolStats,
     mother::{JobsFeed, MotherJob, MotherSourceState, MotherStatus},
 };

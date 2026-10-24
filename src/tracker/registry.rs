@@ -109,7 +109,10 @@ pub enum TrackerError {
     #[error("op {index}: invalid status {value:?}")]
     InvalidStatus { index: usize, value: String },
     #[error("invalid arguments: {reason}")]
-    InvalidArgs { index: Option<usize>, reason: String },
+    InvalidArgs {
+        index: Option<usize>,
+        reason: String,
+    },
     #[error("the board file is unreadable at line {line}: {reason}")]
     BoardUnreadable { line: usize, reason: String },
     #[error("the board file is missing")]
@@ -344,7 +347,12 @@ impl TrackerRegistry {
 
     /// Opens (creates, adopts or recreates) the board for `tag`, and binds it.
     /// Idempotent: opening a board that is already bound changes no bytes.
-    pub fn open(&self, tag: &str, session: &str, args: &OpenArgs) -> Result<OpenOutcome, TrackerError> {
+    pub fn open(
+        &self,
+        tag: &str,
+        session: &str,
+        args: &OpenArgs,
+    ) -> Result<OpenOutcome, TrackerError> {
         let (root, topic, path) = self.resolve_open(args)?;
         let committable = probe_committable(&root.dir, &path);
 
@@ -371,7 +379,11 @@ impl TrackerRegistry {
         entry.committable = committable.clone();
         let key = key_of(&path);
         let version = entry.log.seq;
-        let counts = entry.parsed.as_ref().map(|p| p.board.counts()).unwrap_or_default();
+        let counts = entry
+            .parsed
+            .as_ref()
+            .map(|p| p.board.counts())
+            .unwrap_or_default();
         let board = (inner.cursors.get(session, &key).is_none())
             .then(|| entry.parsed.as_ref().map(|p| compact_full(&p.board)))
             .flatten();
@@ -411,7 +423,11 @@ impl TrackerRegistry {
     ) -> Result<WriteOutcome, TrackerError> {
         let mut guard = self.lock();
         let inner = &mut *guard;
-        let path = inner.bindings.get(tag).cloned().ok_or(TrackerError::NoTracker)?;
+        let path = inner
+            .bindings
+            .get(tag)
+            .cloned()
+            .ok_or(TrackerError::NoTracker)?;
         let entry = inner.boards.get_mut(&path).ok_or(TrackerError::NoTracker)?;
         let result = self.write_ops(entry, &path, ops, author);
         let cursor = inner.cursors.get(session, &key_of(&path));
@@ -420,7 +436,10 @@ impl TrackerRegistry {
         // Even a refused write may have ingested an external edit.
         inner.dirty.insert(path);
         self.persist(inner);
-        result.map(|()| WriteOutcome { version, user_changes })
+        result.map(|()| WriteOutcome {
+            version,
+            user_changes,
+        })
     }
 
     /// The changes `session` hasn't seen (or the whole board on its first
@@ -428,7 +447,11 @@ impl TrackerRegistry {
     pub fn read(&self, tag: &str, session: &str) -> Result<ReadOutcome, TrackerError> {
         let mut guard = self.lock();
         let inner = &mut *guard;
-        let path = inner.bindings.get(tag).cloned().ok_or(TrackerError::NoTracker)?;
+        let path = inner
+            .bindings
+            .get(tag)
+            .cloned()
+            .ok_or(TrackerError::NoTracker)?;
         let key = key_of(&path);
         let entry = inner.boards.get_mut(&path).ok_or(TrackerError::NoTracker)?;
         self.recheck_path(entry, &path)?;
@@ -436,7 +459,12 @@ impl TrackerRegistry {
         let ingested = self.ingest_from_disk(entry, &path);
         let version = entry.log.seq;
         let board = entry.parsed.as_ref().map(|p| &p.board);
-        let outcome = match (board, entry.log.since(inner.cursors.get(session, &key), Some(session))) {
+        let outcome = match (
+            board,
+            entry
+                .log
+                .since(inner.cursors.get(session, &key), Some(session)),
+        ) {
             (Some(board), Since::Full | Since::TooOld { .. }) => ReadOutcome::Full {
                 version,
                 board: compact_full(board),
@@ -489,7 +517,9 @@ impl TrackerRegistry {
             return 0;
         };
         match inner.boards.get(path) {
-            Some(entry) => user_changes_of(entry, inner.cursors.get(session, &key_of(path)), session),
+            Some(entry) => {
+                user_changes_of(entry, inner.cursors.get(session, &key_of(path)), session)
+            }
             None => 0,
         }
     }
@@ -598,12 +628,18 @@ impl TrackerRegistry {
             if added.iter().any(|p| p == super::placement::TRACKER_PANE_ID) {
                 registry.set_pane_hidden_by_user(tag, false);
             }
-            if removed.iter().any(|p| p == super::placement::TRACKER_PANE_ID) {
+            if removed
+                .iter()
+                .any(|p| p == super::placement::TRACKER_PANE_ID)
+            {
                 registry.mark_pane_closed(tag);
             }
             registry.flush(&tx);
         });
-        panes.lock().unwrap_or_else(|e| e.into_inner()).set_pane_set_hook(hook);
+        panes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_pane_set_hook(hook);
     }
 
     /// The topic of the board bound to `tag`, when there is one.
@@ -765,7 +801,8 @@ impl TrackerRegistry {
                     Some(good) if entry.parsed.is_some() => (good.clone(), true),
                     _ => {
                         let title = args.title.as_deref().unwrap_or(topic);
-                        let sections: Vec<&str> = args.sections.iter().map(String::as_str).collect();
+                        let sections: Vec<&str> =
+                            args.sections.iter().map(String::as_str).collect();
                         (template(title, &sections).into_bytes(), false)
                     }
                 };
@@ -1021,7 +1058,10 @@ impl TrackerRegistry {
             entry.last_good_at = persisted.last_good_at;
             entry.committable = persisted.committable;
             // The last-good copy is the baseline the file is diffed against.
-            if let Some(good) = self.last_good_file(&path).and_then(|f| std::fs::read(f).ok()) {
+            if let Some(good) = self
+                .last_good_file(&path)
+                .and_then(|f| std::fs::read(f).ok())
+            {
                 if let Ok(parsed) = parse(&good) {
                     entry.parsed = Some(parsed);
                     entry.last_ingested = Some(good);
@@ -1084,7 +1124,9 @@ impl TrackerFrameProvider for TrackerRegistry {
     fn tracker_frames(&self) -> Vec<ServerMsg> {
         let mut tags: Vec<String> = self.lock().bindings.keys().cloned().collect();
         tags.sort();
-        tags.iter().flat_map(|tag| self.frames_for_tag(tag)).collect()
+        tags.iter()
+            .flat_map(|tag| self.frames_for_tag(tag))
+            .collect()
     }
 
     fn has_bound_board(&self, tag: &str) -> bool {
@@ -1155,7 +1197,9 @@ fn refuse_agent_ran_it(old: &Board, new: &Board) -> Result<(), TrackerError> {
             o.kind == Kind::Command && o.status == Status::Done && o.command == item.command
         });
         if !unchanged {
-            return Err(TrackerError::NotPermitted { id: item.id.clone() });
+            return Err(TrackerError::NotPermitted {
+                id: item.id.clone(),
+            });
         }
     }
     Ok(())

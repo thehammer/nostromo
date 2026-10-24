@@ -389,11 +389,7 @@ impl SessionManager {
                     ),
                 );
             }
-            return refuse(
-                &target,
-                "unknown_focus",
-                format!("no focus named {tag}"),
-            );
+            return refuse(&target, "unknown_focus", format!("no focus named {tag}"));
         }
         if self.restrictions.contains_key(tag) {
             return refuse(
@@ -904,7 +900,9 @@ impl SessionManager {
                 let deadline = std::time::Instant::now() + WRITE_WAIT_LIMIT;
                 loop {
                     let state = lock_recover(&s.shared.state);
-                    if s.shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    if s.shared.writing.load(Ordering::SeqCst)
+                        && std::time::Instant::now() < deadline
+                    {
                         drop(state);
                         std::thread::sleep(Duration::from_millis(1));
                         continue;
@@ -914,7 +912,11 @@ impl SessionManager {
                     // A message held for a sign-in stays held, and the session
                     // stays paused, across the restart.
                     let login = s.shared.login.take_for_respawn();
-                    break Carry { messages, waiting, login };
+                    break Carry {
+                        messages,
+                        waiting,
+                        login,
+                    };
                 }
             }
             None => Carry::default(),
@@ -1117,7 +1119,8 @@ fn model_state_from(
     });
     SessionModelState {
         tag: tag.to_owned(),
-        effective_effort: effective_effort.or_else(|| record.as_ref().and_then(|r| r.effort.clone())),
+        effective_effort: effective_effort
+            .or_else(|| record.as_ref().and_then(|r| r.effort.clone())),
         recorded: record.map(|r| RecordedModel {
             model: r.model,
             effort: r.effort,
@@ -1258,7 +1261,10 @@ fn validate_target(
         };
         return Err((
             "unknown_model",
-            format!("{} is not offered by the installed CLI{choices}", target.model),
+            format!(
+                "{} is not offered by the installed CLI{choices}",
+                target.model
+            ),
         ));
     }
     if let (Some(entry), Some(effort)) = (entry, &target.effort) {
@@ -1652,12 +1658,24 @@ impl StoredSwitch {
     /// and tell the clients.
     fn run(self) -> ModelRequestOutcome {
         // Retires the "not yet written" entry however `record` ends, even by a panic.
-        let _guard = self.ctx.hub.guard_stored(&self.ctx.tag, self.seq, self.actor.clone(), self.target.clone());
+        let _guard = self.ctx.hub.guard_stored(
+            &self.ctx.tag,
+            self.seq,
+            self.actor.clone(),
+            self.target.clone(),
+        );
         self.record()
     }
 
     fn record(self) -> ModelRequestOutcome {
-        let Self { ctx, current, target, actor, session, .. } = self;
+        let Self {
+            ctx,
+            current,
+            target,
+            actor,
+            session,
+            ..
+        } = self;
         let hub = Arc::clone(&ctx.hub);
         let tag = ctx.tag.as_str();
         let written = model_store::update_focus_record(&hub.paths.focus_models, tag, |_| {
@@ -1707,7 +1725,13 @@ impl StoredSwitch {
         // A stopped session's note belongs after the prompts its stored JSONL
         // holds, which means parsing that file.
         if session.is_none() && !ctx.session_id.is_empty() {
-            note_while_stopped(&hub, tag, &ctx.session_id, NoteKind::ModelChanged, text.clone());
+            note_while_stopped(
+                &hub,
+                tag,
+                &ctx.session_id,
+                NoteKind::ModelChanged,
+                text.clone(),
+            );
         }
         ModelRequestOutcome {
             status: ModelRequestStatus::Applied,

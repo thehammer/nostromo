@@ -41,7 +41,10 @@ fn env_file(dir: &tempfile::TempDir, contents: Option<&str>) -> PathBuf {
 #[test]
 fn the_credentials_file_supplies_the_site_when_nothing_else_does() {
     let dir = tempfile::tempdir().unwrap();
-    let path = env_file(&dir, Some("OTHER=1\nATLASSIAN_SITE_NAME=file.atlassian.net\n"));
+    let path = env_file(
+        &dir,
+        Some("OTHER=1\nATLASSIAN_SITE_NAME=file.atlassian.net\n"),
+    );
     let got = with_env(None, || JiraSite::new(None, path).lookup());
     assert_eq!(got.as_deref(), Some("file.atlassian.net"));
 }
@@ -60,7 +63,9 @@ fn a_configured_site_wins_over_both_the_environment_and_the_file() {
 fn the_environment_wins_over_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = env_file(&dir, Some("ATLASSIAN_SITE_NAME=file.atlassian.net\n"));
-    let got = with_env(Some("env.atlassian.net"), || JiraSite::new(None, path).lookup());
+    let got = with_env(Some("env.atlassian.net"), || {
+        JiraSite::new(None, path).lookup()
+    });
     assert_eq!(got.as_deref(), Some("env.atlassian.net"));
 }
 
@@ -69,8 +74,14 @@ fn a_blank_configured_site_or_a_blank_environment_value_counts_as_absent() {
     let dir = tempfile::tempdir().unwrap();
     let path = env_file(&dir, Some("ATLASSIAN_SITE_NAME=file.atlassian.net\n"));
     for blank in ["", "   "] {
-        let got = with_env(Some(blank), || JiraSite::new(Some(blank.into()), path.clone()).lookup());
-        assert_eq!(got.as_deref(), Some("file.atlassian.net"), "blank {blank:?}");
+        let got = with_env(Some(blank), || {
+            JiraSite::new(Some(blank.into()), path.clone()).lookup()
+        });
+        assert_eq!(
+            got.as_deref(),
+            Some("file.atlassian.net"),
+            "blank {blank:?}"
+        );
     }
 }
 
@@ -78,9 +89,17 @@ fn a_blank_configured_site_or_a_blank_environment_value_counts_as_absent() {
 fn no_site_anywhere_is_none() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing.env");
-    assert_eq!(with_env(None, || JiraSite::new(None, missing).lookup()), None, "missing file");
+    assert_eq!(
+        with_env(None, || JiraSite::new(None, missing).lookup()),
+        None,
+        "missing file"
+    );
     let blank = env_file(&dir, Some("ATLASSIAN_SITE_NAME=\n"));
-    assert_eq!(with_env(None, || JiraSite::new(None, blank).lookup()), None, "blank value in the file");
+    assert_eq!(
+        with_env(None, || JiraSite::new(None, blank).lookup()),
+        None,
+        "blank value in the file"
+    );
 }
 
 #[test]
@@ -88,11 +107,22 @@ fn the_file_is_re_read_when_it_changes() {
     let dir = tempfile::tempdir().unwrap();
     let path = env_file(&dir, Some("ATLASSIAN_SITE_NAME=first.atlassian.net\n"));
     let site = JiraSite::new(None, path.clone());
-    assert_eq!(with_env(None, || site.lookup()).as_deref(), Some("first.atlassian.net"));
+    assert_eq!(
+        with_env(None, || site.lookup()).as_deref(),
+        Some("first.atlassian.net")
+    );
 
     std::fs::write(&path, "ATLASSIAN_SITE_NAME=second.atlassian.net\n").unwrap();
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
-    std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
 
-    assert_eq!(with_env(None, || site.lookup()).as_deref(), Some("second.atlassian.net"));
+    assert_eq!(
+        with_env(None, || site.lookup()).as_deref(),
+        Some("second.atlassian.net")
+    );
 }

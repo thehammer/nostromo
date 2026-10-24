@@ -133,8 +133,20 @@ impl ModelHub {
     }
 
     /// A guard for the job that writes switch `seq` of `tag` (see [`StoredGuard`]).
-    pub fn guard_stored(self: &Arc<Self>, tag: &str, seq: u64, actor: Actor, target: ModelTarget) -> StoredGuard {
-        StoredGuard { hub: Arc::clone(self), tag: tag.to_owned(), seq, actor, target }
+    pub fn guard_stored(
+        self: &Arc<Self>,
+        tag: &str,
+        seq: u64,
+        actor: Actor,
+        target: ModelTarget,
+    ) -> StoredGuard {
+        StoredGuard {
+            hub: Arc::clone(self),
+            tag: tag.to_owned(),
+            seq,
+            actor,
+            target,
+        }
     }
 
     /// What the latest switch of `tag` not yet written will make it run.
@@ -153,11 +165,14 @@ impl ModelHub {
         for _ in 0..2 {
             if io.is_none() {
                 let (tx, rx) = mpsc::channel::<IoJob>();
-                let started = std::thread::Builder::new().name("model-io".into()).spawn(move || {
-                    for job in rx {
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-                    }
-                });
+                let started =
+                    std::thread::Builder::new()
+                        .name("model-io".into())
+                        .spawn(move || {
+                            for job in rx {
+                                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                            }
+                        });
                 match started {
                     Ok(_) => *io = Some(tx),
                     Err(e) => {
@@ -196,7 +211,9 @@ impl ModelHub {
         let now = Instant::now();
         if let Some(last) = gate.last_started {
             if now.duration_since(last) < gate.min_interval {
-                return Err(anyhow!("model catalogue probe throttled: probed a moment ago"));
+                return Err(anyhow!(
+                    "model catalogue probe throttled: probed a moment ago"
+                ));
             }
         }
         gate.in_flight = true;
@@ -221,7 +238,10 @@ impl ModelHub {
     }
 
     pub fn catalog(&self) -> ModelCatalog {
-        self.catalog.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Install a freshly probed catalogue: cache it and tell every client.
@@ -365,14 +385,21 @@ pub fn probe_before_use(hub: &Arc<ModelHub>, limit: Duration) {
     let probing = match hub.begin_probe() {
         Ok(slot) => {
             let probe_hub = Arc::clone(hub);
-            let started = std::thread::Builder::new().name("model-first-probe".into()).spawn(move || {
-                match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                    Ok(runtime) => {
-                        let _ = runtime.block_on(probe_and_install(&probe_hub, slot));
+            let started = std::thread::Builder::new()
+                .name("model-first-probe".into())
+                .spawn(move || {
+                    match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => {
+                            let _ = runtime.block_on(probe_and_install(&probe_hub, slot));
+                        }
+                        Err(e) => {
+                            warn!("could not start a runtime for the model catalogue probe: {e}")
+                        }
                     }
-                    Err(e) => warn!("could not start a runtime for the model catalogue probe: {e}"),
-                }
-            });
+                });
             if let Err(e) = started {
                 warn!("could not start the model catalogue probe: {e}");
             }
@@ -438,7 +465,12 @@ impl Drop for StoredGuard {
         self.hub.stored_done(&self.tag, self.seq);
         if std::thread::panicking() {
             warn!(tag = %self.tag, "the job recording a model switch panicked: the switch was not recorded");
-            self.hub.record_request(&self.tag, &self.actor, &self.target, ModelRequestStatus::Failed);
+            self.hub.record_request(
+                &self.tag,
+                &self.actor,
+                &self.target,
+                ModelRequestStatus::Failed,
+            );
         }
     }
 }

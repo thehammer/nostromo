@@ -115,7 +115,11 @@ impl SchemaNode {
                 children: children.iter().map(SchemaNode::to_pane_tree).collect(),
                 ratios: ratios.clone(),
             },
-            SchemaNode::Tabs { tabs, active, region } => {
+            SchemaNode::Tabs {
+                tabs,
+                active,
+                region,
+            } => {
                 let active_index = tabs.iter().position(|t| &t.pane == active).unwrap_or(0);
                 PaneTree::Tabs {
                     children: tabs

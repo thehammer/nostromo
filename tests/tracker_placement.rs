@@ -50,7 +50,11 @@ fn git(repo: &Path, args: &[&str]) {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("git is installed");
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn now() -> chrono::DateTime<chrono::Utc> {
@@ -58,7 +62,9 @@ fn now() -> chrono::DateTime<chrono::Utc> {
 }
 
 fn leaf(id: &str) -> PaneTree {
-    PaneTree::Leaf { pane_id: id.to_string() }
+    PaneTree::Leaf {
+        pane_id: id.to_string(),
+    }
 }
 
 /// The curated-Perri shape: a `detail` tab region above the REPL, holding
@@ -89,6 +95,11 @@ fn split_with_tracker() -> PaneTree {
 
 impl Fx {
     fn new() -> Fx {
+        Fx::with_panes(|_| PaneRegistry::in_memory())
+    }
+
+    /// A fixture whose pane registry is `panes(dir)`, `dir` being the fixture's temp directory.
+    fn with_panes(panes: impl FnOnce(&Path) -> PaneRegistry) -> Fx {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let repo = base.join("repo");
@@ -100,12 +111,15 @@ impl Fx {
         git(&repo, &["init", "-q"]);
         let excludes = base.join("global-excludes");
         std::fs::write(&excludes, "").unwrap();
-        git(&repo, &["config", "core.excludesFile", excludes.to_str().unwrap()]);
+        git(
+            &repo,
+            &["config", "core.excludesFile", excludes.to_str().unwrap()],
+        );
 
         let clock = Arc::new(FakeClock::at_secs(1_760_540_000));
         let parts = RegistryParts::hermetic(state_root, home, clock);
         let registry = Arc::new(TrackerRegistry::new(parts));
-        let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+        let panes = Arc::new(Mutex::new(panes(&base)));
         let (tx, rx) = broadcast::channel::<ServerMsg>(8192);
         let state = McpSharedState::for_daemon(DaemonMcpBackend {
             pane_registry: Arc::clone(&panes),
@@ -114,19 +128,31 @@ impl Fx {
             ))),
             broadcast_tx: tx.clone(),
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                nostromo::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
             tracker: Arc::clone(&registry),
         });
         // As nostromd does after building the backend.
         registry.follow_panes(&panes, tx);
-        Fx { _tmp: tmp, repo, registry, panes, state, rx: Mutex::new(rx) }
+        Fx {
+            _tmp: tmp,
+            repo,
+            registry,
+            panes,
+            state,
+            rx: Mutex::new(rx),
+        }
     }
 
     fn seat(&self, tag: &str, session: &str) {
         self.registry.set_caller_facts(
             tag,
-            CallerFacts { cwd: Some(self.repo.clone()), session_id: Some(session.to_string()) },
+            CallerFacts {
+                cwd: Some(self.repo.clone()),
+                session_id: Some(session.to_string()),
+            },
         );
     }
 
@@ -134,7 +160,8 @@ impl Fx {
         match dispatch("nostromo.tracker", Some(&args), &self.state, Some(tag)).await {
             ToolResult::Ok(content) => {
                 let text = content[0]["text"].as_str().expect("text content");
-                serde_json::from_str(text).unwrap_or_else(|e| panic!("tool text is JSON ({e}): {text}"))
+                serde_json::from_str(text)
+                    .unwrap_or_else(|e| panic!("tool text is JSON ({e}): {text}"))
             }
             ToolResult::UnknownTool(n) => panic!("unknown tool {n}"),
             ToolResult::Forbidden(n) => panic!("forbidden tool {n}"),
@@ -167,11 +194,18 @@ impl Fx {
     fn set_tree(&self, tag: &str, tree: &PaneTree) {
         let mut panes = self.panes.lock().unwrap();
         panes.get_or_init(tag);
-        panes.set_layout(tag, &json!({ "tree": tree })).expect("set_layout");
+        panes
+            .set_layout(tag, &json!({ "tree": tree }))
+            .expect("set_layout");
     }
 
     fn tree(&self, tag: &str) -> PaneTree {
-        self.panes.lock().unwrap().get(tag).cloned().expect("the focus has a tree")
+        self.panes
+            .lock()
+            .unwrap()
+            .get(tag)
+            .cloned()
+            .expect("the focus has a tree")
     }
 
     fn report_rendered(&self, tag: &str, ids: &[&str]) {
@@ -185,8 +219,14 @@ impl Fx {
     }
 
     fn board(&self, topic: &str) -> Vec<u8> {
-        std::fs::read(self.repo.join(".claude").join("wip").join(topic).join("index.md"))
-            .expect("board file")
+        std::fs::read(
+            self.repo
+                .join(".claude")
+                .join("wip")
+                .join(topic)
+                .join("index.md"),
+        )
+        .expect("board file")
     }
 }
 
@@ -195,16 +235,20 @@ fn layouts(frames: &[ServerMsg], tag: &str) -> Vec<(PaneTree, Option<String>)> {
     frames
         .iter()
         .filter_map(|m| match m {
-            ServerMsg::FocusLayout { tag: t, tree, focused_pane } if t == tag => {
-                Some((tree.clone(), focused_pane.clone()))
-            }
+            ServerMsg::FocusLayout {
+                tag: t,
+                tree,
+                focused_pane,
+            } if t == tag => Some((tree.clone(), focused_pane.clone())),
             _ => None,
         })
         .collect()
 }
 
 fn any_focus_layout(frames: &[ServerMsg]) -> bool {
-    frames.iter().any(|m| matches!(m, ServerMsg::FocusLayout { .. }))
+    frames
+        .iter()
+        .any(|m| matches!(m, ServerMsg::FocusLayout { .. }))
 }
 
 fn ids(tree: &PaneTree) -> Vec<String> {
@@ -220,7 +264,9 @@ fn tracker_tab_labels(tree: &PaneTree) -> Vec<String> {
     match tree {
         PaneTree::Leaf { .. } => vec![],
         PaneTree::Split { children, .. } => children.iter().flat_map(tracker_tab_labels).collect(),
-        PaneTree::Tabs { children, labels, .. } => {
+        PaneTree::Tabs {
+            children, labels, ..
+        } => {
             let mut out: Vec<String> = children
                 .iter()
                 .zip(labels)
@@ -243,7 +289,12 @@ fn assert_label_is_literal(tree: &PaneTree) {
 fn tabs(tree: &PaneTree) -> (Vec<String>, Vec<String>, usize) {
     fn find(t: &PaneTree) -> Option<(Vec<String>, Vec<String>, usize)> {
         match t {
-            PaneTree::Tabs { children, labels, active, .. } => Some((
+            PaneTree::Tabs {
+                children,
+                labels,
+                active,
+                ..
+            } => Some((
                 children.iter().flat_map(|c| c.pane_ids()).collect(),
                 labels.clone(),
                 *active,
@@ -273,12 +324,24 @@ async fn the_first_open_in_a_repl_only_focus_sends_one_layout_with_the_transcrip
     let (tree, focused) = &sent[0];
     assert_eq!(*focused, None, "the tracker never takes focus");
 
-    let PaneTree::Split { direction, children, ratios } = tree else {
+    let PaneTree::Split {
+        direction,
+        children,
+        ratios,
+    } = tree
+    else {
         panic!("a split: {tree:?}")
     };
     assert_eq!(*direction, SplitDirection::Horizontal);
-    assert_eq!(children, &vec![leaf("repl"), leaf("tracker")], "transcript left, tracker right");
-    assert!(ratios[0] >= 0.62, "the transcript keeps at least 62%: {ratios:?}");
+    assert_eq!(
+        children,
+        &vec![leaf("repl"), leaf("tracker")],
+        "transcript left, tracker right"
+    );
+    assert!(
+        ratios[0] >= 0.62,
+        "the transcript keeps at least 62%: {ratios:?}"
+    );
     assert!((ratios[0] + ratios[1] - 1.0).abs() < 1e-4, "{ratios:?}");
     assert_eq!(&fx.tree(TAG_A), tree, "the registry holds what was sent");
 }
@@ -290,11 +353,16 @@ fn the_tool_takes_no_position_from_the_agent() {
         .iter()
         .find(|d| d["name"] == json!("nostromo.tracker"))
         .expect("nostromo.tracker is listed");
-    let props = tracker["inputSchema"]["properties"].as_object().expect("properties");
+    let props = tracker["inputSchema"]["properties"]
+        .as_object()
+        .expect("properties");
     for key in props.keys() {
         let k = key.to_lowercase();
         for banned in ["position", "placement", "split", "region", "ratio"] {
-            assert!(!k.contains(banned), "the schema offers a placement knob {key:?}");
+            assert!(
+                !k.contains(banned),
+                "the schema offers a placement knob {key:?}"
+            );
         }
     }
 }
@@ -304,7 +372,8 @@ fn the_tool_takes_no_position_from_the_agent() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn with_a_detail_region_the_tracker_is_a_tab_after_queue_labelled_tracker_whatever_the_board_is_called() {
+async fn with_a_detail_region_the_tracker_is_a_tab_after_queue_labelled_tracker_whatever_the_board_is_called(
+) {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.set_tree(TAG_A, &detail_layout());
@@ -315,8 +384,11 @@ async fn with_a_detail_region_the_tracker_is_a_tab_after_queue_labelled_tracker_
         json!({"op": "open", "topic": "secret-topic", "title": "SECRET-TRACKER-1"}),
     )
     .await;
-    fx.ok(TAG_A, json!({"op": "upsert", "id": "a-1", "section": "now", "text": "SECRET-TRACKER-2"}))
-        .await;
+    fx.ok(
+        TAG_A,
+        json!({"op": "upsert", "id": "a-1", "section": "now", "text": "SECRET-TRACKER-2"}),
+    )
+    .await;
 
     let frames = fx.drain();
     let sent = layouts(&frames, TAG_A);
@@ -325,11 +397,26 @@ async fn with_a_detail_region_the_tracker_is_a_tab_after_queue_labelled_tracker_
     assert_eq!(*focused, None);
 
     let (order, labels, active) = tabs(tree);
-    assert_eq!(order, ["queue", "tracker", "detail.0", "detail.1"], "right after queue");
-    assert_eq!(labels, ["Queue", "Tracker", "a.rs", "b.rs"], "other tabs unchanged, literal label");
+    assert_eq!(
+        order,
+        ["queue", "tracker", "detail.0", "detail.1"],
+        "right after queue"
+    );
+    assert_eq!(
+        labels,
+        ["Queue", "Tracker", "a.rs", "b.rs"],
+        "other tabs unchanged, literal label"
+    );
     assert_eq!(active, 1, "the tracker tab is frontmost on creation");
     // The rest of the layout is as the agent left it.
-    let PaneTree::Split { direction, children, ratios } = tree else { panic!("{tree:?}") };
+    let PaneTree::Split {
+        direction,
+        children,
+        ratios,
+    } = tree
+    else {
+        panic!("{tree:?}")
+    };
     assert_eq!(*direction, SplitDirection::Vertical);
     assert_eq!(ratios, &vec![0.6, 0.4]);
     assert_eq!(children[1], leaf("repl"));
@@ -342,7 +429,9 @@ async fn with_a_detail_region_the_tracker_is_a_tab_after_queue_labelled_tracker_
             );
         }
         assert!(
-            !serde_json::to_string(&fx.tree(TAG_A)).unwrap().contains(sentinel),
+            !serde_json::to_string(&fx.tree(TAG_A))
+                .unwrap()
+                .contains(sentinel),
             "{sentinel} leaked into the stored tree"
         );
     }
@@ -367,24 +456,34 @@ async fn after_the_first_open_thirty_mixed_calls_send_no_layout_and_leave_the_tr
         let mut calls = 0;
         for i in 0..6 {
             let id = format!("item-{i}");
-            fx.ok(TAG_A, json!({"op": "upsert", "id": id, "section": "now", "text": format!("Thing {i}")}))
-                .await;
+            fx.ok(
+                TAG_A,
+                json!({"op": "upsert", "id": id, "section": "now", "text": format!("Thing {i}")}),
+            )
+            .await;
             calls += 1;
         }
         for i in 0..4 {
-            fx.ok(TAG_A, json!({"op": "status", "id": format!("item-{i}"), "status": "in-progress"}))
-                .await;
+            fx.ok(
+                TAG_A,
+                json!({"op": "status", "id": format!("item-{i}"), "status": "in-progress"}),
+            )
+            .await;
             calls += 1;
         }
         for i in 0..3 {
-            fx.ok(TAG_A, json!({"op": "move", "id": format!("item-{i}"), "section": "next"}))
-                .await;
+            fx.ok(
+                TAG_A,
+                json!({"op": "move", "id": format!("item-{i}"), "section": "next"}),
+            )
+            .await;
             calls += 1;
         }
         fx.ok(TAG_A, json!({"op": "remove", "id": "item-5"})).await;
         calls += 1;
         for i in 0..5 {
-            fx.ok(TAG_A, json!({"op": "log", "text": format!("note {i}")})).await;
+            fx.ok(TAG_A, json!({"op": "log", "text": format!("note {i}")}))
+                .await;
             calls += 1;
         }
         for _ in 0..4 {
@@ -408,7 +507,11 @@ async fn after_the_first_open_thirty_mixed_calls_send_no_layout_and_leave_the_tr
             .await;
             calls += 1;
         }
-        fx.ok(TAG_A, json!({"op": "open", "topic": "triage", "show": true})).await;
+        fx.ok(
+            TAG_A,
+            json!({"op": "open", "topic": "triage", "show": true}),
+        )
+        .await;
         calls += 1;
         assert_eq!(calls, 30);
 
@@ -432,7 +535,11 @@ async fn visible_means_the_leaf_is_in_the_tree_and_a_window_reported_rendering_i
     fx.seat(TAG_A, "sess-a");
 
     let opened = fx.open(TAG_A, "triage").await;
-    assert_eq!(opened["visible"], json!(false), "no window has reported: {opened}");
+    assert_eq!(
+        opened["visible"],
+        json!(false),
+        "no window has reported: {opened}"
+    );
     let w = fx.ok(TAG_A, json!({"op": "log", "text": "x"})).await;
     assert_eq!(w["visible"], json!(false), "{w}");
 
@@ -448,10 +555,112 @@ async fn visible_means_the_leaf_is_in_the_tree_and_a_window_reported_rendering_i
 
     // Reported again, then the leaf leaves the tree.
     fx.report_rendered(TAG_A, &["repl", "tracker"]);
-    assert_eq!(fx.ok(TAG_A, json!({"op": "log", "text": "w"})).await["visible"], json!(true));
-    fx.panes.lock().unwrap().close_tab(TAG_A, "tracker").unwrap();
+    assert_eq!(
+        fx.ok(TAG_A, json!({"op": "log", "text": "w"})).await["visible"],
+        json!(true)
+    );
+    fx.panes
+        .lock()
+        .unwrap()
+        .close_tab(TAG_A, "tracker")
+        .unwrap();
     let w = fx.ok(TAG_A, json!({"op": "log", "text": "v"})).await;
-    assert_eq!(w["visible"], json!(false), "the leaf is gone from the tree: {w}");
+    assert_eq!(
+        w["visible"],
+        json!(false),
+        "the leaf is gone from the tree: {w}"
+    );
+}
+
+#[tokio::test]
+async fn open_says_why_the_pane_is_not_visible_when_the_layout_has_no_place_for_it() {
+    // A layout from an older daemon's store: no `repl` leaf, no detail region.
+    let fx = Fx::with_panes(|dir| {
+        let store = dir.join("panes.json");
+        let tree = json!({"kind": "leaf", "pane_id": "notes"});
+        std::fs::write(
+            &store,
+            json!({"version": 3, "trees": {TAG_A: tree}, "bindings": {}}).to_string(),
+        )
+        .unwrap();
+        PaneRegistry::with_store_path(store)
+    });
+    fx.seat(TAG_A, "sess-a");
+    assert_eq!(
+        ids(&fx.tree(TAG_A)),
+        vec!["notes"],
+        "setup: nothing to put the tracker beside"
+    );
+
+    let opened = fx.open(TAG_A, "triage").await;
+
+    assert_eq!(opened["visible"], json!(false), "{opened}");
+    assert_eq!(
+        opened["reason"],
+        json!("no_room_in_layout"),
+        "the agent is told why: {opened}"
+    );
+    assert!(
+        !any_focus_layout(&fx.drain()),
+        "nothing was placed, so nothing was announced"
+    );
+    assert_eq!(
+        ids(&fx.tree(TAG_A)),
+        vec!["notes"],
+        "the layout is untouched"
+    );
+
+    // A normal open carries no reason.
+    fx.seat(TAG_B, "sess-b");
+    assert!(fx.open(TAG_B, "other").await.get("reason").is_none());
+}
+
+#[tokio::test]
+async fn open_says_why_the_pane_is_not_visible_when_the_layout_rejects_the_tracker() {
+    // A layout from an older daemon's store that the registry would not accept
+    // today (the same pane id twice; stored layouts are not re-validated on
+    // load). It has a `repl` to sit beside, so the tracker is offered a place,
+    // but the registry refuses the tree it would be in.
+    let fx = Fx::with_panes(|dir| {
+        let store = dir.join("panes.json");
+        let tree = json!({
+            "kind": "split",
+            "direction": "vertical",
+            "children": [
+                {"kind": "leaf", "pane_id": "notes"},
+                {"kind": "leaf", "pane_id": "notes"},
+                {"kind": "leaf", "pane_id": "repl"},
+            ],
+            "ratios": [0.3, 0.3, 0.4],
+        });
+        std::fs::write(
+            &store,
+            json!({"version": 3, "trees": {TAG_A: tree}, "bindings": {}}).to_string(),
+        )
+        .unwrap();
+        PaneRegistry::with_store_path(store)
+    });
+    fx.seat(TAG_A, "sess-a");
+    let before = fx.tree(TAG_A);
+    assert_eq!(
+        ids(&before),
+        vec!["notes", "notes", "repl"],
+        "setup: the stored layout is the one the registry will refuse to extend"
+    );
+
+    let opened = fx.open(TAG_A, "triage").await;
+
+    assert_eq!(opened["visible"], json!(false), "{opened}");
+    assert_eq!(
+        opened["reason"],
+        json!("layout_rejected"),
+        "the agent is told why: {opened}"
+    );
+    assert!(
+        !any_focus_layout(&fx.drain()),
+        "nothing was placed, so nothing was announced"
+    );
+    assert_eq!(fx.tree(TAG_A), before, "the layout is untouched");
 }
 
 #[tokio::test]
@@ -463,8 +672,14 @@ async fn visible_is_per_focus() {
     fx.open(TAG_B, "other").await;
     fx.report_rendered(TAG_A, &["repl", "tracker"]);
 
-    assert_eq!(fx.ok(TAG_A, json!({"op": "log", "text": "x"})).await["visible"], json!(true));
-    assert_eq!(fx.ok(TAG_B, json!({"op": "log", "text": "x"})).await["visible"], json!(false));
+    assert_eq!(
+        fx.ok(TAG_A, json!({"op": "log", "text": "x"})).await["visible"],
+        json!(true)
+    );
+    assert_eq!(
+        fx.ok(TAG_B, json!({"op": "log", "text": "x"})).await["visible"],
+        json!(false)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +689,11 @@ async fn visible_is_per_focus() {
 type Closer = fn(&Fx, &str);
 
 fn close_like_clicking_x(fx: &Fx, tag: &str) {
-    fx.panes.lock().unwrap().close_tab(tag, "tracker").expect("close_tab");
+    fx.panes
+        .lock()
+        .unwrap()
+        .close_tab(tag, "tracker")
+        .expect("close_tab");
 }
 
 /// An agent's layout call (apply_layout / set_pane_layout) with a tree that
@@ -512,10 +731,16 @@ async fn pane_leaves_then_stays_gone(initial: PaneTree, closer: Closer) {
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.set_tree(TAG_A, &initial);
-    fx.ok(TAG_A, json!({"op": "open", "topic": "triage", "title": "SECRET-TRACKER-3"}))
-        .await;
-    fx.ok(TAG_A, json!({"op": "upsert", "id": "a-1", "section": "now", "text": "keep me"}))
-        .await;
+    fx.ok(
+        TAG_A,
+        json!({"op": "open", "topic": "triage", "title": "SECRET-TRACKER-3"}),
+    )
+    .await;
+    fx.ok(
+        TAG_A,
+        json!({"op": "upsert", "id": "a-1", "section": "now", "text": "keep me"}),
+    )
+    .await;
     assert!(has_tracker(&fx.tree(TAG_A)));
     fx.report_rendered(TAG_A, &["repl", "tracker"]);
     fx.drain();
@@ -523,23 +748,41 @@ async fn pane_leaves_then_stays_gone(initial: PaneTree, closer: Closer) {
     // The layout call itself never touches the board file, and the binding stays.
     let file_before = fx.board("triage");
     closer(&fx, TAG_A);
-    assert_eq!(fx.board("triage"), file_before, "the board file is byte-identical");
+    assert_eq!(
+        fx.board("triage"),
+        file_before,
+        "the board file is byte-identical"
+    );
     assert!(fx.registry.has_bound_board(TAG_A), "the binding stays");
     let tree = fx.tree(TAG_A);
     assert!(!has_tracker(&tree), "{tree:?}");
     fx.drain();
 
     // Writes still succeed, report visible:false, and never bring the pane back.
-    let w = fx.ok(TAG_A, json!({"op": "upsert", "id": "a-2", "section": "now", "text": "still works"})).await;
+    let w = fx
+        .ok(
+            TAG_A,
+            json!({"op": "upsert", "id": "a-2", "section": "now", "text": "still works"}),
+        )
+        .await;
     assert_eq!(w["visible"], json!(false), "{w}");
-    let w = fx.ok(TAG_A, json!({"op": "log", "text": "after close"})).await;
+    let w = fx
+        .ok(TAG_A, json!({"op": "log", "text": "after close"}))
+        .await;
     assert_eq!(w["visible"], json!(false), "{w}");
-    let w = fx.ok(TAG_A, json!({"ops": [{"op": "status", "id": "a-1", "status": "done"}]})).await;
+    let w = fx
+        .ok(
+            TAG_A,
+            json!({"ops": [{"op": "status", "id": "a-1", "status": "done"}]}),
+        )
+        .await;
     assert_eq!(w["visible"], json!(false), "{w}");
     let r = fx.call(TAG_A, json!({"op": "read"})).await;
     assert!(r.get("error").is_none() && r["version"].is_u64(), "{r}");
     assert!(
-        String::from_utf8(fx.board("triage")).unwrap().contains("still works"),
+        String::from_utf8(fx.board("triage"))
+            .unwrap()
+            .contains("still works"),
         "the write reached the file"
     );
     assert!(!any_focus_layout(&fx.drain()), "writes never send a layout");
@@ -549,11 +792,19 @@ async fn pane_leaves_then_stays_gone(initial: PaneTree, closer: Closer) {
     let res = fx.open(TAG_A, "triage").await;
     assert_eq!(res["hidden_by_user"], json!(true), "{res}");
     assert_eq!(res["visible"], json!(false), "{res}");
-    assert!(!any_focus_layout(&fx.drain()), "no layout for a hidden open");
+    assert!(
+        !any_focus_layout(&fx.drain()),
+        "no layout for a hidden open"
+    );
     assert_eq!(fx.tree(TAG_A), tree);
 
     // `show: true` brings it back: one layout, no focus taken.
-    let res = fx.ok(TAG_A, json!({"op": "open", "topic": "triage", "show": true})).await;
+    let res = fx
+        .ok(
+            TAG_A,
+            json!({"op": "open", "topic": "triage", "show": true}),
+        )
+        .await;
     assert!(res.get("hidden_by_user").is_none(), "{res}");
     let frames = fx.drain();
     let sent = layouts(&frames, TAG_A);
@@ -561,7 +812,9 @@ async fn pane_leaves_then_stays_gone(initial: PaneTree, closer: Closer) {
     assert_eq!(sent[0].1, None, "focused_pane is None");
     assert!(has_tracker(&sent[0].0), "{:?}", sent[0].0);
     assert_label_is_literal(&sent[0].0);
-    assert!(!serde_json::to_string(&sent[0].0).unwrap().contains("SECRET-TRACKER-3"));
+    assert!(!serde_json::to_string(&sent[0].0)
+        .unwrap()
+        .contains("SECRET-TRACKER-3"));
     assert_eq!(fx.tree(TAG_A), sent[0].0);
 
     // Afterwards it is no longer hidden.
@@ -607,7 +860,10 @@ async fn a_layout_call_that_adds_the_tracker_leaf_back_clears_the_hidden_state()
     fx.seat(TAG_A, "sess-a");
     fx.open(TAG_A, "triage").await;
     close_like_clicking_x(&fx, TAG_A);
-    assert_eq!(fx.open(TAG_A, "triage").await["hidden_by_user"], json!(true));
+    assert_eq!(
+        fx.open(TAG_A, "triage").await["hidden_by_user"],
+        json!(true)
+    );
 
     fx.set_tree(TAG_A, &split_with_tracker());
     fx.drain();
@@ -658,8 +914,15 @@ async fn closing_one_focus_tracker_hides_only_that_focus() {
 
     close_like_clicking_x(&fx, TAG_A);
 
-    assert_eq!(fx.open(TAG_A, "triage").await["hidden_by_user"], json!(true));
-    assert!(fx.open(TAG_B, "other").await.get("hidden_by_user").is_none());
+    assert_eq!(
+        fx.open(TAG_A, "triage").await["hidden_by_user"],
+        json!(true)
+    );
+    assert!(fx
+        .open(TAG_B, "other")
+        .await
+        .get("hidden_by_user")
+        .is_none());
     assert!(has_tracker(&fx.tree(TAG_B)));
 }
 
@@ -672,18 +935,29 @@ async fn the_tracker_tab_is_captioned_tracker_in_every_layout_the_daemon_sends()
     let fx = Fx::new();
     fx.seat(TAG_A, "sess-a");
     fx.set_tree(TAG_A, &detail_layout());
-    fx.ok(TAG_A, json!({"op": "open", "topic": "secret-tracker-4"})).await;
+    fx.ok(TAG_A, json!({"op": "open", "topic": "secret-tracker-4"}))
+        .await;
     close_like_clicking_x(&fx, TAG_A);
     fx.drain();
-    fx.ok(TAG_A, json!({"op": "open", "topic": "secret-tracker-4", "show": true})).await;
+    fx.ok(
+        TAG_A,
+        json!({"op": "open", "topic": "secret-tracker-4", "show": true}),
+    )
+    .await;
 
     let frames = fx.drain();
     let sent = layouts(&frames, TAG_A);
     assert_eq!(sent.len(), 1);
     assert_eq!(tracker_tab_labels(&sent[0].0), ["Tracker"]);
-    let json = serde_json::to_string(&frames.iter().filter_map(|m| match m {
-        ServerMsg::FocusLayout { tree, .. } => Some(tree.clone()),
-        _ => None,
-    }).collect::<Vec<_>>()).unwrap();
+    let json = serde_json::to_string(
+        &frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::FocusLayout { tree, .. } => Some(tree.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
     assert!(!json.contains("secret-tracker-4"), "{json}");
 }

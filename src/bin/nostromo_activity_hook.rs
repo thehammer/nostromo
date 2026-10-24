@@ -36,10 +36,15 @@ struct EventFields {
 
 /// `PostToolUse` → a `tool_use` event, summarized via
 /// `activity::summary::summarize`. `None` if `tool_name` is missing.
-fn build_post_tool_use_fields(obj: &serde_json::Map<String, serde_json::Value>) -> Option<EventFields> {
+fn build_post_tool_use_fields(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<EventFields> {
     let str_field = |key: &str| obj.get(key).and_then(|v| v.as_str()).map(str::to_string);
     let tool_name = str_field("tool_name")?;
-    let tool_input = obj.get("tool_input").cloned().unwrap_or(serde_json::Value::Null);
+    let tool_input = obj
+        .get("tool_input")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let summary = nostromo::activity::summary::summarize(&tool_name, &tool_input);
     Some(EventFields {
         kind: "tool_use",
@@ -79,7 +84,11 @@ fn build_subagent_fields(
     } else {
         "subagent_stop"
     };
-    let verb = if kind == "subagent_start" { "started" } else { "finished" };
+    let verb = if kind == "subagent_start" {
+        "started"
+    } else {
+        "finished"
+    };
     let summary = format!("{agent_type} {verb}");
     Some(EventFields {
         kind,
@@ -161,7 +170,11 @@ fn main() {
     }
     if let Ok(line) = serde_json::to_string(&event) {
         use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = writeln!(f, "{line}");
         }
     }
@@ -351,7 +364,8 @@ mod tests {
         });
         let ev = build_event(&payload).expect("well-formed PostToolUse must produce an event");
         assert!(
-            !ev.summary.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+            !ev.summary
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
             "secret leaked into summary: {}",
             ev.summary
         );

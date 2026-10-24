@@ -80,7 +80,10 @@ impl TeriTodosSnapshot {
         if serialized_len(&wire) <= TERI_STATE_MAX_BYTES {
             return wire;
         }
-        warn!(todos = wire.items.len(), "teri todos over the frame budget; dropping bodies");
+        warn!(
+            todos = wire.items.len(),
+            "teri todos over the frame budget; dropping bodies"
+        );
         wire.items.iter_mut().for_each(|t| t.body = None);
         if serialized_len(&wire) <= TERI_STATE_MAX_BYTES {
             return wire;
@@ -100,7 +103,10 @@ impl TeriTodosSnapshot {
             budget -= size;
             keep += 1;
         }
-        warn!(kept = keep, total, "teri todos still over the frame budget; trimming todos");
+        warn!(
+            kept = keep,
+            total, "teri todos still over the frame budget; trimming todos"
+        );
         wire.items.truncate(keep);
         wire
     }
@@ -221,7 +227,11 @@ async fn run(path: PathBuf, tx: watch::Sender<Option<TeriTodosSnapshot>>, refres
 /// (as Teri's tooling may keep one) appends to the `-wal` without the
 /// file-system event stream reporting it.
 fn stat_signature(db: &Path) -> [Option<(std::time::SystemTime, u64)>; 2] {
-    let stat = |p: &Path| std::fs::metadata(p).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+    let stat = |p: &Path| {
+        std::fs::metadata(p)
+            .ok()
+            .and_then(|m| Some((m.modified().ok()?, m.len())))
+    };
     let mut wal = db.as_os_str().to_owned();
     wal.push("-wal");
     [stat(db), stat(Path::new(&wal))]
@@ -241,7 +251,8 @@ fn watch_db_dir(db: &Path, wake: mpsc::UnboundedSender<()>) -> Option<Recommende
             return;
         }
         let relevant = event.paths.iter().any(|p| {
-            p.file_name().is_some_and(|n| n == file_name.as_str() || n == wal_name.as_str())
+            p.file_name()
+                .is_some_and(|n| n == file_name.as_str() || n == wal_name.as_str())
         });
         if relevant {
             let _ = wake.send(());
@@ -324,7 +335,10 @@ mod tests {
 
         let snap = fetch_once(missing);
 
-        assert!(snap.not_configured, "a user with no Teri db is 'not configured'");
+        assert!(
+            snap.not_configured,
+            "a user with no Teri db is 'not configured'"
+        );
         assert_eq!(snap.error, None, "not an error");
         assert!(!snap.stale);
         assert!(snap.items.is_empty());
@@ -344,7 +358,10 @@ mod tests {
 
         let snap = fetch_once(path);
 
-        assert!(!snap.not_configured, "a corrupt db is a failure, not an empty state");
+        assert!(
+            !snap.not_configured,
+            "a corrupt db is a failure, not an empty state"
+        );
         assert!(snap.stale, "{snap:?}");
         assert!(snap.error.is_some(), "{snap:?}");
         assert!(snap.items.is_empty());
@@ -375,7 +392,9 @@ mod tests {
             .unwrap();
         assert_eq!(first.items.len(), 1, "{first:?}");
 
-        writer.execute("INSERT INTO todos (title) VALUES ('second')", []).unwrap();
+        writer
+            .execute("INSERT INTO todos (title) VALUES ('second')", [])
+            .unwrap();
         refresh.notify_one();
 
         let next = tokio::time::timeout(

@@ -38,7 +38,10 @@ fn replay_lines(lines: &[String]) -> Replay {
     let mut outcome = None;
     for line in lines {
         let parsed = parse_line(line);
-        if let Some(ParsedLine::UserPrompt { is_replay: true, .. }) = &parsed {
+        if let Some(ParsedLine::UserPrompt {
+            is_replay: true, ..
+        }) = &parsed
+        {
             tracker.begin_turn();
         }
         let signal = classify_line(line);
@@ -56,7 +59,11 @@ fn replay(name: &str) -> Replay {
 }
 
 fn result_line(is_error: bool, text: &str) -> String {
-    let subtype = if is_error { "error_during_execution" } else { "success" };
+    let subtype = if is_error {
+        "error_during_execution"
+    } else {
+        "success"
+    };
     json!({"type": "result", "subtype": subtype, "is_error": is_error, "result": text}).to_string()
 }
 
@@ -77,7 +84,10 @@ fn s1_line_of_len(total: usize) -> String {
     let head = r#"{"type":"assistant","error":"authentication_failed","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Failed to authenticate: OAuth session expired"}]},"padding":""#;
     let tail = r#""}"#;
     assert!(total > head.len() + tail.len());
-    let line = format!("{head}{}{tail}", "x".repeat(total - head.len() - tail.len()));
+    let line = format!(
+        "{head}{}{tail}",
+        "x".repeat(total - head.len() - tail.len())
+    );
     assert_eq!(line.len(), total);
     line
 }
@@ -125,7 +135,11 @@ const POSITIVE: &[(&str, AuthSignal, bool)] = &[
     ("invalid_api_key", AuthSignal::SyntheticText, true),
     ("oauth_token_expired", AuthSignal::SyntheticText, true),
     ("oauth_revoked", AuthSignal::SyntheticText, true),
-    ("api_401_authentication_error", AuthSignal::SyntheticText, true),
+    (
+        "api_401_authentication_error",
+        AuthSignal::SyntheticText,
+        true,
+    ),
     ("mid_turn_after_tool_call", AuthSignal::ErrorField, false),
 ];
 
@@ -147,14 +161,20 @@ fn the_error_field_fixture_signals_s1_on_the_assistant_line_and_s3_on_the_result
     // S1 wins over S2 on the same line; the result line is its own S3 signal.
     let r = replay("s1_error_field");
     let signals: Vec<_> = r.per_line.iter().flatten().copied().collect();
-    assert_eq!(signals, vec![AuthSignal::ErrorField, AuthSignal::ResultText]);
+    assert_eq!(
+        signals,
+        vec![AuthSignal::ErrorField, AuthSignal::ResultText]
+    );
 }
 
 #[test]
 fn the_synthetic_text_fixture_signals_s2_without_an_error_field() {
     let r = replay("s2_synthetic_text_only");
     let signals: Vec<_> = r.per_line.iter().flatten().copied().collect();
-    assert_eq!(signals, vec![AuthSignal::SyntheticText, AuthSignal::ResultText]);
+    assert_eq!(
+        signals,
+        vec![AuthSignal::SyntheticText, AuthSignal::ResultText]
+    );
 }
 
 #[test]
@@ -199,7 +219,11 @@ fn turns_that_are_not_auth_failures_signal_nothing_on_any_line() {
 
 #[test]
 fn the_oversize_fixture_really_has_a_line_over_64_kib() {
-    let longest = fixture_lines("oversize_line").iter().map(String::len).max().unwrap();
+    let longest = fixture_lines("oversize_line")
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap();
     assert!(longest > 64 * 1024, "longest line is {longest} bytes");
 }
 
@@ -219,7 +243,10 @@ const NEEDLE_COVERED_PHRASES: &[&str] = &[
 const NEEDLE_FREE_PHRASES: &[&str] = &["could not be refreshed", "not logged in"];
 
 fn all_phrases() -> impl Iterator<Item = &'static str> {
-    NEEDLE_COVERED_PHRASES.iter().chain(NEEDLE_FREE_PHRASES.iter()).copied()
+    NEEDLE_COVERED_PHRASES
+        .iter()
+        .chain(NEEDLE_FREE_PHRASES.iter())
+        .copied()
 }
 
 fn variants(p: &str) -> Vec<String> {
@@ -240,7 +267,11 @@ fn every_phrase_matches_case_insensitively_in_a_result_line() {
     for p in all_phrases() {
         for text in variants(p) {
             let line = result_line(true, &format!("Error: {text} (try again)"));
-            assert_eq!(classify_line(&line), Some(AuthSignal::ResultText), "{text:?}");
+            assert_eq!(
+                classify_line(&line),
+                Some(AuthSignal::ResultText),
+                "{text:?}"
+            );
         }
     }
 }
@@ -250,7 +281,11 @@ fn every_phrase_matches_case_insensitively_in_a_synthetic_assistant_line() {
     for p in all_phrases() {
         for text in variants(p) {
             let line = synthetic_line(&format!("Error: {text} (try again)"));
-            assert_eq!(classify_line(&line), Some(AuthSignal::SyntheticText), "{text:?}");
+            assert_eq!(
+                classify_line(&line),
+                Some(AuthSignal::SyntheticText),
+                "{text:?}"
+            );
         }
     }
 }
@@ -259,7 +294,11 @@ fn every_phrase_matches_case_insensitively_in_a_synthetic_assistant_line() {
 fn every_entry_of_the_pattern_list_matches_itself() {
     for p in AUTH_PATTERNS.iter().filter(|p| !p.contains("401")) {
         let line = result_line(true, &format!("x {p} x"));
-        assert_eq!(classify_line(&line), Some(AuthSignal::ResultText), "pattern {p:?}");
+        assert_eq!(
+            classify_line(&line),
+            Some(AuthSignal::ResultText),
+            "pattern {p:?}"
+        );
     }
 }
 
@@ -273,7 +312,11 @@ fn a_401_with_unauthorized_or_authentication_matches() {
         "API Error: 401 AUTHENTICATION failed upstream",
     ] {
         let line = result_line(true, text);
-        assert_eq!(classify_line(&line), Some(AuthSignal::ResultText), "{text:?}");
+        assert_eq!(
+            classify_line(&line),
+            Some(AuthSignal::ResultText),
+            "{text:?}"
+        );
     }
 }
 
@@ -335,7 +378,11 @@ fn the_401_combo_also_obeys_the_512_char_window() {
 #[test]
 fn a_real_models_text_quoting_the_phrase_is_not_an_auth_failure() {
     for p in all_phrases() {
-        assert_eq!(classify_line(&model_line(&format!("The CLI said: {p}"))), None, "{p:?}");
+        assert_eq!(
+            classify_line(&model_line(&format!("The CLI said: {p}"))),
+            None,
+            "{p:?}"
+        );
     }
 }
 
@@ -346,7 +393,10 @@ fn a_matching_result_text_without_is_error_is_not_an_auth_failure() {
 
 #[test]
 fn an_error_result_with_unrelated_text_is_not_an_auth_failure() {
-    assert_eq!(classify_line(&result_line(true, "Rate limit reached")), None);
+    assert_eq!(
+        classify_line(&result_line(true, "Rate limit reached")),
+        None
+    );
     let no_text = r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#;
     assert_eq!(classify_line(no_text), None);
     let numeric = r#"{"type":"result","is_error":true,"result":401}"#;
@@ -469,12 +519,20 @@ fn a_line_with_none_of_the_needles_is_not_json_parsed() {
 fn a_small_matching_line_is_json_parsed() {
     let line = s1_line_of_len(2_000);
     let parses = parses_during(|| assert_eq!(classify_line(&line), Some(AuthSignal::ErrorField)));
-    assert!(parses >= 1, "a matching line must be parsed to be classified");
+    assert!(
+        parses >= 1,
+        "a matching line must be parsed to be classified"
+    );
 }
 
 #[test]
 fn the_prefilter_needles_are_ascii_case_insensitive() {
-    for text in ["FAILED TO AUTHENTICATE", "oAuth Session Expired", "RUN /LOGIN", "INVALID API KEY"] {
+    for text in [
+        "FAILED TO AUTHENTICATE",
+        "oAuth Session Expired",
+        "RUN /LOGIN",
+        "INVALID API KEY",
+    ] {
         assert_eq!(
             classify_line(&result_line(true, text)),
             Some(AuthSignal::ResultText),
@@ -512,7 +570,8 @@ fn outcome(tracker: &mut TurnAuthTracker) -> Option<(AuthSignal, bool)> {
 }
 
 fn echo_line() -> String {
-    json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": "hello"}}).to_string()
+    json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": "hello"}})
+        .to_string()
 }
 
 #[test]
@@ -539,7 +598,11 @@ fn finish_resets_so_the_next_turn_starts_clean() {
     t.begin_turn();
     feed_line(&mut t, &result_line(true, EXPIRED));
     assert_eq!(outcome(&mut t), Some((AuthSignal::ResultText, true)));
-    assert_eq!(outcome(&mut t), None, "finishing twice reports the failure once");
+    assert_eq!(
+        outcome(&mut t),
+        None,
+        "finishing twice reports the failure once"
+    );
 }
 
 #[test]

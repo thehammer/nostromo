@@ -36,7 +36,10 @@ fn find<'a>(p: &'a ShellParse, texts: &[&str]) -> Option<&'a SimpleCommand> {
 #[track_caller]
 fn assert_command_at(input: &str, texts: &[&str], depth: u32) {
     let p = parse(input);
-    let hit = p.commands.iter().any(|c| c.texts() == texts && c.depth == depth);
+    let hit = p
+        .commands
+        .iter()
+        .any(|c| c.texts() == texts && c.depth == depth);
     assert!(
         hit,
         "expected {texts:?} at depth {depth} in {input:?}, found {:?}",
@@ -73,14 +76,20 @@ fn body<'a>(input: &'a str, h: &HereDoc) -> &'a str {
 
 #[test]
 fn plain_words_are_split_on_whitespace() {
-    assert_eq!(cmds("ls -la  /tmp\tfoo"), vec![vec!["ls", "-la", "/tmp", "foo"]]);
+    assert_eq!(
+        cmds("ls -la  /tmp\tfoo"),
+        vec![vec!["ls", "-la", "/tmp", "foo"]]
+    );
 }
 
 #[test]
 fn single_quotes_are_literal_and_not_dynamic() {
     let c = only_command("echo 'single quoted' '$HOME' 'a\\b'");
     assert_eq!(c.texts(), vec!["echo", "single quoted", "$HOME", "a\\b"]);
-    assert!(c.words.iter().all(|w| !w.dynamic), "single quotes never expand");
+    assert!(
+        c.words.iter().all(|w| !w.dynamic),
+        "single quotes never expand"
+    );
 }
 
 #[test]
@@ -104,7 +113,11 @@ fn unquoted_variables_are_dynamic() {
 #[test]
 fn backslash_outside_quotes_escapes_the_next_character() {
     let c = only_command(r"echo a\ b");
-    assert_eq!(c.texts(), vec!["echo", "a b"], "an escaped space stays inside one word");
+    assert_eq!(
+        c.texts(),
+        vec!["echo", "a b"],
+        "an escaped space stays inside one word"
+    );
 
     let c = only_command(r"echo \$X");
     assert_eq!(c.texts(), vec!["echo", "$X"]);
@@ -112,14 +125,20 @@ fn backslash_outside_quotes_escapes_the_next_character() {
 
     let c = only_command(r"echo a\;b");
     assert_eq!(c.texts(), vec!["echo", "a;b"]);
-    assert!(sep_kinds(r"echo a\;b").is_empty(), "an escaped semicolon is not a separator");
+    assert!(
+        sep_kinds(r"echo a\;b").is_empty(),
+        "an escaped semicolon is not a separator"
+    );
 }
 
 #[test]
 fn inside_double_quotes_only_quote_backslash_and_dollar_are_escapes() {
     let c = only_command(r#"echo "a\"b" "a\\b" "a\$b" "a\nb""#);
     assert_eq!(c.texts(), vec!["echo", "a\"b", "a\\b", "a$b", "a\\nb"]);
-    assert!(!c.words[3].dynamic, "an escaped dollar in double quotes is not an expansion");
+    assert!(
+        !c.words[3].dynamic,
+        "an escaped dollar in double quotes is not an expansion"
+    );
 }
 
 #[test]
@@ -147,14 +166,20 @@ fn ansi_c_quoting_resolves_escapes() {
 
 #[test]
 fn ansi_c_quoting_can_spell_a_command_name() {
-    assert_eq!(cmds(r"$'\x65cs_connect' ap"), vec![vec!["ecs_connect", "ap"]]);
+    assert_eq!(
+        cmds(r"$'\x65cs_connect' ap"),
+        vec![vec!["ecs_connect", "ap"]]
+    );
 }
 
 #[test]
 fn backslash_newline_joins_lines() {
     let input = "echo a\\\nb";
     assert_eq!(cmds(input), vec![vec!["echo", "ab"]]);
-    assert!(sep_kinds(input).is_empty(), "a continuation is not a newline separator");
+    assert!(
+        sep_kinds(input).is_empty(),
+        "a continuation is not a newline separator"
+    );
 }
 
 #[test]
@@ -194,7 +219,11 @@ fn every_separator_splits_commands_and_is_reported_in_order() {
 fn a_top_level_separator_span_slices_to_its_operator() {
     let input = "a && b || c; d | e & f\ng";
     let p = parse(input);
-    let sliced: Vec<&str> = p.separators.iter().map(|s| &input[s.span.clone()]).collect();
+    let sliced: Vec<&str> = p
+        .separators
+        .iter()
+        .map(|s| &input[s.span.clone()])
+        .collect();
     assert_eq!(sliced, vec!["&&", "||", ";", "|", "&", "\n"]);
 }
 
@@ -234,8 +263,14 @@ fn redirection_operators_and_their_targets_are_dropped_from_the_words() {
     assert_eq!(cmds("cat > out.txt"), vec![vec!["cat"]]);
     assert_eq!(cmds("cat >> out.txt"), vec![vec!["cat"]]);
     assert_eq!(cmds("cat < in.txt"), vec![vec!["cat"]]);
-    assert_eq!(cmds("grep x < in.txt > out.txt file"), vec![vec!["grep", "x", "file"]]);
-    assert_eq!(cmds("grep x >out.txt file"), vec![vec!["grep", "x", "file"]]);
+    assert_eq!(
+        cmds("grep x < in.txt > out.txt file"),
+        vec![vec!["grep", "x", "file"]]
+    );
+    assert_eq!(
+        cmds("grep x >out.txt file"),
+        vec![vec!["grep", "x", "file"]]
+    );
 }
 
 #[test]
@@ -263,7 +298,10 @@ fn a_hash_inside_a_word_is_not_a_comment() {
 
 #[test]
 fn a_hash_inside_quotes_is_not_a_comment() {
-    assert_eq!(cmds(r#"echo "a #b" '#c'"#), vec![vec!["echo", "a #b", "#c"]]);
+    assert_eq!(
+        cmds(r#"echo "a #b" '#c'"#),
+        vec![vec!["echo", "a #b", "#c"]]
+    );
 }
 
 #[test]
@@ -287,7 +325,11 @@ fn a_dollar_paren_substitution_exposes_the_inner_command_at_the_same_depth() {
 #[test]
 fn nested_substitutions_expose_every_level() {
     let p = parse("echo $(a $(b))");
-    assert!(find(&p, &["a", "$(b)"]).is_some(), "found {:?}", cmds("echo $(a $(b))"));
+    assert!(
+        find(&p, &["a", "$(b)"]).is_some(),
+        "found {:?}",
+        cmds("echo $(a $(b))")
+    );
     assert!(find(&p, &["b"]).is_some());
 }
 
@@ -326,7 +368,11 @@ fn arithmetic_expansion_is_not_a_command() {
 fn separators_inside_a_substitution_are_not_top_level_separators() {
     for input in ["echo $(a; b)", "echo $(a && b | c)", "echo `a; b`"] {
         assert!(sep_kinds(input).is_empty(), "input {input:?}");
-        assert!(cmds(input).len() >= 3, "inner commands found for {input:?}: {:?}", cmds(input));
+        assert!(
+            cmds(input).len() >= 3,
+            "inner commands found for {input:?}: {:?}",
+            cmds(input)
+        );
     }
 }
 
@@ -337,7 +383,11 @@ fn separators_inside_a_substitution_are_not_top_level_separators() {
 #[track_caller]
 fn pattern_of(input: &str, index: usize) -> String {
     let p = parse(input);
-    let outer = p.commands.iter().max_by_key(|c| c.span.len()).expect("a command");
+    let outer = p
+        .commands
+        .iter()
+        .max_by_key(|c| c.span.len())
+        .expect("a command");
     outer.words[index].pattern.clone()
 }
 
@@ -402,9 +452,17 @@ fn text_that_only_looks_like_an_expansion_is_not_a_wildcard() {
 fn a_nested_command_word_has_its_own_pattern() {
     // The outer word holds one expansion; the commands inside it are parsed on their own.
     let p = parse("echo x$(ecs_${U}connect y)z");
-    let outer = p.commands.iter().find(|c| c.texts()[0] == "echo").expect("the outer command");
+    let outer = p
+        .commands
+        .iter()
+        .find(|c| c.texts()[0] == "echo")
+        .expect("the outer command");
     assert_eq!(outer.words[1].pattern, wild("x@z"));
-    let inner = p.commands.iter().find(|c| c.texts()[0].starts_with("ecs_")).expect("the inner command");
+    let inner = p
+        .commands
+        .iter()
+        .find(|c| c.texts()[0].starts_with("ecs_"))
+        .expect("the inner command");
     assert_eq!(inner.words[0].pattern, wild("ecs_@connect"));
 }
 
@@ -425,7 +483,10 @@ fn a_brace_group_exposes_its_commands() {
     let p = parse("{ a; b; }");
     assert!(!p.unparsed);
     let first_real_word = |c: &SimpleCommand| {
-        c.texts().into_iter().find(|t| *t != "{" && *t != "}").map(str::to_string)
+        c.texts()
+            .into_iter()
+            .find(|t| *t != "{" && *t != "}")
+            .map(str::to_string)
     };
     let firsts: Vec<Option<String>> = p.commands.iter().map(first_real_word).collect();
     assert!(firsts.contains(&Some("a".to_string())), "found {firsts:?}");
@@ -436,7 +497,11 @@ fn a_brace_group_exposes_its_commands() {
 fn process_substitution_exposes_the_inner_commands() {
     let p = parse("diff <(ls a) <(ls b)");
     assert!(!p.unparsed);
-    assert!(find(&p, &["ls", "a"]).is_some(), "found {:?}", cmds("diff <(ls a) <(ls b)"));
+    assert!(
+        find(&p, &["ls", "a"]).is_some(),
+        "found {:?}",
+        cmds("diff <(ls a) <(ls b)")
+    );
     assert!(find(&p, &["ls", "b"]).is_some());
     assert!(p.commands.iter().any(|c| c.texts()[0] == "diff"));
 }
@@ -484,7 +549,11 @@ fn a_heredoc_terminator_at_the_very_end_of_input_needs_no_trailing_newline() {
 
 #[test]
 fn quoted_heredoc_delimiters_are_unquoted_and_flagged() {
-    for (op, label) in [("<<'EOF'", "single"), ("<<\"EOF\"", "double"), ("<<\\EOF", "backslash")] {
+    for (op, label) in [
+        ("<<'EOF'", "single"),
+        ("<<\"EOF\"", "double"),
+        ("<<\\EOF", "backslash"),
+    ] {
         let input = format!("cat {op}\n$X\nEOF\n");
         let p = parse(&input);
         assert!(!p.unparsed, "{label}: {input:?}");
@@ -543,7 +612,11 @@ fn a_heredoc_fed_to_a_shell_is_parsed_as_a_script_one_level_deeper() {
         assert!(!p.unparsed, "{shell}");
         assert_command_at(&input, &["ecs_connect", "ap", "production", "portal"], 1);
         assert_command_at(&input, &[shell], 0);
-        assert_eq!(p.heredocs.len(), 1, "{shell}: the here-doc is still reported");
+        assert_eq!(
+            p.heredocs.len(),
+            1,
+            "{shell}: the here-doc is still reported"
+        );
     }
 }
 
@@ -597,7 +670,11 @@ fn dash_c_payloads_are_found_for_every_shell_and_flag_spelling() {
 #[test]
 fn an_env_prefix_stays_in_the_outer_command() {
     let p = parse("env FOO=1 bash -c 'ls'");
-    let outer = p.commands.iter().find(|c| c.depth == 0).expect("outer command");
+    let outer = p
+        .commands
+        .iter()
+        .find(|c| c.depth == 0)
+        .expect("outer command");
     assert_eq!(outer.texts()[0], "env");
 }
 
@@ -789,7 +866,10 @@ fn must_finish_within(limit: Duration, f: impl FnOnce() + Send + 'static) {
             panic!("worker ended without finishing");
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            panic!("did not finish within {limit:?} (ran {:?})", started.elapsed())
+            panic!(
+                "did not finish within {limit:?} (ran {:?})",
+                started.elapsed()
+            )
         }
     }
 }
@@ -800,16 +880,43 @@ fn random_shell_punctuation_never_panics_or_hangs() {
         "a", "b", "'", "\"", "\\", "$", "(", ")", "{", "}", ";", "&", "|", "<", ">", "#", "\n",
         "\t", " ", "-c",
     ];
-    must_finish_within(Duration::from_secs(60), move || fuzz(&tokens, 5_000, 0x5eed));
+    must_finish_within(Duration::from_secs(60), move || {
+        fuzz(&tokens, 5_000, 0x5eed)
+    });
 }
 
 #[test]
 fn random_shell_fragments_with_payloads_heredocs_and_non_ascii_never_panic_or_hang() {
     let tokens = [
-        "bash ", "sh ", "eval ", "-c ", "-lc ", "<<EOF\n", "<<-EOF\n", "<<'EOF'\n", "EOF", "\n",
-        "$(", ")", "`", "'", "\"", "$'", "\\", " ", "é", "✓", "echo ", ";", "&&", "|&", "<(",
+        "bash ",
+        "sh ",
+        "eval ",
+        "-c ",
+        "-lc ",
+        "<<EOF\n",
+        "<<-EOF\n",
+        "<<'EOF'\n",
+        "EOF",
+        "\n",
+        "$(",
+        ")",
+        "`",
+        "'",
+        "\"",
+        "$'",
+        "\\",
+        " ",
+        "é",
+        "✓",
+        "echo ",
+        ";",
+        "&&",
+        "|&",
+        "<(",
     ];
-    must_finish_within(Duration::from_secs(60), move || fuzz(&tokens, 5_000, 0xbadc0de));
+    must_finish_within(Duration::from_secs(60), move || {
+        fuzz(&tokens, 5_000, 0xbadc0de)
+    });
 }
 
 // ── 10. round 4: constructs that used to desync the tokenizer ─────────────────
@@ -846,8 +953,17 @@ fn the_commands_inside_case_arms_are_found_too() {
     let input = "case $x in a) echo one;; b|c) echo two;; *) ecs_connect ap;; esac; ls";
     let p = parse(input);
     assert!(!p.unparsed);
-    for texts in [&["echo", "one"][..], &["echo", "two"], &["ecs_connect", "ap"], &["ls"]] {
-        assert!(find(&p, texts).is_some(), "{texts:?} missing from {:?}", p.commands.iter().map(|c| c.texts()).collect::<Vec<_>>());
+    for texts in [
+        &["echo", "one"][..],
+        &["echo", "two"],
+        &["ecs_connect", "ap"],
+        &["ls"],
+    ] {
+        assert!(
+            find(&p, texts).is_some(),
+            "{texts:?} missing from {:?}",
+            p.commands.iter().map(|c| c.texts()).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -896,12 +1012,16 @@ fn a_quoted_heredoc_ends_at_a_delimiter_line_even_after_a_line_ending_in_a_backs
         assert_eq!(p.heredocs.len(), 1, "{op}");
         assert!(p.heredocs[0].quoted, "{op}");
         assert_eq!(body(&input, &p.heredocs[0]), "foo\\\n", "{op}");
-        assert!(find(&p, &["ecs_connect"]).is_some(), "{op}: the line after the here-doc is a command");
+        assert!(
+            find(&p, &["ecs_connect"]).is_some(),
+            "{op}: the line after the here-doc is a command"
+        );
     }
 }
 
 #[test]
-fn an_unquoted_heredoc_does_not_end_at_a_delimiter_line_that_a_backslash_joined_to_the_line_before() {
+fn an_unquoted_heredoc_does_not_end_at_a_delimiter_line_that_a_backslash_joined_to_the_line_before()
+{
     // `foo\` + newline + `EOF` is the one body line `fooEOF`: the here-doc goes on to the real `EOF`.
     let input = "cat <<EOF\nfoo\\\nEOF\nbar\nEOF\nls";
     let p = parse(input);
@@ -983,9 +1103,16 @@ fn parse_within_budget(what: &str, cmd: String) -> ShellParse {
 #[track_caller]
 fn assert_bounded_and_unparsed(what: &'static str, cmd: String) {
     must_finish_within(HANG_LIMIT, move || {
-        assert!(cmd.len() >= FOUR_MIB / 2, "{what}: the command is pathologically large ({} bytes)", cmd.len());
+        assert!(
+            cmd.len() >= FOUR_MIB / 2,
+            "{what}: the command is pathologically large ({} bytes)",
+            cmd.len()
+        );
         let parsed = parse_within_budget(what, cmd);
-        assert!(parsed.unparsed, "{what}: a command the tokenizer cannot finish reading is `unparsed`");
+        assert!(
+            parsed.unparsed,
+            "{what}: a command the tokenizer cannot finish reading is `unparsed`"
+        );
     });
 }
 
@@ -993,13 +1120,20 @@ fn assert_bounded_and_unparsed(what: &'static str, cmd: String) {
 fn the_work_limit_is_proportional_to_the_input_and_leaves_room_for_tiny_inputs() {
     assert!(work_limit(0) > 0, "even an empty command has a budget");
     assert!(work_limit(10) > 10 * 8, "a tiny command is not starved");
-    assert!(work_limit(2_000_000) >= 2 * 1_000_000, "the budget grows with the input");
+    assert!(
+        work_limit(2_000_000) >= 2 * 1_000_000,
+        "the budget grows with the input"
+    );
     assert!(work_limit(2_000_000) > work_limit(1_000_000));
     assert!(
         work_limit(FOUR_MIB) < FOUR_MIB * 64,
         "and it stays linear: a few dozen steps per byte at most"
     );
-    assert_eq!(work_limit(usize::MAX), usize::MAX, "no overflow on an absurd length");
+    assert_eq!(
+        work_limit(usize::MAX),
+        usize::MAX,
+        "no overflow on an absurd length"
+    );
 }
 
 #[test]
@@ -1052,10 +1186,17 @@ fn four_mib_of_dollar_double_quote_pairs_is_unparsed_within_its_step_budget() {
 #[test]
 fn a_bash_c_payload_nested_beyond_the_depth_limit_is_unparsed_within_its_step_budget() {
     let cmd = nested_bash_c(21);
-    assert!(cmd.len() > 3 * 1024 * 1024, "the command is pathologically large ({} bytes)", cmd.len());
+    assert!(
+        cmd.len() > 3 * 1024 * 1024,
+        "the command is pathologically large ({} bytes)",
+        cmd.len()
+    );
     must_finish_within(HANG_LIMIT, move || {
         let parsed = parse_within_budget("nested bash -c", cmd);
-        assert!(parsed.unparsed, "nesting deeper than MAX_DEPTH ({MAX_DEPTH}) is unparsed");
+        assert!(
+            parsed.unparsed,
+            "nesting deeper than MAX_DEPTH ({MAX_DEPTH}) is unparsed"
+        );
     });
 }
 
@@ -1075,7 +1216,10 @@ fn balanced_pathological_input_is_still_read_within_its_step_budget() {
         ("`${` repeated", repeated("${", FOUR_MIB)),
         ("`case ` repeated", repeated("case ", FOUR_MIB)),
         ("`bash -c ` repeated", repeated("bash -c ", FOUR_MIB)),
-        ("`cat <<A\\nx\\nA\\n` repeated", repeated("cat <<A\nx\nA\n", FOUR_MIB)),
+        (
+            "`cat <<A\\nx\\nA\\n` repeated",
+            repeated("cat <<A\nx\nA\n", FOUR_MIB),
+        ),
     ] {
         must_finish_within(HANG_LIMIT, move || {
             parse_within_budget(what, cmd);
@@ -1102,7 +1246,10 @@ fn more_words_than_max_words_is_unparsed_and_exactly_max_words_is_not() {
 
     let over = "a ".repeat(MAX_WORDS + 1);
     let parsed = parse_within_budget("MAX_WORDS + 1 words", over);
-    assert!(parsed.unparsed, "one word more than the cap is 'can't tell'");
+    assert!(
+        parsed.unparsed,
+        "one word more than the cap is 'can't tell'"
+    );
 }
 
 #[test]
@@ -1134,7 +1281,8 @@ fn ordinary_commands_take_a_small_fraction_of_their_budget_and_are_not_unparsed(
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let fixture: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         for tool_use in fixture["tool_uses"].as_array().into_iter().flatten() {
             if let Some(command) = tool_use["input"]["command"].as_str() {
                 commands.push(command.to_owned());
@@ -1152,7 +1300,10 @@ fn ordinary_commands_take_a_small_fraction_of_their_budget_and_are_not_unparsed(
             "an ordinary command must stay far below its budget: {} of {limit} steps for {command:.60?}",
             parsed.work
         );
-        assert!(!parsed.unparsed || command.contains("unterminated"), "{command:.80?} should be read in full");
+        assert!(
+            !parsed.unparsed || command.contains("unterminated"),
+            "{command:.80?} should be read in full"
+        );
     }
 }
 
@@ -1164,7 +1315,9 @@ fn the_step_budget_does_not_change_what_an_ordinary_command_parses_to() {
     let parsed = parse(&long);
     assert!(!parsed.unparsed);
     assert_eq!(parsed.commands.len(), 3_000);
-    assert_eq!(cmds("ls -la /tmp && echo done"), vec![vec!["ls", "-la", "/tmp"], vec!["echo", "done"]]);
+    assert_eq!(
+        cmds("ls -la /tmp && echo done"),
+        vec![vec!["ls", "-la", "/tmp"], vec!["echo", "done"]]
+    );
     assert_command_at("bash -c 'echo hi; ls'", &["ls"], 1);
 }
-

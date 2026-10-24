@@ -39,9 +39,9 @@ pub use model::{
     Stamp, Status,
 };
 pub use ops::{apply_batch, apply_to_file, Applied, Op, OpError, Upsert, WriteError};
+pub use registry::{
+    CallerFacts, OpenArgs, OpenOutcome, ReadOutcome, RegistryParts, TrackerError, TrackerRegistry,
+    TrackerSummary, WriteOutcome, CONCURRENT_EDIT,
+};
 pub use render::{compact_full, delta_entries, quote_untrusted};
 pub use view::{TrackerBoardView, ViewFacts};
-pub use registry::{
-    CallerFacts, CONCURRENT_EDIT, OpenArgs, OpenOutcome, ReadOutcome, RegistryParts, TrackerError, TrackerRegistry,
-    TrackerSummary, WriteOutcome,
-};

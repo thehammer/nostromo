@@ -240,7 +240,10 @@ mod tests {
         let policy = perri_policy();
         for agent in ["mother", "fred", "teri", "cody"] {
             assert!(policy.denied_for(Some(agent)).is_empty(), "{agent}");
-            assert!(!policy.denies(Some(agent), "nostromo.apply_layout"), "{agent}");
+            assert!(
+                !policy.denies(Some(agent), "nostromo.apply_layout"),
+                "{agent}"
+            );
         }
     }
 
@@ -304,10 +307,15 @@ mod tests {
 
     #[test]
     fn the_tracker_is_never_filtered_or_denied_even_when_a_policy_lists_it() {
-        let policy = parse("agents:\n  perri:\n    deny:\n      - nostromo.tracker\n      - nostromo.show\n");
+        let policy = parse(
+            "agents:\n  perri:\n    deny:\n      - nostromo.tracker\n      - nostromo.show\n",
+        );
         assert!(!policy.denies(Some("perri"), "nostromo.tracker"));
         assert!(policy.denies(Some("perri"), "nostromo.show"));
-        let list = vec![json!({"name": "nostromo.tracker"}), json!({"name": "nostromo.show"})];
+        let list = vec![
+            json!({"name": "nostromo.tracker"}),
+            json!({"name": "nostromo.show"}),
+        ];
         let filtered = filter_descriptors(list, policy.denied_for(Some("perri")));
         assert_eq!(filtered, vec![json!({"name": "nostromo.tracker"})]);
     }

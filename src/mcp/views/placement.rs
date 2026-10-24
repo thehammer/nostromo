@@ -158,19 +158,20 @@ pub fn place(
                 .is_some_and(|pr| pr != requested_pr)
         });
         if displaced {
-            let (kept, closed): (Vec<LiveView>, Vec<LiveView>) = tabs
-                .into_iter()
-                .partition(|t| match t.view.as_ref().map(|v| &v.identity) {
-                    // The queue is a singleton that belongs to no PR: it
-                    // survives every review-context change (it is the way
-                    // BACK to the queue).
-                    Some(id) => {
-                        id.pr() == Some(requested_pr) || matches!(id, super::ViewIdentity::Singleton)
-                    }
-                    // A tab the curated layer doesn't recognise is not part of
-                    // any review context, so a PR change leaves it alone.
-                    None => true,
-                });
+            let (kept, closed): (Vec<LiveView>, Vec<LiveView>) =
+                tabs.into_iter()
+                    .partition(|t| match t.view.as_ref().map(|v| &v.identity) {
+                        // The queue is a singleton that belongs to no PR: it
+                        // survives every review-context change (it is the way
+                        // BACK to the queue).
+                        Some(id) => {
+                            id.pr() == Some(requested_pr)
+                                || matches!(id, super::ViewIdentity::Singleton)
+                        }
+                        // A tab the curated layer doesn't recognise is not part of
+                        // any review context, so a PR change leaves it alone.
+                        None => true,
+                    });
             reset_closed = closed.into_iter().map(|t| t.pane_id).collect();
             tabs = kept;
         }
@@ -378,11 +379,7 @@ fn insertion_index(cfg: &ViewPlacementConfig, tabs: &[LiveView], req: &ShowReque
 ///
 /// `None` when every tab is pinned or frontmost — a cap must never turn a show
 /// into a failure, so the region is simply allowed to run one over.
-fn pick_victim(
-    tabs: &[LiveView],
-    frontmost: Option<&str>,
-    policy: EvictPolicy,
-) -> Option<String> {
+fn pick_victim(tabs: &[LiveView], frontmost: Option<&str>, policy: EvictPolicy) -> Option<String> {
     let EvictPolicy::LeastRecentlyFocusedUnpinned = policy;
     tabs.iter()
         .enumerate()
@@ -492,7 +489,8 @@ mod tests {
 
     fn file(path: &str) -> ViewIdentity {
         ViewIdentity::File {
-            repo: None, path: path.into(),
+            repo: None,
+            path: path.into(),
             revision: None,
         }
     }
@@ -534,7 +532,12 @@ mod tests {
     /// The review queue as it lives in a real focus: a pinned tab, pane id
     /// `queue`.
     fn queue_tab() -> LiveView {
-        pinned(tab("queue", ViewType::ReviewQueue, ViewIdentity::Singleton, 0))
+        pinned(tab(
+            "queue",
+            ViewType::ReviewQueue,
+            ViewIdentity::Singleton,
+            0,
+        ))
     }
 
     /// `curated_start` plus a detail region holding `tabs`, frontmost `active`.
@@ -568,7 +571,10 @@ mod tests {
             (ViewType::Ticket, ticket("CORE-1")),
             (ViewType::File, file("a.rs")),
         ] {
-            assert_eq!(place(&cfg(), &state, &show(t, id)).unwrap().region, "detail");
+            assert_eq!(
+                place(&cfg(), &state, &show(t, id)).unwrap().region,
+                "detail"
+            );
         }
     }
 
@@ -581,7 +587,10 @@ mod tests {
         )
         .unwrap();
         assert!(p.tabbed, "the queue is a tab now, not a region of its own");
-        assert_eq!(p.pane_id, "queue", "the queue keeps the pane id the whole system knows it by");
+        assert_eq!(
+            p.pane_id, "queue",
+            "the queue keeps the pane id the whole system knows it by"
+        );
         assert_eq!(p.tab_order, vec!["queue"]);
         assert_eq!(p.labels, vec!["Queue"]);
     }
@@ -593,7 +602,12 @@ mod tests {
             vec![tab("detail.0", ViewType::PrDiff, pr(94), 1)],
             0,
         );
-        let p = place(&cfg(), &state, &show(ViewType::ReviewQueue, ViewIdentity::Singleton)).unwrap();
+        let p = place(
+            &cfg(),
+            &state,
+            &show(ViewType::ReviewQueue, ViewIdentity::Singleton),
+        )
+        .unwrap();
         assert_eq!(p.tab_order, vec!["queue", "detail.0"]);
         assert_eq!(p.tab_index, 0, "showing the queue brings it to front (R5)");
     }
@@ -605,11 +619,20 @@ mod tests {
             vec![queue_tab(), tab("detail.0", ViewType::PrDiff, pr(94), 3)],
             1,
         );
-        let p = place(&cfg(), &state, &show(ViewType::ReviewQueue, ViewIdentity::Singleton)).unwrap();
+        let p = place(
+            &cfg(),
+            &state,
+            &show(ViewType::ReviewQueue, ViewIdentity::Singleton),
+        )
+        .unwrap();
         assert!(p.reused, "R2: same identity, same tab");
         assert_eq!(p.pane_id, "queue");
         assert_eq!(p.tab_index, 0);
-        assert_eq!(p.tab_order, vec!["queue", "detail.0"], "no duplicate queue tab");
+        assert_eq!(
+            p.tab_order,
+            vec!["queue", "detail.0"],
+            "no duplicate queue tab"
+        );
     }
 
     #[test]
@@ -618,7 +641,12 @@ mod tests {
         // views. A new tab must evict someone, and it must not be the queue.
         let mut tabs = vec![queue_tab()];
         for n in 0..5u64 {
-            tabs.push(tab(&format!("detail.{n}"), ViewType::File, file(&format!("f{n}.rs")), n + 1));
+            tabs.push(tab(
+                &format!("detail.{n}"),
+                ViewType::File,
+                file(&format!("f{n}.rs")),
+                n + 1,
+            ));
         }
         let state = with_detail(curated_start(), tabs, 5);
 
@@ -644,11 +672,18 @@ mod tests {
         );
 
         let p = place(&cfg(), &state, &show(ViewType::PrDiff, pr(95))).unwrap();
-        assert!(!p.reset_closed.contains(&"queue".to_string()), "queue closed by R8: {:?}", p.reset_closed);
+        assert!(
+            !p.reset_closed.contains(&"queue".to_string()),
+            "queue closed by R8: {:?}",
+            p.reset_closed
+        );
         assert!(p.tab_order.contains(&"queue".to_string()));
 
         let cleared = reset_for_pr_change(&cfg(), &state, None);
-        assert!(!cleared.contains(&"queue".to_string()), "clearing the PR closed the queue: {cleared:?}");
+        assert!(
+            !cleared.contains(&"queue".to_string()),
+            "clearing the PR closed the queue: {cleared:?}"
+        );
         assert_eq!(cleared, vec!["detail.0", "detail.1"]);
     }
 
@@ -666,11 +701,19 @@ mod tests {
         regions.insert(
             "queue".to_string(),
             RegionState {
-                tabs: vec![tab("queue", ViewType::ReviewQueue, ViewIdentity::Singleton, 0)],
+                tabs: vec![tab(
+                    "queue",
+                    ViewType::ReviewQueue,
+                    ViewIdentity::Singleton,
+                    0,
+                )],
                 active: Some(0),
             },
         );
-        let state = ViewState { regions, taken_pane_ids: taken(&["queue", "repl"]) };
+        let state = ViewState {
+            regions,
+            taken_pane_ids: taken(&["queue", "repl"]),
+        };
         let err = place(&cfg, &state, &show(ViewType::File, file("a.rs"))).unwrap_err();
         assert_eq!(err.code(), "region_not_tabbed");
     }
@@ -680,7 +723,12 @@ mod tests {
     #[test]
     fn showing_the_same_type_and_identity_twice_produces_one_tab_not_two() {
         let cfg = cfg();
-        let first = place(&cfg, &curated_start(), &show(ViewType::File, file("src/a.rs"))).unwrap();
+        let first = place(
+            &cfg,
+            &curated_start(),
+            &show(ViewType::File, file("src/a.rs")),
+        )
+        .unwrap();
         assert!(!first.reused);
 
         let state = with_detail(
@@ -823,7 +871,11 @@ mod tests {
         let state = with_detail(curated_start(), six_tabs(), 5);
         let p = place(&cfg(), &state, &show(ViewType::File, file("src/d.rs"))).unwrap();
         assert_eq!(p.evicted.as_deref(), Some("detail.3"), "lowest lru_rank");
-        assert_eq!(p.tab_order.len(), 6, "still at the cap, exactly one evicted");
+        assert_eq!(
+            p.tab_order.len(),
+            6,
+            "still at the cap, exactly one evicted"
+        );
         assert!(!p.tab_order.contains(&"detail.3".to_string()));
     }
 
@@ -870,7 +922,11 @@ mod tests {
         let state = with_detail(curated_start(), tabs, 5);
         let p = place(&cfg(), &state, &show(ViewType::File, file("src/d.rs"))).unwrap();
         assert_eq!(p.evicted, None);
-        assert_eq!(p.tab_order.len(), 7, "a cap must not turn a show into a failure");
+        assert_eq!(
+            p.tab_order.len(),
+            7,
+            "a cap must not turn a show into a failure"
+        );
     }
 
     #[test]
@@ -912,7 +968,11 @@ mod tests {
         tabs[4].lru_rank = 1;
         let state = with_detail(curated_start(), tabs, 5);
         let p = place(&cfg(), &state, &show(ViewType::File, file("src/d.rs"))).unwrap();
-        assert_eq!(p.evicted.as_deref(), Some("detail.2"), "leftmost of the tie");
+        assert_eq!(
+            p.evicted.as_deref(),
+            Some("detail.2"),
+            "leftmost of the tie"
+        );
     }
 
     // ── 5. R5 — focus asymmetry ───────────────────────────────────────────────
@@ -1013,10 +1073,7 @@ mod tests {
         // which tabs go. `pr(94)` is what those two tabs are bound to *now*,
         // and the new PR is 95, so both are stale.
         let closed = reset_for_pr_change(&cfg(), &state, Some(("thehammer/nostromo", 95)));
-        assert_eq!(
-            closed,
-            vec!["detail.0", "detail.1", "detail.2", "detail.3"]
-        );
+        assert_eq!(closed, vec!["detail.0", "detail.1", "detail.2", "detail.3"]);
     }
 
     #[test]
@@ -1061,10 +1118,7 @@ mod tests {
             vec![tab("detail.0", ViewType::PrDiff, pr(94), 4), unknown],
             0,
         );
-        assert_eq!(
-            reset_for_pr_change(&cfg(), &state, None),
-            vec!["detail.0"]
-        );
+        assert_eq!(reset_for_pr_change(&cfg(), &state, None), vec!["detail.0"]);
         let p = place(&cfg(), &state, &show(ViewType::PrDiff, pr(95))).unwrap();
         assert_eq!(p.reset_closed, vec!["detail.0"]);
         assert!(p.tab_order.contains(&"detail.9".to_string()));
@@ -1074,12 +1128,7 @@ mod tests {
 
     #[test]
     fn the_detail_region_is_created_above_the_repl_when_it_does_not_exist() {
-        let p = place(
-            &cfg(),
-            &curated_start(),
-            &show(ViewType::PrDiff, pr(94)),
-        )
-        .unwrap();
+        let p = place(&cfg(), &curated_start(), &show(ViewType::PrDiff, pr(94))).unwrap();
         assert_eq!(
             p.create_region,
             Some(RegionCreation {
@@ -1127,7 +1176,10 @@ mod tests {
         // second creation candidate rather than refusing.
         let detail = place(&cfg(), &bare, &show(ViewType::PrDiff, pr(94))).unwrap();
         assert_eq!(
-            detail.create_region.as_ref().map(|c| c.relative_to.as_str()),
+            detail
+                .create_region
+                .as_ref()
+                .map(|c| c.relative_to.as_str()),
             Some("repl")
         );
     }

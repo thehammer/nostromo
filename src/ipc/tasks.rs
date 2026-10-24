@@ -699,10 +699,19 @@ impl TaskRegistry {
     }
 
     /// The wire form of each task `kind` names that exists, by name.
-    fn metas_of(&self, kind: &TaskEventKind, tool_name: ToolNameLookup<'_>) -> Vec<(String, Option<TaskMeta>)> {
+    fn metas_of(
+        &self,
+        kind: &TaskEventKind,
+        tool_name: ToolNameLookup<'_>,
+    ) -> Vec<(String, Option<TaskMeta>)> {
         event_task_ids(kind)
             .into_iter()
-            .map(|id| (id.to_owned(), self.entries.get(id).map(|e| e.meta(tool_name))))
+            .map(|id| {
+                (
+                    id.to_owned(),
+                    self.entries.get(id).map(|e| e.meta(tool_name)),
+                )
+            })
             .collect()
     }
 
@@ -780,7 +789,11 @@ impl TaskRegistry {
     /// What a stop request needs to know about `task_id`, and the mark that a
     /// stop was sent. `None` when the task is unknown or has ended (nothing to
     /// stop). The mark changes nothing the wire shows.
-    pub fn begin_stop(&mut self, task_id: &str, tool_name: ToolNameLookup<'_>) -> Option<TaskLabel> {
+    pub fn begin_stop(
+        &mut self,
+        task_id: &str,
+        tool_name: ToolNameLookup<'_>,
+    ) -> Option<TaskLabel> {
         let entry = self.entries.get_mut(task_id)?;
         if entry.status.is_terminal() {
             return None;
@@ -864,7 +877,13 @@ impl TaskRegistry {
     /// refused task is counted in [`Self::dropped_tasks`]. Anything else
     /// naming an unknown id (a task never started here, or one retention
     /// already dropped) is ignored: it could never be told to end.
-    fn entry_for(&mut self, id: &str, run_id: Option<&str>, now: u64, create: bool) -> Option<&mut TaskEntry> {
+    fn entry_for(
+        &mut self,
+        id: &str,
+        run_id: Option<&str>,
+        now: u64,
+        create: bool,
+    ) -> Option<&mut TaskEntry> {
         if !self.entries.contains_key(id) {
             if !create {
                 return None;
@@ -976,7 +995,8 @@ impl TaskRegistry {
             entry.detail.completion_summary = clean_text(summary, MAX_SUMMARY_CHARS);
         }
         entry.absorb_usage(e.usage);
-        let reason = (e.reason.as_deref() == Some("worker_restart")).then_some(TaskEndReason::Restart);
+        let reason =
+            (e.reason.as_deref() == Some("worker_restart")).then_some(TaskEndReason::Restart);
         entry.finish(e.status, now, reason);
         // A restart notification that follows an earlier `stopped` still
         // says why.
@@ -1005,8 +1025,14 @@ impl TaskRegistry {
             if entry.description.is_empty() {
                 entry.description = clean_description(&t.description);
             }
-            entry.subagent_type = entry.subagent_type.take().or_else(|| t.subagent_type.clone());
-            entry.parent_task_id = entry.parent_task_id.take().or_else(|| t.parent_task_id.clone());
+            entry.subagent_type = entry
+                .subagent_type
+                .take()
+                .or_else(|| t.subagent_type.clone());
+            entry.parent_task_id = entry
+                .parent_task_id
+                .take()
+                .or_else(|| t.parent_task_id.clone());
             entry.housekeeping |= t.ambient;
         }
         for entry in self.entries.values_mut() {
@@ -1022,7 +1048,10 @@ impl TaskRegistry {
 
     /// Tasks not yet ended.
     fn running_count(&self) -> usize {
-        self.entries.values().filter(|e| !e.status.is_terminal()).count()
+        self.entries
+            .values()
+            .filter(|e| !e.status.is_terminal())
+            .count()
     }
 
     /// Keep every running task and the [`RETAINED_ENDED_TASKS`] most recently
@@ -1032,7 +1061,13 @@ impl TaskRegistry {
             .entries
             .values()
             .filter(|e| e.status.is_terminal())
-            .map(|e| (e.ended_at_ms.unwrap_or(e.started_at_ms), e.seq, e.id.clone()))
+            .map(|e| {
+                (
+                    e.ended_at_ms.unwrap_or(e.started_at_ms),
+                    e.seq,
+                    e.id.clone(),
+                )
+            })
             .collect();
         if ended.len() <= RETAINED_ENDED_TASKS {
             return false;
@@ -1141,7 +1176,11 @@ impl TaskHub {
     }
 
     /// A stop was asked for `task_id`; see [`TaskRegistry::begin_stop`].
-    pub fn begin_stop(&mut self, task_id: &str, tool_name: ToolNameLookup<'_>) -> Option<TaskLabel> {
+    pub fn begin_stop(
+        &mut self,
+        task_id: &str,
+        tool_name: ToolNameLookup<'_>,
+    ) -> Option<TaskLabel> {
         self.registry.begin_stop(task_id, tool_name)
     }
 
@@ -1232,7 +1271,8 @@ mod tests {
     }
 
     fn parsed(subtype: &str, obj: Map<String, Value>) -> TaskEvent {
-        parse_task_event(subtype, &obj).unwrap_or_else(|| panic!("{subtype} did not parse: {obj:?}"))
+        parse_task_event(subtype, &obj)
+            .unwrap_or_else(|| panic!("{subtype} did not parse: {obj:?}"))
     }
 
     fn started(id: &str, extra: Value) -> TaskEvent {
@@ -1250,7 +1290,10 @@ mod tests {
     }
 
     fn updated_run(id: &str, run: &str, patch: Value) -> TaskEvent {
-        parsed("task_updated", body(id, json!({ "run_id": run, "patch": patch })))
+        parsed(
+            "task_updated",
+            body(id, json!({ "run_id": run, "patch": patch })),
+        )
     }
 
     fn notified(id: &str, status: &str, extra: Value) -> TaskEvent {
@@ -1322,14 +1365,39 @@ mod tests {
 
         // (task_type, originating tool call, kind, has output)
         let table: &[(Option<&str>, Option<&str>, TaskKind, bool)] = &[
-            (Some("local_bash"), Some("toolu_mon"), TaskKind::Monitor, true),
-            (Some("local_bash"), Some("toolu_bash"), TaskKind::Shell, true),
+            (
+                Some("local_bash"),
+                Some("toolu_mon"),
+                TaskKind::Monitor,
+                true,
+            ),
+            (
+                Some("local_bash"),
+                Some("toolu_bash"),
+                TaskKind::Shell,
+                true,
+            ),
             (Some("local_bash"), None, TaskKind::Shell, true),
-            (Some("local_bash"), Some("toolu_not_seen"), TaskKind::Shell, true),
+            (
+                Some("local_bash"),
+                Some("toolu_not_seen"),
+                TaskKind::Shell,
+                true,
+            ),
             (Some("monitor_mcp"), None, TaskKind::Monitor, true),
-            (Some("monitor_mcp"), Some("toolu_bash"), TaskKind::Monitor, true),
+            (
+                Some("monitor_mcp"),
+                Some("toolu_bash"),
+                TaskKind::Monitor,
+                true,
+            ),
             (Some("monitor_ws"), None, TaskKind::Monitor, true),
-            (Some("local_agent"), Some("toolu_agent"), TaskKind::Agent, false),
+            (
+                Some("local_agent"),
+                Some("toolu_agent"),
+                TaskKind::Agent,
+                false,
+            ),
             (Some("local_agent"), None, TaskKind::Agent, false),
             (Some("local_workflow"), None, TaskKind::Workflow, false),
             (Some("remote_agent"), None, TaskKind::Other, false),
@@ -1352,8 +1420,15 @@ mod tests {
             let meta = &reg.snapshot(&lookup)[0];
 
             assert_eq!(meta.kind, *kind, "{task_type:?} via {tool_use_id:?}");
-            assert_eq!(meta.has_output, *has_output, "{task_type:?} via {tool_use_id:?}");
-            assert_eq!(meta.task_type, task_type.unwrap_or(""), "the raw type is kept as the CLI sent it");
+            assert_eq!(
+                meta.has_output, *has_output,
+                "{task_type:?} via {tool_use_id:?}"
+            );
+            assert_eq!(
+                meta.task_type,
+                task_type.unwrap_or(""),
+                "the raw type is kept as the CLI sent it"
+            );
         }
     }
 
@@ -1364,26 +1439,54 @@ mod tests {
         tools.learn("toolu_bash", "Bash");
         let lookup = tools.lookup();
         let mut reg = TaskRegistry::new();
-        reg.apply(&started("m", json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"})), 1, &lookup);
-        reg.apply(&started("b", json!({"task_type": "local_bash", "tool_use_id": "toolu_bash"})), 2, &lookup);
+        reg.apply(
+            &started(
+                "m",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"}),
+            ),
+            1,
+            &lookup,
+        );
+        reg.apply(
+            &started(
+                "b",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_bash"}),
+            ),
+            2,
+            &lookup,
+        );
 
         let snapshot = reg.snapshot(&lookup);
 
-        assert_eq!((snapshot[0].kind, snapshot[0].tool_name.as_deref()), (TaskKind::Monitor, Some("Monitor")));
-        assert_eq!((snapshot[1].kind, snapshot[1].tool_name.as_deref()), (TaskKind::Shell, Some("Bash")));
+        assert_eq!(
+            (snapshot[0].kind, snapshot[0].tool_name.as_deref()),
+            (TaskKind::Monitor, Some("Monitor"))
+        );
+        assert_eq!(
+            (snapshot[1].kind, snapshot[1].tool_name.as_deref()),
+            (TaskKind::Shell, Some("Bash"))
+        );
     }
 
     #[test]
-    fn a_task_started_before_its_tool_call_is_known_is_a_shell_and_becomes_a_monitor_on_the_next_snapshot() {
+    fn a_task_started_before_its_tool_call_is_known_is_a_shell_and_becomes_a_monitor_on_the_next_snapshot(
+    ) {
         let tools = Tools::default();
         let lookup = tools.lookup();
         let mut reg = TaskRegistry::new();
         reg.apply(
-            &started("t1", json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"})),
+            &started(
+                "t1",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"}),
+            ),
             1_000,
             &lookup,
         );
-        assert_eq!(reg.snapshot(&lookup)[0].kind, TaskKind::Shell, "the call has not been seen yet");
+        assert_eq!(
+            reg.snapshot(&lookup)[0].kind,
+            TaskKind::Shell,
+            "the call has not been seen yet"
+        );
 
         tools.learn("toolu_mon", "Monitor");
 
@@ -1399,14 +1502,21 @@ mod tests {
         tools.learn("toolu_mon", "Monitor");
         let mut reg = TaskRegistry::new();
         reg.apply(
-            &started("t1", json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"})),
+            &started(
+                "t1",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"}),
+            ),
             1_000,
             &tools.lookup(),
         );
 
         // The retained turns moved on: the index forgot the call.
         tools.0.borrow_mut().clear();
-        reg.apply(&progress("t1", json!({"description": "still watching"})), 2_000, &tools.lookup());
+        reg.apply(
+            &progress("t1", json!({"description": "still watching"})),
+            2_000,
+            &tools.lookup(),
+        );
 
         assert_eq!(reg.snapshot(&tools.lookup())[0].kind, TaskKind::Monitor);
     }
@@ -1418,11 +1528,21 @@ mod tests {
         assert_eq!(one(&reg, "t1").task_type, "local_bash");
         assert_eq!(one(&reg, "t1").status, TaskStatus::Running);
 
-        reg.apply(&started("t1", json!({"description": "Run it", "tool_use_id": "toolu_x"})), 1_100, &no_tools);
+        reg.apply(
+            &started(
+                "t1",
+                json!({"description": "Run it", "tool_use_id": "toolu_x"}),
+            ),
+            1_100,
+            &no_tools,
+        );
 
         assert_eq!(reg.len(), 1, "one task, not two");
         let t = one(&reg, "t1");
-        assert_eq!((t.description.as_str(), t.task_type.as_str()), ("Run it", "local_bash"));
+        assert_eq!(
+            (t.description.as_str(), t.task_type.as_str()),
+            ("Run it", "local_bash")
+        );
         assert_eq!(t.started_at_ms, Some(1_000), "the first event it saw");
     }
 
@@ -1452,9 +1572,17 @@ mod tests {
             (&started("n", json!({})), 1),
             (&notified("n", "completed", json!({"ambient": true})), 2),
             (&started("s", json!({})), 3),
-            (&notified("s", "completed", json!({"skip_transcript": true})), 4),
+            (
+                &notified("s", "completed", json!({"skip_transcript": true})),
+                4,
+            ),
             (&started("l", json!({})), 5),
-            (&level(json!([{"task_id": "l", "task_type": "monitor_ws", "description": "d", "ambient": true}])), 6),
+            (
+                &level(
+                    json!([{"task_id": "l", "task_type": "monitor_ws", "description": "d", "ambient": true}]),
+                ),
+                6,
+            ),
         ]);
         assert!(one(&reg, "n").housekeeping);
         assert!(one(&reg, "s").housekeeping);
@@ -1467,7 +1595,10 @@ mod tests {
         tools.learn("toolu_mon", "Monitor");
         let mut reg = TaskRegistry::new();
         reg.apply(
-            &started("m", json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"})),
+            &started(
+                "m",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"}),
+            ),
             1,
             &tools.lookup(),
         );
@@ -1500,7 +1631,10 @@ mod tests {
         let reg = registry_with(&[(&started("t1", json!({})), 1_000)]);
         let t = one(&reg, "t1");
         assert_eq!(t.status, TaskStatus::Running);
-        assert_eq!((t.ended_at_ms, t.end_reason, t.duration_ms), (None, None, None));
+        assert_eq!(
+            (t.ended_at_ms, t.end_reason, t.duration_ms),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -1515,7 +1649,11 @@ mod tests {
                 (&notified("t1", raw, json!({})), 2_000),
             ]);
             assert_eq!(one(&reg, "t1").status, expected, "{raw}");
-            assert_eq!(one(&reg, "t1").end_reason, None, "no reason given, none invented: {raw}");
+            assert_eq!(
+                one(&reg, "t1").end_reason,
+                None,
+                "no reason given, none invented: {raw}"
+            );
         }
     }
 
@@ -1523,10 +1661,16 @@ mod tests {
     fn a_worker_restart_notification_ends_the_task_stopped_with_the_restart_reason() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&notified("t1", "stopped", json!({"reason": "worker_restart"})), 2_000),
+            (
+                &notified("t1", "stopped", json!({"reason": "worker_restart"})),
+                2_000,
+            ),
         ]);
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::Restart)));
+        assert_eq!(
+            (t.status, t.end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::Restart))
+        );
     }
 
     #[test]
@@ -1534,17 +1678,26 @@ mod tests {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
             (&updated("t1", json!({"status": "killed"})), 2_000),
-            (&notified("t1", "stopped", json!({"reason": "worker_restart"})), 2_100),
+            (
+                &notified("t1", "stopped", json!({"reason": "worker_restart"})),
+                2_100,
+            ),
         ]);
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::Restart)));
+        assert_eq!(
+            (t.status, t.end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::Restart))
+        );
     }
 
     #[test]
     fn any_other_reason_gives_no_end_reason() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&notified("t1", "stopped", json!({"reason": "something_new"})), 2_000),
+            (
+                &notified("t1", "stopped", json!({"reason": "something_new"})),
+                2_000,
+            ),
         ]);
         assert_eq!(one(&reg, "t1").end_reason, None);
     }
@@ -1553,9 +1706,21 @@ mod tests {
     fn an_ended_task_stays_ended_within_its_run() {
         let reg = registry_with(&[
             (&started("t1", json!({"run_id": "run-001"})), 1_000),
-            (&notified("t1", "completed", json!({"run_id": "run-001"})), 2_000),
-            (&updated_run("t1", "run-001", json!({"status": "running"})), 3_000),
-            (&progress("t1", json!({"run_id": "run-001", "usage": {"total_tokens": 9}})), 3_100),
+            (
+                &notified("t1", "completed", json!({"run_id": "run-001"})),
+                2_000,
+            ),
+            (
+                &updated_run("t1", "run-001", json!({"status": "running"})),
+                3_000,
+            ),
+            (
+                &progress(
+                    "t1",
+                    json!({"run_id": "run-001", "usage": {"total_tokens": 9}}),
+                ),
+                3_100,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!(t.status, TaskStatus::Completed);
@@ -1566,7 +1731,10 @@ mod tests {
     fn an_unrecognised_patch_status_changes_nothing() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&updated("t1", json!({"status": "weird", "end_time": "yesterday"})), 2_000),
+            (
+                &updated("t1", json!({"status": "weird", "end_time": "yesterday"})),
+                2_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.status, t.ended_at_ms), (TaskStatus::Running, None));
@@ -1575,8 +1743,20 @@ mod tests {
     #[test]
     fn a_patch_merges_description_and_backgrounded_without_ending_the_task() {
         let reg = registry_with(&[
-            (&started("t1", json!({"description": "before", "is_backgrounded": false})), 1_000),
-            (&updated("t1", json!({"description": "after", "is_backgrounded": true})), 2_000),
+            (
+                &started(
+                    "t1",
+                    json!({"description": "before", "is_backgrounded": false}),
+                ),
+                1_000,
+            ),
+            (
+                &updated(
+                    "t1",
+                    json!({"description": "after", "is_backgrounded": true}),
+                ),
+                2_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!(t.description, "after");
@@ -1622,8 +1802,20 @@ mod tests {
     #[test]
     fn progress_updates_the_live_description_and_the_last_tool() {
         let reg = registry_with(&[
-            (&started("t1", json!({"task_type": "local_agent", "description": "Survey"})), 1_000),
-            (&progress("t1", json!({"description": "Reading files", "last_tool_name": "Read"})), 2_000),
+            (
+                &started(
+                    "t1",
+                    json!({"task_type": "local_agent", "description": "Survey"}),
+                ),
+                1_000,
+            ),
+            (
+                &progress(
+                    "t1",
+                    json!({"description": "Reading files", "last_tool_name": "Read"}),
+                ),
+                2_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!(t.description, "Reading files");
@@ -1635,7 +1827,10 @@ mod tests {
     #[test]
     fn a_frame_from_an_older_run_changes_nothing_and_marks_nothing_dirty() {
         let mut reg = registry_with(&[(
-            &started("t1", json!({"run_id": "run-002", "description": "current run"})),
+            &started(
+                "t1",
+                json!({"run_id": "run-002", "description": "current run"}),
+            ),
             1_000,
         )]);
         reg.take_dirty();
@@ -1643,16 +1838,36 @@ mod tests {
         let details_before = reg.details();
 
         let late = [
-            progress("t1", json!({"run_id": "run-001", "description": "stale", "usage": {"total_tokens": 99}, "summary": "stale summary"})),
-            updated_run("t1", "run-001", json!({"status": "completed", "end_time": 1_500, "description": "stale"})),
-            notified("t1", "failed", json!({"run_id": "run-001", "summary": "stale", "ambient": true})),
-            started("t1", json!({"run_id": "run-001", "description": "stale start", "prompt": "stale prompt"})),
-            level(json!([{"task_id": "t1", "run_id": "run-001", "task_type": "monitor_ws", "description": "stale", "ambient": true}])),
+            progress(
+                "t1",
+                json!({"run_id": "run-001", "description": "stale", "usage": {"total_tokens": 99}, "summary": "stale summary"}),
+            ),
+            updated_run(
+                "t1",
+                "run-001",
+                json!({"status": "completed", "end_time": 1_500, "description": "stale"}),
+            ),
+            notified(
+                "t1",
+                "failed",
+                json!({"run_id": "run-001", "summary": "stale", "ambient": true}),
+            ),
+            started(
+                "t1",
+                json!({"run_id": "run-001", "description": "stale start", "prompt": "stale prompt"}),
+            ),
+            level(
+                json!([{"task_id": "t1", "run_id": "run-001", "task_type": "monitor_ws", "description": "stale", "ambient": true}]),
+            ),
         ];
         for (i, event) in late.iter().enumerate() {
             reg.apply(event, 2_000 + i as u64, &no_tools);
             assert_eq!(snap(&reg), before, "late frame {i} changed the snapshot");
-            assert_eq!(reg.details(), details_before, "late frame {i} changed a detail");
+            assert_eq!(
+                reg.details(),
+                details_before,
+                "late frame {i} changed a detail"
+            );
             assert!(!reg.is_dirty(), "late frame {i} marked the registry dirty");
             assert!(reg.take_dirty().is_clean(), "late frame {i}");
         }
@@ -1660,15 +1875,24 @@ mod tests {
 
     #[test]
     fn a_frame_for_a_task_never_started_is_ignored_and_one_for_a_started_task_keeps_its_run() {
-        let reg = registry_with(&[(&progress("t1", json!({"run_id": "run-001", "description": "hello"})), 1_000)]);
+        let reg = registry_with(&[(
+            &progress("t1", json!({"run_id": "run-001", "description": "hello"})),
+            1_000,
+        )]);
         assert_eq!(reg.len(), 0, "progress alone does not make a task");
 
         let reg = registry_with(&[
             (&started("t1", json!({})), 900),
-            (&progress("t1", json!({"run_id": "run-001", "description": "hello"})), 1_000),
+            (
+                &progress("t1", json!({"run_id": "run-001", "description": "hello"})),
+                1_000,
+            ),
         ]);
         let t = one(&reg, "t1");
-        assert_eq!((t.run_id.as_deref(), t.description.as_str()), (Some("run-001"), "hello"));
+        assert_eq!(
+            (t.run_id.as_deref(), t.description.as_str()),
+            (Some("run-001"), "hello")
+        );
     }
 
     #[test]
@@ -1678,14 +1902,20 @@ mod tests {
             (&notified("t1", "completed", json!({})), 2_000),
         ]);
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.run_id.as_deref()), (TaskStatus::Completed, Some("run-003")));
+        assert_eq!(
+            (t.status, t.run_id.as_deref()),
+            (TaskStatus::Completed, Some("run-003"))
+        );
     }
 
     #[test]
     fn a_run_id_arriving_after_a_task_without_one_is_adopted() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&progress("t1", json!({"run_id": "run-001", "description": "later"})), 1_500),
+            (
+                &progress("t1", json!({"run_id": "run-001", "description": "later"})),
+                1_500,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!(t.run_id.as_deref(), Some("run-001"));
@@ -1696,9 +1926,28 @@ mod tests {
     #[test]
     fn a_newer_run_of_the_same_task_makes_it_running_again_with_a_fresh_start_time() {
         let reg = registry_with(&[
-            (&started("t1", json!({"run_id": "run-001", "task_type": "local_agent", "description": "first"})), 1_000),
-            (&notified("t1", "completed", json!({"run_id": "run-001", "usage": {"total_tokens": 10, "tool_uses": 2, "duration_ms": 500}})), 2_000),
-            (&started("t1", json!({"run_id": "run-002", "task_type": "local_agent", "description": "resumed"})), 9_000),
+            (
+                &started(
+                    "t1",
+                    json!({"run_id": "run-001", "task_type": "local_agent", "description": "first"}),
+                ),
+                1_000,
+            ),
+            (
+                &notified(
+                    "t1",
+                    "completed",
+                    json!({"run_id": "run-001", "usage": {"total_tokens": 10, "tool_uses": 2, "duration_ms": 500}}),
+                ),
+                2_000,
+            ),
+            (
+                &started(
+                    "t1",
+                    json!({"run_id": "run-002", "task_type": "local_agent", "description": "resumed"}),
+                ),
+                9_000,
+            ),
         ]);
 
         let t = one(&reg, "t1");
@@ -1707,8 +1956,15 @@ mod tests {
         assert_eq!(t.status, TaskStatus::Running);
         assert_eq!(t.run_id.as_deref(), Some("run-002"));
         assert_eq!(t.started_at_ms, Some(9_000));
-        assert_eq!((t.ended_at_ms, t.duration_ms, t.end_reason), (None, None, None));
-        assert_eq!((t.total_tokens, t.tool_uses), (None, None), "the earlier run's counts are not this run's");
+        assert_eq!(
+            (t.ended_at_ms, t.duration_ms, t.end_reason),
+            (None, None, None)
+        );
+        assert_eq!(
+            (t.total_tokens, t.tool_uses),
+            (None, None),
+            "the earlier run's counts are not this run's"
+        );
         assert_eq!(t.description, "resumed");
     }
 
@@ -1716,13 +1972,25 @@ mod tests {
     fn the_resumed_run_can_end_again_and_then_ignores_the_first_runs_late_frames() {
         let reg = registry_with(&[
             (&started("t1", json!({"run_id": "run-001"})), 1_000),
-            (&notified("t1", "completed", json!({"run_id": "run-001"})), 2_000),
+            (
+                &notified("t1", "completed", json!({"run_id": "run-001"})),
+                2_000,
+            ),
             (&started("t1", json!({"run_id": "run-002"})), 9_000),
-            (&notified("t1", "failed", json!({"run_id": "run-002"})), 9_500),
-            (&notified("t1", "completed", json!({"run_id": "run-001"})), 9_600),
+            (
+                &notified("t1", "failed", json!({"run_id": "run-002"})),
+                9_500,
+            ),
+            (
+                &notified("t1", "completed", json!({"run_id": "run-001"})),
+                9_600,
+            ),
         ]);
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.ended_at_ms, t.duration_ms), (TaskStatus::Failed, Some(9_500), Some(500)));
+        assert_eq!(
+            (t.status, t.ended_at_ms, t.duration_ms),
+            (TaskStatus::Failed, Some(9_500), Some(500))
+        );
     }
 
     #[test]
@@ -1741,7 +2009,13 @@ mod tests {
     /// A backgrounded shell started at 10_000 and listed at 10_100.
     fn backgrounded_and_listed() -> TaskRegistry {
         registry_with(&[
-            (&started("t1", json!({"task_type": "local_bash", "is_backgrounded": true})), 10_000),
+            (
+                &started(
+                    "t1",
+                    json!({"task_type": "local_bash", "is_backgrounded": true}),
+                ),
+                10_000,
+            ),
             (&in_level(&["t1"]), 10_100),
         ])
     }
@@ -1757,7 +2031,10 @@ mod tests {
 
         assert!(reg.tick(20_000 + 3_000), "on the dot");
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::Vanished)));
+        assert_eq!(
+            (t.status, t.end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::Vanished))
+        );
         assert_eq!(t.ended_at_ms, Some(23_000));
         assert_eq!(reg.next_deadline(), None);
         assert!(!reg.tick(99_000), "nothing left to end");
@@ -1782,11 +2059,18 @@ mod tests {
         let mut reg = backgrounded_and_listed();
         reg.apply(&level(json!([])), 20_000, &no_tools);
 
-        reg.apply(&updated("t1", json!({"status": "completed"})), 21_000, &no_tools);
+        reg.apply(
+            &updated("t1", json!({"status": "completed"})),
+            21_000,
+            &no_tools,
+        );
 
         assert!(!reg.tick(23_000));
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.end_reason, t.ended_at_ms), (TaskStatus::Completed, None, Some(21_000)));
+        assert_eq!(
+            (t.status, t.end_reason, t.ended_at_ms),
+            (TaskStatus::Completed, None, Some(21_000))
+        );
         assert_eq!(reg.next_deadline(), None);
     }
 
@@ -1863,7 +2147,13 @@ mod tests {
     #[test]
     fn a_task_backgrounded_by_a_later_patch_becomes_subject_to_vanishing() {
         let mut reg = registry_with(&[
-            (&started("t1", json!({"task_type": "local_bash", "is_backgrounded": false})), 10_000),
+            (
+                &started(
+                    "t1",
+                    json!({"task_type": "local_bash", "is_backgrounded": false}),
+                ),
+                10_000,
+            ),
             (&updated("t1", json!({"is_backgrounded": true})), 12_000),
         ]);
         reg.apply(&level(json!([])), 20_000, &no_tools);
@@ -1878,7 +2168,11 @@ mod tests {
             reg.apply(&updated("t1", json!({"status": raw})), 11_000, &no_tools);
             reg.apply(&level(json!([])), 20_000, &no_tools);
             assert!(reg.tick(23_000), "{raw}");
-            assert_eq!(one(&reg, "t1").end_reason, Some(TaskEndReason::Vanished), "{raw}");
+            assert_eq!(
+                one(&reg, "t1").end_reason,
+                Some(TaskEndReason::Vanished),
+                "{raw}"
+            );
         }
     }
 
@@ -1898,8 +2192,20 @@ mod tests {
     #[test]
     fn only_the_missing_task_vanishes() {
         let mut reg = registry_with(&[
-            (&started("keep", json!({"task_type": "local_bash", "is_backgrounded": true})), 10_000),
-            (&started("gone", json!({"task_type": "local_bash", "is_backgrounded": true})), 10_000),
+            (
+                &started(
+                    "keep",
+                    json!({"task_type": "local_bash", "is_backgrounded": true}),
+                ),
+                10_000,
+            ),
+            (
+                &started(
+                    "gone",
+                    json!({"task_type": "local_bash", "is_backgrounded": true}),
+                ),
+                10_000,
+            ),
             (&in_level(&["keep", "gone"]), 10_100),
         ]);
         reg.apply(&in_level(&["keep"]), 20_000, &no_tools);
@@ -1918,12 +2224,21 @@ mod tests {
             (&updated("pend", json!({"status": "pending"})), 1_100),
             (&started("paus", json!({})), 1_000),
             (&updated("paus", json!({"status": "paused"})), 1_100),
-            (&started("vanishing", json!({"task_type": "local_bash", "is_backgrounded": true})), 1_000),
+            (
+                &started(
+                    "vanishing",
+                    json!({"task_type": "local_bash", "is_backgrounded": true}),
+                ),
+                1_000,
+            ),
             (&level(json!([])), 1_200),
             (&started("done", json!({})), 1_000),
             (&notified("done", "completed", json!({})), 1_500),
             (&started("restarted", json!({})), 1_000),
-            (&notified("restarted", "stopped", json!({"reason": "worker_restart"})), 1_600),
+            (
+                &notified("restarted", "stopped", json!({"reason": "worker_restart"})),
+                1_600,
+            ),
         ]);
         reg.take_dirty();
 
@@ -1933,14 +2248,24 @@ mod tests {
             let t = one(&reg, id);
             assert_eq!(
                 (t.status, t.end_reason, t.ended_at_ms),
-                (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded), Some(5_000)),
+                (
+                    TaskStatus::Stopped,
+                    Some(TaskEndReason::SessionEnded),
+                    Some(5_000)
+                ),
                 "{id}"
             );
         }
         let done = one(&reg, "done");
-        assert_eq!((done.status, done.end_reason, done.ended_at_ms), (TaskStatus::Completed, None, Some(1_500)));
+        assert_eq!(
+            (done.status, done.end_reason, done.ended_at_ms),
+            (TaskStatus::Completed, None, Some(1_500))
+        );
         let restarted = one(&reg, "restarted");
-        assert_eq!((restarted.end_reason, restarted.ended_at_ms), (Some(TaskEndReason::Restart), Some(1_600)));
+        assert_eq!(
+            (restarted.end_reason, restarted.ended_at_ms),
+            (Some(TaskEndReason::Restart), Some(1_600))
+        );
         assert!(reg.take_dirty().snapshot, "clients must be told");
         assert_eq!(reg.next_deadline(), None);
     }
@@ -1979,18 +2304,36 @@ mod tests {
             let id = format!("e{i:02}");
             // Half of them housekeeping: retention does not care about kind.
             let ambient = i % 2 == 0;
-            reg.apply(&started(&id, json!({"prompt": format!("prompt {i}"), "ambient": ambient})), 1_000 + i, &no_tools);
-            reg.apply(&notified(&id, "completed", json!({})), 2_000 + i * 10, &no_tools);
+            reg.apply(
+                &started(
+                    &id,
+                    json!({"prompt": format!("prompt {i}"), "ambient": ambient}),
+                ),
+                1_000 + i,
+                &no_tools,
+            );
+            reg.apply(
+                &notified(&id, "completed", json!({})),
+                2_000 + i * 10,
+                &no_tools,
+            );
         }
         for i in 0..3u64 {
-            reg.apply(&started(&format!("r{i}"), json!({"prompt": "running prompt"})), 5_000 + i, &no_tools);
+            reg.apply(
+                &started(&format!("r{i}"), json!({"prompt": "running prompt"})),
+                5_000 + i,
+                &no_tools,
+            );
         }
 
         let ids: Vec<String> = snap(&reg).into_iter().map(|t| t.id).collect();
 
         assert_eq!(ids.len(), 43, "3 running + 40 ended: {ids:?}");
         for dropped in 0..5 {
-            assert!(!ids.contains(&format!("e{dropped:02}")), "e{dropped:02} is among the 5 oldest ended");
+            assert!(
+                !ids.contains(&format!("e{dropped:02}")),
+                "e{dropped:02} is among the 5 oldest ended"
+            );
             assert_eq!(reg.detail(&format!("e{dropped:02}")), None);
         }
         for kept in 5..45 {
@@ -1998,7 +2341,10 @@ mod tests {
             assert!(reg.detail(&format!("e{kept:02}")).is_some());
         }
         assert_eq!(reg.details().len(), 43, "details follow their tasks");
-        assert!(reg.take_dirty().details.iter().all(|id| ids.contains(id)), "no detail is announced for a dropped task");
+        assert!(
+            reg.take_dirty().details.iter().all(|id| ids.contains(id)),
+            "no detail is announced for a dropped task"
+        );
     }
 
     #[test]
@@ -2015,7 +2361,10 @@ mod tests {
 
         let snapshot = snap(&reg);
 
-        let running = snapshot.iter().filter(|t| t.status == TaskStatus::Running).count();
+        let running = snapshot
+            .iter()
+            .filter(|t| t.status == TaskStatus::Running)
+            .count();
         let ended = snapshot.iter().filter(|t| t.status.is_terminal()).count();
         assert_eq!((running, ended), (60, 40));
     }
@@ -2035,7 +2384,10 @@ mod tests {
         let ids: Vec<String> = snap(&reg).into_iter().map(|t| t.id).collect();
 
         assert!(ids.contains(&"long".to_owned()));
-        assert!(!ids.contains(&"quick00".to_owned()), "the oldest-ended makes room");
+        assert!(
+            !ids.contains(&"quick00".to_owned()),
+            "the oldest-ended makes room"
+        );
         assert_eq!(ids.len(), 40);
     }
 
@@ -2045,29 +2397,50 @@ mod tests {
     fn without_usage_the_counts_are_unknown_not_zero() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&progress("t1", json!({"description": "no usage here"})), 1_500),
+            (
+                &progress("t1", json!({"description": "no usage here"})),
+                1_500,
+            ),
             (&notified("t1", "completed", json!({})), 2_000),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (None, None));
         let wire = serde_json::to_value(&t).unwrap();
-        assert!(wire.get("total_tokens").is_none() && wire.get("tool_uses").is_none(), "{wire}");
+        assert!(
+            wire.get("total_tokens").is_none() && wire.get("tool_uses").is_none(),
+            "{wire}"
+        );
     }
 
     #[test]
     fn an_empty_usage_object_is_still_unknown() {
-        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": {}})), 1_000)]);
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 900),
+            (&progress("t1", json!({"usage": {}})), 1_000),
+        ]);
         let t = one(&reg, "t1");
-        assert_eq!((t.total_tokens, t.tool_uses, t.duration_ms), (None, None, None));
+        assert_eq!(
+            (t.total_tokens, t.tool_uses, t.duration_ms),
+            (None, None, None)
+        );
     }
 
     #[test]
     fn usage_with_only_some_fields_sets_only_those() {
-        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": {"total_tokens": 50}})), 1_000)]);
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 900),
+            (
+                &progress("t1", json!({"usage": {"total_tokens": 50}})),
+                1_000,
+            ),
+        ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (Some(50), None));
 
-        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": {"tool_uses": 4}})), 1_000)]);
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 900),
+            (&progress("t1", json!({"usage": {"tool_uses": 4}})), 1_000),
+        ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (None, Some(4)));
     }
@@ -2076,7 +2449,10 @@ mod tests {
     fn a_reported_zero_is_a_zero() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 900),
-            (&progress("t1", json!({"usage": {"total_tokens": 0, "tool_uses": 0}})), 1_000),
+            (
+                &progress("t1", json!({"usage": {"total_tokens": 0, "tool_uses": 0}})),
+                1_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (Some(0), Some(0)));
@@ -2086,9 +2462,21 @@ mod tests {
     fn later_usage_updates_the_fields_it_names_and_keeps_the_others() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 900),
-            (&progress("t1", json!({"usage": {"total_tokens": 100, "tool_uses": 2}})), 1_000),
-            (&progress("t1", json!({"usage": {"total_tokens": 250}})), 2_000),
-            (&progress("t1", json!({"description": "no usage this time"})), 3_000),
+            (
+                &progress(
+                    "t1",
+                    json!({"usage": {"total_tokens": 100, "tool_uses": 2}}),
+                ),
+                1_000,
+            ),
+            (
+                &progress("t1", json!({"usage": {"total_tokens": 250}})),
+                2_000,
+            ),
+            (
+                &progress("t1", json!({"description": "no usage this time"})),
+                3_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (Some(250), Some(2)));
@@ -2098,7 +2486,14 @@ mod tests {
     fn a_notifications_usage_counts_too() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&notified("t1", "completed", json!({"usage": {"total_tokens": 7, "tool_uses": 1}})), 2_000),
+            (
+                &notified(
+                    "t1",
+                    "completed",
+                    json!({"usage": {"total_tokens": 7, "tool_uses": 1}}),
+                ),
+                2_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (Some(7), Some(1)));
@@ -2106,7 +2501,10 @@ mod tests {
 
     #[test]
     fn malformed_usage_is_ignored() {
-        let reg = registry_with(&[(&started("t1", json!({})), 900), (&progress("t1", json!({"usage": "lots"})), 1_000)]);
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 900),
+            (&progress("t1", json!({"usage": "lots"})), 1_000),
+        ]);
         let t = one(&reg, "t1");
         assert_eq!((t.total_tokens, t.tool_uses), (None, None));
     }
@@ -2127,7 +2525,10 @@ mod tests {
     fn a_patch_end_time_wins_over_the_time_the_event_arrived() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&updated("t1", json!({"status": "completed", "end_time": 5_000})), 9_000),
+            (
+                &updated("t1", json!({"status": "completed", "end_time": 5_000})),
+                9_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.ended_at_ms, t.duration_ms), (Some(5_000), Some(4_000)));
@@ -2154,7 +2555,10 @@ mod tests {
     fn a_reported_duration_wins_over_end_minus_start() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&notified("t1", "completed", json!({"usage": {"duration_ms": 1_234}})), 4_000),
+            (
+                &notified("t1", "completed", json!({"usage": {"duration_ms": 1_234}})),
+                4_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.ended_at_ms, t.duration_ms), (Some(4_000), Some(1_234)));
@@ -2164,8 +2568,14 @@ mod tests {
     fn a_reported_duration_beats_a_patch_end_time_too() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 1_000),
-            (&progress("t1", json!({"usage": {"duration_ms": 777}})), 2_000),
-            (&updated("t1", json!({"status": "completed", "end_time": 9_000})), 9_500),
+            (
+                &progress("t1", json!({"usage": {"duration_ms": 777}})),
+                2_000,
+            ),
+            (
+                &updated("t1", json!({"status": "completed", "end_time": 9_000})),
+                9_500,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.ended_at_ms, t.duration_ms), (Some(9_000), Some(777)));
@@ -2173,9 +2583,18 @@ mod tests {
 
     #[test]
     fn a_running_task_has_no_duration_unless_the_cli_reported_one() {
-        let reg = registry_with(&[(&started("t1", json!({})), 1_000), (&progress("t1", json!({"description": "x"})), 5_000)]);
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 1_000),
+            (&progress("t1", json!({"description": "x"})), 5_000),
+        ]);
         assert_eq!(one(&reg, "t1").duration_ms, None);
-        let reg = registry_with(&[(&started("t1", json!({})), 1_000), (&progress("t1", json!({"usage": {"duration_ms": 300}})), 5_000)]);
+        let reg = registry_with(&[
+            (&started("t1", json!({})), 1_000),
+            (
+                &progress("t1", json!({"usage": {"duration_ms": 300}})),
+                5_000,
+            ),
+        ]);
         assert_eq!(one(&reg, "t1").duration_ms, Some(300));
     }
 
@@ -2183,7 +2602,10 @@ mod tests {
     fn an_end_time_before_the_start_does_not_underflow() {
         let reg = registry_with(&[
             (&started("t1", json!({})), 10_000),
-            (&updated("t1", json!({"status": "completed", "end_time": 500})), 11_000),
+            (
+                &updated("t1", json!({"status": "completed", "end_time": 500})),
+                11_000,
+            ),
         ]);
         let t = one(&reg, "t1");
         assert_eq!((t.ended_at_ms, t.duration_ms), (Some(500), Some(0)));
@@ -2201,7 +2623,13 @@ mod tests {
                 ),
                 1_000,
             ),
-            (&progress("agt", json!({"summary": "SECRET-OUTPUT-2 reading", "usage": {"total_tokens": 5}})), 2_000),
+            (
+                &progress(
+                    "agt",
+                    json!({"summary": "SECRET-OUTPUT-2 reading", "usage": {"total_tokens": 5}}),
+                ),
+                2_000,
+            ),
             (
                 &notified(
                     "agt",
@@ -2219,13 +2647,30 @@ mod tests {
         let detail = reg.detail("agt").expect("a detail");
 
         assert_eq!(detail.task_id, "agt");
-        assert_eq!(detail.prompt.as_deref(), Some("SECRET-OUTPUT-1 read the config"));
-        assert_eq!(detail.progress_summary.as_deref(), Some("SECRET-OUTPUT-2 reading"));
-        assert_eq!(detail.completion_summary.as_deref(), Some("SECRET-OUTPUT-3 finished"));
+        assert_eq!(
+            detail.prompt.as_deref(),
+            Some("SECRET-OUTPUT-1 read the config")
+        );
+        assert_eq!(
+            detail.progress_summary.as_deref(),
+            Some("SECRET-OUTPUT-2 reading")
+        );
+        assert_eq!(
+            detail.completion_summary.as_deref(),
+            Some("SECRET-OUTPUT-3 finished")
+        );
         assert_eq!(detail.preview.as_deref(), Some("SECRET-OUTPUT-5 last line"));
         let wire = serde_json::to_string(&snap(&reg)).unwrap();
-        assert!(!wire.contains("SECRET-OUTPUT"), "free text leaked into the metadata frame: {wire}");
-        assert!(!wire.contains("/private/tmp") && !wire.contains("output_file") && !wire.contains(".output"), "{wire}");
+        assert!(
+            !wire.contains("SECRET-OUTPUT"),
+            "free text leaked into the metadata frame: {wire}"
+        );
+        assert!(
+            !wire.contains("/private/tmp")
+                && !wire.contains("output_file")
+                && !wire.contains(".output"),
+            "{wire}"
+        );
     }
 
     #[test]
@@ -2233,12 +2678,21 @@ mod tests {
         let reg = registry_with(&[
             (&started("t1", json!({"task_type": "local_bash"})), 1_000),
             (
-                &notified("t1", "completed", json!({"output_file": "/private/tmp/claude-501/-repo/s/tasks/t1.output"})),
+                &notified(
+                    "t1",
+                    "completed",
+                    json!({"output_file": "/private/tmp/claude-501/-repo/s/tasks/t1.output"}),
+                ),
                 2_000,
             ),
         ]);
         let wire = serde_json::to_string(&one(&reg, "t1")).unwrap();
-        assert!(!wire.contains("/private/tmp") && !wire.contains("tasks/t1") && !wire.contains("output_file"), "{wire}");
+        assert!(
+            !wire.contains("/private/tmp")
+                && !wire.contains("tasks/t1")
+                && !wire.contains("output_file"),
+            "{wire}"
+        );
     }
 
     #[test]
@@ -2258,7 +2712,11 @@ mod tests {
         assert!(dirty.snapshot);
         assert_eq!(dirty.details, ["t1"]);
 
-        reg.apply(&progress("t1", json!({"usage": {"total_tokens": 3}})), 2_000, &no_tools);
+        reg.apply(
+            &progress("t1", json!({"usage": {"total_tokens": 3}})),
+            2_000,
+            &no_tools,
+        );
         let dirty = reg.take_dirty();
         assert!(dirty.snapshot);
         assert!(dirty.details.is_empty(), "the prompt did not change");
@@ -2277,15 +2735,25 @@ mod tests {
 
     #[test]
     fn descriptions_and_texts_arrive_clean() {
-        let hostile = format!("\u{1b}[31mred\u{1b}[0m\u{1b}]0;title\u{7} {}", "x".repeat(10_000));
+        let hostile = format!(
+            "\u{1b}[31mred\u{1b}[0m\u{1b}]0;title\u{7} {}",
+            "x".repeat(10_000)
+        );
         let reg = registry_with(&[(
             &started("t1", json!({"description": hostile, "prompt": hostile})),
             1_000,
         )]);
         let t = one(&reg, "t1");
-        assert!(t.description.starts_with("red x"), "{:?}", &t.description[..20]);
+        assert!(
+            t.description.starts_with("red x"),
+            "{:?}",
+            &t.description[..20]
+        );
         assert!(!t.description.contains('\u{1b}'));
-        assert!(t.description.chars().count() < 10_000, "a 10 KB description is cut");
+        assert!(
+            t.description.chars().count() < 10_000,
+            "a 10 KB description is cut"
+        );
         let detail = reg.detail("t1").unwrap();
         assert!(!detail.prompt.unwrap().contains('\u{1b}'));
     }
@@ -2301,7 +2769,11 @@ mod tests {
             (&started("wf", json!({"task_type": "local_workflow"})), 4),
             (&started("ot", json!({"task_type": "quantum_task"})), 5),
         ]);
-        let ids: Vec<String> = reg.preview_targets(&no_tools).into_iter().map(|t| t.task_id).collect();
+        let ids: Vec<String> = reg
+            .preview_targets(&no_tools)
+            .into_iter()
+            .map(|t| t.task_id)
+            .collect();
         assert_eq!(ids, ["sh", "mon"]);
         assert!(reg.has_running_output_task(&no_tools));
     }
@@ -2314,7 +2786,10 @@ mod tests {
         ]);
         assert!(reg.has_running_output_task(&no_tools));
         reg.apply(&notified("sh", "completed", json!({})), 3, &no_tools);
-        assert!(!reg.has_running_output_task(&no_tools), "an agent is not previewed");
+        assert!(
+            !reg.has_running_output_task(&no_tools),
+            "an agent is not previewed"
+        );
         assert!(reg.preview_targets(&no_tools)[0].terminal);
     }
 
@@ -2322,9 +2797,15 @@ mod tests {
     fn a_notifications_output_path_is_offered_to_the_poller_only() {
         let reg = registry_with(&[
             (&started("sh", json!({"task_type": "local_bash"})), 1),
-            (&notified("sh", "completed", json!({"output_file": "/x/y/sh.output"})), 2),
+            (
+                &notified("sh", "completed", json!({"output_file": "/x/y/sh.output"})),
+                2,
+            ),
         ]);
-        assert_eq!(reg.preview_targets(&no_tools)[0].output_file.as_deref(), Some("/x/y/sh.output"));
+        assert_eq!(
+            reg.preview_targets(&no_tools)[0].output_file.as_deref(),
+            Some("/x/y/sh.output")
+        );
     }
 
     // ── coalescing ──────────────────────────────────────────────────────────
@@ -2367,25 +2848,47 @@ mod tests {
     fn a_hundred_progress_events_in_a_second_make_at_most_five_snapshots_and_the_last_is_current() {
         let mut hub = TaskHub::new();
         let mut out = Vec::new();
-        out.extend(hub.on_event(&started("agt", json!({})), 0, &no_tools).into_iter().map(|o| (0, o)));
+        out.extend(
+            hub.on_event(&started("agt", json!({})), 0, &no_tools)
+                .into_iter()
+                .map(|o| (0, o)),
+        );
         for i in 0..100u64 {
             let now = i * 10;
             run_timer(&mut hub, now, &mut out);
             let event = progress("agt", json!({"usage": {"total_tokens": i + 1}}));
-            out.extend(hub.on_event(&event, now, &no_tools).into_iter().map(|o| (now, o)));
+            out.extend(
+                hub.on_event(&event, now, &no_tools)
+                    .into_iter()
+                    .map(|o| (now, o)),
+            );
         }
         run_timer(&mut hub, u64::MAX, &mut out);
 
         let published = snapshots(&out);
 
         assert!(!published.is_empty());
-        assert!(published.len() <= 5, "{} snapshots: at {:?}", published.len(), published.iter().map(|p| p.0).collect::<Vec<_>>());
+        assert!(
+            published.len() <= 5,
+            "{} snapshots: at {:?}",
+            published.len(),
+            published.iter().map(|p| p.0).collect::<Vec<_>>()
+        );
         assert_eq!(published[0].0, 0, "the first change goes out at once");
         for pair in published.windows(2) {
-            assert!(pair[1].0 - pair[0].0 >= COALESCE_MS, "{} then {}", pair[0].0, pair[1].0);
+            assert!(
+                pair[1].0 - pair[0].0 >= COALESCE_MS,
+                "{} then {}",
+                pair[0].0,
+                pair[1].0
+            );
         }
         let last = &published.last().unwrap().1;
-        assert_eq!(last[0].total_tokens, Some(100), "the last snapshot reflects the last event");
+        assert_eq!(
+            last[0].total_tokens,
+            Some(100),
+            "the last snapshot reflects the last event"
+        );
         assert_eq!(hub.next_wakeup(), None, "nothing is left unpublished");
     }
 
@@ -2393,37 +2896,69 @@ mod tests {
     fn the_first_change_after_a_quiet_spell_is_published_in_the_same_call() {
         let mut hub = TaskHub::new();
         hub.on_event(&started("t1", json!({})), 0, &no_tools);
-        let first = hub.on_event(&progress("t1", json!({"description": "one"})), 1_000, &no_tools);
+        let first = hub.on_event(
+            &progress("t1", json!({"description": "one"})),
+            1_000,
+            &no_tools,
+        );
         assert_eq!(snapshot_in(&first).len(), 1);
 
         // Exactly the window later.
-        let second = hub.on_event(&progress("t1", json!({"description": "two"})), 1_000 + COALESCE_MS, &no_tools);
-        assert!(matches!(second.as_slice(), [TaskOutput::Snapshot(s)] if s[0].description == "two"), "{second:?}");
+        let second = hub.on_event(
+            &progress("t1", json!({"description": "two"})),
+            1_000 + COALESCE_MS,
+            &no_tools,
+        );
+        assert!(
+            matches!(second.as_slice(), [TaskOutput::Snapshot(s)] if s[0].description == "two"),
+            "{second:?}"
+        );
 
         // A long quiet.
-        let third = hub.on_event(&progress("t1", json!({"description": "three"})), 60_000, &no_tools);
-        assert!(matches!(third.as_slice(), [TaskOutput::Snapshot(s)] if s[0].description == "three"), "{third:?}");
+        let third = hub.on_event(
+            &progress("t1", json!({"description": "three"})),
+            60_000,
+            &no_tools,
+        );
+        assert!(
+            matches!(third.as_slice(), [TaskOutput::Snapshot(s)] if s[0].description == "three"),
+            "{third:?}"
+        );
     }
 
     #[test]
     fn a_change_inside_the_window_waits_for_the_window_to_end() {
         let mut hub = TaskHub::new();
-        hub.on_event(&started("t1", json!({"description": "one"})), 1_000, &no_tools);
+        hub.on_event(
+            &started("t1", json!({"description": "one"})),
+            1_000,
+            &no_tools,
+        );
 
-        let early = hub.on_event(&progress("t1", json!({"description": "two"})), 1_249, &no_tools);
+        let early = hub.on_event(
+            &progress("t1", json!({"description": "two"})),
+            1_249,
+            &no_tools,
+        );
 
         assert!(early.is_empty());
         assert_eq!(hub.next_wakeup(), Some(1_250));
         assert!(hub.on_tick(1_249, &no_tools).is_empty(), "not yet");
         let due = hub.on_tick(1_250, &no_tools);
-        assert!(matches!(due.as_slice(), [TaskOutput::Snapshot(s)] if s[0].description == "two"), "{due:?}");
+        assert!(
+            matches!(due.as_slice(), [TaskOutput::Snapshot(s)] if s[0].description == "two"),
+            "{due:?}"
+        );
         assert_eq!(hub.next_wakeup(), None);
     }
 
     #[test]
     fn an_event_that_changes_nothing_publishes_nothing_and_asks_for_no_wakeup() {
         let mut hub = TaskHub::new();
-        let event = progress("t1", json!({"description": "same", "usage": {"total_tokens": 5}, "last_tool_name": "Read"}));
+        let event = progress(
+            "t1",
+            json!({"description": "same", "usage": {"total_tokens": 5}, "last_tool_name": "Read"}),
+        );
         hub.on_event(&started("t1", json!({})), 1_000, &no_tools);
         snapshot_in(&hub.on_event(&event, 1_250, &no_tools));
 
@@ -2436,7 +2971,11 @@ mod tests {
     #[test]
     fn a_stale_run_event_publishes_nothing() {
         let mut hub = TaskHub::new();
-        hub.on_event(&started("t1", json!({"run_id": "run-002"})), 1_000, &no_tools);
+        hub.on_event(
+            &started("t1", json!({"run_id": "run-002"})),
+            1_000,
+            &no_tools,
+        );
         let late = progress("t1", json!({"run_id": "run-001", "description": "late"}));
         assert!(hub.on_event(&late, 9_000, &no_tools).is_empty());
         assert_eq!(hub.next_wakeup(), None);
@@ -2447,50 +2986,90 @@ mod tests {
         let mut reg = registry_with(&[(&started("t1", json!({})), 1_000)]);
         let dirty = reg.take_dirty();
         assert!(dirty.snapshot);
-        assert!(dirty.details.is_empty(), "there is nothing to say about it yet: {:?}", dirty.details);
+        assert!(
+            dirty.details.is_empty(),
+            "there is nothing to say about it yet: {:?}",
+            dirty.details
+        );
     }
 
     #[test]
     fn a_plain_new_task_publishes_a_snapshot_and_no_empty_detail() {
         let mut hub = TaskHub::new();
-        let out = hub.on_event(&started("t1", json!({"task_type": "local_bash"})), 1_000, &no_tools);
-        assert!(matches!(out.as_slice(), [TaskOutput::Snapshot(_)]), "{out:?}");
+        let out = hub.on_event(
+            &started("t1", json!({"task_type": "local_bash"})),
+            1_000,
+            &no_tools,
+        );
+        assert!(
+            matches!(out.as_slice(), [TaskOutput::Snapshot(_)]),
+            "{out:?}"
+        );
     }
 
     #[test]
     fn a_publication_is_the_snapshot_then_the_details_that_changed() {
         let mut hub = TaskHub::new();
         let out = hub.on_event(&started("t1", json!({"prompt": "hello"})), 1_000, &no_tools);
-        assert!(matches!(out.as_slice(), [TaskOutput::Snapshot(_), TaskOutput::Detail(d)] if d.prompt.as_deref() == Some("hello")), "{out:?}");
+        assert!(
+            matches!(out.as_slice(), [TaskOutput::Snapshot(_), TaskOutput::Detail(d)] if d.prompt.as_deref() == Some("hello")),
+            "{out:?}"
+        );
     }
 
     #[test]
     fn a_new_preview_publishes_a_detail_only_and_the_same_preview_nothing() {
         let mut hub = TaskHub::new();
-        hub.on_event(&started("t1", json!({"task_type": "local_bash"})), 1_000, &no_tools);
+        hub.on_event(
+            &started("t1", json!({"task_type": "local_bash"})),
+            1_000,
+            &no_tools,
+        );
 
         let out = hub.set_preview("t1", Some("building 3/9".into()), 5_000, &no_tools);
         assert!(
             matches!(out.as_slice(), [TaskOutput::Detail(d)] if d.task_id == "t1" && d.preview.as_deref() == Some("building 3/9")),
             "{out:?}"
         );
-        assert!(hub.set_preview("t1", Some("building 3/9".into()), 9_000, &no_tools).is_empty());
+        assert!(hub
+            .set_preview("t1", Some("building 3/9".into()), 9_000, &no_tools)
+            .is_empty());
         assert_eq!(hub.next_wakeup(), None);
     }
 
     #[test]
     fn a_vanished_task_is_published_when_its_grace_ends() {
         let mut hub = TaskHub::new();
-        hub.on_event(&started("t1", json!({"task_type": "local_bash", "is_backgrounded": true})), 10_000, &no_tools);
+        hub.on_event(
+            &started(
+                "t1",
+                json!({"task_type": "local_bash", "is_backgrounded": true}),
+            ),
+            10_000,
+            &no_tools,
+        );
         hub.on_event(&in_level(&["t1"]), 10_500, &no_tools);
-        assert!(hub.on_event(&level(json!([])), 20_000, &no_tools).is_empty(), "nothing visible changed yet");
-        assert_eq!(hub.next_wakeup(), Some(23_000), "the timer must wake for the deadline");
+        assert!(
+            hub.on_event(&level(json!([])), 20_000, &no_tools)
+                .is_empty(),
+            "nothing visible changed yet"
+        );
+        assert_eq!(
+            hub.next_wakeup(),
+            Some(23_000),
+            "the timer must wake for the deadline"
+        );
 
         assert!(hub.on_tick(22_999, &no_tools).is_empty());
         let out = hub.on_tick(23_000, &no_tools);
 
-        let [TaskOutput::Snapshot(tasks)] = out.as_slice() else { panic!("{out:?}") };
-        assert_eq!((tasks[0].status, tasks[0].end_reason), (TaskStatus::Stopped, Some(TaskEndReason::Vanished)));
+        let [TaskOutput::Snapshot(tasks)] = out.as_slice() else {
+            panic!("{out:?}")
+        };
+        assert_eq!(
+            (tasks[0].status, tasks[0].end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::Vanished))
+        );
     }
 
     #[test]
@@ -2500,8 +3079,13 @@ mod tests {
 
         let out = hub.end_session(1_010, &no_tools);
 
-        let [TaskOutput::Snapshot(tasks)] = out.as_slice() else { panic!("{out:?}") };
-        assert_eq!((tasks[0].status, tasks[0].end_reason), (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded)));
+        let [TaskOutput::Snapshot(tasks)] = out.as_slice() else {
+            panic!("{out:?}")
+        };
+        assert_eq!(
+            (tasks[0].status, tasks[0].end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded))
+        );
     }
 
     #[test]
@@ -2531,16 +3115,27 @@ mod tests {
     fn the_current_state_is_available_without_disturbing_the_schedule() {
         let mut hub = TaskHub::new();
         hub.on_event(&started("t1", json!({"prompt": "p"})), 1_000, &no_tools);
-        hub.on_event(&progress("t1", json!({"usage": {"total_tokens": 9}})), 1_100, &no_tools); // deferred
+        hub.on_event(
+            &progress("t1", json!({"usage": {"total_tokens": 9}})),
+            1_100,
+            &no_tools,
+        ); // deferred
         let wake = hub.next_wakeup();
 
         let (tasks, details) = hub.current(&no_tools);
 
-        assert_eq!(tasks[0].total_tokens, Some(9), "current includes the unpublished change");
+        assert_eq!(
+            tasks[0].total_tokens,
+            Some(9),
+            "current includes the unpublished change"
+        );
         assert_eq!(details.len(), 1);
         assert_eq!(hub.next_wakeup(), wake);
         let due = hub.on_tick(1_250, &no_tools);
-        assert!(matches!(due.as_slice(), [TaskOutput::Snapshot(s)] if *s == tasks), "{due:?}");
+        assert!(
+            matches!(due.as_slice(), [TaskOutput::Snapshot(s)] if *s == tasks),
+            "{due:?}"
+        );
     }
 
     // ── parsing ─────────────────────────────────────────────────────────────
@@ -2559,18 +3154,32 @@ mod tests {
         assert!(parse_task_event("init", &o(json!({"task_id": "t"}))).is_none());
         assert!(parse_task_event("task_started", &o(json!({"description": "no id"}))).is_none());
         assert!(parse_task_event("task_progress", &o(json!({"task_id": ""}))).is_none());
-        assert!(parse_task_event("task_updated", &o(json!({"task_id": "t", "patch": "done"}))).is_none());
+        assert!(
+            parse_task_event("task_updated", &o(json!({"task_id": "t", "patch": "done"})))
+                .is_none()
+        );
         assert!(parse_task_event("task_updated", &o(json!({"task_id": "t"}))).is_none());
-        assert!(parse_task_event("task_notification", &o(json!({"task_id": "t", "status": "exploded"}))).is_none());
+        assert!(parse_task_event(
+            "task_notification",
+            &o(json!({"task_id": "t", "status": "exploded"}))
+        )
+        .is_none());
         assert!(parse_task_event("task_notification", &o(json!({"task_id": "t"}))).is_none());
         assert!(parse_task_event("background_tasks_changed", &o(json!({"tasks": "t"}))).is_none());
-        assert!(parse_task_event("background_tasks_changed", &o(json!({}))).is_none(), "a level without `tasks` is not an empty level");
+        assert!(
+            parse_task_event("background_tasks_changed", &o(json!({}))).is_none(),
+            "a level without `tasks` is not an empty level"
+        );
     }
 
     #[test]
     fn a_level_skips_entries_it_cannot_use_and_keeps_the_rest() {
-        let e = level(json!([42, null, {"description": "no id"}, {"task_id": "ok1", "task_type": "local_bash", "description": "survivor"}]));
-        let TaskEventKind::LevelChanged(tasks) = e.kind else { panic!() };
+        let e = level(
+            json!([42, null, {"description": "no id"}, {"task_id": "ok1", "task_type": "local_bash", "description": "survivor"}]),
+        );
+        let TaskEventKind::LevelChanged(tasks) = e.kind else {
+            panic!()
+        };
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "ok1");
     }
@@ -2579,11 +3188,17 @@ mod tests {
     fn a_hostile_event_stream_never_panics_the_registry() {
         let mut reg = TaskRegistry::new();
         let events = [
-            progress("t1", json!({"usage": {"total_tokens": u64::MAX, "tool_uses": u64::MAX, "duration_ms": u64::MAX}})),
+            progress(
+                "t1",
+                json!({"usage": {"total_tokens": u64::MAX, "tool_uses": u64::MAX, "duration_ms": u64::MAX}}),
+            ),
             updated("t1", json!({"status": "completed", "end_time": 0})),
             updated("t1", json!({"end_time": u64::MAX})),
             notified("t1", "stopped", json!({"usage": {"duration_ms": u64::MAX}})),
-            started("t2", json!({"description": "\u{1b}[", "task_type": "\u{1b}]0;x"})),
+            started(
+                "t2",
+                json!({"description": "\u{1b}[", "task_type": "\u{1b}]0;x"}),
+            ),
             level(json!([{"task_id": "t2"}, {"task_id": "t2"}])),
             level(json!([])),
         ];
@@ -2613,11 +3228,17 @@ mod tests {
     fn invisible_characters_never_reach_a_task_description_or_a_detail() {
         let reg = registry_with(&[
             (
-                &started("t1", json!({"description": hostile("abcd"), "prompt": hostile("pro")})),
+                &started(
+                    "t1",
+                    json!({"description": hostile("abcd"), "prompt": hostile("pro")}),
+                ),
                 1_000,
             ),
             (&progress("t1", json!({"summary": hostile("sum")})), 2_000),
-            (&notified("t1", "completed", json!({"summary": hostile("done")})), 3_000),
+            (
+                &notified("t1", "completed", json!({"summary": hostile("done")})),
+                3_000,
+            ),
         ]);
 
         let meta = one(&reg, "t1");
@@ -2630,13 +3251,25 @@ mod tests {
     }
 
     #[test]
-    fn invisible_characters_are_dropped_from_a_description_changed_by_progress_updates_and_levels() {
+    fn invisible_characters_are_dropped_from_a_description_changed_by_progress_updates_and_levels()
+    {
         let reg = registry_with(&[
             (&in_level(&["t1"]), 500),
-            (&progress("t1", json!({"description": hostile("live")})), 1_000),
+            (
+                &progress("t1", json!({"description": hostile("live")})),
+                1_000,
+            ),
             (&started("t2", json!({})), 1_000),
-            (&updated("t2", json!({"description": hostile("patched")})), 2_000),
-            (&level(json!([{"task_id": "t3", "task_type": "local_bash", "description": hostile("listed")}])), 3_000),
+            (
+                &updated("t2", json!({"description": hostile("patched")})),
+                2_000,
+            ),
+            (
+                &level(
+                    json!([{"task_id": "t3", "task_type": "local_bash", "description": hostile("listed")}]),
+                ),
+                3_000,
+            ),
         ]);
         assert_eq!(one(&reg, "t1").description, "live");
         assert_eq!(one(&reg, "t2").description, "patched");
@@ -2646,7 +3279,10 @@ mod tests {
     #[test]
     fn text_that_is_only_invisible_characters_leaves_no_detail() {
         let reg = registry_with(&[(
-            &started("t1", json!({"prompt": "\u{202E}\u{200B}\u{E0041}", "task_type": "local_agent"})),
+            &started(
+                "t1",
+                json!({"prompt": "\u{202E}\u{200B}\u{E0041}", "task_type": "local_agent"}),
+            ),
             1_000,
         )]);
         assert_eq!(reg.detail("t1").and_then(|d| d.prompt), None);
@@ -2658,15 +3294,36 @@ mod tests {
     /// Every kind of late news about `id`.
     fn news_about(id: &str) -> Vec<(&'static str, TaskEvent)> {
         vec![
-            ("progress", progress(id, json!({"description": "late", "usage": {"total_tokens": 9}, "summary": "s"}))),
-            ("progress with run", progress(id, json!({"run_id": "run-009", "description": "late"}))),
-            ("non-terminal patch", updated(id, json!({"status": "running", "description": "late"}))),
+            (
+                "progress",
+                progress(
+                    id,
+                    json!({"description": "late", "usage": {"total_tokens": 9}, "summary": "s"}),
+                ),
+            ),
+            (
+                "progress with run",
+                progress(id, json!({"run_id": "run-009", "description": "late"})),
+            ),
+            (
+                "non-terminal patch",
+                updated(id, json!({"status": "running", "description": "late"})),
+            ),
             ("paused patch", updated(id, json!({"status": "paused"}))),
-            ("terminal patch", updated(id, json!({"status": "completed", "end_time": 5_000}))),
+            (
+                "terminal patch",
+                updated(id, json!({"status": "completed", "end_time": 5_000})),
+            ),
             ("killed patch", updated(id, json!({"status": "killed"}))),
-            ("completed notification", notified(id, "completed", json!({"summary": "done"}))),
+            (
+                "completed notification",
+                notified(id, "completed", json!({"summary": "done"})),
+            ),
             ("failed notification", notified(id, "failed", json!({}))),
-            ("stopped notification", notified(id, "stopped", json!({"reason": "worker_restart"}))),
+            (
+                "stopped notification",
+                notified(id, "stopped", json!({"reason": "worker_restart"})),
+            ),
         ]
     }
 
@@ -2675,8 +3332,16 @@ mod tests {
         let mut reg = TaskRegistry::new();
         for i in 0..45u64 {
             let id = format!("e{i:02}");
-            reg.apply(&started(&id, json!({"prompt": format!("p{i}")})), 1_000 + i, &no_tools);
-            reg.apply(&notified(&id, "completed", json!({})), 2_000 + i * 10, &no_tools);
+            reg.apply(
+                &started(&id, json!({"prompt": format!("p{i}")})),
+                1_000 + i,
+                &no_tools,
+            );
+            reg.apply(
+                &notified(&id, "completed", json!({})),
+                2_000 + i * 10,
+                &no_tools,
+            );
         }
         reg.take_dirty();
         reg
@@ -2688,7 +3353,11 @@ mod tests {
         for (label, event) in news_about(id) {
             reg.apply(&event, 90_000, &no_tools);
 
-            assert_eq!(reg.len(), before.len(), "{label} changed the number of tasks");
+            assert_eq!(
+                reg.len(),
+                before.len(),
+                "{label} changed the number of tasks"
+            );
             assert_eq!(snap(reg), before, "{label} changed the snapshot");
             assert_eq!(reg.details(), details_before, "{label} changed the details");
             assert_eq!(reg.detail(id), None, "{label} made a detail for {id}");
@@ -2697,7 +3366,10 @@ mod tests {
             assert!(!reg.tick(1_000_000), "{label} left something to end");
             assert_eq!(reg.next_deadline(), None, "{label}");
         }
-        assert!(!snap(reg).iter().any(|t| t.id == id), "{id} must not have appeared");
+        assert!(
+            !snap(reg).iter().any(|t| t.id == id),
+            "{id} must not have appeared"
+        );
     }
 
     #[test]
@@ -2719,14 +3391,27 @@ mod tests {
     #[test]
     fn news_about_a_task_retention_already_dropped_does_not_bring_it_back() {
         let mut reg = registry_after_retention();
-        assert!(!snap(&reg).iter().any(|t| t.id == "e00"), "e00 is among the oldest ended and gone");
+        assert!(
+            !snap(&reg).iter().any(|t| t.id == "e00"),
+            "e00 is among the oldest ended and gone"
+        );
         assert_eq!(reg.len(), 40);
 
         assert_news_about_changes_nothing(&mut reg, "e00");
 
-        assert_eq!(reg.len(), 40, "nothing was resurrected and nothing else was evicted");
-        assert!(snap(&reg).iter().any(|t| t.id == "e44"), "the newest ended task is still there");
-        assert!(snap(&reg).iter().any(|t| t.id == "e05"), "the oldest kept ended task is still there");
+        assert_eq!(
+            reg.len(),
+            40,
+            "nothing was resurrected and nothing else was evicted"
+        );
+        assert!(
+            snap(&reg).iter().any(|t| t.id == "e44"),
+            "the newest ended task is still there"
+        );
+        assert!(
+            snap(&reg).iter().any(|t| t.id == "e05"),
+            "the oldest kept ended task is still there"
+        );
     }
 
     #[test]
@@ -2747,11 +3432,21 @@ mod tests {
         reg.apply(&in_level(&["t1"]), 1_000, &no_tools);
         assert_eq!(reg.len(), 1);
 
-        reg.apply(&progress("t1", json!({"description": "now known", "usage": {"total_tokens": 4}})), 2_000, &no_tools);
+        reg.apply(
+            &progress(
+                "t1",
+                json!({"description": "now known", "usage": {"total_tokens": 4}}),
+            ),
+            2_000,
+            &no_tools,
+        );
         reg.apply(&notified("t1", "completed", json!({})), 3_000, &no_tools);
 
         let t = one(&reg, "t1");
-        assert_eq!((t.description.as_str(), t.total_tokens, t.status), ("now known", Some(4), TaskStatus::Completed));
+        assert_eq!(
+            (t.description.as_str(), t.total_tokens, t.status),
+            ("now known", Some(4), TaskStatus::Completed)
+        );
     }
 
     // ── the running cap ─────────────────────────────────────────────────────
@@ -2785,8 +3480,12 @@ mod tests {
         assert_eq!(hub.registry().dropped_tasks(), 4_800);
         let (tasks, _) = hub.current(&no_tools);
         let ids: Vec<String> = tasks.into_iter().map(|t| t.id).collect();
-        let first_two_hundred: Vec<String> = (0..MAX_RUNNING_TASKS as u64).map(running_id).collect();
-        assert_eq!(ids, first_two_hundred, "the earliest are kept, in order, none swapped for a later one");
+        let first_two_hundred: Vec<String> =
+            (0..MAX_RUNNING_TASKS as u64).map(running_id).collect();
+        assert_eq!(
+            ids, first_two_hundred,
+            "the earliest are kept, in order, none swapped for a later one"
+        );
     }
 
     #[test]
@@ -2799,7 +3498,10 @@ mod tests {
         let builds = hub.registry().snapshot_builds();
 
         let allowed = 5_000 / COALESCE_MS + 2;
-        assert!(builds <= allowed, "{builds} snapshots built for 5 s of events (allowed {allowed})");
+        assert!(
+            builds <= allowed,
+            "{builds} snapshots built for 5 s of events (allowed {allowed})"
+        );
     }
 
     #[test]
@@ -2807,12 +3509,19 @@ mod tests {
         let mut hub = TaskHub::new();
         // 5,000 events, all within 100 ms of injected time.
         for i in 0..5_000u64 {
-            hub.on_event(&started(&running_id(i), json!({})), 1_000 + i / 50, &no_tools);
+            hub.on_event(
+                &started(&running_id(i), json!({})),
+                1_000 + i / 50,
+                &no_tools,
+            );
         }
 
         let builds = hub.registry().snapshot_builds();
 
-        assert!(builds <= 2, "{builds} snapshots built inside one 100 ms window");
+        assert!(
+            builds <= 2,
+            "{builds} snapshots built inside one 100 ms window"
+        );
         assert_eq!(hub.registry().len(), MAX_RUNNING_TASKS);
     }
 
@@ -2822,11 +3531,19 @@ mod tests {
         let before = snap(&reg);
         let details_before = reg.details();
 
-        reg.apply(&started("one-too-many", json!({"prompt": "p", "description": "x"})), 9_000, &no_tools);
+        reg.apply(
+            &started("one-too-many", json!({"prompt": "p", "description": "x"})),
+            9_000,
+            &no_tools,
+        );
 
         assert_eq!(reg.len(), MAX_RUNNING_TASKS);
         assert_eq!(reg.dropped_tasks(), 1);
-        assert_eq!(snap(&reg), before, "nothing existing was evicted or changed");
+        assert_eq!(
+            snap(&reg),
+            before,
+            "nothing existing was evicted or changed"
+        );
         assert_eq!(reg.details(), details_before);
         assert_eq!(reg.detail("one-too-many"), None);
         assert!(!reg.is_dirty());
@@ -2886,11 +3603,23 @@ mod tests {
         reg.apply(&started("refused", json!({})), 5_000, &no_tools);
         assert_eq!(reg.dropped_tasks(), 1);
 
-        reg.apply(&notified(&running_id(7), "completed", json!({})), 6_000, &no_tools);
-        reg.apply(&started("welcome", json!({"description": "fits now"})), 7_000, &no_tools);
+        reg.apply(
+            &notified(&running_id(7), "completed", json!({})),
+            6_000,
+            &no_tools,
+        );
+        reg.apply(
+            &started("welcome", json!({"description": "fits now"})),
+            7_000,
+            &no_tools,
+        );
 
         assert_eq!(one(&reg, "welcome").description, "fits now");
-        assert_eq!(one(&reg, &running_id(7)).status, TaskStatus::Completed, "the ended task is kept as ever");
+        assert_eq!(
+            one(&reg, &running_id(7)).status,
+            TaskStatus::Completed,
+            "the ended task is kept as ever"
+        );
         assert_eq!(reg.dropped_tasks(), 1);
         assert!(!snap(&reg).iter().any(|t| t.id == "refused"));
 
@@ -2902,7 +3631,14 @@ mod tests {
     #[test]
     fn a_task_that_vanishes_makes_room_too() {
         let mut reg = TaskRegistry::new();
-        reg.apply(&started("bg", json!({"task_type": "local_bash", "is_backgrounded": true})), 1_000, &no_tools);
+        reg.apply(
+            &started(
+                "bg",
+                json!({"task_type": "local_bash", "is_backgrounded": true}),
+            ),
+            1_000,
+            &no_tools,
+        );
         reg.apply(&in_level(&["bg"]), 1_100, &no_tools);
         for i in 0..MAX_RUNNING_TASKS as u64 - 1 {
             reg.apply(&started(&running_id(i), json!({})), 2_000 + i, &no_tools);
@@ -2922,10 +3658,32 @@ mod tests {
         let mut reg = registry_at_the_cap();
         let known = running_id(3);
 
-        reg.apply(&progress(&known, json!({"description": "still going", "usage": {"total_tokens": 8}})), 5_000, &no_tools);
-        reg.apply(&updated(&known, json!({"is_backgrounded": true})), 5_100, &no_tools);
-        reg.apply(&started(&known, json!({"run_id": "run-2", "description": "second run"})), 5_200, &no_tools);
-        reg.apply(&notified(&running_id(4), "failed", json!({"summary": "boom"})), 5_300, &no_tools);
+        reg.apply(
+            &progress(
+                &known,
+                json!({"description": "still going", "usage": {"total_tokens": 8}}),
+            ),
+            5_000,
+            &no_tools,
+        );
+        reg.apply(
+            &updated(&known, json!({"is_backgrounded": true})),
+            5_100,
+            &no_tools,
+        );
+        reg.apply(
+            &started(
+                &known,
+                json!({"run_id": "run-2", "description": "second run"}),
+            ),
+            5_200,
+            &no_tools,
+        );
+        reg.apply(
+            &notified(&running_id(4), "failed", json!({"summary": "boom"})),
+            5_300,
+            &no_tools,
+        );
         let ids: Vec<String> = (0..MAX_RUNNING_TASKS as u64).map(running_id).collect();
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         reg.apply(&in_level(&refs), 5_400, &no_tools);
@@ -2968,7 +3726,8 @@ mod tests {
     // ── work is bounded by the window, not by the event count ───────────────
 
     #[test]
-    fn a_thousand_progress_events_in_one_window_build_at_most_two_snapshots_and_the_last_is_current() {
+    fn a_thousand_progress_events_in_one_window_build_at_most_two_snapshots_and_the_last_is_current(
+    ) {
         let mut hub = TaskHub::new();
         let mut out = Vec::new();
         out.extend(hub.on_event(&started("agt", json!({})), 1_000, &no_tools));
@@ -2985,7 +3744,10 @@ mod tests {
 
         let builds = hub.registry().snapshot_builds() - builds_before;
 
-        assert!(builds <= 2, "{builds} snapshots built for 1,000 events in one window");
+        assert!(
+            builds <= 2,
+            "{builds} snapshots built for 1,000 events in one window"
+        );
         let last = out
             .iter()
             .rev()
@@ -2994,7 +3756,11 @@ mod tests {
                 TaskOutput::Detail(_) => None,
             })
             .expect("a snapshot was published");
-        assert_eq!(last[0].total_tokens, Some(1_000), "the final publication is current");
+        assert_eq!(
+            last[0].total_tokens,
+            Some(1_000),
+            "the final publication is current"
+        );
         assert_eq!(hub.next_wakeup(), None);
     }
 
@@ -3011,13 +3777,22 @@ mod tests {
         }
 
         assert_eq!(hub.next_wakeup(), None);
-        assert!(hub.registry().snapshot_builds() - before <= 1, "an unchanged task is not re-published");
+        assert!(
+            hub.registry().snapshot_builds() - before <= 1,
+            "an unchanged task is not re-published"
+        );
     }
 
     // ── stopping a task (BA1) ───────────────────────────────────────────────
 
     fn running_shell(id: &str) -> TaskRegistry {
-        registry_with(&[(&started(id, json!({"task_type": "local_bash", "description": "build watcher"})), 1_000)])
+        registry_with(&[(
+            &started(
+                id,
+                json!({"task_type": "local_bash", "description": "build watcher"}),
+            ),
+            1_000,
+        )])
     }
 
     #[test]
@@ -3035,23 +3810,45 @@ mod tests {
             assert_eq!(reg.begin_stop("t1", &no_tools), None, "a {status} task");
         }
         let mut killed = running_shell("t1");
-        killed.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        killed.apply(
+            &updated("t1", json!({"status": "killed"})),
+            2_000,
+            &no_tools,
+        );
         assert_eq!(killed.begin_stop("t1", &no_tools), None, "a killed task");
     }
 
     #[test]
     fn a_stop_for_a_running_task_says_what_it_is_for_the_audit_line() {
         let mut reg = registry_with(&[
-            (&started("t1", json!({"task_type": "local_bash", "description": "build watcher"})), 1_000),
-            (&started("a1", json!({"task_type": "local_agent", "description": "review the diff"})), 1_000),
+            (
+                &started(
+                    "t1",
+                    json!({"task_type": "local_bash", "description": "build watcher"}),
+                ),
+                1_000,
+            ),
+            (
+                &started(
+                    "a1",
+                    json!({"task_type": "local_agent", "description": "review the diff"}),
+                ),
+                1_000,
+            ),
         ]);
         assert_eq!(
             reg.begin_stop("t1", &no_tools),
-            Some(TaskLabel { kind: TaskKind::Shell, description: "build watcher".into() })
+            Some(TaskLabel {
+                kind: TaskKind::Shell,
+                description: "build watcher".into()
+            })
         );
         assert_eq!(
             reg.begin_stop("a1", &no_tools),
-            Some(TaskLabel { kind: TaskKind::Agent, description: "review the diff".into() })
+            Some(TaskLabel {
+                kind: TaskKind::Agent,
+                description: "review the diff".into()
+            })
         );
     }
 
@@ -3060,8 +3857,18 @@ mod tests {
         let tools = Tools::default();
         tools.learn("toolu_m", "Monitor");
         let mut reg = TaskRegistry::new();
-        reg.apply(&started("m1", json!({"task_type": "local_bash", "tool_use_id": "toolu_m"})), 1_000, &tools.lookup());
-        assert_eq!(reg.begin_stop("m1", &tools.lookup()).map(|l| l.kind), Some(TaskKind::Monitor));
+        reg.apply(
+            &started(
+                "m1",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_m"}),
+            ),
+            1_000,
+            &tools.lookup(),
+        );
+        assert_eq!(
+            reg.begin_stop("m1", &tools.lookup()).map(|l| l.kind),
+            Some(TaskKind::Monitor)
+        );
     }
 
     #[test]
@@ -3072,8 +3879,15 @@ mod tests {
 
         reg.begin_stop("t1", &no_tools);
 
-        assert_eq!(snap(&reg), before, "no status, reason or time changes on the ask");
-        assert!(reg.take_dirty().is_clean(), "nothing is queued for publication");
+        assert_eq!(
+            snap(&reg),
+            before,
+            "no status, reason or time changes on the ask"
+        );
+        assert!(
+            reg.take_dirty().is_clean(),
+            "nothing is queued for publication"
+        );
         assert_eq!(one(&reg, "t1").status, TaskStatus::Running);
 
         reg.cancel_stop("t1");
@@ -3084,7 +3898,11 @@ mod tests {
     #[test]
     fn a_hub_asked_to_begin_a_stop_publishes_nothing() {
         let mut hub = TaskHub::new();
-        hub.on_event(&started("t1", json!({"task_type": "local_bash"})), 1_000, &no_tools);
+        hub.on_event(
+            &started("t1", json!({"task_type": "local_bash"})),
+            1_000,
+            &no_tools,
+        );
         assert!(hub.begin_stop("t1", &no_tools).is_some());
         assert!(hub.on_tick(5_000, &no_tools).is_empty());
         hub.cancel_stop("t1");
@@ -3096,21 +3914,32 @@ mod tests {
     fn a_task_that_ends_stopped_after_an_accepted_stop_ends_with_the_user_stop_reason() {
         let ends: [(&str, TaskEvent); 2] = [
             ("a killed patch", updated("t1", json!({"status": "killed"}))),
-            ("a stopped notification", notified("t1", "stopped", json!({}))),
+            (
+                "a stopped notification",
+                notified("t1", "stopped", json!({})),
+            ),
         ];
         for (what, end) in ends {
             let mut reg = running_shell("t1");
             reg.begin_stop("t1", &no_tools);
             reg.apply(&end, 2_000, &no_tools);
             let t = one(&reg, "t1");
-            assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::UserStop)), "{what}");
+            assert_eq!(
+                (t.status, t.end_reason),
+                (TaskStatus::Stopped, Some(TaskEndReason::UserStop)),
+                "{what}"
+            );
         }
     }
 
     #[test]
     fn the_same_ends_without_a_stop_for_the_task_have_no_reason() {
         let mut reg = running_shell("t1");
-        reg.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        reg.apply(
+            &updated("t1", json!({"status": "killed"})),
+            2_000,
+            &no_tools,
+        );
         assert_eq!(one(&reg, "t1").end_reason, None);
 
         let mut other = registry_with(&[
@@ -3118,8 +3947,16 @@ mod tests {
             (&started("t2", json!({"task_type": "local_bash"})), 1_000),
         ]);
         other.begin_stop("t2", &no_tools);
-        other.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
-        assert_eq!(one(&other, "t1").end_reason, None, "a stop of another task explains nothing here");
+        other.apply(
+            &updated("t1", json!({"status": "killed"})),
+            2_000,
+            &no_tools,
+        );
+        assert_eq!(
+            one(&other, "t1").end_reason,
+            None,
+            "a stop of another task explains nothing here"
+        );
     }
 
     #[test]
@@ -3131,7 +3968,10 @@ mod tests {
         assert!(reg.tick(23_000));
 
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::UserStop)));
+        assert_eq!(
+            (t.status, t.end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::UserStop))
+        );
     }
 
     #[test]
@@ -3147,15 +3987,33 @@ mod tests {
         // Notification first, and the killed patch first: either order says restart.
         let mut notified_first = running_shell("t1");
         notified_first.begin_stop("t1", &no_tools);
-        notified_first.apply(&notified("t1", "stopped", json!({"reason": "worker_restart"})), 2_000, &no_tools);
-        assert_eq!(one(&notified_first, "t1").end_reason, Some(TaskEndReason::Restart));
+        notified_first.apply(
+            &notified("t1", "stopped", json!({"reason": "worker_restart"})),
+            2_000,
+            &no_tools,
+        );
+        assert_eq!(
+            one(&notified_first, "t1").end_reason,
+            Some(TaskEndReason::Restart)
+        );
 
         let mut killed_first = running_shell("t1");
         killed_first.begin_stop("t1", &no_tools);
-        killed_first.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
-        killed_first.apply(&notified("t1", "stopped", json!({"reason": "worker_restart"})), 2_100, &no_tools);
+        killed_first.apply(
+            &updated("t1", json!({"status": "killed"})),
+            2_000,
+            &no_tools,
+        );
+        killed_first.apply(
+            &notified("t1", "stopped", json!({"reason": "worker_restart"})),
+            2_100,
+            &no_tools,
+        );
         let t = one(&killed_first, "t1");
-        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::Restart)));
+        assert_eq!(
+            (t.status, t.end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::Restart))
+        );
     }
 
     #[test]
@@ -3163,7 +4021,10 @@ mod tests {
         let mut reg = running_shell("t1");
         reg.begin_stop("t1", &no_tools);
         reg.end_session(5_000);
-        assert_eq!(one(&reg, "t1").end_reason, Some(TaskEndReason::SessionEnded));
+        assert_eq!(
+            one(&reg, "t1").end_reason,
+            Some(TaskEndReason::SessionEnded)
+        );
     }
 
     #[test]
@@ -3178,7 +4039,11 @@ mod tests {
         }
         let mut patched = running_shell("t1");
         patched.begin_stop("t1", &no_tools);
-        patched.apply(&updated("t1", json!({"status": "completed"})), 2_000, &no_tools);
+        patched.apply(
+            &updated("t1", json!({"status": "completed"})),
+            2_000,
+            &no_tools,
+        );
         assert_eq!(one(&patched, "t1").end_reason, None);
     }
 
@@ -3187,7 +4052,11 @@ mod tests {
         let mut reg = running_shell("t1");
         reg.begin_stop("t1", &no_tools);
         reg.cancel_stop("t1");
-        reg.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        reg.apply(
+            &updated("t1", json!({"status": "killed"})),
+            2_000,
+            &no_tools,
+        );
         assert_eq!(one(&reg, "t1").end_reason, None);
     }
 
@@ -3202,15 +4071,31 @@ mod tests {
     fn a_new_run_of_the_task_does_not_inherit_the_stop_of_the_earlier_run() {
         let mut reg = registry_with(&[(&started("t1", json!({"run_id": "run-001"})), 1_000)]);
         reg.begin_stop("t1", &no_tools);
-        reg.apply(&notified("t1", "stopped", json!({"run_id": "run-001"})), 2_000, &no_tools);
+        reg.apply(
+            &notified("t1", "stopped", json!({"run_id": "run-001"})),
+            2_000,
+            &no_tools,
+        );
         assert_eq!(one(&reg, "t1").end_reason, Some(TaskEndReason::UserStop));
 
-        reg.apply(&started("t1", json!({"run_id": "run-002"})), 3_000, &no_tools);
+        reg.apply(
+            &started("t1", json!({"run_id": "run-002"})),
+            3_000,
+            &no_tools,
+        );
         assert_eq!(one(&reg, "t1").status, TaskStatus::Running);
-        reg.apply(&updated_run("t1", "run-002", json!({"status": "killed"})), 4_000, &no_tools);
+        reg.apply(
+            &updated_run("t1", "run-002", json!({"status": "killed"})),
+            4_000,
+            &no_tools,
+        );
 
         let t = one(&reg, "t1");
-        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, None), "nobody asked to stop the second run");
+        assert_eq!(
+            (t.status, t.end_reason),
+            (TaskStatus::Stopped, None),
+            "nobody asked to stop the second run"
+        );
     }
 
     // ── has_stoppable_task ───────────────────────────────────────────────────
@@ -3222,7 +4107,13 @@ mod tests {
 
     #[test]
     fn a_running_task_that_is_not_housekeeping_is_stoppable_whatever_its_kind() {
-        for task_type in ["local_bash", "local_agent", "local_workflow", "monitor_mcp", "weird"] {
+        for task_type in [
+            "local_bash",
+            "local_agent",
+            "local_workflow",
+            "monitor_mcp",
+            "weird",
+        ] {
             let reg = registry_with(&[(&started("t1", json!({"task_type": task_type})), 1_000)]);
             assert!(reg.has_stoppable_task(), "{task_type}");
         }
@@ -3247,7 +4138,10 @@ mod tests {
         }
         let mut mixed = registry_with(&[(&started("hk", json!({"ambient": true})), 1_000)]);
         mixed.apply(&started("real", json!({})), 1_100, &no_tools);
-        assert!(mixed.has_stoppable_task(), "one real task makes the session stoppable");
+        assert!(
+            mixed.has_stoppable_task(),
+            "one real task makes the session stoppable"
+        );
     }
 
     #[test]
@@ -3272,16 +4166,30 @@ mod tests {
     #[test]
     fn the_output_target_names_the_kind_and_where_the_output_may_be() {
         let mut reg = registry_with(&[(
-            &started("t1", json!({"task_type": "local_bash", "tool_use_id": "toolu_1", "description": "d"})),
+            &started(
+                "t1",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_1", "description": "d"}),
+            ),
             1_000,
         )]);
         let (kind, target) = reg.output_target("t1", &no_tools).expect("a retained task");
         assert_eq!(kind, TaskKind::Shell);
-        assert_eq!((target.task_id.as_str(), target.terminal, target.housekeeping), ("t1", false, false));
+        assert_eq!(
+            (
+                target.task_id.as_str(),
+                target.terminal,
+                target.housekeeping
+            ),
+            ("t1", false, false)
+        );
         assert_eq!(target.output_file, None);
         assert_eq!(target.tool_use_id.as_deref(), Some("toolu_1"));
 
-        reg.apply(&notified("t1", "completed", json!({"output_file": "/x/y/t1.output"})), 2_000, &no_tools);
+        reg.apply(
+            &notified("t1", "completed", json!({"output_file": "/x/y/t1.output"})),
+            2_000,
+            &no_tools,
+        );
         let (_, ended) = reg.output_target("t1", &no_tools).unwrap();
         assert!(ended.terminal);
         assert_eq!(ended.output_file.as_deref(), Some("/x/y/t1.output"));
@@ -3291,9 +4199,15 @@ mod tests {
     fn the_output_target_of_an_agent_or_a_housekeeping_task_is_still_reported_with_its_kind() {
         let reg = registry_with(&[
             (&started("a1", json!({"task_type": "local_agent"})), 1_000),
-            (&started("hk", json!({"task_type": "monitor_ws", "ambient": true})), 1_000),
+            (
+                &started("hk", json!({"task_type": "monitor_ws", "ambient": true})),
+                1_000,
+            ),
         ]);
-        assert_eq!(reg.output_target("a1", &no_tools).map(|(k, _)| k), Some(TaskKind::Agent));
+        assert_eq!(
+            reg.output_target("a1", &no_tools).map(|(k, _)| k),
+            Some(TaskKind::Agent)
+        );
         let (kind, hk) = reg.output_target("hk", &no_tools).unwrap();
         assert_eq!(kind, TaskKind::Monitor);
         assert!(hk.housekeeping);

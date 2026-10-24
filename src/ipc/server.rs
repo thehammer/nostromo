@@ -32,13 +32,16 @@ use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
     peer::{
-        outbound, refuse_for_network, withheld_msg, within_work_send, PeerTrust,
-        SensitiveTags, Transport,
+        outbound, refuse_for_network, withheld_msg, within_work_send, PeerTrust, SensitiveTags,
+        Transport,
     },
-    peer_verify::{classify_peer, claim_diagnostic, still_same_operator, PeerInfo, PeerVerifier, MAC_APP_CLIENT_KIND},
+    peer_verify::{
+        claim_diagnostic, classify_peer, still_same_operator, PeerInfo, PeerVerifier,
+        MAC_APP_CLIENT_KIND,
+    },
     protocol::{
-        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg, SessionAction, Topic,
-        FEATURE_LOGIN, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
+        SessionAction, Topic, FEATURE_LOGIN, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -49,7 +52,8 @@ use crate::data::work::{
 };
 
 /// The answer to every retired `ClientMsg::Pty*` verb.
-const PTY_HOST_REMOVED: &str = "pty_host_removed: the daemon no longer hosts PTYs (the Rust TUI was removed)";
+const PTY_HOST_REMOVED: &str =
+    "pty_host_removed: the daemon no longer hosts PTYs (the Rust TUI was removed)";
 
 /// The refusal a `DecisionAnswer` from anyone but the verified Mac app gets.
 const NOT_OPERATOR_APP: &str = "not_operator_app: only the verified Nostromo app may answer";
@@ -76,7 +80,8 @@ const NOT_OPERATOR_APP_LOGIN: &str =
     "not_operator_app: only the verified Nostromo app may resend or discard a held message";
 
 /// What `SessionAnswerPermission` is answered with, from every peer.
-const ANSWER_PERMISSION_SUPERSEDED: &str = "session_answer_permission is superseded by approval_answer";
+const ANSWER_PERMISSION_SUPERSEDED: &str =
+    "session_answer_permission is superseded by approval_answer";
 
 /// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
 /// local client that subscribes after the frame was sent.
@@ -87,10 +92,12 @@ type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
 type HeldMotherJobs = Arc<Mutex<HashSet<String>>>;
 
 /// What a client is told when it sends a `PerriAction` while Perri is switched off.
-const PERRI_DISABLED: &str = "Perri is disabled in this daemon's config ([agents.perri] enabled = false).";
+const PERRI_DISABLED: &str =
+    "Perri is disabled in this daemon's config ([agents.perri] enabled = false).";
 
 /// What a local peer that is not the operator's app is told when it tries to answer a held job.
-const MOTHER_HOLD_NEEDS_OPERATOR: &str = "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
+const MOTHER_HOLD_NEEDS_OPERATOR: &str =
+    "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
 
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
@@ -163,15 +170,33 @@ impl Server {
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
         let (republish, _) = tokio::sync::watch::channel(0u64);
-        tokio::spawn(retain_broadcasts(tx.subscribe(), Arc::clone(&retained), republish.clone()));
+        tokio::spawn(retain_broadcasts(
+            tx.subscribe(),
+            Arc::clone(&retained),
+            republish.clone(),
+        ));
         let held_mother_jobs: HeldMotherJobs = Arc::new(Mutex::new(HashSet::new()));
-        tokio::spawn(track_held_mother_jobs(tx.subscribe(), Arc::clone(&held_mother_jobs)));
+        tokio::spawn(track_held_mother_jobs(
+            tx.subscribe(),
+            Arc::clone(&held_mother_jobs),
+        ));
 
         let retained_for_loop = Arc::clone(&retained);
         let held_for_loop = Arc::clone(&held_mother_jobs);
         let unix_peers = UnixPeers { verifier, qa_mode };
         tokio::spawn(async move {
-            if let Err(e) = accept_loop(listener, unix_peers, tx_clone, session_mgr, perri_state_dir, decisions, retained_for_loop, held_for_loop).await {
+            if let Err(e) = accept_loop(
+                listener,
+                unix_peers,
+                tx_clone,
+                session_mgr,
+                perri_state_dir,
+                decisions,
+                retained_for_loop,
+                held_for_loop,
+            )
+            .await
+            {
                 warn!("IPC accept loop exited: {e:#}");
             }
         });
@@ -218,7 +243,17 @@ impl Server {
         let retained = Arc::clone(&self.retained);
         let held = Arc::clone(&self.held_mother_jobs);
         tokio::spawn(async move {
-            if let Err(e) = accept_loop_tcp(listener, tx, session_mgr, perri_state_dir, decisions, retained, held).await {
+            if let Err(e) = accept_loop_tcp(
+                listener,
+                tx,
+                session_mgr,
+                perri_state_dir,
+                decisions,
+                retained,
+                held,
+            )
+            .await
+            {
                 warn!("TCP IPC accept loop exited: {e:#}");
             }
         });
@@ -264,10 +299,19 @@ impl PeerOrigin {
     /// only when the `Hello` claims to be the Mac app.
     async fn resolve(&mut self, client_kind: Option<&str>) -> PeerTrust {
         match self {
-            PeerOrigin::Unix { verifier, fd, qa_mode, info } => {
+            PeerOrigin::Unix {
+                verifier,
+                fd,
+                qa_mode,
+                info,
+            } => {
                 let verify_code = client_kind == Some(MAC_APP_CLIENT_KIND);
                 let (verifier, peer_fd) = (Arc::clone(verifier), Arc::clone(fd));
-                *info = match tokio::task::spawn_blocking(move || verifier.inspect(peer_fd.as_fd(), verify_code)).await {
+                *info = match tokio::task::spawn_blocking(move || {
+                    verifier.inspect(peer_fd.as_fd(), verify_code)
+                })
+                .await
+                {
                     Ok(resolved) => resolved,
                     Err(e) => {
                         warn!("peer lookup failed: {e}");
@@ -291,18 +335,27 @@ impl PeerOrigin {
     /// check it is still the very process verified at `Hello`
     /// ([`still_same_operator`]). `Err` names what failed; any failure refuses.
     async fn still_the_operator(&self) -> Result<(), String> {
-        let PeerOrigin::Unix { verifier, fd, info: Some(accepted), .. } = self else {
+        let PeerOrigin::Unix {
+            verifier,
+            fd,
+            info: Some(accepted),
+            ..
+        } = self
+        else {
             return Err("DecisionAnswer refused: no verified peer to re-check".to_string());
         };
         let (verifier, peer_fd, was) = (Arc::clone(verifier), Arc::clone(fd), accepted.clone());
         let now = tokio::task::spawn_blocking(move || verifier.reinspect(peer_fd.as_fd(), &was))
             .await
-            .map_err(|e| format!("DecisionAnswer refused: answer-time re-inspection failed: {e}"))?;
+            .map_err(|e| {
+                format!("DecisionAnswer refused: answer-time re-inspection failed: {e}")
+            })?;
         if still_same_operator(accepted, now.as_ref()) {
             return Ok(());
         }
         Err(match now {
-            None => "DecisionAnswer refused: answer-time re-inspection could not identify the peer".to_string(),
+            None => "DecisionAnswer refused: answer-time re-inspection could not identify the peer"
+                .to_string(),
             Some(now) => format!(
                 "DecisionAnswer refused: the peer is no longer the process verified at Hello \
                  (pid {} -> {}, pidversion {} -> {}, code {:?})",
@@ -378,8 +431,25 @@ async fn accept_loop(
                             return;
                         }
                     };
-                    let origin = PeerOrigin::Unix { verifier: peers.verifier, fd, qa_mode: peers.qa_mode, info: None };
-                    if let Err(e) = handle_client(stream, origin, rx, broadcast_tx, session_mgr, psd, decisions, retained, held).await {
+                    let origin = PeerOrigin::Unix {
+                        verifier: peers.verifier,
+                        fd,
+                        qa_mode: peers.qa_mode,
+                        info: None,
+                    };
+                    if let Err(e) = handle_client(
+                        stream,
+                        origin,
+                        rx,
+                        broadcast_tx,
+                        session_mgr,
+                        psd,
+                        decisions,
+                        retained,
+                        held,
+                    )
+                    .await
+                    {
                         debug!("client disconnected: {e:#}");
                     }
                 });
@@ -412,7 +482,19 @@ async fn accept_loop_tcp(
                 let retained = Arc::clone(&retained);
                 let held = Arc::clone(&held_mother_jobs);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, PeerOrigin::Tcp, rx, broadcast_tx, session_mgr, psd, decisions, retained, held).await {
+                    if let Err(e) = handle_client(
+                        stream,
+                        PeerOrigin::Tcp,
+                        rx,
+                        broadcast_tx,
+                        session_mgr,
+                        psd,
+                        decisions,
+                        retained,
+                        held,
+                    )
+                    .await
+                    {
                         debug!(%addr, "TCP client disconnected: {e:#}");
                     }
                 });
@@ -442,6 +524,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         ],
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
+        disabled_agents: Some(mgr.enabled_agents().disabled_names()),
     }
 }
 
@@ -499,7 +582,11 @@ where
                     "client version {protocol_version} too old (need {MIN_CLIENT_VERSION}+)"
                 );
             }
-            (client_id.clone(), Uuid::new_v4().to_string(), client_kind.clone())
+            (
+                client_id.clone(),
+                Uuid::new_v4().to_string(),
+                client_kind.clone(),
+            )
         }
         _ => {
             let kind = frame_type(&hello_bytes);
@@ -523,11 +610,25 @@ where
     let peer_pid = origin.info().map(|i| i.pid);
     let peer_exe = origin.info().map(|i| i.exe.display().to_string());
     if trust == PeerTrust::OperatorApp {
-        info!(claimed_id, conn_key, ?trust, peer_pid, peer_exe, "operator app welcomed");
+        info!(
+            claimed_id,
+            conn_key,
+            ?trust,
+            peer_pid,
+            peer_exe,
+            "operator app welcomed"
+        );
     } else if let Some(note) = claim_diagnostic(origin.info(), client_kind.as_deref(), trust) {
         warn!(claimed_id, conn_key, ?trust, peer_pid, peer_exe, "{note}");
     } else {
-        debug!(claimed_id, conn_key, ?trust, peer_pid, peer_exe, "client welcomed");
+        debug!(
+            claimed_id,
+            conn_key,
+            ?trust,
+            peer_pid,
+            peer_exe,
+            "client welcomed"
+        );
     }
 
     // ── Subscribe ─────────────────────────────────────────────────────────────
@@ -536,9 +637,11 @@ where
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
     let (mut topics, renders_decisions, renders_approvals): (Vec<Topic>, bool, bool) = match sub {
-        ClientMsg::Subscribe { topics, renders_decisions, renders_approvals } => {
-            (topics, renders_decisions, renders_approvals)
-        }
+        ClientMsg::Subscribe {
+            topics,
+            renders_decisions,
+            renders_approvals,
+        } => (topics, renders_decisions, renders_approvals),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
             (vec![], false, false)
@@ -549,7 +652,13 @@ where
         }
     };
 
-    info!(claimed_id, conn_key, ?topics, renders_decisions, "client subscribed");
+    info!(
+        claimed_id,
+        conn_key,
+        ?topics,
+        renders_decisions,
+        "client subscribed"
+    );
 
     // ── Decision-modal operator accounting (W6) ───────────────────────────────
     // An empty `topics` list still means "deliver everything" for routing (see
@@ -587,7 +696,9 @@ where
     if can_answer && renders_approvals {
         if let Some(broker) = &broker {
             presents_approvals = true;
-            approvals_replay.push(ServerMsg::ApprovalsSnapshot { requests: broker.presenter_connected(&conn_key) });
+            approvals_replay.push(ServerMsg::ApprovalsSnapshot {
+                requests: broker.presenter_connected(&conn_key),
+            });
         }
     }
 
@@ -633,7 +744,8 @@ where
         let mut snapshots: Vec<ServerMsg> = {
             let mgr = session_mgr.lock().unwrap();
             if let Some(reg) = mgr.pane_registry() {
-                reg.lock().unwrap()
+                reg.lock()
+                    .unwrap()
                     .all_layouts()
                     .into_iter()
                     .map(|(tag, tree, focused)| ServerMsg::FocusLayout {
@@ -671,7 +783,9 @@ where
         // `peer.rs`.)
         replay_messages(
             &mut writer,
-            snapshots.into_iter().filter_map(|m| outbound(trust, m, &sensitive)),
+            snapshots
+                .into_iter()
+                .filter_map(|m| outbound(trust, m, &sensitive)),
         )
         .await;
     }
@@ -746,9 +860,16 @@ where
             let tags: Vec<String> = mgr.focus_registry().into_iter().map(|f| f.tag).collect();
             (mgr.perri_state_provider(), tags)
         };
-        let frames = provider.map(|p| p.perri_states(&focus_tags)).unwrap_or_default();
-        replay_messages(&mut writer, frames.into_iter().filter_map(|m| outbound(trust, m, &sensitive)))
-            .await;
+        let frames = provider
+            .map(|p| p.perri_states(&focus_tags))
+            .unwrap_or_default();
+        replay_messages(
+            &mut writer,
+            frames
+                .into_iter()
+                .filter_map(|m| outbound(trust, m, &sensitive)),
+        )
+        .await;
     }
 
     // ── Retained replay — latest Teri/Fred/work frames, local clients only ────
@@ -765,8 +886,13 @@ where
     // the same filter as that focus's transcript.
     if wants_model(&topics) {
         let frames = model_replay(&session_mgr);
-        replay_messages(&mut writer, frames.into_iter().filter_map(|m| outbound(trust, m, &sensitive)))
-            .await;
+        replay_messages(
+            &mut writer,
+            frames
+                .into_iter()
+                .filter_map(|m| outbound(trust, m, &sensitive)),
+        )
+        .await;
     }
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
@@ -920,8 +1046,7 @@ where
     reader_task.abort();
     debug!(
         claimed_id,
-        conn_key,
-        "client handler exiting; detaching sessions"
+        conn_key, "client handler exiting; detaching sessions"
     );
     {
         let mut mgr = session_mgr.lock().unwrap();
@@ -960,7 +1085,10 @@ where
 /// invisible characters, and bounded.
 fn log_safe(s: &str) -> String {
     let clean = crate::approvals::audit::sanitize_string(s);
-    let mut out: String = clean.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let mut out: String = clean
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     if out.len() > 256 {
         let mut cut = 256;
         while !out.is_char_boundary(cut) {
@@ -988,7 +1116,12 @@ where
     W: AsyncWrite + Unpin,
 {
     if bytes.len() > MAX_FRAME_LEN {
-        warn!(conn, len = bytes.len(), max = MAX_FRAME_LEN, "dropping an oversized server frame");
+        warn!(
+            conn,
+            len = bytes.len(),
+            max = MAX_FRAME_LEN,
+            "dropping an oversized server frame"
+        );
         return Ok(());
     }
     write_frame(writer, bytes).await
@@ -1056,7 +1189,9 @@ fn handle_client_msg(
         | ClientMsg::PtyResize { .. }
         | ClientMsg::PtyKill { .. }
         | ClientMsg::PtyList => {
-            let _ = targeted_tx.send(ServerMsg::Error { message: PTY_HOST_REMOVED.to_owned() });
+            let _ = targeted_tx.send(ServerMsg::Error {
+                message: PTY_HOST_REMOVED.to_owned(),
+            });
         }
 
         // ── persistent session commands (protocol v3) ─────────────────────────
@@ -1083,17 +1218,19 @@ fn handle_client_msg(
             match result {
                 Ok(session_id) => {
                     // A fresh spawn re-seeds the layout (`init_focus`), which for a
-                    // focus that owns a native pane replaces the tree a window may
-                    // still hold. Tell every client the tree the daemon now has.
-                    if crate::mcp::views::tree::native_pane_for(&tag).is_some() {
-                        let tree = registry.and_then(|reg| reg.lock().unwrap().get(&tag).cloned());
-                        if let Some(tree) = tree {
-                            let _ = broadcast_tx.send(ServerMsg::FocusLayout {
-                                tag: tag.clone(),
-                                tree,
-                                focused_pane: None,
-                            });
-                        }
+                    // focus that owns a native pane, or keeps its tracker pane,
+                    // replaces the tree a window may still hold. Tell every client
+                    // the tree the daemon now has.
+                    let tree = registry.and_then(|reg| reg.lock().unwrap().get(&tag).cloned());
+                    if let Some(tree) = tree.filter(|tree| {
+                        crate::mcp::views::tree::native_pane_for(&tag).is_some()
+                            || crate::tracker::placement::has_tracker(tree)
+                    }) {
+                        let _ = broadcast_tx.send(ServerMsg::FocusLayout {
+                            tag: tag.clone(),
+                            tree,
+                            focused_pane: None,
+                        });
                     }
                     let _ = targeted_tx.send(ServerMsg::SessionSpawned { tag, session_id });
                 }
@@ -1181,7 +1318,8 @@ fn handle_client_msg(
                     let _ = targeted_tx.send(ServerMsg::Notification {
                         tag: tag.clone(),
                         level: crate::ipc::protocol::NotificationLevel::Info,
-                        message: "Stopped: the message waiting for sign-in was discarded.".to_string(),
+                        message: "Stopped: the message waiting for sign-in was discarded."
+                            .to_string(),
                     });
                 }
                 Ok(_) => {}
@@ -1211,10 +1349,17 @@ fn handle_client_msg(
             // Superseded by `ApprovalAnswer` (AP0b): refused for every peer, with
             // no side effect.
             debug!(conn_key, %tag, "SessionAnswerPermission refused: superseded by approval_answer");
-            let _ = targeted_tx.send(ServerMsg::Error { message: ANSWER_PERMISSION_SUPERSEDED.to_string() });
+            let _ = targeted_tx.send(ServerMsg::Error {
+                message: ANSWER_PERMISSION_SUPERSEDED.to_string(),
+            });
         }
 
-        ClientMsg::ApprovalAnswer { request_id, decision, window_id, .. } => {
+        ClientMsg::ApprovalAnswer {
+            request_id,
+            decision,
+            window_id,
+            ..
+        } => {
             let broker = session_mgr.lock().unwrap().approvals().cloned();
             let refused = |code: AnswerRefusal| ServerMsg::ApprovalAnswerRefused {
                 request_id: request_id.clone(),
@@ -1252,16 +1397,27 @@ fn handle_client_msg(
                 return;
             };
             // Writing the answer to the session and the audit log is blocking I/O.
-            let (tx, conn, peer) = (targeted_tx.clone(), conn_key.to_string(), peer_json(trust, peer));
+            let (tx, conn, peer) = (
+                targeted_tx.clone(),
+                conn_key.to_string(),
+                peer_json(trust, peer),
+            );
             tokio::task::spawn_blocking(move || {
                 // Applied: the resolution is broadcast to every presenter, this one included.
-                if let Some(refusal) = broker.answer_or_refusal(&request_id, &decision, &window_id, &conn, peer) {
+                if let Some(refusal) =
+                    broker.answer_or_refusal(&request_id, &decision, &window_id, &conn, peer)
+                {
                     let _ = tx.send(refusal);
                 }
             });
         }
 
-        ClientMsg::ClaudeLoginAction { action, tag, hold_id, .. } => {
+        ClientMsg::ClaudeLoginAction {
+            action,
+            tag,
+            hold_id,
+            ..
+        } => {
             // Only the verified Mac app resends or drops a held message, and only with
             // the connection's nonce from a process still verified (checked by the
             // caller). Anything else changes nothing and is told, with no content.
@@ -1275,8 +1431,15 @@ fn handle_client_msg(
                 }
             };
             if let Some(why) = refusal {
-                debug!(conn_key, ?trust, peer_pid = peer.map(|p| p.pid), "ClaudeLoginAction refused: {why}");
-                let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP_LOGIN.to_string() });
+                debug!(
+                    conn_key,
+                    ?trust,
+                    peer_pid = peer.map(|p| p.pid),
+                    "ClaudeLoginAction refused: {why}"
+                );
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: NOT_OPERATOR_APP_LOGIN.to_string(),
+                });
                 return;
             }
             let mut mgr = session_mgr.lock().unwrap();
@@ -1296,9 +1459,17 @@ fn handle_client_msg(
             }
         }
 
-        ClientMsg::ApprovalRefusalReport { request_id, control, channel } => {
+        ClientMsg::ApprovalRefusalReport {
+            request_id,
+            control,
+            channel,
+        } => {
             if trust != PeerTrust::OperatorApp {
-                debug!(conn_key, ?trust, "ApprovalRefusalReport dropped: not the verified Nostromo app");
+                debug!(
+                    conn_key,
+                    ?trust,
+                    "ApprovalRefusalReport dropped: not the verified Nostromo app"
+                );
                 return;
             }
             let broker = session_mgr.lock().unwrap().approvals().cloned();
@@ -1440,10 +1611,10 @@ fn handle_client_msg(
             let conn = conn_key.to_string();
             tokio::spawn(async move {
                 let res = match action {
-                    MotherActionKind::Cancel     => crate::mother::cancel(&job_id).await,
-                    MotherActionKind::Retry      => crate::mother::retry(&job_id).await,
+                    MotherActionKind::Cancel => crate::mother::cancel(&job_id).await,
+                    MotherActionKind::Retry => crate::mother::retry(&job_id).await,
                     MotherActionKind::ForceStart => crate::mother::force_start(&job_id).await,
-                    MotherActionKind::Archive    => crate::mother::archive(&job_id).await,
+                    MotherActionKind::Archive => crate::mother::archive(&job_id).await,
                 };
                 if let Err(e) = res {
                     tracing::warn!(conn, %job_id, ?action, "MotherAction failed: {e:#}");
@@ -1461,9 +1632,16 @@ fn handle_client_msg(
             // A structured hold is the operator's choice, made in Nostromo's Mother panel (the verified
             // app). Anything else on this machine is turned away, without a call to the `mother` CLI.
             // A job with no open decision resumes as before. (TCP peers never reach here: refused above.)
-            if trust != PeerTrust::OperatorApp && held_mother_jobs.lock().unwrap().contains(&job_id) {
-                warn!(conn_key, ?trust, "MotherResume refused: the job has an open decision");
-                let _ = targeted_tx.send(ServerMsg::Error { message: MOTHER_HOLD_NEEDS_OPERATOR.to_owned() });
+            if trust != PeerTrust::OperatorApp && held_mother_jobs.lock().unwrap().contains(&job_id)
+            {
+                warn!(
+                    conn_key,
+                    ?trust,
+                    "MotherResume refused: the job has an open decision"
+                );
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: MOTHER_HOLD_NEEDS_OPERATOR.to_owned(),
+                });
                 return;
             }
             let btx = broadcast_tx.clone();
@@ -1489,9 +1667,16 @@ fn handle_client_msg(
         } => {
             // A disabled Perri must not run `gh` or write its state files.
             // The refusal names no action, repo or PR.
-            if !session_mgr.lock().unwrap().enabled_agents().is_enabled(crate::agents::Agent::Perri) {
+            if !session_mgr
+                .lock()
+                .unwrap()
+                .enabled_agents()
+                .is_enabled(crate::agents::Agent::Perri)
+            {
                 warn!(conn_key, "PerriAction refused: perri is disabled");
-                let _ = targeted_tx.send(ServerMsg::Error { message: PERRI_DISABLED.to_owned() });
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: PERRI_DISABLED.to_owned(),
+                });
                 return;
             }
             let conn = conn_key.to_string();
@@ -1523,7 +1708,11 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::DecisionAnswer { request_id, choice_id, .. } => {
+        ClientMsg::DecisionAnswer {
+            request_id,
+            choice_id,
+            ..
+        } => {
             // Only the verified Mac app answers for the human: an agent's own
             // script on this socket must not answer the agent's decision. The
             // request stays pending, untouched.
@@ -1536,7 +1725,9 @@ fn handle_client_msg(
                     peer_exe = ?peer.map(|p| &p.exe),
                     "DecisionAnswer refused: not the verified Nostromo app"
                 );
-                let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP.to_string() });
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: NOT_OPERATOR_APP.to_string(),
+                });
                 return;
             }
             // The operator app, but this frame must also carry the
@@ -1561,7 +1752,9 @@ fn handle_client_msg(
                          refused: {why}. Run make mac-install and relaunch the app, then ask again"
                     );
                 }
-                let _ = targeted_tx.send(ServerMsg::Error { message: NOT_OPERATOR_APP.to_string() });
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: NOT_OPERATOR_APP.to_string(),
+                });
                 return;
             }
             let outcome = decisions.lock().unwrap().answer(&request_id, choice_id);
@@ -1580,7 +1773,8 @@ fn handle_client_msg(
                 AnswerOutcome::UnknownChoice => {
                     warn!(conn_key, %request_id, "DecisionAnswer named a choice the request did not offer");
                     let _ = targeted_tx.send(ServerMsg::Error {
-                        message: "decision_answer: choice_id is not one of the offered choices".to_string(),
+                        message: "decision_answer: choice_id is not one of the offered choices"
+                            .to_string(),
                     });
                 }
             }
@@ -1602,13 +1796,21 @@ fn handle_client_msg(
         } => {
             let mgr = session_mgr.lock().unwrap();
             if let Some(reg) = mgr.pane_registry() {
-                reg.lock().unwrap()
-                    .record_rendered_shape(conn_key, &window_id, &tag, pane_ids, rendered_at);
+                reg.lock().unwrap().record_rendered_shape(
+                    conn_key,
+                    &window_id,
+                    &tag,
+                    pane_ids,
+                    rendered_at,
+                );
             }
         }
 
         // ── Teri/Fred work views (local peers only; network refused above) ───
-        ClientMsg::WorkDetailRequest { request_id, item_id } => {
+        ClientMsg::WorkDetailRequest {
+            request_id,
+            item_id,
+        } => {
             let tx = targeted_tx.clone();
             tokio::spawn(async move {
                 let result = if item_id.starts_with("mail:") || item_id.starts_with("event:") {
@@ -1616,7 +1818,10 @@ fn handle_client_msg(
                 } else {
                     work_service().detail(&item_id).await
                 };
-                let _ = tx.send(ServerMsg::WorkDetail { request_id, result: result.into() });
+                let _ = tx.send(ServerMsg::WorkDetail {
+                    request_id,
+                    result: result.into(),
+                });
             });
         }
 
@@ -1636,11 +1841,17 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::WorkSendPreviewRequest { request_id, item_id } => {
+        ClientMsg::WorkSendPreviewRequest {
+            request_id,
+            item_id,
+        } => {
             let tx = targeted_tx.clone();
             tokio::spawn(async move {
                 let result = work_service().send_preview(&item_id).await;
-                let _ = tx.send(ServerMsg::WorkSendPreview { request_id, result: result.into() });
+                let _ = tx.send(ServerMsg::WorkSendPreview {
+                    request_id,
+                    result: result.into(),
+                });
             });
         }
 
@@ -1686,7 +1897,10 @@ fn handle_client_msg(
                         sensitive.mark_job(job_id);
                     }
                 }
-                let _ = tx.send(ServerMsg::WorkSendResult { request_id, result: result.into() });
+                let _ = tx.send(ServerMsg::WorkSendResult {
+                    request_id,
+                    result: result.into(),
+                });
             });
         }
 
@@ -1744,8 +1958,17 @@ fn handle_client_msg(
             let _ = targeted_tx.send(msg);
         }
 
-        ClientMsg::ModelDefaultSet { agent, model, effort, clear, request_id } => {
-            let outcome = session_mgr.lock().unwrap().set_agent_default(&agent, model, effort, clear);
+        ClientMsg::ModelDefaultSet {
+            agent,
+            model,
+            effort,
+            clear,
+            request_id,
+        } => {
+            let outcome = session_mgr
+                .lock()
+                .unwrap()
+                .set_agent_default(&agent, model, effort, clear);
             let _ = targeted_tx.send(model_request_result(request_id, outcome));
         }
 
@@ -1753,8 +1976,16 @@ fn handle_client_msg(
         // An agent's own script on this socket must not stop another focus's
         // task or read its output. Refused before the registry, a file or the
         // CLI is touched; the reply carries no task content.
-        ClientMsg::SessionTaskStop { request_id, tag, task_id } if trust != PeerTrust::OperatorApp => {
-            warn!(conn_key, ?trust, "SessionTaskStop refused: not the verified Nostromo app");
+        ClientMsg::SessionTaskStop {
+            request_id,
+            tag,
+            task_id,
+        } if trust != PeerTrust::OperatorApp => {
+            warn!(
+                conn_key,
+                ?trust,
+                "SessionTaskStop refused: not the verified Nostromo app"
+            );
             let _ = targeted_tx.send(ServerMsg::SessionTaskStopResult {
                 request_id,
                 tag,
@@ -1764,8 +1995,17 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::SessionTaskOutput { request_id, tag, task_id, .. } if trust != PeerTrust::OperatorApp => {
-            warn!(conn_key, ?trust, "SessionTaskOutput refused: not the verified Nostromo app");
+        ClientMsg::SessionTaskOutput {
+            request_id,
+            tag,
+            task_id,
+            ..
+        } if trust != PeerTrust::OperatorApp => {
+            warn!(
+                conn_key,
+                ?trust,
+                "SessionTaskOutput refused: not the verified Nostromo app"
+            );
             let _ = targeted_tx.send(ServerMsg::SessionTaskOutputResult {
                 request_id,
                 tag,
@@ -1780,7 +2020,11 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::SessionTaskStop { request_id, tag, task_id } => {
+        ClientMsg::SessionTaskStop {
+            request_id,
+            tag,
+            task_id,
+        } => {
             let stop = session_mgr.lock().unwrap().task_stop(&tag, &task_id);
             let audit_tag = audit_focus_tag(&tag, sensitive);
             let tx = targeted_tx.clone();
@@ -1798,8 +2042,17 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::SessionTaskOutput { request_id, tag, task_id, offset, max_bytes } => {
-            let read = session_mgr.lock().unwrap().task_output(&tag, &task_id, offset, max_bytes);
+        ClientMsg::SessionTaskOutput {
+            request_id,
+            tag,
+            task_id,
+            offset,
+            max_bytes,
+        } => {
+            let read = session_mgr
+                .lock()
+                .unwrap()
+                .task_output(&tag, &task_id, offset, max_bytes);
             let tx = targeted_tx.clone();
             tokio::spawn(async move {
                 let reply = read.await;
@@ -1837,17 +2090,23 @@ fn audit_focus_tag(tag: &str, sensitive: &SensitiveTags) -> String {
 /// the task's kind and description, and how it ended.
 fn log_task_stop(report: &crate::ipc::session_manager::StopReport, focus_tag: String) {
     use crate::ipc::protocol::TaskStopOutcome as Stop;
-    use crate::model::activity::{activity_path, append_task, Outcome, TaskActivity, TaskActivityKind};
+    use crate::model::activity::{
+        activity_path, append_task, Outcome, TaskActivity, TaskActivityKind,
+    };
     let (outcome, reason) = match report.outcome {
         Stop::Accepted => (Outcome::Applied, None),
-        Stop::Refused => (Outcome::Refused, report.message.as_deref().map(bounded_reason)),
+        Stop::Refused => (
+            Outcome::Refused,
+            report.message.as_deref().map(bounded_reason),
+        ),
         Stop::NotRunning => (Outcome::Refused, Some("not_running".to_owned())),
         Stop::Timeout => (Outcome::Failed, Some("timeout".to_owned())),
         Stop::Unsupported => (Outcome::Failed, Some("unsupported".to_owned())),
     };
-    let description = report.label.as_ref().map(|l| {
-        crate::ipc::task_output::truncate_chars(&l.description, 200)
-    });
+    let description = report
+        .label
+        .as_ref()
+        .map(|l| crate::ipc::task_output::truncate_chars(&l.description, 200));
     // The summary is what the activity stream shows: it names the kind of task,
     // never its description (a command line or a prompt).
     let what = report.label.as_ref().map_or("task", |l| l.kind.label());
@@ -1911,10 +2170,19 @@ fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<Server
             turns.iter_mut().for_each(strip);
             Some(ServerMsg::SessionTurns { tag, turns })
         }
-        ServerMsg::SessionTurnDelta { delta: TurnDelta::Note { .. }, .. } => None,
-        ServerMsg::SessionTurnDelta { tag, delta: TurnDelta::TurnStarted { mut turn } } => {
+        ServerMsg::SessionTurnDelta {
+            delta: TurnDelta::Note { .. },
+            ..
+        } => None,
+        ServerMsg::SessionTurnDelta {
+            tag,
+            delta: TurnDelta::TurnStarted { mut turn },
+        } => {
             strip(&mut turn);
-            Some(ServerMsg::SessionTurnDelta { tag, delta: TurnDelta::TurnStarted { turn } })
+            Some(ServerMsg::SessionTurnDelta {
+                tag,
+                delta: TurnDelta::TurnStarted { turn },
+            })
         }
         other => Some(other),
     }
@@ -1925,7 +2193,11 @@ fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<Server
 fn model_replay(session_mgr: &Arc<Mutex<SessionManager>>) -> Vec<ServerMsg> {
     let mgr = session_mgr.lock().unwrap();
     let mut frames = vec![mgr.model_hub().catalog_msg(), mgr.model_defaults_msg()];
-    frames.extend(mgr.model_state_replay().into_iter().map(ServerMsg::SessionModelState));
+    frames.extend(
+        mgr.model_state_replay()
+            .into_iter()
+            .map(ServerMsg::SessionModelState),
+    );
     frames
 }
 
@@ -1953,7 +2225,9 @@ fn log_network_model_refusal(
     session_mgr: &Arc<Mutex<SessionManager>>,
     sensitive: &SensitiveTags,
 ) {
-    use crate::model::activity::{activity_path, append, current_posture, ModelActivity, ModelActivityKind, Outcome};
+    use crate::model::activity::{
+        activity_path, append, current_posture, ModelActivity, ModelActivityKind, Outcome,
+    };
     use crate::model::ModelTarget;
     let kind = match msg {
         ClientMsg::SessionModelSet { .. } => ModelActivityKind::ModelSwitch,
@@ -1966,29 +2240,40 @@ fn log_network_model_refusal(
     let (tag, agent, to) = {
         let mgr = session_mgr.lock().unwrap();
         let catalog = mgr.model_catalog();
-        let offered = |model: &Option<String>, effort: &Option<crate::ipc::protocol::EffortChoice>| {
-            model.as_ref().filter(|m| catalog.entry(m).is_some()).map(|m| ModelTarget {
-                model: m.clone(),
-                effort: effort.and_then(|e| e.level()).map(str::to_owned),
-            })
+        let offered = |model: &Option<String>,
+                       effort: &Option<crate::ipc::protocol::EffortChoice>| {
+            model
+                .as_ref()
+                .filter(|m| catalog.entry(m).is_some())
+                .map(|m| ModelTarget {
+                    model: m.clone(),
+                    effort: effort.and_then(|e| e.level()).map(str::to_owned),
+                })
         };
         match msg {
-            ClientMsg::SessionModelSet { tag, model, effort, .. } => {
+            ClientMsg::SessionModelSet {
+                tag, model, effort, ..
+            } => {
                 let (tag, agent) = known_focus(&mgr, tag);
                 (tag, agent, offered(model, effort))
             }
-            ClientMsg::ModelDefaultSet { model, effort, .. } => (None, None, offered(model, effort)),
+            ClientMsg::ModelDefaultSet { model, effort, .. } => {
+                (None, None, offered(model, effort))
+            }
             _ => return,
         }
     };
     let tag = tag.map(|t| audit_focus_tag(&t, sensitive));
-    let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
+    let agent = agent
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| "claude".to_owned());
     append(
         &activity_path(),
         &ModelActivity {
             agent: agent.clone(),
             kind,
-            summary: "Model change from a network client refused: requires a secure connection.".to_owned(),
+            summary: "Model change from a network client refused: requires a secure connection."
+                .to_owned(),
             session_id: None,
             agent_type: Some(agent),
             focus_tag: tag,
@@ -2019,10 +2304,14 @@ fn log_network_task_refusal(
     session_mgr: &Arc<Mutex<SessionManager>>,
     sensitive: &SensitiveTags,
 ) {
-    use crate::model::activity::{activity_path, append_task, Outcome, TaskActivity, TaskActivityKind};
+    use crate::model::activity::{
+        activity_path, append_task, Outcome, TaskActivity, TaskActivityKind,
+    };
     let (kind, tag, what) = match msg {
         ClientMsg::SessionTaskStop { tag, .. } => (TaskActivityKind::TaskStop, tag, "Task stop"),
-        ClientMsg::SessionTaskOutput { tag, .. } => (TaskActivityKind::TaskOutput, tag, "Task output read"),
+        ClientMsg::SessionTaskOutput { tag, .. } => {
+            (TaskActivityKind::TaskOutput, tag, "Task output read")
+        }
         _ => return,
     };
     if !refusal_line_allowed() {
@@ -2037,7 +2326,9 @@ fn log_network_task_refusal(
         Some(t) if !sensitive.tag_is_sensitive(&t) => (Some(t), agent),
         _ => (None, None),
     };
-    let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
+    let agent = agent
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| "claude".to_owned());
     append_task(
         &activity_path(),
         &TaskActivity {
@@ -2079,10 +2370,7 @@ fn refusal_line_allowed() -> bool {
 const FRED_TAG: &str = "fred";
 
 /// Send `text` into Fred's session as a user message.
-fn seed_fred(
-    session_mgr: &Arc<Mutex<SessionManager>>,
-    text: &str,
-) -> WorkResult<SendOutcome> {
+fn seed_fred(session_mgr: &Arc<Mutex<SessionManager>>, text: &str) -> WorkResult<SendOutcome> {
     let mut mgr = session_mgr.lock().unwrap();
     if !mgr.has_live_session(FRED_TAG) {
         return WorkResult::err("fred_not_running", "Fred's session is not running");
@@ -2127,9 +2415,17 @@ fn refuse_approval_answer(
     peer: serde_json::Value,
 ) {
     let tx = targeted_tx.clone();
-    audit_refusal_then(broker, Some(request_id), code.as_str(), peer, None, None, move || {
-        let _ = tx.send(reply);
-    });
+    audit_refusal_then(
+        broker,
+        Some(request_id),
+        code.as_str(),
+        peer,
+        None,
+        None,
+        move || {
+            let _ = tx.send(reply);
+        },
+    );
 }
 
 /// Write a `refusal` audit entry on the blocking pool, then run `then` (the reply
@@ -2145,7 +2441,13 @@ fn audit_refusal_then(
 ) {
     tokio::task::spawn_blocking(move || {
         if let Some(broker) = broker {
-            broker.record_refusal(request_id.as_deref(), code, peer, channel, control.as_deref());
+            broker.record_refusal(
+                request_id.as_deref(),
+                code,
+                peer,
+                channel,
+                control.as_deref(),
+            );
         }
         then();
     });
@@ -2176,23 +2478,31 @@ fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
                 result: WorkResult::Err(refusal),
             }
         }
-        ClientMsg::SessionModelSet { request_id, .. } | ClientMsg::ModelDefaultSet { request_id, .. } => {
-            ServerMsg::ModelRequestResult {
-                request_id: request_id.clone(),
-                status: crate::ipc::protocol::ModelRequestStatus::Refused,
-                code: Some(refusal.code.clone()),
-                message: Some(refusal.message.clone()),
-                warning: None,
-            }
-        }
-        ClientMsg::SessionTaskStop { request_id, tag, task_id } => ServerMsg::SessionTaskStopResult {
+        ClientMsg::SessionModelSet { request_id, .. }
+        | ClientMsg::ModelDefaultSet { request_id, .. } => ServerMsg::ModelRequestResult {
+            request_id: request_id.clone(),
+            status: crate::ipc::protocol::ModelRequestStatus::Refused,
+            code: Some(refusal.code.clone()),
+            message: Some(refusal.message.clone()),
+            warning: None,
+        },
+        ClientMsg::SessionTaskStop {
+            request_id,
+            tag,
+            task_id,
+        } => ServerMsg::SessionTaskStopResult {
             request_id: request_id.clone(),
             tag: tag.clone(),
             task_id: task_id.clone(),
             outcome: crate::ipc::protocol::TaskStopOutcome::Refused,
             message: Some(format!("{}: {}", refusal.code, refusal.message)),
         },
-        ClientMsg::SessionTaskOutput { request_id, tag, task_id, .. } => ServerMsg::SessionTaskOutputResult {
+        ClientMsg::SessionTaskOutput {
+            request_id,
+            tag,
+            task_id,
+            ..
+        } => ServerMsg::SessionTaskOutputResult {
             request_id: request_id.clone(),
             tag: tag.clone(),
             task_id: task_id.clone(),
@@ -2218,7 +2528,9 @@ fn retain_key(msg: &ServerMsg) -> Option<String> {
     match msg {
         ServerMsg::FredState { .. } => Some("fred".to_string()),
         ServerMsg::TeriState { .. } => Some("teri".to_string()),
-        ServerMsg::WorkSourceStatus { status } => Some(format!("status:{}", status.source.as_str())),
+        ServerMsg::WorkSourceStatus { status } => {
+            Some(format!("status:{}", status.source.as_str()))
+        }
         ServerMsg::WorkSnapshot { source, group, .. } => Some(format!(
             "work:{}:{}",
             source.as_str(),
@@ -2310,7 +2622,11 @@ async fn track_held_mother_jobs(mut rx: broadcast::Receiver<ServerMsg>, held: He
     loop {
         match rx.recv().await {
             Ok(ServerMsg::MotherJobs { jobs }) => {
-                let ids = jobs.iter().filter(|j| j.open_decision().is_some()).map(|j| j.id.clone()).collect();
+                let ids = jobs
+                    .iter()
+                    .filter(|j| j.open_decision().is_some())
+                    .map(|j| j.id.clone())
+                    .collect();
                 *held.lock().unwrap() = ids;
             }
             Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -2492,18 +2808,41 @@ mod tests {
     fn welcome_reports_only_the_enabled_agents() {
         let mut mgr = SessionManager::new();
         match welcome_msg(&mgr, None) {
-            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
+            ServerMsg::Welcome {
                 enabled_agents,
-                Some(vec!["fred".into(), "mother".into(), "perri".into(), "teri".into()])
-            ),
+                disabled_agents,
+                ..
+            } => {
+                assert_eq!(
+                    enabled_agents,
+                    Some(vec![
+                        "fred".into(),
+                        "mother".into(),
+                        "perri".into(),
+                        "teri".into()
+                    ])
+                );
+                assert_eq!(disabled_agents, Some(vec![]), "nothing is off");
+            }
             other => panic!("{other:?}"),
         }
-        mgr.configure_enabled_agents(crate::agents::EnabledAgents { fred: false, perri: true, teri: true });
+        mgr.configure_enabled_agents(crate::agents::EnabledAgents {
+            fred: false,
+            perri: true,
+            teri: true,
+        });
         match welcome_msg(&mgr, None) {
-            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
+            ServerMsg::Welcome {
                 enabled_agents,
-                Some(vec!["mother".into(), "perri".into(), "teri".into()])
-            ),
+                disabled_agents,
+                ..
+            } => {
+                assert_eq!(
+                    enabled_agents,
+                    Some(vec!["mother".into(), "perri".into(), "teri".into()])
+                );
+                assert_eq!(disabled_agents, Some(vec!["fred".to_string()]));
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -2527,7 +2866,12 @@ mod tests {
         let (ttx, mut trx) = mpsc::unbounded_channel();
         let (btx, _brx) = broadcast::channel(8);
         handle_client_msg(
-            ClientMsg::PerriAction { action: "load_pr".into(), pr_number: Some(7), repo: Some("o/r".into()), tag: None },
+            ClientMsg::PerriAction {
+                action: "load_pr".into(),
+                pr_number: Some(7),
+                repo: Some("o/r".into()),
+                tag: None,
+            },
             PeerTrust::OperatorApp,
             None,
             None,
@@ -2551,13 +2895,21 @@ mod tests {
     #[test]
     fn perri_action_is_refused_without_touching_state_when_perri_is_disabled() {
         let dir = tempfile::tempdir().unwrap();
-        let off = crate::agents::EnabledAgents { fred: true, perri: false, teri: true };
+        let off = crate::agents::EnabledAgents {
+            fred: true,
+            perri: false,
+            teri: true,
+        };
         let out = perri_action_with(off, dir.path());
         assert!(
             matches!(out.as_slice(), [ServerMsg::Error { message }] if message == PERRI_DISABLED),
             "{out:?}"
         );
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "no Perri state files written");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no Perri state files written"
+        );
     }
 
     #[tokio::test]
@@ -2577,9 +2929,15 @@ mod tests {
 
     #[test]
     fn log_safe_strips_newlines_and_bounds_length() {
-        let nasty = format!("a\nb\r\nINFO forged line\u{202e}{}", "x".repeat(4 * 1024 * 1024));
+        let nasty = format!(
+            "a\nb\r\nINFO forged line\u{202e}{}",
+            "x".repeat(4 * 1024 * 1024)
+        );
         let out = log_safe(&nasty);
-        assert!(!out.contains('\n') && !out.contains('\r') && !out.contains('\u{202e}'), "{out:?}");
+        assert!(
+            !out.contains('\n') && !out.contains('\r') && !out.contains('\u{202e}'),
+            "{out:?}"
+        );
         assert!(out.len() <= 256, "{}", out.len());
         assert_eq!(log_safe("req-1"), "req-1");
     }
@@ -2693,12 +3051,18 @@ mod tests {
 
     #[test]
     fn notification_matches_when_subscribed_to_the_layout_topic() {
-        assert!(message_matches_topics(&sample_notification(), &[Topic::Layout]));
+        assert!(message_matches_topics(
+            &sample_notification(),
+            &[Topic::Layout]
+        ));
     }
 
     #[test]
     fn notification_does_not_match_a_subscription_to_some_other_topic() {
-        assert!(!message_matches_topics(&sample_notification(), &[Topic::Activity]));
+        assert!(!message_matches_topics(
+            &sample_notification(),
+            &[Topic::Activity]
+        ));
     }
 
     #[test]
@@ -2714,7 +3078,8 @@ mod tests {
         // since no real trigger calls this path for at least one more wedge
         // and it must still be demonstrably wired correctly today.
         let (tx, mut rx) = broadcast::channel::<ServerMsg>(8);
-        tx.send(sample_notification()).expect("send into a fresh channel");
+        tx.send(sample_notification())
+            .expect("send into a fresh channel");
 
         let received = rx.recv().await.expect("receive back out");
 
@@ -2757,7 +3122,12 @@ mod tests {
             std::env::temp_dir().join(format!("nostromo-health-{}.json", std::process::id())),
         );
         match activity_health_msg(&mgr, false) {
-            ServerMsg::ActivityHealth { ingesting, reason, hook_installed, .. } => {
+            ServerMsg::ActivityHealth {
+                ingesting,
+                reason,
+                hook_installed,
+                ..
+            } => {
                 assert!(!ingesting);
                 assert!(!hook_installed);
                 assert!(reason.unwrap().contains("bin/nostromo-doctor --fix"));
@@ -2782,7 +3152,12 @@ mod tests {
         });
 
         match activity_health_msg(&mgr, true) {
-            ServerMsg::ActivityHealth { ingesting, reason, last_event_at, .. } => {
+            ServerMsg::ActivityHealth {
+                ingesting,
+                reason,
+                last_event_at,
+                ..
+            } => {
                 assert!(ingesting);
                 assert!(reason.is_none(), "a healthy ingest must clear the reason that told the operator to install the hook");
                 assert!(last_event_at.is_some());
@@ -2806,31 +3181,50 @@ mod tests {
             id: "t0".into(),
             user_input: "hi".into(),
             timestamp: None,
-            blocks: vec![note_block(), crate::ipc::stream_json::TurnBlock::text("hello")],
+            blocks: vec![
+                note_block(),
+                crate::ipc::stream_json::TurnBlock::text("hello"),
+            ],
             is_complete: true,
         }
     }
 
     #[test]
     fn model_frames_go_only_to_clients_that_name_the_model_topic() {
-        let catalog = ServerMsg::ModelCatalog { families: vec![], stale: false, fetched_at: None };
+        let catalog = ServerMsg::ModelCatalog {
+            families: vec![],
+            stale: false,
+            fetched_at: None,
+        };
         assert!(message_matches_topics(&catalog, &[Topic::Model]));
-        assert!(!message_matches_topics(&catalog, &[]), "the everything-list predates model frames");
+        assert!(
+            !message_matches_topics(&catalog, &[]),
+            "the everything-list predates model frames"
+        );
         assert!(!message_matches_topics(&catalog, &[Topic::Activity]));
     }
 
     #[test]
     fn a_client_that_has_not_asked_for_model_frames_gets_transcripts_without_notes() {
-        let turns = ServerMsg::SessionTurns { tag: "cody-1".into(), turns: vec![turn_with_note()] };
+        let turns = ServerMsg::SessionTurns {
+            tag: "cody-1".into(),
+            turns: vec![turn_with_note()],
+        };
         match without_notes_unless_model(turns.clone(), &[Topic::Activity]) {
             Some(ServerMsg::SessionTurns { turns, .. }) => {
-                assert_eq!(turns[0].blocks, vec![crate::ipc::stream_json::TurnBlock::text("hello")]);
+                assert_eq!(
+                    turns[0].blocks,
+                    vec![crate::ipc::stream_json::TurnBlock::text("hello")]
+                );
             }
             other => panic!("{other:?}"),
         }
         let note = ServerMsg::SessionTurnDelta {
             tag: "cody-1".into(),
-            delta: crate::ipc::stream_json::TurnDelta::Note { turn_id: Some("t0".into()), block: note_block() },
+            delta: crate::ipc::stream_json::TurnDelta::Note {
+                turn_id: Some("t0".into()),
+                block: note_block(),
+            },
         };
         assert!(without_notes_unless_model(note.clone(), &[]).is_none());
         // A client that names the topic gets both untouched.
@@ -2875,8 +3269,14 @@ mod tests {
             vec![Topic::Work, Topic::Fred],
             vec![Topic::Layout, Topic::Focuses],
         ] {
-            assert!(message_matches_topics(&tasks_frame(), &topics), "{topics:?}");
-            assert!(message_matches_topics(&task_detail_frame(), &topics), "{topics:?}");
+            assert!(
+                message_matches_topics(&tasks_frame(), &topics),
+                "{topics:?}"
+            );
+            assert!(
+                message_matches_topics(&task_detail_frame(), &topics),
+                "{topics:?}"
+            );
         }
     }
 

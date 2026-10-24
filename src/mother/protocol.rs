@@ -230,7 +230,11 @@ impl SnapshotData {
         }
         let raw: Raw = serde_json::from_value(data)?;
         let (jobs, skipped) = super::decode::decode_jobs(raw.jobs);
-        Ok(Self { sub: raw.sub, jobs, skipped })
+        Ok(Self {
+            sub: raw.sub,
+            jobs,
+            skipped,
+        })
     }
 }
 

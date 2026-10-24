@@ -41,7 +41,10 @@ struct ExpectedGroup {
 }
 
 fn load() -> Fixture {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/work_query_cases.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/work_query_cases.json"
+    );
     let text = std::fs::read_to_string(path).expect("fixture file is readable");
     serde_json::from_str(&text).expect("fixture parses as the work_query_cases format")
 }
@@ -79,15 +82,20 @@ fn every_shared_fixture_case_gives_the_expected_result() {
                 let source = case.source.expect("group cases name a source");
                 let filtered = query::filter(&f.items, &case.filter);
                 let groups = query::group(&filtered, source, case.sort.unwrap_or_default());
-                let got: Vec<(Option<String>, Vec<String>)> =
-                    groups.iter().map(|g| (g.key.clone(), ids(&g.items))).collect();
+                let got: Vec<(Option<String>, Vec<String>)> = groups
+                    .iter()
+                    .map(|g| (g.key.clone(), ids(&g.items)))
+                    .collect();
                 let want: Vec<(Option<String>, Vec<String>)> = case
                     .expected_groups
                     .iter()
                     .map(|g| (g.key.clone(), g.ids.clone()))
                     .collect();
                 if got != want {
-                    failures.push(format!("[{}] group: expected {want:?}, got {got:?}", case.name));
+                    failures.push(format!(
+                        "[{}] group: expected {want:?}, got {got:?}",
+                        case.name
+                    ));
                 }
             }
             "facet_counts" => {
@@ -103,13 +111,24 @@ fn every_shared_fixture_case_gives_the_expected_result() {
             other => panic!("unknown op {other} in case {}", case.name),
         }
     }
-    assert!(failures.is_empty(), "{} case(s) failed:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} case(s) failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
 fn filtering_does_not_mutate_or_reorder_the_input() {
     let f = load();
     let before = ids(&f.items);
-    let _ = query::filter(&f.items, &WorkFilter { query: "payment".into(), ..Default::default() });
+    let _ = query::filter(
+        &f.items,
+        &WorkFilter {
+            query: "payment".into(),
+            ..Default::default()
+        },
+    );
     assert_eq!(ids(&f.items), before);
 }

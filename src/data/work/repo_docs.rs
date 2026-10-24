@@ -25,8 +25,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, ErrorKind, Read};
-use std::path::{Path, PathBuf};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -37,11 +37,11 @@ use tokio::sync::{watch, Notify};
 use tracing::warn;
 
 use super::hub::SourceUpdate;
-use super::untrusted::{one_line, MAX_LINE_CHARS};
 use super::model::{
     GroupError, Link, Priority, SourceState, SourceStatus, WorkDetail, WorkError, WorkItem,
     WorkSource,
 };
+use super::untrusted::{one_line, MAX_LINE_CHARS};
 
 /// A burst of events in one repo is rescanned once, this long after the last.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -95,7 +95,9 @@ const WATCHED_TOPS: [&str; 5] = ["bugs", "features", "ideas", "todos", "wip"];
 /// The directory whose children are the repos: `$NOSTROMO_CODE_ROOT`, else
 /// `code_root` from `config.toml`, else `~/Code`.
 pub fn code_root() -> PathBuf {
-    crate::config::Config::load(None).unwrap_or_default().code_root_dir()
+    crate::config::Config::load(None)
+        .unwrap_or_default()
+        .code_root_dir()
 }
 
 /// Start the source on [`code_root`]. `refresh` is poked by a manual refresh
@@ -112,8 +114,15 @@ pub fn spawn_at(root: PathBuf, refresh: Arc<Notify>) -> watch::Receiver<SourceUp
 }
 
 /// [`spawn_at`] reading through `io` (tests make reads fail on purpose).
-pub fn spawn_with_fs(root: PathBuf, refresh: Arc<Notify>, io: Arc<dyn DocFs>) -> watch::Receiver<SourceUpdate> {
-    let (tx, rx) = watch::channel((status(SourceState::Loading, None, 0, Vec::new(), false), Vec::new()));
+pub fn spawn_with_fs(
+    root: PathBuf,
+    refresh: Arc<Notify>,
+    io: Arc<dyn DocFs>,
+) -> watch::Receiver<SourceUpdate> {
+    let (tx, rx) = watch::channel((
+        status(SourceState::Loading, None, 0, Vec::new(), false),
+        Vec::new(),
+    ));
     let tx = Arc::new(tx);
     let (msg_tx, msg_rx) = mpsc::channel();
 
@@ -131,24 +140,40 @@ pub fn spawn_with_fs(root: PathBuf, refresh: Arc<Notify>, io: Arc<dyn DocFs>) ->
     });
 
     let thread_tx = Arc::clone(&tx);
-    let spawned = std::thread::Builder::new().name("repo-docs".into()).spawn(move || {
-        let outcome =
-            catch_unwind(AssertUnwindSafe(|| run(Scanner::with_fs(root, io), &thread_tx, msg_tx, &msg_rx)));
-        if outcome.is_err() {
-            warn!("repo docs: the watcher thread panicked");
-            thread_tx.send_replace(error_update("The repo docs scanner crashed; restart Nostromo to read them again"));
-        }
-    });
+    let spawned = std::thread::Builder::new()
+        .name("repo-docs".into())
+        .spawn(move || {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                run(Scanner::with_fs(root, io), &thread_tx, msg_tx, &msg_rx)
+            }));
+            if outcome.is_err() {
+                warn!("repo docs: the watcher thread panicked");
+                thread_tx.send_replace(error_update(
+                    "The repo docs scanner crashed; restart Nostromo to read them again",
+                ));
+            }
+        });
     if let Err(e) = spawned {
         warn!(error = %e, "could not start the repo docs watcher thread");
-        tx.send_replace(error_update(&format!("Couldn't start the repo docs scanner: {e}")));
+        tx.send_replace(error_update(&format!(
+            "Couldn't start the repo docs scanner: {e}"
+        )));
     }
     rx
 }
 
 /// The update for a source that cannot run at all: an error and no items.
 fn error_update(reason: &str) -> SourceUpdate {
-    (status(SourceState::Error, Some(reason.to_string()), 0, Vec::new(), false), Vec::new())
+    (
+        status(
+            SourceState::Error,
+            Some(reason.to_string()),
+            0,
+            Vec::new(),
+            false,
+        ),
+        Vec::new(),
+    )
 }
 
 /// Detail for a `doc:<repo>:<path>` item id under [`code_root`].
@@ -283,8 +308,13 @@ impl Tally {
     }
 
     fn into_error(self) -> Option<String> {
-        let skipped = (self.skipped > 0)
-            .then(|| format!("skipped {} unreadable file{}", self.skipped, if self.skipped == 1 { "" } else { "s" }));
+        let skipped = (self.skipped > 0).then(|| {
+            format!(
+                "skipped {} unreadable file{}",
+                self.skipped,
+                if self.skipped == 1 { "" } else { "s" }
+            )
+        });
         match (self.first_folder_error, skipped) {
             (Some(folder), Some(skipped)) => Some(format!("{folder}; {skipped}")),
             (folder, skipped) => folder.or(skipped),
@@ -370,7 +400,8 @@ impl Scanner {
                     }
                 }
                 changed |= !old.is_empty();
-                self.idle_dirs.retain(|name| self.repos.contains_key(name) || self.root.join(name).is_dir());
+                self.idle_dirs
+                    .retain(|name| self.repos.contains_key(name) || self.root.join(name).is_dir());
             }
             Err(e) => {
                 let issue = if e.kind() == ErrorKind::NotFound {
@@ -423,12 +454,21 @@ impl Scanner {
     fn watch_targets(&self) -> Vec<WatchTarget> {
         let mut targets = Vec::new();
         for state in self.repos.values() {
-            targets.push(WatchTarget { dir: state.repo_dir.clone(), recursive: false });
+            targets.push(WatchTarget {
+                dir: state.repo_dir.clone(),
+                recursive: false,
+            });
             if state.watch_claude {
-                targets.push(WatchTarget { dir: state.claude_dir.clone(), recursive: true });
+                targets.push(WatchTarget {
+                    dir: state.claude_dir.clone(),
+                    recursive: true,
+                });
             }
         }
-        targets.extend(self.idle_dirs.iter().map(|name| WatchTarget { dir: self.root.join(name), recursive: false }));
+        targets.extend(self.idle_dirs.iter().map(|name| WatchTarget {
+            dir: self.root.join(name),
+            recursive: false,
+        }));
         targets
     }
 
@@ -484,26 +524,49 @@ impl Scanner {
             Ok(m) if m.is_dir() => {}
             Ok(_) => return None,
             Err(e) if e.kind() == ErrorKind::NotFound => return None, // not a repo, or a dangling link
-            Err(e) => return Some(failed(state, previous, format!("Can't open the repo folder: {}", describe(&e)))),
+            Err(e) => {
+                return Some(failed(
+                    state,
+                    previous,
+                    format!("Can't open the repo folder: {}", describe(&e)),
+                ))
+            }
         }
         // A git worktree's `.git` is a file: its docs duplicate the main repo's.
-        if self.io.symlink_metadata(&dir.join(".git")).is_ok_and(|m| m.is_file()) {
+        if self
+            .io
+            .symlink_metadata(&dir.join(".git"))
+            .is_ok_and(|m| m.is_file())
+        {
             return None;
         }
         match self.io.symlink_metadata(&state.claude_dir) {
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => return None, // no `.claude`: not a repo with docs
-            Err(e) => return Some(failed(state, previous, format!("Can't search the repo folder: {}", describe(&e)))),
+            Err(e) => {
+                return Some(failed(
+                    state,
+                    previous,
+                    format!("Can't search the repo folder: {}", describe(&e)),
+                ))
+            }
         }
         state.repo_real = match fs::canonicalize(&dir) {
             Ok(real) => real,
-            Err(e) => return Some(failed(state, previous, format!("Can't resolve the repo folder: {}", describe(&e)))),
+            Err(e) => {
+                return Some(failed(
+                    state,
+                    previous,
+                    format!("Can't resolve the repo folder: {}", describe(&e)),
+                ))
+            }
         };
         if let Ok(real) = fs::canonicalize(&state.claude_dir) {
             // A cloned repo must not be able to point `.claude` at the rest of the disk.
             if real == state.repo_real || !real.starts_with(&state.repo_real) {
                 state.items.clear();
-                state.error = Some("Skipped: .claude is a symlink that leaves the repo".to_string());
+                state.error =
+                    Some("Skipped: .claude is a symlink that leaves the repo".to_string());
                 return Some(state);
             }
             state.claude_real = real;
@@ -529,7 +592,12 @@ impl Scanner {
 
     /// Read every doc folder of `state`'s `.claude/` into `state`; returns why
     /// anything was left out, if it was.
-    fn read_docs(&self, repo: &str, old_cache: &HashMap<PathBuf, CachedItem>, state: &mut RepoState) -> Option<String> {
+    fn read_docs(
+        &self,
+        repo: &str,
+        old_cache: &HashMap<PathBuf, CachedItem>,
+        state: &mut RepoState,
+    ) -> Option<String> {
         let (claude_dir, base) = (state.claude_dir.clone(), state.claude_real.clone());
         let io = self.io.as_ref();
         let mut tally = Tally::default();
@@ -559,7 +627,11 @@ impl Scanner {
     }
 
     fn update(&self) -> SourceUpdate {
-        let groups = self.repos.iter().map(|(name, r)| (Some(name.clone()), r.items.clone())).collect();
+        let groups = self
+            .repos
+            .iter()
+            .map(|(name, r)| (Some(name.clone()), r.items.clone()))
+            .collect();
         (self.status_now(), groups)
     }
 
@@ -568,7 +640,9 @@ impl Scanner {
     fn patch(&self, current: &mut SourceUpdate, repos: &[String]) {
         current.0 = self.status_now();
         for repo in repos {
-            current.1.retain(|(group, _)| group.as_deref() != Some(repo.as_str()));
+            current
+                .1
+                .retain(|(group, _)| group.as_deref() != Some(repo.as_str()));
             if let Some(state) = self.repos.get(repo) {
                 current.1.push((Some(repo.clone()), state.items.clone()));
             }
@@ -582,7 +656,10 @@ impl Scanner {
             .repos
             .iter()
             .filter_map(|(name, r)| {
-                r.error.as_ref().map(|reason| GroupError { group: name.clone(), reason: reason.clone() })
+                r.error.as_ref().map(|reason| GroupError {
+                    group: name.clone(),
+                    reason: reason.clone(),
+                })
             })
             .collect();
 
@@ -591,12 +668,19 @@ impl Scanner {
                 SourceState::NotConfigured,
                 Some(format!("Code folder {} not found", self.root.display())),
             ),
-            Some(RootIssue::Unreadable(why)) => {
-                (SourceState::Error, Some(format!("Couldn't read {}: {why}", self.root.display())))
-            }
+            Some(RootIssue::Unreadable(why)) => (
+                SourceState::Error,
+                Some(format!("Couldn't read {}: {why}", self.root.display())),
+            ),
             // Error only when nothing could be shown: readable items keep the list fresh, with the partial-scan note.
-            None if count == 0 && !self.repos.is_empty() && group_errors.len() == self.repos.len() => {
-                (SourceState::Error, Some("Couldn't read any repo's .claude folder".to_string()))
+            None if count == 0
+                && !self.repos.is_empty()
+                && group_errors.len() == self.repos.len() =>
+            {
+                (
+                    SourceState::Error,
+                    Some("Couldn't read any repo's .claude folder".to_string()),
+                )
             }
             None => {
                 // Readable, but never plain "fresh" while anything was left out or the list is not live.
@@ -610,13 +694,22 @@ impl Scanner {
                 }
                 match self.root_skipped {
                     0 => {}
-                    1 => notes.push("1 folder in the code root has a non-UTF-8 name and was skipped".to_string()),
-                    n => notes.push(format!("{n} folders in the code root have non-UTF-8 names and were skipped")),
+                    1 => notes.push(
+                        "1 folder in the code root has a non-UTF-8 name and was skipped"
+                            .to_string(),
+                    ),
+                    n => notes.push(format!(
+                        "{n} folders in the code root have non-UTF-8 names and were skipped"
+                    )),
                 }
                 if self.live_updates_unavailable {
                     notes.push(LIVE_UPDATES_UNAVAILABLE.to_string());
                 }
-                let state = if count == 0 { SourceState::Empty } else { SourceState::Fresh };
+                let state = if count == 0 {
+                    SourceState::Empty
+                } else {
+                    SourceState::Fresh
+                };
                 (state, (!notes.is_empty()).then(|| notes.join("; ")))
             }
         };
@@ -668,7 +761,9 @@ fn status(
 }
 
 fn is_watched_top(component: &std::ffi::OsStr) -> bool {
-    component.to_str().is_some_and(|c| WATCHED_TOPS.contains(&c))
+    component
+        .to_str()
+        .is_some_and(|c| WATCHED_TOPS.contains(&c))
 }
 
 /// Plain-English reason for an unreadable `.claude`.
@@ -707,7 +802,10 @@ enum Verdict {
 /// a cloned repo must not be able to put another file's text in the list.
 fn list_dir(dir: &Path, base: &Path) -> io::Result<Listing> {
     if !dir_stays_inside(dir, base) {
-        return Ok(Listing { paths: Vec::new(), skipped: 0 });
+        return Ok(Listing {
+            paths: Vec::new(),
+            skipped: 0,
+        });
     }
     list_children(dir, |name, path| {
         if !has_md_extension(name) {
@@ -725,7 +823,10 @@ fn list_dir(dir: &Path, base: &Path) -> io::Result<Listing> {
 /// Topic directories (not hidden) directly in `wip/`. A missing directory is empty.
 fn list_wip(dir: &Path, base: &Path) -> io::Result<Listing> {
     if !dir_stays_inside(dir, base) {
-        return Ok(Listing { paths: Vec::new(), skipped: 0 });
+        return Ok(Listing {
+            paths: Vec::new(),
+            skipped: 0,
+        });
     }
     list_children(dir, |_, path| match fs::metadata(path) {
         Ok(m) if m.is_dir() && stays_inside(path, base) => Verdict::Keep,
@@ -738,7 +839,9 @@ fn list_wip(dir: &Path, base: &Path) -> io::Result<Listing> {
 /// Whether a doc directory (which may itself be a symlink, or sit under one)
 /// resolves inside `base`. One that does not exist has nothing to leave.
 fn dir_stays_inside(dir: &Path, base: &Path) -> bool {
-    fs::canonicalize(dir).ok().is_none_or(|real| real.starts_with(base))
+    fs::canonicalize(dir)
+        .ok()
+        .is_none_or(|real| real.starts_with(base))
 }
 
 /// A plain entry is inside by construction; a symlink must resolve under `base`.
@@ -754,11 +857,17 @@ fn list_children(dir: &Path, judge: impl Fn(&str, &Path) -> Verdict) -> io::Resu
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound || is_not_a_directory(&e) => {
-            return Ok(Listing { paths: Vec::new(), skipped: 0 })
+            return Ok(Listing {
+                paths: Vec::new(),
+                skipped: 0,
+            })
         }
         Err(e) => return Err(e),
     };
-    let mut listing = Listing { paths: Vec::new(), skipped: 0 };
+    let mut listing = Listing {
+        paths: Vec::new(),
+        skipped: 0,
+    };
     for entry in entries {
         let Ok(entry) = entry else {
             listing.skipped += 1;
@@ -769,7 +878,8 @@ fn list_children(dir: &Path, judge: impl Fn(&str, &Path) -> Verdict) -> io::Resu
             // Not UTF-8: it cannot be an item id. Hidden names are never docs, so those stay silent,
             // and neither does a plain file that is not a `.md` (it was never a doc).
             let bytes = name.as_encoded_bytes();
-            let could_be_doc = bytes.len() > 3 && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md");
+            let could_be_doc =
+                bytes.len() > 3 && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md");
             if !bytes.starts_with(b".") && (could_be_doc || entry.path().is_dir()) {
                 listing.skipped += 1;
             }
@@ -794,7 +904,9 @@ fn is_not_a_directory(e: &io::Error) -> bool {
 }
 
 fn has_md_extension(name: &str) -> bool {
-    Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("md"))
+    Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
 /// A file that cannot be reached: gone for good, or there but unreadable.
@@ -819,7 +931,11 @@ fn read_file_item(
         Ok(meta) => meta,
         Err(e) => return lost(&e),
     };
-    let stamp = Stamp { mtime: meta.modified().ok(), size: meta.len(), dir_mtime: None };
+    let stamp = Stamp {
+        mtime: meta.modified().ok(),
+        size: meta.len(),
+        dir_mtime: None,
+    };
     if let Some(hit) = cache.get(path).filter(|c| c.stamp == stamp) {
         return Outcome::Item(stamp, hit.item.clone());
     }
@@ -827,9 +943,14 @@ fn read_file_item(
         Ok(text) => text,
         Err(e) => return lost(&e),
     };
-    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else { return Outcome::Gone };
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Outcome::Gone;
+    };
     let rel = format!("{rel_dir}/{file_name}");
-    Outcome::Item(stamp, build_item(repo, kind, &rel, path, &text, &meta, file_name))
+    Outcome::Item(
+        stamp,
+        build_item(repo, kind, &rel, path, &text, &meta, file_name),
+    )
 }
 
 /// The item for one wip folder (its `index.md` is the body; it may have none).
@@ -865,7 +986,9 @@ fn read_wip_item(
     if let Some(hit) = cache.get(dir).filter(|c| c.stamp == stamp && !unreadable) {
         return Outcome::Item(stamp, hit.item.clone());
     }
-    let Some(topic) = dir.file_name().and_then(|n| n.to_str()) else { return Outcome::Gone };
+    let Some(topic) = dir.file_name().and_then(|n| n.to_str()) else {
+        return Outcome::Gone;
+    };
     let mut text = String::new();
     if index_meta.is_some() {
         match io.read_text(&index, MAX_READ) {
@@ -918,13 +1041,20 @@ fn build_item(
     );
 
     let mut metrics = BTreeMap::new();
-    let filed = prefix_date(name).or(parsed.front_date).map(noon_utc).or_else(|| {
-        let inferred = meta.created().or_else(|_| meta.modified()).ok().map(DateTime::<Utc>::from);
-        if inferred.is_some() {
-            metrics.insert("date_inferred".to_string(), 1);
-        }
-        inferred
-    });
+    let filed = prefix_date(name)
+        .or(parsed.front_date)
+        .map(noon_utc)
+        .or_else(|| {
+            let inferred = meta
+                .created()
+                .or_else(|_| meta.modified())
+                .ok()
+                .map(DateTime::<Utc>::from);
+            if inferred.is_some() {
+                metrics.insert("date_inferred".to_string(), 1);
+            }
+            inferred
+        });
 
     let (search_text, cut) = search_text(&title, text);
     if cut || meta.len() > MAX_READ {
@@ -960,7 +1090,8 @@ fn parse(text: &str) -> Parsed {
     let (front, body) = split_front_matter(text);
     let mut parsed = Parsed::default();
     if let Some(front) = front {
-        parsed.severity = front_value(front, "severity").map(|v| truncate_chars(&v, MAX_LABEL_CHARS));
+        parsed.severity =
+            front_value(front, "severity").map(|v| truncate_chars(&v, MAX_LABEL_CHARS));
         parsed.priority = front_value(front, "priority").map(|v| priority_from(&v));
         parsed.front_date = front_value(front, "date")
             .or_else(|| front_value(front, "filed"))
@@ -992,7 +1123,8 @@ fn parse(text: &str) -> Parsed {
             continue;
         }
         if parsed.severity.is_none() {
-            parsed.severity = body_value(line, "**Severity:**").map(|v| truncate_chars(v, MAX_LABEL_CHARS));
+            parsed.severity =
+                body_value(line, "**Severity:**").map(|v| truncate_chars(v, MAX_LABEL_CHARS));
         }
         if parsed.priority.is_none() {
             parsed.priority = body_value(line, "**Priority:**").map(priority_from);
@@ -1013,8 +1145,13 @@ fn fence_marker(line: &str) -> Option<(char, usize, bool)> {
 /// `(front matter, rest)`: front matter is a `---` fenced block at the very top.
 fn split_front_matter(text: &str) -> (Option<&str>, &str) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let Some(rest) = text.strip_prefix("---") else { return (None, text) };
-    let Some(rest) = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n")) else {
+    let Some(rest) = text.strip_prefix("---") else {
+        return (None, text);
+    };
+    let Some(rest) = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+    else {
         return (None, text);
     };
     let mut offset = 0;
@@ -1051,14 +1188,24 @@ fn body_value<'a>(line: &'a str, label: &str) -> Option<&'a str> {
 
 /// `P1`..`P5` (first word) -> rank; anything else keeps its words at rank 9.
 fn priority_from(value: &str) -> Priority {
-    let first = value.split_whitespace().next().unwrap_or("").trim_end_matches([',', ';', ':', '.', ')']);
+    let first = value
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([',', ';', ':', '.', ')']);
     let mut chars = first.chars();
     if let (Some('P' | 'p'), Some(d), None) = (chars.next(), chars.next(), chars.next()) {
         if let Some(rank) = d.to_digit(10).filter(|r| (1..=5).contains(r)) {
-            return Priority { label: format!("P{rank}"), rank: rank as u8 };
+            return Priority {
+                label: format!("P{rank}"),
+                rank: rank as u8,
+            };
         }
     }
-    Priority { label: truncate_chars(value.trim(), MAX_LABEL_CHARS), rank: OTHER_PRIORITY_RANK }
+    Priority {
+        label: truncate_chars(value.trim(), MAX_LABEL_CHARS),
+        rank: OTHER_PRIORITY_RANK,
+    }
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -1080,14 +1227,26 @@ fn prefix_date(name: &str) -> Option<NaiveDate> {
 
 /// Noon UTC: the same calendar day in every time zone a person works in.
 fn noon_utc(date: NaiveDate) -> DateTime<Utc> {
-    date.and_hms_opt(12, 0, 0).expect("12:00:00 is a valid time").and_utc()
+    date.and_hms_opt(12, 0, 0)
+        .expect("12:00:00 is a valid time")
+        .and_utc()
 }
 
 /// `2026-10-01-login-fails-badly.md` -> "Login fails badly".
 fn humanize_slug(file_name: &str) -> String {
-    let stem = Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or(file_name);
-    let without_date = if prefix_date(stem).is_some() { stem[10..].trim_start_matches(['-', '_']) } else { stem };
-    let spaced: String = without_date.chars().map(|c| if matches!(c, '-' | '_') { ' ' } else { c }).collect();
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+    let without_date = if prefix_date(stem).is_some() {
+        stem[10..].trim_start_matches(['-', '_'])
+    } else {
+        stem
+    };
+    let spaced: String = without_date
+        .chars()
+        .map(|c| if matches!(c, '-' | '_') { ' ' } else { c })
+        .collect();
     let words = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = words.chars();
     match chars.next() {
@@ -1175,7 +1334,10 @@ fn run(
                     pending
                         .entry(repo)
                         .and_modify(|p| p.last = now)
-                        .or_insert(Pending { first: now, last: now });
+                        .or_insert(Pending {
+                            first: now,
+                            last: now,
+                        });
                 }
             }
             Ok(Msg::Refresh) => manual_refresh = true,
@@ -1196,9 +1358,17 @@ fn run(
             // A manual refresh is answered even when nothing changed.
             everything_changed = scanner.rescan_all() || manual_refresh;
         } else {
-            let mut due: Vec<String> =
-                pending.iter().filter(|(_, p)| p.due() <= now).map(|(name, _)| name.clone()).collect();
-            due.extend(rechecks.iter().filter(|(_, (_, at))| *at <= now).map(|(name, _)| name.clone()));
+            let mut due: Vec<String> = pending
+                .iter()
+                .filter(|(_, p)| p.due() <= now)
+                .map(|(name, _)| name.clone())
+                .collect();
+            due.extend(
+                rechecks
+                    .iter()
+                    .filter(|(_, (_, at))| *at <= now)
+                    .map(|(name, _)| name.clone()),
+            );
             due.sort();
             due.dedup();
             due_was_empty = due.is_empty();
@@ -1210,7 +1380,10 @@ fn run(
                     changed.push(repo.clone());
                 }
                 // A new directory may get its `.claude/` after we looked.
-                if !scanner.has_repo(&repo) && scanner.root.join(&repo).is_dir() && !repo.starts_with('.') {
+                if !scanner.has_repo(&repo)
+                    && scanner.root.join(&repo).is_dir()
+                    && !repo.starts_with('.')
+                {
                     if let Some(delay) = NEW_REPO_RECHECKS.get(attempts) {
                         rechecks.insert(repo, (attempts + 1, Instant::now() + *delay));
                     }
@@ -1291,7 +1464,9 @@ impl RepoWatcher {
         if self.root_watched {
             return;
         }
-        let Some(watcher) = self.watcher.as_mut() else { return };
+        let Some(watcher) = self.watcher.as_mut() else {
+            return;
+        };
         match watcher.watch(&self.root, RecursiveMode::NonRecursive) {
             Ok(()) => self.root_watched = true,
             Err(e) => {
@@ -1311,9 +1486,16 @@ impl RepoWatcher {
     /// Watch exactly the targets (retrying ones that failed before, and the root).
     fn sync(&mut self, targets: &[WatchTarget]) {
         self.watch_root();
-        let Some(watcher) = self.watcher.as_mut() else { return };
+        let Some(watcher) = self.watcher.as_mut() else {
+            return;
+        };
         let wanted: HashSet<&PathBuf> = targets.iter().map(|t| &t.dir).collect();
-        let gone: Vec<PathBuf> = self.watched.iter().filter(|d| !wanted.contains(d)).cloned().collect();
+        let gone: Vec<PathBuf> = self
+            .watched
+            .iter()
+            .filter(|d| !wanted.contains(d))
+            .cloned()
+            .collect();
         for dir in gone {
             let _ = watcher.unwatch(&dir);
             self.watched.remove(&dir);
@@ -1323,7 +1505,11 @@ impl RepoWatcher {
             if self.watched.contains(&target.dir) {
                 continue;
             }
-            let mode = if target.recursive { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
+            let mode = if target.recursive {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
             match watcher.watch(&target.dir, mode) {
                 Ok(()) => {
                     self.failed.remove(&target.dir);
@@ -1350,9 +1536,14 @@ fn unknown_item() -> WorkError {
 /// split is the first `:` that is followed by one of the doc directories.
 fn split_item_id(rest: &str) -> Option<(&str, &str)> {
     let starts_doc_path = |tail: &str| {
-        DOC_DIRS.iter().map(|(dir, _)| *dir).chain([WIP_DIR]).any(|dir| {
-            tail.strip_prefix(dir).is_some_and(|after| after.starts_with('/'))
-        })
+        DOC_DIRS
+            .iter()
+            .map(|(dir, _)| *dir)
+            .chain([WIP_DIR])
+            .any(|dir| {
+                tail.strip_prefix(dir)
+                    .is_some_and(|after| after.starts_with('/'))
+            })
     };
     rest.match_indices(':')
         .map(|(at, _)| (&rest[..at], &rest[at + 1..]))
@@ -1363,11 +1554,18 @@ fn detail_blocking(root: &Path, item_id: &str) -> Result<WorkDetail, WorkError> 
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let rest = item_id.strip_prefix("doc:").ok_or_else(unknown_item)?;
     let (repo, rel) = split_item_id(rest).ok_or_else(unknown_item)?;
-    if repo.is_empty() || repo.starts_with('.') || repo.contains(['/', '\\', '\0']) || rel.contains(['\\', '\0']) {
+    if repo.is_empty()
+        || repo.starts_with('.')
+        || repo.contains(['/', '\\', '\0'])
+        || rel.contains(['\\', '\0'])
+    {
         return Err(unknown_item());
     }
     let parts: Vec<&str> = rel.split('/').collect();
-    if parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
         return Err(unknown_item());
     }
     let (kind, is_wip) = kind_of_rel(&parts).ok_or_else(unknown_item)?;
@@ -1396,13 +1594,15 @@ fn detail_blocking(root: &Path, item_id: &str) -> Result<WorkDetail, WorkError> 
         }
         let index = path.join("index.md");
         match fs::metadata(&index) {
-            Ok(m) if m.is_file() && stays_inside(&index, &real_claude) => match read_detail_text(&index) {
-                Ok(text) => (text, Some(m)),
-                Err(e) => {
-                    notes.push(format!("index.md could not be read: {}", describe(&e)));
-                    (String::new(), Some(m))
+            Ok(m) if m.is_file() && stays_inside(&index, &real_claude) => {
+                match read_detail_text(&index) {
+                    Ok(text) => (text, Some(m)),
+                    Err(e) => {
+                        notes.push(format!("index.md could not be read: {}", describe(&e)));
+                        (String::new(), Some(m))
+                    }
                 }
-            },
+            }
             Err(e) if e.kind() != ErrorKind::NotFound => {
                 notes.push(format!("index.md could not be read: {}", describe(&e)));
                 (String::new(), None)
@@ -1418,19 +1618,34 @@ fn detail_blocking(root: &Path, item_id: &str) -> Result<WorkDetail, WorkError> 
                 if e.kind() == ErrorKind::NotFound {
                     unknown_item()
                 } else {
-                    WorkError::new("unreadable", format!("Couldn't read that doc: {}", describe(&e)))
+                    WorkError::new(
+                        "unreadable",
+                        format!("Couldn't read that doc: {}", describe(&e)),
+                    )
                 }
             })?,
             None,
         )
     };
-    let item = build_item(repo, kind, rel, &path, &text, index_meta.as_ref().unwrap_or(&meta), name);
+    let item = build_item(
+        repo,
+        kind,
+        rel,
+        &path,
+        &text,
+        index_meta.as_ref().unwrap_or(&meta),
+        name,
+    );
 
     let mut fields = detail_fields(&item, kind, repo, rel);
     let files = if is_wip {
         let listed = wip_files(&path, &real_claude);
         if listed.total > listed.files.len() {
-            notes.push(format!("showing the first {} of {} files", listed.files.len(), listed.total));
+            notes.push(format!(
+                "showing the first {} of {} files",
+                listed.files.len(),
+                listed.total
+            ));
         }
         if listed.unreadable > 0 {
             notes.push(format!("{} entries could not be listed", listed.unreadable));
@@ -1441,7 +1656,11 @@ fn detail_blocking(root: &Path, item_id: &str) -> Result<WorkDetail, WorkError> 
     };
     fields.extend(notes.into_iter().map(|note| ("Note".to_string(), note)));
     let link = url::Url::from_file_path(&path).ok().map(|u| Link {
-        label: if is_wip { "Open folder".to_string() } else { "Open file".to_string() },
+        label: if is_wip {
+            "Open folder".to_string()
+        } else {
+            "Open file".to_string()
+        },
         url: u.to_string(),
     });
     Ok(WorkDetail {
@@ -1477,7 +1696,10 @@ fn detail_fields(item: &WorkItem, kind: &str, repo: &str, rel: &str) -> Vec<(Str
     if item.metrics.contains_key(TRUNCATED_METRIC) {
         fields.push((
             "Search".to_string(),
-            format!("truncated: only the first {} KiB of this doc is searchable", SEARCH_TEXT_CAP / 1024),
+            format!(
+                "truncated: only the first {} KiB of this doc is searchable",
+                SEARCH_TEXT_CAP / 1024
+            ),
         ));
     }
     fields
@@ -1493,7 +1715,10 @@ fn kind_of_rel(parts: &[&str]) -> Option<(&'static str, bool)> {
         return None;
     }
     let dir = dir.join("/");
-    DOC_DIRS.iter().find(|(d, _)| *d == dir).map(|(_, kind)| (*kind, false))
+    DOC_DIRS
+        .iter()
+        .find(|(d, _)| *d == dir)
+        .map(|(_, kind)| (*kind, false))
 }
 
 fn kind_label(kind: &str) -> &'static str {
@@ -1533,7 +1758,13 @@ struct WipFiles {
 fn wip_files(dir: &Path, base: &Path) -> WipFiles {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(_) => return WipFiles { files: Vec::new(), total: 0, unreadable: 1 },
+        Err(_) => {
+            return WipFiles {
+                files: Vec::new(),
+                total: 0,
+                unreadable: 1,
+            }
+        }
     };
     let mut unreadable = 0;
     let mut files = Vec::new();
@@ -1555,7 +1786,11 @@ fn wip_files(dir: &Path, base: &Path) -> WipFiles {
     files.sort();
     let total = files.len();
     files.truncate(MAX_WIP_FILES);
-    WipFiles { files, total, unreadable }
+    WipFiles {
+        files,
+        total,
+        unreadable,
+    }
 }
 
 // ── unit tests (pure parts) ───────────────────────────────────────────────────
@@ -1579,30 +1814,81 @@ mod tests {
 
     #[test]
     fn severity_comes_from_a_bold_body_line_case_insensitively() {
-        assert_eq!(parse("# T\n**Severity:** high\n").severity.as_deref(), Some("high"));
-        assert_eq!(parse("# T\n**severity:**   Medium  \n").severity.as_deref(), Some("Medium"));
+        assert_eq!(
+            parse("# T\n**Severity:** high\n").severity.as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            parse("# T\n**severity:**   Medium  \n").severity.as_deref(),
+            Some("Medium")
+        );
         assert_eq!(parse("# T\nNothing about it here\n").severity, None);
-        assert_eq!(parse("# T\n**Severity:**\n").severity, None, "an empty value states nothing");
+        assert_eq!(
+            parse("# T\n**Severity:**\n").severity,
+            None,
+            "an empty value states nothing"
+        );
     }
 
     #[test]
     fn front_matter_wins_over_the_body_for_severity() {
-        assert_eq!(parse("---\nSeverity: \"high\"\n---\n**Severity:** low\n").severity.as_deref(), Some("high"));
+        assert_eq!(
+            parse("---\nSeverity: \"high\"\n---\n**Severity:** low\n")
+                .severity
+                .as_deref(),
+            Some("high")
+        );
     }
 
     #[test]
     fn priority_maps_p1_to_p5_and_keeps_other_words() {
-        assert_eq!(priority_from("P2"), Priority { label: "P2".into(), rank: 2 });
-        assert_eq!(priority_from("p4 (nice to have)"), Priority { label: "P4".into(), rank: 4 });
-        assert_eq!(priority_from("urgent"), Priority { label: "urgent".into(), rank: 9 });
-        assert_eq!(priority_from("P7"), Priority { label: "P7".into(), rank: 9 });
-        assert_eq!(parse("# T\n**Priority:** P1\n").priority, Some(Priority { label: "P1".into(), rank: 1 }));
+        assert_eq!(
+            priority_from("P2"),
+            Priority {
+                label: "P2".into(),
+                rank: 2
+            }
+        );
+        assert_eq!(
+            priority_from("p4 (nice to have)"),
+            Priority {
+                label: "P4".into(),
+                rank: 4
+            }
+        );
+        assert_eq!(
+            priority_from("urgent"),
+            Priority {
+                label: "urgent".into(),
+                rank: 9
+            }
+        );
+        assert_eq!(
+            priority_from("P7"),
+            Priority {
+                label: "P7".into(),
+                rank: 9
+            }
+        );
+        assert_eq!(
+            parse("# T\n**Priority:** P1\n").priority,
+            Some(Priority {
+                label: "P1".into(),
+                rank: 1
+            })
+        );
     }
 
     #[test]
     fn dates_come_from_the_name_prefix_only_when_it_is_a_whole_date() {
-        assert_eq!(prefix_date("2026-10-01-slug.md"), NaiveDate::from_ymd_opt(2026, 10, 1));
-        assert_eq!(prefix_date("2026-10-01.md"), NaiveDate::from_ymd_opt(2026, 10, 1));
+        assert_eq!(
+            prefix_date("2026-10-01-slug.md"),
+            NaiveDate::from_ymd_opt(2026, 10, 1)
+        );
+        assert_eq!(
+            prefix_date("2026-10-01.md"),
+            NaiveDate::from_ymd_opt(2026, 10, 1)
+        );
         assert_eq!(prefix_date("2026-10-011-slug.md"), None);
         assert_eq!(prefix_date("slug.md"), None);
         assert_eq!(prefix_date("é2026-10-01-x.md"), None);
@@ -1610,7 +1896,10 @@ mod tests {
 
     #[test]
     fn slugs_are_humanised_without_their_date() {
-        assert_eq!(humanize_slug("2026-10-01-login-fails_badly.md"), "Login fails badly");
+        assert_eq!(
+            humanize_slug("2026-10-01-login-fails_badly.md"),
+            "Login fails badly"
+        );
         assert_eq!(humanize_slug("callimachus-notes.md"), "Callimachus notes");
         assert_eq!(humanize_slug("2026-10-01.md"), "2026-10-01");
     }
@@ -1670,7 +1959,11 @@ mod tests {
         let text = "```\n~~~\n**Severity:** high\n**Priority:** P1\n```\n# T\n**Severity:** low\n";
         let parsed = parse(text);
         assert_eq!(parsed.title.as_deref(), Some("T"));
-        assert_eq!(parsed.severity.as_deref(), Some("low"), "only the line after the real close counts");
+        assert_eq!(
+            parsed.severity.as_deref(),
+            Some("low"),
+            "only the line after the real close counts"
+        );
         assert_eq!(parsed.priority, None);
     }
 
@@ -1684,18 +1977,33 @@ mod tests {
         fs::write(root.join("alpha/.claude/ideas/one.md"), "# One\n").unwrap();
         let mut scanner = Scanner::new(root);
         let (status, _) = scanner.scan_all();
-        assert_eq!((status.state, status.reason.as_deref(), status.complete), (SourceState::Fresh, None, true));
+        assert_eq!(
+            (status.state, status.reason.as_deref(), status.complete),
+            (SourceState::Fresh, None, true)
+        );
 
-        assert!(scanner.set_live_updates(false), "the watcher failing is a change to publish, though no doc changed");
+        assert!(
+            scanner.set_live_updates(false),
+            "the watcher failing is a change to publish, though no doc changed"
+        );
         let (status, _) = scanner.update();
         assert_eq!(status.state, SourceState::Fresh);
         assert_eq!(status.reason.as_deref(), Some(LIVE_UPDATES_UNAVAILABLE));
         assert_eq!(status.count, 1);
-        assert!(status.complete, "the list was scanned whole; only its freshness is in doubt: {status:?}");
+        assert!(
+            status.complete,
+            "the list was scanned whole; only its freshness is in doubt: {status:?}"
+        );
 
-        assert!(!scanner.set_live_updates(false), "saying the same thing again is no change");
+        assert!(
+            !scanner.set_live_updates(false),
+            "saying the same thing again is no change"
+        );
 
-        assert!(scanner.set_live_updates(true), "the watcher coming back is a change too");
+        assert!(
+            scanner.set_live_updates(true),
+            "the watcher coming back is a change too"
+        );
         let (status, _) = scanner.update();
         assert_eq!((status.reason, status.complete), (None, true));
     }

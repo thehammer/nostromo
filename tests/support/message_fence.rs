@@ -53,7 +53,11 @@ pub fn lines(text: &str) -> Vec<&str> {
             }
             b'\r' => {
                 out.push(&text[start..i]);
-                i += if bytes.get(i + 1) == Some(&b'\n') { 2 } else { 1 };
+                i += if bytes.get(i + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
                 start = i;
             }
             _ => i += 1,
@@ -69,27 +73,63 @@ fn clip(text: &str) -> String {
     if text.chars().count() <= 2500 {
         text.to_owned()
     } else {
-        format!("{}... [{} chars]", text.chars().take(2500).collect::<String>(), text.chars().count())
+        format!(
+            "{}... [{} chars]",
+            text.chars().take(2500).collect::<String>(),
+            text.chars().count()
+        )
     }
 }
 
 /// Cut `text` at its one real fence, or fail saying what is wrong with it.
 pub fn split(what: &str, text: &str) -> Split {
     let all = lines(text);
-    let nonce_of = |line: &str, prefix: &str| line.strip_prefix(prefix).and_then(|r| r.strip_suffix(">>>")).map(str::to_owned);
-    let begins: Vec<(usize, String)> =
-        all.iter().enumerate().filter_map(|(i, l)| nonce_of(l, BEGIN).map(|n| (i, n))).collect();
-    let ends: Vec<(usize, String)> =
-        all.iter().enumerate().filter_map(|(i, l)| nonce_of(l, END).map(|n| (i, n))).collect();
-    assert_eq!(begins.len(), 1, "{what}: expected exactly one begin-marker line, got {begins:?}:\n{}", clip(text));
-    assert_eq!(ends.len(), 1, "{what}: expected exactly one end-marker line, got {ends:?}:\n{}", clip(text));
-    let ((b, nonce), (e, end_nonce)) = (begins.into_iter().next().unwrap(), ends.into_iter().next().unwrap());
-    assert_eq!(nonce, end_nonce, "{what}: the two markers carry different nonces:\n{}", clip(text));
+    let nonce_of = |line: &str, prefix: &str| {
+        line.strip_prefix(prefix)
+            .and_then(|r| r.strip_suffix(">>>"))
+            .map(str::to_owned)
+    };
+    let begins: Vec<(usize, String)> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| nonce_of(l, BEGIN).map(|n| (i, n)))
+        .collect();
+    let ends: Vec<(usize, String)> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| nonce_of(l, END).map(|n| (i, n)))
+        .collect();
+    assert_eq!(
+        begins.len(),
+        1,
+        "{what}: expected exactly one begin-marker line, got {begins:?}:\n{}",
+        clip(text)
+    );
+    assert_eq!(
+        ends.len(),
+        1,
+        "{what}: expected exactly one end-marker line, got {ends:?}:\n{}",
+        clip(text)
+    );
+    let ((b, nonce), (e, end_nonce)) = (
+        begins.into_iter().next().unwrap(),
+        ends.into_iter().next().unwrap(),
+    );
+    assert_eq!(
+        nonce,
+        end_nonce,
+        "{what}: the two markers carry different nonces:\n{}",
+        clip(text)
+    );
     assert!(
         nonce.len() >= 8 && nonce.chars().all(|c| c.is_ascii_alphanumeric()),
         "{what}: the nonce must be an unguessable token, got {nonce:?}"
     );
-    assert!(b < e, "{what}: the end marker comes before the begin marker:\n{}", clip(text));
+    assert!(
+        b < e,
+        "{what}: the end marker comes before the begin marker:\n{}",
+        clip(text)
+    );
 
     let before = all[..b].join("\n");
     let inside = all[b + 1..e].join("\n");
@@ -103,7 +143,10 @@ pub fn split(what: &str, text: &str) -> Split {
             "{what}: a marker delimiter survived {part_name}:\n{}",
             clip(part)
         );
-        assert!(!part.contains(&nonce), "{what}: the nonce leaked {part_name}");
+        assert!(
+            !part.contains(&nonce),
+            "{what}: the nonce leaked {part_name}"
+        );
     }
     // In front of the fence the notice may name the markers, but only with the real nonce.
     let mut rest = before.as_str();
@@ -118,7 +161,12 @@ pub fn split(what: &str, text: &str) -> Split {
         );
         rest = tail;
     }
-    Split { nonce, before, inside, after }
+    Split {
+        nonce,
+        before,
+        inside,
+        after,
+    }
 }
 
 /// Every byte offset of `needle` in `haystack`.
@@ -130,16 +178,36 @@ pub fn offsets(haystack: &str, needle: &str) -> Vec<usize> {
 /// outside it. Positional: both halves must hold.
 pub fn assert_only_inside(what: &str, s: &Split, tokens: &[&str]) {
     for token in tokens {
-        assert!(s.inside.contains(token), "{what}: `{token}` should be inside the fence, which holds:\n{}", clip(&s.inside));
-        assert!(!s.before.contains(token), "{what}: `{token}` is in front of the fence:\n{}", clip(&s.before));
-        assert!(!s.after.contains(token), "{what}: `{token}` is after the fence:\n{}", clip(&s.after));
+        assert!(
+            s.inside.contains(token),
+            "{what}: `{token}` should be inside the fence, which holds:\n{}",
+            clip(&s.inside)
+        );
+        assert!(
+            !s.before.contains(token),
+            "{what}: `{token}` is in front of the fence:\n{}",
+            clip(&s.before)
+        );
+        assert!(
+            !s.after.contains(token),
+            "{what}: `{token}` is after the fence:\n{}",
+            clip(&s.after)
+        );
     }
 }
 
 /// Assert none of `tokens` is anywhere outside the fence.
 pub fn assert_not_outside(what: &str, s: &Split, tokens: &[&str]) {
     for token in tokens {
-        assert!(!s.before.contains(token), "{what}: `{token}` is in front of the fence:\n{}", clip(&s.before));
-        assert!(!s.after.contains(token), "{what}: `{token}` is after the fence:\n{}", clip(&s.after));
+        assert!(
+            !s.before.contains(token),
+            "{what}: `{token}` is in front of the fence:\n{}",
+            clip(&s.before)
+        );
+        assert!(
+            !s.after.contains(token),
+            "{what}: `{token}` is after the fence:\n{}",
+            clip(&s.after)
+        );
     }
 }

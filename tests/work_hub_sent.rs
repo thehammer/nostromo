@@ -37,7 +37,10 @@ static FAKE_CLAUDE_DIR: OnceLock<PathBuf> = OnceLock::new();
 fn install_fake_claude() {
     FAKE_CLAUDE_DIR.get_or_init(|| {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("nostromo-fake-claude-hubsent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "nostromo-fake-claude-hubsent-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("fake claude dir");
         let script = dir.join("claude");
         std::fs::write(&script, FAKE_CLAUDE_SCRIPT).expect("write fake claude");
@@ -108,7 +111,10 @@ impl Drop for Rig {
     fn drop(&mut self) {
         // The sessions' reader threads live in the runtime's blocking pool: end
         // the children or dropping the runtime waits for them forever.
-        self.sessions.lock().unwrap_or_else(|e| e.into_inner()).kill_all_on_shutdown();
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .kill_all_on_shutdown();
     }
 }
 
@@ -121,7 +127,9 @@ impl Rig {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Arc::new(SentLedger::new(dir.path().join("sent.json")));
         install_ledger(Arc::clone(&ledger));
-        let sessions = Arc::new(Mutex::new(SessionManager::with_store_path(dir.path().join("sessions.json"))));
+        let sessions = Arc::new(Mutex::new(SessionManager::with_store_path(
+            dir.path().join("sessions.json"),
+        )));
         before(&ledger, &sessions);
 
         let (btx, rx) = broadcast::channel(1024);
@@ -132,7 +140,15 @@ impl Rig {
             repo_docs_root: Some(dir.path().join("no-code-here")),
             ..HubDeps::new(btx, trx)
         });
-        Rig { _guard: guard, _dir: dir, ledger, sessions, hub, rx, _todos_tx: ttx }
+        Rig {
+            _guard: guard,
+            _dir: dir,
+            ledger,
+            sessions,
+            hub,
+            rx,
+            _todos_tx: ttx,
+        }
     }
 
     fn spawn_live(sessions: &Mutex<SessionManager>, tag: &str) {
@@ -148,7 +164,10 @@ impl Rig {
     }
 
     fn item(&self, id: &str) -> WorkItem {
-        self.items().into_iter().find(|i| i.id == id).unwrap_or_else(|| panic!("no item {id}"))
+        self.items()
+            .into_iter()
+            .find(|i| i.id == id)
+            .unwrap_or_else(|| panic!("no item {id}"))
     }
 
     /// Next todos snapshot satisfying `pred`, within `WAIT`.
@@ -158,9 +177,11 @@ impl Rig {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             match tokio::time::timeout(left, self.rx.recv()).await {
                 Err(_) => panic!("timed out waiting for the expected WorkSnapshot"),
-                Ok(Ok(ServerMsg::WorkSnapshot { source: WorkSource::Todos, items, .. })) if pred(&items) => {
-                    return items
-                }
+                Ok(Ok(ServerMsg::WorkSnapshot {
+                    source: WorkSource::Todos,
+                    items,
+                    ..
+                })) if pred(&items) => return items,
                 Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
                 Ok(Err(broadcast::error::RecvError::Closed)) => panic!("broadcast closed"),
             }
@@ -169,13 +190,20 @@ impl Rig {
 }
 
 fn sent_of<'a>(items: &'a [WorkItem], id: &str) -> &'a [SentMarker] {
-    &items.iter().find(|i| i.id == id).unwrap_or_else(|| panic!("no item {id}")).sent
+    &items
+        .iter()
+        .find(|i| i.id == id)
+        .unwrap_or_else(|| panic!("no item {id}"))
+        .sent
 }
 
 async fn wait_until_items_loaded(rig: &Rig) {
     let deadline = tokio::time::Instant::now() + WAIT;
     while rig.items().len() < 2 {
-        assert!(tokio::time::Instant::now() < deadline, "hub never loaded the todos");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "hub never loaded the todos"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -184,7 +212,9 @@ async fn wait_until_items_loaded(rig: &Rig) {
 async fn an_item_sent_to_a_live_focus_shows_sent_and_an_unsent_one_does_not() {
     let rig = Rig::new(|ledger, sessions| {
         Rig::spawn_live(sessions, "cody-first");
-        ledger.record("todo:1", marker("focus", "cody-first")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-first"))
+            .unwrap();
     })
     .await;
     wait_until_items_loaded(&rig).await;
@@ -198,7 +228,9 @@ async fn an_item_sent_to_a_live_focus_shows_sent_and_an_unsent_one_does_not() {
 #[tokio::test]
 async fn a_marker_whose_focus_has_no_live_session_is_not_shown_once_the_registry_is_known() {
     let rig = Rig::new(|ledger, sessions| {
-        ledger.record("todo:1", marker("focus", "cody-never-ran")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-never-ran"))
+            .unwrap();
         push(sessions, &["cody-someone-else"]);
         push(sessions, &["cody-someone-else"]);
         assert!(sessions.lock().unwrap().registry_known(), "precondition");
@@ -213,9 +245,14 @@ async fn a_focus_still_running_between_a_restart_and_the_first_registry_push_kee
     // The daemon restarted: no session entry for the focus yet and nothing
     // pushed. The chip follows the rule `send` applies, so it stays.
     let rig = Rig::new(|ledger, sessions| {
-        ledger.record("todo:1", marker("focus", "cody-still-running")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-still-running"))
+            .unwrap();
         let mgr = sessions.lock().unwrap();
-        assert!(!mgr.has_session_entry("cody-still-running"), "precondition: no session entry");
+        assert!(
+            !mgr.has_session_entry("cody-still-running"),
+            "precondition: no session entry"
+        );
         assert!(!mgr.registry_known(), "precondition: nothing pushed");
     })
     .await;
@@ -231,9 +268,13 @@ async fn sending_an_item_after_the_hub_is_up_republishes_it_with_sent() {
     let mut rig = Rig::new(|_, sessions| Rig::spawn_live(sessions, "cody-late")).await;
     wait_until_items_loaded(&rig).await;
 
-    rig.ledger.record("todo:2", marker("focus", "cody-late")).unwrap();
+    rig.ledger
+        .record("todo:2", marker("focus", "cody-late"))
+        .unwrap();
 
-    let items = rig.next_snapshot(|items| !sent_of(items, "todo:2").is_empty()).await;
+    let items = rig
+        .next_snapshot(|items| !sent_of(items, "todo:2").is_empty())
+        .await;
     assert_eq!(sent_of(&items, "todo:2")[0].target_id, "cody-late");
     assert!(sent_of(&items, "todo:1").is_empty());
     assert_eq!(rig.item("todo:2").sent.len(), 1);
@@ -243,21 +284,31 @@ async fn sending_an_item_after_the_hub_is_up_republishes_it_with_sent() {
 async fn closing_the_focus_clears_sent_and_clients_get_a_fresh_snapshot() {
     let mut rig = Rig::new(|ledger, sessions| {
         Rig::spawn_live(sessions, "cody-closing");
-        ledger.record("todo:1", marker("focus", "cody-closing")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-closing"))
+            .unwrap();
         // A registry the daemon can vouch for: only then is an unlisted tag gone.
         push(sessions, &["cody-closing"]);
         push(sessions, &["cody-closing"]);
     })
     .await;
-    rig.next_snapshot(|items| !sent_of(items, "todo:1").is_empty()).await;
+    rig.next_snapshot(|items| !sent_of(items, "todo:1").is_empty())
+        .await;
 
     rig.sessions.lock().unwrap().stop("cody-closing");
     // The hub also re-checks on a short timer; a ledger change is the prompt
     // way to make it look now, whichever happens first.
-    rig.ledger.record("todo:2", marker("focus", "some-dead-focus")).unwrap();
+    rig.ledger
+        .record("todo:2", marker("focus", "some-dead-focus"))
+        .unwrap();
 
-    let items = rig.next_snapshot(|items| sent_of(items, "todo:1").is_empty()).await;
-    assert!(sent_of(&items, "todo:2").is_empty(), "a dead marker never shows");
+    let items = rig
+        .next_snapshot(|items| sent_of(items, "todo:1").is_empty())
+        .await;
+    assert!(
+        sent_of(&items, "todo:2").is_empty(),
+        "a dead marker never shows"
+    );
     assert!(rig.item("todo:1").sent.is_empty());
 }
 
@@ -268,9 +319,17 @@ async fn closing_the_focus_clears_sent_and_clients_get_a_fresh_snapshot() {
 #[tokio::test]
 async fn a_focus_known_only_from_the_pushed_registry_shows_sent_before_its_session_is_back() {
     let rig = Rig::new(|ledger, sessions| {
-        sessions.lock().unwrap().set_focus_registry(vec![registry_meta("cody-restarted")]);
-        assert!(!sessions.lock().unwrap().has_live_session("cody-restarted"), "precondition: no session yet");
-        ledger.record("todo:1", marker("focus", "cody-restarted")).unwrap();
+        sessions
+            .lock()
+            .unwrap()
+            .set_focus_registry(vec![registry_meta("cody-restarted")]);
+        assert!(
+            !sessions.lock().unwrap().has_live_session("cody-restarted"),
+            "precondition: no session yet"
+        );
+        ledger
+            .record("todo:1", marker("focus", "cody-restarted"))
+            .unwrap();
     })
     .await;
     wait_until_items_loaded(&rig).await;
@@ -287,7 +346,9 @@ async fn a_marker_whose_tag_is_neither_running_nor_registered_is_not_shown_even_
         push(sessions, &["cody-someone-else"]);
         push(sessions, &["cody-someone-else"]);
         assert!(sessions.lock().unwrap().registry_known(), "precondition");
-        ledger.record("todo:1", marker("focus", "cody-gone")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-gone"))
+            .unwrap();
     })
     .await;
     wait_until_items_loaded(&rig).await;
@@ -295,24 +356,39 @@ async fn a_marker_whose_tag_is_neither_running_nor_registered_is_not_shown_even_
 }
 
 #[tokio::test]
-async fn a_focus_stopped_in_this_process_stops_showing_sent_even_though_the_registry_still_lists_it() {
+async fn a_focus_stopped_in_this_process_stops_showing_sent_even_though_the_registry_still_lists_it(
+) {
     let mut rig = Rig::new(|ledger, sessions| {
         Rig::spawn_live(sessions, "cody-stopped-listed");
-        sessions.lock().unwrap().set_focus_registry(vec![registry_meta("cody-stopped-listed")]);
-        ledger.record("todo:1", marker("focus", "cody-stopped-listed")).unwrap();
+        sessions
+            .lock()
+            .unwrap()
+            .set_focus_registry(vec![registry_meta("cody-stopped-listed")]);
+        ledger
+            .record("todo:1", marker("focus", "cody-stopped-listed"))
+            .unwrap();
     })
     .await;
-    rig.next_snapshot(|items| !sent_of(items, "todo:1").is_empty()).await;
+    rig.next_snapshot(|items| !sent_of(items, "todo:1").is_empty())
+        .await;
 
     rig.sessions.lock().unwrap().stop("cody-stopped-listed");
     assert!(
-        rig.sessions.lock().unwrap().focus_registry().iter().any(|f| f.tag == "cody-stopped-listed"),
+        rig.sessions
+            .lock()
+            .unwrap()
+            .focus_registry()
+            .iter()
+            .any(|f| f.tag == "cody-stopped-listed"),
         "precondition: the registry still lists the closed focus"
     );
     // Make the hub look now (it also re-checks on a timer).
-    rig.ledger.record("todo:2", marker("focus", "some-dead-focus")).unwrap();
+    rig.ledger
+        .record("todo:2", marker("focus", "some-dead-focus"))
+        .unwrap();
 
-    rig.next_snapshot(|items| sent_of(items, "todo:1").is_empty()).await;
+    rig.next_snapshot(|items| sent_of(items, "todo:1").is_empty())
+        .await;
     assert!(rig.item("todo:1").sent.is_empty());
 }
 
@@ -326,11 +402,18 @@ async fn a_focus_stopped_in_this_process_stops_showing_sent_even_though_the_regi
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn push(sessions: &Mutex<SessionManager>, tags: &[&str]) {
-    sessions.lock().unwrap().set_focus_registry(tags.iter().map(|t| registry_meta(t)).collect());
+    sessions
+        .lock()
+        .unwrap()
+        .set_focus_registry(tags.iter().map(|t| registry_meta(t)).collect());
 }
 
 fn tags_in_ledger(ledger: &SentLedger, item: &str) -> Vec<String> {
-    let mut tags: Vec<String> = ledger.markers(item).into_iter().map(|m| m.target_id).collect();
+    let mut tags: Vec<String> = ledger
+        .markers(item)
+        .into_iter()
+        .map(|m| m.target_id)
+        .collect();
     tags.sort();
     tags
 }
@@ -338,16 +421,27 @@ fn tags_in_ledger(ledger: &SentLedger, item: &str) -> Vec<String> {
 #[tokio::test]
 async fn a_prune_before_the_mac_has_pushed_a_registry_keeps_every_focus_marker() {
     let rig = Rig::new(|ledger, sessions| {
-        ledger.record("todo:1", marker("focus", "cody-after-restart")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-after-restart"))
+            .unwrap();
         let mgr = sessions.lock().unwrap();
-        assert!(!mgr.has_live_session("cody-after-restart"), "precondition: no session");
-        assert!(mgr.focus_registry().is_empty(), "precondition: nothing pushed");
+        assert!(
+            !mgr.has_live_session("cody-after-restart"),
+            "precondition: no session"
+        );
+        assert!(
+            mgr.focus_registry().is_empty(),
+            "precondition: nothing pushed"
+        );
     })
     .await;
 
     rig.hub.prune_sent().await;
 
-    assert_eq!(tags_in_ledger(&rig.ledger, "todo:1"), vec!["cody-after-restart".to_string()]);
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:1"),
+        vec!["cody-after-restart".to_string()]
+    );
     assert_eq!(
         tags_in_ledger(&SentLedger::new(rig.ledger.path()), "todo:1"),
         vec!["cody-after-restart".to_string()],
@@ -359,10 +453,18 @@ async fn a_prune_before_the_mac_has_pushed_a_registry_keeps_every_focus_marker()
 async fn once_two_pushes_agree_a_prune_drops_only_the_focus_markers_the_registry_lacks() {
     let rig = Rig::new(|ledger, sessions| {
         Rig::spawn_live(sessions, "cody-running");
-        ledger.record("todo:1", marker("focus", "cody-gone")).unwrap();
-        ledger.record("todo:1", marker("focus", "cody-listed")).unwrap();
-        ledger.record("todo:2", marker("focus", "cody-running")).unwrap();
-        ledger.record("todo:2", marker("focus", "cody-pending")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-gone"))
+            .unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-listed"))
+            .unwrap();
+        ledger
+            .record("todo:2", marker("focus", "cody-running"))
+            .unwrap();
+        ledger
+            .record("todo:2", marker("focus", "cody-pending"))
+            .unwrap();
         push(sessions, &["cody-listed", "cody-pending", "cody-other"]);
         // `cody-pending` is omitted by the latest push only: a second push has to
         // agree before it is gone.
@@ -391,12 +493,16 @@ async fn once_two_pushes_agree_a_prune_drops_only_the_focus_markers_the_registry
 }
 
 #[tokio::test]
-async fn a_focus_marker_whose_tag_was_reused_by_a_later_focus_is_pruned_even_with_the_tag_registered() {
+async fn a_focus_marker_whose_tag_was_reused_by_a_later_focus_is_pruned_even_with_the_tag_registered(
+) {
     let rig = Rig::new(|ledger, sessions| {
         let mut old = marker("focus", "cody-reused");
         old.nonce = Some("old-focus".into());
         ledger.record("todo:1", old).unwrap();
-        sessions.lock().unwrap().set_focus_nonce("cody-reused", "new-focus".into());
+        sessions
+            .lock()
+            .unwrap()
+            .set_focus_nonce("cody-reused", "new-focus".into());
         push(sessions, &["cody-reused"]);
         push(sessions, &["cody-reused"]);
     })
@@ -404,7 +510,10 @@ async fn a_focus_marker_whose_tag_was_reused_by_a_later_focus_is_pruned_even_wit
 
     rig.hub.prune_sent().await;
 
-    assert!(rig.ledger.markers("todo:1").is_empty(), "the marker belongs to a focus that is gone");
+    assert!(
+        rig.ledger.markers("todo:1").is_empty(),
+        "the marker belongs to a focus that is gone"
+    );
 }
 
 #[tokio::test]
@@ -422,14 +531,23 @@ async fn an_empty_push_makes_the_registry_unknown_again_so_a_prune_keeps_the_mar
 
     rig.hub.prune_sent().await;
 
-    assert_eq!(tags_in_ledger(&rig.ledger, "todo:1"), vec!["cody-a".to_string()]);
-    assert_eq!(tags_in_ledger(&rig.ledger, "todo:2"), vec!["cody-b".to_string()], "not registered, but nothing vouches for that");
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:1"),
+        vec!["cody-a".to_string()]
+    );
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:2"),
+        vec!["cody-b".to_string()],
+        "not registered, but nothing vouches for that"
+    );
 }
 
 #[tokio::test]
 async fn a_single_non_empty_push_is_not_enough_to_prune_on() {
     let rig = Rig::new(|ledger, sessions| {
-        ledger.record("todo:1", marker("focus", "cody-not-in-the-first-push")).unwrap();
+        ledger
+            .record("todo:1", marker("focus", "cody-not-in-the-first-push"))
+            .unwrap();
         push(sessions, &["cody-someone-else"]);
         assert!(!sessions.lock().unwrap().registry_known(), "precondition");
     })
@@ -437,7 +555,10 @@ async fn a_single_non_empty_push_is_not_enough_to_prune_on() {
 
     rig.hub.prune_sent().await;
 
-    assert_eq!(tags_in_ledger(&rig.ledger, "todo:1"), vec!["cody-not-in-the-first-push".to_string()]);
+    assert_eq!(
+        tags_in_ledger(&rig.ledger, "todo:1"),
+        vec!["cody-not-in-the-first-push".to_string()]
+    );
 }
 
 // ── Mother job markers made while `mother list` is running ───────────────────
@@ -480,7 +601,10 @@ exit 2
 async fn wait_for_file(path: &std::path::Path, what: &str) {
     let deadline = tokio::time::Instant::now() + WAIT;
     while !path.exists() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -512,11 +636,20 @@ async fn a_job_recorded_while_mother_is_being_listed_survives_the_prune_that_cou
 
     // The prune is now inside `mother list`. A job queued and recorded at this
     // moment is in the ledger but cannot be in the list it is about to get.
-    wait_for_file(&mother_dir.join("list-started"), "the prune to ask Mother for its jobs").await;
-    rig.ledger.record("todo:2", marker("mother_job", "job-just-queued")).unwrap();
+    wait_for_file(
+        &mother_dir.join("list-started"),
+        "the prune to ask Mother for its jobs",
+    )
+    .await;
+    rig.ledger
+        .record("todo:2", marker("mother_job", "job-just-queued"))
+        .unwrap();
     std::fs::write(mother_dir.join("release"), "").unwrap();
 
-    tokio::time::timeout(WAIT, prune).await.expect("the prune finishes once Mother answers").unwrap();
+    tokio::time::timeout(WAIT, prune)
+        .await
+        .expect("the prune finishes once Mother answers")
+        .unwrap();
 
     assert_eq!(
         tags_in_ledger(&rig.ledger, "todo:2"),

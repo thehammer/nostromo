@@ -255,16 +255,33 @@ mod tests {
 
     #[test]
     fn contents_url_builds_the_ordinary_shape() {
-        let u = contents_url("https://api.github.com", "Carefeed", "referral-monitor", "docs/a.md").unwrap();
-        assert_eq!(u.as_str(), "https://api.github.com/repos/Carefeed/referral-monitor/contents/docs/a.md");
+        let u = contents_url(
+            "https://api.github.com",
+            "Carefeed",
+            "referral-monitor",
+            "docs/a.md",
+        )
+        .unwrap();
+        assert_eq!(
+            u.as_str(),
+            "https://api.github.com/repos/Carefeed/referral-monitor/contents/docs/a.md"
+        );
     }
 
     #[test]
     fn contents_url_cannot_be_retargeted_by_the_path() {
         // `?` and `#` stay inside the path as encoded characters: no query, no fragment.
         let u = contents_url("https://api.github.com", "o", "r", "a?ref=evil#x").unwrap();
-        assert_eq!(u.query(), None, "a `?` in the path must not start a query: {u}");
-        assert_eq!(u.fragment(), None, "a `#` in the path must not start a fragment: {u}");
+        assert_eq!(
+            u.query(),
+            None,
+            "a `?` in the path must not start a query: {u}"
+        );
+        assert_eq!(
+            u.fragment(),
+            None,
+            "a `#` in the path must not start a fragment: {u}"
+        );
         assert!(u.path().starts_with("/repos/o/r/contents/"));
         // Spaces and a pre-encoded `..` are encoded, never interpreted.
         let u = contents_url("https://api.github.com", "o", "r", "a b/%2e%2e/c").unwrap();
@@ -274,7 +291,11 @@ mod tests {
 
     #[test]
     fn contents_url_cannot_climb_out_with_dot_segments_in_the_path_or_repo() {
-        for (owner, repo, path) in [("o", "r", "../../../user"), ("..", "x", "a.md"), ("o", "..", "a.md")] {
+        for (owner, repo, path) in [
+            ("o", "r", "../../../user"),
+            ("..", "x", "a.md"),
+            ("o", "..", "a.md"),
+        ] {
             let u = contents_url("https://api.github.com", owner, repo, path).unwrap();
             assert!(
                 u.path().starts_with("/repos/") && u.path().contains("/contents/"),

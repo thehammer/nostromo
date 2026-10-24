@@ -581,7 +581,10 @@ async fn clear_current_pr_over_the_real_socket_closes_a_curated_pr_diff_tab() {
         bound,
     )
     .await;
-    assert_eq!(res["ok"], true, "nostromo.show should open the pr_diff tab: {res}");
+    assert_eq!(
+        res["ok"], true,
+        "nostromo.show should open the pr_diff tab: {res}"
+    );
 
     let res = call_tool_bounded(
         &mut reader,
@@ -644,7 +647,10 @@ async fn load_pr_over_the_real_socket_on_a_curated_focus_with_an_open_pr_diff_ta
         bound,
     )
     .await;
-    assert_eq!(res["ok"], true, "nostromo.show should open the pr_diff tab: {res}");
+    assert_eq!(
+        res["ok"], true,
+        "nostromo.show should open the pr_diff tab: {res}"
+    );
 
     // Load the *same* PR the open tab is showing — a realistic flow (the
     // agent reviews the diff it already opened, then calls load_pr with the
@@ -2034,7 +2040,10 @@ async fn load_pr_on_a_curated_focus_rebuilds_the_detail_region_for_the_new_pr_wi
         bound,
     )
     .await;
-    assert_eq!(res["ok"], true, "nostromo.show should open the pr_conversation tab: {res}");
+    assert_eq!(
+        res["ok"], true,
+        "nostromo.show should open the pr_conversation tab: {res}"
+    );
 
     let res = call_tool_bounded(
         &mut reader,
@@ -2045,10 +2054,17 @@ async fn load_pr_on_a_curated_focus_rebuilds_the_detail_region_for_the_new_pr_wi
         bound,
     )
     .await;
-    assert_eq!(res["ok"], true, "nostromo.show should open the pr_diff tab: {res}");
+    assert_eq!(
+        res["ok"], true,
+        "nostromo.show should open the pr_diff tab: {res}"
+    );
 
     let before = detail_pane_ids(&get_self(&mut reader, &mut writer, 5).await);
-    assert_eq!(before.len(), 2, "sanity: the detail region has both tabs before load_pr: {before:?}");
+    assert_eq!(
+        before.len(),
+        2,
+        "sanity: the detail region has both tabs before load_pr: {before:?}"
+    );
 
     // A *different* PR, no `nostromo.show` anywhere in this test — exactly the
     // GUI's "click a PR row" path.
@@ -2134,7 +2150,10 @@ async fn load_pr_on_perri_standard_leaves_the_pane_tree_untouched_across_prs() {
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
     after_first.sort();
-    assert_eq!(before, after_first, "load_pr must not alter perri-standard's pane tree");
+    assert_eq!(
+        before, after_first,
+        "load_pr must not alter perri-standard's pane tree"
+    );
 
     // A different PR — the R8 close still runs (unrelated, existing
     // behavior), but there is no detail region to rebuild here regardless.
@@ -2156,7 +2175,10 @@ async fn load_pr_on_perri_standard_leaves_the_pane_tree_untouched_across_prs() {
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
     after_second.sort();
-    assert_eq!(before, after_second, "load_pr must not alter perri-standard's pane tree");
+    assert_eq!(
+        before, after_second,
+        "load_pr must not alter perri-standard's pane tree"
+    );
 }
 
 /// Scope guard, not a red test — passes against both `main` and the fix. A
@@ -2189,7 +2211,10 @@ async fn load_pr_does_not_conjure_a_detail_region_that_never_existed() {
     // No `nostromo.show` call anywhere — perri-curated's starting tree is
     // just a bound `queue` and a `repl`.
     let before = detail_pane_ids(&get_self(&mut reader, &mut writer, 3).await);
-    assert!(before.is_empty(), "sanity: no detail region before load_pr: {before:?}");
+    assert!(
+        before.is_empty(),
+        "sanity: no detail region before load_pr: {before:?}"
+    );
 
     let res = call_tool_bounded(
         &mut reader,
@@ -2331,7 +2356,13 @@ async fn load_pr_paints_loading_for_the_recreated_tabs_without_waiting_on_a_fetc
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .expect("server should bind");
-    let mut bcast = harness.state.daemon.as_ref().unwrap().broadcast_tx.subscribe();
+    let mut bcast = harness
+        .state
+        .daemon
+        .as_ref()
+        .unwrap()
+        .broadcast_tx
+        .subscribe();
 
     let (mut reader, mut writer) = connect(&socket_path, "perri").await;
     let bound = Duration::from_millis(1500);
@@ -2420,7 +2451,10 @@ fn tree_json(harness: &Harness, tag: &str) -> String {
 
 /// Open the curated layout with a pr_conversation + pr_diff detail region for
 /// `repo#number`, from `tag`'s own connection.
-async fn curated_focus_with_detail_region<W: AsyncWriteExt + Unpin, R: tokio::io::AsyncRead + Unpin>(
+async fn curated_focus_with_detail_region<
+    W: AsyncWriteExt + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+>(
     reader: &mut BufReader<R>,
     writer: &mut W,
     repo: &str,
@@ -2446,7 +2480,10 @@ async fn curated_focus_with_detail_region<W: AsyncWriteExt + Unpin, R: tokio::io
             BOUND,
         )
         .await;
-        assert_eq!(res["ok"], true, "nostromo.show {view} should succeed: {res}");
+        assert_eq!(
+            res["ok"], true,
+            "nostromo.show {view} should succeed: {res}"
+        );
     }
     assert_eq!(
         detail_pane_ids(&get_self(reader, writer, 5).await).len(),
@@ -2462,7 +2499,13 @@ async fn curated_focus_with_detail_region<W: AsyncWriteExt + Unpin, R: tokio::io
 async fn load_pr_in_one_focus_rebuilds_only_that_focus_s_detail_region() {
     let harness = make_daemon_state();
     let (_server, socket) = serve(&harness, "rebuild-one-focus").await;
-    let mut bcast = harness.state.daemon.as_ref().unwrap().broadcast_tx.subscribe();
+    let mut bcast = harness
+        .state
+        .daemon
+        .as_ref()
+        .unwrap()
+        .broadcast_tx
+        .subscribe();
 
     let (mut ra, mut wa) = connect(&socket, "focus-a").await;
     let (mut rb, mut wb) = connect(&socket, "focus-b").await;

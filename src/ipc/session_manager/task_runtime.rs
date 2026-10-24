@@ -22,16 +22,16 @@ use tokio::sync::{broadcast, Notify};
 
 mod verbs;
 
-pub use verbs::{OutputReply, StopReport};
 pub(super) use verbs::{ensure_probe, read_output, stop_task};
+pub use verbs::{OutputReply, StopReport};
 
 use super::control::{control, says_unsupported, CONTROL_TIMEOUT};
 use super::{lock_recover, SessionEvent, Shared};
 use crate::ipc::protocol::{ServerMsg, TaskDetailMsg, TaskMeta, TasksSnapshot};
 use crate::ipc::stream_json::SessionTranscript;
 use crate::ipc::task_output::{
-    current_uid, is_valid_task_id, last_nonempty_line, learnable_root, sanitize, OutputFileValidator,
-    TAIL_MAX_BYTES,
+    current_uid, is_valid_task_id, last_nonempty_line, learnable_root, sanitize,
+    OutputFileValidator, TAIL_MAX_BYTES,
 };
 use crate::ipc::tasks::{PreviewTarget, TaskEvent, TaskEventKind, TaskHub, TaskOutput};
 
@@ -265,7 +265,11 @@ impl TaskRuntime {
     // ── internals ───────────────────────────────────────────────────────────
 
     fn tool_lookup(&self) -> impl Fn(&str) -> Option<String> + '_ {
-        move |id| lock_recover(&self.transcript).tool_name_of(id).map(str::to_owned)
+        move |id| {
+            lock_recover(&self.transcript)
+                .tool_name_of(id)
+                .map(str::to_owned)
+        }
     }
 
     fn snapshot_of(&self, tasks: Vec<TaskMeta>) -> TasksSnapshot {
@@ -297,9 +301,12 @@ impl TaskRuntime {
     /// `/tmp` or `/private/tmp` (see [`learnable_root`]); anything else
     /// teaches nothing and leaves the lesson for a later path.
     fn learn_root(&self, task_id: &str, reported: &str) {
-        let Some(session_id) = &self.session_id else { return };
+        let Some(session_id) = &self.session_id else {
+            return;
+        };
         let path = std::path::Path::new(reported);
-        let shaped = path.file_name().and_then(|n| n.to_str()) == Some(&format!("{task_id}.output"))
+        let shaped = path.file_name().and_then(|n| n.to_str())
+            == Some(&format!("{task_id}.output"))
             && path
                 .ancestors()
                 .nth(2)
@@ -644,17 +651,24 @@ mod tests {
 
     fn started(id: &str, extra: serde_json::Value) -> TaskEvent {
         let mut body = json!({"task_id": id, "description": "a task"});
-        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         event("task_started", body)
     }
 
     fn progress(id: &str, tokens: u64) -> TaskEvent {
-        event("task_progress", json!({"task_id": id, "usage": {"total_tokens": tokens}}))
+        event(
+            "task_progress",
+            json!({"task_id": id, "usage": {"total_tokens": tokens}}),
+        )
     }
 
     fn notified(id: &str, status: &str, extra: serde_json::Value) -> TaskEvent {
         let mut body = json!({"task_id": id, "status": status});
-        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         event("task_notification", body)
     }
 
@@ -665,7 +679,11 @@ mod tests {
         )
     }
 
-    fn runtime() -> (Arc<TaskRuntime>, Arc<Mutex<SessionTranscript>>, tempfile::TempDir) {
+    fn runtime() -> (
+        Arc<TaskRuntime>,
+        Arc<Mutex<SessionTranscript>>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let transcript = Arc::new(Mutex::new(SessionTranscript::new()));
         let runtime = TaskRuntime::with_validator(
@@ -730,12 +748,20 @@ mod tests {
         let (rt, transcript, _dir) = runtime();
         {
             let mut t = transcript.lock().unwrap();
-            t.ingest_line(r#"{"type":"user","message":{"role":"user","content":"watch it"},"isReplay":true}"#);
+            t.ingest_line(
+                r#"{"type":"user","message":{"role":"user","content":"watch it"},"isReplay":true}"#,
+            );
             t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_mon","name":"Monitor","input":{"command":"tail -f x"}}]}}"#);
         }
         let (tx, _rx) = broadcast::channel(16);
 
-        rt.on_event(&tx, &started("t1", json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"})));
+        rt.on_event(
+            &tx,
+            &started(
+                "t1",
+                json!({"task_type": "local_bash", "tool_use_id": "toolu_mon"}),
+            ),
+        );
 
         let (snapshot, _) = rt.current();
         assert_eq!(snapshot.tasks[0].kind, TaskKind::Monitor);
@@ -757,7 +783,10 @@ mod tests {
         let tasks = &published[0].tasks;
         assert_eq!(tasks.len(), 2, "the deferred task is in it");
         for t in tasks {
-            assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded)));
+            assert_eq!(
+                (t.status, t.end_reason),
+                (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded))
+            );
         }
     }
 
@@ -784,13 +813,24 @@ mod tests {
         let exited = Arc::new(AtomicBool::new(false));
         rt.on_event(&tx, &started("t1", json!({})));
         rt.on_event(&tx, &progress("t1", 7));
-        assert_eq!(snapshots(&drain(&mut rx)).len(), 1, "only the first change went out");
-        let timer = tokio::spawn(drive_timer(Arc::clone(&rt), tx.clone(), Arc::clone(&exited)));
+        assert_eq!(
+            snapshots(&drain(&mut rx)).len(),
+            1,
+            "only the first change went out"
+        );
+        let timer = tokio::spawn(drive_timer(
+            Arc::clone(&rt),
+            tx.clone(),
+            Arc::clone(&exited),
+        ));
         settle().await;
 
         tokio::time::advance(Duration::from_millis(249)).await;
         settle().await;
-        assert!(snapshots(&drain(&mut rx)).is_empty(), "the window is still open");
+        assert!(
+            snapshots(&drain(&mut rx)).is_empty(),
+            "the window is still open"
+        );
 
         tokio::time::advance(Duration::from_millis(1)).await;
         settle().await;
@@ -808,24 +848,44 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, mut rx) = broadcast::channel(16);
         let exited = Arc::new(AtomicBool::new(false));
-        rt.on_event(&tx, &started("t1", json!({"task_type": "local_bash", "is_backgrounded": true})));
+        rt.on_event(
+            &tx,
+            &started(
+                "t1",
+                json!({"task_type": "local_bash", "is_backgrounded": true}),
+            ),
+        );
         rt.on_event(&tx, &level(&["t1"]));
         rt.on_event(&tx, &level(&[]));
         drain(&mut rx);
-        let timer = tokio::spawn(drive_timer(Arc::clone(&rt), tx.clone(), Arc::clone(&exited)));
+        let timer = tokio::spawn(drive_timer(
+            Arc::clone(&rt),
+            tx.clone(),
+            Arc::clone(&exited),
+        ));
         settle().await;
 
         tokio::time::advance(Duration::from_millis(2_999)).await;
         settle().await;
-        assert!(snapshots(&drain(&mut rx)).is_empty(), "still inside the grace");
+        assert!(
+            snapshots(&drain(&mut rx)).is_empty(),
+            "still inside the grace"
+        );
         assert_eq!(rt.current().0.tasks[0].status, TaskStatus::Running);
 
         tokio::time::advance(Duration::from_millis(1)).await;
         settle().await;
         let published = snapshots(&drain(&mut rx));
-        assert_eq!(published.len(), 1, "the vanish is published, not just recorded");
+        assert_eq!(
+            published.len(),
+            1,
+            "the vanish is published, not just recorded"
+        );
         let t = &published[0].tasks[0];
-        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::Vanished)));
+        assert_eq!(
+            (t.status, t.end_reason),
+            (TaskStatus::Stopped, Some(TaskEndReason::Vanished))
+        );
 
         exited.store(true, Ordering::SeqCst);
         rt.set_clients(0);
@@ -837,10 +897,20 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, mut rx) = broadcast::channel(16);
         let exited = Arc::new(AtomicBool::new(false));
-        rt.on_event(&tx, &started("t1", json!({"task_type": "local_bash", "is_backgrounded": true})));
+        rt.on_event(
+            &tx,
+            &started(
+                "t1",
+                json!({"task_type": "local_bash", "is_backgrounded": true}),
+            ),
+        );
         rt.on_event(&tx, &level(&["t1"]));
         rt.on_event(&tx, &level(&[]));
-        let timer = tokio::spawn(drive_timer(Arc::clone(&rt), tx.clone(), Arc::clone(&exited)));
+        let timer = tokio::spawn(drive_timer(
+            Arc::clone(&rt),
+            tx.clone(),
+            Arc::clone(&exited),
+        ));
         settle().await;
         tokio::time::advance(Duration::from_millis(2_000)).await;
         rt.on_event(&tx, &notified("t1", "completed", json!({})));
@@ -850,7 +920,9 @@ mod tests {
 
         let all = snapshots(&drain(&mut rx));
         assert!(
-            all.iter().flat_map(|s| s.tasks.iter()).all(|t| t.end_reason != Some(TaskEndReason::Vanished)),
+            all.iter()
+                .flat_map(|s| s.tasks.iter())
+                .all(|t| t.end_reason != Some(TaskEndReason::Vanished)),
             "{all:?}"
         );
         assert_eq!(all.last().unwrap().tasks[0].status, TaskStatus::Completed);
@@ -864,7 +936,11 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, _rx) = broadcast::channel(16);
         let exited = Arc::new(AtomicBool::new(false));
-        let timer = tokio::spawn(drive_timer(Arc::clone(&rt), tx.clone(), Arc::clone(&exited)));
+        let timer = tokio::spawn(drive_timer(
+            Arc::clone(&rt),
+            tx.clone(),
+            Arc::clone(&exited),
+        ));
         settle().await;
 
         exited.store(true, Ordering::SeqCst);
@@ -897,7 +973,12 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, rx) = broadcast::channel::<SessionEvent>(64);
         let (out_tx, mut out) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(forward_session_events(rx, move |m| out_tx.send(m).is_ok(), "cody-1".into(), rt));
+        let handle = tokio::spawn(forward_session_events(
+            rx,
+            move |m| out_tx.send(m).is_ok(),
+            "cody-1".into(),
+            rt,
+        ));
         let snapshot = TasksSnapshot {
             session_id: Some("sess-1".into()),
             daemon_epoch: "epoch-1".into(),
@@ -913,12 +994,24 @@ mod tests {
             ..Default::default()
         })))
         .unwrap();
-        tx.send(SessionEvent::Exited { exit_code: Some(3) }).unwrap();
-        tx.send(SessionEvent::PermanentlyDown { reason: crate::ipc::session_manager::StopReason::User }).unwrap();
+        tx.send(SessionEvent::Exited { exit_code: Some(3) })
+            .unwrap();
+        tx.send(SessionEvent::PermanentlyDown {
+            reason: crate::ipc::session_manager::StopReason::User,
+        })
+        .unwrap();
 
-        assert!(matches!(next_frame(&mut out).await, ServerMsg::SessionState { tag, state: SessionState::MidTurn } if tag == "cody-1"));
+        assert!(
+            matches!(next_frame(&mut out).await, ServerMsg::SessionState { tag, state: SessionState::MidTurn } if tag == "cody-1")
+        );
         match next_frame(&mut out).await {
-            ServerMsg::SessionTasks { tag, session_id, daemon_epoch, stop_supported, tasks } => {
+            ServerMsg::SessionTasks {
+                tag,
+                session_id,
+                daemon_epoch,
+                stop_supported,
+                tasks,
+            } => {
                 assert_eq!(tag, "cody-1");
                 assert_eq!(session_id.as_deref(), Some("sess-1"));
                 assert_eq!(daemon_epoch, "epoch-1");
@@ -928,14 +1021,30 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match next_frame(&mut out).await {
-            ServerMsg::SessionTaskDetail { tag, task_id, preview, progress_summary, completion_summary, prompt } => {
-                assert_eq!((tag.as_str(), task_id.as_str(), preview.as_deref()), ("cody-1", "t1", Some("line")));
-                assert_eq!((progress_summary, completion_summary, prompt), (None, None, None));
+            ServerMsg::SessionTaskDetail {
+                tag,
+                task_id,
+                preview,
+                progress_summary,
+                completion_summary,
+                prompt,
+            } => {
+                assert_eq!(
+                    (tag.as_str(), task_id.as_str(), preview.as_deref()),
+                    ("cody-1", "t1", Some("line"))
+                );
+                assert_eq!(
+                    (progress_summary, completion_summary, prompt),
+                    (None, None, None)
+                );
             }
             other => panic!("{other:?}"),
         }
         assert_eq!(exit_code_of(&next_frame(&mut out).await), Some(3));
-        assert!(matches!(next_frame(&mut out).await, ServerMsg::SessionDown { .. }));
+        assert!(matches!(
+            next_frame(&mut out).await,
+            ServerMsg::SessionDown { .. }
+        ));
         drop(tx);
         handle.await.unwrap();
     }
@@ -959,23 +1068,59 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, rx) = broadcast::channel::<SessionEvent>(2);
         // The task's whole story happens while the forwarder is not reading.
-        rt.on_event(&tx, &started("agt", json!({"task_type": "local_agent", "prompt": "Read the config"})));
-        rt.on_event(&tx, &notified("agt", "completed", json!({"summary": "All done"})));
+        rt.on_event(
+            &tx,
+            &started(
+                "agt",
+                json!({"task_type": "local_agent", "prompt": "Read the config"}),
+            ),
+        );
+        rt.on_event(
+            &tx,
+            &notified("agt", "completed", json!({"summary": "All done"})),
+        );
         for code in 10..13 {
-            tx.send(SessionEvent::Exited { exit_code: Some(code) }).unwrap();
+            tx.send(SessionEvent::Exited {
+                exit_code: Some(code),
+            })
+            .unwrap();
         }
         let (out_tx, mut out) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(forward_session_events(rx, move |m| out_tx.send(m).is_ok(), "cody-1".into(), Arc::clone(&rt)));
+        let handle = tokio::spawn(forward_session_events(
+            rx,
+            move |m| out_tx.send(m).is_ok(),
+            "cody-1".into(),
+            Arc::clone(&rt),
+        ));
 
         // First: the current snapshot, which has the final state.
-        let ServerMsg::SessionTasks { tag, session_id, tasks, .. } = next_frame(&mut out).await else {
+        let ServerMsg::SessionTasks {
+            tag,
+            session_id,
+            tasks,
+            ..
+        } = next_frame(&mut out).await
+        else {
             panic!("the first frame after a lag must be the current task list")
         };
-        assert_eq!((tag.as_str(), session_id.as_deref()), ("cody-1", Some("sess-1")));
+        assert_eq!(
+            (tag.as_str(), session_id.as_deref()),
+            ("cody-1", Some("sess-1"))
+        );
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].status, TaskStatus::Completed, "the state the dropped events described");
+        assert_eq!(
+            tasks[0].status,
+            TaskStatus::Completed,
+            "the state the dropped events described"
+        );
         // Then: its details.
-        let ServerMsg::SessionTaskDetail { task_id, prompt, completion_summary, .. } = next_frame(&mut out).await else {
+        let ServerMsg::SessionTaskDetail {
+            task_id,
+            prompt,
+            completion_summary,
+            ..
+        } = next_frame(&mut out).await
+        else {
             panic!("the details follow the snapshot")
         };
         assert_eq!(task_id, "agt");
@@ -984,7 +1129,10 @@ mod tests {
         // Only then: what was still in the channel, and what comes later.
         assert_eq!(exit_code_of(&next_frame(&mut out).await), Some(11));
         assert_eq!(exit_code_of(&next_frame(&mut out).await), Some(12));
-        tx.send(SessionEvent::Exited { exit_code: Some(13) }).unwrap();
+        tx.send(SessionEvent::Exited {
+            exit_code: Some(13),
+        })
+        .unwrap();
         assert_eq!(exit_code_of(&next_frame(&mut out).await), Some(13));
         drop(tx);
         handle.await.unwrap();
@@ -995,12 +1143,22 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, rx) = broadcast::channel::<SessionEvent>(2);
         for code in 0..5 {
-            tx.send(SessionEvent::Exited { exit_code: Some(code) }).unwrap();
+            tx.send(SessionEvent::Exited {
+                exit_code: Some(code),
+            })
+            .unwrap();
         }
         let (out_tx, mut out) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(forward_session_events(rx, move |m| out_tx.send(m).is_ok(), "t".into(), rt));
+        let handle = tokio::spawn(forward_session_events(
+            rx,
+            move |m| out_tx.send(m).is_ok(),
+            "t".into(),
+            rt,
+        ));
 
-        let ServerMsg::SessionTasks { tasks, .. } = next_frame(&mut out).await else { panic!("first frame") };
+        let ServerMsg::SessionTasks { tasks, .. } = next_frame(&mut out).await else {
+            panic!("first frame")
+        };
         assert!(tasks.is_empty());
         assert_eq!(exit_code_of(&next_frame(&mut out).await), Some(3));
         drop(tx);
@@ -1012,7 +1170,12 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, rx) = broadcast::channel::<SessionEvent>(64);
         let (out_tx, mut out) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(forward_session_events(rx, move |m| out_tx.send(m).is_ok(), "t".into(), rt));
+        let handle = tokio::spawn(forward_session_events(
+            rx,
+            move |m| out_tx.send(m).is_ok(),
+            "t".into(),
+            rt,
+        ));
         tx.send(SessionEvent::Tasks(Arc::new(TasksSnapshot {
             session_id: None,
             daemon_epoch: "e".into(),
@@ -1020,9 +1183,13 @@ mod tests {
             tasks: vec![],
         })))
         .unwrap();
-        tx.send(SessionEvent::Exited { exit_code: Some(1) }).unwrap();
+        tx.send(SessionEvent::Exited { exit_code: Some(1) })
+            .unwrap();
 
-        assert!(matches!(next_frame(&mut out).await, ServerMsg::SessionTasks { .. }));
+        assert!(matches!(
+            next_frame(&mut out).await,
+            ServerMsg::SessionTasks { .. }
+        ));
         assert_eq!(exit_code_of(&next_frame(&mut out).await), Some(1));
         drop(tx);
         handle.await.unwrap();
@@ -1038,8 +1205,14 @@ mod tests {
 
         let events = drain(&mut rx);
         assert_eq!(snapshots(&events).len(), 1);
-        let details: Vec<_> = events.iter().filter(|e| matches!(e, SessionEvent::TaskDetail(_))).collect();
-        assert!(details.is_empty(), "a detail frame with no text says nothing: {details:?}");
+        let details: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::TaskDetail(_)))
+            .collect();
+        assert!(
+            details.is_empty(),
+            "a detail frame with no text says nothing: {details:?}"
+        );
     }
 
     // ── which output paths teach the output root ─────────────────────────────
@@ -1050,29 +1223,37 @@ mod tests {
 
     fn report_output_file(rt: &TaskRuntime, task_id: &str, path: &str) {
         let (tx, _rx) = broadcast::channel(16);
-        rt.on_event(&tx, &notified(task_id, "completed", json!({"output_file": path})));
+        rt.on_event(
+            &tx,
+            &notified(task_id, "completed", json!({"output_file": path})),
+        );
     }
 
     #[test]
-    fn a_reported_output_path_that_is_not_this_sessions_own_task_file_never_widens_the_readable_roots() {
+    fn a_reported_output_path_that_is_not_this_sessions_own_task_file_never_widens_the_readable_roots(
+    ) {
         // (task id, reported path): each merely resembles `<root>/<cwd>/<session>/tasks/<task>.output`.
         let cases = [
-            ("t1", "/elsewhere/-work-repo/sess-1/tasks/other.output"),   // not this task's file name
-            ("t1", "/elsewhere/-work-repo/sess-1/tasks/t1.output.bak"),  // not exactly `<task>.output`
+            ("t1", "/elsewhere/-work-repo/sess-1/tasks/other.output"), // not this task's file name
+            ("t1", "/elsewhere/-work-repo/sess-1/tasks/t1.output.bak"), // not exactly `<task>.output`
             ("t1", "/elsewhere/-work-repo/other-session/tasks/t1.output"), // another session's folder
-            ("t1", "/home/alice/work/tasks/t1.output"),                  // ends in tasks/<id>.output under a parent of home
+            ("t1", "/home/alice/work/tasks/t1.output"), // ends in tasks/<id>.output under a parent of home
             ("t1", "/Users/alice/tasks/t1.output"),
             ("t1", "/tasks/t1.output"),
-            ("t1", "tasks/t1.output"),                                   // relative
-            ("t1", "/elsewhere/-work-repo/sess-1/notasks/t1.output"),    // not a `tasks` folder
-            ("t1", "/elsewhere/sess-1/other/tasks/t1.output"),           // the session id is at the wrong level
+            ("t1", "tasks/t1.output"), // relative
+            ("t1", "/elsewhere/-work-repo/sess-1/notasks/t1.output"), // not a `tasks` folder
+            ("t1", "/elsewhere/sess-1/other/tasks/t1.output"), // the session id is at the wrong level
         ];
         for (task_id, path) in cases {
             let (rt, _t, dir) = runtime();
 
             report_output_file(&rt, task_id, path);
 
-            assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()], "{path} must not teach a root");
+            assert_eq!(
+                roots_of(&rt),
+                vec![dir.path().to_path_buf()],
+                "{path} must not teach a root"
+            );
         }
     }
 
@@ -1101,10 +1282,21 @@ mod tests {
         assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()]);
 
         let real_root = PathBuf::from(format!("/tmp/claude-{uid}"));
-        report_output_file(&rt, "t1", &format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output"));
-        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf(), real_root.clone()]);
+        report_output_file(
+            &rt,
+            "t1",
+            &format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output"),
+        );
+        assert_eq!(
+            roots_of(&rt),
+            vec![dir.path().to_path_buf(), real_root.clone()]
+        );
 
-        report_output_file(&rt, "t2", &format!("/private/tmp/claude-{uid}/-work-repo/sess-1/tasks/t2.output"));
+        report_output_file(
+            &rt,
+            "t2",
+            &format!("/private/tmp/claude-{uid}/-work-repo/sess-1/tasks/t2.output"),
+        );
         assert_eq!(
             roots_of(&rt),
             vec![dir.path().to_path_buf(), real_root],
@@ -1119,17 +1311,44 @@ mod tests {
 
         // Right shape for this session and task, wrong place: a document
         // folder, a tmp root of someone else, a path that climbs out.
-        report_output_file(&rt, "t1", "/Users/h/Documents/-work-repo/sess-1/tasks/t1.output");
-        report_output_file(&rt, "t1", &format!("/tmp/claude-{}/-work-repo/sess-1/tasks/t1.output", uid + 1));
-        report_output_file(&rt, "t1", &format!("/var/folders/ab/T/claude-{uid}/-work-repo/sess-1/tasks/t1.output"));
-        report_output_file(&rt, "t1", &format!("/tmp/claude-{uid}/../../Users/h/-work-repo/sess-1/tasks/t1.output"));
-        assert_eq!(roots_of(&rt), vec![dir.path().to_path_buf()], "nothing taught");
+        report_output_file(
+            &rt,
+            "t1",
+            "/Users/h/Documents/-work-repo/sess-1/tasks/t1.output",
+        );
+        report_output_file(
+            &rt,
+            "t1",
+            &format!("/tmp/claude-{}/-work-repo/sess-1/tasks/t1.output", uid + 1),
+        );
+        report_output_file(
+            &rt,
+            "t1",
+            &format!("/var/folders/ab/T/claude-{uid}/-work-repo/sess-1/tasks/t1.output"),
+        );
+        report_output_file(
+            &rt,
+            "t1",
+            &format!("/tmp/claude-{uid}/../../Users/h/-work-repo/sess-1/tasks/t1.output"),
+        );
+        assert_eq!(
+            roots_of(&rt),
+            vec![dir.path().to_path_buf()],
+            "nothing taught"
+        );
 
-        report_output_file(&rt, "t1", &format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output"));
+        report_output_file(
+            &rt,
+            "t1",
+            &format!("/tmp/claude-{uid}/-work-repo/sess-1/tasks/t1.output"),
+        );
 
         assert_eq!(
             roots_of(&rt),
-            vec![dir.path().to_path_buf(), PathBuf::from(format!("/tmp/claude-{uid}"))],
+            vec![
+                dir.path().to_path_buf(),
+                PathBuf::from(format!("/tmp/claude-{uid}"))
+            ],
             "a later real-shaped path still teaches"
         );
     }
@@ -1141,14 +1360,45 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, _rx) = broadcast::channel(64);
         rt.on_event(&tx, &started("live", json!({"task_type": "local_bash"})));
-        rt.on_event(&tx, &started("ambient", json!({"task_type": "local_bash", "ambient": true})));
-        rt.on_event(&tx, &started("skipped", json!({"task_type": "monitor_mcp", "skip_transcript": true})));
-        rt.on_event(&tx, &started("ambient-ended", json!({"task_type": "local_bash", "ambient": true})));
+        rt.on_event(
+            &tx,
+            &started(
+                "ambient",
+                json!({"task_type": "local_bash", "ambient": true}),
+            ),
+        );
+        rt.on_event(
+            &tx,
+            &started(
+                "skipped",
+                json!({"task_type": "monitor_mcp", "skip_transcript": true}),
+            ),
+        );
+        rt.on_event(
+            &tx,
+            &started(
+                "ambient-ended",
+                json!({"task_type": "local_bash", "ambient": true}),
+            ),
+        );
         rt.on_event(&tx, &notified("ambient-ended", "completed", json!({})));
-        rt.on_event(&tx, &started("live-ended", json!({"task_type": "local_bash"})));
+        rt.on_event(
+            &tx,
+            &started("live-ended", json!({"task_type": "local_bash"})),
+        );
         rt.on_event(&tx, &notified("live-ended", "completed", json!({})));
-        rt.on_event(&tx, &started("flagged-late", json!({"task_type": "local_bash"})));
-        rt.on_event(&tx, &notified("flagged-late", "completed", json!({"skip_transcript": true})));
+        rt.on_event(
+            &tx,
+            &started("flagged-late", json!({"task_type": "local_bash"})),
+        );
+        rt.on_event(
+            &tx,
+            &notified(
+                "flagged-late",
+                "completed",
+                json!({"skip_transcript": true}),
+            ),
+        );
 
         let plan: Vec<String> = rt.poll_plan().into_iter().map(|t| t.task_id).collect();
 
@@ -1160,7 +1410,13 @@ mod tests {
         let (rt, _t, _dir) = runtime();
         let (tx, _rx) = broadcast::channel(16);
         rt.set_clients(2);
-        rt.on_event(&tx, &started("ambient", json!({"task_type": "monitor_ws", "ambient": true})));
+        rt.on_event(
+            &tx,
+            &started(
+                "ambient",
+                json!({"task_type": "monitor_ws", "ambient": true}),
+            ),
+        );
         assert!(!rt.poll_wanted());
 
         rt.on_event(&tx, &started("live", json!({"task_type": "local_bash"})));
@@ -1172,7 +1428,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn after_a_failed_answer_the_cli_is_not_asked_again_for_thirty_seconds() {
         let (rt, _t, _dir) = runtime();
-        assert!(rt.cli_tail_allowed(), "a CLI nobody has asked yet may be asked");
+        assert!(
+            rt.cli_tail_allowed(),
+            "a CLI nobody has asked yet may be asked"
+        );
 
         rt.note_cli_tail_answer(&Err("No task found with ID".into()));
 
@@ -1180,7 +1439,10 @@ mod tests {
         tokio::time::advance(Duration::from_millis(29_999)).await;
         assert!(!rt.cli_tail_allowed(), "still inside the backoff");
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(rt.cli_tail_allowed(), "thirty seconds on, the CLI may be asked again");
+        assert!(
+            rt.cli_tail_allowed(),
+            "thirty seconds on, the CLI may be asked again"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1207,7 +1469,10 @@ mod tests {
 
         rt.note_cli_tail_answer(&Ok(()));
 
-        assert!(rt.cli_tail_allowed(), "no need to wait out the rest of the backoff");
+        assert!(
+            rt.cli_tail_allowed(),
+            "no need to wait out the rest of the backoff"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1225,7 +1490,10 @@ mod tests {
 
             assert!(!rt.cli_tail_allowed(), "{text}");
             tokio::time::advance(Duration::from_secs(24 * 3600)).await;
-            assert!(!rt.cli_tail_allowed(), "{text}: a day later the CLI is still not asked");
+            assert!(
+                !rt.cli_tail_allowed(),
+                "{text}: a day later the CLI is still not asked"
+            );
         }
     }
 
@@ -1244,7 +1512,10 @@ mod tests {
             assert!(!rt.cli_tail_allowed(), "{text}");
             tokio::time::advance(Duration::from_secs(30)).await;
 
-            assert!(rt.cli_tail_allowed(), "{text}: the CLI may be asked again after the backoff");
+            assert!(
+                rt.cli_tail_allowed(),
+                "{text}: the CLI may be asked again after the backoff"
+            );
         }
     }
 
@@ -1263,25 +1534,39 @@ mod tests {
     /// What a peer of `trust` is sent when its forwarder lagged over a task's whole story (whose
     /// texts are `SECRET-OUTPUT-` sentinels). The frames go through the same `outbound` filter the
     /// server applies to every targeted frame.
-    async fn frames_after_a_lag(trust: crate::ipc::peer::PeerTrust, tag: &str, sensitive: bool) -> Vec<ServerMsg> {
+    async fn frames_after_a_lag(
+        trust: crate::ipc::peer::PeerTrust,
+        tag: &str,
+        sensitive: bool,
+    ) -> Vec<ServerMsg> {
         use crate::ipc::peer::{outbound, SensitiveTags};
         let (rt, _t, _dir) = runtime();
         let (tx, rx) = broadcast::channel::<SessionEvent>(2);
-        rt.on_event(&tx, &started("agt", json!({"task_type": "local_agent", "prompt": "SECRET-OUTPUT-PROMPT"})));
-        rt.on_event(&tx, &notified("agt", "completed", json!({"summary": "SECRET-OUTPUT-DONE"})));
+        rt.on_event(
+            &tx,
+            &started(
+                "agt",
+                json!({"task_type": "local_agent", "prompt": "SECRET-OUTPUT-PROMPT"}),
+            ),
+        );
+        rt.on_event(
+            &tx,
+            &notified("agt", "completed", json!({"summary": "SECRET-OUTPUT-DONE"})),
+        );
         for code in 10..13 {
-            tx.send(SessionEvent::Exited { exit_code: Some(code) }).unwrap();
+            tx.send(SessionEvent::Exited {
+                exit_code: Some(code),
+            })
+            .unwrap();
         }
         let tags = SensitiveTags::in_memory();
         if sensitive {
             tags.mark_tag(tag);
         }
         let (out_tx, mut out) = mpsc::unbounded_channel();
-        let peer = move |msg: ServerMsg| {
-            match outbound(trust, msg, &tags) {
-                Some(msg) => out_tx.send(msg).is_ok(),
-                None => true,
-            }
+        let peer = move |msg: ServerMsg| match outbound(trust, msg, &tags) {
+            Some(msg) => out_tx.send(msg).is_ok(),
+            None => true,
         };
         let handle = tokio::spawn(forward_session_events(rx, peer, tag.into(), rt));
         drop(tx);
@@ -1299,20 +1584,37 @@ mod tests {
         for sensitive in [false, true] {
             let frames = frames_after_a_lag(PeerTrust::LocalOther, "cody-1", sensitive).await;
             let wire = serde_json::to_string(&frames).unwrap();
-            assert!(frames.iter().any(|f| matches!(f, ServerMsg::SessionTasks { .. })), "{wire}");
-            assert!(wire.contains("SECRET-OUTPUT-PROMPT") && wire.contains("SECRET-OUTPUT-DONE"), "the control: {wire}");
+            assert!(
+                frames
+                    .iter()
+                    .any(|f| matches!(f, ServerMsg::SessionTasks { .. })),
+                "{wire}"
+            );
+            assert!(
+                wire.contains("SECRET-OUTPUT-PROMPT") && wire.contains("SECRET-OUTPUT-DONE"),
+                "the control: {wire}"
+            );
         }
     }
 
     #[tokio::test]
-    async fn after_a_lag_a_network_peer_is_resent_the_task_list_of_an_ordinary_tag_but_never_a_detail() {
+    async fn after_a_lag_a_network_peer_is_resent_the_task_list_of_an_ordinary_tag_but_never_a_detail(
+    ) {
         use crate::ipc::peer::PeerTrust;
         let frames = frames_after_a_lag(PeerTrust::Tcp, "cody-1", false).await;
         let wire = serde_json::to_string(&frames).unwrap();
 
-        let lists: Vec<_> = frames.iter().filter(|f| matches!(f, ServerMsg::SessionTasks { .. })).collect();
+        let lists: Vec<_> = frames
+            .iter()
+            .filter(|f| matches!(f, ServerMsg::SessionTasks { .. }))
+            .collect();
         assert_eq!(lists.len(), 1, "{wire}");
-        assert!(!frames.iter().any(|f| matches!(f, ServerMsg::SessionTaskDetail { .. })), "{wire}");
+        assert!(
+            !frames
+                .iter()
+                .any(|f| matches!(f, ServerMsg::SessionTaskDetail { .. })),
+            "{wire}"
+        );
         assert!(!wire.contains("SECRET-OUTPUT"), "{wire}");
     }
 
@@ -1321,6 +1623,10 @@ mod tests {
         use crate::ipc::peer::PeerTrust;
         let frames = frames_after_a_lag(PeerTrust::Tcp, "cody-1", true).await;
 
-        assert!(frames.is_empty(), "{}", serde_json::to_string(&frames).unwrap());
+        assert!(
+            frames.is_empty(),
+            "{}",
+            serde_json::to_string(&frames).unwrap()
+        );
     }
 }

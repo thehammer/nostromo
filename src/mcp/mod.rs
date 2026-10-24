@@ -68,6 +68,7 @@ pub use command::PaneContent;
 pub use server::McpServer;
 pub use socket::{daemon_socket_path, default_socket_path, write_bridge_mcp_config};
 pub use state::{
-    DaemonMcpBackend, DaemonSources, McpSharedState, PerriDaemonState, PtyIdentity, TicketRegistryState, ViewMeta,
+    DaemonMcpBackend, DaemonSources, McpSharedState, PerriDaemonState, PtyIdentity,
+    TicketRegistryState, ViewMeta,
 };
 pub use tool_stats::ToolStats;

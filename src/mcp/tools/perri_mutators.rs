@@ -36,9 +36,9 @@ use crate::ipc::pane_registry::PaneRegistry;
 use crate::ipc::protocol::{PaneContentWire, PaneFreshness};
 use crate::mcp::pane_sources::{broadcast_loading_if_first_paint, broadcast_pane_content};
 use crate::mcp::state::DaemonMcpBackend;
+use crate::mcp::state::McpSharedState;
 use crate::mcp::tools::apply_layout::{self, SOURCE_CURRENT_PR, SOURCE_PR_QUEUE};
 use crate::mcp::tools::show;
-use crate::mcp::state::McpSharedState;
 
 // ── handlers ─────────────────────────────────────────────────────────────────
 
@@ -519,14 +519,7 @@ async fn clear_current_pr_daemon(
         match apply_layout::fetch(SOURCE_PR_QUEUE, state, apply_layout::FetchArgs::default()) {
             Ok(content) => {
                 let fr = apply_layout::freshness(SOURCE_PR_QUEUE, state, Some(&tag));
-                push_content_to_all(
-                    daemon,
-                    &tag,
-                    &queue_panes,
-                    content,
-                    Some(fr),
-                    &mut warnings,
-                );
+                push_content_to_all(daemon, &tag, &queue_panes, content, Some(fr), &mut warnings);
             }
             Err(e) => {
                 for pane in &queue_panes {
@@ -838,7 +831,9 @@ mod tests {
                 selected_index: Arc::new(AtomicUsize::new(0)),
                 settle_timeout: Duration::from_millis(50),
             },
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
             tracker: Default::default(),
         };
@@ -1256,7 +1251,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
             tracker: Default::default(),
         };
@@ -1389,11 +1386,8 @@ mod tests {
 
         // The pin still lands — under **this focus's** tag (W7), not the old
         // machine-wide `current-pr.json`.
-        let pin = crate::data::perri_current_pr::pin_path(
-            &tmp.path().join("perri-state"),
-            "perri",
-        )
-        .unwrap();
+        let pin = crate::data::perri_current_pr::pin_path(&tmp.path().join("perri-state"), "perri")
+            .unwrap();
         let content = std::fs::read_to_string(pin).unwrap();
         let parsed: Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["number"], 42);
@@ -1432,11 +1426,11 @@ mod tests {
         // stays bound to perri.get_pr_diff (with params) and must not
         // receive anything.
         if let Some(daemon) = &state.daemon {
-            daemon
-                .pane_registry
-                .lock()
-                .unwrap()
-                .bind_source("perri", "detail.0", SOURCE_CURRENT_PR);
+            daemon.pane_registry.lock().unwrap().bind_source(
+                "perri",
+                "detail.0",
+                SOURCE_CURRENT_PR,
+            );
         }
 
         let args = json!({ "number": 42, "repo": "acme/web", "highlights": "check auth" });
@@ -1489,7 +1483,11 @@ mod tests {
         assert_eq!(first["ok"], true);
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 None,
                 "sanity: the first call must sever diff's binding"
             );
@@ -1518,7 +1516,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 None,
                 "diff must remain unbound after a second highlights call"
             );
@@ -1599,7 +1601,9 @@ mod tests {
         );
         assert_eq!(result["pane_ids"], json!([]));
         assert!(
-            perri_current_pr::pin_path(&tmp.path().join("perri-state"), "perri").unwrap().exists(),
+            perri_current_pr::pin_path(&tmp.path().join("perri-state"), "perri")
+                .unwrap()
+                .exists(),
             "the pin must still be written"
         );
     }
@@ -1655,7 +1659,11 @@ mod tests {
         // perri.get_current_pr — confirm the starting point before mutating.
         let daemon = state.daemon.as_ref().unwrap();
         assert_eq!(
-            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            daemon
+                .pane_registry
+                .lock()
+                .unwrap()
+                .source_for("perri", "diff"),
             Some("perri.get_current_pr")
         );
 
@@ -1664,7 +1672,11 @@ mod tests {
         assert_eq!(result["ok"], true);
 
         assert_eq!(
-            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            daemon
+                .pane_registry
+                .lock()
+                .unwrap()
+                .source_for("perri", "diff"),
             None,
             "agent-authored highlights are final content — the diff pane must no \
              longer be considered live, or the broadcaster would clobber them on \
@@ -1682,7 +1694,11 @@ mod tests {
 
         let daemon = state.daemon.as_ref().unwrap();
         assert_eq!(
-            daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+            daemon
+                .pane_registry
+                .lock()
+                .unwrap()
+                .source_for("perri", "diff"),
             Some("perri.get_current_pr"),
             "no-highlights load_pr must keep (or re-establish) the diff pane's \
              live binding, since its rendered content came from that source"
@@ -1759,7 +1775,11 @@ mod tests {
         assert_eq!(load_result["ok"], true);
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 None,
                 "sanity: highlights must have severed diff's binding first"
             );
@@ -1772,7 +1792,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "diff"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "diff"),
                 Some("perri.get_current_pr"),
                 "clear_current_pr must rebind an unbound legacy diff pane so it goes live \
                  again the moment a PR loads"
@@ -1787,7 +1811,10 @@ mod tests {
                 if pane_id == "diff" && text == "No PR loaded."
             )
         });
-        assert!(got_placeholder, "expected diff to receive the placeholder; got {messages:?}");
+        assert!(
+            got_placeholder,
+            "expected diff to receive the placeholder; got {messages:?}"
+        );
     }
 
     #[tokio::test]
@@ -1797,7 +1824,10 @@ mod tests {
 
         let result = clear_current_pr(&state, &json!({}), Some("perri")).await;
         assert_eq!(result["ok"], true);
-        assert!(result.get("warnings").is_none(), "unexpected warnings: {result}");
+        assert!(
+            result.get("warnings").is_none(),
+            "unexpected warnings: {result}"
+        );
         assert!(result["cleared"].is_array());
         assert!(result["queue"].is_array());
 
@@ -1890,7 +1920,11 @@ mod tests {
 
         if let Some(daemon) = &state.daemon {
             assert_eq!(
-                daemon.pane_registry.lock().unwrap().source_for("perri", "queue"),
+                daemon
+                    .pane_registry
+                    .lock()
+                    .unwrap()
+                    .source_for("perri", "queue"),
                 Some("perri.list_pr_queue")
             );
         }
@@ -2063,7 +2097,9 @@ mod tests {
             session_mgr,
             broadcast_tx,
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(crate::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                crate::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
             tracker: Default::default(),
         };
@@ -2188,7 +2224,9 @@ mod tests {
             "a dead PR source must not fail the clear — the pin really was removed; got: {result}"
         );
         assert!(
-            !perri_current_pr::pin_path(&state_dir, tag).unwrap().exists(),
+            !perri_current_pr::pin_path(&state_dir, tag)
+                .unwrap()
+                .exists(),
             "the pin file must be gone even though the refetch request could not be delivered"
         );
 
@@ -2238,7 +2276,9 @@ mod tests {
             "a dead queue source must not fail the clear — the pin really was removed; got: {result}"
         );
         assert!(
-            !perri_current_pr::pin_path(&state_dir, tag).unwrap().exists(),
+            !perri_current_pr::pin_path(&state_dir, tag)
+                .unwrap()
+                .exists(),
             "the pin file must be gone even though the queue refresh could not be requested"
         );
 
@@ -2331,9 +2371,13 @@ mod tests {
     fn registry_with_panes(tag: &str, ids: &[&str]) -> PaneRegistry {
         let mut children: Vec<PaneTree> = ids
             .iter()
-            .map(|id| PaneTree::Leaf { pane_id: id.to_string() })
+            .map(|id| PaneTree::Leaf {
+                pane_id: id.to_string(),
+            })
             .collect();
-        children.push(PaneTree::Leaf { pane_id: "repl".into() });
+        children.push(PaneTree::Leaf {
+            pane_id: "repl".into(),
+        });
         let n = children.len();
         let mut reg = PaneRegistry::in_memory();
         reg.get_or_init(tag);

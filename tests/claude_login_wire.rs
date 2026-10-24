@@ -25,13 +25,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nostromo::approvals::guard;
-use nostromo::ipc::claude_login::{CredentialStamp, CredentialWatch, LoginCoordinator, LOGIN_QUEUE_CAP};
+use nostromo::ipc::claude_login::{
+    CredentialStamp, CredentialWatch, LoginCoordinator, LOGIN_QUEUE_CAP,
+};
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::decisions::DecisionRegistry;
 use nostromo::ipc::peer_verify::testing::{app_info, script_info};
 use nostromo::ipc::peer_verify::{CodeIdentity, PeerInfo, PeerVerifier, UnverifiedReason};
 use nostromo::ipc::protocol::{
-    ClaudeLoginActionKind, ClaudeLoginPhase, ClaudeLoginSession, ClientMsg, ServerMsg, Topic, PROTOCOL_VERSION,
+    ClaudeLoginActionKind, ClaudeLoginPhase, ClaudeLoginSession, ClientMsg, ServerMsg, Topic,
+    PROTOCOL_VERSION,
 };
 use nostromo::ipc::server::Server;
 use nostromo::ipc::session_manager::{SessionManager, CLAUDE_BIN_ENV};
@@ -41,7 +44,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::mpsc;
 
-const FAKE_CLI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/fake_claude_perm.py");
+const FAKE_CLI: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/support/fake_claude_perm.py"
+);
 
 /// Every topic a client can name.
 const ALL_TOPICS: [Topic; 12] = [
@@ -78,7 +84,9 @@ impl PeerVerifier for Peers {
     fn inspect(&self, _fd: BorrowedFd<'_>, verify_code: bool) -> Option<PeerInfo> {
         let mut info = self.next.lock().unwrap().pop_front()?;
         if !verify_code {
-            info.code = CodeIdentity::Unverified { reason: UnverifiedReason::NotChecked };
+            info.code = CodeIdentity::Unverified {
+                reason: UnverifiedReason::NotChecked,
+            };
         }
         Some(info)
     }
@@ -103,7 +111,10 @@ struct KillOnDrop(Arc<Mutex<SessionManager>>);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).kill_all_on_shutdown();
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .kill_all_on_shutdown();
     }
 }
 
@@ -129,7 +140,11 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn run<Fut: Future<Output = ()>>(body: impl FnOnce(Rig) -> Fut) {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
     rt.block_on(async move {
         let rig = Rig::new().await;
         body(rig).await;
@@ -142,12 +157,17 @@ impl Rig {
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("HOME", &home);
-        std::env::set_var(nostromo::approvals::APPROVALS_DIR_ENV, tmp.path().join("approvals"));
+        std::env::set_var(
+            nostromo::approvals::APPROVALS_DIR_ENV,
+            tmp.path().join("approvals"),
+        );
         std::env::set_var(guard::GUARD_BIN_ENV, env!("CARGO_BIN_EXE_nostromo-guard"));
         let auth_file = tmp.path().join("auth-state");
         std::fs::write(&auth_file, "ok").unwrap();
 
-        let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(tmp.path().join("daemon-sessions.json"))));
+        let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+            tmp.path().join("daemon-sessions.json"),
+        )));
         // Attached before `Server::bind`, which wires the coordinator's broadcast to its channel.
         let coordinator = LoginCoordinator::new(Arc::new(QuietWatch));
         coordinator.attach(&mgr);
@@ -166,7 +186,12 @@ impl Rig {
         .expect("bind the unix socket");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
         let tcp_port = listener.local_addr().unwrap().port();
-        server.bind_tcp(listener, Arc::clone(&mgr), tmp.path().join("perri-state"), decisions);
+        server.bind_tcp(
+            listener,
+            Arc::clone(&mgr),
+            tmp.path().join("perri-state"),
+            decisions,
+        );
         Self {
             _kill: KillOnDrop(Arc::clone(&mgr)),
             server,
@@ -210,13 +235,24 @@ impl Rig {
         self.mgr
             .lock()
             .unwrap()
-            .spawn_session(tag.into(), "cody".into(), format!("view-{tag}"), Some(work), None, false)
+            .spawn_session(
+                tag.into(),
+                "cody".into(),
+                format!("view-{tag}"),
+                Some(work),
+                None,
+                false,
+            )
             .expect("the session starts");
         Fake { dir }
     }
 
     fn say(&self, tag: &str, text: &str) {
-        self.mgr.lock().unwrap().send_user_message(tag, text, &[]).expect("the message is accepted");
+        self.mgr
+            .lock()
+            .unwrap()
+            .send_user_message(tag, text, &[])
+            .expect("the message is accepted");
     }
 
     /// What the daemon would tell a client right now.
@@ -230,7 +266,10 @@ impl Rig {
         self.set_login("expired");
         self.say(tag, text);
         let entry = wait_until("a hold", || {
-            self.picture().1.into_iter().find(|s| s.tag == tag && s.hold_id.is_some())
+            self.picture()
+                .1
+                .into_iter()
+                .find(|s| s.tag == tag && s.hold_id.is_some())
         })
         .await;
         (fake, entry)
@@ -241,7 +280,9 @@ impl Rig {
     fn sentinel(&mut self) -> String {
         self.sentinels += 1;
         let message = format!("sentinel-{}", self.sentinels);
-        let _ = self.server.tx.send(ServerMsg::Error { message: message.clone() });
+        let _ = self.server.tx.send(ServerMsg::Error {
+            message: message.clone(),
+        });
         message
     }
 
@@ -249,25 +290,31 @@ impl Rig {
 
     /// The verified Mac app, following `topics`.
     async fn app(&self, topics: Vec<Topic>) -> Conn {
-        self.open_unix(app_info(), Some("mac_app"), subscribe(topics)).await
+        self.open_unix(app_info(), Some("mac_app"), subscribe(topics))
+            .await
     }
 
     /// An agent's own process on the daemon's socket. It claims to be the Mac app; the process
     /// behind it is not the app.
     async fn agent(&self, topics: Vec<Topic>) -> Conn {
-        self.open_unix(script_info(), Some("mac_app"), subscribe(topics)).await
+        self.open_unix(script_info(), Some("mac_app"), subscribe(topics))
+            .await
     }
 
     /// A LAN peer.
     async fn tcp(&self, topics: Vec<Topic>) -> Conn {
-        let s = TcpStream::connect(("127.0.0.1", self.tcp_port)).await.expect("tcp connect");
+        let s = TcpStream::connect(("127.0.0.1", self.tcp_port))
+            .await
+            .expect("tcp connect");
         let (r, w) = s.into_split();
         Conn::start(r, w).handshake(None, subscribe(topics)).await
     }
 
     async fn open_unix(&self, info: PeerInfo, client_kind: Option<&str>, subscribe: Value) -> Conn {
         self.peers.queue(info);
-        let s = UnixStream::connect(&self.socket_path).await.expect("unix connect");
+        let s = UnixStream::connect(&self.socket_path)
+            .await
+            .expect("unix connect");
         let (r, w) = s.into_split();
         Conn::start(r, w).handshake(client_kind, subscribe).await
     }
@@ -282,13 +329,23 @@ impl Fake {
             .filter(|l| !l.trim().is_empty())
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|f| f["type"] == "user")
-            .map(|f| f["message"]["content"].as_str().unwrap_or_default().to_owned())
+            .map(|f| {
+                f["message"]["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
             .collect()
     }
 }
 
 fn subscribe(topics: Vec<Topic>) -> Value {
-    serde_json::to_value(ClientMsg::Subscribe { topics, renders_decisions: false, renders_approvals: false }).unwrap()
+    serde_json::to_value(ClientMsg::Subscribe {
+        topics,
+        renders_decisions: false,
+        renders_approvals: false,
+    })
+    .unwrap()
 }
 
 /// Real-time polling that never parks the (paused) runtime.
@@ -298,7 +355,10 @@ async fn wait_until<R>(what: &str, mut ready: impl FnMut() -> Option<R>) -> R {
         if let Some(v) = ready() {
             return v;
         }
-        assert!(start.elapsed() < Duration::from_secs(30), "timed out (real time) waiting for {what}");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "timed out (real time) waiting for {what}"
+        );
         std::thread::sleep(Duration::from_millis(2));
         tokio::task::yield_now().await;
     }
@@ -369,14 +429,22 @@ impl Conn {
             client_kind: client_kind.map(str::to_owned),
         })
         .await;
-        match self.next("the Welcome", |m| matches!(m, ServerMsg::Welcome { .. })).await {
-            ServerMsg::Welcome { operator_nonce, features, .. } => {
+        match self
+            .next("the Welcome", |m| matches!(m, ServerMsg::Welcome { .. }))
+            .await
+        {
+            ServerMsg::Welcome {
+                operator_nonce,
+                features,
+                ..
+            } => {
                 self.nonce = operator_nonce;
                 self.features = features;
             }
             _ => unreachable!(),
         }
-        self.send_raw(&serde_json::to_vec(&subscribe).unwrap()).await;
+        self.send_raw(&serde_json::to_vec(&subscribe).unwrap())
+            .await;
         self.connect_frames = self.sync().await;
         self
     }
@@ -386,14 +454,20 @@ impl Conn {
     }
 
     async fn send_raw(&mut self, bytes: &[u8]) {
-        write_frame(&mut self.tx, bytes).await.expect("write a frame");
+        write_frame(&mut self.tx, bytes)
+            .await
+            .expect("write a frame");
     }
 
     /// Move whatever has arrived into `seen`.
     fn pump(&mut self) {
         while let Ok(bytes) = self.rx.try_recv() {
-            let msg: ServerMsg = serde_json::from_slice(&bytes)
-                .unwrap_or_else(|e| panic!("undecodable frame ({e}): {}", String::from_utf8_lossy(&bytes)));
+            let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                panic!(
+                    "undecodable frame ({e}): {}",
+                    String::from_utf8_lossy(&bytes)
+                )
+            });
             self.raw.push(bytes);
             self.seen.push(msg);
         }
@@ -422,7 +496,8 @@ impl Conn {
     async fn sync(&mut self) -> Vec<ServerMsg> {
         let start = self.cursor;
         self.send(&ClientMsg::Ping).await;
-        self.next("the Pong", |m| matches!(m, ServerMsg::Pong)).await;
+        self.next("the Pong", |m| matches!(m, ServerMsg::Pong))
+            .await;
         self.seen[start..self.cursor - 1].to_vec()
     }
 
@@ -446,7 +521,11 @@ impl Conn {
     /// Wait until the broadcast `sentinel` has arrived (everything sent before it has too).
     async fn through(&mut self, sentinel: &str) {
         let want = sentinel.to_owned();
-        self.next("the sentinel", move |m| matches!(m, ServerMsg::Error { message } if *message == want)).await;
+        self.next(
+            "the sentinel",
+            move |m| matches!(m, ServerMsg::Error { message } if *message == want),
+        )
+        .await;
     }
 
     /// Everything this connection has received so far.
@@ -466,7 +545,10 @@ impl Conn {
 
     /// How many `Error` frames starting with `prefix` this connection has received.
     fn errors_starting(&mut self, prefix: &str) -> usize {
-        self.all().iter().filter(|m| matches!(m, ServerMsg::Error { message } if message.starts_with(prefix))).count()
+        self.all()
+            .iter()
+            .filter(|m| matches!(m, ServerMsg::Error { message } if message.starts_with(prefix)))
+            .count()
     }
 
     async fn wait_errors_starting(&mut self, prefix: &str, n: usize) {
@@ -492,7 +574,13 @@ impl Conn {
             .collect()
     }
 
-    async fn action(&mut self, action: ClaudeLoginActionKind, tag: &str, hold_id: Option<&str>, nonce: Option<&str>) {
+    async fn action(
+        &mut self,
+        action: ClaudeLoginActionKind,
+        tag: &str,
+        hold_id: Option<&str>,
+        nonce: Option<&str>,
+    ) {
         self.send(&ClientMsg::ClaudeLoginAction {
             action,
             tag: tag.into(),
@@ -503,7 +591,12 @@ impl Conn {
     }
 
     /// An action carrying this connection's own nonce (the app's valid one).
-    async fn action_with_own_nonce(&mut self, action: ClaudeLoginActionKind, tag: &str, hold_id: Option<&str>) {
+    async fn action_with_own_nonce(
+        &mut self,
+        action: ClaudeLoginActionKind,
+        tag: &str,
+        hold_id: Option<&str>,
+    ) {
         let nonce = self.nonce.clone();
         self.action(action, tag, hold_id, nonce.as_deref()).await;
     }
@@ -511,7 +604,11 @@ impl Conn {
 
 fn state_of(m: &ServerMsg) -> Option<(bool, Vec<ClaudeLoginSession>)> {
     match m {
-        ServerMsg::ClaudeLoginState { needs_login, sessions, .. } => Some((*needs_login, sessions.clone())),
+        ServerMsg::ClaudeLoginState {
+            needs_login,
+            sessions,
+            ..
+        } => Some((*needs_login, sessions.clone())),
         _ => None,
     }
 }
@@ -521,7 +618,13 @@ fn is_login_state(m: &ServerMsg) -> bool {
 }
 
 fn is_login_state_needing_login(m: &ServerMsg) -> bool {
-    matches!(m, ServerMsg::ClaudeLoginState { needs_login: true, .. })
+    matches!(
+        m,
+        ServerMsg::ClaudeLoginState {
+            needs_login: true,
+            ..
+        }
+    )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -530,7 +633,10 @@ fn is_login_state_needing_login(m: &ServerMsg) -> bool {
 
 #[test]
 fn protocol_version_is_unchanged_at_4() {
-    assert_eq!(PROTOCOL_VERSION, 4, "the sign-in frames are additive: an old Mac keeps working");
+    assert_eq!(
+        PROTOCOL_VERSION, 4,
+        "the sign-in frames are additive: an old Mac keeps working"
+    );
 }
 
 #[test]
@@ -539,7 +645,11 @@ fn welcome_announces_claude_login_v1_to_local_peers() {
         let app = rig.app(vec![]).await;
         let agent = rig.agent(vec![]).await;
         for (who, conn) in [("app", &app), ("agent", &agent)] {
-            assert!(conn.features.iter().any(|f| f == "claude_login_v1"), "{who}: {:?}", conn.features);
+            assert!(
+                conn.features.iter().any(|f| f == "claude_login_v1"),
+                "{who}: {:?}",
+                conn.features
+            );
         }
     });
 }
@@ -553,7 +663,10 @@ fn a_local_subscriber_is_replayed_a_state_saying_nothing_is_waiting_whatever_its
     run(|rig| async move {
         let mut with_none = rig.app(vec![]).await;
         let mut with_layout = rig.agent(vec![Topic::Layout]).await;
-        for (who, conn) in [("no topics", &mut with_none), ("layout only", &mut with_layout)] {
+        for (who, conn) in [
+            ("no topics", &mut with_none),
+            ("layout only", &mut with_layout),
+        ] {
             conn.wait_seen("the replayed state", is_login_state).await;
             let (needs_login, sessions) = conn.last_state().unwrap();
             assert!(!needs_login, "{who}");
@@ -569,7 +682,8 @@ fn a_local_subscriber_is_replayed_the_current_picture_when_a_session_waits() {
         rig.say("cody-1", "WIRE-QUEUED-REPLAY");
 
         let mut app = rig.app(vec![]).await;
-        app.wait_seen("a state that needs a login", is_login_state_needing_login).await;
+        app.wait_seen("a state that needs a login", is_login_state_needing_login)
+            .await;
         let (needs_login, sessions) = app.last_state().unwrap();
         assert!(needs_login);
         assert_eq!(sessions.len(), 1);
@@ -590,13 +704,20 @@ fn a_change_is_broadcast_to_every_local_subscriber_whatever_its_topics_with_no_c
         let (_fake, entry) = rig.hold("cody-1", "WIRE-HELD-LIVE hello").await;
 
         for (who, conn) in [("app", &mut app), ("agent", &mut agent)] {
-            conn.wait_seen("a state that needs a login", is_login_state_needing_login).await;
+            conn.wait_seen("a state that needs a login", is_login_state_needing_login)
+                .await;
             let (_, sessions) = conn.last_state().unwrap();
             assert_eq!(sessions.len(), 1, "{who}");
             assert_eq!(sessions[0].hold_id, entry.hold_id, "{who}");
             for frame in conn.raw_state_frames() {
-                assert!(!frame.contains("WIRE-HELD-LIVE"), "{who}: the message text is on the wire: {frame}");
-                assert!(!frame.contains("OAuth"), "{who}: the error text is on the wire: {frame}");
+                assert!(
+                    !frame.contains("WIRE-HELD-LIVE"),
+                    "{who}: the message text is on the wire: {frame}"
+                );
+                assert!(
+                    !frame.contains("OAuth"),
+                    "{who}: the error text is on the wire: {frame}"
+                );
             }
         }
     });
@@ -607,11 +728,16 @@ fn a_tcp_peer_subscribed_to_everything_never_receives_the_login_state() {
     run(|mut rig| async move {
         let (_fake, _entry) = rig.hold("cody-1", "WIRE-HELD-TCP hello").await;
         let mut app = rig.app(vec![]).await;
-        app.wait_seen("the replayed state", is_login_state_needing_login).await;
+        app.wait_seen("the replayed state", is_login_state_needing_login)
+            .await;
 
         // Connects while a session waits: no replay.
         let mut tcp = rig.tcp(ALL_TOPICS.to_vec()).await;
-        assert!(!tcp.connect_frames.iter().any(is_login_state), "{:?}", tcp.connect_frames);
+        assert!(
+            !tcp.connect_frames.iter().any(is_login_state),
+            "{:?}",
+            tcp.connect_frames
+        );
 
         // Then the picture changes: the app is told, the TCP peer is not.
         rig.say("cody-1", "WIRE-QUEUED-TCP");
@@ -647,22 +773,27 @@ fn only_the_verified_app_with_its_nonce_may_resend_or_discard_anyone_else_gets_n
         // A process that is not the app: no nonce, and even the app's own nonce.
         for action in [ClaudeLoginActionKind::Retry, ClaudeLoginActionKind::Discard] {
             agent.action(action, "cody-1", Some(&id), None).await;
-            agent.action(action, "cody-1", Some(&id), Some(&app_nonce)).await;
+            agent
+                .action(action, "cody-1", Some(&id), Some(&app_nonce))
+                .await;
         }
         agent.wait_errors_starting("not_operator_app", 4).await;
 
         // The app, with a missing, a wrong and an empty nonce.
         for action in [ClaudeLoginActionKind::Retry, ClaudeLoginActionKind::Discard] {
             app.action(action, "cody-1", Some(&id), None).await;
-            app.action(action, "cody-1", Some(&id), Some("not-the-nonce")).await;
+            app.action(action, "cody-1", Some(&id), Some("not-the-nonce"))
+                .await;
             app.action(action, "cody-1", Some(&id), Some("")).await;
         }
         app.wait_errors_starting("not_operator_app", 6).await;
 
         // A LAN peer (its reply, if any, is not pinned).
         let mut tcp = rig.tcp(ALL_TOPICS.to_vec()).await;
-        tcp.action(ClaudeLoginActionKind::Retry, "cody-1", Some(&id), None).await;
-        tcp.action(ClaudeLoginActionKind::Discard, "cody-1", Some(&id), None).await;
+        tcp.action(ClaudeLoginActionKind::Retry, "cody-1", Some(&id), None)
+            .await;
+        tcp.action(ClaudeLoginActionKind::Discard, "cody-1", Some(&id), None)
+            .await;
 
         // Nothing was written, resent or dropped.
         settle().await;
@@ -680,11 +811,21 @@ fn a_refusal_carries_no_content() {
     run(|mut rig| async move {
         let (_fake, entry) = rig.hold("cody-1", "WIRE-HELD-NOCONTENT hello").await;
         let mut agent = rig.agent(vec![]).await;
-        agent.action(ClaudeLoginActionKind::Retry, "cody-1", entry.hold_id.as_deref(), None).await;
+        agent
+            .action(
+                ClaudeLoginActionKind::Retry,
+                "cody-1",
+                entry.hold_id.as_deref(),
+                None,
+            )
+            .await;
         agent.wait_errors_starting("not_operator_app", 1).await;
         for m in agent.all() {
             if let ServerMsg::Error { message } = m {
-                assert!(!message.contains("WIRE-HELD-NOCONTENT") && !message.contains("OAuth"), "{message}");
+                assert!(
+                    !message.contains("WIRE-HELD-NOCONTENT") && !message.contains("OAuth"),
+                    "{message}"
+                );
             }
         }
     });
@@ -700,14 +841,20 @@ fn retry_from_the_app_resends_the_held_message_once_even_when_pressed_twice() {
         let (fake, entry) = rig.hold("cody-1", "WIRE-HELD-RETRY hello").await;
         let id = entry.hold_id.clone().unwrap();
         let mut app = rig.app(vec![]).await;
-        app.wait_seen("the replayed state", is_login_state_needing_login).await;
+        app.wait_seen("the replayed state", is_login_state_needing_login)
+            .await;
         rig.set_login("ok");
 
         // Pressed twice, back to back.
-        app.action_with_own_nonce(ClaudeLoginActionKind::Retry, "cody-1", Some(&id)).await;
-        app.action_with_own_nonce(ClaudeLoginActionKind::Retry, "cody-1", Some(&id)).await;
+        app.action_with_own_nonce(ClaudeLoginActionKind::Retry, "cody-1", Some(&id))
+            .await;
+        app.action_with_own_nonce(ClaudeLoginActionKind::Retry, "cody-1", Some(&id))
+            .await;
 
-        wait_until("the held message to be written again", || (fake.user_texts().len() >= 2).then_some(())).await;
+        wait_until("the held message to be written again", || {
+            (fake.user_texts().len() >= 2).then_some(())
+        })
+        .await;
         wait_until("the hold to clear", || (!rig.picture().0).then_some(())).await;
         app.wait_seen("a state saying nothing waits", |m| {
             matches!(m, ServerMsg::ClaudeLoginState { needs_login: false, sessions, .. } if sessions.is_empty())
@@ -715,11 +862,20 @@ fn retry_from_the_app_resends_the_held_message_once_even_when_pressed_twice() {
         .await;
 
         // A late third press naming the same, now gone, hold.
-        app.action_with_own_nonce(ClaudeLoginActionKind::Retry, "cody-1", Some(&id)).await;
+        app.action_with_own_nonce(ClaudeLoginActionKind::Retry, "cody-1", Some(&id))
+            .await;
         app.sync().await;
         settle().await;
-        assert_eq!(fake.user_texts(), vec!["WIRE-HELD-RETRY hello"; 2], "written once more, not more");
-        assert_eq!(app.errors_starting("not_operator_app"), 0, "the app's own presses are never refused");
+        assert_eq!(
+            fake.user_texts(),
+            vec!["WIRE-HELD-RETRY hello"; 2],
+            "written once more, not more"
+        );
+        assert_eq!(
+            app.errors_starting("not_operator_app"),
+            0,
+            "the app's own presses are never refused"
+        );
     });
 }
 
@@ -730,12 +886,17 @@ fn discard_from_the_app_drops_the_hold_and_the_queue_goes_on() {
         let id = entry.hold_id.clone().unwrap();
         rig.say("cody-1", "WIRE-QUEUED-DISCARD");
         let mut app = rig.app(vec![]).await;
-        app.wait_seen("the replayed state", is_login_state_needing_login).await;
+        app.wait_seen("the replayed state", is_login_state_needing_login)
+            .await;
         rig.set_login("ok");
 
-        app.action_with_own_nonce(ClaudeLoginActionKind::Discard, "cody-1", Some(&id)).await;
+        app.action_with_own_nonce(ClaudeLoginActionKind::Discard, "cody-1", Some(&id))
+            .await;
 
-        wait_until("the queued message to be written", || (fake.user_texts().len() >= 2).then_some(())).await;
+        wait_until("the queued message to be written", || {
+            (fake.user_texts().len() >= 2).then_some(())
+        })
+        .await;
         wait_until("the hold to clear", || (!rig.picture().0).then_some(())).await;
         settle().await;
         assert_eq!(
@@ -744,7 +905,13 @@ fn discard_from_the_app_drops_the_hold_and_the_queue_goes_on() {
             "the held message is gone; the queued one is sent"
         );
         app.wait_seen("a state saying nothing waits", |m| {
-            matches!(m, ServerMsg::ClaudeLoginState { needs_login: false, .. })
+            matches!(
+                m,
+                ServerMsg::ClaudeLoginState {
+                    needs_login: false,
+                    ..
+                }
+            )
         })
         .await;
     });
@@ -755,11 +922,22 @@ fn an_action_naming_an_old_hold_changes_nothing() {
     run(|mut rig| async move {
         let (fake, entry) = rig.hold("cody-1", "WIRE-HELD-OLD hello").await;
         let mut app = rig.app(vec![]).await;
-        app.wait_seen("the replayed state", is_login_state_needing_login).await;
+        app.wait_seen("the replayed state", is_login_state_needing_login)
+            .await;
         rig.set_login("ok");
 
-        app.action_with_own_nonce(ClaudeLoginActionKind::Retry, "cody-1", Some("00000000-0000-4000-8000-00000000dead")).await;
-        app.action_with_own_nonce(ClaudeLoginActionKind::Discard, "cody-1", Some("00000000-0000-4000-8000-00000000dead")).await;
+        app.action_with_own_nonce(
+            ClaudeLoginActionKind::Retry,
+            "cody-1",
+            Some("00000000-0000-4000-8000-00000000dead"),
+        )
+        .await;
+        app.action_with_own_nonce(
+            ClaudeLoginActionKind::Discard,
+            "cody-1",
+            Some("00000000-0000-4000-8000-00000000dead"),
+        )
+        .await;
         app.sync().await;
         settle().await;
         assert_eq!(fake.user_texts().len(), 1);
@@ -786,17 +964,28 @@ fn a_session_send_to_a_waiting_session_with_a_full_queue_is_refused_over_the_wir
             .await;
         }
         app.sync().await;
-        wait_until("the queue to fill", || (rig.picture().1[0].queued as usize == LOGIN_QUEUE_CAP).then_some(())).await;
+        wait_until("the queue to fill", || {
+            (rig.picture().1[0].queued as usize == LOGIN_QUEUE_CAP).then_some(())
+        })
+        .await;
         assert_eq!(app.errors_starting("waiting_for_sign_in"), 0, "twenty fit");
 
-        app.send(&ClientMsg::SessionSend { tag: "cody-1".into(), text: "WIRE-OVERFLOW".into(), images: vec![] }).await;
+        app.send(&ClientMsg::SessionSend {
+            tag: "cody-1".into(),
+            text: "WIRE-OVERFLOW".into(),
+            images: vec![],
+        })
+        .await;
         app.wait_seen("the queue-full refusal", |m| {
             matches!(m, ServerMsg::Error { message } if message.contains("waiting_for_sign_in: queue full"))
         })
         .await;
         for m in app.all() {
             if let ServerMsg::Error { message } = m {
-                assert!(!message.contains("WIRE-OVERFLOW"), "the refusal carries no message text: {message}");
+                assert!(
+                    !message.contains("WIRE-OVERFLOW"),
+                    "the refusal carries no message text: {message}"
+                );
             }
         }
         settle().await;

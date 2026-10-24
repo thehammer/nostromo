@@ -25,7 +25,13 @@ use crate::data::work::is_invisible;
 /// Input fields the CLI's `AskUserQuestion` reads as the person's own words or state (answers, notes
 /// on an answer, a free-form reply, an away-from-keyboard timeout, a request for more questions).
 /// An agent can write them into its call; the reply never carries them through.
-const HUMAN_OWNED_FIELDS: [&str; 5] = ["answers", "annotations", "response", "afkTimeoutMs", "followUp"];
+const HUMAN_OWNED_FIELDS: [&str; 5] = [
+    "answers",
+    "annotations",
+    "response",
+    "afkTimeoutMs",
+    "followUp",
+];
 
 /// One option of a question.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,13 +107,24 @@ pub fn parse_questions(input: &Value) -> Option<Vec<AskQuestion>> {
             if label.is_empty() || options.iter().any(|seen| seen.label == label) {
                 return None;
             }
-            let description = o.get("description").and_then(Value::as_str).unwrap_or("").to_owned();
+            let description = o
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             options.push(AskOption { label, description });
         }
         questions.push(AskQuestion {
             question,
-            header: q.get("header").and_then(Value::as_str).unwrap_or("").to_owned(),
-            multi_select: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+            header: q
+                .get("header")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            multi_select: q
+                .get("multiSelect")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             options,
         });
     }
@@ -133,7 +150,10 @@ pub fn updated_input(input: &Value, answers: &[QuestionAnswer]) -> Result<Value,
     }
     let mut map = Map::new();
     for (question, value) in questions.iter().zip(values) {
-        map.insert(question.question.clone(), Value::String(value.ok_or(AnswerError::MissingAnswer)?));
+        map.insert(
+            question.question.clone(),
+            Value::String(value.ok_or(AnswerError::MissingAnswer)?),
+        );
     }
     let mut updated = input.clone();
     let fields = updated.as_object_mut().ok_or(AnswerError::NotAnswerable)?;

@@ -19,7 +19,9 @@ impl Agent {
     }
 
     pub fn from_name(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|a| a.name().eq_ignore_ascii_case(s))
+        Self::ALL
+            .into_iter()
+            .find(|a| a.name().eq_ignore_ascii_case(s))
     }
 
     /// The MCP tool-name / pane-source prefix this agent owns ("fred." ...).
@@ -47,7 +49,11 @@ impl Default for EnabledAgents {
 
 impl EnabledAgents {
     pub const fn all() -> Self {
-        Self { fred: true, perri: true, teri: true }
+        Self {
+            fred: true,
+            perri: true,
+            teri: true,
+        }
     }
 
     pub fn is_enabled(&self, a: Agent) -> bool {
@@ -82,6 +88,19 @@ impl EnabledAgents {
         names
     }
 
+    /// Sorted lowercase names of the switchable built-ins that are off (`mother`
+    /// never is). The complement of [`Self::wire_names`] over the switchable agents:
+    /// a client that knows an agent this daemon does not still learns what is off.
+    pub fn disabled_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Agent::ALL
+            .into_iter()
+            .filter(|a| !self.is_enabled(*a))
+            .map(|a| a.name().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
     fn set(&mut self, a: Agent, on: bool) {
         match a {
             Agent::Fred => self.fred = on,
@@ -102,7 +121,10 @@ pub struct ParkedSenders(Vec<Box<dyn std::any::Any + Send>>);
 impl ParkedSenders {
     /// A receiver whose sender is parked here (so it never reports closed and
     /// never produces a value) for as long as `self` lives.
-    pub fn channel<T: Send + Sync + 'static>(&mut self, initial: T) -> tokio::sync::watch::Receiver<T> {
+    pub fn channel<T: Send + Sync + 'static>(
+        &mut self,
+        initial: T,
+    ) -> tokio::sync::watch::Receiver<T> {
         let (tx, rx) = tokio::sync::watch::channel(initial);
         self.0.push(Box::new(tx));
         rx
@@ -115,6 +137,21 @@ impl ParkedSenders {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// `key` as it may be logged: control characters (newlines, escape sequences)
+/// written out as `\u{..}` escapes, so a config key cannot forge a log line or
+/// drive a terminal.
+fn escape_key(key: &str) -> String {
+    key.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Resolve the `[agents]` value from config.toml. Returns warnings to log,
@@ -133,11 +170,14 @@ pub fn resolve(agents: Option<&toml::Value>) -> (EnabledAgents, Vec<String>) {
         return (enabled, warnings);
     };
     let Some(tables) = value.as_table() else {
-        warnings.push("[agents] must be a table of [agents.<name>] tables; ignoring it".to_string());
+        warnings
+            .push("[agents] must be a table of [agents.<name>] tables; ignoring it".to_string());
         return (enabled, warnings);
     };
     let mut seen: Vec<Agent> = Vec::new();
-    for (name, entry) in tables {
+    for (key, entry) in tables {
+        let name = escape_key(key);
+        let name = name.as_str();
         let Some(entry) = entry.as_table() else {
             warnings.push(format!("agents.{name} must be a table; ignoring it"));
             continue;
@@ -146,15 +186,18 @@ pub fn resolve(agents: Option<&toml::Value>) -> (EnabledAgents, Vec<String>) {
             None => true,
             Some(toml::Value::Boolean(b)) => *b,
             Some(_) => {
-                warnings.push(format!("agents.{name}.enabled must be true or false; ignoring it"));
+                warnings.push(format!(
+                    "agents.{name}.enabled must be true or false; ignoring it"
+                ));
                 continue;
             }
         };
-        if name.eq_ignore_ascii_case("mother") {
+        if key.eq_ignore_ascii_case("mother") {
             if !on {
-                warnings.push("agents.mother cannot be disabled; ignoring enabled = false".to_string());
+                warnings
+                    .push("agents.mother cannot be disabled; ignoring enabled = false".to_string());
             }
-        } else if let Some(a) = Agent::from_name(name) {
+        } else if let Some(a) = Agent::from_name(key) {
             if seen.contains(&a) {
                 warnings.push(format!(
                     "agents.{name} duplicates another {} key that differs only by case; the key sorting last wins",
@@ -176,12 +219,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
 use crate::data::{
-    fred_calendar::CalendarSnapshot,
-    fred_mailbox::MailboxSnapshot,
-    perri_pr::PrSnapshots,
-    perri_queue::PrQueueSnapshot,
-    relay_client::QueueSignal,
-    teri_todos::TeriTodosSnapshot,
+    fred_calendar::CalendarSnapshot, fred_mailbox::MailboxSnapshot, perri_pr::PrSnapshots,
+    perri_queue::PrQueueSnapshot, relay_client::QueueSignal, teri_todos::TeriTodosSnapshot,
     work::hub::WorkHub,
 };
 
@@ -243,16 +282,27 @@ pub struct WiredAgents {
 pub fn wire_agents(enabled: EnabledAgents, spawner: &mut dyn AgentSpawner) -> WiredAgents {
     let mut parked = ParkedSenders::default();
 
-    let (perri_queue_rx, perri_queue_refresh_tx, perri_queue_relay_tx, perri_pr_rx, perri_pr_refresh_tx) =
-        if enabled.perri {
-            let p = spawner.start_perri();
-            spawner.start_perri_broadcaster(p.queue_rx.clone(), p.pr_rx.clone());
-            (p.queue_rx, Some(p.queue_refresh_tx), Some(p.queue_relay_tx), p.pr_rx, Some(p.pr_refresh_tx))
-        } else {
-            let q = parked.channel::<Option<PrQueueSnapshot>>(None);
-            let p = parked.channel(crate::data::perri_pr::no_prs());
-            (q, None, None, p, None)
-        };
+    let (
+        perri_queue_rx,
+        perri_queue_refresh_tx,
+        perri_queue_relay_tx,
+        perri_pr_rx,
+        perri_pr_refresh_tx,
+    ) = if enabled.perri {
+        let p = spawner.start_perri();
+        spawner.start_perri_broadcaster(p.queue_rx.clone(), p.pr_rx.clone());
+        (
+            p.queue_rx,
+            Some(p.queue_refresh_tx),
+            Some(p.queue_relay_tx),
+            p.pr_rx,
+            Some(p.pr_refresh_tx),
+        )
+    } else {
+        let q = parked.channel::<Option<PrQueueSnapshot>>(None);
+        let p = parked.channel(crate::data::perri_pr::no_prs());
+        (q, None, None, p, None)
+    };
 
     let (fred_mailbox_rx, fred_calendar_rx) = if enabled.fred {
         let (m, c) = spawner.start_fred();
@@ -309,8 +359,35 @@ mod tests {
     #[test]
     fn a_disabled_table_disables_only_that_agent() {
         let (e, w) = r("[agents.fred]\nenabled = false\n");
-        assert_eq!(e, EnabledAgents { fred: false, perri: true, teri: true });
+        assert_eq!(
+            e,
+            EnabledAgents {
+                fred: false,
+                perri: true,
+                teri: true
+            }
+        );
         assert!(w.is_empty());
+    }
+
+    #[test]
+    fn warnings_write_control_characters_in_a_key_as_escapes() {
+        // An unknown key, a non-table key and a bad `enabled`, each with a newline or escape in its name.
+        let (_, w) = r("[agents.\"bob\\nERROR forged line\"]\nenabled = false\n");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("bob\\nERROR forged line"), "{w:?}");
+        assert!(!w[0].contains('\n'));
+
+        let (_, w) = r("[agents]\n\"a\\u001b[31mb\" = 3\n");
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("a\\u{1b}[31mb") && !w[0].contains('\u{1b}'),
+            "{w:?}"
+        );
+
+        let (_, w) = r("[agents.\"c\\rd\"]\nenabled = \"no\"\n");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("c\\rd") && !w[0].contains('\r'), "{w:?}");
     }
 
     #[test]
@@ -361,7 +438,14 @@ mod tests {
     #[test]
     fn a_bad_entry_does_not_stop_a_good_one() {
         let (e, w) = r("[agents]\nfred = false\n[agents.perri]\nenabled = false\n");
-        assert_eq!(e, EnabledAgents { fred: true, perri: false, teri: true });
+        assert_eq!(
+            e,
+            EnabledAgents {
+                fred: true,
+                perri: false,
+                teri: true
+            }
+        );
         assert_eq!(w.len(), 1);
     }
 
@@ -389,7 +473,10 @@ mod tests {
     #[test]
     fn duplicate_winner_follows_sorted_key_order_not_file_order() {
         let (e, w) = r("[agents.fred]\nenabled = false\n[agents.Fred]\nenabled = true\n");
-        assert!(!e.fred, "`fred` sorts after `Fred`, so it wins even though it is written first");
+        assert!(
+            !e.fred,
+            "`fred` sorts after `Fred`, so it wins even though it is written first"
+        );
         assert_eq!(w.len(), 1);
         let (e, w) = r("[agents.fred]\nenabled = true\n[agents.Fred]\nenabled = false\n");
         assert!(e.fred);
@@ -409,12 +496,19 @@ mod tests {
             "a parked sender must keep changed() pending"
         );
         drop(parked);
-        assert!(rx.changed().await.is_err(), "control: dropping the senders closes the channel");
+        assert!(
+            rx.changed().await.is_err(),
+            "control: dropping the senders closes the channel"
+        );
     }
 
     #[test]
     fn allows_tool_denies_only_disabled_prefixes() {
-        let e = EnabledAgents { fred: false, perri: true, teri: true };
+        let e = EnabledAgents {
+            fred: false,
+            perri: true,
+            teri: true,
+        };
         assert!(!e.allows_tool("fred.get_state"));
         assert!(e.allows_tool("nostromo.list_views"));
         assert!(e.allows_tool("mother.list_jobs"));
@@ -424,9 +518,28 @@ mod tests {
 
     #[test]
     fn wire_names_always_has_mother_and_is_sorted() {
-        let e = EnabledAgents { fred: false, perri: true, teri: false };
+        let e = EnabledAgents {
+            fred: false,
+            perri: true,
+            teri: false,
+        };
         assert_eq!(e.wire_names(), vec!["mother", "perri"]);
-        assert_eq!(EnabledAgents::all().wire_names(), vec!["fred", "mother", "perri", "teri"]);
+        assert_eq!(
+            EnabledAgents::all().wire_names(),
+            vec!["fred", "mother", "perri", "teri"]
+        );
+    }
+
+    #[test]
+    fn disabled_names_lists_exactly_the_switchable_agents_that_are_off() {
+        assert!(EnabledAgents::all().disabled_names().is_empty());
+        let e = EnabledAgents {
+            fred: false,
+            perri: true,
+            teri: false,
+        };
+        assert_eq!(e.disabled_names(), vec!["fred", "teri"]);
+        assert!(!e.disabled_names().contains(&"mother".to_string()));
     }
 
     #[test]

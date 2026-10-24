@@ -36,10 +36,10 @@ use tracing::warn;
 use super::credentials::{default_env_path, EnvFile};
 use super::endpoint::{https_api_base, https_link, is_slug};
 use super::hub::SourceUpdate;
-use super::untrusted::{one_line, MAX_LINE_CHARS};
 use super::model::{
     Link, Priority, SourceState, SourceStatus, WorkDetail, WorkError, WorkItem, WorkSource,
 };
+use super::untrusted::{one_line, MAX_LINE_CHARS};
 
 const TOKEN_VAR: &str = "SENTRY_API_TOKEN";
 const ORG_VAR: &str = "SENTRY_ORG";
@@ -81,8 +81,14 @@ struct Search {
 
 const SEARCHES: [Search; 2] = [
     // Assigned to me stays assigned however quiet the issue is: look far back.
-    Search { query: "is:unresolved assigned:me", stats_period: "90d" },
-    Search { query: "is:unresolved is:unassigned level:[error,fatal] lastSeen:-24h", stats_period: "24h" },
+    Search {
+        query: "is:unresolved assigned:me",
+        stats_period: "90d",
+    },
+    Search {
+        query: "is:unresolved is:unassigned level:[error,fatal] lastSeen:-24h",
+        stats_period: "24h",
+    },
 ];
 
 /// The time source, injectable so rate-limit holds can be tested without waiting.
@@ -129,9 +135,20 @@ impl SentryConfig {
     /// the daemon, and not even compiled into it.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
-    pub fn for_test_server(base_url: String, org: String, env_path: PathBuf, repos_path: PathBuf) -> Self {
+    pub fn for_test_server(
+        base_url: String,
+        org: String,
+        env_path: PathBuf,
+        repos_path: PathBuf,
+    ) -> Self {
         let error = check_org(&org, "the configured organization");
-        Self::assemble(base_url.trim_end_matches('/').to_string(), error, &org, env_path, repos_path)
+        Self::assemble(
+            base_url.trim_end_matches('/').to_string(),
+            error,
+            &org,
+            env_path,
+            repos_path,
+        )
     }
 
     /// The daemon's configuration: `SENTRY_ORG`, else `sentry.json`
@@ -139,10 +156,16 @@ impl SentryConfig {
     pub fn from_environment() -> Self {
         let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
         Self::from_sources(
-            &home.join(".claude").join("credentials").join("services").join("sentry.json"),
+            &home
+                .join(".claude")
+                .join("credentials")
+                .join("services")
+                .join("sentry.json"),
             std::env::var(ORG_VAR).ok(),
             default_env_path(),
-            home.join(".nostromo").join("teri").join("sentry-repos.json"),
+            home.join(".nostromo")
+                .join("teri")
+                .join("sentry-repos.json"),
         )
     }
 
@@ -166,15 +189,23 @@ impl SentryConfig {
             Value::String(s) => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
             _ => Some(String::new()),
         };
-        let env_org = org_override.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let env_org = org_override
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let (org, org_label) = match (env_org, setting("organization")) {
             (Some(org), _) => (org, ORG_VAR.to_string()),
             (None, Some(org)) => (org, format!("organization in {SENTRY_JSON_NAME}")),
-            (None, None) => (DEFAULT_ORG.to_string(), "the default organization".to_string()),
+            (None, None) => (
+                DEFAULT_ORG.to_string(),
+                "the default organization".to_string(),
+            ),
         };
         let (base, base_label) = match setting("base_url") {
             Some(base) => (base, format!("base_url in {SENTRY_JSON_NAME}")),
-            None => (DEFAULT_BASE_URL.to_string(), "the default base URL".to_string()),
+            None => (
+                DEFAULT_BASE_URL.to_string(),
+                "the default base URL".to_string(),
+            ),
         };
         Self::checked(&base, (&base_label, &org_label), &org, env_path, repos_path)
     }
@@ -245,7 +276,10 @@ fn check_org(org: &str, label: &str) -> Option<String> {
 
 /// `sentry.io` and any subdomain of it (regions such as `de.sentry.io`).
 fn is_sentry_host(host: &str) -> bool {
-    host == "sentry.io" || host.strip_suffix(".sentry.io").is_some_and(|label| !label.is_empty())
+    host == "sentry.io"
+        || host
+            .strip_suffix(".sentry.io")
+            .is_some_and(|label| !label.is_empty())
 }
 
 /// Start the source. `refresh` is poked by a manual refresh that passed the
@@ -257,7 +291,13 @@ pub fn spawn(refresh: Arc<Notify>) -> watch::Receiver<SourceUpdate> {
 /// The dormant placeholder for a hub that was not given a Sentry configuration
 /// (tests): it reads no credentials and never touches the network.
 pub fn spawn_dormant(_refresh: Arc<Notify>) -> watch::Receiver<SourceUpdate> {
-    let status = status(SourceState::NotConfigured, Some("Coming soon".into()), None, None, 0);
+    let status = status(
+        SourceState::NotConfigured,
+        Some("Coming soon".into()),
+        None,
+        None,
+        0,
+    );
     // The sender is dropped on purpose: the placeholder never changes.
     watch::channel((status, Vec::new())).1
 }
@@ -268,7 +308,10 @@ pub async fn detail(item_id: &str) -> Result<WorkDetail, WorkError> {
 }
 
 pub fn spawn_with(config: SentryConfig, refresh: Arc<Notify>) -> watch::Receiver<SourceUpdate> {
-    let (tx, rx) = watch::channel((status(SourceState::Loading, None, None, None, 0), Vec::new()));
+    let (tx, rx) = watch::channel((
+        status(SourceState::Loading, None, None, None, 0),
+        Vec::new(),
+    ));
     tokio::spawn(run(config, refresh, tx));
     rx
 }
@@ -307,7 +350,10 @@ fn status(
 async fn run(config: SentryConfig, refresh: Arc<Notify>, tx: watch::Sender<SourceUpdate>) {
     let Some(client) = http_client() else {
         let reason = "Couldn't start the Sentry client".to_string();
-        let _ = tx.send((status(SourceState::Error, Some(reason), None, None, 0), Vec::new()));
+        let _ = tx.send((
+            status(SourceState::Error, Some(reason), None, None, 0),
+            Vec::new(),
+        ));
         return;
     };
     let mut items: Vec<WorkItem> = Vec::new();
@@ -316,7 +362,15 @@ async fn run(config: SentryConfig, refresh: Arc<Notify>, tx: watch::Sender<Sourc
     let mut hold_until: Option<DateTime<Utc>> = None;
 
     loop {
-        let (update, wait) = fetch_round(&config, &client, &mut items, &mut last_ok, &mut failures, &mut hold_until).await;
+        let (update, wait) = fetch_round(
+            &config,
+            &client,
+            &mut items,
+            &mut last_ok,
+            &mut failures,
+            &mut hold_until,
+        )
+        .await;
         if tx.send(update).is_err() {
             return; // nobody is listening any more
         }
@@ -348,7 +402,10 @@ async fn fetch_round(
         *last_ok = None;
         *failures = 0;
         *hold_until = None;
-        let update = (status(SourceState::Error, Some(reason.to_string()), None, None, 0), Vec::new());
+        let update = (
+            status(SourceState::Error, Some(reason.to_string()), None, None, 0),
+            Vec::new(),
+        );
         return (update, config.poll_interval);
     }
     let Some(token) = lookup_token(&config.env_file).await else {
@@ -356,21 +413,39 @@ async fn fetch_round(
         *last_ok = None;
         *failures = 0;
         *hold_until = None;
-        let update = (status(SourceState::NotConfigured, Some(NOT_CONFIGURED_REASON.into()), None, None, 0), Vec::new());
+        let update = (
+            status(
+                SourceState::NotConfigured,
+                Some(NOT_CONFIGURED_REASON.into()),
+                None,
+                None,
+                0,
+            ),
+            Vec::new(),
+        );
         return (update, config.poll_interval);
     };
 
     let repos = read_repos(&config.repos_path).await;
-    let api = Api { client, base: &config.base_url, token: &token, clock: &config.clock };
+    let api = Api {
+        client,
+        base: &config.base_url,
+        token: &token,
+        clock: &config.clock,
+    };
     let mut hold: Option<DateTime<Utc>> = None;
     let result = fetch_issues(&api, &config.org, &repos, &mut hold).await;
     let now = config.now();
     *hold_until = hold.filter(|t| *t > now);
 
-    let publish = |state, reason, retry_at, complete, items: &Vec<WorkItem>, last_ok| -> SourceUpdate {
-        let status = SourceStatus { complete, ..status(state, reason, last_ok, retry_at, items.len()) };
-        (status, vec![(None, items.clone())])
-    };
+    let publish =
+        |state, reason, retry_at, complete, items: &Vec<WorkItem>, last_ok| -> SourceUpdate {
+            let status = SourceStatus {
+                complete,
+                ..status(state, reason, last_ok, retry_at, items.len())
+            };
+            (status, vec![(None, items.clone())])
+        };
     let hold_wait = |base: Duration, hold_until: &Option<DateTime<Utc>>| {
         hold_until
             .and_then(|t| (t - config.now()).to_std().ok())
@@ -387,18 +462,26 @@ async fn fetch_round(
             let truncated = fetched.truncated.then(|| TRUNCATED_REASON.to_string());
             // A hold that outlasts the freshness window means the list will be
             // out of date before it can be refreshed: say so.
-            let held_past_window = hold_until.filter(|t| *t - now > chrono_duration(FRESHNESS_WINDOW));
+            let held_past_window =
+                hold_until.filter(|t| *t - now > chrono_duration(FRESHNESS_WINDOW));
             let (state, reason, retry_at) = match held_past_window {
                 Some(until) => {
                     let why = "Sentry's rate limit is holding off the next refresh".to_string();
-                    (SourceState::Stale, Some(truncated.map_or(why.clone(), |t| format!("{why}. {t}"))), Some(until))
+                    (
+                        SourceState::Stale,
+                        Some(truncated.map_or(why.clone(), |t| format!("{why}. {t}"))),
+                        Some(until),
+                    )
                 }
                 None if items.is_empty() => (SourceState::Empty, None, None),
                 None => (SourceState::Fresh, truncated, None),
             };
             // Whole only when nothing was cut or unreadable and the list is not held past its freshness window.
             let complete = !partial && matches!(state, SourceState::Fresh | SourceState::Empty);
-            (publish(state, reason, retry_at, complete, items, *last_ok), hold_wait(config.poll_interval, hold_until))
+            (
+                publish(state, reason, retry_at, complete, items, *last_ok),
+                hold_wait(config.poll_interval, hold_until),
+            )
         }
         Err(rejected @ (ApiError::Unauthenticated | ApiError::Forbidden)) => {
             items.clear();
@@ -410,16 +493,39 @@ async fn fetch_round(
                 "Sentry rejected the token. Check SENTRY_API_TOKEN in ~/.claude/credentials/.env (scopes: project:read, event:read, org:read)."
             };
             (
-                (status(SourceState::Unauthenticated, Some(reason.into()), None, None, 0), Vec::new()),
+                (
+                    status(
+                        SourceState::Unauthenticated,
+                        Some(reason.into()),
+                        None,
+                        None,
+                        0,
+                    ),
+                    Vec::new(),
+                ),
                 config.poll_interval,
             )
         }
         Err(ApiError::RateLimited { retry_at }) => {
-            let retry_at = retry_at.clamp(now + chrono_duration(MIN_HOLD), now + chrono_duration(MAX_HOLD));
+            let retry_at = retry_at.clamp(
+                now + chrono_duration(MIN_HOLD),
+                now + chrono_duration(MAX_HOLD),
+            );
             *hold_until = Some(retry_at);
             let wait = (retry_at - now).to_std().unwrap_or_default();
-            let reason = "Sentry is rate-limiting requests; waiting before the next try".to_string();
-            (publish(SourceState::RateLimited, Some(reason), Some(retry_at), false, items, *last_ok), wait)
+            let reason =
+                "Sentry is rate-limiting requests; waiting before the next try".to_string();
+            (
+                publish(
+                    SourceState::RateLimited,
+                    Some(reason),
+                    Some(retry_at),
+                    false,
+                    items,
+                    *last_ok,
+                ),
+                wait,
+            )
         }
         Err(other) => {
             *failures = failures.saturating_add(1);
@@ -427,18 +533,28 @@ async fn fetch_round(
             let what = other.describe();
             warn!(failures = *failures, "sentry fetch failed: {what}");
             let (state, reason) = if last_ok.is_some() {
-                (SourceState::Stale, format!("Couldn't refresh Sentry ({what}); showing the last results"))
+                (
+                    SourceState::Stale,
+                    format!("Couldn't refresh Sentry ({what}); showing the last results"),
+                )
             } else {
-                (SourceState::Error, format!("Couldn't load Sentry issues ({what})"))
+                (
+                    SourceState::Error,
+                    format!("Couldn't load Sentry issues ({what})"),
+                )
             };
-            (publish(state, Some(reason), None, false, items, *last_ok), hold_wait(delay, hold_until))
+            (
+                publish(state, Some(reason), None, false, items, *last_ok),
+                hold_wait(delay, hold_until),
+            )
         }
     }
 }
 
 fn backoff(base: Duration, failures: u32) -> Duration {
     let shift = failures.saturating_sub(1).min(16);
-    base.saturating_mul(1u32 << shift).min(MAX_BACKOFF.max(base))
+    base.saturating_mul(1u32 << shift)
+        .min(MAX_BACKOFF.max(base))
 }
 
 fn chrono_duration(d: Duration) -> chrono::Duration {
@@ -456,7 +572,9 @@ async fn lookup_token(env: &Arc<EnvFile>) -> Option<String> {
 }
 
 pub(crate) async fn read_repos(path: &std::path::Path) -> HashMap<String, String> {
-    let Ok(raw) = tokio::fs::read_to_string(path).await else { return HashMap::new() };
+    let Ok(raw) = tokio::fs::read_to_string(path).await else {
+        return HashMap::new();
+    };
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
@@ -468,7 +586,9 @@ enum ApiError {
     /// 403: the token is accepted but may not do this (a missing scope).
     Forbidden,
     NotFound,
-    RateLimited { retry_at: DateTime<Utc> },
+    RateLimited {
+        retry_at: DateTime<Utc>,
+    },
     Status(u16),
     Transport,
     Malformed,
@@ -551,7 +671,10 @@ impl Api<'_> {
             }
             code => return Err(ApiError::Status(code)),
         }
-        let body = response.json::<Value>().await.map_err(|_| ApiError::Malformed)?;
+        let body = response
+            .json::<Value>()
+            .await
+            .map_err(|_| ApiError::Malformed)?;
         Ok((body, headers))
     }
 }
@@ -568,12 +691,22 @@ fn rate_limit_reset(headers: &HeaderMap) -> Option<DateTime<Utc>> {
         return None;
     }
     // Out of chrono's range (a bogus far-future value) is still "a long way off".
-    Some(DateTime::from_timestamp(secs as i64, 0).unwrap_or(if secs > 0.0 { DateTime::<Utc>::MAX_UTC } else { DateTime::<Utc>::MIN_UTC }))
+    Some(
+        DateTime::from_timestamp(secs as i64, 0).unwrap_or(if secs > 0.0 {
+            DateTime::<Utc>::MAX_UTC
+        } else {
+            DateTime::<Utc>::MIN_UTC
+        }),
+    )
 }
 
 /// The `cursor` of the `rel="next"` link when it has results.
 fn next_cursor(headers: &HeaderMap) -> Option<String> {
-    headers.get_all("link").iter().filter_map(|v| v.to_str().ok()).find_map(next_cursor_in)
+    headers
+        .get_all("link")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(next_cursor_in)
 }
 
 fn next_cursor_in(link: &str) -> Option<String> {
@@ -659,27 +792,42 @@ async fn fetch_issues(
             }
         }
     }
-    Ok(Fetched { items, truncated, unreadable })
+    Ok(Fetched {
+        items,
+        truncated,
+        unreadable,
+    })
 }
 
 // ── mapping ───────────────────────────────────────────────────────────────────
 
 fn text(v: &Value) -> Option<String> {
-    v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+    v.as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 fn number(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 fn timestamp(v: &Value) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(v.as_str()?).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(v.as_str()?)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 fn events_24h(issue: &Value) -> i64 {
     issue["stats"]["24h"]
         .as_array()
-        .map(|points| points.iter().filter_map(|p| p.get(1).and_then(number)).sum())
+        .map(|points| {
+            points
+                .iter()
+                .filter_map(|p| p.get(1).and_then(number))
+                .sum()
+        })
         .unwrap_or(0)
 }
 
@@ -707,12 +855,18 @@ fn priority_for(level: &str) -> Priority {
         "warning" => 3,
         _ => 4,
     };
-    Priority { label: level.to_string(), rank }
+    Priority {
+        label: level.to_string(),
+        rank,
+    }
 }
 
 fn to_item(issue: &Value, repos: &HashMap<String, String>) -> Option<WorkItem> {
     let id = text(&issue["id"]).or_else(|| number(&issue["id"]).map(|n| n.to_string()))?;
-    let title = one_line(&text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()), MAX_LINE_CHARS);
+    let title = one_line(
+        &text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()),
+        MAX_LINE_CHARS,
+    );
     let project = text(&issue["project"]["slug"]);
     let short_id = text(&issue["shortId"]);
     let level = text(&issue["level"]);
@@ -721,11 +875,15 @@ fn to_item(issue: &Value, repos: &HashMap<String, String>) -> Option<WorkItem> {
     if let Some(users) = number(&issue["userCount"]) {
         metrics.insert("users".to_string(), users);
     }
-    let search_text = [short_id.clone(), Some(title.clone()), text(&issue["culprit"])]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let search_text = [
+        short_id.clone(),
+        Some(title.clone()),
+        text(&issue["culprit"]),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
     Some(WorkItem {
         id: format!("sentry:{id}"),
         source: WorkSource::Sentry,
@@ -763,24 +921,46 @@ pub async fn detail_with(config: &SentryConfig, item_id: &str) -> Result<WorkDet
     let token = lookup_token(&config.env_file)
         .await
         .ok_or_else(|| WorkError::new("not_configured", NOT_CONFIGURED_REASON))?;
-    let client = http_client().ok_or_else(|| WorkError::new("error", "Couldn't start the Sentry client"))?;
-    let api = Api { client: &client, base: &config.base_url, token: &token, clock: &config.clock };
+    let client =
+        http_client().ok_or_else(|| WorkError::new("error", "Couldn't start the Sentry client"))?;
+    let api = Api {
+        client: &client,
+        base: &config.base_url,
+        token: &token,
+        clock: &config.clock,
+    };
     let mut hold = None;
 
     let issue_path = format!("/organizations/{}/issues/{id}/", config.org);
-    let (issue, _) = api.get(&issue_path, &[], &mut hold).await.map_err(|e| detail_error(&e))?;
+    let (issue, _) = api
+        .get(&issue_path, &[], &mut hold)
+        .await
+        .map_err(|e| detail_error(&e))?;
     // Anything that is not this issue (an error-shaped 200, another issue) is not shown as one.
-    if text(&issue["id"]).or_else(|| number(&issue["id"]).map(|n| n.to_string())).as_deref() != Some(id) {
+    if text(&issue["id"])
+        .or_else(|| number(&issue["id"]).map(|n| n.to_string()))
+        .as_deref()
+        != Some(id)
+    {
         return Err(detail_error(&ApiError::Malformed));
     }
     // The latest event only adds the stack and environment: the issue is still
     // worth showing without it, but the reader is told why the stack is missing.
-    let event = match api.get(&format!("{issue_path}events/latest/"), &[], &mut hold).await {
+    let event = match api
+        .get(&format!("{issue_path}events/latest/"), &[], &mut hold)
+        .await
+    {
         Ok((event, _)) => Ok(event),
-        Err(rejected @ (ApiError::Unauthenticated | ApiError::Forbidden)) => return Err(detail_error(&rejected)),
+        Err(rejected @ (ApiError::Unauthenticated | ApiError::Forbidden)) => {
+            return Err(detail_error(&rejected))
+        }
         Err(other) => Err(other.describe()),
     };
-    Ok(build_detail(item_id, &issue, event.as_ref().map_err(String::as_str)))
+    Ok(build_detail(
+        item_id,
+        &issue,
+        event.as_ref().map_err(String::as_str),
+    ))
 }
 
 fn detail_error(e: &ApiError) -> WorkError {
@@ -791,10 +971,14 @@ fn detail_error(e: &ApiError) -> WorkError {
             "Sentry rejected the token. Check SENTRY_API_TOKEN in ~/.claude/credentials/.env.",
         ),
         ApiError::Forbidden => WorkError::new("unauthenticated", MISSING_PERMISSION_REASON),
-        ApiError::RateLimited { .. } => {
-            WorkError::new("rate_limited", "Sentry is rate-limiting requests; try again shortly")
-        }
-        other => WorkError::new("error", format!("Couldn't load the Sentry issue ({})", other.describe())),
+        ApiError::RateLimited { .. } => WorkError::new(
+            "rate_limited",
+            "Sentry is rate-limiting requests; try again shortly",
+        ),
+        other => WorkError::new(
+            "error",
+            format!("Couldn't load the Sentry issue ({})", other.describe()),
+        ),
     }
 }
 
@@ -805,8 +989,14 @@ fn build_detail(item_id: &str, issue: &Value, event: Result<&Value, &str>) -> Wo
     let when = |v: &Value| timestamp(v).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string());
     let mut fields: Vec<(String, String)> = Vec::new();
     let total = number(&issue["count"]).unwrap_or(0);
-    fields.push(("Events".into(), format!("{total} total, {} in 24 h", events_24h(issue))));
-    fields.push(("Users".into(), number(&issue["userCount"]).unwrap_or(0).to_string()));
+    fields.push((
+        "Events".into(),
+        format!("{total} total, {} in 24 h", events_24h(issue)),
+    ));
+    fields.push((
+        "Users".into(),
+        number(&issue["userCount"]).unwrap_or(0).to_string(),
+    ));
     if let Some(t) = when(&issue["firstSeen"]) {
         fields.push(("First seen".into(), t));
     }
@@ -838,11 +1028,19 @@ fn build_detail(item_id: &str, issue: &Value, event: Result<&Value, &str>) -> Wo
     };
 
     let links = sentry_link(&issue["permalink"])
-        .map(|url| vec![Link { label: "Open in Sentry".into(), url }])
+        .map(|url| {
+            vec![Link {
+                label: "Open in Sentry".into(),
+                url,
+            }]
+        })
         .unwrap_or_default();
     WorkDetail {
         item_id: item_id.to_string(),
-        title: one_line(&text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()), MAX_LINE_CHARS),
+        title: one_line(
+            &text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()),
+            MAX_LINE_CHARS,
+        ),
         fields,
         markdown,
         files: Vec::new(),
@@ -878,7 +1076,11 @@ fn stack_markdown(event: &Value) -> Option<String> {
             if let Some(func) = text(&f["function"]) {
                 line.push_str(&format!(" in {func}"));
             }
-            let mark = if f["inApp"].as_bool() == Some(true) { "● " } else { "  " };
+            let mark = if f["inApp"].as_bool() == Some(true) {
+                "● "
+            } else {
+                "  "
+            };
             format!("{mark}{line}")
         })
         .collect::<Vec<_>>()

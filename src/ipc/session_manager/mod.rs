@@ -54,11 +54,14 @@ use crate::approvals::broker::{
 use super::auth_failure::{classify_line, TurnAuthTracker};
 use super::claude_login::{LoginCoordinator, LOGIN_QUEUE_CAP};
 use super::decisions::DecisionRegistry;
-use super::orphans::{self, ledger_path_beside, ChildLedger, Target, MARKER_ENV, SESSIONS_LEAD_OWN_GROUP, SHUTDOWN_GRACE};
-use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
+use super::orphans::{
+    self, child_unreaped, ledger_path_beside, ChildLedger, Target, MARKER_ENV,
+    SESSIONS_LEAD_OWN_GROUP, SHUTDOWN_GRACE,
+};
 use super::pane_registry::{
     PaneContentProvider, PaneRegistry, PerriStateProvider, TrackerFrameProvider,
 };
+use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
 use super::stream_json::{
     load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript, TurnDelta,
@@ -73,19 +76,19 @@ mod control;
 mod login;
 mod model_switch;
 mod task_runtime;
+use control::ControlReply;
 pub use control::CONTROL_TIMEOUT;
 pub use login::{ResendOutcome, ResendTrigger};
-use control::ControlReply;
-pub use task_runtime::{OutputReply, StopReport, TaskIoConfig};
-use task_runtime::{
-    detail_msg, drive_timer, ensure_poller, ensure_probe, forward_session_events, read_output,
-    stop_task, tasks_msg, TaskRuntime,
-};
-pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket};
 use model_switch::{
     emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,
     SessionCtx,
 };
+pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket};
+use task_runtime::{
+    detail_msg, drive_timer, ensure_poller, ensure_probe, forward_session_events, read_output,
+    stop_task, tasks_msg, TaskRuntime,
+};
+pub use task_runtime::{OutputReply, StopReport, TaskIoConfig};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
 /// operators with a non-standard install).
@@ -276,6 +279,13 @@ struct ManagedSession {
     /// Resolved `claude` session id (persisted in the id store).
     session_id: Option<String>,
     child: Child,
+    /// Set the moment this manager reaps `child` (`try_reap`). A reaped child's
+    /// pid is free to be given to a stranger, so nothing may be signalled by
+    /// that pid afterwards; `stop_target` checks this before it asks the OS.
+    reaped: bool,
+    /// Whether the child's pid is still an unreaped child of ours. Always
+    /// [`child_unreaped`]; a field so tests can simulate a reused pid.
+    unreaped_probe: fn(u32) -> bool,
     shared: Shared,
     /// How to respawn on restart. `None` → a real `claude` session (rebuild
     /// args with `--resume`). `Some((program, args))` → replay this exact
@@ -339,6 +349,18 @@ impl ManagedSession {
         self.alive() && self.stop_reason.is_none()
     }
 
+    /// Non-blocking reap of the child. The one place this manager waits for it:
+    /// a `Some` records that the pid is no longer ours (`reaped`).
+    fn try_reap(&mut self) -> Option<std::process::ExitStatus> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.reaped = true;
+                Some(status)
+            }
+            _ => None,
+        }
+    }
+
     /// Kill the child, and its whole process group when it leads one.
     fn kill(&mut self) {
         self.signal_kill();
@@ -347,8 +369,8 @@ impl ManagedSession {
 
     /// SIGKILL the child and its group, leaving the ledger as it is.
     ///
-    /// The group is signalled only while the child is still unreaped
-    /// (`stop_target`'s rule): the group id is the child's pid, and once the
+    /// The group is signalled only while the child is still unreaped, running
+    /// or exited and not yet waited for (`stop_target`'s rule): the group id is the child's pid, and once the
     /// child has been reaped (`reap_and_recover` does so for a crashed CLI)
     /// that pid is free to be given to a stranger who leads a group of its
     /// own. A reaped child gets `Child::kill`, which sends nothing for a
@@ -368,8 +390,16 @@ impl ManagedSession {
     /// What a graceful stop aims at: the child's group when it leads one, else
     /// the child. `None` once the child has been reaped: its pid may since have
     /// been given to something else, and a signal to it would hit a stranger.
+    ///
+    /// A child this manager has reaped is never probed: once its pid is free,
+    /// another child of the daemon may hold it, and a probe that only asks
+    /// "is this pid one of my unreaped children?" would say yes for that
+    /// stranger. Only an unreaped child is then checked, without reaping: an
+    /// exited CLI nobody has waited for yet still holds its pid, so its group
+    /// (the subagents and servers it left) is still ours to signal, and asking
+    /// must not be what frees the pid.
     fn stop_target(&mut self) -> Option<Target> {
-        if !matches!(self.child.try_wait(), Ok(None)) {
+        if self.reaped || !(self.unreaped_probe)(self.child.id()) {
             return None;
         }
         Some(if self.own_process_group {
@@ -546,8 +576,10 @@ impl SessionManager {
 
     pub fn with_store_path(store_path: PathBuf) -> Self {
         let stored = load_id_store(&store_path);
-        let sensitive =
-            SensitiveTags::persisted_for_sessions(registry_path_beside(&store_path), !stored.is_empty());
+        let sensitive = SensitiveTags::persisted_for_sessions(
+            registry_path_beside(&store_path),
+            !stored.is_empty(),
+        );
         if sensitive.is_degraded() {
             // The registry may have lost registrations (a failed write before
             // this start, or it is missing while sessions exist), so every
@@ -637,7 +669,8 @@ impl SessionManager {
     /// The approval broker only holds requests from such sessions.
     pub fn session_has_guard(&self, args: &[String]) -> bool {
         let expected = crate::approvals::guard::hook_settings_json(&self.guard_path);
-        args.windows(2).any(|w| w[0] == "--settings" && w[1] == expected)
+        args.windows(2)
+            .any(|w| w[0] == "--settings" && w[1] == expected)
     }
 
     /// The registry of sensitive tags/jobs (a shared handle: clones see the
@@ -765,7 +798,11 @@ impl SessionManager {
     ) -> crate::activity::store::Attribution {
         use crate::activity::store::Attribution;
 
-        let from_focus_tag = event.focus_tag.as_ref().filter(|tag| self.knows_focus(tag)).cloned();
+        let from_focus_tag = event
+            .focus_tag
+            .as_ref()
+            .filter(|tag| self.knows_focus(tag))
+            .cloned();
         let from_session_id = event
             .session_id
             .as_ref()
@@ -876,7 +913,10 @@ impl SessionManager {
         // content likewise (see `peer::within_work_send`).
         // A restricted session (the picks session) reads work-item data with no
         // agent name to say so, so it is sensitive by its restriction.
-        if is_teri_or_fred_agent(&agent_name) || in_work_send() || self.restrictions.contains_key(&tag) {
+        if is_teri_or_fred_agent(&agent_name)
+            || in_work_send()
+            || self.restrictions.contains_key(&tag)
+        {
             self.sensitive.mark_tag(&tag);
         }
 
@@ -896,7 +936,8 @@ impl SessionManager {
         if resume {
             self.sensitive.note_resumed(&tag);
         }
-        self.session_reverse.insert(effective_id.clone(), tag.clone());
+        self.session_reverse
+            .insert(effective_id.clone(), tag.clone());
 
         let program = resolve_claude()?;
         let mut args = build_claude_args_with(
@@ -962,7 +1003,9 @@ impl SessionManager {
                     .tracker_frame_provider
                     .as_ref()
                     .is_some_and(|p| p.has_bound_board(&tag));
-                reg.lock().unwrap().init_focus_with_tracker(&tag, has_tracker);
+                reg.lock()
+                    .unwrap()
+                    .init_focus_with_tracker(&tag, has_tracker);
             }
         }
 
@@ -1004,7 +1047,11 @@ impl SessionManager {
         transcript.set_live(true);
         let restricted = self.restrictions.contains_key(&tag);
         let runtime = ModelRuntime {
-            recorded: if restricted { None } else { model_store::focus_record(&paths.focus_models, &tag) },
+            recorded: if restricted {
+                None
+            } else {
+                model_store::focus_record(&paths.focus_models, &tag)
+            },
             ..ModelRuntime::default()
         };
 
@@ -1042,12 +1089,12 @@ impl SessionManager {
                 cmd.arg("--mcp-config").arg(config);
             }
         }
-                                     // Child working directory. When the focus carries no project dir, default
-                                     // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
-                                     // is `/` (filesystem root). Running an agent at `/` has no git context, so
-                                     // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
-                                     // in ways they never do when launched from a real dir. $HOME matches what a
-                                     // terminal-launched agent would typically see.
+        // Child working directory. When the focus carries no project dir, default
+        // to the operator's $HOME — NOT the daemon's own cwd, which under launchd
+        // is `/` (filesystem root). Running an agent at `/` has no git context, so
+        // `gh` can't infer owner/repo and repo-aware commands (Perri's, etc.) fail
+        // in ways they never do when launched from a real dir. $HOME matches what a
+        // terminal-launched agent would typically see.
         let dir = cwd
             .clone()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
@@ -1141,19 +1188,26 @@ impl SessionManager {
         // same test as the `--permission-prompt-tool` flag) gets a broker to
         // answer its permission requests.
         let guarded = self.session_has_guard(&args);
-        let approval_generation = self.approvals.as_ref().filter(|_| !restricted && !remote_control).map(|broker| {
-            let info = ApprovalSessionInfo {
-                tag: tag.clone(),
-                agent: agent_name.clone(),
-                session_id: Some(session_id.clone()),
-                cwd: Some(task_dir.clone()),
-                // The ordering rule: a request is held for a human only when the
-                // session carries the guard hook (see `ApprovalBroker`).
-                guarded,
-            };
-            let sink = Arc::new(StdinSink { stdin: Arc::clone(&shared.stdin), exited: Arc::clone(&shared.exited) });
-            broker.register_session(info, sink)
-        });
+        let approval_generation = self
+            .approvals
+            .as_ref()
+            .filter(|_| !restricted && !remote_control)
+            .map(|broker| {
+                let info = ApprovalSessionInfo {
+                    tag: tag.clone(),
+                    agent: agent_name.clone(),
+                    session_id: Some(session_id.clone()),
+                    cwd: Some(task_dir.clone()),
+                    // The ordering rule: a request is held for a human only when the
+                    // session carries the guard hook (see `ApprovalBroker`).
+                    guarded,
+                };
+                let sink = Arc::new(StdinSink {
+                    stdin: Arc::clone(&shared.stdin),
+                    exited: Arc::clone(&shared.exited),
+                });
+                broker.register_session(info, sink)
+            });
         let approvals = self
             .approvals
             .clone()
@@ -1164,8 +1218,9 @@ impl SessionManager {
         // the pending queue on turn completion; signal exit on EOF.
         let reader_shared = shared.clone();
         let tag_for_reader = tag.clone();
-        let reader_task =
-            tokio::task::spawn_blocking(move || run_reader(tag_for_reader, stdout, reader_shared, approvals));
+        let reader_task = tokio::task::spawn_blocking(move || {
+            run_reader(tag_for_reader, stdout, reader_shared, approvals)
+        });
 
         Ok(ManagedSession {
             tag,
@@ -1175,6 +1230,8 @@ impl SessionManager {
             remote_control,
             session_id: Some(session_id),
             child,
+            reaped: false,
+            unreaped_probe: child_unreaped,
             shared,
             respawn_fixed,
             intentional_stop: Arc::new(AtomicBool::new(false)),
@@ -1197,12 +1254,7 @@ impl SessionManager {
 
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
-    pub fn send_user_message(
-        &mut self,
-        tag: &str,
-        text: &str,
-        images: &[String],
-    ) -> Result<()> {
+    pub fn send_user_message(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
         // Text sent during a work-item send is that item's content: the
         // session it lands in is sensitive before the text is written.
         if in_work_send() {
@@ -1252,9 +1304,15 @@ impl SessionManager {
             // agent hears about it once, ahead of what it was sent. Only a message
             // written now carries it (a queued one can still be dropped by an
             // interrupt), and it is forgotten only once the write has succeeded.
-            let note = self.approvals.as_ref().and_then(|b| b.peek_restart_note(tag));
+            let note = self
+                .approvals
+                .as_ref()
+                .and_then(|b| b.peek_restart_note(tag));
             let outgoing = match &note {
-                Some(note) => PendingMessage { text: format!("{note}\n\n{}", message.text), ..message.clone() },
+                Some(note) => PendingMessage {
+                    text: format!("{note}\n\n{}", message.text),
+                    ..message.clone()
+                },
                 None => message.clone(),
             };
             if let Err(e) = write_user_message(&session.shared, &outgoing) {
@@ -1312,12 +1370,16 @@ impl SessionManager {
         let deadline = std::time::Instant::now() + WRITE_WAIT_LIMIT;
         let (running, discarded) = loop {
             let state = lock_recover(&session.shared.state);
-            if session.shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            if session.shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline
+            {
                 drop(state);
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            let running = matches!(*state, SessionState::MidTurn | SessionState::AwaitingPermission);
+            let running = matches!(
+                *state,
+                SessionState::MidTurn | SessionState::AwaitingPermission
+            );
             let discarded = session.shared.login.discard_for_stop();
             if running || discarded {
                 lock_recover(&session.shared.pending).clear();
@@ -1329,7 +1391,11 @@ impl SessionManager {
             session.shared.login.notify();
         }
         if !running {
-            return Ok(if discarded { InterruptOutcome::DiscardedHold } else { InterruptOutcome::NotRunning });
+            return Ok(if discarded {
+                InterruptOutcome::DiscardedHold
+            } else {
+                InterruptOutcome::NotRunning
+            });
         }
 
         lock_recover(&session.shared.transcript).mark_interrupt_requested();
@@ -1353,10 +1419,10 @@ impl SessionManager {
                 .get_mut(tag)
                 .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
             session.attached_clients.insert(client_id.to_string());
-            session
-                .shared
-                .tasks
-                .set_clients(local_client_count(&session.attached_clients, &self.network_clients));
+            session.shared.tasks.set_clients(local_client_count(
+                &session.attached_clients,
+                &self.network_clients,
+            ));
             ensure_poller(&session.shared);
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
@@ -1440,10 +1506,10 @@ impl SessionManager {
     pub fn detach(&mut self, tag: &str, client_id: &str) {
         if let Some(session) = self.sessions.get_mut(tag) {
             session.attached_clients.remove(client_id);
-            session
-                .shared
-                .tasks
-                .set_clients(local_client_count(&session.attached_clients, &self.network_clients));
+            session.shared.tasks.set_clients(local_client_count(
+                &session.attached_clients,
+                &self.network_clients,
+            ));
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
@@ -1471,16 +1537,23 @@ impl SessionManager {
             let agent = self.agent_of(tag);
             let session_id = self.sessions.get(tag).and_then(|s| s.session_id.clone());
             let current = self.model_hub.stored_target(tag).or_else(|| {
-                model_store::focus_record(&self.model_hub.paths.focus_models, tag).map(|r| r.target())
+                model_store::focus_record(&self.model_hub.paths.focus_models, tag)
+                    .map(|r| r.target())
             });
-            let ctx = SessionCtx::stopped(tag, agent.as_deref(), session_id.as_deref(), &self.model_hub);
+            let ctx = SessionCtx::stopped(
+                tag,
+                agent.as_deref(),
+                session_id.as_deref(),
+                &self.model_hub,
+            );
             let _ = self.switch_not_running(&ctx, current, target, actor);
         }
         let mut ended_tasks = None;
         if let Some(session) = self.sessions.get_mut(tag) {
             // Before the kill: a request still pending ends `cancelled`, and
             // nothing is written to a process that is about to die.
-            if let (Some(broker), Some(generation)) = (&self.approvals, session.approval_generation) {
+            if let (Some(broker), Some(generation)) = (&self.approvals, session.approval_generation)
+            {
                 broker.on_session_gone(tag, generation, "stopped");
             }
             session.intentional_stop.store(true, Ordering::SeqCst);
@@ -1552,7 +1625,8 @@ impl SessionManager {
         // instead of waiting on a process that will never read.
         if let Some(session) = self.sessions.get_mut(tag) {
             // Before the kill, as in `stop`: nothing is written to a dying process.
-            if let (Some(broker), Some(generation)) = (&self.approvals, session.approval_generation) {
+            if let (Some(broker), Some(generation)) = (&self.approvals, session.approval_generation)
+            {
                 broker.on_session_gone(tag, generation, "restarted");
             }
             session.intentional_stop.store(true, Ordering::SeqCst);
@@ -1560,8 +1634,41 @@ impl SessionManager {
         }
         let carry = self.take_carry(tag);
         self.stop(tag);
-        self.sessions.remove(tag);
+        let old = self.sessions.remove(tag);
 
+        if let Err(e) = self.respawn(tag, agent, view, cwd, sid, rc, fixed) {
+            // No new process: the carry (queued messages, a waiting switch, a
+            // message held for a sign-in) goes back on the old, downed session,
+            // which the supervisor then retries like any crash, instead of
+            // being lost with it.
+            if let Some(old) = old {
+                self.keep_downed(tag, old, carry);
+            }
+            return Err(e);
+        }
+
+        // Re-attach previously attached clients so the GUI re-syncs after a
+        // transparent restart.
+        for client_id in attached {
+            let _ = self.attach(tag, &client_id);
+        }
+        // Messages queued (and a model switch waiting) on the old process go
+        // to the new one, switch first.
+        self.resume_carry(tag, carry);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn respawn(
+        &mut self,
+        tag: &str,
+        agent: String,
+        view: String,
+        cwd: Option<PathBuf>,
+        sid: Option<String>,
+        rc: bool,
+        fixed: Option<(PathBuf, Vec<String>)>,
+    ) -> Result<()> {
         match fixed {
             // Real claude session: resolve the binary and resume.
             None => {
@@ -1570,7 +1677,8 @@ impl SessionManager {
             // Test stub / fixed program: replay it verbatim.
             Some((program, args)) => {
                 let effective_id = sid.unwrap_or_else(|| Uuid::new_v4().to_string());
-                self.session_reverse.insert(effective_id.clone(), tag.to_string());
+                self.session_reverse
+                    .insert(effective_id.clone(), tag.to_string());
                 let managed = self.spawn_managed(
                     tag.to_string(),
                     agent,
@@ -1586,16 +1694,22 @@ impl SessionManager {
                 self.sessions.insert(tag.to_string(), managed);
             }
         }
-
-        // Re-attach previously attached clients so the GUI re-syncs after a
-        // transparent restart.
-        for client_id in attached {
-            let _ = self.attach(tag, &client_id);
-        }
-        // Messages queued (and a model switch waiting) on the old process go
-        // to the new one, switch first.
-        self.resume_carry(tag, carry);
         Ok(())
+    }
+
+    /// A restart found no process to start: put the stopped session back as a
+    /// crashed one, carrying what it held, so `reap_and_recover` tries again
+    /// (a held message counts as work to recover).
+    fn keep_downed(&mut self, tag: &str, mut old: ManagedSession, carry: model_switch::Carry) {
+        old.intentional_stop.store(false, Ordering::SeqCst);
+        old.stop_reason = None;
+        if let Some(hold) = carry.login {
+            old.shared.login.restore(hold);
+        }
+        lock_recover(&old.shared.pending).extend(carry.messages);
+        lock_recover(&old.shared.model).waiting = carry.waiting;
+        self.sessions.insert(tag.to_string(), old);
+        self.login_changed();
     }
 
     /// Drop the persisted session id and stop the child; the next spawn starts
@@ -1671,13 +1785,13 @@ impl SessionManager {
 
                 // Capture the real exit code (non-blocking; child has already
                 // closed stdout before the reader sets exited).
-                let code = capture_exit_code(&mut s.child);
+                let code = s.try_reap().and_then(|status| status.code());
                 s.last_exit_code = code;
                 // Reaped: nothing is left of this CLI to sweep (its pid is free
                 // for reuse), so the ledger drops it now instead of carrying it
                 // through the backoff, and a guard-tripped session never leaves
                 // it behind.
-                if matches!(s.child.try_wait(), Ok(Some(_))) {
+                if s.reaped {
                     s.ledger.forget(s.child.id());
                 }
 
@@ -1724,7 +1838,8 @@ impl SessionManager {
                 let has_waiting_switch = lock_recover(&s.shared.model).waiting.is_some();
                 // A held message (a sign-in is awaited) is work the respawn inherits.
                 let has_hold = s.shared.login.paused();
-                wants_recovery = !s.attached_clients.is_empty() || has_pending || has_waiting_switch || has_hold;
+                wants_recovery =
+                    !s.attached_clients.is_empty() || has_pending || has_waiting_switch || has_hold;
                 let crash_count = s.crash_times.len() as u32;
                 guard_tripped = crash_count >= MAX_RESTARTS;
                 exit_code = s.last_exit_code;
@@ -2058,7 +2173,10 @@ impl SessionManager {
     /// Called for registries pushed by a *local* peer only: the registration is
     /// permanent and persisted, so a network peer must not be able to grow it.
     pub fn mark_teri_fred_focuses(&self, focuses: &[FocusMeta]) {
-        for focus in focuses.iter().filter(|f| is_teri_or_fred_agent(&f.agent_name)) {
+        for focus in focuses
+            .iter()
+            .filter(|f| is_teri_or_fred_agent(&f.agent_name))
+        {
             self.sensitive.mark_tag(&focus.tag);
         }
     }
@@ -2170,7 +2288,6 @@ impl SessionManager {
         self.focus_registry.clone()
     }
 
-
     // ── shutdown ────────────────────────────────────────────────────────────
 
     /// Before shutdown kills the children: deny every pending permission request
@@ -2178,7 +2295,9 @@ impl SessionManager {
     /// `timeout` for each affected session to print the result of the call it
     /// denied, or to exit, so the agent hears why instead of seeing a dead pipe.
     pub fn prepare_shutdown(&self, timeout: Duration) {
-        let Some(broker) = self.approvals.clone() else { return };
+        let Some(broker) = self.approvals.clone() else {
+            return;
+        };
         let deadline = Instant::now() + timeout;
         // The denies are written on a helper thread: a write waits for the
         // session's stdin lock, and another thread may hold it in a long write to a
@@ -2193,9 +2312,9 @@ impl SessionManager {
         };
         while !waiting.is_empty() && Instant::now() < deadline {
             waiting.retain(|(tag, tool_use_id)| {
-                self.sessions
-                    .get(tag)
-                    .is_some_and(|s| s.alive() && !lock_recover(&s.shared.transcript).has_tool_result(tool_use_id))
+                self.sessions.get(tag).is_some_and(|s| {
+                    s.alive() && !lock_recover(&s.shared.transcript).has_tool_result(tool_use_id)
+                })
             });
             if !waiting.is_empty() {
                 std::thread::sleep(Duration::from_millis(10));
@@ -2237,11 +2356,14 @@ impl SessionManager {
         let stragglers = orphans::terminate(&live, grace, || {
             // Reap exited CLIs so a zombie does not look like a live group member.
             for session in self.sessions.values_mut() {
-                let _ = session.child.try_wait();
+                session.try_reap();
             }
         });
         if !stragglers.is_empty() {
-            warn!(count = stragglers.len(), "shutdown: sessions still running after the grace were killed");
+            warn!(
+                count = stragglers.len(),
+                "shutdown: sessions still running after the grace were killed"
+            );
         }
         for (tag, target) in &targets {
             // Only what outlived the grace is killed; a group that is gone may
@@ -2267,10 +2389,10 @@ impl SessionManager {
     pub fn on_client_disconnect(&mut self, client_id: &str) {
         for session in self.sessions.values_mut() {
             session.attached_clients.remove(client_id);
-            session
-                .shared
-                .tasks
-                .set_clients(local_client_count(&session.attached_clients, &self.network_clients));
+            session.shared.tasks.set_clients(local_client_count(
+                &session.attached_clients,
+                &self.network_clients,
+            ));
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
@@ -2282,7 +2404,9 @@ impl SessionManager {
         // render-state-visibility) — a closed window's report must not
         // outlive the connection that sent it.
         if let Some(reg) = &self.pane_registry {
-            reg.lock().unwrap().prune_rendered_shapes_for_conn(client_id);
+            reg.lock()
+                .unwrap()
+                .prune_rendered_shapes_for_conn(client_id);
         }
     }
 
@@ -2352,7 +2476,12 @@ impl Default for SessionManager {
 /// deltas, drive turn state, drain the pending queue, and signal EOF. Control
 /// responses are handed to whoever waits for them, and model reports are
 /// recorded; the reader itself never waits on anything but stdout.
-fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, approvals: Option<ApprovalLink>) {
+fn run_reader(
+    tag: String,
+    stdout: std::process::ChildStdout,
+    shared: Shared,
+    approvals: Option<ApprovalLink>,
+) {
     let reader = BufReader::new(stdout);
     // Follows the turn now running, to tell at its end whether it failed to
     // authenticate and whether sending its message again repeats anything.
@@ -2393,11 +2522,26 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
                 }
                 continue;
             }
-            ParsedLine::ControlRequest { request_id, subtype, request } => {
-                route_control_request(&tag, &shared, approvals.as_ref(), request_id, subtype, request);
+            ParsedLine::ControlRequest {
+                request_id,
+                subtype,
+                request,
+            } => {
+                route_control_request(
+                    &tag,
+                    &shared,
+                    approvals.as_ref(),
+                    request_id,
+                    subtype,
+                    request,
+                );
                 continue;
             }
-            ParsedLine::UnreadableControlRequest { request_id, subtype, tool_name } => {
+            ParsedLine::UnreadableControlRequest {
+                request_id,
+                subtype,
+                tool_name,
+            } => {
                 route_unreadable_control_request(
                     &tag,
                     &shared,
@@ -2410,7 +2554,10 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
             }
             ParsedLine::ControlCancel { request_id } => {
                 if let Some(link) = &approvals {
-                    let cancel = Incoming::Cancel { tag: tag.clone(), cli_request_id: request_id.clone() };
+                    let cancel = Incoming::Cancel {
+                        tag: tag.clone(),
+                        cli_request_id: request_id.clone(),
+                    };
                     if link.broker.submit(cancel).is_err() {
                         // The broker's worker is gone: do it inline.
                         link.broker.on_cancel(&tag, request_id);
@@ -2444,7 +2591,9 @@ fn run_reader(tag: String, stdout: std::process::ChildStdout, shared: Shared, ap
                 // A phantom dropped as the real prompt arrives is no turn
                 // end: that prompt's turn is live, and advancing would write
                 // the next queued message into it or start a switch mid-turn.
-                TurnDelta::TurnErrored { discarded: true, .. } => {}
+                TurnDelta::TurnErrored {
+                    discarded: true, ..
+                } => {}
                 TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. } => {
                     shared.broadcast(SessionEvent::Delta(delta.clone()));
                     // A turn that failed to authenticate makes a hold, and `step`
@@ -2497,7 +2646,10 @@ impl SessionSink for StdinSink {
 
     fn respond(&self, cli_request_id: &str, response: &serde_json::Value) -> std::io::Result<()> {
         if !self.live() {
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session has exited"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "session has exited",
+            ));
         }
         write_control_response(&self.stdin, cli_request_id, response).map_err(std::io::Error::other)
     }
@@ -2519,7 +2671,10 @@ fn route_control_request(
 ) {
     let id = serde_json::Value::String(request_id.to_owned());
     if subtype != "can_use_tool" {
-        warn!(tag, subtype, "control_request of an unsupported subtype: answering it with an error");
+        warn!(
+            tag,
+            subtype, "control_request of an unsupported subtype: answering it with an error"
+        );
         answer_unsupported(tag, shared, &id);
         return;
     }
@@ -2534,11 +2689,18 @@ fn route_control_request(
         if link.broker.submit(incoming()).is_ok() {
             return;
         }
-        warn!(tag, "no approval broker to take a permission request: denying it");
-        link.broker.record_unqueued_denial(tag, link.generation, request, deny);
+        warn!(
+            tag,
+            "no approval broker to take a permission request: denying it"
+        );
+        link.broker
+            .record_unqueued_denial(tag, link.generation, request, deny);
         return;
     }
-    warn!(tag, "no approval broker to take a permission request: denying it");
+    warn!(
+        tag,
+        "no approval broker to take a permission request: denying it"
+    );
     if let Err(e) = deny() {
         warn!(tag, "could not write the deny: {e}");
     }
@@ -2565,21 +2727,29 @@ fn route_unreadable_control_request(
     tool_name: Option<&str>,
 ) {
     let Some(id) = request_id else {
-        error!(tag, "a control request from the CLI could not be read and has no id to answer under");
+        error!(
+            tag,
+            "a control request from the CLI could not be read and has no id to answer under"
+        );
         if let Some(link) = link {
             link.broker.record_unparseable(tag, link.generation);
         }
         return;
     };
     if subtype.is_some_and(|s| s != "can_use_tool") {
-        warn!(tag, "unreadable control_request of an unsupported subtype: answering it with an error");
+        warn!(
+            tag,
+            "unreadable control_request of an unsupported subtype: answering it with an error"
+        );
         answer_unsupported(tag, shared, id);
         return;
     }
     warn!(tag, "a permission request could not be read: denying it");
     let deny = || deny_unless_exited(shared, id, INVALID_REQUEST_MESSAGE);
     match link {
-        Some(link) => link.broker.record_unreadable_denial(tag, link.generation, tool_name, deny),
+        Some(link) => link
+            .broker
+            .record_unreadable_denial(tag, link.generation, tool_name, deny),
         None => {
             if let Err(e) = deny() {
                 warn!(tag, "could not write the deny: {e}");
@@ -2607,11 +2777,19 @@ fn answer_unsupported(tag: &str, shared: &Shared, request_id: &serde_json::Value
 /// so the pipe drains. The only thing ahead of it on the pipe or on the stdin lock
 /// (a leaf lock) is another of our own frames, which the CLI is draining the same
 /// way, and the broker's worker and watchdog write through this same path anyway.
-fn deny_unless_exited(shared: &Shared, request_id: &serde_json::Value, message: &str) -> std::io::Result<()> {
+fn deny_unless_exited(
+    shared: &Shared,
+    request_id: &serde_json::Value,
+    message: &str,
+) -> std::io::Result<()> {
     if shared.exited.load(Ordering::SeqCst) {
-        return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session has exited"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "session has exited",
+        ));
     }
-    write_control_response_to(&shared.stdin, request_id, &deny_response(message)).map_err(std::io::Error::other)
+    write_control_response_to(&shared.stdin, request_id, &deny_response(message))
+        .map_err(std::io::Error::other)
 }
 
 /// After a turn ends or a switch has been applied: apply a switch waiting for
@@ -2662,7 +2840,11 @@ fn step(shared: &Shared, finished_apply: bool) {
             // queued for the respawned session, never dropped between the two.
             // Nor while the session waits for a sign-in: the queue stays behind
             // the held message (a switch may still apply).
-            let msg = if exited || shared.login.paused() { None } else { lock_recover(&shared.pending).pop_front() };
+            let msg = if exited || shared.login.paused() {
+                None
+            } else {
+                lock_recover(&shared.pending).pop_front()
+            };
             match msg {
                 Some(msg) => {
                     shared.writing.store(true, Ordering::SeqCst);
@@ -2682,7 +2864,10 @@ fn step(shared: &Shared, finished_apply: bool) {
             spawn_apply(shared, target, actor, None);
         }
         Next::Write(msg) => {
-            let in_flight = WriteInFlight { shared, msg: Some(msg) };
+            let in_flight = WriteInFlight {
+                shared,
+                msg: Some(msg),
+            };
             let wrote = in_flight.write().is_ok();
             in_flight.finish(wrote);
         }
@@ -2841,7 +3026,11 @@ fn write_control_response(
     request_id: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    write_control_response_to(stdin, &serde_json::Value::String(request_id.to_owned()), response)
+    write_control_response_to(
+        stdin,
+        &serde_json::Value::String(request_id.to_owned()),
+        response,
+    )
 }
 
 /// [`write_control_response`] for a request id of any JSON value: the CLI's id is
@@ -2903,8 +3092,17 @@ fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
     let prefix = lock_recover(&shared.note_prefix).take();
     match prefix {
         Some(note) => {
-            let text = format!("{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}", msg.text);
-            let result = login::write_recorded(shared, &PendingMessage { text, images: msg.images.clone() });
+            let text = format!(
+                "{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}",
+                msg.text
+            );
+            let result = login::write_recorded(
+                shared,
+                &PendingMessage {
+                    text,
+                    images: msg.images.clone(),
+                },
+            );
             if result.is_err() {
                 // Not delivered: the note goes with the next message instead.
                 *lock_recover(&shared.note_prefix) = Some(note);
@@ -2924,7 +3122,11 @@ fn write_user_frame(
     images: &[String],
 ) -> Result<()> {
     let (encoded, failed) = encode_images(images);
-    let note = if failed.is_empty() { String::new() } else { unreadable_images_note(&failed) };
+    let note = if failed.is_empty() {
+        String::new()
+    } else {
+        unreadable_images_note(&failed)
+    };
     let text = format!("{text}{note}");
     let text = text.as_str();
     let content = if encoded.is_empty() {
@@ -2973,17 +3175,6 @@ fn backoff_delay(crash_count: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Non-blocking reap of a crashed child's exit code. Safe to call under the
-/// manager mutex: `try_wait()` never blocks. Returns the numeric exit code if
-/// the child exited with one, else `None` (killed by signal, already reaped,
-/// or still winding down — by the time `exited` is set this is rare).
-fn capture_exit_code(child: &mut Child) -> Option<i32> {
-    match child.try_wait() {
-        Ok(Some(status)) => status.code(),
-        _ => None,
-    }
-}
-
 /// Build the `claude` argument vector for a persistent stream-json session. An
 /// empty `agent_name` starts the session with no `--agent`.
 ///
@@ -2998,7 +3189,15 @@ pub fn build_claude_args(
     resume: bool,
     guard_settings: &str,
 ) -> Vec<String> {
-    build_claude_args_with(agent_name, view_name, remote_control, session_id, resume, None, guard_settings)
+    build_claude_args_with(
+        agent_name,
+        view_name,
+        remote_control,
+        session_id,
+        resume,
+        None,
+        guard_settings,
+    )
 }
 
 /// [`build_claude_args`], optionally under [`SessionRestrictions`].
@@ -3296,7 +3495,10 @@ mod tests {
     fn derive_summary_41_chars_gets_ellipsis() {
         let input = "a".repeat(41);
         let result = derive_summary(&input).unwrap();
-        assert!(result.ends_with('\u{2026}'), "should end with ellipsis: {result:?}");
+        assert!(
+            result.ends_with('\u{2026}'),
+            "should end with ellipsis: {result:?}"
+        );
         // The truncated part is 40 chars + 1 ellipsis codepoint
         assert_eq!(result.chars().count(), 41);
     }
@@ -3403,7 +3605,10 @@ mod tests {
     fn restricted() -> SessionRestrictions {
         SessionRestrictions {
             builtin_tools: vec!["ToolSearch".into()],
-            allowed_tools: vec!["mcp__nostromo__teri_list_work_items".into(), "ToolSearch".into()],
+            allowed_tools: vec![
+                "mcp__nostromo__teri_list_work_items".into(),
+                "ToolSearch".into(),
+            ],
             max_budget_usd: Some(2.0),
         }
     }
@@ -3420,12 +3625,26 @@ mod tests {
 
     #[test]
     fn restricted_args_carry_the_allow_list_and_no_permission_bypass() {
-        let args = build_claude_args_with("teri:teri", "Teri picks", false, "sid", false, Some(&restricted()), &guard());
-        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"), "{args:?}");
+        let args = build_claude_args_with(
+            "teri:teri",
+            "Teri picks",
+            false,
+            "sid",
+            false,
+            Some(&restricted()),
+            &guard(),
+        );
+        assert!(
+            !args.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "{args:?}"
+        );
         for pair in [
             ["--permission-mode", "dontAsk"],
             ["--tools", "ToolSearch"],
-            ["--allowedTools", "mcp__nostromo__teri_list_work_items,ToolSearch"],
+            [
+                "--allowedTools",
+                "mcp__nostromo__teri_list_work_items,ToolSearch",
+            ],
             ["--max-budget-usd", "2"],
         ] {
             assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
@@ -3434,8 +3653,15 @@ mod tests {
         // A named agent is still passed to a restricted session ...
         assert!(args.windows(2).any(|w| w == ["--agent", "teri:teri"]));
         // ... which never loads user settings, hooks, plugins or slash commands.
-        assert!(args.windows(2).any(|w| w == ["--setting-sources", "project"]), "{args:?}");
-        assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--setting-sources", "project"]),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--disable-slash-commands"),
+            "{args:?}"
+        );
         // The unrestricted vector is unchanged.
         assert_eq!(
             build_claude_args_with("a", "v", false, "sid", false, None, &guard()),
@@ -3445,14 +3671,34 @@ mod tests {
 
     #[test]
     fn a_restricted_session_with_no_agent_name_gets_no_agent_flag() {
-        let args = build_claude_args_with("", "Teri picks", false, "sid", false, Some(&restricted()), &guard());
+        let args = build_claude_args_with(
+            "",
+            "Teri picks",
+            false,
+            "sid",
+            false,
+            Some(&restricted()),
+            &guard(),
+        );
         assert!(!args.iter().any(|a| a == "--agent"), "{args:?}");
         assert!(!args.iter().any(|a| a.contains("teri:teri")), "{args:?}");
-        assert!(args.windows(2).any(|w| w == ["--setting-sources", "project"]), "{args:?}");
-        assert!(args.iter().any(|a| a == "--disable-slash-commands"), "{args:?}");
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--setting-sources", "project"]),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--disable-slash-commands"),
+            "{args:?}"
+        );
         // An unrestricted session with no agent name has no agent flag either, and gains nothing else.
         let plain = build_claude_args_with("", "v", false, "sid", false, None, &guard());
-        assert!(!plain.iter().any(|a| a == "--agent" || a == "--setting-sources" || a == "--disable-slash-commands"), "{plain:?}");
+        assert!(
+            !plain.iter().any(|a| a == "--agent"
+                || a == "--setting-sources"
+                || a == "--disable-slash-commands"),
+            "{plain:?}"
+        );
     }
 
     #[tokio::test]
@@ -3461,9 +3707,16 @@ mod tests {
         mgr.restrict_tag("boxed", restricted());
         let pid_file = std::env::temp_dir().join(format!("nostromo-pg-{}", Uuid::new_v4()));
         // The stub starts a long-lived grandchild and waits on it.
-        spawn_stub(&mut mgr, "boxed", &format!("sleep 300 & echo $! > {}; wait", pid_file.display()));
+        spawn_stub(
+            &mut mgr,
+            "boxed",
+            &format!("sleep 300 & echo $! > {}; wait", pid_file.display()),
+        );
         let grandchild = loop {
-            if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|t| t.trim().parse::<i32>().ok()) {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|t| t.trim().parse::<i32>().ok())
+            {
                 break pid;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3550,7 +3803,9 @@ mod tests {
 
     #[test]
     fn resolve_claude_honours_env_override() {
-        let _env = CLAUDE_BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var(CLAUDE_BIN_ENV, "/custom/path/to/claude");
         let p = resolve_claude().unwrap();
         assert_eq!(p, PathBuf::from("/custom/path/to/claude"));
@@ -3568,11 +3823,20 @@ mod tests {
 
     #[tokio::test]
     async fn after_spawn_session_tag_for_session_id_resolves() {
-        let _env = CLAUDE_BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
-            .spawn_session("cody-1".into(), "cody".into(), "Cody".into(), None, None, false)
+            .spawn_session(
+                "cody-1".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
             .unwrap()
             .expect("a fresh session id is always resolved");
         assert_eq!(
@@ -3584,11 +3848,20 @@ mod tests {
 
     #[tokio::test]
     async fn after_restart_tag_for_session_id_still_resolves() {
-        let _env = CLAUDE_BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
         let mut mgr = SessionManager::with_store_path(tmp_store());
         let effective_id = mgr
-            .spawn_session("cody-2".into(), "cody".into(), "Cody".into(), None, None, false)
+            .spawn_session(
+                "cody-2".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
             .unwrap()
             .expect("a fresh session id is always resolved");
 
@@ -3631,7 +3904,10 @@ mod tests {
 
     // ── activity attribution resolution (activity-path wedge D2) ──────────────
 
-    fn raw_activity_event(focus_tag: Option<&str>, session_id: Option<&str>) -> crate::agent_bus::ActivityEvent {
+    fn raw_activity_event(
+        focus_tag: Option<&str>,
+        session_id: Option<&str>,
+    ) -> crate::agent_bus::ActivityEvent {
         crate::agent_bus::ActivityEvent {
             ts: chrono::Utc::now(),
             agent: "claude".into(),
@@ -3951,7 +4227,10 @@ mod tests {
     #[test]
     fn the_registry_is_not_known_until_two_non_empty_pushes_have_landed() {
         let mut mgr = SessionManager::with_store_path(tmp_store());
-        assert!(!mgr.registry_known(), "a fresh daemon has been told nothing");
+        assert!(
+            !mgr.registry_known(),
+            "a fresh daemon has been told nothing"
+        );
 
         mgr.set_focus_registry(vec![focus("perri")]);
         assert!(
@@ -3960,7 +4239,10 @@ mod tests {
         );
 
         mgr.set_focus_registry(vec![focus("perri")]);
-        assert!(mgr.registry_known(), "two non-empty pushes are enough evidence");
+        assert!(
+            mgr.registry_known(),
+            "two non-empty pushes are enough evidence"
+        );
     }
 
     #[test]
@@ -4070,7 +4352,11 @@ mod tests {
 
         let finalized = mgr.ingest_activity_event(raw_activity_event(Some("fred"), None));
         assert_eq!(finalized.focus_tag.as_deref(), Some("fred"));
-        assert_eq!(finalized.seq, Some(0), "an attributed event must be seq-assigned");
+        assert_eq!(
+            finalized.seq,
+            Some(0),
+            "an attributed event must be seq-assigned"
+        );
         assert_eq!(mgr.activity_streams_for_focus("fred").len(), 1);
     }
 
@@ -4081,8 +4367,13 @@ mod tests {
 
         // "cody-1" is not in the registry/sessions map, but the session id
         // resolves via the reverse index — the fallback must still find it.
-        let finalized = mgr.ingest_activity_event(raw_activity_event(Some("cody-1"), Some("sess-1")));
-        assert_eq!(mgr.activity_streams_for_focus("cody-1").len(), 1, "{finalized:?}");
+        let finalized =
+            mgr.ingest_activity_event(raw_activity_event(Some("cody-1"), Some("sess-1")));
+        assert_eq!(
+            mgr.activity_streams_for_focus("cody-1").len(),
+            1,
+            "{finalized:?}"
+        );
     }
 
     #[test]
@@ -4099,9 +4390,13 @@ mod tests {
         let mut mgr = SessionManager::with_store_path(tmp_store());
         assert!(!mgr.activity_health().ingesting);
 
-        let (_, became) = mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
+        let (_, became) =
+            mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
 
-        assert!(became, "the event that flips health from quiet to ingesting must say so");
+        assert!(
+            became,
+            "the event that flips health from quiet to ingesting must say so"
+        );
         assert!(mgr.activity_health().ingesting);
     }
 
@@ -4110,9 +4405,13 @@ mod tests {
         let mut mgr = SessionManager::with_store_path(tmp_store());
         mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
 
-        let (_, became) = mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
+        let (_, became) =
+            mgr.ingest_activity_event_reporting(raw_activity_event(Some("fred"), None));
 
-        assert!(!became, "only the first event is a transition; the rest must not re-broadcast health");
+        assert!(
+            !became,
+            "only the first event is a transition; the rest must not re-broadcast health"
+        );
     }
 
     // ── manager mechanics with a stub child ───────────────────────────────────
@@ -4221,23 +4520,45 @@ mod tests {
         let before = chrono::Utc::now();
         let mut rx = {
             spawn_stub(&mut mgr, "fred", script);
-            mgr.sessions.get("fred").unwrap().shared.event_tx.subscribe()
+            mgr.sessions
+                .get("fred")
+                .unwrap()
+                .shared
+                .event_tx
+                .subscribe()
         };
         collect_events(&mut rx, 20).await;
         let after = chrono::Utc::now();
 
-        let transcript = mgr.sessions.get("fred").unwrap().shared.transcript.lock().unwrap();
-        assert!(transcript.is_live(), "a spawned session's transcript is live");
+        let transcript = mgr
+            .sessions
+            .get("fred")
+            .unwrap()
+            .shared
+            .transcript
+            .lock()
+            .unwrap();
+        assert!(
+            transcript.is_live(),
+            "a spawned session's transcript is live"
+        );
         let blocks = &transcript.snapshot()[0].blocks;
         let (call_ts, result_ts) = match (&blocks[0], &blocks[1]) {
             (
-                crate::ipc::stream_json::TurnBlock::ToolCall { ts: c, tool_use_id: Some(id), .. },
+                crate::ipc::stream_json::TurnBlock::ToolCall {
+                    ts: c,
+                    tool_use_id: Some(id),
+                    ..
+                },
                 crate::ipc::stream_json::TurnBlock::ToolResult { ts: r, .. },
             ) if id == "toolu_live" => (*c, *r),
             other => panic!("expected call then result, got {other:?}"),
         };
         let call_ts = call_ts.expect("a live call with no line timestamp is stamped");
-        assert!(before <= call_ts && call_ts <= after, "{call_ts} not within {before}..{after}");
+        assert!(
+            before <= call_ts && call_ts <= after,
+            "{call_ts} not within {before}..{after}"
+        );
         assert_eq!(
             result_ts,
             Some(
@@ -4264,14 +4585,23 @@ mod tests {
         spawn_stub(&mut mgr, "perri", &recording_stub(&out));
 
         mgr.send_user_message("perri", "first", &[]).unwrap(); // goes to the child; session is now mid-turn
-        mgr.send_user_message("perri", "queued behind it", &[]).unwrap(); // queued
-        assert_eq!(mgr.sessions["perri"].shared.pending.lock().unwrap().len(), 1);
+        mgr.send_user_message("perri", "queued behind it", &[])
+            .unwrap(); // queued
+        assert_eq!(
+            mgr.sessions["perri"].shared.pending.lock().unwrap().len(),
+            1
+        );
 
         let outcome = mgr.interrupt("perri").unwrap();
 
         assert_eq!(outcome, InterruptOutcome::Requested);
         assert!(
-            mgr.sessions["perri"].shared.pending.lock().unwrap().is_empty(),
+            mgr.sessions["perri"]
+                .shared
+                .pending
+                .lock()
+                .unwrap()
+                .is_empty(),
             "Stop means stop: a queued message must not start the moment the turn ends"
         );
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -4282,8 +4612,14 @@ mod tests {
             .find(|v| v["type"] == "control_request")
             .expect("a control_request frame must have been written to the child's stdin");
         assert_eq!(frame["request"]["subtype"], "interrupt");
-        assert!(frame["request_id"].as_str().unwrap().starts_with("interrupt-"));
-        assert!(!written.contains("queued behind it"), "the queued message must never reach the child");
+        assert!(frame["request_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("interrupt-"));
+        assert!(
+            !written.contains("queued behind it"),
+            "the queued message must never reach the child"
+        );
         // The stub never exits on its own; stop it so its reader thread ends
         // and the runtime can shut down.
         mgr.stop("perri");
@@ -4301,7 +4637,10 @@ mod tests {
         assert_eq!(outcome, InterruptOutcome::NotRunning);
         tokio::time::sleep(Duration::from_millis(300)).await;
         let written = std::fs::read_to_string(&out).unwrap_or_default();
-        assert!(!written.contains("control_request"), "nothing to interrupt, nothing to send: {written:?}");
+        assert!(
+            !written.contains("control_request"),
+            "nothing to interrupt, nothing to send: {written:?}"
+        );
         mgr.stop("perri");
     }
 
@@ -4778,10 +5117,20 @@ mod tests {
         let out = dir.path().join("stdin.log");
         spawn_stub(&mut mgr, "t", &recording_stub(&out));
         let shared = mgr.sessions["t"].shared.clone();
-        shared.model.lock().unwrap().applying = Some(ModelTarget { model: "opus".into(), effort: None });
-        mgr.send_user_message("t", "queued while applying", &[]).unwrap();
-        assert_eq!(shared.pending.lock().unwrap().len(), 1, "queued, not written: a switch is being applied");
-        assert!(!std::fs::read_to_string(&out).unwrap_or_default().contains("queued while applying"));
+        shared.model.lock().unwrap().applying = Some(ModelTarget {
+            model: "opus".into(),
+            effort: None,
+        });
+        mgr.send_user_message("t", "queued while applying", &[])
+            .unwrap();
+        assert_eq!(
+            shared.pending.lock().unwrap().len(),
+            1,
+            "queued, not written: a switch is being applied"
+        );
+        assert!(!std::fs::read_to_string(&out)
+            .unwrap_or_default()
+            .contains("queued while applying"));
         (Reap(mgr), shared, out)
     }
 
@@ -4797,7 +5146,13 @@ mod tests {
     /// The queued message reaches the stub's stdin, once, and the session is out of `Applying`.
     async fn assert_session_released(shared: &Shared, out: &std::path::Path) {
         eventually("the session to leave Applying", || {
-            shared.model.lock().unwrap_or_else(|e| e.into_inner()).applying.is_none().then_some(())
+            shared
+                .model
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .applying
+                .is_none()
+                .then_some(())
         })
         .await;
         let written = eventually("the queued message to be written", || {
@@ -4805,7 +5160,11 @@ mod tests {
             text.contains("queued while applying").then_some(text)
         })
         .await;
-        assert_eq!(written.matches("queued while applying").count(), 1, "exactly once: {written:?}");
+        assert_eq!(
+            written.matches("queued while applying").count(),
+            1,
+            "exactly once: {written:?}"
+        );
         assert!(shared.pending.lock().unwrap().is_empty());
     }
 
@@ -4818,14 +5177,18 @@ mod tests {
 
         model_switch::spawn_apply_task(&shared, Some(tx), async { applied() });
 
-        let outcome = tokio::time::timeout(Duration::from_secs(30), rx).await.expect("answered").expect("not dropped");
+        let outcome = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .expect("answered")
+            .expect("not dropped");
         assert_eq!(outcome, applied());
         assert_session_released(&shared, &out).await;
     }
 
     // [seam: model_switch::spawn_apply_task]
     #[tokio::test]
-    async fn a_switch_task_that_panics_still_leaves_applying_fails_its_requester_and_releases_the_queue() {
+    async fn a_switch_task_that_panics_still_leaves_applying_fails_its_requester_and_releases_the_queue(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (_reap, shared, out) = stub_applying_a_switch(&dir);
         let (tx, rx) = oneshot::channel();
@@ -4841,7 +5204,10 @@ mod tests {
             .await
             .expect("the requester is answered, not left waiting")
             .expect("the answer is a result, not a dropped channel");
-        assert_eq!(outcome.status, crate::ipc::protocol::ModelRequestStatus::Failed);
+        assert_eq!(
+            outcome.status,
+            crate::ipc::protocol::ModelRequestStatus::Failed
+        );
         assert_session_released(&shared, &out).await;
     }
 
@@ -4873,7 +5239,10 @@ mod tests {
             panic!("poison the model lock");
         })
         .join();
-        assert!(shared.model.is_poisoned(), "precondition: the lock is poisoned");
+        assert!(
+            shared.model.is_poisoned(),
+            "precondition: the lock is poisoned"
+        );
         let (tx, rx) = oneshot::channel();
 
         model_switch::spawn_apply_task(&shared, Some(tx), async {
@@ -4887,7 +5256,10 @@ mod tests {
             .await
             .expect("the requester is answered")
             .expect("not dropped");
-        assert_eq!(outcome.status, crate::ipc::protocol::ModelRequestStatus::Failed);
+        assert_eq!(
+            outcome.status,
+            crate::ipc::protocol::ModelRequestStatus::Failed
+        );
         assert_session_released(&shared, &out).await;
     }
 
@@ -4917,14 +5289,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_reap, shared) = stub_session(&dir, "t", "cat > /dev/null");
         poison(&shared.model);
-        assert!(shared.model.is_poisoned(), "precondition: the lock is poisoned");
+        assert!(
+            shared.model.is_poisoned(),
+            "precondition: the lock is poisoned"
+        );
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             model_switch::on_model_report(&shared, "claude-opus-5-5")
         }));
 
-        assert!(outcome.is_ok(), "the report must not panic on a poisoned lock");
-        assert_eq!(lock_recover(&shared.model).reported.as_deref(), Some("claude-opus-5-5"));
+        assert!(
+            outcome.is_ok(),
+            "the report must not panic on a poisoned lock"
+        );
+        assert_eq!(
+            lock_recover(&shared.model).reported.as_deref(),
+            Some("claude-opus-5-5")
+        );
     }
 
     #[tokio::test]
@@ -4941,11 +5322,16 @@ mod tests {
 
         std::fs::write(&gate, "").unwrap();
 
-        eventually("the reader to see its child exit (it panicked on the model report instead)", || {
-            shared.exited.load(Ordering::SeqCst).then_some(())
-        })
+        eventually(
+            "the reader to see its child exit (it panicked on the model report instead)",
+            || shared.exited.load(Ordering::SeqCst).then_some(()),
+        )
         .await;
-        assert_eq!(lock_recover(&shared.model).reported.as_deref(), Some("claude-opus-5-5"), "the report was still taken");
+        assert_eq!(
+            lock_recover(&shared.model).reported.as_deref(),
+            Some("claude-opus-5-5"),
+            "the report was still taken"
+        );
     }
 
     #[tokio::test]
@@ -4959,13 +5345,17 @@ mod tests {
         );
         let (_reap, shared) = stub_session(&dir, "t", &script);
         poison(&shared.transcript);
-        assert!(shared.transcript.is_poisoned(), "precondition: the lock is poisoned");
+        assert!(
+            shared.transcript.is_poisoned(),
+            "precondition: the lock is poisoned"
+        );
 
         std::fs::write(&gate, "").unwrap();
 
-        eventually("the reader to see its child exit (it panicked on the transcript lock instead)", || {
-            shared.exited.load(Ordering::SeqCst).then_some(())
-        })
+        eventually(
+            "the reader to see its child exit (it panicked on the transcript lock instead)",
+            || shared.exited.load(Ordering::SeqCst).then_some(()),
+        )
         .await;
     }
 
@@ -4985,11 +5375,19 @@ mod tests {
         let (_reap, shared) = stub_session(&dir, "t", &recording_stub(&out));
         *shared.note_prefix.lock().unwrap() = Some("the note".into());
         poison(&shared.note_prefix);
-        assert!(shared.note_prefix.is_poisoned(), "precondition: the lock is poisoned");
-        let msg = PendingMessage { text: "hello".into(), images: vec![] };
+        assert!(
+            shared.note_prefix.is_poisoned(),
+            "precondition: the lock is poisoned"
+        );
+        let msg = PendingMessage {
+            text: "hello".into(),
+            images: vec![],
+        };
 
-        let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write_user_message(&shared, &msg)))
-            .expect("a poisoned note lock must not make the write panic");
+        let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            write_user_message(&shared, &msg)
+        }))
+        .expect("a poisoned note lock must not make the write panic");
 
         assert!(written.is_ok(), "{written:?}");
         let frames = eventually("the child to read the frame", || {
@@ -5010,18 +5408,31 @@ mod tests {
         let out = dir.path().join("stdin.log");
         let (_reap, shared) = stub_session(&dir, "t", &recording_stub(&out));
         poison(&shared.stdin);
-        assert!(shared.stdin.is_poisoned(), "precondition: the lock is poisoned");
-        let msg = PendingMessage { text: "hello".into(), images: vec![] };
+        assert!(
+            shared.stdin.is_poisoned(),
+            "precondition: the lock is poisoned"
+        );
+        let msg = PendingMessage {
+            text: "hello".into(),
+            images: vec![],
+        };
 
         let (message, control) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (
                 write_user_message(&shared, &msg),
-                write_control_request(&shared.stdin, "r1", serde_json::json!({ "subtype": "interrupt" })),
+                write_control_request(
+                    &shared.stdin,
+                    "r1",
+                    serde_json::json!({ "subtype": "interrupt" }),
+                ),
             )
         }))
         .expect("a poisoned stdin lock must not make a write panic");
 
-        assert!(message.is_ok() && control.is_ok(), "{message:?} {control:?}");
+        assert!(
+            message.is_ok() && control.is_ok(),
+            "{message:?} {control:?}"
+        );
         let frames = eventually("the child to read both frames", || {
             let frames = frames_read(&out);
             (frames.len() >= 2).then_some(frames)
@@ -5032,13 +5443,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn asking_for_the_model_a_focus_already_has_does_not_panic_after_a_runtime_lock_was_poisoned() {
+    async fn asking_for_the_model_a_focus_already_has_does_not_panic_after_a_runtime_lock_was_poisoned(
+    ) {
         for which in ["model", "state", "pending"] {
             let dir = tempfile::tempdir().unwrap();
             let (mut reap, shared) = stub_session(&dir, "t", "cat > /dev/null");
             let hub = reap.0.model_hub();
             model_store::update_focus_record(&hub.paths.focus_models, "t", |_| {
-                Some(crate::model::store::FocusModelRecord { model: "opus".into(), ..Default::default() })
+                Some(crate::model::store::FocusModelRecord {
+                    model: "opus".into(),
+                    ..Default::default()
+                })
             })
             .unwrap();
             match which {
@@ -5054,8 +5469,10 @@ mod tests {
                 request_id: None,
             };
 
-            let ticket = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reap.0.request_switch("t", request)))
-                .unwrap_or_else(|_| panic!("a poisoned {which} lock made request_switch panic"));
+            let ticket = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reap.0.request_switch("t", request)
+            }))
+            .unwrap_or_else(|_| panic!("a poisoned {which} lock made request_switch panic"));
 
             assert_eq!(
                 ticket.immediate().map(|o| o.status),
@@ -5070,20 +5487,28 @@ mod tests {
     async fn a_queued_message_whose_write_panics_is_not_lost_and_the_session_is_not_left_writing() {
         let dir = tempfile::tempdir().unwrap();
         let (_reap, shared) = stub_session(&dir, "t", "cat > /dev/null");
-        lock_recover(&shared.pending).push_back(PendingMessage { text: "M1".into(), images: vec![] });
+        lock_recover(&shared.pending).push_back(PendingMessage {
+            text: "M1".into(),
+            images: vec![],
+        });
         // Start writing M1 the way `step` does: off the queue, the write marked in flight, mid-turn.
         // (Nothing in the write path panics by itself any more now that it survives poisoned locks, so
         // the panic is made by hand while the write is in flight.)
         let msg = {
             let mut state = lock_recover(&shared.state);
-            let msg = lock_recover(&shared.pending).pop_front().expect("M1 is queued");
+            let msg = lock_recover(&shared.pending)
+                .pop_front()
+                .expect("M1 is queued");
             shared.writing.store(true, Ordering::SeqCst);
             *state = SessionState::MidTurn;
             msg
         };
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _in_flight = WriteInFlight { shared: &shared, msg: Some(msg) };
+            let _in_flight = WriteInFlight {
+                shared: &shared,
+                msg: Some(msg),
+            };
             if true {
                 panic!("the write blew up");
             }
@@ -5095,14 +5520,23 @@ mod tests {
             "`writing` stays set after a panic: a restart then waits five seconds under the manager lock for a write that is long over"
         );
         let pending = lock_recover(&shared.pending);
-        assert_eq!(pending.front().map(|m| m.text.as_str()), Some("M1"), "the message was not delivered, so it is still queued");
+        assert_eq!(
+            pending.front().map(|m| m.text.as_str()),
+            Some("M1"),
+            "the message was not delivered, so it is still queued"
+        );
         drop(pending);
-        assert_eq!(*lock_recover(&shared.state), SessionState::Idle, "and nothing is running that would ever end");
+        assert_eq!(
+            *lock_recover(&shared.state),
+            SessionState::Idle,
+            "and nothing is running that would ever end"
+        );
     }
 
     // [seam: SessionManager::interrupt]
     #[tokio::test]
-    async fn a_stop_pressed_while_a_queued_message_is_being_written_comes_after_that_message_on_stdin() {
+    async fn a_stop_pressed_while_a_queued_message_is_being_written_comes_after_that_message_on_stdin(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("stdin.log");
         let mut mgr = SessionManager::with_store_path(dir.path().join("sessions.json"));
@@ -5122,10 +5556,16 @@ mod tests {
         };
         let started = Instant::now();
         while !shared.writing.load(Ordering::SeqCst) {
-            assert!(started.elapsed() < Duration::from_secs(30), "the writer never took M1");
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the writer never took M1"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(lock_recover(&shared.pending).is_empty(), "M1 is off the queue and not yet on stdin");
+        assert!(
+            lock_recover(&shared.pending).is_empty(),
+            "M1 is off the queue and not yet on stdin"
+        );
         // Stop is pressed now.
         let stopping = std::thread::spawn(move || {
             let mut reap = reap;
@@ -5164,12 +5604,16 @@ mod tests {
             ["first", "M1", "control_request:interrupt"],
             "the interrupt reaches the child after M1, so it applies to M1's turn; M1 never starts a turn the user tried to stop"
         );
-        assert!(lock_recover(&shared.pending).is_empty(), "Stop leaves nothing queued");
+        assert!(
+            lock_recover(&shared.pending).is_empty(),
+            "Stop leaves nothing queued"
+        );
     }
 
     // [seam: SessionManager::interrupt]
     #[tokio::test]
-    async fn an_interrupt_cannot_slip_between_the_writer_popping_a_message_and_the_message_reaching_stdin() {
+    async fn an_interrupt_cannot_slip_between_the_writer_popping_a_message_and_the_message_reaching_stdin(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("stdin.log");
         let mut mgr = SessionManager::with_store_path(dir.path().join("sessions.json"));
@@ -5196,10 +5640,15 @@ mod tests {
             while !stopping.is_finished() && Instant::now() < patience {
                 std::thread::sleep(Duration::from_millis(1));
             }
-            assert!(!stopping.is_finished(), "precondition: the interrupt is waiting for the session's state");
+            assert!(
+                !stopping.is_finished(),
+                "precondition: the interrupt is waiting for the session's state"
+            );
 
             // The writer, still holding `state`, takes M1 off the queue and marks the write in flight (`step`).
-            let msg = lock_recover(&shared.pending).pop_front().expect("M1 is queued");
+            let msg = lock_recover(&shared.pending)
+                .pop_front()
+                .expect("M1 is queued");
             shared.writing.store(true, Ordering::SeqCst);
             *state = SessionState::MidTurn;
             drop(state);
@@ -5212,7 +5661,10 @@ mod tests {
         while !stopping.is_finished() && Instant::now() < patience {
             std::thread::sleep(Duration::from_millis(1));
         }
-        let in_flight = WriteInFlight { shared: &shared, msg: Some(msg) };
+        let in_flight = WriteInFlight {
+            shared: &shared,
+            msg: Some(msg),
+        };
         in_flight.write().unwrap();
         in_flight.finish(true);
         let (_reap, outcome) = stopping.join().unwrap();
@@ -5235,7 +5687,10 @@ mod tests {
             ["first", "M1", "control_request:interrupt"],
             "the interrupt reaches the child after M1, which it was pressed against, never before it"
         );
-        assert!(lock_recover(&shared.pending).is_empty(), "Stop leaves nothing queued");
+        assert!(
+            lock_recover(&shared.pending).is_empty(),
+            "Stop leaves nothing queued"
+        );
     }
     // ── background tasks, end to end through a stub session ───────────────────
     //
@@ -5251,8 +5706,11 @@ mod tests {
 
     /// A `system` event line from the stub CLI (session id `stub-sid`).
     fn task_line(subtype: &str, body: serde_json::Value) -> String {
-        let mut line = serde_json::json!({"type": "system", "subtype": subtype, "session_id": "stub-sid"});
-        line.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+        let mut line =
+            serde_json::json!({"type": "system", "subtype": subtype, "session_id": "stub-sid"});
+        line.as_object_mut()
+            .unwrap()
+            .extend(body.as_object().unwrap().clone());
         line.to_string()
     }
 
@@ -5268,7 +5726,13 @@ mod tests {
     /// Prints `lines`, then answers `get_task_output` control requests with the
     /// JSON in `reply` (or an error while `fail` exists), logging every frame it
     /// reads to `log`.
-    fn answering_stub(gate: Option<&std::path::Path>, lines: &[String], reply: &std::path::Path, fail: &std::path::Path, log: &std::path::Path) -> String {
+    fn answering_stub(
+        gate: Option<&std::path::Path>,
+        lines: &[String],
+        reply: &std::path::Path,
+        fail: &std::path::Path,
+        log: &std::path::Path,
+    ) -> String {
         let wait = gate
             .map(|g| format!("while [ ! -e '{}' ]; do sleep 0.05; done;", g.display()))
             .unwrap_or_default();
@@ -5294,7 +5758,8 @@ done
     }
 
     fn output_reply(output: &str) -> String {
-        serde_json::json!({"output": output, "total_bytes": output.len(), "truncated": false}).to_string()
+        serde_json::json!({"output": output, "total_bytes": output.len(), "truncated": false})
+            .to_string()
     }
 
     async fn next_client_frame(crx: &mut mpsc::UnboundedReceiver<ServerMsg>) -> ServerMsg {
@@ -5326,17 +5791,38 @@ done
     async fn attach_sends_the_task_list_then_one_detail_per_task_that_has_text_after_the_state() {
         let mut reap = Reap(SessionManager::with_store_path(tmp_store()));
         let lines = vec![
-            task_line("task_started", serde_json::json!({"task_id": "b7k2m9x1a", "description": "Run the build", "task_type": "local_bash", "is_backgrounded": true})),
-            task_line("task_started", serde_json::json!({"task_id": "agt5r1w3d", "description": "Survey the config", "task_type": "local_agent", "subagent_type": "Explore", "prompt": "Read the config"})),
-            task_line("task_progress", serde_json::json!({"task_id": "agt5r1w3d", "summary": "Reading the files"})),
-            task_line("task_started", serde_json::json!({"task_id": "done1", "description": "Quick job", "task_type": "local_bash"})),
-            task_line("task_notification", serde_json::json!({"task_id": "done1", "status": "completed", "summary": "Quick job finished"})),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "b7k2m9x1a", "description": "Run the build", "task_type": "local_bash", "is_backgrounded": true}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "agt5r1w3d", "description": "Survey the config", "task_type": "local_agent", "subagent_type": "Explore", "prompt": "Read the config"}),
+            ),
+            task_line(
+                "task_progress",
+                serde_json::json!({"task_id": "agt5r1w3d", "summary": "Reading the files"}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "done1", "description": "Quick job", "task_type": "local_bash"}),
+            ),
+            task_line(
+                "task_notification",
+                serde_json::json!({"task_id": "done1", "status": "completed", "summary": "Quick job finished"}),
+            ),
         ];
-        spawn_stub(&mut reap.0, "cody-1", &format!("{} cat >/dev/null", print_lines(&lines)));
+        spawn_stub(
+            &mut reap.0,
+            "cody-1",
+            &format!("{} cat >/dev/null", print_lines(&lines)),
+        );
         let shared = reap.0.sessions["cody-1"].shared.clone();
         eventually("the registry to hold all three tasks", || {
             let (snapshot, details) = shared.tasks.current();
-            (snapshot.tasks.len() == 3 && snapshot.tasks[2].status == crate::ipc::protocol::TaskStatus::Completed && details.len() == 2)
+            (snapshot.tasks.len() == 3
+                && snapshot.tasks[2].status == crate::ipc::protocol::TaskStatus::Completed
+                && details.len() == 2)
                 .then_some(())
         })
         .await;
@@ -5355,25 +5841,69 @@ done
         }
 
         let kinds: Vec<&str> = got_first.iter().map(frame_kind).collect();
-        assert_eq!(kinds, ["turns", "state", "tasks", "detail", "detail"], "{got_first:?}");
-        let ServerMsg::SessionTasks { tag, session_id, tasks, .. } = &got_first[2] else { unreachable!() };
-        assert_eq!((tag.as_str(), session_id.as_deref()), ("cody-1", Some("stub-sid")));
+        assert_eq!(
+            kinds,
+            ["turns", "state", "tasks", "detail", "detail"],
+            "{got_first:?}"
+        );
+        let ServerMsg::SessionTasks {
+            tag,
+            session_id,
+            tasks,
+            ..
+        } = &got_first[2]
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (tag.as_str(), session_id.as_deref()),
+            ("cody-1", Some("stub-sid"))
+        );
         let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["b7k2m9x1a", "agt5r1w3d", "done1"]);
         let statuses: Vec<_> = tasks.iter().map(|t| t.status).collect();
         assert_eq!(
             statuses,
-            [crate::ipc::protocol::TaskStatus::Running, crate::ipc::protocol::TaskStatus::Running, crate::ipc::protocol::TaskStatus::Completed],
+            [
+                crate::ipc::protocol::TaskStatus::Running,
+                crate::ipc::protocol::TaskStatus::Running,
+                crate::ipc::protocol::TaskStatus::Completed
+            ],
             "the session is alive: its running tasks are running"
         );
-        let ServerMsg::SessionTaskDetail { task_id, prompt, progress_summary, .. } = &got_first[3] else { unreachable!() };
+        let ServerMsg::SessionTaskDetail {
+            task_id,
+            prompt,
+            progress_summary,
+            ..
+        } = &got_first[3]
+        else {
+            unreachable!()
+        };
         assert_eq!(task_id, "agt5r1w3d");
-        assert_eq!((prompt.as_deref(), progress_summary.as_deref()), (Some("Read the config"), Some("Reading the files")));
-        let ServerMsg::SessionTaskDetail { task_id, completion_summary, .. } = &got_first[4] else { unreachable!() };
-        assert_eq!((task_id.as_str(), completion_summary.as_deref()), ("done1", Some("Quick job finished")));
+        assert_eq!(
+            (prompt.as_deref(), progress_summary.as_deref()),
+            (Some("Read the config"), Some("Reading the files"))
+        );
+        let ServerMsg::SessionTaskDetail {
+            task_id,
+            completion_summary,
+            ..
+        } = &got_first[4]
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (task_id.as_str(), completion_summary.as_deref()),
+            ("done1", Some("Quick job finished"))
+        );
         assert!(first.try_recv().is_err(), "nothing else was sent");
         for (a, b) in got_first.iter().zip(&got_second) {
-            assert_eq!(serde_json::to_string(a).unwrap(), serde_json::to_string(b).unwrap(), "a second client sees the same frames");
+            assert_eq!(
+                serde_json::to_string(a).unwrap(),
+                serde_json::to_string(b).unwrap(),
+                "a second client sees the same frames"
+            );
         }
     }
 
@@ -5387,7 +5917,9 @@ done
 
         assert_eq!(frame_kind(&next_client_frame(&mut crx).await), "turns");
         assert_eq!(frame_kind(&next_client_frame(&mut crx).await), "state");
-        let ServerMsg::SessionTasks { tasks, .. } = next_client_frame(&mut crx).await else { panic!("a task list") };
+        let ServerMsg::SessionTasks { tasks, .. } = next_client_frame(&mut crx).await else {
+            panic!("a task list")
+        };
         assert!(tasks.is_empty());
     }
 
@@ -5397,17 +5929,45 @@ done
         let dir = tempfile::tempdir().unwrap();
         let gate = dir.path().join("gate");
         let lines = vec![
-            task_line("task_started", serde_json::json!({"task_id": "shell1", "description": "Run it", "task_type": "local_bash", "is_backgrounded": true})),
-            task_line("task_started", serde_json::json!({"task_id": "agent1", "description": "Survey", "task_type": "local_agent"})),
-            task_line("task_started", serde_json::json!({"task_id": "pend1", "description": "Queued", "task_type": "local_workflow"})),
-            task_line("task_updated", serde_json::json!({"task_id": "pend1", "patch": {"status": "pending"}})),
-            task_line("task_started", serde_json::json!({"task_id": "paus1", "description": "Paused", "task_type": "local_workflow"})),
-            task_line("task_updated", serde_json::json!({"task_id": "paus1", "patch": {"status": "paused"}})),
-            task_line("task_started", serde_json::json!({"task_id": "done1", "description": "Finished", "task_type": "local_bash"})),
-            task_line("task_notification", serde_json::json!({"task_id": "done1", "status": "completed"})),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "shell1", "description": "Run it", "task_type": "local_bash", "is_backgrounded": true}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "agent1", "description": "Survey", "task_type": "local_agent"}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "pend1", "description": "Queued", "task_type": "local_workflow"}),
+            ),
+            task_line(
+                "task_updated",
+                serde_json::json!({"task_id": "pend1", "patch": {"status": "pending"}}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "paus1", "description": "Paused", "task_type": "local_workflow"}),
+            ),
+            task_line(
+                "task_updated",
+                serde_json::json!({"task_id": "paus1", "patch": {"status": "paused"}}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "done1", "description": "Finished", "task_type": "local_bash"}),
+            ),
+            task_line(
+                "task_notification",
+                serde_json::json!({"task_id": "done1", "status": "completed"}),
+            ),
         ];
         // The stub prints its events once the gate opens, then exits: EOF.
-        let script = format!("while [ ! -e '{}' ]; do sleep 0.05; done; {}", gate.display(), print_lines(&lines));
+        let script = format!(
+            "while [ ! -e '{}' ]; do sleep 0.05; done; {}",
+            gate.display(),
+            print_lines(&lines)
+        );
         let mut reap = Reap(SessionManager::with_store_path(tmp_store()));
         spawn_stub(&mut reap.0, "cody-1", &script);
         let mut crx = client(&reap.0, "c1");
@@ -5432,8 +5992,14 @@ done
             .iter()
             .rposition(|f| matches!(f, ServerMsg::SessionTasks { .. }))
             .expect("a task list was sent");
-        assert!(last_tasks_at < exited_at, "the final task list must reach the client before SessionExited: {:?}", frames.iter().map(frame_kind).collect::<Vec<_>>());
-        let ServerMsg::SessionTasks { tasks, .. } = &frames[last_tasks_at] else { unreachable!() };
+        assert!(
+            last_tasks_at < exited_at,
+            "the final task list must reach the client before SessionExited: {:?}",
+            frames.iter().map(frame_kind).collect::<Vec<_>>()
+        );
+        let ServerMsg::SessionTasks { tasks, .. } = &frames[last_tasks_at] else {
+            unreachable!()
+        };
         assert_eq!(tasks.len(), 5);
         for t in tasks {
             if t.id == "done1" {
@@ -5442,7 +6008,8 @@ done
                 assert_eq!(
                     (t.status, t.end_reason),
                     (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded)),
-                    "{} must end with the session", t.id
+                    "{} must end with the session",
+                    t.id
                 );
             }
         }
@@ -5466,7 +6033,9 @@ done
         let root = dir.path().join("claude-501");
         let tasks_dir = root.join("-work-repo").join("stub-sid").join("tasks");
         std::fs::create_dir_all(&tasks_dir).unwrap();
-        let mut reap = Reap(SessionManager::with_store_path(dir.path().join("sessions.json")));
+        let mut reap = Reap(SessionManager::with_store_path(
+            dir.path().join("sessions.json"),
+        ));
         spawn_stub(&mut reap.0, tag, script);
         let managed = reap.0.sessions.get_mut(tag).unwrap();
         let runtime = TaskRuntime::with_validator(
@@ -5479,15 +6048,27 @@ done
         // feeds and reads goes through the injected one.
         managed.shared.tasks = Arc::clone(&runtime);
         let shared = managed.shared.clone();
-        tokio::spawn(drive_timer(runtime, shared.event_tx.clone(), Arc::clone(&shared.exited)));
+        tokio::spawn(drive_timer(
+            runtime,
+            shared.event_tx.clone(),
+            Arc::clone(&shared.exited),
+        ));
         let rx = shared.event_tx.subscribe();
-        PreviewRig { reap, shared, rx, tasks_dir, _dir: dir }
+        PreviewRig {
+            reap,
+            shared,
+            rx,
+            tasks_dir,
+            _dir: dir,
+        }
     }
 
     impl PreviewRig {
         fn feed(&self, subtype: &str, body: serde_json::Value) {
             let mut obj = serde_json::json!({"session_id": "stub-sid"});
-            obj.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+            obj.as_object_mut()
+                .unwrap()
+                .extend(body.as_object().unwrap().clone());
             let event = parse_task_event(subtype, obj.as_object().unwrap()).expect("a task event");
             self.shared.tasks.on_event(&self.shared.event_tx, &event);
         }
@@ -5520,7 +6101,13 @@ done
         }
 
         fn published_preview(&self, id: &str) -> Option<String> {
-            self.shared.tasks.current().1.into_iter().find(|d| d.task_id == id).and_then(|d| d.preview.clone())
+            self.shared
+                .tasks
+                .current()
+                .1
+                .into_iter()
+                .find(|d| d.task_id == id)
+                .and_then(|d| d.preview.clone())
         }
 
         /// The next `SessionTaskDetail` carrying a preview, if one is published within `within`.
@@ -5548,14 +6135,18 @@ done
                 match self.next_preview(left).await {
                     Some((task, preview)) if task == id && preview == expected => return,
                     Some(other) => seen.push(other),
-                    None => panic!("no preview {expected:?} for {id} within 30 s; previews seen: {seen:?}"),
+                    None => panic!(
+                        "no preview {expected:?} for {id} within 30 s; previews seen: {seen:?}"
+                    ),
                 }
             }
         }
 
         /// Wait two poll intervals and a bit: no preview may be published meanwhile.
         async fn expect_no_preview(&mut self, why: &str) {
-            let got = self.next_preview(PREVIEW_INTERVAL * 2 + Duration::from_millis(500)).await;
+            let got = self
+                .next_preview(PREVIEW_INTERVAL * 2 + Duration::from_millis(500))
+                .await;
             assert_eq!(got, None, "{why}");
         }
     }
@@ -5574,25 +6165,38 @@ done
         rig.expect_preview("b7k2m9x1a", "compiling b").await;
 
         // A progress bar and colour: the preview is the cleaned final state.
-        rig.append_output("b7k2m9x1a", b"\x1b[32mlinking\x1b[0m 10%\rlinking 100%\n\n   \n");
+        rig.append_output(
+            "b7k2m9x1a",
+            b"\x1b[32mlinking\x1b[0m 10%\rlinking 100%\n\n   \n",
+        );
         rig.expect_preview("b7k2m9x1a", "linking 100%").await;
         let preview = rig.published_preview("b7k2m9x1a").unwrap();
         assert!(!preview.contains('\u{1b}') && preview.chars().count() <= 200);
 
         // Output that adds no new visible line changes nothing: nothing is published.
         rig.append_output("b7k2m9x1a", b"\n   \n\t\n");
-        rig.expect_no_preview("an unchanged last line must not be re-published").await;
-        assert_eq!(rig.published_preview("b7k2m9x1a").as_deref(), Some("linking 100%"));
+        rig.expect_no_preview("an unchanged last line must not be re-published")
+            .await;
+        assert_eq!(
+            rig.published_preview("b7k2m9x1a").as_deref(),
+            Some("linking 100%")
+        );
     }
 
     #[tokio::test]
     async fn a_very_long_output_line_previews_as_at_most_200_characters() {
         let mut rig = preview_rig("cody-1", STAY_ALIVE);
-        rig.write_output("b7k2m9x1a", format!("short\n{}\n", "y".repeat(5_000)).as_bytes());
+        rig.write_output(
+            "b7k2m9x1a",
+            format!("short\n{}\n", "y".repeat(5_000)).as_bytes(),
+        );
         rig.shared.tasks.set_clients(1);
         rig.start_shell("b7k2m9x1a");
 
-        let (_, preview) = rig.next_preview(Duration::from_secs(30)).await.expect("a preview");
+        let (_, preview) = rig
+            .next_preview(Duration::from_secs(30))
+            .await
+            .expect("a preview");
 
         assert_eq!(preview.chars().count(), 200);
         assert!(preview.ends_with('\u{2026}'));
@@ -5608,7 +6212,8 @@ done
         rig.feed_as_reader("task_started", serde_json::json!({"task_id": "mon1", "description": "Watch", "task_type": "monitor_mcp"}));
 
         rig.expect_preview("mon1", "event: deploy started").await;
-        rig.expect_no_preview("an agent has no output preview").await;
+        rig.expect_no_preview("an agent has no output preview")
+            .await;
         assert_eq!(rig.published_preview("agt1"), None);
     }
 
@@ -5618,13 +6223,15 @@ done
         rig.write_output("b7k2m9x1a", b"hidden until someone looks\n");
 
         rig.start_shell("b7k2m9x1a"); // clients: 0
-        rig.expect_no_preview("no client is attached: the poller must not run").await;
+        rig.expect_no_preview("no client is attached: the poller must not run")
+            .await;
         assert_eq!(rig.published_preview("b7k2m9x1a"), None);
 
         // Someone attaches: the poller starts.
         rig.shared.tasks.set_clients(1);
         ensure_poller(&rig.shared);
-        rig.expect_preview("b7k2m9x1a", "hidden until someone looks").await;
+        rig.expect_preview("b7k2m9x1a", "hidden until someone looks")
+            .await;
     }
 
     #[tokio::test]
@@ -5657,12 +6264,19 @@ done
 
         // The last output lands, then the task ends: the final read picks it up.
         rig.append_output("b7k2m9x1a", b"final line\n");
-        rig.feed("task_notification", serde_json::json!({"task_id": "b7k2m9x1a", "status": "completed", "summary": "done"}));
+        rig.feed(
+            "task_notification",
+            serde_json::json!({"task_id": "b7k2m9x1a", "status": "completed", "summary": "done"}),
+        );
         rig.expect_preview("b7k2m9x1a", "final line").await;
 
         rig.append_output("b7k2m9x1a", b"written after the end\n");
-        rig.expect_no_preview("an ended task is not polled any more").await;
-        assert_eq!(rig.published_preview("b7k2m9x1a").as_deref(), Some("final line"));
+        rig.expect_no_preview("an ended task is not polled any more")
+            .await;
+        assert_eq!(
+            rig.published_preview("b7k2m9x1a").as_deref(),
+            Some("final line")
+        );
     }
 
     #[tokio::test]
@@ -5671,7 +6285,10 @@ done
         rig.write_output("quick1", b"output of a quick job\nall good\n");
         rig.shared.tasks.set_clients(1);
         rig.feed("task_started", serde_json::json!({"task_id": "quick1", "description": "Quick", "task_type": "local_bash"}));
-        rig.feed_as_reader("task_notification", serde_json::json!({"task_id": "quick1", "status": "completed"}));
+        rig.feed_as_reader(
+            "task_notification",
+            serde_json::json!({"task_id": "quick1", "status": "completed"}),
+        );
 
         rig.expect_preview("quick1", "all good").await;
         rig.expect_no_preview("one read, then done").await;
@@ -5688,7 +6305,8 @@ done
         rig.shared.tasks.set_clients(1);
         rig.start_shell("b7k2m9x1a");
 
-        rig.expect_no_preview("a symlinked output file must not be followed").await;
+        rig.expect_no_preview("a symlinked output file must not be followed")
+            .await;
         assert_eq!(rig.published_preview("b7k2m9x1a"), None);
     }
 
@@ -5704,10 +6322,19 @@ done
     }
 
     #[tokio::test]
-    async fn without_a_file_the_preview_comes_from_get_task_output_and_an_error_keeps_the_last_one() {
+    async fn without_a_file_the_preview_comes_from_get_task_output_and_an_error_keeps_the_last_one()
+    {
         let dir = tempfile::tempdir().unwrap();
-        let (reply, fail, log) = (dir.path().join("reply"), dir.path().join("fail"), dir.path().join("log"));
-        std::fs::write(&reply, output_reply("alpha\nbeta \u{1b}[31mred\u{1b}[0m\n\n")).unwrap();
+        let (reply, fail, log) = (
+            dir.path().join("reply"),
+            dir.path().join("fail"),
+            dir.path().join("log"),
+        );
+        std::fs::write(
+            &reply,
+            output_reply("alpha\nbeta \u{1b}[31mred\u{1b}[0m\n\n"),
+        )
+        .unwrap();
         let script = answering_stub(None, &[], &reply, &fail, &log);
         let mut rig = preview_rig("cody-1", &script);
         rig.shared.tasks.set_clients(1);
@@ -5719,7 +6346,12 @@ done
         rig.expect_preview("b7k2m9x1a", "beta red").await;
         let requests = control_log(&log);
         assert!(!requests.is_empty());
-        assert!(requests.iter().all(|r| r["request"]["task_id"] == "b7k2m9x1a"), "only the shell task is read: {requests:?}");
+        assert!(
+            requests
+                .iter()
+                .all(|r| r["request"]["task_id"] == "b7k2m9x1a"),
+            "only the shell task is read: {requests:?}"
+        );
         assert!(requests.iter().all(|r| r["type"] == "control_request"));
 
         // New output, new preview.
@@ -5729,25 +6361,49 @@ done
         // The CLI starts refusing: the preview stays as it was and nothing is published.
         let before = control_log(&log).len();
         std::fs::write(&fail, "").unwrap();
-        eventually("a read to be attempted and refused", || (control_log(&log).len() > before).then_some(())).await;
-        assert_eq!(rig.next_preview(PREVIEW_INTERVAL + Duration::from_millis(500)).await, None);
-        assert_eq!(rig.published_preview("b7k2m9x1a").as_deref(), Some("gamma"), "the last preview is kept on an error");
-        assert!(control_log(&log).iter().all(|r| r["request"]["task_id"] != "agt1"));
+        eventually("a read to be attempted and refused", || {
+            (control_log(&log).len() > before).then_some(())
+        })
+        .await;
+        assert_eq!(
+            rig.next_preview(PREVIEW_INTERVAL + Duration::from_millis(500))
+                .await,
+            None
+        );
+        assert_eq!(
+            rig.published_preview("b7k2m9x1a").as_deref(),
+            Some("gamma"),
+            "the last preview is kept on an error"
+        );
+        assert!(control_log(&log)
+            .iter()
+            .all(|r| r["request"]["task_id"] != "agt1"));
     }
 
     #[tokio::test]
     async fn an_output_reply_with_nothing_visible_publishes_no_preview() {
         let dir = tempfile::tempdir().unwrap();
-        let (reply, fail, log) = (dir.path().join("reply"), dir.path().join("fail"), dir.path().join("log"));
+        let (reply, fail, log) = (
+            dir.path().join("reply"),
+            dir.path().join("fail"),
+            dir.path().join("log"),
+        );
         std::fs::write(&reply, output_reply("\n   \n")).unwrap();
         let script = answering_stub(None, &[], &reply, &fail, &log);
         let mut rig = preview_rig("cody-1", &script);
         rig.shared.tasks.set_clients(1);
         rig.start_shell("b7k2m9x1a");
 
-        eventually("a read to be attempted", || (!control_log(&log).is_empty()).then_some(())).await;
+        eventually("a read to be attempted", || {
+            (!control_log(&log).is_empty()).then_some(())
+        })
+        .await;
 
-        assert_eq!(rig.next_preview(PREVIEW_INTERVAL + Duration::from_millis(500)).await, None);
+        assert_eq!(
+            rig.next_preview(PREVIEW_INTERVAL + Duration::from_millis(500))
+                .await,
+            None
+        );
         assert_eq!(rig.published_preview("b7k2m9x1a"), None);
     }
 
@@ -5756,14 +6412,27 @@ done
     #[tokio::test]
     async fn a_client_attached_before_a_task_starts_gets_its_preview_from_the_cli() {
         let dir = tempfile::tempdir().unwrap();
-        let (gate, reply, fail, log) = (dir.path().join("gate"), dir.path().join("reply"), dir.path().join("fail"), dir.path().join("log"));
-        std::fs::write(&reply, output_reply("step 1\nstep 2 \u{1b}[1mdone\u{1b}[0m\n")).unwrap();
+        let (gate, reply, fail, log) = (
+            dir.path().join("gate"),
+            dir.path().join("reply"),
+            dir.path().join("fail"),
+            dir.path().join("log"),
+        );
+        std::fs::write(
+            &reply,
+            output_reply("step 1\nstep 2 \u{1b}[1mdone\u{1b}[0m\n"),
+        )
+        .unwrap();
         let lines = vec![task_line(
             "task_started",
             serde_json::json!({"task_id": "e2e-shell", "description": "Run it", "task_type": "local_bash", "is_backgrounded": true}),
         )];
         let mut reap = Reap(SessionManager::with_store_path(tmp_store()));
-        spawn_stub(&mut reap.0, "cody-1", &answering_stub(Some(&gate), &lines, &reply, &fail, &log));
+        spawn_stub(
+            &mut reap.0,
+            "cody-1",
+            &answering_stub(Some(&gate), &lines, &reply, &fail, &log),
+        );
         let mut crx = client(&reap.0, "c1");
         reap.0.attach("cody-1", "c1").unwrap();
         for _ in 0..3 {
@@ -5775,14 +6444,23 @@ done
         let preview = loop {
             let frame = next_client_frame(&mut crx).await;
             seen.push(frame_kind(&frame));
-            if let ServerMsg::SessionTaskDetail { task_id, preview: Some(p), .. } = frame {
+            if let ServerMsg::SessionTaskDetail {
+                task_id,
+                preview: Some(p),
+                ..
+            } = frame
+            {
                 assert_eq!(task_id, "e2e-shell");
                 break p;
             }
         };
 
         assert_eq!(preview, "step 2 done");
-        assert_eq!(seen.first(), Some(&"tasks"), "the client learns of the task before its preview: {seen:?}");
+        assert_eq!(
+            seen.first(),
+            Some(&"tasks"),
+            "the client learns of the task before its preview: {seen:?}"
+        );
     }
 
     #[tokio::test]
@@ -5799,10 +6477,15 @@ done
         loop {
             let frame = tokio::time::timeout(Duration::from_secs(20), crx.recv())
                 .await
-                .unwrap_or_else(|_| panic!("no preview reached the attached client; frames: {seen:?}"))
+                .unwrap_or_else(|_| {
+                    panic!("no preview reached the attached client; frames: {seen:?}")
+                })
                 .expect("open");
             seen.push(frame_kind(&frame));
-            if let ServerMsg::SessionTaskDetail { preview: Some(p), .. } = frame {
+            if let ServerMsg::SessionTaskDetail {
+                preview: Some(p), ..
+            } = frame
+            {
                 assert_eq!(p, "linking");
                 break;
             }
@@ -5834,10 +6517,22 @@ done
     /// Two running tasks (a shell and an agent) and one that finished.
     fn running_and_finished_task_lines() -> Vec<String> {
         vec![
-            task_line("task_started", serde_json::json!({"task_id": "shell1", "description": "Run it", "task_type": "local_bash", "is_backgrounded": true})),
-            task_line("task_started", serde_json::json!({"task_id": "agent1", "description": "Survey", "task_type": "local_agent"})),
-            task_line("task_started", serde_json::json!({"task_id": "done1", "description": "Finished", "task_type": "local_bash"})),
-            task_line("task_notification", serde_json::json!({"task_id": "done1", "status": "completed"})),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "shell1", "description": "Run it", "task_type": "local_bash", "is_backgrounded": true}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "agent1", "description": "Survey", "task_type": "local_agent"}),
+            ),
+            task_line(
+                "task_started",
+                serde_json::json!({"task_id": "done1", "description": "Finished", "task_type": "local_bash"}),
+            ),
+            task_line(
+                "task_notification",
+                serde_json::json!({"task_id": "done1", "status": "completed"}),
+            ),
         ]
     }
 
@@ -5847,22 +6542,43 @@ done
         assert_eq!(ids, ["shell1", "agent1", "done1"]);
         for t in tasks {
             if t.id == "done1" {
-                assert_eq!((t.status, t.end_reason), (TaskStatus::Completed, None), "a finished task stays as it ended");
+                assert_eq!(
+                    (t.status, t.end_reason),
+                    (TaskStatus::Completed, None),
+                    "a finished task stays as it ended"
+                );
             } else {
-                assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded)), "{} was running when the session was stopped", t.id);
+                assert_eq!(
+                    (t.status, t.end_reason),
+                    (TaskStatus::Stopped, Some(TaskEndReason::SessionEnded)),
+                    "{} was running when the session was stopped",
+                    t.id
+                );
             }
         }
     }
 
     #[tokio::test]
-    async fn stopping_a_session_tells_its_attached_client_that_every_running_task_ended_with_the_session() {
+    async fn stopping_a_session_tells_its_attached_client_that_every_running_task_ended_with_the_session(
+    ) {
         let mut reap = Reap(SessionManager::with_store_path(tmp_store()));
-        spawn_stub(&mut reap.0, "cody-1", &format!("{} cat >/dev/null", print_lines(&running_and_finished_task_lines())));
+        spawn_stub(
+            &mut reap.0,
+            "cody-1",
+            &format!(
+                "{} cat >/dev/null",
+                print_lines(&running_and_finished_task_lines())
+            ),
+        );
         let shared = reap.0.sessions["cody-1"].shared.clone();
-        eventually("the registry to hold the three tasks, the last one finished", || {
-            let tasks = shared.tasks.current().0.tasks.clone();
-            (tasks.len() == 3 && tasks[2].status == crate::ipc::protocol::TaskStatus::Completed).then_some(())
-        })
+        eventually(
+            "the registry to hold the three tasks, the last one finished",
+            || {
+                let tasks = shared.tasks.current().0.tasks.clone();
+                (tasks.len() == 3 && tasks[2].status == crate::ipc::protocol::TaskStatus::Completed)
+                    .then_some(())
+            },
+        )
         .await;
         let mut crx = client(&reap.0, "c1");
         reap.0.attach("cody-1", "c1").unwrap();
@@ -5884,7 +6600,10 @@ done
         wait_for_reader_eof(&mut events).await;
         for frame in queued(&mut crx) {
             if let ServerMsg::SessionTasks { tasks, .. } = frame {
-                assert_eq!(tasks, final_list, "a later task list must not differ from the final one");
+                assert_eq!(
+                    tasks, final_list,
+                    "a later task list must not differ from the final one"
+                );
             }
         }
     }
@@ -5902,10 +6621,14 @@ done
         let mut reap = Reap(SessionManager::with_store_path(tmp_store()));
         spawn_stub(&mut reap.0, "cody-1", &script);
         let shared = reap.0.sessions["cody-1"].shared.clone();
-        eventually("the registry to hold the three tasks, the last one finished", || {
-            let tasks = shared.tasks.current().0.tasks.clone();
-            (tasks.len() == 3 && tasks[2].status == crate::ipc::protocol::TaskStatus::Completed).then_some(())
-        })
+        eventually(
+            "the registry to hold the three tasks, the last one finished",
+            || {
+                let tasks = shared.tasks.current().0.tasks.clone();
+                (tasks.len() == 3 && tasks[2].status == crate::ipc::protocol::TaskStatus::Completed)
+                    .then_some(())
+            },
+        )
         .await;
         let mut crx = client(&reap.0, "c1");
         reap.0.attach("cody-1", "c1").unwrap();
@@ -5919,9 +6642,15 @@ done
                 lists.push(tasks);
             }
         }
-        assert!(lists.len() >= 2, "the old session's last list, then the new session's: {lists:?}");
+        assert!(
+            lists.len() >= 2,
+            "the old session's last list, then the new session's: {lists:?}"
+        );
         assert_running_tasks_ended_with_the_session(&lists[0]);
-        assert!(lists.last().unwrap().is_empty(), "the restarted session starts with no tasks");
+        assert!(
+            lists.last().unwrap().is_empty(),
+            "the restarted session starts with no tasks"
+        );
     }
 
     // ── network clients do not keep the preview poller running ───────────────
@@ -5938,7 +6667,8 @@ done
         // It is attached like any other client: it is told the tasks.
         let kinds: Vec<&str> = queued(&mut net).iter().map(frame_kind).collect();
         assert!(kinds.contains(&"tasks"), "{kinds:?}");
-        rig.expect_no_preview("only a network client is attached: nothing is read for it").await;
+        rig.expect_no_preview("only a network client is attached: nothing is read for it")
+            .await;
         assert_eq!(rig.published_preview("b7k2m9x1a"), None);
 
         // A local client attaches: the poller starts.
@@ -5948,7 +6678,8 @@ done
     }
 
     #[tokio::test]
-    async fn the_last_local_client_detaching_stops_task_previews_even_though_a_network_client_remains() {
+    async fn the_last_local_client_detaching_stops_task_previews_even_though_a_network_client_remains(
+    ) {
         let mut rig = preview_rig("cody-1", STAY_ALIVE);
         rig.write_output("b7k2m9x1a", b"one\n");
         let _net = client(&rig.reap.0, "net1");
@@ -5963,14 +6694,16 @@ done
         while rig.rx.try_recv().is_ok() {}
         rig.append_output("b7k2m9x1a", b"two\n");
 
-        rig.expect_no_preview("only the network client is left: nobody is looking").await;
+        rig.expect_no_preview("only the network client is left: nobody is looking")
+            .await;
         let _again = client(&rig.reap.0, "loc2");
         rig.reap.0.attach("cody-1", "loc2").unwrap();
         rig.expect_preview("b7k2m9x1a", "two").await;
     }
 
     #[tokio::test]
-    async fn a_local_client_disconnecting_stops_task_previews_even_though_a_network_client_remains() {
+    async fn a_local_client_disconnecting_stops_task_previews_even_though_a_network_client_remains()
+    {
         let mut rig = preview_rig("cody-1", STAY_ALIVE);
         rig.write_output("b7k2m9x1a", b"one\n");
         let _net = client(&rig.reap.0, "net1");
@@ -5985,7 +6718,8 @@ done
         while rig.rx.try_recv().is_ok() {}
         rig.append_output("b7k2m9x1a", b"two\n");
 
-        rig.expect_no_preview("only the network client is left: nobody is looking").await;
+        rig.expect_no_preview("only the network client is left: nobody is looking")
+            .await;
     }
 
     #[tokio::test]
@@ -6008,26 +6742,49 @@ done
     #[tokio::test]
     async fn a_restart_keeps_a_network_client_a_network_client() {
         let dir = tempfile::tempdir().unwrap();
-        let (gate, reply, fail, log) = (dir.path().join("gate"), dir.path().join("reply"), dir.path().join("fail"), dir.path().join("log"));
+        let (gate, reply, fail, log) = (
+            dir.path().join("gate"),
+            dir.path().join("reply"),
+            dir.path().join("fail"),
+            dir.path().join("log"),
+        );
         std::fs::write(&reply, output_reply("from the CLI\n")).unwrap();
-        let lines = vec![task_line("task_started", serde_json::json!({"task_id": "shell1", "description": "Run it", "task_type": "local_bash", "is_backgrounded": true}))];
+        let lines = vec![task_line(
+            "task_started",
+            serde_json::json!({"task_id": "shell1", "description": "Run it", "task_type": "local_bash", "is_backgrounded": true}),
+        )];
         let mut reap = Reap(SessionManager::with_store_path(tmp_store()));
-        spawn_stub(&mut reap.0, "cody-1", &answering_stub(Some(&gate), &lines, &reply, &fail, &log));
+        spawn_stub(
+            &mut reap.0,
+            "cody-1",
+            &answering_stub(Some(&gate), &lines, &reply, &fail, &log),
+        );
         let _net = client(&reap.0, "net1");
         reap.0.attach_network("cody-1", "net1").unwrap();
 
         reap.0.restart("cody-1").unwrap();
         std::fs::write(&gate, "").unwrap(); // the restarted CLI now reports its task
         let shared = reap.0.sessions["cody-1"].shared.clone();
-        eventually("the task to be registered", || (shared.tasks.current().0.tasks.len() == 1).then_some(())).await;
+        eventually("the task to be registered", || {
+            (shared.tasks.current().0.tasks.len() == 1).then_some(())
+        })
+        .await;
 
         // The task has no output file, so any poll would ask the CLI: it is never asked.
         tokio::time::sleep(PREVIEW_INTERVAL * 2 + Duration::from_millis(500)).await;
-        assert!(control_log(&log).is_empty(), "a network client attached again by the restart started the poller: {:?}", control_log(&log));
+        assert!(
+            control_log(&log).is_empty(),
+            "a network client attached again by the restart started the poller: {:?}",
+            control_log(&log)
+        );
 
         let _local = client(&reap.0, "loc1");
         reap.0.attach("cody-1", "loc1").unwrap();
-        eventually("the CLI to be asked once a local client is attached", || (!control_log(&log).is_empty()).then_some(())).await;
+        eventually(
+            "the CLI to be asked once a local client is attached",
+            || (!control_log(&log).is_empty()).then_some(()),
+        )
+        .await;
     }
 
     // ── housekeeping tasks are not polled ────────────────────────────────────
@@ -6035,7 +6792,11 @@ done
     #[tokio::test]
     async fn an_ambient_or_skip_transcript_task_is_neither_read_from_a_file_nor_asked_of_the_cli() {
         let dir = tempfile::tempdir().unwrap();
-        let (reply, fail, log) = (dir.path().join("reply"), dir.path().join("fail"), dir.path().join("log"));
+        let (reply, fail, log) = (
+            dir.path().join("reply"),
+            dir.path().join("fail"),
+            dir.path().join("log"),
+        );
         std::fs::write(&reply, output_reply("from the CLI\n")).unwrap();
         let mut rig = preview_rig("cody-1", &answering_stub(None, &[], &reply, &fail, &log));
         for id in ["hk-ambient", "hk-skip", "hk-ended", "live-file"] {
@@ -6051,21 +6812,34 @@ done
         hk("hk-skip", "monitor_mcp", "skip_transcript"); // has a file
         hk("hk-nofile", "local_bash", "ambient"); // would be asked of the CLI
         hk("hk-ended", "local_bash", "ambient");
-        rig.feed("task_notification", serde_json::json!({"task_id": "hk-ended", "status": "completed"})); // owed a final read, were it activity
-        // Ordinary tasks, as controls: one with a file, one only the CLI can tell about.
+        rig.feed(
+            "task_notification",
+            serde_json::json!({"task_id": "hk-ended", "status": "completed"}),
+        ); // owed a final read, were it activity
+           // Ordinary tasks, as controls: one with a file, one only the CLI can tell about.
         rig.start_shell("live-file");
         rig.start_shell("live-nofile");
 
         rig.expect_preview("live-file", "live-file line").await;
         rig.expect_preview("live-nofile", "from the CLI").await;
-        rig.expect_no_preview("housekeeping tasks are not read").await;
+        rig.expect_no_preview("housekeeping tasks are not read")
+            .await;
 
         for id in ["hk-ambient", "hk-skip", "hk-nofile", "hk-ended"] {
-            assert_eq!(rig.published_preview(id), None, "{id} is housekeeping and must not be previewed");
+            assert_eq!(
+                rig.published_preview(id),
+                None,
+                "{id} is housekeeping and must not be previewed"
+            );
         }
         let asked = control_log(&log);
         assert!(!asked.is_empty());
-        assert!(asked.iter().all(|r| r["request"]["task_id"] == "live-nofile"), "the CLI was asked about something else: {asked:?}");
+        assert!(
+            asked
+                .iter()
+                .all(|r| r["request"]["task_id"] == "live-nofile"),
+            "the CLI was asked about something else: {asked:?}"
+        );
     }
 
     // ── the CLI fallback backs off ───────────────────────────────────────────
@@ -6073,7 +6847,11 @@ done
     #[tokio::test]
     async fn a_cli_that_refuses_get_task_output_is_not_asked_again_and_file_previews_carry_on() {
         let dir = tempfile::tempdir().unwrap();
-        let (reply, fail, log) = (dir.path().join("reply"), dir.path().join("fail"), dir.path().join("log"));
+        let (reply, fail, log) = (
+            dir.path().join("reply"),
+            dir.path().join("fail"),
+            dir.path().join("log"),
+        );
         std::fs::write(&reply, output_reply("never used\n")).unwrap();
         std::fs::write(&fail, "").unwrap(); // every get_task_output is refused
         let mut rig = preview_rig("cody-1", &answering_stub(None, &[], &reply, &fail, &log));
@@ -6083,7 +6861,10 @@ done
         rig.start_shell("with-file");
 
         rig.expect_preview("with-file", "one").await;
-        eventually("the CLI to be asked once and refuse", || (!control_log(&log).is_empty()).then_some(())).await;
+        eventually("the CLI to be asked once and refuse", || {
+            (!control_log(&log).is_empty()).then_some(())
+        })
+        .await;
         // Several poll cycles later the file-backed task is still being followed...
         rig.append_output("with-file", b"two\n");
         rig.expect_preview("with-file", "two").await;
@@ -6091,7 +6872,12 @@ done
         rig.expect_preview("with-file", "three").await;
 
         // ...and the refusing CLI was left alone in all of them.
-        assert_eq!(control_log(&log).len(), 1, "the CLI was asked again straight after refusing: {:?}", control_log(&log));
+        assert_eq!(
+            control_log(&log).len(),
+            1,
+            "the CLI was asked again straight after refusing: {:?}",
+            control_log(&log)
+        );
         assert_eq!(rig.published_preview("no-file"), None);
     }
 
@@ -6100,12 +6886,22 @@ done
     #[tokio::test]
     async fn an_output_path_that_is_not_this_sessions_does_not_make_its_directory_readable() {
         let dir = tempfile::tempdir().unwrap();
-        let (reply, fail, log) = (dir.path().join("reply"), dir.path().join("fail"), dir.path().join("log"));
+        let (reply, fail, log) = (
+            dir.path().join("reply"),
+            dir.path().join("fail"),
+            dir.path().join("log"),
+        );
         std::fs::write(&reply, output_reply("")).unwrap();
         std::fs::write(&fail, "").unwrap(); // the CLI fallback fails at once
         let mut rig = preview_rig("cody-1", &answering_stub(None, &[], &reply, &fail, &log));
         // Under a directory the validator was not told about, in another session's folder.
-        let foreign = rig._dir.path().join("elsewhere").join("-work-repo").join("other-sid").join("tasks");
+        let foreign = rig
+            ._dir
+            .path()
+            .join("elsewhere")
+            .join("-work-repo")
+            .join("other-sid")
+            .join("tasks");
         std::fs::create_dir_all(&foreign).unwrap();
         std::fs::write(foreign.join("shell1.output"), "SECRET-OUTPUT-FOREIGN\n").unwrap();
         rig.shared.tasks.set_clients(1);
@@ -6116,8 +6912,12 @@ done
             serde_json::json!({"task_id": "shell1", "status": "completed", "output_file": foreign.join("shell1.output")}),
         );
 
-        eventually("the final read to be attempted", || (!control_log(&log).is_empty()).then_some(())).await;
-        rig.expect_no_preview("a file in another session's folder must not be read").await;
+        eventually("the final read to be attempted", || {
+            (!control_log(&log).is_empty()).then_some(())
+        })
+        .await;
+        rig.expect_no_preview("a file in another session's folder must not be read")
+            .await;
         assert_eq!(rig.published_preview("shell1"), None);
     }
 
@@ -6126,8 +6926,16 @@ done
         let mut rig = preview_rig("cody-1", STAY_ALIVE);
         // The CLI's real root is somewhere the daemon was not told about: only
         // `/tmp/claude-<uid>` can be learned, so use a folder of our own in it.
-        let cwd_dir = format!("-work-repo-{}-{}", std::process::id(), rig._dir.path().file_name().unwrap().to_string_lossy());
-        let learned_cwd = PathBuf::from(format!("/tmp/claude-{}", crate::ipc::task_output::current_uid())).join(cwd_dir);
+        let cwd_dir = format!(
+            "-work-repo-{}-{}",
+            std::process::id(),
+            rig._dir.path().file_name().unwrap().to_string_lossy()
+        );
+        let learned_cwd = PathBuf::from(format!(
+            "/tmp/claude-{}",
+            crate::ipc::task_output::current_uid()
+        ))
+        .join(cwd_dir);
         struct Cleanup(PathBuf);
         impl Drop for Cleanup {
             fn drop(&mut self) {
@@ -6160,7 +6968,10 @@ done
         rig.feed_as_reader("task_started", run(1));
         rig.expect_preview("t1", "run one").await;
         rig.append_output("t1", b"run one final\n");
-        rig.feed_as_reader("task_notification", serde_json::json!({"task_id": "t1", "run_id": "run-001", "status": "completed"}));
+        rig.feed_as_reader(
+            "task_notification",
+            serde_json::json!({"task_id": "t1", "run_id": "run-001", "status": "completed"}),
+        );
         rig.expect_preview("t1", "run one final").await;
 
         // The same task starts a second run.
@@ -6173,7 +6984,10 @@ done
         tokio::time::sleep(PREVIEW_INTERVAL + Duration::from_millis(500)).await;
         while rig.rx.try_recv().is_ok() {}
         rig.append_output("t1", b"run two final\n");
-        rig.feed("task_notification", serde_json::json!({"task_id": "t1", "run_id": "run-002", "status": "completed"}));
+        rig.feed(
+            "task_notification",
+            serde_json::json!({"task_id": "t1", "run_id": "run-002", "status": "completed"}),
+        );
         // ...so only the final read of an ended task can pick it up.
         rig.shared.tasks.set_clients(1);
         ensure_poller(&rig.shared);
@@ -6188,23 +7002,35 @@ done
         rig.write_output("old1", b"first life\n");
         rig.shared.tasks.set_clients(1);
         rig.feed("task_started", serde_json::json!({"task_id": "old1", "description": "Run it", "task_type": "local_bash"}));
-        rig.feed_as_reader("task_notification", serde_json::json!({"task_id": "old1", "status": "completed"}));
+        rig.feed_as_reader(
+            "task_notification",
+            serde_json::json!({"task_id": "old1", "status": "completed"}),
+        );
         rig.expect_preview("old1", "first life").await;
 
         // Later tasks end, and the registry keeps only the most recent ones: old1 is dropped.
         for i in 0..=RETAINED_ENDED_TASKS {
             let id = format!("agent{i:02}");
             rig.feed("task_started", serde_json::json!({"task_id": id, "description": "Survey", "task_type": "local_agent"}));
-            rig.feed_as_reader("task_notification", serde_json::json!({"task_id": id, "status": "completed"}));
+            rig.feed_as_reader(
+                "task_notification",
+                serde_json::json!({"task_id": id, "status": "completed"}),
+            );
         }
         let (snapshot, _) = rig.shared.tasks.current();
-        assert!(snapshot.tasks.iter().all(|t| t.id != "old1"), "old1 should have been dropped by retention");
+        assert!(
+            snapshot.tasks.iter().all(|t| t.id != "old1"),
+            "old1 should have been dropped by retention"
+        );
 
         // The id comes back and ends before anything polls (no await in between), with new
         // output: a new task, and it is read once.
         rig.write_output("old1", b"second life\n");
         rig.feed("task_started", serde_json::json!({"task_id": "old1", "description": "Run it", "task_type": "local_bash"}));
-        rig.feed_as_reader("task_notification", serde_json::json!({"task_id": "old1", "status": "completed"}));
+        rig.feed_as_reader(
+            "task_notification",
+            serde_json::json!({"task_id": "old1", "status": "completed"}),
+        );
 
         rig.expect_preview("old1", "second life").await;
     }
@@ -6288,7 +7114,9 @@ mod work_send_scope_tests {
     }
 
     fn manager(dir: &tempfile::TempDir) -> Reaped {
-        Reaped(SessionManager::with_store_path(dir.path().join("sessions.json")))
+        Reaped(SessionManager::with_store_path(
+            dir.path().join("sessions.json"),
+        ))
     }
 
     /// A session that stays alive and swallows its stdin.
@@ -6330,25 +7158,34 @@ mod work_send_scope_tests {
         })
         .await;
 
-        assert!(tags.tag_is_sensitive("cody-derived"), "registration is permanent");
+        assert!(
+            tags.tag_is_sensitive("cody-derived"),
+            "registration is permanent"
+        );
         assert!(!tags.tag_is_sensitive("cody-ordinary"));
         mgr.add_or_update_focus(focus("cody-after"));
-        assert!(!tags.tag_is_sensitive("cody-after"), "the scope ended with the work send");
+        assert!(
+            !tags.tag_is_sensitive("cody-after"),
+            "the scope ended with the work send"
+        );
     }
 
     #[tokio::test]
-    async fn a_message_sent_inside_a_work_send_marks_the_session_sensitive_but_one_sent_outside_does_not() {
+    async fn a_message_sent_inside_a_work_send_marks_the_session_sensitive_but_one_sent_outside_does_not(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = manager(&dir);
         let tags = mgr.sensitive_tags();
         spawn_idle(&mut mgr, "cody-plain");
         spawn_idle(&mut mgr, "cody-seeded");
 
-        mgr.send_user_message("cody-plain", "hello", &[]).expect("send outside the scope");
+        mgr.send_user_message("cody-plain", "hello", &[])
+            .expect("send outside the scope");
         assert!(!tags.tag_is_sensitive("cody-plain"));
 
         within_work_send(async {
-            mgr.send_user_message("cody-seeded", "WORK-CONTEXT", &[]).expect("send inside the scope");
+            mgr.send_user_message("cody-seeded", "WORK-CONTEXT", &[])
+                .expect("send inside the scope");
         })
         .await;
         assert!(tags.tag_is_sensitive("cody-seeded"));
@@ -6408,12 +7245,15 @@ mod orphan_tests {
 
     impl Drop for Mgr {
         fn drop(&mut self) {
-            self.0.kill_all_on_shutdown_with_grace(Duration::from_millis(200));
+            self.0
+                .kill_all_on_shutdown_with_grace(Duration::from_millis(200));
         }
     }
 
     fn manager(dir: &tempfile::TempDir) -> Mgr {
-        Mgr(SessionManager::with_store_path(dir.path().join("sessions.json")))
+        Mgr(SessionManager::with_store_path(
+            dir.path().join("sessions.json"),
+        ))
     }
 
     fn ledger_file(dir: &tempfile::TempDir) -> PathBuf {
@@ -6457,7 +7297,10 @@ mod orphan_tests {
 
     /// The process state letters, or `None` when there is no such process.
     fn state_of(pid: u32) -> Option<String> {
-        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().ok()?;
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         (out.status.success() && !text.is_empty()).then_some(text)
     }
@@ -6497,7 +7340,10 @@ mod orphan_tests {
 
     /// A CLI that ignores SIGTERM and says when it is up.
     fn stubborn_cli(ready: &Path) -> String {
-        format!("trap '' TERM\necho ready > {}\nwhile :; do sleep 1; done\n", ready.display())
+        format!(
+            "trap '' TERM\necho ready > {}\nwhile :; do sleep 1; done\n",
+            ready.display()
+        )
     }
 
     // ── RO-1: shutdown leaves nothing behind ──────────────────────────────────
@@ -6510,18 +7356,29 @@ mod orphan_tests {
         let cli = start(&mut mgr, "t", &script);
         wait_until("the CLI to be up", || ready.exists());
         let (bg, stubborn) = (read_pid(&bg).unwrap(), read_pid(&stubborn).unwrap());
-        assert!(!is_gone(bg) && !is_gone(stubborn) && !is_gone(cli), "setup: all three are running");
+        assert!(
+            !is_gone(bg) && !is_gone(stubborn) && !is_gone(cli),
+            "setup: all three are running"
+        );
         let grace = Duration::from_secs(1);
 
         let started = Instant::now();
         mgr.kill_all_on_shutdown_with_grace(grace);
         let took = started.elapsed();
 
-        assert!(term.exists(), "the CLI was sent SIGTERM and got to run its own handler");
+        assert!(
+            term.exists(),
+            "the CLI was sent SIGTERM and got to run its own handler"
+        );
         wait_until("the CLI to be gone", || is_gone(cli));
         wait_until("the background child to be gone", || is_gone(bg));
-        wait_until("the SIGTERM-ignoring child to be gone", || is_gone(stubborn));
-        assert!(took < grace + Duration::from_millis(1500), "shutdown took {took:?} with a {grace:?} grace");
+        wait_until("the SIGTERM-ignoring child to be gone", || {
+            is_gone(stubborn)
+        });
+        assert!(
+            took < grace + Duration::from_millis(1500),
+            "shutdown took {took:?} with a {grace:?} grace"
+        );
     }
 
     #[tokio::test]
@@ -6542,7 +7399,10 @@ mod orphan_tests {
         mgr.kill_all_on_shutdown_with_grace(Duration::from_secs(10));
         let took = started.elapsed();
 
-        assert!(took < Duration::from_secs(5), "a cooperative CLI should be done in about a second, took {took:?}");
+        assert!(
+            took < Duration::from_secs(5),
+            "a cooperative CLI should be done in about a second, took {took:?}"
+        );
         assert!(term.exists(), "stopped by SIGTERM, not by a kill");
         wait_until("the CLI to be gone", || is_gone(cli));
     }
@@ -6550,23 +7410,36 @@ mod orphan_tests {
     // ── RO-4: shutdown is bounded, shared, idempotent and tidy ────────────────
 
     #[tokio::test]
-    async fn shutdown_is_bounded_by_the_grace_even_when_the_cli_ignores_sigterm_and_clears_the_ledger() {
+    async fn shutdown_is_bounded_by_the_grace_even_when_the_cli_ignores_sigterm_and_clears_the_ledger(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = manager(&dir);
         let ready = dir.path().join("ready");
         let cli = start(&mut mgr, "t", &stubborn_cli(&ready));
         wait_until("the CLI to be up", || ready.exists());
-        assert!(ledger_file(&dir).exists(), "setup: the ledger is there while the session runs");
+        assert!(
+            ledger_file(&dir).exists(),
+            "setup: the ledger is there while the session runs"
+        );
         let grace = Duration::from_secs(1);
 
         let started = Instant::now();
         mgr.kill_all_on_shutdown_with_grace(grace);
         let took = started.elapsed();
 
-        assert!(took < grace + Duration::from_millis(1500), "shutdown took {took:?} with a {grace:?} grace");
-        assert!(took >= Duration::from_millis(900), "SIGTERM was given its grace first, took {took:?}");
+        assert!(
+            took < grace + Duration::from_millis(1500),
+            "shutdown took {took:?} with a {grace:?} grace"
+        );
+        assert!(
+            took >= Duration::from_millis(900),
+            "SIGTERM was given its grace first, took {took:?}"
+        );
         wait_until("the CLI to be gone", || is_gone(cli));
-        assert!(!ledger_file(&dir).exists(), "a completed shutdown leaves no ledger");
+        assert!(
+            !ledger_file(&dir).exists(),
+            "a completed shutdown leaves no ledger"
+        );
     }
 
     #[tokio::test]
@@ -6585,7 +7458,10 @@ mod orphan_tests {
         mgr.kill_all_on_shutdown_with_grace(grace);
         let took = started.elapsed();
 
-        assert!(took < grace + Duration::from_millis(1500), "three sessions took {took:?} with a {grace:?} grace");
+        assert!(
+            took < grace + Duration::from_millis(1500),
+            "three sessions took {took:?} with a {grace:?} grace"
+        );
         for pid in pids {
             wait_until("the CLI to be gone", || is_gone(pid));
         }
@@ -6604,7 +7480,10 @@ mod orphan_tests {
         mgr.kill_all_on_shutdown_with_grace(Duration::from_secs(5));
         mgr.kill_all_on_shutdown();
 
-        assert!(started.elapsed() < Duration::from_millis(500), "nothing is left to wait for");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "nothing is left to wait for"
+        );
         assert!(!ledger_file(&dir).exists());
     }
 
@@ -6644,7 +7523,9 @@ mod orphan_tests {
 
         mgr.kill_all_on_shutdown_with_grace(Duration::from_millis(300));
 
-        let leftover = read_ledger_file(&ledger_file(&dir)).map(|f| f.children.len()).unwrap_or(0);
+        let leftover = read_ledger_file(&ledger_file(&dir))
+            .map(|f| f.children.len())
+            .unwrap_or(0);
         assert_eq!(leftover, 0, "nothing the daemon started is still recorded");
     }
 
@@ -6654,17 +7535,27 @@ mod orphan_tests {
     async fn while_a_session_runs_its_pid_and_group_are_on_disk_in_a_file_only_the_user_can_read() {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = manager(&dir);
-        assert!(!ledger_file(&dir).exists(), "nothing is recorded before a session exists");
+        assert!(
+            !ledger_file(&dir).exists(),
+            "nothing is recorded before a session exists"
+        );
         let ready = dir.path().join("ready");
         let cli = start(&mut mgr, "t", &stubborn_cli(&ready));
         wait_until("the CLI to be up", || ready.exists());
 
         // The state a daemon killed at this instant would leave for the next start.
         let path = ledger_file(&dir);
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let file = read_ledger_file(&path).expect("a readable ledger");
         assert_eq!(file.daemon_pid, std::process::id());
-        let rec = file.children.iter().find(|c| c.pid == cli).expect("the running session is recorded");
+        let rec = file
+            .children
+            .iter()
+            .find(|c| c.pid == cli)
+            .expect("the running session is recorded");
         assert_eq!(rec.pgid, cli, "recorded with the group it leads");
         assert!(rec.own_group);
         assert_eq!(file.children.len(), 1);
@@ -6687,7 +7578,11 @@ mod orphan_tests {
 
         let report = crate::ipc::orphans::sweep(&copy, Duration::from_millis(300));
 
-        assert_eq!(report.terminated, vec![cli], "the record verifies against the live process");
+        assert_eq!(
+            report.terminated,
+            vec![cli],
+            "the record verifies against the live process"
+        );
         assert_eq!(report.dropped, 0);
         wait_until("the CLI to be gone", || is_gone(cli));
     }
@@ -6702,10 +7597,18 @@ mod orphan_tests {
         let cli = start(&mut mgr, "plain", &stubborn_cli(&ready));
         wait_until("the CLI to be up", || ready.exists());
 
-        assert_eq!(pgid_of(cli), cli as i32, "the child leads a group named after itself");
+        assert_eq!(
+            pgid_of(cli),
+            cli as i32,
+            "the child leads a group named after itself"
+        );
         // SAFETY: plain syscall.
         let ours = unsafe { libc::getpgrp() };
-        assert_ne!(pgid_of(cli), ours, "and it is not the group the daemon (or test runner) is in");
+        assert_ne!(
+            pgid_of(cli),
+            ours,
+            "and it is not the group the daemon (or test runner) is in"
+        );
     }
 
     #[tokio::test]
@@ -6730,16 +7633,23 @@ mod orphan_tests {
     }
 
     #[tokio::test]
-    async fn stopping_one_plain_session_ends_its_background_child_and_leaves_the_other_session_running() {
+    async fn stopping_one_plain_session_ends_its_background_child_and_leaves_the_other_session_running(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = manager(&dir);
         let bg_file = dir.path().join("bg.pid");
         let ready = dir.path().join("ready");
-        let script = format!("sleep 300 &\necho $! > {}\necho ready > {}\nwait\n", bg_file.display(), ready.display());
+        let script = format!(
+            "sleep 300 &\necho $! > {}\necho ready > {}\nwait\n",
+            bg_file.display(),
+            ready.display()
+        );
         let cli = start(&mut mgr, "stopped", &script);
         let other_ready = dir.path().join("other-ready");
         let other = start(&mut mgr, "kept", &stubborn_cli(&other_ready));
-        wait_until("both CLIs to be up", || ready.exists() && other_ready.exists());
+        wait_until("both CLIs to be up", || {
+            ready.exists() && other_ready.exists()
+        });
         let bg = read_pid(&bg_file).unwrap();
         assert!(!is_gone(bg));
 
@@ -6748,10 +7658,17 @@ mod orphan_tests {
         wait_until("the stopped CLI to be gone", || is_gone(cli));
         wait_until("its background child to be gone", || is_gone(bg));
         assert!(!is_gone(other), "the other session is not affected");
-        let listed: Vec<u32> =
-            read_ledger_file(&ledger_file(&dir)).map(|f| f.children.iter().map(|c| c.pid).collect()).unwrap_or_default();
-        assert!(!listed.contains(&cli), "a stopped session is no longer in the ledger: {listed:?}");
-        assert!(listed.contains(&other), "the running one still is: {listed:?}");
+        let listed: Vec<u32> = read_ledger_file(&ledger_file(&dir))
+            .map(|f| f.children.iter().map(|c| c.pid).collect())
+            .unwrap_or_default();
+        assert!(
+            !listed.contains(&cli),
+            "a stopped session is no longer in the ledger: {listed:?}"
+        );
+        assert!(
+            listed.contains(&other),
+            "the running one still is: {listed:?}"
+        );
     }
 
     // ── a reaped CLI's pid is no longer ours to signal; its ledger entry goes ──
@@ -6783,19 +7700,26 @@ mod orphan_tests {
     /// A CLI that leaves a background `sleep` in its group (not holding the CLI's stdio, so
     /// the CLI's exit is noticed) and then exits with `code`.
     fn cli_that_exits_leaving_a_sleeper(bg_file: &Path, code: i32) -> String {
-        format!("sleep 300 </dev/null >/dev/null 2>&1 &\necho $! >> {}\nexit {code}\n", bg_file.display())
+        format!(
+            "sleep 300 </dev/null >/dev/null 2>&1 &\necho $! >> {}\nexit {code}\n",
+            bg_file.display()
+        )
     }
 
     /// Wait until the CLI has exited and the manager has noticed.
     fn wait_for_exit_noticed(mgr: &SessionManager, tag: &str, cli: u32) {
         wait_until("the CLI to have exited", || is_gone(cli));
         wait_until("the manager to notice the exit", || {
-            mgr.sessions.get(tag).is_some_and(|s| s.shared.exited.load(Ordering::SeqCst))
+            mgr.sessions
+                .get(tag)
+                .is_some_and(|s| s.shared.exited.load(Ordering::SeqCst))
         });
     }
 
     fn listed_in_ledger(dir: &tempfile::TempDir) -> Vec<u32> {
-        read_ledger_file(&ledger_file(dir)).map(|f| f.children.iter().map(|c| c.pid).collect()).unwrap_or_default()
+        read_ledger_file(&ledger_file(dir))
+            .map(|f| f.children.iter().map(|c| c.pid).collect())
+            .unwrap_or_default()
     }
 
     /// Crash a session whose CLI left a background child, and let the supervisor reap it (a
@@ -6803,17 +7727,35 @@ mod orphan_tests {
     /// CLI pid and the background child's.
     fn crash_and_reap_leaving_a_sleeper(mgr: &mut Mgr, bg_file: &Path) -> (u32, u32) {
         let cli = start(mgr, "t", &cli_that_exits_leaving_a_sleeper(bg_file, 1));
-        mgr.sessions.get_mut("t").unwrap().attached_clients.insert("c1".into());
-        wait_until("the background child to be started", || read_pid(bg_file).is_some());
+        mgr.sessions
+            .get_mut("t")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
+        wait_until("the background child to be started", || {
+            read_pid(bg_file).is_some()
+        });
         let bg = read_pid(bg_file).unwrap();
         wait_for_exit_noticed(mgr, "t", cli);
 
         mgr.reap_and_recover();
 
-        let s = mgr.sessions.get_mut("t").expect("still tracked, in backoff");
-        assert!(s.restart_at.is_some(), "setup: the crashed session is waiting out a backoff");
-        assert!(matches!(s.child.try_wait(), Ok(Some(_))), "setup: the CLI has been reaped");
-        assert!(!is_gone(bg), "setup: the CLI's background child outlives it");
+        let s = mgr
+            .sessions
+            .get_mut("t")
+            .expect("still tracked, in backoff");
+        assert!(
+            s.restart_at.is_some(),
+            "setup: the crashed session is waiting out a backoff"
+        );
+        assert!(
+            matches!(s.child.try_wait(), Ok(Some(_))),
+            "setup: the CLI has been reaped"
+        );
+        assert!(
+            !is_gone(bg),
+            "setup: the CLI's background child outlives it"
+        );
         (cli, bg)
     }
 
@@ -6829,7 +7771,48 @@ mod orphan_tests {
 
         // A kill is delivered at once, but give a wrongly-sent one time to show.
         std::thread::sleep(Duration::from_millis(300));
-        assert!(!is_gone(bg), "the old pid is free to be reused, so nothing in its group may be signalled");
+        assert!(
+            !is_gone(bg),
+            "the old pid is free to be reused, so nothing in its group may be signalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_a_session_whose_cli_exited_but_was_not_reaped_still_kills_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let cli = start(
+            &mut mgr,
+            "t",
+            &cli_that_exits_leaving_a_sleeper(&bg_file, 1),
+        );
+        wait_until("the background child to be started", || {
+            read_pid(&bg_file).is_some()
+        });
+        let bg = read_pid(&bg_file).unwrap();
+        // The reader has seen the CLI's exit; nothing has waited for it, so it is a zombie.
+        wait_until("the manager to notice the exit", || {
+            mgr.sessions
+                .get("t")
+                .is_some_and(|s| s.shared.exited.load(Ordering::SeqCst))
+        });
+        assert!(
+            child_unreaped(cli),
+            "setup: the exited CLI has not been reaped"
+        );
+        assert!(
+            !is_gone(bg),
+            "setup: the CLI's background child outlives it"
+        );
+
+        mgr.stop("t");
+
+        wait_until(
+            "the background child to be killed with the CLI's group",
+            || is_gone(bg),
+        );
     }
 
     #[tokio::test]
@@ -6843,7 +7826,87 @@ mod orphan_tests {
         mgr.restart("t").expect("restart");
 
         std::thread::sleep(Duration::from_millis(300));
-        assert!(!is_gone(bg), "the old pid is free to be reused, so nothing in its group may be signalled");
+        assert!(
+            !is_gone(bg),
+            "the old pid is free to be reused, so nothing in its group may be signalled"
+        );
+    }
+
+    // A reaped child's pid can be handed to another child of the daemon. `waitid`
+    // then succeeds for that stranger, so the OS-level probe alone would call the
+    // pid "ours and unreaped". These tests make the probe say exactly that
+    // (`|_| true`): a session this manager has reaped must still signal nothing.
+
+    #[tokio::test]
+    async fn stopping_a_reaped_session_signals_nothing_even_if_its_pid_looks_live_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+        mgr.sessions.get_mut("t").unwrap().unreaped_probe = |_| true;
+
+        mgr.stop("t");
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !is_gone(bg),
+            "a reaped pid may now belong to a stranger, so nothing in its group may be signalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn restarting_a_reaped_session_signals_nothing_even_if_its_pid_looks_live_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+        mgr.sessions.get_mut("t").unwrap().unreaped_probe = |_| true;
+
+        mgr.restart("t").expect("restart");
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !is_gone(bg),
+            "a reaped pid may now belong to a stranger, so nothing in its group may be signalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reaped_session_has_no_stop_target_even_if_its_pid_looks_live_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let _cleanup = KillListed(bg_file.clone());
+        let (_cli, _bg) = crash_and_reap_leaving_a_sleeper(&mut mgr, &bg_file);
+        let s = mgr.sessions.get_mut("t").unwrap();
+        s.unreaped_probe = |_| true;
+
+        assert!(s.stop_target().is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_live_session_ends_its_background_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let bg_file = dir.path().join("bg.pid");
+        let ready = dir.path().join("ready");
+        let _cleanup = KillListed(bg_file.clone());
+        let script = format!(
+            "sleep 300 &\necho $! >> {}\necho ready > {}\nwait\n",
+            bg_file.display(),
+            ready.display()
+        );
+        let cli = start(&mut mgr, "t", &script);
+        wait_until("the CLI to be up", || ready.exists());
+        let bg = read_pids(&bg_file)[0];
+        assert!(!is_gone(bg));
+
+        mgr.stop("t");
+
+        wait_until("the CLI to be gone", || is_gone(cli));
+        wait_until("the CLI's background child to be gone", || is_gone(bg));
     }
 
     #[tokio::test]
@@ -6853,7 +7916,11 @@ mod orphan_tests {
         let bg_file = dir.path().join("bg.pid");
         let ready = dir.path().join("ready");
         let _cleanup = KillListed(bg_file.clone());
-        let script = format!("sleep 300 &\necho $! >> {}\necho ready > {}\nwait\n", bg_file.display(), ready.display());
+        let script = format!(
+            "sleep 300 &\necho $! >> {}\necho ready > {}\nwait\n",
+            bg_file.display(),
+            ready.display()
+        );
         let cli = start(&mut mgr, "t", &script);
         wait_until("the CLI to be up", || ready.exists());
         let bg = read_pids(&bg_file)[0];
@@ -6870,15 +7937,28 @@ mod orphan_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = manager(&dir);
         let cli = start(&mut mgr, "t", "exit 1");
-        mgr.sessions.get_mut("t").unwrap().attached_clients.insert("c1".into());
+        mgr.sessions
+            .get_mut("t")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
         wait_for_exit_noticed(&mgr, "t", cli);
-        assert!(listed_in_ledger(&dir).contains(&cli), "setup: the unreaped CLI is still recorded");
+        assert!(
+            listed_in_ledger(&dir).contains(&cli),
+            "setup: the unreaped CLI is still recorded"
+        );
 
         mgr.reap_and_recover();
 
-        assert!(mgr.sessions.get("t").unwrap().restart_at.is_some(), "setup: waiting out a backoff, not respawned");
+        assert!(
+            mgr.sessions.get("t").unwrap().restart_at.is_some(),
+            "setup: waiting out a backoff, not respawned"
+        );
         let listed = listed_in_ledger(&dir);
-        assert!(!listed.contains(&cli), "a reaped pid is free for reuse and must not stay listed: {listed:?}");
+        assert!(
+            !listed.contains(&cli),
+            "a reaped pid is free for reuse and must not stay listed: {listed:?}"
+        );
     }
 
     #[tokio::test]
@@ -6886,12 +7966,19 @@ mod orphan_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = manager(&dir);
         let cli = start(&mut mgr, "t", "exit 0");
-        mgr.sessions.get_mut("t").unwrap().attached_clients.insert("c1".into());
+        mgr.sessions
+            .get_mut("t")
+            .unwrap()
+            .attached_clients
+            .insert("c1".into());
         wait_for_exit_noticed(&mgr, "t", cli);
 
         mgr.reap_and_recover();
 
         let listed = listed_in_ledger(&dir);
-        assert!(!listed.contains(&cli), "the replaced CLI's pid must not stay listed: {listed:?}");
+        assert!(
+            !listed.contains(&cli),
+            "the replaced CLI's pid must not stay listed: {listed:?}"
+        );
     }
 }

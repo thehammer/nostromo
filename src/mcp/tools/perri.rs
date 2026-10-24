@@ -149,7 +149,10 @@ mod tests {
     fn get_state_current_pin_reflects_a_fully_loaded_pr() {
         let state = state_with_pr(Some(full_pr_snapshot()));
         let out = get_state(&state, Some("perri"));
-        assert_eq!(out["current_pin"], json!({ "repo": "acme/web", "number": 42 }));
+        assert_eq!(
+            out["current_pin"],
+            json!({ "repo": "acme/web", "number": 42 })
+        );
     }
 
     #[test]

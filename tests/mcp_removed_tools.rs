@@ -14,7 +14,9 @@ use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::protocol::ServerMsg;
 use nostromo::ipc::SessionManager;
 use nostromo::mcp::tools::tool_descriptors;
-use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState, TicketRegistryState};
+use nostromo::mcp::{
+    DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState, TicketRegistryState,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -50,7 +52,11 @@ impl HomeOverride {
         std::fs::create_dir_all(dir.path().join(".nostromo")).unwrap();
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", dir.path());
-        Self { _lock: lock, _dir: dir, previous }
+        Self {
+            _lock: lock,
+            _dir: dir,
+            previous,
+        }
     }
 }
 
@@ -64,17 +70,21 @@ impl Drop for HomeOverride {
 }
 
 fn make_daemon_state(dir: &TempDir) -> McpSharedState {
-    let pane_registry =
-        Arc::new(Mutex::new(PaneRegistry::with_store_path(dir.path().join("panes.json"))));
-    let session_mgr =
-        Arc::new(Mutex::new(SessionManager::with_store_path(dir.path().join("sessions.json"))));
+    let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
+        dir.path().join("panes.json"),
+    )));
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        dir.path().join("sessions.json"),
+    )));
     let (broadcast_tx, _rx) = broadcast::channel::<ServerMsg>(64);
     McpSharedState::for_daemon(DaemonMcpBackend {
         pane_registry,
         session_mgr,
         broadcast_tx,
         perri: PerriDaemonState::default(),
-        decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+        decisions: Arc::new(Mutex::new(
+            nostromo::ipc::decisions::DecisionRegistry::default(),
+        )),
         tickets: TicketRegistryState::default(),
         tracker: Default::default(),
     })
@@ -95,7 +105,10 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(r: &mut BufReader<R>) -> Va
 async fn connect(
     socket_path: &std::path::Path,
     tag: &str,
-) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
     let stream = UnixStream::connect(socket_path).await.unwrap();
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -115,9 +128,15 @@ async fn connect(
 #[test]
 fn the_static_tool_catalogue_has_none_of_the_removed_tools() {
     let descriptors = tool_descriptors();
-    let names: Vec<&str> = descriptors.iter().filter_map(|t| t["name"].as_str()).collect();
+    let names: Vec<&str> = descriptors
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
     for removed in REMOVED_TOOLS {
-        assert!(!names.contains(&removed), "{removed} must not be in the catalogue");
+        assert!(
+            !names.contains(&removed),
+            "{removed} must not be in the catalogue"
+        );
     }
 }
 
@@ -126,14 +145,23 @@ async fn a_daemon_hosted_tools_list_has_none_of_the_removed_tools() {
     let _home = HomeOverride::new();
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-daemon.sock");
-    let _server = McpServer::bind(socket_path.clone(), make_daemon_state(&dir)).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), make_daemon_state(&dir))
+        .await
+        .unwrap();
     let (mut reader, mut writer) = connect(&socket_path, "cody-x").await;
 
-    write_frame(&mut writer, &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
+    write_frame(
+        &mut writer,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    )
+    .await;
     let resp = read_frame(&mut reader).await;
     let tools = resp["result"]["tools"].as_array().expect("a tools array");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(names.contains(&"nostromo.get_self"), "control: the list is populated: {names:?}");
+    assert!(
+        names.contains(&"nostromo.get_self"),
+        "control: the list is populated: {names:?}"
+    );
     for removed in REMOVED_TOOLS {
         assert!(!names.contains(&removed), "{removed} must not be listed");
     }
@@ -144,7 +172,9 @@ async fn calling_a_removed_tool_is_an_unknown_tool_error() {
     let _home = HomeOverride::new();
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("mcp-daemon.sock");
-    let _server = McpServer::bind(socket_path.clone(), make_daemon_state(&dir)).await.unwrap();
+    let _server = McpServer::bind(socket_path.clone(), make_daemon_state(&dir))
+        .await
+        .unwrap();
     let (mut reader, mut writer) = connect(&socket_path, "cody-x").await;
 
     for (i, removed) in REMOVED_TOOLS.iter().enumerate() {
@@ -158,7 +188,14 @@ async fn calling_a_removed_tool_is_an_unknown_tool_error() {
         .await;
         let resp = read_frame(&mut reader).await;
         assert_eq!(resp["error"]["code"], -32601, "{removed}: {resp}");
-        assert_eq!(resp["error"]["message"], format!("Unknown tool: {removed}"), "{removed}: {resp}");
-        assert!(resp.get("result").is_none(), "{removed} must not succeed: {resp}");
+        assert_eq!(
+            resp["error"]["message"],
+            format!("Unknown tool: {removed}"),
+            "{removed}: {resp}"
+        );
+        assert!(
+            resp.get("result").is_none(),
+            "{removed} must not succeed: {resp}"
+        );
     }
 }

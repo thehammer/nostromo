@@ -188,13 +188,18 @@ impl LoginCoordinator {
             manager: Arc::downgrade(manager),
             runtime: tokio::runtime::Handle::current(),
         });
-        manager.lock().unwrap_or_else(|e| e.into_inner()).configure_login(Arc::clone(self));
+        manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .configure_login(Arc::clone(self));
         let weak = Arc::downgrade(self);
         let dirty = Arc::clone(&self.dirty);
         tokio::spawn(async move {
             loop {
                 dirty.notified().await;
-                let Some(coordinator) = weak.upgrade() else { return };
+                let Some(coordinator) = weak.upgrade() else {
+                    return;
+                };
                 coordinator.publish();
             }
         });
@@ -243,15 +248,31 @@ impl LoginCoordinator {
     }
 
     fn manager(&self) -> Option<Arc<Mutex<SessionManager>>> {
-        self.attached.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.manager.upgrade()
+        self.attached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()?
+            .manager
+            .upgrade()
     }
 
     /// Build the picture and send it unless it is the one already sent. Starts
     /// the poller when someone is waiting.
     fn publish(self: &Arc<Self>) {
-        let Some(manager) = self.manager() else { return };
-        let snapshot = manager.lock().unwrap_or_else(|e| e.into_inner()).login_snapshot();
-        let waiting = matches!(&snapshot, ServerMsg::ClaudeLoginState { needs_login: true, .. });
+        let Some(manager) = self.manager() else {
+            return;
+        };
+        let snapshot = manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .login_snapshot();
+        let waiting = matches!(
+            &snapshot,
+            ServerMsg::ClaudeLoginState {
+                needs_login: true,
+                ..
+            }
+        );
         let json = serde_json::to_string(&snapshot).unwrap_or_default();
         if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let mut last = self.last_sent.lock().unwrap_or_else(|e| e.into_inner());
@@ -284,7 +305,9 @@ impl LoginCoordinator {
         runtime.spawn(async move {
             loop {
                 tokio::time::sleep(POLL_INTERVAL).await;
-                let Some(coordinator) = weak.upgrade() else { return };
+                let Some(coordinator) = weak.upgrade() else {
+                    return;
+                };
                 if coordinator.poll_once().await {
                     continue;
                 }
@@ -301,7 +324,10 @@ impl LoginCoordinator {
 
     fn any_hold(&self) -> bool {
         match self.manager() {
-            Some(manager) => manager.lock().unwrap_or_else(|e| e.into_inner()).has_login_hold(),
+            Some(manager) => manager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .has_login_hold(),
             None => false,
         }
     }
@@ -318,7 +344,10 @@ impl LoginCoordinator {
             .unwrap_or(CredentialStamp::Unavailable);
         self.observe(&stamp);
         if let (CredentialStamp::Stamp(current), Some(manager)) = (stamp, self.manager()) {
-            manager.lock().unwrap_or_else(|e| e.into_inner()).on_credential_stamp(&current);
+            manager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .on_credential_stamp(&current);
         }
         true
     }

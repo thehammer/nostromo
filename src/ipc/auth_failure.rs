@@ -141,7 +141,9 @@ impl TurnAuthTracker {
             self.signal = signal;
         }
         if let Some(ParsedLine::Blocks { blocks, .. }) = parsed {
-            let tool_call = blocks.iter().any(|b| matches!(b, TurnBlock::ToolCall { .. }));
+            let tool_call = blocks
+                .iter()
+                .any(|b| matches!(b, TurnBlock::ToolCall { .. }));
             if tool_call || (signal.is_none() && !blocks.is_empty()) {
                 self.real_output = true;
             }
@@ -151,18 +153,25 @@ impl TurnAuthTracker {
     /// The turn ended. `Some` when it showed an auth signal. Resets the tracker.
     pub fn finish(&mut self) -> Option<TurnAuthOutcome> {
         let done = std::mem::take(self);
-        done.signal.map(|signal| TurnAuthOutcome { signal, resendable: !done.real_output })
+        done.signal.map(|signal| TurnAuthOutcome {
+            signal,
+            resendable: !done.real_output,
+        })
     }
 }
 
 // ── matching ───────────────────────────────────────────────────────────────────
 
 fn passes_prefilter(line: &[u8]) -> bool {
-    NEEDLES.iter().any(|needle| contains_ignore_ascii_case(line, needle.as_bytes()))
+    NEEDLES
+        .iter()
+        .any(|needle| contains_ignore_ascii_case(line, needle.as_bytes()))
 }
 
 fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+    haystack
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 fn assistant_signal(value: &Value) -> Option<AuthSignal> {
@@ -177,7 +186,10 @@ fn assistant_signal(value: &Value) -> Option<AuthSignal> {
         Value::String(text) => matches_auth_text(text),
         Value::Array(blocks) => blocks.iter().any(|block| {
             block.get("type").and_then(Value::as_str) == Some("text")
-                && block.get("text").and_then(Value::as_str).is_some_and(matches_auth_text)
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(matches_auth_text)
         }),
         _ => false,
     };
@@ -194,7 +206,11 @@ fn result_signal(value: &Value) -> Option<AuthSignal> {
 
 /// Does the start of `text` say Claude cannot authenticate?
 fn matches_auth_text(text: &str) -> bool {
-    let head: String = text.chars().take(MATCH_WINDOW_CHARS).collect::<String>().to_lowercase();
+    let head: String = text
+        .chars()
+        .take(MATCH_WINDOW_CHARS)
+        .collect::<String>()
+        .to_lowercase();
     AUTH_PATTERNS.iter().any(|pattern| head.contains(pattern)) || has_401_auth(&head)
 }
 

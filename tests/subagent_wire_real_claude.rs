@@ -34,7 +34,8 @@ use nostromo::data::work::picks::transcript_dir_for;
 use nostromo::ipc::stream_json::{SessionTranscript, TurnBlock};
 use serde_json::Value;
 
-const PROMPT: &str = "Use the Agent tool (subagent_type general-purpose) to read the file notes.txt in the \
+const PROMPT: &str =
+    "Use the Agent tool (subagent_type general-purpose) to read the file notes.txt in the \
 current directory and report its first line. Do not read the file yourself: the subagent must. \
 Then answer in one sentence.";
 
@@ -56,7 +57,11 @@ fn subagent_traffic_is_tagged_on_the_real_stream() {
     }
 
     let cwd = tempfile::tempdir().unwrap();
-    std::fs::write(cwd.path().join("notes.txt"), "first line of the notes\nsecond line\n").unwrap();
+    std::fs::write(
+        cwd.path().join("notes.txt"),
+        "first line of the notes\nsecond line\n",
+    )
+    .unwrap();
 
     let mut child = Command::new(claude_bin())
         .current_dir(cwd.path())
@@ -79,7 +84,12 @@ fn subagent_traffic_is_tagged_on_the_real_stream() {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("spawn claude");
-    child.stdin.take().unwrap().write_all(PROMPT.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(PROMPT.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("claude output");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
 
@@ -90,7 +100,10 @@ fn subagent_traffic_is_tagged_on_the_real_stream() {
     }
 
     // What the raw lines say.
-    let lines: Vec<Value> = stdout.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let lines: Vec<Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     let is_subagent = |v: &Value| {
         v.get("isSidechain").and_then(Value::as_bool) == Some(true)
             || v.get("parent_tool_use_id").is_some_and(|p| !p.is_null())
@@ -98,7 +111,12 @@ fn subagent_traffic_is_tagged_on_the_real_stream() {
     let subagent_call_ids: HashSet<String> = lines
         .iter()
         .filter(|v| v.get("type").and_then(Value::as_str) == Some("assistant") && is_subagent(v))
-        .flat_map(|v| v["message"]["content"].as_array().cloned().unwrap_or_default())
+        .flat_map(|v| {
+            v["message"]["content"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
         .filter_map(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
         .collect();
@@ -108,11 +126,18 @@ fn subagent_traffic_is_tagged_on_the_real_stream() {
     );
 
     let mut result_lines = 0;
-    for v in lines.iter().filter(|v| v.get("type").and_then(Value::as_str) == Some("user")) {
-        let Some(arr) = v["message"]["content"].as_array() else { continue };
+    for v in lines
+        .iter()
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("user"))
+    {
+        let Some(arr) = v["message"]["content"].as_array() else {
+            continue;
+        };
         let answers_subagent = arr.iter().any(|b| {
             b.get("type").and_then(Value::as_str) == Some("tool_result")
-                && b.get("tool_use_id").and_then(Value::as_str).is_some_and(|id| subagent_call_ids.contains(id))
+                && b.get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| subagent_call_ids.contains(id))
         });
         if !answers_subagent {
             continue;
@@ -128,7 +153,10 @@ fn subagent_traffic_is_tagged_on_the_real_stream() {
             "a subagent's tool_result line carries neither isSidechain nor parent_tool_use_id: {v}"
         );
     }
-    assert!(result_lines > 0, "no tool_result line answered a subagent call. Raw stream:\n{stdout}");
+    assert!(
+        result_lines > 0,
+        "no tool_result line answered a subagent call. Raw stream:\n{stdout}"
+    );
 
     // What the daemon makes of them.
     let mut t = SessionTranscript::new();
@@ -137,10 +165,22 @@ fn subagent_traffic_is_tagged_on_the_real_stream() {
         let _ = t.ingest_line(line);
     }
     let turns = t.snapshot();
-    assert_eq!(turns.len(), 1, "a subagent prompt opened a spurious turn: {turns:#?}");
+    assert_eq!(
+        turns.len(),
+        1,
+        "a subagent prompt opened a spurious turn: {turns:#?}"
+    );
     let untagged_subagent_result = turns[0].blocks.iter().any(|b| match b {
-        TurnBlock::ToolResult { tool_use_id: Some(id), parent_tool_use_id: None, .. } => subagent_call_ids.contains(id),
+        TurnBlock::ToolResult {
+            tool_use_id: Some(id),
+            parent_tool_use_id: None,
+            ..
+        } => subagent_call_ids.contains(id),
         _ => false,
     });
-    assert!(!untagged_subagent_result, "a subagent's tool_result reached the turn untagged: {:#?}", turns[0].blocks);
+    assert!(
+        !untagged_subagent_result,
+        "a subagent's tool_result reached the turn untagged: {:#?}",
+        turns[0].blocks
+    );
 }

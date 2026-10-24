@@ -42,7 +42,9 @@ pub fn handle(state: &McpSharedState) -> Value {
 
     // snapshot_json() returns the `tools`/`total_calls`/etc. fields; splice in
     // process identity and the wall-clock start time.
-    let obj = snapshot.as_object_mut().expect("snapshot_json returns an object");
+    let obj = snapshot
+        .as_object_mut()
+        .expect("snapshot_json returns an object");
     obj.insert(
         "nostromo_version".to_string(),
         json!(env!("CARGO_PKG_VERSION")),

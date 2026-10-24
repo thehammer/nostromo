@@ -142,7 +142,11 @@ pub struct HereDoc {
 
 /// Tokenize `cmd`.
 pub fn parse(cmd: &str) -> ShellParse {
-    let mut work = Work { limit: work_limit(cmd.len()), used: 0, words: 0 };
+    let mut work = Work {
+        limit: work_limit(cmd.len()),
+        used: 0,
+        words: 0,
+    };
     let mut out = parse_at_depth(cmd, 0, &mut work);
     out.work = work.used;
     out
@@ -181,8 +185,26 @@ const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "fish"];
 
 /// Words that may precede the real command word (`env X=1 bash -c …`).
 const PREFIX_WORDS: &[&str] = &[
-    "!", "{", "(", "if", "then", "else", "elif", "while", "until", "do", "time", "command", "builtin",
-    "exec", "nohup", "env", "sudo", "nice", "timeout", "caffeinate",
+    "!",
+    "{",
+    "(",
+    "if",
+    "then",
+    "else",
+    "elif",
+    "while",
+    "until",
+    "do",
+    "time",
+    "command",
+    "builtin",
+    "exec",
+    "nohup",
+    "env",
+    "sudo",
+    "nice",
+    "timeout",
+    "caffeinate",
 ];
 
 fn parse_at_depth(src: &str, depth: u32, work: &mut Work) -> ShellParse {
@@ -300,7 +322,10 @@ impl<'a> Parser<'a> {
 
     /// After an opening `'`: the length of the quoted text, up to the closing quote.
     fn single_quoted_len(&self) -> Step<usize> {
-        self.b[self.pos..].iter().position(|&c| c == b'\'').ok_or(Unbalanced)
+        self.b[self.pos..]
+            .iter()
+            .position(|&c| c == b'\'')
+            .ok_or(Unbalanced)
     }
 
     /// Skip blanks, then read the word at `pos` if there is one (it is
@@ -316,7 +341,10 @@ impl<'a> Parser<'a> {
     }
 
     fn is_meta(c: u8) -> bool {
-        matches!(c, b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>')
+        matches!(
+            c,
+            b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>'
+        )
     }
 
     fn skip_blanks(&mut self) {
@@ -331,7 +359,10 @@ impl<'a> Parser<'a> {
 
     fn sep(&mut self, kind: SepKind, len: usize) {
         if self.nest == 0 {
-            self.out.separators.push(Sep { kind, span: self.pos..self.pos + len });
+            self.out.separators.push(Sep {
+                kind,
+                span: self.pos..self.pos + len,
+            });
         }
         self.pos += len;
     }
@@ -424,7 +455,9 @@ impl<'a> Parser<'a> {
                     let word = self.read_word()?;
                     // `2>file`: a word of digits right before `<`/`>` is a file descriptor.
                     let fd = matches!(self.peek(), Some(b'<' | b'>'))
-                        && self.src[word.span.clone()].bytes().all(|c| c.is_ascii_digit());
+                        && self.src[word.span.clone()]
+                            .bytes()
+                            .all(|c| c.is_ascii_digit());
                     cmd.touch(&word.span);
                     if !fd {
                         // `case` and `esac` as written, where a command may start.
@@ -468,7 +501,12 @@ impl<'a> Parser<'a> {
             let text = self.src[span.clone()].to_owned();
             cmd.keywords_only = false;
             self.work.word()?;
-            cmd.words.push(Word { pattern: WILDCARD.to_string(), text, span, dynamic: true });
+            cmd.words.push(Word {
+                pattern: WILDCARD.to_string(),
+                text,
+                span,
+                dynamic: true,
+            });
             return Ok(());
         }
         if self.starts_with("<<<") {
@@ -500,13 +538,19 @@ impl<'a> Parser<'a> {
             });
             return Ok(());
         }
-        let op_len = [">>", ">|", ">&", "<&", "<>"].iter().find(|op| self.starts_with(op)).map_or(1, |op| op.len());
+        let op_len = [">>", ">|", ">&", "<&", "<>"]
+            .iter()
+            .find(|op| self.starts_with(op))
+            .map_or(1, |op| op.len());
         let dup = self.b[self.pos + op_len - 1] == b'&';
         self.pos += op_len;
         cmd.touch(&(start..self.pos));
         if dup {
             self.skip_blanks();
-            let digits = self.b[self.pos..].iter().take_while(|c| c.is_ascii_digit() || **c == b'-').count();
+            let digits = self.b[self.pos..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit() || **c == b'-')
+                .count();
             if digits > 0 {
                 self.pos += digits;
                 cmd.touch(&(start..self.pos));
@@ -533,7 +577,12 @@ impl<'a> Parser<'a> {
         let wild = std::mem::replace(&mut self.wild, outer_wild);
         word?;
         let pattern = pattern_of(&text, &wild);
-        Ok(Word { text: String::from_utf8_lossy(&text).into_owned(), span: start..self.pos, dynamic, pattern })
+        Ok(Word {
+            text: String::from_utf8_lossy(&text).into_owned(),
+            span: start..self.pos,
+            dynamic,
+            pattern,
+        })
     }
 
     fn read_word_parts(&mut self, text: &mut Vec<u8>, dynamic: &mut bool) -> Step<()> {
@@ -627,7 +676,10 @@ impl<'a> Parser<'a> {
                 // `$1` takes one digit; `$VAR` takes its whole name.
                 Some(c) if c.is_ascii_digit() => self.pos += 1,
                 Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
-                    while self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                    while self
+                        .peek()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    {
                         self.pos += 1;
                     }
                 }
@@ -685,7 +737,13 @@ impl<'a> Parser<'a> {
         self.out.expanding_heredoc |= sub.out.expanding_heredoc;
         // Map spans back onto this input when the text was copied verbatim.
         let close = self.pos;
-        let shift = move |r: &Range<usize>| if escaped { open..close } else { r.start + open + 1..r.end + open + 1 };
+        let shift = move |r: &Range<usize>| {
+            if escaped {
+                open..close
+            } else {
+                r.start + open + 1..r.end + open + 1
+            }
+        };
         for mut c in sub.out.commands {
             c.span = shift(&c.span);
             for w in &mut c.words {
@@ -804,7 +862,9 @@ impl<'a> Parser<'a> {
                         b'u' | b'U' => {
                             let max = if e == b'u' { 4 } else { 8 };
                             match self.hex_digits(max).and_then(char::from_u32) {
-                                Some(ch) => text.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes()),
+                                Some(ch) => {
+                                    text.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes())
+                                }
                                 None => text.extend_from_slice(&[b'\\', e]),
                             }
                         }
@@ -830,7 +890,11 @@ impl<'a> Parser<'a> {
 
     /// Up to `max` hex digits at `pos`, as a number; `None` if there are none.
     fn hex_digits(&mut self, max: usize) -> Option<u32> {
-        let n = self.b[self.pos..].iter().take(max).take_while(|c| c.is_ascii_hexdigit()).count();
+        let n = self.b[self.pos..]
+            .iter()
+            .take(max)
+            .take_while(|c| c.is_ascii_hexdigit())
+            .count();
         if n == 0 {
             return None;
         }
@@ -851,7 +915,10 @@ impl<'a> Parser<'a> {
                     return Err(Unbalanced);
                 }
                 let line_start = self.pos;
-                let line_end = self.b[line_start..].iter().position(|&c| c == b'\n').map_or(self.b.len(), |n| line_start + n);
+                let line_end = self.b[line_start..]
+                    .iter()
+                    .position(|&c| c == b'\n')
+                    .map_or(self.b.len(), |n| line_start + n);
                 // A line costs its length: looking for the delimiter is a pass over it.
                 self.work.spend(line_end - line_start + 1)?;
                 self.pos = (line_end + 1).min(self.b.len());
@@ -872,7 +939,10 @@ impl<'a> Parser<'a> {
             if hd.feeds_shell {
                 let body = &self.src[body_span.clone()];
                 let body = if hd.strip_tabs {
-                    body.lines().map(|l| l.trim_start_matches('\t')).collect::<Vec<_>>().join("\n")
+                    body.lines()
+                        .map(|l| l.trim_start_matches('\t'))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 } else {
                     body.to_owned()
                 };
@@ -907,7 +977,11 @@ impl<'a> Parser<'a> {
             return;
         }
         let payloads = command_payloads(&cmd.words);
-        self.out.commands.push(SimpleCommand { words: cmd.words, span: span.clone(), depth: self.depth });
+        self.out.commands.push(SimpleCommand {
+            words: cmd.words,
+            span: span.clone(),
+            depth: self.depth,
+        });
         match payloads {
             Payload::Text(text, at) => self.payload(&text, at),
             Payload::Stdin => {
@@ -937,13 +1011,21 @@ impl<'a> Parser<'a> {
         let sub = parse_at_depth(text, self.depth + 1, self.work);
         self.out.unparsed |= sub.unparsed;
         self.out.expanding_heredoc |= sub.expanding_heredoc;
-        self.out.commands.extend(sub.commands.into_iter().map(|c| SimpleCommand { span: span.clone(), ..c }));
+        self.out
+            .commands
+            .extend(sub.commands.into_iter().map(|c| SimpleCommand {
+                span: span.clone(),
+                ..c
+            }));
     }
 }
 
 /// A word that may start a command without being the command (`then`, `{`, …).
 fn is_command_keyword(w: &str) -> bool {
-    matches!(w, "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "{" | "!" | "time")
+    matches!(
+        w,
+        "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "{" | "!" | "time"
+    )
 }
 
 /// What a finished command runs as a nested script.
@@ -985,10 +1067,14 @@ pub(crate) fn command_word_index(words: &[Word]) -> Option<usize> {
                 let o = words[i].text.as_str();
                 if o.starts_with('-') && o.len() > 1 {
                     i += 1;
-                    if matches!(o, "-u" | "-n" | "-g" | "-a" | "-C" | "-s" | "-k") && i < words.len() {
+                    if matches!(o, "-u" | "-n" | "-g" | "-a" | "-C" | "-s" | "-k")
+                        && i < words.len()
+                    {
                         i += 1;
                     }
-                } else if is_assignment(o) || (w == "timeout" && o.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+                } else if is_assignment(o)
+                    || (w == "timeout" && o.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                {
                     i += 1;
                 } else {
                     break;
@@ -1002,13 +1088,18 @@ pub(crate) fn command_word_index(words: &[Word]) -> Option<usize> {
 }
 
 fn command_payloads(words: &[Word]) -> Payload {
-    let Some(at) = command_word_index(words) else { return Payload::None };
+    let Some(at) = command_word_index(words) else {
+        return Payload::None;
+    };
     let name = basename(&words[at].text);
     let rest = &words[at + 1..];
     if name == "eval" {
         return match (rest.first(), rest.last()) {
             (Some(first), Some(last)) => Payload::Text(
-                rest.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+                rest.iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 first.span.start..last.span.end,
             ),
             _ => Payload::None,

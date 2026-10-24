@@ -144,7 +144,11 @@ mod tests {
 
     #[test]
     fn diff_shapes_rendered_missing_a_subset() {
-        let expected = vec!["repl".to_string(), "detail.0".to_string(), "detail.1".to_string()];
+        let expected = vec![
+            "repl".to_string(),
+            "detail.0".to_string(),
+            "detail.1".to_string(),
+        ];
         let rendered = vec!["repl".to_string()];
         let diff = diff_shapes(&expected, &rendered);
         assert!(!diff.agrees);

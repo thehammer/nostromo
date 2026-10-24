@@ -132,15 +132,19 @@ pub fn view_state(
             .and_then(|b| view_of_binding(b, current_pr));
         // The tracker tab is never evicted, whatever it is bound to.
         let tracker_tab = pane_id == crate::tracker::placement::TRACKER_PANE_ID;
-        let pinned = tracker_tab || view.as_ref().is_some_and(|v| {
-            // The PR under review's conversation/diff are pinned; so is any view
-            // type the rules mark `pinned` (the review queue).
-            let rule_pins = cfg.view(v.view_type.as_str()).map(|r| r.pinned).unwrap_or(false);
-            rule_pins
-                || (matches!(v.view_type, ViewType::PrConversation | ViewType::PrDiff)
-                    && v.identity.pr() == pinned_pr
-                    && pinned_pr.is_some())
-        });
+        let pinned = tracker_tab
+            || view.as_ref().is_some_and(|v| {
+                // The PR under review's conversation/diff are pinned; so is any view
+                // type the rules mark `pinned` (the review queue).
+                let rule_pins = cfg
+                    .view(v.view_type.as_str())
+                    .map(|r| r.pinned)
+                    .unwrap_or(false);
+                rule_pins
+                    || (matches!(v.view_type, ViewType::PrConversation | ViewType::PrDiff)
+                        && v.identity.pr() == pinned_pr
+                        && pinned_pr.is_some())
+            });
         LiveView {
             pane_id: pane_id.to_string(),
             view,
@@ -292,7 +296,10 @@ mod tests {
     #[test]
     fn a_file_binding_recovers_its_path_and_revision_as_the_identity() {
         let v = view_of_binding(
-            &binding(SOURCE_FILE, Some(json!({"path": "src/a.rs", "revision": "abc"}))),
+            &binding(
+                SOURCE_FILE,
+                Some(json!({"path": "src/a.rs", "revision": "abc"})),
+            ),
             None,
         )
         .unwrap();
@@ -300,7 +307,8 @@ mod tests {
         assert_eq!(
             v.identity,
             ViewIdentity::File {
-                repo: None, path: "src/a.rs".into(),
+                repo: None,
+                path: "src/a.rs".into(),
                 revision: Some("abc".into())
             }
         );
@@ -309,14 +317,18 @@ mod tests {
     #[test]
     fn a_file_binding_with_an_empty_revision_is_the_resolve_it_for_me_identity() {
         let v = view_of_binding(
-            &binding(SOURCE_FILE, Some(json!({"path": "src/a.rs", "revision": ""}))),
+            &binding(
+                SOURCE_FILE,
+                Some(json!({"path": "src/a.rs", "revision": ""})),
+            ),
             None,
         )
         .unwrap();
         assert_eq!(
             v.identity,
             ViewIdentity::File {
-                repo: None, path: "src/a.rs".into(),
+                repo: None,
+                path: "src/a.rs".into(),
                 revision: None
             }
         );
@@ -325,7 +337,10 @@ mod tests {
     #[test]
     fn a_ticket_binding_recovers_its_provider_and_key() {
         let v = view_of_binding(
-            &binding(SOURCE_TICKET, Some(json!({"provider": "jira", "key": "CORE-1"}))),
+            &binding(
+                SOURCE_TICKET,
+                Some(json!({"provider": "jira", "key": "CORE-1"})),
+            ),
             None,
         )
         .unwrap();
@@ -357,17 +372,20 @@ mod tests {
 
     #[test]
     fn perri_standards_current_pr_pane_is_not_a_curated_view() {
-        assert!(view_of_binding(&binding("perri.get_current_pr", None), Some(("o/r", 94))).is_none());
+        assert!(
+            view_of_binding(&binding("perri.get_current_pr", None), Some(("o/r", 94))).is_none()
+        );
     }
 
     #[test]
     fn a_malformed_binding_is_unrecognised_rather_than_a_wrong_identity() {
         assert!(view_of_binding(&binding(SOURCE_FILE, Some(json!({}))), None).is_none());
         assert!(view_of_binding(&binding(SOURCE_FILE, None), None).is_none());
-        assert!(
-            view_of_binding(&binding(SOURCE_TICKET, Some(json!({"provider": "jira"}))), None)
-                .is_none()
-        );
+        assert!(view_of_binding(
+            &binding(SOURCE_TICKET, Some(json!({"provider": "jira"}))),
+            None
+        )
+        .is_none());
     }
 
     // ── 2. state derivation ───────────────────────────────────────────────────
@@ -380,14 +398,20 @@ mod tests {
             children: vec![
                 PaneTree::Tabs {
                     children: vec![
-                        PaneTree::Leaf { pane_id: "queue".into() },
-                        PaneTree::Leaf { pane_id: "detail.0".into() },
+                        PaneTree::Leaf {
+                            pane_id: "queue".into(),
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "detail.0".into(),
+                        },
                     ],
                     labels: vec!["Queue".into(), "Diff".into()],
                     active: 0,
                     region: Some("detail".into()),
                 },
-                PaneTree::Leaf { pane_id: "repl".into() },
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
             ],
             ratios: vec![0.6, 0.4],
         };
@@ -404,7 +428,10 @@ mod tests {
         let detail = state.region("detail").unwrap();
         assert_eq!(detail.tabs.len(), 2);
         assert_eq!(detail.tabs[0].pane_id, "queue");
-        assert_eq!(detail.tabs[0].view.as_ref().unwrap().view_type, ViewType::ReviewQueue);
+        assert_eq!(
+            detail.tabs[0].view.as_ref().unwrap().view_type,
+            ViewType::ReviewQueue
+        );
         assert!(detail.tabs[0].pinned, "the queue is always pinned");
         assert!(!detail.tabs[1].pinned);
     }
@@ -424,7 +451,11 @@ mod tests {
         let state = view_state(&cfg(), &tree, &bindings, Some(("o/r", 94)), &[]);
         let detail = state.region("detail").unwrap();
         assert_eq!(
-            detail.tabs.iter().map(|t| t.pane_id.as_str()).collect::<Vec<_>>(),
+            detail
+                .tabs
+                .iter()
+                .map(|t| t.pane_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["detail.0", "detail.1"]
         );
         assert_eq!(detail.active, Some(1));
@@ -447,7 +478,10 @@ mod tests {
         let mut bindings = BTreeMap::new();
         bindings.insert(
             "detail.0".to_string(),
-            binding(SOURCE_TICKET, Some(json!({"provider": "jira", "key": "CORE-1"}))),
+            binding(
+                SOURCE_TICKET,
+                Some(json!({"provider": "jira", "key": "CORE-1"})),
+            ),
         );
         bindings.insert(
             "detail.1".to_string(),
@@ -465,7 +499,8 @@ mod tests {
         assert_eq!(
             detail.tabs[1].view.as_ref().unwrap().identity,
             ViewIdentity::File {
-                repo: None, path: "src/a.rs".into(),
+                repo: None,
+                path: "src/a.rs".into(),
                 revision: None
             }
         );
@@ -479,7 +514,10 @@ mod tests {
         let mut bindings = BTreeMap::new();
         bindings.insert(
             "detail.0".to_string(),
-            binding(SOURCE_PR_CONVERSATION, Some(json!({"repo": "o/r", "number": 94}))),
+            binding(
+                SOURCE_PR_CONVERSATION,
+                Some(json!({"repo": "o/r", "number": 94})),
+            ),
         );
         bindings.insert(
             "detail.1".to_string(),

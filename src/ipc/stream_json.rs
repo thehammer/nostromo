@@ -511,15 +511,20 @@ fn parse_system_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine
             }),
             None => session_id.map(ParsedLine::SessionId),
         },
-        Some("model_fallback") | Some("model_refusal_fallback") | Some("model_consent_fallback") => {
-            Some(ParsedLine::ModelFallback {
-                original: str_field("original_model"),
-                fallback: str_field("fallback_model"),
-                content: str_field("content"),
-            })
-        }
-        Some(subtype @ ("task_started" | "task_progress" | "task_updated" | "task_notification"
-        | "background_tasks_changed")) => match parse_task_event(subtype, obj) {
+        Some("model_fallback")
+        | Some("model_refusal_fallback")
+        | Some("model_consent_fallback") => Some(ParsedLine::ModelFallback {
+            original: str_field("original_model"),
+            fallback: str_field("fallback_model"),
+            content: str_field("content"),
+        }),
+        Some(
+            subtype @ ("task_started"
+            | "task_progress"
+            | "task_updated"
+            | "task_notification"
+            | "background_tasks_changed"),
+        ) => match parse_task_event(subtype, obj) {
             Some(event) => Some(ParsedLine::Task(event)),
             // Malformed: treated like any other `system` line.
             None => session_id.map(ParsedLine::SessionId),
@@ -699,7 +704,10 @@ pub const NOSTROMO_NOTE_CLOSE: &str = "</nostromo-note>\n\n";
 /// and is never displayed.
 pub fn strip_nostromo_note(text: &str) -> &str {
     text.strip_prefix(NOSTROMO_NOTE_OPEN)
-        .and_then(|rest| rest.find(NOSTROMO_NOTE_CLOSE).map(|end| &rest[end + NOSTROMO_NOTE_CLOSE.len()..]))
+        .and_then(|rest| {
+            rest.find(NOSTROMO_NOTE_CLOSE)
+                .map(|end| &rest[end + NOSTROMO_NOTE_CLOSE.len()..])
+        })
         .unwrap_or(text)
 }
 
@@ -776,7 +784,10 @@ fn str_field(b: &Value, key: &str) -> Option<String> {
 
 /// The file a file tool works on: `input.file_path`, else `input.notebook_path`.
 fn target_of(name: &str, input: &Value) -> Option<String> {
-    if !matches!(name, "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit") {
+    if !matches!(
+        name,
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+    ) {
         return None;
     }
     str_field(input, "file_path").or_else(|| str_field(input, "notebook_path"))
@@ -1113,7 +1124,10 @@ impl SessionTranscript {
     /// Where the background `Bash` call `tool_use_id` writes its output,
     /// as its tool result said. A path the CLI reported, not yet validated.
     pub fn background_output_path(&self, tool_use_id: &str) -> Option<&str> {
-        self.tool_index.output_paths.get(tool_use_id).map(String::as_str)
+        self.tool_index
+            .output_paths
+            .get(tool_use_id)
+            .map(String::as_str)
     }
 
     /// Total user prompts ingested (see the `prompt_count` field).
@@ -1128,11 +1142,17 @@ impl SessionTranscript {
             Some(turn) => {
                 self.retained_bytes += block_bytes(&block);
                 turn.blocks.push(block.clone());
-                TurnDelta::Note { turn_id: Some(turn.id.clone()), block }
+                TurnDelta::Note {
+                    turn_id: Some(turn.id.clone()),
+                    block,
+                }
             }
             None => {
                 self.orphan_notes.push(block.clone());
-                TurnDelta::Note { turn_id: None, block }
+                TurnDelta::Note {
+                    turn_id: None,
+                    block,
+                }
             }
         };
         self.enforce_limits();
@@ -1167,7 +1187,8 @@ impl SessionTranscript {
             if note.after_prompt < first_retained {
                 continue;
             }
-            let index = ((note.after_prompt - first_retained) as usize).min(self.turns.len().saturating_sub(1));
+            let index = ((note.after_prompt - first_retained) as usize)
+                .min(self.turns.len().saturating_sub(1));
             match self.turns.get_mut(index) {
                 Some(turn) => {
                     self.retained_bytes += block_bytes(&block);
@@ -1203,7 +1224,9 @@ impl SessionTranscript {
                 vec![]
             }
 
-            ParsedLine::Model { session_id: None, .. }
+            ParsedLine::Model {
+                session_id: None, ..
+            }
             | ParsedLine::ModelFallback { .. }
             | ParsedLine::ControlResponse { .. }
             | ParsedLine::ControlRequest { .. }
@@ -1325,7 +1348,10 @@ impl SessionTranscript {
             let t = last.user_input.trim();
             t.starts_with('<') && t.ends_with('>')
         };
-        let answered = last.blocks.iter().any(|b| !matches!(b, TurnBlock::Note { .. }));
+        let answered = last
+            .blocks
+            .iter()
+            .any(|b| !matches!(b, TurnBlock::Note { .. }));
         if last.is_complete || !wrapped || answered {
             return None;
         }
@@ -1705,10 +1731,7 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#;
         match parse_line(line) {
             Some(ParsedLine::Blocks { blocks, .. }) => {
-                assert_eq!(
-                    blocks,
-                    vec![TurnBlock::text("hello")]
-                );
+                assert_eq!(blocks, vec![TurnBlock::text("hello")]);
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
@@ -1719,10 +1742,7 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"answer"}]}}"#;
         match parse_line(line) {
             Some(ParsedLine::Blocks { blocks, .. }) => {
-                assert_eq!(
-                    blocks,
-                    vec![TurnBlock::text("answer")]
-                );
+                assert_eq!(blocks, vec![TurnBlock::text("answer")]);
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
@@ -1871,17 +1891,28 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(results, vec![true, false], "first result interrupted, the next not");
+        assert_eq!(
+            results,
+            vec![true, false],
+            "first result interrupted, the next not"
+        );
     }
 
     #[test]
     fn a_result_without_an_interrupt_request_is_not_interrupted() {
         let mut t = SessionTranscript::new();
         ingest_all(&mut t, SIMPLE);
-        assert!(t.snapshot().iter().flat_map(|turn| turn.blocks.iter()).all(|b| !matches!(
-            b,
-            TurnBlock::ResultSummary { interrupted: true, .. }
-        )));
+        assert!(t
+            .snapshot()
+            .iter()
+            .flat_map(|turn| turn.blocks.iter())
+            .all(|b| !matches!(
+                b,
+                TurnBlock::ResultSummary {
+                    interrupted: true,
+                    ..
+                }
+            )));
     }
 
     #[test]
@@ -1896,7 +1927,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(saw, Some(true), "live clients get the flag on TurnCompleted, not only on replay");
+        assert_eq!(
+            saw,
+            Some(true),
+            "live clients get the flag on TurnCompleted, not only on replay"
+        );
     }
 
     #[test]
@@ -1938,15 +1973,9 @@ mod tests {
         match parse_line(line) {
             Some(ParsedLine::Blocks { blocks: b, .. }) => {
                 assert_eq!(b.len(), 3);
-                assert_eq!(
-                    b[0],
-                    TurnBlock::text("before")
-                );
+                assert_eq!(b[0], TurnBlock::text("before"));
                 assert!(matches!(b[1], TurnBlock::AskQuestion { .. }));
-                assert_eq!(
-                    b[2],
-                    TurnBlock::text("after")
-                );
+                assert_eq!(b[2], TurnBlock::text("after"));
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
@@ -1976,15 +2005,9 @@ mod tests {
         match parse_line(line) {
             Some(ParsedLine::Blocks { blocks: b, .. }) => {
                 assert_eq!(b.len(), 3);
-                assert_eq!(
-                    b[0],
-                    TurnBlock::text("before")
-                );
+                assert_eq!(b[0], TurnBlock::text("before"));
                 assert!(matches!(b[1], TurnBlock::AskQuestion { .. }));
-                assert_eq!(
-                    b[2],
-                    TurnBlock::text("after")
-                );
+                assert_eq!(b[2], TurnBlock::text("after"));
             }
             other => panic!("expected Blocks, got {other:?}"),
         }
@@ -2784,7 +2807,10 @@ mod tests {
             "ok, now run /model and tell me about <command-args>",
         ] {
             assert!(
-                matches!(parse_line(&user_event(serde_json::json!(text))), Some(ParsedLine::UserPrompt { .. })),
+                matches!(
+                    parse_line(&user_event(serde_json::json!(text))),
+                    Some(ParsedLine::UserPrompt { .. })
+                ),
                 "{text:?} is something the user typed"
             );
         }
@@ -2809,11 +2835,15 @@ mod tests {
         assert!(turns[0].is_complete);
         assert_eq!(t.prompt_count(), 1, "the phantom never counted as a prompt");
         assert!(
-            replaced.iter().any(|d| matches!(d, TurnDelta::TurnErrored { turn_id, .. } if *turn_id == phantom_id)),
+            replaced.iter().any(
+                |d| matches!(d, TurnDelta::TurnErrored { turn_id, .. } if *turn_id == phantom_id)
+            ),
             "a client that already saw the phantom's TurnStarted is told to close it: {replaced:?}"
         );
         assert!(
-            replaced.iter().any(|d| matches!(d, TurnDelta::TurnStarted { turn } if turn.user_input == "hi")),
+            replaced
+                .iter()
+                .any(|d| matches!(d, TurnDelta::TurnStarted { turn } if turn.user_input == "hi")),
             "{replaced:?}"
         );
     }
@@ -2823,7 +2853,9 @@ mod tests {
         deltas
             .iter()
             .filter_map(|d| match d {
-                TurnDelta::TurnErrored { turn_id, discarded, .. } => Some((turn_id.clone(), *discarded)),
+                TurnDelta::TurnErrored {
+                    turn_id, discarded, ..
+                } => Some((turn_id.clone(), *discarded)),
                 _ => None,
             })
             .collect()
@@ -2852,27 +2884,54 @@ mod tests {
         let mut t = SessionTranscript::new();
         t.ingest_line(&user_event(serde_json::json!("do a thing")));
 
-        let delta = t.mark_current_errored("child crashed").expect("there was an open turn");
+        let delta = t
+            .mark_current_errored("child crashed")
+            .expect("there was an open turn");
 
-        assert_eq!(errored(&[delta]).iter().map(|(_, discarded)| *discarded).collect::<Vec<_>>(), [false]);
+        assert_eq!(
+            errored(&[delta])
+                .iter()
+                .map(|(_, discarded)| *discarded)
+                .collect::<Vec<_>>(),
+            [false]
+        );
     }
 
     #[test]
     fn whether_an_errored_turn_was_discarded_is_not_on_the_wire() {
-        let ended = TurnDelta::TurnErrored { turn_id: "t0".into(), message: "x".into(), discarded: false };
-        let dropped = TurnDelta::TurnErrored { turn_id: "t1".into(), message: "y".into(), discarded: true };
+        let ended = TurnDelta::TurnErrored {
+            turn_id: "t0".into(),
+            message: "x".into(),
+            discarded: false,
+        };
+        let dropped = TurnDelta::TurnErrored {
+            turn_id: "t1".into(),
+            message: "y".into(),
+            discarded: true,
+        };
 
         for delta in [&ended, &dropped] {
             let json = serde_json::to_value(delta).unwrap();
             assert_eq!(json["delta"], "turn_errored");
-            assert!(json.get("discarded").is_none(), "no new key for the clients to trip over: {json}");
+            assert!(
+                json.get("discarded").is_none(),
+                "no new key for the clients to trip over: {json}"
+            );
             assert_eq!(
-                json.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>(),
-                ["delta", "message", "turn_id"].map(String::from).into_iter().collect(),
+                json.as_object()
+                    .unwrap()
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                ["delta", "message", "turn_id"]
+                    .map(String::from)
+                    .into_iter()
+                    .collect(),
                 "the same keys as before the flag existed"
             );
         }
-        let back: TurnDelta = serde_json::from_value(serde_json::to_value(&ended).unwrap()).unwrap();
+        let back: TurnDelta =
+            serde_json::from_value(serde_json::to_value(&ended).unwrap()).unwrap();
         assert_eq!(back, ended, "an ordinary errored turn still round-trips");
     }
 
@@ -2905,7 +2964,13 @@ mod tests {
         t.ingest_line(&user_event(serde_json::json!("hello? anyone?")));
 
         let turns = t.snapshot();
-        assert_eq!(turns.iter().map(|t| t.user_input.as_str()).collect::<Vec<_>>(), ["hello", "hello? anyone?"]);
+        assert_eq!(
+            turns
+                .iter()
+                .map(|t| t.user_input.as_str())
+                .collect::<Vec<_>>(),
+            ["hello", "hello? anyone?"]
+        );
         assert_eq!(t.prompt_count(), 2);
     }
 
@@ -2994,7 +3059,11 @@ mod tests {
                 tool_use_id,
                 parent_tool_use_id,
                 ..
-            } => (content, tool_use_id.as_deref(), parent_tool_use_id.as_deref()),
+            } => (
+                content,
+                tool_use_id.as_deref(),
+                parent_tool_use_id.as_deref(),
+            ),
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }
@@ -3103,10 +3172,7 @@ mod tests {
 
         let turns = t.snapshot();
         let blocks = &turns[1].blocks;
-        assert_eq!(
-            ts_of(first_call(blocks)),
-            Some(utc("2026-05-30T20:01:01Z"))
-        );
+        assert_eq!(ts_of(first_call(blocks)), Some(utc("2026-05-30T20:01:01Z")));
         assert_eq!(
             ts_of(first_result(blocks)),
             Some(utc("2026-05-30T20:01:02Z"))
@@ -3209,16 +3275,25 @@ mod tests {
         assert_eq!(blocks.len(), 10, "{blocks:#?}");
 
         // Main agent: prose, the Agent call.
-        assert!(matches!(&blocks[0], TurnBlock::Text { text, .. } if text == "Delegating the survey."));
+        assert!(
+            matches!(&blocks[0], TurnBlock::Text { text, .. } if text == "Delegating the survey.")
+        );
         assert_eq!(parent_of(&blocks[0]), None);
         assert_eq!(call_parts(&blocks[1]), ("Agent", AGENT, None, None));
 
         // Subagent: text, Read call, its result.
-        assert!(matches!(&blocks[2], TurnBlock::Text { text, .. } if text == "Reading the config."));
+        assert!(
+            matches!(&blocks[2], TurnBlock::Text { text, .. } if text == "Reading the config.")
+        );
         assert_eq!(parent_of(&blocks[2]), AGENT);
         assert_eq!(
             call_parts(&blocks[3]),
-            ("Read", Some("toolu_sub_read"), Some("/repo/src/config.rs"), AGENT)
+            (
+                "Read",
+                Some("toolu_sub_read"),
+                Some("/repo/src/config.rs"),
+                AGENT
+            )
         );
         assert_eq!(
             result_parts(&blocks[4]),
@@ -3232,14 +3307,23 @@ mod tests {
             call_parts(&blocks[6]),
             ("Bash", Some("toolu_sub_bash"), None, AGENT)
         );
-        assert_eq!(result_parts(&blocks[7]), ("", Some("toolu_sub_bash"), AGENT));
+        assert_eq!(
+            result_parts(&blocks[7]),
+            ("", Some("toolu_sub_bash"), AGENT)
+        );
 
         // The Agent call's own result and the main agent's closing prose.
         assert_eq!(
             result_parts(&blocks[8]),
-            ("The config is one small function.", Some("toolu_agent1"), None)
+            (
+                "The config is one small function.",
+                Some("toolu_agent1"),
+                None
+            )
         );
-        assert!(matches!(&blocks[9], TurnBlock::Text { text, .. } if text.starts_with("The subagent found")));
+        assert!(
+            matches!(&blocks[9], TurnBlock::Text { text, .. } if text.starts_with("The subagent found"))
+        );
         assert_eq!(parent_of(&blocks[9]), None);
     }
 
@@ -3309,7 +3393,10 @@ mod tests {
         t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"out","is_error":false,"tool_use_id":"toolu_s1"}]},"parent_tool_use_id":"toolu_agent1"}"#);
 
         let blocks = &t.snapshot()[0].blocks;
-        assert_eq!(result_parts(&blocks[0]), ("out", Some("toolu_s1"), Some("toolu_agent1")));
+        assert_eq!(
+            result_parts(&blocks[0]),
+            ("out", Some("toolu_s1"), Some("toolu_agent1"))
+        );
     }
 
     #[test]
@@ -3340,8 +3427,14 @@ mod tests {
             call_positions[0] + 1,
             "no block (thinking is dropped) sits between the calls: {blocks:#?}"
         );
-        assert_eq!(call_parts(&blocks[call_positions[0]]).1, Some("toolu_first"));
-        assert_eq!(call_parts(&blocks[call_positions[1]]).1, Some("toolu_second"));
+        assert_eq!(
+            call_parts(&blocks[call_positions[0]]).1,
+            Some("toolu_first")
+        );
+        assert_eq!(
+            call_parts(&blocks[call_positions[1]]).1,
+            Some("toolu_second")
+        );
         assert!(
             blocks.iter().all(|b| !matches!(b, TurnBlock::Note { .. })),
             "thinking must not surface as another kind of block"
@@ -3381,8 +3474,14 @@ mod tests {
     #[test]
     fn tools_that_are_not_file_tools_report_no_target() {
         assert_eq!(call_target("Bash", r#"{"command":"ls"}"#), None);
-        assert_eq!(call_target("Bash", r#"{"command":"ls","file_path":"/x"}"#), None);
-        assert_eq!(call_target("Grep", r#"{"pattern":"x","path":"/repo"}"#), None);
+        assert_eq!(
+            call_target("Bash", r#"{"command":"ls","file_path":"/x"}"#),
+            None
+        );
+        assert_eq!(
+            call_target("Grep", r#"{"pattern":"x","path":"/repo"}"#),
+            None
+        );
         assert_eq!(call_target("Read", r#"{}"#), None);
     }
 
@@ -3509,7 +3608,10 @@ mod tests {
             parent_tool_use_id: None,
         };
 
-        assert_eq!(keys(&call), ["input_full", "input_summary", "kind", "tool_name"]);
+        assert_eq!(
+            keys(&call),
+            ["input_full", "input_summary", "kind", "tool_name"]
+        );
         assert_eq!(keys(&result), ["content", "is_error", "kind"]);
         assert_eq!(keys(&TurnBlock::text("x")), ["kind", "text"]);
     }
@@ -3534,16 +3636,25 @@ mod tests {
     fn identity_time_and_parentage_all_count_toward_retained_bytes() {
         let plain = retained_after(|_| {}, &call_line(""));
         let with_id = retained_after(|_| {}, &call_line(r#""id":"toolu_0123456789","#));
-        assert!(with_id > plain, "tool_use_id must be counted: {with_id} vs {plain}");
+        assert!(
+            with_id > plain,
+            "tool_use_id must be counted: {with_id} vs {plain}"
+        );
 
         let live = retained_after(|t| t.set_live(true), &call_line(""));
-        assert!(live > plain, "a stamped ts must be counted: {live} vs {plain}");
+        assert!(
+            live > plain,
+            "a stamped ts must be counted: {live} vs {plain}"
+        );
 
         let sidechain = retained_after(
             |_| {},
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"same"}}]},"parent_tool_use_id":"toolu_agent_long_id"}"#,
         );
-        assert!(sidechain > plain, "parent id must be counted: {sidechain} vs {plain}");
+        assert!(
+            sidechain > plain,
+            "parent id must be counted: {sidechain} vs {plain}"
+        );
     }
 
     #[test]
@@ -3568,9 +3679,22 @@ mod tests {
         ingest_all(&mut t, THINKING_BETWEEN_CALLS);
         ingest_all(&mut t, TOOL_SUCCESS);
         // Make sure the interesting fields really are on the wire here.
-        let tagged = t.snapshot().iter().flat_map(|turn| turn.blocks.clone()).any(|b| {
-            matches!(&b, TurnBlock::ToolCall { target: Some(_), ts: Some(_), parent_tool_use_id: Some(_), tool_use_id: Some(_), .. })
-        });
+        let tagged = t
+            .snapshot()
+            .iter()
+            .flat_map(|turn| turn.blocks.clone())
+            .any(|b| {
+                matches!(
+                    &b,
+                    TurnBlock::ToolCall {
+                        target: Some(_),
+                        ts: Some(_),
+                        parent_tool_use_id: Some(_),
+                        tool_use_id: Some(_),
+                        ..
+                    }
+                )
+            });
         assert!(tagged);
 
         assert_eq!(t.byte_len(), recount_bytes(&t));
@@ -3587,7 +3711,10 @@ mod tests {
     const TASK_SESSION: &str = include_str!("testdata/tasks-session.jsonl");
 
     fn fixture_line(content: &str, n: usize) -> &str {
-        content.lines().nth(n).unwrap_or_else(|| panic!("fixture has no line {n}"))
+        content
+            .lines()
+            .nth(n)
+            .unwrap_or_else(|| panic!("fixture has no line {n}"))
     }
 
     fn task_event_at(n: usize) -> TaskEvent {
@@ -3599,7 +3726,8 @@ mod tests {
 
     /// A line the CLI emits about its background tasks, found without the parser.
     fn is_task_line(line: &str) -> bool {
-        line.contains(r#""subtype":"task_"#) || line.contains(r#""subtype":"background_tasks_changed""#)
+        line.contains(r#""subtype":"task_"#)
+            || line.contains(r#""subtype":"background_tasks_changed""#)
     }
 
     #[test]
@@ -3646,18 +3774,25 @@ mod tests {
 
     #[test]
     fn an_agent_start_carries_its_prompt_and_subagent_type() {
-        let TaskEventKind::Started(s) = task_event_at(2).kind else { panic!() };
+        let TaskEventKind::Started(s) = task_event_at(2).kind else {
+            panic!()
+        };
         assert_eq!(s.task_id, "agt5r1w3d");
         assert_eq!(s.task_type.as_deref(), Some("local_agent"));
         assert_eq!(s.subagent_type.as_deref(), Some("Explore"));
-        assert_eq!(s.prompt.as_deref(), Some("Read the config and report what you find."));
+        assert_eq!(
+            s.prompt.as_deref(),
+            Some("Read the config and report what you find.")
+        );
         assert_eq!(s.is_backgrounded, Some(false));
         assert_eq!(s.run_id, None);
     }
 
     #[test]
     fn a_workflow_start_carries_its_name_and_parent() {
-        let TaskEventKind::Started(s) = task_event_at(3).kind else { panic!() };
+        let TaskEventKind::Started(s) = task_event_at(3).kind else {
+            panic!()
+        };
         assert_eq!(s.task_type.as_deref(), Some("local_workflow"));
         assert_eq!(s.workflow_name.as_deref(), Some("release-checks"));
         assert_eq!(s.parent_task_id.as_deref(), Some("agt5r1w3d"));
@@ -3665,30 +3800,44 @@ mod tests {
 
     #[test]
     fn a_future_task_type_is_carried_through_untouched() {
-        let TaskEventKind::Started(s) = task_event_at(4).kind else { panic!() };
+        let TaskEventKind::Started(s) = task_event_at(4).kind else {
+            panic!()
+        };
         assert_eq!(s.task_type.as_deref(), Some("quantum_task"));
     }
 
     #[test]
     fn ambient_and_skip_transcript_are_read_from_a_start() {
-        let TaskEventKind::Started(ambient) = task_event_at(5).kind else { panic!() };
+        let TaskEventKind::Started(ambient) = task_event_at(5).kind else {
+            panic!()
+        };
         assert!(ambient.ambient && !ambient.skip_transcript);
-        let TaskEventKind::Started(skip) = task_event_at(6).kind else { panic!() };
+        let TaskEventKind::Started(skip) = task_event_at(6).kind else {
+            panic!()
+        };
         assert!(skip.skip_transcript && !skip.ambient);
-        let TaskEventKind::Started(plain) = task_event_at(0).kind else { panic!() };
+        let TaskEventKind::Started(plain) = task_event_at(0).kind else {
+            panic!()
+        };
         assert!(!plain.ambient && !plain.skip_transcript);
     }
 
     #[test]
     fn task_progress_parses_usage_last_tool_and_summary() {
-        let TaskEventKind::Progress(p) = task_event_at(7).kind else { panic!() };
+        let TaskEventKind::Progress(p) = task_event_at(7).kind else {
+            panic!()
+        };
         assert_eq!(p.task_id, "agt5r1w3d");
         assert_eq!(p.tool_use_id.as_deref(), Some("toolu_agent1"));
         assert_eq!(p.description.as_deref(), Some("Reading the config files"));
         assert_eq!(p.subagent_type.as_deref(), Some("Explore"));
         assert_eq!(
             p.usage,
-            Some(TaskUsage { total_tokens: Some(1234), tool_uses: Some(3), duration_ms: Some(4200) })
+            Some(TaskUsage {
+                total_tokens: Some(1234),
+                tool_uses: Some(3),
+                duration_ms: Some(4200)
+            })
         );
         assert_eq!(p.last_tool_name.as_deref(), Some("Read"));
         assert_eq!(p.summary.as_deref(), Some("Reading the config files"));
@@ -3696,33 +3845,50 @@ mod tests {
 
     #[test]
     fn partial_and_absent_usage_stay_partial_and_absent() {
-        let TaskEventKind::Progress(partial) = task_event_at(8).kind else { panic!() };
+        let TaskEventKind::Progress(partial) = task_event_at(8).kind else {
+            panic!()
+        };
         assert_eq!(
             partial.usage,
-            Some(TaskUsage { total_tokens: Some(50), tool_uses: None, duration_ms: None })
+            Some(TaskUsage {
+                total_tokens: Some(50),
+                tool_uses: None,
+                duration_ms: None
+            })
         );
-        let TaskEventKind::Progress(none) = task_event_at(9).kind else { panic!() };
+        let TaskEventKind::Progress(none) = task_event_at(9).kind else {
+            panic!()
+        };
         assert_eq!(none.usage, None);
     }
 
     #[test]
     fn task_updated_parses_its_patch() {
-        let TaskEventKind::Updated(u) = task_event_at(10).kind else { panic!() };
+        let TaskEventKind::Updated(u) = task_event_at(10).kind else {
+            panic!()
+        };
         assert_eq!(u.task_id, "b7k2m9x1a");
         assert_eq!(u.run_id.as_deref(), Some("run-001"));
         assert_eq!(u.patch.status, Some(RawTaskStatus::Completed));
         assert_eq!(u.patch.end_time, Some(1_760_000_012_345));
 
-        let TaskEventKind::Updated(misc) = task_event_at(11).kind else { panic!() };
+        let TaskEventKind::Updated(misc) = task_event_at(11).kind else {
+            panic!()
+        };
         assert_eq!(misc.patch.status, None);
-        assert_eq!(misc.patch.description.as_deref(), Some("Watch the deploy log (prod)"));
+        assert_eq!(
+            misc.patch.description.as_deref(),
+            Some("Watch the deploy log (prod)")
+        );
         assert_eq!(misc.patch.is_backgrounded, Some(true));
         assert_eq!(misc.patch.end_time, None);
     }
 
     #[test]
     fn task_notification_parses_status_reason_output_file_and_usage() {
-        let TaskEventKind::Notification(n) = task_event_at(12).kind else { panic!() };
+        let TaskEventKind::Notification(n) = task_event_at(12).kind else {
+            panic!()
+        };
         assert_eq!(n.task_id, "agt5r1w3d");
         assert_eq!(n.tool_use_id.as_deref(), Some("toolu_agent1"));
         assert_eq!(n.status, TaskStatus::Completed);
@@ -3731,20 +3897,31 @@ mod tests {
             n.output_file.as_deref(),
             Some("/private/tmp/claude-501/-repo/tsk-0001/tasks/agt5r1w3d.output")
         );
-        assert_eq!(n.summary.as_deref(), Some("Agent \"Survey the config\" finished"));
+        assert_eq!(
+            n.summary.as_deref(),
+            Some("Agent \"Survey the config\" finished")
+        );
         assert_eq!(
             n.usage,
-            Some(TaskUsage { total_tokens: Some(2000), tool_uses: Some(5), duration_ms: Some(9000) })
+            Some(TaskUsage {
+                total_tokens: Some(2000),
+                tool_uses: Some(5),
+                duration_ms: Some(9000)
+            })
         );
 
-        let TaskEventKind::Notification(restart) = task_event_at(13).kind else { panic!() };
+        let TaskEventKind::Notification(restart) = task_event_at(13).kind else {
+            panic!()
+        };
         assert_eq!(restart.status, TaskStatus::Stopped);
         assert_eq!(restart.reason.as_deref(), Some("worker_restart"));
     }
 
     #[test]
     fn background_tasks_changed_parses_the_whole_level() {
-        let TaskEventKind::LevelChanged(level) = task_event_at(14).kind else { panic!() };
+        let TaskEventKind::LevelChanged(level) = task_event_at(14).kind else {
+            panic!()
+        };
         assert_eq!(
             level,
             vec![
@@ -3772,13 +3949,17 @@ mod tests {
                 },
             ]
         );
-        let TaskEventKind::LevelChanged(empty) = task_event_at(15).kind else { panic!() };
+        let TaskEventKind::LevelChanged(empty) = task_event_at(15).kind else {
+            panic!()
+        };
         assert!(empty.is_empty(), "an empty level is a real, empty level");
     }
 
     #[test]
     fn a_frame_naming_an_earlier_run_still_parses_and_is_left_to_the_registry() {
-        let TaskEventKind::Progress(p) = task_event_at(16).kind else { panic!() };
+        let TaskEventKind::Progress(p) = task_event_at(16).kind else {
+            panic!()
+        };
         assert_eq!(p.run_id.as_deref(), Some("run-000"));
     }
 
@@ -3800,11 +3981,15 @@ mod tests {
     fn a_level_without_tasks_is_not_mistaken_for_an_empty_level() {
         // An empty level would end every background task after the grace.
         assert!(!matches!(
-            parse_line(r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s"}"#),
+            parse_line(
+                r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s"}"#
+            ),
             Some(ParsedLine::Task(_))
         ));
         assert!(!matches!(
-            parse_line(r#"{"type":"system","subtype":"background_tasks_changed","tasks":null,"session_id":"s"}"#),
+            parse_line(
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":null,"session_id":"s"}"#
+            ),
             Some(ParsedLine::Task(_))
         ));
     }
@@ -3812,23 +3997,29 @@ mod tests {
     #[test]
     fn odd_but_usable_task_events_are_tolerated() {
         // Garbage entries in a level are skipped, the good one is kept.
-        let Some(ParsedLine::Task(TaskEvent { kind: TaskEventKind::LevelChanged(level), .. })) =
-            parse_line(fixture_line(TASK_MALFORMED, 12))
+        let Some(ParsedLine::Task(TaskEvent {
+            kind: TaskEventKind::LevelChanged(level),
+            ..
+        })) = parse_line(fixture_line(TASK_MALFORMED, 12))
         else {
             panic!("line 12 should still be a level")
         };
         assert_eq!(level.len(), 1);
         assert_eq!(level[0].task_id, "ok1");
         // A usage that is not an object is no usage.
-        let Some(ParsedLine::Task(TaskEvent { kind: TaskEventKind::Progress(p), .. })) =
-            parse_line(fixture_line(TASK_MALFORMED, 13))
+        let Some(ParsedLine::Task(TaskEvent {
+            kind: TaskEventKind::Progress(p),
+            ..
+        })) = parse_line(fixture_line(TASK_MALFORMED, 13))
         else {
             panic!("line 13 should still be progress")
         };
         assert_eq!(p.usage, None);
         // An unknown patch status and an end_time that is not a number are ignored.
-        let Some(ParsedLine::Task(TaskEvent { kind: TaskEventKind::Updated(u), .. })) =
-            parse_line(fixture_line(TASK_MALFORMED, 14))
+        let Some(ParsedLine::Task(TaskEvent {
+            kind: TaskEventKind::Updated(u),
+            ..
+        })) = parse_line(fixture_line(TASK_MALFORMED, 14))
         else {
             panic!("line 14 should still be an update")
         };
@@ -3853,17 +4044,28 @@ mod tests {
         let mut t = SessionTranscript::new();
         t.ingest_line(fixture_line(TASK_EVENTS, 0));
         assert_eq!(t.session_id(), Some("tsk-0001"));
-        t.ingest_line(r#"{"type":"system","subtype":"task_progress","task_id":"x","session_id":"another"}"#);
+        t.ingest_line(
+            r#"{"type":"system","subtype":"task_progress","task_id":"x","session_id":"another"}"#,
+        );
         assert_eq!(t.session_id(), Some("tsk-0001"), "the first id sticks");
     }
 
     #[test]
     fn a_recorded_session_with_task_events_builds_the_same_transcript_as_without_them() {
-        let all: Vec<&str> = TASK_SESSION.lines().filter(|l| !l.trim().is_empty()).collect();
+        let all: Vec<&str> = TASK_SESSION
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
         let task_lines = all.iter().filter(|l| is_task_line(l)).count();
-        assert!(task_lines >= 7, "the fixture must really interleave task events ({task_lines})");
+        assert!(
+            task_lines >= 7,
+            "the fixture must really interleave task events ({task_lines})"
+        );
         for line in all.iter().filter(|l| is_task_line(l)) {
-            assert!(matches!(parse_line(line), Some(ParsedLine::Task(_))), "{line}");
+            assert!(
+                matches!(parse_line(line), Some(ParsedLine::Task(_))),
+                "{line}"
+            );
         }
 
         let mut with = SessionTranscript::new();
@@ -3874,7 +4076,11 @@ mod tests {
             let d = with.ingest_line(line);
             if is_task_line(line) {
                 assert!(d.is_empty(), "a task event produced deltas: {d:?}");
-                assert_eq!(serde_json::to_string(&with.snapshot()).unwrap(), before, "a task event changed a turn");
+                assert_eq!(
+                    serde_json::to_string(&with.snapshot()).unwrap(),
+                    before,
+                    "a task event changed a turn"
+                );
             } else {
                 deltas_without.extend(without.ingest_line(line));
             }
@@ -3922,9 +4128,12 @@ mod tests {
             .iter()
             .flat_map(|turn| turn.blocks.iter())
             .filter_map(|b| match b {
-                TurnBlock::ToolCall { tool_name, tool_use_id: Some(id), parent_tool_use_id, .. } => {
-                    Some((id.clone(), tool_name.clone(), parent_tool_use_id.is_some()))
-                }
+                TurnBlock::ToolCall {
+                    tool_name,
+                    tool_use_id: Some(id),
+                    parent_tool_use_id,
+                    ..
+                } => Some((id.clone(), tool_name.clone(), parent_tool_use_id.is_some())),
                 _ => None,
             })
             .collect()
@@ -3936,7 +4145,10 @@ mod tests {
         ingest_all(&mut t, SUBAGENT);
         let calls = calls_in(&t);
         assert!(calls.len() >= 3, "{calls:?}");
-        assert!(calls.iter().any(|(_, _, sub)| *sub), "the fixture has a subagent's calls");
+        assert!(
+            calls.iter().any(|(_, _, sub)| *sub),
+            "the fixture has a subagent's calls"
+        );
         assert!(calls.iter().any(|(_, _, sub)| !sub), "and a top-level one");
 
         for (id, name, _) in &calls {
@@ -3966,10 +4178,14 @@ mod tests {
     fn bash_background_exchange(i: usize, path: &str) -> String {
         format!(
             concat!(
-                r#"{{"type":"user","message":{{"role":"user","content":"prompt {i}"}},"isReplay":true}}"#, "\n",
-                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_{i}","name":"Bash","input":{{"command":"make {i}","run_in_background":true}}}}]}}}}"#, "\n",
-                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"Command running in background with ID: b{i}. Output is being written to: {path}","is_error":false,"tool_use_id":"toolu_{i}"}}]}}}}"#, "\n",
-                r#"{{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}}"#, "\n",
+                r#"{{"type":"user","message":{{"role":"user","content":"prompt {i}"}},"isReplay":true}}"#,
+                "\n",
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_{i}","name":"Bash","input":{{"command":"make {i}","run_in_background":true}}}}]}}}}"#,
+                "\n",
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"Command running in background with ID: b{i}. Output is being written to: {path}","is_error":false,"tool_use_id":"toolu_{i}"}}]}}}}"#,
+                "\n",
+                r#"{{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}}"#,
+                "\n",
             ),
             i = i,
             path = path,
@@ -3979,7 +4195,10 @@ mod tests {
     #[test]
     fn a_background_bash_results_output_path_is_captured_without_the_full_stop() {
         let mut t = SessionTranscript::new();
-        ingest_all(&mut t, &bash_background_exchange(0, "/private/tmp/claude-501/-repo/s1/tasks/b0.output."));
+        ingest_all(
+            &mut t,
+            &bash_background_exchange(0, "/private/tmp/claude-501/-repo/s1/tasks/b0.output."),
+        );
         assert_eq!(
             t.background_output_path("toolu_0"),
             Some("/private/tmp/claude-501/-repo/s1/tasks/b0.output")
@@ -3989,7 +4208,10 @@ mod tests {
     #[test]
     fn the_path_is_taken_whether_or_not_a_full_stop_follows_it() {
         let mut t = SessionTranscript::new();
-        ingest_all(&mut t, &bash_background_exchange(1, "/private/tmp/claude-501/-repo/s1/tasks/b1.output"));
+        ingest_all(
+            &mut t,
+            &bash_background_exchange(1, "/private/tmp/claude-501/-repo/s1/tasks/b1.output"),
+        );
         assert_eq!(
             t.background_output_path("toolu_1"),
             Some("/private/tmp/claude-501/-repo/s1/tasks/b1.output")
@@ -4002,7 +4224,10 @@ mod tests {
         t.ingest_line(&user_line(0));
         t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_x","name":"Bash","input":{"command":"x"}}]}}"#);
         t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Started. Output is being written to: /p/q/tasks/bx.output.\nYou will be notified when it completes.","is_error":false,"tool_use_id":"toolu_x"}]}}"#);
-        assert_eq!(t.background_output_path("toolu_x"), Some("/p/q/tasks/bx.output"));
+        assert_eq!(
+            t.background_output_path("toolu_x"),
+            Some("/p/q/tasks/bx.output")
+        );
     }
 
     #[test]
@@ -4016,7 +4241,11 @@ mod tests {
             t.ingest_line(&format!(
                 r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"Output is being written to: /p/q/tasks/b.output.","is_error":false,"tool_use_id":"toolu_{tool}"}}]}}}}"#
             ));
-            assert_eq!(t.background_output_path(&format!("toolu_{tool}")), None, "{tool}");
+            assert_eq!(
+                t.background_output_path(&format!("toolu_{tool}")),
+                None,
+                "{tool}"
+            );
         }
     }
 
@@ -4046,7 +4275,10 @@ mod tests {
         t.ingest_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_sb","name":"Bash","input":{"command":"x"}}]},"parent_tool_use_id":"toolu_agent9"}"#);
         t.ingest_line(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output is being written to: /p/q/tasks/sb.output.","is_error":false,"tool_use_id":"toolu_sb"}]},"isSidechain":true,"parent_tool_use_id":"toolu_agent9"}"#);
         assert_eq!(t.tool_name_of("toolu_sb"), Some("Bash"));
-        assert_eq!(t.background_output_path("toolu_sb"), Some("/p/q/tasks/sb.output"));
+        assert_eq!(
+            t.background_output_path("toolu_sb"),
+            Some("/p/q/tasks/sb.output")
+        );
     }
 
     #[test]
@@ -4054,11 +4286,15 @@ mod tests {
         let mut t = SessionTranscript::new();
         let total = 5 * RETAINED_TURNS;
         for i in 0..total {
-            ingest_all(&mut t, &bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output.")));
+            ingest_all(
+                &mut t,
+                &bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output.")),
+            );
         }
         assert_eq!(t.turn_count(), RETAINED_TURNS);
 
-        let kept: std::collections::HashSet<String> = calls_in(&t).into_iter().map(|(id, _, _)| id).collect();
+        let kept: std::collections::HashSet<String> =
+            calls_in(&t).into_iter().map(|(id, _, _)| id).collect();
         assert_eq!(kept.len(), RETAINED_TURNS);
         for i in 0..total {
             let id = format!("toolu_{i}");
@@ -4067,7 +4303,11 @@ mod tests {
                 assert!(t.background_output_path(&id).is_some(), "{id} is retained");
             } else {
                 assert_eq!(t.tool_name_of(&id), None, "{id} was dropped with its turn");
-                assert_eq!(t.background_output_path(&id), None, "{id} was dropped with its turn");
+                assert_eq!(
+                    t.background_output_path(&id),
+                    None,
+                    "{id} was dropped with its turn"
+                );
             }
         }
     }
@@ -4076,24 +4316,40 @@ mod tests {
     fn the_index_forgets_the_calls_of_turns_cut_by_truncate_to_last() {
         let mut t = SessionTranscript::new();
         for i in 0..6 {
-            ingest_all(&mut t, &bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output.")));
+            ingest_all(
+                &mut t,
+                &bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output.")),
+            );
         }
 
         t.truncate_to_last(2);
 
         for i in 0..4 {
             assert_eq!(t.tool_name_of(&format!("toolu_{i}")), None, "toolu_{i}");
-            assert_eq!(t.background_output_path(&format!("toolu_{i}")), None, "toolu_{i}");
+            assert_eq!(
+                t.background_output_path(&format!("toolu_{i}")),
+                None,
+                "toolu_{i}"
+            );
         }
         for i in 4..6 {
-            assert_eq!(t.tool_name_of(&format!("toolu_{i}")), Some("Bash"), "toolu_{i}");
-            assert!(t.background_output_path(&format!("toolu_{i}")).is_some(), "toolu_{i}");
+            assert_eq!(
+                t.tool_name_of(&format!("toolu_{i}")),
+                Some("Bash"),
+                "toolu_{i}"
+            );
+            assert!(
+                t.background_output_path(&format!("toolu_{i}")).is_some(),
+                "toolu_{i}"
+            );
         }
     }
 
     #[test]
     fn a_stored_session_trimmed_to_its_last_turns_indexes_only_those() {
-        let content: String = (0..6).map(|i| bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output."))).collect();
+        let content: String = (0..6)
+            .map(|i| bash_background_exchange(i, &format!("/p/q/tasks/b{i}.output.")))
+            .collect();
         let t = transcript_from_jsonl(&content, 2);
         assert_eq!(t.tool_name_of("toolu_3"), None);
         assert_eq!(t.tool_name_of("toolu_4"), Some("Bash"));
@@ -4137,7 +4393,9 @@ mod tests {
                 if live {
                     registry.apply(&event, now, &|id| t.tool_name_of(id).map(str::to_owned));
                 } else {
-                    registry.apply(&event, now, &|id| replayed.tool_name_of(id).map(str::to_owned));
+                    registry.apply(&event, now, &|id| {
+                        replayed.tool_name_of(id).map(str::to_owned)
+                    });
                 }
             }
             t.ingest_line(line);
@@ -4157,7 +4415,11 @@ mod tests {
 
         for id in ["toolu_bash_bg", "toolu_monitor1", "toolu_missing"] {
             assert_eq!(live.tool_name_of(id), replayed.tool_name_of(id), "{id}");
-            assert_eq!(live.background_output_path(id), replayed.background_output_path(id), "{id}");
+            assert_eq!(
+                live.background_output_path(id),
+                replayed.background_output_path(id),
+                "{id}"
+            );
         }
         assert_eq!(
             live.background_output_path("toolu_bash_bg"),
@@ -4166,8 +4428,15 @@ mod tests {
         let from_live = resolved(&live_registry, &live);
         let from_replay = resolved(&replay_registry, &replayed);
         assert_eq!(from_live, from_replay);
-        let kinds: Vec<(&str, TaskKind)> = from_live.iter().map(|t| (t.id.as_str(), t.kind)).collect();
-        assert_eq!(kinds, [("b7k2m9x1a", TaskKind::Shell), ("mon4q8z2c", TaskKind::Monitor)]);
+        let kinds: Vec<(&str, TaskKind)> =
+            from_live.iter().map(|t| (t.id.as_str(), t.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("b7k2m9x1a", TaskKind::Shell),
+                ("mon4q8z2c", TaskKind::Monitor)
+            ]
+        );
     }
 
     #[test]
@@ -4193,10 +4462,17 @@ mod tests {
         let frame: Value = serde_json::from_str(SPIKE_CAN_USE_TOOL).unwrap();
 
         match parse_line(SPIKE_CAN_USE_TOOL) {
-            Some(ParsedLine::ControlRequest { request_id, subtype, request }) => {
+            Some(ParsedLine::ControlRequest {
+                request_id,
+                subtype,
+                request,
+            }) => {
                 assert_eq!(request_id, "315e4b2d-d8ae-4f3e-b81a-fc597edca048");
                 assert_eq!(subtype, "can_use_tool");
-                assert_eq!(request, frame["request"], "the inner request, field for field");
+                assert_eq!(
+                    request, frame["request"],
+                    "the inner request, field for field"
+                );
             }
             other => panic!("expected a control request, got {other:?}"),
         }
@@ -4207,8 +4483,15 @@ mod tests {
         let line = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback","callback_id":"hook_0"}}"#;
 
         match parse_line(line) {
-            Some(ParsedLine::ControlRequest { request_id, subtype, request }) => {
-                assert_eq!((request_id.as_str(), subtype.as_str()), ("r1", "hook_callback"));
+            Some(ParsedLine::ControlRequest {
+                request_id,
+                subtype,
+                request,
+            }) => {
+                assert_eq!(
+                    (request_id.as_str(), subtype.as_str()),
+                    ("r1", "hook_callback")
+                );
                 assert_eq!(request["callback_id"], "hook_0");
             }
             other => panic!("{other:?}"),
@@ -4219,7 +4502,9 @@ mod tests {
     fn a_withdrawn_request_parses_as_a_control_cancel_with_its_request_id() {
         assert_eq!(
             parse_line(SPIKE_CANCEL),
-            Some(ParsedLine::ControlCancel { request_id: "1b4be05b-b626-44da-9c7c-e5596c1df87f".to_string() })
+            Some(ParsedLine::ControlCancel {
+                request_id: "1b4be05b-b626-44da-9c7c-e5596c1df87f".to_string()
+            })
         );
     }
 
@@ -4238,7 +4523,9 @@ mod tests {
     fn a_control_request_without_a_string_id_is_unreadable_and_keeps_a_numeric_id() {
         // The CLI waits for an answer all the same, so it is handed on, not dropped.
         assert_eq!(
-            parse_line(r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}"#),
+            parse_line(
+                r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}"#
+            ),
             Some(ParsedLine::UnreadableControlRequest {
                 request_id: None,
                 subtype: Some("can_use_tool".to_string()),
@@ -4246,7 +4533,9 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_line(r#"{"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool"}}"#),
+            parse_line(
+                r#"{"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool"}}"#
+            ),
             Some(ParsedLine::UnreadableControlRequest {
                 request_id: Some(serde_json::json!(7)),
                 subtype: Some("can_use_tool".to_string()),
@@ -4265,10 +4554,17 @@ mod tests {
         for line in [SPIKE_CAN_USE_TOOL, SPIKE_CANCEL] {
             assert!(t.ingest_line(line).is_empty(), "no turn event for {line}");
             let parsed = parse_line(line).expect("parses");
-            assert!(t.ingest_parsed(parsed).is_empty(), "no turn event for {line}");
+            assert!(
+                t.ingest_parsed(parsed).is_empty(),
+                "no turn event for {line}"
+            );
         }
 
-        assert_eq!(t.snapshot().len(), before, "a prompt opens no turn and adds no block");
+        assert_eq!(
+            t.snapshot().len(),
+            before,
+            "a prompt opens no turn and adds no block"
+        );
         assert_eq!(t.session_id().map(str::to_owned), session);
     }
 
@@ -4276,6 +4572,10 @@ mod tests {
     fn a_control_response_still_parses_as_before() {
         let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"interrupt-1","response":{"still_queued":[]}}}"#;
 
-        assert!(matches!(parse_line(line), Some(ParsedLine::ControlResponse { .. })), "{:?}", parse_line(line));
+        assert!(
+            matches!(parse_line(line), Some(ParsedLine::ControlResponse { .. })),
+            "{:?}",
+            parse_line(line)
+        );
     }
 }

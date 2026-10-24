@@ -93,7 +93,9 @@ impl Fx {
             session_mgr: Arc::clone(&session_mgr),
             broadcast_tx: tx.clone(),
             perri: PerriDaemonState::default(),
-            decisions: Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default())),
+            decisions: Arc::new(Mutex::new(
+                nostromo::ipc::decisions::DecisionRegistry::default(),
+            )),
             tickets: Default::default(),
             tracker: Arc::clone(&registry),
         });
@@ -144,7 +146,8 @@ impl Fx {
                     if line.starts_with("- [ ] ") {
                         line.replacen("- [ ] ", "- [x] ", 1)
                     } else {
-                        line.replacen("- [x] ", "- [ ] ", 1).replacen("- [X] ", "- [ ] ", 1)
+                        line.replacen("- [x] ", "- [ ] ", 1)
+                            .replacen("- [X] ", "- [ ] ", 1)
                     }
                 } else {
                     line.to_string()
@@ -248,7 +251,11 @@ fn different_status(current: Status) -> &'static str {
 
 async fn run_benchmark() -> Bench {
     let plain = plain_items();
-    assert!(plain.len() >= 35, "the fixture has {} plain items", plain.len());
+    assert!(
+        plain.len() >= 35,
+        "the fixture has {} plain items",
+        plain.len()
+    );
     let updates: Vec<&(String, Status)> = plain[..30].iter().collect();
     let edits: Vec<&(String, Status)> = plain[30..35].iter().collect();
 
@@ -260,9 +267,18 @@ async fn run_benchmark() -> Bench {
     let mut tally = |req: usize, resp: usize| session_tokens += req + resp;
 
     // open: the session's first call, which carries the compact board.
-    let (open, req, resp) = call(&fx, &mut log, "tracker/open", json!({"op": "open", "topic": TOPIC})).await;
+    let (open, req, resp) = call(
+        &fx,
+        &mut log,
+        "tracker/open",
+        json!({"op": "open", "topic": TOPIC}),
+    )
+    .await;
     assert_eq!(open["ok"], json!(true), "{open}");
-    assert!(open["board"].is_string(), "the first open carries the board: {open}");
+    assert!(
+        open["board"].is_string(),
+        "the first open carries the board: {open}"
+    );
     let open_response_tokens = resp;
     tally(req, resp);
 
@@ -322,7 +338,9 @@ async fn run_benchmark() -> Bench {
                         "pane_id": "tracker",
                         "content": {"type": "text", "text": board_now},
                     });
-                    let base_req = json!({"name": "nostromo.set_pane_content", "arguments": base_args}).to_string();
+                    let base_req =
+                        json!({"name": "nostromo.set_pane_content", "arguments": base_args})
+                            .to_string();
                     let base_resp = json!({"ok": true}).to_string();
                     let base_label = format!("baseline/set_pane_content-{next_update:02}");
                     log.push(&base_label, "request", &base_req);
@@ -396,34 +414,82 @@ async fn the_tracker_meets_the_token_targets_on_the_sixty_item_benchmark() {
 
     let ratio = bench.session_tokens as f64 / bench.baseline_tokens as f64;
     println!("== tracker token benchmark (est_tokens = ceil(bytes / 2.5)) ==");
-    println!("file (board-60.md)                 : {} tokens", bench.file_tokens);
-    println!("open response (with board)         : {} tokens", bench.open_response_tokens);
-    println!("first read of a fresh session      : {} tokens", bench.first_read_response_tokens);
-    println!("status request, max of 30          : {} tokens (limit 80)", bench.max_status_request);
-    println!("status response, max of 30         : {} tokens (limit 50)", bench.max_status_response);
+    println!(
+        "file (board-60.md)                 : {} tokens",
+        bench.file_tokens
+    );
+    println!(
+        "open response (with board)         : {} tokens",
+        bench.open_response_tokens
+    );
+    println!(
+        "first read of a fresh session      : {} tokens",
+        bench.first_read_response_tokens
+    );
+    println!(
+        "status request, max of 30          : {} tokens (limit 80)",
+        bench.max_status_request
+    );
+    println!(
+        "status response, max of 30         : {} tokens (limit 50)",
+        bench.max_status_response
+    );
     for (i, (k, tokens)) in bench.reads.iter().enumerate() {
-        println!("read {i} with {k} change(s)           : {tokens} tokens (limit {})", 40 + 70 * k);
+        println!(
+            "read {i} with {k} change(s)           : {tokens} tokens (limit {})",
+            40 + 70 * k
+        );
     }
     for k in [1, 3, 5] {
-        println!("read with {k} change(s), fresh board  : {} tokens (limit {})", read_with_k_changes(k).await, 40 + 70 * k);
+        println!(
+            "read with {k} change(s), fresh board  : {} tokens (limit {})",
+            read_with_k_changes(k).await,
+            40 + 70 * k
+        );
     }
-    println!("tracker session total              : {} tokens", bench.session_tokens);
-    println!("full-board baseline total          : {} tokens", bench.baseline_tokens);
-    println!("tracker / baseline                 : {:.1}% (limit 15%)", ratio * 100.0);
-    println!("descriptor                         : {} tokens, {} bytes (limits 1500, 3600)", bench.descriptor_tokens, bench.descriptor_bytes);
+    println!(
+        "tracker session total              : {} tokens",
+        bench.session_tokens
+    );
+    println!(
+        "full-board baseline total          : {} tokens",
+        bench.baseline_tokens
+    );
+    println!(
+        "tracker / baseline                 : {:.1}% (limit 15%)",
+        ratio * 100.0
+    );
+    println!(
+        "descriptor                         : {} tokens, {} bytes (limits 1500, 3600)",
+        bench.descriptor_tokens, bench.descriptor_bytes
+    );
 
-    assert!(bench.max_status_request <= 80, "status request: {} tokens", bench.max_status_request);
-    assert!(bench.max_status_response <= 50, "status response: {} tokens", bench.max_status_response);
+    assert!(
+        bench.max_status_request <= 80,
+        "status request: {} tokens",
+        bench.max_status_request
+    );
+    assert!(
+        bench.max_status_response <= 50,
+        "status response: {} tokens",
+        bench.max_status_response
+    );
     for (i, (k, tokens)) in bench.reads.iter().enumerate() {
         if *k == 0 {
             assert!(*tokens <= 40, "empty read {i}: {tokens} tokens");
         } else {
-            assert!(*tokens <= 40 + 70 * k, "read {i} with {k} change(s): {tokens} tokens");
+            assert!(
+                *tokens <= 40 + 70 * k,
+                "read {i} with {k} change(s): {tokens} tokens"
+            );
         }
     }
     for k in [1, 3, 5] {
         let tokens = read_with_k_changes(k).await;
-        assert!(tokens <= 40 + 70 * k, "read with {k} changes: {tokens} tokens");
+        assert!(
+            tokens <= 40 + 70 * k,
+            "read with {k} changes: {tokens} tokens"
+        );
     }
     assert!(
         bench.first_read_response_tokens <= bench.file_tokens,
@@ -444,8 +510,16 @@ async fn the_tracker_meets_the_token_targets_on_the_sixty_item_benchmark() {
         bench.session_tokens,
         bench.baseline_tokens
     );
-    assert!(bench.descriptor_tokens <= 1_500, "descriptor: {} tokens", bench.descriptor_tokens);
-    assert!(bench.descriptor_bytes <= 3_600, "descriptor: {} bytes", bench.descriptor_bytes);
+    assert!(
+        bench.descriptor_tokens <= 1_500,
+        "descriptor: {} tokens",
+        bench.descriptor_tokens
+    );
+    assert!(
+        bench.descriptor_bytes <= 3_600,
+        "descriptor: {} bytes",
+        bench.descriptor_bytes
+    );
 }
 
 /// Writes every benchmark request and response to `target/tracker-bench/`.
@@ -468,5 +542,9 @@ async fn dump() {
         let body = json!({"label": record.label, "kind": record.kind, "text": record.text});
         std::fs::write(dir.join(name), serde_json::to_vec_pretty(&body).unwrap()).expect("write");
     }
-    println!("wrote {} files to {}", bench.log.records.len(), dir.display());
+    println!(
+        "wrote {} files to {}",
+        bench.log.records.len(),
+        dir.display()
+    );
 }

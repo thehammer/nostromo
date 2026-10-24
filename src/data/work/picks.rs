@@ -76,7 +76,11 @@ pub const PICKS_TAG: &str = "teri-picks";
 
 /// The MCP tools the picking session may call, as the daemon names them. The
 /// daemon's MCP dispatch refuses every other tool for the [`PICKS_TAG`] caller.
-pub const PICKS_TOOLS: [&str; 3] = ["teri.list_work_items", "teri.get_work_item", "teri.publish_picks"];
+pub const PICKS_TOOLS: [&str; 3] = [
+    "teri.list_work_items",
+    "teri.get_work_item",
+    "teri.publish_picks",
+];
 /// The same tools as `claude` names them (`mcp__<server>__<tool>`).
 pub const PICKS_MCP_TOOLS: [&str; 3] = [
     "mcp__nostromo__teri_list_work_items",
@@ -92,7 +96,11 @@ pub const PICKS_MAX_BUDGET_USD: f64 = 2.0;
 pub fn picks_restrictions() -> SessionRestrictions {
     SessionRestrictions {
         builtin_tools: PICKS_BUILTIN_TOOLS.iter().map(|t| t.to_string()).collect(),
-        allowed_tools: PICKS_MCP_TOOLS.iter().chain(PICKS_BUILTIN_TOOLS.iter()).map(|t| t.to_string()).collect(),
+        allowed_tools: PICKS_MCP_TOOLS
+            .iter()
+            .chain(PICKS_BUILTIN_TOOLS.iter())
+            .map(|t| t.to_string())
+            .collect(),
         max_budget_usd: Some(PICKS_MAX_BUDGET_USD),
     }
 }
@@ -151,8 +159,12 @@ pub fn sanitize_reason(raw: &str) -> Option<String> {
     }
     // Invisible characters first: they must not split a URL past the scanners below.
     // Then NFKC, so full-width `ｈｔｔｐ：／／` and the like read as the ASCII they imitate.
-    let flat = one_line(&one_line(raw, usize::MAX).nfkc().collect::<String>(), usize::MAX);
-    let markdown_link = MARKDOWN_LINK.get_or_init(|| Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").expect("static regex"));
+    let flat = one_line(
+        &one_line(raw, usize::MAX).nfkc().collect::<String>(),
+        usize::MAX,
+    );
+    let markdown_link =
+        MARKDOWN_LINK.get_or_init(|| Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").expect("static regex"));
     let url = URL.get_or_init(|| {
         Regex::new(r"(?i)\b(?:[a-z][a-z0-9+.\-]*://|www\.|mailto:|javascript:|data:|vbscript:|file:|tel:|sms:)\S*")
             .expect("static regex")
@@ -272,7 +284,12 @@ impl PicksStore {
     pub fn load(path: Option<PathBuf>, tx: broadcast::Sender<ServerMsg>) -> Arc<Self> {
         let mut snapshot = path.as_deref().map(read_saved).unwrap_or_default();
         snapshot.generating = false;
-        Arc::new(Self { path, tx, snapshot: Mutex::new(snapshot), publishes: watch::channel(0).0 })
+        Arc::new(Self {
+            path,
+            tx,
+            snapshot: Mutex::new(snapshot),
+            publishes: watch::channel(0).0,
+        })
     }
 
     pub fn snapshot(&self) -> PicksSnapshot {
@@ -285,7 +302,11 @@ impl PicksStore {
     /// Each stored reason is the sanitised one ([`sanitize_reason`]) and each
     /// title the hub's, as one line. The ids are checked against the hub's real
     /// ids inside the store lock, so a publish and a source update cannot cross.
-    pub fn publish(&self, entries: &[PickEntry], hub: &WorkHub) -> Result<PicksSnapshot, PublishError> {
+    pub fn publish(
+        &self,
+        entries: &[PickEntry],
+        hub: &WorkHub,
+    ) -> Result<PicksSnapshot, PublishError> {
         if !(MIN_PICKS..=MAX_PICKS).contains(&entries.len()) {
             return Err(PublishError::WrongCount(entries.len()));
         }
@@ -301,12 +322,16 @@ impl PicksStore {
 
         let published = self.update(|snap| {
             let (known, presence) = hub.picks_view(&seen);
-            let unknown: Vec<String> =
-                entries.iter().filter(|e| !known.contains_key(&e.item_id)).map(|e| e.item_id.clone()).collect();
+            let unknown: Vec<String> = entries
+                .iter()
+                .filter(|e| !known.contains_key(&e.item_id))
+                .map(|e| e.item_id.clone())
+                .collect();
             if !unknown.is_empty() {
                 return Err(PublishError::UnknownIds(unknown));
             }
-            let reasons: Vec<Option<String>> = entries.iter().map(|e| sanitize_reason(&e.reason)).collect();
+            let reasons: Vec<Option<String>> =
+                entries.iter().map(|e| sanitize_reason(&e.reason)).collect();
             let bad_reasons: Vec<String> = entries
                 .iter()
                 .zip(&reasons)
@@ -400,7 +425,9 @@ impl PicksStore {
         let result = change(&mut guard);
         if *guard != before {
             self.persist(&guard);
-            let _ = self.tx.send(ServerMsg::TeriPicks { picks: guard.clone() });
+            let _ = self.tx.send(ServerMsg::TeriPicks {
+                picks: guard.clone(),
+            });
         }
         result
     }
@@ -414,8 +441,13 @@ impl PicksStore {
     /// never saved: it is a property of this process.
     fn persist(&self, snapshot: &PicksSnapshot) {
         let Some(path) = &self.path else { return };
-        let saved = PicksSnapshot { generating: false, ..snapshot.clone() };
-        if let Err(e) = write_atomically(path, &serde_json::to_vec_pretty(&saved).unwrap_or_default()) {
+        let saved = PicksSnapshot {
+            generating: false,
+            ..snapshot.clone()
+        };
+        if let Err(e) =
+            write_atomically(path, &serde_json::to_vec_pretty(&saved).unwrap_or_default())
+        {
             warn!(path = %path.display(), "could not save picks: {e}");
         }
     }
@@ -452,7 +484,10 @@ fn read_saved(path: &Path) -> PicksSnapshot {
 
 /// Rename `path` to the first free `<name>.corrupt-N`.
 fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     for n in 1..1_000 {
         let target = path.with_file_name(format!("{name}.corrupt-{n}"));
         if !target.exists() {
@@ -468,7 +503,10 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let tmp = path.with_file_name(format!("{name}.tmp-{}", uuid::Uuid::new_v4().simple()));
     let result = (|| {
         let mut file = std::fs::File::create(&tmp)?;
@@ -491,7 +529,12 @@ pub fn default_path() -> PathBuf {
 /// empty or stale (a stale source still holds items to pick from).
 fn unavailable_sources<'a>(statuses: impl Iterator<Item = &'a SourceStatus>) -> Vec<WorkSource> {
     statuses
-        .filter(|s| !matches!(s.state, SourceState::Fresh | SourceState::Empty | SourceState::Stale))
+        .filter(|s| {
+            !matches!(
+                s.state,
+                SourceState::Fresh | SourceState::Empty | SourceState::Stale
+            )
+        })
         .map(|s| s.source)
         .collect()
 }
@@ -516,7 +559,9 @@ fn done_since(pick: &Pick, presence: &[SourcePresence]) -> Option<bool> {
 
 /// A repo-docs item whose repo failed to scan is missing because of the failure.
 fn repo_group_failed(status: &SourceStatus, item_id: &str) -> bool {
-    let Some(rest) = item_id.strip_prefix("doc:") else { return false };
+    let Some(rest) = item_id.strip_prefix("doc:") else {
+        return false;
+    };
     let repo = rest.split(':').next().unwrap_or("");
     status.group_errors.iter().any(|e| e.group == repo)
 }
@@ -527,7 +572,12 @@ fn repo_group_failed(status: &SourceStatus, item_id: &str) -> bool {
 pub trait PicksSessionHost: Send + Sync {
     /// Start a fresh hidden session in `cwd` under `restrictions`, with no
     /// agent (the instructions are the prompt). Must not register it as a focus.
-    fn spawn(&self, tag: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String>;
+    fn spawn(
+        &self,
+        tag: &str,
+        cwd: &Path,
+        restrictions: &SessionRestrictions,
+    ) -> Result<(), String>;
     /// Send the session its one message.
     fn send(&self, tag: &str, text: &str) -> Result<(), String>;
     fn is_alive(&self, _tag: &str) -> bool {
@@ -554,19 +604,33 @@ impl SessionManagerHost {
 }
 
 impl PicksSessionHost for SessionManagerHost {
-    fn spawn(&self, tag: &str, cwd: &Path, restrictions: &SessionRestrictions) -> Result<(), String> {
+    fn spawn(
+        &self,
+        tag: &str,
+        cwd: &Path,
+        restrictions: &SessionRestrictions,
+    ) -> Result<(), String> {
         let mut mgr = self.mgr();
         // The tag runs restricted for good: a restart or a respawn of it is boxed in too.
         mgr.restrict_tag(tag, restrictions.clone());
         // Every generation starts from a blank conversation, never a resumed one.
         mgr.new_session(tag);
-        mgr.spawn_session(tag.into(), String::new(), "Teri picks".into(), Some(cwd.to_path_buf()), None, false)
-            .map(|_| ())
-            .map_err(|e| format!("{e:#}"))
+        mgr.spawn_session(
+            tag.into(),
+            String::new(),
+            "Teri picks".into(),
+            Some(cwd.to_path_buf()),
+            None,
+            false,
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
     }
 
     fn send(&self, tag: &str, text: &str) -> Result<(), String> {
-        self.mgr().send_user_message(tag, text, &[]).map_err(|e| format!("{e:#}"))
+        self.mgr()
+            .send_user_message(tag, text, &[])
+            .map_err(|e| format!("{e:#}"))
     }
 
     fn is_alive(&self, tag: &str) -> bool {
@@ -598,7 +662,13 @@ impl Attempts {
 
     /// May a run for `reason` start now? `picks_made_today`: the stored picks were
     /// published on today's local date, by any run, in this process or an earlier one.
-    fn allows(&self, reason: Reason, today: NaiveDate, picks_made_today: bool, now: Instant) -> bool {
+    fn allows(
+        &self,
+        reason: Reason,
+        today: NaiveDate,
+        picks_made_today: bool,
+        now: Instant,
+    ) -> bool {
         match reason {
             Reason::FirstOpen => {
                 !picks_made_today
@@ -652,7 +722,11 @@ impl GeneratorEnv {
 /// path with every non-alphanumeric character turned into `-`, under `projects_dir`.
 pub fn transcript_dir_for(projects_dir: &Path, cwd: &Path) -> PathBuf {
     let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let name: String = real.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let name: String = real
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     projects_dir.join(name)
 }
 
@@ -669,7 +743,11 @@ pub struct PicksGenerator {
 impl PicksGenerator {
     /// A generator that counts days by the machine's local calendar (DST-safe: it
     /// is the calendar date, not a 24-hour span).
-    pub fn new(store: Arc<PicksStore>, host: Arc<dyn PicksSessionHost>, timeout: Duration) -> Arc<Self> {
+    pub fn new(
+        store: Arc<PicksStore>,
+        host: Arc<dyn PicksSessionHost>,
+        timeout: Duration,
+    ) -> Arc<Self> {
         Self::with_env(store, host, timeout, GeneratorEnv::local())
     }
 
@@ -681,7 +759,12 @@ impl PicksGenerator {
         timeout: Duration,
         today: TodayFn,
     ) -> Arc<Self> {
-        let env = GeneratorEnv { today, date_of: Arc::new(|_| NaiveDate::MIN), projects_dir: None, scratch_root: None };
+        let env = GeneratorEnv {
+            today,
+            date_of: Arc::new(|_| NaiveDate::MIN),
+            projects_dir: None,
+            scratch_root: None,
+        };
         Self::with_env(store, host, timeout, env)
     }
 
@@ -715,20 +798,27 @@ impl PicksGenerator {
                 self.store.broadcast();
                 return Ok(());
             }
-            _ => return Err(WorkError::new("invalid_argument", "unknown picks refresh reason")),
+            _ => {
+                return Err(WorkError::new(
+                    "invalid_argument",
+                    "unknown picks refresh reason",
+                ))
+            }
         };
         if self.in_flight.load(Ordering::SeqCst) {
             return Ok(());
         }
         let today = (self.env.today)();
-        let picks_made_today =
-            self.store.snapshot().generated_at.is_some_and(|at| (self.env.date_of)(at) == today);
-        let allowed = self.attempts.lock().unwrap_or_else(|e| e.into_inner()).allows(
-            reason,
-            today,
-            picks_made_today,
-            Instant::now(),
-        );
+        let picks_made_today = self
+            .store
+            .snapshot()
+            .generated_at
+            .is_some_and(|at| (self.env.date_of)(at) == today);
+        let allowed = self
+            .attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .allows(reason, today, picks_made_today, Instant::now());
         if !allowed {
             self.store.broadcast();
             return Ok(());
@@ -748,7 +838,12 @@ impl PicksGenerator {
         self.in_flight.load(Ordering::SeqCst)
     }
 
-    async fn run(self: Arc<Self>, reason: Reason, today: NaiveDate, publishes: watch::Receiver<u64>) {
+    async fn run(
+        self: Arc<Self>,
+        reason: Reason,
+        today: NaiveDate,
+        publishes: watch::Receiver<u64>,
+    ) {
         let started = SystemTime::now();
         let scratch = ScratchDir::create(self.env.scratch_root.as_deref());
         // Worked out while the directory exists: `claude` files transcripts under its real path.
@@ -778,7 +873,9 @@ impl PicksGenerator {
         }
         match outcome {
             Ok(()) => self.store.finish_generation(None),
-            Err(reason) => self.store.finish_generation(Some(format!("Picks refresh failed: {reason}"))),
+            Err(reason) => self
+                .store
+                .finish_generation(Some(format!("Picks refresh failed: {reason}"))),
         }
         self.in_flight.store(false, Ordering::SeqCst);
     }
@@ -788,7 +885,9 @@ impl PicksGenerator {
         self.host
             .spawn(PICKS_TAG, cwd, &picks_restrictions())
             .map_err(|e| format!("could not start the session: {e}"))?;
-        self.host.send(PICKS_TAG, PICKS_PROMPT).map_err(|e| format!("could not send the request: {e}"))?;
+        self.host
+            .send(PICKS_TAG, PICKS_PROMPT)
+            .map_err(|e| format!("could not send the request: {e}"))?;
 
         let deadline = Instant::now() + self.timeout;
         loop {
@@ -848,8 +947,16 @@ struct RunTranscripts {
 
 impl RunTranscripts {
     fn new(projects: &Path, scratch: &Path, started: SystemTime) -> Self {
-        let token = scratch.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Self { projects: projects.to_path_buf(), derived: transcript_dir_for(projects, scratch), token, started }
+        let token = scratch
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self {
+            projects: projects.to_path_buf(),
+            derived: transcript_dir_for(projects, scratch),
+            token,
+            started,
+        }
     }
 
     /// Best effort; never fails the run.
@@ -857,12 +964,18 @@ impl RunTranscripts {
         if !self.token.starts_with(SCRATCH_PREFIX) {
             return;
         }
-        let derived_name = self.derived.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let derived_name = self
+            .derived
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if derived_name.contains(&self.token) {
             let _ = std::fs::remove_dir_all(&self.derived);
         }
         let prefix: String = derived_name.chars().take(SWEEP_PREFIX_CHARS).collect();
-        let Ok(entries) = std::fs::read_dir(&self.projects) else { return };
+        let Ok(entries) = std::fs::read_dir(&self.projects) else {
+            return;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with(&prefix) && self.is_this_runs(&entry.path()) {
@@ -872,23 +985,36 @@ impl RunTranscripts {
     }
 
     fn is_this_runs(&self, dir: &Path) -> bool {
-        let Ok(meta) = std::fs::symlink_metadata(dir) else { return false };
+        let Ok(meta) = std::fs::symlink_metadata(dir) else {
+            return false;
+        };
         if !meta.is_dir() {
             return false;
         }
-        let since = self.started.checked_sub(START_SLACK).unwrap_or(self.started);
-        meta.modified().is_ok_and(|m| m >= since) && self.a_transcript_names_the_scratch_directory(dir)
+        let since = self
+            .started
+            .checked_sub(START_SLACK)
+            .unwrap_or(self.started);
+        meta.modified().is_ok_and(|m| m >= since)
+            && self.a_transcript_names_the_scratch_directory(dir)
     }
 
     fn a_transcript_names_the_scratch_directory(&self, dir: &Path) -> bool {
         use std::io::Read as _;
-        let Ok(files) = std::fs::read_dir(dir) else { return false };
-        files.flatten().filter(|f| f.path().extension().is_some_and(|e| e == "jsonl")).any(|f| {
-            let Ok(file) = std::fs::File::open(f.path()) else { return false };
-            let mut head = Vec::new();
-            file.take(SWEEP_READ_BYTES).read_to_end(&mut head).is_ok()
-                && String::from_utf8_lossy(&head).contains(&self.token)
-        })
+        let Ok(files) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        files
+            .flatten()
+            .filter(|f| f.path().extension().is_some_and(|e| e == "jsonl"))
+            .any(|f| {
+                let Ok(file) = std::fs::File::open(f.path()) else {
+                    return false;
+                };
+                let mut head = Vec::new();
+                file.take(SWEEP_READ_BYTES).read_to_end(&mut head).is_ok()
+                    && String::from_utf8_lossy(&head).contains(&self.token)
+            })
     }
 }
 
@@ -898,7 +1024,9 @@ struct ScratchDir(PathBuf);
 
 impl ScratchDir {
     fn create(root: Option<&Path>) -> std::io::Result<Self> {
-        let root = root.map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+        let root = root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
         let path = root.join(format!("{SCRATCH_PREFIX}{}", uuid::Uuid::new_v4().simple()));
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
@@ -937,7 +1065,12 @@ fn describe(d: Duration) -> String {
 mod tests {
     use super::*;
 
-    fn presence(state: SourceState, complete: bool, reason: Option<&str>, ids: &[&str]) -> Vec<SourcePresence> {
+    fn presence(
+        state: SourceState,
+        complete: bool,
+        reason: Option<&str>,
+        ids: &[&str],
+    ) -> Vec<SourcePresence> {
         vec![SourcePresence {
             status: SourceStatus {
                 source: WorkSource::Jira,
@@ -954,7 +1087,13 @@ mod tests {
     }
 
     fn pick(id: &str) -> Pick {
-        Pick { item_id: id.into(), source: WorkSource::Jira, title: "t".into(), reason: "r".into(), done_since: false }
+        Pick {
+            item_id: id.into(),
+            source: WorkSource::Jira,
+            title: "t".into(),
+            reason: "r".into(),
+            done_since: false,
+        }
     }
 
     #[test]
@@ -962,7 +1101,12 @@ mod tests {
         // `fresh` with no note but `complete: false` (a truncated list, an older sender): says nothing.
         let partial = presence(SourceState::Fresh, false, None, &["RM-1"]);
         assert_eq!(done_since(&pick("RM-2"), &partial), None);
-        let noted = presence(SourceState::Fresh, false, Some("results truncated"), &["RM-1"]);
+        let noted = presence(
+            SourceState::Fresh,
+            false,
+            Some("results truncated"),
+            &["RM-1"],
+        );
         assert_eq!(done_since(&pick("RM-2"), &noted), None);
     }
 
@@ -977,8 +1121,17 @@ mod tests {
 
     #[test]
     fn a_stale_or_failing_complete_flagged_source_still_says_nothing() {
-        for state in [SourceState::Stale, SourceState::Error, SourceState::Loading, SourceState::RateLimited] {
-            assert_eq!(done_since(&pick("RM-2"), &presence(state, true, None, &[])), None, "{state:?}");
+        for state in [
+            SourceState::Stale,
+            SourceState::Error,
+            SourceState::Loading,
+            SourceState::RateLimited,
+        ] {
+            assert_eq!(
+                done_since(&pick("RM-2"), &presence(state, true, None, &[])),
+                None,
+                "{state:?}"
+            );
         }
     }
 }

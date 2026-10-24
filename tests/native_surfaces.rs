@@ -29,6 +29,7 @@ struct Daemon {
     socket_path: std::path::PathBuf,
     tcp_port: u16,
     registry: Arc<Mutex<PaneRegistry>>,
+    session_mgr: Arc<Mutex<SessionManager>>,
     state: McpSharedState,
     _server: Server,
     _tmp: TempDir,
@@ -47,21 +48,29 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         let envelope = json!({ "version": 3, "trees": trees, "bindings": {} });
         std::fs::write(tmp.path().join("panes.json"), envelope.to_string()).unwrap();
     }
-    let registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(tmp.path().join("panes.json"))));
-    let session_mgr =
-        Arc::new(Mutex::new(SessionManager::with_store_path(tmp.path().join("sessions.json"))));
+    let registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
+        tmp.path().join("panes.json"),
+    )));
+    let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+        tmp.path().join("sessions.json"),
+    )));
     session_mgr.lock().unwrap().configure_mcp_bridge(
         Arc::clone(&registry),
         tmp.path().join("mcp.sock"),
         tmp.path().join("mcp-config.json"),
     );
-    let decisions = Arc::new(Mutex::new(nostromo::ipc::decisions::DecisionRegistry::default()));
+    let decisions = Arc::new(Mutex::new(
+        nostromo::ipc::decisions::DecisionRegistry::default(),
+    ));
+    let session_mgr_handle = Arc::clone(&session_mgr);
     let server = Server::bind(
         &socket_path,
         Arc::clone(&session_mgr),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
-        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(tmp.path().join("operator-app.pin"))),
+        Arc::new(nostromo::ipc::peer_verify::MacPeerVerifier::new(
+            tmp.path().join("operator-app.pin"),
+        )),
         false,
     )
     .unwrap();
@@ -84,11 +93,21 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         tickets: Default::default(),
         tracker: Default::default(),
     });
-    Daemon { socket_path, tcp_port, registry, state, _server: server, _tmp: tmp }
+    Daemon {
+        socket_path,
+        tcp_port,
+        registry,
+        session_mgr: session_mgr_handle,
+        state,
+        _server: server,
+        _tmp: tmp,
+    }
 }
 
 async fn send(s: &mut UnixStream, msg: &ClientMsg) {
-    write_frame(s, &serde_json::to_vec(msg).unwrap()).await.unwrap();
+    write_frame(s, &serde_json::to_vec(msg).unwrap())
+        .await
+        .unwrap();
 }
 
 async fn recv(s: &mut UnixStream) -> ServerMsg {
@@ -101,10 +120,25 @@ async fn recv(s: &mut UnixStream) -> ServerMsg {
 
 async fn connect(d: &Daemon) -> UnixStream {
     let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
-    send(&mut s, &ClientMsg::Hello { client_id: "native-surfaces-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None })
-        .await;
+    send(
+        &mut s,
+        &ClientMsg::Hello {
+            client_id: "native-surfaces-it".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client_kind: None,
+        },
+    )
+    .await;
     assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
-    send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false, renders_approvals: false }).await;
+    send(
+        &mut s,
+        &ClientMsg::Subscribe {
+            topics: vec![Topic::Layout, Topic::Focuses],
+            renders_decisions: false,
+            renders_approvals: false,
+        },
+    )
+    .await;
     sync(&mut s).await;
     s
 }
@@ -182,12 +216,24 @@ async fn pushing_the_registry_gives_teri_and_fred_their_native_panes_beside_the_
     let d = spawn();
     let mut client = connect(&d).await;
 
-    let frames = push_and_settle(&mut client, vec![meta("teri", "teri"), meta("fred", "fred")]).await;
+    let frames = push_and_settle(
+        &mut client,
+        vec![meta("teri", "teri"), meta("fred", "fred")],
+    )
+    .await;
 
     let teri = layouts_for(&frames, "teri");
     let fred = layouts_for(&frames, "fred");
-    assert_eq!(teri.len(), 1, "exactly one FocusLayout for teri: {frames:?}");
-    assert_eq!(fred.len(), 1, "exactly one FocusLayout for fred: {frames:?}");
+    assert_eq!(
+        teri.len(),
+        1,
+        "exactly one FocusLayout for teri: {frames:?}"
+    );
+    assert_eq!(
+        fred.len(),
+        1,
+        "exactly one FocusLayout for fred: {frames:?}"
+    );
     assert_eq!(ids(teri[0]), vec!["teri_surface", "repl"]);
     assert_eq!(ids(fred[0]), vec!["fred_hud", "repl"]);
     assert_eq!(registry_ids(&d, "teri"), vec!["teri_surface", "repl"]);
@@ -198,13 +244,23 @@ async fn pushing_the_registry_gives_teri_and_fred_their_native_panes_beside_the_
 async fn a_second_push_sends_no_new_layout() {
     let d = spawn();
     let mut client = connect(&d).await;
-    let first = push_and_settle(&mut client, vec![meta("teri", "teri"), meta("fred", "fred")]).await;
+    let first = push_and_settle(
+        &mut client,
+        vec![meta("teri", "teri"), meta("fred", "fred")],
+    )
+    .await;
     assert!(!layouts_for(&first, "teri").is_empty());
 
-    let second = push_and_settle(&mut client, vec![meta("teri", "teri"), meta("fred", "fred")]).await;
+    let second = push_and_settle(
+        &mut client,
+        vec![meta("teri", "teri"), meta("fred", "fred")],
+    )
+    .await;
 
     assert!(
-        !second.iter().any(|m| matches!(m, ServerMsg::FocusLayout { .. })),
+        !second
+            .iter()
+            .any(|m| matches!(m, ServerMsg::FocusLayout { .. })),
         "an already-seeded focus is not re-announced: {second:?}"
     );
 }
@@ -213,7 +269,11 @@ async fn a_second_push_sends_no_new_layout() {
 async fn an_agent_cannot_apply_a_layout_that_drops_the_native_pane() {
     let d = spawn();
     let mut client = connect(&d).await;
-    push_and_settle(&mut client, vec![meta("teri", "teri"), meta("fred", "fred")]).await;
+    push_and_settle(
+        &mut client,
+        vec![meta("teri", "teri"), meta("fred", "fred")],
+    )
+    .await;
 
     for (tag, native) in [("teri", "teri_surface"), ("fred", "fred_hud")] {
         let before = registry_ids(&d, tag);
@@ -236,8 +296,17 @@ async fn an_agent_cannot_apply_a_layout_that_drops_the_native_pane() {
     }
 
     // Nothing was announced for the refused layouts.
-    let control = push_and_settle(&mut client, vec![meta("teri", "teri"), meta("fred", "fred")]).await;
-    assert!(!control.iter().any(|m| matches!(m, ServerMsg::FocusLayout { .. })), "{control:?}");
+    let control = push_and_settle(
+        &mut client,
+        vec![meta("teri", "teri"), meta("fred", "fred")],
+    )
+    .await;
+    assert!(
+        !control
+            .iter()
+            .any(|m| matches!(m, ServerMsg::FocusLayout { .. })),
+        "{control:?}"
+    );
 }
 
 #[tokio::test]
@@ -292,7 +361,11 @@ async fn an_agent_built_layout_is_wrapped_when_the_focus_registry_is_pushed() {
 async fn other_focuses_are_not_given_native_panes() {
     let d = spawn();
     let mut client = connect(&d).await;
-    let frames = push_and_settle(&mut client, vec![meta("cody-x", "cody"), meta("my-mail", "fred")]).await;
+    let frames = push_and_settle(
+        &mut client,
+        vec![meta("cody-x", "cody"), meta("my-mail", "fred")],
+    )
+    .await;
 
     assert!(layouts_for(&frames, "cody-x").is_empty(), "{frames:?}");
     assert!(layouts_for(&frames, "my-mail").is_empty(), "{frames:?}");
@@ -302,7 +375,11 @@ async fn other_focuses_are_not_given_native_panes() {
 async fn an_agent_cannot_apply_a_layout_that_buries_the_native_pane_in_tabs() {
     let d = spawn();
     let mut client = connect(&d).await;
-    push_and_settle(&mut client, vec![meta("teri", "teri"), meta("fred", "fred")]).await;
+    push_and_settle(
+        &mut client,
+        vec![meta("teri", "teri"), meta("fred", "fred")],
+    )
+    .await;
 
     for (tag, native) in [("teri", "teri_surface"), ("fred", "fred_hud")] {
         let before = d.registry.lock().unwrap().get(tag).cloned();
@@ -323,7 +400,11 @@ async fn an_agent_cannot_apply_a_layout_that_buries_the_native_pane_in_tabs() {
         )
         .await;
         assert_eq!(result["error"], "native_pane_required", "{tag}: {result}");
-        assert_eq!(d.registry.lock().unwrap().get(tag).cloned(), before, "{tag}: layout unchanged");
+        assert_eq!(
+            d.registry.lock().unwrap().get(tag).cloned(),
+            before,
+            "{tag}: layout unchanged"
+        );
     }
 }
 
@@ -379,9 +460,25 @@ async fn spawn_and_collect(s: &mut UnixStream, tag: &str) -> Vec<ServerMsg> {
 /// What a client connecting right now is told about `tag`'s layout.
 async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
     let mut s = UnixStream::connect(&d.socket_path).await.unwrap();
-    send(&mut s, &ClientMsg::Hello { client_id: "replay-probe".into(), protocol_version: PROTOCOL_VERSION, client_kind: None }).await;
+    send(
+        &mut s,
+        &ClientMsg::Hello {
+            client_id: "replay-probe".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client_kind: None,
+        },
+    )
+    .await;
     assert!(matches!(recv(&mut s).await, ServerMsg::Welcome { .. }));
-    send(&mut s, &ClientMsg::Subscribe { topics: vec![Topic::Layout], renders_decisions: false, renders_approvals: false }).await;
+    send(
+        &mut s,
+        &ClientMsg::Subscribe {
+            topics: vec![Topic::Layout],
+            renders_decisions: false,
+            renders_approvals: false,
+        },
+    )
+    .await;
     let frames = sync(&mut s).await;
     layouts_for(&frames, tag).last().map(|t| (*t).clone())
 }
@@ -397,9 +494,19 @@ async fn a_fresh_spawn_keeps_the_native_pane_for_a_client_that_connects_afterwar
 
         spawn_and_collect(&mut client, tag).await;
 
-        let replayed = replayed_layout(&d, tag).await.unwrap_or_else(|| panic!("{tag}: no layout replayed"));
-        assert_eq!(ids(&replayed), vec![native, "repl"], "{tag}: replay shows the native pane");
-        assert_eq!(registry_ids(&d, tag), vec![native, "repl"], "{tag}: registry agrees");
+        let replayed = replayed_layout(&d, tag)
+            .await
+            .unwrap_or_else(|| panic!("{tag}: no layout replayed"));
+        assert_eq!(
+            ids(&replayed),
+            vec![native, "repl"],
+            "{tag}: replay shows the native pane"
+        );
+        assert_eq!(
+            registry_ids(&d, tag),
+            vec![native, "repl"],
+            "{tag}: registry agrees"
+        );
     }
 }
 
@@ -413,7 +520,10 @@ async fn a_fresh_spawn_announces_the_native_layout_to_connected_clients() {
         let frames = spawn_and_collect(&mut client, tag).await;
 
         let layouts = layouts_for(&frames, tag);
-        assert!(!layouts.is_empty(), "{tag}: spawn broadcasts a FocusLayout: {frames:?}");
+        assert!(
+            !layouts.is_empty(),
+            "{tag}: spawn broadcasts a FocusLayout: {frames:?}"
+        );
         assert_eq!(ids(layouts.last().unwrap()), vec![native, "repl"], "{tag}");
     }
 }
@@ -428,16 +538,80 @@ async fn spawning_after_new_session_keeps_the_native_pane_and_announces_it_again
 
         // "New session": drop the session id and stop the child, then spawn
         // fresh (id nil), as the Mac app does.
-        send(&mut client, &ClientMsg::SessionControl { tag: tag.into(), action: SessionAction::NewSession }).await;
+        send(
+            &mut client,
+            &ClientMsg::SessionControl {
+                tag: tag.into(),
+                action: SessionAction::NewSession,
+            },
+        )
+        .await;
         sync(&mut client).await;
         let frames = spawn_and_collect(&mut client, tag).await;
 
         let layouts = layouts_for(&frames, tag);
-        assert!(!layouts.is_empty(), "{tag}: the second fresh spawn is announced too: {frames:?}");
+        assert!(
+            !layouts.is_empty(),
+            "{tag}: the second fresh spawn is announced too: {frames:?}"
+        );
         assert_eq!(ids(layouts.last().unwrap()), vec![native, "repl"], "{tag}");
-        let replayed = replayed_layout(&d, tag).await.unwrap_or_else(|| panic!("{tag}: no layout replayed"));
-        assert_eq!(ids(&replayed), vec![native, "repl"], "{tag}: replay after new_session + spawn");
+        let replayed = replayed_layout(&d, tag)
+            .await
+            .unwrap_or_else(|| panic!("{tag}: no layout replayed"));
+        assert_eq!(
+            ids(&replayed),
+            vec![native, "repl"],
+            "{tag}: replay after new_session + spawn"
+        );
     }
+}
+
+/// Every focus has a bound tracker board (and so keeps its tracker pane across a fresh session).
+struct EveryFocusHasABoard;
+
+impl nostromo::ipc::pane_registry::TrackerFrameProvider for EveryFocusHasABoard {
+    fn tracker_frames(&self) -> Vec<ServerMsg> {
+        Vec::new()
+    }
+
+    fn has_bound_board(&self, _tag: &str) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_spawn_of_an_ordinary_focus_with_a_tracker_announces_the_layout_that_keeps_it() {
+    use_stub_claude();
+    let d = spawn();
+    d.session_mgr
+        .lock()
+        .unwrap()
+        .configure_tracker_frame_provider(Arc::new(EveryFocusHasABoard));
+    let mut client = connect(&d).await;
+
+    // The focus had the tracker beside its REPL (a window holds that tree).
+    {
+        let mut reg = d.registry.lock().unwrap();
+        reg.get_or_init("cody-x");
+        let tree = json!({"tree": {"kind": "split", "direction": "horizontal", "ratios": [0.66, 0.34], "children": [
+            {"kind": "leaf", "pane_id": "repl"}, {"kind": "leaf", "pane_id": "tracker"}]}});
+        reg.set_layout("cody-x", &tree)
+            .expect("a layout with the tracker");
+    }
+
+    let frames = spawn_and_collect(&mut client, "cody-x").await;
+
+    assert_eq!(
+        registry_ids(&d, "cody-x"),
+        vec!["repl", "tracker"],
+        "the fresh session keeps the tracker pane"
+    );
+    let layouts = layouts_for(&frames, "cody-x");
+    assert!(
+        !layouts.is_empty(),
+        "the re-seeded tree is announced, so a window does not keep a tree without the tracker: {frames:?}"
+    );
+    assert_eq!(ids(layouts.last().unwrap()), vec!["repl", "tracker"]);
 }
 
 #[tokio::test]
@@ -461,7 +635,9 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
     let mut client = connect(&d).await;
 
     // A TCP peer subscribed to layouts.
-    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", d.tcp_port)).await.unwrap();
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", d.tcp_port))
+        .await
+        .unwrap();
     write_frame(
         &mut tcp,
         &serde_json::to_vec(&ClientMsg::Hello {
@@ -473,22 +649,34 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
     )
     .await
     .unwrap();
-    assert!(matches!(recv_any(&mut tcp).await, ServerMsg::Welcome { .. }));
+    assert!(matches!(
+        recv_any(&mut tcp).await,
+        ServerMsg::Welcome { .. }
+    ));
     write_frame(
         &mut tcp,
-        &serde_json::to_vec(&ClientMsg::Subscribe { topics: vec![Topic::Layout, Topic::Focuses], renders_decisions: false, renders_approvals: false })
-            .unwrap(),
+        &serde_json::to_vec(&ClientMsg::Subscribe {
+            topics: vec![Topic::Layout, Topic::Focuses],
+            renders_decisions: false,
+            renders_approvals: false,
+        })
+        .unwrap(),
     )
     .await
     .unwrap();
 
     for (tag, _) in NATIVE {
         let frames = spawn_and_collect(&mut client, tag).await;
-        assert!(!layouts_for(&frames, tag).is_empty(), "control: the local client is told: {frames:?}");
+        assert!(
+            !layouts_for(&frames, tag).is_empty(),
+            "control: the local client is told: {frames:?}"
+        );
     }
 
     // Ping, then read to the Pong: everything the peer was going to be sent is before it.
-    write_frame(&mut tcp, &serde_json::to_vec(&ClientMsg::Ping).unwrap()).await.unwrap();
+    write_frame(&mut tcp, &serde_json::to_vec(&ClientMsg::Ping).unwrap())
+        .await
+        .unwrap();
     loop {
         match recv_any(&mut tcp).await {
             ServerMsg::Pong => break,

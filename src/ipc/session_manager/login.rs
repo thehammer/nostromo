@@ -21,7 +21,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{
-    advance, lock_recover, resolve_claude, write_user_frame, PendingMessage, SessionEvent, SessionManager, Shared,
+    advance, lock_recover, resolve_claude, write_user_frame, PendingMessage, SessionEvent,
+    SessionManager, Shared,
 };
 use crate::ipc::auth_failure::TurnAuthOutcome;
 use crate::ipc::claude_login::{
@@ -60,6 +61,9 @@ pub enum ResendOutcome {
     /// Not now (a turn or a model switch is running, or the write failed); asking
     /// again later may succeed.
     Busy,
+    /// The session had to be restarted first and could not be: the hold is kept
+    /// on the downed session, and the supervisor retries the respawn.
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,30 @@ pub(super) struct Hold {
     /// The last resend failed after the credential had changed: the live process
     /// may have cached the old one, so one restart is due.
     escalation_due: bool,
+}
+
+/// The baseline of a hold whose credential was already rewritten when it was
+/// first looked at: it sorts before every real stamp, so the next look sees a change.
+const BEFORE_ANY_STAMP: &str = "";
+
+/// The stamp a hold that failed at `failed_at` should treat as "the credential
+/// the turn failed under", given the first stamp `seen` for it. The stamp is the
+/// credential's own modification time (`20261018200418Z`, see `parse_mdat`), so
+/// when it is later than the failure the user signed in before the probe or the
+/// poller got to look: adopting that stamp would hide the sign-in forever, so the
+/// baseline is [`BEFORE_ANY_STAMP`] instead and the change is acted on. A stamp
+/// that is not a timestamp, or is not later (to the second), is adopted as is.
+///
+/// The comparison is to the second: a sign-in in the same second as the failure
+/// is not told apart from the credential the turn failed under, so that one
+/// sign-in is missed (the hold waits for the next change). The credential's
+/// stamp has no finer grain to compare against.
+fn baseline_for(seen: &str, failed_at: DateTime<Utc>) -> String {
+    let written = chrono::NaiveDateTime::parse_from_str(seen, "%Y%m%d%H%M%SZ").map(|t| t.and_utc());
+    match written {
+        Ok(written) if written.timestamp() > failed_at.timestamp() => BEFORE_ANY_STAMP.to_owned(),
+        _ => seen.to_owned(),
+    }
 }
 
 impl Hold {
@@ -184,7 +212,10 @@ pub(super) struct LoginLink {
 
 impl LoginLink {
     pub(super) fn new(coordinator: Option<Arc<LoginCoordinator>>) -> Arc<Self> {
-        Arc::new(Self { cell: Mutex::new(LoginCell::default()), coordinator })
+        Arc::new(Self {
+            cell: Mutex::new(LoginCell::default()),
+            coordinator,
+        })
     }
 
     /// Is the session paused for a sign-in? A leaf lock: callable under `state`.
@@ -210,7 +241,11 @@ impl LoginLink {
     /// turn's interrupted end clears it). True when a hold was dropped.
     pub(super) fn discard_for_stop(&self) -> bool {
         let mut cell = lock_recover(&self.cell);
-        if cell.hold.as_ref().is_some_and(|h| h.phase != HoldPhase::Resending) {
+        if cell
+            .hold
+            .as_ref()
+            .is_some_and(|h| h.phase != HoldPhase::Resending)
+        {
             cell.hold = None;
             return true;
         }
@@ -270,7 +305,10 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
             let mut cell = lock_recover(&link.cell);
             cell.bound = None;
             cell.written = None;
-            let resending = cell.hold.as_ref().is_some_and(|h| h.phase == HoldPhase::Resending);
+            let resending = cell
+                .hold
+                .as_ref()
+                .is_some_and(|h| h.phase == HoldPhase::Resending);
             if resending {
                 cell.hold = None;
             }
@@ -314,7 +352,13 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
     }
     match first {
         Some(resendable) => {
-            warn!(tag, signal = outcome.signal.id(), resendable, queued, "claude auth failure detected");
+            warn!(
+                tag,
+                signal = outcome.signal.id(),
+                resendable,
+                queued,
+                "claude auth failure detected"
+            );
         }
         None => info!(tag, "held message resent: auth_failed"),
     }
@@ -326,16 +370,24 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
 /// runs on a thread of its own; a probe that cannot say leaves the stamp to the
 /// poller, which adopts the first one it sees.
 fn capture_stamp(link: &Arc<LoginLink>, hold_id: String) {
-    let Some(coordinator) = link.coordinator.clone() else { return };
+    let Some(coordinator) = link.coordinator.clone() else {
+        return;
+    };
     let link = Arc::clone(link);
-    let spawned = std::thread::Builder::new().name("claude-login-stamp".into()).spawn(move || {
-        if let CredentialStamp::Stamp(stamp) = coordinator.stamp_now() {
-            let mut cell = lock_recover(&link.cell);
-            if let Some(hold) = cell.hold.as_mut().filter(|h| h.id == hold_id && h.stamp_at_failure.is_none()) {
-                hold.stamp_at_failure = Some(stamp);
+    let spawned = std::thread::Builder::new()
+        .name("claude-login-stamp".into())
+        .spawn(move || {
+            if let CredentialStamp::Stamp(stamp) = coordinator.stamp_now() {
+                let mut cell = lock_recover(&link.cell);
+                if let Some(hold) = cell
+                    .hold
+                    .as_mut()
+                    .filter(|h| h.id == hold_id && h.stamp_at_failure.is_none())
+                {
+                    hold.stamp_at_failure = Some(baseline_for(&stamp, hold.failed_at));
+                }
             }
-        }
-    });
+        });
     if let Err(e) = spawned {
         warn!("could not start the credential probe: {e}");
     }
@@ -346,7 +398,11 @@ fn capture_stamp(link: &Arc<LoginLink>, hold_id: String) {
 /// What [`plan_resend`] decided, made under the session's locks.
 enum ResendPlan {
     /// The hold is now `Resending` and the session `MidTurn`: write `frame`.
-    Write { frame: PendingMessage, attempt: u8, prev_attempt_stamp: Option<String> },
+    Write {
+        frame: PendingMessage,
+        attempt: u8,
+        prev_attempt_stamp: Option<String>,
+    },
     /// Restart the session process first (the credential may be cached), then plan again.
     Escalate,
     Skip(ResendOutcome),
@@ -355,15 +411,24 @@ enum ResendPlan {
 /// Decide whether `hold_id` may be written again and, if so, move the hold to
 /// resending and the session to `MidTurn` in one step. `after_restart` skips the
 /// trigger rules: the restart was already the escalation.
-fn plan_resend(shared: &Shared, hold_id: &str, trigger: &ResendTrigger, after_restart: bool) -> ResendPlan {
+fn plan_resend(
+    shared: &Shared,
+    hold_id: &str,
+    trigger: &ResendTrigger,
+    after_restart: bool,
+) -> ResendPlan {
     let mut state = lock_recover(&shared.state);
     let applying = lock_recover(&shared.model).applying.is_some();
     let mut cell = lock_recover(&shared.login.cell);
-    let Some(hold) = cell.hold.as_mut() else { return ResendPlan::Skip(ResendOutcome::NoOp) };
+    let Some(hold) = cell.hold.as_mut() else {
+        return ResendPlan::Skip(ResendOutcome::NoOp);
+    };
     if hold.id != hold_id || hold.phase != HoldPhase::Held {
         return ResendPlan::Skip(ResendOutcome::NoOp);
     }
-    let Some(frame) = hold.frame.clone() else { return ResendPlan::Skip(ResendOutcome::NoOp) };
+    let Some(frame) = hold.frame.clone() else {
+        return ResendPlan::Skip(ResendOutcome::NoOp);
+    };
     if !after_restart && !hold.allows(trigger) {
         return ResendPlan::Skip(ResendOutcome::NoOp);
     }
@@ -382,7 +447,11 @@ fn plan_resend(shared: &Shared, hold_id: &str, trigger: &ResendTrigger, after_re
         hold.last_attempt_stamp = Some(stamp.clone());
     }
     *state = SessionState::MidTurn;
-    ResendPlan::Write { frame, attempt: hold.attempts, prev_attempt_stamp }
+    ResendPlan::Write {
+        frame,
+        attempt: hold.attempts,
+        prev_attempt_stamp,
+    }
 }
 
 /// The message could not be written: back to waiting, as if nothing had been tried.
@@ -413,7 +482,9 @@ impl SessionManager {
 
     /// Is any session holding a message for a sign-in?
     pub fn has_login_hold(&self) -> bool {
-        self.sessions.values().any(|s| s.waits_for_login() && s.shared.login.paused())
+        self.sessions
+            .values()
+            .any(|s| s.waits_for_login() && s.shared.login.paused())
     }
 
     /// Ask the coordinator to publish: something about a hold changed.
@@ -435,7 +506,9 @@ impl SessionManager {
         }
         let mut cache = lock_recover(&self.claude_bin_cache);
         match &*cache {
-            Some((Some(path), _)) if super::is_executable(path) => return Some(path.display().to_string()),
+            Some((Some(path), _)) if super::is_executable(path) => {
+                return Some(path.display().to_string())
+            }
             Some((None, at)) if at.elapsed() < RETRY_AFTER => return None,
             _ => {}
         }
@@ -475,7 +548,10 @@ impl SessionManager {
         ServerMsg::ClaudeLoginState {
             needs_login,
             claude_bin: needs_login.then(|| self.claude_bin()).flatten(),
-            watch: self.login.as_ref().map_or(ClaudeLoginWatch::Keychain, |c| c.watch_state()),
+            watch: self
+                .login
+                .as_ref()
+                .map_or(ClaudeLoginWatch::Keychain, |c| c.watch_state()),
             sessions,
         }
     }
@@ -492,9 +568,12 @@ impl SessionManager {
         let mut acts: Vec<(String, Act)> = Vec::new();
         for (tag, session) in self.sessions.iter().filter(|(_, s)| s.waits_for_login()) {
             let mut cell = lock_recover(&session.shared.login.cell);
-            let Some(hold) = cell.hold.as_mut() else { continue };
+            let Some(hold) = cell.hold.as_mut() else {
+                continue;
+            };
             let Some(base) = hold.stamp_at_failure.as_deref() else {
-                hold.stamp_at_failure = Some(current.to_owned());
+                hold.stamp_at_failure = Some(baseline_for(current, hold.failed_at));
+                // Seen again (as a change, if the sign-in beat this look) on the next one.
                 continue;
             };
             let changed = base != current;
@@ -506,14 +585,23 @@ impl SessionManager {
                 if changed {
                     acts.push((tag.clone(), Act::Release));
                 }
-            } else if hold.resendable && hold.phase == HoldPhase::Held && (changed || hold.escalation_due) {
+            } else if hold.resendable
+                && hold.phase == HoldPhase::Held
+                && (changed || hold.escalation_due)
+            {
                 acts.push((tag.clone(), Act::Resend(hold.id.clone())));
             }
         }
         for (tag, act) in acts {
             match act {
                 Act::Resend(id) => {
-                    self.resend_held(&tag, &id, ResendTrigger::Keychain { stamp: current.to_owned() });
+                    self.resend_held(
+                        &tag,
+                        &id,
+                        ResendTrigger::Keychain {
+                            stamp: current.to_owned(),
+                        },
+                    );
                 }
                 Act::Release => {
                     self.drop_hold(&tag, None, false);
@@ -530,12 +618,25 @@ impl SessionManager {
     /// A resend that fails again after the credential changed restarts the
     /// session process once (it may have cached the old credential) and resends
     /// once more after the respawn.
-    pub fn resend_held(&mut self, tag: &str, hold_id: &str, trigger: ResendTrigger) -> ResendOutcome {
+    pub fn resend_held(
+        &mut self,
+        tag: &str,
+        hold_id: &str,
+        trigger: ResendTrigger,
+    ) -> ResendOutcome {
         self.resend_inner(tag, hold_id, &trigger, false)
     }
 
-    fn resend_inner(&mut self, tag: &str, hold_id: &str, trigger: &ResendTrigger, after_restart: bool) -> ResendOutcome {
-        let Some(session) = self.sessions.get(tag) else { return ResendOutcome::NoOp };
+    fn resend_inner(
+        &mut self,
+        tag: &str,
+        hold_id: &str,
+        trigger: &ResendTrigger,
+        after_restart: bool,
+    ) -> ResendOutcome {
+        let Some(session) = self.sessions.get(tag) else {
+            return ResendOutcome::NoOp;
+        };
         if !session.alive() {
             return ResendOutcome::NoOp;
         }
@@ -552,14 +653,24 @@ impl SessionManager {
             ResendPlan::Escalate => {
                 info!(tag, "held message resent: restarting");
                 if let Err(e) = self.restart(tag) {
-                    // A failed restart leaves no session behind, and the hold goes with it.
-                    warn!(tag, "restart before resending a held message failed; the session and its hold are gone: {e:#}");
-                    return ResendOutcome::Busy;
+                    // The hold stays with the downed session (see `restart`).
+                    warn!(tag, "restart before resending a held message failed; the hold is kept and the respawn retried: {e:#}");
+                    return ResendOutcome::Failed;
                 }
                 self.resend_inner(tag, hold_id, trigger, true)
             }
-            ResendPlan::Write { frame, attempt, prev_attempt_stamp } => {
-                info!(tag, hold_id, trigger = trigger.id(), attempt, "resending held message");
+            ResendPlan::Write {
+                frame,
+                attempt,
+                prev_attempt_stamp,
+            } => {
+                info!(
+                    tag,
+                    hold_id,
+                    trigger = trigger.id(),
+                    attempt,
+                    "resending held message"
+                );
                 if write_recorded(&shared, &frame).is_ok() {
                     shared.broadcast(SessionEvent::State(SessionState::MidTurn));
                     shared.login.notify();
@@ -582,7 +693,9 @@ impl SessionManager {
     }
 
     fn drop_hold(&mut self, tag: &str, hold_id: Option<&str>, discarded: bool) -> bool {
-        let Some(session) = self.sessions.get(tag) else { return false };
+        let Some(session) = self.sessions.get(tag) else {
+            return false;
+        };
         let shared = session.shared.clone();
         let (dropped, idle) = {
             let state = lock_recover(&shared.state);
@@ -612,5 +725,49 @@ impl SessionManager {
         }
         shared.login.notify();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    /// A failure at 20:04:18 UTC with a sub-second part, as `Utc::now()` gives.
+    fn failed_at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 18, 20, 4, 18).unwrap()
+            + chrono::Duration::nanoseconds(600_000_000)
+    }
+
+    #[test]
+    fn a_credential_written_seconds_after_the_failure_is_acted_on() {
+        assert_eq!(
+            baseline_for("20261018200420Z", failed_at()),
+            BEFORE_ANY_STAMP
+        );
+    }
+
+    #[test]
+    fn a_credential_written_in_the_failure_second_is_adopted_as_the_one_it_failed_under() {
+        // Documented limitation: the stamp has no finer grain than a second.
+        assert_eq!(
+            baseline_for("20261018200418Z", failed_at()),
+            "20261018200418Z"
+        );
+    }
+
+    #[test]
+    fn a_credential_written_before_the_failure_is_adopted_as_is() {
+        assert_eq!(
+            baseline_for("20261018200000Z", failed_at()),
+            "20261018200000Z"
+        );
+    }
+
+    #[test]
+    fn a_stamp_that_is_not_a_timestamp_is_adopted_as_is() {
+        assert_eq!(baseline_for("not-a-time", failed_at()), "not-a-time");
+        assert_eq!(baseline_for("", failed_at()), "");
     }
 }

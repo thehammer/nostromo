@@ -49,7 +49,10 @@ pub async fn handle(
         other => json!({ "error": "unknown_view", "view_id": other }),
     };
     if let Value::Object(ref mut map) = result {
-        map.insert("render_state".to_string(), render_state::compute(state, &input.view_id));
+        map.insert(
+            "render_state".to_string(),
+            render_state::compute(state, &input.view_id),
+        );
     }
     result
 }
@@ -62,11 +65,29 @@ mod agent_switch_tests {
     #[tokio::test]
     async fn a_disabled_agents_view_is_unknown() {
         let mut state = McpSharedState::for_test();
-        state.enabled_agents = EnabledAgents { fred: false, perri: true, teri: true };
-        let out = handle(&state, &GetViewStateInput { view_id: "fred".into() }, None).await;
+        state.enabled_agents = EnabledAgents {
+            fred: false,
+            perri: true,
+            teri: true,
+        };
+        let out = handle(
+            &state,
+            &GetViewStateInput {
+                view_id: "fred".into(),
+            },
+            None,
+        )
+        .await;
         assert_eq!(out["error"], "unknown_view");
         assert_eq!(out["view_id"], "fred");
-        let out = handle(&state, &GetViewStateInput { view_id: "teri".into() }, None).await;
+        let out = handle(
+            &state,
+            &GetViewStateInput {
+                view_id: "teri".into(),
+            },
+            None,
+        )
+        .await;
         assert_ne!(out["error"], "unknown_view");
     }
 }

@@ -44,7 +44,10 @@ fn can_use_tool(id_json: &str, input_json: &str) -> String {
 }
 
 fn deep_input(depth: usize) -> String {
-    format!(r#"{{"command":"rm -rf /tmp/x","n":{}}}"#, nested_arrays(depth))
+    format!(
+        r#"{{"command":"rm -rf /tmp/x","n":{}}}"#,
+        nested_arrays(depth)
+    )
 }
 
 /// What a scan of an unreadable control request recovered.
@@ -90,7 +93,10 @@ fn unreadable(line: &str) -> Hint {
 fn assert_not_a_control_request(line: &str, why: &str) {
     match parse_line(line) {
         Some(ParsedLine::UnreadableControlRequest { .. }) => {
-            panic!("{why}: wrongly an unreadable control request: {}", snip(line))
+            panic!(
+                "{why}: wrongly an unreadable control request: {}",
+                snip(line)
+            )
         }
         Some(ParsedLine::ControlRequest { .. }) => {
             panic!("{why}: wrongly a control request: {}", snip(line))
@@ -140,7 +146,10 @@ fn a_control_request_of_another_subtype_that_parses_is_still_a_control_request()
             subtype,
             request,
         }) => {
-            assert_eq!((request_id.as_str(), subtype.as_str()), ("r1", "hook_callback"));
+            assert_eq!(
+                (request_id.as_str(), subtype.as_str()),
+                ("r1", "hook_callback")
+            );
             assert_eq!(request["callback_id"], "hook_0");
         }
         other => panic!("{other:?}"),
@@ -198,9 +207,14 @@ fn every_recorded_request_still_parses_and_its_deep_twin_is_unreadable_with_the_
         let spliced = if bare == "{}" {
             format!(r#"{{"input":{}}}"#, deep_input(500))
         } else {
-            format!(r#"{},"input":{}}}"#, &bare[..bare.len() - 1], deep_input(500))
+            format!(
+                r#"{},"input":{}}}"#,
+                &bare[..bare.len() - 1],
+                deep_input(500)
+            )
         };
-        let deep = format!(r#"{{"type":"control_request","request_id":"{id}","request":{spliced}}}"#);
+        let deep =
+            format!(r#"{{"type":"control_request","request_id":"{id}","request":{spliced}}}"#);
         assert_eq!(
             unreadable(&deep),
             hint(
@@ -245,7 +259,8 @@ fn a_request_id_that_is_neither_a_string_nor_a_number_cannot_be_recovered() {
 
 #[test]
 fn a_control_request_without_any_request_id_cannot_be_answered_and_is_reported_unreadable() {
-    let line = r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}"#;
+    let line =
+        r#"{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"}}"#;
 
     let h = unreadable(line);
 
@@ -276,7 +291,10 @@ fn a_deep_request_is_never_dropped_whatever_the_depth() {
                     "depth {depth}"
                 );
             }
-            other => panic!("depth {depth}: dropped or misread: {:?}", other.map(|_| "some")),
+            other => panic!(
+                "depth {depth}: dropped or misread: {:?}",
+                other.map(|_| "some")
+            ),
         }
     }
 }
@@ -358,7 +376,9 @@ fn many_unclosed_brackets_in_a_row_are_scanned_in_linear_time() {
         "[".repeat(3_000_000)
     );
 
-    let h = assert_fast("unclosed nesting", Duration::from_secs(10), || unreadable(&line));
+    let h = assert_fast("unclosed nesting", Duration::from_secs(10), || {
+        unreadable(&line)
+    });
 
     assert_eq!(h.request_id, Some(json!("req-open")));
     assert_eq!(h.subtype.as_deref(), Some("can_use_tool"));
@@ -372,13 +392,21 @@ fn the_top_level_keys_may_come_in_any_order() {
     let expected = hint(Some(json!("r1")), Some("can_use_tool"), Some("Bash"));
     let lines = [
         // type last
-        format!(r#"{{"request_id":"r1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{deep}}},"type":"control_request"}}"#),
+        format!(
+            r#"{{"request_id":"r1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{deep}}},"type":"control_request"}}"#
+        ),
         // request first, id last
-        format!(r#"{{"type":"control_request","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{deep}}},"request_id":"r1"}}"#),
+        format!(
+            r#"{{"type":"control_request","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{deep}}},"request_id":"r1"}}"#
+        ),
         // subtype and tool_name after the (deep) input
-        format!(r#"{{"type":"control_request","request_id":"r1","request":{{"input":{deep},"tool_name":"Bash","subtype":"can_use_tool"}}}}"#),
+        format!(
+            r#"{{"type":"control_request","request_id":"r1","request":{{"input":{deep},"tool_name":"Bash","subtype":"can_use_tool"}}}}"#
+        ),
         // everything reversed
-        format!(r#"{{"request":{{"tool_name":"Bash","subtype":"can_use_tool","input":{deep}}},"request_id":"r1","type":"control_request"}}"#),
+        format!(
+            r#"{{"request":{{"tool_name":"Bash","subtype":"can_use_tool","input":{deep}}},"request_id":"r1","type":"control_request"}}"#
+        ),
     ];
     for (i, line) in lines.iter().enumerate() {
         assert_eq!(unreadable(line), expected, "ordering {i}");
@@ -634,7 +662,11 @@ fn a_line_cut_off_anywhere_is_unreadable_and_never_yields_a_half_read_string() {
             assert_eq!(request_id, None, "cut at {cut}: {prefix}");
         }
         if recovered(sub_end) {
-            assert_eq!(subtype.as_deref(), Some("can_use_tool"), "cut at {cut}: {prefix}");
+            assert_eq!(
+                subtype.as_deref(),
+                Some("can_use_tool"),
+                "cut at {cut}: {prefix}"
+            );
         } else if not_yet(sub_end) {
             assert_eq!(subtype, None, "cut at {cut}: {prefix}");
         }
@@ -653,14 +685,19 @@ fn a_line_cut_off_anywhere_is_unreadable_and_never_yields_a_half_read_string() {
 #[test]
 fn a_numeric_id_cut_off_in_the_middle_of_its_digits_is_not_guessed() {
     // "request_id":75 cut after the 7 could be 7, 75 or 7500: nothing to answer under.
-    let line = r#"{"type":"control_request","request_id":7500,"request":{"subtype":"can_use_tool"}}"#;
+    let line =
+        r#"{"type":"control_request","request_id":7500,"request":{"subtype":"can_use_tool"}}"#;
     let cut = line.find("7500").unwrap() + 1;
 
     let h = unreadable(&line[..cut]);
 
     assert_eq!(h.request_id, None);
     let h = unreadable(&line[..line.find("7500").unwrap() + 4 + 1]);
-    assert_eq!(h.request_id, Some(json!(7500)), "once the number has ended it is whole");
+    assert_eq!(
+        h.request_id,
+        Some(json!(7500)),
+        "once the number has ended it is whole"
+    );
 }
 
 #[test]
@@ -702,7 +739,10 @@ fn a_valid_line_just_under_the_cap_is_an_ordinary_control_request() {
             request_id,
             subtype,
             ..
-        }) => assert_eq!((request_id.as_str(), subtype.as_str()), ("r-big", "can_use_tool")),
+        }) => assert_eq!(
+            (request_id.as_str(), subtype.as_str()),
+            ("r-big", "can_use_tool")
+        ),
         other => panic!("{:?}", other.map(|_| "something else")),
     }
 }
@@ -806,7 +846,9 @@ fn lines_that_are_not_control_requests_are_parsed_exactly_as_before() {
         Some(ParsedLine::SessionId("s-1".to_owned()))
     );
     assert!(matches!(
-        parse_line(r#"{"type":"assistant","message":{"model":"m","content":[{"type":"text","text":"hi"}]}}"#),
+        parse_line(
+            r#"{"type":"assistant","message":{"model":"m","content":[{"type":"text","text":"hi"}]}}"#
+        ),
         Some(ParsedLine::Blocks { .. })
     ));
 }

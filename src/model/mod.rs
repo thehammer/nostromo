@@ -255,7 +255,10 @@ mod tests {
             ..ModelEntry::default()
         };
         ModelCatalog::from_rows(
-            vec![row("sonnet", "claude-sonnet-5-5"), row("opus", "claude-opus-5-5")],
+            vec![
+                row("sonnet", "claude-sonnet-5-5"),
+                row("opus", "claude-opus-5-5"),
+            ],
             chrono::Utc::now(),
         )
     }
@@ -272,12 +275,21 @@ mod tests {
     #[test]
     fn a_full_name_must_match_exactly() {
         let c = catalog();
-        assert_eq!(runs_as("claude-sonnet-4-6", "claude-sonnet-4-6", &c), Some(true));
-        assert_eq!(runs_as("claude-sonnet-4-6", "claude-sonnet-5-5", &c), Some(false));
+        assert_eq!(
+            runs_as("claude-sonnet-4-6", "claude-sonnet-4-6", &c),
+            Some(true)
+        );
+        assert_eq!(
+            runs_as("claude-sonnet-4-6", "claude-sonnet-5-5", &c),
+            Some(false)
+        );
     }
 
     #[test]
     fn an_unknown_family_with_no_catalogue_entry_cannot_be_judged() {
-        assert_eq!(runs_as("zeta", "claude-zeta-1", &ModelCatalog::default()), None);
+        assert_eq!(
+            runs_as("zeta", "claude-zeta-1", &ModelCatalog::default()),
+            None
+        );
     }
 }

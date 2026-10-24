@@ -42,7 +42,13 @@ pub fn place_tracker(tree: &PaneTree) -> Option<PaneTree> {
         return None;
     }
     let mut placed = tree.clone();
-    if add_detail_tab(&mut placed) || split_beside_repl(&mut placed, TRACKER_SPLIT_RATIOS.to_vec(), SplitDirection::Horizontal) {
+    if add_detail_tab(&mut placed)
+        || split_beside_repl(
+            &mut placed,
+            TRACKER_SPLIT_RATIOS.to_vec(),
+            SplitDirection::Horizontal,
+        )
+    {
         Some(placed)
     } else {
         None
@@ -85,13 +91,23 @@ pub fn remove_tracker(tree: &PaneTree) -> Option<PaneTree> {
 /// Adds the `Tracker` tab to the first `detail` tabs node.
 fn add_detail_tab(node: &mut PaneTree) -> bool {
     match node {
-        PaneTree::Tabs { children, labels, active, region: Some(name) } if name == DETAIL_REGION => {
+        PaneTree::Tabs {
+            children,
+            labels,
+            active,
+            region: Some(name),
+        } if name == DETAIL_REGION => {
             let after_queue = children
                 .iter()
                 .position(|c| matches!(c, PaneTree::Leaf { pane_id } if pane_id == QUEUE_PANE_ID))
                 .map(|i| i + 1);
             let at = after_queue.unwrap_or(children.len());
-            children.insert(at, PaneTree::Leaf { pane_id: TRACKER_PANE_ID.to_string() });
+            children.insert(
+                at,
+                PaneTree::Leaf {
+                    pane_id: TRACKER_PANE_ID.to_string(),
+                },
+            );
             labels.insert(at.min(labels.len()), TRACKER_LABEL.to_string());
             *active = at;
             true
@@ -111,17 +127,17 @@ fn split_beside_repl(node: &mut PaneTree, ratios: Vec<f32>, direction: SplitDire
                 direction,
                 children: vec![
                     PaneTree::repl_leaf(),
-                    PaneTree::Leaf { pane_id: TRACKER_PANE_ID.to_string() },
+                    PaneTree::Leaf {
+                        pane_id: TRACKER_PANE_ID.to_string(),
+                    },
                 ],
                 ratios,
             };
             true
         }
-        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } => {
-            children
-                .iter_mut()
-                .any(|c| split_beside_repl(c, ratios.clone(), direction))
-        }
+        PaneTree::Split { children, .. } | PaneTree::Tabs { children, .. } => children
+            .iter_mut()
+            .any(|c| split_beside_repl(c, ratios.clone(), direction)),
         PaneTree::Leaf { .. } => false,
     }
 }
@@ -130,8 +146,13 @@ fn split_beside_repl(node: &mut PaneTree, ratios: Vec<f32>, direction: SplitDire
 /// right after it.
 fn repl_tracker_split(node: &PaneTree) -> Option<(SplitDirection, Vec<f32>)> {
     match node {
-        PaneTree::Split { direction, children, ratios } => {
-            let is = |c: &PaneTree, id: &str| matches!(c, PaneTree::Leaf { pane_id } if pane_id == id);
+        PaneTree::Split {
+            direction,
+            children,
+            ratios,
+        } => {
+            let is =
+                |c: &PaneTree, id: &str| matches!(c, PaneTree::Leaf { pane_id } if pane_id == id);
             let beside = children
                 .windows(2)
                 .any(|w| is(&w[0], REPL_PANE_ID) && is(&w[1], TRACKER_PANE_ID));
@@ -145,33 +166,102 @@ fn repl_tracker_split(node: &PaneTree) -> Option<(SplitDirection, Vec<f32>)> {
     }
 }
 
-/// Removes the `tracker` leaf that is a direct child of a split.
+/// What removing the tracker leaf from a subtree did.
+enum Gone {
+    /// It is not in this subtree.
+    NotFound,
+    /// It was removed and the node still stands.
+    Removed,
+    /// It was the node's last child: the parent drops the node.
+    NodeEmptied,
+}
+
+fn is_tracker(node: &PaneTree) -> bool {
+    matches!(node, PaneTree::Leaf { pane_id } if pane_id == TRACKER_PANE_ID)
+}
+
+/// Removes the `tracker` leaf from wherever it sits: a split's child, a tab, or
+/// any of those nested in any of those. A node left with nothing goes too, a
+/// split left with one child collapses into it, and its ratios are renormalised.
+/// A root that holds nothing but the tracker would be emptied: that is not a
+/// removal (`false`), matching `remove_tracker`'s "would leave nothing". The
+/// caller works on a copy it drops then, so no half-emptied tree escapes.
 fn remove_split_leaf(node: &mut PaneTree) -> bool {
-    let PaneTree::Split { children, ratios, .. } = node else {
-        if let PaneTree::Tabs { children, .. } = node {
-            return children.iter_mut().any(remove_split_leaf);
+    matches!(remove_leaf(node), Gone::Removed)
+}
+
+fn remove_leaf(node: &mut PaneTree) -> Gone {
+    match node {
+        PaneTree::Leaf { .. } => Gone::NotFound,
+        PaneTree::Split {
+            children, ratios, ..
+        } => {
+            for i in 0..children.len() {
+                let hit = if is_tracker(&children[i]) {
+                    Gone::NodeEmptied
+                } else {
+                    remove_leaf(&mut children[i])
+                };
+                match hit {
+                    Gone::NotFound => continue,
+                    Gone::Removed => return Gone::Removed,
+                    Gone::NodeEmptied => {
+                        children.remove(i);
+                        if i < ratios.len() {
+                            ratios.remove(i);
+                        }
+                        let sum: f32 = ratios.iter().sum();
+                        if sum > 0.0 {
+                            ratios.iter_mut().for_each(|r| *r /= sum);
+                        }
+                        match children.len() {
+                            0 => return Gone::NodeEmptied,
+                            1 => {
+                                let only = children.remove(0);
+                                *node = only;
+                            }
+                            _ => {}
+                        }
+                        return Gone::Removed;
+                    }
+                }
+            }
+            Gone::NotFound
         }
-        return false;
-    };
-    if let Some(i) = children
-        .iter()
-        .position(|c| matches!(c, PaneTree::Leaf { pane_id } if pane_id == TRACKER_PANE_ID))
-    {
-        children.remove(i);
-        if i < ratios.len() {
-            ratios.remove(i);
+        PaneTree::Tabs {
+            children,
+            labels,
+            active,
+            ..
+        } => {
+            for i in 0..children.len() {
+                let hit = if is_tracker(&children[i]) {
+                    Gone::NodeEmptied
+                } else {
+                    remove_leaf(&mut children[i])
+                };
+                match hit {
+                    Gone::NotFound => continue,
+                    Gone::Removed => return Gone::Removed,
+                    Gone::NodeEmptied => {
+                        children.remove(i);
+                        if i < labels.len() {
+                            labels.remove(i);
+                        }
+                        if children.is_empty() {
+                            return Gone::NodeEmptied;
+                        }
+                        if i < *active {
+                            *active -= 1;
+                        }
+                        *active = (*active).min(children.len() - 1);
+                        return Gone::Removed;
+                    }
+                }
+            }
+            Gone::NotFound
         }
-        let sum: f32 = ratios.iter().sum();
-        if sum > 0.0 {
-            ratios.iter_mut().for_each(|r| *r /= sum);
-        }
-        if children.len() == 1 {
-            let only = children.remove(0);
-            *node = only;
-        }
-        return true;
     }
-    children.iter_mut().any(remove_split_leaf)
 }
 
 #[cfg(test)]
@@ -181,11 +271,17 @@ mod tests {
     use super::*;
 
     fn leaf(id: &str) -> PaneTree {
-        PaneTree::Leaf { pane_id: id.to_string() }
+        PaneTree::Leaf {
+            pane_id: id.to_string(),
+        }
     }
 
     fn split(direction: SplitDirection, children: Vec<PaneTree>, ratios: Vec<f32>) -> PaneTree {
-        PaneTree::Split { direction, children, ratios }
+        PaneTree::Split {
+            direction,
+            children,
+            ratios,
+        }
     }
 
     fn detail(tabs: &[(&str, &str)], active: usize) -> PaneTree {
@@ -217,10 +313,20 @@ mod tests {
     fn tabs_of(tree: &PaneTree) -> (&Vec<PaneTree>, &Vec<String>, usize) {
         match tree {
             PaneTree::Split { children, .. } => children.iter().find_map(|c| match c {
-                PaneTree::Tabs { children, labels, active, .. } => Some((children, labels, *active)),
+                PaneTree::Tabs {
+                    children,
+                    labels,
+                    active,
+                    ..
+                } => Some((children, labels, *active)),
                 _ => None,
             }),
-            PaneTree::Tabs { children, labels, active, .. } => Some((children, labels, *active)),
+            PaneTree::Tabs {
+                children,
+                labels,
+                active,
+                ..
+            } => Some((children, labels, *active)),
             PaneTree::Leaf { .. } => None,
         }
         .expect("a tabs node")
@@ -243,28 +349,52 @@ mod tests {
     fn a_bare_repl_becomes_repl_beside_tracker_with_the_transcript_on_the_left() {
         let placed = place_tracker(&PaneTree::repl_leaf()).expect("placed");
         assert_eq!(placed, repl_tracker());
-        let PaneTree::Split { ratios, .. } = &placed else { panic!("split") };
-        assert!(ratios[0] >= 0.62, "the transcript keeps at least 62%: {ratios:?}");
+        let PaneTree::Split { ratios, .. } = &placed else {
+            panic!("split")
+        };
+        assert!(
+            ratios[0] >= 0.62,
+            "the transcript keeps at least 62%: {ratios:?}"
+        );
     }
 
     #[test]
     fn with_a_detail_region_the_tracker_is_a_labelled_tab_right_after_queue_and_frontmost() {
-        let before = curated(&[("queue", "Queue"), ("detail.0", "a.rs"), ("detail.1", "b.rs")], 2);
+        let before = curated(
+            &[
+                ("queue", "Queue"),
+                ("detail.0", "a.rs"),
+                ("detail.1", "b.rs"),
+            ],
+            2,
+        );
         let placed = place_tracker(&before).expect("placed");
 
         let (children, labels, active) = tabs_of(&placed);
         assert_eq!(
-            children.iter().flat_map(|c| c.pane_ids()).collect::<Vec<_>>(),
+            children
+                .iter()
+                .flat_map(|c| c.pane_ids())
+                .collect::<Vec<_>>(),
             ["queue", "tracker", "detail.0", "detail.1"]
         );
         assert_eq!(labels, &["Queue", "Tracker", "a.rs", "b.rs"]);
         assert_eq!(active, 1, "the tracker tab is frontmost on creation");
         // Everything outside the tab list is as it was.
-        let PaneTree::Split { direction, ratios, children: top } = &placed else { panic!("split") };
+        let PaneTree::Split {
+            direction,
+            ratios,
+            children: top,
+        } = &placed
+        else {
+            panic!("split")
+        };
         assert_eq!(*direction, SplitDirection::Vertical);
         assert_ratios(ratios, &[0.6, 0.4]);
         assert_eq!(top[1], leaf("repl"));
-        let PaneTree::Tabs { region, .. } = &top[0] else { panic!("tabs") };
+        let PaneTree::Tabs { region, .. } = &top[0] else {
+            panic!("tabs")
+        };
         assert_eq!(region.as_deref(), Some("detail"));
     }
 
@@ -283,7 +413,10 @@ mod tests {
         let placed = place_tracker(&before).expect("placed");
         let (children, labels, active) = tabs_of(&placed);
         assert_eq!(
-            children.iter().flat_map(|c| c.pane_ids()).collect::<Vec<_>>(),
+            children
+                .iter()
+                .flat_map(|c| c.pane_ids())
+                .collect::<Vec<_>>(),
             ["detail.0", "detail.1", "tracker"]
         );
         assert_eq!(labels, &["a.rs", "b.rs", "Tracker"]);
@@ -332,9 +465,13 @@ mod tests {
         for name in ["perri-curated", "perri-standard"] {
             let tree = crate::mcp::layout_schema::load_from_dir(name, nowhere)
                 .unwrap_or_else(|_| panic!("{name} loads"))
-                .tree.to_pane_tree();
+                .tree
+                .to_pane_tree();
             let placed = place_tracker(&tree).unwrap_or_else(|| panic!("{name} takes the tracker"));
-            assert!(ids(&placed).contains(&"tracker".to_string()), "{name}: {placed:?}");
+            assert!(
+                ids(&placed).contains(&"tracker".to_string()),
+                "{name}: {placed:?}"
+            );
             assert_eq!(remove_tracker(&placed), Some(tree), "{name} round-trips");
         }
     }
@@ -344,7 +481,8 @@ mod tests {
         let nowhere = std::path::Path::new("/nonexistent-nostromo-layouts-for-tests");
         let tree = crate::mcp::layout_schema::load_from_dir("perri-curated", nowhere)
             .unwrap()
-            .tree.to_pane_tree();
+            .tree
+            .to_pane_tree();
         let placed = place_tracker(&tree).unwrap();
         let (children, labels, active) = tabs_of(&placed);
         assert_eq!(children[0].pane_ids(), ["queue"]);
@@ -362,7 +500,10 @@ mod tests {
             vec![leaf("repl"), leaf("tracker")],
             vec![0.5, 0.5],
         );
-        assert_eq!(reattach_tracker(&PaneTree::repl_leaf(), &previous), previous);
+        assert_eq!(
+            reattach_tracker(&PaneTree::repl_leaf(), &previous),
+            previous
+        );
     }
 
     #[test]
@@ -372,7 +513,10 @@ mod tests {
             vec![leaf("repl"), leaf("tracker")],
             vec![0.3, 0.7],
         );
-        assert_eq!(reattach_tracker(&PaneTree::repl_leaf(), &previous), previous);
+        assert_eq!(
+            reattach_tracker(&PaneTree::repl_leaf(), &previous),
+            previous
+        );
     }
 
     #[test]
@@ -381,7 +525,11 @@ mod tests {
             SplitDirection::Vertical,
             vec![
                 detail(&[("queue", "Queue")], 0),
-                split(SplitDirection::Horizontal, vec![leaf("repl"), leaf("tracker")], vec![0.7, 0.3]),
+                split(
+                    SplitDirection::Horizontal,
+                    vec![leaf("repl"), leaf("tracker")],
+                    vec![0.7, 0.3],
+                ),
             ],
             vec![0.6, 0.4],
         );
@@ -390,19 +538,28 @@ mod tests {
             vec![leaf("repl"), leaf("tracker")],
             vec![0.7, 0.3],
         );
-        assert_eq!(reattach_tracker(&PaneTree::repl_leaf(), &previous), expected);
+        assert_eq!(
+            reattach_tracker(&PaneTree::repl_leaf(), &previous),
+            expected
+        );
     }
 
     #[test]
     fn a_tracker_that_was_a_detail_tab_comes_back_as_the_default_split() {
         let previous = curated(&[("queue", "Queue"), ("tracker", "Tracker")], 1);
-        assert_eq!(reattach_tracker(&PaneTree::repl_leaf(), &previous), repl_tracker());
+        assert_eq!(
+            reattach_tracker(&PaneTree::repl_leaf(), &previous),
+            repl_tracker()
+        );
     }
 
     #[test]
     fn a_previous_tree_without_a_tracker_leaves_the_baseline_unchanged() {
         let previous = curated(&[("queue", "Queue")], 0);
-        assert_eq!(reattach_tracker(&PaneTree::repl_leaf(), &previous), PaneTree::repl_leaf());
+        assert_eq!(
+            reattach_tracker(&PaneTree::repl_leaf(), &previous),
+            PaneTree::repl_leaf()
+        );
         let baseline = curated(&[("queue", "Queue")], 0);
         assert_eq!(reattach_tracker(&baseline, &previous), baseline);
     }
@@ -420,11 +577,96 @@ mod tests {
             SplitDirection::Vertical,
             vec![
                 detail(&[("queue", "Queue")], 0),
-                split(SplitDirection::Horizontal, vec![leaf("repl"), leaf("tracker")], vec![0.55, 0.45]),
+                split(
+                    SplitDirection::Horizontal,
+                    vec![leaf("repl"), leaf("tracker")],
+                    vec![0.55, 0.45],
+                ),
             ],
             vec![0.6, 0.4],
         );
         assert_eq!(out, expected);
+    }
+
+    // ── remove_tracker: wherever the tracker sits ────────────────────────────
+
+    #[test]
+    fn a_tracker_tab_nested_in_another_tabs_node_is_removed() {
+        let tree = PaneTree::Tabs {
+            children: vec![
+                leaf("queue"),
+                PaneTree::Tabs {
+                    children: vec![leaf("tracker"), leaf("notes")],
+                    labels: vec!["Tracker".into(), "Notes".into()],
+                    active: 0,
+                    region: None,
+                },
+            ],
+            labels: vec!["Queue".into(), "More".into()],
+            active: 1,
+            region: Some("detail".into()),
+        };
+        let out = remove_tracker(&tree).expect("removed");
+        assert!(!has_tracker(&out));
+        assert!(
+            out.pane_ids().contains(&"notes".to_string()),
+            "the rest stays: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_tabs_node_holding_only_the_tracker_goes_with_it_inside_a_tabs_node() {
+        let tree = PaneTree::Tabs {
+            children: vec![
+                leaf("queue"),
+                PaneTree::Tabs {
+                    children: vec![leaf("tracker")],
+                    labels: vec!["Tracker".into()],
+                    active: 0,
+                    region: None,
+                },
+            ],
+            labels: vec!["Queue".into(), "Tracker".into()],
+            active: 1,
+            region: Some("detail".into()),
+        };
+        let out = remove_tracker(&tree).expect("removed");
+        match out {
+            PaneTree::Tabs {
+                children,
+                labels,
+                active,
+                ..
+            } => {
+                assert_eq!(children, vec![leaf("queue")]);
+                assert_eq!(labels, vec!["Queue".to_string()]);
+                assert_eq!(active, 0);
+            }
+            other => panic!("unexpected tree: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tracker_split_side_under_a_tabs_node_under_a_tabs_node_is_removed() {
+        let inner = split(
+            SplitDirection::Horizontal,
+            vec![leaf("repl"), leaf("tracker")],
+            vec![0.66, 0.34],
+        );
+        let tree = PaneTree::Tabs {
+            children: vec![PaneTree::Tabs {
+                children: vec![inner, leaf("queue")],
+                labels: vec!["A".into(), "B".into()],
+                active: 0,
+                region: None,
+            }],
+            labels: vec!["Outer".into()],
+            active: 0,
+            region: None,
+        };
+        let out = remove_tracker(&tree).expect("removed");
+        assert!(!has_tracker(&out));
+        assert!(out.pane_ids().contains(&"repl".to_string()));
     }
 
     // ── remove_tracker ───────────────────────────────────────────────────────
@@ -441,7 +683,11 @@ mod tests {
             vec![leaf("diff"), repl_tracker()],
             vec![0.7, 0.3],
         );
-        let expected = split(SplitDirection::Vertical, vec![leaf("diff"), leaf("repl")], vec![0.7, 0.3]);
+        let expected = split(
+            SplitDirection::Vertical,
+            vec![leaf("diff"), leaf("repl")],
+            vec![0.7, 0.3],
+        );
         assert_eq!(remove_tracker(&tree), Some(expected));
     }
 
@@ -453,7 +699,12 @@ mod tests {
             vec![0.5, 0.3, 0.2],
         );
         let out = remove_tracker(&tree).expect("removed");
-        let PaneTree::Split { children, ratios, .. } = &out else { panic!("still a split") };
+        let PaneTree::Split {
+            children, ratios, ..
+        } = &out
+        else {
+            panic!("still a split")
+        };
         assert_eq!(children, &vec![leaf("repl"), leaf("other")]);
         assert_ratios(ratios, &[0.5 / 0.7, 0.2 / 0.7]);
         assert!((ratios.iter().sum::<f32>() - 1.0).abs() < 1e-5);
@@ -462,13 +713,20 @@ mod tests {
     #[test]
     fn removing_the_tracker_tab_leaves_the_other_tabs_and_labels_alone() {
         let tree = curated(
-            &[("queue", "Queue"), ("tracker", "Tracker"), ("detail.0", "a.rs")],
+            &[
+                ("queue", "Queue"),
+                ("tracker", "Tracker"),
+                ("detail.0", "a.rs"),
+            ],
             1,
         );
         let out = remove_tracker(&tree).expect("removed");
         let (children, labels, active) = tabs_of(&out);
         assert_eq!(
-            children.iter().flat_map(|c| c.pane_ids()).collect::<Vec<_>>(),
+            children
+                .iter()
+                .flat_map(|c| c.pane_ids())
+                .collect::<Vec<_>>(),
             ["queue", "detail.0"]
         );
         assert_eq!(labels, &["Queue", "a.rs"]);
@@ -482,12 +740,48 @@ mod tests {
     }
 
     #[test]
+    fn a_root_split_holding_only_the_tracker_has_nothing_to_remove_it_into() {
+        let tree = split(SplitDirection::Horizontal, vec![leaf("tracker")], vec![1.0]);
+        let before = tree.clone();
+
+        assert_eq!(remove_tracker(&tree), None);
+        assert_eq!(tree, before, "the caller's tree is left as it was");
+    }
+
+    #[test]
+    fn a_root_tabs_node_holding_only_the_tracker_has_nothing_to_remove_it_into() {
+        let tree = detail(&[("tracker", "Tracker")], 0);
+        let before = tree.clone();
+
+        assert_eq!(remove_tracker(&tree), None);
+        assert_eq!(tree, before, "the caller's tree is left as it was");
+    }
+
+    #[test]
+    fn a_split_holding_only_the_tracker_inside_another_split_goes_and_the_outer_collapses() {
+        let tree = split(
+            SplitDirection::Vertical,
+            vec![
+                split(SplitDirection::Horizontal, vec![leaf("tracker")], vec![1.0]),
+                leaf("repl"),
+            ],
+            vec![0.4, 0.6],
+        );
+
+        assert_eq!(remove_tracker(&tree), Some(PaneTree::repl_leaf()));
+    }
+
+    #[test]
     fn placing_then_removing_returns_the_original_tree() {
         for tree in [
             PaneTree::repl_leaf(),
             curated(&[("queue", "Queue"), ("detail.0", "a.rs")], 1),
             curated(&[("detail.0", "a.rs")], 0),
-            split(SplitDirection::Vertical, vec![leaf("diff"), leaf("repl")], vec![0.7, 0.3]),
+            split(
+                SplitDirection::Vertical,
+                vec![leaf("diff"), leaf("repl")],
+                vec![0.7, 0.3],
+            ),
         ] {
             let placed = place_tracker(&tree).expect("placed");
             assert_eq!(remove_tracker(&placed), Some(tree.clone()), "{tree:?}");

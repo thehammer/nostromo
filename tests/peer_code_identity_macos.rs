@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 use nostromo::ipc::{
     decisions::DecisionRegistry,
     peer_verify::{
-        audit_token, still_same_operator, verify_code, CodeIdentity, MacPeerVerifier, OperatorPin, PeerInfo,
-        PeerVerifier, UnverifiedReason, APP_BUNDLE_ID, INSTALLED_APP_EXE, PIN_FILE_NAME,
+        audit_token, still_same_operator, verify_code, CodeIdentity, MacPeerVerifier, OperatorPin,
+        PeerInfo, PeerVerifier, UnverifiedReason, APP_BUNDLE_ID, INSTALLED_APP_EXE, PIN_FILE_NAME,
     },
     protocol::{ClientMsg, DecisionChoice, ServerMsg, Topic, PROTOCOL_VERSION},
     server::Server,
@@ -183,9 +183,9 @@ struct Helpers {
 
 fn run(cmd: &mut Command) -> std::process::Output {
     let shown = format!("{cmd:?}");
-    let out = cmd
-        .output()
-        .unwrap_or_else(|e| panic!("cannot run {shown}: {e} (these tests need the Xcode command-line tools)"));
+    let out = cmd.output().unwrap_or_else(|e| {
+        panic!("cannot run {shown}: {e} (these tests need the Xcode command-line tools)")
+    });
     assert!(
         out.status.success(),
         "{shown} failed ({}):\nstdout: {}\nstderr: {}",
@@ -294,16 +294,23 @@ fn cdhashes(path: &Path) -> Vec<String> {
     let archs = String::from_utf8(archs.stdout).unwrap();
     let mut out = Vec::new();
     for arch in archs.split_whitespace() {
-        let shown = run(Command::new("codesign").args(["-dvvv", "--arch", arch]).arg(path));
+        let shown = run(Command::new("codesign")
+            .args(["-dvvv", "--arch", arch])
+            .arg(path));
         // codesign -d prints to stderr.
-        let text = String::from_utf8_lossy(&shown.stderr).into_owned() + &String::from_utf8_lossy(&shown.stdout);
+        let text = String::from_utf8_lossy(&shown.stderr).into_owned()
+            + &String::from_utf8_lossy(&shown.stdout);
         let hash = text
             .lines()
             .find_map(|l| l.strip_prefix("CDHash="))
             .unwrap_or_else(|| panic!("no CDHash= line for {} ({arch}):\n{text}", path.display()));
         out.push(hash.trim().to_string());
     }
-    assert!(!out.is_empty(), "lipo found no architectures in {}", path.display());
+    assert!(
+        !out.is_empty(),
+        "lipo found no architectures in {}",
+        path.display()
+    );
     out
 }
 
@@ -329,10 +336,20 @@ struct Helper {
 }
 
 impl Helper {
-    fn spawn(binary: &Path, dir: &Path, socket: &Path, frames: Option<&Path>, action: &str, exec: Option<&Path>) -> Self {
+    fn spawn(
+        binary: &Path,
+        dir: &Path,
+        socket: &Path,
+        frames: Option<&Path>,
+        action: &str,
+        exec: Option<&Path>,
+    ) -> Self {
         let stdout = dir.join(format!("helper-{}.out", uniq()));
         let mut cmd = Command::new(binary);
-        cmd.arg("client").arg(socket).arg(frames.map_or(PathBuf::from("-"), Path::to_path_buf)).arg(action);
+        cmd.arg("client")
+            .arg(socket)
+            .arg(frames.map_or(PathBuf::from("-"), Path::to_path_buf))
+            .arg(action);
         if let Some(exec) = exec {
             cmd.arg(exec);
         }
@@ -375,14 +392,19 @@ fn accept(listener: &UnixListener, helper: &mut Helper) -> UnixStream {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
                 return stream;
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if let Some(status) = helper.child.try_wait().unwrap() {
                     panic!("the helper exited ({status}) before connecting");
                 }
-                assert!(Instant::now() < deadline, "the helper did not connect within 10 s");
+                assert!(
+                    Instant::now() < deadline,
+                    "the helper did not connect within 10 s"
+                );
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(e) => panic!("accept: {e}"),
@@ -392,7 +414,9 @@ fn accept(listener: &UnixListener, helper: &mut Helper) -> UnixStream {
 
 fn read_byte(stream: &mut UnixStream, what: &str) -> u8 {
     let mut b = [0u8; 1];
-    stream.read_exact(&mut b).unwrap_or_else(|e| panic!("waiting for {what}: {e}"));
+    stream
+        .read_exact(&mut b)
+        .unwrap_or_else(|e| panic!("waiting for {what}: {e}"));
     b[0]
 }
 
@@ -420,18 +444,33 @@ fn verify_helper(binary: &Path, pin_binary: &Path) -> PeerInfo {
 /// As [`verify_helper`], with the verifier told that the installed app lives
 /// at `app_exe` (the path binding).
 fn verify_helper_at(binary: &Path, pin_binary: &Path, app_exe: &Path) -> PeerInfo {
-    inspect_helper(binary, pin_binary, |pin| MacPeerVerifier::with_app_exe(pin, app_exe))
+    inspect_helper(binary, pin_binary, |pin| {
+        MacPeerVerifier::with_app_exe(pin, app_exe)
+    })
 }
 
 /// As [`verify_helper_at`], for a verifier the caller builds from the pin's path
 /// (e.g. [`MacPeerVerifier::new`], which uses the real installed-app path).
-fn inspect_helper(binary: &Path, pin_binary: &Path, verifier: impl FnOnce(PathBuf) -> MacPeerVerifier) -> PeerInfo {
+fn inspect_helper(
+    binary: &Path,
+    pin_binary: &Path,
+    verifier: impl FnOnce(PathBuf) -> MacPeerVerifier,
+) -> PeerInfo {
     let (dir, listener, socket) = listen();
     let pin = write_pin_for(dir.path(), APP_BUNDLE_ID, pin_binary);
-    let mut helper = Helper::spawn(binary, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "hold", None);
+    let mut helper = Helper::spawn(
+        binary,
+        dir.path(),
+        &socket,
+        Some(&bytes_file(dir.path(), b"a")),
+        "hold",
+        None,
+    );
     let mut stream = accept(&listener, &mut helper);
     assert_eq!(read_byte(&mut stream, "the helper's first byte"), b'a');
-    let info = verifier(pin).inspect(stream.as_fd(), true).expect("the helper is alive and identifiable");
+    let info = verifier(pin)
+        .inspect(stream.as_fd(), true)
+        .expect("the helper is alive and identifiable");
     assert_eq!(info.pid, helper.pid(), "the peer is the helper");
     info
 }
@@ -446,7 +485,12 @@ fn unverified(reason: UnverifiedReason) -> CodeIdentity {
 fn the_pinned_helper_is_pinned_as_the_app() {
     let h = helpers();
     let info = verify_helper(&h.pinned, &h.pinned);
-    assert_eq!(info.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+    assert_eq!(
+        info.code,
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        }
+    );
     assert_ne!(info.pidversion, 0);
     assert_eq!(info.path_bundle_id, None, "the helper is in no bundle");
 }
@@ -493,7 +537,8 @@ fn pinned_code_that_allows_a_debugger_to_attach_is_refused() {
 // installed app's path.
 
 #[test]
-fn pinned_code_running_from_another_existing_file_than_the_installed_app_is_refused_as_wrong_path() {
+fn pinned_code_running_from_another_existing_file_than_the_installed_app_is_refused_as_wrong_path()
+{
     let h = helpers();
     // The installed app is (some other file at) h.unpinned; the pinned helper runs from elsewhere.
     let info = verify_helper_at(&h.pinned, &h.pinned, &h.unpinned);
@@ -511,14 +556,17 @@ fn pinned_code_is_refused_as_wrong_path_when_nothing_is_installed_at_the_expecte
 }
 
 #[test]
-fn rewriting_the_pin_to_name_an_attackers_binary_does_not_make_it_the_app_when_it_is_not_at_the_installed_path() {
+fn rewriting_the_pin_to_name_an_attackers_binary_does_not_make_it_the_app_when_it_is_not_at_the_installed_path(
+) {
     let h = helpers();
     // The attacker signs its own client with the app's identifier and writes ITS cdhash
     // into the (user-writable) pin: the code check alone passes...
     let at_its_own_path = verify_helper(&h.impostor, &h.impostor);
     assert_eq!(
         at_its_own_path.code,
-        CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() },
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        },
         "precondition: with the path binding out of play the rewritten pin does match"
     );
     // ...but the real app lives elsewhere (the installed path), so it is refused.
@@ -527,18 +575,25 @@ fn rewriting_the_pin_to_name_an_attackers_binary_does_not_make_it_the_app_when_i
 }
 
 #[test]
-fn residual_risk_an_attacker_who_also_replaces_the_installed_app_and_rewrites_the_pin_is_accepted() {
+fn residual_risk_an_attacker_who_also_replaces_the_installed_app_and_rewrites_the_pin_is_accepted()
+{
     // Documented in docs/operator-app-trust.md: the pin and the path are not a root of
     // trust. Replace the binary AT the installed path AND rewrite the pin to match, and
     // the verifier (by design) calls it the app. This test pins that boundary: if it ever
     // starts failing, the doc's residual-risk section needs updating too.
     let h = helpers();
     let info = verify_helper_at(&h.impostor, &h.impostor, &h.impostor);
-    assert_eq!(info.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+    assert_eq!(
+        info.code,
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        }
+    );
 }
 
 #[test]
-fn a_binary_with_the_apps_identifier_but_another_cdhash_fails_the_requirement_even_at_the_installed_path() {
+fn a_binary_with_the_apps_identifier_but_another_cdhash_fails_the_requirement_even_at_the_installed_path(
+) {
     let h = helpers();
     // The pin is the genuine app's (original pin); the impostor sits at the expected path
     // (it replaced the installed binary) but its cdhash is not the pinned one.
@@ -553,7 +608,12 @@ fn the_installed_app_may_be_named_through_a_symlink() {
     let link = links.path().join("Nostromo-link");
     std::os::unix::fs::symlink(&h.pinned, &link).unwrap();
     let info = verify_helper_at(&h.pinned, &h.pinned, &link);
-    assert_eq!(info.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+    assert_eq!(
+        info.code,
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        }
+    );
 }
 
 #[test]
@@ -588,12 +648,20 @@ fn swap_loop(a: PathBuf, b: PathBuf, stop: Arc<AtomicBool>) -> std::thread::Join
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     std::thread::spawn(move || {
-        let (a, b) = (CString::new(a.as_os_str().as_bytes()).unwrap(), CString::new(b.as_os_str().as_bytes()).unwrap());
+        let (a, b) = (
+            CString::new(a.as_os_str().as_bytes()).unwrap(),
+            CString::new(b.as_os_str().as_bytes()).unwrap(),
+        );
         let mut swaps = 0u64;
         while !stop.load(Ordering::Relaxed) {
             // SAFETY: both are valid NUL-terminated paths for the duration of the call.
             let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
-            assert_eq!(rc, 0, "RENAME_SWAP failed: {}", std::io::Error::last_os_error());
+            assert_eq!(
+                rc,
+                0,
+                "RENAME_SWAP failed: {}",
+                std::io::Error::last_os_error()
+            );
             swaps += 1;
         }
         swaps
@@ -623,15 +691,30 @@ fn swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_ma
     // Preconditions, so a pass is not vacuous: the installed copy IS accepted at the
     // installed path, and the attacker's copy, standing still, is refused.
     let genuine = verify_helper_at(&installed, &installed, &installed);
-    assert_eq!(genuine.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+    assert_eq!(
+        genuine.code,
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        }
+    );
     let standing_still = verify_helper_at(&attacker, &installed, &installed);
     assert_eq!(standing_still.code, unverified(UnverifiedReason::WrongPath));
 
     // The race: the attacker's client is connected; the directory it runs from is swapped
     // with the symlink in a tight loop while the daemon inspects it again and again.
     let (dir, listener, socket) = listen();
-    let verifier = MacPeerVerifier::with_app_exe(write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned), &installed);
-    let mut helper = Helper::spawn(&attacker, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "hold", None);
+    let verifier = MacPeerVerifier::with_app_exe(
+        write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned),
+        &installed,
+    );
+    let mut helper = Helper::spawn(
+        &attacker,
+        dir.path(),
+        &socket,
+        Some(&bytes_file(dir.path(), b"a")),
+        "hold",
+        None,
+    );
     let mut stream = accept(&listener, &mut helper);
     assert_eq!(read_byte(&mut stream, "the attacker's first byte"), b'a');
 
@@ -656,10 +739,18 @@ fn swapping_the_attackers_directory_with_a_symlink_to_the_installed_app_never_ma
     stop.store(true, Ordering::Relaxed);
     let swaps = swapper.join().unwrap();
 
-    assert!(swaps >= u64::from(ATTEMPTS), "the swap loop must really have run alongside ({swaps} swaps)");
-    assert_eq!(pinned, 0, "{pinned} of {ATTEMPTS} inspections called the attacker the installed app");
     assert!(
-        outcomes.iter().all(|code| *code == unverified(UnverifiedReason::WrongPath)),
+        swaps >= u64::from(ATTEMPTS),
+        "the swap loop must really have run alongside ({swaps} swaps)"
+    );
+    assert_eq!(
+        pinned, 0,
+        "{pinned} of {ATTEMPTS} inspections called the attacker the installed app"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .all(|code| *code == unverified(UnverifiedReason::WrongPath)),
         "every inspection must refuse as WrongPath: {outcomes:?}"
     );
 }
@@ -671,7 +762,10 @@ fn by_default_the_app_must_run_from_the_installed_applications_path() {
     let dir = tempfile::tempdir().unwrap();
     let verifier = MacPeerVerifier::new(dir.path().join(PIN_FILE_NAME));
     assert_eq!(verifier.app_exe(), Path::new(INSTALLED_APP_EXE));
-    assert_eq!(INSTALLED_APP_EXE, "/Applications/Nostromo.app/Contents/MacOS/Nostromo");
+    assert_eq!(
+        INSTALLED_APP_EXE,
+        "/Applications/Nostromo.app/Contents/MacOS/Nostromo"
+    );
 
     // A correctly signed and pinned helper that is run from a temp dir (not from
     // /Applications) is not the app: it used to be Pinned wherever it ran.
@@ -684,46 +778,82 @@ fn a_token_taken_before_an_exec_names_no_code_afterwards_and_a_fresh_one_names_t
     let h = helpers();
     let (dir, listener, socket) = listen();
     let pin = OperatorPin::load(&write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned)).unwrap();
-    let mut helper =
-        Helper::spawn(&h.unpinned, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "goexec", Some(&h.pinned));
+    let mut helper = Helper::spawn(
+        &h.unpinned,
+        dir.path(),
+        &socket,
+        Some(&bytes_file(dir.path(), b"a")),
+        "goexec",
+        Some(&h.pinned),
+    );
     let mut stream = accept(&listener, &mut helper);
     assert_eq!(read_byte(&mut stream, "the unpinned image's byte"), b'a');
 
     let before = audit_token(stream.as_fd()).expect("token before the exec");
     assert_eq!(before.pid(), helper.pid());
-    assert_eq!(verify_code(&before, &pin), unverified(UnverifiedReason::RequirementFailed), "before: the unpinned image");
+    assert_eq!(
+        verify_code(&before, &pin),
+        unverified(UnverifiedReason::RequirementFailed),
+        "before: the unpinned image"
+    );
 
     stream.write_all(b"g").unwrap();
     assert_eq!(read_byte(&mut stream, "the exec'd image's byte"), b'b');
 
     let after = audit_token(stream.as_fd()).expect("token after the exec");
     assert_eq!(after.pid(), before.pid(), "exec keeps the pid");
-    assert_ne!(after.pidversion(), before.pidversion(), "exec changes the pidversion");
+    assert_ne!(
+        after.pidversion(),
+        before.pidversion(),
+        "exec changes the pidversion"
+    );
     assert_eq!(
         verify_code(&before, &pin),
         unverified(UnverifiedReason::NoSuchCode),
         "the old token must name no running code once the process exec'd"
     );
-    assert_eq!(verify_code(&after, &pin), CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+    assert_eq!(
+        verify_code(&after, &pin),
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        }
+    );
 }
 
 #[test]
 fn a_forked_child_writing_on_the_apps_socket_is_another_peer() {
     let h = helpers();
     let (dir, listener, socket) = listen();
-    let verifier = MacPeerVerifier::with_app_exe(write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned), &h.pinned);
-    let mut helper = Helper::spawn(&h.pinned, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "gofork", None);
+    let verifier = MacPeerVerifier::with_app_exe(
+        write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned),
+        &h.pinned,
+    );
+    let mut helper = Helper::spawn(
+        &h.pinned,
+        dir.path(),
+        &socket,
+        Some(&bytes_file(dir.path(), b"a")),
+        "gofork",
+        None,
+    );
     let mut stream = accept(&listener, &mut helper);
     assert_eq!(read_byte(&mut stream, "the app's byte"), b'a');
 
     let accepted = verifier.inspect(stream.as_fd(), true).expect("the app");
     assert_eq!(accepted.pid, helper.pid());
-    assert_eq!(accepted.code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
+    assert_eq!(
+        accepted.code,
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        }
+    );
 
     stream.write_all(b"g").unwrap();
     assert_eq!(read_byte(&mut stream, "the forked child's byte"), b'c');
 
-    let now = verifier.reinspect(stream.as_fd(), &accepted).expect("the child");
+    let now = verifier
+        .reinspect(stream.as_fd(), &accepted)
+        .expect("the child");
     // Reap the grandchild even if an assertion below fails.
     let child_pid = now.pid;
     struct KillOnDrop(i32);
@@ -735,8 +865,14 @@ fn a_forked_child_writing_on_the_apps_socket_is_another_peer() {
     }
     let _reap = (child_pid != accepted.pid && child_pid > 1).then(|| KillOnDrop(child_pid));
 
-    assert_ne!(now.pid, accepted.pid, "the socket's peer is now the child that wrote last");
-    assert!(!still_same_operator(&accepted, Some(&now)), "a forked fd sharer is not the verified operator");
+    assert_ne!(
+        now.pid, accepted.pid,
+        "the socket's peer is now the child that wrote last"
+    );
+    assert!(
+        !still_same_operator(&accepted, Some(&now)),
+        "a forked fd sharer is not the verified operator"
+    );
 }
 
 #[test]
@@ -744,7 +880,14 @@ fn one_code_check_with_resource_validation_takes_well_under_two_seconds() {
     let h = helpers();
     let (dir, listener, socket) = listen();
     let pin = OperatorPin::load(&write_pin_for(dir.path(), APP_BUNDLE_ID, &h.pinned)).unwrap();
-    let mut helper = Helper::spawn(&h.pinned, dir.path(), &socket, Some(&bytes_file(dir.path(), b"a")), "hold", None);
+    let mut helper = Helper::spawn(
+        &h.pinned,
+        dir.path(),
+        &socket,
+        Some(&bytes_file(dir.path(), b"a")),
+        "hold",
+        None,
+    );
     let mut stream = accept(&listener, &mut helper);
     read_byte(&mut stream, "the helper's byte");
     let token = audit_token(stream.as_fd()).unwrap();
@@ -761,8 +904,16 @@ fn one_code_check_with_resource_validation_takes_well_under_two_seconds() {
         first.as_secs_f64() * 1e3,
         second.as_secs_f64() * 1e3
     );
-    assert_eq!(code, CodeIdentity::Pinned { identifier: APP_BUNDLE_ID.to_string() });
-    assert!(first < Duration::from_secs(2), "one verify_code took {first:?}");
+    assert_eq!(
+        code,
+        CodeIdentity::Pinned {
+            identifier: APP_BUNDLE_ID.to_string()
+        }
+    );
+    assert!(
+        first < Duration::from_secs(2),
+        "one verify_code took {first:?}"
+    );
 }
 
 // ── the whole daemon: buffered bytes, then exec the pinned app ───────────────
@@ -783,7 +934,8 @@ impl PeerVerifier for LateVerifier {
     }
 
     fn reinspect(&self, fd: std::os::fd::BorrowedFd<'_>, accepted: &PeerInfo) -> Option<PeerInfo> {
-        self.reinspects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.reinspects
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.reinspect(fd, accepted)
     }
 }
@@ -824,19 +976,32 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
     let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
     let server = Server::bind(
         &socket_path,
-        Arc::new(Mutex::new(SessionManager::with_store_path(tmp.path().join("sessions.json")))),
+        Arc::new(Mutex::new(SessionManager::with_store_path(
+            tmp.path().join("sessions.json"),
+        ))),
         tmp.path().join("perri-state"),
         Arc::clone(&decisions),
         Arc::clone(&verifier) as Arc<dyn PeerVerifier>,
         false,
     )
     .expect("bind");
-    decisions.lock().unwrap().configure_broadcast(server.tx.clone());
+    decisions
+        .lock()
+        .unwrap()
+        .configure_broadcast(server.tx.clone());
 
     // The agent's decision, already pending (so its id is known to the attacker).
-    let choices = vec![DecisionChoice { id: "yes".into(), label: "Yes".into(), detail: None, is_default: false }];
+    let choices = vec![DecisionChoice {
+        id: "yes".into(),
+        label: "Yes".into(),
+        detail: None,
+        is_default: false,
+    }];
     let (request_id, mut rx, _) =
-        decisions.lock().unwrap().submit("cody-x".into(), "Proceed?".into(), None, choices, None);
+        decisions
+            .lock()
+            .unwrap()
+            .submit("cody-x".into(), "Proceed?".into(), None, choices, None);
 
     // Everything an app would say, written by the unpinned image before the
     // daemon has verified anyone, so it cannot carry a nonce.
@@ -845,7 +1010,11 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         protocol_version: PROTOCOL_VERSION,
         client_kind: Some("mac_app".into()),
     });
-    bytes.extend(frame(&ClientMsg::Subscribe { topics: vec![Topic::Decision], renders_decisions: false, renders_approvals: false }));
+    bytes.extend(frame(&ClientMsg::Subscribe {
+        topics: vec![Topic::Decision],
+        renders_decisions: false,
+        renders_approvals: false,
+    }));
     bytes.extend(frame(&ClientMsg::DecisionAnswer {
         request_id: request_id.clone(),
         choice_id: Some("yes".into()),
@@ -853,7 +1022,14 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
     }));
     bytes.extend(frame(&ClientMsg::Ping));
     let frames_file = bytes_file(tmp.path(), &bytes);
-    let helper = Helper::spawn(&h.unpinned, tmp.path(), &socket_path, Some(&frames_file), "exec", Some(&h.pinned));
+    let helper = Helper::spawn(
+        &h.unpinned,
+        tmp.path(),
+        &socket_path,
+        Some(&frames_file),
+        "exec",
+        Some(&h.pinned),
+    );
 
     // Wait until the daemon has said what it will (the Pong after the answer).
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -862,7 +1038,10 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         if frames.iter().any(|m| matches!(m, ServerMsg::Pong)) {
             break frames;
         }
-        assert!(Instant::now() < deadline, "no Pong from the daemon within 15 s; got {frames:?}");
+        assert!(
+            Instant::now() < deadline,
+            "no Pong from the daemon within 15 s; got {frames:?}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
 
@@ -876,21 +1055,40 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         matches!(welcome_nonce, Some(Some(_))),
         "the exec'd pinned image must have been verified as the operator app (Welcome with a nonce): {frames:?}"
     );
-    assert!(decisions.lock().unwrap().has_operator(), "it counts as an operator");
+    assert!(
+        decisions.lock().unwrap().has_operator(),
+        "it counts as an operator"
+    );
 
     // ...and the answer it had buffered is refused all the same: no nonce.
     assert!(
-        frames.iter().any(|m| matches!(m, ServerMsg::Error { message } if message.starts_with("not_operator_app"))),
+        frames.iter().any(
+            |m| matches!(m, ServerMsg::Error { message } if message.starts_with("not_operator_app"))
+        ),
         "the buffered answer must be refused with not_operator_app: {frames:?}"
     );
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::DecisionResolved { .. })), "{frames:?}");
-    assert_eq!(decisions.lock().unwrap().active_request_id("cody-x"), Some(request_id), "still pending");
     assert!(
-        matches!(rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+        !frames
+            .iter()
+            .any(|m| matches!(m, ServerMsg::DecisionResolved { .. })),
+        "{frames:?}"
+    );
+    assert_eq!(
+        decisions.lock().unwrap().active_request_id("cody-x"),
+        Some(request_id),
+        "still pending"
+    );
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
         "the asker must not be answered"
     );
     assert_eq!(
-        verifier.reinspects.load(std::sync::atomic::Ordering::SeqCst),
+        verifier
+            .reinspects
+            .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "the missing nonce refuses before any answer-time re-check"
     );

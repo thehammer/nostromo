@@ -138,7 +138,10 @@ fn a_restricted_session_never_gets_the_prompt_flag_in_any_arm() {
                         !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
                         "{arm}: a restricted session has no bypass: {argv:?}"
                     );
-                    let mode = argv.iter().position(|a| a == "--permission-mode").expect(&arm);
+                    let mode = argv
+                        .iter()
+                        .position(|a| a == "--permission-mode")
+                        .expect(&arm);
                     assert_eq!(argv[mode + 1], "dontAsk", "{arm}: {argv:?}");
                     assert_guard_settings_present(&argv);
                 }

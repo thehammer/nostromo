@@ -64,13 +64,19 @@ fn the_tracker_is_in_the_top_three_for_every_phrase_an_agent_would_search() {
         "where things stand",
     ] {
         let top: Vec<String> = rank(query).into_iter().take(3).collect();
-        assert!(top.contains(&"nostromo.tracker".to_string()), "{query:?}: top 3 was {top:?}");
+        assert!(
+            top.contains(&"nostromo.tracker".to_string()),
+            "{query:?}: top 3 was {top:?}"
+        );
     }
 }
 
 #[test]
 fn the_description_opens_with_the_search_words_and_the_descriptor_stays_in_budget() {
-    let d = tool_descriptors().into_iter().find(|d| d["name"] == "nostromo.tracker").unwrap();
+    let d = tool_descriptors()
+        .into_iter()
+        .find(|d| d["name"] == "nostromo.tracker")
+        .unwrap();
     assert!(d["description"].as_str().unwrap().starts_with(
         "Tracker (status board / todo list / checklist) pane: keep track of tasks and where things stand, as a markdown handoff file beside the transcript."
     ));
