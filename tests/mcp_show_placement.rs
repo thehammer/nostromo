@@ -1274,3 +1274,33 @@ async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_
     );
     assert_eq!(inner[1], PaneTree::Leaf { pane_id: "repl".into() }, "{tree:?}");
 }
+
+// ── the tracker is exempt from the tool policy (PRD 29) ──────────────────────
+
+#[tokio::test]
+async fn the_tracker_stays_listed_and_callable_for_perri_under_the_intended_policy_and_an_explicit_deny() {
+    for policy in [
+        INTENDED_PERRI_POLICY.to_string(),
+        format!("{INTENDED_PERRI_POLICY}      - nostromo.tracker\n"),
+    ] {
+        let home = HomeOverride::new();
+        home.write_tool_policy(&policy);
+        let harness = make_daemon_state();
+        register_focuses(&harness, &["perri"]);
+        let socket_path = harness.dir.path().join("mcp-tracker-exempt.sock");
+        let _server = McpServer::bind(socket_path.clone(), harness.state.clone()).await.unwrap();
+        let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+
+        let tools = list_tools(&mut reader, &mut writer, 2).await;
+        assert!(
+            tools.as_array().unwrap().iter().any(|t| t["name"] == "nostromo.tracker"),
+            "nostromo.tracker must be listed for perri"
+        );
+        let resp = call_tool_raw(&mut reader, &mut writer, 3, "nostromo.tracker", json!({"op":"read"})).await;
+        assert_ne!(
+            resp["error"]["code"].as_i64(),
+            Some(TOOL_FORBIDDEN_CODE),
+            "a tracker call must not be Forbidden: {resp}"
+        );
+    }
+}

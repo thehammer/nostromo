@@ -606,6 +606,13 @@ impl TrackerRegistry {
         panes.lock().unwrap_or_else(|e| e.into_inner()).set_pane_set_hook(hook);
     }
 
+    /// The topic of the board bound to `tag`, when there is one.
+    pub fn bound_topic(&self, tag: &str) -> Option<String> {
+        let inner = self.lock();
+        let path = inner.bindings.get(tag)?;
+        inner.boards.get(path).map(|entry| entry.topic.clone())
+    }
+
     /// Whether `tag` has a bound board (a fresh session re-attaches the pane).
     pub fn has_bound_board(&self, tag: &str) -> bool {
         self.lock().bindings.contains_key(tag)

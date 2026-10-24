@@ -51,6 +51,7 @@
 //! counts and p50/p95/max wall-clock durations plus process uptime.
 
 pub mod command;
+pub mod instructions;
 pub mod layout_schema;
 pub mod pane_sources;
 pub mod server;

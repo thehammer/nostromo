@@ -20,12 +20,14 @@ use crate::tracker::placement::{place_tracker, TRACKER_PANE_ID};
 use crate::tracker::registry::{OpenArgs, OpenOutcome, ReadOutcome, TrackerError, WriteOutcome};
 use crate::tracker::{validate_command_text, Author, TrackerRegistry};
 
-/// The tool's description. One constant so the discoverability slice (T2) can
-/// reword it without touching the schema.
-pub const TRACKER_DESCRIPTION: &str = "Keep a visible task board for the work you are doing. \
-Boards are markdown files (default <repo>/.claude/wip/<topic>/index.md) shown in a pane next to the transcript; \
-the user can edit the file or the pane too. Start with {op:'open',topic} (idempotent; returns counts, and the \
-board the first time). Then change items one at a time: {op:'status',id,status} is the cheapest call. \
+/// The tool's description. The first sentence carries the words an agent
+/// searches with (tracker, status board, todo list, checklist, handoff); the
+/// `tests/tracker_tool_search.rs` BM25 proxy keeps it findable.
+pub const TRACKER_DESCRIPTION: &str = "Tracker (status board / todo list / checklist) pane: keep track of tasks and where things stand, \
+as a markdown handoff file beside the transcript. \
+The file (default <repo>/.claude/wip/<topic>/index.md) is shown in a pane; the user can edit the file or the pane too. \
+Start with {op:'open',topic} (idempotent; returns counts, and the board the first time). \
+Then change items one at a time: {op:'status',id,status} is the cheapest call. \
 {op:'upsert',id?,section?,text?,status?,owner?,note?,links?,kind?,command?,env?} changes only the fields you give. \
 {op:'remove',id}, {op:'move',id,section,before?|after?}, {op:'log',text}. Send {ops:[...]} (max 200) for an atomic \
 batch of these. {op:'read'} returns only what changed since your last read (the user's edits included, yours excluded); \

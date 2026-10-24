@@ -309,14 +309,15 @@ def take_snapshot(user_home, ps_text, defaults_text, qa_root=None):
 def daemon_env(qa_root, base_env, fake_claude, guard_bin):
     """Environment for the QA nostromd. Nothing of the user's HOME leaks in."""
     home = os.path.join(qa_root, "home")
-    env = {k: v for k, v in base_env.items() if k in ("PATH", "TMPDIR", "LANG", "NOSTROMO_AWS_CLI")}
+    env = {k: v for k, v in base_env.items() if k in ("PATH", "TMPDIR", "LANG", "NOSTROMO_AWS_CLI", "ANTHROPIC_MODEL")}
     env.update({
         "HOME": home,
         "NOSTROMOD_SOCKET": os.path.join(qa_root, "nostromd.sock"),
         "NOSTROMD_SOCKET": os.path.join(qa_root, "nostromd.sock"),
         "NOSTROMO_MCP_SOCKET": os.path.join(qa_root, "mcp.sock"),
         "NOSTROMD_TCP_ADDR": "127.0.0.1:0",
-        "NOSTROMO_CLAUDE_BIN": fake_claude,
+        # NOSTROMO_QA_CLAUDE_BIN (a real CLI) is for the user-run tracker-discoverability.sh only.
+        "NOSTROMO_CLAUDE_BIN": base_env.get("NOSTROMO_QA_CLAUDE_BIN") or fake_claude,
         "NOSTROMO_GUARD_BIN": guard_bin,
         "NOSTROMO_APPROVALS_DIR": os.path.join(home, ".nostromo", "approvals"),
         "NOSTROMO_QA_DAEMON": "1",

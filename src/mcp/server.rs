@@ -171,7 +171,7 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
         let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
         let response = match method {
-            "initialize" => Some(handle_initialize(id, &req)),
+            "initialize" => Some(handle_initialize(id, &req, &state, pty_id.as_deref())),
             "notifications/initialized" => None, // notification; no response
             "ping" => id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
             "tools/list" => Some(handle_tools_list(id, &state, pty_id.as_deref()).await),
@@ -192,7 +192,12 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
 
 // ── method handlers ───────────────────────────────────────────────────────────
 
-fn handle_initialize(id: Option<Value>, req: &Value) -> Value {
+fn handle_initialize(
+    id: Option<Value>,
+    req: &Value,
+    state: &McpSharedState,
+    pty_id: Option<&str>,
+) -> Value {
     let client_version = req
         .pointer("/params/protocolVersion")
         .and_then(|v| v.as_str())
@@ -201,7 +206,7 @@ fn handle_initialize(id: Option<Value>, req: &Value) -> Value {
     debug!("MCP: initialize from client protocol {client_version}");
 
     let id = id.unwrap_or(json!(null));
-    json!({
+    let mut response = json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
@@ -214,7 +219,32 @@ fn handle_initialize(id: Option<Value>, req: &Value) -> Value {
                 "version": env!("CARGO_PKG_VERSION")
             }
         }
-    })
+    });
+    if let Some(text) = initialize_instructions(state, pty_id) {
+        response["result"]["instructions"] = json!(text);
+    }
+    response
+}
+
+/// The `instructions` for this connection: only for a session the daemon
+/// spawned (its Hello `pty_id` is a focus tag the daemon knows), and never for
+/// the picks session, which cannot call the tracker. Everyone else gets today's
+/// response unchanged.
+fn initialize_instructions(state: &McpSharedState, pty_id: Option<&str>) -> Option<String> {
+    let tag = pty_id.filter(|t| !t.is_empty() && *t != crate::data::work::picks::PICKS_TAG)?;
+    let daemon = state.daemon.as_ref()?;
+    let known = daemon
+        .session_mgr
+        .lock()
+        .ok()?
+        .focus_registry()
+        .iter()
+        .any(|f| f.tag == tag);
+    if !known {
+        return None;
+    }
+    let topic = daemon.tracker.bound_topic(tag);
+    Some(crate::mcp::instructions::nostromo_instructions(topic.as_deref()))
 }
 
 /// `tools/list`, narrowed to what this caller may see (W5 —

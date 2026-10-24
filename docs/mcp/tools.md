@@ -1326,6 +1326,14 @@ agents:
       - nostromo.refresh_pane_content
 ```
 
+**One tool is exempt: `nostromo.tracker`.** `ALWAYS_AVAILABLE`
+(`src/mcp/tool_policy.rs`) lists tools that `filter_descriptors` never removes
+and `ToolPolicy::denies` never denies, even when a policy names them. The
+session instructions (`src/mcp/instructions.rs`, see
+[`tracker.md`](tracker.md#discoverability)) tell every Nostromo agent to use
+the tracker, so withdrawing it from one agent would contradict its own prompt.
+The list is deliberately a single entry.
+
 Every other caller — Mother, Fred, Teri, Cody, and anyone else the policy
 doesn't name — sees a `tools/list` byte-for-byte identical to what it always
 returned, whether or not this policy is armed for Perri.
