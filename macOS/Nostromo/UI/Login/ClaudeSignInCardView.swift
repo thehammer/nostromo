@@ -18,7 +18,7 @@ final class ClaudeSignInCardView: NSView {
     static let buttonHeight: CGFloat = 24
     static let rowGap: CGFloat = 8
 
-    let tag: String
+    let focusTag: String
     private(set) var model: ClaudeLoginCardModel
     private var claudeBin: String?
     private let store: ClaudeLoginStore
@@ -43,7 +43,7 @@ final class ClaudeSignInCardView: NSView {
              NSPasteboard.general.clearContents()
              NSPasteboard.general.setString(text, forType: .string)
          }) {
-        self.tag = tag
+        self.focusTag = tag
         self.claudeBin = claudeBin
         self.store = store
         self.launcher = launcher
@@ -197,11 +197,11 @@ final class ClaudeSignInCardView: NSView {
 
     @objc private func resendPressed(_ sender: NSButton) {
         guard isHuman(sender, "resend") else { return }
-        store.retry(tag: tag)
+        store.retry(tag: focusTag)
     }
 
     @objc private func discardPressed(_ sender: NSButton) {
         guard isHuman(sender, "discard") else { return }
-        store.discard(tag: tag)
+        store.discard(tag: focusTag)
     }
 }
