@@ -590,6 +590,37 @@ class TestTrackerCommandsAreAllowedAndReadOnly(StubCase):
         self.assertEqual(self.invocations(), [])
 
 
+class TestTasksCommandIsAllowedAndReadOnly(StubCase):
+    """`tasks` (list|chip) only reads what the Background activity popover and chip show, so QA scripts may use it."""
+
+    def test_tasks_is_on_the_allow_list(self):
+        self.assertIn("tasks", appctl.ALLOWED_COMMANDS)
+
+    def test_it_is_not_guarded_like_click_and_key(self):
+        self.assertNotIn("tasks", appctl._GUARDED_COMMANDS)
+
+    def test_tasks_list_and_chip_reach_the_cli_under_the_window_selection(self):
+        app = App(self.make_stub(), window_args=["-w", "1"])
+        self.assertIsNotNone(app._run("tasks", ["list", "--focus", "kate"]))
+        self.assertIsNotNone(app._run("tasks", ["list", "--all"]))
+        self.assertIsNotNone(app._run("tasks", ["chip"]))
+        self.assertEqual(self.invocations(), [
+            ["-w", "1", "tasks", "list", "--focus", "kate"],
+            ["-w", "1", "tasks", "list", "--all"],
+            ["-w", "1", "tasks", "chip"],
+        ])
+
+    def test_nothing_that_stops_or_acts_on_a_task_is_allowed(self):
+        acts = {"tasks-stop", "tasks-output", "task", "task-stop", "stop", "tasks-clear"}
+        self.assertFalse(acts & set(appctl.ALLOWED_COMMANDS))
+        app = App(self.make_stub())
+        for cmd in sorted(acts):
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(RefusedError):
+                    app._run(cmd, [])
+        self.assertEqual(self.invocations(), [])
+
+
 class TestArgvConstruction(StubCase):
     def test_window_selection_goes_before_the_subcommand_except_for_app_wide_commands(self):
         app = App(self.make_stub(), window_args=["-w", "1"])

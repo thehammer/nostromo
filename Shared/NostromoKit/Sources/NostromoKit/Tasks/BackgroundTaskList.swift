@@ -314,10 +314,18 @@ public struct BackgroundTaskList: Equatable {
             if let name = task.workflowName.map(oneLine), !name.isEmpty { return name }
             return description
         case .other, .unknown:
-            return joined(task.taskType)
+            return joined(kindName(task))
         case .shell, .monitor:
             return description
         }
+    }
+
+    /// The CLI's own name for the task's kind: its `task_type`, else the kind string this client
+    /// did not recognise; nil when neither was sent.
+    public static func kindName(_ task: TaskMetaWire) -> String? {
+        if !task.taskType.isEmpty { return task.taskType }
+        if case .unknown(let raw) = task.kind, !raw.isEmpty { return raw }
+        return nil
     }
 
     /// `950 tokens`, `18.2k tokens`, `1.3M tokens`.
@@ -377,7 +385,7 @@ public struct BackgroundTaskList: Equatable {
             section: section,
             kind: task.kind,
             kindLabel: kindLabel(task.kind),
-            kindName: task.taskType.isEmpty ? nil : task.taskType,
+            kindName: kindName(task),
             description: task.description,
             title: title(task),
             status: task.status,
