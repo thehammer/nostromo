@@ -502,6 +502,7 @@ fn make_raw_daemon_state() -> RawHarness {
         // other local processes are covered by `tests/ipc_operator_app.rs`.
         Arc::new(nostromo::ipc::peer_verify::testing::FakePeerVerifier::always_app()),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .expect("raw server should bind");
     decisions
@@ -581,9 +582,12 @@ async fn raw_recv(stream: &mut UnixStream) -> ServerMsg {
         .expect("timed out waiting for a server frame")
         .expect("read frame");
         let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
-        // Every local subscriber is replayed the Claude sign-in picture on connect
-        // (CL1): a frame this file's tests are not about.
-        if !matches!(msg, ServerMsg::ClaudeLoginState { .. }) {
+        // Every local subscriber is replayed the Claude sign-in picture (CL1)
+        // and the terminal list on connect: frames this file's tests are not about.
+        if !matches!(
+            msg,
+            ServerMsg::ClaudeLoginState { .. } | ServerMsg::TerminalList { .. }
+        ) {
             return msg;
         }
     }
@@ -600,8 +604,12 @@ async fn raw_recv_none_within(stream: &mut UnixStream, within: Duration) {
     {
         let bytes = frame_result.expect("read frame");
         let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
-        // The Claude sign-in replay (CL1) is not what this proves the absence of.
-        if !matches!(msg, ServerMsg::ClaudeLoginState { .. }) {
+        // The Claude sign-in replay (CL1) and the terminal list are not what
+        // this proves the absence of.
+        if !matches!(
+            msg,
+            ServerMsg::ClaudeLoginState { .. } | ServerMsg::TerminalList { .. }
+        ) {
             panic!("expected no frame to arrive, but got: {msg:?}");
         }
     }
@@ -641,6 +649,8 @@ async fn raw_handshake(
             topics,
             renders_decisions,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -909,6 +919,7 @@ async fn make_combined_harness() -> CombinedHarness {
         // other local processes are covered by `tests/ipc_operator_app.rs`.
         Arc::new(nostromo::ipc::peer_verify::testing::FakePeerVerifier::always_app()),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .expect("raw server should bind");
     decisions

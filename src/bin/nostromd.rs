@@ -170,6 +170,35 @@ async fn main() -> Result<()> {
     // an assembled layout survives a daemon restart.
     let pane_registry: Arc<Mutex<PaneRegistry>> = Arc::new(Mutex::new(PaneRegistry::new()));
 
+    // ── Terminal panes ────────────────────────────────────────────────────────
+    // Daemon-owned shells. Only the verified Mac app can type into, read,
+    // resize, close or restart one (see `nostromo::terminal::access`). What a
+    // previous daemon left is settled before anything can connect.
+    let terminal_audit = {
+        let path = nostromo::terminal::audit::default_path();
+        nostromo::terminal::audit::AuditLog::open(&path).unwrap_or_else(|e| {
+            // Fail closed: with no audit trail no terminal is opened
+            // (`terminal_audit_unavailable`), instead of running unaudited.
+            error!(
+                path = %path.display(),
+                "terminal audit log unavailable, terminals are DISABLED until the daemon restarts with a writable audit log: {e}"
+            );
+            nostromo::terminal::audit::AuditLog::unavailable()
+        })
+    };
+    let terminals = nostromo::terminal::TerminalManager::new(nostromo::terminal::TerminalConfig {
+        audit: terminal_audit,
+        store: nostromo::terminal::store::TerminalStore::at(
+            nostromo::terminal::store::TerminalStore::default_path(),
+        ),
+        pane_registry: Some(Arc::clone(&pane_registry)),
+    });
+    {
+        let mut terminals = terminals.lock().unwrap();
+        terminals.set_sensitive_tags(session_mgr.lock().unwrap().sensitive_tags());
+        terminals.reconcile();
+    }
+
     // ── Decision registry (W6 decision modals) ─────────────────────────────────
     // Shared between the IPC server (routes ClientMsg::DecisionAnswer, tracks
     // Topic::Decision subscribers) and the daemon-hosted MCP backend
@@ -238,6 +267,7 @@ async fn main() -> Result<()> {
         Arc::clone(&decisions),
         Arc::new(verifier),
         qa_mode,
+        Arc::clone(&terminals),
     )
     .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
 
@@ -608,6 +638,9 @@ async fn main() -> Result<()> {
         );
         mgr.kill_all_on_shutdown_with_grace(grace);
     }
+    // Every terminal's shell ends with the daemon; the records stay, so the
+    // next daemon shows them ended (`daemon_stopped`).
+    terminals.lock().unwrap().shutdown();
 
     // `server` drop impl removes the socket file.
     drop(server);

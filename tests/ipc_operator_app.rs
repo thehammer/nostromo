@@ -80,6 +80,7 @@ async fn env_with(verifier: Arc<dyn PeerVerifier>, qa_mode: bool) -> Env {
         Arc::clone(&decisions),
         verifier,
         qa_mode,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .expect("bind unix socket");
     decisions
@@ -193,6 +194,8 @@ async fn connect_unix_with_nonce(
             topics,
             renders_decisions,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -240,6 +243,8 @@ async fn connect_tcp(env: &Env, topics: Vec<Topic>, renders_decisions: bool) -> 
             topics,
             renders_decisions,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;

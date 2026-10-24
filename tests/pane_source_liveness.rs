@@ -82,6 +82,8 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
             topics,
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -121,6 +123,7 @@ async fn reconnecting_client_gets_layout_and_live_pane_content_replayed() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -250,6 +253,7 @@ async fn a_pane_bound_to_get_file_does_not_deadlock_a_reconnecting_client() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -432,6 +436,7 @@ async fn attaching_client_gets_perri_state_replayed() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -500,6 +505,7 @@ async fn attaching_client_with_empty_topics_gets_layout_and_perri_replayed() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -569,6 +575,7 @@ async fn attaching_client_gets_no_perri_frame_before_first_fetch() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -663,6 +670,7 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 

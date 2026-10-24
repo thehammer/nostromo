@@ -56,6 +56,7 @@ fn spawn() -> Daemon {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
     Daemon {
@@ -115,6 +116,8 @@ async fn connect(d: &Daemon, topics: Vec<Topic>) -> (UnixStream, Vec<ServerMsg>)
             topics,
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;

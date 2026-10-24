@@ -24,9 +24,12 @@ async fn recv(stream: &mut UnixStream) -> ServerMsg {
             .expect("timed out waiting for a server frame")
             .expect("read frame");
         let msg: ServerMsg = serde_json::from_slice(&bytes).unwrap();
-        // Every local subscriber is replayed the Claude sign-in picture on connect
-        // (CL1): a frame this file's tests are not about.
-        if !matches!(msg, ServerMsg::ClaudeLoginState { .. }) {
+        // Every local subscriber is replayed the Claude sign-in picture (CL1)
+        // and the terminal list on connect: frames this file's tests are not about.
+        if !matches!(
+            msg,
+            ServerMsg::ClaudeLoginState { .. } | ServerMsg::TerminalList { .. }
+        ) {
             return msg;
         }
     }
@@ -49,6 +52,8 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
             topics,
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -80,6 +85,7 @@ async fn activity_snapshot_request_yields_an_activity_snapshot() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 

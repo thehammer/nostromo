@@ -182,6 +182,7 @@ impl Rig {
             Arc::clone(&decisions),
             peers.clone(),
             false,
+            nostromo::terminal::TerminalManager::in_memory(),
         )
         .expect("bind the unix socket");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
@@ -344,6 +345,8 @@ fn subscribe(topics: Vec<Topic>) -> Value {
         topics,
         renders_decisions: false,
         renders_approvals: false,
+        capabilities: vec![],
+        operator_nonce: None,
     })
     .unwrap()
 }

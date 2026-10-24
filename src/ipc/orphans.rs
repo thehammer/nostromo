@@ -302,7 +302,7 @@ pub enum Target {
 }
 
 impl Target {
-    fn signal(self, sig: libc::c_int) {
+    pub fn signal(self, sig: libc::c_int) {
         // SAFETY: plain syscalls; a stale id fails with ESRCH. `valid_id`
         // keeps pid 0 / 1 and our own group out of reach of a group signal.
         unsafe {

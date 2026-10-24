@@ -50,6 +50,8 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
             topics,
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
         },
     )
     .await;
@@ -97,6 +99,7 @@ async fn perri_action_load_pr_writes_a_current_pr_pointer_via_the_socket() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -162,6 +165,7 @@ async fn perri_action_clear_removes_the_pointer_via_the_socket() {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -421,6 +425,7 @@ async fn serve_with_session_mgr() -> (
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
     (socket_path, perri_state_dir, tmp, server, session_mgr)

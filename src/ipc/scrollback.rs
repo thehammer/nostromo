@@ -4,6 +4,8 @@
 //! - **Total bytes** ≤ `MAX_BYTES` (2 MiB)
 //! - **Newline count** ≤ `MAX_NEWLINES` (10 000)
 //!
+//! (or bounds of its own, see [`ScrollbackBuf::with_limits`]).
+//!
 //! When either limit is exceeded, old chunks are discarded from the front until
 //! the buffer is back within bounds.
 //!
@@ -19,16 +21,34 @@ pub const MAX_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 pub const MAX_NEWLINES: usize = 10_000;
 
 /// Bounded ring buffer of raw PTY output chunks.
-#[derive(Default)]
 pub struct ScrollbackBuf {
     chunks: VecDeque<Vec<u8>>,
     total_bytes: usize,
     total_newlines: usize,
+    max_bytes: usize,
+    max_newlines: usize,
+}
+
+impl Default for ScrollbackBuf {
+    fn default() -> Self {
+        Self::with_limits(MAX_BYTES, MAX_NEWLINES)
+    }
 }
 
 impl ScrollbackBuf {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A buffer with its own bounds instead of [`MAX_BYTES`]/[`MAX_NEWLINES`].
+    pub fn with_limits(max_bytes: usize, max_newlines: usize) -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            total_bytes: 0,
+            total_newlines: 0,
+            max_bytes,
+            max_newlines,
+        }
     }
 
     /// Append `data` to the buffer, evicting old chunks if necessary.
@@ -41,7 +61,7 @@ impl ScrollbackBuf {
         self.chunks.push_back(data);
 
         // Evict from front until within budget.
-        while (self.total_bytes > MAX_BYTES || self.total_newlines > MAX_NEWLINES)
+        while (self.total_bytes > self.max_bytes || self.total_newlines > self.max_newlines)
             && !self.chunks.is_empty()
         {
             if let Some(front) = self.chunks.pop_front() {
