@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import NostromoKit
 
 // The transcript pane's input bar, moved out of `ReplView.swift` so it can be compiled into
 // the logic test bundle (`ReplView` itself pulls in `AppStore` and the whole daemon client
@@ -8,7 +9,7 @@ import Combine
 
 // MARK: - ReplInputBar
 
-class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShortcutTarget {
+class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShortcutTarget, BackgroundShortcutTarget {
 
     var onSend:        ((String, [URL]) -> Void)?
     /// The Stop button / ⌘. — interrupt the running turn. Only reachable while one is running.
@@ -45,6 +46,34 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private var modelNoticeBinding: AnyCancellable?
     private var modelNoticePopover: ModelNoticePopover?
     private var modelNoticeId: Int?
+    /// The Background activity chip (BA3), right-aligned in `backgroundSlot`, left of the model chip.
+    let backgroundChip       = BackgroundChip()
+    /// The space the chip lives in. `BackgroundChip.slotWidth` wide once the bar is bound to a session,
+    /// whatever the chip shows, so the chip appearing, changing or going never changes the composer's
+    /// width (and so never rewraps typed text or changes the bar's height). Only a narrow bar makes
+    /// it give way (see `composerMinimumWidth`), and then by the bar's width alone.
+    let backgroundSlot       = NSView()
+    /// The Background activity popover, while it is open.
+    private(set) var backgroundPopover: BackgroundPopover?
+    /// Open, Stop, Show in Transcript: none until later slices provide them.
+    var backgroundActions: BackgroundTaskActions = NoBackgroundTaskActions.shared
+    private var backgroundStore: BackgroundTaskStore?
+    private var backgroundTag: String?
+    private var backgroundDisplayName: String?
+    private var backgroundBinding: AnyCancellable?
+    private var backgroundSlotWidth: NSLayoutConstraint!
+    private var backgroundSlotGap: NSLayoutConstraint!
+
+    /// The composer never gets narrower than this, or than `composerMinimumFraction` of the bar,
+    /// whichever is more, while the bar is wide enough for it at all. What gives way for it: the
+    /// background slot first (its chip shows the icon alone, then nothing), then the model chip.
+    static let composerMinimumWidth: CGFloat = 120
+    static let composerMinimumFraction: CGFloat = 0.35
+    /// Priorities of what gives way, weakest first. All stay under `NSLayoutConstraint.Priority.windowSizeStayPut`
+    /// (750): a bar too narrow for its parts must squeeze them, never widen its window.
+    private static let slotPriority = NSLayoutConstraint.Priority(600)
+    private static let modelChipPriority = NSLayoutConstraint.Priority(700)
+    private static let composerPriority = NSLayoutConstraint.Priority(740)
     private let spinner      = NSProgressIndicator()
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
@@ -167,8 +196,30 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         modelChip.action = #selector(showModelPopover(_:))
         addSubview(modelChip)
         chipWidth = modelChip.widthAnchor.constraint(equalToConstant: 0)
+        chipWidth.priority = Self.modelChipPriority
+        // Its width is `chipWidth`, which gives way (below the composer's minimum); the button's own
+        // 750 resistance to compression would outrank that and the window's size.
+        modelChip.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
         chipTrailingToSend = modelChip.trailingAnchor.constraint(equalTo: button.leadingAnchor)
         chipTrailingToStop = modelChip.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor)
+
+        // Background activity slot: zero-width until the bar is bound to a session (so a bar with
+        // no session keeps its old extent), then fixed. The chip is right-aligned inside it.
+        backgroundSlot.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(backgroundSlot)
+        backgroundChip.target = self
+        backgroundChip.action = #selector(backgroundChipClicked(_:))
+        backgroundSlot.addSubview(backgroundChip)
+        backgroundSlotWidth = backgroundSlot.widthAnchor.constraint(equalToConstant: 0)
+        backgroundSlotWidth.priority = Self.slotPriority
+        let composerMinimum = textScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.composerMinimumWidth)
+        let composerFraction = textScroll.widthAnchor.constraint(greaterThanOrEqualTo: widthAnchor,
+                                                                 multiplier: Self.composerMinimumFraction)
+        composerMinimum.priority = Self.composerPriority
+        composerFraction.priority = Self.composerPriority
+        // The gap between the slot and the model chip (or Send/Stop while the model chip is
+        // hidden: it is zero-wide then and sits flush against them).
+        backgroundSlotGap = backgroundSlot.trailingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: 0)
 
         textTopConstraint = textScroll.topAnchor.constraint(equalTo: border.bottomAnchor, constant: 9)
 
@@ -187,7 +238,21 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
             placeholder.leadingAnchor.constraint(equalTo: textScroll.leadingAnchor, constant: 4),
             placeholder.topAnchor.constraint(equalTo: textScroll.topAnchor, constant: 6),
 
-            textScroll.trailingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: -8),
+            // The text view stops short of the background slot, which sits left of the model chip.
+            // FV4: TranscriptModeChip goes between the background slot and modelChip.
+            textScroll.trailingAnchor.constraint(equalTo: backgroundSlot.leadingAnchor, constant: -8),
+            backgroundSlotGap,
+            backgroundSlotWidth,
+            backgroundSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            modelChip.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            composerMinimum,
+            composerFraction,
+            backgroundSlot.heightAnchor.constraint(equalToConstant: BackgroundChip.height),
+            backgroundSlot.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            backgroundChip.trailingAnchor.constraint(equalTo: backgroundSlot.trailingAnchor),
+            backgroundChip.leadingAnchor.constraint(greaterThanOrEqualTo: backgroundSlot.leadingAnchor),
+            backgroundChip.topAnchor.constraint(equalTo: backgroundSlot.topAnchor),
+            backgroundChip.bottomAnchor.constraint(equalTo: backgroundSlot.bottomAnchor),
             chipTrailingToSend,
             chipWidth,
             modelChip.heightAnchor.constraint(equalToConstant: ModelChip.height),
@@ -312,6 +377,74 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         chipTrailingToStop.constant = gap
     }
 
+    // MARK: Background activity chip
+
+    override func layout() {
+        super.layout()
+        fitBackgroundChipToSlot()
+    }
+
+    /// The chip shows what its slot has room for: the text, the icon alone, or nothing. Reads the
+    /// slot's laid-out width (set by the bar's width, never by the chip), so it settles at once.
+    private func fitBackgroundChipToSlot() {
+        guard backgroundTag != nil else { return }
+        let room = backgroundSlot.frame.width + 0.5
+        backgroundChip.setFit(room >= BackgroundChip.slotWidth ? .full
+                              : room >= BackgroundChip.iconWidth ? .iconOnly : .hidden)
+    }
+
+    /// Show `tag`'s background tasks in the chip, live from `store`. Every bar bound to the same
+    /// store updates from the same delivery, which keeps two windows in step. Reserves the slot.
+    func bindBackground(tag: String, store: BackgroundTaskStore, displayName: String? = nil) {
+        backgroundTag = tag
+        backgroundStore = store
+        backgroundDisplayName = displayName
+        backgroundSlotWidth.constant = BackgroundChip.slotWidth
+        backgroundSlotGap.constant = -6
+        backgroundBinding = store.changes
+            .filter { $0 == tag }
+            .sink { [weak self] _ in self?.refreshBackgroundChip() }
+        refreshBackgroundChip()
+    }
+
+    /// Read the store and show its chip state. Changes only the chip's text and visibility, inside
+    /// the fixed slot: no layout outside it, no first-responder change.
+    private func refreshBackgroundChip() {
+        guard let store = backgroundStore, let tag = backgroundTag else { return }
+        let list = store.list(for: tag)
+        backgroundChip.apply(list.chip, tooltip: list.chipTooltip)
+    }
+
+    /// A click on the chip (or Space on it with Full Keyboard Access, which is a keyboard intent).
+    @objc private func backgroundChipClicked(_ sender: Any?) {
+        toggleBackgroundPopover(takeKeyboard: NSApp.currentEvent?.type == .keyDown)
+    }
+
+    /// ⇧⌘B: open (or close) the Background activity popover, with the keyboard in it.
+    @objc func showBackgroundPopover(_ sender: Any?) {
+        toggleBackgroundPopover(takeKeyboard: true)
+    }
+
+    var canShowBackgroundPopover: Bool {
+        backgroundTag != nil && backgroundStore?.tasksSupported == true
+    }
+
+    func toggleBackgroundPopover(takeKeyboard: Bool) {
+        if let open = backgroundPopover, open.isShown {
+            open.close()
+            return
+        }
+        guard let store = backgroundStore, let tag = backgroundTag else { return }
+        let popover = BackgroundPopover(tag: tag, displayName: backgroundDisplayName ?? tag, store: store,
+                                        actions: backgroundActions)
+        popover.onDidClose = { [weak self, weak popover] in
+            if self?.backgroundPopover === popover { self?.backgroundPopover = nil }
+        }
+        backgroundPopover = popover
+        // Anchored to the chip; to the slot while the chip is hidden (⇧⌘B with nothing to show).
+        popover.show(relativeTo: backgroundChip.isHidden ? backgroundSlot : backgroundChip, takeKeyboard: takeKeyboard)
+    }
+
     // MARK: Actions
 
     @objc private func sendButtonAction() { submitAction() }
@@ -351,7 +484,9 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     var canShowModelPopover: Bool { !modelChip.isHidden && modelChip.isEnabled }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        menuItem.action == ModelShortcut.action ? canShowModelPopover : true
+        if menuItem.action == ModelShortcut.action { return canShowModelPopover }
+        if menuItem.action == BackgroundShortcut.action { return canShowBackgroundPopover }
+        return true
     }
 
     private func submitAction() {

@@ -9,7 +9,7 @@ send. It is modelled on the window overflow capture (`layout-overflow-*.json`).
 
 1. **A pane blanks.** Do not relaunch. Run `bin/nostromo-app windows` and send the path in
    `blankCapture` for that window (`null` means nothing was captured).
-2. **`blankCapture` is `null`?** Press **Debug > Capture render state now** (⇧⌘B) right away, or run
+2. **`blankCapture` is `null`?** Press **Debug > Capture render state now** (⌥⇧⌘B) right away, or run
    `bin/nostromo-app capture-render-state`. It writes a capture for every transcript pane on screen and
    puts the paths on the pasteboard. The recorder already holds the seconds before, so a capture made
    just after the blank is still useful.
