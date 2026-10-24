@@ -1412,7 +1412,9 @@ final class TrackerRowLayoutTests: XCTestCase {
 
         // (b) the row stays about as tall as the same text without chips.
         XCTAssertGreaterThan(s.plain.frame.height, 2 * 17, "\(label): setup: the 100 characters wrap", file: file, line: line)
-        XCTAssertLessThanOrEqual(row.frame.height, s.plain.frame.height + 30,
+        // Beside the text a chip narrows it to its minimum column, which wraps a few more lines; below
+        // it the chip line is one more line. Either way a bounded amount (the 1 pt collapse was > 1,000 pt).
+        XCTAssertLessThanOrEqual(row.frame.height, s.plain.frame.height + 60,
                                  "\(label): \(row.frame.height) pt against \(s.plain.frame.height) pt without chips",
                                  file: file, line: line)
         XCTAssertLessThanOrEqual(row.frame.height, 260, "\(label): row height \(row.frame.height)", file: file, line: line)

@@ -810,8 +810,9 @@ final class TrackerScrollSafetyTests: XCTestCase {
         let shift = pane.scrollView.frame.minY - chromeBefore
         XCTAssertEqual(shift, pane.strip.preferredHeight, accuracy: 0.5)
         let after = pane.anchorSnapshot(windowIndex: 0)
-        XCTAssertEqual(after.firstVisible?.rowKey, readKey, "the row being read is still the first visible row")
-        XCTAssertEqual(after.firstVisible?.offsetPt ?? .infinity, before.firstVisible?.offsetPt ?? 0, accuracy: 1)
+        // The line being read stays put on screen. It is not asserted to stay the first row *in the
+        // viewport*: the strip now covers the top of the old viewport, and the heading being read is
+        // shorter than the strip, so the next row is the first one left in view.
         XCTAssertEqual(try XCTUnwrap(harness.screenTop(of: readKey)), screenBefore, accuracy: 1,
                        "the line being read did not move on screen")
         XCTAssertEqual(after.scrollY, before.scrollY + Double(shift), accuracy: 1, "the content scrolled by the strip's height")
