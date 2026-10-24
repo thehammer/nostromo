@@ -896,6 +896,145 @@ fn if_the_respawned_cli_still_cannot_authenticate_the_message_is_held_again_with
     });
 }
 
+#[test]
+fn a_restart_that_cannot_spawn_keeps_the_held_message_and_the_respawn_is_retried() {
+    run(|mut w| async move {
+        let tag = "cody-escalate-fails";
+        w.set_login("expired");
+        let fake = w.spawn(tag, true);
+        w.say(tag, "HELD-ESCFAIL");
+        w.wait_hold(tag).await;
+        w.wait_idle(tag).await;
+
+        // The new process cannot be started.
+        let good = std::env::var_os(CLAUDE_BIN_ENV).expect("the fake wrapper");
+        std::env::set_var(CLAUDE_BIN_ENV, w.tmp.path().join("no-such-claude"));
+        w.set_login("ok");
+        w.watch.set_stamp("stamp-1");
+
+        // The first resend fails again on the sticky CLI, so the next look escalates to a
+        // restart, and that fails.
+        w.drive_until("the failed restart", || {
+            (!logs_with(&["restart before resending a held message failed"]).is_empty()).then_some(())
+        })
+        .await;
+        assert!(
+            w.mgr.lock().unwrap().list().iter().any(|s| s.tag == tag),
+            "the session is still known after the failed restart"
+        );
+
+        // Once the CLI can be started again the supervisor brings the session back with its hold.
+        std::env::set_var(CLAUDE_BIN_ENV, &good);
+        w.drive_until("the supervisor to respawn the session", || {
+            w.mgr.lock().unwrap().reap_and_recover();
+            (fake.spawn_lines().len() >= 2).then_some(())
+        })
+        .await;
+        let entry = w.wait_hold(tag).await;
+        assert!(entry.hold_id.is_some(), "the message is still held, not lost");
+    });
+}
+
+/// An approval broker that can ask somebody (so a prompt stays pending), over `dir`.
+fn broker_over(dir: &Path) -> nostromo::approvals::broker::ApprovalBroker {
+    use nostromo::approvals::broker::{ApprovalBroker, BrokerParts, Presenter, APPROVAL_TIMEOUT};
+    use nostromo::approvals::guard::{PaneInfo, PaneProbe, ProbeError, TmuxSocket};
+    use nostromo::approvals::request::{AskRule, SettingsSource};
+
+    struct Asks;
+    impl Presenter for Asks {
+        fn can_present(&self, _tag: &str) -> bool {
+            true
+        }
+    }
+    struct NoPanes;
+    impl PaneProbe for NoPanes {
+        fn pane(&self, _: &TmuxSocket, _: &str) -> Result<Option<PaneInfo>, ProbeError> {
+            Ok(None)
+        }
+        fn all_panes(&self, _: &TmuxSocket) -> Result<Vec<PaneInfo>, ProbeError> {
+            Ok(Vec::new())
+        }
+        fn subtree_args(&self, _: u32) -> Result<Vec<String>, ProbeError> {
+            Ok(Vec::new())
+        }
+        fn servers(&self, _: &[PathBuf]) -> Result<Vec<TmuxSocket>, ProbeError> {
+            Ok(vec![TmuxSocket::Default])
+        }
+    }
+    struct NoRules;
+    impl SettingsSource for NoRules {
+        fn ask_rules(&self, _: Option<&Path>) -> Vec<AskRule> {
+            Vec::new()
+        }
+    }
+    ApprovalBroker::new(
+        nostromo::approvals::audit::AuditLog::open(dir).unwrap(),
+        BrokerParts {
+            presenters: Default::default(),
+            presenter: Arc::new(Asks),
+            probe: Arc::new(|| Box::new(NoPanes)),
+            settings: Arc::new(NoRules),
+            timeout: APPROVAL_TIMEOUT,
+        },
+    )
+}
+
+#[test]
+fn a_restart_while_a_resent_message_waits_on_an_approval_cancels_it_and_keeps_the_hold_unsent() {
+    use nostromo::approvals::audit::{AuditFilter, Event};
+    run(|mut w| async move {
+        let tag = "cody-approval-restart";
+        let broker = broker_over(&w.tmp.path().join("approvals"));
+        w.mgr.lock().unwrap().configure_approvals(broker.clone());
+        let outcomes = || -> Vec<String> {
+            let window = chrono::Utc::now() - chrono::Duration::days(2)..chrono::Utc::now() + chrono::Duration::days(2);
+            broker
+                .audit()
+                .read(window, &AuditFilter::default())
+                .unwrap()
+                .into_iter()
+                .filter_map(|e| match e.event {
+                    Event::Outcome { outcome, .. } => Some(outcome),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // The login is expired: the message fails and is held (its cue is not acted on).
+        w.set_login("expired");
+        let fake = w.spawn(tag, false);
+        w.say(tag, "HELD-APPROVAL FIXTURE:simple_rm");
+        let hold = w.wait_hold(tag).await.hold_id.unwrap();
+        w.wait_idle(tag).await;
+
+        // The user signs in and retries: the resent turn asks for an approval and waits.
+        w.set_login("ok");
+        assert_eq!(w.resend(tag, &hold, ResendTrigger::Manual), ResendOutcome::Resent);
+        wait_until("the approval to be pending", || {
+            std::fs::read_to_string(fake.dir.join("stdin.jsonl")).ok().filter(|t| t.matches("\"user\"").count() >= 2)
+        })
+        .await;
+        settle().await;
+        assert!(outcomes().is_empty(), "the approval is still pending");
+
+        // What an escalation does: the session restarts under the pending approval.
+        w.restart(tag);
+        wait_until("the approval to be cancelled", || (outcomes() == ["cancelled"]).then_some(())).await;
+        assert!(
+            fake.read_lines("responses.jsonl").is_empty(),
+            "nothing is written to the old process or the new one"
+        );
+
+        // The message is held again, for a human to retry: never sent again on its own.
+        let entry = w.wait_hold(tag).await;
+        assert_eq!(entry.phase, ClaudeLoginPhase::NotResendable);
+        w.watch.set_stamp("stamp-1");
+        let texts = w.settled_user_texts(&fake).await;
+        assert_eq!(texts, vec!["HELD-APPROVAL FIXTURE:simple_rm"; 2], "no double send");
+    });
+}
+
 // ═════════════════════════════════════════════════════════════════════════════════
 // 7. discard
 // ═════════════════════════════════════════════════════════════════════════════════

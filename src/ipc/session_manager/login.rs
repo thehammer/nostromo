@@ -60,6 +60,9 @@ pub enum ResendOutcome {
     /// Not now (a turn or a model switch is running, or the write failed); asking
     /// again later may succeed.
     Busy,
+    /// The session had to be restarted first and could not be: the hold is kept
+    /// on the downed session, and the supervisor retries the respawn.
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,9 +555,9 @@ impl SessionManager {
             ResendPlan::Escalate => {
                 info!(tag, "held message resent: restarting");
                 if let Err(e) = self.restart(tag) {
-                    // A failed restart leaves no session behind, and the hold goes with it.
-                    warn!(tag, "restart before resending a held message failed; the session and its hold are gone: {e:#}");
-                    return ResendOutcome::Busy;
+                    // The hold stays with the downed session (see `restart`).
+                    warn!(tag, "restart before resending a held message failed; the hold is kept and the respawn retried: {e:#}");
+                    return ResendOutcome::Failed;
                 }
                 self.resend_inner(tag, hold_id, trigger, true)
             }

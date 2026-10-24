@@ -1560,8 +1560,40 @@ impl SessionManager {
         }
         let carry = self.take_carry(tag);
         self.stop(tag);
-        self.sessions.remove(tag);
+        let old = self.sessions.remove(tag);
 
+        if let Err(e) = self.respawn(tag, agent, view, cwd, sid, rc, fixed) {
+            // No new process: the carry (queued messages, a waiting switch, a
+            // message held for a sign-in) goes back on the old, downed session,
+            // which the supervisor then retries like any crash, instead of
+            // being lost with it.
+            if let Some(old) = old {
+                self.keep_downed(tag, old, carry);
+            }
+            return Err(e);
+        }
+
+        // Re-attach previously attached clients so the GUI re-syncs after a
+        // transparent restart.
+        for client_id in attached {
+            let _ = self.attach(tag, &client_id);
+        }
+        // Messages queued (and a model switch waiting) on the old process go
+        // to the new one, switch first.
+        self.resume_carry(tag, carry);
+        Ok(())
+    }
+
+    fn respawn(
+        &mut self,
+        tag: &str,
+        agent: String,
+        view: String,
+        cwd: Option<PathBuf>,
+        sid: Option<String>,
+        rc: bool,
+        fixed: Option<(PathBuf, Vec<String>)>,
+    ) -> Result<()> {
         match fixed {
             // Real claude session: resolve the binary and resume.
             None => {
@@ -1586,16 +1618,22 @@ impl SessionManager {
                 self.sessions.insert(tag.to_string(), managed);
             }
         }
-
-        // Re-attach previously attached clients so the GUI re-syncs after a
-        // transparent restart.
-        for client_id in attached {
-            let _ = self.attach(tag, &client_id);
-        }
-        // Messages queued (and a model switch waiting) on the old process go
-        // to the new one, switch first.
-        self.resume_carry(tag, carry);
         Ok(())
+    }
+
+    /// A restart found no process to start: put the stopped session back as a
+    /// crashed one, carrying what it held, so `reap_and_recover` tries again
+    /// (a held message counts as work to recover).
+    fn keep_downed(&mut self, tag: &str, mut old: ManagedSession, carry: model_switch::Carry) {
+        old.intentional_stop.store(false, Ordering::SeqCst);
+        old.stop_reason = None;
+        if let Some(hold) = carry.login {
+            old.shared.login.restore(hold);
+        }
+        lock_recover(&old.shared.pending).extend(carry.messages);
+        lock_recover(&old.shared.model).waiting = carry.waiting;
+        self.sessions.insert(tag.to_string(), old);
+        self.login_changed();
     }
 
     /// Drop the persisted session id and stop the child; the next spawn starts
