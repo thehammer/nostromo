@@ -5,6 +5,13 @@ gates:
   max_attempts: 2
   budget_minutes: 45
   checks:
+    - name: rust-fmt
+      run: "cargo fmt --check"
+      where: sandbox
+      blocking: false
+      when: { paths: ["src/**", "tests/*.rs", "tests/**/*.rs", "Cargo.toml", "rust-toolchain.toml"] }
+      timeout_s: 300
+      hint: "Run `rwx sandbox exec -- cargo fmt` (never cargo locally, docs/rwx-sandbox.md) and commit the result."
     - name: rust-clippy
       run: "cargo clippy --all-targets -- -D warnings"
       where: sandbox
