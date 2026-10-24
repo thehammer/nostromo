@@ -196,7 +196,8 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             let bar = p.bar
             p.world.ingest(p.world.fixture())
 
-            p.rig.assertNoMove("shift-command-B opens the list (following: \(following))", following: following) {
+            p.rig.assertNoMove("shift-command-B opens the list (following: \(following))", following: following,
+                               focusMovesOnPurpose: true) {
                 bar.showBackgroundPopover(nil)
             }
 
@@ -209,7 +210,8 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             XCTAssertEqual(popover.viewController.selectedIndex, 0, "the first row is selected")
             XCTAssertEqual(popover.viewController.selectedRow?.id, "agent")
 
-            p.rig.assertNoMove("Esc in the list closes it (following: \(following))", following: following) {
+            p.rig.assertNoMove("Esc in the list closes it (following: \(following))", following: following,
+                               focusMovesOnPurpose: true) {
                 content.keyDown(with: BA3UIKey.keyDown(BA3UIKey.escape))
                 waitForClose(bar)
             }
@@ -228,7 +230,7 @@ final class BackgroundScrollSafetyTests: XCTestCase {
         let popover = try XCTUnwrap(p.bar.backgroundPopover)
         XCTAssertTrue(popover.tookKeyboard, "precondition")
 
-        p.rig.assertNoMove("shift-command-B again (following: true)", following: true) {
+        p.rig.assertNoMove("shift-command-B again (following: true)", following: true, focusMovesOnPurpose: true) {
             _ = popover.viewController.contentView.tryToPerform(BackgroundShortcut.action, with: nil)
             waitForClose(p.bar)
         }

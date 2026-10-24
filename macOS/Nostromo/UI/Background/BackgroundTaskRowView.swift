@@ -10,7 +10,9 @@ enum BackgroundPalette {
     /// Row text: kind, title, status, time.
     static let text = Theme.fg
     /// Sign of life, ended-ago, section headers, housekeeping rows (dimmed by colour, not alpha).
-    static let muted = Theme.fgMuted
+    /// `Theme.fgMuted` (white 140) measured 4.47:1 on `background`, under the 4.5:1 floor, so the
+    /// popover's muted grey is a little lighter (contract §2.9 allows it; the PR records the ratio).
+    static let muted = NSColor(white: 155 / 255, alpha: 1)
     static let failed = Theme.foldFailure
     /// The selected row's ring. A ring, not a fill: a fill under muted text would take it below 4.5:1.
     static let selectionRing = NSColor.white.withAlphaComponent(0.55)

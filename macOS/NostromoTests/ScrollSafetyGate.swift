@@ -390,7 +390,9 @@ extension SafetyRig {
     /// Run `event`, let the pane's own pass finish, and assert what the operator sees did not change:
     /// the first visible block and its offset (≤ 1 pt), the bottom when following, the composer's
     /// height and scroll-view frame, first responder, text and selection.
-    func assertNoMove(_ name: String, following: Bool, event: () -> Void,
+    /// `focusMovesOnPurpose`: the event is the user explicitly moving the keyboard (⇧⌘B into a
+    /// popover, or closing it again); the first-responder check is skipped, everything else holds.
+    func assertNoMove(_ name: String, following: Bool, focusMovesOnPurpose: Bool = false, event: () -> Void,
                       file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(followTail.isPinned, following, "\(name): setup follows the tail = \(following)", file: file, line: line)
         let before = snapshot()
@@ -417,7 +419,9 @@ extension SafetyRig {
         }
         XCTAssertEqual(inputBar.frame.height, barBefore, accuracy: 0.5, "\(name): input bar height changed", file: file, line: line)
         XCTAssertEqual(composerScroll?.frame, scrollBefore, "\(name): composer text scroll frame changed", file: file, line: line)
-        XCTAssertTrue(window.firstResponder === responderBefore, "\(name): first responder changed to \(String(describing: window.firstResponder))", file: file, line: line)
+        if !focusMovesOnPurpose {
+            XCTAssertTrue(window.firstResponder === responderBefore, "\(name): first responder changed to \(String(describing: window.firstResponder))", file: file, line: line)
+        }
         XCTAssertEqual(textView.string, textBefore, "\(name): composer text changed", file: file, line: line)
         XCTAssertEqual(textView.selectedRange(), selectionBefore, "\(name): composer selection changed", file: file, line: line)
     }
