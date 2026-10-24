@@ -24,6 +24,15 @@
 		AQ0000000000000000000003 /* ApprovalQuestionFormView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AQ0000000000000000000001 /* ApprovalQuestionFormView.swift */; };
 		AP0000000000000000002131 /* ApprovalOverlayHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002130 /* ApprovalOverlayHost.swift */; };
 		AP0000000000000000002132 /* ApprovalOverlayHost.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002130 /* ApprovalOverlayHost.swift */; };
+		CL0000000000000000000011 /* ClaudeLoginStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000001 /* ClaudeLoginStore.swift */; };
+		CL0000000000000000000021 /* ClaudeLoginStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000001 /* ClaudeLoginStore.swift */; };
+		CL0000000000000000000012 /* ClaudeSignInOverlayHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000002 /* ClaudeSignInOverlayHost.swift */; };
+		CL0000000000000000000022 /* ClaudeSignInOverlayHost.swift in TestSources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000002 /* ClaudeSignInOverlayHost.swift */; };
+		CL0000000000000000000013 /* ClaudeSignInCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000003 /* ClaudeSignInCardView.swift */; };
+		CL0000000000000000000023 /* ClaudeSignInCardView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000003 /* ClaudeSignInCardView.swift */; };
+		CL0000000000000000000014 /* LoginTerminalLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000004 /* LoginTerminalLauncher.swift */; };
+		CL0000000000000000000024 /* LoginTerminalLauncher.swift in TestSources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000004 /* LoginTerminalLauncher.swift */; };
+		CL0000000000000000000015 /* ClaudeSignInCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CL0000000000000000000005 /* ClaudeSignInCardTests.swift */; };
 		AP0000000000000000002141 /* ApprovalCountdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002140 /* ApprovalCountdown.swift */; };
 		AP0000000000000000002142 /* ApprovalCountdown.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002140 /* ApprovalCountdown.swift */; };
 		AP0000000000000000002151 /* ApprovalRowStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000002150 /* ApprovalRowStatus.swift */; };
@@ -562,6 +571,11 @@
 		AP0000000000000000002120 /* ApprovalInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalInputView.swift; sourceTree = "<group>"; };
 		AQ0000000000000000000001 /* ApprovalQuestionFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalQuestionFormView.swift; sourceTree = "<group>"; };
 		AP0000000000000000002130 /* ApprovalOverlayHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalOverlayHost.swift; sourceTree = "<group>"; };
+		CL0000000000000000000001 /* ClaudeLoginStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeLoginStore.swift; sourceTree = "<group>"; };
+		CL0000000000000000000002 /* ClaudeSignInOverlayHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSignInOverlayHost.swift; sourceTree = "<group>"; };
+		CL0000000000000000000003 /* ClaudeSignInCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSignInCardView.swift; sourceTree = "<group>"; };
+		CL0000000000000000000004 /* LoginTerminalLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginTerminalLauncher.swift; sourceTree = "<group>"; };
+		CL0000000000000000000005 /* ClaudeSignInCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSignInCardTests.swift; sourceTree = "<group>"; };
 		AP0000000000000000002140 /* ApprovalCountdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalCountdown.swift; sourceTree = "<group>"; };
 		AP0000000000000000002150 /* ApprovalRowStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalRowStatus.swift; sourceTree = "<group>"; };
 		AP0000000000000000002160 /* GuardBlockedBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuardBlockedBar.swift; sourceTree = "<group>"; };
@@ -1127,6 +1141,7 @@
 				ZZ0000000000000000BA9000 /* Background */,
 				AA0000020000000000000021 /* Views */,
 				ZZ0000000000000000TK9000 /* Tracker */,
+				CL0000000000000000000030 /* Login */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -1251,6 +1266,7 @@
 				AP0000000000000000001030 /* SyntheticInputGateTests.swift */,
 				AP0000000000000000001040 /* HumanGestureTests.swift */,
 				AP0000000000000000002300 /* ApprovalCardTests.swift */,
+				CL0000000000000000000005 /* ClaudeSignInCardTests.swift */,
 				AP0000000000000000002310 /* ApprovalScrollSafetyTests.swift */,
 				ATD000000000000000000010 /* ApprovalCardRenderTests.swift */,
 				AP0000000000000000002320 /* ApprovalRowStatusTests.swift */,
@@ -1381,6 +1397,17 @@
 				ZZ0000000000000000BA1200 /* WakeMarkerView.swift */,
 			);
 			path = Background;
+			sourceTree = "<group>";
+		};
+		CL0000000000000000000030 /* Login */ = {
+			isa = PBXGroup;
+			children = (
+				CL0000000000000000000001 /* ClaudeLoginStore.swift */,
+				CL0000000000000000000002 /* ClaudeSignInOverlayHost.swift */,
+				CL0000000000000000000003 /* ClaudeSignInCardView.swift */,
+				CL0000000000000000000004 /* LoginTerminalLauncher.swift */,
+			);
+			path = Login;
 			sourceTree = "<group>";
 		};
 		ZZ0000000000000000TK9000 /* Tracker */ = {
@@ -1533,6 +1560,10 @@
 				AP0000000000000000002121 /* ApprovalInputView.swift in Sources */,
 				AQ0000000000000000000002 /* ApprovalQuestionFormView.swift in Sources */,
 				AP0000000000000000002131 /* ApprovalOverlayHost.swift in Sources */,
+				CL0000000000000000000011 /* ClaudeLoginStore.swift in Sources */,
+				CL0000000000000000000012 /* ClaudeSignInOverlayHost.swift in Sources */,
+				CL0000000000000000000013 /* ClaudeSignInCardView.swift in Sources */,
+				CL0000000000000000000014 /* LoginTerminalLauncher.swift in Sources */,
 				AP0000000000000000002141 /* ApprovalCountdown.swift in Sources */,
 				AP0000000000000000002151 /* ApprovalRowStatus.swift in Sources */,
 				AP0000000000000000002161 /* GuardBlockedBar.swift in Sources */,
@@ -1780,6 +1811,10 @@
 				AP0000000000000000002122 /* ApprovalInputView.swift in TestSources */,
 				AQ0000000000000000000003 /* ApprovalQuestionFormView.swift in TestSources */,
 				AP0000000000000000002132 /* ApprovalOverlayHost.swift in TestSources */,
+				CL0000000000000000000021 /* ClaudeLoginStore.swift in TestSources */,
+				CL0000000000000000000022 /* ClaudeSignInOverlayHost.swift in TestSources */,
+				CL0000000000000000000023 /* ClaudeSignInCardView.swift in TestSources */,
+				CL0000000000000000000024 /* LoginTerminalLauncher.swift in TestSources */,
 				AP0000000000000000002142 /* ApprovalCountdown.swift in TestSources */,
 				AP0000000000000000002152 /* ApprovalRowStatus.swift in TestSources */,
 				AP0000000000000000002162 /* GuardBlockedBar.swift in TestSources */,
@@ -1792,6 +1827,7 @@
 				AP0000000000000000002232 /* PersistedRulesView.swift in TestSources */,
 				AP0000000000000000002242 /* ConsequencePreviewView.swift in TestSources */,
 				AP0000000000000000002301 /* ApprovalCardTests.swift in Sources */,
+				CL0000000000000000000015 /* ClaudeSignInCardTests.swift in Sources */,
 				AP0000000000000000002311 /* ApprovalScrollSafetyTests.swift in Sources */,
 				ATD000000000000000000011 /* ApprovalCardRenderTests.swift in Sources */,
 				AP0000000000000000002321 /* ApprovalRowStatusTests.swift in Sources */,

@@ -184,6 +184,9 @@ class AppStore: ObservableObject {
     /// `approval_resolved` and `approval_answer_refused` frame. Deliberately not `@Published`,
     /// like decisions: a request is an event, and `ApprovalStore` owns what it means.
     let approvalEvents = PassthroughSubject<ApprovalEvent, Never>()
+
+    /// `claude_login_state` frames (CL2), for `ClaudeLoginStore`. Not `@Published`, like approvals.
+    let claudeLoginEvents = PassthroughSubject<ClaudeLoginStateFrame, Never>()
     /// A daemon-announced focus that this client asked to have selected
     /// (`select_for_client`). Each window's `MainLayout` switches to it only if
     /// it is the key window.
@@ -1652,9 +1655,9 @@ class AppStore: ObservableObject {
         case .approvalPending:
             break
 
-        // CL1 only decodes the frame; the sign-in card that renders it is CL2.
-        case .claudeLoginState:
-            break
+        // A session waiting for a Claude sign-in (CL2): `ClaudeLoginStore` keeps it, the card shows it.
+        case .claudeLoginState(let frame):
+            claudeLoginEvents.send(frame)
 
         case .pong, .unknown:
             break
@@ -1734,6 +1737,20 @@ extension ApprovalStore {
             report: { AppStore.shared.reportApprovalRefusal(requestId: $0, control: $1, channel: $2) },
             canSend: { AppStore.shared.client.hasConnection })
         store.attach(to: AppStore.shared.approvalEvents)
+        return store
+    }()
+}
+
+// MARK: - Claude sign-in wiring
+
+extension ClaudeLoginStore {
+    /// The app's one store of sessions waiting for a Claude sign-in, fed by `AppStore.claudeLoginEvents`.
+    static let shared: ClaudeLoginStore = {
+        let store = ClaudeLoginStore(
+            send: { AppStore.shared.client.sendClaudeLoginAction(action: $0, tag: $1, holdID: $2) },
+            featureAdvertised: { AppStore.shared.client.daemonAdvertisesClaudeLogin },
+            canSend: { AppStore.shared.client.hasConnection })
+        store.attach(to: AppStore.shared.claudeLoginEvents)
         return store
     }()
 }

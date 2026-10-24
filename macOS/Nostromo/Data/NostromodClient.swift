@@ -650,6 +650,8 @@ class NostromodClient {
     /// cleared when the socket is torn down and when a new one connects (fd
     /// numbers are reused). Guarded by `sendLock`.
     private var operatorNonce: (sock: Int32, value: String)?
+    /// `welcome.features` of the current connection (guarded by `sendLock`).
+    private var advertisedFeatures: [String] = []
     /// Whether the "not verified as the operator" error was logged already.
     private var loggedNoOperatorNonce = false
     private let socketPath: String
@@ -729,6 +731,7 @@ class NostromodClient {
         log.info("Connected to nostromd at \(self.socketPath, privacy: .public)")
         sendLock.lock()
         operatorNonce = nil
+        advertisedFeatures = []
         sendLock.unlock()
         fd = sock
         reconnectDelay = 1.0
@@ -942,6 +945,26 @@ class NostromodClient {
         writeFrameLocked(body, to: curFd, type: "approval_answer", tag: nil)
     }
 
+    /// Whether the connection's last `welcome` advertised `claude_login_v1`.
+    var daemonAdvertisesClaudeLogin: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return advertisedFeatures.contains(claudeLoginFeature)
+    }
+
+    /// Send the held message again, or drop it (CL2). Carries the connection's operator nonce, like
+    /// `approvalAnswer`. Nothing is written unless the daemon advertised `claude_login_v1`.
+    func sendClaudeLoginAction(action: ClaudeLoginActionKind, tag: String, holdID: String) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("claude_login_action dropped — not connected"); return }
+        guard advertisedFeatures.contains(claudeLoginFeature) else { return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientClaudeLoginAction(action: action, tag: tag, holdId: holdID,
+                                                                     operatorNonce: nonce))
+        else { return }
+        writeFrameLocked(body, to: curFd, type: "claude_login_action", tag: tag)
+    }
+
     /// Tell the daemon an input that was not a person's was refused at an approval control.
     func approvalRefusalReport(requestId: String?, control: String, channel: ApprovalRefusalChannel) {
         sendLock.lock(); defer { sendLock.unlock() }
@@ -1109,7 +1132,7 @@ class NostromodClient {
         log.info("read loop ended (fd=\(sock, privacy: .public)) — reconnecting")
         Darwin.close(sock)
         sendLock.lock()
-        if operatorNonce?.sock == sock { operatorNonce = nil }
+        if operatorNonce?.sock == sock { operatorNonce = nil; advertisedFeatures = [] }
         sendLock.unlock()
         if fd == sock { fd = -1 }
         connected.send(false)
@@ -1149,6 +1172,7 @@ class NostromodClient {
         // forwarder and every delta would render twice.
         if type_ == "welcome", fd == sock {
             noteWelcome(operatorNonce: json["operator_nonce"] as? String, on: sock)
+            sendLock.lock(); advertisedFeatures = json["features"] as? [String] ?? []; sendLock.unlock()
             subscribeToAdvertisedFeatures(json["features"] as? [String] ?? [])
             connected.send(true)
         }

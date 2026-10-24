@@ -87,6 +87,8 @@ class ReplView: NSView {
     private let jumpOverlay = JumpToLatestOverlay()
     /// The approval card for this focus, floated over the bottom of the transcript (AP2a).
     private let approvalHost: ApprovalOverlayHost
+    /// The "Claude needs you to sign in" card for this focus, floated over the bottom of the transcript (CL2).
+    private let signInHost: ClaudeSignInOverlayHost
     /// Whether the transcript auto-scrolls to the newest content, and everything
     /// that decides it (bounds observer, overlay, scroller, catch-up). Cleared
     /// only by the operator scrolling away from the bottom, so a background
@@ -123,6 +125,11 @@ class ReplView: NSView {
         session = shared
         // The guard bar names who was blocked (`Blocked: Cody tried to …`).
         approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared, agentName: { shared.agentName })
+        let approvals = approvalHost
+        // Stacks above an approval card of the same pane without moving it.
+        signInHost = ClaudeSignInOverlayHost(tag: tag, store: ClaudeLoginStore.shared, obstructionTop: { [weak approvals] in
+            approvals?.subviews.filter { !$0.isHidden }.map(\.frame.maxY).max() ?? 0
+        })
         super.init(frame: .zero)
         _ = renderWatch
         setup()
@@ -292,6 +299,9 @@ class ReplView: NSView {
         // its card, and it never touches the scroll view's or the input bar's frames.
         approvalHost.translatesAutoresizingMaskIntoConstraints = false
         addSubview(approvalHost, positioned: .above, relativeTo: jumpOverlay)
+        // The sign-in card sits under the approval card in z-order: a click lands on whichever is on top of it.
+        signInHost.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(signInHost, positioned: .above, relativeTo: jumpOverlay)
         // Esc in the approval card (or collapsing a focused card) hands keyboard focus back to the composer.
         approvalHost.focusComposer = { [weak self] in
             guard let self else { return }
@@ -344,6 +354,11 @@ class ReplView: NSView {
             approvalHost.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             approvalHost.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
             approvalHost.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+
+            signInHost.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            signInHost.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            signInHost.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            signInHost.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
         ]
 
         if let strip = quickActionStrip {
