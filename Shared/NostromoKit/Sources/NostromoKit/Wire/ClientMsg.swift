@@ -292,3 +292,66 @@ public struct ClientActivitySnapshotRequest: Encodable {
 
     enum CodingKeys: String, CodingKey { case type_ = "type", tag }
 }
+
+// MARK: - Background tasks
+
+/// Stop a background task. The daemon answers with
+/// `ServerMsg.sessionTaskStopResult`; refused over TCP.
+/// Mirrors `ClientMsg::SessionTaskStop` in `src/ipc/protocol.rs`.
+public struct ClientSessionTaskStop: Encodable, Equatable {
+    let type_: String = "session_task_stop"
+    public let requestId: String
+    public let tag: String
+    public let taskId: String
+
+    public init(requestId: String, tag: String, taskId: String) {
+        self.requestId = requestId
+        self.tag = tag
+        self.taskId = taskId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag
+        case requestId = "request_id"
+        case taskId = "task_id"
+    }
+}
+
+/// Read a shell or monitor task's output. `offset` is a raw byte offset into the
+/// output (`nil`: the tail); the daemon clamps `maxBytes` to 1 MiB. Answered with
+/// `ServerMsg.sessionTaskOutputResult`; refused over TCP.
+/// Mirrors `ClientMsg::SessionTaskOutput` in `src/ipc/protocol.rs`.
+public struct ClientSessionTaskOutput: Encodable, Equatable {
+    let type_: String = "session_task_output"
+    public let requestId: String
+    public let tag: String
+    public let taskId: String
+    public let offset: UInt64?
+    public let maxBytes: UInt32
+
+    public init(requestId: String, tag: String, taskId: String, offset: UInt64?, maxBytes: UInt32) {
+        self.requestId = requestId
+        self.tag = tag
+        self.taskId = taskId
+        self.offset = offset
+        self.maxBytes = maxBytes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag, offset
+        case requestId = "request_id"
+        case taskId = "task_id"
+        case maxBytes = "max_bytes"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(requestId, forKey: .requestId)
+        try c.encode(tag, forKey: .tag)
+        try c.encode(taskId, forKey: .taskId)
+        // Absent means "the tail"; the daemon reads a missing `offset` as `None`.
+        try c.encodeIfPresent(offset, forKey: .offset)
+        try c.encode(maxBytes, forKey: .maxBytes)
+    }
+}

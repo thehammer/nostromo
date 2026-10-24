@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::protocol::{ClientMsg, FocusMeta, ServerMsg, Topic};
+use super::protocol::{ClientMsg, FocusMeta, ServerMsg, TaskOutputOutcome, TaskStopOutcome, Topic};
 use crate::data::work::WorkResult;
 
 /// Wire transport a connection arrived on.
@@ -685,6 +685,11 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // output or the conversation is a separate frame, local only.
         ServerMsg::SessionTasks { tag, .. } => ServerClass::Focus(tag),
         ServerMsg::SessionTaskDetail { .. } => ServerClass::LocalOnly,
+        // The replies to the two task verbs (a network peer can never send
+        // them): one carries output, the other answers a local request.
+        ServerMsg::SessionTaskStopResult { .. } | ServerMsg::SessionTaskOutputResult { .. } => {
+            ServerClass::LocalOnly
+        }
 
         // The tracker pane's content (title, item text, notes, owners, links,
         // commands, the file path) goes to local clients only. A network peer
@@ -752,6 +757,18 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
         }
         ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),
         ServerMsg::ModelRequestResult { code: Some(code), .. } => is_secure_refusal(code),
+        // The typed refusals of the two task verbs: a refusal with no text.
+        ServerMsg::SessionTaskStopResult {
+            outcome: TaskStopOutcome::Refused,
+            message: Some(message),
+            ..
+        } => message.starts_with("requires_secure_connection"),
+        ServerMsg::SessionTaskOutputResult {
+            outcome: TaskOutputOutcome::Refused,
+            message: Some(message),
+            text,
+            ..
+        } => text.is_empty() && message.starts_with("requires_secure_connection"),
         _ => false,
     }
 }
@@ -884,7 +901,11 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::FredSeed { .. }
         | ClientMsg::ModelCatalogRefresh {}
         | ClientMsg::SessionModelSet { .. }
-        | ClientMsg::ModelDefaultSet { .. } => NetworkPolicy::Refused,
+        | ClientMsg::ModelDefaultSet { .. }
+        // Stops a background task, and reads a task's output: neither is
+        // ever available to a network peer.
+        | ClientMsg::SessionTaskStop { .. }
+        | ClientMsg::SessionTaskOutput { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -918,6 +939,8 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::RenderedShape { tag, .. }
         | ClientMsg::SessionModelGet { tag }
         | ClientMsg::SessionModelSet { tag, .. }
+        | ClientMsg::SessionTaskStop { tag, .. }
+        | ClientMsg::SessionTaskOutput { tag, .. }
         | ClientMsg::ClaudeLoginAction { tag, .. } => tags.tag_is_sensitive(tag),
 
         ClientMsg::Hello { .. }
@@ -1529,6 +1552,18 @@ mod tests {
                 hold_id: Some("h".into()),
                 operator_nonce: None,
             },
+            ClientMsg::SessionTaskStop {
+                request_id: "r".into(),
+                tag: "x1".into(),
+                task_id: "t1".into(),
+            },
+            ClientMsg::SessionTaskOutput {
+                request_id: "r".into(),
+                tag: "x1".into(),
+                task_id: "t1".into(),
+                offset: None,
+                max_bytes: 4096,
+            },
         ]
     }
 
@@ -1565,7 +1600,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 42;
+    const CLIENT_MSG_VARIANTS: usize = 44;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -1612,6 +1647,8 @@ mod tests {
             ClientMsg::ApprovalAnswer { .. } => 39,
             ClientMsg::ApprovalRefusalReport { .. } => 40,
             ClientMsg::ClaudeLoginAction { .. } => 41,
+            ClientMsg::SessionTaskStop { .. } => 42,
+            ClientMsg::SessionTaskOutput { .. } => 43,
         }
     }
 
@@ -1648,8 +1685,8 @@ mod tests {
         assert_eq!(by_name("PtyAttach"), 7);
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
-        assert_eq!(CLIENT_MSG_VARIANTS, 42);
-        assert_eq!(every_client_msg().len(), 42);
+        assert_eq!(CLIENT_MSG_VARIANTS, 44);
+        assert_eq!(every_client_msg().len(), 44);
     }
 
     #[test]
@@ -2984,5 +3021,210 @@ mod tests {
         }
         assert!(mentions >= 3, "the scan finds the definition and the classification arms: {mentions}");
         assert!(offenders.is_empty(), "something constructs (or destructures) SessionPermissionRequest:\n{}", offenders.join("\n"));
+    }
+
+    // ── BA1: stopping a task and reading its output ───────────────────────────
+
+    use crate::ipc::protocol::TaskOutputSource;
+
+    const STOP_OUTCOMES: [TaskStopOutcome; 5] = [
+        TaskStopOutcome::Accepted,
+        TaskStopOutcome::Refused,
+        TaskStopOutcome::Timeout,
+        TaskStopOutcome::Unsupported,
+        TaskStopOutcome::NotRunning,
+    ];
+
+    const OUTPUT_OUTCOMES: [TaskOutputOutcome; 4] = [
+        TaskOutputOutcome::Ok,
+        TaskOutputOutcome::Unavailable,
+        TaskOutputOutcome::Refused,
+        TaskOutputOutcome::Error,
+    ];
+
+    fn stop_result(tag: &str, outcome: TaskStopOutcome, message: Option<&str>) -> ServerMsg {
+        ServerMsg::SessionTaskStopResult {
+            request_id: "r".into(),
+            tag: tag.into(),
+            task_id: "t1".into(),
+            outcome,
+            message: message.map(str::to_owned),
+        }
+    }
+
+    fn output_result(tag: &str, outcome: TaskOutputOutcome, text: &str, message: Option<&str>) -> ServerMsg {
+        ServerMsg::SessionTaskOutputResult {
+            request_id: "r".into(),
+            tag: tag.into(),
+            task_id: "t1".into(),
+            outcome,
+            text: text.into(),
+            start_offset: 0,
+            end_offset: text.len() as u64,
+            total_bytes: text.len() as u64,
+            source: Some(TaskOutputSource::File),
+            message: message.map(str::to_owned),
+        }
+    }
+
+    const REFUSAL_MESSAGE: &str = "requires_secure_connection: this needs a secure connection";
+
+    #[test]
+    fn both_task_results_are_local_only_whatever_the_tag_and_outcome() {
+        for tag in ["cody-ordinary", "cody-sensitive", "fred", "teri", ""] {
+            for outcome in STOP_OUTCOMES {
+                assert_eq!(classify_server_msg(&stop_result(tag, outcome, None)), ServerClass::LocalOnly, "{tag} {outcome:?}");
+            }
+            for outcome in OUTPUT_OUTCOMES {
+                assert_eq!(
+                    classify_server_msg(&output_result(tag, outcome, "SECRET-OUTPUT-1", None)),
+                    ServerClass::LocalOnly,
+                    "{tag} {outcome:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_task_results_are_not_teri_or_fred_data_themselves() {
+        assert_eq!(is_sensitive_server_msg(&stop_result("x", TaskStopOutcome::Accepted, None)), SensitiveClass::NotSensitive);
+        assert_eq!(
+            is_sensitive_server_msg(&output_result("x", TaskOutputOutcome::Ok, "t", None)),
+            SensitiveClass::NotSensitive
+        );
+    }
+
+    #[test]
+    fn a_network_peer_is_never_sent_a_task_result_for_any_tag_even_an_ordinary_one() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive", "fred", "teri"] {
+            let mut frames: Vec<ServerMsg> = Vec::new();
+            for outcome in STOP_OUTCOMES {
+                frames.push(stop_result(tag, outcome, None));
+                frames.push(stop_result(tag, outcome, Some("StopTask: a reason")));
+            }
+            for outcome in OUTPUT_OUTCOMES {
+                frames.push(output_result(tag, outcome, "SECRET-OUTPUT-1\n", None));
+                frames.push(output_result(tag, outcome, "SECRET-OUTPUT-2\n", Some("a note")));
+                frames.push(output_result(tag, outcome, "", Some("a note")));
+            }
+            // Dressed up as the refusal: wrong outcome, wrong message, or carrying text.
+            frames.push(stop_result(tag, TaskStopOutcome::Accepted, Some(REFUSAL_MESSAGE)));
+            frames.push(stop_result(tag, TaskStopOutcome::NotRunning, Some(REFUSAL_MESSAGE)));
+            frames.push(stop_result(tag, TaskStopOutcome::Refused, Some("not requires_secure_connection")));
+            frames.push(stop_result(tag, TaskStopOutcome::Refused, None));
+            frames.push(output_result(tag, TaskOutputOutcome::Ok, "", Some(REFUSAL_MESSAGE)));
+            frames.push(output_result(tag, TaskOutputOutcome::Refused, "SECRET-OUTPUT-3", Some(REFUSAL_MESSAGE)));
+            frames.push(output_result(tag, TaskOutputOutcome::Refused, "", Some("a reason")));
+            frames.push(output_result(tag, TaskOutputOutcome::Refused, "", None));
+
+            for msg in frames {
+                let delivered = may_receive(PeerTrust::Tcp, &msg, &tags);
+                let is_the_refusal = matches!(
+                    &msg,
+                    ServerMsg::SessionTaskStopResult { outcome: TaskStopOutcome::Refused, message: Some(m), .. }
+                        if m.starts_with("requires_secure_connection")
+                ) || matches!(
+                    &msg,
+                    ServerMsg::SessionTaskOutputResult { outcome: TaskOutputOutcome::Refused, text, message: Some(m), .. }
+                        if text.is_empty() && m.starts_with("requires_secure_connection")
+                );
+                assert_eq!(delivered, is_the_refusal, "{tag}: {}", wire(&msg));
+                if !is_the_refusal {
+                    assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(), "{tag}: {}", wire(&msg));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_typed_refusal_of_a_task_verb_is_delivered_to_a_network_peer_for_any_tag() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+            let stop = stop_result(tag, TaskStopOutcome::Refused, Some(REFUSAL_MESSAGE));
+            let output = output_result(tag, TaskOutputOutcome::Refused, "", Some(REFUSAL_MESSAGE));
+            for msg in [stop, output] {
+                assert!(is_refusal(&msg), "{}", wire(&msg));
+                assert!(may_receive(PeerTrust::Tcp, &msg, &tags), "{tag}: {}", wire(&msg));
+                let sent = outbound(PeerTrust::Tcp, msg.clone(), &tags).expect("the refusal is delivered");
+                assert_eq!(wire(&sent), wire(&msg), "{tag}: nothing in the refusal is redacted away or added");
+            }
+        }
+    }
+
+    #[test]
+    fn a_local_peer_receives_every_task_result_unchanged() {
+        let tags = tags_with("cody-sensitive");
+        for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
+            for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+                for msg in [
+                    stop_result(tag, TaskStopOutcome::Accepted, None),
+                    stop_result(tag, TaskStopOutcome::Refused, Some("StopTask: no")),
+                    output_result(tag, TaskOutputOutcome::Ok, "SECRET-OUTPUT-1\n", None),
+                ] {
+                    assert!(may_receive(trust, &msg, &tags), "{trust:?} {tag}");
+                    let sent = outbound(trust, msg.clone(), &tags).expect("delivered");
+                    assert_eq!(wire(&sent), wire(&msg), "{trust:?} {tag}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_task_verbs_are_refused_for_a_network_peer_whatever_the_tag() {
+        let tags = SensitiveTags::in_memory();
+        for tag in ["cody-ordinary", "x1", "", "ghost", "fred"] {
+            for msg in [
+                ClientMsg::SessionTaskStop { request_id: "r".into(), tag: tag.into(), task_id: "t1".into() },
+                ClientMsg::SessionTaskOutput {
+                    request_id: "r".into(),
+                    tag: tag.into(),
+                    task_id: "t1".into(),
+                    offset: Some(0),
+                    max_bytes: 4096,
+                },
+                ClientMsg::SessionTaskOutput {
+                    request_id: "r".into(),
+                    tag: tag.into(),
+                    task_id: "t1".into(),
+                    offset: None,
+                    max_bytes: 4096,
+                },
+            ] {
+                assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{msg:?}");
+                assert!(refused_for_network(&msg), "{msg:?}");
+                assert!(refuse_for_network(&msg, &tags), "{msg:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn neither_task_verb_is_on_the_network_allow_list() {
+        assert!(!NETWORK_ALLOWED.contains(&"SessionTaskStop"));
+        assert!(!NETWORK_ALLOWED.contains(&"SessionTaskOutput"));
+        let names: Vec<String> = every_client_msg().iter().map(variant_name).collect();
+        assert!(names.iter().any(|n| n == "SessionTaskStop"), "the fixture list names the stop verb");
+        assert!(names.iter().any(|n| n == "SessionTaskOutput"), "the fixture list names the output verb");
+    }
+
+    #[test]
+    fn both_task_verbs_are_listed_as_targeting_a_sensitive_session_by_their_tag() {
+        let tags = tags_with("cody-sensitive");
+        let stop = |tag: &str| ClientMsg::SessionTaskStop { request_id: "r".into(), tag: tag.into(), task_id: "t1".into() };
+        let output = |tag: &str| ClientMsg::SessionTaskOutput {
+            request_id: "r".into(),
+            tag: tag.into(),
+            task_id: "t1".into(),
+            offset: None,
+            max_bytes: 4096,
+        };
+        for tag in ["cody-sensitive", "fred", "teri", "FRED"] {
+            assert!(targets_sensitive_session(&stop(tag), &tags), "stop {tag}");
+            assert!(targets_sensitive_session(&output(tag), &tags), "output {tag}");
+        }
+        for tag in ["cody-ordinary", "x1"] {
+            assert!(!targets_sensitive_session(&stop(tag), &tags), "stop {tag}");
+            assert!(!targets_sensitive_session(&output(tag), &tags), "output {tag}");
+        }
     }
 }

@@ -393,6 +393,9 @@ struct TaskEntry {
     output_file: Option<String>,
     /// Missing from the live level since; ends `vanished` at this time.
     vanish_at: Option<u64>,
+    /// A Nostromo stop for this run was sent. Never shown as a status: it only
+    /// decides the `end_reason` if the task then ends `stopped`.
+    stop_requested: bool,
     detail: TaskDetailMsg,
 }
 
@@ -422,6 +425,7 @@ impl TaskEntry {
             last_tool_name: None,
             output_file: None,
             vanish_at: None,
+            stop_requested: false,
             detail: TaskDetailMsg {
                 task_id: id.to_owned(),
                 ..Default::default()
@@ -492,6 +496,14 @@ impl TaskEntry {
         self.vanish_at = None;
         if status == TaskStatus::Stopped {
             self.end_reason = end_reason.or(self.end_reason);
+            // The user asked for this: it explains an end that has no reason
+            // of its own, and a task that left the live set before its end
+            // was reported.
+            if self.stop_requested
+                && matches!(self.end_reason, None | Some(TaskEndReason::Vanished))
+            {
+                self.end_reason = Some(TaskEndReason::UserStop);
+            }
         }
     }
 
@@ -556,6 +568,13 @@ pub struct PreviewTarget {
     pub tool_use_id: Option<String>,
     /// The preview already published, if any.
     pub preview: Option<String>,
+}
+
+/// What a task is, for the audit line of a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskLabel {
+    pub kind: TaskKind,
+    pub description: String,
 }
 
 /// The tasks of one session.
@@ -758,6 +777,64 @@ impl TaskRegistry {
             .collect()
     }
 
+    /// What a stop request needs to know about `task_id`, and the mark that a
+    /// stop was sent. `None` when the task is unknown or has ended (nothing to
+    /// stop). The mark changes nothing the wire shows.
+    pub fn begin_stop(&mut self, task_id: &str, tool_name: ToolNameLookup<'_>) -> Option<TaskLabel> {
+        let entry = self.entries.get_mut(task_id)?;
+        if entry.status.is_terminal() {
+            return None;
+        }
+        entry.stop_requested = true;
+        Some(TaskLabel {
+            kind: entry.kind(tool_name),
+            description: entry.description.clone(),
+        })
+    }
+
+    /// Withdraw the mark of [`Self::begin_stop`]: the CLI did not take the stop.
+    pub fn cancel_stop(&mut self, task_id: &str) {
+        if let Some(entry) = self.entries.get_mut(task_id) {
+            entry.stop_requested = false;
+        }
+    }
+
+    /// `true` while any task that is not housekeeping has not ended: the
+    /// moment worth asking the CLI whether it can stop tasks at all.
+    pub fn has_stoppable_task(&self) -> bool {
+        self.entries
+            .values()
+            .any(|e| !e.status.is_terminal() && !e.housekeeping)
+    }
+
+    /// A retained task's kind and where its output may be, for the output
+    /// verb. `None` when the registry does not hold the task.
+    pub fn output_target(
+        &self,
+        task_id: &str,
+        tool_name: ToolNameLookup<'_>,
+    ) -> Option<(TaskKind, PreviewTarget)> {
+        let entry = self.entries.get(task_id)?;
+        let kind = entry.kind(tool_name);
+        Some((
+            kind,
+            PreviewTarget {
+                task_id: entry.id.clone(),
+                terminal: entry.status.is_terminal(),
+                housekeeping: entry.housekeeping,
+                output_file: entry.output_file.clone(),
+                tool_use_id: entry.tool_use_id.clone(),
+                preview: entry.detail.preview.clone(),
+            },
+        ))
+    }
+
+    /// The snapshot differs from what clients hold (a field outside the tasks
+    /// changed, like what the CLI can do): publish it again.
+    pub fn mark_snapshot_dirty(&mut self) {
+        self.dirty_snapshot = true;
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -903,7 +980,11 @@ impl TaskRegistry {
         entry.finish(e.status, now, reason);
         // A restart notification that follows an earlier `stopped` still
         // says why.
-        if reason.is_some() && entry.status == TaskStatus::Stopped && entry.end_reason.is_none() {
+        // (It also wins over a `user_stop` the earlier `stopped` patch gave.)
+        if reason.is_some()
+            && entry.status == TaskStatus::Stopped
+            && matches!(entry.end_reason, None | Some(TaskEndReason::UserStop))
+        {
             entry.end_reason = reason;
         }
     }
@@ -1056,6 +1137,21 @@ impl TaskHub {
         tool_name: ToolNameLookup<'_>,
     ) -> Vec<TaskOutput> {
         self.registry.set_preview(task_id, preview);
+        self.publish_if_due(now, tool_name)
+    }
+
+    /// A stop was asked for `task_id`; see [`TaskRegistry::begin_stop`].
+    pub fn begin_stop(&mut self, task_id: &str, tool_name: ToolNameLookup<'_>) -> Option<TaskLabel> {
+        self.registry.begin_stop(task_id, tool_name)
+    }
+
+    pub fn cancel_stop(&mut self, task_id: &str) {
+        self.registry.cancel_stop(task_id);
+    }
+
+    /// Publish the snapshot again even though no task changed.
+    pub fn republish(&mut self, now: u64, tool_name: ToolNameLookup<'_>) -> Vec<TaskOutput> {
+        self.registry.mark_snapshot_dirty();
         self.publish_if_due(now, tool_name)
     }
 
@@ -2916,5 +3012,327 @@ mod tests {
 
         assert_eq!(hub.next_wakeup(), None);
         assert!(hub.registry().snapshot_builds() - before <= 1, "an unchanged task is not re-published");
+    }
+
+    // ── stopping a task (BA1) ───────────────────────────────────────────────
+
+    fn running_shell(id: &str) -> TaskRegistry {
+        registry_with(&[(&started(id, json!({"task_type": "local_bash", "description": "build watcher"})), 1_000)])
+    }
+
+    #[test]
+    fn a_stop_for_an_unknown_task_has_nothing_to_stop() {
+        let mut reg = running_shell("t1");
+        assert_eq!(reg.begin_stop("nope", &no_tools), None);
+        assert_eq!(reg.begin_stop("", &no_tools), None);
+    }
+
+    #[test]
+    fn a_stop_for_a_task_that_has_ended_has_nothing_to_stop() {
+        for status in ["completed", "failed", "stopped"] {
+            let mut reg = running_shell("t1");
+            reg.apply(&notified("t1", status, json!({})), 2_000, &no_tools);
+            assert_eq!(reg.begin_stop("t1", &no_tools), None, "a {status} task");
+        }
+        let mut killed = running_shell("t1");
+        killed.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        assert_eq!(killed.begin_stop("t1", &no_tools), None, "a killed task");
+    }
+
+    #[test]
+    fn a_stop_for_a_running_task_says_what_it_is_for_the_audit_line() {
+        let mut reg = registry_with(&[
+            (&started("t1", json!({"task_type": "local_bash", "description": "build watcher"})), 1_000),
+            (&started("a1", json!({"task_type": "local_agent", "description": "review the diff"})), 1_000),
+        ]);
+        assert_eq!(
+            reg.begin_stop("t1", &no_tools),
+            Some(TaskLabel { kind: TaskKind::Shell, description: "build watcher".into() })
+        );
+        assert_eq!(
+            reg.begin_stop("a1", &no_tools),
+            Some(TaskLabel { kind: TaskKind::Agent, description: "review the diff".into() })
+        );
+    }
+
+    #[test]
+    fn a_stop_for_a_monitor_resolves_its_kind_from_the_tool_that_started_it() {
+        let tools = Tools::default();
+        tools.learn("toolu_m", "Monitor");
+        let mut reg = TaskRegistry::new();
+        reg.apply(&started("m1", json!({"task_type": "local_bash", "tool_use_id": "toolu_m"})), 1_000, &tools.lookup());
+        assert_eq!(reg.begin_stop("m1", &tools.lookup()).map(|l| l.kind), Some(TaskKind::Monitor));
+    }
+
+    #[test]
+    fn asking_for_a_stop_changes_nothing_the_wire_shows() {
+        let mut reg = running_shell("t1");
+        let before = snap(&reg);
+        reg.take_dirty();
+
+        reg.begin_stop("t1", &no_tools);
+
+        assert_eq!(snap(&reg), before, "no status, reason or time changes on the ask");
+        assert!(reg.take_dirty().is_clean(), "nothing is queued for publication");
+        assert_eq!(one(&reg, "t1").status, TaskStatus::Running);
+
+        reg.cancel_stop("t1");
+        assert_eq!(snap(&reg), before);
+        assert!(reg.take_dirty().is_clean());
+    }
+
+    #[test]
+    fn a_hub_asked_to_begin_a_stop_publishes_nothing() {
+        let mut hub = TaskHub::new();
+        hub.on_event(&started("t1", json!({"task_type": "local_bash"})), 1_000, &no_tools);
+        assert!(hub.begin_stop("t1", &no_tools).is_some());
+        assert!(hub.on_tick(5_000, &no_tools).is_empty());
+        hub.cancel_stop("t1");
+        assert!(hub.on_tick(9_000, &no_tools).is_empty());
+        assert_eq!(hub.next_wakeup(), None);
+    }
+
+    #[test]
+    fn a_task_that_ends_stopped_after_an_accepted_stop_ends_with_the_user_stop_reason() {
+        let ends: [(&str, TaskEvent); 2] = [
+            ("a killed patch", updated("t1", json!({"status": "killed"}))),
+            ("a stopped notification", notified("t1", "stopped", json!({}))),
+        ];
+        for (what, end) in ends {
+            let mut reg = running_shell("t1");
+            reg.begin_stop("t1", &no_tools);
+            reg.apply(&end, 2_000, &no_tools);
+            let t = one(&reg, "t1");
+            assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::UserStop)), "{what}");
+        }
+    }
+
+    #[test]
+    fn the_same_ends_without_a_stop_for_the_task_have_no_reason() {
+        let mut reg = running_shell("t1");
+        reg.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        assert_eq!(one(&reg, "t1").end_reason, None);
+
+        let mut other = registry_with(&[
+            (&started("t1", json!({"task_type": "local_bash"})), 1_000),
+            (&started("t2", json!({"task_type": "local_bash"})), 1_000),
+        ]);
+        other.begin_stop("t2", &no_tools);
+        other.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        assert_eq!(one(&other, "t1").end_reason, None, "a stop of another task explains nothing here");
+    }
+
+    #[test]
+    fn a_task_that_leaves_the_live_set_after_a_stop_ends_with_the_user_stop_reason_not_vanished() {
+        let mut reg = backgrounded_and_listed();
+        reg.begin_stop("t1", &no_tools);
+        reg.apply(&level(json!([])), 20_000, &no_tools);
+
+        assert!(reg.tick(23_000));
+
+        let t = one(&reg, "t1");
+        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::UserStop)));
+    }
+
+    #[test]
+    fn a_task_that_vanishes_without_a_stop_is_still_vanished() {
+        let mut reg = backgrounded_and_listed();
+        reg.apply(&level(json!([])), 20_000, &no_tools);
+        reg.tick(23_000);
+        assert_eq!(one(&reg, "t1").end_reason, Some(TaskEndReason::Vanished));
+    }
+
+    #[test]
+    fn a_worker_restart_still_wins_over_a_stop_that_was_asked_for() {
+        // Notification first, and the killed patch first: either order says restart.
+        let mut notified_first = running_shell("t1");
+        notified_first.begin_stop("t1", &no_tools);
+        notified_first.apply(&notified("t1", "stopped", json!({"reason": "worker_restart"})), 2_000, &no_tools);
+        assert_eq!(one(&notified_first, "t1").end_reason, Some(TaskEndReason::Restart));
+
+        let mut killed_first = running_shell("t1");
+        killed_first.begin_stop("t1", &no_tools);
+        killed_first.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        killed_first.apply(&notified("t1", "stopped", json!({"reason": "worker_restart"})), 2_100, &no_tools);
+        let t = one(&killed_first, "t1");
+        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, Some(TaskEndReason::Restart)));
+    }
+
+    #[test]
+    fn the_session_ending_still_wins_over_a_stop_that_was_asked_for() {
+        let mut reg = running_shell("t1");
+        reg.begin_stop("t1", &no_tools);
+        reg.end_session(5_000);
+        assert_eq!(one(&reg, "t1").end_reason, Some(TaskEndReason::SessionEnded));
+    }
+
+    #[test]
+    fn a_task_that_completes_or_fails_after_a_stop_keeps_no_user_stop_reason() {
+        for status in ["completed", "failed"] {
+            let mut reg = running_shell("t1");
+            reg.begin_stop("t1", &no_tools);
+            reg.apply(&notified("t1", status, json!({})), 2_000, &no_tools);
+            let t = one(&reg, "t1");
+            assert_eq!(t.end_reason, None, "{status}");
+            assert_ne!(t.status, TaskStatus::Stopped);
+        }
+        let mut patched = running_shell("t1");
+        patched.begin_stop("t1", &no_tools);
+        patched.apply(&updated("t1", json!({"status": "completed"})), 2_000, &no_tools);
+        assert_eq!(one(&patched, "t1").end_reason, None);
+    }
+
+    #[test]
+    fn a_withdrawn_stop_leaves_a_later_kill_without_the_user_stop_reason() {
+        let mut reg = running_shell("t1");
+        reg.begin_stop("t1", &no_tools);
+        reg.cancel_stop("t1");
+        reg.apply(&updated("t1", json!({"status": "killed"})), 2_000, &no_tools);
+        assert_eq!(one(&reg, "t1").end_reason, None);
+    }
+
+    #[test]
+    fn withdrawing_a_stop_for_an_unknown_task_is_harmless() {
+        let mut reg = running_shell("t1");
+        reg.cancel_stop("nope");
+        assert_eq!(one(&reg, "t1").status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn a_new_run_of_the_task_does_not_inherit_the_stop_of_the_earlier_run() {
+        let mut reg = registry_with(&[(&started("t1", json!({"run_id": "run-001"})), 1_000)]);
+        reg.begin_stop("t1", &no_tools);
+        reg.apply(&notified("t1", "stopped", json!({"run_id": "run-001"})), 2_000, &no_tools);
+        assert_eq!(one(&reg, "t1").end_reason, Some(TaskEndReason::UserStop));
+
+        reg.apply(&started("t1", json!({"run_id": "run-002"})), 3_000, &no_tools);
+        assert_eq!(one(&reg, "t1").status, TaskStatus::Running);
+        reg.apply(&updated_run("t1", "run-002", json!({"status": "killed"})), 4_000, &no_tools);
+
+        let t = one(&reg, "t1");
+        assert_eq!((t.status, t.end_reason), (TaskStatus::Stopped, None), "nobody asked to stop the second run");
+    }
+
+    // ── has_stoppable_task ───────────────────────────────────────────────────
+
+    #[test]
+    fn an_empty_registry_holds_nothing_stoppable() {
+        assert!(!TaskRegistry::new().has_stoppable_task());
+    }
+
+    #[test]
+    fn a_running_task_that_is_not_housekeeping_is_stoppable_whatever_its_kind() {
+        for task_type in ["local_bash", "local_agent", "local_workflow", "monitor_mcp", "weird"] {
+            let reg = registry_with(&[(&started("t1", json!({"task_type": task_type})), 1_000)]);
+            assert!(reg.has_stoppable_task(), "{task_type}");
+        }
+    }
+
+    #[test]
+    fn pending_and_paused_tasks_are_stoppable_too() {
+        for status in ["pending", "paused"] {
+            let reg = registry_with(&[
+                (&started("t1", json!({})), 1_000),
+                (&updated("t1", json!({"status": status})), 1_100),
+            ]);
+            assert!(reg.has_stoppable_task(), "{status}");
+        }
+    }
+
+    #[test]
+    fn housekeeping_tasks_alone_are_not_stoppable() {
+        for extra in [json!({"ambient": true}), json!({"skip_transcript": true})] {
+            let reg = registry_with(&[(&started("hk", extra.clone()), 1_000)]);
+            assert!(!reg.has_stoppable_task(), "{extra}");
+        }
+        let mut mixed = registry_with(&[(&started("hk", json!({"ambient": true})), 1_000)]);
+        mixed.apply(&started("real", json!({})), 1_100, &no_tools);
+        assert!(mixed.has_stoppable_task(), "one real task makes the session stoppable");
+    }
+
+    #[test]
+    fn a_registry_whose_tasks_all_ended_holds_nothing_stoppable() {
+        let mut reg = registry_with(&[
+            (&started("a", json!({})), 1_000),
+            (&started("b", json!({})), 1_000),
+        ]);
+        reg.apply(&notified("a", "completed", json!({})), 2_000, &no_tools);
+        assert!(reg.has_stoppable_task());
+        reg.apply(&updated("b", json!({"status": "killed"})), 2_100, &no_tools);
+        assert!(!reg.has_stoppable_task());
+    }
+
+    // ── output_target ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_output_target_of_an_unknown_task_is_none() {
+        assert_eq!(running_shell("t1").output_target("nope", &no_tools), None);
+    }
+
+    #[test]
+    fn the_output_target_names_the_kind_and_where_the_output_may_be() {
+        let mut reg = registry_with(&[(
+            &started("t1", json!({"task_type": "local_bash", "tool_use_id": "toolu_1", "description": "d"})),
+            1_000,
+        )]);
+        let (kind, target) = reg.output_target("t1", &no_tools).expect("a retained task");
+        assert_eq!(kind, TaskKind::Shell);
+        assert_eq!((target.task_id.as_str(), target.terminal, target.housekeeping), ("t1", false, false));
+        assert_eq!(target.output_file, None);
+        assert_eq!(target.tool_use_id.as_deref(), Some("toolu_1"));
+
+        reg.apply(&notified("t1", "completed", json!({"output_file": "/x/y/t1.output"})), 2_000, &no_tools);
+        let (_, ended) = reg.output_target("t1", &no_tools).unwrap();
+        assert!(ended.terminal);
+        assert_eq!(ended.output_file.as_deref(), Some("/x/y/t1.output"));
+    }
+
+    #[test]
+    fn the_output_target_of_an_agent_or_a_housekeeping_task_is_still_reported_with_its_kind() {
+        let reg = registry_with(&[
+            (&started("a1", json!({"task_type": "local_agent"})), 1_000),
+            (&started("hk", json!({"task_type": "monitor_ws", "ambient": true})), 1_000),
+        ]);
+        assert_eq!(reg.output_target("a1", &no_tools).map(|(k, _)| k), Some(TaskKind::Agent));
+        let (kind, hk) = reg.output_target("hk", &no_tools).unwrap();
+        assert_eq!(kind, TaskKind::Monitor);
+        assert!(hk.housekeeping);
+    }
+
+    // ── republishing the snapshot ────────────────────────────────────────────
+
+    #[test]
+    fn a_republish_sends_the_snapshot_again_even_though_no_task_changed() {
+        let mut hub = TaskHub::new();
+        hub.on_event(&started("t1", json!({})), 1_000, &no_tools);
+        let first = hub.on_tick(1_000, &no_tools);
+        assert!(first.is_empty(), "already published with the event");
+        assert_eq!(hub.next_wakeup(), None, "control: nothing is pending");
+
+        let again = hub.republish(1_000 + COALESCE_MS, &no_tools);
+
+        assert_eq!(snapshot_in(&again).len(), 1);
+        assert_eq!(snapshot_in(&again)[0].id, "t1");
+        assert_eq!(hub.next_wakeup(), None);
+    }
+
+    #[test]
+    fn a_republish_inside_the_coalescing_window_waits_for_the_window_to_end() {
+        let mut hub = TaskHub::new();
+        hub.on_event(&started("t1", json!({})), 1_000, &no_tools);
+
+        let early = hub.republish(1_100, &no_tools);
+
+        assert!(early.is_empty());
+        assert_eq!(hub.next_wakeup(), Some(1_000 + COALESCE_MS));
+        let due = hub.on_tick(1_000 + COALESCE_MS, &no_tools);
+        assert_eq!(snapshot_in(&due).len(), 1);
+    }
+
+    #[test]
+    fn a_republish_of_an_empty_hub_still_publishes_an_empty_snapshot() {
+        let mut hub = TaskHub::new();
+        let out = hub.republish(10_000, &no_tools);
+        assert!(snapshot_in(&out).is_empty());
     }
 }

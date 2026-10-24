@@ -17,6 +17,8 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::data::work::is_invisible;
 
@@ -223,6 +225,22 @@ pub struct TailRead {
     pub total_bytes: u64,
 }
 
+/// A read of a range of an output file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeRead {
+    /// The raw bytes of `[start, end)`.
+    pub bytes: Vec<u8>,
+    /// Where the range begins: the requested offset, moved forward past the
+    /// rest of a UTF-8 scalar it fell inside.
+    pub start: u64,
+    /// Where it ends: on a line boundary, a UTF-8 scalar boundary and not
+    /// inside an escape sequence (a line longer than the window ends where the
+    /// window does, at the nearest safe place before it).
+    pub end: u64,
+    /// The size of the file after the read.
+    pub total_bytes: u64,
+}
+
 /// `true` for an id the CLI could have issued: `^[A-Za-z0-9_-]{1,64}$`.
 pub fn is_valid_task_id(id: &str) -> bool {
     (1..=64).contains(&id.len())
@@ -246,6 +264,9 @@ pub fn is_valid_task_id(id: &str) -> bool {
 pub struct OutputFileValidator {
     roots: Vec<PathBuf>,
     uid: u32,
+    /// Counts every call to [`Self::open`], accepted or not (tests assert that
+    /// a refused request opened nothing).
+    opens: Arc<AtomicUsize>,
 }
 
 impl OutputFileValidator {
@@ -254,7 +275,15 @@ impl OutputFileValidator {
         Self {
             roots: vec![root.into()],
             uid: current_uid(),
+            opens: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Count this validator's `open` calls in `counter` (shared with whoever
+    /// holds it).
+    pub fn with_open_counter(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.opens = counter;
+        self
     }
 
     /// A validator for the CLI's tmp root of this user: `/private/tmp/claude-<uid>`
@@ -278,6 +307,7 @@ impl OutputFileValidator {
 
     /// Check `path` against the rules above and open it for reading.
     pub fn open(&self, path: &Path, task_id: &str) -> Result<File, OutputFileError> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
         let (dir, name) = self.check_shape(path, task_id)?;
         let file = open_nofollow(&dir.join(name)).map_err(OutputFileError::Unreadable)?;
         let meta = file.metadata().map_err(OutputFileError::Unreadable)?;
@@ -315,6 +345,84 @@ impl OutputFileValidator {
         Ok(TailRead {
             bytes,
             total_bytes: total,
+        })
+    }
+
+    /// Read up to `max_bytes` of the file at `path`, starting at `offset`
+    /// (`None`: so that the read ends at the end of the file). The file may
+    /// still be growing: see [`Self::read_range_of`].
+    ///
+    /// The range always starts on a UTF-8 scalar boundary and ends on one
+    /// that is also outside any escape sequence, so consecutive ranges
+    /// (`next offset = previous end`) can be sanitised separately and joined.
+    /// When the window stops short of the end of the file the range also ends
+    /// after a newline, unless the window holds no newline at all. A tail
+    /// read (`None`) starts after the first newline of its window, so it does
+    /// not open with half a line, unless the window holds no newline.
+    ///
+    /// Growth-safe: the file may grow while it is read. The range holds what
+    /// was read, and `total_bytes` is the size afterwards. An `offset` past
+    /// the end is an empty range at the end.
+    pub fn read_range(
+        &self,
+        path: &Path,
+        task_id: &str,
+        offset: Option<u64>,
+        max_bytes: usize,
+    ) -> Result<RangeRead, OutputFileError> {
+        self.read_range_of(path, task_id, offset, max_bytes, false)
+    }
+
+    /// [`Self::read_range`] for a file that will not grow any more
+    /// (`finished`, the task has ended): what ends the file is taken whole,
+    /// even half a scalar or an escape sequence that was never finished,
+    /// where a file that may still grow holds those back until their end
+    /// arrives.
+    pub fn read_range_of(
+        &self,
+        path: &Path,
+        task_id: &str,
+        offset: Option<u64>,
+        max_bytes: usize,
+        finished: bool,
+    ) -> Result<RangeRead, OutputFileError> {
+        let mut file = self.open(path, task_id)?;
+        let size = file.metadata().map_err(OutputFileError::Unreadable)?.len();
+        let tail = offset.is_none();
+        let mut start = match offset {
+            Some(offset) => offset.min(size),
+            None => size.saturating_sub(max_bytes as u64),
+        };
+        let mut bytes = Vec::with_capacity(max_bytes.min(size.saturating_sub(start) as usize));
+        file.seek(SeekFrom::Start(start))
+            .map_err(OutputFileError::Unreadable)?;
+        (&mut file)
+            .take(max_bytes as u64)
+            .read_to_end(&mut bytes)
+            .map_err(OutputFileError::Unreadable)?;
+        let total_bytes = file
+            .metadata()
+            .map_err(OutputFileError::Unreadable)?
+            .len()
+            .max(start + bytes.len() as u64);
+
+        let skip = leading_skip(&bytes, start, tail);
+        bytes.drain(..skip);
+        start += skip as u64;
+
+        // End on a line, a scalar and outside an escape.
+        let reached_eof = start + bytes.len() as u64 >= total_bytes;
+        let keep = if reached_eof && finished {
+            bytes.len()
+        } else {
+            safe_end(&bytes, reached_eof)
+        };
+        bytes.truncate(keep);
+        Ok(RangeRead {
+            end: start + bytes.len() as u64,
+            bytes,
+            start,
+            total_bytes,
         })
     }
 
@@ -366,6 +474,173 @@ impl OutputFileValidator {
         let _ = self.uid;
         true
     }
+}
+
+/// How many leading bytes of a range read at `start` to drop: the rest of a
+/// scalar the cut fell inside, and for a tail that began mid-file, the rest
+/// of its first line (unless that would leave nothing: the last line is
+/// longer than the window).
+fn leading_skip(bytes: &[u8], start: u64, tail: bool) -> usize {
+    if start == 0 {
+        return 0;
+    }
+    let scalar_rest = bytes.iter().take(3).take_while(|b| (**b & 0xC0) == 0x80).count();
+    if !tail {
+        return scalar_rest;
+    }
+    bytes
+        .iter()
+        .position(|b| *b == b'\n')
+        .filter(|i| i + 1 < bytes.len())
+        .map_or(scalar_rest, |i| i + 1)
+}
+
+/// How far back from the end of a window an unfinished escape sequence is
+/// looked for. An unterminated string sequence longer than this is output.
+const ESCAPE_LOOKBACK: usize = 4096;
+
+/// How many bytes of `window` to keep so the range ends in a safe place: on a
+/// newline when the window stopped short of the end of the file (and holds
+/// one), never inside a UTF-8 scalar, never inside an escape sequence.
+fn safe_end(window: &[u8], reached_eof: bool) -> usize {
+    let mut end = window.len();
+    if !reached_eof {
+        if let Some(newline) = window.iter().rposition(|b| *b == b'\n') {
+            // A newline ends every escape sequence and scalar.
+            return newline + 1;
+        }
+    }
+    // Not after the first byte of a multi-byte scalar that is cut short.
+    let mut back = 0;
+    while back < 3 && back < end {
+        let b = window[end - 1 - back];
+        if (b & 0xC0) == 0x80 {
+            back += 1;
+            continue;
+        }
+        let needed = match b {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        if needed > back + 1 {
+            end -= back + 1;
+        }
+        break;
+    }
+    if let Some(open) = unfinished_escape(&window[..end]) {
+        // A window that is one escape sequence and nothing else keeps it
+        // (unless it is the end of the file, which may yet grow) so a reader
+        // always advances.
+        if open > 0 || reached_eof {
+            end = open;
+        }
+    }
+    end
+}
+
+/// Where an escape sequence that has not ended by the end of `window` begins.
+///
+/// Sequences end at a newline, so only the last line can hold one. It is
+/// scanned forward, the way the sanitiser reads it, so an introducer inside
+/// a string sequence's text is not mistaken for the start of a sequence.
+fn unfinished_escape(window: &[u8]) -> Option<usize> {
+    let line_start = window.iter().rposition(|b| *b == b'\n').map_or(0, |p| p + 1);
+    let mut at = line_start.max(window.len().saturating_sub(ESCAPE_LOOKBACK));
+    while at < window.len() {
+        let Some(body) = introducer_body(window, at) else {
+            at += 1;
+            continue;
+        };
+        match escape_end(window, at, body) {
+            None => return Some(at),
+            // `max`: always move on, whatever the sequence consumed.
+            Some(end) => at = end.max(at + 1),
+        }
+    }
+    None
+}
+
+/// Where the body of the escape sequence introduced at `at` begins: after an
+/// `ESC`, or after the 8-bit introducers U+009B / U+009D (`C2 9B`, `C2 9D`).
+fn introducer_body(window: &[u8], at: usize) -> Option<usize> {
+    match window[at] {
+        0x1b => Some(at + 1),
+        0xc2 if matches!(window.get(at + 1), Some(0x9b | 0x9d)) => Some(at + 1),
+        _ => None,
+    }
+}
+
+/// Where the sequence introduced at `at` (body from `body`) ends: `Some(end)`
+/// when the window holds all of it (`end` is where the next thing starts, which
+/// may be the escape that cut a string short), `None` when it runs off the end.
+fn escape_end(window: &[u8], at: usize, body: usize) -> Option<usize> {
+    if window[at] != 0x1b {
+        // An 8-bit introducer: `body` is its `9B` / `9D` byte.
+        return if window[body] == 0x9b {
+            csi_end(window, body + 1)
+        } else {
+            string_end(window, body + 1)
+        };
+    }
+    match *window.get(body)? {
+        b'[' => csi_end(window, body + 1),
+        b']' | b'P' | b'X' | b'^' | b'_' => string_end(window, body + 1),
+        // nF: intermediates 0x20-0x2F, then one final 0x30-0x7E.
+        c if (0x20..=0x2f).contains(&c) => {
+            let mut k = body;
+            while window.get(k).is_some_and(|b| (0x20..=0x2f).contains(b)) {
+                k += 1;
+            }
+            match window.get(k) {
+                None => None,
+                Some(b) if (0x30..=0x7e).contains(b) => Some(k + 1),
+                Some(_) => Some(k),
+            }
+        }
+        // Fe/Fp/Fs: a single final byte.
+        c if (0x30..=0x7e).contains(&c) => Some(body + 1),
+        // A lone ESC.
+        _ => Some(body),
+    }
+}
+
+fn csi_end(window: &[u8], from: usize) -> Option<usize> {
+    let mut k = from;
+    while window.get(k).is_some_and(|b| (0x30..=0x3f).contains(b)) {
+        k += 1;
+    }
+    while window.get(k).is_some_and(|b| (0x20..=0x2f).contains(b)) {
+        k += 1;
+    }
+    match window.get(k) {
+        None => None,
+        Some(b) if (0x40..=0x7e).contains(b) => Some(k + 1),
+        Some(_) => Some(k),
+    }
+}
+
+/// An OSC-style string ends at BEL, ST (`ESC \`, or U+009C) or a newline; any
+/// other `ESC` cuts it short and starts a sequence of its own.
+fn string_end(window: &[u8], from: usize) -> Option<usize> {
+    let mut k = from;
+    while k < window.len() {
+        match window[k] {
+            0x07 => return Some(k + 1),
+            b'\n' => return Some(k),
+            0xc2 if window.get(k + 1) == Some(&0x9c) => return Some(k + 2),
+            0x1b => {
+                return match window.get(k + 1) {
+                    None => None,
+                    Some(b'\\') => Some(k + 2),
+                    Some(_) => Some(k),
+                };
+            }
+            _ => k += 1,
+        }
+    }
+    None
 }
 
 /// The root a CLI-reported output path implies: the path is
@@ -1219,5 +1494,709 @@ mod tests {
         assert!(!is_valid_task_id("a.b"));
         assert!(!is_valid_task_id("a b"));
         assert!(!is_valid_task_id("\u{e9}"));
+    }
+
+    // ── ranged reads (BA1) ──────────────────────────────────────────────────
+
+    const MIB: usize = 1024 * 1024;
+
+    fn range(v: &OutputFileValidator, path: &Path, offset: Option<u64>, max: usize) -> RangeRead {
+        v.read_range(path, ID, offset, max)
+            .unwrap_or_else(|e| panic!("read_range(offset {offset:?}, max {max}) failed: {e:?}"))
+    }
+
+    /// Read a whole finished file the way a viewer does: from offset 0, each request starting
+    /// where the previous range ended. Asserts the ranges are contiguous and always make progress.
+    fn read_all(v: &OutputFileValidator, path: &Path, max: usize) -> Vec<RangeRead> {
+        let mut out: Vec<RangeRead> = Vec::new();
+        let mut offset = 0u64;
+        for _ in 0..1_000_000 {
+            let r = v
+                .read_range_of(path, ID, Some(offset), max, true)
+                .unwrap_or_else(|e| panic!("read_range_of(offset {offset}, max {max}) failed: {e:?}"));
+            assert_eq!(r.start, offset, "a range must start where the previous one ended (max {max})");
+            assert_eq!(r.end - r.start, r.bytes.len() as u64, "end - start is the number of bytes (max {max})");
+            assert!(r.bytes.len() <= max, "{} bytes for a window of {max}", r.bytes.len());
+            assert!(
+                std::str::from_utf8(&r.bytes).is_ok(),
+                "a range of valid UTF-8 text must be valid UTF-8 (max {max}, start {})",
+                r.start
+            );
+            let done = r.end >= r.total_bytes;
+            if !done {
+                assert!(r.end > r.start, "no progress at offset {offset} of {} (max {max})", r.total_bytes);
+            }
+            offset = r.end;
+            out.push(r);
+            if done {
+                return out;
+            }
+        }
+        panic!("the reader never reached the end of the file (max {max})");
+    }
+
+    fn sanitised_join(ranges: &[RangeRead]) -> String {
+        ranges.iter().map(|r| sanitize(&r.bytes)).collect()
+    }
+
+    /// A log of coloured, titled, hyperlinked and progress-barred lines, exactly `len` bytes long.
+    fn escaped_log_of(len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let mut i = 0usize;
+        while out.len() + 400 < len {
+            let line = match i % 7 {
+                0 => format!("\x1b[1;3{}mline {i}: caf\u{e9} \u{2713}\x1b[0m\n", i % 8),
+                1 => format!("\x1b]0;title {i}\x07progress {i}%\r{}%\n", i + 1),
+                2 => format!("\x1b]8;;http://example.test/{i}\x1b\\link {i}\x1b]8;;\x1b\\ \u{1f600}\n"),
+                3 => format!("plain {i} {}\n", "x".repeat(i % 97)),
+                4 => format!("\x1b[2K\x1b[1G{i}\u{9b}31m red\n"),
+                5 => format!("\u{9d}0;t{i}\x07tab\there {i}\n"),
+                _ => format!("\x1b[?25l{i}\n"),
+            };
+            out.extend_from_slice(line.as_bytes());
+            i += 1;
+        }
+        out.resize(len, b'.');
+        out
+    }
+
+    #[test]
+    fn ranges_read_in_one_mebibyte_requests_from_offset_zero_reassemble_the_sanitised_whole_of_a_two_mebibyte_file() {
+        let rig = rig();
+        let content = escaped_log_of(2 * MIB);
+        assert_eq!(content.len(), 2 * MIB);
+        let path = rig.write(&format!("{ID}.output"), &content);
+
+        let ranges = read_all(&rig.validator(), &path, MIB);
+
+        assert!(ranges.len() >= 2, "a 2 MiB file does not fit one 1 MiB request: {} range(s)", ranges.len());
+        assert_eq!(ranges[0].start, 0);
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "contiguous [start, end) ranges");
+        }
+        assert_eq!(ranges.last().unwrap().end, (2 * MIB) as u64, "the last range ends at the end of the file");
+        for r in &ranges {
+            assert_eq!(r.total_bytes, (2 * MIB) as u64);
+        }
+        let text = sanitised_join(&ranges);
+        assert!(!text.contains('\u{1b}'), "no escape byte survives");
+        assert_eq!(text, sanitize(&content), "the ranges, sanitised one by one, join to the sanitised whole");
+        let raw: Vec<u8> = ranges.iter().flat_map(|r| r.bytes.iter().copied()).collect();
+        assert_eq!(raw, content, "the ranges tile the file exactly");
+    }
+
+    /// Things a window must never cut through, each followed and preceded by plain text.
+    const HOSTILE_CONSTRUCTS: &[(&str, &str)] = &[
+        ("a two-byte scalar", "\u{e9}"),
+        ("a three-byte scalar", "\u{2713}"),
+        ("a four-byte scalar", "\u{1f600}"),
+        ("a colour CSI", "\x1b[1;31m"),
+        ("a private-mode CSI", "\x1b[?25l"),
+        ("an OSC ended by BEL", "\x1b]0;window title\x07"),
+        ("an OSC ended by ST", "\x1b]8;;http://example.test/a\x1b\\"),
+        ("a DCS ended by ST", "\x1bPq#0;2;0;0;0\x1b\\"),
+        ("an 8-bit CSI", "\u{9b}31m"),
+        ("an 8-bit OSC", "\u{9d}0;title\x07"),
+        ("a charset selection", "\x1b(B"),
+    ];
+
+    #[test]
+    fn a_window_of_any_size_never_ends_inside_a_scalar_or_an_escape_sequence() {
+        for (what, construct) in HOSTILE_CONSTRUCTS {
+            let whole = format!("aaaa{construct}bbbb");
+            let rig = rig();
+            let path = rig.write(&format!("{ID}.output"), whole.as_bytes());
+            let expected = sanitize(whole.as_bytes());
+            for max in 4..=whole.len() + 2 {
+                let ranges = read_all(&rig.validator(), &path, max);
+                // Every window that can hold the construct whole (and starts where a read does)
+                // reproduces the sanitised file: nothing was cut through.
+                if max >= construct.len() {
+                    assert_eq!(
+                        sanitised_join(&ranges),
+                        expected,
+                        "{what}: window {max} cut through it; ranges {:?}",
+                        ranges.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>()
+                    );
+                }
+                for r in &ranges {
+                    assert!(
+                        !sanitize(&r.bytes).contains('\u{1b}'),
+                        "{what}: window {max}: escape byte in sanitised text"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_never_ends_inside_a_string_sequence_that_holds_an_eight_bit_introducer() {
+        // The U+009B inside the title is the last introducer in a window cut after it, but the
+        // sequence that is unfinished is the OSC around it.
+        let whole = "aaaa\x1b]0;ti\u{9b}tle\x07bbbb";
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), whole.as_bytes());
+        let expected = sanitize(whole.as_bytes());
+        assert_eq!(expected, "aaaabbbb", "control: the whole title is swallowed");
+        // Every window that can hold the whole title sequence, wherever the cuts before it fall.
+        for max in "\x1b]0;ti\u{9b}tle\x07".len()..=whole.len() + 2 {
+            let ranges = read_all(&rig.validator(), &path, max);
+            assert_eq!(
+                sanitised_join(&ranges),
+                expected,
+                "window {max}; ranges {:?}",
+                ranges.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_longer_than_the_window_is_split_inside_the_window_and_still_reassembles() {
+        let rig = rig();
+        let long = "x".repeat(10 * 1024);
+        let content = format!("{long}\ntail\n");
+        let path = rig.write(&format!("{ID}.output"), content.as_bytes());
+
+        let first = range(&rig.validator(), &path, Some(0), 4096);
+
+        assert_eq!((first.start, first.end), (0, 4096), "an ASCII line with no newline in the window ends where the window does");
+        assert_eq!(first.bytes.len(), 4096);
+        let ranges = read_all(&rig.validator(), &path, 4096);
+        assert_eq!(ranges.iter().flat_map(|r| r.bytes.iter().copied()).collect::<Vec<_>>(), content.as_bytes());
+        assert_eq!(sanitised_join(&ranges), content);
+    }
+
+    #[test]
+    fn a_long_line_of_multi_byte_characters_is_cut_between_characters() {
+        let rig = rig();
+        let content = "\u{e9}".repeat(5_000);
+        let path = rig.write(&format!("{ID}.output"), content.as_bytes());
+
+        let first = range(&rig.validator(), &path, Some(0), 4097);
+
+        assert_eq!(first.end, 4096, "4097 would cut an e-acute in half");
+        assert_eq!(sanitised_join(&read_all(&rig.validator(), &path, 4097)), content);
+    }
+
+    #[test]
+    fn a_long_line_of_mixed_escapes_and_scalars_reassembles_for_every_nearby_window_size() {
+        const PIECES: [&str; 9] = [
+            "\x1b[1;31m", "\x1b]0;t\x07", "\u{e9}", "\u{2713}", "\u{1f600}", "\x1b]8;;u\x1b\\", "\u{9b}31m", "\u{9d}0;t\x07", "text ",
+        ];
+        let mut rng = Prng(7);
+        let mut line = String::new();
+        while line.len() < 64 * 1024 {
+            line.push_str(PIECES[rng.below(PIECES.len())]);
+        }
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), line.as_bytes());
+        let expected = sanitize(line.as_bytes());
+
+        for max in 4096..4136 {
+            let ranges = read_all(&rig.validator(), &path, max);
+            assert_eq!(sanitised_join(&ranges), expected, "window {max}");
+        }
+    }
+
+    #[test]
+    fn a_long_escaped_line_over_a_one_mebibyte_window_reassembles() {
+        const PIECES: [&str; 8] = ["\x1b[1;31m", "\x1b]0;t\x07", "\u{e9}", "\u{2713}", "\u{1f600}", "\x1b]8;;u\x1b\\", "\x1b[0m", "word "];
+        let mut rng = Prng(99);
+        let mut line = String::new();
+        while line.len() < MIB + MIB / 2 {
+            line.push_str(PIECES[rng.below(PIECES.len())]);
+        }
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), line.as_bytes());
+
+        let ranges = read_all(&rig.validator(), &path, MIB);
+
+        assert!(ranges.len() >= 2);
+        assert_eq!(sanitised_join(&ranges), sanitize(line.as_bytes()));
+    }
+
+    #[test]
+    fn random_escape_heavy_text_reassembles_whatever_the_window() {
+        // Valid UTF-8 pieces only (lossy decoding of cut invalid bytes legitimately differs), no
+        // `\r` (carriage returns collapse per line, and a line may be split), newline-free runs.
+        const PIECES: &[&str] = &[
+            "\x1b", "\x1b[", "\x1b]", "\x1bP", "\x1b_", "\x1b^", "\x1bX", "\x1b(", "\x1b\\", "\x07", "\t", "[", "]", ";", "31", "0",
+            "m", "H", "abc ", " ", "\u{e9}", "\u{2713}", "\u{1f600}", "\x7f", "\x1b[0m", "\x1b]0;t\x07",
+        ];
+        let rig = rig();
+        let mut rng = Prng(0xC0FFEE);
+        for round in 0..30 {
+            let mut text = String::new();
+            let target = 8_000 + rng.below(8_000);
+            while text.len() < target {
+                text.push_str(PIECES[rng.below(PIECES.len())]);
+                // A line break now and then so some windows have one and some do not.
+                if rng.below(200) == 0 {
+                    text.push('\n');
+                }
+            }
+            let path = rig.write(&format!("{ID}.output"), text.as_bytes());
+            let max = 4096 + rng.below(1024);
+            let ranges = read_all(&rig.validator(), &path, max);
+            assert_eq!(sanitised_join(&ranges), sanitize(text.as_bytes()), "round {round}, window {max}, text {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_tail_read_holds_at_most_the_window_ends_at_the_end_and_starts_on_a_line() {
+        let rig = rig();
+        let content: String = (0..20_000).map(|i| format!("line {i:05}\n")).collect();
+        let path = rig.write(&format!("{ID}.output"), content.as_bytes());
+
+        let r = range(&rig.validator(), &path, None, 4096);
+
+        assert!(r.bytes.len() <= 4096, "{} bytes", r.bytes.len());
+        assert_eq!(r.end, content.len() as u64, "a tail ends at the end of the file");
+        assert_eq!(r.total_bytes, content.len() as u64);
+        assert!(r.start > 0);
+        assert_eq!(content.as_bytes()[r.start as usize - 1], b'\n', "a tail starts right after a newline");
+        assert_eq!(r.bytes, content.as_bytes()[r.start as usize..], "the bytes are the file's, start to end");
+        assert!(String::from_utf8(r.bytes).unwrap().starts_with("line "), "no half line at the top");
+    }
+
+    #[test]
+    fn a_tail_of_a_file_smaller_than_the_window_is_the_whole_file() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"one\ntwo\nthree");
+
+        let r = range(&rig.validator(), &path, None, 4096);
+
+        assert_eq!((r.start, r.end, r.total_bytes), (0, 13, 13));
+        assert_eq!(r.bytes, b"one\ntwo\nthree", "the last line needs no newline when it is the end of the file");
+    }
+
+    #[test]
+    fn a_tail_of_a_file_with_no_newline_in_its_window_still_ends_at_the_end_and_starts_on_a_scalar() {
+        let rig = rig();
+        let content = "\u{e9}".repeat(5_000);
+        let path = rig.write(&format!("{ID}.output"), content.as_bytes());
+
+        for max in [4096usize, 4097, 4099] {
+            let r = range(&rig.validator(), &path, None, max);
+            assert_eq!(r.end, content.len() as u64, "window {max}");
+            assert!(r.bytes.len() <= max);
+            assert!(!r.bytes.is_empty(), "window {max}: a window with no newline is still returned");
+            assert_eq!(r.start % 2, 0, "window {max}: starts between two e-acutes");
+            assert!(String::from_utf8(r.bytes).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_tail_of_an_empty_file_is_empty() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"");
+        let r = range(&rig.validator(), &path, None, 4096);
+        assert_eq!((r.start, r.end, r.total_bytes, r.bytes.len()), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_read_past_the_end_is_an_empty_range_at_the_end() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"0123456789");
+        for offset in [10u64, 11, 4096, u64::MAX] {
+            let r = range(&rig.validator(), &path, Some(offset), 4096);
+            assert_eq!((r.start, r.end, r.total_bytes), (10, 10, 10), "offset {offset}");
+            assert!(r.bytes.is_empty(), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn an_empty_file_reads_as_an_empty_range_from_any_offset() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"");
+        for offset in [0u64, 1, 100] {
+            let r = range(&rig.validator(), &path, Some(offset), 4096);
+            assert_eq!((r.start, r.end, r.total_bytes, r.bytes.len()), (0, 0, 0, 0), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn an_offset_inside_a_scalar_starts_at_the_next_scalar() {
+        let rig = rig();
+        // a(0) e-acute(1,2) check(3,4,5) b(6) smiley(7..=10) c(11)
+        let content = "a\u{e9}\u{2713}b\u{1f600}c";
+        let path = rig.write(&format!("{ID}.output"), content.as_bytes());
+        let v = rig.validator();
+
+        for (offset, start, text) in [
+            (0u64, 0u64, content),
+            (1, 1, "\u{e9}\u{2713}b\u{1f600}c"),
+            (2, 3, "\u{2713}b\u{1f600}c"),
+            (3, 3, "\u{2713}b\u{1f600}c"),
+            (4, 6, "b\u{1f600}c"),
+            (5, 6, "b\u{1f600}c"),
+            (6, 6, "b\u{1f600}c"),
+            (8, 11, "c"),
+            (9, 11, "c"),
+            (10, 11, "c"),
+        ] {
+            let r = range(&v, &path, Some(offset), 4096);
+            assert_eq!(r.start, start, "offset {offset}");
+            assert_eq!(String::from_utf8(r.bytes).unwrap(), text, "offset {offset}");
+            assert_eq!(r.end, content.len() as u64);
+        }
+    }
+
+    #[test]
+    fn a_reader_that_starts_inside_a_scalar_with_the_smallest_window_still_reaches_the_end() {
+        let rig = rig();
+        let content = "\u{1f600}".repeat(10);
+        let path = rig.write(&format!("{ID}.output"), content.as_bytes());
+        let v = rig.validator();
+
+        let first = range(&v, &path, Some(2), 4);
+        assert_eq!(first.start, 4, "the rest of the first smiley is skipped");
+        assert!(first.end >= first.start);
+
+        let mut offset = first.end;
+        let mut text = sanitize(&first.bytes);
+        while offset < content.len() as u64 {
+            let r = range(&v, &path, Some(offset), 4);
+            assert!(r.end > offset, "stuck at {offset}");
+            text.push_str(&sanitize(&r.bytes));
+            offset = r.end;
+        }
+        assert_eq!(text, "\u{1f600}".repeat(9), "every smiley after the cut one, once");
+    }
+
+    #[test]
+    fn the_next_request_after_growth_returns_exactly_the_appended_part() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"one\ntwo\n");
+        let v = rig.validator();
+        let first = range(&v, &path, Some(0), 4096);
+        assert_eq!((first.end, first.total_bytes), (8, 8));
+
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"three\nfour\n").unwrap();
+        let second = range(&v, &path, Some(first.end), 4096);
+
+        assert_eq!(second.bytes, b"three\nfour\n");
+        assert_eq!((second.start, second.end, second.total_bytes), (8, 19, 19));
+    }
+
+    #[test]
+    fn a_line_still_being_written_is_returned_as_far_as_it_goes_and_continued_by_the_next_request() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"done\nhalf");
+        let v = rig.validator();
+        let first = range(&v, &path, Some(0), 4096);
+        assert_eq!(first.bytes, b"done\nhalf", "the end of the file needs no newline");
+
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut file, b" a line\n").unwrap();
+        let second = range(&v, &path, Some(first.end), 4096);
+
+        assert_eq!(second.bytes, b" a line\n");
+        assert_eq!(sanitized_text(&[&first, &second]), "done\nhalf a line\n");
+    }
+
+    fn sanitized_text(ranges: &[&RangeRead]) -> String {
+        ranges.iter().map(|r| sanitize(&r.bytes)).collect()
+    }
+
+    #[test]
+    fn a_scalar_cut_in_half_by_the_end_of_a_growing_file_is_left_for_the_next_request() {
+        let rig = rig();
+        let bytes = "ab\u{e9}c\n".as_bytes();
+        let path = rig.write(&format!("{ID}.output"), &bytes[..3]);
+        let v = rig.validator();
+
+        let first = range(&v, &path, Some(0), 4096);
+        assert_eq!((first.bytes.as_slice(), first.end), (&b"ab"[..], 2), "the half scalar is not returned");
+
+        std::fs::write(&path, bytes).unwrap();
+        let second = range(&v, &path, Some(first.end), 4096);
+
+        assert_eq!(second.bytes, "\u{e9}c\n".as_bytes());
+        assert_eq!(sanitized_text(&[&first, &second]), "ab\u{e9}c\n");
+    }
+
+    #[test]
+    fn an_escape_sequence_cut_by_the_end_of_a_growing_file_is_left_for_the_next_request() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"ok\n\x1b[3");
+        let v = rig.validator();
+
+        let first = range(&v, &path, Some(0), 4096);
+        assert_eq!((first.bytes.as_slice(), first.end), (&b"ok\n"[..], 3), "the unfinished escape is not returned");
+
+        std::fs::write(&path, b"ok\n\x1b[31mred\n").unwrap();
+        let second = range(&v, &path, Some(first.end), 4096);
+
+        assert_eq!(sanitized_text(&[&first, &second]), "ok\nred\n", "the colour code was never shown as `1mred`");
+    }
+
+    #[test]
+    fn a_range_that_is_only_the_start_of_an_escape_at_the_end_of_a_growing_file_is_not_consumed() {
+        // The reader polls from where it stopped: the writer's escape sequence is cut by the end
+        // of the file, and the range would be nothing but that fragment.
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"\x1b[3");
+        let v = rig.validator();
+
+        let first = range(&v, &path, Some(0), 4096);
+        assert_eq!(first.end, 0, "nothing safe to return yet: the range stays empty ({:?})", first.bytes);
+
+        std::fs::write(&path, b"\x1b[31mred\n").unwrap();
+        let second = range(&v, &path, Some(first.end), 4096);
+        assert_eq!(sanitized_text(&[&first, &second]), "red\n");
+    }
+
+    #[test]
+    fn a_finished_file_is_taken_whole_even_when_it_ends_in_half_an_escape_or_half_a_scalar() {
+        // A running task's file may still grow, so the end of it holds back what is unfinished;
+        // an ended task's file never will, so nothing may be left behind unread.
+        let rig = rig();
+        let v = rig.validator();
+        for tail in [&b"\x1b[3"[..], &b"\x1b]0;title"[..], &"\u{e9}".as_bytes()[..1]] {
+            let mut content = b"done\n".to_vec();
+            content.extend_from_slice(tail);
+            let path = rig.write(&format!("{ID}.output"), &content);
+
+            let running = range(&v, &path, Some(0), 4096);
+            assert!(running.end < content.len() as u64, "a file that may grow keeps {tail:?} back");
+
+            let ended = v.read_range_of(&path, ID, Some(0), 4096, true).unwrap();
+            assert_eq!((ended.start, ended.end), (0, content.len() as u64), "an ended file ends at its end");
+            assert_eq!(ended.total_bytes, content.len() as u64);
+            assert!(!sanitize(&ended.bytes).contains('\u{1b}'));
+        }
+    }
+
+    #[test]
+    fn a_tail_whose_window_is_inside_one_long_last_line_still_returns_that_line() {
+        let rig = rig();
+        let mut content = vec![b'x'; 10 * 1024];
+        content.push(b'\n');
+        let path = rig.write(&format!("{ID}.output"), &content);
+
+        let tail = range(&rig.validator(), &path, None, 4096);
+        assert!(!tail.bytes.is_empty(), "the window is all one line: it is returned, not skipped");
+        assert_eq!(tail.end, content.len() as u64);
+        assert!(tail.bytes.len() <= 4096);
+    }
+
+    #[test]
+    fn reading_while_another_thread_appends_never_loses_or_repeats_a_byte() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"");
+        let v = rig.validator();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (path, done) = (path.clone(), Arc::clone(&done));
+            std::thread::spawn(move || {
+                let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                for i in 0..3_000 {
+                    let line = format!("\x1b[3{}mline {i} caf\u{e9} \u{2713}\x1b[0m\n", i % 8);
+                    std::io::Write::write_all(&mut file, line.as_bytes()).unwrap();
+                    if i % 50 == 0 {
+                        std::thread::yield_now();
+                    }
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let mut offset = 0u64;
+        let mut raw: Vec<u8> = Vec::new();
+        let mut after_done = 0;
+        loop {
+            let finished = done.load(Ordering::SeqCst);
+            let r = range(&v, &path, Some(offset), 4096);
+            assert_eq!(r.start, offset);
+            assert!(r.total_bytes >= r.end, "the reported size covers what was read: {} < {}", r.total_bytes, r.end);
+            assert_eq!(r.end - r.start, r.bytes.len() as u64);
+            offset = r.end;
+            raw.extend_from_slice(&r.bytes);
+            if finished && r.end >= r.total_bytes {
+                after_done += 1;
+                if after_done > 1 {
+                    break;
+                }
+            }
+        }
+        writer.join().unwrap();
+
+        assert_eq!(raw, std::fs::read(&path).unwrap(), "every appended byte arrived once, in order");
+        assert!(String::from_utf8(raw).is_ok());
+    }
+
+    #[test]
+    fn a_file_that_shrinks_between_requests_reads_as_an_empty_range_at_its_new_end() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"0123456789");
+        let v = rig.validator();
+        let first = range(&v, &path, Some(0), 4096);
+        assert_eq!(first.end, 10);
+
+        std::fs::write(&path, b"abc").unwrap();
+        let second = range(&v, &path, Some(first.end), 4096);
+
+        assert_eq!((second.start, second.end, second.total_bytes), (3, 3, 3));
+    }
+
+    // Every rejection below must come back as an error, with the file never read; the open counter
+    // counts calls to `open` (a rejected path is still a call), so exactly one means "asked once,
+    // refused, no second attempt".
+
+    fn counted(rig: &Rig) -> (OutputFileValidator, Arc<AtomicUsize>) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        (rig.validator().with_open_counter(Arc::clone(&counter)), counter)
+    }
+
+    #[test]
+    fn a_ranged_read_of_a_file_outside_the_root_is_refused_and_its_content_never_returned() {
+        let rig = rig();
+        let outside = rig.outside().join(format!("{ID}.output"));
+        std::fs::write(&outside, b"SECRET-OUTPUT-OUTSIDE\n").unwrap();
+        let (v, opens) = counted(&rig);
+
+        let result = v.read_range(&outside, ID, Some(0), 4096);
+
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert!(!format!("{result:?}").contains("SECRET-OUTPUT"));
+    }
+
+    #[test]
+    fn a_ranged_read_of_a_symlink_is_refused_even_into_the_root() {
+        let rig = rig();
+        let target = rig.write("real.txt", b"SECRET-OUTPUT-LINKED\n");
+        let link = rig.tasks.join(format!("{ID}.output"));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (v, opens) = counted(&rig);
+
+        assert!(v.read_range(&link, ID, Some(0), 4096).is_err());
+        assert!(v.read_range(&link, ID, None, 4096).is_err());
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_ranged_read_with_a_file_name_that_is_not_the_task_id_is_refused() {
+        let rig = rig();
+        let path = rig.write("other.output", b"SECRET-OUTPUT-NAME\n");
+        let (v, opens) = counted(&rig);
+
+        assert!(v.read_range(&path, ID, Some(0), 4096).is_err());
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_ranged_read_for_an_invalid_task_id_is_refused_even_though_the_file_exists() {
+        let rig = rig();
+        for bad in ["a/b", "..", "a.b", "", &"x".repeat(65)] {
+            let path = rig.write(&format!("{bad}.output").replace('/', "_"), b"SECRET-OUTPUT-ID\n");
+            let (v, opens) = counted(&rig);
+            assert!(v.read_range(&path, bad, Some(0), 4096).is_err(), "id {bad:?}");
+            assert_eq!(opens.load(Ordering::SeqCst), 1, "id {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_ranged_read_of_a_directory_is_refused() {
+        let rig = rig();
+        let path = rig.tasks.join(format!("{ID}.output"));
+        std::fs::create_dir(&path).unwrap();
+        let (v, opens) = counted(&rig);
+
+        assert!(v.read_range(&path, ID, Some(0), 4096).is_err());
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_ranged_read_of_a_named_pipe_is_refused_without_blocking() {
+        let rig = rig();
+        let path = rig.tasks.join(format!("{ID}.output"));
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo has no other preconditions.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let (v, opens) = counted(&rig);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(v.read_range(&path, ID, Some(0), 4096).is_err());
+        });
+
+        // A hang guard, not a timing assertion: a blocked `open` never answers.
+        let refused = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the read of a FIFO blocked");
+
+        assert!(refused);
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_ranged_read_of_a_missing_file_is_an_error_after_one_open() {
+        let rig = rig();
+        let (v, opens) = counted(&rig);
+        assert!(v.read_range(&rig.tasks.join(format!("{ID}.output")), ID, Some(0), 4096).is_err());
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn every_successful_ranged_read_opens_the_file_once() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"hello\n");
+        let (v, opens) = counted(&rig);
+        range(&v, &path, Some(0), 4096);
+        range(&v, &path, None, 4096);
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_validator_without_a_counter_reads_normally() {
+        let rig = rig();
+        let path = rig.write(&format!("{ID}.output"), b"hello\n");
+        assert_eq!(range(&rig.validator(), &path, Some(0), 4096).bytes, b"hello\n");
+    }
+
+    // ── the largest frame a read can produce ─────────────────────────────────
+
+    fn result_frame(text: String, bytes: u64) -> Vec<u8> {
+        serde_json::to_vec(&crate::ipc::protocol::ServerMsg::SessionTaskOutputResult {
+            request_id: "request-0000000000".into(),
+            tag: "a-focus-tag".into(),
+            task_id: ID.into(),
+            outcome: crate::ipc::protocol::TaskOutputOutcome::Ok,
+            text,
+            start_offset: 0,
+            end_offset: bytes,
+            total_bytes: bytes,
+            source: Some(crate::ipc::protocol::TaskOutputSource::File),
+            message: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_result_frame_of_a_one_mebibyte_read_stays_under_the_frame_cap_whatever_the_bytes() {
+        let rig = rig();
+        let worst: [(&str, Vec<u8>); 7] = [
+            ("invalid 0xFF bytes (each becomes U+FFFD)", vec![0xFF; MIB]),
+            ("stray continuation bytes", vec![0x80; MIB]),
+            ("double quotes (each is escaped)", vec![b'"'; MIB]),
+            ("backslashes (each is escaped)", vec![b'\\'; MIB]),
+            ("newlines (each is escaped)", vec![b'\n'; MIB]),
+            ("four-byte scalars", "\u{1f600}".repeat(MIB / 4).into_bytes()),
+            ("alternating invalid bytes and quotes", (0..MIB).map(|i| if i % 2 == 0 { 0xFF } else { b'"' }).collect()),
+        ];
+        for (what, content) in worst {
+            let path = rig.write(&format!("{ID}.output"), &content);
+            let r = range(&rig.validator(), &path, Some(0), MIB);
+            let text = sanitize(&r.bytes);
+
+            let frame = result_frame(text, r.total_bytes);
+
+            assert!(
+                frame.len() < crate::ipc::protocol::MAX_FRAME_LEN,
+                "{what}: a frame of {} bytes does not fit the {} byte cap",
+                frame.len(),
+                crate::ipc::protocol::MAX_FRAME_LEN
+            );
+        }
     }
 }

@@ -1024,6 +1024,7 @@ fn handle_client_msg(
     // but an explicitly allowed read-only request changes nothing.
     if trust.is_network() && refuse_for_network(&msg, sensitive) {
         log_network_model_refusal(&msg, session_mgr, sensitive);
+        log_network_task_refusal(&msg, session_mgr, sensitive);
         // An attempt to answer a permission request over the network is a
         // security event: it is logged before the peer is told no.
         if let ClientMsg::ApprovalAnswer { request_id, .. } = &msg {
@@ -1748,8 +1749,142 @@ fn handle_client_msg(
             let _ = targeted_tx.send(model_request_result(request_id, outcome));
         }
 
+        // ── background tasks (the verified app only; network refused above) ─
+        // An agent's own script on this socket must not stop another focus's
+        // task or read its output. Refused before the registry, a file or the
+        // CLI is touched; the reply carries no task content.
+        ClientMsg::SessionTaskStop { request_id, tag, task_id } if trust != PeerTrust::OperatorApp => {
+            warn!(conn_key, ?trust, "SessionTaskStop refused: not the verified Nostromo app");
+            let _ = targeted_tx.send(ServerMsg::SessionTaskStopResult {
+                request_id,
+                tag,
+                task_id,
+                outcome: crate::ipc::protocol::TaskStopOutcome::Refused,
+                message: Some(NOT_OPERATOR_APP.to_string()),
+            });
+        }
+
+        ClientMsg::SessionTaskOutput { request_id, tag, task_id, .. } if trust != PeerTrust::OperatorApp => {
+            warn!(conn_key, ?trust, "SessionTaskOutput refused: not the verified Nostromo app");
+            let _ = targeted_tx.send(ServerMsg::SessionTaskOutputResult {
+                request_id,
+                tag,
+                task_id,
+                outcome: crate::ipc::protocol::TaskOutputOutcome::Refused,
+                text: String::new(),
+                start_offset: 0,
+                end_offset: 0,
+                total_bytes: 0,
+                source: None,
+                message: Some(NOT_OPERATOR_APP.to_string()),
+            });
+        }
+
+        ClientMsg::SessionTaskStop { request_id, tag, task_id } => {
+            let stop = session_mgr.lock().unwrap().task_stop(&tag, &task_id);
+            let audit_tag = audit_focus_tag(&tag, sensitive);
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let report = stop.await;
+                // The line is written before the client hears the outcome.
+                log_task_stop(&report, audit_tag);
+                let _ = tx.send(ServerMsg::SessionTaskStopResult {
+                    request_id,
+                    tag,
+                    task_id,
+                    outcome: report.outcome,
+                    message: report.message,
+                });
+            });
+        }
+
+        ClientMsg::SessionTaskOutput { request_id, tag, task_id, offset, max_bytes } => {
+            let read = session_mgr.lock().unwrap().task_output(&tag, &task_id, offset, max_bytes);
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let reply = read.await;
+                let _ = tx.send(ServerMsg::SessionTaskOutputResult {
+                    request_id,
+                    tag,
+                    task_id,
+                    outcome: reply.outcome,
+                    text: reply.text,
+                    start_offset: reply.start_offset,
+                    end_offset: reply.end_offset,
+                    total_bytes: reply.total_bytes,
+                    source: reply.source,
+                    message: reply.message,
+                });
+            });
+        }
+
         // These are already handled during handshake; ignore duplicates.
         ClientMsg::Hello { .. } | ClientMsg::Subscribe { .. } => {}
+    }
+}
+
+/// `tag` as an activity line may name it: a sensitive focus's tag can embed a
+/// work item's title, so it is logged as its opaque id.
+fn audit_focus_tag(tag: &str, sensitive: &SensitiveTags) -> String {
+    if sensitive.tag_is_sensitive(tag) {
+        sensitive.opaque_tag(tag)
+    } else {
+        tag.to_owned()
+    }
+}
+
+/// Append the audit line for a stop the user asked for: actor, the focus,
+/// the task's kind and description, and how it ended.
+fn log_task_stop(report: &crate::ipc::session_manager::StopReport, focus_tag: String) {
+    use crate::ipc::protocol::TaskStopOutcome as Stop;
+    use crate::model::activity::{activity_path, append_task, Outcome, TaskActivity, TaskActivityKind};
+    let (outcome, reason) = match report.outcome {
+        Stop::Accepted => (Outcome::Applied, None),
+        Stop::Refused => (Outcome::Refused, report.message.as_deref().map(bounded_reason)),
+        Stop::NotRunning => (Outcome::Refused, Some("not_running".to_owned())),
+        Stop::Timeout => (Outcome::Failed, Some("timeout".to_owned())),
+        Stop::Unsupported => (Outcome::Failed, Some("unsupported".to_owned())),
+    };
+    let description = report.label.as_ref().map(|l| {
+        crate::ipc::task_output::truncate_chars(&l.description, 200)
+    });
+    // The summary is what the activity stream shows: it names the kind of task,
+    // never its description (a command line or a prompt).
+    let what = report.label.as_ref().map_or("task", |l| l.kind.label());
+    let agent = (!report.agent_name.is_empty()).then(|| report.agent_name.clone());
+    append_task(
+        &activity_path(),
+        &TaskActivity {
+            agent: agent.clone().unwrap_or_else(|| "claude".to_owned()),
+            kind: TaskActivityKind::TaskStop,
+            summary: format!("Stop of a {what}: {}.", outcome_word(outcome)),
+            session_id: report.session_id.clone(),
+            agent_type: agent,
+            focus_tag: Some(focus_tag),
+            actor: "user".to_owned(),
+            task_kind: report.label.as_ref().map(|l| l.kind),
+            description,
+            outcome,
+            reason,
+        },
+    );
+}
+
+/// The CLI's refusal text as an audit `reason`: control characters stripped,
+/// at most 120 characters.
+fn bounded_reason(text: &str) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    crate::ipc::task_output::truncate_chars(&clean, 120)
+}
+
+fn outcome_word(outcome: crate::model::activity::Outcome) -> &'static str {
+    use crate::model::activity::Outcome;
+    match outcome {
+        Outcome::Applied => "applied",
+        Outcome::Failed => "failed",
+        Outcome::Denied => "denied",
+        Outcome::Expired => "expired",
+        Outcome::Refused => "refused",
     }
 }
 
@@ -1839,15 +1974,14 @@ fn log_network_model_refusal(
         };
         match msg {
             ClientMsg::SessionModelSet { tag, model, effort, .. } => {
-                let session = mgr.list().into_iter().find(|s| &s.tag == tag);
-                let known = session.is_some() || mgr.known_focus_tags().contains(tag);
-                (known.then(|| tag.clone()), session.map(|s| s.agent_name), offered(model, effort))
+                let (tag, agent) = known_focus(&mgr, tag);
+                (tag, agent, offered(model, effort))
             }
             ClientMsg::ModelDefaultSet { model, effort, .. } => (None, None, offered(model, effort)),
             _ => return,
         }
     };
-    let tag = tag.map(|t| if sensitive.tag_is_sensitive(&t) { sensitive.opaque_tag(&t) } else { t });
+    let tag = tag.map(|t| audit_focus_tag(&t, sensitive));
     let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
     append(
         &activity_path(),
@@ -1864,6 +1998,60 @@ fn log_network_model_refusal(
             outcome: Outcome::Refused,
             reason: Some("requires_secure_connection".to_owned()),
             posture: current_posture(),
+        },
+    );
+}
+
+/// `tag` and its session's agent name, each only when the daemon knows the
+/// focus: a network peer's tag is not written to the log otherwise.
+fn known_focus(mgr: &SessionManager, tag: &str) -> (Option<String>, Option<String>) {
+    let session = mgr.list().into_iter().find(|s| s.tag == tag);
+    let known = session.is_some() || mgr.known_focus_tags().iter().any(|t| t == tag);
+    (known.then(|| tag.to_owned()), session.map(|s| s.agent_name))
+}
+
+/// A network peer's task verb is refused with no side effect but one
+/// `refused` activity line, rate-limited like the model one. Nothing the
+/// unauthenticated peer sent is written: not the task id, and the focus tag
+/// only if it names a focus the daemon knows (opaque id when sensitive).
+fn log_network_task_refusal(
+    msg: &ClientMsg,
+    session_mgr: &Arc<Mutex<SessionManager>>,
+    sensitive: &SensitiveTags,
+) {
+    use crate::model::activity::{activity_path, append_task, Outcome, TaskActivity, TaskActivityKind};
+    let (kind, tag, what) = match msg {
+        ClientMsg::SessionTaskStop { tag, .. } => (TaskActivityKind::TaskStop, tag, "Task stop"),
+        ClientMsg::SessionTaskOutput { tag, .. } => (TaskActivityKind::TaskOutput, tag, "Task output read"),
+        _ => return,
+    };
+    if !refusal_line_allowed() {
+        return;
+    }
+    // A sensitive focus is named by nothing at all, not even its opaque id: the
+    // line reaches network peers through the activity stream, and an id that
+    // appeared only for sensitive tags would tell a guessing peer which of its
+    // guesses are real (an unknown tag is logged unnamed too).
+    let (tag, agent) = known_focus(&session_mgr.lock().unwrap(), tag);
+    let (tag, agent) = match tag {
+        Some(t) if !sensitive.tag_is_sensitive(&t) => (Some(t), agent),
+        _ => (None, None),
+    };
+    let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
+    append_task(
+        &activity_path(),
+        &TaskActivity {
+            agent: agent.clone(),
+            kind,
+            summary: format!("{what} from a network client refused: requires a secure connection."),
+            session_id: None,
+            agent_type: Some(agent),
+            focus_tag: tag,
+            actor: "network".to_owned(),
+            task_kind: None,
+            description: None,
+            outcome: Outcome::Refused,
+            reason: Some("requires_secure_connection".to_owned()),
         },
     );
 }
@@ -1997,6 +2185,25 @@ fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
                 warning: None,
             }
         }
+        ClientMsg::SessionTaskStop { request_id, tag, task_id } => ServerMsg::SessionTaskStopResult {
+            request_id: request_id.clone(),
+            tag: tag.clone(),
+            task_id: task_id.clone(),
+            outcome: crate::ipc::protocol::TaskStopOutcome::Refused,
+            message: Some(format!("{}: {}", refusal.code, refusal.message)),
+        },
+        ClientMsg::SessionTaskOutput { request_id, tag, task_id, .. } => ServerMsg::SessionTaskOutputResult {
+            request_id: request_id.clone(),
+            tag: tag.clone(),
+            task_id: task_id.clone(),
+            outcome: crate::ipc::protocol::TaskOutputOutcome::Refused,
+            text: String::new(),
+            start_offset: 0,
+            end_offset: 0,
+            total_bytes: 0,
+            source: None,
+            message: Some(format!("{}: {}", refusal.code, refusal.message)),
+        },
         _ => ServerMsg::Error {
             message: format!("{}: {}", refusal.code, refusal.message),
         },
@@ -2299,6 +2506,15 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_refusal_reason_is_short_and_free_of_control_characters() {
+        let long = format!("nope\n\x1b[31m{}", "x".repeat(500));
+        let reason = bounded_reason(&long);
+        assert!(reason.chars().count() <= 120, "{}", reason.chars().count());
+        assert!(!reason.chars().any(|c| c.is_control()), "{reason:?}");
+        assert!(reason.starts_with("nope"));
     }
 
     use super::*;

@@ -1639,6 +1639,9 @@ class AppStore: ObservableObject {
         case .sessionTasks, .sessionTaskDetail:
             break   // BA3 routes these to BackgroundTaskStore
 
+        case .sessionTaskStopResult, .sessionTaskOutputResult:
+            break   // BA4/BA5 route: the output viewer and the Stop control wait on these
+
         // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:
             TrackerStore.shared.ingest(msg)

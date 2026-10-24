@@ -20,7 +20,12 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, Notify};
 
-use super::control::control;
+mod verbs;
+
+pub use verbs::{OutputReply, StopReport};
+pub(super) use verbs::{ensure_probe, read_output, stop_task};
+
+use super::control::{control, says_unsupported, CONTROL_TIMEOUT};
 use super::{lock_recover, SessionEvent, Shared};
 use crate::ipc::protocol::{ServerMsg, TaskDetailMsg, TaskMeta, TasksSnapshot};
 use crate::ipc::stream_json::SessionTranscript;
@@ -59,6 +64,33 @@ impl TaskClock {
 
     fn now_ms(&self) -> u64 {
         self.base_epoch_ms + self.started.elapsed().as_millis() as u64
+    }
+}
+
+/// Knobs of how a session reads and controls its tasks. The defaults are the
+/// daemon's; integration tests turn them (a short wait, a temp output root, a
+/// count of file opens).
+#[derive(Clone, Default)]
+pub struct TaskIoConfig {
+    /// How long a task control request waits for the CLI.
+    pub control_timeout: Option<Duration>,
+    /// The only root output files may live under, instead of the CLI's
+    /// `/private/tmp/claude-<uid>`.
+    pub output_root: Option<PathBuf>,
+    /// Counts every attempt to open an output file.
+    pub open_counter: Option<Arc<AtomicUsize>>,
+}
+
+impl TaskIoConfig {
+    fn validator(&self) -> OutputFileValidator {
+        let validator = match &self.output_root {
+            Some(root) => OutputFileValidator::new(root),
+            None => OutputFileValidator::for_current_user(),
+        };
+        match &self.open_counter {
+            Some(counter) => validator.with_open_counter(Arc::clone(counter)),
+            None => validator,
+        }
     }
 }
 
@@ -104,6 +136,12 @@ pub(super) struct TaskRuntime {
     wake: Notify,
     files: Mutex<FileState>,
     cli_tail: Mutex<CliTail>,
+    /// How long a task control request waits for the CLI.
+    control_timeout: Duration,
+    /// Whether the CLI can stop tasks: `None` until learned.
+    stop_supported: Mutex<Option<bool>>,
+    /// The capability probe was sent (at most once per CLI process).
+    probe_started: AtomicBool,
 }
 
 impl TaskRuntime {
@@ -111,16 +149,34 @@ impl TaskRuntime {
         transcript: Arc<Mutex<SessionTranscript>>,
         session_id: Option<String>,
         cwd: PathBuf,
+        io: &TaskIoConfig,
     ) -> Arc<Self> {
-        Self::with_validator(transcript, session_id, cwd, OutputFileValidator::for_current_user())
+        Self::build(
+            transcript,
+            session_id,
+            cwd,
+            io.validator(),
+            io.control_timeout.unwrap_or(CONTROL_TIMEOUT),
+        )
     }
 
     /// [`Self::new`] with the validator to use (tests inject a temp root).
+    #[cfg(test)]
     pub(super) fn with_validator(
         transcript: Arc<Mutex<SessionTranscript>>,
         session_id: Option<String>,
         cwd: PathBuf,
         validator: OutputFileValidator,
+    ) -> Arc<Self> {
+        Self::build(transcript, session_id, cwd, validator, CONTROL_TIMEOUT)
+    }
+
+    fn build(
+        transcript: Arc<Mutex<SessionTranscript>>,
+        session_id: Option<String>,
+        cwd: PathBuf,
+        validator: OutputFileValidator,
+        control_timeout: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             hub: Mutex::new(TaskHub::new()),
@@ -139,6 +195,9 @@ impl TaskRuntime {
                 finalized: HashSet::new(),
             }),
             cli_tail: Mutex::new(CliTail::default()),
+            control_timeout,
+            stop_supported: Mutex::new(None),
+            probe_started: AtomicBool::new(false),
         })
     }
 
@@ -213,8 +272,7 @@ impl TaskRuntime {
         TasksSnapshot {
             session_id: self.session_id.clone(),
             daemon_epoch: daemon_epoch().to_owned(),
-            // Learned by the capability probe (a later slice).
-            stop_supported: None,
+            stop_supported: *lock_recover(&self.stop_supported),
             tasks,
         }
     }
@@ -274,11 +332,7 @@ impl TaskRuntime {
         match answer {
             Ok(()) => tail.retry_at_ms = 0,
             Err(reason) => {
-                let reason = reason.to_lowercase();
-                if reason.contains("unsupported")
-                    || reason.contains("not supported")
-                    || (reason.contains("unknown") && reason.contains("subtype"))
-                {
+                if says_unsupported(reason) {
                     tail.unsupported = true;
                 } else {
                     tail.retry_at_ms = self.clock.now_ms() + CLI_TAIL_BACKOFF_MS;
@@ -362,22 +416,12 @@ impl TaskRuntime {
     /// Read the tail of the first candidate file that validates. `None`: no
     /// file could be read.
     async fn read_file_tail(&self, target: &PreviewTarget) -> Option<Vec<u8>> {
-        for path in self.candidate_paths(target) {
-            let validator = lock_recover(&self.files).validator.clone();
-            let id = target.task_id.clone();
-            let read_path = path.clone();
-            let read = tokio::task::spawn_blocking(move || {
-                validator.read_tail(&read_path, &id, TAIL_MAX_BYTES)
+        let tail = self
+            .first_readable(target, |validator, path, id| {
+                validator.read_tail(path, id, TAIL_MAX_BYTES)
             })
-            .await;
-            if let Ok(Ok(tail)) = read {
-                if let Some(dir) = path.parent() {
-                    lock_recover(&self.files).known_dir = Some(dir.to_path_buf());
-                }
-                return Some(tail.bytes);
-            }
-        }
-        None
+            .await?;
+        Some(tail.bytes)
     }
 }
 

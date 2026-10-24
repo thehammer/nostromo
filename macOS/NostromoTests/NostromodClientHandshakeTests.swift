@@ -735,6 +735,51 @@ final class NostromodClientHandshakeTests: XCTestCase {
         XCTAssertFalse(after.keys.contains("operator_nonce"),
                        "the previous connection's nonce must not leak to this one: \(after)")
     }
+
+    // MARK: - Background task verbs (BA1)
+
+    private func waitForFrame(connection i: Int, type: String, count: Int = 1, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(waitUntil(5) { self.daemon.frames(connection: i, ofType: type).count >= count },
+                      "connection \(i) never received `\(type)` #\(count)", file: file, line: line)
+    }
+
+    func testSendTaskStopWritesTheStopFrameWithExactlyItsKeys() throws {
+        let c = try connectClient(to: [.init(features: nil)])
+        waitForWelcome(connection: 0, c)
+
+        c.sendTaskStop(requestId: "req-stop-1", tag: "cody-1", taskId: "b7k2m9x1a")
+        waitForFrame(connection: 0, type: "session_task_stop")
+
+        let frame = try XCTUnwrap(daemon.frames(connection: 0, ofType: "session_task_stop").first).json
+        XCTAssertEqual(Set(frame.keys), ["type", "request_id", "tag", "task_id"], "\(frame)")
+        XCTAssertEqual(frame["request_id"] as? String, "req-stop-1")
+        XCTAssertEqual(frame["tag"] as? String, "cody-1")
+        XCTAssertEqual(frame["task_id"] as? String, "b7k2m9x1a")
+    }
+
+    func testSendTaskOutputWithAnOffsetWritesItAndWithoutOneOmitsTheKey() throws {
+        let c = try connectClient(to: [.init(features: nil)])
+        waitForWelcome(connection: 0, c)
+
+        c.sendTaskOutput(requestId: "req-out-1", tag: "cody-1", taskId: "t1", offset: 5_368_709_127, maxBytes: 65_536)
+        c.sendTaskOutput(requestId: "req-out-2", tag: "cody-1", taskId: "t1", offset: nil, maxBytes: 8_192)
+        c.sendTaskOutput(requestId: "req-out-3", tag: "cody-1", taskId: "t1", offset: 0, maxBytes: 4)
+        waitForFrame(connection: 0, type: "session_task_output", count: 3)
+
+        let frames = daemon.frames(connection: 0, ofType: "session_task_output").map(\.json)
+        let byId = Dictionary(uniqueKeysWithValues: frames.compactMap { f in (f["request_id"] as? String).map { ($0, f) } })
+        let withOffset = try XCTUnwrap(byId["req-out-1"])
+        XCTAssertEqual(Set(withOffset.keys), ["type", "request_id", "tag", "task_id", "offset", "max_bytes"], "\(withOffset)")
+        XCTAssertEqual((withOffset["offset"] as? NSNumber)?.uint64Value, 5_368_709_127, "an offset past 4 GiB is exact")
+        XCTAssertEqual(withOffset["max_bytes"] as? Int, 65_536)
+
+        let tail = try XCTUnwrap(byId["req-out-2"])
+        XCTAssertEqual(Set(tail.keys), ["type", "request_id", "tag", "task_id", "max_bytes"], "the tail has no `offset` key at all (not null): \(tail)")
+        XCTAssertEqual(tail["max_bytes"] as? Int, 8_192)
+
+        let zero = try XCTUnwrap(byId["req-out-3"])
+        XCTAssertEqual(zero["offset"] as? Int, 0, "offset 0 (the start) is not the same as no offset (the tail): \(zero)")
+    }
 }
 
 
@@ -1094,5 +1139,158 @@ final class BackgroundTaskWireDecodeTests: XCTestCase {
             return XCTFail("expected .welcome")
         }
         XCTAssertEqual(enabled, .all)
+    }
+    // MARK: - session_task_stop_result / session_task_output_result (BA1)
+    //
+    // The same cases as `TaskWireTests` in NostromoKit, through the Mac client's decoder. The JSON
+    // is exactly what the daemon serialises (golden strings in `src/ipc/protocol.rs`): `message`,
+    // `source` are OMITTED when absent.
+
+    private func stopResult(_ json: String, file: StaticString = #filePath, line: UInt = #line) throws -> SessionTaskStopResultWire {
+        guard case let .sessionTaskStopResult(r) = decode(json) else {
+            XCTFail("expected .sessionTaskStopResult", file: file, line: line)
+            throw XCTSkip("not a session_task_stop_result frame")
+        }
+        return r
+    }
+
+    private func outputResult(_ json: String, file: StaticString = #filePath, line: UInt = #line) throws -> SessionTaskOutputResultWire {
+        guard case let .sessionTaskOutputResult(r) = decode(json) else {
+            XCTFail("expected .sessionTaskOutputResult", file: file, line: line)
+            throw XCTSkip("not a session_task_output_result frame")
+        }
+        return r
+    }
+
+    func testAnAcceptedStopResultDecodesWithNoMessage() throws {
+        let r = try stopResult(#"{"type":"session_task_stop_result","request_id":"r1","tag":"cody-1","task_id":"t1","outcome":"accepted"}"#)
+        XCTAssertEqual(r.requestId, "r1")
+        XCTAssertEqual(r.tag, "cody-1")
+        XCTAssertEqual(r.taskId, "t1")
+        XCTAssertEqual(r.outcome, .accepted)
+        XCTAssertNil(r.message)
+    }
+
+    func testARefusedStopResultCarriesTheClisMessage() throws {
+        let r = try stopResult(#"{"type":"session_task_stop_result","request_id":"r2","tag":"cody-1","task_id":"t1","outcome":"refused","message":"StopTask: not stoppable"}"#)
+        XCTAssertEqual(r.outcome, .refused)
+        XCTAssertEqual(r.message, "StopTask: not stoppable")
+    }
+
+    func testEveryStopOutcomeDecodesByItsWireName() throws {
+        let expected: [(String, TaskStopOutcomeWire)] = [
+            ("accepted", .accepted), ("refused", .refused), ("timeout", .timeout),
+            ("unsupported", .unsupported), ("not_running", .notRunning),
+        ]
+        for (name, outcome) in expected {
+            let r = try stopResult(#"{"type":"session_task_stop_result","request_id":"r","tag":"t","task_id":"x","outcome":"\#(name)"}"#)
+            XCTAssertEqual(r.outcome, outcome, name)
+        }
+    }
+
+    func testAnUnknownStopOutcomeDecodesAsUnknownWithoutCostingTheFrame() throws {
+        let r = try stopResult(#"{"type":"session_task_stop_result","request_id":"r","tag":"t","task_id":"x","outcome":"exploded","message":"m"}"#)
+        XCTAssertEqual(r.outcome, .unknown("exploded"))
+        XCTAssertEqual(r.message, "m")
+        XCTAssertEqual(r.requestId, "r")
+    }
+
+    func testAStopResultThatCannotBeCorrelatedIsNotUsable() {
+        for json in [
+            #"{"type":"session_task_stop_result","tag":"t","task_id":"x","outcome":"accepted"}"#,
+            #"{"type":"session_task_stop_result","request_id":"r","tag":"t","outcome":"accepted"}"#,
+            #"{"type":"session_task_stop_result","request_id":"r","tag":"t","task_id":"x"}"#,
+            #"{"type":"session_task_stop_result","requestId":"r","tag":"t","taskId":"x","outcome":"accepted"}"#,
+        ] {
+            XCTAssertTrue(isUnknownFrame(decode(json)), json)
+        }
+    }
+
+    func testAFullOutputResultDecodesEveryField() throws {
+        let r = try outputResult("""
+        {"type":"session_task_output_result","request_id":"r1","tag":"cody-1","task_id":"t1","outcome":"ok",
+         "text":"line one\\nline two\\n","start_offset":100,"end_offset":118,"total_bytes":4096,
+         "source":"cli_tail","message":"a note"}
+        """)
+        XCTAssertEqual(r.requestId, "r1")
+        XCTAssertEqual(r.tag, "cody-1")
+        XCTAssertEqual(r.taskId, "t1")
+        XCTAssertEqual(r.outcome, .ok)
+        XCTAssertEqual(r.text, "line one\nline two\n")
+        XCTAssertEqual(r.startOffset, 100)
+        XCTAssertEqual(r.endOffset, 118)
+        XCTAssertEqual(r.totalBytes, 4096)
+        XCTAssertEqual(r.source, .cliTail)
+        XCTAssertEqual(r.message, "a note")
+    }
+
+    func testAMinimalOutputResultHasNoSourceAndNoMessage() throws {
+        let r = try outputResult(#"{"type":"session_task_output_result","request_id":"r2","tag":"cody-1","task_id":"t1","outcome":"unavailable","text":"","start_offset":0,"end_offset":0,"total_bytes":0}"#)
+        XCTAssertEqual(r.outcome, .unavailable)
+        XCTAssertEqual(r.text, "")
+        XCTAssertEqual([r.startOffset, r.endOffset, r.totalBytes], [0, 0, 0])
+        XCTAssertNil(r.source)
+        XCTAssertNil(r.message)
+    }
+
+    func testEveryOutputOutcomeAndSourceDecodesByItsWireName() throws {
+        let outcomes: [(String, TaskOutputOutcomeWire)] = [("ok", .ok), ("unavailable", .unavailable), ("refused", .refused), ("error", .error)]
+        for (name, outcome) in outcomes {
+            let r = try outputResult(#"{"type":"session_task_output_result","request_id":"r","tag":"t","task_id":"x","outcome":"\#(name)","text":"","start_offset":0,"end_offset":0,"total_bytes":0}"#)
+            XCTAssertEqual(r.outcome, outcome, name)
+        }
+        let sources: [(String, TaskOutputSourceWire)] = [("file", .file), ("cli_tail", .cliTail)]
+        for (name, source) in sources {
+            let r = try outputResult(#"{"type":"session_task_output_result","request_id":"r","tag":"t","task_id":"x","outcome":"ok","text":"","start_offset":0,"end_offset":0,"total_bytes":0,"source":"\#(name)"}"#)
+            XCTAssertEqual(r.source, source, name)
+        }
+    }
+
+    func testAnUnknownOutputOutcomeOrSourceDecodesAsUnknownWithoutCostingTheFrame() throws {
+        let r = try outputResult(#"{"type":"session_task_output_result","request_id":"r","tag":"t","task_id":"x","outcome":"throttled","text":"partial","start_offset":1,"end_offset":8,"total_bytes":9,"source":"s3"}"#)
+        XCTAssertEqual(r.outcome, .unknown("throttled"))
+        XCTAssertEqual(r.source, .unknown("s3"))
+        XCTAssertEqual(r.text, "partial")
+        XCTAssertEqual([r.startOffset, r.endOffset, r.totalBytes], [1, 8, 9])
+    }
+
+    func testOutputResultFieldsOmittedByAnOlderOrNewerDaemonDefaultInsteadOfCostingTheFrame() throws {
+        let r = try outputResult(#"{"type":"session_task_output_result","request_id":"r","tag":"t","task_id":"x","outcome":"error","message":"the session has no such task"}"#)
+        XCTAssertEqual(r.outcome, .error)
+        XCTAssertEqual(r.text, "")
+        XCTAssertEqual([r.startOffset, r.endOffset, r.totalBytes], [0, 0, 0])
+        XCTAssertEqual(r.message, "the session has no such task")
+    }
+
+    func testOutputOffsetsBeyondFourGibibytesDecodeExactly() throws {
+        let big: UInt64 = 5 * 1024 * 1024 * 1024 + 7
+        let r = try outputResult(#"{"type":"session_task_output_result","request_id":"r","tag":"t","task_id":"x","outcome":"ok","text":"x","start_offset":\#(big),"end_offset":\#(big + 1),"total_bytes":\#(big + 1),"source":"file"}"#)
+        XCTAssertEqual(r.startOffset, big)
+        XCTAssertEqual(r.endOffset, big + 1)
+        XCTAssertEqual(r.totalBytes, big + 1)
+    }
+
+    func testOutputTextKeepsUnicodeQuotesAndLineBreaksExactly() throws {
+        let r = try outputResult(#"{"type":"session_task_output_result","request_id":"r","tag":"t","task_id":"x","outcome":"ok","text":"café ✓ 😀 \"quoted\" back\\slash\ttab\nnext\r\n","start_offset":0,"end_offset":40,"total_bytes":40,"source":"file"}"#)
+        XCTAssertEqual(r.text, "caf\u{e9} \u{2713} \u{1F600} \"quoted\" back\\slash\ttab\nnext\r\n")
+    }
+
+    func testTheTypedRefusalOfAnOutputReadDecodesWithNoText() throws {
+        let r = try outputResult(#"{"type":"session_task_output_result","request_id":"net-1","tag":"cody-1","task_id":"t1","outcome":"refused","text":"","start_offset":0,"end_offset":0,"total_bytes":0,"message":"requires_secure_connection: this needs a secure connection"}"#)
+        XCTAssertEqual(r.outcome, .refused)
+        XCTAssertEqual(r.text, "")
+        XCTAssertTrue(r.message?.hasPrefix("requires_secure_connection") == true)
+        XCTAssertNil(r.source)
+    }
+
+    func testAnOutputResultThatCannotBeCorrelatedIsNotUsable() {
+        for json in [
+            #"{"type":"session_task_output_result","tag":"t","task_id":"x","outcome":"ok","text":""}"#,
+            #"{"type":"session_task_output_result","request_id":"r","tag":"t","outcome":"ok","text":""}"#,
+            #"{"type":"session_task_output_result","request_id":"r","tag":"t","task_id":"x","text":""}"#,
+            #"{"type":"session_task_output_result","requestId":"r","tag":"t","taskId":"x","outcome":"ok","startOffset":1}"#,
+        ] {
+            XCTAssertTrue(isUnknownFrame(decode(json)), json)
+        }
     }
 }
