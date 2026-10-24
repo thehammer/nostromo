@@ -117,6 +117,15 @@ impl ParkedSenders {
     }
 }
 
+/// `key` as it may be logged: control characters (newlines, escape sequences)
+/// written out as `\u{..}` escapes, so a config key cannot forge a log line or
+/// drive a terminal.
+fn escape_key(key: &str) -> String {
+    key.chars()
+        .map(|c| if c.is_control() { c.escape_default().to_string() } else { c.to_string() })
+        .collect()
+}
+
 /// Resolve the `[agents]` value from config.toml. Returns warnings to log,
 /// never an error: anything unreadable (a non-table `agents`, a non-table
 /// entry, a non-bool `enabled`) is warned about and ignored, so it can never
@@ -137,7 +146,9 @@ pub fn resolve(agents: Option<&toml::Value>) -> (EnabledAgents, Vec<String>) {
         return (enabled, warnings);
     };
     let mut seen: Vec<Agent> = Vec::new();
-    for (name, entry) in tables {
+    for (key, entry) in tables {
+        let name = escape_key(key);
+        let name = name.as_str();
         let Some(entry) = entry.as_table() else {
             warnings.push(format!("agents.{name} must be a table; ignoring it"));
             continue;
@@ -150,11 +161,11 @@ pub fn resolve(agents: Option<&toml::Value>) -> (EnabledAgents, Vec<String>) {
                 continue;
             }
         };
-        if name.eq_ignore_ascii_case("mother") {
+        if key.eq_ignore_ascii_case("mother") {
             if !on {
                 warnings.push("agents.mother cannot be disabled; ignoring enabled = false".to_string());
             }
-        } else if let Some(a) = Agent::from_name(name) {
+        } else if let Some(a) = Agent::from_name(key) {
             if seen.contains(&a) {
                 warnings.push(format!(
                     "agents.{name} duplicates another {} key that differs only by case; the key sorting last wins",
@@ -311,6 +322,23 @@ mod tests {
         let (e, w) = r("[agents.fred]\nenabled = false\n");
         assert_eq!(e, EnabledAgents { fred: false, perri: true, teri: true });
         assert!(w.is_empty());
+    }
+
+    #[test]
+    fn warnings_write_control_characters_in_a_key_as_escapes() {
+        // An unknown key, a non-table key and a bad `enabled`, each with a newline or escape in its name.
+        let (_, w) = r("[agents.\"bob\\nERROR forged line\"]\nenabled = false\n");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("bob\\nERROR forged line"), "{w:?}");
+        assert!(!w[0].contains('\n'));
+
+        let (_, w) = r("[agents]\n\"a\\u001b[31mb\" = 3\n");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("a\\u{1b}[31mb") && !w[0].contains('\u{1b}'), "{w:?}");
+
+        let (_, w) = r("[agents.\"c\\rd\"]\nenabled = \"no\"\n");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("c\\rd") && !w[0].contains('\r'), "{w:?}");
     }
 
     #[test]
