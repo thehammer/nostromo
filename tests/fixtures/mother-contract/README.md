@@ -7,7 +7,9 @@ broker read. The contract itself is Mother's `docs/design.md`, "Headless crew co
 
 **Recordings.** Since Mother's HC-16 (#76) these are recordings of real runs
 (`scripts/record-contract-fixtures.sh`: timestamps monotonic, `updated_at` increasing, real `crew` shape),
-not hand-written. Pinned to Mother `15513946b0e5` (see `MANIFEST.json`). What changed from `0ca8b700`:
+not hand-written. Pinned to Mother `6712f38ecb28` (see `MANIFEST.json`). Since `15513946b0e5` the only change is Mother #98's
+additive job-record key `base_sha` (string or null; placeholder `0000000000000000000000000000000000000001` in
+`queued` event data and snapshot jobs). Clients must ignore it if unknown; Nostromo has no use for it. What changed from `0ca8b700`:
 
 - each recording opens with an empty `snapshot`; the job arrives as a `queued` event carrying the full job
   (with the `crew` blob), and later `snapshot`s show it at later stages (so a fixture has several snapshot jobs

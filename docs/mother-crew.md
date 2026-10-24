@@ -59,3 +59,7 @@ lenses: {add: [tests], remove: [ops-infra]}
 - `swift-ci` dispatches the whole macOS GitHub workflow for each gate attempt (up to two attempts), so it duplicates the PR's own CI run and uses Actions minutes. Its `timeout_s` is 1800, below the 45-minute `budget_minutes`, so a hung dispatch fails on its own instead of marking every gate `unavailable` through the total watchdog.
 - `python-test` runs on the HOST Mac (`where: any`), not in the Linux sandbox: `tests/operator_pin` needs `codesign`/`lipo` and refuses to skip without them, so a sandbox gate fails every time (seen in the first live gate run on 2026-10-21, exit 2 after 81 s). Its `when` paths cover the trees the Python policy suites scan (`macOS/`, `iOS/`, `Shared/`, `.github/`, `src/mother/`). CI's Python job runs on macOS for the same reason.
 - `shellcheck-changed.sh` cannot check a changed file whose name git prints quoted (non-ASCII, quotes, tabs): it says so on stderr and fails rather than passing silently.
+
+## Vendored contract fixtures
+
+The contract recordings in `tests/fixtures/mother-contract/` are pinned to Mother `6712f38ecb28` (see `MANIFEST.json`; refresh with `scripts/mother-contract.py vendor`). Mother #98 added `base_sha` (string or null) to the job record. It is an additive key: clients must ignore it if unknown, and Nostromo's Rust, Kit and Mac decoders do.

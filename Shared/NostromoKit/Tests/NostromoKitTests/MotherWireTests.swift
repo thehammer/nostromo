@@ -89,6 +89,18 @@ final class MotherWireTests: XCTestCase {
         XCTAssertEqual(job.branch, "feature/payments")
     }
 
+    func testMotherJobDecodesWithBaseSha() throws {
+        // Mother #98: additive `base_sha` (string or null) that clients ignore.
+        for value in ["\"0000000000000000000000000000000000000001\"", "null"] {
+            let json = """
+            {"id": "b1", "state": "queued", "title": "t", "base_ref": "origin/main", "base_sha": \(value)}
+            """.data(using: .utf8)!
+            let job = try JSONDecoder().decode(MotherJob.self, from: json)
+            XCTAssertEqual(job.id, "b1")
+            XCTAssertEqual(job.state, "queued")
+        }
+    }
+
     func testMotherJobDecodesWithMissingOptionalFields() throws {
         let json = """
         {
