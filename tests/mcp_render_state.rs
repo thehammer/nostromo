@@ -69,6 +69,7 @@ async fn make_harness() -> Harness {
             dir.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .expect("raw server should bind");
 
@@ -144,6 +145,7 @@ async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
             topics: vec![Topic::Layout],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;

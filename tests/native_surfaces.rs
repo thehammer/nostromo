@@ -72,6 +72,7 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
             tmp.path().join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
     // A network listener beside the Unix socket, for the leak test.
@@ -136,6 +137,7 @@ async fn connect(d: &Daemon) -> UnixStream {
             topics: vec![Topic::Layout, Topic::Focuses],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;
@@ -476,6 +478,7 @@ async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
             topics: vec![Topic::Layout],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;
@@ -659,6 +662,7 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
             topics: vec![Topic::Layout, Topic::Focuses],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         })
         .unwrap(),
     )

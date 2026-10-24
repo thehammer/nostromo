@@ -717,6 +717,16 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::TrackerBoard { .. } => ServerClass::LocalOnly,
         ServerMsg::TrackerSummary { tag, .. } => ServerClass::Focus(tag),
 
+        // Terminal panes: a network peer gets no terminal frame at all, not
+        // even metadata. Output and replay carry what a shell printed (which
+        // can be production data); the rest names local paths and panes.
+        ServerMsg::TerminalList { .. }
+        | ServerMsg::TerminalState { .. }
+        | ServerMsg::TerminalClosed(_)
+        | ServerMsg::TerminalReplay { .. }
+        | ServerMsg::TerminalOutput { .. }
+        | ServerMsg::TerminalRefused { .. } => ServerClass::LocalOnly,
+
         ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
 
         // Scoped to one Mother job. A job started from a work item carries
@@ -887,8 +897,10 @@ pub enum NetworkPolicy {
 /// (`SessionModelSet`, `ModelDefaultSet` and `ModelCatalogRefresh`, which
 /// starts a process),
 /// `RenderedShape` (it overwrites what `get_view_state` reports to agents) and
-/// the work/picks/seed verbs. An iOS client over the LAN is therefore read-only
-/// until authentication exists.
+/// the work/picks/seed verbs, and every `Terminal*` verb (open, attach, detach,
+/// input, resize, close, restart, refusal report: a terminal is the operator
+/// app's alone). An iOS client over the LAN is therefore read-only until
+/// authentication exists.
 pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
     match msg {
         ClientMsg::Hello { .. }
@@ -938,7 +950,17 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         // Stops a background task, and reads a task's output: neither is
         // ever available to a network peer.
         | ClientMsg::SessionTaskStop { .. }
-        | ClientMsg::SessionTaskOutput { .. } => NetworkPolicy::Refused,
+        | ClientMsg::SessionTaskOutput { .. }
+        // Terminal panes: type into, read, resize, close or start a shell.
+        // Operator app only; a network peer never reaches the terminal arms.
+        | ClientMsg::TerminalOpenLocal { .. }
+        | ClientMsg::TerminalAttach { .. }
+        | ClientMsg::TerminalDetach { .. }
+        | ClientMsg::TerminalInput { .. }
+        | ClientMsg::TerminalResize { .. }
+        | ClientMsg::TerminalClose { .. }
+        | ClientMsg::TerminalRestart { .. }
+        | ClientMsg::TerminalRefusalReport { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1004,7 +1026,17 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::ModelCatalogRequest {}
         | ClientMsg::ModelCatalogRefresh {}
         | ClientMsg::ModelDefaultsRequest {}
-        | ClientMsg::ModelDefaultSet { .. } => false,
+        | ClientMsg::ModelDefaultSet { .. }
+        // Name a terminal or a focus tag, but are refused for a network peer
+        // whatever they name.
+        | ClientMsg::TerminalOpenLocal { .. }
+        | ClientMsg::TerminalAttach { .. }
+        | ClientMsg::TerminalDetach { .. }
+        | ClientMsg::TerminalInput { .. }
+        | ClientMsg::TerminalResize { .. }
+        | ClientMsg::TerminalClose { .. }
+        | ClientMsg::TerminalRestart { .. }
+        | ClientMsg::TerminalRefusalReport { .. } => false,
     }
 }
 
@@ -1578,6 +1610,7 @@ mod tests {
                 topics: vec![],
                 renders_decisions: false,
                 renders_approvals: false,
+                capabilities: vec![],
             },
             ClientMsg::Ping,
             ClientMsg::PtySpawn {
@@ -1741,6 +1774,39 @@ mod tests {
                 offset: None,
                 max_bytes: 4096,
             },
+            ClientMsg::TerminalOpenLocal {
+                tag: "x1".into(),
+                relative_to: None,
+                position: None,
+                cwd: None,
+                client_request_id: "r".into(),
+            },
+            ClientMsg::TerminalAttach {
+                terminal_id: "t".into(),
+            },
+            ClientMsg::TerminalDetach {
+                terminal_id: "t".into(),
+            },
+            ClientMsg::TerminalInput {
+                terminal_id: "t".into(),
+                bytes: "bHMK".into(),
+            },
+            ClientMsg::TerminalResize {
+                terminal_id: "t".into(),
+                cols: 80,
+                rows: 24,
+            },
+            ClientMsg::TerminalClose {
+                terminal_id: "t".into(),
+            },
+            ClientMsg::TerminalRestart {
+                terminal_id: "t".into(),
+            },
+            ClientMsg::TerminalRefusalReport {
+                terminal_id: None,
+                op: "input".into(),
+                channel: "app_control".into(),
+            },
         ]
     }
 
@@ -1779,7 +1845,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 44;
+    const CLIENT_MSG_VARIANTS: usize = 52;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -1828,6 +1894,14 @@ mod tests {
             ClientMsg::ClaudeLoginAction { .. } => 41,
             ClientMsg::SessionTaskStop { .. } => 42,
             ClientMsg::SessionTaskOutput { .. } => 43,
+            ClientMsg::TerminalOpenLocal { .. } => 44,
+            ClientMsg::TerminalAttach { .. } => 45,
+            ClientMsg::TerminalDetach { .. } => 46,
+            ClientMsg::TerminalInput { .. } => 47,
+            ClientMsg::TerminalResize { .. } => 48,
+            ClientMsg::TerminalClose { .. } => 49,
+            ClientMsg::TerminalRestart { .. } => 50,
+            ClientMsg::TerminalRefusalReport { .. } => 51,
         }
     }
 
@@ -1864,8 +1938,8 @@ mod tests {
         assert_eq!(by_name("PtyAttach"), 7);
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
-        assert_eq!(CLIENT_MSG_VARIANTS, 44);
-        assert_eq!(every_client_msg().len(), 44);
+        assert_eq!(CLIENT_MSG_VARIANTS, 52);
+        assert_eq!(every_client_msg().len(), 52);
     }
 
     #[test]

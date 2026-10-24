@@ -62,6 +62,7 @@ async fn session_round_trip_drives_real_claude() {
             tmp.join("operator-app.pin"),
         )),
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .unwrap();
 
@@ -87,6 +88,7 @@ async fn session_round_trip_drives_real_claude() {
             topics: vec![],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;

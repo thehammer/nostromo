@@ -983,6 +983,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         Arc::clone(&decisions),
         Arc::clone(&verifier) as Arc<dyn PeerVerifier>,
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .expect("bind");
     decisions
@@ -1014,6 +1015,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         topics: vec![Topic::Decision],
         renders_decisions: false,
         renders_approvals: false,
+        capabilities: vec![],
     }));
     bytes.extend(frame(&ClientMsg::DecisionAnswer {
         request_id: request_id.clone(),

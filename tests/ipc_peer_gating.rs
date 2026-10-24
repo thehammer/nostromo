@@ -127,6 +127,7 @@ async fn spawn_server_with_verifier(
         Arc::clone(&decisions),
         verifier,
         false,
+        nostromo::terminal::TerminalManager::in_memory(),
     )
     .expect("bind unix socket");
 
@@ -271,6 +272,7 @@ async fn handshake_with_nonce<S: AsyncRead + AsyncWrite + Unpin>(
             topics,
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;
@@ -3034,6 +3036,7 @@ async fn a_unix_client_that_subscribed_to_everything_is_not_replayed_retained_fr
             topics: vec![],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;
@@ -3551,6 +3554,7 @@ async fn a_unix_client_that_adds_the_work_topic_with_a_second_subscribe_is_repla
             topics: vec![Topic::Activity, Topic::Work],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;
@@ -3616,6 +3620,7 @@ async fn a_tcp_client_that_adds_the_work_topic_with_a_second_subscribe_is_still_
             topics: vec![Topic::Activity, Topic::Work],
             renders_decisions: false,
             renders_approvals: false,
+            capabilities: vec![],
         },
     )
     .await;
@@ -6727,6 +6732,7 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
                 topics: vec![Topic::Activity],
                 renders_decisions: false,
                 renders_approvals: false,
+                capabilities: vec![],
             },
         )
         .await,
@@ -7639,6 +7645,7 @@ mod background_tasks {
                 topics: vec![],
                 renders_decisions: false,
                 renders_approvals: false,
+                capabilities: vec![],
             })
             .await;
             tap.sync().await;
