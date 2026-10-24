@@ -266,6 +266,29 @@ fn kitchen_sink() -> Value {
 // ── the vendored fixtures decode with the contract's values ──────────────────
 
 #[test]
+fn base_sha_is_an_additive_job_key_that_is_ignored_or_absent() {
+    // Mother #98 added `base_sha` to the job record (string or null). Nostromo has no
+    // use for it, so it must decode with and without the key.
+    for name in ["gate_hold_answered", "gates_fix_pass", "lens_wave"] {
+        let arrays = snapshot_job_arrays(name);
+        let with_key = arrays
+            .iter()
+            .flat_map(|a| a.as_array().unwrap())
+            .filter(|j| j.get("base_sha").is_some())
+            .count();
+        assert!(with_key > 0, "{name}: fixtures carry base_sha");
+    }
+    let mut j = fixture_job_json("gate_hold_answered", "j-hold1");
+    assert_eq!(j["base_sha"], "0000000000000000000000000000000000000001");
+    let (with, skipped, _) = decode_one(j.clone());
+    assert_eq!((with.len(), skipped), (1, 0));
+    j["base_sha"] = Value::Null;
+    assert_eq!(decode_one(j.clone()).0.len(), 1);
+    j.as_object_mut().unwrap().remove("base_sha");
+    assert_eq!(decode_one(j).0.len(), 1);
+}
+
+#[test]
 fn gates_fix_pass_snapshot_decodes_with_the_contract_values() {
     let jobs = snapshot_jobs("gates_fix_pass");
     let job = find(&jobs, "j-gates1");

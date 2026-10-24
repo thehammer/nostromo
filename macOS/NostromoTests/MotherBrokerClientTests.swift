@@ -842,6 +842,20 @@ final class MC2JobSlimCrewDecodingTests: XCTestCase {
         XCTAssertEqual(job.crew.decodeIssues, [])
     }
 
+    func testAJobWithBaseShaDecodesAndTheKeyIsIgnored() throws {
+        // Mother #98: additive `base_sha` (string or null). Present, null or absent all decode.
+        let plain = jobJSON(gates: goodGates)
+        for extra in [#""base_sha":"0000000000000000000000000000000000000001","#, #""base_sha":null,"#] {
+            let withKey = plain.replacingOccurrences(of: #"{"id":"j-hold1","#, with: "{" + extra + #""id":"j-hold1","#)
+            XCTAssertNotEqual(withKey, plain)
+            let job = try decode(withKey)
+            XCTAssertEqual(job.id, "j-hold1")
+            XCTAssertEqual(job.crew.gates?.status, "exhausted")
+            XCTAssertEqual(job.crew.decodeIssues, [])
+        }
+        XCTAssertEqual(try decode(plain).id, "j-hold1")
+    }
+
     func testAMalformedGatesKeyCostsOnlyThatKey() throws {
         let job = try decode(jobJSON(gates: #""not an object""#))
 
