@@ -60,10 +60,10 @@ final class ClaudeSignInOverlayHost: NSView {
             return
         }
         if let card {
-            card.update(session: session, claudeBin: store.claudeBin)
+            card.update(session: session, claudeBin: store.claudeBin, watch: store.watch)
         } else {
             let new = ClaudeSignInCardView(tag: focusTag, session: session, claudeBin: store.claudeBin,
-                                           store: store, launcher: launcher, permit: permit)
+                                           watch: store.watch, store: store, launcher: launcher, permit: permit)
             addSubview(new)
             card = new
         }

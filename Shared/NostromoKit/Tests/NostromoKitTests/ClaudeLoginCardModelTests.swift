@@ -25,7 +25,7 @@ final class ClaudeLoginCardModelTests: XCTestCase {
 
     func testNotResendable() {
         let m = ClaudeLoginCardModel(session: session(.notResendable), claudeBin: "/bin/claude")
-        XCTAssertEqual(m.body, "Your last message may have partly run before sign-in failed, so Nostromo won't send it again on its own.")
+        XCTAssertEqual(m.body, "Your last message may have partly run before sign-in failed, so Nostromo won't send it again on its own. After you sign in, press Resend anyway if you want it sent.")
         XCTAssertEqual(m.resendTitle, "Resend anyway")
     }
 
@@ -49,5 +49,68 @@ final class ClaudeLoginCardModelTests: XCTestCase {
         let some = ClaudeLoginCardModel(session: session(.waiting), claudeBin: "/bin/claude")
         XCTAssertTrue(some.showsOpenTerminal)
         XCTAssertFalse(some.showsManualCommand)
+    }
+
+    func testDiscardIsNotOfferedOnceTheMessageIsBeingSentAgain() {
+        let m = ClaudeLoginCardModel(session: session(.resending), claudeBin: "/bin/claude")
+        XCTAssertFalse(m.showsDiscard)
+        for phase in [ClaudeLoginPhase.waiting, .notResendable] {
+            XCTAssertTrue(ClaudeLoginCardModel(session: session(phase), claudeBin: "/bin/claude").showsDiscard, "\(phase)")
+        }
+    }
+
+    func testTheWatchDefaultsToTheKeychain() {
+        for phase in [ClaudeLoginPhase.waiting, .resending, .notResendable, .pausedNoHold] {
+            let s = session(phase, hold: phase == .pausedNoHold ? nil : "h1")
+            XCTAssertEqual(ClaudeLoginCardModel(session: s, claudeBin: "/bin/claude"),
+                           ClaudeLoginCardModel(session: s, claudeBin: "/bin/claude", watch: .keychain), "\(phase)")
+        }
+    }
+
+    // MARK: Copy per phase and watch
+
+    private let signedOut = "Claude's sign-in expired, so your last message wasn't answered. "
+    private let partlyRan = "Your last message may have partly run before sign-in failed, so Nostromo won't send it again on its own. After you sign in, press Resend anyway if you want it sent."
+
+    func testWhatTheCardSaysForEveryPhaseAndWatch() {
+        let cases: [(phase: ClaudeLoginPhase, watch: ClaudeLoginWatch, body: String, afterSignIn: String)] = [
+            (.waiting, .keychain,
+             signedOut + "It's saved and will be sent again once you sign in.",
+             "Nostromo sends your message once Claude is signed in."),
+            (.waiting, .unavailable,
+             signedOut + "It's saved. After you sign in, press Resend now.",
+             "After you sign in, press Resend now."),
+            (.notResendable, .keychain, partlyRan, "After you sign in, press Resend anyway."),
+            (.notResendable, .unavailable, partlyRan, "After you sign in, press Resend anyway."),
+            (.resending, .keychain, "Sending your message again…",
+             "Nostromo sends your message once Claude is signed in."),
+            (.resending, .unavailable, "Sending your message again…",
+             "Nostromo sends your message once Claude is signed in."),
+            (.pausedNoHold, .keychain, "Messages are waiting until Claude can sign in.",
+             "Nostromo sends your message once Claude is signed in."),
+            (.pausedNoHold, .unavailable,
+             "Messages are waiting until Claude can sign in. Nostromo can't see when you do, so they won't go out on their own.",
+             "Nostromo can't see when you've signed in."),
+        ]
+        for c in cases {
+            let s = session(c.phase, hold: c.phase == .pausedNoHold ? nil : "h1")
+            let m = ClaudeLoginCardModel(session: s, claudeBin: "/bin/claude", watch: c.watch)
+            XCTAssertEqual(m.body, c.body, "\(c.phase) / \(c.watch) body")
+            XCTAssertEqual(m.afterSignIn, c.afterSignIn, "\(c.phase) / \(c.watch) afterSignIn")
+        }
+    }
+
+    func testTheQueuedCountComesAfterTheWatchSpecificText() {
+        let m = ClaudeLoginCardModel(session: session(.waiting, queued: 1), claudeBin: "/bin/claude", watch: .unavailable)
+        XCTAssertEqual(m.body, signedOut + "It's saved. After you sign in, press Resend now. 1 more message is waiting.")
+    }
+
+    func testWhenNothingSendsItselfTheCardNeverPromisesItWill() {
+        for phase in [ClaudeLoginPhase.waiting, .notResendable, .pausedNoHold] {
+            let s = session(phase, hold: phase == .pausedNoHold ? nil : "h1")
+            let m = ClaudeLoginCardModel(session: s, claudeBin: "/bin/claude", watch: .unavailable)
+            XCTAssertFalse(m.body.contains("will be sent again"), "\(phase): \(m.body)")
+            XCTAssertFalse(m.afterSignIn.contains("Nostromo sends"), "\(phase): \(m.afterSignIn)")
+        }
     }
 }

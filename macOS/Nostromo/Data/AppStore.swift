@@ -603,6 +603,8 @@ class AppStore: ObservableObject {
                     WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
                     // Tracker panes keep their last board; the reconnect's replay replaces it in place.
                     TrackerStore.shared.daemonDisconnected()
+                    // A sign-in card from a dropped connection is stale until the daemon says again.
+                    ClaudeLoginStore.shared.reset()
                 }
             }
             .store(in: &cancellables)
@@ -1424,6 +1426,8 @@ class AppStore: ObservableObject {
 
         case .error(let msg):
             log.error("Daemon error: \(msg, privacy: .public)")
+            // The daemon refused a resend/discard: the card's buttons come back with a notice.
+            if isClaudeLoginRefusal(msg) { ClaudeLoginStore.shared.actionRefused() }
 
         case .sessionState(let tag, let state):
             // Derive health for the sparse sidebar badge map (all focuses, not just

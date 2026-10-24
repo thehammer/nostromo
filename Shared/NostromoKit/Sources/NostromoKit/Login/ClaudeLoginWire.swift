@@ -65,6 +65,12 @@ public struct ClaudeLoginStateFrame: Decodable, Equatable {
     }
 }
 
+/// Whether an `error` frame's message is the daemon refusing a `claude_login_action`
+/// (not the verified app, or a nonce that no longer checks out).
+public func isClaudeLoginRefusal(_ message: String) -> Bool {
+    message.hasPrefix("not_operator_app:") && message.contains("resend or discard a held message")
+}
+
 // MARK: - Outbound frame (`ClientMsg`)
 
 /// What a `claude_login_action` asks for.
