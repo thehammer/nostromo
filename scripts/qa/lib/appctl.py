@@ -20,7 +20,8 @@ import json
 import subprocess
 
 ALLOWED_COMMANDS = {"ping", "windows", "tree", "find", "click", "key", "hittest",
-                    "screenshot", "activate", "restore", "transcript-anchor", "tracker", "tracker-anchor"}
+                    "screenshot", "activate", "restore", "transcript-anchor", "tracker", "tracker-anchor",
+                    "tasks"}
 _GUARDED_COMMANDS = {"click", "key"}   # reachable only through App.click_node / click_at / key
 
 # Tabs a script may click. Picks is never clickable (the first open of the day can start a paid

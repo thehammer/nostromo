@@ -965,6 +965,12 @@ class NostromodClient {
         writeFrameLocked(body, to: curFd, type: "approval_answer", tag: nil)
     }
 
+    /// Whether the connection's last `welcome` advertised `tasks` (background task frames, BA0).
+    var daemonAdvertisesTasks: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return advertisedFeatures.contains("tasks")
+    }
+
     /// Whether the connection's last `welcome` advertised `claude_login_v1`.
     var daemonAdvertisesClaudeLogin: Bool {
         sendLock.lock(); defer { sendLock.unlock() }

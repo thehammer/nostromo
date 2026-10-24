@@ -74,10 +74,11 @@ enum MainMenu {
         paneDiagItem.keyEquivalentModifierMask = [.command, .shift]
         paneDiagItem.target = target
         debugMenu.addItem(paneDiagItem)
+        // ⌥⇧⌘B: ⇧⌘B is the Session menu's Background Activity (BA3).
         let captureItem = NSMenuItem(title: "Capture render state now",
                                      action: #selector(MainMenuActions.captureRenderStateNow),
                                      keyEquivalent: "b")
-        captureItem.keyEquivalentModifierMask = [.command, .shift]
+        captureItem.keyEquivalentModifierMask = [.command, .shift, .option]
         captureItem.target = target
         debugMenu.addItem(captureItem)
 
@@ -89,6 +90,9 @@ enum MainMenu {
         let sessionMenu = NSMenu(title: "Session")
         sessionMenuItem.submenu = sessionMenu
         sessionMenu.addItem(ModelShortcut.makeMenuItem())
+        // ⇧⌘B: the focused pane's Background activity popover, keyboard in the list (BA3). Routed
+        // like ⇧⌘M; `AppDelegate.showBackgroundPopover` catches it when focus sits outside any bar.
+        sessionMenu.addItem(BackgroundShortcut.makeMenuItem())
         // ⌥⌘A: move keyboard focus into the visible approval card (AP3). No visible card: a beep.
         let approvalCardItem = NSMenuItem(title: "Go to Approval Card", action: #selector(MainMenuActions.goToApprovalCard(_:)),
                                           keyEquivalent: "a")

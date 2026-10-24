@@ -260,8 +260,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         ModelShortcut.bar(in: NSApp.keyWindow)?.showModelPopover(sender)
     }
 
+    /// ⇧⌘B with focus outside every input bar: open the focused pane's Background activity popover.
+    @objc func showBackgroundPopover(_ sender: Any?) {
+        BackgroundShortcut.bar(in: NSApp.keyWindow)?.showBackgroundPopover(sender)
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        menuItem.action == ModelShortcut.action ? !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty : true
+        if menuItem.action == ModelShortcut.action { return !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty }
+        if menuItem.action == BackgroundShortcut.action { return !BackgroundShortcut.bars(in: NSApp.keyWindow).isEmpty }
+        return true
     }
 
     /// Open one window per attached display, then activate ONCE at the end

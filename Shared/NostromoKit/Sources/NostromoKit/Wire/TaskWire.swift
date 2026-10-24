@@ -268,6 +268,49 @@ public struct TaskMetaWire: Decodable, Equatable {
         lastToolName = try c.decodeIfPresent(String.self, forKey: .lastToolName)
         hasOutput = try c.decodeIfPresent(Bool.self, forKey: .hasOutput) ?? false
     }
+
+    /// For clients that build a task themselves (the Mac's restart-stopped entries) and for tests.
+    public init(id: String, runId: String? = nil, taskType: String = "", kind: TaskKindWire,
+                toolName: String? = nil, description: String = "", subagentType: String? = nil,
+                workflowName: String? = nil, toolUseId: String? = nil, parentTaskId: String? = nil,
+                isBackgrounded: Bool? = nil, housekeeping: Bool = false, status: TaskStatusWire,
+                endReason: TaskEndReasonWire? = nil, startedAtMs: UInt64? = nil, endedAtMs: UInt64? = nil,
+                durationMs: UInt64? = nil, totalTokens: UInt64? = nil, toolUses: UInt64? = nil,
+                lastToolName: String? = nil, hasOutput: Bool = false) {
+        self.id = id
+        self.runId = runId
+        self.taskType = taskType
+        self.kind = kind
+        self.toolName = toolName
+        self.description = description
+        self.subagentType = subagentType
+        self.workflowName = workflowName
+        self.toolUseId = toolUseId
+        self.parentTaskId = parentTaskId
+        self.isBackgrounded = isBackgrounded
+        self.housekeeping = housekeeping
+        self.status = status
+        self.endReason = endReason
+        self.startedAtMs = startedAtMs
+        self.endedAtMs = endedAtMs
+        self.durationMs = durationMs
+        self.totalTokens = totalTokens
+        self.toolUses = toolUses
+        self.lastToolName = lastToolName
+        self.hasOutput = hasOutput
+    }
+
+    /// This task, ended as `status` at `endedAtMs` for `endReason`. The duration is what ran until then.
+    public func ended(as status: TaskStatusWire, endReason: TaskEndReasonWire?, atMs endedAtMs: UInt64) -> TaskMetaWire {
+        let duration = durationMs ?? startedAtMs.map { endedAtMs >= $0 ? endedAtMs - $0 : 0 }
+        return TaskMetaWire(id: id, runId: runId, taskType: taskType, kind: kind, toolName: toolName,
+                            description: description, subagentType: subagentType, workflowName: workflowName,
+                            toolUseId: toolUseId, parentTaskId: parentTaskId, isBackgrounded: isBackgrounded,
+                            housekeeping: housekeeping, status: status, endReason: endReason,
+                            startedAtMs: startedAtMs, endedAtMs: endedAtMs, durationMs: duration,
+                            totalTokens: totalTokens, toolUses: toolUses, lastToolName: lastToolName,
+                            hasOutput: hasOutput)
+    }
 }
 
 // MARK: - Frames
@@ -302,6 +345,15 @@ public struct SessionTasksWire: Decodable, Equatable {
         tasks = lossy.compactMap(\.value)
     }
 
+    public init(tag: String, sessionId: String? = nil, daemonEpoch: String, stopSupported: Bool? = nil,
+                tasks: [TaskMetaWire]) {
+        self.tag = tag
+        self.sessionId = sessionId
+        self.daemonEpoch = daemonEpoch
+        self.stopSupported = stopSupported
+        self.tasks = tasks
+    }
+
     /// Decodes to `nil` instead of throwing.
     private struct LossyTask: Decodable {
         let value: TaskMetaWire?
@@ -329,6 +381,16 @@ public struct SessionTaskDetailWire: Decodable, Equatable {
         case taskId = "task_id"
         case progressSummary = "progress_summary"
         case completionSummary = "completion_summary"
+    }
+
+    public init(tag: String, taskId: String, preview: String? = nil, progressSummary: String? = nil,
+                completionSummary: String? = nil, prompt: String? = nil) {
+        self.tag = tag
+        self.taskId = taskId
+        self.preview = preview
+        self.progressSummary = progressSummary
+        self.completionSummary = completionSummary
+        self.prompt = prompt
     }
 }
 

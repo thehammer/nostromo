@@ -287,6 +287,7 @@ class ReplView: NSView {
         // Every window showing this focus binds to the one shared store, so a switch made in
         // any of them (or by an agent, or a script) reaches all their chips.
         inputBar.bindModel(tag: session.tag, agentName: session.agentName, store: ModelStore.shared)
+        inputBar.bindBackground(tag: session.tag, store: BackgroundTaskStore.shared, displayName: session.displayName)
         addSubview(inputBar)
 
         // "Jump to latest" — covers exactly the transcript area (so it sits above
