@@ -729,6 +729,8 @@ impl GoogleClient {
                 Ok(Ok((stream, _))) => stream,
                 Ok(Err(e)) => {
                     debug!("loopback accept failed: {:?}", e.kind());
+                    // Back off so a persistent error (e.g. EMFILE) cannot busy-spin.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     continue;
                 }
                 Err(_) => return Err("The sign-in link expired".to_owned()),
