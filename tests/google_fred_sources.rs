@@ -97,7 +97,22 @@ struct World {
     calendar_pages: HashMap<String, Value>,
     /// Every Gmail and Calendar request fails like this: (status, Retry-After secs).
     failure: Option<(u16, Option<u64>)>,
+    /// Body of the injected failure; the generic quota error when `None`.
+    failure_body: Option<Value>,
+    /// When set, every history call answers with a next page.
+    history_chain: Option<Chain>,
+    /// When set, every events call answers with a next page of distinct tokens.
+    calendar_endless: bool,
     hits: Vec<Hit>,
+}
+
+/// A paginated answer that never ends.
+#[derive(Clone, Copy, Debug)]
+enum Chain {
+    /// Every page carries a new `nextPageToken`.
+    Distinct,
+    /// Every page carries the same `nextPageToken`.
+    Repeating,
 }
 
 impl World {
@@ -111,6 +126,9 @@ impl World {
             history_head: "100".into(),
             calendar_pages: HashMap::from([(String::new(), json!({ "items": [] }))]),
             failure: None,
+            failure_body: None,
+            history_chain: None,
+            calendar_endless: false,
             hits: Vec::new(),
         }
     }
@@ -166,6 +184,7 @@ impl World {
 
     fn heal(&mut self) {
         self.failure = None;
+        self.failure_body = None;
     }
 }
 
@@ -201,9 +220,12 @@ fn serve(shared: &Shared, req: &Request) -> ResponseTemplate {
     });
 
     if let Some((status, retry_after)) = failure {
-        let mut t = ResponseTemplate::new(status).set_body_json(json!({
-            "error": { "code": status, "message": "slow down", "status": "RESOURCE_EXHAUSTED" }
-        }));
+        let body = w.failure_body.clone().unwrap_or_else(|| {
+            json!({
+                "error": { "code": status, "message": "slow down", "status": "RESOURCE_EXHAUSTED" }
+            })
+        });
+        let mut t = ResponseTemplate::new(status).set_body_json(body);
         if let Some(secs) = retry_after {
             t = t.insert_header("Retry-After", secs.to_string().as_str());
         }
@@ -214,12 +236,27 @@ fn serve(shared: &Shared, req: &Request) -> ResponseTemplate {
         PROFILE => ResponseTemplate::new(200).set_body_json(w.profile.clone()),
         LIST => ResponseTemplate::new(200).set_body_json(w.list.clone()),
         INBOX_LABEL => ResponseTemplate::new(200).set_body_json(w.labels.clone()),
+        HISTORY if w.history_chain.is_some() => {
+            let n = w.count(HISTORY);
+            let token = match w.history_chain {
+                Some(Chain::Repeating) => "same-token".to_owned(),
+                _ => format!("history-token-{n}"),
+            };
+            ResponseTemplate::new(200).set_body_json(
+                json!({ "history": [], "historyId": w.history_head, "nextPageToken": token }),
+            )
+        }
         HISTORY => match w.history_queue.pop_front() {
             Some((status, body)) => ResponseTemplate::new(status).set_body_json(body),
             None => {
                 ResponseTemplate::new(200).set_body_json(json!({ "historyId": w.history_head }))
             }
         },
+        EVENTS if w.calendar_endless => {
+            let n = w.count(EVENTS);
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "items": [], "nextPageToken": format!("events-token-{n}") }))
+        }
         EVENTS => {
             let token = req
                 .url
@@ -1970,4 +2007,413 @@ async fn a_calendar_429_is_rate_limited_and_keeps_the_events() {
     assert_eq!(snap.events.len(), 1);
     assert!(snap.retry_at.unwrap() >= t_set + ChronoDuration::milliseconds(950));
     assert!(snap.error.as_deref().unwrap().contains("rate limiting"));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Pagination that never ends, and failures that never heal
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Generous: far above any sane page cap, far below "never stops".
+const PAGE_REQUEST_CEILING: usize = 100;
+
+/// Let the source run a moment and check it asked Google for nothing more. A
+/// source that kept going would add requests; this can only false-pass.
+async fn assert_requests_stop(e: &Env, p: &str, what: &str) {
+    let before = e.world().count(p);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        e.world().count(p),
+        before,
+        "{what}: the source kept requesting after giving up on the cycle"
+    );
+}
+
+#[tokio::test]
+async fn a_history_list_with_endless_distinct_page_tokens_is_stale_with_the_old_data_and_stops_asking(
+) {
+    let e = env(true, &[]).await;
+    e.world().set_inbox(&standard_inbox(), 7);
+    let (mut rx, dirty) = spawn_mailbox(&e, manual());
+    first_fresh_mailbox(&mut rx).await;
+    let before = e.world().count(HISTORY);
+    e.world().history_chain = Some(Chain::Distinct);
+
+    let snap = next_snapshot(&mut rx, &dirty, "the endless-history cycle").await;
+
+    assert_eq!(snap.state, SourceState::Stale, "never Fresh: {snap:?}");
+    assert!(snap.stale && snap.error.is_some());
+    assert_eq!(snap.unread_count, 7, "the last good count, never 0");
+    assert_eq!(
+        ids(&snap),
+        vec!["m3", "m1", "m2"],
+        "the last good rows are kept"
+    );
+    let asked = e.world().count(HISTORY) - before;
+    assert!(
+        (2..=PAGE_REQUEST_CEILING).contains(&asked),
+        "pages are followed, but not forever: {asked} history requests in one cycle"
+    );
+    assert_requests_stop(&e, HISTORY, "endless history").await;
+
+    // Once Gmail answers sanely the source is healthy again.
+    e.world().history_chain = None;
+    let healed = next_snapshot(&mut rx, &dirty, "the recovery cycle").await;
+    assert_eq!(healed.state, SourceState::Fresh);
+    assert_eq!(healed.unread_count, 7);
+}
+
+#[tokio::test]
+async fn a_history_list_that_repeats_a_page_token_is_stale_with_the_old_data_and_stops_asking() {
+    let e = env(true, &[]).await;
+    e.world().set_inbox(&standard_inbox(), 7);
+    let (mut rx, dirty) = spawn_mailbox(&e, manual());
+    first_fresh_mailbox(&mut rx).await;
+    let before = e.world().count(HISTORY);
+    e.world().history_chain = Some(Chain::Repeating);
+
+    let snap = next_snapshot(&mut rx, &dirty, "the repeating-token cycle").await;
+
+    assert_eq!(snap.state, SourceState::Stale, "never Fresh: {snap:?}");
+    assert!(snap.stale && snap.error.is_some());
+    assert_eq!(snap.unread_count, 7);
+    assert_eq!(snap.items.len(), 3, "the last good rows are kept");
+    let asked = e.world().count(HISTORY) - before;
+    assert!(
+        (2..=10).contains(&asked),
+        "a repeated token is spotted at once, not after a page cap: {asked} history requests"
+    );
+    assert_requests_stop(&e, HISTORY, "repeating history token").await;
+}
+
+#[tokio::test]
+async fn an_endless_history_chain_never_moves_the_history_cursor() {
+    let e = env(true, &[]).await;
+    e.world().set_inbox(&standard_inbox(), 7);
+    let (mut rx, dirty) = spawn_mailbox(&e, manual());
+    first_fresh_mailbox(&mut rx).await;
+    e.world().history_chain = Some(Chain::Distinct);
+    next_snapshot(&mut rx, &dirty, "the endless-history cycle").await;
+    let before = e.world().count(HISTORY);
+    e.world().history_chain = None;
+
+    next_snapshot(&mut rx, &dirty, "the recovery cycle").await;
+
+    let w = e.world();
+    let recovery = &w.hits_on(HISTORY)[before..];
+    assert!(!recovery.is_empty());
+    assert_eq!(
+        recovery[0].param("startHistoryId"),
+        Some("100"),
+        "an abandoned chain does not advance the cursor past changes never read"
+    );
+    assert!(
+        recovery[0].param("pageToken").is_none(),
+        "and the next cycle starts from the first page"
+    );
+}
+
+#[tokio::test]
+async fn a_calendar_with_endless_distinct_page_tokens_is_an_error_without_data_and_stops_asking() {
+    let e = env(true, &[]).await;
+    e.world().calendar_endless = true;
+    let (mut rx, dirty) = spawn_calendar(&e, manual());
+
+    let snap = wait_for(
+        &mut rx,
+        "the first snapshot",
+        &[SourceState::Fresh, SourceState::Empty],
+        |_| true,
+    )
+    .await;
+
+    assert_eq!(
+        snap.state,
+        SourceState::Error,
+        "never an empty day: {snap:?}"
+    );
+    assert!(snap.events.is_empty() && snap.error.is_some());
+    let asked = e.world().count(EVENTS);
+    assert!(
+        (2..=PAGE_REQUEST_CEILING).contains(&asked),
+        "pages are followed, but not forever: {asked} events requests"
+    );
+    assert_requests_stop(&e, EVENTS, "endless events").await;
+
+    // A real answer brings the day back.
+    e.world().calendar_endless = false;
+    let start = Utc::now() + ChronoDuration::minutes(45);
+    set_events(
+        &e,
+        vec![timed_event(
+            "ok",
+            "Back again",
+            start,
+            start + ChronoDuration::hours(1),
+        )],
+    );
+    let healed = next_snapshot(&mut rx, &dirty, "the recovery cycle").await;
+    assert_eq!(healed.state, SourceState::Fresh);
+    assert_eq!(healed.events.len(), 1);
+}
+
+#[tokio::test]
+async fn a_calendar_with_endless_page_tokens_after_a_good_fetch_is_stale_with_the_last_events() {
+    let e = env(true, &[]).await;
+    let start = Utc::now() + ChronoDuration::minutes(45);
+    set_events(
+        &e,
+        vec![timed_event(
+            "keep",
+            "Keep showing me",
+            start,
+            start + ChronoDuration::hours(1),
+        )],
+    );
+    let (mut rx, dirty) = spawn_calendar(&e, manual());
+    first_calendar(&mut rx, SourceState::Fresh).await;
+    let before = e.world().count(EVENTS);
+    e.world().calendar_endless = true;
+
+    let snap = next_snapshot(&mut rx, &dirty, "the endless-events cycle").await;
+
+    assert_eq!(snap.state, SourceState::Stale, "never Fresh: {snap:?}");
+    assert!(snap.stale && snap.error.is_some());
+    assert_eq!(snap.events.len(), 1, "the last good events stay on screen");
+    assert_eq!(snap.events[0].id, "keep");
+    assert!(snap.next.is_some(), "and so does the next meeting");
+    let asked = e.world().count(EVENTS) - before;
+    assert!(
+        (2..=PAGE_REQUEST_CEILING).contains(&asked),
+        "{asked} events requests in one cycle"
+    );
+    assert_requests_stop(&e, EVENTS, "endless events after data").await;
+}
+
+#[tokio::test]
+async fn a_calendar_that_repeats_a_page_token_is_never_fresh_and_stops_asking() {
+    let e = env(true, &[]).await;
+    {
+        let mut w = e.world();
+        // The first page points at "same"; "same" points at itself.
+        w.calendar_pages.insert(
+            String::new(),
+            json!({ "items": [], "nextPageToken": "same" }),
+        );
+        w.calendar_pages.insert(
+            "same".into(),
+            json!({ "items": [], "nextPageToken": "same" }),
+        );
+    }
+    let (mut rx, _dirty) = spawn_calendar(&e, manual());
+
+    let snap = wait_for(
+        &mut rx,
+        "the first snapshot",
+        &[SourceState::Fresh, SourceState::Empty],
+        |_| true,
+    )
+    .await;
+
+    assert_eq!(snap.state, SourceState::Error, "{snap:?}");
+    assert!(snap.events.is_empty() && snap.error.is_some());
+    let asked = e.world().count(EVENTS);
+    assert!(
+        (2..=10).contains(&asked),
+        "a repeated token is spotted at once: {asked} events requests"
+    );
+    assert_requests_stop(&e, EVENTS, "repeating events token").await;
+}
+
+// ── A failure that is not a throttle and does not heal ───────────────────────
+
+fn access_not_configured(api: &str) -> Value {
+    json!({
+        "error": {
+            "code": 403,
+            "message": format!("{api} has not been used in project 1234567890 before or it is disabled."),
+            "errors": [{
+                "message": format!("{api} has not been used in project 1234567890 before or it is disabled."),
+                "domain": "usageLimits",
+                "reason": "accessNotConfigured",
+                "extendedHelp": "https://console.developers.google.com",
+            }],
+            "status": "PERMISSION_DENIED",
+        }
+    })
+}
+
+/// The gaps between the failing requests the fake saw, oldest first.
+fn failing_gaps(w: &World) -> Vec<Duration> {
+    let failed: Vec<&Hit> = w.hits.iter().filter(|h| h.failed).collect();
+    failed
+        .windows(2)
+        .map(|pair| pair[1].at.duration_since(pair[0].at))
+        .collect()
+}
+
+/// A persistent failure is retried at the normal cadence once, and then ever
+/// more slowly: it must not be hammered every poll. Lower bounds only (the
+/// source can be slower than its wait, never faster), so this cannot flake.
+fn assert_backs_off(gaps: &[Duration], poll: Duration) {
+    assert!(gaps.len() >= 4, "{gaps:?}");
+    assert!(
+        gaps[2] >= poll * 3,
+        "the 4th request came {:?} after the 3rd; a persistent failure must back off beyond the {poll:?} poll: {gaps:?}",
+        gaps[2]
+    );
+    assert!(
+        gaps[3] >= poll * 6,
+        "the 5th request came {:?} after the 4th; the wait keeps growing: {gaps:?}",
+        gaps[3]
+    );
+    assert!(
+        gaps[3] > gaps[0],
+        "later gaps are longer than the first: {gaps:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_persistent_403_access_not_configured_on_the_mailbox_is_not_repolled_every_poll() {
+    let e = env(true, &[]).await;
+    {
+        let mut w = e.world();
+        w.failure = Some((403, None));
+        w.failure_body = Some(access_not_configured("Gmail API"));
+    }
+    let poll = fast();
+    let (mut rx, _dirty) = spawn_mailbox(&e, timing(poll, an_hour()));
+
+    let first = wait_for(
+        &mut rx,
+        "the first snapshot",
+        &[SourceState::Fresh, SourceState::Empty],
+        |_| true,
+    )
+    .await;
+    assert_eq!(
+        first.state,
+        SourceState::Error,
+        "a permission problem is an error, not a throttle: {first:?}"
+    );
+    assert!(first.items.is_empty() && first.error.is_some());
+
+    e.wait_until("five failing requests", |w| {
+        w.hits.iter().filter(|h| h.failed).count() >= 5
+    })
+    .await;
+    assert_backs_off(&failing_gaps(&e.world()), poll);
+
+    let state = rx.borrow().clone().unwrap();
+    assert_ne!(
+        state.state,
+        SourceState::RateLimited,
+        "a permission problem is never reported as throttling"
+    );
+}
+
+#[tokio::test]
+async fn a_persistent_403_access_not_configured_on_the_calendar_is_not_repolled_every_poll() {
+    let e = env(true, &[]).await;
+    {
+        let mut w = e.world();
+        w.failure = Some((403, None));
+        w.failure_body = Some(access_not_configured("Google Calendar API"));
+    }
+    let poll = fast();
+    let (mut rx, _dirty) = spawn_calendar(&e, timing(poll, an_hour()));
+
+    let first = wait_for(
+        &mut rx,
+        "the first snapshot",
+        &[SourceState::Fresh, SourceState::Empty],
+        |_| true,
+    )
+    .await;
+    assert_eq!(
+        first.state,
+        SourceState::Error,
+        "a permission problem is an error, not a throttle: {first:?}"
+    );
+    assert!(first.events.is_empty() && first.error.is_some());
+
+    e.wait_until("five failing requests", |w| {
+        w.hits.iter().filter(|h| h.failed).count() >= 5
+    })
+    .await;
+    assert_backs_off(&failing_gaps(&e.world()), poll);
+}
+
+#[tokio::test]
+async fn a_persistent_403_recovers_when_the_api_is_enabled_and_a_later_failure_starts_the_backoff_over(
+) {
+    let e = env(true, &[]).await;
+    {
+        let mut w = e.world();
+        w.failure = Some((403, None));
+        w.failure_body = Some(access_not_configured("Gmail API"));
+        w.set_inbox(&standard_inbox(), 7);
+    }
+    let (mut rx, _dirty) = spawn_mailbox(&e, timing(fast(), an_hour()));
+    e.wait_until("four failing requests", |w| {
+        w.hits.iter().filter(|h| h.failed).count() >= 4
+    })
+    .await;
+
+    // The user enables the API: the next poll (after the backoff) succeeds.
+    e.world().heal();
+    let healed = wait_for(&mut rx, "a fresh snapshot", &[], |s| {
+        s.state == SourceState::Fresh
+    })
+    .await;
+    assert_eq!(healed.unread_count, 7);
+    assert_eq!(healed.items.len(), 3);
+
+    // It breaks again. A success wiped the memory of the earlier failures, so
+    // the first retry is at the normal poll, not after the long wait the four
+    // earlier failures had built up (1.6 s and more). Deliberately generous.
+    let failed_so_far = e.world().hits.iter().filter(|h| h.failed).count();
+    {
+        let mut w = e.world();
+        w.failure = Some((403, None));
+        w.failure_body = Some(access_not_configured("Gmail API"));
+    }
+    e.wait_until("two new failing requests", |w| {
+        w.hits.iter().filter(|h| h.failed).count() >= failed_so_far + 2
+    })
+    .await;
+    let w = e.world();
+    let failed: Vec<&Hit> = w.hits.iter().filter(|h| h.failed).collect();
+    let gap = failed[failed_so_far + 1]
+        .at
+        .duration_since(failed[failed_so_far].at);
+    assert!(
+        gap < Duration::from_millis(1200),
+        "the first failure after a success is retried at the normal cadence, took {gap:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_throttle_is_still_reported_as_rate_limited_and_not_as_a_persistent_failure() {
+    // The 403 backoff must not swallow real throttling: a 403 rateLimitExceeded
+    // is Google's quota answer and keeps its own, Retry-After-driven handling.
+    let e = env(true, &[]).await;
+    {
+        let mut w = e.world();
+        w.failure = Some((403, Some(2)));
+        w.failure_body = Some(json!({
+            "error": { "code": 403, "message": "Rate Limit Exceeded",
+                       "errors": [{ "reason": "rateLimitExceeded", "domain": "usageLimits" }] }
+        }));
+    }
+    let (mut rx, _dirty) = spawn_mailbox(&e, timing(fast(), an_hour()));
+
+    let snap = wait_for(
+        &mut rx,
+        "a rate-limited snapshot",
+        &[SourceState::Fresh],
+        |s| s.state == SourceState::RateLimited,
+    )
+    .await;
+
+    assert!(snap.retry_at.is_some());
 }

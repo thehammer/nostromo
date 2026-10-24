@@ -42,7 +42,12 @@ pub fn throttle_of(e: &anyhow::Error) -> Option<Option<std::time::Duration>> {
 #[derive(Debug, Default)]
 pub struct ThrottleBackoff {
     consecutive: u32,
+    /// Consecutive non-throttle failures (see [`persistent`](Self::persistent)).
+    failures: u32,
 }
+
+/// Longest quiet period for a persistent non-throttle failure.
+const MAX_PERSISTENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -50,6 +55,19 @@ impl ThrottleBackoff {
     /// A fetch succeeded: the next throttle starts again at the first step.
     pub fn succeeded(&mut self) {
         self.consecutive = 0;
+        self.failures = 0;
+    }
+
+    /// A non-throttle failure (say 403 `accessNotConfigured`). The first one
+    /// is retried at the normal cadence (`None`); a repeat backs off
+    /// `poll * 2^(n-1)`, capped at 5 minutes, instead of hammering every poll.
+    pub fn persistent(&mut self, poll: std::time::Duration) -> Option<std::time::Duration> {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures < 2 {
+            return None;
+        }
+        let factor = 1u32.checked_shl(self.failures - 1).unwrap_or(u32::MAX);
+        Some(poll.saturating_mul(factor).min(MAX_PERSISTENT_WAIT))
     }
 
     /// `e` is how a fetch failed. When it is a throttle, how long to stay
@@ -106,6 +124,21 @@ mod tests {
     fn google_plain_403_is_not_a_throttle() {
         assert!(throttle_of(&google(403, Some("forbidden"), None)).is_none());
         assert!(throttle_of(&google(500, None, None)).is_none());
+    }
+
+    #[test]
+    fn persistent_failures_back_off_and_reset() {
+        let poll = std::time::Duration::from_secs(5);
+        let mut b = ThrottleBackoff::default();
+        assert_eq!(b.persistent(poll), None);
+        assert_eq!(b.persistent(poll), Some(poll * 2));
+        assert_eq!(b.persistent(poll), Some(poll * 4));
+        for _ in 0..40 {
+            b.persistent(poll);
+        }
+        assert_eq!(b.persistent(poll), Some(MAX_PERSISTENT_WAIT));
+        b.succeeded();
+        assert_eq!(b.persistent(poll), None);
     }
 
     #[test]

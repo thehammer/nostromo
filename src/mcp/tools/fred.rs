@@ -9,7 +9,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
 
 use crate::data::{
-    fred_calendar::CalendarSnapshot, fred_mailbox::MailboxSnapshot, graph_client::DeviceFlowPrompt,
+    fred_calendar::CalendarSnapshot,
+    fred_mailbox::{AccountStatus, MailboxSnapshot},
+    graph_client::DeviceFlowPrompt,
     work::model::SourceState,
 };
 use crate::mcp::state::McpSharedState;
@@ -27,6 +29,8 @@ struct SourceView {
     updated_at: Option<DateTime<Utc>>,
     reason: Option<String>,
     auth: Option<Value>,
+    /// Per-account status in multi-account mode; empty in legacy mode.
+    accounts: Vec<Value>,
 }
 
 impl SourceView {
@@ -36,17 +40,49 @@ impl SourceView {
             updated_at: None,
             reason: None,
             auth: None,
+            accounts: Vec::new(),
         }
     }
 }
 
 /// The sign-in prompt as MCP shows it — never a token.
+///
+/// A browser (Google) prompt's URL carries `state`, `login_hint` (the email),
+/// `client_id` and the PKCE challenge, so the agent gets `kind` and `account`
+/// instead. Device-code prompts keep the URL and code.
 fn auth_json(p: &DeviceFlowPrompt) -> Value {
-    json!({
-        "verification_uri": p.verification_uri,
-        "user_code": p.user_code,
-        "expires_at": p.expires_at,
-    })
+    let mut out = if p.kind == "browser" {
+        json!({ "expires_at": p.expires_at })
+    } else {
+        json!({
+            "verification_uri": p.verification_uri,
+            "user_code": p.user_code,
+            "expires_at": p.expires_at,
+        })
+    };
+    out["kind"] = json!(p.kind);
+    if let Some(a) = &p.account {
+        out["account"] = json!(a);
+    }
+    if let Some(a) = &p.provider {
+        out["provider"] = json!(a);
+    }
+    out
+}
+
+fn accounts_json(accounts: &[AccountStatus]) -> Vec<Value> {
+    accounts
+        .iter()
+        .map(|a| {
+            json!({
+                "label": a.account,
+                "provider": a.provider,
+                "state": a.state,
+                "error": a.error,
+                "retry_at": a.retry_at,
+            })
+        })
+        .collect()
 }
 
 fn mailbox_view(snap: Option<&MailboxSnapshot>) -> SourceView {
@@ -58,6 +94,7 @@ fn mailbox_view(snap: Option<&MailboxSnapshot>) -> SourceView {
         updated_at: snap.updated_at,
         reason: snap.error.clone(),
         auth: snap.auth_prompt.as_ref().map(auth_json),
+        accounts: accounts_json(&snap.accounts),
     }
 }
 
@@ -70,6 +107,7 @@ fn calendar_view(snap: Option<&CalendarSnapshot>) -> SourceView {
         updated_at: snap.updated_at,
         reason: snap.error.clone(),
         auth: snap.auth_prompt.as_ref().map(auth_json),
+        accounts: accounts_json(&snap.accounts),
     }
 }
 
@@ -208,6 +246,8 @@ pub fn get_state(state: &McpSharedState) -> Value {
     drop(calendar_borrow);
 
     let (mailbox_state, calendar_state) = (mailbox.state, calendar.state);
+    let (mailbox_accounts, calendar_accounts) =
+        (mailbox.accounts.clone(), calendar.accounts.clone());
     let composite = composite_state(&mailbox, &calendar);
     let worst = if severity(calendar_state) > severity(mailbox_state) {
         calendar
@@ -225,6 +265,16 @@ pub fn get_state(state: &McpSharedState) -> Value {
         "calendar_state": calendar_state,
     });
     insert_reason_auth(&mut out, &worst);
+    // Both sources' per-account status, whichever one is "worst".
+    if let Some(obj) = out.as_object_mut() {
+        obj.remove("accounts");
+        if !mailbox_accounts.is_empty() {
+            obj.insert("accounts".into(), json!(mailbox_accounts));
+        }
+        if !calendar_accounts.is_empty() {
+            obj.insert("calendar_accounts".into(), json!(calendar_accounts));
+        }
+    }
     out
 }
 
@@ -237,5 +287,8 @@ fn insert_reason_auth(out: &mut Value, view: &SourceView) {
     }
     if let Some(a) = &view.auth {
         obj.insert("auth".into(), a.clone());
+    }
+    if !view.accounts.is_empty() {
+        obj.insert("accounts".into(), json!(view.accounts));
     }
 }
