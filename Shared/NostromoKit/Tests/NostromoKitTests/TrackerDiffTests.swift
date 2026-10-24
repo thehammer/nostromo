@@ -363,3 +363,190 @@ final class TrackerDiffTests: XCTestCase {
         XCTAssertFalse(section.differsOnlyInTime(from: section), "only item rows tick")
     }
 }
+
+// MARK: - The longest common subsequence behind "which rows moved"
+
+// A reorder is told apart from rows that merely shifted by keeping the longest common subsequence of
+// the old and new keys and calling the rest moved. The table behind it is O(old x new), so a 500-item
+// board dragged through many layouts must not pay for rows that did not change: a common prefix and
+// suffix are stable by construction and never need the table. These tests pin the result (it is still
+// a longest common subsequence whatever is trimmed) and that the cheap cases are cheap.
+
+final class TrackerDiffLongestCommonSubsequenceTests: XCTestCase {
+
+    private func lcs(_ a: [String], _ b: [String]) -> Set<String> {
+        TrackerDiff.longestCommonSubsequence(a, b)
+    }
+
+    private func keys(_ count: Int) -> [String] {
+        (0..<count).map { "k\($0)" }
+    }
+
+    private func prose(_ key: String) -> TrackerRow {
+        TrackerRow(key: key, content: .prose(TrackerProseRow(key: key, blocks: [.paragraph([.text("x")])])))
+    }
+
+    private func moves(_ ops: [TrackerDiffOp]) -> [String] {
+        ops.compactMap { op -> String? in
+            if case .move(let key, _) = op { return key }
+            return nil
+        }
+    }
+
+    /// The length of a longest common subsequence, computed the plain way (no trimming, no shortcuts).
+    private func referenceLength(_ a: [String], _ b: [String]) -> Int {
+        var previous = [Int](repeating: 0, count: b.count + 1)
+        for x in a {
+            var row = [Int](repeating: 0, count: b.count + 1)
+            for (j, y) in b.enumerated() {
+                row[j + 1] = x == y ? previous[j] + 1 : max(previous[j + 1], row[j])
+            }
+            previous = row
+        }
+        return previous[b.count]
+    }
+
+    private struct SeededGenerator: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    // MARK: Results
+
+    func testIdenticalListsKeepEveryKey() {
+        let list = ["a", "b", "c", "d", "e"]
+        XCTAssertEqual(lcs(list, list), Set(list))
+    }
+
+    func testACommonPrefixAndSuffixAroundADifferentMiddleKeepsExactlyThePrefixAndSuffix() {
+        let old = ["p1", "p2", "x", "y", "s1", "s2"]
+        let new = ["p1", "p2", "u", "v", "w", "s1", "s2"]
+        XCTAssertEqual(lcs(old, new), ["p1", "p2", "s1", "s2"])
+        XCTAssertEqual(lcs(new, old), ["p1", "p2", "s1", "s2"])
+    }
+
+    func testDisjointListsHaveNothingInCommon() {
+        XCTAssertEqual(lcs(["a", "b", "c"], ["x", "y"]), [])
+        XCTAssertEqual(lcs(["x", "y"], ["a", "b", "c"]), [])
+    }
+
+    func testAnEmptyListHasNothingInCommonWithAnything() {
+        XCTAssertEqual(lcs([], []), [])
+        XCTAssertEqual(lcs(["a", "b"], []), [])
+        XCTAssertEqual(lcs([], ["a", "b"]), [])
+    }
+
+    func testOneListThatIsAPrefixOrASuffixOfTheOtherIsKeptWhole() {
+        XCTAssertEqual(lcs(["a", "b", "c"], ["a", "b", "c", "d", "e"]), ["a", "b", "c"])
+        XCTAssertEqual(lcs(["a", "b", "c", "d", "e"], ["a", "b", "c"]), ["a", "b", "c"])
+        XCTAssertEqual(lcs(["d", "e"], ["a", "b", "c", "d", "e"]), ["d", "e"])
+        XCTAssertEqual(lcs(["a", "b", "c", "d", "e"], ["d", "e"]), ["d", "e"])
+    }
+
+    func testOneKeyMovedFromTheFrontToTheBackKeepsEveryOtherKey() {
+        let old = keys(50)
+        let new = Array(old.dropFirst()) + [old[0]]
+        XCTAssertEqual(lcs(old, new), Set(old).subtracting(["k0"]))
+    }
+
+    func testOneKeyMovedFromTheBackToTheFrontKeepsEveryOtherKey() {
+        let old = keys(50)
+        let new = [old[49]] + Array(old.dropLast())
+        XCTAssertEqual(lcs(old, new), Set(old).subtracting(["k49"]))
+    }
+
+    func testAKeyAtOneEndAndAnotherInTheMiddleMovedStillKeepsTheRest() {
+        let old = ["a", "b", "c", "d", "e", "f"]
+        let new = ["a", "c", "d", "f", "e", "b"]
+        XCTAssertEqual(lcs(old, new).count, referenceLength(old, new))
+    }
+
+    func testWhateverIsTrimmedTheResultIsAValidLongestCommonSubsequence() {
+        var rng = SeededGenerator(state: 20_251_015)
+        let universe = keys(14)
+        for round in 0..<300 {
+            let a = Array(universe.shuffled(using: &rng).prefix(Int.random(in: 0...14, using: &rng)))
+            var b = a
+            if !b.isEmpty, Bool.random(using: &rng) { b.remove(at: Int.random(in: 0..<b.count, using: &rng)) }
+            if let extra = universe.filter({ !a.contains($0) }).randomElement(using: &rng) {
+                b.insert(extra, at: Int.random(in: 0...b.count, using: &rng))
+            }
+            if b.count > 1, Bool.random(using: &rng) {
+                b.swapAt(Int.random(in: 0..<b.count, using: &rng), Int.random(in: 0..<b.count, using: &rng))
+            }
+            let kept = lcs(a, b)
+            XCTAssertEqual(a.filter { kept.contains($0) }, b.filter { kept.contains($0) },
+                           "round \(round): what is kept is in the same order in both \(a) \(b)")
+            XCTAssertEqual(kept.count, referenceLength(a, b), "round \(round): it is a longest one \(a) \(b)")
+        }
+    }
+
+    // MARK: Cost
+
+    func testAThousandsOfRowsWithOneSwappedPairInTheMiddleIsCheap() {
+        let n = 4_000
+        let old = keys(n)
+        var new = old
+        new.swapAt(2_000, 2_001)
+
+        let start = Date()
+        let kept = lcs(old, new)
+        let seconds = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(kept.count, n - 1)
+        XCTAssertTrue(kept.isSuperset(of: Set(old).subtracting(["k2000", "k2001"])), "everything else stays put")
+        XCTAssertEqual(kept.intersection(["k2000", "k2001"]).count, 1, "one of the swapped pair moved, not both")
+        // Generous: with the common prefix and suffix trimmed the table is two keys wide; without it,
+        // it is 16 million cells.
+        XCTAssertLessThan(seconds, 2.0, "took \(seconds) s")
+    }
+
+    // MARK: Through `ops`
+
+    func testSwappingOnePairInAThousandsOfRowsIsExactlyOneMoveAndIsCheap() {
+        let n = 4_000
+        let old = keys(n).map(prose)
+        var new = old
+        new.swapAt(2_000, 2_001)
+
+        let start = Date()
+        let ops = TrackerDiff.ops(from: old, to: new)
+        let seconds = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(ops.count, 1)
+        XCTAssertTrue(["k2000", "k2001"].contains(moves(ops).first ?? ""), "\(moves(ops))")
+        XCTAssertLessThan(seconds, 2.0, "took \(seconds) s")
+    }
+
+    func testMovingOneRowToTheEndOfAListWithALongStableStartIsExactlyOneMove() {
+        let stable = keys(10)
+        let tail = (0..<10).map { "s\($0)" }
+        let old = (stable + ["X"] + tail).map(prose)
+        let new = (stable + tail + ["X"]).map(prose)
+        let ops = TrackerDiff.ops(from: old, to: new)
+        XCTAssertEqual(ops.count, 1)
+        XCTAssertEqual(moves(ops), ["X"])
+        if case .move(_, let to)? = ops.first {
+            XCTAssertEqual(to, new.count - 1)
+        }
+    }
+
+    func testMovingOneRowToTheFrontOfAListWithALongStableEndIsExactlyOneMove() {
+        let head = keys(10)
+        let stable = (0..<10).map { "s\($0)" }
+        let old = (head + ["X"] + stable).map(prose)
+        let new = (["X"] + head + stable).map(prose)
+        let ops = TrackerDiff.ops(from: old, to: new)
+        XCTAssertEqual(ops.count, 1)
+        XCTAssertEqual(moves(ops), ["X"])
+        if case .move(_, let to)? = ops.first {
+            XCTAssertEqual(to, 0)
+        }
+    }
+}

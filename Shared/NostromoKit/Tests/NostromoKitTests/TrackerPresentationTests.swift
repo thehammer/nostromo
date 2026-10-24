@@ -1034,6 +1034,52 @@ final class TrackerMarkdownTests: XCTestCase {
         }
     }
 
+    // MARK: A node this client does not recognise
+
+    /// A board of `# B`, whatever `middle` holds, and `## Now`, decoded the way the app decodes it.
+    private func board(withNodesBetweenTheTitleAndNow middle: [TFx.Obj]) throws -> TrackerBoardViewWire {
+        let title: TFx.Obj = ["type": "title", "text": "B", "source": "# B\n"]
+        let now: TFx.Obj = ["type": "section", "id": "now", "title": "Now", "source": "## Now\n"]
+        let nodes: [TFx.Obj] = [title] + middle + [now]
+        let log: [TFx.Obj] = []
+        let body: TFx.Obj = ["title": "B", "path": "/p.md", "version": 3, "hidden_by_user": false,
+                             "log": log, "nodes": nodes]
+        return try TFx.board(fromFrame: ["type": "tracker_board", "tag": "t", "board": body])
+    }
+
+    private func hologram(_ source: String) -> TFx.Obj {
+        ["type": "hologram", "source": source, "extra": ["a": 1]]
+    }
+
+    func testACopyOfTheBoardDoesNotSilentlyDropANodeItCouldNotRead() throws {
+        let view = try board(withNodesBetweenTheTitleAndNow: [hologram("???")])
+        XCTAssertEqual(view.nodes.count, 3, "setup: the unknown node is on the board")
+        XCTAssertEqual(view.nodes[1], .unknown, "setup: and decoded as unknown")
+
+        let copy = TrackerMarkdown.board(view)
+        XCTAssertTrue(copy.hasPrefix("# B\n"), copy)
+        XCTAssertTrue(copy.hasSuffix("## Now\n"), copy)
+        let middle = String(copy.dropFirst("# B\n".count).dropLast("## Now\n".count))
+        XCTAssertFalse(middle.isEmpty, "the copy shows that something was there: \(copy)")
+        XCTAssertTrue(middle.hasSuffix("\n"), "on a line of its own: \(middle)")
+        // The wire carries no raw text for an unknown node, so what stands in for it is a visible
+        // markdown comment (or, should the wire ever carry the raw text, that text).
+        XCTAssertTrue((middle.contains("<!--") && middle.contains("-->")) || middle.contains("???"),
+                      "a visible placeholder: \(middle)")
+    }
+
+    func testEveryUnrecognisedNodeLeavesItsOwnPlaceholderAndTheKnownNodesKeepTheirText() throws {
+        let view = try board(withNodesBetweenTheTitleAndNow: [hologram("one"), hologram("two")])
+        let copy = TrackerMarkdown.board(view)
+        let middle = String(copy.dropFirst("# B\n".count).dropLast("## Now\n".count))
+        let comments = middle.components(separatedBy: "<!--").count - 1
+        let raw = (middle.contains("one") ? 1 : 0) + (middle.contains("two") ? 1 : 0)
+        XCTAssertGreaterThanOrEqual(max(comments, raw), 2, "two unrecognised nodes, two placeholders: \(middle)")
+        XCTAssertTrue(copy.hasPrefix("# B\n"))
+        XCTAssertTrue(copy.hasSuffix("## Now\n"))
+        XCTAssertEqual(TrackerMarkdown.section("now", in: view), "## Now\n", "a known section still copies as written")
+    }
+
     func testUnknownIdsCopyNothing() throws {
         let board = try TFx.golden()
         XCTAssertNil(TrackerMarkdown.section("no-such-section", in: board))

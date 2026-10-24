@@ -25,8 +25,6 @@ final class TrackerStore {
 
     private(set) var boards: [String: TrackerBoardViewWire] = [:]
     private(set) var summaries: [String: TrackerSummaryFrameWire] = [:]
-    /// False from a lost daemon connection until a board arrives again.
-    private(set) var isConnected = true
 
     private let now: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
@@ -54,7 +52,6 @@ final class TrackerStore {
     func ingest(_ msg: ServerMsg) {
         switch msg {
         case .trackerBoard(let frame):
-            isConnected = true
             // `board: null` means the focus has no tracker now. The pane only exists while the
             // tree has a tracker leaf, and it never blanks, so the last board stays. An identical
             // board is still announced: the pane's diff turns it into no change at all, which is
@@ -71,10 +68,9 @@ final class TrackerStore {
         }
     }
 
-    /// The daemon connection dropped. Boards stay as they were: no placeholder, no `Loading`.
-    func daemonDisconnected() {
-        isConnected = false
-    }
+    /// The daemon connection dropped. Boards stay as they were: no placeholder, no `Loading`, so
+    /// there is nothing to do; the reconnect's replayed board replaces them.
+    func daemonDisconnected() {}
 
     /// The focus is gone.
     func forget(tag: String) {

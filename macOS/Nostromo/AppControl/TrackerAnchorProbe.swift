@@ -12,7 +12,7 @@ struct TrackerAnchorSnapshot: Codable, Equatable {
 
     struct Pending: Codable, Equatable {
         var key: String
-        /// `done_in_place`, `moved`, `removed` or `selection`.
+        /// `done_in_place`, `kept_in_place`, `moved`, `removed` or `selection`.
         var kind: String
     }
 

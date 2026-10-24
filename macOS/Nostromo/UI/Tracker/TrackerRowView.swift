@@ -53,6 +53,18 @@ final class TrackerRowView: NSView {
     static let markWidth: CGFloat = 18
     static let timeWidth: CGFloat = 44
     static let gap: CGFloat = 6
+    /// The owner chip never grows past this (a 32-character owner is ~190 pt at 11 pt); longer owners
+    /// truncate with a tail ellipsis and show in full as the chip's tooltip.
+    static let maxOwnerChipWidth: CGFloat = 80
+    /// The env badge's cap (a short word such as PROD or STAGING; longer ones truncate).
+    static let envBadgeMaxWidth: CGFloat = 48
+    static let chipHeight: CGFloat = 15
+
+    /// The least width an item's text keeps beside its marks: when the owner chip and env badge would
+    /// leave less than this on the first line they move to a line below the text instead.
+    static func minimumTextWidth(forRowWidth width: CGFloat) -> CGFloat {
+        max(120, width * 0.4)
+    }
 
     private(set) var row: TrackerRow
     /// A stub keeps at least the height of the row it replaced, so holding a change never moves
@@ -74,7 +86,8 @@ final class TrackerRowView: NSView {
     private(set) var textViews: [TrackerTextView] = []
     private var markLabel: NSTextField?
     private(set) var timeLabel: NSTextField?
-    private var badges: [NSTextField] = []
+    private(set) var badges: [NSTextField] = []
+    private var ownerChip: NSTextField?
     private var mainText: TrackerTextView?
     private var noteText: TrackerTextView?
     /// The row's prose (a prose row, or an expanded note).
@@ -276,21 +289,41 @@ final class TrackerRowView: NSView {
     private func layoutItem(_ item: TrackerItemRow, width: CGFloat) -> CGFloat {
         let h = Self.hPad, v = Self.vPad
         let textX = h + Self.markWidth
-        // Right column: badges then the fixed-width time.
+        // Right column: the fixed-width time, then the badges if they leave the text its minimum
+        // width; otherwise the badges take a line below the text.
         var right = width - h
         timeLabel?.frame = NSRect(x: right - Self.timeWidth, y: v + 1, width: Self.timeWidth, height: 15)
         right -= Self.timeWidth + Self.gap
-        for badge in badges.reversed() {
-            let w = ceil(badge.intrinsicContentSize.width) + 8
-            badge.frame = NSRect(x: right - w, y: v + 1, width: w, height: 15)
-            right -= w + 4
+        let widths = badges.map { badgeWidth($0) }
+        let badgesWidth = widths.reduce(0) { $0 + $1 + 4 }
+        let minimumText = Self.minimumTextWidth(forRowWidth: width)
+        let textWidthAlone = max(right - Self.gap - textX, 1)
+        let stacked = !badges.isEmpty && textWidthAlone - badgesWidth < minimumText
+        var textWidth = textWidthAlone
+        if !stacked {
+            for (badge, w) in zip(badges, widths).reversed() {
+                badge.frame = NSRect(x: right - w, y: v + 1, width: w, height: Self.chipHeight)
+                right -= w + 4
+            }
+            textWidth = max(right - Self.gap - textX, 1)
         }
-        let textWidth = max(right - Self.gap - textX, 1)
         markLabel?.frame = NSRect(x: h, y: v, width: Self.markWidth, height: 17)
         var y = v
         let mainHeight = mainText?.height(forWidth: textWidth) ?? 0
         mainText?.frame = NSRect(x: textX, y: y, width: textWidth, height: mainHeight)
         y += max(mainHeight, 17)
+        if stacked {
+            // The chips' own line, under the text, inside the row.
+            y += 2
+            var x = textX
+            let limit = max(width - h, textX)
+            for (badge, w) in zip(badges, widths) {
+                let fitted = min(w, max(limit - x, 1))
+                badge.frame = NSRect(x: x, y: y, width: fitted, height: Self.chipHeight)
+                x += fitted + 4
+            }
+            y += Self.chipHeight
+        }
 
         let blockWidth = max(width - h - textX, 1)
         if let proseView {
@@ -325,12 +358,19 @@ final class TrackerRowView: NSView {
         return height
     }
 
+    /// A badge's width: its text plus padding, never past its cap.
+    private func badgeWidth(_ badge: NSTextField) -> CGFloat {
+        let cap = badge === ownerChip ? Self.maxOwnerChipWidth : Self.envBadgeMaxWidth
+        return min(ceil(badge.intrinsicContentSize.width) + 8, cap)
+    }
+
     // MARK: - Building
 
     private func build() {
         subviews.forEach { $0.removeFromSuperview() }
         textViews = []
         badges = []
+        ownerChip = nil
         markLabel = nil
         timeLabel = nil
         mainText = nil
@@ -408,6 +448,8 @@ final class TrackerRowView: NSView {
             let badge = addLabel(env, color: item.isHazard ? TrackerTheme.hazard : muted,
                                  font: NSFont.systemFont(ofSize: 10, weight: .semibold))
             badge.alignment = .center
+            badge.lineBreakMode = .byTruncatingTail
+            badge.toolTip = env
             badge.wantsLayer = true
             badge.layer?.backgroundColor = (item.isHazard ? TrackerTheme.hazardFill : TrackerTheme.badgeFill).cgColor
             badge.layer?.cornerRadius = 3
@@ -416,10 +458,13 @@ final class TrackerRowView: NSView {
         if let owner = item.owner, !owner.isEmpty {
             let chip = addLabel(owner, color: muted, font: TrackerTheme.metaFont)
             chip.alignment = .center
+            chip.lineBreakMode = .byTruncatingTail
+            chip.toolTip = owner
             chip.wantsLayer = true
             chip.layer?.backgroundColor = TrackerTheme.badgeFill.cgColor
             chip.layer?.cornerRadius = 7
             badges.append(chip)
+            ownerChip = chip
         }
         let time = addLabel(item.relativeTime, color: muted, font: TrackerTheme.timeFont)
         time.alignment = .right

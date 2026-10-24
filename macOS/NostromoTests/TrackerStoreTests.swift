@@ -92,7 +92,6 @@ final class TrackerStoreTests: XCTestCase {
         record(store, into: &bag) { heard.append($0.tag) }
         store.ingest(.unknown)
         XCTAssertEqual(heard, [])
-        XCTAssertTrue(store.isConnected)
     }
 
     // MARK: - A null board never blanks a focus
@@ -266,14 +265,12 @@ final class TrackerStoreTests: XCTestCase {
         store.ingest(try a.message())
         store.ingest(try b.message())
         store.ingest(try Fx.summaryMessage(tag: "kate-a"))
-        XCTAssertTrue(store.isConnected)
         var bag = Set<AnyCancellable>()
         var heard: [String] = []
         record(store, into: &bag) { heard.append($0.tag) }
 
         store.daemonDisconnected()
 
-        XCTAssertFalse(store.isConnected)
         XCTAssertEqual(store.board(for: "kate-a"), try a.decodedBoard())
         XCTAssertEqual(store.board(for: "kate-b"), try b.decodedBoard())
         XCTAssertNotNil(store.summary(for: "kate-a"))
@@ -293,7 +290,6 @@ final class TrackerStoreTests: XCTestCase {
         s.setVersion(2)
         store.ingest(try s.message())
 
-        XCTAssertTrue(store.isConnected, "a board arriving means the daemon is back")
         XCTAssertEqual(deliveries.count, 1)
         XCTAssertEqual(store.board(for: "kate-a"), try s.decodedBoard())
     }

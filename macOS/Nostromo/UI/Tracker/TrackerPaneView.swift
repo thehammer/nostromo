@@ -174,6 +174,21 @@ final class TrackerPaneView: NSView {
         render()
     }
 
+    /// The 30 s clock only runs while the pane can be seen: in a window, not hidden, no hidden ancestor.
+    var isTickTimerRunning: Bool { tickTimer != nil }
+
+    private func updateTickTimer() {
+        let shouldRun = tickInterval != nil && window != nil && !isHiddenOrHasHiddenAncestor
+        if !shouldRun {
+            tickTimer?.invalidate()
+            tickTimer = nil
+        } else if tickTimer == nil, let tickInterval {
+            let timer = Timer(timeInterval: tickInterval, repeats: true) { [weak self] _ in self?.tick() }
+            RunLoop.main.add(timer, forMode: .common)
+            tickTimer = timer
+        }
+    }
+
     /// The user picked a filter. View-only: nothing goes to the daemon.
     func setFilter(_ filter: TrackerFilter) {
         guard filter != self.filter else { return }
@@ -210,6 +225,7 @@ final class TrackerPaneView: NSView {
         let anchor = captureAnchor()
         let visible = visibleKeys()
         let scrollTop = scrollView.frame.minY
+        let atVeryTop = clipView.bounds.minY <= 0.5
         header.update(target.header)
         banner.update(target.banner)
         strip.update(target.strip)
@@ -250,8 +266,10 @@ final class TrackerPaneView: NSView {
 
         layoutChrome()
         // The banner or the strip appearing or going pushes the scroll view's top by this much: the
-        // reading position follows it, so the line being read stays where it is on screen.
+        // reading position follows it, so the line being read stays where it is on screen. At the
+        // very top (offset 0) there is no line being read below the fold: stay at the top.
         let chromeShift = scrollView.frame.minY - scrollTop
+        let followShift = atVeryTop ? 0 : chromeShift
         if result.applyNow.isEmpty && chromeShift == 0 && contentWidth == laidOutWidth && !firstRender {
             rowsUpdatedLast = 0
             return   // nothing on screen changed (a re-check on scroll, an identical board)
@@ -261,7 +279,7 @@ final class TrackerPaneView: NSView {
             if case .move(let key, _) = op { return key }
             return nil
         })
-        restore(anchor, renamed: result.renamed, skipping: moved, shift: chromeShift, firstRender: firstRender)
+        restore(anchor, renamed: result.renamed, skipping: moved, shift: followShift, firstRender: firstRender)
 
         if !result.applyNow.isEmpty { renderGeneration += 1 }
         rowsUpdatedLast = updated
@@ -332,6 +350,13 @@ final class TrackerPaneView: NSView {
     }
 
     /// Stack the row views in display order at `width`.
+    ///
+    /// Every row is measured, on screen or not (design contract §9: no virtualisation up to 500
+    /// items). A measurement is a TextKit layout of a few lines, and a row caches its height per
+    /// width, so a live divider drag costs one pass over the rows per width step; the 500-item
+    /// board test (`testAFiveHundredItemBoard…`) puts a generous time budget on 30 such steps.
+    /// Measuring only the rows near the viewport would leave the rows above it with guessed
+    /// heights, which moves the reading anchor when they are measured later: not worth it here.
     private func layoutRows(width: CGFloat) {
         laidOutWidth = width
         var y: CGFloat = 0
@@ -417,8 +442,7 @@ final class TrackerPaneView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        tickTimer?.invalidate()
-        tickTimer = nil
+        updateTickTimer()
         guard window != nil else {
             // A layout rebuild detaches the reused pane and puts it back within the same turn of
             // the run loop; only a pane still out of a window after that was really away.
@@ -427,19 +451,21 @@ final class TrackerPaneView: NSView {
             }
             return
         }
-        if let tickInterval {
-            let timer = Timer(timeInterval: tickInterval, repeats: true) { [weak self] _ in self?.tick() }
-            RunLoop.main.add(timer, forMode: .common)
-            tickTimer = timer
-        }
         if wasAway {
             wasAway = false
             reopened()
         }
     }
 
+    override func viewDidHide() {
+        super.viewDidHide()
+        updateTickTimer()
+    }
+
     override func viewDidUnhide() {
         super.viewDidUnhide()
+        updateTickTimer()
+        if tickTimer != nil { tick() }   // the times moved on while hidden
         reopened()
     }
 

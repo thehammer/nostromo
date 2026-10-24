@@ -122,6 +122,8 @@
 		AA0000000000000000000017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000007 /* Assets.xcassets */; };
 		AA0000000000000000000011 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000001 /* main.swift */; };
 		AA0000000000000000000012 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000002 /* AppDelegate.swift */; };
+		ZZ0000000000000000MM0002 /* MainMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MM0001 /* MainMenu.swift */; };
+		ZZ0000000000000000MM0003 /* MainMenu.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MM0001 /* MainMenu.swift */; };
 		AA0000000000000000000013 /* NostromoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* NostromoWindow.swift */; };
 		AA0000020000000000000101 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001 /* Models.swift */; };
 		AA0000020000000000000102 /* NostromodClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
@@ -626,6 +628,7 @@
 		PS00000000000000000000F0 /* ProseSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProseSelectionTests.swift; sourceTree = "<group>"; };
 		AA0000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		AA0000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MM0001 /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
 		AA0000000000000000000003 /* NostromoWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoWindow.swift; sourceTree = "<group>"; };
 		AA0000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA0000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -948,6 +951,7 @@
 			children = (
 				AA0000000000000000000001 /* main.swift */,
 				AA0000000000000000000002 /* AppDelegate.swift */,
+				ZZ0000000000000000MM0001 /* MainMenu.swift */,
 				AA0000000000000000000003 /* NostromoWindow.swift */,
 				AA0000000000000000000005 /* Info.plist */,
 				AA0000000000000000000007 /* Assets.xcassets */,
@@ -1549,6 +1553,7 @@
 				HH000000000000000000081 /* TurnHeightEstimator.swift in Sources */,
 				AA0000000000000000000011 /* main.swift in Sources */,
 				AA0000000000000000000012 /* AppDelegate.swift in Sources */,
+				ZZ0000000000000000MM0002 /* MainMenu.swift in Sources */,
 				AA0000000000000000000013 /* NostromoWindow.swift in Sources */,
 				ZP0000000000000000000011 /* DisplayIdentity.swift in Sources */,
 				ZP0000000000000000000015 /* DisplayTopology.swift in Sources */,
@@ -1681,6 +1686,7 @@
 				ZZ0000000000000000M20102 /* ModelStore.swift in TestSources */,
 				ZZ0000000000000000M20112 /* ModelPresentation.swift in TestSources */,
 				ZZ0000000000000000M20122 /* ModelChip.swift in TestSources */,
+				ZZ0000000000000000MM0003 /* MainMenu.swift in TestSources */,
 				ZZ0000000000000000M20132 /* ModelPopover.swift in TestSources */,
 				ZZ0000000000000000M20142 /* CreateFocusModelPickers.swift in TestSources */,
 				ZZ0000000000000000M20152 /* ModelDefaultsView.swift in TestSources */,

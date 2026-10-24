@@ -604,7 +604,9 @@ final class TrackerGateHarness {
     /// at the same place on screen (≤ 1 pt), and, when nothing above the scroll view changed height,
     /// it is still the first visible row with the viewport top's offset into it moved by at most
     /// 1 pt; the pane never took focus. (When the banner or the strip appears, the scroll view's top
-    /// moves down and the content scrolls by as much, so the read line stays put on screen.)
+    /// moves down and the content scrolls by as much, so the read line stays put on screen. The one
+    /// exception is a pane at offset 0: there is no line being read below the fold, so it stays at
+    /// the very top, scrolled by nothing, and the first row stays the first row at offset 0.)
     func assertNoMove(_ name: String, _ event: TrackerGateEvent,
                       file: StaticString = #filePath, line: UInt = #line) {
         let before = pane.anchorSnapshot(windowIndex: 0)
@@ -612,6 +614,7 @@ final class TrackerGateHarness {
         let readKey = before.firstVisible?.rowKey
         let screenBefore = readKey.flatMap(screenTop(of:))
         let chromeBefore = pane.scrollView.frame.minY
+        let atTop = before.scrollY <= 0.5
         do {
             try perform(event)
         } catch {
@@ -619,7 +622,13 @@ final class TrackerGateHarness {
             return
         }
         let after = pane.anchorSnapshot(windowIndex: 0)
-        if let readKey, let screenBefore, let screenAfter = screenTop(of: readKey) {
+        if atTop && pane.scrollView.frame.minY != chromeBefore {
+            XCTAssertLessThanOrEqual(after.scrollY, 0.5, "\(name): the pane left the top of the board (scrollY \(after.scrollY))",
+                                     file: file, line: line)
+            XCTAssertEqual(after.firstVisible?.rowKey, readKey, "\(name): first visible row changed", file: file, line: line)
+            XCTAssertLessThanOrEqual(after.firstVisible?.offsetPt ?? .infinity, 1,
+                                     "\(name): the first row was scrolled into", file: file, line: line)
+        } else if let readKey, let screenBefore, let screenAfter = screenTop(of: readKey) {
             let moved = abs(screenAfter - screenBefore)
             XCTAssertLessThanOrEqual(moved, 1, "\(name): the line being read (\(readKey)) moved \(moved) pt on screen",
                                      file: file, line: line)
@@ -717,6 +726,95 @@ final class TrackerScrollSafetyTests: XCTestCase {
         for (i, event) in TrackerGateScript.events().enumerated() {
             harness.assertNoMove("top #\(i + 1) \(event.name)", event)
         }
+    }
+
+    // MARK: - The banner or the strip appearing at offset 0
+
+    /// The first displayed row, the viewport top and the scroll position at the very top of the board.
+    private func assertAtTheVeryTop(_ harness: TrackerGateHarness, firstRow: String, _ message: String,
+                                    file: StaticString = #filePath, line: UInt = #line) {
+        let snapshot = harness.pane.anchorSnapshot(windowIndex: 0)
+        XCTAssertEqual(snapshot.scrollY, 0, accuracy: 0.5, "\(message): scrollY", file: file, line: line)
+        XCTAssertEqual(harness.pane.clipView.bounds.minY, 0, accuracy: 0.5, "\(message): clip top", file: file, line: line)
+        XCTAssertEqual(snapshot.firstVisible?.rowKey, firstRow, "\(message): first visible row", file: file, line: line)
+        XCTAssertEqual(snapshot.firstVisible?.offsetPt ?? .infinity, 0, accuracy: 0.5,
+                       "\(message): offset into the first row", file: file, line: line)
+        XCTAssertEqual(harness.frame(of: firstRow)?.minY ?? .infinity, 0, accuracy: 0.5,
+                       "\(message): the first row is at the top of the document", file: file, line: line)
+    }
+
+    func testTheWaitingStripAppearingAtOffsetZeroLeavesThePaneAtTheTopWithTheFirstRowStillFirst() throws {
+        let harness = try makeHarness(.top)
+        let pane = harness.pane
+        let firstRow = try XCTUnwrap(pane.anchorSnapshot(windowIndex: 0).firstVisible?.rowKey)
+        assertAtTheVeryTop(harness, firstRow: firstRow, "setup")
+        XCTAssertEqual(pane.strip.preferredHeight, 0, "setup: nothing waits yet")
+        let chromeBefore = pane.scrollView.frame.minY
+
+        let item = try harness.requireItem(.below) { $0.status == .todo }
+        try harness.mutate { try $0.setStatus(item.id, "needs-you") }
+
+        XCTAssertGreaterThan(pane.strip.preferredHeight, 0, "the strip appeared")
+        XCTAssertEqual(pane.scrollView.frame.minY - chromeBefore, pane.strip.preferredHeight, accuracy: 0.5,
+                       "it pushed the scroll view down by its own height")
+        assertAtTheVeryTop(harness, firstRow: firstRow, "after the strip appeared")
+
+        try harness.mutate { try $0.setStatus(item.id, "todo") }
+        XCTAssertEqual(pane.strip.preferredHeight, 0, "the strip went again")
+        assertAtTheVeryTop(harness, firstRow: firstRow, "after the strip went")
+    }
+
+    func testTheBannerAppearingAtOffsetZeroLeavesThePaneAtTheTopWithTheFirstRowStillFirst() throws {
+        let harness = try makeHarness(.top)
+        let pane = harness.pane
+        let firstRow = try XCTUnwrap(pane.anchorSnapshot(windowIndex: 0).firstVisible?.rowKey)
+        assertAtTheVeryTop(harness, firstRow: firstRow, "setup")
+        XCTAssertEqual(pane.banner.preferredHeight, 0, "setup: no banner yet")
+
+        try harness.mutate { $0.setBanner() }
+        XCTAssertGreaterThan(pane.banner.preferredHeight, 0, "the banner appeared")
+        assertAtTheVeryTop(harness, firstRow: firstRow, "after the banner appeared")
+
+        try harness.mutate { $0.clearBanner() }
+        XCTAssertEqual(pane.banner.preferredHeight, 0, "the banner went")
+        assertAtTheVeryTop(harness, firstRow: firstRow, "after the banner went")
+    }
+
+    func testTheStripAndTheBannerTogetherAtOffsetZeroStillLeaveThePaneAtTheTop() throws {
+        let harness = try makeHarness(.top)
+        let firstRow = try XCTUnwrap(harness.pane.anchorSnapshot(windowIndex: 0).firstVisible?.rowKey)
+        let item = try harness.requireItem(.below) { $0.status == .todo }
+        try harness.mutate { board in
+            board.setBanner()
+            try board.setStatus(item.id, "needs-you")
+        }
+        XCTAssertGreaterThan(harness.pane.banner.preferredHeight, 0)
+        XCTAssertGreaterThan(harness.pane.strip.preferredHeight, 0)
+        assertAtTheVeryTop(harness, firstRow: firstRow, "after both appeared")
+    }
+
+    func testTheWaitingStripAppearingWhileScrolledAwayFromTheTopStillKeepsTheReadingLineStationary() throws {
+        let harness = try makeHarness(.top)
+        try harness.scroll(toRow: "section:next", offset: 10)
+        let pane = harness.pane
+        let before = pane.anchorSnapshot(windowIndex: 0)
+        XCTAssertGreaterThan(before.scrollY, 100, "setup: scrolled into the board")
+        let readKey = try XCTUnwrap(before.firstVisible?.rowKey)
+        let screenBefore = try XCTUnwrap(harness.screenTop(of: readKey))
+        let chromeBefore = pane.scrollView.frame.minY
+
+        let item = try harness.requireItem(.below) { $0.status == .todo }
+        try harness.mutate { try $0.setStatus(item.id, "needs-you") }
+
+        XCTAssertGreaterThan(pane.strip.preferredHeight, 0, "the strip appeared")
+        let shift = pane.scrollView.frame.minY - chromeBefore
+        XCTAssertEqual(shift, pane.strip.preferredHeight, accuracy: 0.5)
+        let after = pane.anchorSnapshot(windowIndex: 0)
+        XCTAssertEqual(after.firstVisible?.rowKey, readKey, "the row being read is still the first visible row")
+        XCTAssertEqual(after.firstVisible?.offsetPt ?? .infinity, before.firstVisible?.offsetPt ?? 0, accuracy: 1)
+        XCTAssertEqual(try XCTUnwrap(harness.screenTop(of: readKey)), screenBefore, accuracy: 1,
+                       "the line being read did not move on screen")
+        XCTAssertEqual(after.scrollY, before.scrollY + Double(shift), accuracy: 1, "the content scrolled by the strip's height")
     }
 
     // MARK: - PRD 18a: done

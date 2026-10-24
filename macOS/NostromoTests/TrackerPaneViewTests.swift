@@ -995,7 +995,6 @@ final class TrackerPaneViewTests: XCTestCase {
         rig.store.daemonDisconnected()
         rig.pane.render()
         rig.settle()
-        XCTAssertFalse(rig.store.isConnected)
         XCTAssertEqual(rig.pane.displayedRows.map(\.key), keys)
         XCTAssertNil(rig.pane.placeholder.superview)
         XCTAssertFalse(rig.pane.rowViews.isEmpty)
@@ -1013,7 +1012,6 @@ final class TrackerPaneViewTests: XCTestCase {
 
         rig.store.daemonDisconnected()
         rig.push(script)   // the reconnect's replay of the same board
-        XCTAssertTrue(rig.store.isConnected, "a board arriving means we are connected again")
 
         XCTAssertEqual(rig.pane.anchorSnapshot(windowIndex: 0), anchor, "the reading position is identical")
         XCTAssertEqual(rig.rowFrames, frames)
@@ -1126,19 +1124,6 @@ final class TrackerPaneViewTests: XCTestCase {
         "⇧⌘d", "⇧⌘i", "⇧⌘k", "⇧⌘p", "⇧⌘b", "⇧⌘m", "⌥⌘a",
     ]
 
-    private func symbols(forFlags flags: [String]) -> String {
-        var out = ""
-        if flags.contains(".control") { out += "⌃" }
-        if flags.contains(".option") { out += "⌥" }
-        if flags.contains(".shift") { out += "⇧" }
-        if flags.contains(".command") { out += "⌘" }
-        return out
-    }
-
-    private func flags(in text: String) -> [String] {
-        text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-    }
-
     private func groups(_ pattern: String, in text: String, options: NSRegularExpression.Options = []) throws -> [[String]] {
         let regex = try NSRegularExpression(pattern: pattern, options: options)
         let ns = text as NSString
@@ -1149,45 +1134,88 @@ final class TrackerPaneViewTests: XCTestCase {
         }
     }
 
-    private func mainMenuKeyEquivalents() throws -> Set<String> {
-        let root = Fx.repoRoot()
-        let source = try String(contentsOf: root.appendingPathComponent("macOS/Nostromo/AppDelegate.swift"), encoding: .utf8)
-        let start = try XCTUnwrap(source.range(of: "private func setupMenu()"), "setupMenu() moved")
-        let end = try XCTUnwrap(source.range(of: "NSApplication.shared.mainMenu = mainMenu", range: start.upperBound..<source.endIndex))
-        let body = String(source[start.lowerBound..<end.upperBound])
-        let ns = body as NSString
+    // The live main menu, walked item by item (App, Edit, Debug and Session, ModelShortcut's ⇧⌘M included),
+    // not the source text that builds it: an item added by any route, in any submenu, shows up here.
 
-        var found = Set<String>()
-        let regex = try NSRegularExpression(pattern: #"keyEquivalent:\s*"([^"]*)""#)
-        for match in regex.matches(in: body, range: NSRange(location: 0, length: ns.length)) {
-            let key = ns.substring(with: match.range(at: 1))
-            guard !key.isEmpty else { continue }
-            let before = ns.substring(to: match.range.location)
-            var mask = [".command"]
-            if let open = before.range(of: "NSMenuItem(", options: .backwards) {
-                let lineStart = before[..<open.lowerBound].lastIndex(of: "\n").map { before.index(after: $0) } ?? before.startIndex
-                let prefix = String(before[lineStart..<open.lowerBound])
-                if let name = try groups(#"(?:let|var)\s+(\w+)\s*=\s*$"#, in: prefix).first?[1] {
-                    if let flagText = try groups(#"\b"# + name + #"\.keyEquivalentModifierMask\s*=\s*\[([^\]]*)\]"#, in: body).first?[1] {
-                        mask = flags(in: flagText)
-                    }
-                }
-            }
-            found.insert(symbols(forFlags: mask) + key)
+    /// The menu `setupMenu()` installs, built with no target (the Debug and Approval Card items act on the
+    /// delegate; nothing here sends an action).
+    private func liveMainMenu() -> NSMenu {
+        _ = NSApplication.shared
+        return MainMenu.make(target: nil)
+    }
+
+    private struct MenuKey: Equatable {
+        /// "⌘q", "⇧⌘d", "⌥⌘a", "⌘Z" (control, option, shift, command, then the key as written).
+        let symbol: String
+        let title: String
+    }
+
+    /// Every item with a key equivalent, submenus included.
+    private func keyEquivalents(in menu: NSMenu) -> [MenuKey] {
+        var found: [MenuKey] = []
+        for item in menu.items {
+            if let symbol = keySymbol(of: item) { found.append(MenuKey(symbol: symbol, title: item.title)) }
+            if let submenu = item.submenu { found += keyEquivalents(in: submenu) }
         }
-
-        // ModelShortcut.makeMenuItem() carries its own key and mask.
-        let chip = try String(contentsOf: root.appendingPathComponent("macOS/Nostromo/UI/Model/ModelChip.swift"), encoding: .utf8)
-        let key = try XCTUnwrap(try groups(#"static let keyEquivalent\s*=\s*"([^"]+)""#, in: chip).first?[1], "ModelShortcut.keyEquivalent moved")
-        let maskText = try XCTUnwrap(try groups(#"static let modifierMask[^=]*=\s*\[([^\]]*)\]"#, in: chip).first?[1], "ModelShortcut.modifierMask moved")
-        found.insert(symbols(forFlags: flags(in: maskText)) + key)
         return found
     }
 
+    private func keySymbol(of item: NSMenuItem) -> String? {
+        let key = item.keyEquivalent
+        guard !key.isEmpty else { return nil }
+        var mask = item.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask)
+        // An upper-case letter means ⇧ already ("Z" is ⇧⌘Z): whatever AppKit does with the mask, it reads "⌘Z".
+        if key.count == 1, key != key.lowercased() { mask.remove(.shift) }
+        var out = ""
+        if mask.contains(.control) { out += "⌃" }
+        if mask.contains(.option) { out += "⌥" }
+        if mask.contains(.shift) { out += "⇧" }
+        if mask.contains(.command) { out += "⌘" }
+        return out + key
+    }
+
+    private func mainMenuKeyEquivalents() -> Set<String> {
+        Set(keyEquivalents(in: liveMainMenu()).map(\.symbol))
+    }
+
     func testTheMainMenusKeyEquivalentsAreExactlyTheOnesItHadBeforeTheTracker() throws {
-        let found = try mainMenuKeyEquivalents()
+        let found = mainMenuKeyEquivalents()
         XCTAssertEqual(found.sorted(), Self.pinnedKeyEquivalents.sorted(),
                        "the tracker adds no main-menu item and no global key equivalent (contract 1.5). Added: \(found.subtracting(Self.pinnedKeyEquivalents).sorted()); gone: \(Self.pinnedKeyEquivalents.subtracting(found).sorted())")
+    }
+
+    func testTheLiveMainMenuWalkSeesEverySubmenu() {
+        let titles = Set(keyEquivalents(in: liveMainMenu()).map(\.title))
+        XCTAssertTrue(titles.contains("Quit Nostromo"), "the App menu: \(titles.sorted())")
+        XCTAssertTrue(titles.contains("Select All"), "the Edit menu: \(titles.sorted())")
+        XCTAssertTrue(titles.contains("Copy transcript diagnostics"), "the Debug menu: \(titles.sorted())")
+        XCTAssertTrue(titles.contains(ModelShortcut.menuTitle), "the Session menu's ⇧⌘M: \(titles.sorted())")
+        XCTAssertTrue(titles.contains("Go to Approval Card"), "the Session menu's ⌥⌘A: \(titles.sorted())")
+    }
+
+    func testNoTwoItemsInTheMainMenuShareAKeyEquivalent() {
+        let all = keyEquivalents(in: liveMainMenu())
+        var seen: [String: String] = [:]
+        for entry in all {
+            if let other = seen[entry.symbol] {
+                XCTFail("\(entry.symbol) is on both \"\(other)\" and \"\(entry.title)\"")
+            }
+            seen[entry.symbol] = entry.title
+        }
+        XCTAssertEqual(Set(all.map(\.symbol)).count, all.count)
+    }
+
+    func testTheKeysTheTrackerReservesAreNotInTheLiveMainMenu() {
+        let found = mainMenuKeyEquivalents()
+        for reserved in ["⌃⌘a", "⌘.", "⌘o"] {
+            XCTAssertFalse(found.contains(reserved), "\(reserved) is reserved and must not be a main-menu key equivalent")
+        }
+    }
+
+    func testOptionCommandAGoesToTheApprovalCardAndNothingElseUsesIt() {
+        let matches = keyEquivalents(in: liveMainMenu()).filter { $0.symbol == "⌥⌘a" }
+        XCTAssertEqual(matches.count, 1, "⌥⌘A is on exactly one item: \(matches)")
+        XCTAssertEqual(matches.first?.title, "Go to Approval Card")
     }
 
     func testNothingInTheTrackerSourcesDeclaresAKeyEquivalentOrTouchesTheMainMenu() throws {
@@ -1306,5 +1334,631 @@ final class TrackerPaneViewTests: XCTestCase {
         split.mouseDown(with: down)
         // Anything the tracking loop left behind must not leak into later tests.
         while NSApp.nextEvent(matching: [.leftMouseUp, .leftMouseDragged], until: .distantPast, inMode: .default, dequeue: true) != nil {}
+    }
+}
+
+// MARK: - An item's owner chip and environment badge never squeeze its text (TF-1, TF-3)
+
+// An owner can be any length the agent likes and the pane can be narrow. The chip and the badge are
+// capped, and when they would leave the item's text less than a readable column beside the time they
+// move to a line of their own below it, inside the row, so the text always has room and the window
+// never has to grow. Everything is read from the frames the pane gives the row's views.
+
+final class TrackerRowLayoutTests: XCTestCase {
+
+    private typealias Fx = TrackerPaneFx
+
+    /// 100 characters that wrap at any word boundary.
+    private static let hundredCharacters = String(String(repeating: "wrapword ", count: 12).prefix(100))
+    /// 32 characters, unbroken enough to be one chip.
+    private static let thirtyTwoCharacterOwner = String("agent-with-a-very-long-owner-name-".prefix(32))
+
+    private struct Subject {
+        let rig: TrackerPaneRig
+        /// `close-1629`, with the owner and env the case asks for.
+        let chipped: TrackerRowView
+        /// `repro-1666`: the same text, no owner, no env.
+        let plain: TrackerRowView
+        let windowWidthBefore: CGFloat
+    }
+
+    /// Two items in the golden board's Next section with the same long text: one with the given owner and
+    /// environment, one with neither.
+    private func makeSubject(width: CGFloat, owner: String?, env: String?,
+                             text: String = TrackerRowLayoutTests.hundredCharacters,
+                             file: StaticString = #filePath, line: UInt = #line) throws -> Subject {
+        let tag = Fx.uniqueTag()
+        let rig = Fx.makeRig(self, tag: tag, size: NSSize(width: width, height: 600))
+        let windowWidthBefore = rig.window.frame.width
+        var script = try TrackerBoardScript(tag: tag, file: file)
+        try script.setText("close-1629", text)
+        try script.setText("repro-1666", text)
+        try script.updateItem("close-1629") { node in
+            if let owner { node["owner"] = owner } else { node.removeValue(forKey: "owner") }
+            if let env { node["env"] = env } else { node.removeValue(forKey: "env") }
+        }
+        rig.push(script, file: file, line: line)
+        return Subject(rig: rig,
+                       chipped: try XCTUnwrap(rig.rowView("item:close-1629", file: file, line: line)),
+                       plain: try XCTUnwrap(rig.rowView("item:repro-1666", file: file, line: line)),
+                       windowWidthBefore: windowWidthBefore)
+    }
+
+    private func chip(_ text: String, in row: TrackerRowView) -> NSTextField? {
+        row.badges.first { $0.stringValue == text }
+    }
+
+    /// The part of the row's width that is neither margin, mark nor time: the most the text can have.
+    private func widthBesideTheTime(rowWidth: CGFloat) -> CGFloat {
+        rowWidth - TrackerRowView.hPad - TrackerRowView.markWidth - TrackerRowView.gap
+            - TrackerRowView.timeWidth - TrackerRowView.gap - TrackerRowView.hPad
+    }
+
+    /// What every owner/env combination at every width must satisfy.
+    private func assertWellFormed(_ s: Subject, owner: String?, env: String?, label: String,
+                                  file: StaticString = #filePath, line: UInt = #line) throws {
+        let row = s.chipped
+        let rowWidth = row.frame.width
+        let clipWidth = s.rig.pane.clipView.bounds.width
+        let text = try XCTUnwrap(row.textViews.first, "\(label): the item's text view", file: file, line: line)
+        let time = try XCTUnwrap(row.timeLabel, "\(label): the time label", file: file, line: line)
+
+        // (a) the text keeps its column.
+        let required = min(TrackerRowView.minimumTextWidth(forRowWidth: rowWidth), widthBesideTheTime(rowWidth: rowWidth))
+        XCTAssertGreaterThanOrEqual(required, 100, "\(label): setup: a real column is available", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(text.frame.width, required - 0.5,
+                                    "\(label): the text is \(text.frame.width) pt wide, wanted at least \(required)",
+                                    file: file, line: line)
+
+        // (b) the row stays about as tall as the same text without chips.
+        XCTAssertGreaterThan(s.plain.frame.height, 2 * 17, "\(label): setup: the 100 characters wrap", file: file, line: line)
+        XCTAssertLessThanOrEqual(row.frame.height, s.plain.frame.height + 30,
+                                 "\(label): \(row.frame.height) pt against \(s.plain.frame.height) pt without chips",
+                                 file: file, line: line)
+        XCTAssertLessThanOrEqual(row.frame.height, 260, "\(label): row height \(row.frame.height)", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(row.frame.height, s.plain.frame.height - 0.5, file: file, line: line)
+
+        // (c) every chip is inside the row and capped.
+        for badge in row.badges {
+            XCTAssertGreaterThanOrEqual(badge.frame.minX, -0.5, "\(label): \(badge.stringValue) left", file: file, line: line)
+            XCTAssertLessThanOrEqual(badge.frame.maxX, rowWidth + 0.5, "\(label): \(badge.stringValue) right", file: file, line: line)
+            XCTAssertGreaterThanOrEqual(badge.frame.minY, -0.5, "\(label): \(badge.stringValue) top", file: file, line: line)
+            XCTAssertLessThanOrEqual(badge.frame.maxY, row.frame.height + 0.5, "\(label): \(badge.stringValue) bottom", file: file, line: line)
+        }
+        for view in row.subviews {
+            XCTAssertLessThanOrEqual(view.frame.maxX, rowWidth + 0.5, "\(label): \(type(of: view)) reaches past the row", file: file, line: line)
+        }
+        if let owner {
+            let ownerChip = try XCTUnwrap(chip(owner, in: row), "\(label): the owner chip", file: file, line: line)
+            XCTAssertLessThanOrEqual(ownerChip.frame.width, 80.5, "\(label): owner chip \(ownerChip.frame.width) pt", file: file, line: line)
+            // (d) the whole owner is one hover away.
+            XCTAssertEqual(ownerChip.toolTip, owner, "\(label): the owner chip's tooltip is the full owner", file: file, line: line)
+        } else {
+            XCTAssertTrue(row.badges.allSatisfy { $0.stringValue == "PROD" }, "\(label): no owner chip", file: file, line: line)
+        }
+        if env != nil {
+            let envBadge = try XCTUnwrap(chip("PROD", in: row), "\(label): the env badge", file: file, line: line)
+            XCTAssertLessThanOrEqual(envBadge.frame.width, 48.5, "\(label): env badge \(envBadge.frame.width) pt", file: file, line: line)
+            XCTAssertEqual(envBadge.toolTip, "PROD", "\(label): the env badge's tooltip is its full text", file: file, line: line)
+        }
+
+        // (e) nothing sits on anything else.
+        let others: [(String, NSRect)] = [("the text", text.frame), ("the time", time.frame)]
+        for badge in row.badges {
+            let mine = badge.frame.insetBy(dx: 0.5, dy: 0.5)
+            for (name, frame) in others {
+                XCTAssertFalse(mine.intersects(frame), "\(label): \(badge.stringValue) overlaps \(name)", file: file, line: line)
+            }
+        }
+        if row.badges.count == 2 {
+            XCTAssertFalse(row.badges[0].frame.insetBy(dx: 0.5, dy: 0.5).intersects(row.badges[1].frame),
+                           "\(label): the badge and the chip overlap", file: file, line: line)
+        }
+
+        // (f) the window never widens.
+        XCTAssertEqual(s.rig.window.frame.width, s.windowWidthBefore, accuracy: 0.5, "\(label): the window grew", file: file, line: line)
+        XCTAssertEqual(s.rig.pane.documentView.frame.width, clipWidth, accuracy: 0.5,
+                       "\(label): the document is exactly as wide as the viewport", file: file, line: line)
+        XCTAssertLessThanOrEqual(rowWidth, clipWidth + 0.5, file: file, line: line)
+        XCTAssertFalse(s.rig.pane.scrollView.hasHorizontalScroller, "\(label): a horizontal scroller", file: file, line: line)
+    }
+
+    /// The chips took a line of their own under the text, at the text's left edge.
+    private func assertStacked(_ s: Subject, label: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        let row = s.chipped
+        let text = try XCTUnwrap(row.textViews.first, file: file, line: line)
+        XCTAssertFalse(row.badges.isEmpty, "\(label): setup: the row has chips", file: file, line: line)
+        for badge in row.badges {
+            XCTAssertGreaterThanOrEqual(badge.frame.minY, text.frame.maxY - 0.5,
+                                        "\(label): \(badge.stringValue) is below the text", file: file, line: line)
+        }
+        if let first = row.badges.first {
+            XCTAssertEqual(first.frame.minX, text.frame.minX, accuracy: 0.5,
+                           "\(label): the chips start at the text column's left edge", file: file, line: line)
+        }
+        XCTAssertGreaterThan(row.frame.height, s.plain.frame.height, "\(label): the chip line costs some height", file: file, line: line)
+    }
+
+    // MARK: A 32-character owner and a hazardous environment
+
+    func testAThirtyTwoCharacterOwnerAndAProdBadgeStackBelowTheTextInANarrowPane() throws {
+        XCTAssertEqual(Self.thirtyTwoCharacterOwner.count, 32)
+        XCTAssertEqual(Self.hundredCharacters.count, 100)
+        let subject = try makeSubject(width: 260, owner: Self.thirtyTwoCharacterOwner, env: "prod")
+        try assertWellFormed(subject, owner: Self.thirtyTwoCharacterOwner, env: "prod", label: "260 pt")
+        try assertStacked(subject, label: "260 pt")
+    }
+
+    func testAThirtyTwoCharacterOwnerAndAProdBadgeStackBelowTheTextInAMediumPane() throws {
+        let subject = try makeSubject(width: 340, owner: Self.thirtyTwoCharacterOwner, env: "prod")
+        try assertWellFormed(subject, owner: Self.thirtyTwoCharacterOwner, env: "prod", label: "340 pt")
+        try assertStacked(subject, label: "340 pt")
+    }
+
+    func testAThirtyTwoCharacterOwnerAloneNeverSqueezesTheTextAtEitherWidth() throws {
+        for width in [CGFloat(260), 340] {
+            let subject = try makeSubject(width: width, owner: Self.thirtyTwoCharacterOwner, env: nil)
+            try assertWellFormed(subject, owner: Self.thirtyTwoCharacterOwner, env: nil, label: "owner alone at \(width) pt")
+        }
+    }
+
+    func testAnEnvBadgeAloneNeverSqueezesTheTextAtEitherWidth() throws {
+        for width in [CGFloat(260), 340] {
+            let subject = try makeSubject(width: width, owner: nil, env: "prod")
+            try assertWellFormed(subject, owner: nil, env: "prod", label: "env alone at \(width) pt")
+        }
+    }
+
+    func testAnOwnerAndABadgeStayWithinTheRowWhateverTheLengthOfTheOwner() throws {
+        for count in [1, 4, 12, 32, 80] {
+            let owner = String(repeating: "o", count: count)
+            let subject = try makeSubject(width: 260, owner: owner, env: "prod")
+            try assertWellFormed(subject, owner: owner, env: "prod", label: "\(count)-character owner")
+        }
+    }
+
+    // MARK: The normal case keeps its normal layout
+
+    private func assertInline(_ row: TrackerRowView, label: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        let text = try XCTUnwrap(row.textViews.first, file: file, line: line)
+        let time = try XCTUnwrap(row.timeLabel, file: file, line: line)
+        XCTAssertFalse(row.badges.isEmpty, "\(label): setup: the row has a chip", file: file, line: line)
+        for badge in row.badges {
+            XCTAssertGreaterThanOrEqual(badge.frame.minX, text.frame.maxX - 0.5,
+                                        "\(label): the chip is to the right of the text, on its first line", file: file, line: line)
+            XCTAssertLessThanOrEqual(badge.frame.maxX, time.frame.minX + 0.5,
+                                     "\(label): and to the left of the time", file: file, line: line)
+            XCTAssertLessThan(badge.frame.midY, text.frame.minY + 20, "\(label): on the first line", file: file, line: line)
+        }
+    }
+
+    func testAShortOwnerStaysOnTheFirstLineAndAShortItemKeepsItsSingleLineHeight() throws {
+        let tag = Fx.uniqueTag()
+        let rig = Fx.makeRig(self, tag: tag, size: NSSize(width: 340, height: 600))
+        var script = try TrackerBoardScript(tag: tag)
+        try script.setOwner("verif-1037", "kate")
+        rig.push(script)
+
+        let withOwner = try XCTUnwrap(rig.rowView("item:verif-1037"))
+        let without = try XCTUnwrap(rig.rowView("item:revie-1111"))
+        XCTAssertNil(script.owner("revie-1111"), "setup: the comparison row has no owner")
+        XCTAssertTrue(withOwner.visibleText.contains("kate"), withOwner.visibleText)
+        try assertInline(withOwner, label: "kate")
+        XCTAssertEqual(withOwner.frame.height, without.frame.height, accuracy: 0.5,
+                       "a short item with a short owner is as tall as one without")
+        XCTAssertLessThan(withOwner.frame.height, 34, "and it is one line")
+    }
+
+    func testAShortOwnerOnALongItemStillSitsBesideTheTextAt340() throws {
+        let subject = try makeSubject(width: 340, owner: "kate", env: nil)
+        try assertInline(subject.chipped, label: "kate on 100 characters")
+        XCTAssertEqual(subject.chipped.frame.height, subject.plain.frame.height, accuracy: 0.5,
+                       "no chip line was added")
+        try assertWellFormed(subject, owner: "kate", env: nil, label: "kate on 100 characters")
+    }
+
+    func testAnInlineChipNarrowsTheTextOnlyDownToItsMinimumColumn() throws {
+        let subject = try makeSubject(width: 340, owner: "kate", env: nil)
+        let withChip = try XCTUnwrap(subject.chipped.textViews.first)
+        let without = try XCTUnwrap(subject.plain.textViews.first)
+        XCTAssertGreaterThanOrEqual(withChip.frame.width, TrackerRowView.minimumTextWidth(forRowWidth: subject.chipped.frame.width) - 0.5)
+        XCTAssertLessThanOrEqual(withChip.frame.width, without.frame.width + 0.5)
+    }
+}
+
+// MARK: - A 500-item board (TF-2)
+
+// The pane keeps every row view (no virtualisation up to 500 items), so a live divider drag costs one
+// measuring pass per width step. These tests put a time budget on that and check nothing leaks or
+// jumps on the way. The budgets are generous because CI is a shared machine: they are there to catch a
+// layout that went quadratic, not to benchmark. The measured seconds are printed so the CI log shows
+// how close it is.
+
+final class TrackerLargeBoardTests: XCTestCase {
+
+    private typealias Fx = TrackerPaneFx
+
+    private func bulkText(_ i: Int) -> String {
+        if i % 20 == 0 {
+            // 200+ characters.
+            return String(repeating: "A long item that keeps going so it wraps over many lines at any width. ", count: 3) + "(\(i))"
+        }
+        switch i % 3 {
+        case 0: return "A medium item that wraps once in a narrow pane, number \(i)"
+        case 1: return "Item \(i)"
+        default: return "A somewhat longer item whose text needs a second line when the pane is narrow \(i)"
+        }
+    }
+
+    private func fiveHundredItemBoard(tag: String) throws -> TrackerBoardScript {
+        var script = try TrackerBoardScript(tag: tag)
+        let sections = ["now", "next", "findings", "loose-ends"]
+        let statuses = ["todo", "in-progress", "blocked"]
+        for i in 0..<440 {
+            try script.insertItem(id: "bulk-\(i)", section: sections[i % sections.count],
+                                  status: statuses[i % statuses.count], text: bulkText(i))
+        }
+        // Chips on some rows: a few long owners, a few hazardous environments.
+        for i in stride(from: 0, to: 440, by: 5) {
+            try script.setOwner("bulk-\(i)", i % 25 == 0 ? "an-owner-name-that-is-rather-long-\(i)" : "agent\(i % 7)")
+        }
+        for i in stride(from: 0, to: 440, by: 40) {
+            try script.updateItem("bulk-\(i)") { $0["env"] = "prod" }
+        }
+        XCTAssertEqual(script.itemNodes.count, 500, "setup: the golden board's 60 items and 440 more")
+        return script
+    }
+
+    private func assertSane(_ pane: TrackerPaneView, _ message: String, line: UInt = #line) {
+        XCTAssertEqual(pane.documentView.subviews.count, pane.displayedRows.count, "\(message): one view per row, no strays", line: line)
+        XCTAssertEqual(pane.rowViews.count, pane.displayedRows.count, "\(message): a view for each row and none for anything else", line: line)
+        XCTAssertEqual(pane.documentView.frame.width, pane.clipView.bounds.width, accuracy: 0.5, "\(message): document width", line: line)
+        XCTAssertFalse(pane.scrollView.hasHorizontalScroller, "\(message): horizontal scroller", line: line)
+        let snapshot = pane.anchorSnapshot(windowIndex: 0)
+        XCTAssertGreaterThanOrEqual(snapshot.documentHeight, snapshot.viewportHeight - 0.5, "\(message): the document fills the viewport", line: line)
+        XCTAssertGreaterThanOrEqual(snapshot.scrollY, -0.5, "\(message): scrollY", line: line)
+        XCTAssertLessThanOrEqual(snapshot.scrollY, max(0, snapshot.documentHeight - snapshot.viewportHeight) + 0.5,
+                                 "\(message): scrollY past the end", line: line)
+    }
+
+    func testAFiveHundredItemBoardRendersAndSurvivesALiveDividerDragWithinGenerousBudgets() throws {
+        let tag = Fx.uniqueTag()
+        let rig = Fx.makeRig(self, tag: tag, size: NSSize(width: 500, height: 600))
+        let script = try fiveHundredItemBoard(tag: tag)
+        let windowWidth = rig.window.frame.width
+
+        // First render.
+        let renderStart = CFAbsoluteTimeGetCurrent()
+        rig.push(script)
+        let renderSeconds = CFAbsoluteTimeGetCurrent() - renderStart
+        print("TF-2: first render of the 500-item board took \(String(format: "%.2f", renderSeconds)) s")
+        XCTAssertLessThan(renderSeconds, 10, "first render took \(renderSeconds) s")
+        XCTAssertEqual(Fx.itemKeys(rig.pane).count, 43 + 440, "every open item has a row")
+        assertSane(rig.pane, "after the first render")
+
+        // The reader is mid-board, on a short one-line row (so its height cannot fall below the
+        // offset into it as the width changes).
+        let candidate = rig.pane.displayedRows.dropFirst(rig.pane.displayedRows.count / 3).first(where: { (row: TrackerRow) -> Bool in
+            guard let item = row.item, row.key == TrackerRow.itemKey(item.id) else { return false }
+            return item.text.count <= 12 && item.owner == nil && item.noteBlocks.isEmpty && item.linkTexts.isEmpty
+        })
+        let shortItem = try XCTUnwrap(candidate, "a short item in the middle of the board")
+        let anchorKey = shortItem.key
+        let anchorFrame = try XCTUnwrap(rig.pane.rowViews[anchorKey]?.frame)
+        rig.scroll(to: anchorFrame.minY + 2)
+        let start = rig.pane.anchorSnapshot(windowIndex: 0)
+        XCTAssertEqual(start.firstVisible?.rowKey, anchorKey, "setup: the viewport top is in \(anchorKey)")
+        XCTAssertGreaterThan(start.scrollY, 1_000, "setup: well into the board")
+        let viewsBefore = rig.pane.rowViews
+
+        // Thirty width steps, 500 -> 260 -> 500 pt, as a live divider drag does.
+        let down = (1...15).map { 500 - CGFloat($0) * 16 }
+        let up = (1...15).map { 260 + CGFloat($0) * 16 }
+        let widths = down + up
+        XCTAssertEqual(widths.count, 30)
+
+        let dragStart = CFAbsoluteTimeGetCurrent()
+        for (step, width) in widths.enumerated() {
+            rig.pane.setFrameSize(NSSize(width: width, height: 600))
+            rig.pane.needsLayout = true
+            rig.settle()
+
+            let message = "step \(step + 1) at \(width) pt"
+            XCTAssertEqual(rig.pane.clipView.bounds.width, width, accuracy: 20, "\(message): the pane took the width")
+            assertSane(rig.pane, message)
+            let snapshot = rig.pane.anchorSnapshot(windowIndex: 0)
+            XCTAssertEqual(snapshot.firstVisible?.rowKey, anchorKey, "\(message): the reader's row is still the first on screen")
+            XCTAssertEqual(snapshot.firstVisible?.offsetPt ?? .infinity, start.firstVisible?.offsetPt ?? 0, accuracy: 1.5,
+                           "\(message): and the viewport is the same distance into it")
+        }
+        let dragSeconds = CFAbsoluteTimeGetCurrent() - dragStart
+        print("TF-2: 30 width steps over the 500-item board took \(String(format: "%.2f", dragSeconds)) s")
+        XCTAssertLessThan(dragSeconds, 30, "30 width steps took \(dragSeconds) s")
+
+        XCTAssertEqual(Set(rig.pane.rowViews.keys), Set(viewsBefore.keys), "no row came or went")
+        for (key, view) in viewsBefore { XCTAssertTrue(rig.pane.rowViews[key] === view, "\(key) is the same view after the drag") }
+        XCTAssertEqual(rig.window.frame.width, windowWidth, accuracy: 0.5, "the window never changed width")
+    }
+}
+
+// MARK: - Hostile text (N4)
+
+// The agent and the file can put anything in an item. In T1 the pane shows board text as it comes (it
+// does not rewrite it: the quoting rules are for text going to a model), and nothing in it is ever a
+// link: a link's look is kept but its `.link` attribute is not, so no click can open anything. These
+// tests document both. They read `tests/fixtures/tracker/hostile-text.txt` (NAME<TAB>PAYLOAD per line,
+// '#' comments, escapes \e \a \r \\ \u{HEX}), the same file the Rust tests read.
+
+final class TrackerHostileTextTests: XCTestCase {
+
+    private typealias Fx = TrackerPaneFx
+
+    private struct Case {
+        let name: String
+        let payload: String
+    }
+
+    private func decodeEscapes(_ text: String) -> String {
+        var out = String.UnicodeScalarView()
+        var iterator = text.unicodeScalars.makeIterator()
+        while let scalar = iterator.next() {
+            guard scalar == "\\" else {
+                out.append(scalar)
+                continue
+            }
+            guard let next = iterator.next() else { break }
+            switch next {
+            case "e": out.append("\u{1b}")
+            case "a": out.append("\u{07}")
+            case "r": out.append("\r")
+            case "\\": out.append("\\")
+            case "u":
+                _ = iterator.next()   // the opening brace
+                var hex = ""
+                while let digit = iterator.next(), digit != "}" { hex.unicodeScalars.append(digit) }
+                if let value = UInt32(hex, radix: 16), let decoded = Unicode.Scalar(value) { out.append(decoded) }
+            default:
+                break
+            }
+        }
+        return String(out)
+    }
+
+    private func hostileCases(file: StaticString = #filePath) throws -> [Case] {
+        try Fx.fixtureText("hostile-text.txt", file: file)
+            .components(separatedBy: "\n")
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            .compactMap { line -> Case? in
+                guard let tab = line.firstIndex(of: "\t") else { return nil }
+                return Case(name: String(line[..<tab]), payload: decodeEscapes(String(line[line.index(after: tab)...])))
+            }
+    }
+
+    private func letters(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.filter { CharacterSet.letters.contains($0) }))
+    }
+
+    private func linkRanges(in view: NSTextView) -> Int {
+        guard let storage = view.textStorage, storage.length > 0 else { return 0 }
+        var count = 0
+        storage.enumerateAttribute(.link, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
+            if value != nil { count += 1 }
+        }
+        return count
+    }
+
+    private func assertNoLinks(in row: TrackerRowView, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(row.allTextViews.isEmpty, "\(message): the row has text", file: file, line: line)
+        for view in row.allTextViews {
+            XCTAssertEqual(linkRanges(in: view), 0, "\(message): a link attribute in \(type(of: view))", file: file, line: line)
+        }
+    }
+
+    func testTheFixtureHasTheDocumentedCases() throws {
+        let names = Set(try hostileCases().map(\.name))
+        for name in ["bidi_rlo", "zero_width", "bom", "ansi_csi", "osc_bel", "osc_st", "bare_cr", "c1_csi", "long_10k"] {
+            XCTAssertTrue(names.contains(name), "hostile-text.txt has \(name)")
+        }
+        let rlo = try XCTUnwrap(try hostileCases().first { $0.name == "bidi_rlo" })
+        XCTAssertEqual(rlo.payload, "before\u{202e}after", "the escape decoder reads \\u{HEX}")
+    }
+
+    func testHostileItemTextIsShownAsItIsWithEveryVisibleLetterAndNoLink() throws {
+        let cases = try hostileCases()
+        let tag = Fx.uniqueTag()
+        let rig = Fx.makeRig(self, tag: tag, size: NSSize(width: 360, height: 600))
+        var script = try TrackerBoardScript(tag: tag)
+        let ids = Array(script.itemIDs(notStatus: "done").prefix(cases.count))
+        XCTAssertEqual(ids.count, cases.count, "setup: an item for each case")
+        for (id, hostile) in zip(ids, cases) { try script.setText(id, hostile.payload) }
+        rig.push(script)
+
+        for (id, hostile) in zip(ids, cases) {
+            let row = try XCTUnwrap(rig.rowView("item:\(id)"))
+            let text = try XCTUnwrap(row.textViews.first)
+            // Never print the payload (long_10k is 10 kB): names and counts only.
+            XCTAssertTrue(letters(text.string) == letters(hostile.payload), "\(hostile.name): every visible letter is shown, in order")
+            assertNoLinks(in: row, hostile.name)
+            XCTAssertFalse(rig.pane.scrollView.hasHorizontalScroller, "\(hostile.name): no horizontal scroller")
+            XCTAssertEqual(row.frame.width, rig.pane.clipView.bounds.width, accuracy: 0.5, "\(hostile.name): the row is the pane's width")
+            XCTAssertLessThanOrEqual(text.frame.maxX, row.bounds.width + 0.5, "\(hostile.name): the text stays inside the row")
+            if hostile.name == "long_10k" {
+                XCTAssertEqual(text.string.count, hostile.payload.count, "long_10k: shown whole, wrapped")
+                XCTAssertGreaterThan(text.frame.height, 17 * 20, "long_10k: it wraps over many lines")
+            }
+        }
+    }
+
+    // Documents current behaviour: the pane does not rewrite board text, so bidi controls, zero-width
+    // characters and a BOM reach the text view exactly as the file has them.
+    func testBidiZeroWidthAndBomCharactersAreShownExactlyAsTheFileHasThem() throws {
+        let cases = try hostileCases().filter { ["bidi_rlo", "zero_width", "bom"].contains($0.name) }
+        XCTAssertEqual(cases.count, 3)
+        let tag = Fx.uniqueTag()
+        let rig = Fx.makeRig(self, tag: tag, size: NSSize(width: 360, height: 600))
+        var script = try TrackerBoardScript(tag: tag)
+        let ids = Array(script.itemIDs(notStatus: "done").prefix(cases.count))
+        for (id, hostile) in zip(ids, cases) { try script.setText(id, hostile.payload) }
+        rig.push(script)
+
+        for (id, hostile) in zip(ids, cases) {
+            let row = try XCTUnwrap(rig.rowView("item:\(id)"))
+            XCTAssertEqual(row.textViews.first?.string, hostile.payload, "\(hostile.name): shown as is")
+            XCTAssertTrue(row.visibleText.contains(hostile.payload), "\(hostile.name): and read back as is")
+        }
+    }
+
+    // Documents current behaviour: raw terminal escapes and a bare CR are text to the pane too (it is
+    // not a terminal, so nothing interprets them); the letters around them are all there.
+    func testTerminalEscapesAndABareCarriageReturnAreInertText() throws {
+        let cases = try hostileCases().filter { ["ansi_csi", "osc_bel", "osc_st", "bare_cr", "c1_csi"].contains($0.name) }
+        XCTAssertEqual(cases.count, 5)
+        let tag = Fx.uniqueTag()
+        let rig = Fx.makeRig(self, tag: tag, size: NSSize(width: 360, height: 600))
+        var script = try TrackerBoardScript(tag: tag)
+        let ids = Array(script.itemIDs(notStatus: "done").prefix(cases.count))
+        for (id, hostile) in zip(ids, cases) { try script.setText(id, hostile.payload) }
+        rig.push(script)
+
+        for (id, hostile) in zip(ids, cases) {
+            let row = try XCTUnwrap(rig.rowView("item:\(id)"))
+            XCTAssertTrue(letters(row.textViews.first?.string ?? "") == letters(hostile.payload), "\(hostile.name): every visible letter is shown")
+            assertNoLinks(in: row, hostile.name)
+            XCTAssertNil(rig.window.firstResponder as? TrackerTextView, "\(hostile.name): showing it took no focus")
+        }
+    }
+
+    func testLinksInBoardTextAreInertWhetherTheyAreMarkdownLinksOrPlainText() throws {
+        let evil = "https://evil.example/x"
+        let js = "javascript:alert(1)"
+        let tag = Fx.uniqueTag()
+        let rig = Fx.makeRig(self, tag: tag, size: NSSize(width: 360, height: 600))
+        var script = try TrackerBoardScript(tag: tag)
+
+        typealias Obj = TrackerPaneFx.Obj
+        func text(_ value: String) -> Obj { ["kind": "text", "text": value] }
+        func link(_ label: String, _ url: String) -> Obj { ["kind": "link", "spans": [text(label)], "url": url] }
+        let itemSpans: [Obj] = [text("see "), link("evil", evil), text(" and "), link("script", js),
+                                text(" or plain \(evil) and \(js)")]
+        let note: [Obj] = [["kind": "paragraph", "spans": [link("note link", js), text(" \(evil)")]]]
+        let links: [Obj] = [["text": "\(evil) \u{202e}x", "kind": "url", "url": evil],
+                            ["text": js, "kind": "url", "url": js]]
+        try script.updateItem("verif-1037") { node in
+            node["text_spans"] = itemSpans
+            node["note_blocks"] = note
+            node["links"] = links
+        }
+        rig.push(script)
+
+        let row = try XCTUnwrap(rig.rowView("item:verif-1037"))
+        XCTAssertNotNil(row.proseView, "setup: the short note is shown, with its own text views")
+        XCTAssertGreaterThanOrEqual(row.allTextViews.count, 3, "setup: item text, note and link texts are all text views")
+        let all = row.visibleText
+        XCTAssertTrue(all.contains("evil"), "the link's label is shown: \(all)")
+        XCTAssertTrue(all.contains(evil), "a plain URL is shown as text")
+        XCTAssertTrue(all.contains(js), "so is a javascript: URL")
+        XCTAssertTrue(all.contains("note link"), "and a link in the note")
+        assertNoLinks(in: row, "item, note and link texts")
+
+        // Clicking the text where a link would be opens nothing and moves no focus.
+        if let main = row.textViews.first {
+            main.clicked(onLink: URL(string: evil) as Any, at: 4)
+            main.clicked(onLink: js, at: 10)
+        }
+        XCTAssertNil(rig.window.firstResponder as? TrackerTextView)
+    }
+}
+
+// MARK: - The clock only runs while the pane can be seen (N5)
+
+final class TrackerPaneClockTests: XCTestCase {
+
+    private typealias Fx = TrackerPaneFx
+
+    private struct Setup {
+        let pane: TrackerPaneView
+        let container: RigFlippedDoc
+        let window: RigWindow
+        let clock: TrackerManualClock
+    }
+
+    /// A pane with a real 30 s tick, not yet in any window, showing the golden board.
+    private func makeSetup() throws -> Setup {
+        let tag = Fx.uniqueTag()
+        let store = Fx.makeImmediateStore()
+        let clock = TrackerManualClock(Fx.now)
+        let pane = TrackerPaneView(tag: tag, store: store, now: { clock.date }, reduceMotion: { false },
+                                   pasteboard: rigPrivatePasteboard(self), schedule: { _, _ in },
+                                   timeZone: Fx.utc, tickInterval: 30)
+        store.ingest(try TrackerBoardScript(tag: tag).message())
+        let window = makeRigWindow(self, size: NSSize(width: 360, height: 640))
+        let host = RigFlippedDoc(frame: NSRect(x: 0, y: 0, width: 360, height: 640))
+        let container = RigFlippedDoc(frame: host.bounds)
+        pane.frame = container.bounds
+        container.addSubview(pane)
+        host.addSubview(container)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        return Setup(pane: pane, container: container, window: window, clock: clock)
+    }
+
+    private func timeLabel(_ pane: TrackerPaneView) -> String? {
+        pane.rowViews["item:audit-3183"]?.timeLabel?.stringValue
+    }
+
+    func testThePanesTimerRunsOnlyWhileItIsInAWindowAndNotHidden() throws {
+        let tag = Fx.uniqueTag()
+        let detached = TrackerPaneView(tag: tag, store: Fx.makeImmediateStore(), now: { Fx.now }, reduceMotion: { false },
+                                       pasteboard: rigPrivatePasteboard(self), schedule: { _, _ in },
+                                       timeZone: Fx.utc, tickInterval: 30)
+        XCTAssertFalse(detached.isTickTimerRunning, "not in a window: nothing to refresh")
+
+        let s = try makeSetup()
+        XCTAssertTrue(s.pane.isTickTimerRunning, "in a window and visible")
+
+        s.pane.isHidden = true
+        XCTAssertFalse(s.pane.isTickTimerRunning, "hidden")
+        s.pane.isHidden = false
+        XCTAssertTrue(s.pane.isTickTimerRunning, "shown again")
+
+        s.container.isHidden = true
+        XCTAssertFalse(s.pane.isTickTimerRunning, "an ancestor is hidden (a background tab)")
+        s.container.isHidden = false
+        XCTAssertTrue(s.pane.isTickTimerRunning, "the ancestor is shown again")
+
+        s.pane.removeFromSuperview()
+        XCTAssertFalse(s.pane.isTickTimerRunning, "out of its window")
+        s.pane.isHidden = true
+        s.container.addSubview(s.pane)
+        XCTAssertFalse(s.pane.isTickTimerRunning, "back in the window but still hidden")
+        s.pane.isHidden = false
+        XCTAssertTrue(s.pane.isTickTimerRunning, "visible in the window again")
+    }
+
+    func testAPaneWithoutATickIntervalNeverRunsATimer() throws {
+        let rig = Fx.makeRig(self)
+        XCTAssertNotNil(rig.pane.window)
+        XCTAssertFalse(rig.pane.isTickTimerRunning)
+    }
+
+    func testUnhidingThePaneRefreshesItsRelativeTimesAtOnce() throws {
+        let s = try makeSetup()
+        XCTAssertEqual(timeLabel(s.pane), "4 m", "setup: the newest item is 4 minutes old")
+
+        s.pane.isHidden = true
+        s.clock.advance(600)
+        XCTAssertEqual(timeLabel(s.pane), "4 m", "nothing refreshes a pane nobody can see")
+        s.pane.isHidden = false
+        XCTAssertEqual(timeLabel(s.pane), "14 m", "shown again, the times have moved on without waiting for the next tick")
+        XCTAssertEqual(s.pane.header.updatedLabel.stringValue, "updated 14 m ago")
+    }
+
+    func testShowingAHiddenAncestorRefreshesRelativeTimesAtOnce() throws {
+        let s = try makeSetup()
+        s.container.isHidden = true
+        s.clock.advance(3_600)
+        XCTAssertEqual(timeLabel(s.pane), "4 m")
+        s.container.isHidden = false
+        XCTAssertEqual(timeLabel(s.pane), "1 h", "an hour on")
     }
 }

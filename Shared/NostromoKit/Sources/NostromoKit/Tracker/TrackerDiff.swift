@@ -56,7 +56,25 @@ public enum TrackerDiff {
     }
 
     /// The keys of a longest common subsequence of `a` and `b` (both duplicate-free).
+    ///
+    /// The common prefix and suffix are part of some longest common subsequence, so they are taken
+    /// first and the O(n*m) table is built only over what is left; a board with one changed row
+    /// (the usual update) costs O(n).
     static func longestCommonSubsequence(_ a: [String], _ b: [String]) -> Set<String> {
+        var prefix = 0
+        while prefix < a.count, prefix < b.count, a[prefix] == b[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < a.count - prefix, suffix < b.count - prefix, a[a.count - 1 - suffix] == b[b.count - 1 - suffix] {
+            suffix += 1
+        }
+        var keys = Set(a[..<prefix])
+        keys.formUnion(a[(a.count - suffix)...])
+        keys.formUnion(tableLongestCommonSubsequence(Array(a[prefix..<(a.count - suffix)]),
+                                                     Array(b[prefix..<(b.count - suffix)])))
+        return keys
+    }
+
+    private static func tableLongestCommonSubsequence(_ a: [String], _ b: [String]) -> Set<String> {
         let n = a.count, m = b.count
         guard n > 0, m > 0 else { return [] }
         var table = [Int](repeating: 0, count: (n + 1) * (m + 1))

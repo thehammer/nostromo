@@ -679,6 +679,10 @@ public enum TrackerMarkdown {
         return nil
     }
 
+    /// What a copy shows in place of a node this client does not recognise (it carries no source):
+    /// a visible comment, so a whole-board copy is never silently missing a piece of the file.
+    static let unknownNodePlaceholder = "<!-- nostromo: unrecognised board node -->\n"
+
     static func source(_ node: TrackerNodeWire) -> String {
         switch node {
         case .title(_, let source), .section(_, _, let source), .logHeading(_, let source),
@@ -687,7 +691,7 @@ public enum TrackerMarkdown {
         case .item(let item):
             return item.source
         case .unknown:
-            return ""
+            return unknownNodePlaceholder
         }
     }
 }
