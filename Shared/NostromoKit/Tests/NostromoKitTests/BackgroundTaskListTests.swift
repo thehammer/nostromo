@@ -747,4 +747,148 @@ final class BackgroundTaskListTests: XCTestCase {
         XCTAssertEqual(list.running.last?.title, "npm run dev")
         XCTAssertEqual(list.chip, .running(2))
     }
+
+    // MARK: - A status this client does not know (bounded)
+
+    private func unknownLabel(_ raw: String) -> String {
+        BackgroundTaskList.statusLabel(.unknown(raw))
+    }
+
+    func testAShortUnknownStatusIsShownAsTheDaemonSentIt() {
+        XCTAssertEqual(unknownLabel("stalled"), "stalled")
+        XCTAssertEqual(unknownLabel("zombie"), "zombie")
+    }
+
+    func testAnEmptyOrBlankUnknownStatusReadsUnknown() {
+        XCTAssertEqual(unknownLabel(""), "unknown")
+        XCTAssertEqual(unknownLabel("   "), "unknown", "only spaces says nothing")
+        XCTAssertEqual(unknownLabel("\n\t\r\n"), "unknown", "only newlines and tabs says nothing")
+        XCTAssertEqual(unknownLabel("\u{1B}\u{0}\u{7}\u{9B}"), "unknown", "only control characters says nothing")
+    }
+
+    func testAnUnknownStatusLosesItsControlCharactersAndNewlines() {
+        XCTAssertEqual(unknownLabel("stal\tled\n"), "stalled", "tabs and a trailing newline are removed")
+        XCTAssertEqual(unknownLabel("line one\nline two"), "line oneline two", "a newline cannot make a second line")
+        XCTAssertEqual(unknownLabel("a\u{0}b\u{7}c\u{9B}d"), "abcd", "NUL, BEL and C1 controls are removed")
+        XCTAssertEqual(unknownLabel("  stalled  "), "stalled", "and the ends are trimmed")
+        for raw in ["x\ny", "x\ry", "x\u{2028}y", "x\u{0}y", "x\u{1B}[31my", "\u{7F}x"] {
+            let label = unknownLabel(raw)
+            XCTAssertNil(label.rangeOfCharacter(from: .newlines), "no line break survives in `\(label)`")
+            XCTAssertNil(label.rangeOfCharacter(from: .controlCharacters), "no control character survives in `\(label)`")
+        }
+    }
+
+    func testAnUnknownStatusOfExactlyTheLimitIsNotCutAndOneMoreIs() {
+        let limit = BackgroundTaskList.statusTextLimit
+        XCTAssertEqual(limit, 24, "the documented limit")
+
+        let exact = String(repeating: "a", count: limit)
+        XCTAssertEqual(unknownLabel(exact), exact, "\(limit) characters fit")
+
+        let over = String(repeating: "a", count: limit + 1)
+        let cut = unknownLabel(over)
+        XCTAssertNotEqual(cut, over, "\(limit + 1) characters do not")
+        XCTAssertLessThanOrEqual(cut.count, limit)
+        XCTAssertTrue(cut.hasSuffix("\u{2026}"), "a cut status says so with an ellipsis: \(cut)")
+    }
+
+    func testAFiveHundredCharacterUnknownStatusIsBoundedAndKeepsItsStart() {
+        let raw = (0 ..< 500).map { String(Character(Unicode.Scalar(UInt8(97 + $0 % 26)))) }.joined()
+
+        let label = unknownLabel(raw)
+
+        XCTAssertLessThanOrEqual(label.count, BackgroundTaskList.statusTextLimit, "bounded: `\(label)`")
+        XCTAssertTrue(label.hasSuffix("\u{2026}"), "the cut ends in an ellipsis")
+        let kept = String(label.dropLast())
+        XCTAssertFalse(kept.isEmpty, "something of the word is kept")
+        XCTAssertTrue(raw.hasPrefix(kept), "what is kept is the start of what the daemon sent: `\(kept)`")
+    }
+
+    func testTheBoundOnAnUnknownStatusIsAppliedAfterTheControlCharactersAreRemoved() {
+        // 24 printable characters padded with controls and newlines: nothing printable is lost to the cut.
+        let printable = String(repeating: "b", count: BackgroundTaskList.statusTextLimit)
+        let head = String(printable.prefix(10)), tail = String(printable.suffix(14))
+        let raw = "\n\t" + head + "\u{0}\n" + tail + "\t\n"
+        XCTAssertEqual(unknownLabel(raw), printable)
+    }
+
+    func testAKnownStatusKeepsItsOwnWordWhateverTheLimitIs() {
+        XCTAssertEqual(BackgroundTaskList.statusLabel(.running), "running")
+        XCTAssertEqual(BackgroundTaskList.statusLabel(.completed), "completed")
+        XCTAssertEqual(BackgroundTaskList.statusLabel(.failed), "failed")
+        XCTAssertEqual(BackgroundTaskList.statusLabel(.stopped), "stopped")
+    }
+
+    func testARowFromAnUnknownStatusIsBoundedButKeepsTheRawStatus() throws {
+        let raw = String(repeating: "x", count: 500)
+        let list = build([task("u1", .shell, status: .unknown(raw), description: "odd one", started: ago(10))])
+
+        let row = try XCTUnwrap(runningRow(list), "an unrecognised status still counts as running")
+
+        XCTAssertLessThanOrEqual(row.statusLabel.count, BackgroundTaskList.statusTextLimit, "the label is bounded")
+        XCTAssertTrue(row.statusLabel.hasSuffix("\u{2026}"))
+        XCTAssertEqual(row.status, .unknown(raw), "the status itself is still what the daemon sent")
+        XCTAssertEqual(list.chip, .running(1))
+    }
+
+    func testARowFromAnUnknownStatusWithControlCharactersIsOneCleanLine() throws {
+        let list = build([task("u1", .shell, status: .unknown("stal\nled\u{1B}[31m"), started: ago(10))])
+        let row = try XCTUnwrap(runningRow(list))
+        XCTAssertNil(row.statusLabel.rangeOfCharacter(from: .newlines))
+        XCTAssertNil(row.statusLabel.rangeOfCharacter(from: .controlCharacters))
+        XCTAssertFalse(row.statusLabel.isEmpty)
+    }
+
+    // MARK: - Chip counts above 99
+
+    func testTheChipTextCapsEveryCountAboveNinetyNineAtNinetyNinePlus() {
+        XCTAssertEqual(BackgroundChipState.countCap, 99)
+        XCTAssertEqual(BackgroundChipState.running(99).text, "\u{25F7} 99 running", "99 is still shown as it is")
+        XCTAssertEqual(BackgroundChipState.running(100).text, "\u{25F7} 99+ running")
+        XCTAssertEqual(BackgroundChipState.running(1_000_000).text, "\u{25F7} 99+ running")
+        XCTAssertEqual(BackgroundChipState.done(99).text, "\u{2713} 99 done")
+        XCTAssertEqual(BackgroundChipState.done(150).text, "\u{2713} 99+ done")
+        XCTAssertEqual(BackgroundChipState.failed(99).text, "\u{2715} 99 failed")
+        XCTAssertEqual(BackgroundChipState.failed(1_000).text, "\u{2715} 99+ failed")
+    }
+
+    func testSmallCountsReadAsTheyAlwaysDid() {
+        XCTAssertEqual(BackgroundChipState.running(1).text, "\u{25F7} 1 running")
+        XCTAssertEqual(BackgroundChipState.running(12).text, "\u{25F7} 12 running")
+        XCTAssertEqual(BackgroundChipState.done(3).text, "\u{2713} 3 done")
+        XCTAssertEqual(BackgroundChipState.failed(1).text, "\u{2715} 1 failed")
+    }
+
+    func testTheCapChangesTheChipTextButNotTheCountVoiceOverHears() {
+        XCTAssertEqual(BackgroundChipState.running(100).accessibilityLabel, "Background activity: 100 running")
+        XCTAssertEqual(BackgroundChipState.done(150).accessibilityLabel, "Background activity: 150 done")
+        XCTAssertEqual(BackgroundChipState.failed(1_000).accessibilityLabel, "Background activity: 1000 failed")
+    }
+
+    func testAHundredRunningTasksReadNinetyNinePlusOnTheChipAndTheRealCountForVoiceOver() {
+        let tasks = (0 ..< 100).map { task("job\($0)", .shell, description: "job \($0)", started: ago(UInt64(1_000 - $0))) }
+
+        let list = build(tasks)
+
+        XCTAssertEqual(list.chip, .running(100), "the state keeps the real count")
+        XCTAssertEqual(list.chip.text, "\u{25F7} 99+ running")
+        XCTAssertEqual(list.chip.accessibilityLabel, "Background activity: 100 running")
+        XCTAssertEqual(list.running.count, 100, "and the popover lists every one")
+    }
+
+    // MARK: - The chip's icon
+
+    func testEachChipStateHasItsGlyphAndHiddenHasNone() {
+        XCTAssertEqual(BackgroundChipState.running(2).icon, "\u{25F7}")
+        XCTAssertEqual(BackgroundChipState.done(3).icon, "\u{2713}")
+        XCTAssertEqual(BackgroundChipState.failed(1).icon, "\u{2715}")
+        XCTAssertNil(BackgroundChipState.hidden.icon)
+    }
+
+    func testTheChipTextStartsWithItsGlyph() {
+        for state in [BackgroundChipState.running(2), .done(3), .failed(1), .running(100)] {
+            let icon = state.icon ?? "<none>"
+            XCTAssertTrue(state.text?.hasPrefix(icon) ?? false, "\(state): `\(state.text ?? "")` starts with `\(icon)`")
+        }
+    }
 }

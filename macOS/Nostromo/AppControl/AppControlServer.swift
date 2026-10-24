@@ -525,6 +525,7 @@ final class AppControlServer {
         }
         let tag: String
         if let focus = req.string("focus") {
+            try AppControlTasks.requireKnownFocus(focus, known: knownFocusTags())
             tag = focus
         } else {
             tag = try pickPane(req, in: try window(req)).diagnosticsTag
@@ -532,6 +533,18 @@ final class AppControlServer {
         let list = BackgroundTaskStore.shared.list(for: tag)
         if sub == "chip" { return AppControlTasks.chip(tag: tag, list: list) }
         return AppControlTasks.list(tag: tag, list: list, all: (req.args["all"] as? Bool) == true)
+    }
+
+    /// Every focus tag the app knows: each pane in every window (visible or not) and each the task store
+    /// holds tasks for.
+    private func knownFocusTags() -> Set<String> {
+        var tags = Set(BackgroundTaskStore.shared.states.keys)
+        func walk(_ v: NSView) {
+            if let pane = v as? ReplView { tags.insert(pane.diagnosticsTag) }
+            v.subviews.forEach(walk)
+        }
+        for w in appDelegate?.windows ?? [] { if let content = w.contentView { walk(content) } }
+        return tags
     }
 
     /// The visible tracker panes of `w`, and the one a tracker request means: the pane tagged `focus`,

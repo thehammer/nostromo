@@ -236,6 +236,8 @@ final class BackgroundChipTests: XCTestCase {
         _ = NSApplication.shared
         world = BA3UIWorld(self)
         bars = []
+        modelStores = []
+        modelSenders = []
         previousMainMenu = NSApp.mainMenu
     }
 
@@ -348,32 +350,56 @@ final class BackgroundChipTests: XCTestCase {
 
     // MARK: The slot
 
-    func testTheSlotIsAtLeastAsWideAsNinetyNineRunningPlusPadding() {
-        let text = "\u{25F7} 99 running"
-        let measured = NSAttributedString(string: text, attributes: [.font: BackgroundChip.font]).size().width
+    /// The widest text any chip state can show: the counts cap at `99+`, so a hundred of anything is the
+    /// longest (and `99` itself is checked too, in case the cap is ever raised).
+    private let widestChipStates: [BackgroundChipState] = [.running(100), .done(100), .failed(100), .running(99),
+                                                            .done(99), .failed(99), .running(1_000_000)]
+
+    private func naturalWidth(of text: String) -> CGFloat {
+        ceil(NSAttributedString(string: text, attributes: [.font: BackgroundChip.font]).size().width)
             + 2 * BackgroundChip.horizontalPadding
+    }
+
+    func testTheSlotIsAtLeastAsWideAsTheLongestChipTextPlusPadding() {
+        let texts = widestChipStates.compactMap(\.text)
+        XCTAssertFalse(texts.isEmpty, "precondition")
+        let widest = texts.map(naturalWidth).max() ?? 0
         print("BA3 slotWidth: \(BackgroundChip.slotWidth)")
         XCTContext.runActivity(named: "BA3 slotWidth: \(BackgroundChip.slotWidth)") { _ in }
 
-        XCTAssertGreaterThanOrEqual(BackgroundChip.slotWidth, measured - 0.001,
-                                    "slot \(BackgroundChip.slotWidth) vs measured `\(text)` + padding \(measured)")
+        XCTAssertGreaterThanOrEqual(BackgroundChip.slotWidth, widest - 0.001,
+                                    "slot \(BackgroundChip.slotWidth) vs the longest chip text + padding \(widest)")
+        for text in texts {
+            XCTAssertGreaterThanOrEqual(BackgroundChip.slotWidth, naturalWidth(of: text) - 0.001, "`\(text)` must fit the slot")
+        }
     }
 
     func testEveryChipStateFitsTheSlotAndKeepsTheChipHeight() {
         let chip = BackgroundChip()
-        let states: [BackgroundChipState] = [.hidden, .running(1), .running(12), .running(99), .done(1),
-                                             .done(99), .failed(1), .failed(99)]
+        let states: [BackgroundChipState] = [.hidden, .running(1), .running(12), .running(99), .running(100), .done(1),
+                                             .done(99), .done(100), .failed(1), .failed(99), .failed(100)]
         for state in states {
             chip.apply(state, tooltip: nil)
             XCTAssertLessThanOrEqual(chip.intrinsicContentSize.width, BackgroundChip.slotWidth + 0.001, "\(state)")
             XCTAssertEqual(chip.intrinsicContentSize.height, BackgroundChip.height, "\(state)")
             if let text = state.text {
                 // Not the clamped intrinsic size: the text itself, measured, fits.
-                let natural = ceil(NSAttributedString(string: text, attributes: [.font: BackgroundChip.font]).size().width)
-                    + 2 * BackgroundChip.horizontalPadding
+                let natural = naturalWidth(of: text)
                 XCTAssertLessThanOrEqual(natural, BackgroundChip.slotWidth + 0.001, "`\(text)` needs \(natural) pt")
             }
         }
+    }
+
+    func testAHundredRunningChipIsDrawnInFullWithinTheSlotNotClipped() {
+        let chip = BackgroundChip()
+        chip.apply(.running(100), tooltip: nil)
+
+        XCTAssertEqual(chip.title, "\u{25F7} 99+ running")
+        XCTAssertLessThanOrEqual(naturalWidth(of: chip.title), BackgroundChip.slotWidth + 0.001,
+                                 "the chip's own text is not wider than the slot reserved for it")
+        XCTAssertEqual(chip.intrinsicContentSize.width, naturalWidth(of: chip.title), accuracy: 0.5,
+                       "so its natural width is not clamped")
+        XCTAssertEqual(chip.accessibilityLabel(), "Background activity: 100 running", "VoiceOver still hears the real count")
     }
 
     func testTheSlotIsZeroWidthUntilBoundThenFixedWhateverTheChipSays() {
@@ -401,6 +427,376 @@ final class BackgroundChipTests: XCTestCase {
             XCTAssertLessThanOrEqual(bar.backgroundChip.frame.width, bar.backgroundSlot.frame.width + 0.5,
                                      "the chip stays inside its slot: \(bar.backgroundChip.title)")
         }
+    }
+
+    // MARK: Counts above 99
+
+    func testCountsAboveNinetyNineReadNinetyNinePlus() {
+        XCTAssertEqual(BackgroundChipState.running(100).text, "\u{25F7} 99+ running")
+        XCTAssertEqual(BackgroundChipState.done(150).text, "\u{2713} 99+ done")
+        XCTAssertEqual(BackgroundChipState.failed(1_000).text, "\u{2715} 99+ failed")
+        XCTAssertEqual(BackgroundChipState.running(99).text, "\u{25F7} 99 running", "99 is still shown as it is")
+        XCTAssertEqual(BackgroundChipState.running(12).text, "\u{25F7} 12 running")
+    }
+
+    func testAHundredTasksOnABoundBarReadNinetyNinePlusButAreLabelledWithTheRealCount() {
+        let window = makeRigWindow(self, size: NSSize(width: 600, height: 60))
+        let bar = makeBar(in: window)
+
+        world.ingest(world.running(100))
+        bar.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(bar.backgroundChip.chipState, .running(100), "the state keeps the real count")
+        XCTAssertEqual(bar.backgroundChip.title, "\u{25F7} 99+ running")
+        XCTAssertEqual(bar.backgroundChip.accessibilityLabel(), "Background activity: 100 running")
+        XCTAssertLessThanOrEqual(bar.backgroundChip.frame.width, bar.backgroundSlot.frame.width + 0.5,
+                                 "the chip stays inside its slot")
+        XCTAssertEqual(bar.backgroundSlot.frame.width, BackgroundChip.slotWidth, accuracy: 0.5,
+                       "and the slot is still the same width as for one task")
+    }
+
+    // MARK: How much of itself the chip shows
+
+    func testAnIconOnlyChipShowsJustTheGlyphOfItsState() {
+        let chip = BackgroundChip()
+        let expectations: [(BackgroundChipState, String)] = [(.running(2), "\u{25F7}"), (.done(3), "\u{2713}"),
+                                                              (.failed(1), "\u{2715}"), (.running(100), "\u{25F7}")]
+        for (state, icon) in expectations {
+            chip.apply(state, tooltip: nil)
+            chip.setFit(.iconOnly)
+            XCTAssertEqual(chip.fit, .iconOnly)
+            XCTAssertEqual(chip.title, icon, "\(state): the glyph alone")
+            XCTAssertEqual(chip.title, state.icon)
+            XCTAssertFalse(chip.isHidden, "\(state): an icon-only chip is still there")
+            XCTAssertEqual(chip.accessibilityLabel(), state.accessibilityLabel,
+                           "\(state): VoiceOver still gets the whole story from the icon")
+            XCTAssertLessThanOrEqual(chip.intrinsicContentSize.width, BackgroundChip.iconWidth + 0.5,
+                                     "\(state): the icon needs no more than the icon width")
+            chip.setFit(.full)
+        }
+    }
+
+    func testTheIconWidthIsBetweenNothingAndTheFullSlot() {
+        XCTAssertGreaterThan(BackgroundChip.iconWidth, 2 * BackgroundChip.horizontalPadding, "room for a glyph and its padding")
+        XCTAssertLessThan(BackgroundChip.iconWidth, BackgroundChip.slotWidth, "the icon alone is narrower than the text")
+        for state in [BackgroundChipState.running(1), .done(1), .failed(1)] {
+            XCTAssertLessThanOrEqual(naturalWidth(of: state.icon ?? ""), BackgroundChip.iconWidth + 0.001, "\(state)'s glyph fits")
+        }
+    }
+
+    func testAHiddenFitHidesTheChipAndFullBringsItBack() {
+        let chip = BackgroundChip()
+        chip.apply(.running(2), tooltip: "two jobs")
+        XCTAssertFalse(chip.isHidden, "precondition")
+        XCTAssertEqual(chip.title, "\u{25F7} 2 running", "precondition")
+
+        chip.setFit(.hidden)
+        XCTAssertEqual(chip.fit, .hidden)
+        XCTAssertTrue(chip.isHidden, "no room: no chip")
+
+        chip.setFit(.full)
+        XCTAssertFalse(chip.isHidden)
+        XCTAssertEqual(chip.title, "\u{25F7} 2 running", "the whole text again")
+        XCTAssertEqual(chip.toolTip, "two jobs", "nothing else was lost on the way")
+        XCTAssertEqual(chip.chipState, .running(2))
+    }
+
+    func testAChipWithNothingToReportStaysHiddenInEveryFit() {
+        let chip = BackgroundChip()
+        chip.apply(.hidden, tooltip: nil)
+        for fit in [BackgroundChip.Fit.full, .iconOnly, .hidden, .full] {
+            chip.setFit(fit)
+            XCTAssertTrue(chip.isHidden, "a hidden state is hidden at \(fit) too")
+            XCTAssertEqual(chip.title, "", "and says nothing at \(fit)")
+        }
+    }
+
+    func testAChipThatHadNoRoomStaysHiddenWhenItsStateChangesUntilThereIsRoom() {
+        let chip = BackgroundChip()
+        chip.apply(.running(1), tooltip: nil)
+        chip.setFit(.hidden)
+
+        chip.apply(.failed(2), tooltip: nil)
+        XCTAssertTrue(chip.isHidden, "a new state does not squeeze a chip into a slot with no room")
+
+        chip.setFit(.iconOnly)
+        XCTAssertFalse(chip.isHidden)
+        XCTAssertEqual(chip.title, "\u{2715}")
+
+        chip.apply(.done(4), tooltip: nil)
+        XCTAssertEqual(chip.title, "\u{2713}", "a new state keeps the fit the slot gave it")
+
+        chip.setFit(.full)
+        XCTAssertEqual(chip.title, "\u{2713} 4 done")
+    }
+
+    func testChangingTheFitNeverMovesTheKeyboard() {
+        let window = makeRigWindow(self, size: NSSize(width: 600, height: 60))
+        let bar = makeBar(in: window)
+        bar.textView.string = "half a thought"
+        XCTAssertTrue(window.makeFirstResponder(bar.textView))
+        world.ingest(world.running(3))
+
+        for fit in [BackgroundChip.Fit.iconOnly, .hidden, .full] {
+            bar.backgroundChip.setFit(fit)
+            XCTAssertTrue(window.firstResponder === bar.textView, "\(fit): the composer keeps the keyboard")
+            XCTAssertEqual(bar.textView.string, "half a thought", "\(fit)")
+        }
+    }
+
+    // MARK: Narrow panes
+
+    /// One narrow-pane rig: a window and a bound bar `width` wide, the chip showing 100 running tasks, optionally
+    /// with the model chip showing and Stop up (a turn running).
+    private struct NarrowRig {
+        let window: RigWindow
+        let bar: ReplInputBar
+        let world: BA3UIWorld
+    }
+
+    private var modelStores: [ModelStore] = []
+    private var modelSenders: [ModelRequestRecorder] = []
+
+    private func makeNarrowRig(width: CGFloat, modelChip: Bool = false, stopShowing: Bool = false) -> NarrowRig {
+        let window = makeRigWindow(self, size: NSSize(width: width, height: 60))
+        // Its own store, so the bar is bound before the tasks arrive whichever variant it is.
+        let rigWorld = BA3UIWorld(self)
+        let bar = ba3uiMakeBar(in: window, frame: NSRect(x: 0, y: 0, width: width, height: 60), store: rigWorld.store)
+        bars.append(bar)
+        if modelChip {
+            let sender = ModelRequestRecorder()
+            let store = ModelStore(sender: sender)
+            store.connectionChanged(true)
+            modelSenders.append(sender)
+            modelStores.append(store)
+            bar.bindModel(tag: "gate", agentName: "claudia", store: store)
+            let state = SessionModelStateWire(tag: "gate",
+                                              recorded: RecordedModelWire(model: "sonnet", effort: nil, source: .focus),
+                                              reported: ReportedModelWire(model: "claude-sonnet-5-5", family: "sonnet"),
+                                              running: true)
+            store.ingest(.sessionModelState(state))
+            modelWaitUntil { !bar.modelChip.isHidden }
+        }
+        if stopShowing {
+            bar.setRunning(true)
+            addTeardownBlock { bar.setRunning(false) }
+        }
+        rigWorld.ingest(rigWorld.running(100))
+        settle(bar, in: window)
+        return NarrowRig(window: window, bar: bar, world: rigWorld)
+    }
+
+    /// Layout until nothing moves (a chip changing its fit asks for one more pass).
+    private func settle(_ bar: ReplInputBar, in window: NSWindow) {
+        for _ in 0 ..< 3 {
+            window.contentView?.layoutSubtreeIfNeeded()
+            bar.layoutSubtreeIfNeeded()
+        }
+    }
+
+    private func resize(_ rig: NarrowRig, to width: CGFloat) {
+        rig.window.setContentSize(NSSize(width: width, height: 60))
+        rig.bar.setFrameSize(NSSize(width: width, height: 60))
+        settle(rig.bar, in: rig.window)
+    }
+
+    private func sendButton(of bar: ReplInputBar, file: StaticString = #filePath, line: UInt = #line) -> NSButton? {
+        let found = bar.subviews.compactMap { $0 as? NSButton }.first { $0.attributedTitle.string == "Send" || $0.title == "Send" }
+        XCTAssertNotNil(found, "the bar has a Send button", file: file, line: line)
+        return found
+    }
+
+    private func stopButton(of bar: ReplInputBar) -> NSButton? {
+        bar.subviews.compactMap { $0 as? NSButton }.first { $0.attributedTitle.string.contains("Stop") || $0.title.contains("Stop") }
+    }
+
+    /// What a narrow bar must never do: widen its window, move off its pane, or put one control on another;
+    /// and, where the arithmetic allows (`composerFits`), keep the composer a usable width.
+    private func assertTheBarHolds(_ rig: NarrowRig, width: CGFloat, composerFits: Bool, _ name: String,
+                                   file: StaticString = #filePath, line: UInt = #line) {
+        let bar = rig.bar
+        settle(bar, in: rig.window)
+        XCTAssertEqual(rig.window.frame.width, width, accuracy: 0.5,
+                       "\(name): the window must never widen to fit the bar", file: file, line: line)
+        XCTAssertEqual(bar.frame.width, width, accuracy: 0.5, "\(name): the bar keeps the pane's width", file: file, line: line)
+        XCTAssertEqual(bar.frame.minX, 0, accuracy: 0.5, "\(name): the bar stays on the pane", file: file, line: line)
+        if let content = rig.window.contentView {
+            XCTAssertTrue(content.bounds.insetBy(dx: -0.5, dy: -0.5).contains(bar.frame),
+                          "\(name): the bar \(bar.frame) must stay inside the pane \(content.bounds)", file: file, line: line)
+        }
+
+        guard let composer = bar.textView.enclosingScrollView?.frame else {
+            return XCTFail("\(name): the composer has a scroll view", file: file, line: line)
+        }
+        var parts: [(String, NSRect)] = [("composer", composer), ("background slot", bar.backgroundSlot.frame)]
+        if !bar.modelChip.isHidden { parts.append(("model chip", bar.modelChip.frame)) }
+        if let send = sendButton(of: bar, file: file, line: line) { parts.append(("Send", send.frame)) }
+        if let stop = stopButton(of: bar), !stop.isHidden { parts.append(("Stop", stop.frame)) }
+
+        let barBounds = bar.bounds.insetBy(dx: -0.5, dy: -0.5)
+        for (label, frame) in parts {
+            XCTAssertTrue(barBounds.contains(frame), "\(name): \(label) \(frame) must stay inside the bar \(bar.bounds)",
+                          file: file, line: line)
+        }
+        for (i, a) in parts.enumerated() {
+            for b in parts[(i + 1)...] {
+                let overlap = a.1.intersection(b.1)
+                let overlaps = !overlap.isNull && overlap.width > 0.5 && overlap.height > 0.5
+                XCTAssertFalse(overlaps, "\(name): \(a.0) \(a.1) and \(b.0) \(b.1) must not overlap",
+                               file: file, line: line)
+            }
+        }
+
+        let chip = bar.backgroundChip
+        if !chip.isHidden {
+            let slot = bar.backgroundSlot
+            XCTAssertTrue(slot.bounds.insetBy(dx: -0.5, dy: -0.5).contains(chip.frame),
+                          "\(name): a visible chip \(chip.frame) must sit inside its slot \(slot.bounds)", file: file, line: line)
+        }
+
+        if composerFits {
+            let wanted = max(ReplInputBar.composerMinimumWidth, ReplInputBar.composerMinimumFraction * width)
+            XCTAssertGreaterThanOrEqual(composer.width, wanted - 0.5,
+                                        "\(name): the composer is \(composer.width) pt wide, it must keep at least \(wanted)",
+                                        file: file, line: line)
+        }
+    }
+
+    /// Runs the four things a pane can have on its bar (nothing extra, Stop, the model chip, both).
+    ///
+    /// `composerFits` is false where the bar cannot give the composer its minimum even with the slot and the
+    /// model chip squeezed to nothing: with Stop up (64 pt and its gap) a 260 pt bar has 80 pt left for the
+    /// composer. There the test only checks that nothing overlaps or leaves the bar.
+    private func assertEveryVariantHolds(at width: CGFloat, stopFits: Bool,
+                                         file: StaticString = #filePath, line: UInt = #line) {
+        let variants: [(name: String, model: Bool, stop: Bool, composerFits: Bool)] = [
+            ("plain", false, false, true),
+            ("stop showing", false, true, stopFits),
+            ("model chip showing", true, false, true),
+            ("model chip and stop showing", true, true, stopFits),
+        ]
+        for variant in variants {
+            let rig = makeNarrowRig(width: width, modelChip: variant.model, stopShowing: variant.stop)
+            XCTAssertEqual(rig.bar.backgroundChip.chipState, .running(100), "\(width) pt, \(variant.name): precondition",
+                           file: file, line: line)
+            assertTheBarHolds(rig, width: width, composerFits: variant.composerFits, "\(Int(width)) pt, \(variant.name)",
+                              file: file, line: line)
+        }
+    }
+
+    func testABarAt420PointsKeepsEverythingInsideAndTheComposerWide() {
+        assertEveryVariantHolds(at: 420, stopFits: true)
+    }
+
+    func testABarAt320PointsKeepsEverythingInsideAndTheComposerWide() {
+        assertEveryVariantHolds(at: 320, stopFits: true)
+    }
+
+    func testABarAt260PointsKeepsEverythingInsideAndTheComposerWideWhereItCan() {
+        // The composer's minimum is only asserted for the variants without Stop: with Stop up there is not
+        // the room (see `assertEveryVariantHolds`).
+        assertEveryVariantHolds(at: 260, stopFits: false)
+    }
+
+    func testTheChipGivesWayToTheComposerAsTheBarNarrows() {
+        let cases: [(width: CGFloat, fit: BackgroundChip.Fit)] = [(420, .full), (320, .iconOnly), (230, .hidden)]
+        for (width, fit) in cases {
+            let rig = makeNarrowRig(width: width)
+            let chip = rig.bar.backgroundChip
+            XCTAssertEqual(chip.fit, fit, "\(Int(width)) pt: how much of itself the chip shows")
+            switch fit {
+            case .full:
+                XCTAssertEqual(chip.title, "\u{25F7} 99+ running", "\(Int(width)) pt: the whole text")
+                XCTAssertFalse(chip.isHidden)
+                XCTAssertEqual(rig.bar.backgroundSlot.frame.width, BackgroundChip.slotWidth, accuracy: 0.5,
+                               "\(Int(width)) pt: the slot is its full width while there is room")
+            case .iconOnly:
+                XCTAssertEqual(chip.title, BackgroundChipState.running(100).icon, "\(Int(width)) pt: the icon alone")
+                XCTAssertFalse(chip.isHidden)
+                XCTAssertLessThan(rig.bar.backgroundSlot.frame.width, BackgroundChip.slotWidth,
+                                  "\(Int(width)) pt: the slot gave way")
+            case .hidden:
+                XCTAssertTrue(chip.isHidden, "\(Int(width)) pt: no room for even the icon, so no chip")
+            }
+            XCTAssertEqual(chip.accessibilityLabel(), "Background activity: 100 running",
+                           "\(Int(width)) pt: the label does not shrink with the chip")
+            assertTheBarHolds(rig, width: width, composerFits: true, "\(Int(width)) pt")
+        }
+    }
+
+    func testAtTwoHundredSixtyPointsTheChipIsNoLongerWholeAndNeverOverhangsItsSlot() {
+        // The edge between the icon and nothing depends on the glyph's measured width, so this checks the
+        // rule rather than the name: not the whole text, and whatever is drawn fits the slot it has.
+        let rig = makeNarrowRig(width: 260)
+        let chip = rig.bar.backgroundChip
+
+        XCTAssertNotEqual(chip.fit, .full, "260 pt has no room for `\u{25F7} 99+ running`")
+        XCTAssertEqual(chip.isHidden, chip.fit == .hidden, "a chip is hidden exactly when it has no room at all")
+        if chip.fit == .iconOnly {
+            XCTAssertEqual(chip.title, "\u{25F7}")
+            XCTAssertGreaterThanOrEqual(rig.bar.backgroundSlot.frame.width + 0.5, BackgroundChip.iconWidth,
+                                        "an icon is shown only in a slot that fits it")
+        }
+    }
+
+    func testTheSlotReturnsWhenThePaneWidens() {
+        for narrow in [CGFloat(320), CGFloat(230)] {
+            let rig = makeNarrowRig(width: narrow)
+            XCTAssertNotEqual(rig.bar.backgroundChip.fit, .full, "\(Int(narrow)) pt: precondition")
+
+            resize(rig, to: 600)
+
+            XCTAssertEqual(rig.bar.backgroundSlot.frame.width, BackgroundChip.slotWidth, accuracy: 0.5,
+                           "from \(Int(narrow)) pt: the slot is its full width again")
+            XCTAssertEqual(rig.bar.backgroundChip.fit, .full, "from \(Int(narrow)) pt")
+            XCTAssertFalse(rig.bar.backgroundChip.isHidden)
+            XCTAssertEqual(rig.bar.backgroundChip.title, "\u{25F7} 99+ running", "from \(Int(narrow)) pt: the whole text is back")
+            assertTheBarHolds(rig, width: 600, composerFits: true, "widened from \(Int(narrow)) pt")
+        }
+    }
+
+    func testTheSameBarNarrowedAndWidenedAgainFollowsItsWidthBothWays() {
+        let rig = makeNarrowRig(width: 600)
+        XCTAssertEqual(rig.bar.backgroundChip.fit, .full, "precondition")
+
+        resize(rig, to: 320)
+        XCTAssertEqual(rig.bar.backgroundChip.fit, .iconOnly, "narrowed to 320 pt")
+        XCTAssertEqual(rig.bar.backgroundChip.title, "\u{25F7}")
+
+        resize(rig, to: 230)
+        XCTAssertEqual(rig.bar.backgroundChip.fit, .hidden, "narrowed to 230 pt")
+        XCTAssertTrue(rig.bar.backgroundChip.isHidden)
+
+        resize(rig, to: 420)
+        XCTAssertEqual(rig.bar.backgroundChip.fit, .full, "widened to 420 pt")
+        XCTAssertEqual(rig.bar.backgroundChip.title, "\u{25F7} 99+ running")
+        XCTAssertFalse(rig.bar.backgroundChip.isHidden)
+    }
+
+    func testANarrowBarStillShowsAChipWhoseStateChangesWithoutTheComposerMoving() {
+        let rig = makeNarrowRig(width: 320)
+        let composer = rig.bar.textView.enclosingScrollView?.frame
+
+        rig.world.ingest([rig.world.task("job0", "job number 0", status: .failed, startedAgo: 1_000, endedAgo: 1)])
+        settle(rig.bar, in: rig.window)
+
+        XCTAssertEqual(rig.bar.backgroundChip.chipState, .failed(1), "precondition")
+        XCTAssertEqual(rig.bar.backgroundChip.fit, .iconOnly)
+        XCTAssertEqual(rig.bar.backgroundChip.title, "\u{2715}", "the failure's own icon, not the running one")
+        XCTAssertEqual(rig.bar.textView.enclosingScrollView?.frame, composer,
+                       "a chip changing state never changes the composer's width, narrow or not")
+    }
+
+    func testANarrowBarWithNothingToReportHasTheSameComposerAsWithAChip() {
+        let withChip = makeNarrowRig(width: 320)
+        let composerWithChip = withChip.bar.textView.enclosingScrollView?.frame
+
+        withChip.world.ingest([])
+        settle(withChip.bar, in: withChip.window)
+
+        XCTAssertTrue(withChip.bar.backgroundChip.isHidden, "precondition")
+        XCTAssertEqual(withChip.bar.textView.enclosingScrollView?.frame, composerWithChip,
+                       "the chip going does not hand its room to the composer")
     }
 
     // MARK: Focus

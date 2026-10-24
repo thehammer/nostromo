@@ -7,6 +7,14 @@ import NostromoKit
 /// Unknown values are `null`, never zero.
 enum AppControlTasks {
 
+    /// `--focus TAG` must name a focus this app knows (a pane in some window, or one the task store has
+    /// heard of): a typo answers with the tags it could have meant, not with an empty, hidden result.
+    static func requireKnownFocus(_ focus: String, known: Set<String>) throws {
+        guard known.contains(focus) else {
+            throw AppControlError.notFound("no focus tagged \"\(focus)\"; known tags: \(known.sorted())")
+        }
+    }
+
     /// `tasks list [--all]`: the running section; with `all`, the Ended and Housekeeping rows too.
     static func list(tag: String, list: BackgroundTaskList, all: Bool) -> [String: Any] {
         let rows = all ? list.allRows : list.running

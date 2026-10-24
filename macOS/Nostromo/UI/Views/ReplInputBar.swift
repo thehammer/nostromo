@@ -48,9 +48,10 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private var modelNoticeId: Int?
     /// The Background activity chip (BA3), right-aligned in `backgroundSlot`, left of the model chip.
     let backgroundChip       = BackgroundChip()
-    /// A fixed-width space the chip lives in. Reserved once the bar is bound to a session and never
-    /// resized after, so the chip appearing, changing or going never changes the composer's width
-    /// (and so never rewraps typed text or changes the bar's height).
+    /// The space the chip lives in. `BackgroundChip.slotWidth` wide once the bar is bound to a session,
+    /// whatever the chip shows, so the chip appearing, changing or going never changes the composer's
+    /// width (and so never rewraps typed text or changes the bar's height). Only a narrow bar makes
+    /// it give way (see `composerMinimumWidth`), and then by the bar's width alone.
     let backgroundSlot       = NSView()
     /// The Background activity popover, while it is open.
     private(set) var backgroundPopover: BackgroundPopover?
@@ -62,6 +63,17 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private var backgroundBinding: AnyCancellable?
     private var backgroundSlotWidth: NSLayoutConstraint!
     private var backgroundSlotGap: NSLayoutConstraint!
+
+    /// The composer never gets narrower than this, or than `composerMinimumFraction` of the bar,
+    /// whichever is more, while the bar is wide enough for it at all. What gives way for it: the
+    /// background slot first (its chip shows the icon alone, then nothing), then the model chip.
+    static let composerMinimumWidth: CGFloat = 120
+    static let composerMinimumFraction: CGFloat = 0.35
+    /// Priorities of what gives way, weakest first. All stay under `NSLayoutConstraint.Priority.windowSizeStayPut`
+    /// (750): a bar too narrow for its parts must squeeze them, never widen its window.
+    private static let slotPriority = NSLayoutConstraint.Priority(600)
+    private static let modelChipPriority = NSLayoutConstraint.Priority(700)
+    private static let composerPriority = NSLayoutConstraint.Priority(740)
     private let spinner      = NSProgressIndicator()
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
@@ -184,6 +196,10 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         modelChip.action = #selector(showModelPopover(_:))
         addSubview(modelChip)
         chipWidth = modelChip.widthAnchor.constraint(equalToConstant: 0)
+        chipWidth.priority = Self.modelChipPriority
+        // Its width is `chipWidth`, which gives way (below the composer's minimum); the button's own
+        // 750 resistance to compression would outrank that and the window's size.
+        modelChip.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
         chipTrailingToSend = modelChip.trailingAnchor.constraint(equalTo: button.leadingAnchor)
         chipTrailingToStop = modelChip.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor)
 
@@ -195,6 +211,12 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         backgroundChip.action = #selector(backgroundChipClicked(_:))
         backgroundSlot.addSubview(backgroundChip)
         backgroundSlotWidth = backgroundSlot.widthAnchor.constraint(equalToConstant: 0)
+        backgroundSlotWidth.priority = Self.slotPriority
+        let composerMinimum = textScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.composerMinimumWidth)
+        let composerFraction = textScroll.widthAnchor.constraint(greaterThanOrEqualTo: widthAnchor,
+                                                                 multiplier: Self.composerMinimumFraction)
+        composerMinimum.priority = Self.composerPriority
+        composerFraction.priority = Self.composerPriority
         // The gap between the slot and the model chip (or Send/Stop while the model chip is
         // hidden: it is zero-wide then and sits flush against them).
         backgroundSlotGap = backgroundSlot.trailingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: 0)
@@ -221,6 +243,10 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
             textScroll.trailingAnchor.constraint(equalTo: backgroundSlot.leadingAnchor, constant: -8),
             backgroundSlotGap,
             backgroundSlotWidth,
+            backgroundSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            modelChip.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            composerMinimum,
+            composerFraction,
             backgroundSlot.heightAnchor.constraint(equalToConstant: BackgroundChip.height),
             backgroundSlot.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
             backgroundChip.trailingAnchor.constraint(equalTo: backgroundSlot.trailingAnchor),
@@ -352,6 +378,20 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     }
 
     // MARK: Background activity chip
+
+    override func layout() {
+        super.layout()
+        fitBackgroundChipToSlot()
+    }
+
+    /// The chip shows what its slot has room for: the text, the icon alone, or nothing. Reads the
+    /// slot's laid-out width (set by the bar's width, never by the chip), so it settles at once.
+    private func fitBackgroundChipToSlot() {
+        guard backgroundTag != nil else { return }
+        let room = backgroundSlot.frame.width + 0.5
+        backgroundChip.setFit(room >= BackgroundChip.slotWidth ? .full
+                              : room >= BackgroundChip.iconWidth ? .iconOnly : .hidden)
+    }
 
     /// Show `tag`'s background tasks in the chip, live from `store`. Every bar bound to the same
     /// store updates from the same delivery, which keeps two windows in step. Reserves the slot.

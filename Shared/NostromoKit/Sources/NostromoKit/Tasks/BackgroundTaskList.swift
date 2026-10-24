@@ -29,14 +29,32 @@ public enum BackgroundChipState: Equatable {
     /// Ended since the popover was last opened, this many failed.
     case failed(Int)
 
-    /// `◷ 2 running`, `✓ 3 done`, `✕ 1 failed`; nil when hidden.
+    /// Counts above this read `99+` in the chip, so its text never outgrows the slot reserved for it.
+    public static let countCap = 99
+
+    /// `◷ 2 running`, `✓ 3 done`, `✕ 1 failed` (`◷ 99+ running` from 100); nil when hidden.
     public var text: String? {
         switch self {
         case .hidden: return nil
-        case .running(let n): return "\u{25F7} \(n) running"
-        case .done(let n): return "\u{2713} \(n) done"
-        case .failed(let n): return "\u{2715} \(n) failed"
+        case .running(let n): return "\(icon ?? "") \(Self.countText(n)) running"
+        case .done(let n): return "\(icon ?? "") \(Self.countText(n)) done"
+        case .failed(let n): return "\(icon ?? "") \(Self.countText(n)) failed"
         }
+    }
+
+    /// The glyph alone (`◷`, `✓`, `✕`), what the chip shows when the bar is too narrow for its text;
+    /// nil when hidden.
+    public var icon: String? {
+        switch self {
+        case .hidden: return nil
+        case .running: return "\u{25F7}"
+        case .done: return "\u{2713}"
+        case .failed: return "\u{2715}"
+        }
+    }
+
+    private static func countText(_ n: Int) -> String {
+        n > countCap ? "\(countCap)+" : "\(n)"
     }
 
     /// `hidden`, `running`, `done` or `failed` (what `nostromo-app tasks chip` reports).
@@ -282,8 +300,23 @@ public struct BackgroundTaskList: Equatable {
         case .completed: return "completed"
         case .failed: return "failed"
         case .stopped: return "stopped"
-        case .unknown(let raw): return raw.isEmpty ? "unknown" : raw
+        case .unknown(let raw): return boundedStatus(raw)
         }
+    }
+
+    /// The longest status text a row shows; the daemon's own words for a status this client does
+    /// not know are cut to this (control characters removed first).
+    public static let statusTextLimit = 24
+
+    /// `raw` on one line without control characters, at most `statusTextLimit` characters (the cut
+    /// ends in `…`); `unknown` when nothing printable is left.
+    static func boundedStatus(_ raw: String) -> String {
+        let printable = String(String.UnicodeScalarView(raw.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0) && !CharacterSet.newlines.contains($0)
+        })).trimmingCharacters(in: .whitespaces)
+        if printable.isEmpty { return "unknown" }
+        guard printable.count > statusTextLimit else { return printable }
+        return String(printable.prefix(statusTextLimit - 1)) + "\u{2026}"
     }
 
     public static func statusIcon(_ status: TaskStatusWire) -> String {

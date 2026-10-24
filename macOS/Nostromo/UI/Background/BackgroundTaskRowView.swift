@@ -107,6 +107,9 @@ final class BackgroundTaskRowView: NSView {
             field.setContentHuggingPriority(.required, for: .horizontal)
             field.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
+        // The status is the daemon's own word when this client does not know it (the Kit cuts it to
+        // `statusTextLimit`): in a row too narrow for it, it truncates, after the title has.
+        statusField.setContentCompressionResistancePriority(.defaultLow + 250, for: .horizontal)
         signOfLifeField.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
         addSubview(line)
         addSubview(signOfLifeField)

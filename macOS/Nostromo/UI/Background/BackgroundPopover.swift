@@ -507,8 +507,9 @@ private final class BlockMenuItem: NSMenuItem {
 /// composer keeps it (if showing moved the key window or first responder, both are put back at
 /// once). Opened by ⇧⌘B, it takes the keyboard and selects the first row. However it closes (Esc,
 /// a click outside, ⇧⌘B again), the key window, first responder and selection it took them from
-/// get them back. Esc closes it in both cases: a local key monitor consumes Esc, and only Esc,
-/// while it is shown.
+/// get them back, except that a click-opened popover (which never took them) leaves the first
+/// responder wherever it is by then: a click outside that landed in another composer keeps it.
+/// Esc closes it in both cases: a local key monitor consumes Esc, and only Esc, while it is shown.
 final class BackgroundPopover: NSObject, NSPopoverDelegate {
     let viewController: BackgroundPopoverViewController
     private let popover = NSPopover()
@@ -618,12 +619,24 @@ final class BackgroundPopover: NSObject, NSPopoverDelegate {
         if hadKeyboard || NSApp?.keyWindow == nil || NSApp?.keyWindow === viewController.view.window {
             if let window = saved.window, window.isVisible, NSApp?.keyWindow !== window { window.makeKey() }
         }
-        restoreResponder()
+        if hadKeyboard || firstResponderIsFree() { restoreResponder() }
         saved = (nil, nil, nil)
         onDidClose?()
     }
 
     // MARK: Private
+
+    /// Whether nobody holds the first responder in the window the popover was opened from: it is nil,
+    /// the window itself, or something in the popover's own window. If it is anything else, the user
+    /// has moved on (a click outside that landed in another pane's composer before this close was
+    /// delivered) and that is where the keyboard stays. A click-opened popover never moved it.
+    private func firstResponderIsFree() -> Bool {
+        guard let window = saved.window else { return false }
+        guard let current = window.firstResponder, current !== window else { return true }
+        guard let popoverWindow = viewController.view.window else { return false }
+        if current === popoverWindow { return true }
+        return (current as? NSView)?.window === popoverWindow
+    }
 
     /// Put the first responder and its selection back where they were, if they moved.
     private func restoreResponder() {

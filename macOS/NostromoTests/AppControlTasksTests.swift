@@ -358,4 +358,45 @@ final class AppControlTasksTests: XCTestCase {
         let back = object(try JSONSerialization.jsonObject(with: data), "decoded")
         XCTAssertEqual(objects(back["tasks"], "tasks").first?["description"] as? String, hostile, "and it survives the round trip")
     }
+
+    // MARK: - `--focus TAG` must name a focus the app knows
+
+    func testAKnownFocusIsAccepted() {
+        XCTAssertNoThrow(try AppControlTasks.requireKnownFocus("kate", known: ["kate", "cody"]))
+        XCTAssertNoThrow(try AppControlTasks.requireKnownFocus("cody", known: ["kate", "cody"]))
+        XCTAssertNoThrow(try AppControlTasks.requireKnownFocus("only", known: ["only"]))
+    }
+
+    func testAnUnknownFocusIsNotFoundAndNamesTheTagAndTheKnownOnesSorted() {
+        XCTAssertThrowsError(try AppControlTasks.requireKnownFocus("kaet", known: ["cody", "kate", "ada"])) { error in
+            guard case .notFound(let detail)? = error as? AppControlError else {
+                return XCTFail("a typo is `notFound`, not \(error)")
+            }
+            XCTAssertTrue(detail.contains("kaet"), "the message names the tag that was asked for: \(detail)")
+            let message = (error as? AppControlError)?.message ?? ""
+            XCTAssertTrue(message.contains("kaet"), "and so does the message the caller reads: \(message)")
+            let positions = ["ada", "cody", "kate"].compactMap { detail.range(of: $0)?.lowerBound }
+            XCTAssertEqual(positions.count, 3, "every known tag is listed: \(detail)")
+            XCTAssertEqual(positions, positions.sorted(), "known tags are listed in sorted order: \(detail)")
+        }
+    }
+
+    func testAFocusIsMatchedExactlyNotByCaseOrPrefix() {
+        for wrong in ["Kate", "kat", "kate ", "", "kate2"] {
+            XCTAssertThrowsError(try AppControlTasks.requireKnownFocus(wrong, known: ["kate"]), "`\(wrong)`") { error in
+                guard case .notFound? = error as? AppControlError else {
+                    return XCTFail("`\(wrong)` is `notFound`, not \(error)")
+                }
+            }
+        }
+    }
+
+    func testAnAppWithNoKnownFocusRefusesEveryTagRatherThanAnswerEmpty() {
+        XCTAssertThrowsError(try AppControlTasks.requireKnownFocus("kate", known: [])) { error in
+            guard case .notFound(let detail)? = error as? AppControlError else {
+                return XCTFail("with nothing known the answer is still `notFound`, not \(error)")
+            }
+            XCTAssertTrue(detail.contains("kate"), detail)
+        }
+    }
 }

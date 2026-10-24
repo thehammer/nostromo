@@ -707,6 +707,131 @@ final class BackgroundPopoverTests: XCTestCase {
         XCTAssertTrue(window.firstResponder === focus, "the responder the window had is the responder it has")
     }
 
+    // MARK: Where the keyboard goes when the list closes
+
+    /// A second place the keyboard can be in the anchor's window (another pane's composer, say).
+    private func addOtherResponder(to window: NSWindow) -> NSView {
+        let other = BA3UIFocusView(frame: NSRect(x: 150, y: 0, width: 100, height: 20))
+        window.contentView?.addSubview(other)
+        return other
+    }
+
+    func testAClickOpenedListThatClosesAfterTheUserClickedIntoAnotherResponderLeavesTheKeyboardThere() {
+        loadFixture()
+        let (window, anchor, focus) = makeAnchor()
+        let other = addOtherResponder(to: window)
+        let popover = openPopover(anchor: anchor, takeKeyboard: false)
+        XCTAssertTrue(window.firstResponder === focus, "precondition: the click did not move the keyboard")
+
+        // The click outside that closes the list landed in another responder first.
+        XCTAssertTrue(window.makeFirstResponder(other), "precondition")
+        popover.close()
+        waitForClose()
+
+        XCTAssertFalse(popover.isShown)
+        XCTAssertTrue(window.firstResponder === other,
+                      "the keyboard stays where the user put it, it is not pulled back to the old composer")
+        XCTAssertFalse(window.firstResponder === focus)
+    }
+
+    func testAClickOpenedListThatClosesWithNothingElseMovedLeavesTheKeyboardWhereItWas() {
+        loadFixture()
+        let (window, anchor, focus) = makeAnchor()
+        let popover = openPopover(anchor: anchor, takeKeyboard: false)
+
+        popover.close()
+        waitForClose()
+
+        XCTAssertFalse(popover.isShown)
+        XCTAssertTrue(window.firstResponder === focus, "the composer that had the keyboard has it after the list closes")
+    }
+
+    func testAClickOpenedListThatClosesWhenNobodyHoldsTheKeyboardGivesItBackToTheComposer() {
+        loadFixture()
+        let (window, anchor, focus) = makeAnchor()
+        let popover = openPopover(anchor: anchor, takeKeyboard: false)
+        _ = window.makeFirstResponder(nil)
+        XCTAssertFalse(window.firstResponder === focus, "precondition: the composer let go of the keyboard")
+
+        popover.close()
+        waitForClose()
+
+        XCTAssertTrue(window.firstResponder === focus, "with nobody holding the keyboard, the composer it came from gets it back")
+    }
+
+    func testAKeyboardOpenedListGivesTheKeyboardBackToItsComposerEvenIfAnotherResponderTookItInTheMeantime() {
+        loadFixture()
+        let (window, anchor, focus) = makeAnchor()
+        let other = addOtherResponder(to: window)
+        let popover = openPopover(anchor: anchor, takeKeyboard: true)
+        XCTAssertTrue(popover.tookKeyboard, "precondition")
+
+        // Something in the opening window took the first responder while the list had the keyboard.
+        XCTAssertTrue(window.makeFirstResponder(other), "precondition")
+        popover.close()
+        waitForClose()
+
+        XCTAssertFalse(popover.isShown)
+        XCTAssertTrue(window.firstResponder === focus,
+                      "a list opened from the keyboard always hands the keyboard back to where it took it from")
+    }
+
+    func testAClickOpenedListOnARealBarLeavesTheKeyboardInTheOtherPaneTheUserClickedInto() {
+        let window = ba3uiVisibleWindow(self, size: NSSize(width: 600, height: 140))
+        let barA = ba3uiMakeBar(in: window, frame: NSRect(x: 0, y: 0, width: 600, height: 60), tag: "tag-a",
+                                store: world.store, displayName: "A")
+        let barB = ba3uiMakeBar(in: window, frame: NSRect(x: 0, y: 70, width: 600, height: 60), tag: "tag-b",
+                                store: world.store, displayName: "B")
+        bars += [barA, barB]
+        XCTAssertTrue(window.makeFirstResponder(barA.textView))
+        barA.textView.string = "typed in A"
+        barA.textView.setSelectedRange(NSRange(location: 3, length: 4))
+        barB.textView.string = "typed in B"
+
+        barA.toggleBackgroundPopover(takeKeyboard: false)
+        XCTAssertTrue(barA.backgroundPopover?.isShown ?? false, "precondition")
+        XCTAssertTrue(window.firstResponder === barA.textView, "precondition: opening by click leaves A's composer as it was")
+
+        // The click outside the list that closes it lands in B's composer.
+        XCTAssertTrue(window.makeFirstResponder(barB.textView), "precondition")
+        barA.backgroundPopover?.close()
+        modelWaitUntil { barA.backgroundPopover == nil }
+
+        XCTAssertTrue(window.firstResponder === barB.textView, "the keyboard stays in B's composer")
+        XCTAssertEqual(barA.textView.string, "typed in A")
+        XCTAssertEqual(barB.textView.string, "typed in B", "and nothing was typed or lost on the way")
+    }
+
+    // MARK: A status this client does not know
+
+    func testARowWithAFiveHundredCharacterUnknownStatusIsBoundedAndStaysInsideANarrowRow() throws {
+        let raw = String(repeating: "x", count: 500)
+        let list = BackgroundTaskList.make(tasks: [world.task("odd", "build the thing", status: .unknown(raw), startedAgo: 5)],
+                                           nowMs: world.stamp(0))
+        let row = try XCTUnwrap(list.running.first, "an unrecognised status still counts as running")
+        XCTAssertEqual(row.status, .unknown(raw), "precondition: the row still holds what the daemon sent")
+        let height = BackgroundTaskRowView.height(for: row)
+
+        let window = makeRigWindow(self, size: NSSize(width: 220, height: height))
+        let view = BackgroundTaskRowView(row: row)
+        view.frame = NSRect(x: 0, y: 0, width: 220, height: height)
+        window.contentView?.addSubview(view)
+        window.contentView?.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(view.statusText, row.statusLabel, "the row shows the bounded status")
+        XCTAssertLessThanOrEqual(view.statusText.count, BackgroundTaskList.statusTextLimit, "`\(view.statusText)`")
+        XCTAssertLessThan(view.statusText.count, raw.count)
+        XCTAssertEqual(view.frame.height, height, accuracy: 0.5, "the row keeps its height")
+        XCTAssertEqual(view.frame.width, 220, accuracy: 0.5, "and the width it was given")
+        for sub in rigAllSubviews(of: view) where !sub.isHidden {
+            let frame = sub.convert(sub.bounds, to: view)
+            XCTAssertGreaterThanOrEqual(frame.minX, -0.5, "\(type(of: sub)) \(frame) starts left of the row")
+            XCTAssertLessThanOrEqual(frame.maxX, view.bounds.width + 0.5,
+                                     "\(type(of: sub)) \(frame) extends past the row's \(view.bounds.width) pt")
+        }
+    }
+
     func testTheArrowsAndEscapeWorkInsideTheListWhenItHoldsTheKeyboard() {
         loadFixture()
         let (_, anchor, _) = makeAnchor()
