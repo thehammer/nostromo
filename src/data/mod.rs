@@ -27,8 +27,8 @@ pub mod perri_suppress;
 pub mod rate_limits;
 pub mod relay_client;
 pub mod teri_todos;
-pub mod token_store;
 pub mod tickets;
+pub mod token_store;
 pub mod unified_diff;
 pub mod work;
 

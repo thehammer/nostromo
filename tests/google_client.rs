@@ -49,7 +49,10 @@ struct Env {
 
 impl Env {
     async fn new() -> Self {
-        Self { server: MockServer::start().await, dir: TempDir::new().unwrap() }
+        Self {
+            server: MockServer::start().await,
+            dir: TempDir::new().unwrap(),
+        }
     }
 
     /// The account's token file, inside a directory that does not exist yet
@@ -90,7 +93,10 @@ impl Env {
     }
 
     async fn requests(&self) -> Vec<Request> {
-        self.server.received_requests().await.expect("request recording is enabled")
+        self.server
+            .received_requests()
+            .await
+            .expect("request recording is enabled")
     }
 
     /// Form bodies of every POST to the token endpoint, in order.
@@ -113,7 +119,13 @@ impl Env {
 }
 
 /// Seed a token file (creating its directory).
-fn write_token(file: &Path, access: &str, refresh: Option<&str>, expires_in_secs: i64, email: Option<&str>) {
+fn write_token(
+    file: &Path,
+    access: &str,
+    refresh: Option<&str>,
+    expires_in_secs: i64,
+    email: Option<&str>,
+) {
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(
         file,
@@ -129,7 +141,8 @@ fn write_token(file: &Path, access: &str, refresh: Option<&str>, expires_in_secs
 }
 
 fn read_token(file: &Path) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(file).expect("token file exists")).expect("token file is JSON")
+    serde_json::from_str(&std::fs::read_to_string(file).expect("token file exists"))
+        .expect("token file is JSON")
 }
 
 async fn mount_token(server: &MockServer, body: Value) {
@@ -159,7 +172,8 @@ async fn mount_ping_accepting(server: &MockServer, good_bearer: &'static str) {
             if bearer(req) == good_bearer {
                 ResponseTemplate::new(200).set_body_json(json!({ "ok": true }))
             } else {
-                ResponseTemplate::new(401).set_body_json(json!({ "error": { "status": "UNAUTHENTICATED" } }))
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({ "error": { "status": "UNAUTHENTICATED" } }))
             }
         })
         .mount(server)
@@ -177,9 +191,11 @@ fn bearer(req: &Request) -> String {
 
 /// `S256`: base64url (no padding) of the SHA-256 of the verifier.
 fn s256(verifier: &str) -> String {
-    oauth2::PkceCodeChallenge::from_code_verifier_sha256(&oauth2::PkceCodeVerifier::new(verifier.to_owned()))
-        .as_str()
-        .to_owned()
+    oauth2::PkceCodeChallenge::from_code_verifier_sha256(&oauth2::PkceCodeVerifier::new(
+        verifier.to_owned(),
+    ))
+    .as_str()
+    .to_owned()
 }
 
 struct ParsedPrompt {
@@ -193,7 +209,10 @@ impl ParsedPrompt {
         Self { query }
     }
     fn redirect_uri(&self) -> String {
-        self.query.get("redirect_uri").expect("redirect_uri param").clone()
+        self.query
+            .get("redirect_uri")
+            .expect("redirect_uri param")
+            .clone()
     }
     fn state(&self) -> String {
         self.query.get("state").expect("state param").clone()
@@ -202,10 +221,13 @@ impl ParsedPrompt {
 
 /// What Google's redirect does: the browser GETs the loopback URI.
 async fn browser_get(redirect_uri: &str, query: &[(&str, &str)]) -> reqwest::Response {
-    tokio::time::timeout(WAIT, reqwest::Client::new().get(redirect_uri).query(query).send())
-        .await
-        .expect("loopback answered in time")
-        .expect("loopback is reachable")
+    tokio::time::timeout(
+        WAIT,
+        reqwest::Client::new().get(redirect_uri).query(query).send(),
+    )
+    .await
+    .expect("loopback answered in time")
+    .expect("loopback is reachable")
 }
 
 /// Deliver the redirect while waiting for the flow's outcome. `wait_loopback`
@@ -216,11 +238,16 @@ async fn finish_in_browser(
     redirect_uri: &str,
     query: &[(&str, &str)],
 ) -> (anyhow::Result<String>, reqwest::Response) {
-    tokio::join!(within("wait_loopback", client.wait_loopback()), browser_get(redirect_uri, query))
+    tokio::join!(
+        within("wait_loopback", client.wait_loopback()),
+        browser_get(redirect_uri, query)
+    )
 }
 
 async fn within<T>(what: &str, fut: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(WAIT, fut).await.unwrap_or_else(|_| panic!("timed out: {what}"))
+    tokio::time::timeout(WAIT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("timed out: {what}"))
 }
 
 /// After a flow ended, the next `ensure_authed()` must hand out a new prompt.
@@ -237,7 +264,10 @@ async fn next_prompt_after_flow_ended(client: &GoogleClient, old_state: &str) ->
         if ParsedPrompt::new(&prompt).state() != old_state {
             return prompt;
         }
-        assert!(tokio::time::Instant::now() < deadline, "still handing out the ended flow's prompt");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "still handing out the ended flow's prompt"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -250,16 +280,24 @@ async fn http_error(status: u16, body: Value, retry_after: Option<&str>) -> (any
     if let Some(v) = retry_after {
         template = template.insert_header("Retry-After", v);
     }
-    Mock::given(method("GET")).and(path(PING_PATH)).respond_with(template).mount(&env.server).await;
+    Mock::given(method("GET"))
+        .and(path(PING_PATH))
+        .respond_with(template)
+        .mount(&env.server)
+        .await;
     let client = env.client(Some(EMAIL));
-    let err = within("failing get_json", client.get_json::<Value>(&client.gmail_url("/ping")))
-        .await
-        .expect_err("a non-2xx answer is an error");
+    let err = within(
+        "failing get_json",
+        client.get_json::<Value>(&client.gmail_url("/ping")),
+    )
+    .await
+    .expect_err("a non-2xx answer is an error");
     (err, env)
 }
 
 fn typed(e: &anyhow::Error) -> &GoogleHttpError {
-    e.downcast_ref::<GoogleHttpError>().expect("error carries a GoogleHttpError")
+    e.downcast_ref::<GoogleHttpError>()
+        .expect("error carries a GoogleHttpError")
 }
 
 fn google_error(status: u16, reason: Option<&str>, retry_after: Option<u64>) -> anyhow::Error {
@@ -337,9 +375,17 @@ async fn loopback_sign_in_stores_the_token_after_the_browser_redirect() {
     assert!(redirect.port().is_some());
 
     // The browser comes back with a code.
-    let (outcome, resp) =
-        finish_in_browser(&client, &parsed.redirect_uri(), &[("code", "abc"), ("state", &parsed.state())]).await;
-    assert!(resp.status().is_success(), "the user sees a success page, got {}", resp.status());
+    let (outcome, resp) = finish_in_browser(
+        &client,
+        &parsed.redirect_uri(),
+        &[("code", "abc"), ("state", &parsed.state())],
+    )
+    .await;
+    assert!(
+        resp.status().is_success(),
+        "the user sees a success page, got {}",
+        resp.status()
+    );
     assert_eq!(outcome.expect("sign-in succeeds"), EMAIL);
 
     // Code exchange: authorization_code + PKCE verifier + client secret.
@@ -369,7 +415,11 @@ async fn loopback_sign_in_stores_the_token_after_the_browser_redirect() {
     // Persisted: private file in a private directory, with the email.
     let file = env.token_path();
     let file_mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
-    let dir_mode = std::fs::metadata(file.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+    let dir_mode = std::fs::metadata(file.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(file_mode, 0o600, "token file mode");
     assert_eq!(dir_mode, 0o700, "token directory mode");
     let stored = read_token(&file);
@@ -381,8 +431,14 @@ async fn loopback_sign_in_stores_the_token_after_the_browser_redirect() {
     assert!(client.ensure_authed().await.unwrap().is_none());
     assert_eq!(client.stored_email().await.as_deref(), Some(EMAIL));
     for r in env.requests().await {
-        let ok = r.method.as_str() == "GET" || (r.method.as_str() == "POST" && r.url.path() == TOKEN_PATH);
-        assert!(ok, "Google is only ever read: {} {}", r.method, r.url.path());
+        let ok = r.method.as_str() == "GET"
+            || (r.method.as_str() == "POST" && r.url.path() == TOKEN_PATH);
+        assert!(
+            ok,
+            "Google is only ever read: {} {}",
+            r.method,
+            r.url.path()
+        );
     }
 }
 
@@ -399,7 +455,11 @@ async fn the_sign_in_link_has_no_login_hint_when_no_email_is_configured() {
 #[tokio::test]
 async fn run_loopback_until_done_hands_over_the_prompt_and_returns_the_email() {
     let env = Env::new().await;
-    mount_token(&env.server, json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 })).await;
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 }),
+    )
+    .await;
     mount_profile(&env.server, EMAIL).await;
     let client = env.client(None);
     let seen: Arc<std::sync::Mutex<Option<DeviceFlowPrompt>>> = Arc::default();
@@ -412,14 +472,22 @@ async fn run_loopback_until_done_hands_over_the_prompt_and_returns_the_email() {
             // The "browser" completes the sign-in once it has the link.
             let parsed = ParsedPrompt::new(prompt);
             tokio::spawn(async move {
-                browser_get(&parsed.redirect_uri(), &[("code", "abc"), ("state", &parsed.state())]).await;
+                browser_get(
+                    &parsed.redirect_uri(),
+                    &[("code", "abc"), ("state", &parsed.state())],
+                )
+                .await;
             });
         }),
     )
     .await;
 
     assert_eq!(result.expect("sign-in completes"), EMAIL);
-    let prompt = seen.lock().unwrap().clone().expect("callback received the prompt");
+    let prompt = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("callback received the prompt");
     assert_eq!(prompt.kind, "browser");
     assert_eq!(prompt.account.as_deref(), Some("work"));
     assert!(env.token_path().exists());
@@ -428,34 +496,56 @@ async fn run_loopback_until_done_hands_over_the_prompt_and_returns_the_email() {
 #[tokio::test]
 async fn a_callback_with_the_wrong_state_is_refused_and_the_real_one_still_works() {
     let env = Env::new().await;
-    mount_token(&env.server, json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 })).await;
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 }),
+    )
+    .await;
     mount_profile(&env.server, EMAIL).await;
     let client = env.client(None);
     let prompt = client.ensure_authed().await.unwrap().unwrap();
     let parsed = ParsedPrompt::new(&prompt);
 
     // A forged / stray hit: wrong state, and no state at all.
-    let wrong = browser_get(&parsed.redirect_uri(), &[("code", "evil"), ("state", "not-the-state")]).await;
+    let wrong = browser_get(
+        &parsed.redirect_uri(),
+        &[("code", "evil"), ("state", "not-the-state")],
+    )
+    .await;
     assert_eq!(wrong.status().as_u16(), 400);
     let missing = browser_get(&parsed.redirect_uri(), &[("code", "evil")]).await;
     assert_eq!(missing.status().as_u16(), 400);
-    assert!(env.token_posts().await.is_empty(), "a refused callback never reaches the token endpoint");
+    assert!(
+        env.token_posts().await.is_empty(),
+        "a refused callback never reaches the token endpoint"
+    );
     assert!(!env.token_path().exists());
 
     // The flow is still alive for the genuine redirect.
-    let (outcome, ok) =
-        finish_in_browser(&client, &parsed.redirect_uri(), &[("code", "abc"), ("state", &parsed.state())]).await;
+    let (outcome, ok) = finish_in_browser(
+        &client,
+        &parsed.redirect_uri(),
+        &[("code", "abc"), ("state", &parsed.state())],
+    )
+    .await;
     assert!(ok.status().is_success());
     assert_eq!(outcome.unwrap(), EMAIL);
     let posts = env.token_posts().await;
     assert_eq!(posts.len(), 1);
-    assert_eq!(posts[0]["code"], "abc", "only the genuine code was exchanged");
+    assert_eq!(
+        posts[0]["code"], "abc",
+        "only the genuine code was exchanged"
+    );
 }
 
 #[tokio::test]
 async fn only_get_on_the_callback_path_is_answered_other_requests_get_404() {
     let env = Env::new().await;
-    mount_token(&env.server, json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 })).await;
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 }),
+    )
+    .await;
     mount_profile(&env.server, EMAIL).await;
     let client = env.client(None);
     let prompt = client.ensure_authed().await.unwrap().unwrap();
@@ -467,7 +557,10 @@ async fn only_get_on_the_callback_path_is_answered_other_requests_get_404() {
     // POST to the right path with the right state.
     let post = tokio::time::timeout(
         WAIT,
-        reqwest::Client::new().post(redirect.as_str()).query(&query).send(),
+        reqwest::Client::new()
+            .post(redirect.as_str())
+            .query(&query)
+            .send(),
     )
     .await
     .unwrap()
@@ -487,7 +580,10 @@ async fn only_get_on_the_callback_path_is_answered_other_requests_get_404() {
     };
     assert_eq!(root.status().as_u16(), 404);
 
-    assert!(env.token_posts().await.is_empty(), "none of those started a code exchange");
+    assert!(
+        env.token_posts().await.is_empty(),
+        "none of those started a code exchange"
+    );
 
     // And the real redirect still completes the sign-in.
     let (outcome, _) = finish_in_browser(&client, &parsed.redirect_uri(), &query).await;
@@ -495,56 +591,91 @@ async fn only_get_on_the_callback_path_is_answered_other_requests_get_404() {
 }
 
 #[tokio::test]
-async fn cancelling_in_the_browser_ends_the_flow_without_a_token_and_the_next_attempt_gets_a_new_link() {
+async fn cancelling_in_the_browser_ends_the_flow_without_a_token_and_the_next_attempt_gets_a_new_link(
+) {
     let env = Env::new().await;
     let client = env.client(None);
     let prompt = client.ensure_authed().await.unwrap().unwrap();
     let parsed = ParsedPrompt::new(&prompt);
 
-    let (outcome, _) =
-        finish_in_browser(&client, &parsed.redirect_uri(), &[("error", "access_denied"), ("state", &parsed.state())]).await;
+    let (outcome, _) = finish_in_browser(
+        &client,
+        &parsed.redirect_uri(),
+        &[("error", "access_denied"), ("state", &parsed.state())],
+    )
+    .await;
 
-    assert!(outcome.is_err(), "a cancelled sign-in is reported as a failure");
+    assert!(
+        outcome.is_err(),
+        "a cancelled sign-in is reported as a failure"
+    );
     assert!(!env.token_path().exists(), "no token is stored");
     assert!(env.token_posts().await.is_empty(), "no code was exchanged");
 
     let next = next_prompt_after_flow_ended(&client, &parsed.state()).await;
     let next_parsed = ParsedPrompt::new(&next);
-    assert_ne!(next_parsed.state(), parsed.state(), "a fresh flow has a fresh state");
+    assert_ne!(
+        next_parsed.state(),
+        parsed.state(),
+        "a fresh flow has a fresh state"
+    );
     assert_ne!(next_parsed.redirect_uri(), "", "and its own listener");
 }
 
 #[tokio::test]
 async fn an_error_callback_with_the_wrong_state_does_not_cancel_the_flow() {
     let env = Env::new().await;
-    mount_token(&env.server, json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 })).await;
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 }),
+    )
+    .await;
     mount_profile(&env.server, EMAIL).await;
     let client = env.client(None);
     let prompt = client.ensure_authed().await.unwrap().unwrap();
     let parsed = ParsedPrompt::new(&prompt);
 
-    let forged = browser_get(&parsed.redirect_uri(), &[("error", "access_denied"), ("state", "forged")]).await;
+    let forged = browser_get(
+        &parsed.redirect_uri(),
+        &[("error", "access_denied"), ("state", "forged")],
+    )
+    .await;
     assert_eq!(forged.status().as_u16(), 400);
 
-    let (outcome, _) =
-        finish_in_browser(&client, &parsed.redirect_uri(), &[("code", "abc"), ("state", &parsed.state())]).await;
+    let (outcome, _) = finish_in_browser(
+        &client,
+        &parsed.redirect_uri(),
+        &[("code", "abc"), ("state", &parsed.state())],
+    )
+    .await;
     assert_eq!(outcome.unwrap(), EMAIL);
 }
 
 #[tokio::test]
 async fn signing_in_as_a_different_google_account_persists_nothing_and_asks_again() {
     let env = Env::new().await;
-    mount_token(&env.server, json!({ "access_token": "at-other", "refresh_token": "rt-other", "expires_in": 3600 })).await;
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-other", "refresh_token": "rt-other", "expires_in": 3600 }),
+    )
+    .await;
     mount_profile(&env.server, "someone.else@example.com").await;
     let client = env.client(Some(EMAIL));
     let prompt = client.ensure_authed().await.unwrap().unwrap();
     let parsed = ParsedPrompt::new(&prompt);
 
-    let (outcome, _) =
-        finish_in_browser(&client, &parsed.redirect_uri(), &[("code", "abc"), ("state", &parsed.state())]).await;
+    let (outcome, _) = finish_in_browser(
+        &client,
+        &parsed.redirect_uri(),
+        &[("code", "abc"), ("state", &parsed.state())],
+    )
+    .await;
 
     assert!(outcome.is_err(), "the wrong account is a failed sign-in");
-    assert!(!env.token_path().exists(), "the other account's token is never written");
+    assert!(
+        !env.token_path().exists(),
+        "the other account's token is never written"
+    );
     assert!(client.stored_email().await.is_none());
     let again = next_prompt_after_flow_ended(&client, &parsed.state()).await;
     assert_eq!(again.kind, "browser");
@@ -553,14 +684,22 @@ async fn signing_in_as_a_different_google_account_persists_nothing_and_asks_agai
 #[tokio::test]
 async fn an_account_check_ignores_email_case() {
     let env = Env::new().await;
-    mount_token(&env.server, json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 })).await;
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-1", "refresh_token": "rt-1", "expires_in": 3600 }),
+    )
+    .await;
     mount_profile(&env.server, "Me@Example.COM").await;
     let client = env.client(Some("ME@example.com"));
     let prompt = client.ensure_authed().await.unwrap().unwrap();
     let parsed = ParsedPrompt::new(&prompt);
 
-    let (outcome, _) =
-        finish_in_browser(&client, &parsed.redirect_uri(), &[("code", "abc"), ("state", &parsed.state())]).await;
+    let (outcome, _) = finish_in_browser(
+        &client,
+        &parsed.redirect_uri(),
+        &[("code", "abc"), ("state", &parsed.state())],
+    )
+    .await;
 
     assert!(outcome.is_ok(), "{outcome:?}");
     assert!(env.token_path().exists());
@@ -578,8 +717,12 @@ async fn a_rejected_code_exchange_fails_the_sign_in_and_stores_nothing() {
     let prompt = client.ensure_authed().await.unwrap().unwrap();
     let parsed = ParsedPrompt::new(&prompt);
 
-    let (outcome, _) =
-        finish_in_browser(&client, &parsed.redirect_uri(), &[("code", "bad"), ("state", &parsed.state())]).await;
+    let (outcome, _) = finish_in_browser(
+        &client,
+        &parsed.redirect_uri(),
+        &[("code", "bad"), ("state", &parsed.state())],
+    )
+    .await;
 
     let err = outcome.expect_err("sign-in fails");
     assert!(!format!("{err:#}").contains(CLIENT_SECRET));
@@ -608,7 +751,10 @@ async fn ensure_authed_while_a_sign_in_is_pending_returns_the_same_prompt() {
     let first = client.ensure_authed().await.unwrap().unwrap();
     let second = client.ensure_authed().await.unwrap().unwrap();
 
-    assert_eq!(first.verification_uri, second.verification_uri, "one pending flow, one link");
+    assert_eq!(
+        first.verification_uri, second.verification_uri,
+        "one pending flow, one link"
+    );
 }
 
 #[tokio::test]
@@ -631,7 +777,13 @@ async fn a_token_written_to_disk_while_signed_out_is_picked_up_without_the_brows
     assert_eq!(prompt.kind, "browser");
 
     // The `nostromo-google-auth` CLI signs in and writes the file.
-    write_token(&env.token_path(), "at-cli", Some("rt-cli"), 3600, Some(EMAIL));
+    write_token(
+        &env.token_path(),
+        "at-cli",
+        Some("rt-cli"),
+        3600,
+        Some(EMAIL),
+    );
 
     assert!(
         client.ensure_authed().await.unwrap().is_none(),
@@ -639,7 +791,10 @@ async fn a_token_written_to_disk_while_signed_out_is_picked_up_without_the_brows
     );
     // And it is the token used for requests.
     mount_ping_accepting(&env.server, "at-cli").await;
-    let ok: Value = client.get_json(&client.gmail_url("/ping")).await.expect("authorised with the file's token");
+    let ok: Value = client
+        .get_json(&client.gmail_url("/ping"))
+        .await
+        .expect("authorised with the file's token");
     assert_eq!(ok["ok"], true);
 }
 
@@ -650,7 +805,13 @@ async fn a_token_written_to_disk_while_signed_out_is_picked_up_without_the_brows
 #[tokio::test]
 async fn a_valid_cached_token_needs_no_request_and_no_prompt() {
     let env = Env::new().await;
-    write_token(&env.token_path(), "at-cached", Some("rt"), 3600, Some(EMAIL));
+    write_token(
+        &env.token_path(),
+        "at-cached",
+        Some("rt"),
+        3600,
+        Some(EMAIL),
+    );
     let client = env.client(Some(EMAIL));
 
     assert!(client.ensure_authed().await.unwrap().is_none());
@@ -662,14 +823,26 @@ async fn a_valid_cached_token_needs_no_request_and_no_prompt() {
 #[tokio::test]
 async fn a_token_file_for_a_different_account_is_not_used() {
     let env = Env::new().await;
-    write_token(&env.token_path(), "at-other", Some("rt-other"), 3600, Some("someone.else@example.com"));
+    write_token(
+        &env.token_path(),
+        "at-other",
+        Some("rt-other"),
+        3600,
+        Some("someone.else@example.com"),
+    );
     // Built after the file exists: the daemon's normal start-up order.
     let client = env.client(Some(EMAIL));
 
     let outcome = client.ensure_authed().await.unwrap();
 
-    assert!(outcome.is_some(), "another account's token must not sign this account in");
-    assert!(env.requests().await.is_empty(), "and it is never sent to Google");
+    assert!(
+        outcome.is_some(),
+        "another account's token must not sign this account in"
+    );
+    assert!(
+        env.requests().await.is_empty(),
+        "and it is never sent to Google"
+    );
 }
 
 #[tokio::test]
@@ -678,7 +851,13 @@ async fn a_token_file_for_a_different_account_that_appears_later_is_not_used() {
     let client = env.client(Some(EMAIL));
     assert!(client.ensure_authed().await.unwrap().is_some());
 
-    write_token(&env.token_path(), "at-other", Some("rt-other"), 3600, Some("someone.else@example.com"));
+    write_token(
+        &env.token_path(),
+        "at-other",
+        Some("rt-other"),
+        3600,
+        Some("someone.else@example.com"),
+    );
 
     assert!(client.ensure_authed().await.unwrap().is_some());
 }
@@ -690,7 +869,13 @@ async fn a_token_file_for_a_different_account_that_appears_later_is_not_used() {
 #[tokio::test]
 async fn an_expired_token_is_refreshed_and_the_refresh_token_survives_a_response_without_one() {
     let env = Env::new().await;
-    write_token(&env.token_path(), "at-old", Some("rt-old"), -10, Some(EMAIL));
+    write_token(
+        &env.token_path(),
+        "at-old",
+        Some("rt-old"),
+        -10,
+        Some(EMAIL),
+    );
     // Google's refresh answers carry no refresh_token; hand out a distinct
     // access token each time.
     let calls = Arc::new(AtomicUsize::new(0));
@@ -699,13 +884,17 @@ async fn an_expired_token_is_refreshed_and_the_refresh_token_survives_a_response
         .and(path(TOKEN_PATH))
         .respond_with(move |_: &Request| {
             let n = counter.fetch_add(1, SeqCst) + 1;
-            ResponseTemplate::new(200).set_body_json(json!({ "access_token": format!("at-{n}"), "expires_in": 3600 }))
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "access_token": format!("at-{n}"), "expires_in": 3600 }))
         })
         .mount(&env.server)
         .await;
     let client = env.client(Some(EMAIL));
 
-    assert!(client.ensure_authed().await.unwrap().is_none(), "refreshed, no prompt needed");
+    assert!(
+        client.ensure_authed().await.unwrap().is_none(),
+        "refreshed, no prompt needed"
+    );
 
     let posts = env.token_posts().await;
     assert_eq!(posts.len(), 1);
@@ -715,24 +904,43 @@ async fn an_expired_token_is_refreshed_and_the_refresh_token_survives_a_response
     assert_eq!(posts[0]["client_secret"], CLIENT_SECRET);
     let on_disk = read_token(&env.token_path());
     assert_eq!(on_disk["access_token"], "at-1");
-    assert_eq!(on_disk["refresh_token"], "rt-old", "the refresh token is kept on disk");
+    assert_eq!(
+        on_disk["refresh_token"], "rt-old",
+        "the refresh token is kept on disk"
+    );
     assert_eq!(on_disk["email"], EMAIL, "so is the recorded email");
 
     // The refresh token is still held in memory: a later 401 refreshes with it.
     mount_ping_accepting(&env.server, "at-2").await;
-    let ok: Value = client.get_json(&client.gmail_url("/ping")).await.expect("401 -> refresh -> retry succeeds");
+    let ok: Value = client
+        .get_json(&client.gmail_url("/ping"))
+        .await
+        .expect("401 -> refresh -> retry succeeds");
     assert_eq!(ok["ok"], true);
     let posts = env.token_posts().await;
     assert_eq!(posts.len(), 2);
-    assert_eq!(posts[1]["refresh_token"], "rt-old", "the same refresh token is used again");
+    assert_eq!(
+        posts[1]["refresh_token"], "rt-old",
+        "the same refresh token is used again"
+    );
     assert_eq!(read_token(&env.token_path())["refresh_token"], "rt-old");
 }
 
 #[tokio::test]
 async fn a_rotated_refresh_token_replaces_the_old_one() {
     let env = Env::new().await;
-    write_token(&env.token_path(), "at-old", Some("rt-old"), -10, Some(EMAIL));
-    mount_token(&env.server, json!({ "access_token": "at-1", "refresh_token": "rt-new", "expires_in": 3600 })).await;
+    write_token(
+        &env.token_path(),
+        "at-old",
+        Some("rt-old"),
+        -10,
+        Some(EMAIL),
+    );
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-1", "refresh_token": "rt-new", "expires_in": 3600 }),
+    )
+    .await;
     let client = env.client(Some(EMAIL));
 
     assert!(client.ensure_authed().await.unwrap().is_none());
@@ -743,7 +951,13 @@ async fn a_rotated_refresh_token_replaces_the_old_one() {
 #[tokio::test]
 async fn a_revoked_refresh_token_asks_for_sign_in_and_is_not_retried_every_poll() {
     let env = Env::new().await;
-    write_token(&env.token_path(), "at-old", Some("rt-revoked"), -10, Some(EMAIL));
+    write_token(
+        &env.token_path(),
+        "at-old",
+        Some("rt-revoked"),
+        -10,
+        Some(EMAIL),
+    );
     Mock::given(method("POST"))
         .and(path(TOKEN_PATH))
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({
@@ -754,12 +968,24 @@ async fn a_revoked_refresh_token_asks_for_sign_in_and_is_not_retried_every_poll(
         .await;
     let client = env.client(Some(EMAIL));
 
-    let first = client.ensure_authed().await.expect("invalid_grant is not an error").expect("sign-in is needed");
+    let first = client
+        .ensure_authed()
+        .await
+        .expect("invalid_grant is not an error")
+        .expect("sign-in is needed");
     assert_eq!(first.kind, "browser");
-    let second = client.ensure_authed().await.unwrap().expect("still signed out");
+    let second = client
+        .ensure_authed()
+        .await
+        .unwrap()
+        .expect("still signed out");
 
     assert_eq!(first.verification_uri, second.verification_uri);
-    assert_eq!(env.token_posts().await.len(), 1, "the rejected refresh token is not sent again");
+    assert_eq!(
+        env.token_posts().await.len(),
+        1,
+        "the rejected refresh token is not sent again"
+    );
 }
 
 #[tokio::test]
@@ -775,7 +1001,10 @@ async fn a_transient_refresh_failure_is_an_error_not_a_sign_in_prompt() {
 
     let outcome = client.ensure_authed().await;
 
-    assert!(outcome.is_err(), "Google being down must not make the user sign in again");
+    assert!(
+        outcome.is_err(),
+        "Google being down must not make the user sign in again"
+    );
     assert!(env.token_path().exists(), "and the stored token is kept");
     assert_eq!(read_token(&env.token_path())["refresh_token"], "rt");
 }
@@ -784,18 +1013,37 @@ async fn a_transient_refresh_failure_is_an_error_not_a_sign_in_prompt() {
 async fn a_401_refreshes_once_and_retries_the_request() {
     let env = Env::new().await;
     write_token(&env.token_path(), "at-stale", Some("rt"), 3600, Some(EMAIL));
-    mount_token(&env.server, json!({ "access_token": "at-fresh", "expires_in": 3600 })).await;
+    mount_token(
+        &env.server,
+        json!({ "access_token": "at-fresh", "expires_in": 3600 }),
+    )
+    .await;
     mount_ping_accepting(&env.server, "at-fresh").await;
     let client = env.client(Some(EMAIL));
 
-    let ok: Value = within("get_json", client.get_json(&client.gmail_url("/ping"))).await.expect("retry succeeds");
+    let ok: Value = within("get_json", client.get_json(&client.gmail_url("/ping")))
+        .await
+        .expect("retry succeeds");
 
     assert_eq!(ok["ok"], true);
     assert_eq!(env.token_posts().await.len(), 1, "exactly one refresh");
-    let pings: Vec<String> =
-        env.requests().await.iter().filter(|r| r.url.path() == PING_PATH).map(bearer).collect();
-    assert_eq!(pings, vec!["at-stale".to_owned(), "at-fresh".to_owned()], "stale token first, then the new one");
-    assert_eq!(read_token(&env.token_path())["access_token"], "at-fresh", "the new token is persisted");
+    let pings: Vec<String> = env
+        .requests()
+        .await
+        .iter()
+        .filter(|r| r.url.path() == PING_PATH)
+        .map(bearer)
+        .collect();
+    assert_eq!(
+        pings,
+        vec!["at-stale".to_owned(), "at-fresh".to_owned()],
+        "stale token first, then the new one"
+    );
+    assert_eq!(
+        read_token(&env.token_path())["access_token"],
+        "at-fresh",
+        "the new token is persisted"
+    );
 }
 
 #[tokio::test]
@@ -813,19 +1061,36 @@ async fn a_401_that_cannot_be_refreshed_is_a_401_error_and_never_data() {
     mount_ping_accepting(&env.server, "at-stale-but-accepted-only-if-unrejected").await;
     let client = env.client(Some(EMAIL));
 
-    let err = within("get_json", client.get_json::<Value>(&client.gmail_url("/ping")))
-        .await
-        .expect_err("a failed refresh after a 401 is a failure");
+    let err = within(
+        "get_json",
+        client.get_json::<Value>(&client.gmail_url("/ping")),
+    )
+    .await
+    .expect_err("a failed refresh after a 401 is a failure");
 
     assert_eq!(typed(&err).status.as_u16(), 401);
-    assert_eq!(env.token_posts().await.len(), 1, "one refresh attempt, no loop");
-    assert_eq!(env.count("GET", PING_PATH).await, 1, "no retry without a new token");
+    assert_eq!(
+        env.token_posts().await.len(),
+        1,
+        "one refresh attempt, no loop"
+    );
+    assert_eq!(
+        env.count("GET", PING_PATH).await,
+        1,
+        "no retry without a new token"
+    );
 }
 
 #[tokio::test]
 async fn a_401_whose_refresh_token_was_revoked_is_a_401_error() {
     let env = Env::new().await;
-    write_token(&env.token_path(), "at-stale", Some("rt-revoked"), 3600, Some(EMAIL));
+    write_token(
+        &env.token_path(),
+        "at-stale",
+        Some("rt-revoked"),
+        3600,
+        Some(EMAIL),
+    );
     Mock::given(method("POST"))
         .and(path(TOKEN_PATH))
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({ "error": "invalid_grant" })))
@@ -834,7 +1099,10 @@ async fn a_401_whose_refresh_token_was_revoked_is_a_401_error() {
     mount_ping_accepting(&env.server, "something-else").await;
     let client = env.client(Some(EMAIL));
 
-    let err = client.get_json::<Value>(&client.gmail_url("/ping")).await.expect_err("401");
+    let err = client
+        .get_json::<Value>(&client.gmail_url("/ping"))
+        .await
+        .expect_err("401");
 
     assert_eq!(typed(&err).status.as_u16(), 401);
 }
@@ -846,7 +1114,13 @@ async fn after_a_401_with_a_revoked_refresh_token_the_next_check_asks_for_sign_i
     let env = Env::new().await;
     // The access token still looks valid by its expiry, but Google rejects it
     // and the refresh token was revoked: only a new sign-in can help.
-    write_token(&env.token_path(), "at-stale", Some("rt-revoked"), 3600, Some(EMAIL));
+    write_token(
+        &env.token_path(),
+        "at-stale",
+        Some("rt-revoked"),
+        3600,
+        Some(EMAIL),
+    );
     Mock::given(method("POST"))
         .and(path(TOKEN_PATH))
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({ "error": "invalid_grant" })))
@@ -855,11 +1129,17 @@ async fn after_a_401_with_a_revoked_refresh_token_the_next_check_asks_for_sign_i
     mount_ping_accepting(&env.server, "nothing-matches").await;
     let client = env.client(Some(EMAIL));
     assert!(client.ensure_authed().await.unwrap().is_none());
-    client.get_json::<Value>(&client.gmail_url("/ping")).await.expect_err("401");
+    client
+        .get_json::<Value>(&client.gmail_url("/ping"))
+        .await
+        .expect_err("401");
 
     let outcome = client.ensure_authed().await.unwrap();
 
-    assert!(outcome.is_some(), "a token Google rejected and cannot refresh must not count as signed in");
+    assert!(
+        outcome.is_some(),
+        "a token Google rejected and cannot refresh must not count as signed in"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -868,7 +1148,12 @@ async fn after_a_401_with_a_revoked_refresh_token_the_next_check_asks_for_sign_i
 
 #[tokio::test]
 async fn a_429_is_a_throttle() {
-    let (err, _env) = http_error(429, json!({ "error": { "status": "RESOURCE_EXHAUSTED" } }), None).await;
+    let (err, _env) = http_error(
+        429,
+        json!({ "error": { "status": "RESOURCE_EXHAUSTED" } }),
+        None,
+    )
+    .await;
     let http = typed(&err);
     assert_eq!(http.status.as_u16(), 429);
     assert!(http.is_throttle());
@@ -888,7 +1173,12 @@ async fn a_403_user_rate_limit_exceeded_is_a_throttle() {
 
 #[tokio::test]
 async fn a_503_with_retry_after_is_a_throttle_and_keeps_the_wait() {
-    let (err, _env) = http_error(503, json!({ "error": { "status": "UNAVAILABLE" } }), Some("7")).await;
+    let (err, _env) = http_error(
+        503,
+        json!({ "error": { "status": "UNAVAILABLE" } }),
+        Some("7"),
+    )
+    .await;
     let http = typed(&err);
     assert!(http.is_throttle());
     assert_eq!(http.retry_after, Some(Duration::from_secs(7)));
@@ -919,7 +1209,13 @@ async fn a_503_without_retry_after_and_a_500_are_not_throttles() {
 #[tokio::test]
 async fn an_error_message_carries_neither_the_response_body_nor_the_query_string() {
     let env = Env::new().await;
-    write_token(&env.token_path(), "at-secret-token-value", Some("rt"), 3600, Some(EMAIL));
+    write_token(
+        &env.token_path(),
+        "at-secret-token-value",
+        Some("rt"),
+        3600,
+        Some(EMAIL),
+    );
     Mock::given(method("GET"))
         .and(path(PING_PATH))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({
@@ -932,11 +1228,25 @@ async fn an_error_message_carries_neither_the_response_body_nor_the_query_string
 
     let err = client.get_json::<Value>(&url).await.expect_err("500");
 
-    for text in [format!("{err}"), format!("{err:#}"), format!("{err:?}"), failure_reason("Mail fetch failed", &err)] {
-        assert!(!text.contains("BODY-MARKER"), "response body leaked: {text}");
-        assert!(!text.contains("QUERY-MARKER"), "query string leaked: {text}");
+    for text in [
+        format!("{err}"),
+        format!("{err:#}"),
+        format!("{err:?}"),
+        failure_reason("Mail fetch failed", &err),
+    ] {
+        assert!(
+            !text.contains("BODY-MARKER"),
+            "response body leaked: {text}"
+        );
+        assert!(
+            !text.contains("QUERY-MARKER"),
+            "query string leaked: {text}"
+        );
         assert!(!text.contains("TOKEN-MARKER"), "page token leaked: {text}");
-        assert!(!text.contains("at-secret-token-value"), "access token leaked: {text}");
+        assert!(
+            !text.contains("at-secret-token-value"),
+            "access token leaked: {text}"
+        );
     }
     assert_eq!(typed(&err).status.as_u16(), 500);
 }
@@ -956,7 +1266,10 @@ fn failure_reason_for_401_says_the_sign_in_was_rejected() {
 #[test]
 fn failure_reason_for_403_says_access_was_denied() {
     assert_eq!(
-        failure_reason("Calendar fetch failed", &google_error(403, Some("forbidden"), None)),
+        failure_reason(
+            "Calendar fetch failed",
+            &google_error(403, Some("forbidden"), None)
+        ),
         "Calendar fetch failed: Google denied access (403)"
     );
 }
@@ -968,7 +1281,10 @@ fn failure_reason_for_throttles_says_google_is_rate_limiting() {
         "Mail fetch failed: Google is rate limiting requests (429)"
     );
     assert_eq!(
-        failure_reason("Mail fetch failed", &google_error(403, Some("rateLimitExceeded"), None)),
+        failure_reason(
+            "Mail fetch failed",
+            &google_error(403, Some("rateLimitExceeded"), None)
+        ),
         "Mail fetch failed: Google is rate limiting requests (403)"
     );
     assert_eq!(
@@ -1004,7 +1320,10 @@ fn failure_reason_for_any_other_status_is_unexpected_response() {
 #[test]
 fn failure_reason_for_a_non_http_failure_is_unexpected_response() {
     assert_eq!(
-        failure_reason("Mail fetch failed", &anyhow::anyhow!("something odd happened")),
+        failure_reason(
+            "Mail fetch failed",
+            &anyhow::anyhow!("something odd happened")
+        ),
         "Mail fetch failed: unexpected response from Google"
     );
 }
@@ -1029,11 +1348,17 @@ async fn failure_reason_for_an_unreachable_google_says_could_not_reach() {
         listener.local_addr().unwrap().port()
     };
 
-    let err = within("get_json", client.get_json::<Value>(&format!("http://127.0.0.1:{closed}/gmail/v1/ping")))
-        .await
-        .expect_err("connection refused");
+    let err = within(
+        "get_json",
+        client.get_json::<Value>(&format!("http://127.0.0.1:{closed}/gmail/v1/ping")),
+    )
+    .await
+    .expect_err("connection refused");
 
-    assert_eq!(failure_reason("Mail fetch failed", &err), "Mail fetch failed: could not reach Google");
+    assert_eq!(
+        failure_reason("Mail fetch failed", &err),
+        "Mail fetch failed: could not reach Google"
+    );
 }
 
 #[tokio::test]
@@ -1042,14 +1367,22 @@ async fn failure_reason_for_a_200_that_is_not_json_is_unexpected_response() {
     write_token(&env.token_path(), "at-good", Some("rt"), 3600, Some(EMAIL));
     Mock::given(method("GET"))
         .and(path(PING_PATH))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<html>captive portal BODY-MARKER</html>"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string("<html>captive portal BODY-MARKER</html>"),
+        )
         .mount(&env.server)
         .await;
     let client = env.client(Some(EMAIL));
 
-    let err = client.get_json::<Value>(&client.gmail_url("/ping")).await.expect_err("not JSON");
+    let err = client
+        .get_json::<Value>(&client.gmail_url("/ping"))
+        .await
+        .expect_err("not JSON");
 
-    assert_eq!(failure_reason("Mail fetch failed", &err), "Mail fetch failed: unexpected response from Google");
+    assert_eq!(
+        failure_reason("Mail fetch failed", &err),
+        "Mail fetch failed: unexpected response from Google"
+    );
     assert!(!format!("{err:#}").contains("BODY-MARKER"));
 }
 
@@ -1065,9 +1398,14 @@ fn debug_output_of_the_oauth_client_does_not_contain_the_secret() {
 
 #[test]
 fn the_oauth_client_file_loader_never_echoes_the_file_contents_in_errors() {
-    let web = GoogleOAuthClient::from_json(&json!({ "web": { "client_id": "i", "client_secret": CLIENT_SECRET } }).to_string())
-        .unwrap_err();
+    let web = GoogleOAuthClient::from_json(
+        &json!({ "web": { "client_id": "i", "client_secret": CLIENT_SECRET } }).to_string(),
+    )
+    .unwrap_err();
     assert!(!format!("{web:#}").contains(CLIENT_SECRET));
-    let broken = GoogleOAuthClient::from_json(&format!("{{\"installed\": {{\"client_secret\": \"{CLIENT_SECRET}\"")).unwrap_err();
+    let broken = GoogleOAuthClient::from_json(&format!(
+        "{{\"installed\": {{\"client_secret\": \"{CLIENT_SECRET}\""
+    ))
+    .unwrap_err();
     assert!(!format!("{broken:#}").contains(CLIENT_SECRET));
 }

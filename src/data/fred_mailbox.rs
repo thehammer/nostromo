@@ -144,7 +144,10 @@ impl MailboxSnapshot {
     /// The snapshot to publish while the user must sign in: no data, the
     /// device-flow prompt, and a plain-English reason. Carries no token.
     pub fn unauthenticated(prompt: DeviceFlowPrompt) -> MailboxSnapshot {
-        Self::unauthenticated_with(prompt, "Sign in to Microsoft 365 to see your mail".to_owned())
+        Self::unauthenticated_with(
+            prompt,
+            "Sign in to Microsoft 365 to see your mail".to_owned(),
+        )
     }
 
     /// [`unauthenticated`](Self::unauthenticated) with a provider-specific reason.
@@ -266,7 +269,10 @@ mod tests {
     #[test]
     fn legacy_snapshot_serialises_without_account_keys() {
         let snap = MailboxSnapshot {
-            items: vec![MailboxItem { id: "m1".into(), ..Default::default() }],
+            items: vec![MailboxItem {
+                id: "m1".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let json = serde_json::to_string(&snap).unwrap();

@@ -38,7 +38,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<(), String> {
-    let config = Config::load(args.config.as_deref()).map_err(|e| format!("Could not read the config: {e:#}"))?;
+    let config = Config::load(args.config.as_deref())
+        .map_err(|e| format!("Could not read the config: {e:#}"))?;
     let (accounts, warnings) = config.resolve_fred_accounts();
     for w in warnings {
         eprintln!("warning: {w}");
@@ -49,19 +50,34 @@ async fn run(args: Args) -> Result<(), String> {
     let account = accounts
         .iter()
         .find(|a| a.label == args.account && a.provider == FredProvider::Google)
-        .ok_or_else(|| format!("No Google account labelled '{}' in [[fred_accounts]].", args.account))?;
+        .ok_or_else(|| {
+            format!(
+                "No Google account labelled '{}' in [[fred_accounts]].",
+                args.account
+            )
+        })?;
 
     let oauth_path = config.google_oauth_client_path();
-    let oauth = GoogleOAuthClient::load(&oauth_path)
-        .map_err(|e| format!("Google OAuth client file missing or invalid: {} ({e})", oauth_path.display()))?;
+    let oauth = GoogleOAuthClient::load(&oauth_path).map_err(|e| {
+        format!(
+            "Google OAuth client file missing or invalid: {} ({e})",
+            oauth_path.display()
+        )
+    })?;
 
-    let opts = GoogleOptions { open_browser: !args.no_browser, ..GoogleOptions::default() };
+    let opts = GoogleOptions {
+        open_browser: !args.no_browser,
+        ..GoogleOptions::default()
+    };
     let client = GoogleClient::shared(account, oauth, opts).map_err(|e| format!("{e:#}"))?;
 
     let label = account.label.clone();
     let email = client
         .run_loopback_until_done(|prompt| {
-            println!("Open this link to sign in '{label}' (it expires at {}):", prompt.expires_at.format("%H:%M UTC"));
+            println!(
+                "Open this link to sign in '{label}' (it expires at {}):",
+                prompt.expires_at.format("%H:%M UTC")
+            );
             println!("{}", prompt.verification_uri);
         })
         .await

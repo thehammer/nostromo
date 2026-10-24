@@ -14,7 +14,13 @@ use tracing::{debug, warn};
 pub fn load<T: DeserializeOwned>(path: &Path) -> Option<T> {
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data)
-        .map_err(|e| warn!("ignoring malformed token cache at {}: {:?}", path.display(), e.classify()))
+        .map_err(|e| {
+            warn!(
+                "ignoring malformed token cache at {}: {:?}",
+                path.display(),
+                e.classify()
+            )
+        })
         .ok()
 }
 

@@ -120,9 +120,12 @@ impl GoogleCalendarSource {
         let mut backoff = ThrottleBackoff::default();
         loop {
             let previous = tx.borrow().clone();
-            let (next, throttled_for) = self.refresh(&client, &mut backoff, previous.as_ref()).await;
-            let nothing_to_show =
-                matches!(next.state, SourceState::Unauthenticated | SourceState::Error | SourceState::Loading);
+            let (next, throttled_for) =
+                self.refresh(&client, &mut backoff, previous.as_ref()).await;
+            let nothing_to_show = matches!(
+                next.state,
+                SourceState::Unauthenticated | SourceState::Error | SourceState::Loading
+            );
             let _ = tx.send(Some(next));
 
             if let Some(quiet) = throttled_for {
@@ -160,7 +163,10 @@ impl GoogleCalendarSource {
                 Some(wait) => {
                     let wait = wait.max(poll);
                     let retry_at = Utc::now() + ChronoDuration::from_std(wait).unwrap_or_default();
-                    (CalendarSnapshot::rate_limited(previous, reason, retry_at), Some(wait))
+                    (
+                        CalendarSnapshot::rate_limited(previous, reason, retry_at),
+                        Some(wait),
+                    )
                 }
                 None => (CalendarSnapshot::failed(previous, reason), None),
             }
@@ -199,7 +205,10 @@ impl GoogleCalendarSource {
 
 /// Every event overlapping `window` on the primary calendar, following pages.
 /// A page without an `items` array is an error, never an empty day.
-async fn fetch_events(client: &GoogleClient, window: (DateTime<Utc>, DateTime<Utc>)) -> Result<Vec<RawEvent>> {
+async fn fetch_events(
+    client: &GoogleClient,
+    window: (DateTime<Utc>, DateTime<Utc>),
+) -> Result<Vec<RawEvent>> {
     let time_min = window.0.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let time_max = window.1.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut events = Vec::new();
@@ -217,7 +226,9 @@ async fn fetch_events(client: &GoogleClient, window: (DateTime<Utc>, DateTime<Ut
         }
         let url = client.calendar_url(&with_query("/calendars/primary/events", &params));
         let page: EventsPage = client.get_json(&url).await?;
-        let Some(items) = page.items else { bail!("calendar page has no items array") };
+        let Some(items) = page.items else {
+            bail!("calendar page has no items array")
+        };
         events.extend(items);
         match page.next_page_token {
             Some(t) => page_token = Some(t),
@@ -236,7 +247,9 @@ fn non_empty(s: Option<String>) -> Option<String> {
 /// UTC of that date (no zone conversion), like the Graph source.
 fn parse_time(t: &RawTime) -> Option<(DateTime<Utc>, bool)> {
     if let Some(dt) = t.date_time.as_deref() {
-        return DateTime::parse_from_rfc3339(dt).ok().map(|d| (d.with_timezone(&Utc), false));
+        return DateTime::parse_from_rfc3339(dt)
+            .ok()
+            .map(|d| (d.with_timezone(&Utc), false));
     }
     let date = NaiveDate::parse_from_str(t.date.as_deref()?, "%Y-%m-%d").ok()?;
     Some((date.and_hms_opt(0, 0, 0)?.and_utc(), true))
@@ -260,9 +273,15 @@ fn response_status(ev: &RawEvent) -> String {
 
 fn online_meeting_url(ev: &RawEvent) -> Option<String> {
     non_empty(ev.hangout_link.clone()).or_else(|| {
-        ev.conference_data.as_ref()?.entry_points.iter().find_map(|p| {
-            (p.entry_point_type.as_deref() == Some("video")).then(|| non_empty(p.uri.clone())).flatten()
-        })
+        ev.conference_data
+            .as_ref()?
+            .entry_points
+            .iter()
+            .find_map(|p| {
+                (p.entry_point_type.as_deref() == Some("video"))
+                    .then(|| non_empty(p.uri.clone()))
+                    .flatten()
+            })
     })
 }
 
@@ -277,17 +296,20 @@ fn build_snapshot(raw_events: Vec<RawEvent>, now: DateTime<Utc>) -> CalendarSnap
             let title = non_empty(ev.summary.clone()).unwrap_or_else(|| "(no title)".to_owned());
             let response = response_status(&ev);
             let is_cancelled = ev.status.as_deref() == Some("cancelled");
-            let status = if is_cancelled { "cancelled".to_owned() } else { response.clone() };
+            let status = if is_cancelled {
+                "cancelled".to_owned()
+            } else {
+                response.clone()
+            };
             let is_now = !is_all_day
                 && status != "cancelled"
                 && status != "declined"
                 && start_at <= now
                 && end.is_some_and(|e| e > now);
 
-            let organizer = ev
-                .organizer
-                .as_ref()
-                .and_then(|o| non_empty(o.display_name.clone()).or_else(|| non_empty(o.email.clone())));
+            let organizer = ev.organizer.as_ref().and_then(|o| {
+                non_empty(o.display_name.clone()).or_else(|| non_empty(o.email.clone()))
+            });
 
             Some(CalendarEvent {
                 id: ev.id.clone().unwrap_or_default(),
@@ -312,7 +334,11 @@ fn build_snapshot(raw_events: Vec<RawEvent>, now: DateTime<Utc>) -> CalendarSnap
     events.sort_by_key(|ev| (ev.start, ev.end));
     let (next, sweater) = next_and_sweater(&events, now);
 
-    let state = if events.is_empty() { SourceState::Empty } else { SourceState::Fresh };
+    let state = if events.is_empty() {
+        SourceState::Empty
+    } else {
+        SourceState::Fresh
+    };
     CalendarSnapshot {
         events,
         next,
@@ -338,7 +364,10 @@ mod tests {
 
     #[test]
     fn all_day_dates_are_midnight_utc() {
-        let t = RawTime { date_time: None, date: Some("2026-10-10".into()) };
+        let t = RawTime {
+            date_time: None,
+            date: Some("2026-10-10".into()),
+        };
         let (at, all_day) = parse_time(&t).unwrap();
         assert!(all_day);
         assert_eq!(at.to_rfc3339(), "2026-10-10T00:00:00+00:00");
@@ -346,8 +375,14 @@ mod tests {
 
     #[test]
     fn timed_events_with_an_offset_parse_to_utc() {
-        let t = RawTime { date_time: Some("2026-10-10T09:00:00-04:00".into()), date: None };
-        assert_eq!(parse_time(&t).unwrap().0.to_rfc3339(), "2026-10-10T13:00:00+00:00");
+        let t = RawTime {
+            date_time: Some("2026-10-10T09:00:00-04:00".into()),
+            date: None,
+        };
+        assert_eq!(
+            parse_time(&t).unwrap().0.to_rfc3339(),
+            "2026-10-10T13:00:00+00:00"
+        );
     }
 
     #[test]
@@ -356,7 +391,12 @@ mod tests {
             r#"{"organizer":{"email":"o@x.com"},"attendees":[{"email":"me@x.com","self":true,"responseStatus":"tentative"}]}"#,
         );
         assert_eq!(response_status(&ev), "tentativelyAccepted");
-        assert_eq!(response_status(&event(r#"{"organizer":{"self":true},"attendees":[{"self":true}]}"#)), "organizer");
+        assert_eq!(
+            response_status(&event(
+                r#"{"organizer":{"self":true},"attendees":[{"self":true}]}"#
+            )),
+            "organizer"
+        );
         assert_eq!(response_status(&event("{}")), "organizer");
     }
 }

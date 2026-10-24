@@ -17,7 +17,9 @@ pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<std::time::D
     let wait = if let Ok(secs) = value.parse::<u64>() {
         std::time::Duration::from_secs(secs)
     } else {
-        let when = DateTime::parse_from_rfc2822(value).ok()?.with_timezone(&Utc);
+        let when = DateTime::parse_from_rfc2822(value)
+            .ok()?
+            .with_timezone(&Utc);
         (when - now).to_std().unwrap_or(std::time::Duration::ZERO)
     };
     Some(wait.min(MAX_RETRY_AFTER))
@@ -115,6 +117,9 @@ mod tests {
             retry_after: Some(std::time::Duration::from_secs(3)),
         }
         .into();
-        assert_eq!(throttle_of(&e), Some(Some(std::time::Duration::from_secs(3))));
+        assert_eq!(
+            throttle_of(&e),
+            Some(Some(std::time::Duration::from_secs(3)))
+        );
     }
 }

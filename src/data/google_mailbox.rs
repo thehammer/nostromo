@@ -26,7 +26,9 @@ use crate::{
     data::{
         fred_mailbox::{MailboxItem, MailboxSnapshot},
         fred_mailbox_native::{FredTiming, UnreadCount},
-        google_client::{encode_segment, failure_reason, with_query, GoogleClient, GoogleHttpError},
+        google_client::{
+            encode_segment, failure_reason, with_query, GoogleClient, GoogleHttpError,
+        },
         http_backoff::ThrottleBackoff,
         work::model::SourceState,
     },
@@ -186,7 +188,11 @@ impl GoogleMailboxSource {
     ) -> watch::Receiver<Option<MailboxSnapshot>> {
         let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
-            let source = GoogleMailboxSource { label, config, timing };
+            let source = GoogleMailboxSource {
+                label,
+                config,
+                timing,
+            };
             source.run(client, tx, &mut dirty_rx).await;
         });
         rx
@@ -238,8 +244,12 @@ impl GoogleMailboxSource {
             match backoff.throttled(e) {
                 Some(wait) => {
                     let wait = wait.max(poll);
-                    let retry_at = Utc::now() + chrono::Duration::from_std(wait).unwrap_or_default();
-                    (MailboxSnapshot::rate_limited(previous, reason, retry_at), Some(wait))
+                    let retry_at =
+                        Utc::now() + chrono::Duration::from_std(wait).unwrap_or_default();
+                    (
+                        MailboxSnapshot::rate_limited(previous, reason, retry_at),
+                        Some(wait),
+                    )
                 }
                 None => (MailboxSnapshot::failed(previous, reason), None),
             }
@@ -271,9 +281,15 @@ impl GoogleMailboxSource {
 
         st.backoff.succeeded();
         prune(&mut st.store);
-        debug!("google mailbox '{label}' refreshed ({} messages held)", st.store.len());
+        debug!(
+            "google mailbox '{label}' refreshed ({} messages held)",
+            st.store.len()
+        );
         let unread = st.unread.value.unwrap_or(0);
-        (build_snapshot(&st.store, st.email.as_deref(), unread, &self.config), None)
+        (
+            build_snapshot(&st.store, st.email.as_deref(), unread, &self.config),
+            None,
+        )
     }
 
     /// Bring the store up to date: full sync, or history since the last point
@@ -284,7 +300,10 @@ impl GoogleMailboxSource {
         }
         match incremental_sync(client, st).await {
             Err(e) if is_not_found(&e) => {
-                debug!("google mailbox '{}' history point expired; resyncing", self.label);
+                debug!(
+                    "google mailbox '{}' history point expired; resyncing",
+                    self.label
+                );
                 st.history_id = None;
                 full_sync(client, st).await
             }
@@ -294,7 +313,8 @@ impl GoogleMailboxSource {
 }
 
 fn is_not_found(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<GoogleHttpError>().is_some_and(|h| h.status == reqwest::StatusCode::NOT_FOUND)
+    e.downcast_ref::<GoogleHttpError>()
+        .is_some_and(|h| h.status == reqwest::StatusCode::NOT_FOUND)
 }
 
 // ── Sync steps ────────────────────────────────────────────────────────────────
@@ -302,12 +322,17 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 async fn full_sync(client: &GoogleClient, st: &mut SyncState) -> Result<()> {
     // The history id comes before the list, so nothing that arrives while we
     // list is missed.
-    let profile: Profile = client.get_json(&client.gmail_url("/users/me/profile")).await?;
+    let profile: Profile = client
+        .get_json(&client.gmail_url("/users/me/profile"))
+        .await?;
     let history_id = profile.history_id.context("profile has no historyId")?;
 
     let list_url = client.gmail_url(&with_query(
         "/users/me/messages",
-        &[("labelIds", INBOX), ("maxResults", &MAX_FETCH_PER_CYCLE.to_string())],
+        &[
+            ("labelIds", INBOX),
+            ("maxResults", &MAX_FETCH_PER_CYCLE.to_string()),
+        ],
     ));
     let list: MessageList = client.get_json(&list_url).await?;
 
@@ -343,7 +368,9 @@ async fn incremental_sync(client: &GoogleClient, st: &mut SyncState) -> Result<(
         if let Some(t) = &page_token {
             params.push(("pageToken", t));
         }
-        let page: HistoryPage = client.get_json(&client.gmail_url(&with_query("/users/me/history", &params))).await?;
+        let page: HistoryPage = client
+            .get_json(&client.gmail_url(&with_query("/users/me/history", &params)))
+            .await?;
         // A page without `historyId` is an error, never "no changes".
         let page_id = page.history_id.context("history page has no historyId")?;
         records.extend(page.history);
@@ -360,7 +387,9 @@ async fn incremental_sync(client: &GoogleClient, st: &mut SyncState) -> Result<(
 
     let mut fetched = 0;
     while fetched < MAX_FETCH_PER_CYCLE {
-        let Some(id) = st.queue.pop_front() else { break };
+        let Some(id) = st.queue.pop_front() else {
+            break;
+        };
         fetched += 1;
         match fetch_message(client, &id).await {
             // A message that vanished was deleted; drop it.
@@ -442,7 +471,11 @@ fn remove(st: &mut SyncState, id: &str) {
 async fn fetch_message(client: &GoogleClient, id: &str) -> Result<Option<(String, GmailMsg)>> {
     let url = client.gmail_url(&with_query(
         &format!("/users/me/messages/{}", encode_segment(id)),
-        &[("format", "metadata"), ("metadataHeaders", "From"), ("metadataHeaders", "Subject")],
+        &[
+            ("format", "metadata"),
+            ("metadataHeaders", "From"),
+            ("metadataHeaders", "Subject"),
+        ],
     ));
     let raw: RawMessage = match client.get_json(&url).await {
         Ok(raw) => raw,
@@ -476,8 +509,12 @@ async fn fetch_message(client: &GoogleClient, id: &str) -> Result<Option<(String
 
 /// The INBOX label's `threadsUnread`. A response without it is a failure.
 async fn fetch_unread_count(client: &GoogleClient) -> Result<usize> {
-    let info: LabelInfo = client.get_json(&client.gmail_url("/users/me/labels/INBOX")).await?;
-    let n = info.threads_unread.context("inbox label response has no threadsUnread")?;
+    let info: LabelInfo = client
+        .get_json(&client.gmail_url("/users/me/labels/INBOX"))
+        .await?;
+    let n = info
+        .threads_unread
+        .context("inbox label response has no threadsUnread")?;
     Ok(n.max(0) as usize)
 }
 
@@ -486,10 +523,16 @@ fn prune(store: &mut HashMap<String, GmailMsg>) {
     if store.len() <= MAX_STORE {
         return;
     }
-    let mut by_age: Vec<(Option<DateTime<Utc>>, String)> =
-        store.iter().map(|(id, m)| (m.internal_date, id.clone())).collect();
+    let mut by_age: Vec<(Option<DateTime<Utc>>, String)> = store
+        .iter()
+        .map(|(id, m)| (m.internal_date, id.clone()))
+        .collect();
     by_age.sort_by_key(|(date, _)| std::cmp::Reverse(*date));
-    let keep: HashSet<String> = by_age.into_iter().take(MAX_STORE).map(|(_, id)| id).collect();
+    let keep: HashSet<String> = by_age
+        .into_iter()
+        .take(MAX_STORE)
+        .map(|(_, id)| id)
+        .collect();
     store.retain(|id, _| keep.contains(id));
 }
 
@@ -501,7 +544,11 @@ fn build_snapshot(
     unread_count: usize,
     config: &Config,
 ) -> MailboxSnapshot {
-    let vip_set: HashSet<String> = config.vip_senders.iter().map(|s| s.to_lowercase()).collect();
+    let vip_set: HashSet<String> = config
+        .vip_senders
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
 
     let mut items: Vec<MailboxItem> = store
         .iter()
@@ -519,11 +566,19 @@ fn build_snapshot(
         .collect();
 
     // Unread first (`false < true`), then newest first.
-    items.sort_by(|a, b| a.is_read.cmp(&b.is_read).then_with(|| b.received_at.cmp(&a.received_at)));
+    items.sort_by(|a, b| {
+        a.is_read
+            .cmp(&b.is_read)
+            .then_with(|| b.received_at.cmp(&a.received_at))
+    });
     items.truncate(MAX_SNAPSHOT_ITEMS);
 
     let now = Utc::now();
-    let state = if items.is_empty() && unread_count == 0 { SourceState::Empty } else { SourceState::Fresh };
+    let state = if items.is_empty() && unread_count == 0 {
+        SourceState::Empty
+    } else {
+        SourceState::Fresh
+    };
     MailboxSnapshot {
         generated_at: Some(now),
         unread_count,
@@ -569,7 +624,10 @@ mod tests {
     #[test]
     fn web_link_carries_authuser_and_thread() {
         let link = web_link(Some("a@gmail.com"), "t1");
-        assert_eq!(link, "https://mail.google.com/mail/?authuser=a%40gmail.com#all/t1");
+        assert_eq!(
+            link,
+            "https://mail.google.com/mail/?authuser=a%40gmail.com#all/t1"
+        );
     }
 
     #[test]

@@ -72,7 +72,10 @@ impl std::fmt::Debug for GoogleOAuthClient {
 
 impl GoogleOAuthClient {
     pub fn new(client_id: impl Into<String>, client_secret: impl Into<String>) -> Self {
-        Self { client_id: client_id.into(), client_secret: client_secret.into() }
+        Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+        }
     }
 
     /// Load Google's downloaded `{"installed": {...}}` JSON. The error never
@@ -97,10 +100,16 @@ impl GoogleOAuthClient {
         let file: File = serde_json::from_str(data)
             .map_err(|e| anyhow!("not a Google OAuth client file ({:?})", e.classify()))?;
         match file {
-            File { installed: Some(i), .. } if !i.client_id.is_empty() && !i.client_secret.is_empty() => {
-                Ok(Self { client_id: i.client_id, client_secret: i.client_secret })
-            }
-            File { installed: None, web: Some(_) } => bail!("use a Desktop app client, not a Web application client"),
+            File {
+                installed: Some(i), ..
+            } if !i.client_id.is_empty() && !i.client_secret.is_empty() => Ok(Self {
+                client_id: i.client_id,
+                client_secret: i.client_secret,
+            }),
+            File {
+                installed: None,
+                web: Some(_),
+            } => bail!("use a Desktop app client, not a Web application client"),
             _ => bail!("no installed client_id/client_secret in the Google OAuth client file"),
         }
     }
@@ -157,8 +166,12 @@ impl GoogleHttpError {
     pub fn is_throttle(&self) -> bool {
         self.status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || (self.status == reqwest::StatusCode::FORBIDDEN
-                && matches!(self.reason.as_deref(), Some("rateLimitExceeded" | "userRateLimitExceeded")))
-            || (self.status == reqwest::StatusCode::SERVICE_UNAVAILABLE && self.retry_after.is_some())
+                && matches!(
+                    self.reason.as_deref(),
+                    Some("rateLimitExceeded" | "userRateLimitExceeded")
+                ))
+            || (self.status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                && self.retry_after.is_some())
     }
 }
 
@@ -201,7 +214,10 @@ pub fn failure_reason(what: &str, e: &anyhow::Error) -> String {
             _ => format!("{what}: unexpected response from Google"),
         };
     }
-    if e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout())) {
+    if e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_connect() || r.is_timeout())
+    }) {
         return format!("{what}: could not reach Google");
     }
     format!("{what}: unexpected response from Google")
@@ -223,7 +239,10 @@ impl std::fmt::Debug for GoogleToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GoogleToken")
             .field("access_token", &"<redacted>")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("expires_at", &self.expires_at)
             .field("email", &self.email)
             .finish()
@@ -306,7 +325,11 @@ impl GoogleClient {
     /// The process-wide client for `(label, token file)`. The mailbox and
     /// calendar sources of one account both call this so they share one token
     /// and one sign-in.
-    pub fn shared(account: &FredAccount, oauth: GoogleOAuthClient, opts: GoogleOptions) -> Result<Self> {
+    pub fn shared(
+        account: &FredAccount,
+        oauth: GoogleOAuthClient,
+        opts: GoogleOptions,
+    ) -> Result<Self> {
         type Key = (String, PathBuf);
         static REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<Key, GoogleClient>>> =
             std::sync::OnceLock::new();
@@ -336,7 +359,11 @@ impl GoogleClient {
 
     /// The email recorded in the stored token (set at sign-in), if any.
     pub async fn stored_email(&self) -> Option<String> {
-        self.token.lock().await.as_ref().and_then(|t| t.email.clone())
+        self.token
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|t| t.email.clone())
     }
 
     /// `{gmail_base}{path}`; `path` may carry an already-encoded query.
@@ -417,7 +444,10 @@ impl GoogleClient {
     pub async fn wait_loopback(&self) -> Result<String> {
         let mut outcome = {
             let pending = self.pending.lock().await;
-            pending.as_ref().map(|p| p.outcome.clone()).context("no sign-in in progress")?
+            pending
+                .as_ref()
+                .map(|p| p.outcome.clone())
+                .context("no sign-in in progress")?
         };
         loop {
             if let Some(result) = outcome.borrow().clone() {
@@ -431,7 +461,10 @@ impl GoogleClient {
 
     /// Start the flow, hand the prompt to `on_prompt` (the CLI prints the URL),
     /// then wait until it ends.
-    pub async fn run_loopback_until_done(&self, on_prompt: impl FnOnce(&DeviceFlowPrompt)) -> Result<String> {
+    pub async fn run_loopback_until_done(
+        &self,
+        on_prompt: impl FnOnce(&DeviceFlowPrompt),
+    ) -> Result<String> {
         let prompt = self.start_loopback().await?;
         on_prompt(&prompt);
         self.wait_loopback().await
@@ -466,7 +499,10 @@ impl GoogleClient {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /// Abort any flow in `pending`, start a new one and record it. Returns its prompt.
-    async fn replace_pending(&self, pending: &mut Option<PendingLoopback>) -> Result<DeviceFlowPrompt> {
+    async fn replace_pending(
+        &self,
+        pending: &mut Option<PendingLoopback>,
+    ) -> Result<DeviceFlowPrompt> {
         if let Some(old) = pending.take() {
             old.handle.abort();
         }
@@ -498,14 +534,25 @@ impl GoogleClient {
     /// (`invalid_grant`) or it already did: sign-in is needed. `Err` is
     /// transient.
     async fn refresh_token(&self, tok: &GoogleToken) -> Result<Option<GoogleToken>> {
-        let Some(rt) = tok.refresh_token.as_deref() else { return Ok(None) };
-        if self.rejected_refresh.lock().expect("rejected refresh").as_deref() == Some(rt) {
+        let Some(rt) = tok.refresh_token.as_deref() else {
+            return Ok(None);
+        };
+        if self
+            .rejected_refresh
+            .lock()
+            .expect("rejected refresh")
+            .as_deref()
+            == Some(rt)
+        {
             return Ok(None);
         }
         match self.do_refresh(rt, tok.email.clone()).await {
             Ok(new_tok) => Ok(Some(new_tok)),
             Err(e) if e.downcast_ref::<InvalidGrant>().is_some() => {
-                warn!("google refresh token for '{}' was rejected; sign-in needed", self.label);
+                warn!(
+                    "google refresh token for '{}' was rejected; sign-in needed",
+                    self.label
+                );
                 *self.rejected_refresh.lock().expect("rejected refresh") = Some(rt.to_owned());
                 Ok(None)
             }
@@ -514,7 +561,13 @@ impl GoogleClient {
     }
 
     async fn authenticated_get(&self, url: &str) -> Result<reqwest::Response> {
-        let token = self.token.lock().await.as_ref().map(|t| t.access_token.clone()).unwrap_or_default();
+        let token = self
+            .token
+            .lock()
+            .await
+            .as_ref()
+            .map(|t| t.access_token.clone())
+            .unwrap_or_default();
         self.get_with_token(url, &token).await
     }
 
@@ -531,7 +584,12 @@ impl GoogleClient {
         let (refresh_token, email) = {
             let guard = self.token.lock().await;
             let tok = guard.as_ref().context("no token to refresh")?;
-            (tok.refresh_token.clone().context("no refresh token available")?, tok.email.clone())
+            (
+                tok.refresh_token
+                    .clone()
+                    .context("no refresh token available")?,
+                tok.email.clone(),
+            )
         };
         let new_tok = match self.do_refresh(&refresh_token, email).await {
             Ok(tok) => tok,
@@ -560,7 +618,9 @@ impl GoogleClient {
         Ok(GoogleToken {
             access_token: required_access_token(&resp)?,
             expires_at: expiry(&resp),
-            refresh_token: resp.refresh_token.or_else(|| Some(refresh_token.to_owned())),
+            refresh_token: resp
+                .refresh_token
+                .or_else(|| Some(refresh_token.to_owned())),
             email,
         })
     }
@@ -589,8 +649,13 @@ impl GoogleClient {
     // ── Loopback flow ─────────────────────────────────────────────────────────
 
     async fn begin_loopback(&self) -> Result<PendingLoopback> {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.context("binding loopback listener")?;
-        let port = listener.local_addr().context("loopback listener address")?.port();
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("binding loopback listener")?;
+        let port = listener
+            .local_addr()
+            .context("loopback listener address")?
+            .port();
         let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
 
         let (challenge, verifier) = oauth2::PkceCodeChallenge::new_random_sha256();
@@ -613,7 +678,8 @@ impl GoogleClient {
             }
         }
 
-        let expires_at = Utc::now() + ChronoDuration::from_std(self.opts.loopback_ttl).unwrap_or_default();
+        let expires_at =
+            Utc::now() + ChronoDuration::from_std(self.opts.loopback_ttl).unwrap_or_default();
         let prompt = DeviceFlowPrompt {
             verification_uri: url.to_string(),
             user_code: String::new(),
@@ -645,8 +711,16 @@ impl GoogleClient {
                 pending.take();
             }
         });
-        info!("google sign-in listener started for '{}' on port {port}", self.label);
-        Ok(PendingLoopback { state, prompt, outcome: rx, handle })
+        info!(
+            "google sign-in listener started for '{}' on port {port}",
+            self.label
+        );
+        Ok(PendingLoopback {
+            state,
+            prompt,
+            outcome: rx,
+            handle,
+        })
     }
 
     async fn run_listener(&self, listener: TcpListener, flow: &Flow) -> FlowOutcome {
@@ -684,14 +758,28 @@ impl GoogleClient {
             return None;
         }
 
-        let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+        let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
         if params.get("state") != Some(&flow.state) {
             // A stray or forged hit: refuse it and keep waiting for the real one.
-            respond(&mut stream, 400, "Bad request", "This sign-in link does not match. Please use the link from Nostromo.").await;
+            respond(
+                &mut stream,
+                400,
+                "Bad request",
+                "This sign-in link does not match. Please use the link from Nostromo.",
+            )
+            .await;
             return None;
         }
         if params.contains_key("error") {
-            respond(&mut stream, 200, "OK", "Sign-in was cancelled. You can close this tab.").await;
+            respond(
+                &mut stream,
+                200,
+                "OK",
+                "Sign-in was cancelled. You can close this tab.",
+            )
+            .await;
             return Some(Err("Sign-in was cancelled".to_owned()));
         }
         let Some(code) = params.get("code") else {
@@ -701,7 +789,10 @@ impl GoogleClient {
 
         match self.complete_sign_in(code, flow).await {
             Ok(email) => {
-                let page = format!("Nostromo: {} is signed in. You can close this tab.", self.label);
+                let page = format!(
+                    "Nostromo: {} is signed in. You can close this tab.",
+                    self.label
+                );
                 respond(&mut stream, 200, "OK", &page).await;
                 Some(Ok(email))
             }
@@ -728,17 +819,28 @@ impl GoogleClient {
             debug!("code exchange error chain length {}", e.chain().count());
             "Google did not accept the sign-in. Please try again.".to_owned()
         })?;
-        let access_token = required_access_token(&resp).map_err(|_| "Google did not return a token.".to_owned())?;
+        let access_token = required_access_token(&resp)
+            .map_err(|_| "Google did not return a token.".to_owned())?;
 
         // Learn who signed in before anything is persisted.
         let email = self.fetch_profile_email(&access_token).await.map_err(|e| {
-            warn!("google profile lookup failed for '{}': {}", self.label, failure_reason("profile", &e));
+            warn!(
+                "google profile lookup failed for '{}': {}",
+                self.label,
+                failure_reason("profile", &e)
+            );
             "Could not confirm which Google account signed in.".to_owned()
         })?;
         if let Some(want) = &self.expected_email {
             if !want.eq_ignore_ascii_case(&email) {
-                warn!("google sign-in for '{}' used a different account than configured", self.label);
-                return Err(format!("Signed in as the wrong Google account for '{}'", self.label));
+                warn!(
+                    "google sign-in for '{}' used a different account than configured",
+                    self.label
+                );
+                return Err(format!(
+                    "Signed in as the wrong Google account for '{}'",
+                    self.label
+                ));
             }
         }
 
@@ -792,7 +894,9 @@ pub fn with_query(path: &str, pairs: &[(&str, &str)]) -> String {
 
 /// Percent-encode one URL path segment (message and event ids).
 pub fn encode_segment(segment: &str) -> String {
-    url::form_urlencoded::byte_serialize(segment.as_bytes()).collect::<String>().replace('+', "%20")
+    url::form_urlencoded::byte_serialize(segment.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
 }
 
 /// A token file is only used when its recorded email (if both are known)
@@ -805,17 +909,26 @@ fn email_matches(expected: Option<&str>, recorded: Option<&str>) -> bool {
 }
 
 fn url_path(url: &str) -> String {
-    url::Url::parse(url).map(|u| u.path().to_owned()).unwrap_or_default()
+    url::Url::parse(url)
+        .map(|u| u.path().to_owned())
+        .unwrap_or_default()
 }
 
 fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|e| {
-        anyhow!("Google JSON did not parse ({:?} at line {} column {})", e.classify(), e.line(), e.column())
+        anyhow!(
+            "Google JSON did not parse ({:?} at line {} column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        )
     })
 }
 
 fn required_access_token(resp: &TokenResponse) -> Result<String> {
-    resp.access_token.clone().context("no access_token in Google token response")
+    resp.access_token
+        .clone()
+        .context("no access_token in Google token response")
 }
 
 fn expiry(resp: &TokenResponse) -> DateTime<Utc> {
@@ -835,7 +948,13 @@ async fn ensure_success(resp: reqwest::Response, url: &str) -> Result<reqwest::R
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_retry_after(v, Utc::now()));
     let body = resp.bytes().await.unwrap_or_default();
-    Err(GoogleHttpError { status, path: url_path(url), reason: error_reason(&body), retry_after }.into())
+    Err(GoogleHttpError {
+        status,
+        path: url_path(url),
+        reason: error_reason(&body),
+        retry_after,
+    }
+    .into())
 }
 
 /// `error.errors[0].reason` or `error.status` from a Google error body.
@@ -863,7 +982,10 @@ async fn read_request_head(stream: &mut TcpStream) -> Option<String> {
         buf.truncate(MAX_REQUEST_HEAD);
         Some(String::from_utf8_lossy(&buf).into_owned())
     };
-    tokio::time::timeout(CONNECTION_READ_TIMEOUT, read).await.ok().flatten()
+    tokio::time::timeout(CONNECTION_READ_TIMEOUT, read)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Write a small static HTML page and close. `message` must be a fixed string
@@ -899,7 +1021,10 @@ mod tests {
     #[test]
     fn google_client_only_issues_get_requests_and_posts_only_to_the_token_endpoint() {
         let src = include_str!("google_client.rs");
-        let code = src.split("#[cfg(test)]").next().expect("source before tests");
+        let code = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source before tests");
         for verb in [".put(", ".patch(", ".delete(", ".request("] {
             assert!(!code.contains(verb), "google_client.rs must not use {verb}");
         }
@@ -909,7 +1034,11 @@ mod tests {
             if line.contains(".post(") {
                 posts += 1;
                 let context = lines[i.saturating_sub(20)..=i].join("\n");
-                assert!(context.contains("token_url"), "POST at line {} is not aimed at the token URL", i + 1);
+                assert!(
+                    context.contains("token_url"),
+                    "POST at line {} is not aimed at the token URL",
+                    i + 1
+                );
             }
         }
         assert!(posts >= 1, "expected the token POST to be found");
@@ -917,10 +1046,15 @@ mod tests {
 
     #[test]
     fn oauth_client_file_parses_installed_and_rejects_web() {
-        let ok = GoogleOAuthClient::from_json(r#"{"installed":{"client_id":"id","client_secret":"sec"}}"#).unwrap();
+        let ok = GoogleOAuthClient::from_json(
+            r#"{"installed":{"client_id":"id","client_secret":"sec"}}"#,
+        )
+        .unwrap();
         assert_eq!(ok.client_id, "id");
         assert!(!format!("{ok:?}").contains("sec\""));
-        let web = GoogleOAuthClient::from_json(r#"{"web":{"client_id":"id","client_secret":"sec"}}"#).unwrap_err();
+        let web =
+            GoogleOAuthClient::from_json(r#"{"web":{"client_id":"id","client_secret":"sec"}}"#)
+                .unwrap_err();
         assert!(web.to_string().contains("Desktop app"));
         assert!(GoogleOAuthClient::from_json("{}").is_err());
     }

@@ -30,7 +30,10 @@ use tracing::{debug, warn};
 
 use crate::{
     config::Config,
-    data::{dirty_file, fred_mailbox::AccountStatus, graph_client::DeviceFlowPrompt, work::model::SourceState},
+    data::{
+        dirty_file, fred_mailbox::AccountStatus, graph_client::DeviceFlowPrompt,
+        work::model::SourceState,
+    },
 };
 
 // ── Snapshot types ──────────────────────────────────────────────────────────
@@ -153,7 +156,10 @@ impl CalendarSnapshot {
     /// The snapshot to publish while the user must sign in: no data, the
     /// device-flow prompt, and a plain-English reason. Carries no token.
     pub fn unauthenticated(prompt: DeviceFlowPrompt) -> CalendarSnapshot {
-        Self::unauthenticated_with(prompt, "Sign in to Microsoft 365 to see your calendar".to_owned())
+        Self::unauthenticated_with(
+            prompt,
+            "Sign in to Microsoft 365 to see your calendar".to_owned(),
+        )
     }
 
     /// [`unauthenticated`](Self::unauthenticated) with a provider-specific reason.
@@ -188,7 +194,10 @@ impl CalendarSnapshot {
 
 /// The next upcoming timed, not cancelled/declined event and the sweater colour
 /// for how soon it starts. `events` must be sorted by start.
-pub fn next_and_sweater(events: &[CalendarEvent], now: DateTime<Utc>) -> (Option<NextEvent>, String) {
+pub fn next_and_sweater(
+    events: &[CalendarEvent],
+    now: DateTime<Utc>,
+) -> (Option<NextEvent>, String) {
     let next = events.iter().find(|ev| {
         ev.start.is_some_and(|s| s > now)
             && ev.status != "cancelled"
@@ -198,8 +207,14 @@ pub fn next_and_sweater(events: &[CalendarEvent], now: DateTime<Utc>) -> (Option
 
     match next {
         Some(ev) => {
-            let mins = ev.start.map(|s| (s - now).num_minutes()).unwrap_or(i64::MAX);
-            let ne = NextEvent { title: ev.title.clone(), in_minutes: mins };
+            let mins = ev
+                .start
+                .map(|s| (s - now).num_minutes())
+                .unwrap_or(i64::MAX);
+            let ne = NextEvent {
+                title: ev.title.clone(),
+                in_minutes: mins,
+            };
             (Some(ne), sweater_for_minutes(mins))
         }
         None => (None, "sage".to_owned()),
@@ -296,12 +311,18 @@ mod tests {
     #[test]
     fn legacy_snapshot_serialises_without_account_keys() {
         let snap = CalendarSnapshot {
-            events: vec![CalendarEvent { dedupe_key: Some("uid".into()), ..Default::default() }],
+            events: vec![CalendarEvent {
+                dedupe_key: Some("uid".into()),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("\"account\""), "{json}");
         assert!(!json.contains("\"accounts\""), "{json}");
-        assert!(!json.contains("dedupe_key") && !json.contains("uid"), "{json}");
+        assert!(
+            !json.contains("dedupe_key") && !json.contains("uid"),
+            "{json}"
+        );
     }
 }

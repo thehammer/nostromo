@@ -685,7 +685,6 @@ fn persist_token(path: &Path, tok: &TokenState) -> Result<()> {
     crate::data::token_store::persist(path, tok)
 }
 
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Pass a successful response through; turn anything else into a typed

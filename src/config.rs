@@ -227,7 +227,10 @@ impl Config {
         };
         let mut warnings = Vec::new();
         let Some(entries) = raw.as_array() else {
-            warnings.push("fred_accounts must be an array of tables ([[fred_accounts]]); ignoring it".to_owned());
+            warnings.push(
+                "fred_accounts must be an array of tables ([[fred_accounts]]); ignoring it"
+                    .to_owned(),
+            );
             return (FredAccounts::Configured(Vec::new()), warnings);
         };
         let home = home_dir();
@@ -250,7 +253,10 @@ impl Config {
                     continue;
                 }
             };
-            if accounts.iter().any(|a| a.label.eq_ignore_ascii_case(&label)) {
+            if accounts
+                .iter()
+                .any(|a| a.label.eq_ignore_ascii_case(&label))
+            {
                 warnings.push(format!("fred_accounts[{i}]: duplicate label; skipped"));
                 continue;
             }
@@ -273,11 +279,19 @@ impl Config {
             let token_cache = match provider {
                 FredProvider::Google => match configured_cache.filter(|c| !c.trim().is_empty()) {
                     Some(c) => expand_tilde(c, &home),
-                    None => home.join(".cache").join("nostromo").join(format!("google-{label}-token.json")),
+                    None => home
+                        .join(".cache")
+                        .join("nostromo")
+                        .join(format!("google-{label}-token.json")),
                 },
                 FredProvider::Microsoft => {
-                    if accounts.iter().any(|a| a.provider == FredProvider::Microsoft) {
-                        warnings.push(format!("fred_accounts[{i}]: only one microsoft account is supported; skipped"));
+                    if accounts
+                        .iter()
+                        .any(|a| a.provider == FredProvider::Microsoft)
+                    {
+                        warnings.push(format!(
+                            "fred_accounts[{i}]: only one microsoft account is supported; skipped"
+                        ));
                         continue;
                     }
                     if email.is_some() || configured_cache.is_some() {
@@ -289,14 +303,23 @@ impl Config {
                     self.graph_token_cache_path()
                 }
             };
-            accounts.push(FredAccount { label, provider, email, token_cache });
+            accounts.push(FredAccount {
+                label,
+                provider,
+                email,
+                token_cache,
+            });
         }
         (FredAccounts::Configured(accounts), warnings)
     }
 
     /// Where the Google OAuth client JSON lives (`~` expanded).
     pub fn google_oauth_client_path(&self) -> PathBuf {
-        match self.google_oauth_client.as_ref().filter(|p| !p.as_os_str().is_empty()) {
+        match self
+            .google_oauth_client
+            .as_ref()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
             Some(p) => expand_tilde(&p.to_string_lossy(), &home_dir()),
             None => default_config_path()
                 .ok()
@@ -408,7 +431,9 @@ pub enum FredAccounts {
 /// `^[a-z0-9][a-z0-9_-]{0,31}$`. No `:` so a label can prefix item ids.
 fn valid_account_label(label: &str) -> bool {
     let mut chars = label.chars();
-    let first_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     first_ok
         && label.len() <= 32
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
@@ -606,11 +631,15 @@ mod fred_accounts_tests {
         );
         let (a, w) = cfg.resolve_fred_accounts();
         assert!(w.is_empty(), "{w:?}");
-        let FredAccounts::Configured(list) = a else { panic!("expected configured") };
+        let FredAccounts::Configured(list) = a else {
+            panic!("expected configured")
+        };
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].label, "personal");
         assert_eq!(list[0].email.as_deref(), Some("me@gmail.com"));
-        assert!(list[0].token_cache.ends_with(".cache/nostromo/google-personal-token.json"));
+        assert!(list[0]
+            .token_cache
+            .ends_with(".cache/nostromo/google-personal-token.json"));
         assert!(list[1].token_cache.ends_with("google-family-token.json"));
     }
 
@@ -625,11 +654,15 @@ mod fred_accounts_tests {
              [[fred_accounts]]\nlabel = \"work2\"\nprovider = \"microsoft\"\n",
         );
         let (a, w) = cfg.resolve_fred_accounts();
-        let FredAccounts::Configured(list) = a else { panic!("expected configured") };
+        let FredAccounts::Configured(list) = a else {
+            panic!("expected configured")
+        };
         let labels: Vec<&str> = list.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels, ["ok", "work"]);
         assert_eq!(w.len(), 4, "{w:?}");
-        assert!(w.iter().all(|m| !m.contains("Bad:Label") && !m.contains("yahoo")));
+        assert!(w
+            .iter()
+            .all(|m| !m.contains("Bad:Label") && !m.contains("yahoo")));
         assert!(w[0].contains("fred_accounts[0]"));
     }
 
@@ -644,15 +677,21 @@ mod fred_accounts_tests {
     fn tilde_expands_in_token_cache() {
         let cfg = parse("[[fred_accounts]]\nlabel = \"a\"\nprovider = \"google\"\ntoken_cache = \"~/tok.json\"\n");
         let (a, _) = cfg.resolve_fred_accounts();
-        let FredAccounts::Configured(list) = a else { panic!() };
+        let FredAccounts::Configured(list) = a else {
+            panic!()
+        };
         assert_eq!(list[0].token_cache, home_dir().join("tok.json"));
     }
 
     #[test]
     fn microsoft_entry_ignores_email_and_token_cache_with_a_warning() {
-        let cfg = parse("[[fred_accounts]]\nlabel = \"w\"\nprovider = \"microsoft\"\nemail = \"a@b.c\"\n");
+        let cfg = parse(
+            "[[fred_accounts]]\nlabel = \"w\"\nprovider = \"microsoft\"\nemail = \"a@b.c\"\n",
+        );
         let (a, w) = cfg.resolve_fred_accounts();
-        let FredAccounts::Configured(list) = a else { panic!() };
+        let FredAccounts::Configured(list) = a else {
+            panic!()
+        };
         assert_eq!(list[0].email, None);
         assert_eq!(list[0].token_cache, cfg.graph_token_cache_path());
         assert_eq!(w.len(), 1);
@@ -675,7 +714,9 @@ mod fred_accounts_tests {
 
     #[test]
     fn oauth_client_path_defaults_next_to_the_config_and_expands_tilde() {
-        assert!(parse("").google_oauth_client_path().ends_with("google-oauth-client.json"));
+        assert!(parse("")
+            .google_oauth_client_path()
+            .ends_with("google-oauth-client.json"));
         let cfg = parse("google_oauth_client = \"~/c.json\"\n");
         assert_eq!(cfg.google_oauth_client_path(), home_dir().join("c.json"));
     }
