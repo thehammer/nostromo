@@ -1771,6 +1771,13 @@ pub enum ServerMsg {
         /// read as "every agent enabled"; `PROTOCOL_VERSION` does not change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled_agents: Option<Vec<String>>,
+        /// The switchable agents this daemon has turned off (an empty list: none).
+        /// Lets a client that knows an agent this daemon predates tell "off" from
+        /// "not offered": it hides only what is named here. Additive: absent from
+        /// an older daemon, and ignored by a client that predates it;
+        /// `PROTOCOL_VERSION` does not change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disabled_agents: Option<Vec<String>>,
     },
     Activity(ActivityEvent),
     MotherJobs {
@@ -3643,7 +3650,7 @@ mod tests {
 
     #[test]
     fn welcome_carries_the_operator_nonce_only_when_present() {
-        let plain = ServerMsg::Welcome { protocol_version: PROTOCOL_VERSION, daemon_pid: 1, features: vec![], operator_nonce: None, enabled_agents: None };
+        let plain = ServerMsg::Welcome { protocol_version: PROTOCOL_VERSION, daemon_pid: 1, features: vec![], operator_nonce: None, enabled_agents: None, disabled_agents: None };
         let v = serde_json::to_value(&plain).unwrap();
         assert!(!v.as_object().unwrap().contains_key("operator_nonce"), "{v}");
 
@@ -3653,6 +3660,7 @@ mod tests {
             features: vec![],
             operator_nonce: Some("cd34".into()),
             enabled_agents: None,
+            disabled_agents: None,
         };
         round_trip_server(operator.clone());
         assert_eq!(serde_json::to_value(operator).unwrap()["operator_nonce"], "cd34");
@@ -5629,6 +5637,7 @@ mod work_wire_tests {
                 features: vec!["work".into(), "approvals_v1".into()],
                 operator_nonce: Some("cd34".into()),
                 enabled_agents: None,
+                disabled_agents: None,
             },
             r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"features":["work","approvals_v1"],"operator_nonce":"cd34"}"#,
         );
@@ -5643,9 +5652,47 @@ mod work_wire_tests {
                 features: vec![],
                 operator_nonce: None,
                 enabled_agents: Some(vec!["mother".into(), "teri".into()]),
+                disabled_agents: Some(vec!["fred".into(), "perri".into()]),
             },
-            r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"enabled_agents":["mother","teri"]}"#,
+            r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"enabled_agents":["mother","teri"],"disabled_agents":["fred","perri"]}"#,
         );
+    }
+
+    #[test]
+    fn welcome_with_nothing_disabled_says_so_with_an_empty_list() {
+        assert_server_golden(
+            ServerMsg::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_pid: 9,
+                features: vec![],
+                operator_nonce: None,
+                enabled_agents: None,
+                disabled_agents: Some(vec![]),
+            },
+            r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"disabled_agents":[]}"#,
+        );
+    }
+
+    #[test]
+    fn welcome_without_disabled_agents_decodes_as_none_and_an_unknown_field_is_ignored() {
+        let msg: ServerMsg =
+            serde_json::from_str(r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"enabled_agents":["mother"]}"#)
+                .unwrap();
+        match msg {
+            ServerMsg::Welcome { disabled_agents, enabled_agents, .. } => {
+                assert_eq!(disabled_agents, None, "an older daemon says nothing about what is off");
+                assert_eq!(enabled_agents, Some(vec!["mother".to_string()]));
+            }
+            other => panic!("{other:?}"),
+        }
+        let msg: ServerMsg = serde_json::from_str(
+            r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"disabled_agents":["fred"],"someday":1}"#,
+        )
+        .unwrap();
+        match msg {
+            ServerMsg::Welcome { disabled_agents, .. } => assert_eq!(disabled_agents, Some(vec!["fred".to_string()])),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -96,6 +96,7 @@ async fn codec_server_msg_welcome_round_trip() {
         features: vec![],
         operator_nonce: None,
         enabled_agents: None,
+        disabled_agents: None,
     };
     let bytes = serde_json::to_vec(&msg).unwrap();
     let (mut reader, mut writer) = tokio::io::duplex(256);

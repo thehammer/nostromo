@@ -442,6 +442,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         ],
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
+        disabled_agents: Some(mgr.enabled_agents().disabled_names()),
     }
 }
 
@@ -2494,18 +2495,18 @@ mod tests {
     fn welcome_reports_only_the_enabled_agents() {
         let mut mgr = SessionManager::new();
         match welcome_msg(&mgr, None) {
-            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
-                enabled_agents,
-                Some(vec!["fred".into(), "mother".into(), "perri".into(), "teri".into()])
-            ),
+            ServerMsg::Welcome { enabled_agents, disabled_agents, .. } => {
+                assert_eq!(enabled_agents, Some(vec!["fred".into(), "mother".into(), "perri".into(), "teri".into()]));
+                assert_eq!(disabled_agents, Some(vec![]), "nothing is off");
+            }
             other => panic!("{other:?}"),
         }
         mgr.configure_enabled_agents(crate::agents::EnabledAgents { fred: false, perri: true, teri: true });
         match welcome_msg(&mgr, None) {
-            ServerMsg::Welcome { enabled_agents, .. } => assert_eq!(
-                enabled_agents,
-                Some(vec!["mother".into(), "perri".into(), "teri".into()])
-            ),
+            ServerMsg::Welcome { enabled_agents, disabled_agents, .. } => {
+                assert_eq!(enabled_agents, Some(vec!["mother".into(), "perri".into(), "teri".into()]));
+                assert_eq!(disabled_agents, Some(vec!["fred".to_string()]));
+            }
             other => panic!("{other:?}"),
         }
     }

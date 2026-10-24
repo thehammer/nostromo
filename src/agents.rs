@@ -82,6 +82,19 @@ impl EnabledAgents {
         names
     }
 
+    /// Sorted lowercase names of the switchable built-ins that are off (`mother`
+    /// never is). The complement of [`Self::wire_names`] over the switchable agents:
+    /// a client that knows an agent this daemon does not still learns what is off.
+    pub fn disabled_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Agent::ALL
+            .into_iter()
+            .filter(|a| !self.is_enabled(*a))
+            .map(|a| a.name().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
     fn set(&mut self, a: Agent, on: bool) {
         match a {
             Agent::Fred => self.fred = on,
@@ -455,6 +468,14 @@ mod tests {
         let e = EnabledAgents { fred: false, perri: true, teri: false };
         assert_eq!(e.wire_names(), vec!["mother", "perri"]);
         assert_eq!(EnabledAgents::all().wire_names(), vec!["fred", "mother", "perri", "teri"]);
+    }
+
+    #[test]
+    fn disabled_names_lists_exactly_the_switchable_agents_that_are_off() {
+        assert!(EnabledAgents::all().disabled_names().is_empty());
+        let e = EnabledAgents { fred: false, perri: true, teri: false };
+        assert_eq!(e.disabled_names(), vec!["fred", "teri"]);
+        assert!(!e.disabled_names().contains(&"mother".to_string()));
     }
 
     #[test]
