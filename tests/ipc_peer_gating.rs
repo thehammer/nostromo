@@ -5459,9 +5459,14 @@ mod background_tasks {
 
     impl<S: AsyncRead + AsyncWrite + Unpin> Tap<S> {
         /// Hello, Welcome, Subscribe to everything (empty topic list), Ping, Pong.
+        /// Claims to be the Mac app, as the real app does (the verifier still decides).
         async fn new(stream: S) -> Self {
+            Self::with_kind(stream, Some(MAC_APP_CLIENT_KIND.into())).await
+        }
+
+        async fn with_kind(stream: S, client_kind: Option<String>) -> Self {
             let mut tap = Tap { stream, raw: Vec::new(), frames: Vec::new(), parsed: 0 };
-            tap.send(&ClientMsg::Hello { client_id: "tasks-it".into(), protocol_version: PROTOCOL_VERSION, client_kind: None }).await;
+            tap.send(&ClientMsg::Hello { client_id: "tasks-it".into(), protocol_version: PROTOCOL_VERSION, client_kind }).await;
             tap.wait_until("the welcome", |f| count_type(f, "welcome") > 0).await;
             tap.send(&ClientMsg::Subscribe { topics: vec![], renders_decisions: false, renders_approvals: false }).await;
             tap.sync().await;
@@ -6432,6 +6437,52 @@ mod background_tasks {
             let text = line.to_string();
             assert!(!text.contains("bgsh1") && !text.contains("shell"), "the refusal line names no task: {text}");
             assert!(line["description"].is_null() && line["task_kind"].is_null(), "{line}");
+        }
+
+        /// A non-operator local peer's task verbs: refused with `not_operator_app`, no CLI request, no file open.
+        async fn assert_non_operator_task_verbs_refused(verifier: Arc<dyn nostromo::ipc::peer_verify::PeerVerifier>, name: &str) {
+            let h = spawn_server_with_verifier(verifier).await;
+            let (io, _driver) = unattended_task(&h, name, "bgsh1").await;
+            let path = io.write_output("bgsh1", b"SECRET-OUTPUT-1");
+            let _ = path;
+            let opens_before = io.opens.load(std::sync::atomic::Ordering::SeqCst);
+            // A plain client: it does not even claim to be the app.
+            let mut peer = Tap::with_kind(UnixStream::connect(&h.socket_path).await.expect("unix connect"), None).await;
+
+            peer.send(&ClientMsg::SessionTaskStop { request_id: "s-1".into(), tag: io.tag.clone(), task_id: "bgsh1".into() }).await;
+            let stop = expect_result(&mut peer, "session_task_stop_result", "s-1").await;
+            peer.send(&ClientMsg::SessionTaskOutput {
+                request_id: "o-1".into(),
+                tag: io.tag.clone(),
+                task_id: "bgsh1".into(),
+                offset: None,
+                max_bytes: 100,
+            })
+            .await;
+            let out = expect_result(&mut peer, "session_task_output_result", "o-1").await;
+            peer.sync().await;
+
+            assert_eq!(stop["outcome"], "refused", "{stop}");
+            assert!(stop["message"].as_str().is_some_and(|m| m.starts_with("not_operator_app")), "{stop}");
+            assert_eq!(out["outcome"], "refused", "{out}");
+            assert!(out["message"].as_str().is_some_and(|m| m.starts_with("not_operator_app")), "{out}");
+            assert_eq!(out["text"], "", "no content in a refusal: {out}");
+            assert!(!out.to_string().contains("SECRET-OUTPUT"), "{out}");
+            assert_eq!(io.stops_of("bgsh1").len(), 0, "the CLI was asked to stop a task: {:?}", io.requests("stop_task"));
+            assert_eq!(io.probes(), 1, "only the daemon's own capability probe reached the CLI");
+            assert_eq!(io.requests("get_task_output").len(), 0, "the CLI was asked for output");
+            assert_eq!(io.opens.load(std::sync::atomic::Ordering::SeqCst), opens_before, "an output file was opened");
+            assert!(audit_lines(&io.tag).is_empty(), "a refusal changes nothing, including the stop ledger");
+        }
+
+        #[tokio::test]
+        async fn a_local_non_app_peer_s_stop_and_output_are_refused_with_no_side_effects() {
+            assert_non_operator_task_verbs_refused(Arc::new(FakePeerVerifier::always_script()), "script-verbs").await;
+        }
+
+        #[tokio::test]
+        async fn an_unidentified_local_peer_s_stop_and_output_are_refused_with_no_side_effects() {
+            assert_non_operator_task_verbs_refused(Arc::new(FakePeerVerifier::scripted(Vec::new(), None)), "anon-verbs").await;
         }
 
         #[tokio::test]

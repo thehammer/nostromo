@@ -200,3 +200,18 @@ No transcript-side grouping/collapsing of tool calls, no panes/tabs/content
 kinds for activity, no agent-callable control over the stream (no tool to
 write, tag, filter, or suppress it), and no persistence across a daemon
 restart. See the wedge plan for the full deferred-Phase-2 list.
+
+## Background-task Stop and Output (audit lines and who may ask)
+
+The daemon's `SessionTaskStop` and `SessionTaskOutput` verbs write
+`task_stop` / `task_output` lines to this file. Both verbs require the
+**verified Nostromo app** (`PeerTrust::OperatorApp`), the same gate as
+`DecisionAnswer`. An agent's own script on the socket (any other local peer,
+an unidentifiable one, or a network peer) gets a typed `refused` result whose
+message is `not_operator_app: only the verified Nostromo app may answer`, with
+no task text. The refusal happens before the registry, any file or the CLI is
+touched, so nothing is stopped or read. Network peers are still refused first,
+with the rate-limited content-free audit line. The file is created mode 0600
+(a line can hold up to 200 characters of a command or prompt), and the CLI's
+refusal text in a line's `reason` is stripped of control characters and cut to
+120 characters.

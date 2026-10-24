@@ -1749,7 +1749,37 @@ fn handle_client_msg(
             let _ = targeted_tx.send(model_request_result(request_id, outcome));
         }
 
-        // ── background tasks (local peers only; refused above) ─────────────
+        // ── background tasks (the verified app only; network refused above) ─
+        // An agent's own script on this socket must not stop another focus's
+        // task or read its output. Refused before the registry, a file or the
+        // CLI is touched; the reply carries no task content.
+        ClientMsg::SessionTaskStop { request_id, tag, task_id } if trust != PeerTrust::OperatorApp => {
+            warn!(conn_key, ?trust, "SessionTaskStop refused: not the verified Nostromo app");
+            let _ = targeted_tx.send(ServerMsg::SessionTaskStopResult {
+                request_id,
+                tag,
+                task_id,
+                outcome: crate::ipc::protocol::TaskStopOutcome::Refused,
+                message: Some(NOT_OPERATOR_APP.to_string()),
+            });
+        }
+
+        ClientMsg::SessionTaskOutput { request_id, tag, task_id, .. } if trust != PeerTrust::OperatorApp => {
+            warn!(conn_key, ?trust, "SessionTaskOutput refused: not the verified Nostromo app");
+            let _ = targeted_tx.send(ServerMsg::SessionTaskOutputResult {
+                request_id,
+                tag,
+                task_id,
+                outcome: crate::ipc::protocol::TaskOutputOutcome::Refused,
+                text: String::new(),
+                start_offset: 0,
+                end_offset: 0,
+                total_bytes: 0,
+                source: None,
+                message: Some(NOT_OPERATOR_APP.to_string()),
+            });
+        }
+
         ClientMsg::SessionTaskStop { request_id, tag, task_id } => {
             let stop = session_mgr.lock().unwrap().task_stop(&tag, &task_id);
             let audit_tag = audit_focus_tag(&tag, sensitive);
@@ -1810,7 +1840,7 @@ fn log_task_stop(report: &crate::ipc::session_manager::StopReport, focus_tag: St
     use crate::model::activity::{activity_path, append_task, Outcome, TaskActivity, TaskActivityKind};
     let (outcome, reason) = match report.outcome {
         Stop::Accepted => (Outcome::Applied, None),
-        Stop::Refused => (Outcome::Refused, report.message.clone()),
+        Stop::Refused => (Outcome::Refused, report.message.as_deref().map(bounded_reason)),
         Stop::NotRunning => (Outcome::Refused, Some("not_running".to_owned())),
         Stop::Timeout => (Outcome::Failed, Some("timeout".to_owned())),
         Stop::Unsupported => (Outcome::Failed, Some("unsupported".to_owned())),
@@ -1838,6 +1868,13 @@ fn log_task_stop(report: &crate::ipc::session_manager::StopReport, focus_tag: St
             reason,
         },
     );
+}
+
+/// The CLI's refusal text as an audit `reason`: control characters stripped,
+/// at most 120 characters.
+fn bounded_reason(text: &str) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    crate::ipc::task_output::truncate_chars(&clean, 120)
 }
 
 fn outcome_word(outcome: crate::model::activity::Outcome) -> &'static str {
@@ -2469,6 +2506,15 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_refusal_reason_is_short_and_free_of_control_characters() {
+        let long = format!("nope\n\x1b[31m{}", "x".repeat(500));
+        let reason = bounded_reason(&long);
+        assert!(reason.chars().count() <= 120, "{}", reason.chars().count());
+        assert!(!reason.chars().any(|c| c.is_control()), "{reason:?}");
+        assert!(reason.starts_with("nope"));
     }
 
     use super::*;

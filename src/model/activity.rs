@@ -135,9 +135,12 @@ fn append_line<T: Serialize>(path: &Path, activity: &T) {
         }
         let mut text = serde_json::to_string(&line)?;
         text.push('\n');
+        // 0600: a line can hold up to 200 characters of a command or prompt.
+        use std::os::unix::fs::OpenOptionsExt;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(path)?;
         f.write_all(text.as_bytes())?;
         Ok(())
@@ -173,6 +176,18 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not a JSON line ({e}): {l}")))
             .collect()
+    }
+
+    #[test]
+    fn the_audit_file_is_created_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("activity.jsonl");
+
+        append_task(&log, &stop_line(Outcome::Applied, None));
+
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
