@@ -353,6 +353,7 @@ final class BackgroundChipTests: XCTestCase {
         let measured = NSAttributedString(string: text, attributes: [.font: BackgroundChip.font]).size().width
             + 2 * BackgroundChip.horizontalPadding
         print("BA3 slotWidth: \(BackgroundChip.slotWidth)")
+        XCTContext.runActivity(named: "BA3 slotWidth: \(BackgroundChip.slotWidth)") { _ in }
 
         XCTAssertGreaterThanOrEqual(BackgroundChip.slotWidth, measured - 0.001,
                                     "slot \(BackgroundChip.slotWidth) vs measured `\(text)` + padding \(measured)")
