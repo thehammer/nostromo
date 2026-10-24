@@ -49,23 +49,18 @@ impl SourceView {
 ///
 /// A browser (Google) prompt's URL carries `state`, `login_hint` (the email),
 /// `client_id` and the PKCE challenge, so the agent gets `kind` and `account`
-/// instead. Device-code prompts keep the URL and code.
+/// instead. Device-code prompts are unchanged: URL, code and expiry only.
 fn auth_json(p: &DeviceFlowPrompt) -> Value {
-    let mut out = if p.kind == "browser" {
-        json!({ "expires_at": p.expires_at })
-    } else {
-        json!({
+    if p.kind != "browser" {
+        return json!({
             "verification_uri": p.verification_uri,
             "user_code": p.user_code,
             "expires_at": p.expires_at,
-        })
-    };
-    out["kind"] = json!(p.kind);
+        });
+    }
+    let mut out = json!({ "kind": p.kind, "expires_at": p.expires_at });
     if let Some(a) = &p.account {
         out["account"] = json!(a);
-    }
-    if let Some(a) = &p.provider {
-        out["provider"] = json!(a);
     }
     out
 }

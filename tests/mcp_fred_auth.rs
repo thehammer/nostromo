@@ -217,22 +217,27 @@ fn a_device_code_sign_in_still_reports_its_url_and_code() {
         );
         assert_eq!(auth["user_code"], "ABCD-1234", "{tool}: {auth}");
         assert!(auth.get("expires_at").is_some(), "{tool}: {auth}");
-        assert_eq!(auth["kind"], "device_code", "{tool}: {auth}");
         assert!(
-            auth.get("account").is_none(),
-            "{tool}: a legacy prompt names no account: {auth}"
+            auth.get("kind").is_none() && auth.get("account").is_none(),
+            "{tool}: a device-code prompt keeps its original three keys: {auth}"
         );
     }
 }
 
 #[test]
-fn a_device_code_sign_in_for_a_named_account_adds_the_account_and_keeps_url_and_code() {
+fn a_device_code_sign_in_for_a_named_account_keeps_the_original_three_keys() {
     let (mailbox, calendar) = signed_out(device_prompt(Some("work")));
     let state = state_with(mailbox, calendar);
 
     for (tool, out) in all_tool_outputs(&state) {
         let auth = &out["auth"];
-        assert_eq!(auth["account"], "work", "{tool}: {auth}");
+        let mut keys: Vec<&String> = auth.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["expires_at", "user_code", "verification_uri"],
+            "{tool}: {auth}"
+        );
         assert_eq!(
             auth["verification_uri"], "https://microsoft.com/devicelogin",
             "{tool}"
