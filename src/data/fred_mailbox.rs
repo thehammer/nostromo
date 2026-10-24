@@ -37,7 +37,8 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MailboxItem {
-    /// Graph message id (stable across polls). Empty for the legacy bash source.
+    /// Provider message id (stable across polls); `<label>:<native id>` in
+    /// multi-account mode. Empty for the legacy bash source.
     #[serde(default)]
     pub id: String,
     pub from: String,
@@ -46,9 +47,29 @@ pub struct MailboxItem {
     pub vip: bool,
     pub is_invite: bool,
     pub is_read: bool,
-    /// Link that opens the message in Outlook on the web.
+    /// Opens the message in the provider's web client.
     #[serde(default)]
     pub web_link: Option<String>,
+    /// Configured account label (multi-account mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// Health of one configured account, carried by merged snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct AccountStatus {
+    /// Configured label.
+    pub account: String,
+    /// "google" | "microsoft".
+    pub provider: String,
+    pub state: SourceState,
+    /// Plain-English, safe for UI.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub retry_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -75,6 +96,9 @@ pub struct MailboxSnapshot {
     /// Graph again.
     #[serde(default)]
     pub retry_at: Option<DateTime<Utc>>,
+    /// Per-account health (multi-account mode only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<AccountStatus>,
 }
 
 impl MailboxSnapshot {
@@ -120,10 +144,15 @@ impl MailboxSnapshot {
     /// The snapshot to publish while the user must sign in: no data, the
     /// device-flow prompt, and a plain-English reason. Carries no token.
     pub fn unauthenticated(prompt: DeviceFlowPrompt) -> MailboxSnapshot {
+        Self::unauthenticated_with(prompt, "Sign in to Microsoft 365 to see your mail".to_owned())
+    }
+
+    /// [`unauthenticated`](Self::unauthenticated) with a provider-specific reason.
+    pub fn unauthenticated_with(prompt: DeviceFlowPrompt, reason: String) -> MailboxSnapshot {
         MailboxSnapshot {
             generated_at: Some(Utc::now()),
             state: SourceState::Unauthenticated,
-            error: Some("Sign in to Microsoft 365 to see your mail".to_owned()),
+            error: Some(reason),
             auth_prompt: Some(prompt),
             ..Default::default()
         }
@@ -227,5 +256,31 @@ impl FredMailboxSource {
         let snap: MailboxSnapshot = serde_json::from_slice(&output.stdout)
             .with_context(|| "parsing fred-mailbox-pane --json output")?;
         Ok(snap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_snapshot_serialises_without_account_keys() {
+        let snap = MailboxSnapshot {
+            items: vec![MailboxItem { id: "m1".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("\"account\""), "{json}");
+        assert!(!json.contains("\"accounts\""), "{json}");
+    }
+
+    #[test]
+    fn prompt_without_kind_decodes_as_device_code() {
+        let p: DeviceFlowPrompt = serde_json::from_str(
+            r#"{"verification_uri":"https://x","user_code":"A","expires_at":"2026-10-10T16:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.kind, "device_code");
+        assert!(p.account.is_none() && p.provider.is_none());
     }
 }

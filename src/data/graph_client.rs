@@ -16,7 +16,6 @@
 //! `@odata.deltaLink` returned by Graph to a per-query file.  On the first
 //! call (or if the file is missing) it uses the supplied `initial_path`.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -40,6 +39,19 @@ pub struct DeviceFlowPrompt {
     pub verification_uri: String,
     pub user_code: String,
     pub expires_at: DateTime<Utc>,
+    /// "device_code" (Microsoft: show URL + code) or "browser" (Google loopback: open the URL, no code).
+    #[serde(default = "device_code_kind")]
+    pub kind: String,
+    /// Configured account label, set in multi-account mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// "microsoft" | "google".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+fn device_code_kind() -> String {
+    "device_code".to_owned()
 }
 
 /// Where the client talks to and how it signs in. `Default` is production;
@@ -99,73 +111,9 @@ impl std::fmt::Display for GraphHttpError {
 
 impl std::error::Error for GraphHttpError {}
 
-/// Longest we will ever stay quiet because of a `Retry-After` (contract §9
-/// caps backoff at 15 minutes).
-pub const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-
-/// Parse an HTTP `Retry-After` value: whole seconds or an HTTP-date, measured
-/// from `now`, capped at [`MAX_RETRY_AFTER`]. A date in the past is zero.
-/// `None` when the value is neither.
-pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<std::time::Duration> {
-    let value = value.trim();
-    let wait = if let Ok(secs) = value.parse::<u64>() {
-        std::time::Duration::from_secs(secs)
-    } else {
-        let when = DateTime::parse_from_rfc2822(value)
-            .ok()?
-            .with_timezone(&Utc);
-        (when - now).to_std().unwrap_or(std::time::Duration::ZERO)
-    };
-    Some(wait.min(MAX_RETRY_AFTER))
-}
-
-/// `Some(retry_after)` when `e` is Graph throttling us (429, or 503 with a
-/// `Retry-After`); `None` for any other failure.
-pub fn throttle_of(e: &anyhow::Error) -> Option<Option<std::time::Duration>> {
-    let http = e.downcast_ref::<GraphHttpError>()?;
-    http.is_throttle().then_some(http.retry_after)
-}
-
-/// Consecutive-throttle counter for one polling loop. Success resets it.
-/// The wait after a throttle is the server's `Retry-After` when there is one,
-/// otherwise exponential backoff: 2 s, 4 s, 8 s … capped at 15 min, plus up
-/// to 25 % jitter.
-#[derive(Debug, Default)]
-pub struct ThrottleBackoff {
-    consecutive: u32,
-}
-
-const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
-
-impl ThrottleBackoff {
-    /// A fetch succeeded: the next throttle starts again at the first step.
-    pub fn succeeded(&mut self) {
-        self.consecutive = 0;
-    }
-
-    /// `e` is how a fetch failed. When it is a throttle, how long to stay
-    /// quiet; otherwise `None` (and the backoff is left alone).
-    pub fn throttled(&mut self, e: &anyhow::Error) -> Option<std::time::Duration> {
-        let retry_after = throttle_of(e)?;
-        let step = BACKOFF_BASE
-            .saturating_mul(1u32.checked_shl(self.consecutive).unwrap_or(u32::MAX))
-            .min(MAX_RETRY_AFTER);
-        self.consecutive = self.consecutive.saturating_add(1);
-        Some(match retry_after {
-            Some(wait) => wait,
-            None => (step + step.mul_f64(jitter() * 0.25)).min(MAX_RETRY_AFTER),
-        })
-    }
-}
-
-/// A cheap value in `[0, 1)`; spreads out retries, not security sensitive.
-fn jitter() -> f64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    f64::from(nanos % 1000) / 1000.0
-}
+pub use crate::data::http_backoff::{
+    parse_retry_after, throttle_of, ThrottleBackoff, MAX_RETRY_AFTER,
+};
 
 /// A short plain-English reason for a failed Graph fetch, safe to show in the
 /// UI and MCP results: no URLs, response bodies or tokens.
@@ -578,6 +526,9 @@ impl GraphClient {
             verification_uri: dc.verification_uri.clone(),
             user_code: dc.user_code.clone(),
             expires_at,
+            kind: device_code_kind(),
+            account: None,
+            provider: None,
         };
 
         *self.pending_prompt.lock().await = Some(prompt.clone());
@@ -727,35 +678,13 @@ fn jwt_expiry(token: &str) -> Option<DateTime<Utc>> {
 // ── Token persistence ─────────────────────────────────────────────────────────
 
 fn load_cached_token(path: &Path) -> Option<TokenState> {
-    let data = std::fs::read_to_string(path).ok()?;
-    let tok: TokenState = serde_json::from_str(&data)
-        .map_err(|e| warn!("ignoring malformed token cache: {e}"))
-        .ok()?;
-    Some(tok)
+    crate::data::token_store::load(path)
 }
 
 fn persist_token(path: &Path, tok: &TokenState) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating token cache dir {}", parent.display()))?;
-        // Set directory permissions to 0700.
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("setting permissions on {}", parent.display()))?;
-    }
-
-    let data = serde_json::to_string_pretty(tok).context("serialising token")?;
-
-    // Write to a temp file then rename for atomicity.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &data).with_context(|| format!("writing token to {}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("setting permissions on {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming token file to {}", path.display()))?;
-
-    debug!("graph token cached at {}", path.display());
-    Ok(())
+    crate::data::token_store::persist(path, tok)
 }
+
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

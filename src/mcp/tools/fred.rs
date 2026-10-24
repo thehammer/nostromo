@@ -73,16 +73,8 @@ fn calendar_view(snap: Option<&CalendarSnapshot>) -> SourceView {
     }
 }
 
-/// How bad a state is, for picking the composite `fred.get_state` state.
 fn severity(state: SourceState) -> u8 {
-    match state {
-        SourceState::Unauthenticated => 5,
-        SourceState::NotConfigured => 4,
-        SourceState::Error => 3,
-        SourceState::RateLimited | SourceState::Stale => 2,
-        SourceState::Loading => 1,
-        SourceState::Fresh | SourceState::Empty => 0,
-    }
+    state.severity()
 }
 
 /// The overall state of Fred: the worse of the two sources. When both are

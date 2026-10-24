@@ -119,15 +119,15 @@ pub struct FredMailboxNativeSource {
 
 /// The Inbox unread count and when it was last read from Graph.
 #[derive(Default)]
-struct UnreadCount {
-    value: Option<usize>,
-    fetched_at: Option<Instant>,
+pub(crate) struct UnreadCount {
+    pub(crate) value: Option<usize>,
+    pub(crate) fetched_at: Option<Instant>,
     /// Read state changed since the last successful fetch.
-    dirty: bool,
+    pub(crate) dirty: bool,
 }
 
 impl UnreadCount {
-    fn needs_fetch(&self, ttl: Duration) -> bool {
+    pub(crate) fn needs_fetch(&self, ttl: Duration) -> bool {
         self.dirty || self.value.is_none() || self.fetched_at.is_none_or(|t| t.elapsed() >= ttl)
     }
 }
@@ -170,17 +170,26 @@ impl FredMailboxNativeSource {
         config: Config,
         timing: FredTiming,
     ) -> watch::Receiver<Option<MailboxSnapshot>> {
-        let (tx, rx) = watch::channel(None);
-        let (dirty_tx, mut dirty_rx) = mpsc::unbounded_channel::<()>();
-
+        let (dirty_tx, dirty_rx) = mpsc::unbounded_channel::<()>();
         let dirty_path = config.fred_state_dir().join("mailbox.dirty");
         dirty_file::spawn_watcher(dirty_path, dirty_tx);
+        Self::spawn_with_dirty(graph, config, timing, dirty_rx)
+    }
 
+    /// Like [`spawn_with`](Self::spawn_with) but wakes on a caller-owned dirty
+    /// channel. Merged mode needs this: the sentinel watcher deletes the file,
+    /// so two watchers on one path would race.
+    pub fn spawn_with_dirty(
+        graph: GraphClient,
+        config: Config,
+        timing: FredTiming,
+        mut dirty_rx: mpsc::UnboundedReceiver<()>,
+    ) -> watch::Receiver<Option<MailboxSnapshot>> {
+        let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
             let source = FredMailboxNativeSource { config, timing };
             source.run(graph, tx, &mut dirty_rx).await;
         });
-
         rx
     }
 
@@ -451,6 +460,7 @@ fn build_snapshot(
                 vip,
                 is_invite,
                 is_read,
+                account: None,
             }
         })
         .collect();
@@ -480,6 +490,7 @@ fn build_snapshot(
         state,
         updated_at: Some(now),
         retry_at: None,
+        accounts: Vec::new(),
     }
 }
 
