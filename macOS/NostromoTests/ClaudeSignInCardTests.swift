@@ -2,7 +2,6 @@ import XCTest
 import AppKit
 import Combine
 import NostromoKit
-@testable import Nostromo
 
 // CL2 (criteria B1-B7, D7/D8): the Mac sign-in card.
 //
