@@ -229,7 +229,8 @@ final class BackgroundTaskStoreTests: XCTestCase {
     func testFramesThatAreNotTaskFramesAreIgnored() throws {
         let rig = try makeRig()
         let recorder = rig.record()
-        rig.send(ServerMsg.decode(from: Data(#"{"type":"a_frame_from_the_future","tag":"kate"}"#.utf8)))
+        rig.send(.unknown)   // a frame from the future decodes to this
+        rig.send(.pong)
         XCTAssertTrue(recorder.deliveries.isEmpty)
         XCTAssertNil(rig.store.state(for: "kate"))
     }
@@ -395,13 +396,13 @@ final class BackgroundTaskStoreTests: XCTestCase {
 
     func testAClearContextAfterANewDaemonDropsTheRestartStoppedEntries() throws {
         let rig = try makeRig()
-        rig.send(snapshot(epoch: "e1", session: "s1", [running("b1")]))
+        rig.send(snapshot(session: "s1", epoch: "e1", [running("b1")]))
         rig.clock.advance(1)
         rig.store.daemonDisconnected()
-        rig.send(snapshot(epoch: "e2", session: "s1", [running("n1")]))
+        rig.send(snapshot(session: "s1", epoch: "e2", [running("n1")]))
         XCTAssertTrue(ids(rig.store.list(for: "kate").ended).contains("b1"))
 
-        rig.send(snapshot(epoch: "e2", session: "s2", []))   // Clear Context
+        rig.send(snapshot(session: "s2", epoch: "e2", []))   // Clear Context
 
         let list = rig.store.list(for: "kate")
         XCTAssertFalse(ids(list.allRows).contains("b1"), "the restart-stopped entry is gone")
@@ -426,14 +427,14 @@ final class BackgroundTaskStoreTests: XCTestCase {
         let first = rig.record()
         let second = rig.record()
 
-        rig.send(snapshot(epoch: "e1", session: "s1", [running("b1"), task("a1", .agent, subagentType: "redd",
+        rig.send(snapshot(session: "s1", epoch: "e1", [running("b1"), task("a1", .agent, subagentType: "redd",
                                                                               started: startMs - 30_000, tokens: 950)]))
         rig.send(detail("b1", preview: "ready on :3000"))
-        rig.send(snapshot(epoch: "e1", session: "s1", [ended("b1", .failed), running("a1")]))
+        rig.send(snapshot(session: "s1", epoch: "e1", [ended("b1", .failed), running("a1")]))
         rig.clock.advance(1)
         rig.store.daemonDisconnected()
-        rig.send(snapshot(epoch: "e2", session: "s1", []))
-        rig.send(snapshot(epoch: "e2", session: "s2", []))
+        rig.send(snapshot(session: "s1", epoch: "e2", []))
+        rig.send(snapshot(session: "s2", epoch: "e2", []))
 
         XCTAssertGreaterThanOrEqual(first.deliveries.count, 5)
         XCTAssertEqual(first.deliveries.count, second.deliveries.count)
