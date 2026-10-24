@@ -34,8 +34,8 @@
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use nostromo::ipc::claude_login::{
@@ -115,18 +115,35 @@ fn all_logs() -> Vec<String> {
 struct FakeWatch {
     stamp: Mutex<CredentialStamp>,
     calls: AtomicUsize,
-    /// Real time every look takes (a slow keychain probe); zero by default.
-    delay_ms: AtomicU64,
+    /// While closed, a look at the credential blocks (a wedged keychain probe); open by default.
+    gate: (Mutex<bool>, Condvar),
+    /// Looks currently blocked on the gate.
+    blocked: AtomicUsize,
 }
 
 impl FakeWatch {
     fn new(stamp: CredentialStamp) -> Self {
-        Self { stamp: Mutex::new(stamp), calls: AtomicUsize::new(0), delay_ms: AtomicU64::new(0) }
+        Self {
+            stamp: Mutex::new(stamp),
+            calls: AtomicUsize::new(0),
+            gate: (Mutex::new(true), Condvar::new()),
+            blocked: AtomicUsize::new(0),
+        }
     }
 
-    /// Make every look at the credential take `delay` of real time (`std::thread::sleep`).
-    fn set_delay(&self, delay: Duration) {
-        self.delay_ms.store(delay.as_millis() as u64, Ordering::SeqCst);
+    /// Make every look at the credential block until `open_looks`.
+    fn close_looks(&self) {
+        *self.gate.0.lock().unwrap() = false;
+    }
+
+    fn open_looks(&self) {
+        *self.gate.0.lock().unwrap() = true;
+        self.gate.1.notify_all();
+    }
+
+    /// How many looks are blocked right now.
+    fn blocked_looks(&self) -> usize {
+        self.blocked.load(Ordering::SeqCst)
     }
 
     fn set(&self, stamp: CredentialStamp) {
@@ -145,11 +162,13 @@ impl FakeWatch {
 impl CredentialWatch for FakeWatch {
     fn stamp(&self) -> CredentialStamp {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.blocked.fetch_add(1, Ordering::SeqCst);
+        // The bound only keeps a failed test from leaving this thread behind for good.
+        let open = self.gate.0.lock().unwrap();
+        drop(self.gate.1.wait_timeout_while(open, Duration::from_secs(60), |open| !*open).unwrap());
+        self.blocked.fetch_sub(1, Ordering::SeqCst);
+        // Read last: a look that was stuck reports the credential as it is when it returns.
         let stamp = self.stamp.lock().unwrap().clone();
-        let delay = self.delay_ms.load(Ordering::SeqCst);
-        if delay > 0 {
-            std::thread::sleep(Duration::from_millis(delay));
-        }
         stamp
     }
 }
@@ -1035,6 +1054,30 @@ fn a_restart_while_a_resent_message_waits_on_an_approval_cancels_it_and_keeps_th
     });
 }
 
+#[test]
+fn a_sign_in_that_beats_the_credential_probe_still_resends_the_held_message() {
+    run(|mut w| async move {
+        let tag = "cody-signin-race";
+        let fake = w.spawn(tag, false);
+        // The probe is stuck while the turn fails and the user signs in; when it returns it
+        // reports the credential as the sign-in left it (a modification time after the failure).
+        w.watch.close_looks();
+        w.set_login("expired");
+        w.say(tag, "HELD-RACE");
+        w.wait_hold(tag).await;
+        w.wait_idle(tag).await;
+        wait_until("the probe to be stuck", || (w.watch.blocked_looks() > 0).then_some(())).await;
+        w.set_login("ok");
+        w.watch.set_stamp("20990101000000Z");
+        w.watch.open_looks();
+
+        let texts = w.wait_user_texts(&fake, 2).await;
+        assert_eq!(texts, vec!["HELD-RACE"; 2], "the held message is resent after the late sign-in");
+        w.drive_until("the picture to clear", || (!w.pic().needs_login).then_some(())).await;
+        assert_eq!(w.settled_user_texts(&fake).await.len(), 2, "exactly once");
+    });
+}
+
 // ═════════════════════════════════════════════════════════════════════════════════
 // 7. discard
 // ═════════════════════════════════════════════════════════════════════════════════
@@ -1539,29 +1582,25 @@ fn stop_while_a_held_message_is_being_resent_stops_that_turn_as_it_always_did() 
 // 18. the credential probe never runs on a session's stdout reader
 // ═════════════════════════════════════════════════════════════════════════════════
 
-/// A look at the credential takes this long of real time in the slow-probe test.
-const SLOW_PROBE: Duration = Duration::from_secs(3);
-/// What a session may take to react, well under `SLOW_PROBE`.
-const REACTS_WITHIN: Duration = Duration::from_millis(1500);
-
 #[test]
-fn a_slow_credential_probe_does_not_delay_the_hold_the_idle_state_or_the_next_turns() {
+fn a_wedged_credential_probe_does_not_delay_the_hold_the_idle_state_or_the_next_turns() {
     run(|mut w| async move {
         let tag = "cody-slowprobe";
         let fake = w.spawn(tag, false);
-        w.watch.set_delay(SLOW_PROBE);
+        // Every look at the credential blocks until the test lets it go, so "does not wait for
+        // the probe" is shown by the events happening at all while a look is stuck, with no
+        // wall-clock bound to flake on a loaded runner.
+        w.watch.close_looks();
         w.set_login("expired");
 
         // The failure is held and the session goes idle without waiting for the probe.
-        let started = Instant::now();
         w.say(tag, "HELD-SLOWPROBE");
         let first = w.wait_hold(tag).await.hold_id.unwrap();
         w.wait_idle(tag).await;
-        assert!(started.elapsed() < REACTS_WITHIN, "the failure took {:?} to be held", started.elapsed());
         w.say(tag, "QUEUED-SLOWPROBE");
+        wait_until("a look to be stuck", || (w.watch.blocked_looks() > 0).then_some(())).await;
 
-        // A resend that fails again is held again just as fast.
-        let started = Instant::now();
+        // A resend that fails again is held again just as promptly.
         assert_eq!(w.resend(tag, &first, ResendTrigger::Manual), ResendOutcome::Resent);
         let second = wait_until("a new hold", || {
             w.pic()
@@ -1571,18 +1610,17 @@ fn a_slow_credential_probe_does_not_delay_the_hold_the_idle_state_or_the_next_tu
         })
         .await;
         w.wait_idle(tag).await;
-        assert!(started.elapsed() < REACTS_WITHIN, "the second failure took {:?} to be held", started.elapsed());
 
         // The session carries on: the queued message is written and its turn completes, with
-        // the probe still running somewhere else.
+        // the probe still stuck somewhere else.
         w.set_login("ok");
-        let started = Instant::now();
         assert!(w.discard(tag, Some(&second)));
         wait_until("the queued message to be written", || (fake.user_texts().len() >= 3).then_some(())).await;
         w.wait_idle(tag).await;
-        assert!(started.elapsed() < REACTS_WITHIN, "the next turn took {:?} to complete", started.elapsed());
+        assert!(w.watch.blocked_looks() > 0, "the probe was still stuck throughout");
         assert_eq!(fake.user_texts(), vec!["HELD-SLOWPROBE", "HELD-SLOWPROBE", "QUEUED-SLOWPROBE"]);
         assert!(w.pic().sessions.is_empty());
+        w.watch.open_looks();
     });
 }
 

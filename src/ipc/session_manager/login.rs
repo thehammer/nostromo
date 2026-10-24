@@ -98,6 +98,25 @@ pub(super) struct Hold {
     escalation_due: bool,
 }
 
+/// The baseline of a hold whose credential was already rewritten when it was
+/// first looked at: it sorts before every real stamp, so the next look sees a change.
+const BEFORE_ANY_STAMP: &str = "";
+
+/// The stamp a hold that failed at `failed_at` should treat as "the credential
+/// the turn failed under", given the first stamp `seen` for it. The stamp is the
+/// credential's own modification time (`20261018200418Z`, see `parse_mdat`), so
+/// when it is later than the failure the user signed in before the probe or the
+/// poller got to look: adopting that stamp would hide the sign-in forever, so the
+/// baseline is [`BEFORE_ANY_STAMP`] instead and the change is acted on. A stamp
+/// that is not a timestamp, or is not later (to the second), is adopted as is.
+fn baseline_for(seen: &str, failed_at: DateTime<Utc>) -> String {
+    let written = chrono::NaiveDateTime::parse_from_str(seen, "%Y%m%d%H%M%SZ").map(|t| t.and_utc());
+    match written {
+        Ok(written) if written.timestamp() > failed_at.timestamp() => BEFORE_ANY_STAMP.to_owned(),
+        _ => seen.to_owned(),
+    }
+}
+
 impl Hold {
     /// The credential at the failure is not known yet: it is looked at off the
     /// reader (`capture_stamp`), or adopted by the poller.
@@ -335,7 +354,7 @@ fn capture_stamp(link: &Arc<LoginLink>, hold_id: String) {
         if let CredentialStamp::Stamp(stamp) = coordinator.stamp_now() {
             let mut cell = lock_recover(&link.cell);
             if let Some(hold) = cell.hold.as_mut().filter(|h| h.id == hold_id && h.stamp_at_failure.is_none()) {
-                hold.stamp_at_failure = Some(stamp);
+                hold.stamp_at_failure = Some(baseline_for(&stamp, hold.failed_at));
             }
         }
     });
@@ -497,7 +516,8 @@ impl SessionManager {
             let mut cell = lock_recover(&session.shared.login.cell);
             let Some(hold) = cell.hold.as_mut() else { continue };
             let Some(base) = hold.stamp_at_failure.as_deref() else {
-                hold.stamp_at_failure = Some(current.to_owned());
+                hold.stamp_at_failure = Some(baseline_for(current, hold.failed_at));
+                // Seen again (as a change, if the sign-in beat this look) on the next one.
                 continue;
             };
             let changed = base != current;
