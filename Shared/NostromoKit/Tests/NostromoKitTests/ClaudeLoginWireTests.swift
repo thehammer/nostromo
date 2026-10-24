@@ -153,4 +153,28 @@ final class ClaudeLoginWireTests: XCTestCase {
         XCTAssertEqual(discard["action"] as? String, "discard")
         XCTAssertEqual(discard["hold_id"] as? String, "h")
     }
+
+    // MARK: - isClaudeLoginRefusal
+
+    /// The daemon's refusal of a `claude_login_action` (`NOT_OPERATOR_APP_LOGIN` in `src/ipc/server.rs`).
+    static let loginRefusal = "not_operator_app: only the verified Nostromo app may resend or discard a held message"
+
+    func testTheLoginActionRefusalIsRecognised() {
+        XCTAssertTrue(isClaudeLoginRefusal(Self.loginRefusal))
+    }
+
+    func testNoOtherErrorIsTakenForALoginRefusal() {
+        for message in [
+            // The approval answer refusal shares the code but not the meaning.
+            "not_operator_app: only the verified Nostromo app may answer",
+            "",
+            "ClaudeLoginAction refused: not checked",
+            "Perri is disabled in this daemon's config ([agents.perri] enabled = false).",
+            "session_answer_permission is superseded by approval_answer",
+            "only the verified Nostromo app may resend or discard a held message",
+            "not_operator_app",
+        ] {
+            XCTAssertFalse(isClaudeLoginRefusal(message), message)
+        }
+    }
 }
