@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::json;
 
-use super::super::control::{control_within, says_unsupported};
+use super::super::control::{control_within, says_unsupported, ControlFailure};
 use super::super::{lock_recover, Shared};
 use super::TaskRuntime;
 use crate::ipc::protocol::{
@@ -124,7 +124,7 @@ pub(in crate::ipc::session_manager) async fn stop_task(shared: &Shared, task_id:
     };
     // Every other failure means no stop is under way.
     lock_recover(&runtime.hub).cancel_stop(task_id);
-    let outcome = if failure.refused && says_unsupported(&failure.reason) {
+    let outcome = if stop_is_unsupported(&failure) {
         runtime.learn_stop_supported(&shared.event_tx, false);
         TaskStopOutcome::Unsupported
     } else if failure.refused {
@@ -135,6 +135,16 @@ pub(in crate::ipc::session_manager) async fn stop_task(shared: &Shared, task_id:
         TaskStopOutcome::NotRunning
     };
     report(outcome, Some(failure.reason), Some(label))
+}
+
+/// Does the CLI's error to a `stop_task` say it does not know the request? A
+/// CLI that knows it answers a refusal of its own (code `stop_task_refused`,
+/// text `StopTask: …`), whatever words that refusal uses.
+fn stop_is_unsupported(failure: &ControlFailure) -> bool {
+    failure.refused
+        && failure.code.as_deref() != Some("stop_task_refused")
+        && !failure.reason.starts_with("StopTask")
+        && says_unsupported(&failure.reason)
 }
 
 /// Send the capability probe if it is due: once per CLI process, after the
@@ -167,7 +177,7 @@ async fn probe(shared: &Shared) {
         // Expected: "No task found with ID". Either way the CLI knows the request.
         Ok(_) => runtime.learn_stop_supported(&shared.event_tx, true),
         Err(f) if f.refused => {
-            runtime.learn_stop_supported(&shared.event_tx, !says_unsupported(&f.reason));
+            runtime.learn_stop_supported(&shared.event_tx, !stop_is_unsupported(&f));
         }
         // No answer: stays unknown; Stop is offered and a real refusal explains.
         Err(_) => {}
@@ -209,7 +219,7 @@ pub(in crate::ipc::session_manager) async fn read_output(
         return file_reply(range);
     }
 
-    if let Some(reply) = cli_tail_reply(shared, &target, max).await {
+    if let Some(reply) = cli_tail_reply(shared, &target, offset, max).await {
         return reply;
     }
     OutputReply::without_text(TaskOutputOutcome::Unavailable, "the output is no longer available")
@@ -228,9 +238,18 @@ fn file_reply(range: RangeRead) -> OutputReply {
 }
 
 /// The CLI's own tail of the output, as a reply; `None` when it has none.
-async fn cli_tail_reply(shared: &Shared, target: &PreviewTarget, max: usize) -> Option<OutputReply> {
+///
+/// The CLI only has the last 8 KiB. A reader that already holds everything
+/// before `offset` gets only what lies at or after it (nothing, when it is
+/// caught up), so the ranges it joins never repeat text.
+async fn cli_tail_reply(
+    shared: &Shared,
+    target: &PreviewTarget,
+    offset: Option<u64>,
+    max: usize,
+) -> Option<OutputReply> {
     let runtime = &shared.tasks;
-    if lock_recover(&runtime.cli_tail).unsupported {
+    if !runtime.cli_tail_allowed() {
         return None;
     }
     let reply = control_within(
@@ -253,6 +272,10 @@ async fn cli_tail_reply(shared: &Shared, target: &PreviewTarget, max: usize) -> 
         return None;
     }
     let tail = last_bytes(output, max);
+    let tail = match offset {
+        Some(offset) => from_offset(tail, total, offset),
+        None => tail,
+    };
     Some(OutputReply {
         outcome: TaskOutputOutcome::Ok,
         text: sanitize(tail.as_bytes()),
@@ -262,6 +285,20 @@ async fn cli_tail_reply(shared: &Shared, target: &PreviewTarget, max: usize) -> 
         source: Some(TaskOutputSource::CliTail),
         message: None,
     })
+}
+
+/// The part of `tail` (the last bytes of an output of `total`) that lies at or
+/// after `offset`, starting on a character boundary.
+fn from_offset(tail: &str, total: u64, offset: u64) -> &str {
+    let tail_start = total - tail.len() as u64;
+    if offset <= tail_start {
+        return tail;
+    }
+    let mut from = (offset - tail_start).min(tail.len() as u64) as usize;
+    while !tail.is_char_boundary(from) {
+        from += 1;
+    }
+    &tail[from..]
 }
 
 /// The last `max` bytes of `s`, starting on a character boundary.

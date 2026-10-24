@@ -27,6 +27,8 @@ pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) struct ControlFailure {
     pub(super) reason: String,
     pub(super) refused: bool,
+    /// The `code` of the CLI's error, when it gave one.
+    pub(super) code: Option<String>,
     /// The CLI did not answer in time (the request may still take effect).
     pub(super) timed_out: bool,
 }
@@ -60,7 +62,7 @@ pub(super) async fn control_within(
     request: serde_json::Value,
     timeout: Duration,
 ) -> std::result::Result<ControlReply, ControlFailure> {
-    let failure = |reason: String, refused: bool| ControlFailure { reason, refused, timed_out: false };
+    let failure = |reason: String, refused: bool| ControlFailure { reason, refused, code: None, timed_out: false };
     const EXITED: &str = "the session exited";
     let id = format!("model-{}", Uuid::new_v4());
     let (tx, rx) = oneshot::channel();
@@ -75,19 +77,22 @@ pub(super) async fn control_within(
     }
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(reply)) if reply.ok => Ok(reply),
-        Ok(Ok(reply)) => Err(failure(
-            reply
+        Ok(Ok(reply)) => Err(ControlFailure {
+            reason: reply
                 .error
-                .or(reply.error_code)
+                .or_else(|| reply.error_code.clone())
                 .unwrap_or_else(|| "the session refused the change".to_owned()),
-            true,
-        )),
+            refused: true,
+            code: reply.error_code,
+            timed_out: false,
+        }),
         Ok(Err(_)) => Err(failure(EXITED.to_owned(), false)),
         Err(_) => {
             shared.waiters.lock().unwrap().remove(&id);
             Err(ControlFailure {
                 reason: format!("the session did not answer within {} s", timeout.as_secs().max(1)),
                 refused: false,
+                code: None,
                 timed_out: true,
             })
         }

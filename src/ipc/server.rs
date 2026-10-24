@@ -1818,14 +1818,16 @@ fn log_task_stop(report: &crate::ipc::session_manager::StopReport, focus_tag: St
     let description = report.label.as_ref().map(|l| {
         crate::ipc::task_output::truncate_chars(&l.description, 200)
     });
-    let what = description.as_deref().unwrap_or("a task");
+    // The summary is what the activity stream shows: it names the kind of task,
+    // never its description (a command line or a prompt).
+    let what = report.label.as_ref().map_or("task", |l| l.kind.label());
     let agent = (!report.agent_name.is_empty()).then(|| report.agent_name.clone());
     append_task(
         &activity_path(),
         &TaskActivity {
             agent: agent.clone().unwrap_or_else(|| "claude".to_owned()),
             kind: TaskActivityKind::TaskStop,
-            summary: format!("Stop of {what}: {}.", outcome_word(outcome)),
+            summary: format!("Stop of a {what}: {}.", outcome_word(outcome)),
             session_id: report.session_id.clone(),
             agent_type: agent,
             focus_tag: Some(focus_tag),
@@ -1989,8 +1991,15 @@ fn log_network_task_refusal(
     if !refusal_line_allowed() {
         return;
     }
+    // A sensitive focus is named by nothing at all, not even its opaque id: the
+    // line reaches network peers through the activity stream, and an id that
+    // appeared only for sensitive tags would tell a guessing peer which of its
+    // guesses are real (an unknown tag is logged unnamed too).
     let (tag, agent) = known_focus(&session_mgr.lock().unwrap(), tag);
-    let tag = tag.map(|t| audit_focus_tag(&t, sensitive));
+    let (tag, agent) = match tag {
+        Some(t) if !sensitive.tag_is_sensitive(&t) => (Some(t), agent),
+        _ => (None, None),
+    };
     let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| "claude".to_owned());
     append_task(
         &activity_path(),

@@ -1575,6 +1575,17 @@ pub enum TaskKind {
 }
 
 impl TaskKind {
+    /// The word for this kind of task in a sentence.
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskKind::Shell => "shell task",
+            TaskKind::Monitor => "monitor",
+            TaskKind::Agent => "agent task",
+            TaskKind::Workflow => "workflow task",
+            TaskKind::Other => "background task",
+        }
+    }
+
     /// Shell and Monitor tasks write an output stream the daemon can preview.
     pub fn has_output(self) -> bool {
         matches!(self, TaskKind::Shell | TaskKind::Monitor)

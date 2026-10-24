@@ -1018,7 +1018,7 @@ async fn work_source_statuses_for_different_sources_are_retained_separately() {
 /// in `<view>.path.<id>`), `MON` (a monitor), `AGENT`, `AMBIENT` (a housekeeping watcher), `KILL`
 /// (`task_updated` killed), `STOPPED` (a `stopped` notification), `DONE` (`task_updated` completed)
 /// and `NOTIFY` (a `completed` notification whose `output_file` is in `<view>.path.<id>`). The files
-/// `<view>.stopmode` (`modern` default | `refuse` | `silent` | `legacy`) and `<view>.outmode`
+/// `<view>.stopmode` (`modern` default | `refuse` | `refuse_words` | `silent` | `legacy`) and `<view>.outmode`
 /// (`tail` default | `empty` | `silent` | `legacy`) say how `stop_task` and `get_task_output` are
 /// answered; they are read at each request, so a test may change them mid-way. A modern CLI answers
 /// the daemon's capability probe (`__nostromo_capability_probe__`) with "No task found". Every line
@@ -1057,6 +1057,7 @@ answer_tio() {
         *)
           if [ "$tid" = "__nostromo_capability_probe__" ]; then tio_error "$rid" "No task found with ID: $tid"
           elif [ "$mode" = "refuse" ]; then tio_error "$rid" "StopTask: the task cannot be stopped right now"
+          elif [ "$mode" = "refuse_words" ]; then tio_error "$rid" "StopTask: stopping this kind of task is not supported"
           else tio_ok "$rid" '{}'
           fi ;;
       esac ;;
@@ -6347,6 +6348,17 @@ mod background_tasks {
                 .collect()
         }
 
+        /// Every task audit line a network peer caused.
+        fn task_network_lines() -> Vec<Value> {
+            let path = crate::model_switching::isolated_activity_log();
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|l| matches!(l["kind"].as_str(), Some("task_stop" | "task_output")) && l["actor"] == "network")
+                .collect()
+        }
+
         /// The whole log as text (to prove something never appears in it).
         fn audit_text() -> String {
             std::fs::read_to_string(crate::model_switching::isolated_activity_log()).unwrap_or_default()
@@ -6535,10 +6547,13 @@ mod background_tasks {
             assert_eq!(io.opens.load(Ordering::SeqCst), 0);
             let log = audit_text();
             assert!(!log.contains(&io.tag), "the sensitive tag `{}` is in the activity log", io.tag);
-            let lines = opaque_audit_lines("network");
-            assert_eq!(lines.len(), 2, "one line per refusal, under an opaque id: {lines:?}");
+            // A sensitive focus is not named at all (not even by its opaque id: that id would show
+            // a guessing peer, through the activity stream, which of its guesses are real).
+            let lines = task_network_lines();
+            assert_eq!(lines.len(), 2, "one line per refusal: {lines:?}");
             assert!(lines.iter().all(|l| l["outcome"] == "refused"), "{lines:?}");
-            assert_eq!(lines[0]["focus_tag"], lines[1]["focus_tag"], "the same stand-in for the same focus: {lines:?}");
+            assert!(lines.iter().all(|l| l["focus_tag"].is_null()), "no focus named: {lines:?}");
+            assert!(opaque_audit_lines("network").is_empty(), "no stand-in id either: {lines:?}");
         }
 
         // ═════════════════════════════════════════════════════════════════════
@@ -6629,6 +6644,21 @@ mod background_tasks {
                 "{}",
                 lines[0]
             );
+        }
+
+        #[tokio::test]
+        async fn a_refusal_that_says_not_supported_is_still_a_refusal_and_does_not_switch_stop_off() {
+            // The CLI knows the request and refuses this task, in words that also fit an old CLI.
+            let mut t = live("stop-refused-words", None).await;
+            t.io.stopmode("refuse_words");
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let reply = t.stop("stop-1", "bgsh1").await;
+
+            assert_eq!(reply["outcome"], "refused", "{reply}");
+            t.tap.drain(QUIET).await;
+            assert_eq!(t.stop_supported(), json!(true), "{:?}", latest_tasks(&t.tap.frames, &t.io.tag));
         }
 
         #[tokio::test]
@@ -7011,6 +7041,23 @@ mod background_tasks {
                 "start = total - the length of the tail: {r}"
             );
             assert!(!t.io.requests("get_task_output").is_empty(), "the CLI was asked");
+        }
+
+        #[tokio::test]
+        async fn the_clis_tail_gives_a_reader_that_is_part_way_through_only_what_it_has_not_seen() {
+            // The CLI's tail is 40 bytes of an output of 1000: bytes [960, 1000).
+            let mut t = live("out-tail-offset", None).await;
+            t.cue("BA1-SHELL:bgsh1").await;
+            t.wait_status("bgsh1", "running").await;
+
+            let caught_up = t.read("o-1", "bgsh1", Some(1000), 4096).await;
+            let part_way = t.read("o-2", "bgsh1", Some(980), 4096).await;
+            let behind = t.read("o-3", "bgsh1", Some(100), 4096).await;
+
+            let span = |r: &Value| (r["start_offset"].as_u64(), r["end_offset"].as_u64());
+            assert_eq!((caught_up["outcome"].as_str(), caught_up["text"].as_str(), span(&caught_up)), (Some("ok"), Some(""), (Some(1000), Some(1000))), "{caught_up}");
+            assert_eq!((part_way["text"].as_str(), span(&part_way)), (Some("SECRET-OUTPUT-CLI-2\n"), (Some(980), Some(1000))), "{part_way}");
+            assert_eq!((behind["text"].as_str(), span(&behind)), (Some("SECRET-OUTPUT-CLI-1\nSECRET-OUTPUT-CLI-2\n"), (Some(960), Some(1000))), "a reader behind the tail sees the gap in the offsets: {behind}");
         }
 
         #[tokio::test]
