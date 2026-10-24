@@ -5,7 +5,7 @@ import os
 
 private let appLog = Logger(subsystem: "com.hammer.nostromo.mac", category: "AppDelegate")
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMenuActions {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         AppAppearance.apply(to: NSApplication.shared)
@@ -206,15 +206,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: - Debug
 
-    @objc private func copyTranscriptDiagnostics() {
+    @objc func copyTranscriptDiagnostics() {
         TranscriptDiagnostics.copyReportToPasteboard()
     }
 
-    @objc private func copyDaemonDiagnostics() {
+    @objc func copyDaemonDiagnostics() {
         DaemonDiagnostics.copyReportToPasteboard()
     }
 
-    @objc private func copyCodePaneDiagnostics() {
+    @objc func copyCodePaneDiagnostics() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(AppStore.shared.codePaneDiagnosticsReport(), forType: .string)
@@ -224,7 +224,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Debug ▸ Capture render state now: the same content-free capture the blank detector writes by
     /// itself, for every transcript pane on screen, right away (no rate limit). Press it the moment a
     /// pane blanks if nothing was captured: the recorder already holds the seconds before.
-    @objc private func captureRenderStateNow() {
+    @objc func captureRenderStateNow() {
         let files = PaneRenderWatch.captureAllVisible()
         appLog.info("render state captured for \(files.count, privacy: .public) pane(s)")
         guard !files.isEmpty else { NSSound.beep(); return }
@@ -233,7 +233,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSPasteboard.general.setString(files.map(\.path).joined(separator: "\n"), forType: .string)
     }
 
-    @objc private func copyPaneDiagnostics() {
+    @objc func copyPaneDiagnostics() {
         let report = AppStore.shared.paneDiagnosticsReport()
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -244,87 +244,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // MARK: - Private
 
     private func setupMenu() {
-        let mainMenu = NSMenu()
-
-        // App menu
-        let appMenuItem = NSMenuItem()
-        mainMenu.addItem(appMenuItem)
-        let appMenu = NSMenu()
-        appMenuItem.submenu = appMenu
-        appMenu.addItem(NSMenuItem(
-            title: "Quit Nostromo",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        ))
-
-        // Edit menu — required for Cmd+C/V/A/X to route correctly to NSTextView
-        let editMenuItem = NSMenuItem()
-        mainMenu.addItem(editMenuItem)
-        let editMenu = NSMenu(title: "Edit")
-        editMenuItem.submenu = editMenu
-        editMenu.addItem(NSMenuItem(title: "Cut",        action: #selector(NSText.cut(_:)),       keyEquivalent: "x"))
-        editMenu.addItem(NSMenuItem(title: "Copy",       action: #selector(NSText.copy(_:)),      keyEquivalent: "c"))
-        editMenu.addItem(NSMenuItem(title: "Paste",      action: #selector(NSText.paste(_:)),     keyEquivalent: "v"))
-        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
-        editMenu.addItem(.separator())
-        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
-        editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
-
-        // Debug menu — the app's answer to "is it holding more than it should?"
-        // without attaching a debugger. Several acceptance criteria for the
-        // bounded-transcript work are numeric, and a number nobody can read is
-        // not a criterion.
-        let debugMenuItem = NSMenuItem()
-        mainMenu.addItem(debugMenuItem)
-        let debugMenu = NSMenu(title: "Debug")
-        debugMenuItem.submenu = debugMenu
-        let diagItem = NSMenuItem(title: "Copy transcript diagnostics",
-                                  action: #selector(copyTranscriptDiagnostics),
-                                  keyEquivalent: "d")
-        diagItem.keyEquivalentModifierMask = [.command, .shift]
-        diagItem.target = self
-        debugMenu.addItem(diagItem)
-        let daemonDiagItem = NSMenuItem(title: "Copy daemon diagnostics",
-                                        action: #selector(copyDaemonDiagnostics),
-                                        keyEquivalent: "i")
-        daemonDiagItem.keyEquivalentModifierMask = [.command, .shift]
-        daemonDiagItem.target = self
-        debugMenu.addItem(daemonDiagItem)
-        let codePaneDiagItem = NSMenuItem(title: "Copy code-pane diagnostics",
-                                          action: #selector(copyCodePaneDiagnostics),
-                                          keyEquivalent: "k")
-        codePaneDiagItem.keyEquivalentModifierMask = [.command, .shift]
-        codePaneDiagItem.target = self
-        debugMenu.addItem(codePaneDiagItem)
-        let paneDiagItem = NSMenuItem(title: "Copy pane diagnostics",
-                                      action: #selector(copyPaneDiagnostics),
-                                      keyEquivalent: "p")
-        paneDiagItem.keyEquivalentModifierMask = [.command, .shift]
-        paneDiagItem.target = self
-        debugMenu.addItem(paneDiagItem)
-        let captureItem = NSMenuItem(title: "Capture render state now",
-                                     action: #selector(captureRenderStateNow),
-                                     keyEquivalent: "b")
-        captureItem.keyEquivalentModifierMask = [.command, .shift]
-        captureItem.target = self
-        debugMenu.addItem(captureItem)
-
-        // Session menu — ⇧⌘M opens the model popup. The item has no target, so the action
-        // walks the responder chain from the key window's first responder to that window's
-        // input bar; `showModelPopover` below catches it when focus sits outside any bar.
-        let sessionMenuItem = NSMenuItem()
-        mainMenu.addItem(sessionMenuItem)
-        let sessionMenu = NSMenu(title: "Session")
-        sessionMenuItem.submenu = sessionMenu
-        sessionMenu.addItem(ModelShortcut.makeMenuItem())
-        // ⌥⌘A: move keyboard focus into the visible approval card (AP3). No visible card: a beep.
-        let approvalCardItem = NSMenuItem(title: "Go to Approval Card", action: #selector(goToApprovalCard(_:)),
-                                          keyEquivalent: "a")
-        approvalCardItem.keyEquivalentModifierMask = [.command, .option]
-        approvalCardItem.target = self
-        sessionMenu.addItem(approvalCardItem)
-
-        NSApplication.shared.mainMenu = mainMenu
+        NSApplication.shared.mainMenu = MainMenu.make(target: self)
     }
 
     /// ⌥⌘A: keyboard focus goes into the key window's visible approval card, on its initial key view

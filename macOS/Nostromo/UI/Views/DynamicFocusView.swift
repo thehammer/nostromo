@@ -426,6 +426,11 @@ final class DynamicFocusView: NSView {
             let hud = FredBindings.makeSurface(focus: focus)
             leafViews[paneId] = hud
             return hud
+        } else if paneId == "tracker" {
+            // Native agent tracker: renders the focus's `tracker_board` from `TrackerStore`.
+            let tracker = TrackerPaneView(tag: focus.sessionTag)
+            leafViews[paneId] = tracker
+            return tracker
         } else {
             let wrapper = PaneContentNSView()
             wrapper.paneId = paneId
