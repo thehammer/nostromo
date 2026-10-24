@@ -699,7 +699,7 @@ final class BackgroundChipTests: XCTestCase {
     }
 
     func testTheChipGivesWayToTheComposerAsTheBarNarrows() {
-        let cases: [(width: CGFloat, fit: BackgroundChip.Fit)] = [(420, .full), (320, .iconOnly), (230, .hidden)]
+        let cases: [(width: CGFloat, fit: BackgroundChip.Fit)] = [(420, .full), (320, .iconOnly), (260, .hidden)]
         for (width, fit) in cases {
             let rig = makeNarrowRig(width: width)
             let chip = rig.bar.backgroundChip
