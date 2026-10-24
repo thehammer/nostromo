@@ -560,6 +560,7 @@
 		ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */; };
 		ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */; };
 		ZZ0000000000000000TK2601 /* TrackerRowHoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */; };
+		ZZ0000000000000000TK2701 /* TrackerRowHoldReleaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -931,6 +932,7 @@
 		ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLinkTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptWidthAnchorTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldReleaseTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1382,6 +1384,7 @@
 				ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */,
 				ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */,
 				ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */,
+				ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */,
 			);
 			path = NostromoTests;
 			sourceTree = "<group>";
@@ -2078,6 +2081,7 @@
 				ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */,
 				ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */,
 				ZZ0000000000000000TK2601 /* TrackerRowHoldTests.swift in Sources */,
+				ZZ0000000000000000TK2701 /* TrackerRowHoldReleaseTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -17,6 +17,13 @@
 //   open Done group) stays where it is, with its new content, until it leaves the viewport.
 // - A row holding a text selection keeps its content until the selection is cleared.
 //
+// Release rule (the pane drives it through `releaseAll`; this type only honours it): no hold lasts
+// forever. Besides leaving the viewport, a hold is released when the user collapses a note
+// ("less"), clears the selection, clicks elsewhere, or leaves the pane idle for 20 s. The
+// selection is the one thing a release never touches, and the pane never releases while the
+// pointer is over a held row. Expanding or collapsing a note clears the selection in its own row
+// first: a selected row keeps its content, which would otherwise swallow the toggle.
+//
 // Pure and stateless between calls apart from one-shot release requests: every `resolve` works
 // out what has to be held from what is on screen now (`displayed`), what the board says
 // (`target`), which rows intersect the viewport and which row holds the selection. A hold whose
@@ -218,14 +225,18 @@ public struct TrackerDeferral {
 
     /// Right after the nearest row above it on screen that is still shown and in the same section
     /// (or after that section's heading), so a held row never lands under another section's heading.
+    ///
+    /// "The same section" is where the row sits on screen (the heading above it), never the section
+    /// its item carries: a held done or moved row shows the board's new content, whose section is
+    /// the new one, and a later pass that trusted it would carry the row down under that heading.
     private static func insertionIndex(for held: TrackerRow, at position: Int, displayed: [TrackerRow],
                                        in rows: [TrackerRow]) -> Int {
-        let section = held.item?.sectionId
+        let section = held.item == nil ? nil : sectionId(at: position, in: displayed)
         var fallback: Int?
         for j in stride(from: position - 1, through: 0, by: -1) {
             guard let index = rows.firstIndex(where: { $0.key == displayed[j].key }) else { continue }
             if fallback == nil { fallback = index + 1 }
-            if section == nil || Self.section(of: rows[index]) == section { return index + 1 }
+            if section == nil || sectionId(at: index, in: rows) == section { return index + 1 }
         }
         if let section, let heading = rows.firstIndex(where: { $0.key == TrackerRow.sectionKey(section) }) {
             return heading + 1
@@ -233,12 +244,12 @@ public struct TrackerDeferral {
         return fallback ?? 0
     }
 
-    private static func section(of row: TrackerRow) -> String? {
-        switch row.content {
-        case .section(let section): return section.id
-        case .doneGroup(let group): return group.sectionId
-        default: return row.item?.sectionId
+    /// The id of the section whose heading is at or above `index`.
+    private static func sectionId(at index: Int, in rows: [TrackerRow]) -> String? {
+        for i in stride(from: index, through: 0, by: -1) {
+            if case .section(let section) = rows[i].content { return section.id }
         }
+        return nil
     }
 
     /// A done item still shown in place (struck through, or frozen under a selection) has not
