@@ -617,6 +617,14 @@ fn check_pair(a: Kind, b: Kind, o: &Outcome) {
     if a == Kind::Loading && b == Kind::Loading {
         assert_eq!(o.state, SourceState::Loading, "{ctx}");
     }
+    // An account that has not reported yet may hold anything, so the merge is
+    // never Fresh or Empty while one is still loading.
+    if a == Kind::Loading || b == Kind::Loading {
+        assert!(
+            !matches!(o.state, SourceState::Fresh | SourceState::Empty),
+            "claims health while an account is still loading: {ctx}"
+        );
+    }
     if [a, b]
         .iter()
         .all(|k| matches!(k, Kind::Fresh | Kind::Empty))
@@ -929,6 +937,33 @@ fn calendar_updated_at_is_the_oldest_among_accounts_with_data() {
     let merged = merge_cal(&[(&p, Some(&pc)), (&f, Some(&fc)), (&w, Some(&wc))]);
 
     assert_eq!(merged.updated_at, Some(at(-15)));
+}
+
+#[test]
+fn a_loading_account_keeps_the_merge_loading_never_fresh_or_empty() {
+    let (p, f) = (personal(), family());
+    let fresh = fresh_mailbox(vec![mail_item("p1", 5, false)], 1, 30);
+    let empty = fresh_mailbox(vec![], 0, 30);
+
+    for healthy in [&fresh, &empty] {
+        assert_eq!(
+            merge_mail(&[(&p, Some(healthy)), (&f, None)]).state,
+            SourceState::Loading
+        );
+        assert_eq!(
+            merge_mail(&[(&p, None), (&f, Some(healthy))]).state,
+            SourceState::Loading
+        );
+    }
+    let cal = fresh_calendar(vec![cal_event("p1", 20, None)], 2);
+    assert_eq!(
+        merge_cal(&[(&p, Some(&cal)), (&f, None)]).state,
+        SourceState::Loading
+    );
+    assert_eq!(
+        merge_cal(&[(&p, Some(&fresh_calendar(vec![], 2))), (&f, None)]).state,
+        SourceState::Loading
+    );
 }
 
 #[test]

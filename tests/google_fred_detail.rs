@@ -1295,7 +1295,20 @@ async fn ids_that_are_not_mail_or_event_ids_are_not_found_and_ask_google_nothing
     let e = env(true).await;
     let svc = service(&e);
 
-    for id in ["", "abc", "mail:", "event:", "pr:abc", "mail"] {
+    for id in [
+        "",
+        "abc",
+        "mail:",
+        "event:",
+        "pr:abc",
+        "mail",
+        "mail:.",
+        "mail:..",
+        "mail:...",
+        "event:.",
+        "event:..",
+        "event:...",
+    ] {
         assert_eq!(code(svc.detail(id).await), "not_found", "{id:?}");
     }
     assert!(

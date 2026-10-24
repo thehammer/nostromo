@@ -265,7 +265,8 @@ impl FredDetailService for GoogleFredDetail {
                 "Not a Fred mail or calendar item",
             ));
         };
-        if id.is_empty() {
+        // Empty and all-dot ids (`.`, `..`) would normalise to a parent endpoint.
+        if id.is_empty() || id.chars().all(|c| c == '.') {
             return Err(WorkError::new("not_found", "Missing item id"));
         }
         if let Some(hit) = self.cached(item_id) {

@@ -348,6 +348,10 @@ fn combine(parts: &[PartView<'_>], has_content: bool) -> Combined {
                     }
                 })
         }
+    } else if parts.iter().any(|p| p.state == SourceState::Loading) {
+        // An account that has not reported yet may hold anything: never claim
+        // `Fresh` or `Empty` for the merge, even if the others are healthy.
+        SourceState::Loading
     } else if has_content {
         SourceState::Fresh
     } else {
