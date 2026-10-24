@@ -150,6 +150,7 @@ final class AppControlServer {
         case "transcript-anchor": return try transcriptAnchor(req)
         case "tracker":     return try tracker(req)
         case "tracker-anchor": return try trackerAnchor(req)
+        case "tasks":       return try tasks(req)
         case "capture-render-state": return captureRenderState()
         case "approvals":   return try approvals(req)
         case "key":         return try key(req)
@@ -483,6 +484,15 @@ final class AppControlServer {
     /// else the window's only visible one.
     private func transcriptAnchor(_ req: AppControlRequest) throws -> Any {
         let w = try window(req)
+        let pane = try pickPane(req, in: w)
+        let index = appDelegate?.windows.firstIndex(where: { $0 === w }) ?? req.int("window") ?? 0
+        let data = try JSONEncoder().encode(pane.anchorSnapshot(windowIndex: index))
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    /// The transcript pane a request means: the visible `ReplView` tagged `focus`, else the one
+    /// holding the first responder, else the window's only visible one.
+    private func pickPane(_ req: AppControlRequest, in w: NSWindow) throws -> ReplView {
         var panes: [ReplView] = []
         func walk(_ v: NSView) {
             if let pane = v as? ReplView, !pane.isHiddenOrHasHiddenAncestor { panes.append(pane) }
@@ -490,23 +500,38 @@ final class AppControlServer {
         }
         if let content = w.contentView { walk(content) }
         let tags = panes.map { $0.diagnosticsTag }
-        let pane: ReplView
         if let tag = req.string("focus") {
             guard let found = panes.first(where: { $0.diagnosticsTag == tag }) else {
                 throw AppControlError.notFound("no visible pane tagged \"\(tag)\" in window; visible tags: \(tags)")
             }
-            pane = found
+            return found
         } else if let responder = w.firstResponder as? NSView,
                   let found = panes.first(where: { responder === $0 || responder.isDescendant(of: $0) }) {
-            pane = found
+            return found
         } else if panes.count == 1 {
-            pane = panes[0]
-        } else {
-            throw AppControlError.notFound("no pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(tags)")
+            return panes[0]
         }
-        let index = appDelegate?.windows.firstIndex(where: { $0 === w }) ?? req.int("window") ?? 0
-        let data = try JSONEncoder().encode(pane.anchorSnapshot(windowIndex: index))
-        return try JSONSerialization.jsonObject(with: data)
+        throw AppControlError.notFound("no pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(tags)")
+    }
+
+    /// READ-ONLY (`tasks list [--all] | chip [--focus TAG]`): what the Background activity popover
+    /// lists and what the chip shows, from the same model they render (`AppControlTasks`). With
+    /// `focus`, that focus's tasks whether or not a pane shows it. Sends no event, changes no focus,
+    /// stops nothing, marks nothing seen.
+    private func tasks(_ req: AppControlRequest) throws -> Any {
+        let sub = req.string("sub") ?? "list"
+        guard sub == "list" || sub == "chip" else {
+            throw AppControlError.badRequest("tasks: only `list` and `chip` exist (both read-only)")
+        }
+        let tag: String
+        if let focus = req.string("focus") {
+            tag = focus
+        } else {
+            tag = try pickPane(req, in: try window(req)).diagnosticsTag
+        }
+        let list = BackgroundTaskStore.shared.list(for: tag)
+        if sub == "chip" { return AppControlTasks.chip(tag: tag, list: list) }
+        return AppControlTasks.list(tag: tag, list: list, all: (req.args["all"] as? Bool) == true)
     }
 
     /// The visible tracker panes of `w`, and the one a tracker request means: the pane tagged `focus`,

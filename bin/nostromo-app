@@ -24,6 +24,8 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
     nostromo-app tracker show [--focus TAG] [-w N]   READ-ONLY (sends no event, no focus change, writes nothing): what the tracker pane shows: title, path, updated, committable, sections with items (id, text, status, owner, updated, folded, held, conflict, badge), the Waiting on you strip, banners, visible, filter, render_generation, rows_updated_last; with no pane on screen for TAG, what the board would show (visible: false); JSON
     nostromo-app tracker file [--focus TAG] [-w N]   READ-ONLY: the board file's path, exists, committable (and remote), size in bytes; JSON
     nostromo-app tracker-anchor [--focus TAG] [-w N]   READ-ONLY (sends no event, no focus change): the tracker's first visible row (rowKey) and the viewport top's offset into it, scrollY, documentHeight, viewportHeight, deferredPending and the held changes (pending [{key, kind}]); JSON; exit 1 if no tracker pane / app unreachable
+    nostromo-app tasks list [--focus TAG] [--all] [-w N]   READ-ONLY (sends no event, no focus change, stops nothing): what the Background activity popover shows for the focus (default: the pane with keyboard focus, else the only visible pane): tag, running, chip {text, state} and tasks [{id, section, kind, kind_name, title, description, status, elapsed_ms, duration_ms, ended_ago_ms, sign_of_life, parent_id, depth, housekeeping, stop_offered}]; the running tasks only unless --all (adds Ended and Housekeeping); JSON; exit 1 if no pane / app unreachable
+    nostromo-app tasks chip [--focus TAG] [-w N]   READ-ONLY: the Background activity chip's text (null when hidden) and state (hidden / running / done / failed); JSON
     nostromo-app capture-render-state     Debug > Capture render state now, from a script: writes a content-free capture (pane-blank-<hash>-<UTC>.json) for every transcript pane on screen, no rate limit; prints the paths
     nostromo-app approvals badges   READ-ONLY: the red "needs you now" sidebar pills and the Dock badge: {focuses: [{tag, pill}], dock} (dock is null when clear)
     nostromo-app approvals list [--focus TAG] [-w N]   READ-ONLY (sends no event, answers nothing): the permission-approval cards on screen, from the cards' own views: request_id, focus, agent, tool, the input as displayed (invisible characters as tokens), command_count, invisible_count, reason_line, options [{id, enabled, label}] (Allow once reads "Scroll to the end to allow" until the input was scrolled to its end), default_to_no_kind, seconds_left, collapsed (the card is a one-line bar; window_cards[].collapsed, .bar_text, .bar_countdown), page/of (`1 of 3`), windows (every window showing the request) and window_cards [{window, page, of, state}] (that window's card; `state` is the outcome text once answered); `guard_bars` lists the production-shell guard bars on screen [{window, focus, text}]. With -w N only that window is read (without it, every window); JSON
@@ -129,7 +131,11 @@ def main():
     tr.add_argument("--focus", metavar="TAG", help="the focus whose tracker (default: beside the transcript with keyboard focus, else the only visible tracker)")
     tra = sub.add_parser("tracker-anchor", help="READ-ONLY tracker scroll anchor (first visible row, offset, scroll position, held changes)")
     tra.add_argument("--focus", metavar="TAG", help="the focus whose tracker (default: beside the transcript with keyboard focus, else the only visible tracker)")
-    for tp in (tr, tra):   # `-w N` also after the subcommand, as documented (SUPPRESS keeps a `-w` given before it)
+    tk = sub.add_parser("tasks", help="READ-ONLY Background activity: what the popover lists (list) or the chip shows (chip)")
+    tk.add_argument("sub", choices=["list", "chip"])
+    tk.add_argument("--focus", metavar="TAG", help="the focus (default: the pane with keyboard focus, else the only visible pane)")
+    tk.add_argument("--all", action="store_true", help="list: include the Ended and Housekeeping tasks")
+    for tp in (tr, tra, tk):   # `-w N` also after the subcommand, as documented (SUPPRESS keeps a `-w` given before it)
         tp.add_argument("-w", "--window", type=int, default=argparse.SUPPRESS)
     sub.add_parser("capture-render-state", help="write a content-free render-state capture for every visible transcript pane now")
     ap = sub.add_parser("approvals", help="READ-ONLY approval cards on screen (what each card shows, its options and which are enabled)")
@@ -189,6 +195,11 @@ def main():
         if a.focus: r["focus"] = a.focus
     elif a.cmd == "tracker-anchor":
         if a.focus: r["focus"] = a.focus
+    elif a.cmd == "tasks":
+        if a.all and a.sub != "list": p.error("--all only applies to `tasks list`")
+        r["sub"] = a.sub
+        if a.focus: r["focus"] = a.focus
+        if a.all: r["all"] = True
     elif a.cmd == "approvals":
         r["sub"] = a.sub
         if a.focus: r["focus"] = a.focus

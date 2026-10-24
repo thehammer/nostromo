@@ -597,10 +597,13 @@ class AppStore: ObservableObject {
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
+                BackgroundTaskStore.shared.tasksSupported = connected && self?.client.daemonAdvertisesTasks == true
                 if connected {
                     WorkStore.shared.reset()
                 } else {
                     WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
+                    // The CLI dies with the daemon: nothing shows running until a new snapshot says so.
+                    BackgroundTaskStore.shared.daemonDisconnected()
                     // Tracker panes keep their last board; the reconnect's replay replaces it in place.
                     TrackerStore.shared.daemonDisconnected()
                     // A sign-in card from a dropped connection is stale until the daemon says again.
@@ -675,6 +678,7 @@ class AppStore: ObservableObject {
         TranscriptFoldStore.shared.removeFocus(tag: tag)
         TranscriptDiagnostics.forgetTag(tag)
         TrackerStore.shared.forget(tag: tag)
+        BackgroundTaskStore.shared.forget(tag: tag)
     }
 
     // MARK: - Broker event fold
@@ -1636,8 +1640,9 @@ class AppStore: ObservableObject {
         case .modelCatalog, .sessionModelState, .modelDefaults, .modelRequestResult:
             ModelStore.shared.ingest(msg)
 
+        // Background tasks: the store every window's chip and popover binds to.
         case .sessionTasks, .sessionTaskDetail:
-            break   // BA3 routes these to BackgroundTaskStore
+            BackgroundTaskStore.shared.ingest(msg)
 
         case .sessionTaskStopResult, .sessionTaskOutputResult:
             break   // BA4/BA5 route: the output viewer and the Stop control wait on these
