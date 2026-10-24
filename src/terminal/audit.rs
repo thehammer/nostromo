@@ -38,7 +38,7 @@ pub fn default_path() -> PathBuf {
 }
 
 /// Which way a refused terminal request came in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalChannel {
     Mcp,
@@ -116,6 +116,11 @@ pub enum AuditEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
     },
+    /// A channel hit the per-window cap on `refused` lines: until the window
+    /// ends, its refusals are counted instead of written.
+    RefusalLimitReached { channel: RefusalChannel },
+    /// How many of a channel's refusals the cap kept out of the log.
+    RefusalsSuppressed { channel: RefusalChannel, count: u32 },
 }
 
 #[derive(Serialize)]

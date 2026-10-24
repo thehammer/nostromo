@@ -913,3 +913,60 @@ fn registered_terminal_leaves_are_listed_per_tag_until_unregistered() {
     assert_eq!(panes.terminal_leaves("t"), ["terminal-00000002"]);
     assert_eq!(panes.terminal_leaves("other"), ["terminal-00000003"]);
 }
+
+// ── audit: a flood of refusals is capped per channel ─────────────────────────
+
+#[test]
+fn a_flood_of_refusals_on_one_channel_is_capped_without_silencing_another() {
+    use super::{TerminalConfig, TerminalManager, MAX_REFUSALS_PER_WINDOW};
+    let (_tmp, dir) = scratch_dir();
+    let path = dir.join("audit").join("terminal.jsonl");
+    let mgr = TerminalManager::new(TerminalConfig {
+        audit: AuditLog::open(&path).unwrap(),
+        ..TerminalConfig::in_memory()
+    });
+    let mgr = mgr.lock().unwrap();
+    let flood = MAX_REFUSALS_PER_WINDOW as usize + 30;
+    // A peer-sent id that is not id-shaped is not written as given.
+    let junk_id = "x".repeat(4096);
+    for _ in 0..flood {
+        mgr.audit_refused(
+            RefusalChannel::Tcp,
+            "input",
+            None,
+            Some(&junk_id),
+            None,
+            None,
+        );
+    }
+    mgr.audit_refused(
+        RefusalChannel::Ipc,
+        "input",
+        None,
+        Some("t-9"),
+        Some(4343),
+        None,
+    );
+
+    let lines = jsonl(&path);
+    let refused = |channel: &str| {
+        lines
+            .iter()
+            .filter(|l| l["event"] == "refused" && l["channel"] == channel)
+            .count()
+    };
+    assert_eq!(refused("tcp"), MAX_REFUSALS_PER_WINDOW as usize);
+    assert_eq!(
+        refused("ipc"),
+        1,
+        "the tcp flood must not use up the ipc budget"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l["event"] == "refusal_limit_reached" && l["channel"] == "tcp")
+            .count(),
+        1
+    );
+    assert!(lines.iter().all(|l| !l.to_string().contains(&junk_id)));
+}
