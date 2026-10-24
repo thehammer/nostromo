@@ -368,7 +368,7 @@ public struct BackgroundTaskList: Equatable {
         let ended = task.status.isTerminal
         let elapsed: UInt64? = ended ? nil : task.startedAtMs.map { nowMs >= $0 ? nowMs - $0 : 0 }
         let duration: UInt64? = ended
-            ? (task.durationMs ?? both(task.startedAtMs, task.endedAtMs).map { $1 >= $0 ? $1 - $0 : 0 })
+            ? (task.durationMs ?? both(task.startedAtMs, task.endedAtMs).map { pair in pair.1 >= pair.0 ? pair.1 - pair.0 : 0 })
             : nil
         let ago: UInt64? = ended ? task.endedAtMs.map { nowMs >= $0 ? nowMs - $0 : 0 } : nil
         let time = (elapsed ?? duration).flatMap { ToolGroupSummary.durationText(seconds: Double($0) / 1000) }

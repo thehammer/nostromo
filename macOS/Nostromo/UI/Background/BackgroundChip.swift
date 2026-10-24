@@ -31,7 +31,7 @@ final class BackgroundChip: NSButton {
         return ceil(width) + 2 * horizontalPadding
     }()
 
-    private(set) var state: BackgroundChipState = .hidden
+    private(set) var chipState: BackgroundChipState = .hidden
     /// The chip holds the keyboard focus (Tab with Full Keyboard Access); drawn as a ring.
     private(set) var hasKeyboardFocus = false
 
@@ -52,7 +52,7 @@ final class BackgroundChip: NSButton {
 
     /// Show `state`. Hidden for `.hidden`. Never touches the window's first responder.
     func apply(_ state: BackgroundChipState, tooltip: String?) {
-        self.state = state
+        chipState = state
         title = state.text ?? ""
         toolTip = tooltip
         setAccessibilityLabel(state.accessibilityLabel)
@@ -63,7 +63,7 @@ final class BackgroundChip: NSButton {
 
     /// The colour the title is drawn in.
     var titleColor: NSColor {
-        if case .failed = state { return Self.failedTextColor }
+        if case .failed = chipState { return Self.failedTextColor }
         return Self.textColor
     }
 
