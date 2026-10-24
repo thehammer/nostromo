@@ -16,7 +16,7 @@ use crate::ipc::protocol::{PaneTree, ServerMsg};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::sensitive_text::{first_class, GuardConfig};
 use crate::tracker::ops::{LinkInput, Op, MAX_BATCH_OPS};
-use crate::tracker::placement::{place_tracker, TRACKER_PANE_ID};
+use crate::tracker::placement::{has_tracker, place_tracker, TRACKER_PANE_ID};
 use crate::tracker::registry::{OpenArgs, OpenOutcome, ReadOutcome, TrackerError, WriteOutcome};
 use crate::tracker::{validate_command_text, Author, TrackerRegistry};
 
@@ -280,29 +280,58 @@ fn open(daemon: &DaemonMcpBackend, caller: &Caller, args: &Value) -> Result<Valu
     // The open is the only tracker op that ever changes geometry, and only
     // when the pane is missing and the user hasn't closed it (or `show:true`
     // asks for it back): one frame, naming no focused pane.
+    let mut not_placed = None;
     if !outcome.hidden_by_user {
-        if let Some(tree) = ensure_pane(daemon, &caller.tag) {
-            let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
-                tag: caller.tag.clone(),
-                tree,
-                focused_pane: None,
-            });
+        match ensure_pane(daemon, &caller.tag) {
+            Placement::Placed(tree) => {
+                let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
+                    tag: caller.tag.clone(),
+                    tree,
+                    focused_pane: None,
+                });
+            }
+            Placement::AlreadyThere => {}
+            Placement::NoRoom => not_placed = Some(NOT_PLACED_NO_ROOM),
+            Placement::Failed => not_placed = Some(NOT_PLACED_LAYOUT_FAILED),
         }
     }
-    Ok(open_response(daemon, caller, &outcome))
+    Ok(open_response(daemon, caller, &outcome, not_placed))
 }
 
-/// Adds the tracker pane to `tag`'s layout when it has none; the new tree, or
-/// `None` when nothing changed. Decided and applied under one lock, so two
-/// racing opens place it once.
-fn ensure_pane(daemon: &DaemonMcpBackend, tag: &str) -> Option<PaneTree> {
+/// Why `open` has no pane to show: the layout has no place for it. Fixed text,
+/// never anything the agent or the board said.
+const NOT_PLACED_NO_ROOM: &str = "no_room_in_layout";
+/// Why `open` has no pane to show: the layout would not take it.
+const NOT_PLACED_LAYOUT_FAILED: &str = "layout_rejected";
+
+/// What [`ensure_pane`] did.
+enum Placement {
+    /// The pane was added; this is the focus's new tree.
+    Placed(PaneTree),
+    /// The tree already has it.
+    AlreadyThere,
+    /// The tree has no detail region and no `repl` leaf to put it beside.
+    NoRoom,
+    /// The registry refused the tree with the pane in it.
+    Failed,
+}
+
+/// Adds the tracker pane to `tag`'s layout when it has none. Decided and
+/// applied under one lock, so two racing opens place it once.
+fn ensure_pane(daemon: &DaemonMcpBackend, tag: &str) -> Placement {
     let mut panes = daemon.pane_registry.lock().unwrap_or_else(|e| e.into_inner());
-    let placed = place_tracker(&panes.get_or_init(tag))?;
+    let current = panes.get_or_init(tag);
+    if has_tracker(&current) {
+        return Placement::AlreadyThere;
+    }
+    let Some(placed) = place_tracker(&current) else {
+        return Placement::NoRoom;
+    };
     match panes.set_layout(tag, &json!({ "tree": placed })) {
-        Ok(tree) => Some(tree),
+        Ok(tree) => Placement::Placed(tree),
         Err(err) => {
             tracing::warn!(tag, code = err.code(), "tracker pane could not be placed");
-            None
+            Placement::Failed
         }
     }
 }
@@ -346,7 +375,12 @@ fn write_response(daemon: &DaemonMcpBackend, caller: &Caller, outcome: &WriteOut
     })
 }
 
-fn open_response(daemon: &DaemonMcpBackend, caller: &Caller, outcome: &OpenOutcome) -> Value {
+fn open_response(
+    daemon: &DaemonMcpBackend,
+    caller: &Caller,
+    outcome: &OpenOutcome,
+    not_placed: Option<&'static str>,
+) -> Value {
     let registry = &*daemon.tracker;
     let mut out = Map::new();
     out.insert("ok".into(), json!(true));
@@ -367,6 +401,9 @@ fn open_response(daemon: &DaemonMcpBackend, caller: &Caller, outcome: &OpenOutco
     }
     if outcome.hidden_by_user {
         out.insert("hidden_by_user".into(), json!(true));
+    }
+    if let Some(reason) = not_placed {
+        out.insert("reason".into(), json!(reason));
     }
     if let Some(board) = &outcome.board {
         out.insert("board".into(), json!(board));

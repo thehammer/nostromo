@@ -89,6 +89,11 @@ fn split_with_tracker() -> PaneTree {
 
 impl Fx {
     fn new() -> Fx {
+        Fx::with_panes(|_| PaneRegistry::in_memory())
+    }
+
+    /// A fixture whose pane registry is `panes(dir)`, `dir` being the fixture's temp directory.
+    fn with_panes(panes: impl FnOnce(&Path) -> PaneRegistry) -> Fx {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let repo = base.join("repo");
@@ -105,7 +110,7 @@ impl Fx {
         let clock = Arc::new(FakeClock::at_secs(1_760_540_000));
         let parts = RegistryParts::hermetic(state_root, home, clock);
         let registry = Arc::new(TrackerRegistry::new(parts));
-        let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+        let panes = Arc::new(Mutex::new(panes(&base)));
         let (tx, rx) = broadcast::channel::<ServerMsg>(8192);
         let state = McpSharedState::for_daemon(DaemonMcpBackend {
             pane_registry: Arc::clone(&panes),
@@ -452,6 +457,30 @@ async fn visible_means_the_leaf_is_in_the_tree_and_a_window_reported_rendering_i
     fx.panes.lock().unwrap().close_tab(TAG_A, "tracker").unwrap();
     let w = fx.ok(TAG_A, json!({"op": "log", "text": "v"})).await;
     assert_eq!(w["visible"], json!(false), "the leaf is gone from the tree: {w}");
+}
+
+#[tokio::test]
+async fn open_says_why_the_pane_is_not_visible_when_the_layout_has_no_place_for_it() {
+    // A layout from an older daemon's store: no `repl` leaf, no detail region.
+    let fx = Fx::with_panes(|dir| {
+        let store = dir.join("panes.json");
+        let tree = json!({"kind": "leaf", "pane_id": "notes"});
+        std::fs::write(&store, json!({"version": 3, "trees": {TAG_A: tree}, "bindings": {}}).to_string()).unwrap();
+        PaneRegistry::with_store_path(store)
+    });
+    fx.seat(TAG_A, "sess-a");
+    assert_eq!(ids(&fx.tree(TAG_A)), vec!["notes"], "setup: nothing to put the tracker beside");
+
+    let opened = fx.open(TAG_A, "triage").await;
+
+    assert_eq!(opened["visible"], json!(false), "{opened}");
+    assert_eq!(opened["reason"], json!("no_room_in_layout"), "the agent is told why: {opened}");
+    assert!(!any_focus_layout(&fx.drain()), "nothing was placed, so nothing was announced");
+    assert_eq!(ids(&fx.tree(TAG_A)), vec!["notes"], "the layout is untouched");
+
+    // A normal open carries no reason.
+    fx.seat(TAG_B, "sess-b");
+    assert!(fx.open(TAG_B, "other").await.get("reason").is_none());
 }
 
 #[tokio::test]
