@@ -623,7 +623,7 @@ final class BackgroundTaskListTests: XCTestCase {
         for c in cases {
             let sign = build([c.task]).running.first?.signOfLife
             XCTAssertEqual(sign, c.expected, c.name)
-            if let sign { XCTAssertFalse(sign.contains("0 tokens"), c.name) }
+            if let sign { XCTAssertFalse(sign.hasPrefix("0 ") || sign.contains("\u{00B7} 0 "), "\(c.name): a zero was shown: \(sign)") }
         }
     }
 

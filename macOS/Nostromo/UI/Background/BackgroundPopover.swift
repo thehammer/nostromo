@@ -483,7 +483,8 @@ final class BackgroundPopoverViewController: NSViewController {
         let rows = next.allRows
         defer { lastStatuses = Dictionary(rows.map { ($0.id, $0.status) }, uniquingKeysWith: { a, _ in a }) }
         guard reloadCount > 1 else { return }   // the first load is not news
-        let failed = rows.filter { $0.isFailed && lastStatuses[$0.id].map { $0 != .failed } == true }
+        // A task seen failing, or one that started and failed between two snapshots.
+        let failed = rows.filter { $0.isFailed && lastStatuses[$0.id] != .failed }
         guard !failed.isEmpty else { return }
         announce(failed.count == 1 ? "\(failed[0].title) failed" : "\(failed.count) background tasks failed")
     }
