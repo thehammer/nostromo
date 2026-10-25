@@ -36,19 +36,16 @@ impl Default for HueyConfig {
 pub fn resolve(agents: Option<&toml::Value>) -> (HueyConfig, Vec<String>) {
     let mut cfg = HueyConfig::default();
     let mut warnings = Vec::new();
-    let Some(table) = agents
-        .and_then(toml::Value::as_table)
-        .and_then(|t| {
-            // Same winner as `agents::resolve`: the last matching key that is
-            // a usable table (a table whose `enabled`, if any, is a bool), so
-            // the switch and these settings always come from one table.
-            t.iter()
-                .filter(|(k, _)| k.eq_ignore_ascii_case("huey"))
-                .filter_map(|(_, v)| v.as_table())
-                .filter(|t| matches!(t.get("enabled"), None | Some(toml::Value::Boolean(_))))
-                .last()
-        })
-    else {
+    let Some(table) = agents.and_then(toml::Value::as_table).and_then(|t| {
+        // Same winner as `agents::resolve`: the last matching key that is
+        // a usable table (a table whose `enabled`, if any, is a bool), so
+        // the switch and these settings always come from one table.
+        t.iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("huey"))
+            .filter_map(|(_, v)| v.as_table())
+            .filter(|t| matches!(t.get("enabled"), None | Some(toml::Value::Boolean(_))))
+            .last()
+    }) else {
         return (cfg, warnings);
     };
     for (key, value) in table {
