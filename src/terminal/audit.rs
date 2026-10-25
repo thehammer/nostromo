@@ -79,7 +79,7 @@ pub enum AuditEvent {
         pane_id: String,
         tag: String,
         kind: TerminalKind,
-        /// `exited`, `user_closed`, `daemon_stopped`, `pane_missing`.
+        /// `exited`, `user_closed`, `focus_removed`, `daemon_stopped`, `pane_missing`.
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,

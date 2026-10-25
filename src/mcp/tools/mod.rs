@@ -23,6 +23,7 @@ pub mod render_state;
 pub mod set_pane;
 pub mod show;
 pub mod teri;
+pub mod terminal;
 pub mod tracker;
 
 use serde_json::{json, Value};
@@ -357,6 +358,17 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "required": ["agent", "title"]
             }
         }),
+        json!({
+            "name": OPEN_TERMINAL_TOOL,
+            "description": "Open a terminal pane (the user's login shell) in your own focus, optionally in a given working directory (an absolute path to an existing directory; default: your session's working directory). Returns { ok, terminal_id, pane_id }. Only the user types into the terminal: you cannot type into it, read what it shows, or close it, and no tool does. It takes no command, arguments, environment or initial input. Errors: unknown_view, invalid_working_directory, unknown_argument (any other key; nothing is opened), terminal_limit_reached, terminal_agent_quota_reached (agents may keep only a few terminals open; the user closes them), terminal_open_failed, terminal_audit_unavailable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "working_directory": { "type": "string", "description": "Absolute path of an existing directory to start the shell in; omit to use your session's working directory" }
+                },
+                "additionalProperties": false
+            }
+        }),
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
@@ -562,13 +574,33 @@ fn is_picks_session(pty_id: Option<&str>) -> bool {
     pty_id == Some(crate::data::work::picks::PICKS_TAG)
 }
 
-/// The tools that reach Teri/Fred-derived data or Mother jobs: withheld from a
-/// session an unauthenticated network peer is steering (see
-/// `SensitiveTags::mark_network_driven`).
+/// The tools withheld from a session an unauthenticated network peer is
+/// steering (see `SensitiveTags::mark_network_driven`): those that reach
+/// Teri/Fred-derived data or Mother jobs, and the one that starts a login
+/// shell on the Mac (in a directory the caller picks), which a network peer
+/// must never get by steering an agent.
 fn is_network_withheld_tool(name: &str) -> bool {
-    ["fred.", "teri.", "mother."]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    name == OPEN_TERMINAL_TOOL
+        || ["fred.", "teri.", "mother."]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// The tool that opens a terminal pane.
+const OPEN_TERMINAL_TOOL: &str = "nostromo.open_terminal";
+
+/// `Forbidden` for `name`. A refused [`OPEN_TERMINAL_TOOL`] is also audited
+/// (`refused`, `op: "open"`, `code: "forbidden"`: the focus and tool name,
+/// never the arguments), whoever asked and whichever rule refused it.
+fn forbidden(state: &McpSharedState, pty_id: Option<&str>, name: &str) -> ToolResult {
+    if name == OPEN_TERMINAL_TOOL {
+        if let Some(daemon) = &state.daemon {
+            daemon
+                .terminals
+                .audit_refusal(pty_id, "open", name, "forbidden");
+        }
+    }
+    ToolResult::Forbidden(name.to_string())
 }
 
 /// The built-in views whose state is Teri/Fred/Mother data.
@@ -691,6 +723,14 @@ pub enum ToolResult {
     /// daemon is broken and retry, where "not available to you" is a fact it
     /// can act on. The PRD asks for exactly this distinction.
     Forbidden(String),
+    /// The name is shaped like a request to write to, read from or close a
+    /// terminal. No such tool exists and none ever will for an agent; the
+    /// attempt is audited and answered with its own JSON-RPC code, distinct
+    /// from [`ToolResult::UnknownTool`] and [`ToolResult::Forbidden`].
+    TerminalForbidden {
+        op: terminal::TerminalOp,
+        name: String,
+    },
 }
 
 /// Dispatch a `tools/call` request.
@@ -721,6 +761,21 @@ async fn dispatch_inner(
     state: &McpSharedState,
     pty_id: Option<&str>,
 ) -> ToolResult {
+    // A terminal-shaped name is refused (and audited) whoever asks and
+    // whatever the policy says: no registered tool matches, so this never
+    // shadows a real one.
+    if let Some(op) = terminal::classify_terminal_attempt(name) {
+        if let Some(daemon) = &state.daemon {
+            daemon
+                .terminals
+                .audit_refusal(pty_id, op.as_str(), name, &op.forbidden_code());
+        }
+        return ToolResult::TerminalForbidden {
+            op,
+            name: name.to_string(),
+        };
+    }
+
     // A disabled agent's tools do not exist (not merely forbidden).
     if !state.enabled_agents.allows_tool(name) {
         return ToolResult::UnknownTool(name.to_string());
@@ -728,7 +783,7 @@ async fn dispatch_inner(
 
     // The picks session may call its three tools and nothing else.
     if is_picks_session(pty_id) && !PICKS_TOOLS.contains(&name) {
-        return ToolResult::Forbidden(name.to_string());
+        return forbidden(state, pty_id, name);
     }
 
     // A session a network peer is steering gets no tool that reaches Teri/Fred
@@ -743,7 +798,7 @@ async fn dispatch_inner(
             let refusal = json!({ "ok": false, "error": "requires_secure_connection" });
             return ToolResult::Ok(vec![json!({"type": "text", "text": refusal.to_string()})]);
         }
-        return ToolResult::Forbidden(name.to_string());
+        return forbidden(state, pty_id, name);
     }
 
     // ── per-caller withdrawal (W5 — curated-agent-views, B8/D7) ─────────────
@@ -759,7 +814,7 @@ async fn dispatch_inner(
         if !policy.is_empty() {
             let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id).await;
             if policy.denies(agent.as_deref(), name) {
-                return ToolResult::Forbidden(name.to_string());
+                return forbidden(state, pty_id, name);
             }
         }
     }
@@ -839,11 +894,11 @@ async fn dispatch_inner(
         // ── Phase 3: pane / view mutations ────────────────────────────────
         "nostromo.set_pane_content" => {
             let args = arguments.cloned().unwrap_or_default();
-            set_pane::set_pane_content(state, &args).await
+            set_pane::set_pane_content(state, &args, pty_id).await
         }
         "nostromo.set_pane_layout" => {
             let args = arguments.cloned().unwrap_or_default();
-            set_pane::set_pane_layout(state, &args).await
+            set_pane::set_pane_layout(state, &args, pty_id).await
         }
 
         // ── agent-driven pane layout (Phase 1) ────────────────────────────
@@ -859,6 +914,7 @@ async fn dispatch_inner(
             let args = arguments.cloned().unwrap_or_default();
             create_focus::create_focus(state, &args, pty_id).await
         }
+        OPEN_TERMINAL_TOOL => terminal::open_terminal(state, arguments, pty_id).await,
         "nostromo.apply_layout" => {
             let args = arguments.cloned().unwrap_or_default();
             apply_layout::apply_layout(state, &args, pty_id).await

@@ -14,6 +14,7 @@
 //! broadcast under `Topic::Terminal`. See `docs/terminal.md`.
 
 pub mod access;
+pub mod agent_api;
 pub mod audit;
 mod fanout;
 pub mod session;
@@ -31,6 +32,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 pub use access::OperatorCap;
+pub use agent_api::TerminalAgentApi;
 use audit::{AuditEvent, AuditLog, RefusalChannel};
 use fanout::Fanout;
 use session::{InputError, SignalOps, TerminalSession};
@@ -72,6 +74,15 @@ pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
 pub const MAX_TERMINALS_PER_FOCUS: usize = 8;
 /// Terminals the daemon may have at once, across all focuses.
 pub const MAX_TERMINALS: usize = 32;
+/// Terminals agents may have opened, in one focus (live or ended). Lower than
+/// [`MAX_TERMINALS_PER_FOCUS`] so an agent in a loop cannot fill a focus: the
+/// rest is the user's.
+pub const MAX_AGENT_TERMINALS_PER_FOCUS: usize = 2;
+/// Terminals agents may have opened across the daemon. Lower than
+/// [`MAX_TERMINALS`], so a few agents cannot fill the daemon either.
+pub const MAX_AGENT_TERMINALS: usize = 6;
+/// `requested_by.kind` of a terminal an agent's focus opened.
+const AGENT_REQUESTER: &str = "focus";
 
 /// A verified operator-app connection, as the terminal manager knows it.
 pub struct OperatorConn {
@@ -96,6 +107,10 @@ pub enum TerminalError {
     InputTooLarge,
     /// [`MAX_TERMINALS_PER_FOCUS`] or [`MAX_TERMINALS`] terminals exist already.
     TooManyTerminals,
+    /// An agent has opened [`MAX_AGENT_TERMINALS_PER_FOCUS`] terminals in this
+    /// focus, or agents [`MAX_AGENT_TERMINALS`] in the daemon: the user can
+    /// still open more, and closes the agents' to free their quota.
+    AgentQuotaReached,
     /// The audit trail cannot be written, so no terminal is opened.
     AuditUnavailable,
     /// The daemon is stopping.
@@ -118,6 +133,7 @@ impl TerminalError {
             TerminalError::InputBusy => "terminal_input_busy",
             TerminalError::InputTooLarge => "terminal_input_too_large",
             TerminalError::TooManyTerminals => "terminal_limit_reached",
+            TerminalError::AgentQuotaReached => "terminal_agent_quota_reached",
             TerminalError::AuditUnavailable => "terminal_audit_unavailable",
             TerminalError::ShuttingDown => "daemon_shutting_down",
             TerminalError::InvalidWorkingDirectory => "invalid_working_directory",
@@ -351,7 +367,7 @@ impl TerminalManager {
             ..OpenLocal::default()
         };
         let requester = TerminalRequester {
-            kind: "focus".into(),
+            kind: AGENT_REQUESTER.into(),
             tag: Some(tag.to_string()),
         };
         self.open(req, requester)
@@ -380,6 +396,19 @@ impl TerminalManager {
         {
             return Err(TerminalError::TooManyTerminals);
         }
+        if requested_by.kind == AGENT_REQUESTER {
+            let by_agents = || {
+                self.terminals
+                    .values()
+                    .filter(|t| t.info.requested_by.kind == AGENT_REQUESTER)
+            };
+            if by_agents().count() >= MAX_AGENT_TERMINALS
+                || by_agents().filter(|t| t.info.tag == req.tag).count()
+                    >= MAX_AGENT_TERMINALS_PER_FOCUS
+            {
+                return Err(TerminalError::AgentQuotaReached);
+            }
+        }
         let cwd = resolve_cwd(req.cwd.as_deref())?;
         let position = SplitPosition::parse(req.position.as_deref().unwrap_or(DEFAULT_POSITION))
             .map_err(TerminalError::Pane)?;
@@ -391,7 +420,7 @@ impl TerminalManager {
         let tree = match self.lock_panes() {
             Some(mut panes) => Some(
                 panes
-                    .insert_terminal_leaf(&req.tag, relative_to, position, &pane_id)
+                    .insert_registered_terminal_leaf(&req.tag, relative_to, position, &pane_id)
                     .map_err(TerminalError::Pane)?,
             ),
             None => None,
@@ -404,9 +433,6 @@ impl TerminalManager {
                 return Err(TerminalError::OpenFailed);
             }
         };
-        if let Some(mut panes) = self.lock_panes() {
-            panes.register_terminal_leaf(&req.tag, &pane_id);
-        }
 
         let user_opened = requested_by.kind == "user";
         let info = TerminalInfo {
@@ -603,6 +629,29 @@ impl TerminalManager {
         Ok(())
     }
 
+    /// The focus `tag` is gone (the app pushed a registry without it): end its
+    /// shells and drop their records and leaves, audited `focus_removed`. One
+    /// of the manager's own removal paths, reached only by the daemon, never by
+    /// a connection or an agent.
+    pub(crate) fn close_focus(&mut self, tag: &str) {
+        let ids: Vec<String> = self
+            .terminals
+            .iter()
+            .filter(|(_, t)| t.info.tag == tag)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            let Some(t) = self.terminals.remove(&id) else {
+                continue;
+            };
+            if let Some(session) = &t.session {
+                session.kill();
+            }
+            t.fanout.close();
+            self.finish_closed(t.info, "focus_removed", None);
+        }
+    }
+
     /// A fresh shell in an `ended` local terminal's pane, under a new id.
     pub fn restart(
         &mut self,
@@ -678,6 +727,53 @@ impl TerminalManager {
         peer_pid: Option<i32>,
         peer_exe: Option<String>,
     ) {
+        self.audit_refused_as(
+            channel,
+            op,
+            code,
+            terminal_id,
+            None,
+            None,
+            peer_pid,
+            peer_exe,
+        );
+    }
+
+    /// [`Self::audit_refused`] for a refusal on the MCP socket: it names the
+    /// calling `focus` (its Hello `pty_id`, shown as the audit trail shows any
+    /// focus) and the `tool` or frame that was refused.
+    pub fn audit_refused_mcp(
+        &self,
+        op: &str,
+        code: Option<&str>,
+        terminal_id: Option<&str>,
+        focus: Option<&str>,
+        tool: Option<&str>,
+    ) {
+        self.audit_refused_as(
+            RefusalChannel::Mcp,
+            op,
+            code,
+            terminal_id,
+            focus,
+            tool,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn audit_refused_as(
+        &self,
+        channel: RefusalChannel,
+        op: &str,
+        code: Option<&str>,
+        terminal_id: Option<&str>,
+        focus: Option<&str>,
+        tool: Option<&str>,
+        peer_pid: Option<i32>,
+        peer_exe: Option<String>,
+    ) {
         if !self.take_refusal_budget(channel) {
             return;
         }
@@ -688,11 +784,22 @@ impl TerminalManager {
             terminal_id: terminal_id
                 .filter(|id| is_id_shaped(id))
                 .map(str::to_string),
-            focus: None,
+            focus: focus.map(|f| self.audit_tag(f)),
             peer_pid,
             peer_exe,
-            tool: None,
+            tool: tool.map(str::to_string),
         });
+    }
+
+    /// Does `tag` have any terminal, live or ended?
+    pub(crate) fn has_terminals(&self, tag: &str) -> bool {
+        self.terminals.values().any(|t| t.info.tag == tag)
+    }
+
+    /// Whether `pane_id` in `tag` is a registered terminal leaf.
+    pub fn is_terminal_leaf(&self, tag: &str, pane_id: &str) -> bool {
+        self.lock_panes()
+            .is_some_and(|panes| panes.is_terminal_leaf(tag, pane_id))
     }
 
     /// May one more `refused` line for `channel` be written in its window?

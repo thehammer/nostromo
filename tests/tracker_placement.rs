@@ -133,6 +133,7 @@ impl Fx {
             )),
             tickets: Default::default(),
             tracker: Arc::clone(&registry),
+            terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
         });
         // As nostromd does after building the backend.
         registry.follow_panes(&panes, tx);
@@ -165,6 +166,7 @@ impl Fx {
             }
             ToolResult::UnknownTool(n) => panic!("unknown tool {n}"),
             ToolResult::Forbidden(n) => panic!("forbidden tool {n}"),
+            ToolResult::TerminalForbidden { name, .. } => panic!("terminal-forbidden tool {name}"),
         }
     }
 

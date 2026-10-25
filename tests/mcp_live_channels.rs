@@ -75,6 +75,7 @@ async fn harness_with_feed(feed: JobsFeed) -> Harness {
         )),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     let (queue_tx, queue_rx) = watch::channel(None);
     let (_pr_tx, pr_rx) = watch::channel(nostromo::data::perri_pr::no_prs());

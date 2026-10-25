@@ -1343,6 +1343,67 @@ Source: `src/mcp/tool_policy.rs`, `src/mcp/server.rs` (`TOOL_FORBIDDEN_CODE`),
 
 ---
 
+## Terminals
+
+### `nostromo.open_terminal`
+
+Open a terminal pane (the user's login shell) in the caller's own focus. The user types into it; **no MCP tool can write to, read from or close a terminal**.
+
+**Input** (the only property is optional; `additionalProperties: false`):
+```json
+{ "working_directory": "/Users/me/Code/repo" }
+```
+
+`working_directory` must be an absolute path to an existing directory. Default: the focus session's working directory, else `$HOME`. There is no `command`, `args`, `env`, `initial_input` or `view_id`: the target is always the caller's own focus (its Hello `pty_id`).
+
+No Nostromo path lets an agent run anything in the terminal. The starting directory is the agent's choice, though, so anything the user's shell runs on its own in a directory (prompt hooks, a trusted `direnv`/`mise` file, `core.fsmonitor`) runs there as the user would expect it to in any terminal opened in that directory. Agent-opened terminals count against the same per-focus (8) and daemon-wide (32) limits as the user's, and agents also have a lower quota of their own: 2 open per focus and 6 across the daemon (live or ended; only the user closes one, which frees the quota). The rest is reserved for the user, so an agent in a loop cannot leave the user with `terminal_limit_reached`.
+
+**Who may call it.** A plain agent session (a Hello `pty_id` naming a focus). It is refused with `-32001` (`Forbidden`, the same as a tool the operator's policy withdraws) before anything else happens for: a session an unauthenticated network peer is steering (it is also hidden from that session's `tools/list`), the picks session (`PICKS_TOOLS` only), and an agent the operator's `tool-policy.yaml` denies it to. Each refusal is audited (`refused {channel: "mcp", op: "open", code: "forbidden", focus, tool}`: no arguments) and starts nothing. A Mother worker connects with no focus (no `NOSTROMO_PTY_ID`), so it gets `unknown_view` and nothing opens.
+
+The tool's name is `nostromo.open_terminal` (a dot, like `nostromo.show`); the plan wrote `nostromo_open_terminal`. The MCP refusal audit budget (120 lines a minute) is per channel (all MCP callers share it), not per focus.
+
+**Output**: `{ "ok": true, "terminal_id": "<uuid>", "pane_id": "terminal-<8 hex>" }`. The new leaf does not take keyboard focus. The open is audited (`opened`, `requested_by: focus`).
+
+| `error` | Meaning |
+|---|---|
+| `unknown_argument` | Any key other than `working_directory`; `detail` is the key. Nothing is created. |
+| `invalid_working_directory` | Relative, missing or not a directory. |
+| `unknown_view` | No identifiable caller, or its focus is unknown to the daemon. |
+| `terminal_limit_reached` | The focus (8) or the daemon (32) is at its terminal limit. |
+| `terminal_agent_quota_reached` | Agents already have 2 terminals open in this focus or 6 in the daemon; the user can still open more, and closing one frees the quota. Audited (`refused`, `op: "open"`). |
+| `terminal_open_failed` / `terminal_audit_unavailable` | The shell could not start, or the audit log cannot be written (no terminal runs unaudited). |
+| `not_supported` | Not hosted by `nostromo` (the daemon). |
+
+Source: `src/mcp/tools/terminal.rs`, `src/terminal/agent_api.rs`
+
+### Refused terminal paths: JSON-RPC `-32002`
+
+A request on the MCP socket that looks like writing to, reading from or closing a terminal gets its own JSON-RPC error code, **`-32002`** (`TERMINAL_FORBIDDEN_CODE`, `src/mcp/server.rs`), distinct from `-32601` (no such tool) and `-32001` (withdrawn by policy). The message is `terminal_<op>_forbidden: <name>` with `op` one of `input`, `read`, `close`. Each is audited as `refused {channel: "mcp", focus, op, tool}` and changes nothing.
+
+- `tools/call` with a name that mentions `terminal|shell|pty|tty|console` and an op verb (input: `input|write|send|key|paste|type|signal|kill|interrupt|exec|run|stdin`; read: `read|output|screen|scrollback|tail|capture|snapshot`; close: `close|remove|destroy|detach|stop`), or a bare `send_keys`/`stdin`-style name. No such tool is registered. A real tool that the classifier would match must be added to `EXEMPT_TOOL_NAMES` (`src/mcp/tools/terminal.rs`); a test fails if any registered name is classified.
+- A raw frame with no `jsonrpc` key whose `type` starts `terminal_`/`pty_`, or a request whose `method` starts `terminal/`/`pty/` (case, `.` and `-` for `_` are normalised).
+
+`src/mcp/` cannot name the terminal write path at all: `tests/terminal_policy.rs` scans it as text for `OperatorCap`, `TerminalManager`, the terminal-input message, `.input(`, `access::` and `mint(` (the way to get a cap). The scan is a tripwire (an alias could get around it); the real guard is that `TerminalAgentApi.manager` is a private field, so MCP code can only open, ask and audit. Terminal I/O is only available to the verified Mac app over IPC ([`../terminal.md`](../terminal.md)).
+
+### `terminal_pane_protected` and `reserved_pane_id`
+
+An agent layout call cannot remove, replace or overwrite a live terminal pane. The call fails with `{"error": "terminal_pane_protected"}`, changes nothing and is audited (`refused`, `op: "layout"` or `"content"`):
+
+| Tool | Refused when |
+|---|---|
+| `nostromo.reset_panes` | the focus has a live terminal |
+| `nostromo.set_pane_layout` / `nostromo.apply_layout` | the new tree omits a live terminal's leaf; `apply_layout` also refuses a `panes` entry that names one (`content`) |
+| `nostromo.set_pane_content` / `nostromo.refresh_pane_content` | `pane_id` is a live terminal's pane (`content`) |
+| `nostromo.show` | its placement would land in or close a terminal pane (never happens in practice: terminal tabs are pinned) |
+
+`nostromo.set_pane_layout` and `nostromo.apply_layout` cannot hide a terminal either (`nostromo.show` can still open a new frontmost tab over the terminal's tab: the terminal stays one click away). A full tree that puts a live terminal's leaf in a `tabs` node as an inactive tab fails with `terminal_pane_hidden`, and a tree or ratio map that leaves a terminal's leaf (or any subtree holding it) under 10% of the layout (the ratios multiply down the tree, so two 0.3 splits leave 0.09), or a split holding it with a zero or negative ratio, fails with `terminal_pane_too_small`; both change nothing and are audited like the above (`op: "layout"`).
+
+A ratio-only `set_pane_layout` (including one naming the terminal's pane, as long as it keeps the pane at 10% or more of the layout) and a full tree that keeps the leaf visible still succeed. A terminal goes away only when the user closes it, its shell exits, or its focus is removed (`closed`, reason `user_closed`/`exited`/`focus_removed`).
+
+Pane ids starting with `terminal-` are reserved: `nostromo.create_pane` with one, or a full tree (`set_pane_layout`, `apply_layout`) containing a `terminal-` leaf that is not a live terminal of that focus, fails with `reserved_pane_id`.
+
+---
+
 ## Agent tracker
 
 | Tool | Purpose | Reference |

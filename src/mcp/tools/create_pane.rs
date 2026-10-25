@@ -20,6 +20,7 @@ use crate::mcp::state::McpSharedState;
 // which made that rule decide *which PR a request resolves against*; two
 // copies of a rule that load-bearing is a drift waiting to happen.
 use crate::mcp::tools::apply_layout::target_tag;
+use crate::mcp::tools::terminal;
 
 /// Handle `nostromo.create_pane`.
 pub async fn create_pane(state: &McpSharedState, args: &Value, pty_id: Option<&str>) -> Value {
@@ -68,7 +69,10 @@ pub async fn create_pane(state: &McpSharedState, args: &Value, pty_id: Option<&s
             });
             json!({ "ok": true, "tree": tree })
         }
-        Err(e) => json!({ "error": e.code() }),
+        Err(e) => {
+            terminal::audit_pane_refusal(daemon, pty_id, "nostromo.create_pane", e);
+            json!({ "error": e.code() })
+        }
     }
 }
 
@@ -101,6 +105,9 @@ pub async fn reset_panes(state: &McpSharedState, args: &Value, pty_id: Option<&s
             });
             json!({ "ok": true })
         }
-        Err(e) => json!({ "error": e.code() }),
+        Err(e) => {
+            terminal::audit_pane_refusal(daemon, pty_id, "nostromo.reset_panes", e);
+            json!({ "error": e.code() })
+        }
     }
 }

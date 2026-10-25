@@ -107,6 +107,7 @@ fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
         decisions: decisions.clone(),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     let (state, pr_tx, queue_tx) = match pr_source {
         PrSource::StateOwned => (McpSharedState::for_daemon(backend), None, None),

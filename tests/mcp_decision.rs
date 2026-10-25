@@ -55,6 +55,7 @@ fn make_daemon_state() -> Harness {
         decisions: decisions.clone(),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),
@@ -935,6 +936,7 @@ async fn make_combined_harness() -> CombinedHarness {
         decisions: decisions.clone(),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     let mcp_server = McpServer::bind(mcp_socket_path.clone(), McpSharedState::for_daemon(backend))
         .await

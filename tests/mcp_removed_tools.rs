@@ -87,6 +87,7 @@ fn make_daemon_state(dir: &TempDir) -> McpSharedState {
         )),
         tickets: TicketRegistryState::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     })
 }
 

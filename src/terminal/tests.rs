@@ -30,7 +30,7 @@ use super::session::{
 use super::store::{self, TerminalRecord, TerminalStore};
 use super::{
     OpenLocal, StreamBatch, Terminal, TerminalConfig, TerminalError, TerminalManager,
-    MAX_TERMINALS, MAX_TERMINALS_PER_FOCUS,
+    MAX_AGENT_TERMINALS, MAX_AGENT_TERMINALS_PER_FOCUS, MAX_TERMINALS, MAX_TERMINALS_PER_FOCUS,
 };
 use crate::ipc::orphans::{child_unreaped, Target};
 use crate::ipc::pane_registry::{PaneRegistry, SplitPosition};
@@ -1671,6 +1671,212 @@ fn a_focus_may_have_eight_terminals_and_the_ninth_is_refused_without_a_leaf_or_a
     shut_down(&mgr);
 }
 
+// ── agent quota: an agent in a loop cannot use up the user's room ─────────────
+
+/// A manager with a pane registry, so a placed (or not placed) leaf is visible.
+fn quota_manager() -> (Arc<Mutex<PaneRegistry>>, Arc<Mutex<TerminalManager>>) {
+    let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+    let mgr = TerminalManager::new(TerminalConfig {
+        pane_registry: Some(Arc::clone(&panes)),
+        ..TerminalConfig::in_memory()
+    });
+    (panes, mgr)
+}
+
+fn agent_opens(
+    mgr: &Arc<Mutex<TerminalManager>>,
+    tag: &str,
+    cwd: &Path,
+) -> Result<TerminalInfo, TerminalError> {
+    mgr.lock()
+        .unwrap()
+        .open_local_for_agent(tag, Some(cwd.to_path_buf()))
+}
+
+fn user_opens(
+    mgr: &Arc<Mutex<TerminalManager>>,
+    tag: &str,
+    cwd: &Path,
+) -> Result<TerminalInfo, TerminalError> {
+    mgr.lock()
+        .unwrap()
+        .open_local(&access_cap(), open_in(cwd, tag))
+}
+
+fn terminals_in(mgr: &Arc<Mutex<TerminalManager>>, tag: &str) -> usize {
+    mgr.lock()
+        .unwrap()
+        .list()
+        .iter()
+        .filter(|t| t.tag == tag)
+        .count()
+}
+
+#[test]
+fn agents_have_a_smaller_quota_than_the_general_terminal_limits() {
+    assert_eq!(MAX_AGENT_TERMINALS_PER_FOCUS, 2);
+    assert_eq!(MAX_AGENT_TERMINALS, 6);
+    const { assert!(MAX_AGENT_TERMINALS_PER_FOCUS < MAX_TERMINALS_PER_FOCUS) };
+    const { assert!(MAX_AGENT_TERMINALS < MAX_TERMINALS) };
+    assert_eq!(
+        TerminalError::AgentQuotaReached.code(),
+        "terminal_agent_quota_reached"
+    );
+}
+
+#[test]
+fn an_agent_may_open_two_terminals_in_a_focus_and_the_third_is_refused_without_a_leaf_or_a_process()
+{
+    let (_tmp, cwd) = scratch_dir();
+    let (panes, mgr) = quota_manager();
+    // The user already has some terminals here: they are not the agent's.
+    for _ in 0..3 {
+        user_opens(&mgr, "agent-focus", &cwd).expect("the user opens");
+    }
+    for i in 0..MAX_AGENT_TERMINALS_PER_FOCUS {
+        agent_opens(&mgr, "agent-focus", &cwd).unwrap_or_else(|e| {
+            panic!(
+                "agent terminal {} was refused (the user's own must not count): {e:?}",
+                i + 1
+            )
+        });
+    }
+    let leaves = panes.lock().unwrap().pane_ids("agent-focus");
+    let started = mgr.lock().unwrap().list().len();
+    assert_eq!(started, 3 + MAX_AGENT_TERMINALS_PER_FOCUS);
+
+    let refused =
+        agent_opens(&mgr, "agent-focus", &cwd).expect_err("a third agent terminal in one focus");
+
+    assert_eq!(refused, TerminalError::AgentQuotaReached);
+    assert_eq!(refused.code(), "terminal_agent_quota_reached");
+    assert_eq!(
+        panes.lock().unwrap().pane_ids("agent-focus"),
+        leaves,
+        "a refused open places no leaf"
+    );
+    assert_eq!(
+        mgr.lock().unwrap().list().len(),
+        started,
+        "a refused open starts no terminal"
+    );
+
+    // The rest of the focus is the user's: up to the general limit of 8.
+    for i in (3 + MAX_AGENT_TERMINALS_PER_FOCUS)..MAX_TERMINALS_PER_FOCUS {
+        user_opens(&mgr, "agent-focus", &cwd)
+            .unwrap_or_else(|e| panic!("the user's terminal {} was refused: {e:?}", i + 1));
+    }
+    assert_eq!(terminals_in(&mgr, "agent-focus"), MAX_TERMINALS_PER_FOCUS);
+    assert_eq!(
+        user_opens(&mgr, "agent-focus", &cwd).expect_err("the ninth"),
+        TerminalError::TooManyTerminals,
+        "the user is held only to the general limit"
+    );
+
+    shut_down(&mgr);
+}
+
+#[test]
+fn another_focus_has_its_own_agent_quota_of_two() {
+    let (_tmp, cwd) = scratch_dir();
+    let (_panes, mgr) = quota_manager();
+    for _ in 0..MAX_AGENT_TERMINALS_PER_FOCUS {
+        agent_opens(&mgr, "focus-a", &cwd).expect("focus a");
+    }
+    assert_eq!(
+        agent_opens(&mgr, "focus-a", &cwd).expect_err("focus a is at its quota"),
+        TerminalError::AgentQuotaReached
+    );
+
+    for _ in 0..MAX_AGENT_TERMINALS_PER_FOCUS {
+        agent_opens(&mgr, "focus-b", &cwd).expect("focus b is not affected by focus a");
+    }
+
+    shut_down(&mgr);
+}
+
+#[test]
+fn agents_across_focuses_may_hold_six_terminals_and_the_seventh_is_refused_while_the_user_can_still_open(
+) {
+    let (_tmp, cwd) = scratch_dir();
+    let (panes, mgr) = quota_manager();
+    let focuses = ["focus-a", "focus-b", "focus-c"];
+    assert_eq!(
+        focuses.len() * MAX_AGENT_TERMINALS_PER_FOCUS,
+        MAX_AGENT_TERMINALS,
+        "harness: three full focuses make the daemon-wide quota"
+    );
+    for tag in focuses {
+        for _ in 0..MAX_AGENT_TERMINALS_PER_FOCUS {
+            agent_opens(&mgr, tag, &cwd).unwrap_or_else(|e| panic!("{tag}: {e:?}"));
+        }
+    }
+    panes.lock().unwrap().get_or_init("fresh-focus");
+    let leaves = panes.lock().unwrap().pane_ids("fresh-focus");
+    let started = mgr.lock().unwrap().list().len();
+    assert_eq!(started, MAX_AGENT_TERMINALS);
+
+    let refused = agent_opens(&mgr, "fresh-focus", &cwd)
+        .expect_err("a seventh agent terminal in the daemon, in a focus with none");
+
+    assert_eq!(refused, TerminalError::AgentQuotaReached);
+    assert_eq!(panes.lock().unwrap().pane_ids("fresh-focus"), leaves);
+    assert_eq!(mgr.lock().unwrap().list().len(), started);
+
+    // The user is unaffected: in the fresh focus, and in a full one.
+    user_opens(&mgr, "fresh-focus", &cwd).expect("the user, in the fresh focus");
+    user_opens(&mgr, "focus-a", &cwd).expect("the user, in a focus full of agent terminals");
+    assert_eq!(
+        agent_opens(&mgr, "fresh-focus", &cwd).expect_err("still over the daemon quota"),
+        TerminalError::AgentQuotaReached
+    );
+
+    shut_down(&mgr);
+}
+
+#[test]
+fn the_user_closing_an_agents_terminal_frees_its_quota_in_the_focus_and_in_the_daemon() {
+    let (_tmp, cwd) = scratch_dir();
+    let (_panes, mgr) = quota_manager();
+    let cap = access_cap();
+    let mut ids = Vec::new();
+    for tag in ["focus-a", "focus-b", "focus-c"] {
+        for _ in 0..MAX_AGENT_TERMINALS_PER_FOCUS {
+            ids.push((
+                tag,
+                agent_opens(&mgr, tag, &cwd)
+                    .expect("within quota")
+                    .terminal_id,
+            ));
+        }
+    }
+    assert_eq!(
+        agent_opens(&mgr, "focus-a", &cwd).expect_err("the focus is at its quota"),
+        TerminalError::AgentQuotaReached
+    );
+
+    // Closing one of focus-a's frees a slot in focus-a ...
+    let (_, victim) = ids.iter().find(|(t, _)| *t == "focus-a").unwrap().clone();
+    mgr.lock().unwrap().close(&cap, &victim).expect("close");
+    agent_opens(&mgr, "focus-a", &cwd).expect("the quota freed by the user's close");
+    assert_eq!(
+        agent_opens(&mgr, "focus-a", &cwd).expect_err("full again"),
+        TerminalError::AgentQuotaReached
+    );
+
+    // ... and closing one of focus-b's frees a daemon-wide slot, which a
+    // fresh focus can use.
+    assert_eq!(
+        agent_opens(&mgr, "fresh-focus", &cwd).expect_err("the daemon is at its quota"),
+        TerminalError::AgentQuotaReached
+    );
+    let (_, victim) = ids.iter().find(|(t, _)| *t == "focus-b").unwrap().clone();
+    mgr.lock().unwrap().close(&cap, &victim).expect("close");
+    agent_opens(&mgr, "fresh-focus", &cwd).expect("the daemon-wide quota freed by the close");
+
+    shut_down(&mgr);
+}
+
 #[test]
 fn the_daemon_wide_limit_refuses_a_terminal_past_the_total_whatever_the_focus() {
     let (_tmp, cwd) = scratch_dir();
@@ -1807,8 +2013,10 @@ fn reconcile_never_removes_a_pane_that_is_not_a_terminal_leaf() {
         ("terminal-1234567", SplitPosition::Below),
         ("terminal-123456789", SplitPosition::Below),
     ] {
+        // `insert_terminal_leaf` is the manager's own placement: `create_pane`
+        // refuses the reserved `terminal-` prefix to agents.
         panes
-            .create_pane("t", pane, position, "repl")
+            .insert_terminal_leaf("t", "repl", position, pane)
             .expect("create pane");
     }
 
@@ -2229,4 +2437,103 @@ fn a_connection_that_fell_behind_gets_a_fresh_replay_then_live_output_with_no_ga
     fanout.close();
     s.kill();
     drain.join().expect("drain thread");
+}
+
+// ── a focus going away closes its terminals ───────────────────────────────────
+
+#[test]
+fn closing_a_focus_ends_only_that_focuss_shells_and_leaves_and_audits_each_close() {
+    let (dir, cwd) = scratch_dir();
+    let audit_path = dir.path().join("audit").join("terminal.jsonl");
+    let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+    let mgr = TerminalManager::new(TerminalConfig {
+        audit: AuditLog::open(&audit_path).expect("open the audit log"),
+        store: TerminalStore::in_memory(),
+        pane_registry: Some(Arc::clone(&panes)),
+    });
+    let gone_1 = spawn_with(&["/bin/cat"], &cwd, SignalOps::real());
+    let gone_2 = spawn_with(&["/bin/cat"], &cwd, SignalOps::real());
+    let stays = spawn_with(&["/bin/cat"], &cwd, SignalOps::real());
+    let mut ids = Vec::new();
+    {
+        let mut m = mgr.lock().unwrap();
+        for (tag, n, session) in [
+            ("gone", 1, &gone_1),
+            ("gone", 2, &gone_2),
+            ("stays", 3, &stays),
+        ] {
+            let id = adopt(
+                &mut m,
+                tag,
+                n,
+                TerminalStatus::Running,
+                Some(Arc::clone(session)),
+                &cwd,
+            );
+            let pane = format!("terminal-{n:08x}");
+            let mut reg = panes.lock().unwrap();
+            reg.get_or_init(tag);
+            reg.insert_terminal_leaf(tag, "repl", SplitPosition::Below, &pane)
+                .expect("place the leaf");
+            reg.register_terminal_leaf(tag, &pane);
+            ids.push((tag, id, pane));
+        }
+    }
+
+    mgr.lock().unwrap().close_focus("gone");
+
+    // Its shells end; the other focus's shell runs on.
+    assert!(gone_1.wait_exit(WAIT).is_some(), "the first shell must end");
+    assert!(
+        gone_2.wait_exit(WAIT).is_some(),
+        "the second shell must end"
+    );
+    assert!(
+        !stays.is_exited(),
+        "another focus's shell must not be touched"
+    );
+
+    // Its records and leaves go; the other focus keeps both.
+    let remaining: Vec<String> = mgr
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .map(|t| t.terminal_id)
+        .collect();
+    assert_eq!(remaining, vec![ids[2].1.clone()]);
+    {
+        let reg = panes.lock().unwrap();
+        assert!(reg.terminal_leaves("gone").is_empty());
+        assert!(!reg
+            .pane_ids("gone")
+            .iter()
+            .any(|p| p.starts_with("terminal-")));
+        assert_eq!(reg.terminal_leaves("stays"), vec![ids[2].2.clone()]);
+        assert!(reg.pane_ids("stays").contains(&ids[2].2));
+    }
+
+    // Each close is audited with its reason; the survivor has none.
+    let lines = jsonl(&audit_path);
+    for (_, id, _) in &ids[..2] {
+        assert!(
+            lines.iter().any(|l| l["event"] == "closed"
+                && l["terminal_id"] == *id
+                && l["reason"] == "focus_removed"),
+            "no focus_removed close for {id}: {lines:#?}"
+        );
+    }
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l["event"] == "closed" && l["terminal_id"] == ids[2].1),
+        "{lines:#?}"
+    );
+
+    // A focus with no terminals (or no such focus) is a no-op.
+    mgr.lock().unwrap().close_focus("never-had-one");
+    assert_eq!(mgr.lock().unwrap().list().len(), 1);
+    assert!(!stays.is_exited());
+
+    shut_down(&mgr);
 }

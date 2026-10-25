@@ -492,6 +492,7 @@ async fn main() -> Result<()> {
                 decisions: Arc::clone(&decisions),
                 tickets,
                 tracker: Arc::clone(&tracker),
+                terminals: nostromo::terminal::TerminalAgentApi::new(Arc::clone(&terminals)),
             };
             let state = McpSharedState::for_daemon_with_sources(
                 backend,

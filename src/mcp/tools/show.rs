@@ -37,7 +37,7 @@
 use serde_json::{json, Value};
 
 use crate::data::file_source::FileSourceError;
-use crate::ipc::pane_registry::SplitPosition;
+use crate::ipc::pane_registry::{PaneError, SplitPosition};
 use crate::ipc::protocol::{Anchor, Emphasis, PaneContentWire, ServerMsg};
 use crate::mcp::pane_sources::{broadcast_pane_content, broadcast_pane_content_with_address};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
@@ -45,6 +45,7 @@ use crate::mcp::tools::apply_layout::{
     address, fetch_async, freshness, pin_for_request, target_tag, ApplyLayoutError, FetchArgs,
     SOURCE_FILE, SOURCE_PR_CONVERSATION, SOURCE_PR_DIFF, SOURCE_PR_QUEUE, SOURCE_TICKET,
 };
+use crate::mcp::tools::terminal;
 use crate::mcp::views::{
     self, config as views_config, derive, placement, tree as view_tree, PlacementError,
     ShowRequest, ViewIdentity, ViewType,
@@ -117,7 +118,7 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
     // *now* — reintroducing panes a concurrent R8 reset just closed (with no
     // binding, since that reset already pruned it), or clobbering a
     // concurrent show's own new tab — instead of refusing cleanly.
-    let (placement, tree_at_decide, migrated) = {
+    let (placement, tree_at_decide, migrated, hits_terminal) = {
         let mut reg = daemon.pane_registry.lock().unwrap();
         reg.get_or_init(&tag);
         // A layout from before the queue became a tab (the queue as its own
@@ -131,7 +132,12 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
             Err(e) => return refusal(&e),
         };
         let tree_at_decide = reg.get(&tag).cloned();
-        (placement, tree_at_decide, migrated)
+        // The placement never picks a terminal pane to land in or close (the
+        // derivation pins them); refuse rather than touch one if it ever did.
+        let hits_terminal = std::iter::once(&placement.pane_id)
+            .chain(placement.closed_panes().iter())
+            .any(|p| reg.is_terminal_leaf(&tag, p));
+        (placement, tree_at_decide, migrated, hits_terminal)
     };
     if let Some(tree) = migrated {
         // Tell clients the layout changed even if this show goes on to be refused.
@@ -140,6 +146,12 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
             tree,
             focused_pane: None,
         });
+    }
+
+    if hits_terminal {
+        let error = PaneError::TerminalProtected;
+        terminal::audit_pane_refusal(daemon, pty_id, "nostromo.show", error);
+        return json!({ "error": error.code() });
     }
 
     // ── fetch, still before any mutation ────────────────────────────────────
@@ -226,7 +238,8 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
         if let Err(e) = apply_to_tree(&mut tree, &placement) {
             return refusal(&e);
         }
-        match reg.set_layout(&tag, &json!({ "tree": tree })) {
+        let set_result = reg.set_layout(&tag, &json!({ "tree": tree }));
+        match set_result {
             // `set_layout`'s own `prune_to_tree` drops the bindings of every
             // pane the new tree no longer has, which is exactly what an
             // eviction and an R8 reset each need — no separate unbind pass.
@@ -235,7 +248,13 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
                 reg.touch_view_focus(&tag, &placement.tab_order, &placement.pane_id);
                 t
             }
-            Err(e) => return json!({ "error": e.code() }),
+            Err(e) => {
+                // Audit without the registry lock: the terminal manager takes
+                // its own lock first and the registry's second.
+                drop(reg);
+                terminal::audit_pane_refusal(daemon, pty_id, "nostromo.show", e);
+                return json!({ "error": e.code() });
+            }
         }
     };
 
@@ -1039,6 +1058,7 @@ mod tests {
             )),
             tickets: TicketRegistryState::default(),
             tracker: Default::default(),
+            terminals: crate::terminal::TerminalAgentApi::in_memory(),
         };
         (McpSharedState::for_daemon(backend), rx)
     }

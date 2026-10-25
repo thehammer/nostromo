@@ -7,6 +7,7 @@
 use serde_json::{json, Value};
 
 use crate::ipc::protocol::{PaneContentWire, PrListItem, ServerMsg};
+use crate::mcp::tools::terminal;
 use crate::mcp::{
     command::PaneContent, pane_sources::broadcast_pane_content, state::McpSharedState,
 };
@@ -23,7 +24,7 @@ const KNOWN_CONTENT_KINDS: &[&str] = &["text", "json_snapshot", "pr_list", "load
 // ── handlers ─────────────────────────────────────────────────────────────────
 
 /// Handle `nostromo.set_pane_content`.
-pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
+pub async fn set_pane_content(state: &McpSharedState, args: &Value, pty_id: Option<&str>) -> Value {
     let view_id = match args.get("view_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return json!({ "error": "invalid_args", "detail": "missing view_id" }),
@@ -43,6 +44,17 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
     // Content is decoupled from layout geometry: broadcast a `PaneContent`
     // message that carries no ratios, so an operator's drag-resize survives.
     if let Some(daemon) = &state.daemon {
+        // A terminal pane shows its shell, never agent-authored content.
+        if let Some(refusal) = terminal::refuse_terminal_target(
+            daemon,
+            pty_id,
+            "nostromo.set_pane_content",
+            "content",
+            &view_id,
+            &pane_id,
+        ) {
+            return refusal;
+        }
         let wire = match content {
             PaneContent::Text(t) => PaneContentWire::Text { text: t },
             PaneContent::JsonSnapshot(v) => PaneContentWire::JsonSnapshot { value: v },
@@ -68,7 +80,7 @@ pub async fn set_pane_content(state: &McpSharedState, args: &Value) -> Value {
 }
 
 /// Handle `nostromo.set_pane_layout`.
-pub async fn set_pane_layout(state: &McpSharedState, args: &Value) -> Value {
+pub async fn set_pane_layout(state: &McpSharedState, args: &Value, pty_id: Option<&str>) -> Value {
     let view_id = match args.get("view_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return json!({ "error": "invalid_args", "detail": "missing view_id" }),
@@ -85,7 +97,7 @@ pub async fn set_pane_layout(state: &McpSharedState, args: &Value) -> Value {
     if let Some(daemon) = &state.daemon {
         let result = {
             let mut reg = daemon.pane_registry.lock().unwrap();
-            reg.set_layout(&view_id, &ratios)
+            reg.set_layout_from_agent(&view_id, &ratios)
         };
         return match result {
             Ok(tree) => {
@@ -96,10 +108,13 @@ pub async fn set_pane_layout(state: &McpSharedState, args: &Value) -> Value {
                 });
                 json!({ "ok": true })
             }
-            Err(e) => match e.detail() {
-                Some(detail) => json!({ "error": e.code(), "detail": detail }),
-                None => json!({ "error": e.code() }),
-            },
+            Err(e) => {
+                terminal::audit_pane_refusal(daemon, pty_id, "nostromo.set_pane_layout", e);
+                match e.detail() {
+                    Some(detail) => json!({ "error": e.code(), "detail": detail }),
+                    None => json!({ "error": e.code() }),
+                }
+            }
         };
     }
 
@@ -230,7 +245,7 @@ mod tests {
             "view_id": "perri", "pane_id": "queue",
             "content": { "type": "text", "text": "manual override" }
         });
-        let result = set_pane_content(&state, &args).await;
+        let result = set_pane_content(&state, &args, None).await;
         assert_eq!(result["ok"], true);
 
         assert_eq!(
@@ -259,7 +274,7 @@ mod tests {
             "view_id": "perri", "pane_id": "queue",
             "content": { "type": "text", "text": "manual override" }
         });
-        let result = set_pane_content(&state, &args).await;
+        let result = set_pane_content(&state, &args, None).await;
         assert_eq!(result["ok"], true);
 
         let reg = pane_registry.lock().unwrap();

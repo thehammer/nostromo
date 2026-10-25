@@ -93,6 +93,7 @@ fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
         decisions,
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     });
     Daemon {
         socket_path,

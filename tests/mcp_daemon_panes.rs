@@ -45,6 +45,7 @@ fn make_daemon_state() -> Harness {
         )),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),

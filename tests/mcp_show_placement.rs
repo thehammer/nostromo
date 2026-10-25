@@ -130,6 +130,7 @@ fn make_daemon_state() -> Harness {
         )),
         tickets: TicketRegistryState::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     Harness {
         state: McpSharedState::for_daemon(backend),
@@ -1445,4 +1446,152 @@ async fn the_tracker_stays_listed_and_callable_for_perri_under_the_intended_poli
             "a tracker call must not be Forbidden: {resp}"
         );
     }
+}
+
+// ── terminal panes are never placed over or evicted (terminal pane 1b) ────────
+//
+// A terminal leaf here is registered directly with the pane registry, with no
+// shell process behind it: what is under test is the placement engine's
+// behaviour around it. The real-process variant (the shell keeps running while
+// `show` works beside it) is in `tests/mcp_terminal_guards.rs`.
+
+const TERMINAL_TAG: &str = "cody-term-show";
+const TERMINAL_LEAF: &str = "terminal-0a0b0c0d";
+
+#[tokio::test]
+async fn a_terminal_pane_beside_the_repl_does_not_stop_show_and_its_leaf_survives_it() {
+    use nostromo::ipc::pane_registry::SplitPosition;
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    {
+        let mut reg = harness.panes.lock().unwrap();
+        reg.get_or_init(TERMINAL_TAG);
+        reg.insert_terminal_leaf(TERMINAL_TAG, "repl", SplitPosition::Below, TERMINAL_LEAF)
+            .unwrap();
+        reg.register_terminal_leaf(TERMINAL_TAG, TERMINAL_LEAF);
+    }
+    let socket_path = harness.dir.path().join("mcp-daemon.sock");
+    let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
+        .await
+        .unwrap();
+    let (mut reader, mut writer) = connect(&socket_path, TERMINAL_TAG).await;
+    let root = temp_file_root();
+
+    for n in 0..3 {
+        let path = write_rel_file(root.path(), &format!("t{n}.txt"), "one\ntwo\n");
+        let res = call_tool(
+            &mut reader,
+            &mut writer,
+            10 + n,
+            "nostromo.show",
+            json!({ "type": "file", "target": { "path": path } }),
+        )
+        .await;
+        assert_eq!(res["ok"], true, "show #{n} beside a terminal: {res}");
+        assert_eq!(res["region"], "detail", "{res}");
+    }
+
+    let reg = harness.panes.lock().unwrap();
+    let ids = reg.pane_ids(TERMINAL_TAG);
+    assert!(
+        ids.iter().any(|p| p == TERMINAL_LEAF),
+        "the terminal leaf must survive every show: {ids:?}"
+    );
+    assert_eq!(
+        reg.terminal_leaves(TERMINAL_TAG),
+        vec![TERMINAL_LEAF.to_string()]
+    );
+    assert!(ids.iter().any(|p| p == "repl"));
+    assert_eq!(
+        ids.iter().filter(|p| p.starts_with("detail.")).count(),
+        3,
+        "{ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_terminal_tab_in_the_detail_region_is_never_the_tab_show_evicts() {
+    use nostromo::ipc::protocol::PaneTree;
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    // The detail region (tabs, named `detail`) already holds the terminal.
+    {
+        let mut reg = harness.panes.lock().unwrap();
+        reg.get_or_init(TERMINAL_TAG);
+        reg.register_terminal_leaf(TERMINAL_TAG, TERMINAL_LEAF);
+        let tree = PaneTree::Split {
+            direction: nostromo::ipc::protocol::SplitDirection::Vertical,
+            children: vec![
+                PaneTree::Tabs {
+                    children: vec![PaneTree::Leaf {
+                        pane_id: TERMINAL_LEAF.to_string(),
+                    }],
+                    labels: vec!["Terminal".to_string()],
+                    active: 0,
+                    region: Some("detail".to_string()),
+                },
+                PaneTree::Leaf {
+                    pane_id: "repl".to_string(),
+                },
+            ],
+            ratios: vec![0.6, 0.4],
+        };
+        reg.set_layout(TERMINAL_TAG, &json!({ "tree": tree }))
+            .expect("a layout that keeps the terminal leaf");
+    }
+    let socket_path = harness.dir.path().join("mcp-daemon.sock");
+    let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
+        .await
+        .unwrap();
+    let (mut reader, mut writer) = connect(&socket_path, TERMINAL_TAG).await;
+    let root = temp_file_root();
+
+    // The terminal holds one of the region's six slots: five files fill it, and
+    // the sixth must evict a *file* tab, never the terminal (the least
+    // recently focused tab of all).
+    let mut files = Vec::new();
+    for n in 0..6 {
+        let path = write_rel_file(root.path(), &format!("p{n}.txt"), "one\ntwo\n");
+        let res = call_tool(
+            &mut reader,
+            &mut writer,
+            10 + n,
+            "nostromo.show",
+            json!({ "type": "file", "target": { "path": path } }),
+        )
+        .await;
+        assert_eq!(
+            res["ok"], true,
+            "show #{n} into a region with a terminal: {res}"
+        );
+        files.push(res["pane_id"].as_str().unwrap().to_string());
+        if n < 5 {
+            assert_eq!(
+                res["evicted"],
+                Value::Null,
+                "no eviction before the cap: {res}"
+            );
+        } else {
+            assert_eq!(
+                res["evicted"],
+                Value::String(files[0].clone()),
+                "the oldest FILE tab goes, not the terminal: {res}"
+            );
+        }
+    }
+
+    let reg = harness.panes.lock().unwrap();
+    let ids = reg.pane_ids(TERMINAL_TAG);
+    assert!(
+        ids.iter().any(|p| p == TERMINAL_LEAF),
+        "the terminal tab must survive the cap: {ids:?}"
+    );
+    assert_eq!(
+        reg.terminal_leaves(TERMINAL_TAG),
+        vec![TERMINAL_LEAF.to_string()]
+    );
+    assert!(
+        !ids.contains(&files[0]),
+        "the evicted file tab is gone: {ids:?}"
+    );
 }

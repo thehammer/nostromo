@@ -836,6 +836,7 @@ mod tests {
             )),
             tickets: Default::default(),
             tracker: Default::default(),
+            terminals: crate::terminal::TerminalAgentApi::in_memory(),
         };
         (McpSharedState::for_daemon(backend), broadcast_tx)
     }
@@ -1256,6 +1257,7 @@ mod tests {
             )),
             tickets: Default::default(),
             tracker: Default::default(),
+            terminals: crate::terminal::TerminalAgentApi::in_memory(),
         };
         let state = McpSharedState::for_daemon(backend);
 
@@ -2102,6 +2104,7 @@ mod tests {
             )),
             tickets: Default::default(),
             tracker: Default::default(),
+            terminals: crate::terminal::TerminalAgentApi::in_memory(),
         };
         let state = McpSharedState::for_daemon(backend);
 

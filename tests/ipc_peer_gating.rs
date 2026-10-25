@@ -1723,6 +1723,7 @@ fn mcp_state(h: &Harness) -> McpSharedState {
         decisions: Arc::clone(&h.decisions),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     })
 }
 
@@ -4254,6 +4255,7 @@ fn describe(r: &ToolResult) -> &'static str {
         ToolResult::Ok(_) => "Ok",
         ToolResult::UnknownTool(_) => "UnknownTool",
         ToolResult::Forbidden(_) => "Forbidden",
+        ToolResult::TerminalForbidden { .. } => "TerminalForbidden",
     }
 }
 
@@ -10682,6 +10684,7 @@ fn tracker_world(h: &Harness) -> TrackerWorld {
         decisions: Arc::clone(&h.decisions),
         tickets: Default::default(),
         tracker: Arc::clone(&registry),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     });
     TrackerWorld {
         _tmp: tmp,

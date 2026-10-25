@@ -144,6 +144,10 @@ pub struct DaemonMcpBackend {
     /// The agent tracker: boards, bindings, cursors, change logs
     /// (`nostromo.tracker`).
     pub tracker: Arc<crate::tracker::TrackerRegistry>,
+    /// What an agent may do with terminals: open one in its own focus, ask
+    /// whether a pane is one, and audit a refusal. Nothing that writes to,
+    /// reads from or closes one (see `crate::terminal::agent_api`).
+    pub terminals: crate::terminal::TerminalAgentApi,
 }
 
 // ── shared state ───────────────────────────────────────────────────────────────

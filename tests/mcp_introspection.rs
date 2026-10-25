@@ -965,6 +965,9 @@ async fn dispatch_unknown_tool_returns_unknown_tool() {
         // W5 — curated-agent-views: a withdrawn tool is a *different* outcome
         // from an unknown one, and this test is specifically about the latter.
         tools::ToolResult::Forbidden(_) => panic!("expected UnknownTool, got Forbidden"),
+        tools::ToolResult::TerminalForbidden { .. } => {
+            panic!("expected UnknownTool, got TerminalForbidden")
+        }
     }
 }
 
