@@ -29,12 +29,26 @@ enum AppControlTracker {
         for row in p.rows { if let item = row.item, case .item = row.content { modelSection[item.id] = item.sectionId } }
         for item in p.foldedItems.values { modelSection[item.id] = item.sectionId }
         for item in p.hiddenItems.values { modelSection[item.id] = item.sectionId }
+        // What the view has: the section heading each shown item sits under, and whether its note is
+        // open there (a `moving:` copy is the live item at its new place, not where the view has it).
+        var shownSection: [String: String] = [:]
+        var shownExpanded: [String: Bool] = [:]
+        var heading: String?
+        for row in displayedRows ?? p.rows {
+            if case .section(let section) = row.content { heading = section.id }
+            guard !row.key.hasPrefix(TrackerDeferral.movingPrefix), let item = row.item else { continue }
+            if let heading { shownSection[item.id] = heading }
+            shownExpanded[item.id] = item.noteExpanded
+        }
         func fields(_ item: TrackerItemRow, _ hold: TrackerHold?, moving: Bool = false) -> [String: Any] {
             let section = modelSection[item.id]
             let state: Any = moving ? "moving" : (hold.map { $0.kind.rawValue as Any } ?? NSNull())
             let reason: Any = moving ? "live copy of an item the board moved here; its old place keeps a stub while on screen"
                 : (hold.map { heldReason($0, modelSection: section) as Any } ?? NSNull())
-            return ["held": state, "held_reason": reason, "model_section": section.map { $0 as Any } ?? NSNull()]
+            let shown = moving ? section : (shownSection[item.id] ?? section)
+            return ["held": state, "held_reason": reason, "model_section": section.map { $0 as Any } ?? NSNull(),
+                    "shown_section": shown.map { $0 as Any } ?? NSNull(),
+                    "shown_expanded": shownExpanded[item.id] ?? item.noteExpanded]
         }
 
         var sections: [[String: Any]] = []
@@ -141,6 +155,8 @@ enum AppControlTracker {
             "held": state["held"] ?? NSNull(),
             "held_reason": state["held_reason"] ?? NSNull(),
             "model_section": state["model_section"] ?? NSNull(),
+            "shown_section": state["shown_section"] ?? NSNull(),
+            "shown_expanded": state["shown_expanded"] ?? item.noteExpanded,
             "stub": stub.map { $0 as Any } ?? NSNull(),
             "conflict": NSNull(),
             "badge": NSNull(),

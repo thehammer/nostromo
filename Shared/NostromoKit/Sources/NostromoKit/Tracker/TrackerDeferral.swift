@@ -21,8 +21,10 @@
 // forever. Besides leaving the viewport, a hold is released when the user collapses a note
 // ("less"), clears the selection, clicks elsewhere, or leaves the pane idle for 20 s. The
 // selection is the one thing a release never touches, and the pane never releases while the
-// pointer is over a held row. Expanding or collapsing a note clears the selection in its own row
-// first: a selected row keeps its content, which would otherwise swallow the toggle.
+// pointer is over a held row or a mouse button is down, except Less/More on that row, which is an
+// explicit action (Less releases everything held, whatever the pointer is over). The pointer guard
+// covers held rows only. Expanding or collapsing a note clears the selection in its own row first:
+// a selected row keeps its content, which would otherwise swallow the toggle.
 //
 // Pure and stateless between calls apart from one-shot release requests: every `resolve` works
 // out what has to be held from what is on screen now (`displayed`), what the board says
