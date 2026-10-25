@@ -95,6 +95,8 @@ final class MotherDetailScrollTests: XCTestCase {
     private func waitForTheStartupErrorToClear(_ rig: MDRig, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(MD.pumpUntil(rig.window) { rig.renderedCount(prefix: "ERR") == 0 },
                       "the startup action error never cleared", file: file, line: line)
+        // A reader acts on a settled screen, not in the same breath as the update that cleared the error.
+        MD.pump(rig.window)
     }
 
     private enum Change { case grows, shrinks, either }

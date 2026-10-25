@@ -407,6 +407,11 @@ final class MotherJobDetail: NSView {
         addSubview(contentScrollView)
         let clip = contentScrollView.contentView
         content.onLayout = { [weak self] in self?.contentDidLayout() }
+        // A person scrolling (wheel, trackpad, scroller) is the reader choosing a new place: let go of
+        // any anchor still waiting for layout to settle.
+        NotificationCenter.default.publisher(for: NSScrollView.willStartLiveScrollNotification, object: contentScrollView)
+            .sink { [weak self] _ in self?.placeHeld = false }
+            .store(in: &cancellables)
         NSLayoutConstraint.activate([
             contentScrollView.topAnchor.constraint(equalTo: topAnchor),
             contentScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
