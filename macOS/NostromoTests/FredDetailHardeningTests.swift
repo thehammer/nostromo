@@ -477,7 +477,7 @@ final class FredDetailHardeningTests: XCTestCase {
     func testAnAcceptedGoogleLinkKeepsItsHostPathQueryAndFragment() throws {
         let url = try XCTUnwrap(FredWebLink.url(from: "https://mail.google.com/mail/?authuser=a%40gmail.com#all/abc"))
         XCTAssertEqual(url.host?.lowercased(), "mail.google.com")
-        XCTAssertEqual(url.path, "/mail/")
+        XCTAssertEqual(url.path, "/mail")  // Foundation drops the trailing slash from `path`
         XCTAssertEqual(url.query, "authuser=a%40gmail.com")
         XCTAssertEqual(url.fragment, "all/abc")
     }
