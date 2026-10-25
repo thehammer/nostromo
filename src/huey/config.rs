@@ -38,8 +38,16 @@ pub fn resolve(agents: Option<&toml::Value>) -> (HueyConfig, Vec<String>) {
     let mut warnings = Vec::new();
     let Some(table) = agents
         .and_then(toml::Value::as_table)
-        .and_then(|t| t.iter().find(|(k, _)| k.eq_ignore_ascii_case("huey")))
-        .and_then(|(_, v)| v.as_table())
+        .and_then(|t| {
+            // Same winner as `agents::resolve`: the last matching key that is
+            // a usable table (a table whose `enabled`, if any, is a bool), so
+            // the switch and these settings always come from one table.
+            t.iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("huey"))
+                .filter_map(|(_, v)| v.as_table())
+                .filter(|t| matches!(t.get("enabled"), None | Some(toml::Value::Boolean(_))))
+                .last()
+        })
     else {
         return (cfg, warnings);
     };
@@ -150,6 +158,26 @@ mod tests {
         assert_eq!(w.len(), 4, "{w:?}");
         let all = w.join(" ");
         assert!(!all.contains("soon") && !all.contains("has space"));
+    }
+
+    #[test]
+    fn case_variant_keys_use_the_same_winner_as_the_agent_switch() {
+        let src = "[agents.Huey]\nenabled = false\nreport_time = \"05:00\"\n[agents.huey]\nenabled = true\nreport_time = \"08:00\"\n";
+        let v: toml::Value = toml::from_str(src).unwrap();
+        let (enabled, _) = crate::agents::resolve(v.get("agents"));
+        let (c, _) = resolve(v.get("agents"));
+        assert!(enabled.huey, "lowercase `huey` sorts last and wins");
+        assert_eq!(c.report_time.format("%H:%M").to_string(), "08:00");
+    }
+
+    #[test]
+    fn a_non_table_variant_does_not_hide_a_valid_table() {
+        let (c, w) = r("[agents]\nHuey = 5\n[agents.huey]\nreport_time = \"08:00\"\n");
+        assert_eq!(c.report_time.format("%H:%M").to_string(), "08:00");
+        assert!(w.is_empty(), "{w:?}");
+        // And the other way round: the valid table is the earlier key.
+        let (c, _) = r("[agents.Huey]\nreport_time = \"09:00\"\n[agents]\nhuey = 5\n");
+        assert_eq!(c.report_time.format("%H:%M").to_string(), "09:00");
     }
 
     #[test]
