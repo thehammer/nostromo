@@ -23,7 +23,7 @@ use crate::data::work::service::FredDetailService;
 /// How long a fetched detail is reused.
 const CACHE_TTL: Duration = Duration::from_secs(60);
 /// Most body bytes returned.
-const MAX_BODY_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_BODY_BYTES: usize = 32 * 1024;
 
 const MAIL_SELECT: &str = "subject,from,toRecipients,ccRecipients,receivedDateTime,body,webLink";
 const EVENT_SELECT: &str =
@@ -54,12 +54,49 @@ const PREFER_TEXT_UTC: (&str, &str) = (
 
 /// UTC offset in force at an instant (DST-aware, so a range that crosses a
 /// transition shows each end correctly).
-type OffsetFn = Arc<dyn Fn(DateTime<Utc>) -> FixedOffset + Send + Sync>;
+pub(crate) type OffsetFn = Arc<dyn Fn(DateTime<Utc>) -> FixedOffset + Send + Sync>;
+
+/// How instants are shown: in the zone `offset_at` gives. Shared by the Graph
+/// and Google detail services.
+pub(crate) struct TimeFormat {
+    pub(crate) offset_at: OffsetFn,
+}
+
+impl TimeFormat {
+    /// The Mac's local zone.
+    pub(crate) fn local() -> Self {
+        Self {
+            offset_at: Arc::new(|at| *at.with_timezone(&Local).offset()),
+        }
+    }
+
+    pub(crate) fn format_time(&self, at: DateTime<Utc>) -> String {
+        at.with_timezone(&(self.offset_at)(at))
+            .format("%a %-d %b %Y, %H:%M")
+            .to_string()
+    }
+
+    pub(crate) fn format_range(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> String {
+        let (s, e) = (
+            start.with_timezone(&(self.offset_at)(start)),
+            end.with_timezone(&(self.offset_at)(end)),
+        );
+        if s.date_naive() == e.date_naive() {
+            format!("{}–{}", s.format("%a %-d %b %Y, %H:%M"), e.format("%H:%M"))
+        } else {
+            format!(
+                "{} – {}",
+                s.format("%a %-d %b %Y, %H:%M"),
+                e.format("%a %-d %b %Y, %H:%M")
+            )
+        }
+    }
+}
 
 pub struct GraphFredDetail {
     graph: GraphClient,
     /// Offset times are shown in; production uses the Mac's local zone.
-    offset_at: OffsetFn,
+    time: TimeFormat,
     cache: Mutex<HashMap<String, (Instant, WorkDetail)>>,
 }
 
@@ -77,7 +114,7 @@ impl GraphFredDetail {
     pub fn with_offset_fn(graph: GraphClient, offset_at: OffsetFn) -> Self {
         Self {
             graph,
-            offset_at,
+            time: TimeFormat { offset_at },
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -139,7 +176,7 @@ impl GraphFredDetail {
             fields.push(("Cc".to_owned(), people(&m.cc_recipients)));
         }
         if let Some(at) = m.received_date_time {
-            fields.push(("Received".to_owned(), self.format_time(at)));
+            fields.push(("Received".to_owned(), self.time.format_time(at)));
         }
         Ok(WorkDetail {
             item_id: item_id.to_owned(),
@@ -174,7 +211,7 @@ impl GraphFredDetail {
             } else {
                 utc(start)
                     .zip(utc(end))
-                    .map(|(s, e)| self.format_range(s, e))
+                    .map(|(s, e)| self.time.format_range(s, e))
             };
             if let Some(when) = when {
                 fields.push(("When".to_owned(), when));
@@ -220,28 +257,6 @@ impl GraphFredDetail {
             files: vec![],
             links,
         })
-    }
-
-    fn format_time(&self, at: DateTime<Utc>) -> String {
-        at.with_timezone(&(self.offset_at)(at))
-            .format("%a %-d %b %Y, %H:%M")
-            .to_string()
-    }
-
-    fn format_range(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> String {
-        let (s, e) = (
-            start.with_timezone(&(self.offset_at)(start)),
-            end.with_timezone(&(self.offset_at)(end)),
-        );
-        if s.date_naive() == e.date_naive() {
-            format!("{}–{}", s.format("%a %-d %b %Y, %H:%M"), e.format("%H:%M"))
-        } else {
-            format!(
-                "{} – {}",
-                s.format("%a %-d %b %Y, %H:%M"),
-                e.format("%a %-d %b %Y, %H:%M")
-            )
-        }
     }
 }
 
@@ -363,7 +378,7 @@ fn unauthenticated() -> WorkError {
     )
 }
 
-fn non_empty(s: Option<String>) -> Option<String> {
+pub(crate) fn non_empty(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
 }
 
@@ -388,7 +403,7 @@ fn people(rs: &[Recipient]) -> String {
 }
 
 /// Comma-join `items`, listing at most [`MAX_LISTED_PEOPLE`] ("..., and N more").
-fn join_capped(items: &[String]) -> String {
+pub(crate) fn join_capped(items: &[String]) -> String {
     let mut listed = items
         .iter()
         .take(MAX_LISTED_PEOPLE)
@@ -451,7 +466,7 @@ fn is_https_with_host(link: &str) -> bool {
     parse_https(link).is_some()
 }
 
-fn parse_https(link: &str) -> Option<Url> {
+pub(crate) fn parse_https(link: &str) -> Option<Url> {
     if link.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
@@ -470,7 +485,7 @@ fn parse_https(link: &str) -> Option<Url> {
 /// Collapse every run of whitespace and control characters (newlines included)
 /// to one space and cap the result at `max` characters (ending in `…` when cut).
 /// Header values are written by other people: they must stay on one line.
-fn one_line(s: &str, max: usize) -> String {
+pub(crate) fn one_line(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(s.len().min(max * 4));
     let mut pending_space = false;
     for c in s.chars() {
@@ -496,7 +511,7 @@ fn one_line(s: &str, max: usize) -> String {
     out
 }
 
-fn clean_fields(fields: Vec<(String, String)>) -> Vec<(String, String)> {
+pub(crate) fn clean_fields(fields: Vec<(String, String)>) -> Vec<(String, String)> {
     fields
         .into_iter()
         .map(|(label, value)| (label, one_line(&value, MAX_FIELD_CHARS)))
@@ -543,7 +558,7 @@ pub fn trim_quoted_chain(text: &str) -> String {
     kept.join("\n").trim().to_owned()
 }
 
-fn cap_body(mut text: String) -> String {
+pub(crate) fn cap_body(mut text: String) -> String {
     if text.len() > MAX_BODY_BYTES {
         let mut end = MAX_BODY_BYTES;
         while !text.is_char_boundary(end) {

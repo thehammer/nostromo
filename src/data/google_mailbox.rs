@@ -39,18 +39,33 @@ const MAX_SNAPSHOT_ITEMS: usize = 100;
 const MAX_STORE: usize = 200;
 /// Most metadata fetches per cycle; the rest carry over to the next.
 const MAX_FETCH_PER_CYCLE: usize = 25;
+/// Most `history.list` pages followed in one cycle; more is an error.
+const MAX_HISTORY_PAGES: usize = 20;
 const INBOX: &str = "INBOX";
 const UNREAD: &str = "UNREAD";
 
 // ── Gmail shapes ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct GmailMsg {
     thread_id: String,
     from: String,
     subject: String,
     internal_date: Option<DateTime<Utc>>,
     unread: bool,
+}
+
+/// `from` and `subject` are other people's words: never printed.
+impl std::fmt::Debug for GmailMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GmailMsg")
+            .field("thread_id", &"<redacted>")
+            .field("from", &"<redacted>")
+            .field("subject", &"<redacted>")
+            .field("internal_date", &self.internal_date)
+            .field("unread", &self.unread)
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
@@ -251,7 +266,10 @@ impl GoogleMailboxSource {
                         Some(wait),
                     )
                 }
-                None => (MailboxSnapshot::failed(previous, reason), None),
+                None => (
+                    MailboxSnapshot::failed(previous, reason),
+                    backoff.persistent(poll),
+                ),
             }
         };
 
@@ -356,7 +374,12 @@ async fn incremental_sync(client: &GoogleClient, st: &mut SyncState) -> Result<(
     let mut records: Vec<HistoryRecord> = Vec::new();
     let mut page_token: Option<String> = None;
     let latest;
+    let mut pages = 0usize;
     loop {
+        pages += 1;
+        if pages > MAX_HISTORY_PAGES {
+            anyhow::bail!("history list exceeded {MAX_HISTORY_PAGES} pages");
+        }
         let mut params: Vec<(&str, &str)> = vec![
             ("startHistoryId", &start),
             ("historyTypes", "messageAdded"),
@@ -375,6 +398,9 @@ async fn incremental_sync(client: &GoogleClient, st: &mut SyncState) -> Result<(
         let page_id = page.history_id.context("history page has no historyId")?;
         records.extend(page.history);
         match page.next_page_token {
+            Some(t) if page_token.as_deref() == Some(t.as_str()) => {
+                anyhow::bail!("history list repeated a page token")
+            }
             Some(t) => page_token = Some(t),
             None => {
                 latest = page_id;
@@ -602,7 +628,7 @@ fn sender_address(from: &str) -> &str {
 }
 
 /// `https://mail.google.com/mail/?authuser=<email>#all/<thread id>`.
-fn web_link(email: Option<&str>, thread_id: &str) -> String {
+pub(crate) fn web_link(email: Option<&str>, thread_id: &str) -> String {
     let mut url = url::Url::parse("https://mail.google.com/mail/").expect("static URL");
     if let Some(email) = email {
         url.query_pairs_mut().append_pair("authuser", email);

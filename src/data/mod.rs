@@ -6,6 +6,7 @@
 
 pub mod dirty_file;
 pub mod file_source;
+pub mod fred_accounts;
 pub mod fred_calendar;
 pub mod fred_calendar_native;
 pub mod fred_detail;
@@ -14,6 +15,7 @@ pub mod fred_mailbox_native;
 pub mod github_client;
 pub mod google_calendar;
 pub mod google_client;
+pub mod google_detail;
 pub mod google_mailbox;
 pub mod graph_client;
 pub mod http_backoff;

@@ -140,7 +140,14 @@ mod tests {
     fn tmp_is_created_0600() {
         let root = scratch();
         let tmp = root.join("x.json.tmp");
-        write_tmp_and_rename(&tmp, &root.join("x.json"), b"{}").unwrap();
+        // umask(0) removes the process's own masking, so 0600 can only come
+        // from the creation mode. Process-wide, so guarded and restored.
+        static UMASK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = UMASK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = unsafe { libc::umask(0) };
+        let result = write_tmp_and_rename(&tmp, &root.join("x.json"), b"{}");
+        unsafe { libc::umask(old) };
+        result.unwrap();
         // The renamed file keeps the creation mode; it never had group/other bits.
         assert_eq!(mode(&root.join("x.json")), 0o600);
         std::fs::remove_dir_all(&root).unwrap();

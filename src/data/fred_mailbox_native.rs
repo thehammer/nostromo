@@ -356,6 +356,7 @@ pub(crate) async fn shared_graph_client(config: &Config) -> Result<GraphClient, 
 }
 
 /// Why no Graph client could be built.
+#[derive(Clone)]
 pub(crate) enum UnavailableGraph {
     NotConfigured,
     Failed(String),
