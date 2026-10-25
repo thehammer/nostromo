@@ -44,7 +44,7 @@ pub fn resolve(agents: Option<&toml::Value>) -> (HueyConfig, Vec<String>) {
             .filter(|(k, _)| k.eq_ignore_ascii_case("huey"))
             .filter_map(|(_, v)| v.as_table())
             .filter(|t| matches!(t.get("enabled"), None | Some(toml::Value::Boolean(_))))
-            .last()
+            .next_back()
     }) else {
         return (cfg, warnings);
     };
