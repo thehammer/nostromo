@@ -727,6 +727,13 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::TerminalOutput { .. }
         | ServerMsg::TerminalRefused { .. } => ServerClass::LocalOnly,
 
+        // Remote shells: the vocabulary names clusters' projects and services,
+        // and the confirm request and its outcome name a production target and
+        // the agent's stated reason. Local clients only.
+        ServerMsg::RemoteShellTargets { .. }
+        | ServerMsg::RemoteShellConfirmRequest { .. }
+        | ServerMsg::RemoteShellResolved { .. } => ServerClass::LocalOnly,
+
         ServerMsg::Activity(event) => ServerClass::Activity(event.focus_tag.as_deref()),
 
         // Scoped to one Mother job. A job started from a work item carries
@@ -960,7 +967,12 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::TerminalResize { .. }
         | ClientMsg::TerminalClose { .. }
         | ClientMsg::TerminalRestart { .. }
-        | ClientMsg::TerminalRefusalReport { .. } => NetworkPolicy::Refused,
+        | ClientMsg::TerminalRefusalReport { .. }
+        // Remote shells: ask for the vocabulary, open one, answer the confirm
+        // sheet. A network peer does none of them.
+        | ClientMsg::RemoteShellTargetsRequest
+        | ClientMsg::RemoteShellOpen { .. }
+        | ClientMsg::RemoteShellAnswer { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1036,7 +1048,10 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::TerminalResize { .. }
         | ClientMsg::TerminalClose { .. }
         | ClientMsg::TerminalRestart { .. }
-        | ClientMsg::TerminalRefusalReport { .. } => false,
+        | ClientMsg::TerminalRefusalReport { .. }
+        | ClientMsg::RemoteShellTargetsRequest
+        | ClientMsg::RemoteShellOpen { .. }
+        | ClientMsg::RemoteShellAnswer { .. } => false,
     }
 }
 
@@ -1808,6 +1823,19 @@ mod tests {
                 op: "input".into(),
                 channel: "app_control".into(),
             },
+            ClientMsg::RemoteShellTargetsRequest,
+            ClientMsg::RemoteShellOpen {
+                tag: "x1".into(),
+                project: "admin-portal".into(),
+                environment: "production".into(),
+                service: "scheduler".into(),
+                shell_type: "shell".into(),
+            },
+            ClientMsg::RemoteShellAnswer {
+                request_id: "r".into(),
+                decision: "connect".into(),
+                invite_follow: false,
+            },
         ]
     }
 
@@ -1846,7 +1874,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 52;
+    const CLIENT_MSG_VARIANTS: usize = 55;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -1903,6 +1931,9 @@ mod tests {
             ClientMsg::TerminalClose { .. } => 49,
             ClientMsg::TerminalRestart { .. } => 50,
             ClientMsg::TerminalRefusalReport { .. } => 51,
+            ClientMsg::RemoteShellTargetsRequest => 52,
+            ClientMsg::RemoteShellOpen { .. } => 53,
+            ClientMsg::RemoteShellAnswer { .. } => 54,
         }
     }
 
@@ -1939,8 +1970,8 @@ mod tests {
         assert_eq!(by_name("PtyAttach"), 7);
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
-        assert_eq!(CLIENT_MSG_VARIANTS, 52);
-        assert_eq!(every_client_msg().len(), 52);
+        assert_eq!(CLIENT_MSG_VARIANTS, 55);
+        assert_eq!(every_client_msg().len(), 55);
     }
 
     #[test]
@@ -3892,6 +3923,145 @@ mod tests {
                 !targets_sensitive_session(&output(tag), &tags),
                 "output {tag}"
             );
+        }
+    }
+
+    // ── 2a: remote shell frames (FND-1) ───────────────────────────────────────
+
+    fn remote_client_frames() -> Vec<(&'static str, ClientMsg)> {
+        vec![
+            (
+                "remote_shell_targets_request",
+                ClientMsg::RemoteShellTargetsRequest,
+            ),
+            (
+                "remote_shell_open",
+                ClientMsg::RemoteShellOpen {
+                    tag: "x1".into(),
+                    project: "admin-portal".into(),
+                    environment: "production".into(),
+                    service: "scheduler".into(),
+                    shell_type: "shell".into(),
+                },
+            ),
+            (
+                "remote_shell_answer",
+                ClientMsg::RemoteShellAnswer {
+                    request_id: "r1".into(),
+                    decision: "connect".into(),
+                    invite_follow: true,
+                },
+            ),
+        ]
+    }
+
+    fn remote_server_frames() -> Vec<(&'static str, ServerMsg)> {
+        use crate::ipc::protocol::{
+            RemoteRequester, RemoteShellEnvironment, RemoteShellProject, TerminalTarget,
+        };
+        vec![
+            (
+                "remote_shell_targets",
+                ServerMsg::RemoteShellTargets {
+                    configured: true,
+                    problem: None,
+                    projects: vec![RemoteShellProject {
+                        name: "admin-portal".into(),
+                        default_service: Some("portal".into()),
+                        environments: vec![RemoteShellEnvironment {
+                            name: "production".into(),
+                            services: vec!["scheduler".into()],
+                        }],
+                    }],
+                    shell_types: vec!["shell".into()],
+                },
+            ),
+            (
+                "remote_shell_confirm_request",
+                ServerMsg::RemoteShellConfirmRequest {
+                    request_id: "r1".into(),
+                    tag: Some("cody-plain".into()),
+                    target: TerminalTarget {
+                        project: "admin-portal".into(),
+                        environment: "production".into(),
+                        service: "scheduler".into(),
+                        shell_type: "shell".into(),
+                    },
+                    requested_by: RemoteRequester {
+                        kind: "focus".into(),
+                        tag: Some("cody-plain".into()),
+                        agent: Some("cody".into()),
+                    },
+                    reason: Some("SECRET-REASON".into()),
+                    expires_at: "2026-10-25T12:00:00Z".into(),
+                },
+            ),
+            (
+                "remote_shell_resolved",
+                ServerMsg::RemoteShellResolved {
+                    request_id: "r1".into(),
+                    outcome: "connect_failed".into(),
+                    reason: Some("not_available".into()),
+                    remedy: Some("restart".into()),
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_remote_shell_client_frame_is_refused_to_a_network_peer() {
+        for (name, msg) in remote_client_frames() {
+            assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_remote_shell_client_frame_is_in_the_exhaustive_fixture_list() {
+        let names: Vec<String> = every_client_msg().iter().map(variant_name).collect();
+        for want in [
+            "RemoteShellTargetsRequest",
+            "RemoteShellOpen",
+            "RemoteShellAnswer",
+        ] {
+            assert!(
+                names.iter().any(|n| n == want),
+                "{want} is not in every_client_msg()"
+            );
+        }
+    }
+
+    #[test]
+    fn every_remote_shell_server_frame_is_local_only_and_never_reaches_a_network_peer() {
+        let tags = SensitiveTags::in_memory();
+        for (name, msg) in remote_server_frames() {
+            assert_eq!(classify_server_msg(&msg), ServerClass::LocalOnly, "{name}");
+            assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{name}");
+            assert!(
+                outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(),
+                "{name}"
+            );
+            // The same frame is delivered to local connections.
+            for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
+                assert!(
+                    outbound(trust, msg.clone(), &tags).is_some(),
+                    "{name} {trust:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_remote_shell_frame_is_not_teri_or_fred_data_and_names_no_session() {
+        let tags = tags_with("cody-sensitive");
+        for (name, msg) in remote_server_frames() {
+            assert_eq!(
+                is_sensitive_server_msg(&msg),
+                SensitiveClass::NotSensitive,
+                "{name}"
+            );
+        }
+        for (name, msg) in remote_client_frames() {
+            assert!(!targets_sensitive_session(&msg, &tags), "{name}");
         }
     }
 }

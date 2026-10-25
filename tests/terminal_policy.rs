@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 /// Words no file under `src/mcp/` may contain (`TerminalAgentApi` is the one
 /// terminal name that is allowed there).
-const FORBIDDEN: [&str; 11] = [
+const FORBIDDEN: [&str; 15] = [
     "OperatorCap",
     "TerminalManager",
     "terminal_input",
@@ -40,6 +40,12 @@ const FORBIDDEN: [&str; 11] = [
     // unlocks input, attach and close. It contains none of the tokens above.
     "access::",
     "mint(",
+    // What opens a remote shell or answers its confirm sheet: an agent's MCP
+    // code may only ask, through `TerminalAgentApi::request_remote`.
+    "remote_request::run",
+    "RemoteLauncher",
+    "open_remote",
+    "remote_answer",
 ];
 
 /// One forbidden token found in one file.

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::ipc::protocol::TerminalKind;
+use crate::ipc::protocol::{TerminalKind, TerminalTarget};
 
 /// Rotate the live file once it would grow past this.
 pub const ROTATE_BYTES: u64 = 10 * 1024 * 1024;
@@ -60,7 +60,15 @@ impl RefusalChannel {
     }
 }
 
-/// One audited terminal event (phase-1 events of the design's §D10).
+/// Who asked for a remote shell: `user` or `focus` (with the focus `tag`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditRequester {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+/// One audited terminal event (the design's §D10).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum AuditEvent {
@@ -124,6 +132,42 @@ pub enum AuditEvent {
         peer_exe: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
+    },
+    /// A remote shell was asked for (by an agent's focus or by the user).
+    /// `reason` is the agent's stated reason, cut to 200 characters.
+    RemoteRequested {
+        tag: String,
+        requested_by: AuditRequester,
+        target: TerminalTarget,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// How the confirm request ended: `connect`, `cancelled`, `dismissed`,
+    /// `timed_out`, `abandoned` (the agent's call ended first) or
+    /// `no_operator` (no app could show the sheet).
+    ConfirmOutcome {
+        tag: String,
+        target: TerminalTarget,
+        outcome: String,
+        /// Only written when the user ticked it (honoured by the follow slice).
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        invite_follow: bool,
+    },
+    /// The user clicked Connect; the launcher was called.
+    ConnectStarted { tag: String, target: TerminalTarget },
+    /// The remote shell is open.
+    Connected {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        kind: TerminalKind,
+        target: TerminalTarget,
+    },
+    /// The launcher could not open the shell. No pane exists.
+    ConnectFailed {
+        tag: String,
+        target: TerminalTarget,
+        reason_code: String,
     },
     /// A channel hit the per-window cap on `refused` lines: until the window
     /// ends, its refusals are counted instead of written.

@@ -16,9 +16,12 @@
 pub mod access;
 pub mod agent_api;
 pub mod audit;
+pub mod ecs;
 mod fanout;
 pub mod follow;
+pub mod launcher;
 pub mod redact;
+pub mod remote_request;
 pub mod session;
 pub mod store;
 #[cfg(test)]
@@ -36,7 +39,10 @@ use uuid::Uuid;
 pub use access::OperatorCap;
 pub use agent_api::TerminalAgentApi;
 use audit::{AuditEvent, AuditLog, RefusalChannel};
+use ecs::EcsPaths;
 use fanout::Fanout;
+use launcher::{Placement, RemoteLauncher, UnavailableLauncher};
+use remote_request::{Decision, RemoteRequests};
 use session::{InputError, SignalOps, TerminalSession};
 use store::{TerminalRecord, TerminalStore};
 
@@ -44,7 +50,7 @@ use crate::ipc::pane_registry::{PaneError, PaneRegistry, SplitPosition};
 use crate::ipc::peer::SensitiveTags;
 use crate::ipc::protocol::{
     ClientMsg, PaneContentWire, PaneTree, ServerMsg, TerminalClosedInfo, TerminalInfo,
-    TerminalKind, TerminalRequester, TerminalStatus,
+    TerminalKind, TerminalRequester, TerminalStatus, TerminalTarget,
 };
 
 /// Frames for one connection's terminal stream, queued together (a replay
@@ -92,7 +98,14 @@ pub struct OperatorConn {
     pub stream: mpsc::Sender<StreamBatch>,
     /// What the client said it can do (`Subscribe.capabilities`).
     pub capabilities: Vec<String>,
+    /// The connection's targeted channel: frames meant for this connection
+    /// alone (a remote shell's confirm request and outcome).
+    pub targeted: mpsc::UnboundedSender<ServerMsg>,
 }
+
+/// The capability an operator connection declares when it can show a
+/// remote shell's confirm sheet.
+pub const REMOTE_SHELL_CONFIRM: &str = "remote_shell_confirm";
 
 /// Why a terminal request failed. Nothing changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +188,27 @@ pub struct OpenLocal {
     pub client_request_id: Option<String>,
 }
 
+/// A remote shell the manager is to give a pane: who asked, where the pane
+/// goes and what the terminal is called. The process is started by the
+/// launcher and handed over with this.
+pub(crate) struct OpenRemote {
+    pub tag: String,
+    pub placement: Placement,
+    pub requested_by: TerminalRequester,
+    pub target: TerminalTarget,
+    pub label: String,
+}
+
+/// What `open_with` starts.
+enum Launch {
+    Local,
+    Remote {
+        session: Arc<TerminalSession>,
+        target: TerminalTarget,
+        label: String,
+    },
+}
+
 struct Terminal {
     info: TerminalInfo,
     /// `None` for an ended terminal a previous daemon left.
@@ -199,6 +233,12 @@ pub struct TerminalManager {
     signals: SignalOps,
     shutting_down: bool,
     refusal_budgets: Mutex<HashMap<RefusalChannel, RefusalBudget>>,
+    /// The at-most-one remote shell request waiting for the user.
+    remote_requests: RemoteRequests,
+    /// Opens the remote shell once the user has clicked Connect.
+    remote_launcher: Arc<dyn RemoteLauncher>,
+    /// Where the remote-shell vocabulary's files are (read per request).
+    ecs_paths: EcsPaths,
 }
 
 /// One channel's `refused` lines in the current window.
@@ -225,6 +265,9 @@ impl TerminalManager {
                 signals: SignalOps::real(),
                 shutting_down: false,
                 refusal_budgets: Mutex::new(HashMap::new()),
+                remote_requests: RemoteRequests::default(),
+                remote_launcher: Arc::new(UnavailableLauncher),
+                ecs_paths: EcsPaths::from_config(&crate::config::TerminalConfig::default()),
             })
         })
     }
@@ -330,6 +373,7 @@ impl TerminalManager {
         if let Some(conn) = self.operator_conns.get_mut(conn_key) {
             conn.capabilities = caps;
         }
+        self.end_remote_request_if_unanswerable();
     }
 
     /// The connection is gone: detach it everywhere and forget it.
@@ -338,6 +382,7 @@ impl TerminalManager {
             t.fanout.detach(conn_key);
         }
         self.operator_conns.remove(conn_key);
+        self.end_remote_request_if_unanswerable();
     }
 
     // ── opening ──────────────────────────────────────────────────────────────
@@ -380,6 +425,43 @@ impl TerminalManager {
         req: OpenLocal,
         requested_by: TerminalRequester,
     ) -> Result<TerminalInfo, TerminalError> {
+        self.open_with(req, requested_by, Launch::Local)
+    }
+
+    /// A remote shell's process, already started by a [`launcher::RemoteLauncher`],
+    /// gets its pane and its place in the registry. The caller must have
+    /// shown the user a confirm sheet and been told to connect: this is not
+    /// reachable from an agent. On any error the session is killed.
+    pub(crate) fn open_remote(
+        &mut self,
+        req: OpenRemote,
+        session: Arc<TerminalSession>,
+    ) -> Result<TerminalInfo, TerminalError> {
+        let open = OpenLocal {
+            tag: req.tag,
+            relative_to: req.placement.relative_to,
+            position: req.placement.position,
+            cwd: None,
+            client_request_id: None,
+        };
+        let launch = Launch::Remote {
+            session: Arc::clone(&session),
+            target: req.target,
+            label: req.label,
+        };
+        let result = self.open_with(open, req.requested_by, launch);
+        if result.is_err() {
+            session.kill();
+        }
+        result
+    }
+
+    fn open_with(
+        &mut self,
+        req: OpenLocal,
+        requested_by: TerminalRequester,
+        launch: Launch,
+    ) -> Result<TerminalInfo, TerminalError> {
         if self.shutting_down {
             return Err(TerminalError::ShuttingDown);
         }
@@ -398,11 +480,14 @@ impl TerminalManager {
         {
             return Err(TerminalError::TooManyTerminals);
         }
-        if requested_by.kind == AGENT_REQUESTER {
+        // The agent quota is for shells an agent starts on its own; a remote
+        // shell exists only because the user clicked Connect.
+        if requested_by.kind == AGENT_REQUESTER && matches!(launch, Launch::Local) {
             let by_agents = || {
-                self.terminals
-                    .values()
-                    .filter(|t| t.info.requested_by.kind == AGENT_REQUESTER)
+                self.terminals.values().filter(|t| {
+                    t.info.requested_by.kind == AGENT_REQUESTER
+                        && t.info.kind == TerminalKind::Local
+                })
             };
             if by_agents().count() >= MAX_AGENT_TERMINALS
                 || by_agents().filter(|t| t.info.tag == req.tag).count()
@@ -411,7 +496,10 @@ impl TerminalManager {
                 return Err(TerminalError::AgentQuotaReached);
             }
         }
-        let cwd = resolve_cwd(req.cwd.as_deref())?;
+        let cwd = match launch {
+            Launch::Local => Some(resolve_cwd(req.cwd.as_deref())?),
+            Launch::Remote { .. } => None,
+        };
         let position = SplitPosition::parse(req.position.as_deref().unwrap_or(DEFAULT_POSITION))
             .map_err(TerminalError::Pane)?;
         let relative_to = req.relative_to.as_deref().unwrap_or(DEFAULT_RELATIVE_TO);
@@ -427,13 +515,25 @@ impl TerminalManager {
             ),
             None => None,
         };
-        let session = match TerminalSession::spawn_local(&cwd, cols, rows, self.signals.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(tag = %req.tag, "terminal spawn failed: {e:#}");
-                self.remove_leaf(&req.tag, &pane_id);
-                return Err(TerminalError::OpenFailed);
+        let (session, kind, label, target) = match launch {
+            Launch::Local => {
+                let cwd = cwd
+                    .as_deref()
+                    .expect("a local shell has a working directory");
+                match TerminalSession::spawn_local(cwd, cols, rows, self.signals.clone()) {
+                    Ok(s) => (s, TerminalKind::Local, LOCAL_LABEL.to_string(), None),
+                    Err(e) => {
+                        warn!(tag = %req.tag, "terminal spawn failed: {e:#}");
+                        self.remove_leaf(&req.tag, &pane_id);
+                        return Err(TerminalError::OpenFailed);
+                    }
+                }
             }
+            Launch::Remote {
+                session,
+                target,
+                label,
+            } => (session, TerminalKind::Ecs, label, Some(target)),
         };
 
         let user_opened = requested_by.kind == "user";
@@ -441,10 +541,10 @@ impl TerminalManager {
             terminal_id: Uuid::new_v4().to_string(),
             tag: req.tag.clone(),
             pane_id: pane_id.clone(),
-            kind: TerminalKind::Local,
-            label: LOCAL_LABEL.into(),
-            cwd: Some(cwd.display().to_string()),
-            target: None,
+            kind,
+            label,
+            cwd: cwd.map(|c| c.display().to_string()),
+            target,
             status: TerminalStatus::Running,
             exit_code: None,
             ended_reason: None,
@@ -714,6 +814,75 @@ impl TerminalManager {
         Ok(info)
     }
 
+    // ── remote shells ────────────────────────────────────────────────────────
+
+    /// Replace the launcher that opens a remote shell after Connect (the
+    /// default [`UnavailableLauncher`] fails every connect).
+    pub fn set_remote_launcher(&mut self, launcher: Arc<dyn RemoteLauncher>) {
+        self.remote_launcher = launcher;
+    }
+
+    /// Where the remote-shell vocabulary is read from.
+    pub fn set_ecs_paths(&mut self, paths: EcsPaths) {
+        self.ecs_paths = paths;
+    }
+
+    pub fn ecs_paths(&self) -> &EcsPaths {
+        &self.ecs_paths
+    }
+
+    pub(crate) fn remote_launcher(&self) -> Arc<dyn RemoteLauncher> {
+        Arc::clone(&self.remote_launcher)
+    }
+
+    pub(crate) fn remote_requests_mut(&mut self) -> &mut RemoteRequests {
+        &mut self.remote_requests
+    }
+
+    /// The user's answer to the pending remote shell request, from the verified
+    /// operator connection `conn_key`. `false` when that connection declared no
+    /// `remote_shell_confirm`, or `request_id` is not the pending one
+    /// (answered, timed out or never existed): a late answer changes nothing.
+    pub fn remote_answer(
+        &mut self,
+        cap: &OperatorCap,
+        conn_key: &str,
+        request_id: &str,
+        decision: Decision,
+        invite_follow: bool,
+    ) -> bool {
+        // Only a connection that can show the sheet answers it: a verified app
+        // without the capability was never asked.
+        let can_answer = self
+            .operator_conns
+            .get(conn_key)
+            .is_some_and(|c| c.capabilities.iter().any(|cap| cap == REMOTE_SHELL_CONFIRM));
+        can_answer
+            && self
+                .remote_requests
+                .answer(cap, request_id, decision, invite_follow)
+    }
+
+    /// The targeted channels of the operator connections that declared
+    /// [`REMOTE_SHELL_CONFIRM`]: the only ones a confirm request goes to. A
+    /// verified app without the capability does not count, and neither does
+    /// anything that is not an operator connection.
+    /// A pending request nobody can answer (the last connection that could
+    /// show its sheet went away) ends now rather than at its timeout.
+    fn end_remote_request_if_unanswerable(&mut self) {
+        if self.remote_confirm_conns().is_empty() {
+            self.remote_requests.operator_gone();
+        }
+    }
+
+    pub(crate) fn remote_confirm_conns(&self) -> Vec<mpsc::UnboundedSender<ServerMsg>> {
+        self.operator_conns
+            .values()
+            .filter(|c| c.capabilities.iter().any(|cap| cap == REMOTE_SHELL_CONFIRM))
+            .map(|c| c.targeted.clone())
+            .collect()
+    }
+
     // ── audit ────────────────────────────────────────────────────────────────
 
     /// Record a refused terminal request (no cap: refusals come from anyone).
@@ -846,7 +1015,7 @@ impl TerminalManager {
 
     /// `tag` as the audit trail names it: the opaque stand-in for a
     /// sensitive focus (as `audit_focus_tag` does for the other audits).
-    fn audit_tag(&self, tag: &str) -> String {
+    pub(crate) fn audit_tag(&self, tag: &str) -> String {
         if self.sensitive.tag_is_sensitive(tag) {
             self.sensitive.opaque_tag(tag)
         } else {
@@ -854,7 +1023,7 @@ impl TerminalManager {
         }
     }
 
-    fn record(&self, event: AuditEvent) {
+    pub(crate) fn record(&self, event: AuditEvent) {
         if let Err(e) = self.audit.append(&event) {
             warn!("terminal audit append failed: {e}");
         }
@@ -1011,6 +1180,10 @@ pub fn op_of(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::TerminalClose { .. } => "close",
         ClientMsg::TerminalRestart { .. } => "restart",
         ClientMsg::TerminalRefusalReport { .. } => "refusal_report",
+        // The remote-shell verbs are all "control" to the audit trail.
+        ClientMsg::RemoteShellTargetsRequest
+        | ClientMsg::RemoteShellOpen { .. }
+        | ClientMsg::RemoteShellAnswer { .. } => "control",
         _ => return None,
     })
 }
