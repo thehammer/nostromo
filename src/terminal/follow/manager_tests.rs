@@ -1564,3 +1564,32 @@ async fn every_change_of_follower_is_broadcast_as_terminal_state() {
     w.follow.stop(&cap(), &t.id).unwrap();
     assert_eq!(w.states().last(), Some(&(t.id.clone(), None)));
 }
+
+// ── sensitivity (added by Cody) ────────────────────────────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn following_a_sensitive_focuss_terminal_makes_the_follower_sensitive_before_anything_reaches_it(
+) {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    sensitive.mark_tag("focus-secret");
+    let secret = w.local("focus-secret", "");
+    let ordinary = w.local("focus-1", "");
+
+    w.invite(&ordinary, B, false);
+    w.run_and_settle(&ordinary, "printf 'plain\\n'").await;
+    assert!(
+        !sensitive.tag_is_sensitive(B),
+        "an ordinary focus's terminal leaves its follower as it was"
+    );
+
+    let mark = w.rec.mark();
+    w.invite(&secret, A, false);
+    assert!(
+        sensitive.tag_is_sensitive(A),
+        "marked by the started notice, before any output"
+    );
+    w.run_and_settle(&secret, "printf 'from-the-sensitive-focus\\n'").await;
+    assert_eq!(w.rec.deliveries_for(A, mark).len(), 1);
+    assert!(sensitive.tag_is_sensitive(A));
+}

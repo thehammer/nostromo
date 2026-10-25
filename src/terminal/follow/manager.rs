@@ -440,7 +440,7 @@ impl FollowManager {
                     message.push_str(&element);
                 }
             }
-            self.inject(&follow.follower, &message, terminal_id);
+            self.inject(&follow, &message, terminal_id);
             state.follows.insert(terminal_id.to_string(), follow);
             self.spawn_pump(terminal_id, id, receiver);
         }
@@ -497,7 +497,7 @@ impl FollowManager {
                     follow.pane
                 ),
             );
-            self.inject(&follow.follower, &message, terminal_id);
+            self.inject(follow, &message, terminal_id);
         }
         self.broadcast_state(terminal_id);
         Ok(())
@@ -704,7 +704,7 @@ impl FollowManager {
                     if let Some(element) =
                         self.delivery_element(terminal_id, follow, kind, &delivery)
                     {
-                        self.inject(&follow.follower, &element, terminal_id);
+                        self.inject(follow, &element, terminal_id);
                     }
                     false
                 }
@@ -727,7 +727,7 @@ impl FollowManager {
                             follow.pane
                         ),
                     );
-                    self.inject(&follow.follower, &message, terminal_id);
+                    self.inject(follow, &message, terminal_id);
                     true
                 }
             }
@@ -800,7 +800,7 @@ impl FollowManager {
                 reason.sentence()
             ),
         );
-        self.inject(&follow.follower, &message, terminal_id);
+        self.inject(follow, &message, terminal_id);
     }
 
     fn audit_stopped(&self, terminal_id: &str, follow: &Follow, reason: &EndReason) {
@@ -816,11 +816,22 @@ impl FollowManager {
         });
     }
 
-    /// Deliver into `tag`'s conversation. A session that cannot take it (it
-    /// is down) loses it: following such a session ends with its end hook.
-    fn inject(&self, tag: &str, text: &str, terminal_id: &str) {
-        if let Err(e) = self.sink.inject(tag, text, terminal_id) {
-            debug!(tag, terminal_id, "follow delivery not injected: {e}");
+    /// Deliver into the follower's conversation. A session that cannot take
+    /// it (it is down) loses it: following such a session ends with its end
+    /// hook.
+    ///
+    /// A sensitive focus's terminal makes its follower sensitive first, so its
+    /// output never reaches a network peer through the follower's turns.
+    fn inject(&self, follow: &Follow, text: &str, terminal_id: &str) {
+        if self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
+            self.sensitive.mark_tag(&follow.follower);
+        }
+        if let Err(e) = self.sink.inject(&follow.follower, text, terminal_id) {
+            debug!(
+                follower = %follow.follower,
+                terminal_id,
+                "follow delivery not injected: {e}"
+            );
         }
     }
 
