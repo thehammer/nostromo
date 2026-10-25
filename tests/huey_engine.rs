@@ -1,4 +1,6 @@
-//! H1: an unset-up Huey leaves no trace and makes no request.
+//! H1: an unset-up Huey leaves no trace. (H1 has no network code at all, so
+//! there is no request to assert on; later slices that add HTTP add their own
+//! wired-in mock.)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,18 +8,9 @@ use std::time::Duration;
 use chrono::TimeZone;
 use nostromo::huey::{HueyConfig, HueyDeps, HueyEngine, SetupState};
 use nostromo::tracker::clock::FakeClock;
-use wiremock::matchers::any;
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
-async fn an_unset_up_engine_past_its_run_time_creates_no_files_and_makes_no_request() {
-    let server = MockServer::start().await;
-    Mock::given(any())
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&server)
-        .await;
-
+async fn an_unset_up_engine_past_its_run_time_creates_no_files() {
     let root = tempfile::tempdir().unwrap();
     let clock = Arc::new(FakeClock::new(
         chrono::Utc.with_ymd_and_hms(2026, 10, 25, 3, 0, 0).unwrap(),
@@ -34,5 +27,4 @@ async fn an_unset_up_engine_past_its_run_time_creates_no_files_and_makes_no_requ
 
     assert_eq!(src.handle.setup_state(), SetupState::NotSetUp);
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    assert!(server.received_requests().await.unwrap().is_empty());
 }
