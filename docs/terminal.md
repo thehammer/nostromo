@@ -61,7 +61,7 @@ An agent can **ask** for a shell on a remote ECS service; only a human click on 
 3. At most one request waits at a time (`request_pending`).
 4. `remote_shell_confirm_request` goes to those connections and no one else.
 5. The daemon waits (300 s by default, clamped to 10-600 s) for `remote_shell_answer {decision: connect|cancel|dismiss}` from the operator app (`OperatorCap`).
-6. Only after Connect is the launcher called (`RemoteLauncher`; this daemon's is `UnavailableLauncher`, which fails with `not_available`, until the real launcher lands). Before that no process, pane or terminal exists.
+6. Only after Connect is the launcher called (`RemoteLauncher`; this daemon's is `AwsEcsLauncher`, see "Connecting" below). Before that no process, pane or terminal exists.
 7. `remote_shell_resolved` goes to the same connections: `connected`, `cancelled`, `dismissed`, `timed_out` or `connect_failed` (with `reason` and `remedy`).
 8. Every step is audited.
 
@@ -81,9 +81,23 @@ If the agent's MCP connection closes while the request waits, the request is aba
 
 `remote_shell_open` and `remote_shell_answer` from anyone but the verified app (even a process claiming `client_kind: "mac_app"`) get `terminal_refused {op: "control", code: "terminal_control_forbidden"}` and an audited `refused`; the request stays pending. Over TCP they are refused by FND-1 like every terminal frame. All three server frames are `LocalOnly` and never broadcast.
 
-Audit events (`terminal.jsonl`): `remote_requested {tag, requested_by, target, reason (200 chars at most)}`, `confirm_outcome {tag, target, outcome: connect|cancelled|dismissed|timed_out|abandoned|no_operator|request_pending, invite_follow?}`, `connect_started`, `connected {terminal_id, pane_id, tag, kind, target}`, `connect_failed {reason_code}`. `no_operator` and `request_pending` lines share the per-channel refusal budget. No command, keystroke or output text is ever written.
+Audit events (`terminal.jsonl`): `remote_requested {tag, requested_by, target, reason (200 chars at most)}`, `confirm_outcome {tag, target, outcome: connect|cancelled|dismissed|timed_out|abandoned|no_operator|request_pending, invite_follow?}`, `connect_started`, `connected {terminal_id, pane_id, tag, kind, target}`, `connect_failed {reason_code}`. A connect that fails after its pane appeared also writes `closed` with the same code as its reason; the remote-shell `closed` reasons are codes, never output. `no_operator` and `request_pending` lines share the per-channel refusal budget. No command, keystroke or output text is ever written.
 
 MCP tools: `nostromo.list_remote_shell_targets` and `nostromo.request_remote_shell` (`docs/mcp/tools.md`).
+
+### Connecting (slice 2b)
+
+`AwsEcsLauncher` (`src/terminal/ecs/connect.rs`) runs after Connect. It does not call the layer's `ecs_build_command` (that contacts AWS, may run `aws sso login`, returns a string for `eval` and needs bash 4); it builds the command itself from the layer's *data*.
+
+1. No profile for the environment: `profile_not_configured`.
+2. The AWS CLI is found by absolute path: `[terminal] aws_cli`, then `$NOSTROMO_AWS_CLI`, then `/opt/homebrew/bin/aws`, `/usr/local/bin/aws`, `/usr/bin/aws`; none: `aws_cli_missing`. launchd gives `nostromd` almost no `PATH`, so the child's is `<aws dir>:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` (that is where `session-manager-plugin` is found).
+3. `aws sts get-caller-identity`, `aws ecs list-tasks` and `aws ecs describe-tasks` (argv arrays, `--output json`, `AWS_PAGER=""`, 10 s each, no shell). The task is the first RUNNING one with ECS Exec enabled, as `ecs_get_task_arn` picks it. **`aws sso login` is never run**: an expired session is `sso_expired` with the remedy ``Run `aws sso login --sso-session <sso_session>` `` (from `ecs-local.json`, default `carefeed`).
+4. The pane and terminal are created in status `connecting`: kind `ecs`, label `<env> · <project> · <service> · <shell_type>`, process `aws ecs execute-command --profile … --region … --cluster … --task … --container … --interactive --command <shell command>`. The shell command is one argv element; nothing here runs a shell.
+5. The session-manager plugin's `Starting session with SessionId` makes it `running` (`terminal_state`, and the request returns `connected`). An exit before that is a connect failure: the pane and record are removed and the request returns `{error: "connect_failed", reason, remedy}` with one of `session_manager_plugin_missing`, `sso_expired`, `target_not_connected`, `access_denied`, `unknown` (the last three non-empty lines, sanitised). No marker within 60 s: the process is killed, `connect_timeout`. The captured output is at most 4 KiB, never audited, and dropped once classified.
+
+**The connection is the pane.** Any exit after `running` removes the pane and sends `terminal_closed {reason, exit_code, target, label}`: `user_closed` (the operator closed it), `remote_exit` (the session printed `Exiting session with sessionId`), `sso_expired` or `network` (from the output's last lines), else `unknown`. Nothing reconnects; a new shell needs a new request and a new confirm. `terminal_restart` on an `ecs` terminal is refused (`terminal_control_forbidden`). An `ecs` terminal is `connecting`, `running` or gone, never `ended`. A persisted `ecs` record at daemon start loses its pane and is reported closed `daemon_stopped`.
+
+Tests use `tests/fixtures/fake-aws` (Python standard library; modes `ok`, `expired`, `no_tasks`, `exec_disabled`, `plugin_missing`, `drop_after_connect`, `hang`, `spam`; `FAKE_AWS_MODE`, `FAKE_AWS_LOG`). The QA instance passes `NOSTROMO_AWS_CLI` through, so it drives live QA too. Never point a test or a QA run at the real AWS.
 
 ## Network peers (FND-1)
 

@@ -87,7 +87,11 @@ pub enum AuditEvent {
         pane_id: String,
         tag: String,
         kind: TerminalKind,
-        /// `exited`, `user_closed`, `focus_removed`, `daemon_stopped`, `pane_missing`.
+        /// `exited`, `user_closed`, `focus_removed`, `daemon_stopped`,
+        /// `pane_missing`; for a remote shell `remote_exit`, `sso_expired`,
+        /// `network`, `unknown`, or the code of a connect that failed after its
+        /// pane appeared (`connect_timeout`, `session_manager_plugin_missing`, …).
+        /// Always a code, never output.
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
@@ -163,7 +167,8 @@ pub enum AuditEvent {
         kind: TerminalKind,
         target: TerminalTarget,
     },
-    /// The launcher could not open the shell. No pane exists.
+    /// The launcher could not open the shell. No pane exists. Only a reason
+    /// *code* is kept: what the AWS CLI printed is never audited.
     ConnectFailed {
         tag: String,
         target: TerminalTarget,

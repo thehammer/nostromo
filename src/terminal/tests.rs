@@ -1099,6 +1099,7 @@ fn adopt(
             info,
             session,
             fanout,
+            remote: None,
         },
     );
     terminal_id
@@ -1397,6 +1398,28 @@ fn closing_a_terminal_ends_its_background_job_and_stops_the_reader() {
 }
 
 #[test]
+fn an_observed_session_sweeps_its_process_group_when_the_child_exits_on_its_own() {
+    // A remote shell's helper (the session-manager plugin) must not outlive the
+    // `aws` that started it, or a production session would outlive its pane.
+    let (_dir, cwd) = scratch_dir();
+    let s = TerminalSession::spawn_argv_observed(
+        &argv(&["/bin/sh", "-c", "sleep 300 & echo SLEEPER=$!; exit 0"]),
+        &cwd,
+        &[],
+        80,
+        24,
+        Box::new(|_| {}),
+    )
+    .expect("spawn");
+    let sleeper = printed_pid(&s, "SLEEPER");
+    let _guard = StrayGuard(sleeper);
+
+    assert!(s.wait_exit(WAIT).is_some(), "the shell exits by itself");
+
+    wait_until("the helper to be gone", WAIT, || process_is_gone(sleeper));
+}
+
+#[test]
 fn closing_a_terminal_sigkills_a_background_job_that_ignores_hangup() {
     let (_dir, cwd) = scratch_dir();
     // The shell dies of SIGHUP (it does not ignore it); the job does, so only a
@@ -1602,6 +1625,62 @@ fn open_in(cwd: &Path, tag: &str) -> OpenLocal {
         cwd: Some(cwd.display().to_string()),
         ..OpenLocal::default()
     }
+}
+
+#[test]
+fn a_remote_shell_is_checked_before_anything_starts() {
+    use crate::ipc::pane_registry::PaneError;
+    use crate::terminal::launcher::Placement;
+    let (_tmp, cwd) = scratch_dir();
+    let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+    let mgr = TerminalManager::new(TerminalConfig {
+        pane_registry: Some(Arc::clone(&panes)),
+        ..TerminalConfig::in_memory()
+    });
+    let cap = access_cap();
+    let check = |placement: &Placement| {
+        mgr.lock()
+            .unwrap()
+            .check_can_open_remote("busy-focus", placement)
+    };
+    let default = Placement::default();
+    assert_eq!(
+        check(&default),
+        Ok(()),
+        "a focus with no tree gets the default one"
+    );
+
+    panes.lock().unwrap().get_or_init("busy-focus");
+    let bad_pane = Placement {
+        relative_to: Some("no-such-pane".into()),
+        position: None,
+    };
+    let bad_position = Placement {
+        relative_to: None,
+        position: Some("sideways".into()),
+    };
+    assert_eq!(
+        check(&bad_pane),
+        Err(TerminalError::Pane(PaneError::UnknownPane))
+    );
+    assert_eq!(
+        check(&bad_position),
+        Err(TerminalError::Pane(PaneError::InvalidPosition))
+    );
+
+    for _ in 0..MAX_TERMINALS_PER_FOCUS {
+        mgr.lock()
+            .unwrap()
+            .open_local(&cap, open_in(&cwd, "busy-focus"))
+            .expect("open");
+    }
+    assert_eq!(check(&default), Err(TerminalError::TooManyTerminals));
+    assert_eq!(
+        mgr.lock()
+            .unwrap()
+            .check_can_open_remote("another-focus", &default),
+        Ok(())
+    );
 }
 
 #[test]

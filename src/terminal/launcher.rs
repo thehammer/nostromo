@@ -78,7 +78,7 @@ pub mod testing {
     use async_trait::async_trait;
 
     use super::{ConnectFailure, Placement, RemoteLauncher};
-    use crate::ipc::protocol::{TerminalInfo, TerminalRequester};
+    use crate::ipc::protocol::{TerminalInfo, TerminalRequester, TerminalStatus};
     use crate::terminal::ecs::EcsTarget;
     use crate::terminal::session::TerminalSession;
     use crate::terminal::{store, OpenRemote, TerminalManager};
@@ -181,6 +181,8 @@ pub mod testing {
                         requested_by: requested_by.clone(),
                         target: target.terminal_target(),
                         label,
+                        status: TerminalStatus::Running,
+                        watch: None,
                     },
                     session,
                 );

@@ -723,6 +723,7 @@ fn explicit_terminal_config_paths_are_used_exactly() {
         ecs_config: Some(dir.join("config.json")),
         ecs_local: Some(dir.join("ecs-local.json")),
         ecs_aliases_script: Some(dir.join("ecs.sh")),
+        aws_cli: None,
     };
 
     let paths = EcsPaths::from_config(&cfg);
@@ -793,4 +794,40 @@ fn a_file_that_goes_missing_between_loads_turns_the_second_load_into_an_error() 
     std::fs::remove_file(copy.file("config.json")).unwrap();
 
     assert!(copy.load().is_err());
+}
+
+// ── the SSO session a login remedy names ─────────────────────────────────────
+
+fn sso_session_of(copy: &Copy) -> String {
+    copy.load()
+        .expect("loads")
+        .resolve("admin-portal", "production", "scheduler", "shell")
+        .expect("resolves")
+        .sso_session
+}
+
+#[test]
+fn the_sso_session_is_the_personal_one_then_the_shared_one_then_carefeed() {
+    let copy = Copy::new();
+    assert_eq!(sso_session_of(&copy), "fake-sso-session");
+
+    copy.write("ecs-local.json", r#"{"profiles": {}}"#);
+    assert_eq!(sso_session_of(&copy), "carefeed", "neither file names one");
+
+    let config = copy.read("config.json");
+    copy.write(
+        "config.json",
+        &config.replacen('{', r#"{ "sso_session": "shared-session","#, 1),
+    );
+    assert_eq!(sso_session_of(&copy), "shared-session");
+}
+
+#[test]
+fn an_sso_session_that_is_not_a_plain_name_is_ignored() {
+    let copy = Copy::new();
+    for bad in ["x`; rm -rf ~ #", "two words", "a\nb", ""] {
+        let local = serde_json::json!({ "sso_session": bad, "profiles": {} });
+        copy.write("ecs-local.json", &local.to_string());
+        assert_eq!(sso_session_of(&copy), "carefeed", "{bad:?}");
+    }
 }

@@ -133,6 +133,15 @@ struct Screen {
     hooks: Vec<ReaderHook>,
 }
 
+/// What a spawn adds to the defaults.
+#[derive(Default)]
+struct SpawnOptions {
+    /// Reader hooks installed before the reader starts.
+    hooks: Vec<ReaderHook>,
+    /// Sweep the child's process group when it exits on its own.
+    sweep_group_on_exit: bool,
+}
+
 #[derive(Default)]
 struct ExitState {
     /// `Some(code)` once the child has exited and output has drained.
@@ -159,6 +168,9 @@ pub struct TerminalSession {
     /// `kill` was called: whatever the shell leaves in its group when it exits
     /// is SIGKILLed before the shell is reaped.
     closing: AtomicBool,
+    /// The same sweep happens when the child exits on its own (a remote
+    /// shell's helper processes must not outlive their pane).
+    sweep_group_on_exit: bool,
     /// Tells the reader to stop (the terminal was closed).
     stop_reader: AtomicBool,
     /// Input bytes queued and not yet written.
@@ -179,11 +191,12 @@ impl TerminalSession {
             cols,
             rows,
             ops,
+            SpawnOptions::default(),
         )
     }
 
     /// `argv` (no shell) in `cwd`, with `env` on top of the scrubbed daemon
-    /// environment. Used by tests, and by remote shells (2b).
+    /// environment. Used by tests.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn spawn_argv(
         argv: &[String],
@@ -205,10 +218,27 @@ impl TerminalSession {
         rows: u16,
         ops: SignalOps,
     ) -> Result<Arc<Self>> {
-        let (program, args) = argv.split_first().context("empty argv")?;
-        let mut cmd = CommandBuilder::new(program);
-        cmd.args(args);
-        Self::spawn(cmd, cwd, env, cols, rows, ops)
+        let cmd = argv_command(argv)?;
+        Self::spawn(cmd, cwd, env, cols, rows, ops, SpawnOptions::default())
+    }
+
+    /// [`Self::spawn_argv`] with `hook` installed before the reader starts, so
+    /// it sees the process's very first byte (a remote shell's connect marker
+    /// can arrive before a later `add_reader_hook` would).
+    pub(crate) fn spawn_argv_observed(
+        argv: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+        cols: u16,
+        rows: u16,
+        hook: ReaderHook,
+    ) -> Result<Arc<Self>> {
+        let cmd = argv_command(argv)?;
+        let options = SpawnOptions {
+            hooks: vec![hook],
+            sweep_group_on_exit: true,
+        };
+        Self::spawn(cmd, cwd, env, cols, rows, SignalOps::real(), options)
     }
 
     fn spawn(
@@ -218,6 +248,7 @@ impl TerminalSession {
         cols: u16,
         rows: u16,
         ops: SignalOps,
+        options: SpawnOptions,
     ) -> Result<Arc<Self>> {
         for key in SCRUBBED_ENV {
             cmd.env_remove(key);
@@ -256,7 +287,7 @@ impl TerminalSession {
             screen: Mutex::new(Screen {
                 ring: ScrollbackBuf::with_limits(RING_MAX_BYTES, RING_MAX_NEWLINES),
                 parser: vt100::Parser::new(rows, cols, PARSER_SCROLLBACK_ROWS),
-                hooks: Vec::new(),
+                hooks: options.hooks,
             }),
             input,
             master: Mutex::new(pair.master),
@@ -266,6 +297,7 @@ impl TerminalSession {
             signal_lock: Mutex::new(()),
             reaped: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            sweep_group_on_exit: options.sweep_group_on_exit,
             stop_reader: AtomicBool::new(false),
             queued_bytes: Arc::clone(&queued_bytes),
             exit: Mutex::new(ExitState::default()),
@@ -299,7 +331,7 @@ impl TerminalSession {
                         .signal_lock
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
-                    if for_waiter.closing.load(Ordering::SeqCst) {
+                    if for_waiter.closing.load(Ordering::SeqCst) || for_waiter.sweep_group_on_exit {
                         // Closed: nothing the shell left in its group outlives it.
                         // The shell is a zombie, not reaped, so its pid and group
                         // are still ours.
@@ -575,6 +607,15 @@ impl TerminalSession {
 
 /// Feed queued input to the PTY until the session (the sender) is gone or
 /// the terminal stops taking writes.
+/// `argv` as a command: element 0 is the program, the rest are its arguments.
+/// No shell.
+fn argv_command(argv: &[String]) -> Result<CommandBuilder> {
+    let (program, args) = argv.split_first().context("empty argv")?;
+    let mut cmd = CommandBuilder::new(program);
+    cmd.args(args);
+    Ok(cmd)
+}
+
 fn write_loop(
     mut writer: Box<dyn Write + Send>,
     queued: Receiver<Vec<u8>>,

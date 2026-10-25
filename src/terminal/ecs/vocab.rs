@@ -18,6 +18,9 @@ use tracing::warn;
 use crate::config::TerminalConfig;
 use crate::ipc::protocol::{RemoteShellEnvironment, RemoteShellProject, TerminalTarget};
 
+/// The SSO session `ecs.sh` logs in with when `ecs-local.json` names none.
+pub const DEFAULT_SSO_SESSION: &str = "carefeed";
+
 /// What the layer writes where a profile has not been chosen yet.
 pub const CONFIGURE_ME: &str = "CONFIGURE_ME";
 
@@ -158,6 +161,9 @@ pub struct EcsTarget {
     /// The AWS profile for the environment; `None` when it is missing or
     /// still [`CONFIGURE_ME`].
     pub profile: Option<String>,
+    /// The SSO session a login remedy names (`ecs-local.json`'s
+    /// `sso_session`; `carefeed` when it says none).
+    pub sso_session: String,
     /// The command the shell runs (`/bin/bash`, `php artisan tinker`).
     pub shell_command: String,
 }
@@ -179,6 +185,7 @@ impl EcsTarget {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct ConfigFile {
+    sso_session: Option<String>,
     profiles: BTreeMap<String, String>,
     regions: BTreeMap<String, String>,
     projects: BTreeMap<String, ProjectData>,
@@ -210,6 +217,7 @@ struct ServiceData {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct LocalFile {
+    sso_session: Option<String>,
     profiles: BTreeMap<String, String>,
 }
 
@@ -226,6 +234,7 @@ struct Aliases {
 pub struct EcsVocabulary {
     config: ConfigFile,
     local_profiles: BTreeMap<String, String>,
+    sso_session: Option<String>,
     aliases: Aliases,
 }
 
@@ -252,10 +261,10 @@ impl EcsVocabulary {
             )));
         }
 
-        let local_profiles = EcsPaths::first_existing(&paths.local)
+        let local = EcsPaths::first_existing(&paths.local)
             .and_then(|p| match read_capped(p) {
                 Ok(raw) => match serde_json::from_str::<LocalFile>(&raw) {
-                    Ok(local) => Some(local.profiles),
+                    Ok(local) => Some(local),
                     Err(e) => {
                         warn!("ignoring {}: {e}", p.display());
                         None
@@ -267,6 +276,15 @@ impl EcsVocabulary {
                 }
             })
             .unwrap_or_default();
+        let local_profiles = local.profiles;
+        // As `ecs.sh` picks it: the personal file first, then the shared one.
+        // A name that is not a plain identifier is ignored: it ends up in a
+        // command the user is told to run.
+        let sso_session = local
+            .sso_session
+            .into_iter()
+            .chain(file.sso_session.clone())
+            .find(|name| is_session_name(name));
 
         let aliases = match EcsPaths::first_existing(&paths.aliases_script) {
             Some(p) => match read_capped(p) {
@@ -288,6 +306,7 @@ impl EcsVocabulary {
         Ok(Self {
             config: file,
             local_profiles,
+            sso_session,
             aliases,
         })
     }
@@ -395,6 +414,10 @@ impl EcsVocabulary {
             project: project_name,
             region: self.config.regions[&env_name].clone(),
             profile: self.profile_for(&env_name),
+            sso_session: self
+                .sso_session
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SSO_SESSION.to_string()),
             environment: env_name,
             service: service_name,
             shell_type: shell_name,
@@ -424,6 +447,14 @@ impl EcsVocabulary {
             .filter(|p| !p.is_empty() && p.as_str() != CONFIGURE_ME)
             .cloned()
     }
+}
+
+/// An SSO session name: letters, digits, `.`, `_` and `-`, 1 to 64 of them.
+fn is_session_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// `ecs_resolve_alias`: lowercase, then the alias table, else the lowercase word.

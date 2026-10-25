@@ -37,9 +37,10 @@ use uuid::Uuid;
 pub use access::OperatorCap;
 pub use agent_api::TerminalAgentApi;
 use audit::{AuditEvent, AuditLog, RefusalChannel};
+use ecs::watch::RemoteWatch;
 use ecs::EcsPaths;
 use fanout::Fanout;
-use launcher::{Placement, RemoteLauncher, UnavailableLauncher};
+use launcher::{ConnectFailure, Placement, RemoteLauncher, UnavailableLauncher};
 use remote_request::{Decision, RemoteRequests};
 use session::{InputError, SignalOps, TerminalSession};
 use store::{TerminalRecord, TerminalStore};
@@ -109,8 +110,11 @@ pub const REMOTE_SHELL_CONFIRM: &str = "remote_shell_confirm";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalError {
     UnknownTerminal,
-    /// `terminal_restart` on a terminal that is not `ended`, or a remote one.
+    /// `terminal_restart` on a terminal that is not `ended`.
     NotEnded,
+    /// `terminal_restart` on a remote shell: the connection is the pane, and
+    /// a new one needs a new request and a new confirm.
+    RemoteNotRestartable,
     /// Input to a terminal whose process has ended.
     NotRunning,
     /// The process is not reading its input and its queue is full.
@@ -142,6 +146,7 @@ impl TerminalError {
         match self {
             TerminalError::UnknownTerminal => "unknown_terminal",
             TerminalError::NotEnded => "terminal_not_ended",
+            TerminalError::RemoteNotRestartable => "terminal_control_forbidden",
             TerminalError::NotRunning => "terminal_not_running",
             TerminalError::InputBusy => "terminal_input_busy",
             TerminalError::InputTooLarge => "terminal_input_too_large",
@@ -195,6 +200,11 @@ pub(crate) struct OpenRemote {
     pub requested_by: TerminalRequester,
     pub target: TerminalTarget,
     pub label: String,
+    /// `Connecting` for a shell whose session has not begun (the launcher
+    /// promotes it with [`TerminalManager::promote_remote`]), else `Running`.
+    pub status: TerminalStatus,
+    /// What is watched in its output; `None` for a shell that is not.
+    pub watch: Option<Arc<RemoteWatch>>,
 }
 
 /// What `open_with` starts.
@@ -204,6 +214,8 @@ enum Launch {
         session: Arc<TerminalSession>,
         target: TerminalTarget,
         label: String,
+        status: TerminalStatus,
+        watch: Option<Arc<RemoteWatch>>,
     },
 }
 
@@ -212,6 +224,8 @@ struct Terminal {
     /// `None` for an ended terminal a previous daemon left.
     session: Option<Arc<TerminalSession>>,
     fanout: Arc<Fanout>,
+    /// An ECS terminal's output watch.
+    remote: Option<Arc<RemoteWatch>>,
 }
 
 pub struct TerminalManager {
@@ -237,6 +251,23 @@ pub struct TerminalManager {
     remote_launcher: Arc<dyn RemoteLauncher>,
     /// Where the remote-shell vocabulary's files are (read per request).
     ecs_paths: EcsPaths,
+}
+
+impl Terminal {
+    /// A terminal still connecting is going away: tell the launcher waiting
+    /// on it, which would otherwise wait out its timeout.
+    fn fail_connecting(&self, reason_code: &str, message: &str) {
+        if self.info.status != TerminalStatus::Connecting {
+            return;
+        }
+        if let Some(watch) = &self.remote {
+            watch.fail(ConnectFailure {
+                reason_code: reason_code.into(),
+                message: message.into(),
+                remedy: None,
+            });
+        }
+    }
 }
 
 /// One channel's `refused` lines in the current window.
@@ -329,6 +360,7 @@ impl TerminalManager {
                     info,
                     session: None,
                     fanout,
+                    remote: None,
                 },
             );
         }
@@ -446,6 +478,8 @@ impl TerminalManager {
             session: Arc::clone(&session),
             target: req.target,
             label: req.label,
+            status: req.status,
+            watch: req.watch,
         };
         let result = self.open_with(open, req.requested_by, launch);
         if result.is_err() {
@@ -454,30 +488,40 @@ impl TerminalManager {
         result
     }
 
+    /// Would a remote shell for `tag` at `placement` be opened right now? The
+    /// launcher asks before it starts anything: a process that is then refused
+    /// a pane would be a production session started for nothing. (`open_with`
+    /// checks again: this is a courtesy, not a reservation.)
+    pub(crate) fn check_can_open_remote(
+        &self,
+        tag: &str,
+        placement: &Placement,
+    ) -> Result<(), TerminalError> {
+        self.check_can_open(tag)?;
+        SplitPosition::parse(placement.position.as_deref().unwrap_or(DEFAULT_POSITION))
+            .map_err(TerminalError::Pane)?;
+        let relative_to = placement
+            .relative_to
+            .as_deref()
+            .unwrap_or(DEFAULT_RELATIVE_TO);
+        let panes = self
+            .lock_panes()
+            .map(|panes| panes.pane_ids(tag))
+            .unwrap_or_default();
+        // A focus with no tree yet gets the default one, which has the repl.
+        if !panes.is_empty() && !panes.iter().any(|p| p == relative_to) {
+            return Err(TerminalError::Pane(PaneError::UnknownPane));
+        }
+        Ok(())
+    }
+
     fn open_with(
         &mut self,
         req: OpenLocal,
         requested_by: TerminalRequester,
         launch: Launch,
     ) -> Result<TerminalInfo, TerminalError> {
-        if self.shutting_down {
-            return Err(TerminalError::ShuttingDown);
-        }
-        // Nothing starts that cannot be audited.
-        if let Err(e) = self.audit.check() {
-            warn!("terminal not opened, audit log unavailable: {e}");
-            return Err(TerminalError::AuditUnavailable);
-        }
-        if self.terminals.len() >= MAX_TERMINALS
-            || self
-                .terminals
-                .values()
-                .filter(|t| t.info.tag == req.tag)
-                .count()
-                >= MAX_TERMINALS_PER_FOCUS
-        {
-            return Err(TerminalError::TooManyTerminals);
-        }
+        self.check_can_open(&req.tag)?;
         // The agent quota is for shells an agent starts on its own; a remote
         // shell exists only because the user clicked Connect.
         if requested_by.kind == AGENT_REQUESTER && matches!(launch, Launch::Local) {
@@ -513,13 +557,20 @@ impl TerminalManager {
             ),
             None => None,
         };
-        let (session, kind, label, target) = match launch {
+        let (session, kind, label, target, status, remote) = match launch {
             Launch::Local => {
                 let cwd = cwd
                     .as_deref()
                     .expect("a local shell has a working directory");
                 match TerminalSession::spawn_local(cwd, cols, rows, self.signals.clone()) {
-                    Ok(s) => (s, TerminalKind::Local, LOCAL_LABEL.to_string(), None),
+                    Ok(s) => (
+                        s,
+                        TerminalKind::Local,
+                        LOCAL_LABEL.to_string(),
+                        None,
+                        TerminalStatus::Running,
+                        None,
+                    ),
                     Err(e) => {
                         warn!(tag = %req.tag, "terminal spawn failed: {e:#}");
                         self.remove_leaf(&req.tag, &pane_id);
@@ -531,7 +582,16 @@ impl TerminalManager {
                 session,
                 target,
                 label,
-            } => (session, TerminalKind::Ecs, label, Some(target)),
+                status,
+                watch,
+            } => (
+                session,
+                TerminalKind::Ecs,
+                label,
+                Some(target),
+                status,
+                watch,
+            ),
         };
 
         let user_opened = requested_by.kind == "user";
@@ -543,7 +603,7 @@ impl TerminalManager {
             label,
             cwd: cwd.map(|c| c.display().to_string()),
             target,
-            status: TerminalStatus::Running,
+            status,
             exit_code: None,
             ended_reason: None,
             cols,
@@ -551,7 +611,7 @@ impl TerminalManager {
             requested_by,
             opened_by_request: req.client_request_id,
         };
-        self.insert_live(info.clone(), session);
+        self.insert_live(info.clone(), session, remote);
         self.persist();
         self.record(AuditEvent::Opened {
             terminal_id: info.terminal_id.clone(),
@@ -577,8 +637,36 @@ impl TerminalManager {
         Ok(info)
     }
 
+    /// The checks every new terminal passes before anything is started.
+    fn check_can_open(&self, tag: &str) -> Result<(), TerminalError> {
+        if self.shutting_down {
+            return Err(TerminalError::ShuttingDown);
+        }
+        // Nothing starts that cannot be audited.
+        if let Err(e) = self.audit.check() {
+            warn!("terminal not opened, audit log unavailable: {e}");
+            return Err(TerminalError::AuditUnavailable);
+        }
+        if self.terminals.len() >= MAX_TERMINALS
+            || self
+                .terminals
+                .values()
+                .filter(|t| t.info.tag == tag)
+                .count()
+                >= MAX_TERMINALS_PER_FOCUS
+        {
+            return Err(TerminalError::TooManyTerminals);
+        }
+        Ok(())
+    }
+
     /// Track a freshly spawned session: fan-out, and the exit hook.
-    fn insert_live(&mut self, info: TerminalInfo, session: Arc<TerminalSession>) {
+    fn insert_live(
+        &mut self,
+        info: TerminalInfo,
+        session: Arc<TerminalSession>,
+        remote: Option<Arc<RemoteWatch>>,
+    ) {
         let terminal_id = info.terminal_id.clone();
         let fanout = Fanout::start(&terminal_id, &session, Arc::clone(&self.probe));
         let me = self.me.clone();
@@ -596,6 +684,7 @@ impl TerminalManager {
                 info,
                 session: Some(session),
                 fanout,
+                remote,
             },
         );
     }
@@ -725,6 +814,7 @@ impl TerminalManager {
             session.kill();
         }
         t.fanout.close();
+        t.fail_connecting("user_closed", "The shell was closed before it connected.");
         self.finish_closed(t.info, "user_closed", None);
         Ok(())
     }
@@ -748,6 +838,7 @@ impl TerminalManager {
                 session.kill();
             }
             t.fanout.close();
+            t.fail_connecting("focus_removed", "The pane's focus was removed.");
             self.finish_closed(t.info, "focus_removed", None);
         }
     }
@@ -765,6 +856,9 @@ impl TerminalManager {
             .terminals
             .get(terminal_id)
             .ok_or(TerminalError::UnknownTerminal)?;
+        if old.info.kind == TerminalKind::Ecs {
+            return Err(TerminalError::RemoteNotRestartable);
+        }
         if old.info.status != TerminalStatus::Ended || old.info.kind != TerminalKind::Local {
             return Err(TerminalError::NotEnded);
         }
@@ -796,7 +890,7 @@ impl TerminalManager {
             opened_by_request: None,
             ..old.info
         };
-        self.insert_live(info.clone(), session);
+        self.insert_live(info.clone(), session, None);
         self.persist();
         self.record(AuditEvent::Restarted {
             terminal_id: info.terminal_id.clone(),
@@ -1039,11 +1133,13 @@ impl TerminalManager {
             return;
         };
         t.fanout.close();
-        let closes = match t.info.kind {
-            TerminalKind::Local => code == Some(0),
-            TerminalKind::Ecs => true,
-        };
-        if closes {
+        // The connection is the pane: an ECS terminal never lingers `ended`.
+        if t.info.kind == TerminalKind::Ecs {
+            let t = self.terminals.remove(terminal_id).expect("present");
+            self.finish_remote_exit(t, code);
+            return;
+        }
+        if code == Some(0) {
             let t = self.terminals.remove(terminal_id).expect("present");
             self.finish_closed(t.info, "exited", code);
             return;
@@ -1060,6 +1156,72 @@ impl TerminalManager {
             exit_code: code,
         });
         self.send(ServerMsg::TerminalState { terminal: info });
+    }
+
+    /// An ECS terminal's process exited (it is already out of the registry).
+    /// Before its session began that is a connect failure, and the launcher
+    /// waiting on it is told why; after, the pane closes with the reason the
+    /// output gives (`remote_exit`, `sso_expired`, `network`, `unknown`).
+    /// Nothing reconnects.
+    fn finish_remote_exit(&mut self, t: Terminal, code: Option<i32>) {
+        let Some(watch) = t.remote else {
+            self.finish_closed(t.info, "exited", code);
+            return;
+        };
+        if t.info.status == TerminalStatus::Connecting {
+            let failure = if watch.connected() {
+                // The session began and ended before the launcher saw it begin.
+                ConnectFailure {
+                    reason_code: watch.take_close_reason().into(),
+                    message: "The session ended as soon as it began.".into(),
+                    remedy: None,
+                }
+            } else {
+                watch.take_connect_failure()
+            };
+            let reason = failure.reason_code.clone();
+            watch.fail(failure);
+            self.finish_closed(t.info, &reason, code);
+        } else {
+            let reason = watch.take_close_reason();
+            self.finish_closed(t.info, reason, code);
+        }
+    }
+
+    /// The remote shell's session has begun: `connecting` becomes `running`
+    /// and clients are told. `None` when the terminal is no longer connecting
+    /// (it exited or was closed first; the launcher is told so separately).
+    pub(crate) fn promote_remote(&mut self, terminal_id: &str) -> Option<TerminalInfo> {
+        let t = self.terminals.get_mut(terminal_id)?;
+        if t.info.status != TerminalStatus::Connecting {
+            return None;
+        }
+        t.info.status = TerminalStatus::Running;
+        let info = t.info.clone();
+        self.send(ServerMsg::TerminalState {
+            terminal: info.clone(),
+        });
+        Some(info)
+    }
+
+    /// Give up on a remote shell that has not connected (timeout, or the
+    /// requester went away): kill it, remove its pane and record. `false` when
+    /// it is gone already or is no longer connecting.
+    pub(crate) fn abort_connecting(&mut self, terminal_id: &str, reason: &str) -> bool {
+        let connecting = self
+            .terminals
+            .get(terminal_id)
+            .is_some_and(|t| t.info.status == TerminalStatus::Connecting);
+        if !connecting {
+            return false;
+        }
+        let t = self.terminals.remove(terminal_id).expect("checked above");
+        if let Some(session) = &t.session {
+            session.kill();
+        }
+        t.fanout.close();
+        self.finish_closed(t.info, reason, None);
+        true
     }
 
     /// A terminal left the registry: remove its leaf, persist, audit, tell clients.
@@ -1124,6 +1286,7 @@ impl TerminalManager {
                 session.kill();
             }
             t.fanout.close();
+            t.fail_connecting("daemon_stopping", "The daemon is stopping.");
         }
     }
 

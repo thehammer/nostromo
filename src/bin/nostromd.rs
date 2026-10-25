@@ -196,12 +196,20 @@ async fn main() -> Result<()> {
     {
         let mut terminals = terminals.lock().unwrap();
         terminals.set_sensitive_tags(session_mgr.lock().unwrap().sensitive_tags());
-        // Where the remote-shell vocabulary is read from (per request). The
-        // launcher stays `UnavailableLauncher` until remote shells can be opened.
+        // Where the remote-shell vocabulary is read from (per request).
         terminals.set_ecs_paths(nostromo::terminal::ecs::EcsPaths::from_config(
             &config.terminal,
         ));
         terminals.reconcile();
+    }
+    // The real remote-shell launcher: the AWS CLI, run by argv, never through
+    // a shell. It is called only after the verified app says Connect.
+    {
+        let launcher = nostromo::terminal::ecs::AwsEcsLauncher::new(
+            &terminals,
+            nostromo::terminal::ecs::aws::AwsCliSource::from_config(&config.terminal),
+        );
+        terminals.lock().unwrap().set_remote_launcher(launcher);
     }
 
     // ── Decision registry (W6 decision modals) ─────────────────────────────────
