@@ -183,6 +183,46 @@ fn job_project<'a>(job: &MotherJob, repos: &'a [Repo]) -> Option<&'a Repo> {
         .find(|r| r.id == name || r.name.to_lowercase() == name)
 }
 
+/// What one repository has to show, for the in-flight rule (A9).
+struct ActivitySources<'a> {
+    commits: &'a [projects::Commit],
+    prs: &'a [PrRecord],
+    jobs: &'a [MotherJob],
+    boards: &'a [BoardSummary],
+}
+
+impl ActivitySources<'_> {
+    /// The most recent of: the latest commit (if within
+    /// [`COMMIT_IN_FLIGHT_DAYS`]), open PRs, jobs and board updates.
+    fn latest(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let commit_after = now - chrono::Duration::days(COMMIT_IN_FLIGHT_DAYS);
+        let mut times: Vec<DateTime<Utc>> = Vec::new();
+        times.extend(
+            self.commits
+                .first()
+                .map(|c| c.at)
+                .filter(|t| *t >= commit_after),
+        );
+        times.extend(
+            self.prs
+                .iter()
+                .filter(|p| p.state == PrState::Open)
+                .map(|p| p.at),
+        );
+        times.extend(
+            self.jobs
+                .iter()
+                .map(|j| collectors::job_time(j).unwrap_or(now)),
+        );
+        times.extend(
+            self.boards
+                .iter()
+                .map(|b| b.updated_at.unwrap_or(DateTime::<Utc>::MIN_UTC)),
+        );
+        times.into_iter().max()
+    }
+}
+
 /// Read every context source in `env` and build the digest inputs (version 1,
 /// no mode line, dated today in local time). `profile_cache` is
 /// `state/profiles/`; `None` (the setup scan) caches nothing, so nothing is
@@ -232,36 +272,17 @@ pub fn gather(
     }
 
     // Activity per repository: the in-flight rule (A9).
-    let commit_after = now - chrono::Duration::days(COMMIT_IN_FLIGHT_DAYS);
     let mut commits_by = BTreeMap::new();
     let mut activity: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
     for repo in &repos {
         let commits = projects::recent_commits(&repo.root, 20);
-        let mut times: Vec<DateTime<Utc>> = Vec::new();
-        times.extend(commits.first().map(|c| c.at).filter(|t| *t >= commit_after));
-        times.extend(
-            prs_by
-                .get(&repo.id)
-                .into_iter()
-                .flatten()
-                .filter(|p| p.state == PrState::Open)
-                .map(|p| p.at),
-        );
-        times.extend(
-            jobs_by
-                .get(&repo.id)
-                .into_iter()
-                .flatten()
-                .map(|j| collectors::job_time(j).unwrap_or(now)),
-        );
-        times.extend(
-            boards
-                .get(&repo.id)
-                .into_iter()
-                .flatten()
-                .map(|b| b.updated_at.unwrap_or(DateTime::<Utc>::MIN_UTC)),
-        );
-        if let Some(latest) = times.into_iter().max() {
+        let sources = ActivitySources {
+            commits: &commits,
+            prs: prs_by.get(&repo.id).map_or(&[][..], Vec::as_slice),
+            jobs: jobs_by.get(&repo.id).map_or(&[][..], Vec::as_slice),
+            boards: boards.get(&repo.id).map_or(&[][..], Vec::as_slice),
+        };
+        if let Some(latest) = sources.latest(now) {
             activity.insert(repo.id.clone(), latest);
         }
         commits_by.insert(repo.id.clone(), commits);

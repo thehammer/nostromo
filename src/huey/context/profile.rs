@@ -516,7 +516,9 @@ fn features(root: &Path, deps: &[Dependency]) -> Vec<String> {
 /// Number of tracked files at HEAD containing `term` (fixed string), and the
 /// first repo-relative paths. `None` when git could not answer.
 pub(crate) fn grep_files(root: &Path, term: &str) -> Option<Vec<String>> {
-    let out = git(root, &[
+    let out = git(
+        root,
+        &[
             "grep",
             "--no-textconv",
             "-F",
@@ -526,7 +528,8 @@ pub(crate) fn grep_files(root: &Path, term: &str) -> Option<Vec<String>> {
             term,
             "HEAD",
             "--",
-        ])?;
+        ],
+    )?;
     match out.code {
         0 => Some(
             String::from_utf8_lossy(&out.stdout)

@@ -20,6 +20,8 @@ use crate::mother::MotherJob;
 pub const MAX_DIGEST_BYTES: usize = 16 * 1024;
 /// Heading of the section [`append_checks`] adds.
 pub const CHECKS_HEADING: &str = "## Checks Huey ran";
+/// Longest title or subject carried into the digest, in characters.
+const TITLE_MAX: usize = 120;
 /// Shown after a project's own "how it runs" line is replaced by the user's.
 pub const CORRECTION_MARK: &str = "(your correction)";
 
@@ -132,7 +134,7 @@ fn project_entries(p: &ProjectContext, inputs: &DigestInputs) -> Vec<Entry> {
     for pr in open {
         out.push(line(
             format!("{}:pr#{}", p.id, pr.number),
-            format!("Open PR #{}: {}", pr.number, one_line(&pr.title, 120)),
+            format!("Open PR #{}: {}", pr.number, one_line(&pr.title, TITLE_MAX)),
         ));
     }
     let mut merged: Vec<&PrRecord> = p
@@ -148,7 +150,7 @@ fn project_entries(p: &ProjectContext, inputs: &DigestInputs) -> Vec<Entry> {
                 "Merged {} #{}: {}",
                 short_date(pr.at),
                 pr.number,
-                one_line(&pr.title, 120)
+                one_line(&pr.title, TITLE_MAX)
             ),
         ));
     }
@@ -180,7 +182,7 @@ fn project_entries(p: &ProjectContext, inputs: &DigestInputs) -> Vec<Entry> {
             format!("job:{}", one_line(&job.id, 40)),
             format!(
                 "Job \"{}\": {}",
-                one_line(title, 120),
+                one_line(title, TITLE_MAX),
                 one_line(&job.state, 24)
             ),
         ));
@@ -188,7 +190,11 @@ fn project_entries(p: &ProjectContext, inputs: &DigestInputs) -> Vec<Entry> {
     for c in &p.commits {
         out.push(line(
             format!("{}:commit#{}", p.id, c.sha),
-            format!("Commit {}: {}", short_date(c.at), one_line(&c.subject, 120)),
+            format!(
+                "Commit {}: {}",
+                short_date(c.at),
+                one_line(&c.subject, TITLE_MAX)
+            ),
         ));
     }
     out
@@ -203,7 +209,7 @@ fn title_entry_line(e: &TitleEntry) -> Entry {
     Entry::Line {
         id: e.id.clone(),
         project: None,
-        text: format!("{}{suffix}", one_line(&e.title, 120)),
+        text: format!("{}{suffix}", one_line(&e.title, TITLE_MAX)),
     }
 }
 
