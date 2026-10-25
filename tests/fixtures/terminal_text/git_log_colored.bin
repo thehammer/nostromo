@@ -1,0 +1,12 @@
+[?1h=[33mcommit 1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: Test User <test@example.com>
+Date:   Sat Oct 24 10:00:00 2026 -0500
+
+    Add the thing
+
+[33mcommit 0f9e8d7c6b5a49382716059483726150f9e8d7c6[m
+Author: Test User <test@example.com>
+Date:   Fri Oct 23 09:00:00 2026 -0500
+
+    Initial commit
+[?1l>
