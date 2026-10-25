@@ -27,9 +27,10 @@
 
 mod remote_shell_support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use nostromo::data::work::picks::PICKS_TAG;
 use nostromo::ipc::protocol::{ClientMsg, ServerMsg, TerminalKind, TerminalStatus, Topic};
 use nostromo::mcp::server::TOOL_FORBIDDEN_CODE;
 use nostromo::terminal::agent_api::AgentRemoteRequest;
@@ -68,6 +69,7 @@ async fn assert_app_not_asked(app: &mut Unix, from: usize, what: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn canonical_names_and_aliases_all_resolve_to_the_same_canonical_target() {
     let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
     let variants = [
         ("admin-portal", "production", "scheduler", "shell"),
         ("ap", "prod", "sched", "shell"),
@@ -82,6 +84,8 @@ async fn canonical_names_and_aliases_all_resolve_to_the_same_canonical_target() 
             "service": service, "shell_type": shell_type,
         });
         let calls_before = s.d.launcher().calls();
+        // Five requests from one focus: keep clear of the ceiling of three in ten minutes.
+        clock.advance(Duration::from_secs(600));
 
         let (call, confirm) = s.ask(a).await;
 
@@ -176,6 +180,384 @@ async fn a_word_outside_the_vocabulary_is_refused_with_the_valid_values_and_no_s
     // typed is not in the trail.
     assert!(s.d.remote_audit().is_empty(), "{:?}", s.d.remote_audit());
     assert!(!s.d.audit_text().contains("zzz"), "{}", s.d.audit_text());
+}
+
+// ── an injection corpus, as data ─────────────────────────────────────────────
+
+/// ASCII to fullwidth forms (`prod` to `ｐｒｏｄ`).
+fn fullwidth(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '!'..='~' => char::from_u32(c as u32 + 0xFEE0).unwrap(),
+            c => c,
+        })
+        .collect()
+}
+
+/// Strings that are no word of the vocabulary whichever field they are put in.
+fn injection_corpus() -> Vec<(String, String)> {
+    let fixed: &[&str] = &[
+        "",
+        " ",
+        ";",
+        "&&",
+        "||",
+        "|",
+        "&",
+        ">",
+        "<",
+        "a; rm -rf /",
+        "a && id",
+        "a | id",
+        "$(id)",
+        "${IFS}id",
+        "$HOME",
+        "`id`",
+        "'; id; '",
+        "\"; id; \"",
+        "../",
+        "../../etc/passwd",
+        "/etc/passwd",
+        "..\\..\\windows",
+        "--profile x",
+        "--profile=x",
+        "-p x",
+        "--region us-east-1",
+        "--region=us-east-1",
+        "-- --profile x",
+        "a\nb",
+        "a\r\nb",
+        "a\rb",
+        "\n",
+        "\r\n",
+        "\n; id",
+        "a\0b",
+        "\0",
+        "\t",
+        "a\tb",
+        "  ",
+        "\u{b}",
+        "\u{1b}[31m",
+        "\u{7f}",
+        "\u{85}",
+        // Unicode case folding and normalisation.
+        "ſ",
+        "ſhell",
+        "ſcheduler",
+        "ſched",
+        "\u{212A}",
+        "tin\u{212A}er",
+        "\u{130}",
+        "\u{131}",
+        "productıon",
+        "prod\u{131}",
+        "PRODUCT\u{130}ON",
+        "adm\u{131}n-portal",
+        "mon\u{130}tor",
+        "ǅ",
+        "ß",
+        "ﬁ",
+        "ﬀ",
+        // Fullwidth forms.
+        "ｐｒｏｄ",
+        "ｐｒｏｄｕｃｔｉｏｎ",
+        "ａｄｍｉｎ-ｐｏｒｔａｌ",
+        "ｓｈｅｌｌ",
+        "ｓｃｈｅｄｕｌｅｒ",
+        // Zero-width and bidi characters.
+        "\u{200b}",
+        "\u{200c}",
+        "\u{200d}",
+        "\u{feff}",
+        "\u{2060}",
+        "\u{202e}",
+        "\u{202d}",
+        "\u{2066}",
+        "\u{2067}",
+        "\u{2069}",
+        "\u{200e}",
+        "\u{200f}",
+        "\u{ad}",
+        "\u{a0}",
+        "\u{3000}",
+        "\u{2028}",
+        "\u{2029}",
+        // Homoglyphs of words in the vocabulary (Cyrillic and Greek).
+        "рrod",
+        "prоd",
+        "ѕhell",
+        "shеll",
+        "sсheduler",
+        "ａdmin-portal",
+        "αdmin-portal",
+        "prοd",
+        // Things that look like an argument or a path.
+        "production/../staging",
+        "production%00",
+        "production%0a",
+        "production#",
+        "production?x=1",
+        "{{7*7}}",
+        "%s%s%s%n",
+        "{}",
+        "[]",
+        "null",
+        "true",
+        "0",
+        "-1",
+        "*",
+        "?",
+        "~",
+        "-",
+        "--",
+        "_",
+    ];
+    let mut out: Vec<(String, String)> = fixed
+        .iter()
+        .map(|s| (format!("{s:?}"), s.to_string()))
+        .collect();
+    out.push(("10 000 'a'".into(), "a".repeat(10_000)));
+    out.push(("10 000 ';'".into(), ";".repeat(10_000)));
+    out.push(("10 000 NUL".into(), "\0".repeat(10_000)));
+    out.push((
+        "10 000 chars, a valid word first".into(),
+        format!("production{}", "a".repeat(10_000)),
+    ));
+    out.push(("1 MiB of 'a'".into(), "a".repeat(1 << 20)));
+    out.push((
+        "1 MiB of '; id '".into(),
+        "; id ".repeat((1 << 20) / 5 + 1)[..1 << 20].to_string(),
+    ));
+    out.push(("1 MiB of U+200B".into(), "\u{200b}".repeat((1 << 20) / 3)));
+    out
+}
+
+/// Near misses of one valid word: the word with something added or swapped.
+fn near_misses_of(word: &str) -> Vec<(String, String)> {
+    let first = word.chars().next().unwrap();
+    let rest: String = word.chars().skip(1).collect();
+    let swapped_case = |from: char, to: &str| word.replace(from, to);
+    let homoglyph_first = match first {
+        'a' => Some('\u{430}'),
+        'p' => Some('\u{440}'),
+        's' => Some('\u{455}'),
+        'c' => Some('\u{441}'),
+        'e' => Some('\u{435}'),
+        'o' => Some('\u{43e}'),
+        _ => None,
+    };
+    let mut cases: Vec<(String, String)> = vec![
+        ("trailing ';'".into(), format!("{word};")),
+        ("trailing '; id'".into(), format!("{word}; id")),
+        ("trailing '$(id)'".into(), format!("{word}$(id)")),
+        ("trailing backticks".into(), format!("{word}`id`")),
+        (
+            "trailing ' --profile x'".into(),
+            format!("{word} --profile x"),
+        ),
+        (
+            "trailing ' --region us-east-1'".into(),
+            format!("{word} --region us-east-1"),
+        ),
+        ("leading space".into(), format!(" {word}")),
+        ("trailing space".into(), format!("{word} ")),
+        ("trailing tab".into(), format!("{word}\t")),
+        ("leading tab".into(), format!("\t{word}")),
+        ("trailing LF".into(), format!("{word}\n")),
+        ("trailing CRLF".into(), format!("{word}\r\n")),
+        ("embedded LF".into(), format!("{first}\n{rest}")),
+        ("trailing NUL".into(), format!("{word}\0")),
+        ("embedded NUL".into(), format!("{first}\0{rest}")),
+        ("trailing ZWSP".into(), format!("{word}\u{200b}")),
+        ("embedded ZWSP".into(), format!("{first}\u{200b}{rest}")),
+        ("embedded ZWJ".into(), format!("{first}\u{200d}{rest}")),
+        ("leading BOM".into(), format!("\u{feff}{word}")),
+        ("leading RLO".into(), format!("\u{202e}{word}")),
+        ("trailing RLO".into(), format!("{word}\u{202e}")),
+        ("trailing soft hyphen".into(), format!("{word}\u{ad}")),
+        ("trailing nbsp".into(), format!("{word}\u{a0}")),
+        ("fullwidth".into(), fullwidth(word)),
+        ("long s for s".into(), swapped_case('s', "ſ")),
+        ("Kelvin sign for k".into(), swapped_case('k', "\u{212A}")),
+        (
+            "dotted capital I for i".into(),
+            swapped_case('i', "\u{130}"),
+        ),
+        ("dotless i for i".into(), swapped_case('i', "\u{131}")),
+        ("path suffix".into(), format!("{word}/../{word}")),
+        ("path prefix".into(), format!("../{word}")),
+        ("option prefix".into(), format!("--{word}")),
+        ("doubled".into(), format!("{word}{word}")),
+        ("doubled with a space".into(), format!("{word} {word}")),
+        ("a comma list".into(), format!("{word},{word}")),
+        ("a glob".into(), format!("{word}*")),
+        ("a trailing dot".into(), format!("{word}.")),
+        ("a trailing slash".into(), format!("{word}/")),
+        (
+            "percent-encoded".into(),
+            word.replace(first, &format!("%{:02x}", first as u32)),
+        ),
+    ];
+    if let Some(h) = homoglyph_first {
+        cases.push(("homoglyph first letter".into(), format!("{h}{rest}")));
+    }
+    cases.retain(|(_, v)| v != word);
+    cases
+}
+
+const FIELDS: [&str; 4] = ["project", "environment", "service", "shell_type"];
+
+/// Every corpus string, in every field, with valid words in the others: the
+/// invalid_target error naming that field, and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_string_from_the_injection_corpus_is_accepted_in_any_field_of_the_agents_request() {
+    let mut s = Scene::start().await;
+    let from = s.app.mark();
+    let audit_before = s.d.audit_text();
+    let general = injection_corpus();
+    let mut tried = 0usize;
+
+    for field in FIELDS {
+        let valid_word = args()[field].as_str().unwrap().to_string();
+        let mut corpus = general.clone();
+        corpus.extend(near_misses_of(&valid_word));
+        for (label, value) in corpus {
+            let a = args_with(field, json!(value.clone()));
+
+            // A resolver that accepted it would put a sheet up and wait for the
+            // user; that must be reported, not waited out.
+            let res = match tokio::time::timeout(Duration::from_secs(10), s.mcp.call(REQUEST, a))
+                .await
+            {
+                Ok(res) => res,
+                Err(_) => panic!(
+                    "{field} = {label}: ACCEPTED by the resolver (no refusal came; the request is waiting for the user)"
+                ),
+            };
+
+            assert_eq!(
+                res["error"],
+                "invalid_target",
+                "{field} = {label}: expected invalid_target, got {}",
+                res.to_string().chars().take(300).collect::<String>()
+            );
+            assert_eq!(res["valid"]["field"], field, "{field} = {label}");
+            assert!(
+                res.to_string().len() < 4096,
+                "{field} = {label}: the refusal quoted back {} bytes",
+                res.to_string().len()
+            );
+            tried += 1;
+        }
+        let sheets = s.app.confirms_since(from).len();
+        assert_eq!(sheets, 0, "{field}: a sheet reached the app");
+    }
+    assert!(tried > 4 * 150, "the corpus shrank: {tried} cases");
+
+    assert_app_not_asked(&mut s.app, from, "the injection corpus").await;
+    s.d.assert_nothing_opened("the injection corpus");
+    // Not an event: not one line was audited, so none carries what was typed.
+    assert_eq!(s.d.audit_text(), audit_before, "the audit trail changed");
+    assert!(s.d.remote_audit().is_empty(), "{:?}", s.d.remote_audit());
+    // Nothing was registered: a valid request now gets its sheet at once.
+    let (call, sheet) = s.ask(args()).await;
+    s.app.answer(&sheet.request_id, "cancel").await;
+    assert_eq!(
+        s.mcp.finish(call).await["error"],
+        "cancelled",
+        "not request_pending"
+    );
+}
+
+/// The same corpus through the user's own `remote_shell_open`: refused to the
+/// asker with `invalid_target`, and no sheet.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_string_from_the_injection_corpus_is_accepted_in_any_field_of_the_users_open() {
+    let d = Daemon::start(&[Peer::App]).await;
+    d.init_focus(TAG);
+    let mut app = d.app().await;
+    let from = app.mark();
+    let audit_before = d.audit_text();
+    let words = ["admin-portal", "production", "scheduler", "shell"];
+    let general = injection_corpus();
+    let mut tried = 0usize;
+
+    for (i, field) in FIELDS.iter().enumerate() {
+        let mut corpus = general.clone();
+        corpus.extend(near_misses_of(words[i]));
+        for (label, value) in corpus {
+            let mut w = words;
+            w[i] = &value;
+            let before = app.mark();
+
+            app.open_remote(TAG, w).await;
+            let (_, refused) = app
+                .wait_since(before, &format!("a refusal for {field} = {label}"), |m| {
+                    matches!(m, ServerMsg::TerminalRefused { .. })
+                        || matches!(m, ServerMsg::RemoteShellConfirmRequest { .. })
+                })
+                .await;
+
+            assert!(
+                matches!(&refused, ServerMsg::TerminalRefused { op, code, .. }
+                    if op == "remote_open" && code == "invalid_target"),
+                "{field} = {label}: expected terminal_refused invalid_target, got {}",
+                msg_type(&refused)
+            );
+            tried += 1;
+        }
+    }
+    assert!(tried > 4 * 150, "the corpus shrank: {tried} cases");
+
+    app.assert_no_remote_frames(from, "the injection corpus")
+        .await;
+    d.assert_nothing_opened("the injection corpus");
+    assert_eq!(d.audit_text(), audit_before, "the audit trail changed");
+}
+
+// ── the confirm sheet shows the agent's name cleaned ─────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_name_on_the_confirm_sheet_is_cleaned_like_the_reason() {
+    let long = "a".repeat(300);
+    let cases: [(&str, &str, Option<String>); 6] = [
+        (
+            "a bidi override and a zero-width space are dropped",
+            "co\u{202e}dy\u{200b}",
+            Some("cody".into()),
+        ),
+        (
+            "control characters become spaces",
+            "evil\r\nagent\0x\u{7}",
+            Some("evil  agent x".into()),
+        ),
+        ("it is trimmed", "  padded  ", Some("padded".into())),
+        ("it is cut to 200 characters", &long, Some("a".repeat(200))),
+        (
+            "a name of nothing but invisible characters is no name",
+            "\u{202e}\u{200b}\u{feff}",
+            None,
+        ),
+        ("a plain name is untouched", "cody", Some("cody".into())),
+    ];
+
+    for (what, name, shown) in cases {
+        let mut s = Scene::start().await;
+        let mut meta = focus_meta(TAG);
+        meta.agent_name = name.to_string();
+        s.d.session_mgr
+            .lock()
+            .unwrap()
+            .set_focus_registry(vec![meta]);
+
+        let (call, sheet) = s.ask(args()).await;
+
+        assert_eq!(sheet.requested_by.kind, "focus", "{what}");
+        assert_eq!(sheet.requested_by.tag.as_deref(), Some(TAG), "{what}");
+        assert_eq!(sheet.requested_by.agent, shown, "{what}");
+        s.app.answer(&sheet.request_id, "cancel").await;
+        assert_eq!(s.mcp.finish(call).await["error"], "cancelled", "{what}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -502,6 +884,7 @@ async fn cancel_and_dismiss_are_distinct_outcomes_that_open_nothing_and_are_audi
         ("dismiss", "dismissed", "dismissed", "dismissed"),
     ] {
         let mut s = Scene::start().await;
+        let clock = HandClock::install(&s.d);
         let from = s.app.mark();
 
         let (call, confirm) = s.ask(args()).await;
@@ -530,7 +913,8 @@ async fn cancel_and_dismiss_are_distinct_outcomes_that_open_nothing_and_are_audi
             ],
             "{decision}"
         );
-        // Another request can follow at once.
+        // Another request can follow once the cooldown a denial starts is over.
+        clock.advance(Duration::from_secs(60));
         let (call, confirm) = s.ask(args()).await;
         s.app.answer(&confirm.request_id, "cancel").await;
         assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
@@ -1286,24 +1670,402 @@ async fn a_second_request_while_one_waits_is_refused_at_once_and_the_first_is_un
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_users_own_open_is_refused_as_request_pending_while_an_agents_request_waits() {
+async fn the_users_own_open_while_an_agents_request_waits_takes_the_slot_and_the_agent_is_told_superseded(
+) {
     let mut s = Scene::start().await;
-    let (call, confirm) = s.ask(args()).await;
+    let (call, agent_sheet) = s.ask(args()).await;
     let from = s.app.mark();
 
     s.app
         .open_remote(TAG, ["family-portal", "demo", "portal", "console"])
         .await;
+
+    // The agent's call ends at once, as superseded, and opened nothing.
+    let started = Instant::now();
+    let res = s.mcp.finish(call).await;
+    assert_eq!(res, json!({"error": "superseded"}), "{res}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    s.d.assert_nothing_opened("an agent's request that was superseded");
+    // Its sheet is closed, with its own outcome.
+    let closed = s.app.wait_resolved(from, &agent_sheet.request_id).await;
+    assert_eq!(closed.outcome, "superseded", "{closed:?}");
+    assert_eq!(closed.reason, None);
+    // The user's own sheet is up, marked as the user's, for what the user asked.
+    let user_sheet = s.app.wait_confirm(from).await;
+    assert_ne!(user_sheet.request_id, agent_sheet.request_id);
+    assert_eq!(user_sheet.requested_by.kind, "user");
+    assert_eq!(user_sheet.requested_by.agent, None);
+    assert_eq!(user_sheet.tag.as_deref(), Some(TAG));
+    assert_eq!(
+        (
+            user_sheet.target.project.as_str(),
+            user_sheet.target.environment.as_str(),
+            user_sheet.target.service.as_str(),
+            user_sheet.target.shell_type.as_str()
+        ),
+        ("family-portal", "demo", "portal", "console")
+    );
     s.app.sync().await;
+    assert!(
+        s.app.refusals_since(from).is_empty(),
+        "the user is not refused: {:?}",
+        s.app.refusals_since(from)
+    );
+    assert_eq!(
+        s.app.confirms_since(from).len(),
+        1,
+        "one new sheet, the user's"
+    );
+
+    // A late Connect for the superseded request changes nothing.
+    s.app.answer(&agent_sheet.request_id, "connect").await;
+    s.app.sync().await;
+    s.app.settle(Duration::from_millis(100)).await;
+    assert_eq!(
+        s.d.launcher().calls(),
+        0,
+        "a superseded request cannot connect"
+    );
+
+    // The user's own request still connects, as the user's.
+    s.app.answer(&user_sheet.request_id, "connect").await;
+    assert_eq!(
+        s.app
+            .wait_resolved(from, &user_sheet.request_id)
+            .await
+            .outcome,
+        "connected"
+    );
+    assert_eq!(s.d.launcher().calls(), 1);
+    let (target, tag) = s.d.launcher().last_call().expect("a connect call");
+    assert_eq!(target.project, "family-portal");
+    assert_eq!(tag, TAG);
+
+    // Audited: both requests, how each ended, and only the user's connected.
+    s.d.wait_audit("connected", |l| l["event"] == "connected")
+        .await;
+    let mut names = s.d.remote_audit_names();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "confirm_outcome:connect",
+            "confirm_outcome:superseded",
+            "connect_started",
+            "connected",
+            "remote_requested",
+            "remote_requested",
+        ]
+    );
+    let superseded =
+        s.d.remote_audit()
+            .into_iter()
+            .find(|l| l["outcome"] == "superseded")
+            .expect("a superseded confirm_outcome");
+    assert_eq!(superseded["event"], "confirm_outcome");
+    assert_eq!(superseded["tag"], TAG, "{superseded}");
+    assert_eq!(
+        superseded["target"]["project"], "admin-portal",
+        "{superseded}"
+    );
+
+    // Being superseded is not a denial: the agent may ask again at once.
+    let (call, again) = s.ask(args()).await;
+    s.app.answer(&again.request_id, "cancel").await;
+    assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_request_while_the_users_waits_is_refused_pending_and_the_users_sheet_stays() {
+    let mut s = Scene::start().await;
+    let from = s.app.mark();
     s.app
-        .wait_since(from, "request_pending", |m| {
+        .open_remote(TAG, ["family-portal", "demo", "portal", "console"])
+        .await;
+    let user_sheet = s.app.wait_confirm(from).await;
+    let after_sheet = s.app.mark();
+
+    let res = s.mcp.call(REQUEST, args()).await;
+
+    assert_eq!(res, json!({"error": "request_pending"}), "{res}");
+    assert_app_not_asked(
+        &mut s.app,
+        after_sheet,
+        "an agent against the user's request",
+    )
+    .await;
+    assert!(
+        s.app.resolved_since(from).is_empty(),
+        "the user's sheet stays up"
+    );
+    s.app.answer(&user_sheet.request_id, "cancel").await;
+    assert_eq!(
+        s.app
+            .wait_resolved(from, &user_sheet.request_id)
+            .await
+            .outcome,
+        "cancelled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_user_open_while_the_users_first_waits_is_refused_request_pending() {
+    let mut s = Scene::start().await;
+    let from = s.app.mark();
+    s.app
+        .open_remote(TAG, ["family-portal", "demo", "portal", "console"])
+        .await;
+    let first = s.app.wait_confirm(from).await;
+    let after_sheet = s.app.mark();
+
+    s.app
+        .open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"])
+        .await;
+    s.app
+        .wait_since(after_sheet, "request_pending", |m| {
             matches!(m, ServerMsg::TerminalRefused { op, code, .. } if op == "remote_open" && code == "request_pending")
         })
         .await;
 
-    assert_eq!(s.app.confirms_since(from).len(), 0, "no second sheet");
-    s.app.answer(&confirm.request_id, "cancel").await;
+    assert_eq!(
+        s.app.confirms_since(after_sheet).len(),
+        0,
+        "no second sheet"
+    );
+    assert!(s.app.resolved_since(after_sheet).is_empty());
+    s.app.answer(&first.request_id, "cancel").await;
+    s.app.wait_resolved(from, &first.request_id).await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The cooldown after a denial, and the ceiling (follow-ups to slice 2a)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The daemon's remote-request clock, moved by hand. The wait for the user
+/// still runs on real time; only the cooldown and the ceiling read this.
+struct HandClock(Arc<Mutex<Duration>>);
+
+impl HandClock {
+    fn install(d: &Daemon) -> HandClock {
+        let base = Instant::now();
+        let offset = Arc::new(Mutex::new(Duration::ZERO));
+        let reader = Arc::clone(&offset);
+        d.terminals
+            .lock()
+            .unwrap()
+            .set_remote_clock(Arc::new(move || base + *reader.lock().unwrap()));
+        HandClock(offset)
+    }
+
+    fn advance(&self, by: Duration) {
+        *self.0.lock().unwrap() += by;
+    }
+}
+
+/// The agent asks, the sheet shows, the user cancels; the sheet has closed.
+async fn agent_asks_and_the_user_cancels(s: &mut Scene) {
+    let (call, sheet) = s.ask(args()).await;
+    s.app.answer(&sheet.request_id, "cancel").await;
     assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
+    s.app.wait_resolved(0, &sheet.request_id).await;
+}
+
+/// The agent asks and is refused with exactly `{"error": code}`: no sheet.
+async fn assert_agent_refused(s: &mut Scene, code: &str, what: &str) {
+    let from = s.app.mark();
+    let res = s.mcp.call(REQUEST, args()).await;
+    assert_eq!(res, json!({"error": code}), "{what}");
+    assert_app_not_asked(&mut s.app, from, what).await;
+}
+
+const SECOND: Duration = Duration::from_secs(1);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn after_the_user_cancels_the_agent_is_refused_request_cooldown_with_no_sheet_until_the_minute_is_up(
+) {
+    let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
+    agent_asks_and_the_user_cancels(&mut s).await;
+
+    for _ in 0..3 {
+        assert_agent_refused(&mut s, "request_cooldown", "right after the Cancel").await;
+    }
+    clock.advance(Duration::from_secs(59));
+    assert_agent_refused(
+        &mut s,
+        "request_cooldown",
+        "a second before the minute is up",
+    )
+    .await;
+    assert_eq!(s.d.launcher().calls(), 0);
+    // Each refusal is audited as a refused request, with nothing else.
+    let mut expected = vec!["remote_requested", "confirm_outcome:cancelled"];
+    for _ in 0..4 {
+        expected.extend(["remote_requested", "confirm_outcome:request_cooldown"]);
+    }
+    assert_eq!(s.d.remote_audit_names(), expected);
+    let refusal = s.d.remote_audit().pop().unwrap();
+    assert_eq!(refusal["outcome"], "request_cooldown");
+    assert_eq!(refusal["tag"], TAG);
+
+    // The minute is up: the agent is asked about again, and is refused again
+    // for twice as long after a second Cancel.
+    clock.advance(SECOND);
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(119));
+    assert_agent_refused(
+        &mut s,
+        "request_cooldown",
+        "the second denial costs two minutes",
+    )
+    .await;
+    clock.advance(SECOND);
+    let (call, sheet) = s.ask(args()).await;
+    s.app.answer(&sheet.request_id, "cancel").await;
+    assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dismiss_starts_the_cooldown_too_and_another_focus_is_not_held_by_it() {
+    let mut s = Scene::start().await;
+    let _clock = HandClock::install(&s.d);
+    s.d.init_focus(TAG2);
+    let mut other = s.d.mcp(Some(TAG2)).await;
+    let (call, sheet) = s.ask(args()).await;
+    s.app.answer(&sheet.request_id, "dismiss").await;
+    assert_eq!(s.mcp.finish(call).await["error"], "dismissed");
+    s.app.wait_resolved(0, &sheet.request_id).await;
+
+    assert_agent_refused(&mut s, "request_cooldown", "after a Dismiss").await;
+
+    let from = s.app.mark();
+    let call = other.start_call(REQUEST, args()).await;
+    let sheet = s.app.wait_confirm(from).await;
+    assert_eq!(
+        sheet.tag.as_deref(),
+        Some(TAG2),
+        "the other focus is asked about"
+    );
+    s.app.answer(&sheet.request_id, "cancel").await;
+    assert_eq!(other.finish(call).await["error"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connect_clears_the_cooldown_streak() {
+    let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(60));
+    let (call, sheet) = s.ask(args()).await;
+    s.app.answer(&sheet.request_id, "connect").await;
+    assert_eq!(s.mcp.finish(call).await["ok"], true);
+    s.app.wait_resolved(0, &sheet.request_id).await;
+    // Out of the request window, so only the streak is in play.
+    clock.advance(Duration::from_secs(600));
+
+    // No cooldown after a Connect: the agent can ask at once ...
+    agent_asks_and_the_user_cancels(&mut s).await;
+    // ... and the denial after it costs a minute, not two.
+    clock.advance(Duration::from_secs(59));
+    assert_agent_refused(&mut s, "request_cooldown", "a second early").await;
+    clock.advance(SECOND);
+    let (call, sheet) = s.ask(args()).await;
+    s.app.answer(&sheet.request_id, "cancel").await;
+    assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fourth_request_in_ten_minutes_is_refused_request_limit_until_the_first_ages_out() {
+    let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
+    // Three requests, each cancelled and each asked after its cooldown:
+    // at 0 s, 60 s and 180 s.
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(60));
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(120));
+    agent_asks_and_the_user_cancels(&mut s).await;
+
+    // At 420 s the third denial's 240 s are over, but the ceiling is not.
+    clock.advance(Duration::from_secs(240));
+    assert_agent_refused(&mut s, "request_limit", "a fourth request in the window").await;
+    assert_eq!(s.d.launcher().calls(), 0);
+    let last = s.d.remote_audit().pop().unwrap();
+    assert_eq!(last["event"], "confirm_outcome");
+    assert_eq!(last["outcome"], "request_limit", "{last}");
+    assert_eq!(last["tag"], TAG);
+    // At 599 s the first request is still inside the window.
+    clock.advance(Duration::from_secs(179));
+    assert_agent_refused(&mut s, "request_limit", "a second before it ages out").await;
+
+    // At 600 s it has aged out.
+    clock.advance(SECOND);
+    let (call, sheet) = s.ask(args()).await;
+    s.app.answer(&sheet.request_id, "cancel").await;
+    assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ceiling_is_per_focus() {
+    let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
+    s.d.init_focus(TAG2);
+    let mut other = s.d.mcp(Some(TAG2)).await;
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(60));
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(120));
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(240));
+    assert_agent_refused(&mut s, "request_limit", "the first focus is at its ceiling").await;
+
+    let from = s.app.mark();
+    let call = other.start_call(REQUEST, args()).await;
+    let sheet = s.app.wait_confirm(from).await;
+    assert_eq!(sheet.tag.as_deref(), Some(TAG2));
+    s.app.answer(&sheet.request_id, "cancel").await;
+    assert_eq!(other.finish(call).await["error"], "cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_user_can_open_a_shell_during_the_agents_cooldown_and_at_its_ceiling_and_their_no_costs_the_agent_nothing(
+) {
+    let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
+    agent_asks_and_the_user_cancels(&mut s).await;
+    assert_agent_refused(&mut s, "request_cooldown", "the agent is cooling").await;
+
+    // In the cooldown, the user's own request gets its sheet, and the user may say no.
+    let from = s.app.mark();
+    s.app
+        .open_remote(TAG, ["family-portal", "demo", "portal", "console"])
+        .await;
+    let sheet = s.app.wait_confirm(from).await;
+    assert_eq!(sheet.requested_by.kind, "user");
+    assert!(s.app.refusals_since(from).is_empty());
+    s.app.answer(&sheet.request_id, "cancel").await;
+    assert_eq!(
+        s.app.wait_resolved(from, &sheet.request_id).await.outcome,
+        "cancelled"
+    );
+    // That no did not lengthen the agent's wait: a minute after its own denial it may ask.
+    assert_agent_refused(&mut s, "request_cooldown", "still cooling").await;
+    clock.advance(Duration::from_secs(60));
+    agent_asks_and_the_user_cancels(&mut s).await;
+
+    // At the ceiling (two more asks at 60 s and 180 s make three) the user is still served.
+    clock.advance(Duration::from_secs(120));
+    agent_asks_and_the_user_cancels(&mut s).await;
+    clock.advance(Duration::from_secs(240));
+    assert_agent_refused(&mut s, "request_limit", "the agent is at its ceiling").await;
+    let from = s.app.mark();
+    s.app
+        .open_remote(TAG, ["family-portal", "demo", "portal", "console"])
+        .await;
+    let sheet = s.app.wait_confirm(from).await;
+    assert_eq!(sheet.requested_by.kind, "user");
+    s.app.answer(&sheet.request_id, "cancel").await;
+    s.app.wait_resolved(from, &sheet.request_id).await;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1657,6 +2419,7 @@ async fn the_agents_list_tool_returns_the_same_vocabulary_and_no_account_details
 #[tokio::test(flavor = "multi_thread")]
 async fn editing_the_vocabulary_between_two_requests_changes_the_second_result() {
     let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
     let args_for = |service: &str| json!({"project":"admin-portal","environment":"demo","service":service,"shell_type":"shell"});
 
     // `cron` is not a service yet ...
@@ -1678,6 +2441,7 @@ async fn editing_the_vocabulary_between_two_requests_changes_the_second_result()
     assert_eq!(confirm.target.service, "cron");
     s.app.answer(&confirm.request_id, "cancel").await;
     assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
+    clock.advance(Duration::from_secs(60));
     let (call, confirm) = s.ask(args_for("JOB")).await;
     assert_eq!(confirm.target.service, "cron", "the edited alias applies");
     s.app.answer(&confirm.request_id, "cancel").await;
@@ -2023,6 +2787,166 @@ async fn a_network_driven_session_is_not_offered_the_remote_shell_tools_and_is_r
     assert_app_not_asked(&mut app, from, "a network-driven session").await;
     d.assert_nothing_opened("a network-driven session");
     assert!(d.remote_audit().is_empty());
+}
+
+/// A tool policy that denies the two remote shell tools to one agent. Written
+/// under the private `$HOME`; the agent has a name no other test uses, so the
+/// file changes nothing for tests that run beside this one. Removed on drop.
+struct PolicyFile(std::path::PathBuf);
+
+const POLICY_AGENT: &str = "redd-policy-denied-agent";
+
+impl PolicyFile {
+    fn deny_remote_shell_tools_to(agent: &str) -> PolicyFile {
+        let path = nostromo::mcp::tool_policy::policy_path();
+        assert!(
+            path.starts_with(
+                std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+                    .join(format!("remote-shell-it-home-{}", std::process::id()))
+            ),
+            "the policy file must be under the private $HOME, not {}",
+            path.display()
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create ~/.nostromo");
+        let guard = PolicyFile(path.clone());
+        let yaml = format!("agents:\n  {agent}:\n    deny:\n      - {REQUEST}\n      - {LIST}\n");
+        std::fs::write(&path, yaml).expect("write the policy");
+        guard
+    }
+}
+
+impl Drop for PolicyFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// `caller` (an MCP connection that must be refused both remote shell tools)
+/// is not offered them, is refused with -32001 when it calls them by name, and
+/// nothing else happens: one `refused` audit line for the request (focus and
+/// tool, no arguments), none for anything else, nothing sent to the app, the
+/// launcher never called, nothing registered (a plain agent is then asked
+/// about at once).
+async fn assert_remote_shell_tools_refused_with_no_side_effect(
+    d: &Daemon,
+    app: &mut Unix,
+    caller: &mut Mcp,
+    focus: &str,
+    who: &str,
+) {
+    let offered = |tools: &[Value], name: &str| tools.iter().any(|t| t["name"] == name);
+    let tools = caller.list_tools().await;
+    assert!(!offered(&tools, REQUEST), "{who}: offered {REQUEST}");
+    assert!(!offered(&tools, LIST), "{who}: offered {LIST}");
+    let audit_before = d.audit();
+    let from = app.mark();
+
+    let resp = caller
+        .call_raw(REQUEST, args_with("reason", json!("SECRET-REASON-91")))
+        .await;
+    assert_eq!(
+        resp["error"]["code"],
+        json!(TOOL_FORBIDDEN_CODE),
+        "{who}: {resp}"
+    );
+    let resp = caller.call_raw(LIST, json!({})).await;
+    assert_eq!(
+        resp["error"]["code"],
+        json!(TOOL_FORBIDDEN_CODE),
+        "{who}: {resp}"
+    );
+    // Naming a target that does not exist is refused the same way: the
+    // refusal comes before anything is looked at.
+    let resp = caller
+        .call_raw(REQUEST, args_with("project", json!("billing-zzz")))
+        .await;
+    assert_eq!(
+        resp["error"]["code"],
+        json!(TOOL_FORBIDDEN_CODE),
+        "{who}: {resp}"
+    );
+
+    // The request is audited as refused, by tool and focus, and nothing else is.
+    d.wait_audit("a refused request", |l| {
+        l["event"] == "refused" && l["tool"] == REQUEST
+    })
+    .await;
+    assert_app_not_asked(app, from, who).await;
+    let new_lines: Vec<Value> = d.audit()[audit_before.len()..].to_vec();
+    assert!(
+        new_lines
+            .iter()
+            .all(|l| l["event"] == "refused" && l["tool"] == REQUEST),
+        "{who}: only refusals of the request tool are audited: {new_lines:#?}"
+    );
+    assert!(!new_lines.is_empty(), "{who}: the refusal is audited");
+    for line in &new_lines {
+        assert_eq!(line["channel"], "mcp", "{who}: {line}");
+        assert_eq!(line["op"], "remote_request", "{who}: {line}");
+        assert_eq!(line["code"], "forbidden", "{who}: {line}");
+        assert_eq!(line["focus"], focus, "{who}: {line}");
+        assert!(line.get("reason").is_none() && line.get("arguments").is_none());
+    }
+    let text = d.audit_text();
+    assert!(
+        !text.contains("SECRET-REASON-91") && !text.contains("billing-zzz"),
+        "{who}: the audit trail holds what the caller passed: {text}"
+    );
+    assert!(d.remote_audit().is_empty(), "{who}: {:?}", d.remote_audit());
+    d.assert_nothing_opened(who);
+
+    // Nothing is left pending: an ordinary agent is asked about at once.
+    d.init_focus(TAG2);
+    let mut plain = d.mcp(Some(TAG2)).await;
+    let from = app.mark();
+    let call = plain.start_call(REQUEST, args()).await;
+    let confirm = app.wait_confirm(from).await;
+    assert_eq!(confirm.tag.as_deref(), Some(TAG2), "{who}");
+    app.answer(&confirm.request_id, "cancel").await;
+    assert_eq!(
+        plain.finish(call).await["error"],
+        "cancelled",
+        "{who}: not request_pending"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_picks_session_is_not_offered_the_remote_shell_tools_and_is_refused_if_it_calls_them() {
+    let d = Daemon::start(&[Peer::App]).await;
+    assert!(d.tree(PICKS_TAG).is_none(), "harness: picks has no focus");
+    let mut app = d.app().await;
+    let mut picks = d.mcp(Some(PICKS_TAG)).await;
+
+    assert_remote_shell_tools_refused_with_no_side_effect(
+        &d,
+        &mut app,
+        &mut picks,
+        PICKS_TAG,
+        "the picks session",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_the_operators_policy_denies_is_not_offered_the_remote_shell_tools_and_is_refused_if_it_calls_them(
+) {
+    let d = Daemon::start(&[Peer::App]).await;
+    d.init_focus(TAG);
+    let mut meta = focus_meta(TAG);
+    meta.agent_name = POLICY_AGENT.to_string();
+    d.session_mgr.lock().unwrap().set_focus_registry(vec![meta]);
+    let _policy = PolicyFile::deny_remote_shell_tools_to(POLICY_AGENT);
+    let mut app = d.app().await;
+    let mut restricted = d.mcp(Some(TAG)).await;
+
+    assert_remote_shell_tools_refused_with_no_side_effect(
+        &d,
+        &mut app,
+        &mut restricted,
+        TAG,
+        "an agent the policy denies",
+    )
+    .await;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2499,6 +3423,7 @@ async fn a_verified_app_that_was_never_asked_cannot_answer_for_the_one_that_was(
 #[tokio::test(flavor = "multi_thread")]
 async fn the_reason_is_cleaned_before_the_sheet_and_the_audit_trail_see_it() {
     let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
     let cases: Vec<(&str, String, Option<String>)> = vec![
         (
             "a line break",
@@ -2555,6 +3480,8 @@ async fn the_reason_is_cleaned_before_the_sheet_and_the_audit_trail_see_it() {
                 .filter(|l| l["event"] == "remote_requested")
                 .count();
 
+        // Ten cancelled requests from one focus: out of the cooldown and the ceiling each time.
+        clock.advance(Duration::from_secs(25 * 60));
         let (call, confirm) = s.ask(args_with("reason", json!(reason))).await;
 
         assert_eq!(confirm.reason, expected, "{what}: what the sheet shows");

@@ -75,12 +75,20 @@ async fn an_unanswered_agent_request_times_out_opens_nothing_and_a_late_answer_i
         s.app.summary()
     );
 
-    // The slot is free: the next request is shown (and times out in its turn),
-    // it is not turned away as pending.
+    // The slot is free, so the next request is not turned away as pending; a
+    // timeout is a denial, so the focus is in its cooldown and nothing is shown.
     let from = s.app.mark();
     let res = s.mcp.call(REQUEST, args()).await;
-    assert_eq!(res["error"], "timeout", "not request_pending: {res}");
-    s.app.wait_confirm(from).await;
+    assert_eq!(
+        res["error"], "request_cooldown",
+        "not request_pending: {res}"
+    );
+    s.app.sync().await;
+    assert!(
+        s.app.remote_frames_since(from).is_empty(),
+        "{}",
+        s.app.summary()
+    );
 }
 
 #[tokio::test(start_paused = true)]

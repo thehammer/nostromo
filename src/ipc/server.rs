@@ -2531,7 +2531,10 @@ fn handle_remote_shell_msg(
                     R::InvalidTarget(_) => Some("invalid_target"),
                     R::NoOperator => Some("no_operator"),
                     R::RequestPending => Some("request_pending"),
+                    R::RequestCooldown => Some("request_cooldown"),
+                    R::RequestLimit => Some("request_limit"),
                     R::Connected(_)
+                    | R::Superseded
                     | R::Cancelled
                     | R::Dismissed
                     | R::TimedOut

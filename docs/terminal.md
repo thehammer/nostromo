@@ -58,7 +58,7 @@ An agent can **ask** for a shell on a remote ECS service; only a human click on 
 
 1. Resolve the four words. An unknown word returns at once; no one is asked.
 2. Only operator connections that sent `capabilities: ["remote_shell_confirm"]` in their `Subscribe` can be asked. None: `no_operator` at once. A verified app that does not declare the capability, a TCP client that renders decisions and any other local process do not count.
-3. At most one request waits at a time (`request_pending`).
+3. At most one request waits at a time (`request_pending`). Two further rules hold **agent** requests (never the user's own, so they cannot lock the user out), keyed by the agent's focus tag: a *cooldown* after the user's Cancel, Dismiss or a timeout (60 s, doubling per consecutive denial up to 15 minutes, reset by a Connect, forgotten after an hour without a denial) refuses with `request_cooldown`; and at most 3 requests per focus in 10 minutes, then `request_limit`. Both refusals are content-free, send no sheet and are audited like `request_pending`. A request the **user** makes (`remote_shell_open`) while an agent's waits takes the slot: the agent's request ends as `superseded` (audited, the sheet for it is closed, it does not count as a denial).
 4. `remote_shell_confirm_request` goes to those connections and no one else.
 5. The daemon waits (300 s by default, clamped to 10-600 s) for `remote_shell_answer {decision: connect|cancel|dismiss}` from the operator app (`OperatorCap`).
 6. Only after Connect is the launcher called (`RemoteLauncher`; this daemon's is `UnavailableLauncher`, which fails with `not_available`, until the real launcher lands). Before that no process, pane or terminal exists.
@@ -81,9 +81,25 @@ If the agent's MCP connection closes while the request waits, the request is aba
 
 `remote_shell_open` and `remote_shell_answer` from anyone but the verified app (even a process claiming `client_kind: "mac_app"`) get `terminal_refused {op: "control", code: "terminal_control_forbidden"}` and an audited `refused`; the request stays pending. Over TCP they are refused by FND-1 like every terminal frame. All three server frames are `LocalOnly` and never broadcast.
 
-Audit events (`terminal.jsonl`): `remote_requested {tag, requested_by, target, reason (200 chars at most)}`, `confirm_outcome {tag, target, outcome: connect|cancelled|dismissed|timed_out|abandoned|no_operator|request_pending, invite_follow?}`, `connect_started`, `connected {terminal_id, pane_id, tag, kind, target}`, `connect_failed {reason_code}`. `no_operator` and `request_pending` lines share the per-channel refusal budget. No command, keystroke or output text is ever written.
+Audit events (`terminal.jsonl`): `remote_requested {tag, requested_by, target, reason (200 chars at most)}`, `confirm_outcome {tag, target, outcome: connect|cancelled|dismissed|timed_out|abandoned|superseded|no_operator|request_pending|request_cooldown|request_limit, invite_follow?}`, `connect_started`, `connected {terminal_id, pane_id, tag, kind, target}`, `connect_failed {reason_code}`. `no_operator`, `request_pending`, `request_cooldown` and `request_limit` lines share the per-channel refusal budget. No command, keystroke or output text is ever written.
 
-MCP tools: `nostromo.list_remote_shell_targets` and `nostromo.request_remote_shell` (`docs/mcp/tools.md`).
+MCP tools: `nostromo.list_remote_shell_targets` and `nostromo.request_remote_shell` (`docs/mcp/tools.md`). The `request_remote_shell` call **blocks until the user decides** (or the request times out) and, on Connect, returns `{ok, outcome: "connected", terminal_id, pane_id}` (plan §D6), not just a request id.
+
+### Why there is no per-answer nonce
+
+`DecisionAnswer` and `ApprovalAnswer` check an operator nonce on every message. `RemoteShellAnswer` and `RemoteShellOpen` do not: they rely on the `OperatorCap` minted at `Subscribe` (only after the `Welcome` nonce was echoed and a fresh inspection still saw the verified app) plus a code-signing re-check of the peer on every message. That is equivalent: the nonce exists to prove the sender is the verified app, the cap already proves that for the connection, and the per-message re-check stops a process that replaced the app after `Subscribe` from reusing it. A per-answer nonce would add nothing an attacker without the app's identity could not also forge, and nothing a verified app does not already prove.
+
+### Where the human gesture is proved
+
+The daemon cannot tell a click from a synthetic event. The proof that a human pressed Connect lives in slice 2c's confirm sheet (the `HumanGesture` check in the Mac app); the daemon only trusts an answer from the verified app on a connection that declared `remote_shell_confirm`.
+
+### 2b must
+
+Slice 2b runs `shell_command`, and `shell_command`, `profile` and `cluster` come from `config.json` under `~/.claude/layers/...`, which an agent may be able to write. So 2b must:
+
+1. pin the resolved command when the request is made (already true: the target is resolved before the sheet is shown, and nothing is re-resolved);
+2. show the content hash of the file(s) it was read from, or record it in the audit, at Connect;
+3. never reload the file between Connect and launch.
 
 ## Network peers (FND-1)
 
