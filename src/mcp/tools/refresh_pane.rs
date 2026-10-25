@@ -28,6 +28,7 @@ use crate::mcp::pane_sources::{
 };
 use crate::mcp::state::McpSharedState;
 use crate::mcp::tools::apply_layout::{address, fetch_async, freshness, target_tag, FetchArgs};
+use crate::mcp::tools::terminal;
 
 /// Handle `nostromo.refresh_pane_content`.
 pub async fn refresh_pane_content(
@@ -49,6 +50,18 @@ pub async fn refresh_pane_content(
         return json!({ "error": "unidentified_caller" });
     };
     let tag = tag.to_string();
+
+    // A terminal pane shows its shell, never a bound source.
+    if let Some(refusal) = terminal::refuse_terminal_target(
+        daemon,
+        pty_id,
+        "nostromo.refresh_pane_content",
+        "content",
+        &tag,
+        &pane_id,
+    ) {
+        return refusal;
+    }
 
     // Missing and unknown are the same failure mode here — an absent source
     // is trivially "not in the known registry" — so both fall through to the

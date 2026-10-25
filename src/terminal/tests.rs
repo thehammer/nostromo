@@ -1807,8 +1807,10 @@ fn reconcile_never_removes_a_pane_that_is_not_a_terminal_leaf() {
         ("terminal-1234567", SplitPosition::Below),
         ("terminal-123456789", SplitPosition::Below),
     ] {
+        // `insert_terminal_leaf` is the manager's own placement: `create_pane`
+        // refuses the reserved `terminal-` prefix to agents.
         panes
-            .create_pane("t", pane, position, "repl")
+            .insert_terminal_leaf("t", "repl", position, pane)
             .expect("create pane");
     }
 
@@ -2229,4 +2231,103 @@ fn a_connection_that_fell_behind_gets_a_fresh_replay_then_live_output_with_no_ga
     fanout.close();
     s.kill();
     drain.join().expect("drain thread");
+}
+
+// ── a focus going away closes its terminals ───────────────────────────────────
+
+#[test]
+fn closing_a_focus_ends_only_that_focuss_shells_and_leaves_and_audits_each_close() {
+    let (dir, cwd) = scratch_dir();
+    let audit_path = dir.path().join("audit").join("terminal.jsonl");
+    let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+    let mgr = TerminalManager::new(TerminalConfig {
+        audit: AuditLog::open(&audit_path).expect("open the audit log"),
+        store: TerminalStore::in_memory(),
+        pane_registry: Some(Arc::clone(&panes)),
+    });
+    let gone_1 = spawn_with(&["/bin/cat"], &cwd, SignalOps::real());
+    let gone_2 = spawn_with(&["/bin/cat"], &cwd, SignalOps::real());
+    let stays = spawn_with(&["/bin/cat"], &cwd, SignalOps::real());
+    let mut ids = Vec::new();
+    {
+        let mut m = mgr.lock().unwrap();
+        for (tag, n, session) in [
+            ("gone", 1, &gone_1),
+            ("gone", 2, &gone_2),
+            ("stays", 3, &stays),
+        ] {
+            let id = adopt(
+                &mut m,
+                tag,
+                n,
+                TerminalStatus::Running,
+                Some(Arc::clone(session)),
+                &cwd,
+            );
+            let pane = format!("terminal-{n:08x}");
+            let mut reg = panes.lock().unwrap();
+            reg.get_or_init(tag);
+            reg.insert_terminal_leaf(tag, "repl", SplitPosition::Below, &pane)
+                .expect("place the leaf");
+            reg.register_terminal_leaf(tag, &pane);
+            ids.push((tag, id, pane));
+        }
+    }
+
+    mgr.lock().unwrap().close_focus("gone");
+
+    // Its shells end; the other focus's shell runs on.
+    assert!(gone_1.wait_exit(WAIT).is_some(), "the first shell must end");
+    assert!(
+        gone_2.wait_exit(WAIT).is_some(),
+        "the second shell must end"
+    );
+    assert!(
+        !stays.is_exited(),
+        "another focus's shell must not be touched"
+    );
+
+    // Its records and leaves go; the other focus keeps both.
+    let remaining: Vec<String> = mgr
+        .lock()
+        .unwrap()
+        .list()
+        .into_iter()
+        .map(|t| t.terminal_id)
+        .collect();
+    assert_eq!(remaining, vec![ids[2].1.clone()]);
+    {
+        let reg = panes.lock().unwrap();
+        assert!(reg.terminal_leaves("gone").is_empty());
+        assert!(!reg
+            .pane_ids("gone")
+            .iter()
+            .any(|p| p.starts_with("terminal-")));
+        assert_eq!(reg.terminal_leaves("stays"), vec![ids[2].2.clone()]);
+        assert!(reg.pane_ids("stays").contains(&ids[2].2));
+    }
+
+    // Each close is audited with its reason; the survivor has none.
+    let lines = jsonl(&audit_path);
+    for (_, id, _) in &ids[..2] {
+        assert!(
+            lines.iter().any(|l| l["event"] == "closed"
+                && l["terminal_id"] == *id
+                && l["reason"] == "focus_removed"),
+            "no focus_removed close for {id}: {lines:#?}"
+        );
+    }
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l["event"] == "closed" && l["terminal_id"] == ids[2].1),
+        "{lines:#?}"
+    );
+
+    // A focus with no terminals (or no such focus) is a no-op.
+    mgr.lock().unwrap().close_focus("never-had-one");
+    assert_eq!(mgr.lock().unwrap().list().len(), 1);
+    assert!(!stays.is_exited());
+
+    shut_down(&mgr);
 }

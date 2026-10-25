@@ -1343,6 +1343,58 @@ Source: `src/mcp/tool_policy.rs`, `src/mcp/server.rs` (`TOOL_FORBIDDEN_CODE`),
 
 ---
 
+## Terminals
+
+### `nostromo.open_terminal`
+
+Open a terminal pane (the user's login shell) in the caller's own focus. The user types into it; **no MCP tool can write to, read from or close a terminal**.
+
+**Input** (the only property is optional; `additionalProperties: false`):
+```json
+{ "working_directory": "/Users/me/Code/repo" }
+```
+
+`working_directory` must be an absolute path to an existing directory. Default: the focus session's working directory, else `$HOME`. There is no `command`, `args`, `env`, `initial_input` or `view_id`: the target is always the caller's own focus (its Hello `pty_id`).
+
+**Output**: `{ "ok": true, "terminal_id": "<uuid>", "pane_id": "terminal-<8 hex>" }`. The new leaf does not take keyboard focus. The open is audited (`opened`, `requested_by: focus`).
+
+| `error` | Meaning |
+|---|---|
+| `unknown_argument` | Any key other than `working_directory`; `detail` is the key. Nothing is created. |
+| `invalid_working_directory` | Relative, missing or not a directory. |
+| `unknown_view` | No identifiable caller, or its focus is unknown to the daemon. |
+| `terminal_limit_reached` | The focus (8) or the daemon (32) is at its terminal limit. |
+| `terminal_open_failed` / `terminal_audit_unavailable` | The shell could not start, or the audit log cannot be written (no terminal runs unaudited). |
+| `not_supported` | Not hosted by `nostromo` (the daemon). |
+
+Source: `src/mcp/tools/terminal.rs`, `src/terminal/agent_api.rs`
+
+### Refused terminal paths: JSON-RPC `-32002`
+
+A request on the MCP socket that looks like writing to, reading from or closing a terminal gets its own JSON-RPC error code, **`-32002`** (`TERMINAL_FORBIDDEN_CODE`, `src/mcp/server.rs`), distinct from `-32601` (no such tool) and `-32001` (withdrawn by policy). The message is `terminal_<op>_forbidden: <name>` with `op` one of `input`, `read`, `close`. Each is audited as `refused {channel: "mcp", focus, op, tool}` and changes nothing.
+
+- `tools/call` with a name that mentions `terminal|shell|pty|tty|console` and an op verb (input: `input|write|send|key|paste|type|signal|kill|interrupt|exec|run|stdin`; read: `read|output|screen|scrollback|tail|capture|snapshot`; close: `close|remove|destroy|detach|stop`), or a bare `send_keys`/`stdin`-style name. No such tool is registered. A real tool that the classifier would match must be added to `EXEMPT_TOOL_NAMES` (`src/mcp/tools/terminal.rs`); a test fails if any registered name is classified.
+- A raw frame with no `jsonrpc` key whose `type` starts `terminal_`/`pty_`, or a request whose `method` starts `terminal/`/`pty/`.
+
+`src/mcp/` cannot name the terminal write path at all: `tests/terminal_policy.rs` scans it as text for `OperatorCap`, `TerminalManager`, the terminal-input message and `.input(`. Terminal I/O is only available to the verified Mac app over IPC ([`../terminal.md`](../terminal.md)).
+
+### `terminal_pane_protected` and `reserved_pane_id`
+
+An agent layout call cannot remove, replace or overwrite a live terminal pane. The call fails with `{"error": "terminal_pane_protected"}`, changes nothing and is audited (`refused`, `op: "layout"` or `"content"`):
+
+| Tool | Refused when |
+|---|---|
+| `nostromo.reset_panes` | the focus has a live terminal |
+| `nostromo.set_pane_layout` / `nostromo.apply_layout` | the new tree omits a live terminal's leaf; `apply_layout` also refuses a `panes` entry that names one (`content`) |
+| `nostromo.set_pane_content` / `nostromo.refresh_pane_content` | `pane_id` is a live terminal's pane (`content`) |
+| `nostromo.show` | its placement would land in or close a terminal pane (never happens in practice: terminal tabs are pinned) |
+
+A ratio-only `set_pane_layout` (including one naming the terminal's pane) and a full tree that keeps the leaf still succeed. A terminal goes away only when the user closes it, its shell exits, or its focus is removed (`closed`, reason `user_closed`/`exited`/`focus_removed`).
+
+Pane ids starting with `terminal-` are reserved: `nostromo.create_pane` with one, or a full tree (`set_pane_layout`, `apply_layout`) containing a `terminal-` leaf that is not a live terminal of that focus, fails with `reserved_pane_id`.
+
+---
+
 ## Agent tracker
 
 | Tool | Purpose | Reference |

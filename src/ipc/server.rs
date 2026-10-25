@@ -1720,6 +1720,9 @@ fn handle_client_msg(
                         tracing::warn!(tag = %tag, "focus removed but its PR pin could not be discarded: {e}")
                     }
                 }
+                // Its terminals go first (the manager locks the pane registry
+                // itself, so this must not run under the registry's lock).
+                lock_terminals(terminals).close_focus(tag);
                 if let Some(reg) = &pane_registry {
                     if reg.lock().unwrap().remove_focus(tag) {
                         tracing::info!(tag = %tag, "focus removed — discarded its pane tree and bindings");

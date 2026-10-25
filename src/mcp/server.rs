@@ -50,6 +50,13 @@ const SERVER_NAME: &str = "nostromo";
 /// criterion.
 pub const TOOL_FORBIDDEN_CODE: i64 = -32001;
 
+/// JSON-RPC error code for a request to write to, read from or close a
+/// terminal: a tool name shaped like one, or a raw terminal frame on this
+/// socket. Distinct from -32601 (no such method) and -32001 (withdrawn by
+/// policy): the MCP surface can open a terminal and nothing else, and an
+/// attempt at more is refused and audited, never "unknown".
+pub const TERMINAL_FORBIDDEN_CODE: i64 = -32002;
+
 // ── server handle ─────────────────────────────────────────────────────────────
 
 /// Handle to the running MCP server.  Drop to request shutdown.
@@ -168,6 +175,25 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
         };
 
         let id = req.get("id").cloned();
+
+        if let Some(frame) = tools::terminal::terminal_frame(&req) {
+            if let Some(daemon) = &state.daemon {
+                daemon.terminals.audit_refusal(
+                    pty_id.as_deref(),
+                    &frame.verb,
+                    &frame.name,
+                    &frame.op.forbidden_code(),
+                );
+            }
+            let err = json_rpc_error(
+                id,
+                TERMINAL_FORBIDDEN_CODE,
+                &format!("{}: {}", frame.op.forbidden_code(), frame.name),
+            );
+            write_frame(&mut write_half, &err).await?;
+            continue;
+        }
+
         let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
         let response = match method {
@@ -299,6 +325,11 @@ async fn handle_tools_call(
         // A distinct JSON-RPC code from "Method not found", because the two
         // mean different things to the caller: the tool exists and works, but
         // the operator's policy withdraws it from this agent.
+        tools::ToolResult::TerminalForbidden { op, name } => json_rpc_error(
+            Some(id),
+            TERMINAL_FORBIDDEN_CODE,
+            &format!("{}: {name}", op.forbidden_code()),
+        ),
         tools::ToolResult::Forbidden(n) => json_rpc_error(
             Some(id),
             TOOL_FORBIDDEN_CODE,

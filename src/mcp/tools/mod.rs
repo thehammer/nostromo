@@ -23,6 +23,7 @@ pub mod render_state;
 pub mod set_pane;
 pub mod show;
 pub mod teri;
+pub mod terminal;
 pub mod tracker;
 
 use serde_json::{json, Value};
@@ -355,6 +356,17 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "max_cost":          { "type": "number", "description": "Mother job budget in USD (destination 'mother_job' only; default 10)" }
                 },
                 "required": ["agent", "title"]
+            }
+        }),
+        json!({
+            "name": "nostromo.open_terminal",
+            "description": "Open a terminal pane (the user's login shell) in your own focus, optionally in a given working directory (an absolute path to an existing directory; default: your session's working directory). Returns { ok, terminal_id, pane_id }. Only the user types into the terminal: you cannot type into it, read what it shows, or close it, and no tool does. It takes no command, arguments, environment or initial input. Errors: unknown_view, invalid_working_directory, unknown_argument (any other key; nothing is opened), terminal_limit_reached, terminal_open_failed, terminal_audit_unavailable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "working_directory": { "type": "string", "description": "Absolute path of an existing directory to start the shell in; omit to use your session's working directory" }
+                },
+                "additionalProperties": false
             }
         }),
         // ── Phase 3: Perri mutations ───────────────────────────────────────
@@ -691,6 +703,14 @@ pub enum ToolResult {
     /// daemon is broken and retry, where "not available to you" is a fact it
     /// can act on. The PRD asks for exactly this distinction.
     Forbidden(String),
+    /// The name is shaped like a request to write to, read from or close a
+    /// terminal. No such tool exists and none ever will for an agent; the
+    /// attempt is audited and answered with its own JSON-RPC code, distinct
+    /// from [`ToolResult::UnknownTool`] and [`ToolResult::Forbidden`].
+    TerminalForbidden {
+        op: terminal::TerminalOp,
+        name: String,
+    },
 }
 
 /// Dispatch a `tools/call` request.
@@ -721,6 +741,21 @@ async fn dispatch_inner(
     state: &McpSharedState,
     pty_id: Option<&str>,
 ) -> ToolResult {
+    // A terminal-shaped name is refused (and audited) whoever asks and
+    // whatever the policy says: no registered tool matches, so this never
+    // shadows a real one.
+    if let Some(op) = terminal::classify_terminal_attempt(name) {
+        if let Some(daemon) = &state.daemon {
+            daemon
+                .terminals
+                .audit_refusal(pty_id, op.as_str(), name, &op.forbidden_code());
+        }
+        return ToolResult::TerminalForbidden {
+            op,
+            name: name.to_string(),
+        };
+    }
+
     // A disabled agent's tools do not exist (not merely forbidden).
     if !state.enabled_agents.allows_tool(name) {
         return ToolResult::UnknownTool(name.to_string());
@@ -839,11 +874,11 @@ async fn dispatch_inner(
         // ── Phase 3: pane / view mutations ────────────────────────────────
         "nostromo.set_pane_content" => {
             let args = arguments.cloned().unwrap_or_default();
-            set_pane::set_pane_content(state, &args).await
+            set_pane::set_pane_content(state, &args, pty_id).await
         }
         "nostromo.set_pane_layout" => {
             let args = arguments.cloned().unwrap_or_default();
-            set_pane::set_pane_layout(state, &args).await
+            set_pane::set_pane_layout(state, &args, pty_id).await
         }
 
         // ── agent-driven pane layout (Phase 1) ────────────────────────────
@@ -859,6 +894,7 @@ async fn dispatch_inner(
             let args = arguments.cloned().unwrap_or_default();
             create_focus::create_focus(state, &args, pty_id).await
         }
+        "nostromo.open_terminal" => terminal::open_terminal(state, arguments, pty_id).await,
         "nostromo.apply_layout" => {
             let args = arguments.cloned().unwrap_or_default();
             apply_layout::apply_layout(state, &args, pty_id).await

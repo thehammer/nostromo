@@ -223,6 +223,7 @@ fn tool_json(result: ToolResult) -> Value {
         }
         ToolResult::Forbidden(name) => panic!("tool {name} is forbidden"),
         ToolResult::UnknownTool(name) => panic!("unknown tool {name}"),
+        ToolResult::TerminalForbidden { name, .. } => panic!("tool {name} is terminal-forbidden"),
     }
 }
 

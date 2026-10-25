@@ -33,6 +33,7 @@ use crate::ipc::protocol::{
 use crate::mcp::layout_schema::{self, LayoutSchema};
 use crate::mcp::pane_sources::broadcast_pane_content;
 use crate::mcp::state::McpSharedState;
+use crate::mcp::tools::terminal;
 
 /// Stable, machine-readable failure modes for `apply_layout` and the layout
 /// schema it resolves. Mirrors `PaneError::code()`'s style: the tool layer
@@ -1062,6 +1063,22 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
     };
     let tag = tag.to_string();
 
+    // A layout cannot give a terminal pane a source: it would overwrite the
+    // shell with agent-chosen content. (A tree that merely drops or forges a
+    // terminal pane is refused by the registry just below.)
+    for pane_id in schema.panes.keys() {
+        if let Some(refusal) = terminal::refuse_terminal_target(
+            daemon,
+            pty_id,
+            "nostromo.apply_layout",
+            "content",
+            &tag,
+            pane_id,
+        ) {
+            return refusal;
+        }
+    }
+
     // ── build + validate the tree through the existing PaneRegistry path ────
     let tree = schema.tree.to_pane_tree();
     let set_result = {
@@ -1074,10 +1091,11 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
     let tree = match set_result {
         Ok(t) => t,
         Err(e) => {
+            terminal::audit_pane_refusal(daemon, pty_id, "nostromo.apply_layout", e);
             return match e.detail() {
                 Some(detail) => json!({ "error": e.code(), "detail": detail }),
                 None => json!({ "error": e.code() }),
-            }
+            };
         }
     };
 

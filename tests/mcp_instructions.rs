@@ -80,6 +80,7 @@ fn harness(focuses: &[&str]) -> Harness {
         )),
         tickets: Default::default(),
         tracker: Arc::clone(&registry),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     });
     Harness {
         state,

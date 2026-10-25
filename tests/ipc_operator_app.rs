@@ -122,6 +122,7 @@ fn mcp_state(env: &Env) -> McpSharedState {
         decisions: Arc::clone(&env.decisions),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     })
 }
 

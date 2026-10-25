@@ -25,6 +25,9 @@ async fn dispatch_json(name: &str, state: &McpSharedState) -> Value {
         }
         tools::ToolResult::UnknownTool(n) => panic!("unexpected UnknownTool({n})"),
         tools::ToolResult::Forbidden(n) => panic!("unexpected Forbidden({n})"),
+        tools::ToolResult::TerminalForbidden { name, .. } => {
+            panic!("unexpected TerminalForbidden({name})")
+        }
     }
 }
 
@@ -53,6 +56,9 @@ async fn unknown_tool_creates_no_stats_entry() {
         tools::ToolResult::UnknownTool(name) => assert_eq!(name, "completely.unknown.tool"),
         tools::ToolResult::Ok(_) => panic!("expected UnknownTool"),
         tools::ToolResult::Forbidden(_) => panic!("expected UnknownTool, got Forbidden"),
+        tools::ToolResult::TerminalForbidden { .. } => {
+            panic!("expected UnknownTool, got TerminalForbidden")
+        }
     }
 
     let diag = dispatch_json("nostromo.get_daemon_diagnostics", &state).await;
@@ -82,7 +88,9 @@ async fn descriptor_is_registered_and_dispatchable() {
     let state = test_state();
     match tools::dispatch("nostromo.get_daemon_diagnostics", None, &state, None).await {
         tools::ToolResult::Ok(_) => {}
-        tools::ToolResult::UnknownTool(_) | tools::ToolResult::Forbidden(_) => {
+        tools::ToolResult::UnknownTool(_)
+        | tools::ToolResult::Forbidden(_)
+        | tools::ToolResult::TerminalForbidden { .. } => {
             panic!("nostromo.get_daemon_diagnostics must be dispatchable")
         }
     }

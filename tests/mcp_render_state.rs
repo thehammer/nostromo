@@ -81,6 +81,7 @@ async fn make_harness() -> Harness {
         decisions,
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     let mcp_server = McpServer::bind(mcp_socket_path.clone(), McpSharedState::for_daemon(backend))
         .await

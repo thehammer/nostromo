@@ -267,6 +267,7 @@ impl Env {
             )),
             tickets: Default::default(),
             tracker: Default::default(),
+            terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
         });
         let ledger = Arc::new(SentLedger::new(dir.path().join("teri").join("sent.json")));
         install_ledger(Arc::clone(&ledger));
@@ -3588,6 +3589,7 @@ async fn the_marker_a_reused_tag_superseded_is_gone_from_disk_so_a_restart_does_
         )),
         tickets: Default::default(),
         tracker: Default::default(),
+        terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     });
     install_ledger(Arc::new(on_disk));
 

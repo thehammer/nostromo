@@ -111,6 +111,12 @@ pub enum PaneError {
     NotClosable,
     /// A Teri/Fred layout that would drop the focus's native pane.
     NativePaneRequired,
+    /// The change would remove, replace or overwrite a live terminal pane. Only
+    /// closing the terminal (or its focus) removes one.
+    TerminalProtected,
+    /// A pane id starting with `terminal-` that is not a registered terminal
+    /// leaf: that namespace belongs to the terminal manager.
+    ReservedPaneId,
 }
 
 impl PaneError {
@@ -124,6 +130,8 @@ impl PaneError {
             PaneError::InvalidLayout => "invalid_layout",
             PaneError::NotClosable => "not_closable",
             PaneError::NativePaneRequired => "native_pane_required",
+            PaneError::TerminalProtected => "terminal_pane_protected",
+            PaneError::ReservedPaneId => "reserved_pane_id",
         }
     }
 }
@@ -136,6 +144,14 @@ impl PaneError {
             PaneError::NativePaneRequired => Some(
                 "the focus's native pane (teri_surface / fred_hud) must stay in the layout \
                  as a non-tab leaf: keep it as a split child, not inside a tabs node",
+            ),
+            PaneError::TerminalProtected => Some(
+                "a live terminal pane cannot be removed, replaced or overwritten from here; \
+                 keep its leaf in the layout (ratio changes are fine): the user closes it",
+            ),
+            PaneError::ReservedPaneId => Some(
+                "pane ids starting with `terminal-` are reserved for terminals the user or \
+                 nostromo.open_terminal opened",
             ),
             _ => None,
         }
@@ -385,6 +401,9 @@ impl PaneRegistry {
         let tree = self.trees.get(tag).cloned().ok_or(PaneError::UnknownView)?;
         if !tree.pane_ids().iter().any(|p| p == pane_id) {
             return Err(PaneError::UnknownPane);
+        }
+        if self.is_terminal_leaf(tag, pane_id) {
+            return Err(PaneError::TerminalProtected);
         }
         if pane_id == crate::tracker::placement::TRACKER_PANE_ID {
             // The user closes the tracker wherever it is: a split's side or a
@@ -722,6 +741,13 @@ impl PaneRegistry {
     /// board) a tracker pane the previous tree had is re-attached in the same
     /// place, so a fresh session keeps it (contract §6).
     pub fn init_focus_with_tracker(&mut self, tag: &str, has_tracker: bool) -> PaneTree {
+        // A fresh session must not drop a live terminal's pane: keep the
+        // layout the terminals live in (only closing them removes a leaf).
+        if self.terminal_leaves.contains_key(tag) {
+            if let Some(current) = self.trees.get(tag) {
+                return current.clone();
+            }
+        }
         let baseline =
             crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
         let tree = match self.trees.get(tag) {
@@ -752,7 +778,24 @@ impl PaneRegistry {
     /// Errors: [`PaneError::UnknownView`] (tag absent),
     /// [`PaneError::DuplicatePane`] (`pane_id` already present),
     /// [`PaneError::UnknownPane`] (`relative_to` absent).
+    ///
+    /// [`PaneError::ReservedPaneId`]: `pane_id` starts with `terminal-`.
     pub fn create_pane(
+        &mut self,
+        tag: &str,
+        pane_id: &str,
+        position: SplitPosition,
+        relative_to: &str,
+    ) -> Result<PaneTree, PaneError> {
+        if is_reserved_pane_id(pane_id) {
+            return Err(PaneError::ReservedPaneId);
+        }
+        self.create_pane_unchecked(tag, pane_id, position, relative_to)
+    }
+
+    /// [`Self::create_pane`] without the reserved-id check: the terminal
+    /// manager places its own `terminal-` leaf before registering it.
+    fn create_pane_unchecked(
         &mut self,
         tag: &str,
         pane_id: &str,
@@ -790,6 +833,10 @@ impl PaneRegistry {
         if !self.trees.contains_key(tag) {
             return Err(PaneError::UnknownView);
         }
+        // The default layout has no terminal leaf, so a focus with one cannot reset.
+        if self.terminal_leaves.contains_key(tag) {
+            return Err(PaneError::TerminalProtected);
+        }
         let tree =
             crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
         self.replace_tree(tag, tree.clone());
@@ -811,6 +858,8 @@ impl PaneRegistry {
     pub fn remove_focus(&mut self, tag: &str) -> bool {
         let had_tree = self.trees.remove(tag).is_some();
         let had_bindings = self.bindings.remove(tag).is_some();
+        // A tag that is reused must not inherit the dead focus's terminals.
+        self.terminal_leaves.remove(tag);
         self.painted.remove(tag);
         self.view_focus_lru.remove(tag);
         let removed = had_tree || had_bindings;
@@ -840,6 +889,8 @@ impl PaneRegistry {
             let new_tree: PaneTree =
                 serde_json::from_value(tree_value.clone()).map_err(|_| PaneError::InvalidLayout)?;
             validate_tree(&new_tree)?;
+            self.ensure_no_reserved_ids(tag, &new_tree)?;
+            self.ensure_terminals_kept(tag, &new_tree)?;
             if let Some(native) = crate::mcp::views::tree::native_pane_for(tag)
                 .filter(|_| Self::is_teri_focus(tag) || Self::is_fred_focus(tag))
             {
@@ -937,6 +988,40 @@ impl PaneRegistry {
             .unwrap_or_default()
     }
 
+    /// Is `pane_id` in `tag` a registered terminal leaf?
+    pub fn is_terminal_leaf(&self, tag: &str, pane_id: &str) -> bool {
+        self.terminal_leaves
+            .get(tag)
+            .is_some_and(|leaves| leaves.contains(pane_id))
+    }
+
+    /// `new_tree` must still contain every registered terminal leaf of `tag`.
+    fn ensure_terminals_kept(&self, tag: &str, new_tree: &PaneTree) -> Result<(), PaneError> {
+        let Some(leaves) = self.terminal_leaves.get(tag) else {
+            return Ok(());
+        };
+        let kept: HashSet<String> = new_tree.pane_ids().into_iter().collect();
+        if leaves.iter().all(|leaf| kept.contains(leaf)) {
+            Ok(())
+        } else {
+            Err(PaneError::TerminalProtected)
+        }
+    }
+
+    /// `new_tree` must not name a `terminal-` pane that is not a registered
+    /// terminal leaf of `tag`: an agent cannot mint one.
+    fn ensure_no_reserved_ids(&self, tag: &str, new_tree: &PaneTree) -> Result<(), PaneError> {
+        let forged = new_tree
+            .pane_ids()
+            .iter()
+            .any(|id| is_reserved_pane_id(id) && !self.is_terminal_leaf(tag, id));
+        if forged {
+            Err(PaneError::ReservedPaneId)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Split `relative_to` in `tag` to add the terminal leaf `pane_id`
     /// (creating the focus's default tree first if it has none). Returns the
     /// new tree. Does not register the leaf.
@@ -948,7 +1033,7 @@ impl PaneRegistry {
         pane_id: &str,
     ) -> Result<PaneTree, PaneError> {
         self.get_or_init(tag);
-        self.create_pane(tag, pane_id, position, relative_to)
+        self.create_pane_unchecked(tag, pane_id, position, relative_to)
     }
 
     /// Remove the leaf `pane_id` from `tag`'s tree wherever it is, collapsing
@@ -1149,6 +1234,11 @@ fn apply_ratio_map(node: &mut PaneTree, ratios: &HashMap<String, f32>) {
         }
         PaneTree::Leaf { .. } => {}
     }
+}
+
+/// Does `pane_id` start with the prefix only the terminal manager may use?
+fn is_reserved_pane_id(pane_id: &str) -> bool {
+    pane_id.starts_with(crate::terminal::PANE_PREFIX)
 }
 
 /// Validate the structural invariants of a tree supplied by an agent.
@@ -4214,5 +4304,340 @@ mod native_surface_tests {
             !reg.is_pane_rendered("cody-x", "tracker"),
             "reported but not in the tree"
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_guard_tests {
+    //! A live terminal pane is the user's: nothing the agent-facing layout
+    //! calls do may remove, replace or forge one (PRD criteria 11 and 12).
+    //! The terminal manager registers a leaf once its shell is running; these
+    //! tests register leaves directly, with no process behind them.
+    use super::*;
+    use crate::ipc::protocol::SplitDirection;
+    use serde_json::json;
+
+    const TAG: &str = "cody-x";
+    const LEAF: &str = "terminal-0a0b0c0d";
+
+    /// A focus with `repl` and a registered terminal leaf below it.
+    fn with_terminal() -> PaneRegistry {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+        reg.insert_terminal_leaf(TAG, REPL_PANE_ID, SplitPosition::Below, LEAF)
+            .expect("the manager can place its leaf");
+        reg.register_terminal_leaf(TAG, LEAF);
+        reg
+    }
+
+    fn leaf(id: &str) -> PaneTree {
+        PaneTree::Leaf {
+            pane_id: id.to_string(),
+        }
+    }
+
+    /// `repl` | `ids...`, side by side.
+    fn side_by_side(ids: &[&str]) -> PaneTree {
+        let mut children = vec![leaf(REPL_PANE_ID)];
+        children.extend(ids.iter().map(|id| leaf(id)));
+        let ratios = vec![1.0 / children.len() as f32; children.len()];
+        PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children,
+            ratios,
+        }
+    }
+
+    #[test]
+    fn a_fresh_session_spawn_keeps_the_layout_a_live_terminal_lives_in() {
+        let mut reg = with_terminal();
+        let before = reg.get(TAG).cloned().expect("tree");
+
+        let tree = reg.init_focus_with_tracker(TAG, false);
+
+        assert_eq!(tree, before);
+        assert!(reg.is_terminal_leaf(TAG, LEAF));
+        assert_unchanged(&reg, &before);
+    }
+
+    fn assert_unchanged(reg: &PaneRegistry, before: &PaneTree) {
+        assert_eq!(
+            reg.get(TAG),
+            Some(before),
+            "the refused call changed the tree"
+        );
+        assert_eq!(reg.terminal_leaves(TAG), vec![LEAF.to_string()]);
+    }
+
+    // ── set_layout, full tree ─────────────────────────────────────────────────
+
+    #[test]
+    fn a_replacement_tree_that_omits_a_registered_terminal_leaf_is_refused() {
+        let mut reg = with_terminal();
+        let before = reg.get(TAG).cloned().unwrap();
+
+        let result = reg.set_layout(TAG, &json!({ "tree": side_by_side(&["notes"]) }));
+
+        assert_eq!(result, Err(PaneError::TerminalProtected));
+        assert_eq!(
+            PaneError::TerminalProtected.code(),
+            "terminal_pane_protected"
+        );
+        assert_unchanged(&reg, &before);
+    }
+
+    #[test]
+    fn a_bare_replacement_tree_is_checked_too_not_only_the_wrapped_shape() {
+        let mut reg = with_terminal();
+        let before = reg.get(TAG).cloned().unwrap();
+
+        let bare = serde_json::to_value(side_by_side(&["notes"])).unwrap();
+
+        assert_eq!(
+            reg.set_layout(TAG, &bare),
+            Err(PaneError::TerminalProtected)
+        );
+        assert_unchanged(&reg, &before);
+    }
+
+    #[test]
+    fn a_replacement_tree_that_keeps_the_terminal_leaf_is_applied() {
+        let mut reg = with_terminal();
+
+        let tree = side_by_side(&[LEAF, "notes"]);
+        let result = reg.set_layout(TAG, &json!({ "tree": tree.clone() }));
+
+        assert_eq!(result, Ok(tree.clone()));
+        assert_eq!(reg.get(TAG), Some(&tree));
+        assert_eq!(reg.terminal_leaves(TAG), vec![LEAF.to_string()]);
+    }
+
+    #[test]
+    fn a_replacement_tree_must_keep_every_registered_terminal_leaf_not_just_one() {
+        let mut reg = with_terminal();
+        let second = "terminal-1a1b1c1d";
+        reg.insert_terminal_leaf(TAG, LEAF, SplitPosition::Right, second)
+            .unwrap();
+        reg.register_terminal_leaf(TAG, second);
+        let before = reg.get(TAG).cloned().unwrap();
+
+        assert_eq!(
+            reg.set_layout(TAG, &json!({ "tree": side_by_side(&[LEAF]) })),
+            Err(PaneError::TerminalProtected)
+        );
+        assert_eq!(reg.get(TAG), Some(&before));
+        assert!(reg
+            .set_layout(TAG, &json!({ "tree": side_by_side(&[LEAF, second]) }))
+            .is_ok());
+    }
+
+    #[test]
+    fn a_focus_without_a_terminal_can_still_be_given_any_valid_tree() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+
+        assert!(reg
+            .set_layout(TAG, &json!({ "tree": side_by_side(&["notes"]) }))
+            .is_ok());
+    }
+
+    #[test]
+    fn another_focuss_terminal_does_not_constrain_this_focuss_layout() {
+        let mut reg = with_terminal();
+        reg.init_focus("cody-y");
+
+        let result = reg.set_layout("cody-y", &json!({ "tree": side_by_side(&["notes"]) }));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(reg.reset("cody-y").is_ok());
+    }
+
+    // ── set_layout, ratio map ─────────────────────────────────────────────────
+
+    #[test]
+    fn a_ratio_map_naming_the_terminal_pane_is_applied() {
+        let mut reg = with_terminal();
+
+        let result = reg.set_layout(TAG, &json!({ LEAF: 0.3, REPL_PANE_ID: 0.7 }));
+
+        let tree = result.expect("ratio-only changes are allowed");
+        match tree {
+            PaneTree::Split {
+                children, ratios, ..
+            } => {
+                let at = children
+                    .iter()
+                    .position(|c| c == &leaf(LEAF))
+                    .expect("the terminal leaf is still there");
+                assert!((ratios[at] - 0.3).abs() < 0.01, "{ratios:?}");
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+        assert_eq!(reg.terminal_leaves(TAG), vec![LEAF.to_string()]);
+    }
+
+    // ── reset ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reset_is_refused_while_a_terminal_leaf_is_registered() {
+        let mut reg = with_terminal();
+        let before = reg.get(TAG).cloned().unwrap();
+
+        assert_eq!(reg.reset(TAG), Err(PaneError::TerminalProtected));
+
+        assert_unchanged(&reg, &before);
+    }
+
+    #[test]
+    fn reset_works_for_a_focus_with_no_terminal() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+        reg.create_pane(TAG, "notes", SplitPosition::Right, REPL_PANE_ID)
+            .unwrap();
+
+        assert_eq!(reg.reset(TAG), Ok(PaneTree::repl_leaf()));
+    }
+
+    #[test]
+    fn reset_works_again_once_the_terminal_is_gone() {
+        let mut reg = with_terminal();
+
+        reg.unregister_terminal_leaf(TAG, LEAF);
+        reg.remove_terminal_leaf(TAG, LEAF);
+
+        assert_eq!(reg.reset(TAG), Ok(PaneTree::repl_leaf()));
+    }
+
+    // ── close_tab ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn close_tab_on_a_registered_terminal_leaf_is_refused() {
+        let mut reg = with_terminal();
+        let before = reg.get(TAG).cloned().unwrap();
+
+        assert_eq!(reg.close_tab(TAG, LEAF), Err(PaneError::TerminalProtected));
+
+        assert_unchanged(&reg, &before);
+    }
+
+    // ── reserved ids ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_pane_cannot_mint_a_terminal_pane_id() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+        let before = reg.get(TAG).cloned().unwrap();
+
+        let result = reg.create_pane(TAG, "terminal-x", SplitPosition::Right, REPL_PANE_ID);
+
+        assert_eq!(result, Err(PaneError::ReservedPaneId));
+        assert_eq!(PaneError::ReservedPaneId.code(), "reserved_pane_id");
+        assert_eq!(reg.get(TAG), Some(&before));
+    }
+
+    #[test]
+    fn a_replacement_tree_with_an_unregistered_terminal_leaf_is_refused() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+        let before = reg.get(TAG).cloned().unwrap();
+
+        let result = reg.set_layout(
+            TAG,
+            &json!({ "tree": side_by_side(&["terminal-cafe0001"]) }),
+        );
+
+        assert_eq!(result, Err(PaneError::ReservedPaneId));
+        assert_eq!(reg.get(TAG), Some(&before));
+    }
+
+    #[test]
+    fn a_terminal_leaf_registered_to_another_focus_is_still_forged_here() {
+        let mut reg = with_terminal();
+        reg.init_focus("cody-y");
+
+        let result = reg.set_layout("cody-y", &json!({ "tree": side_by_side(&[LEAF]) }));
+
+        assert_eq!(result, Err(PaneError::ReservedPaneId));
+    }
+
+    #[test]
+    fn the_same_terminal_id_is_fine_once_it_is_a_registered_leaf_of_the_focus() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+        let tree = side_by_side(&["terminal-cafe0001"]);
+
+        assert_eq!(
+            reg.set_layout(TAG, &json!({ "tree": tree.clone() })),
+            Err(PaneError::ReservedPaneId)
+        );
+        reg.register_terminal_leaf(TAG, "terminal-cafe0001");
+
+        assert_eq!(
+            reg.set_layout(TAG, &json!({ "tree": tree.clone() })),
+            Ok(tree)
+        );
+    }
+
+    // ── the terminal manager's own path is unaffected ────────────────────────
+
+    #[test]
+    fn the_manager_can_still_place_a_leaf_that_is_not_registered_yet() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+
+        let tree = reg
+            .insert_terminal_leaf(TAG, REPL_PANE_ID, SplitPosition::Below, LEAF)
+            .expect("the manager places its leaf before registering it");
+
+        assert!(tree.pane_ids().iter().any(|p| p == LEAF));
+        assert!(
+            reg.terminal_leaves(TAG).is_empty(),
+            "placing a leaf does not register it"
+        );
+    }
+
+    #[test]
+    fn the_manager_can_remove_its_leaf_and_the_focus_is_then_unprotected() {
+        let mut reg = with_terminal();
+
+        reg.unregister_terminal_leaf(TAG, LEAF);
+        let tree = reg
+            .remove_terminal_leaf(TAG, LEAF)
+            .expect("the leaf was in the tree");
+
+        assert_eq!(tree, PaneTree::repl_leaf());
+        assert!(reg.terminal_leaves(TAG).is_empty());
+        assert!(reg
+            .set_layout(TAG, &json!({ "tree": side_by_side(&["notes"]) }))
+            .is_ok());
+    }
+
+    #[test]
+    fn removing_a_focus_works_even_with_a_registered_terminal() {
+        let mut reg = with_terminal();
+
+        assert!(reg.remove_focus(TAG));
+
+        assert!(!reg.contains(TAG));
+    }
+
+    #[test]
+    fn a_removed_focus_leaves_no_terminal_registration_for_a_reused_tag_to_trip_over() {
+        // `nostromo.create_focus` derives a focus's tag from (agent, title), so
+        // a closed focus's tag comes back. Its fresh layout must not inherit
+        // the dead focus's terminal protection.
+        let mut reg = with_terminal();
+        reg.remove_focus(TAG);
+
+        reg.init_focus(TAG);
+
+        assert!(
+            reg.terminal_leaves(TAG).is_empty(),
+            "a reused tag must not carry the dead focus's terminal leaves"
+        );
+        assert_eq!(reg.reset(TAG), Ok(PaneTree::repl_leaf()));
+        assert!(reg
+            .set_layout(TAG, &json!({ "tree": side_by_side(&["notes"]) }))
+            .is_ok());
     }
 }

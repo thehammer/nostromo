@@ -3629,6 +3629,7 @@ fn unwrap_tool_json(result: ToolResult) -> Value {
         }
         ToolResult::UnknownTool(name) => panic!("unknown tool {name}"),
         ToolResult::Forbidden(name) => panic!("tool {name} forbidden"),
+        ToolResult::TerminalForbidden { name, .. } => panic!("tool {name} terminal-forbidden"),
     }
 }
 

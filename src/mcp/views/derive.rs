@@ -132,7 +132,10 @@ pub fn view_state(
             .and_then(|b| view_of_binding(b, current_pr));
         // The tracker tab is never evicted, whatever it is bound to.
         let tracker_tab = pane_id == crate::tracker::placement::TRACKER_PANE_ID;
+        // Nor a terminal (only the terminal manager makes `terminal-` panes).
+        let terminal_tab = pane_id.starts_with(crate::terminal::PANE_PREFIX);
         let pinned = tracker_tab
+            || terminal_tab
             || view.as_ref().is_some_and(|v| {
                 // The PR under review's conversation/diff are pinned; so is any view
                 // type the rules mark `pinned` (the review queue).
@@ -608,5 +611,47 @@ mod tests {
         let mut lru = vec!["gone".to_string(), "a".to_string()];
         seed(&mut lru, &["a".to_string()]);
         assert_eq!(lru, vec!["a"]);
+    }
+    // ── terminal panes are never evictable ────────────────────────────────────
+
+    #[test]
+    fn a_terminal_tab_in_the_detail_region_is_pinned_whatever_it_is_bound_to() {
+        let tree = curated_with_detail(&["terminal-0a0b0c0d", "detail.0"], 1);
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "detail.0".to_string(),
+            binding(SOURCE_FILE, Some(json!({"path": "a.rs"}))),
+        );
+
+        // No PR under review and an empty LRU: nothing else pins anything.
+        let state = view_state(&cfg(), &tree, &bindings, None, &[]);
+
+        let detail = state.region("detail").unwrap();
+        let terminal = detail
+            .tabs
+            .iter()
+            .find(|t| t.pane_id == "terminal-0a0b0c0d")
+            .expect("the terminal tab is derived into the region");
+        assert!(
+            terminal.pinned,
+            "a terminal pane must never be a candidate for eviction"
+        );
+        let file = detail
+            .tabs
+            .iter()
+            .find(|t| t.pane_id == "detail.0")
+            .unwrap();
+        assert!(!file.pinned, "an ordinary file tab is still evictable");
+    }
+
+    #[test]
+    fn a_terminal_tab_is_pinned_even_when_it_is_the_least_recently_focused() {
+        let tree = curated_with_detail(&["terminal-0a0b0c0d", "detail.0"], 1);
+        let lru = vec!["terminal-0a0b0c0d".to_string(), "detail.0".to_string()];
+
+        let state = view_state(&cfg(), &tree, &BTreeMap::new(), None, &lru);
+
+        let detail = state.region("detail").unwrap();
+        assert!(detail.tabs[0].pinned);
     }
 }

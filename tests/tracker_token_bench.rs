@@ -98,6 +98,7 @@ impl Fx {
             )),
             tickets: Default::default(),
             tracker: Arc::clone(&registry),
+            terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
         });
         let fx = Fx {
             _tmp: tmp,

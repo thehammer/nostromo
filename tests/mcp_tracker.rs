@@ -201,6 +201,7 @@ impl Fx {
             )),
             tickets: Default::default(),
             tracker: Arc::clone(&registry),
+            terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
         });
         Fx {
             _tmp: tmp,
@@ -239,6 +240,7 @@ impl Fx {
             }
             ToolResult::UnknownTool(n) => panic!("unknown tool {n}"),
             ToolResult::Forbidden(n) => panic!("forbidden tool {n}"),
+            ToolResult::TerminalForbidden { name, .. } => panic!("terminal-forbidden tool {name}"),
         }
     }
 

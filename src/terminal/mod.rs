@@ -14,6 +14,7 @@
 //! broadcast under `Topic::Terminal`. See `docs/terminal.md`.
 
 pub mod access;
+pub mod agent_api;
 pub mod audit;
 mod fanout;
 pub mod session;
@@ -31,6 +32,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 pub use access::OperatorCap;
+pub use agent_api::TerminalAgentApi;
 use audit::{AuditEvent, AuditLog, RefusalChannel};
 use fanout::Fanout;
 use session::{InputError, SignalOps, TerminalSession};
@@ -603,6 +605,29 @@ impl TerminalManager {
         Ok(())
     }
 
+    /// The focus `tag` is gone (the app pushed a registry without it): end its
+    /// shells and drop their records and leaves, audited `focus_removed`. One
+    /// of the manager's own removal paths, reached only by the daemon, never by
+    /// a connection or an agent.
+    pub(crate) fn close_focus(&mut self, tag: &str) {
+        let ids: Vec<String> = self
+            .terminals
+            .iter()
+            .filter(|(_, t)| t.info.tag == tag)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            let Some(t) = self.terminals.remove(&id) else {
+                continue;
+            };
+            if let Some(session) = &t.session {
+                session.kill();
+            }
+            t.fanout.close();
+            self.finish_closed(t.info, "focus_removed", None);
+        }
+    }
+
     /// A fresh shell in an `ended` local terminal's pane, under a new id.
     pub fn restart(
         &mut self,
@@ -678,6 +703,53 @@ impl TerminalManager {
         peer_pid: Option<i32>,
         peer_exe: Option<String>,
     ) {
+        self.audit_refused_as(
+            channel,
+            op,
+            code,
+            terminal_id,
+            None,
+            None,
+            peer_pid,
+            peer_exe,
+        );
+    }
+
+    /// [`Self::audit_refused`] for a refusal on the MCP socket: it names the
+    /// calling `focus` (its Hello `pty_id`, shown as the audit trail shows any
+    /// focus) and the `tool` or frame that was refused.
+    pub fn audit_refused_mcp(
+        &self,
+        op: &str,
+        code: Option<&str>,
+        terminal_id: Option<&str>,
+        focus: Option<&str>,
+        tool: Option<&str>,
+    ) {
+        self.audit_refused_as(
+            RefusalChannel::Mcp,
+            op,
+            code,
+            terminal_id,
+            focus,
+            tool,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn audit_refused_as(
+        &self,
+        channel: RefusalChannel,
+        op: &str,
+        code: Option<&str>,
+        terminal_id: Option<&str>,
+        focus: Option<&str>,
+        tool: Option<&str>,
+        peer_pid: Option<i32>,
+        peer_exe: Option<String>,
+    ) {
         if !self.take_refusal_budget(channel) {
             return;
         }
@@ -688,11 +760,17 @@ impl TerminalManager {
             terminal_id: terminal_id
                 .filter(|id| is_id_shaped(id))
                 .map(str::to_string),
-            focus: None,
+            focus: focus.map(|f| self.audit_tag(f)),
             peer_pid,
             peer_exe,
-            tool: None,
+            tool: tool.map(str::to_string),
         });
+    }
+
+    /// Whether `pane_id` in `tag` is a registered terminal leaf.
+    pub fn is_terminal_leaf(&self, tag: &str, pane_id: &str) -> bool {
+        self.lock_panes()
+            .is_some_and(|panes| panes.is_terminal_leaf(tag, pane_id))
     }
 
     /// May one more `refused` line for `channel` be written in its window?

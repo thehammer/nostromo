@@ -199,6 +199,7 @@ mod tests {
             )),
             tickets: Default::default(),
             tracker: Default::default(),
+            terminals: crate::terminal::TerminalAgentApi::in_memory(),
         })
     }
 
@@ -311,6 +312,7 @@ mod tests {
             )),
             tickets: Default::default(),
             tracker: Default::default(),
+            terminals: crate::terminal::TerminalAgentApi::in_memory(),
         };
         McpSharedState::for_daemon(backend)
     }

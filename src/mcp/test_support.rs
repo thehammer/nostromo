@@ -59,6 +59,7 @@ pub(crate) fn daemon_test_state_with_tickets(tickets: TicketRegistryState) -> Da
         decisions: Arc::new(Mutex::new(DecisionRegistry::default())),
         tickets,
         tracker: Default::default(),
+        terminals: crate::terminal::TerminalAgentApi::in_memory(),
     };
     let state = McpSharedState::for_daemon(backend);
 
