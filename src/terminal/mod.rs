@@ -39,9 +39,9 @@ pub use agent_api::TerminalAgentApi;
 use audit::{AuditEvent, AuditLog, RefusalChannel};
 use ecs::EcsPaths;
 use fanout::Fanout;
-use session::{InputError, SignalOps, TerminalSession};
 use launcher::{Placement, RemoteLauncher, UnavailableLauncher};
 use remote_request::{Decision, RemoteRequests};
+use session::{InputError, SignalOps, TerminalSession};
 use store::{TerminalRecord, TerminalStore};
 
 use crate::ipc::pane_registry::{PaneError, PaneRegistry, SplitPosition};
@@ -482,12 +482,10 @@ impl TerminalManager {
         // shell exists only because the user clicked Connect.
         if requested_by.kind == AGENT_REQUESTER && matches!(launch, Launch::Local) {
             let by_agents = || {
-                self.terminals
-                    .values()
-                    .filter(|t| {
-                        t.info.requested_by.kind == AGENT_REQUESTER
-                            && t.info.kind == TerminalKind::Local
-                    })
+                self.terminals.values().filter(|t| {
+                    t.info.requested_by.kind == AGENT_REQUESTER
+                        && t.info.kind == TerminalKind::Local
+                })
             };
             if by_agents().count() >= MAX_AGENT_TERMINALS
                 || by_agents().filter(|t| t.info.tag == req.tag).count()
@@ -517,7 +515,9 @@ impl TerminalManager {
         };
         let (session, kind, label, target) = match launch {
             Launch::Local => {
-                let cwd = cwd.as_deref().expect("a local shell has a working directory");
+                let cwd = cwd
+                    .as_deref()
+                    .expect("a local shell has a working directory");
                 match TerminalSession::spawn_local(cwd, cols, rows, self.signals.clone()) {
                     Ok(s) => (s, TerminalKind::Local, LOCAL_LABEL.to_string(), None),
                     Err(e) => {
@@ -851,9 +851,10 @@ impl TerminalManager {
     ) -> bool {
         // Only a connection that can show the sheet answers it: a verified app
         // without the capability was never asked.
-        let can_answer = self.operator_conns.get(conn_key).is_some_and(|c| {
-            c.capabilities.iter().any(|cap| cap == REMOTE_SHELL_CONFIRM)
-        });
+        let can_answer = self
+            .operator_conns
+            .get(conn_key)
+            .is_some_and(|c| c.capabilities.iter().any(|cap| cap == REMOTE_SHELL_CONFIRM));
         can_answer
             && self
                 .remote_requests

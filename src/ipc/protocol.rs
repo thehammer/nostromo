@@ -7113,7 +7113,10 @@ mod terminal_wire_tests {
             v["projects"][0]["environments"][0]["services"],
             serde_json::json!(["portal", "scheduler"])
         );
-        assert_eq!(v["shell_types"], serde_json::json!(["shell", "console", "tinker"]));
+        assert_eq!(
+            v["shell_types"],
+            serde_json::json!(["shell", "console", "tinker"])
+        );
 
         let v = round_trip_server(ServerMsg::RemoteShellTargets {
             configured: false,
@@ -7212,7 +7215,10 @@ mod terminal_wire_tests {
         });
         assert_eq!(v["type"], "remote_shell_resolved");
         assert_eq!(v["outcome"], "connected");
-        assert!(v.get("reason").is_none() && v.get("remedy").is_none(), "{v}");
+        assert!(
+            v.get("reason").is_none() && v.get("remedy").is_none(),
+            "{v}"
+        );
 
         let v = round_trip_server(ServerMsg::RemoteShellResolved {
             request_id: "r1".into(),

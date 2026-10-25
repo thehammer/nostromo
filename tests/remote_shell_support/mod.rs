@@ -62,7 +62,8 @@ pub const REMOTE_EVENTS: [&str; 5] = [
 // ── process environment ──────────────────────────────────────────────────────
 
 fn home_path() -> PathBuf {
-    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("remote-shell-it-home-{}", std::process::id()))
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("remote-shell-it-home-{}", std::process::id()))
 }
 
 /// Once per test process: a private `$HOME` so nothing reads or writes the real
@@ -101,7 +102,9 @@ impl Watchdog {
                 std::thread::sleep(Duration::from_millis(100));
             }
             if !flag.load(Ordering::SeqCst) {
-                eprintln!("watchdog: a test ran for more than {secs} s of real time; ending the run");
+                eprintln!(
+                    "watchdog: a test ran for more than {secs} s of real time; ending the run"
+                );
                 std::process::exit(101);
             }
         });
@@ -168,7 +171,11 @@ impl Mcp {
         self.send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await;
         let resp = self.recv().await;
-        assert_eq!(resp["id"], json!(id), "response to a different request: {resp}");
+        assert_eq!(
+            resp["id"],
+            json!(id),
+            "response to a different request: {resp}"
+        );
         resp
     }
 
@@ -205,7 +212,11 @@ impl Mcp {
     /// The whole JSON-RPC response to a call started with [`Mcp::start_call`].
     pub async fn finish_raw(&mut self, id: i64) -> Value {
         let resp = self.recv().await;
-        assert_eq!(resp["id"], json!(id), "response to a different request: {resp}");
+        assert_eq!(
+            resp["id"],
+            json!(id),
+            "response to a different request: {resp}"
+        );
         resp
     }
 
@@ -791,7 +802,9 @@ impl Daemon {
     }
 
     pub fn launcher(&self) -> &Arc<FakeLauncher> {
-        self.launcher.as_ref().expect("this daemon has the fake launcher")
+        self.launcher
+            .as_ref()
+            .expect("this daemon has the fake launcher")
     }
 
     /// A focus with a pane tree, known to the daemon as an agent named `cody`.
@@ -813,7 +826,9 @@ impl Daemon {
         caps: &[&str],
         renders_decisions: bool,
     ) -> Unix {
-        let stream = UnixStream::connect(&self.ipc_sock).await.expect("unix connect");
+        let stream = UnixStream::connect(&self.ipc_sock)
+            .await
+            .expect("unix connect");
         Client::handshake(stream, claim, topics, caps, renders_decisions, self.wait).await
     }
 
@@ -840,7 +855,10 @@ impl Daemon {
         let c = self
             .unix(vec![], Some("mac_app"), &["terminal_ui"], false)
             .await;
-        assert!(c.nonce.is_some(), "harness: the Peer list must say App here");
+        assert!(
+            c.nonce.is_some(),
+            "harness: the Peer list must say App here"
+        );
         c
     }
 
@@ -892,7 +910,10 @@ impl Daemon {
     // ── what the daemon holds ────────────────────────────────────────────────
 
     pub fn list(&self) -> Vec<TerminalInfo> {
-        self.terminals.lock().unwrap_or_else(|e| e.into_inner()).list()
+        self.terminals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list()
     }
 
     pub fn info(&self, terminal_id: &str) -> Option<TerminalInfo> {
@@ -917,9 +938,16 @@ impl Daemon {
     /// No terminal, no pane leaf in either focus, and (when there is a fake
     /// launcher) no connect call.
     pub fn assert_nothing_opened(&self, what: &str) {
-        assert!(self.list().is_empty(), "{what}: a terminal exists: {:?}", self.list());
+        assert!(
+            self.list().is_empty(),
+            "{what}: a terminal exists: {:?}",
+            self.list()
+        );
         for tag in [TAG, TAG2] {
-            assert!(self.leaves(tag).is_empty(), "{what}: a terminal leaf exists in {tag}");
+            assert!(
+                self.leaves(tag).is_empty(),
+                "{what}: a terminal leaf exists in {tag}"
+            );
         }
         if let Some(l) = &self.launcher {
             assert_eq!(l.calls(), 0, "{what}: the launcher was called");

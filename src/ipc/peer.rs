@@ -3930,7 +3930,10 @@ mod tests {
 
     fn remote_client_frames() -> Vec<(&'static str, ClientMsg)> {
         vec![
-            ("remote_shell_targets_request", ClientMsg::RemoteShellTargetsRequest),
+            (
+                "remote_shell_targets_request",
+                ClientMsg::RemoteShellTargetsRequest,
+            ),
             (
                 "remote_shell_open",
                 ClientMsg::RemoteShellOpen {
@@ -4015,8 +4018,15 @@ mod tests {
     #[test]
     fn every_remote_shell_client_frame_is_in_the_exhaustive_fixture_list() {
         let names: Vec<String> = every_client_msg().iter().map(variant_name).collect();
-        for want in ["RemoteShellTargetsRequest", "RemoteShellOpen", "RemoteShellAnswer"] {
-            assert!(names.iter().any(|n| n == want), "{want} is not in every_client_msg()");
+        for want in [
+            "RemoteShellTargetsRequest",
+            "RemoteShellOpen",
+            "RemoteShellAnswer",
+        ] {
+            assert!(
+                names.iter().any(|n| n == want),
+                "{want} is not in every_client_msg()"
+            );
         }
     }
 
@@ -4026,10 +4036,16 @@ mod tests {
         for (name, msg) in remote_server_frames() {
             assert_eq!(classify_server_msg(&msg), ServerClass::LocalOnly, "{name}");
             assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{name}");
-            assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(), "{name}");
+            assert!(
+                outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(),
+                "{name}"
+            );
             // The same frame is delivered to local connections.
             for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
-                assert!(outbound(trust, msg.clone(), &tags).is_some(), "{name} {trust:?}");
+                assert!(
+                    outbound(trust, msg.clone(), &tags).is_some(),
+                    "{name} {trust:?}"
+                );
             }
         }
     }

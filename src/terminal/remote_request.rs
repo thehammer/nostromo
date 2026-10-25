@@ -65,7 +65,9 @@ impl Decision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteOutcome {
     /// The user clicked Connect (`invite_follow`: and ticked the follow box).
-    Connect { invite_follow: bool },
+    Connect {
+        invite_follow: bool,
+    },
     Cancelled,
     Dismissed,
     TimedOut,
@@ -273,11 +275,11 @@ pub(crate) async fn run(
     let timeout = request.timeout.clamp(MIN_TIMEOUT, MAX_TIMEOUT);
 
     // 2-4. Who can be asked, the registration and the sheet.
-    let (request_id, mut rx, conns) =
-        match ask_operators(manager, &request, &wire_target, timeout) {
-            Ok(asked) => asked,
-            Err(refused) => return refused,
-        };
+    let (request_id, mut rx, conns) = match ask_operators(manager, &request, &wire_target, timeout)
+    {
+        Ok(asked) => asked,
+        Err(refused) => return refused,
+    };
 
     // If the caller goes away from here on, the sheet is closed and the
     // request forgotten.
@@ -443,7 +445,10 @@ async fn connect(
                 kind: info.kind,
                 target: wire_target.clone(),
             });
-            (RemoteResult::Connected(Box::new(info)), resolved(request_id, "connected"))
+            (
+                RemoteResult::Connected(Box::new(info)),
+                resolved(request_id, "connected"),
+            )
         }
         Err(failure) => {
             m.record(AuditEvent::ConnectFailed {
@@ -558,7 +563,11 @@ impl TerminalManager {
             tag: self.audit_tag(&request.tag),
             requested_by: AuditRequester {
                 kind: request.requested_by.kind.clone(),
-                tag: request.requested_by.tag.as_deref().map(|t| self.audit_tag(t)),
+                tag: request
+                    .requested_by
+                    .tag
+                    .as_deref()
+                    .map(|t| self.audit_tag(t)),
             },
             target: target.clone(),
             reason: reason.map(str::to_owned),
@@ -706,7 +715,10 @@ mod tests {
             let mut requests = RemoteRequests::default();
             let (id, mut rx) = submit(&mut requests).unwrap();
 
-            assert!(requests.answer(&cap(), &id, decision, follow), "{decision:?}");
+            assert!(
+                requests.answer(&cap(), &id, decision, follow),
+                "{decision:?}"
+            );
 
             assert_eq!(rx.try_recv(), Ok(want), "{decision:?}");
             assert!(requests.pending().is_none(), "{decision:?}");
@@ -830,8 +842,18 @@ mod tests {
         assert_eq!(Decision::parse("cancel"), Some(Decision::Cancel));
         assert_eq!(Decision::parse("dismiss"), Some(Decision::Dismiss));
         for other in [
-            "", "Connect", "CONNECT", " connect", "connect ", "accept", "yes", "approve", "deny",
-            "cancelled", "dismissed", "timeout",
+            "",
+            "Connect",
+            "CONNECT",
+            " connect",
+            "connect ",
+            "accept",
+            "yes",
+            "approve",
+            "deny",
+            "cancelled",
+            "dismissed",
+            "timeout",
         ] {
             assert_eq!(Decision::parse(other), None, "{other:?}");
         }
@@ -897,7 +919,12 @@ mod tests {
         let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["admin-portal", "family-portal", "payments", "referral-monitor"]
+            [
+                "admin-portal",
+                "family-portal",
+                "payments",
+                "referral-monitor"
+            ]
         );
         assert_eq!(shell_types, ["console", "shell", "tinker"]);
     }

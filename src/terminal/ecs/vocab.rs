@@ -72,7 +72,10 @@ impl EcsPaths {
     }
 
     fn first_existing(candidates: &[PathBuf]) -> Option<&Path> {
-        candidates.iter().map(PathBuf::as_path).find(|p| p.is_file())
+        candidates
+            .iter()
+            .map(PathBuf::as_path)
+            .find(|p| p.is_file())
     }
 }
 
@@ -240,9 +243,8 @@ impl EcsVocabulary {
         })?;
         let raw = read_capped(config_path)
             .map_err(|e| VocabError::new(format!("cannot read {}: {e}", config_path.display())))?;
-        let file: ConfigFile = serde_json::from_str(&raw).map_err(|e| {
-            VocabError::new(format!("{} is not valid: {e}", config_path.display()))
-        })?;
+        let file: ConfigFile = serde_json::from_str(&raw)
+            .map_err(|e| VocabError::new(format!("{} is not valid: {e}", config_path.display())))?;
         if file.projects.is_empty() || file.shell_types.is_empty() {
             return Err(VocabError::new(format!(
                 "{} has no projects or no shell_types",

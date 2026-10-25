@@ -43,7 +43,11 @@ fn strings(v: &Value) -> Vec<String> {
     v.as_array()
         .unwrap_or_else(|| panic!("not an array: {v}"))
         .iter()
-        .map(|s| s.as_str().unwrap_or_else(|| panic!("not a string: {s}")).to_string())
+        .map(|s| {
+            s.as_str()
+                .unwrap_or_else(|| panic!("not a string: {s}"))
+                .to_string()
+        })
         .collect()
 }
 
@@ -86,7 +90,11 @@ async fn canonical_names_and_aliases_all_resolve_to_the_same_canonical_target() 
             canonical_target(),
             "{project}/{environment}/{service}/{shell_type}: the sheet names canonical words"
         );
-        assert_eq!(s.d.launcher().calls(), calls_before, "nothing connects before Connect");
+        assert_eq!(
+            s.d.launcher().calls(),
+            calls_before,
+            "nothing connects before Connect"
+        );
         s.app.answer(&confirm.request_id, "connect").await;
         let res = s.mcp.finish(call).await;
         assert_eq!(res["ok"], true, "{project}/{environment}/{service}: {res}");
@@ -119,7 +127,12 @@ async fn a_word_outside_the_vocabulary_is_refused_with_the_valid_values_and_no_s
         (
             "project",
             args_with("project", json!("billing-zzz")),
-            names(&["admin-portal", "family-portal", "payments", "referral-monitor"]),
+            names(&[
+                "admin-portal",
+                "family-portal",
+                "payments",
+                "referral-monitor",
+            ]),
         ),
         (
             "environment",
@@ -147,8 +160,14 @@ async fn a_word_outside_the_vocabulary_is_refused_with_the_valid_values_and_no_s
         assert_eq!(res["valid"]["field"], field, "{res}");
         assert_eq!(strings(&res["valid"]["values"]), valid, "{field}: {res}");
         let detail = res["detail"].as_str().expect("a detail");
-        assert!(detail.contains(&bad), "{field}: the detail names the word: {detail}");
-        assert!(detail.contains(field), "{field}: the detail names the field: {detail}");
+        assert!(
+            detail.contains(&bad),
+            "{field}: the detail names the word: {detail}"
+        );
+        assert!(
+            detail.contains(field),
+            "{field}: the detail names the field: {detail}"
+        );
     }
 
     assert_app_not_asked(&mut s.app, from, "an invalid target").await;
@@ -165,7 +184,10 @@ async fn an_environment_without_a_region_and_a_service_the_environment_lacks_are
     let from = s.app.mark();
 
     // `qa` is in the project's data but nothing says where it is.
-    let res = s.mcp.call(REQUEST, args_with("environment", json!("qa"))).await;
+    let res = s
+        .mcp
+        .call(REQUEST, args_with("environment", json!("qa")))
+        .await;
     assert_eq!(res["error"], "invalid_target", "{res}");
     assert_eq!(res["valid"]["field"], "environment");
     assert_eq!(
@@ -178,7 +200,10 @@ async fn an_environment_without_a_region_and_a_service_the_environment_lacks_are
     let res = s.mcp.call(REQUEST, a).await;
     assert_eq!(res["error"], "invalid_target", "{res}");
     assert_eq!(res["valid"]["field"], "environment");
-    assert_eq!(strings(&res["valid"]["values"]), names(&["demo", "production"]));
+    assert_eq!(
+        strings(&res["valid"]["values"]),
+        names(&["demo", "production"])
+    );
 
     // A real service name, not present in that environment.
     let a = json!({"project": "family-portal", "environment": "demo", "service": "scheduler", "shell_type": "shell"});
@@ -197,8 +222,18 @@ async fn any_key_beyond_the_five_is_refused_as_an_unknown_argument_and_nothing_i
     let from = s.app.mark();
 
     for key in [
-        "command", "cmd", "script", "args", "argv", "shell", "cluster", "profile", "env", "cwd",
-        "Command", "working_directory",
+        "command",
+        "cmd",
+        "script",
+        "args",
+        "argv",
+        "shell",
+        "cluster",
+        "profile",
+        "env",
+        "cwd",
+        "Command",
+        "working_directory",
     ] {
         let a = args_with(key, json!("echo CANARY-1f3a9"));
 
@@ -240,10 +275,9 @@ async fn a_reason_of_two_hundred_characters_is_kept_and_two_hundred_and_one_is_r
     assert_eq!(s.mcp.finish(call).await["error"], "cancelled");
 
     // The longest reason is audited whole.
-    let line = s
-        .d
-        .wait_audit("remote_requested", |l| l["event"] == "remote_requested")
-        .await;
+    let line =
+        s.d.wait_audit("remote_requested", |l| l["event"] == "remote_requested")
+            .await;
     assert_eq!(line["reason"], reason.as_str());
 }
 
@@ -300,23 +334,39 @@ async fn a_caller_with_no_focus_or_an_unknown_one_gets_unknown_view_and_nothing_
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_valid_request_sends_exactly_one_confirm_to_the_app_that_can_show_it_and_to_no_one_else() {
+async fn a_valid_request_sends_exactly_one_confirm_to_the_app_that_can_show_it_and_to_no_one_else()
+{
     // Connection order: the app with the sheet, an app without it, three local
     // processes (the last claims to be the app).
-    let d = Daemon::start(&[Peer::App, Peer::App, Peer::Script, Peer::Script, Peer::Script]).await;
+    let d = Daemon::start(&[
+        Peer::App,
+        Peer::App,
+        Peer::Script,
+        Peer::Script,
+        Peer::Script,
+    ])
+    .await;
     d.init_focus(TAG);
     let mut app = d.app().await;
     let mut old_app = d.app_without_sheet().await;
     let mut script_all = d.script(vec![], &[CONFIRM_CAP]).await;
     let mut script_topics = d
         .script(
-            vec![Topic::Terminal, Topic::Layout, Topic::Decision, Topic::Focuses, Topic::Activity],
+            vec![
+                Topic::Terminal,
+                Topic::Layout,
+                Topic::Decision,
+                Topic::Focuses,
+                Topic::Activity,
+            ],
             &[CONFIRM_CAP],
         )
         .await;
     let mut impostor = d.claiming_app().await;
     let mut tcp_all = d.tcp(vec![], true).await;
-    let mut tcp_some = d.tcp(vec![Topic::Terminal, Topic::Layout, Topic::Decision], true).await;
+    let mut tcp_some = d
+        .tcp(vec![Topic::Terminal, Topic::Layout, Topic::Decision], true)
+        .await;
     let mut mcp = d.mcp(Some(TAG)).await;
     let marks = (
         old_app.mark(),
@@ -337,12 +387,17 @@ async fn a_valid_request_sends_exactly_one_confirm_to_the_app_that_can_show_it_a
     assert_eq!(confirm.requested_by.kind, "focus");
     assert_eq!(confirm.requested_by.tag.as_deref(), Some(TAG));
     assert_eq!(confirm.requested_by.agent.as_deref(), Some(AGENT));
-    assert_eq!(confirm.reason.as_deref(), Some("Check why the nightly job did not run"));
+    assert_eq!(
+        confirm.reason.as_deref(),
+        Some("Check why the nightly job did not run")
+    );
     assert!(!confirm.request_id.is_empty());
     // Nothing exists yet: no launch, no terminal, no pane, no connect line.
     d.assert_nothing_opened("while the sheet is up");
     assert!(
-        !d.remote_audit_names().iter().any(|n| n == "connect_started"),
+        !d.remote_audit_names()
+            .iter()
+            .any(|n| n == "connect_started"),
         "{:?}",
         d.remote_audit_names()
     );
@@ -354,17 +409,33 @@ async fn a_valid_request_sends_exactly_one_confirm_to_the_app_that_can_show_it_a
     app.sync().await;
     app.settle(Duration::from_millis(150)).await;
 
-    assert_eq!(app.confirms_since(from).len(), 1, "exactly one confirm request");
+    assert_eq!(
+        app.confirms_since(from).len(),
+        1,
+        "exactly one confirm request"
+    );
     assert_eq!(app.resolved_since(from).len(), 1, "exactly one resolution");
     d.assert_nothing_opened("after Cancel");
 
     // No one else was ever told anything about it.
-    old_app.assert_no_remote_frames(marks.0, "a verified app without the sheet").await;
-    script_all.assert_no_remote_frames(marks.1, "a local process on every topic").await;
-    script_topics.assert_no_remote_frames(marks.2, "a local process on many topics").await;
-    impostor.assert_no_remote_frames(marks.3, "a process claiming to be the app").await;
-    tcp_all.assert_no_remote_frames(marks.4, "a TCP peer on every topic").await;
-    tcp_some.assert_no_remote_frames(marks.5, "a TCP peer on some topics").await;
+    old_app
+        .assert_no_remote_frames(marks.0, "a verified app without the sheet")
+        .await;
+    script_all
+        .assert_no_remote_frames(marks.1, "a local process on every topic")
+        .await;
+    script_topics
+        .assert_no_remote_frames(marks.2, "a local process on many topics")
+        .await;
+    impostor
+        .assert_no_remote_frames(marks.3, "a process claiming to be the app")
+        .await;
+    tcp_all
+        .assert_no_remote_frames(marks.4, "a TCP peer on every topic")
+        .await;
+    tcp_some
+        .assert_no_remote_frames(marks.5, "a TCP peer on some topics")
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -384,8 +455,14 @@ async fn two_apps_with_the_sheet_are_both_shown_it_and_the_first_answer_decides(
     first.answer(&c1.request_id, "dismiss").await;
     assert_eq!(mcp.finish(call).await["error"], "dismissed");
     // The sheet closes everywhere.
-    assert_eq!(first.wait_resolved(m1, &c1.request_id).await.outcome, "dismissed");
-    assert_eq!(second.wait_resolved(m2, &c1.request_id).await.outcome, "dismissed");
+    assert_eq!(
+        first.wait_resolved(m1, &c1.request_id).await.outcome,
+        "dismissed"
+    );
+    assert_eq!(
+        second.wait_resolved(m2, &c1.request_id).await.outcome,
+        "dismissed"
+    );
 
     // The second app's answer comes too late and changes nothing.
     second.answer(&c1.request_id, "connect").await;
@@ -443,10 +520,14 @@ async fn cancel_and_dismiss_are_distinct_outcomes_that_open_nothing_and_are_audi
                 .any(|m| matches!(m, ServerMsg::TerminalState { .. })),
             "{decision}: a terminal was announced"
         );
-        s.d.wait_audit("the outcome", |l| l["event"] == "confirm_outcome").await;
+        s.d.wait_audit("the outcome", |l| l["event"] == "confirm_outcome")
+            .await;
         assert_eq!(
             s.d.remote_audit_names(),
-            vec!["remote_requested".to_string(), format!("confirm_outcome:{audited}")],
+            vec![
+                "remote_requested".to_string(),
+                format!("confirm_outcome:{audited}")
+            ],
             "{decision}"
         );
         // Another request can follow at once.
@@ -491,7 +572,10 @@ async fn a_requests_wait_is_never_shorter_than_ten_seconds_whatever_the_caller_a
     assert!(app.resolved_since(from).is_empty(), "{}", app.summary());
     assert!(!asking.is_finished());
     app.answer(&confirm.request_id, "connect").await;
-    let result = tokio::time::timeout(WAIT, asking).await.expect("an answer").expect("no panic");
+    let result = tokio::time::timeout(WAIT, asking)
+        .await
+        .expect("an answer")
+        .expect("no panic");
     assert!(matches!(result, RemoteResult::Connected(_)), "{result:?}");
 }
 
@@ -523,7 +607,10 @@ async fn a_requests_wait_is_never_longer_than_ten_minutes_whatever_the_caller_as
         "{left}"
     );
     app.answer(&confirm.request_id, "cancel").await;
-    let result = tokio::time::timeout(WAIT, asking).await.expect("an answer").expect("no panic");
+    let result = tokio::time::timeout(WAIT, asking)
+        .await
+        .expect("an answer")
+        .expect("no panic");
     assert!(matches!(result, RemoteResult::Cancelled), "{result:?}");
 }
 
@@ -546,11 +633,16 @@ async fn assert_no_operator(d: &Daemon, mcp: &mut Mcp, what: &str) {
         "{what}: no_operator must come back at once, not after {took:?}"
     );
     d.assert_nothing_opened(what);
-    d.wait_audit(what, |l| l["event"] == "confirm_outcome" && l["outcome"] == "no_operator")
-        .await;
+    d.wait_audit(what, |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "no_operator"
+    })
+    .await;
     assert_eq!(
         d.remote_audit_names(),
-        vec!["remote_requested".to_string(), "confirm_outcome:no_operator".to_string()],
+        vec![
+            "remote_requested".to_string(),
+            "confirm_outcome:no_operator".to_string()
+        ],
         "{what}"
     );
     let requested = d.remote_audit().remove(0);
@@ -577,7 +669,9 @@ async fn a_verified_app_that_cannot_show_the_sheet_does_not_count() {
 
     assert_no_operator(&d, &mut mcp, "an app without the capability").await;
 
-    old_app.assert_no_remote_frames(mark, "an app without the capability").await;
+    old_app
+        .assert_no_remote_frames(mark, "an app without the capability")
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -591,12 +685,16 @@ async fn a_tcp_client_that_renders_decisions_does_not_count() {
 
     assert_no_operator(&d, &mut mcp, "TCP clients").await;
 
-    tcp.assert_no_remote_frames(marks.0, "a TCP peer on the decision topic").await;
-    tcp_all.assert_no_remote_frames(marks.1, "a TCP peer on every topic").await;
+    tcp.assert_no_remote_frames(marks.0, "a TCP peer on the decision topic")
+        .await;
+    tcp_all
+        .assert_no_remote_frames(marks.1, "a TCP peer on every topic")
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_local_process_does_not_count_even_if_it_claims_to_be_the_app_and_declares_the_capability() {
+async fn a_local_process_does_not_count_even_if_it_claims_to_be_the_app_and_declares_the_capability(
+) {
     let d = Daemon::start(&[Peer::Script, Peer::Script]).await;
     d.init_focus(TAG);
     let mut script = d.script(vec![], &[CONFIRM_CAP]).await;
@@ -606,8 +704,12 @@ async fn a_local_process_does_not_count_even_if_it_claims_to_be_the_app_and_decl
 
     assert_no_operator(&d, &mut mcp, "local processes").await;
 
-    script.assert_no_remote_frames(marks.0, "a local process").await;
-    impostor.assert_no_remote_frames(marks.1, "a process claiming to be the app").await;
+    script
+        .assert_no_remote_frames(marks.0, "a local process")
+        .await;
+    impostor
+        .assert_no_remote_frames(marks.1, "a process claiming to be the app")
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -650,7 +752,8 @@ async fn a_loop_of_requests_that_nobody_can_answer_cannot_flood_the_audit_trail(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_request_that_cannot_be_shown_is_refused_before_anything_is_asked_when_remote_shells_are_not_configured() {
+async fn a_request_that_cannot_be_shown_is_refused_before_anything_is_asked_when_remote_shells_are_not_configured(
+) {
     let mut s = Scene::start().await;
     s.d.remove_ecs("config.json");
     let from = s.app.mark();
@@ -658,7 +761,10 @@ async fn a_request_that_cannot_be_shown_is_refused_before_anything_is_asked_when
     let res = s.mcp.call(REQUEST, args()).await;
 
     assert_eq!(res["error"], "remote_shells_not_configured", "{res}");
-    assert!(!res["detail"].as_str().unwrap_or_default().is_empty(), "{res}");
+    assert!(
+        !res["detail"].as_str().unwrap_or_default().is_empty(),
+        "{res}"
+    );
     assert_app_not_asked(&mut s.app, from, "remote shells not configured").await;
     s.d.assert_nothing_opened("not configured");
 }
@@ -679,12 +785,17 @@ async fn connect_calls_the_launcher_once_and_the_shell_opens_as_an_ecs_pane_in_t
 
     assert_eq!(res["ok"], true, "{res}");
     assert_eq!(res["outcome"], "connected");
-    let terminal_id = res["terminal_id"].as_str().expect("terminal_id").to_string();
+    let terminal_id = res["terminal_id"]
+        .as_str()
+        .expect("terminal_id")
+        .to_string();
     let pane_id = res["pane_id"].as_str().expect("pane_id").to_string();
     assert!(
         pane_id.len() == "terminal-".len() + 8
             && pane_id.starts_with("terminal-")
-            && pane_id["terminal-".len()..].chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            && pane_id["terminal-".len()..]
+                .chars()
+                .all(|c| matches!(c, '0'..='9' | 'a'..='f')),
         "{pane_id}"
     );
     assert_eq!(s.d.launcher().calls(), 1, "Connect launches once");
@@ -701,7 +812,10 @@ async fn connect_calls_the_launcher_once_and_the_shell_opens_as_an_ecs_pane_in_t
     // Its pane is a terminal leaf of the focus's tree.
     assert_eq!(s.d.leaves(TAG), vec![pane_id.clone()]);
     assert!(s.d.pane_ids(TAG).contains(&pane_id));
-    assert!(s.d.pane_ids(TAG).iter().any(|p| p == "repl"), "the rest of the tree stays");
+    assert!(
+        s.d.pane_ids(TAG).iter().any(|p| p == "repl"),
+        "the rest of the tree stays"
+    );
     // The app is told: a terminal_state for it (kind ecs), then the sheet's end.
     let (_, state) = s
         .app
@@ -710,7 +824,9 @@ async fn connect_calls_the_launcher_once_and_the_shell_opens_as_an_ecs_pane_in_t
                 if terminal.terminal_id == terminal_id && terminal.kind == TerminalKind::Ecs)
         })
         .await;
-    let ServerMsg::TerminalState { terminal } = state else { unreachable!() };
+    let ServerMsg::TerminalState { terminal } = state else {
+        unreachable!()
+    };
     assert_eq!(terminal.target, Some(canonical_target()));
     let resolved = s.app.wait_resolved(from, &confirm.request_id).await;
     assert_eq!(resolved.outcome, "connected");
@@ -719,7 +835,8 @@ async fn connect_calls_the_launcher_once_and_the_shell_opens_as_an_ecs_pane_in_t
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_connect_is_audited_as_requested_then_connect_then_started_then_connected_in_that_order() {
+async fn a_connect_is_audited_as_requested_then_connect_then_started_then_connected_in_that_order()
+{
     let mut s = Scene::start().await;
 
     let (call, confirm) = s.ask(args()).await;
@@ -727,10 +844,16 @@ async fn a_connect_is_audited_as_requested_then_connect_then_started_then_connec
     let res = s.mcp.finish(call).await;
 
     assert_eq!(res["ok"], true, "{res}");
-    s.d.wait_audit("connected", |l| l["event"] == "connected").await;
+    s.d.wait_audit("connected", |l| l["event"] == "connected")
+        .await;
     assert_eq!(
         s.d.remote_audit_names(),
-        ["remote_requested", "confirm_outcome:connect", "connect_started", "connected"]
+        [
+            "remote_requested",
+            "confirm_outcome:connect",
+            "connect_started",
+            "connected"
+        ]
     );
     let lines = s.d.remote_audit();
     let connected = &lines[3];
@@ -762,7 +885,10 @@ async fn a_connect_that_fails_reports_why_opens_no_pane_and_is_audited() {
     assert_eq!(res["error"], "connect_failed", "{res}");
     assert_eq!(res["reason"], "sso_expired");
     assert_eq!(res["detail"], "Your AWS session has expired.");
-    assert_eq!(res["remedy"], "Run `aws sso login --profile fake-prod-profile` and try again.");
+    assert_eq!(
+        res["remedy"],
+        "Run `aws sso login --profile fake-prod-profile` and try again."
+    );
     assert_eq!(s.d.launcher().calls(), 1);
     assert!(s.d.list().is_empty(), "no terminal exists");
     assert!(s.d.leaves(TAG).is_empty(), "no pane exists");
@@ -773,12 +899,19 @@ async fn a_connect_that_fails_reports_why_opens_no_pane_and_is_audited() {
         resolved.remedy.as_deref(),
         Some("Run `aws sso login --profile fake-prod-profile` and try again.")
     );
-    let failed = s.d.wait_audit("connect_failed", |l| l["event"] == "connect_failed").await;
+    let failed =
+        s.d.wait_audit("connect_failed", |l| l["event"] == "connect_failed")
+            .await;
     assert_eq!(failed["reason_code"], "sso_expired", "{failed}");
     assert_eq!(failed["tag"], TAG);
     assert_eq!(
         s.d.remote_audit_names(),
-        ["remote_requested", "confirm_outcome:connect", "connect_started", "connect_failed"]
+        [
+            "remote_requested",
+            "confirm_outcome:connect",
+            "connect_started",
+            "connect_failed"
+        ]
     );
     // And the next request is not held up by it.
     s.d.launcher().set_failure(None);
@@ -800,12 +933,20 @@ async fn until_a_real_launcher_exists_connect_fails_as_not_available_and_opens_n
 
     assert_eq!(res["error"], "connect_failed", "{res}");
     assert_eq!(res["reason"], "not_available");
-    assert!(res["remedy"].as_str().is_some_and(|r| !r.is_empty()), "{res}");
+    assert!(
+        res["remedy"].as_str().is_some_and(|r| !r.is_empty()),
+        "{res}"
+    );
     assert!(s.d.list().is_empty());
     assert!(s.d.leaves(TAG).is_empty());
     let resolved = s.app.wait_resolved(from, &confirm.request_id).await;
-    assert_eq!((resolved.outcome.as_str(), resolved.reason.as_deref()), ("connect_failed", Some("not_available")));
-    let failed = s.d.wait_audit("connect_failed", |l| l["event"] == "connect_failed").await;
+    assert_eq!(
+        (resolved.outcome.as_str(), resolved.reason.as_deref()),
+        ("connect_failed", Some("not_available"))
+    );
+    let failed =
+        s.d.wait_audit("connect_failed", |l| l["event"] == "connect_failed")
+            .await;
     assert_eq!(failed["reason_code"], "not_available");
 }
 
@@ -838,12 +979,18 @@ async fn an_answer_for_a_request_that_is_not_pending_is_ignored() {
     // A made-up id while a real request waits.
     let (call, confirm) = s.ask(args()).await;
     s.app.answer("no-such-request", "connect").await;
-    s.app.answer(&format!("{}x", confirm.request_id), "connect").await;
+    s.app
+        .answer(&format!("{}x", confirm.request_id), "connect")
+        .await;
     s.app.sync().await;
     s.app.settle(Duration::from_millis(150)).await;
     assert_eq!(s.d.launcher().calls(), 0);
     assert!(s.app.resolved_since(from).is_empty(), "{}", s.app.summary());
-    assert!(s.app.refusals_since(from).is_empty(), "{:?}", s.app.refusals_since(from));
+    assert!(
+        s.app.refusals_since(from).is_empty(),
+        "{:?}",
+        s.app.refusals_since(from)
+    );
 
     // The real request is still open.
     s.app.answer(&confirm.request_id, "cancel").await;
@@ -882,24 +1029,26 @@ async fn invite_follow_is_audited_only_when_the_user_ticked_it() {
     let (call, confirm) = s.ask(args()).await;
     s.app.answer_following(&confirm.request_id, "connect").await;
     assert_eq!(s.mcp.finish(call).await["ok"], true);
-    let line = s
-        .d
-        .wait_audit("the outcome", |l| l["event"] == "confirm_outcome")
-        .await;
+    let line =
+        s.d.wait_audit("the outcome", |l| l["event"] == "confirm_outcome")
+            .await;
     assert_eq!(line["outcome"], "connect");
     assert_eq!(line["invite_follow"], true, "{line}");
 
     let (call, confirm) = s.ask(args()).await;
     s.app.answer(&confirm.request_id, "cancel").await;
     s.mcp.finish(call).await;
-    let outcomes: Vec<Value> = s
-        .d
-        .audit()
-        .into_iter()
-        .filter(|l| l["event"] == "confirm_outcome")
-        .collect();
+    let outcomes: Vec<Value> =
+        s.d.audit()
+            .into_iter()
+            .filter(|l| l["event"] == "confirm_outcome")
+            .collect();
     assert_eq!(outcomes.len(), 2);
-    assert!(outcomes[1].get("invite_follow").is_none(), "{}", outcomes[1]);
+    assert!(
+        outcomes[1].get("invite_follow").is_none(),
+        "{}",
+        outcomes[1]
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -908,7 +1057,10 @@ async fn invite_follow_is_audited_only_when_the_user_ticked_it() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_answer_from_a_local_process_is_refused_audited_and_changes_nothing() {
-    for (who, claim) in [("an ordinary process", false), ("a process claiming to be the app", true)] {
+    for (who, claim) in [
+        ("an ordinary process", false),
+        ("a process claiming to be the app", true),
+    ] {
         let d = Daemon::start(&[Peer::App, Peer::Script]).await;
         d.init_focus(TAG);
         let mut app = d.app().await;
@@ -930,7 +1082,11 @@ async fn an_answer_from_a_local_process_is_refused_audited_and_changes_nothing()
             let refusals = intruder.refusals_since(before);
             assert_eq!(
                 refusals,
-                vec![("control".to_string(), None, "terminal_control_forbidden".to_string())],
+                vec![(
+                    "control".to_string(),
+                    None,
+                    "terminal_control_forbidden".to_string()
+                )],
                 "{who}: {decision}"
             );
         }
@@ -944,7 +1100,11 @@ async fn an_answer_from_a_local_process_is_refused_audited_and_changes_nothing()
         }
         // The request is untouched: nothing resolved, nothing launched ...
         app.sync().await;
-        assert!(app.resolved_since(app_mark).is_empty(), "{who}: {}", app.summary());
+        assert!(
+            app.resolved_since(app_mark).is_empty(),
+            "{who}: {}",
+            app.summary()
+        );
         assert!(intruder.resolved_since(intruder_mark).is_empty(), "{who}");
         assert_eq!(d.launcher().calls(), 0, "{who}");
         d.assert_nothing_opened(who);
@@ -974,17 +1134,28 @@ async fn an_answer_over_tcp_is_refused_with_requires_secure_connection_and_chang
         tcp.sync().await;
         let errors = tcp.errors_since(before);
         assert!(
-            errors.iter().any(|m| m.starts_with("requires_secure_connection")),
+            errors
+                .iter()
+                .any(|m| m.starts_with("requires_secure_connection")),
             "{decision}: {errors:?}"
         );
     }
 
     // Audited as a refusal over tcp.
-    d.wait_audit("a tcp refusal", |l| l["event"] == "refused" && l["channel"] == "tcp").await;
+    d.wait_audit("a tcp refusal", |l| {
+        l["event"] == "refused" && l["channel"] == "tcp"
+    })
+    .await;
     let lines = d.refused_lines("tcp");
-    assert!(!lines.is_empty() && lines.iter().all(|l| l["op"] == "control"), "{lines:?}");
+    assert!(
+        !lines.is_empty() && lines.iter().all(|l| l["op"] == "control"),
+        "{lines:?}"
+    );
     // A TCP peer is told nothing else about terminals or remote shells.
-    assert!(tcp.refusals_since(tcp_mark).is_empty(), "no terminal_refused over tcp");
+    assert!(
+        tcp.refusals_since(tcp_mark).is_empty(),
+        "no terminal_refused over tcp"
+    );
     assert!(tcp.remote_frames_since(tcp_mark).is_empty());
     // The request is untouched, and the app can still answer it.
     app.sync().await;
@@ -1006,19 +1177,28 @@ async fn opening_a_remote_shell_is_refused_to_anyone_but_the_app_and_starts_no_f
 
     for (who, intruder) in [("a process", &mut script), ("an impostor", &mut impostor)] {
         let before = intruder.mark();
-        intruder.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"]).await;
+        intruder
+            .open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"])
+            .await;
         intruder.sync().await;
         assert_eq!(
             intruder.refusals_since(before),
-            vec![("control".to_string(), None, "terminal_control_forbidden".to_string())],
+            vec![(
+                "control".to_string(),
+                None,
+                "terminal_control_forbidden".to_string()
+            )],
             "{who}"
         );
     }
     let before = tcp.mark();
-    tcp.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"]).await;
+    tcp.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"])
+        .await;
     tcp.sync().await;
     assert!(
-        tcp.errors_since(before).iter().any(|m| m.starts_with("requires_secure_connection")),
+        tcp.errors_since(before)
+            .iter()
+            .any(|m| m.starts_with("requires_secure_connection")),
         "{}",
         tcp.summary()
     );
@@ -1034,7 +1214,11 @@ async fn opening_a_remote_shell_is_refused_to_anyone_but_the_app_and_starts_no_f
     let call = mcp.start_call(REQUEST, args()).await;
     let confirm = app.wait_confirm(from).await;
     app.answer(&confirm.request_id, "cancel").await;
-    assert_eq!(mcp.finish(call).await["error"], "cancelled", "not request_pending");
+    assert_eq!(
+        mcp.finish(call).await["error"],
+        "cancelled",
+        "not request_pending"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1062,7 +1246,11 @@ async fn a_second_request_while_one_waits_is_refused_at_once_and_the_first_is_un
         .await;
 
     assert_eq!(res["error"], "request_pending", "{res}");
-    assert!(started.elapsed() < Duration::from_secs(2), "at once, not after {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "at once, not after {:?}",
+        started.elapsed()
+    );
     // The user is not asked a second time, and nothing launched.
     app.sync().await;
     app.settle(Duration::from_millis(100)).await;
@@ -1070,7 +1258,9 @@ async fn a_second_request_while_one_waits_is_refused_at_once_and_the_first_is_un
     assert_eq!(d.launcher().calls(), 0);
     // It is audited as refused, for the second focus, and not as the first's.
     let outcome = d
-        .wait_audit("request_pending", |l| l["event"] == "confirm_outcome" && l["outcome"] == "request_pending")
+        .wait_audit("request_pending", |l| {
+            l["event"] == "confirm_outcome" && l["outcome"] == "request_pending"
+        })
         .await;
     assert_eq!(outcome["tag"], TAG2, "{outcome}");
     assert_eq!(outcome["target"]["project"], "family-portal", "{outcome}");
@@ -1080,7 +1270,11 @@ async fn a_second_request_while_one_waits_is_refused_at_once_and_the_first_is_un
     let res = first.finish(first_call).await;
     assert_eq!(res["ok"], true, "{res}");
     assert_eq!(d.launcher().calls(), 1);
-    assert_eq!(d.launcher().last_call().unwrap().1, TAG, "the first request's focus");
+    assert_eq!(
+        d.launcher().last_call().unwrap().1,
+        TAG,
+        "the first request's focus"
+    );
 
     // Once it has ended a new request is accepted.
     let from = app.mark();
@@ -1132,7 +1326,11 @@ async fn the_users_own_open_goes_through_the_same_sheet_marked_as_the_user_and_c
     assert_eq!(confirm.requested_by.tag, None);
     assert_eq!(confirm.requested_by.agent, None);
     assert_eq!(confirm.reason, None);
-    assert_eq!(d.launcher().calls(), 0, "the user's request is also a request");
+    assert_eq!(
+        d.launcher().calls(),
+        0,
+        "the user's request is also a request"
+    );
     d.assert_nothing_opened("while the sheet is up");
 
     app.answer(&confirm.request_id, "connect").await;
@@ -1141,25 +1339,40 @@ async fn the_users_own_open_goes_through_the_same_sheet_marked_as_the_user_and_c
             matches!(m, ServerMsg::TerminalState { terminal } if terminal.kind == TerminalKind::Ecs)
         })
         .await;
-    let ServerMsg::TerminalState { terminal } = state else { unreachable!() };
+    let ServerMsg::TerminalState { terminal } = state else {
+        unreachable!()
+    };
     assert_eq!(terminal.requested_by.kind, "user");
     assert_eq!(terminal.requested_by.tag, None);
     assert_eq!(terminal.tag, TAG);
     assert_eq!(terminal.target, Some(canonical_target()));
-    assert_eq!(app.wait_resolved(from, &confirm.request_id).await.outcome, "connected");
+    assert_eq!(
+        app.wait_resolved(from, &confirm.request_id).await.outcome,
+        "connected"
+    );
     assert_eq!(d.launcher().calls(), 1);
     assert_eq!(d.leaves(TAG), vec![terminal.pane_id.clone()]);
 
     // Audited as the user's request (no focus tag in `requested_by`).
-    d.wait_audit("connected", |l| l["event"] == "connected").await;
+    d.wait_audit("connected", |l| l["event"] == "connected")
+        .await;
     let requested = d.remote_audit().remove(0);
     assert_eq!(requested["event"], "remote_requested");
-    assert_eq!(requested["requested_by"], json!({"kind": "user"}), "{requested}");
+    assert_eq!(
+        requested["requested_by"],
+        json!({"kind": "user"}),
+        "{requested}"
+    );
     assert_eq!(requested["tag"], TAG);
     assert!(requested.get("reason").is_none(), "{requested}");
     assert_eq!(
         d.remote_audit_names(),
-        ["remote_requested", "confirm_outcome:connect", "connect_started", "connected"]
+        [
+            "remote_requested",
+            "confirm_outcome:connect",
+            "connect_started",
+            "connected"
+        ]
     );
 }
 
@@ -1170,14 +1383,22 @@ async fn the_users_own_cancel_opens_nothing() {
     let mut app = d.app().await;
     let from = app.mark();
 
-    app.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"]).await;
+    app.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"])
+        .await;
     let confirm = app.wait_confirm(from).await;
     app.answer(&confirm.request_id, "cancel").await;
 
-    assert_eq!(app.wait_resolved(from, &confirm.request_id).await.outcome, "cancelled");
+    assert_eq!(
+        app.wait_resolved(from, &confirm.request_id).await.outcome,
+        "cancelled"
+    );
     d.assert_nothing_opened("the user cancelled");
-    d.wait_audit("cancelled", |l| l["event"] == "confirm_outcome").await;
-    assert_eq!(d.remote_audit_names(), ["remote_requested", "confirm_outcome:cancelled"]);
+    d.wait_audit("cancelled", |l| l["event"] == "confirm_outcome")
+        .await;
+    assert_eq!(
+        d.remote_audit_names(),
+        ["remote_requested", "confirm_outcome:cancelled"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1188,7 +1409,8 @@ async fn the_users_open_that_cannot_proceed_is_refused_to_the_asker_with_a_code_
         d.init_focus(TAG);
         let mut app = d.app().await;
         let from = app.mark();
-        app.open_remote(TAG, ["billing-zzz", "production", "scheduler", "shell"]).await;
+        app.open_remote(TAG, ["billing-zzz", "production", "scheduler", "shell"])
+            .await;
         app.wait_since(from, "invalid_target", |m| {
             matches!(m, ServerMsg::TerminalRefused { op, code, .. } if op == "remote_open" && code == "invalid_target")
         })
@@ -1204,7 +1426,8 @@ async fn the_users_open_that_cannot_proceed_is_refused_to_the_asker_with_a_code_
         d.remove_ecs("config.json");
         let mut app = d.app().await;
         let from = app.mark();
-        app.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"]).await;
+        app.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"])
+            .await;
         app.wait_since(from, "remote_shells_not_configured", |m| {
             matches!(m, ServerMsg::TerminalRefused { op, code, .. } if op == "remote_open" && code == "remote_shells_not_configured")
         })
@@ -1217,13 +1440,17 @@ async fn the_users_open_that_cannot_proceed_is_refused_to_the_asker_with_a_code_
         d.init_focus(TAG);
         let mut old_app = d.app_without_sheet().await;
         let from = old_app.mark();
-        old_app.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"]).await;
+        old_app
+            .open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"])
+            .await;
         old_app
             .wait_since(from, "no_operator", |m| {
                 matches!(m, ServerMsg::TerminalRefused { op, code, .. } if op == "remote_open" && code == "no_operator")
             })
             .await;
-        old_app.assert_no_remote_frames(from, "no sheet to show").await;
+        old_app
+            .assert_no_remote_frames(from, "no sheet to show")
+            .await;
         d.assert_nothing_opened("no sheet to show");
     }
 }
@@ -1248,7 +1475,11 @@ async fn any_local_process_can_ask_for_the_vocabulary_and_only_it_is_answered() 
     let mut bystander = d.script(vec![], &[]).await;
     let by_mark = bystander.mark();
 
-    for (who, client) in [("the app", &mut app), ("a process", &mut script), ("an impostor", &mut impostor)] {
+    for (who, client) in [
+        ("the app", &mut app),
+        ("a process", &mut script),
+        ("an impostor", &mut impostor),
+    ] {
         let from = client.mark();
         client.send(&ClientMsg::RemoteShellTargetsRequest).await;
         client.sync().await;
@@ -1258,7 +1489,8 @@ async fn any_local_process_can_ask_for_the_vocabulary_and_only_it_is_answered() 
             problem,
             projects,
             shell_types,
-        } = targets_of(client, from).unwrap_or_else(|| panic!("{who}: no answer: {}", client.summary()))
+        } = targets_of(client, from)
+            .unwrap_or_else(|| panic!("{who}: no answer: {}", client.summary()))
         else {
             unreachable!()
         };
@@ -1269,31 +1501,57 @@ async fn any_local_process_can_ask_for_the_vocabulary_and_only_it_is_answered() 
         let project_names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             project_names,
-            ["admin-portal", "family-portal", "payments", "referral-monitor"],
+            [
+                "admin-portal",
+                "family-portal",
+                "payments",
+                "referral-monitor"
+            ],
             "{who}"
         );
         let ap = &projects[0];
         assert_eq!(ap.default_service.as_deref(), Some("portal"), "{who}");
         let env_names: Vec<&str> = ap.environments.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(env_names, ["canada", "demo", "production", "staging"], "{who}: qa has no region");
-        let production = ap.environments.iter().find(|e| e.name == "production").unwrap();
+        assert_eq!(
+            env_names,
+            ["canada", "demo", "production", "staging"],
+            "{who}: qa has no region"
+        );
+        let production = ap
+            .environments
+            .iter()
+            .find(|e| e.name == "production")
+            .unwrap();
         assert_eq!(
             production.services,
             names(&["api", "portal", "queue", "referral-intake", "scheduler"]),
             "{who}"
         );
-        assert_eq!(projects[3].default_service.as_deref(), Some("monitor"), "{who}");
+        assert_eq!(
+            projects[3].default_service.as_deref(),
+            Some("monitor"),
+            "{who}"
+        );
         // No profile, cluster, region, account or command in it.
         let wire = serde_json::to_string(&client.log[from..]).unwrap();
         for secret in [
-            "fake-prod-ecs", "fake-demo-ecs", "profile", "sso", "us-east-2", "ca-central-1",
-            "production-fake", "/bin/bash", "php artisan",
+            "fake-prod-ecs",
+            "fake-demo-ecs",
+            "profile",
+            "sso",
+            "us-east-2",
+            "ca-central-1",
+            "production-fake",
+            "/bin/bash",
+            "php artisan",
         ] {
             assert!(!wire.contains(secret), "{who}: {secret} in {wire}");
         }
     }
     // It is a reply to the asker, not a broadcast.
-    bystander.assert_no_remote_frames(by_mark, "a bystander").await;
+    bystander
+        .assert_no_remote_frames(by_mark, "a bystander")
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1316,7 +1574,10 @@ async fn without_a_config_json_the_vocabulary_says_it_is_not_configured_and_why(
         unreachable!()
     };
     assert!(!configured);
-    assert!(problem.is_some_and(|p| p.contains("config.json")), "the problem says what is missing");
+    assert!(
+        problem.is_some_and(|p| p.contains("config.json")),
+        "the problem says what is missing"
+    );
     assert!(projects.is_empty());
     assert!(shell_types.is_empty());
 }
@@ -1329,14 +1590,20 @@ async fn the_vocabulary_is_read_again_for_every_ask() {
     let from = script.mark();
     script.send(&ClientMsg::RemoteShellTargetsRequest).await;
     script.sync().await;
-    let ServerMsg::RemoteShellTargets { projects, .. } = targets_of(&script, from).unwrap() else { unreachable!() };
+    let ServerMsg::RemoteShellTargets { projects, .. } = targets_of(&script, from).unwrap() else {
+        unreachable!()
+    };
     assert!(projects.iter().any(|p| p.name == "payments"));
 
-    d.edit_ecs("config.json", |c| c.replace("\"payments\": {", "\"payments-v2\": {"));
+    d.edit_ecs("config.json", |c| {
+        c.replace("\"payments\": {", "\"payments-v2\": {")
+    });
     let from = script.mark();
     script.send(&ClientMsg::RemoteShellTargetsRequest).await;
     script.sync().await;
-    let ServerMsg::RemoteShellTargets { projects, .. } = targets_of(&script, from).unwrap() else { unreachable!() };
+    let ServerMsg::RemoteShellTargets { projects, .. } = targets_of(&script, from).unwrap() else {
+        unreachable!()
+    };
     assert!(projects.iter().any(|p| p.name == "payments-v2"));
     assert!(!projects.iter().any(|p| p.name == "payments"));
 }
@@ -1348,10 +1615,24 @@ async fn the_agents_list_tool_returns_the_same_vocabulary_and_no_account_details
     let res = s.mcp.call(LIST, json!({})).await;
 
     assert_eq!(res["ok"], true, "{res}");
-    assert_eq!(strings(&res["shell_types"]), names(&["console", "shell", "tinker"]));
+    assert_eq!(
+        strings(&res["shell_types"]),
+        names(&["console", "shell", "tinker"])
+    );
     let projects = res["projects"].as_array().expect("projects");
-    let project_names: Vec<&str> = projects.iter().map(|p| p["name"].as_str().unwrap()).collect();
-    assert_eq!(project_names, ["admin-portal", "family-portal", "payments", "referral-monitor"]);
+    let project_names: Vec<&str> = projects
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        project_names,
+        [
+            "admin-portal",
+            "family-portal",
+            "payments",
+            "referral-monitor"
+        ]
+    );
     let ap = &projects[0];
     assert_eq!(ap["default_service"], "portal");
     assert_eq!(
@@ -1376,9 +1657,7 @@ async fn the_agents_list_tool_returns_the_same_vocabulary_and_no_account_details
 #[tokio::test(flavor = "multi_thread")]
 async fn editing_the_vocabulary_between_two_requests_changes_the_second_result() {
     let mut s = Scene::start().await;
-    let args_for = |service: &str| {
-        json!({"project":"admin-portal","environment":"demo","service":service,"shell_type":"shell"})
-    };
+    let args_for = |service: &str| json!({"project":"admin-portal","environment":"demo","service":service,"shell_type":"shell"});
 
     // `cron` is not a service yet ...
     let res = s.mcp.call(REQUEST, args_for("cron")).await;
@@ -1391,7 +1670,9 @@ async fn editing_the_vocabulary_between_two_requests_changes_the_second_result()
             "\"cron\": { \"service\": \"demo-fake-ap-scheduler\", \"container\": \"main\" }",
         )
     });
-    s.d.edit_ecs("ecs.sh", |c| c.replace("    [job]=\"scheduler\"\n", "    [job]=\"cron\"\n"));
+    s.d.edit_ecs("ecs.sh", |c| {
+        c.replace("    [job]=\"scheduler\"\n", "    [job]=\"cron\"\n")
+    });
 
     let (call, confirm) = s.ask(args_for("cron")).await;
     assert_eq!(confirm.target.service, "cron");
@@ -1404,7 +1685,10 @@ async fn editing_the_vocabulary_between_two_requests_changes_the_second_result()
     // The old name is gone, and the refusal lists the new set.
     let res = s.mcp.call(REQUEST, args_for("scheduler")).await;
     assert_eq!(res["error"], "invalid_target", "{res}");
-    assert_eq!(strings(&res["valid"]["values"]), names(&["cron", "portal", "queue"]));
+    assert_eq!(
+        strings(&res["valid"]["values"]),
+        names(&["cron", "portal", "queue"])
+    );
     // A vocabulary that disappears is not remembered either.
     s.d.remove_ecs("config.json");
     let res = s.mcp.call(REQUEST, args_for("cron")).await;
@@ -1444,7 +1728,8 @@ async fn the_audit_lines_carry_only_the_documented_fields() {
     s.app.answer(&confirm.request_id, "connect").await;
     let res = s.mcp.finish(call).await;
     assert_eq!(res["ok"], true);
-    s.d.wait_audit("connected", |l| l["event"] == "connected").await;
+    s.d.wait_audit("connected", |l| l["event"] == "connected")
+        .await;
     s.d.launcher().set_failure(Some(ConnectFailure {
         reason_code: "no_running_task".into(),
         message: "no task is running".into(),
@@ -1456,27 +1741,55 @@ async fn the_audit_lines_carry_only_the_documented_fields() {
 
     let lines = s.d.remote_audit();
 
-    let by_event = |event: &str| -> Vec<&Value> { lines.iter().filter(|l| l["event"] == event).collect() };
+    let by_event =
+        |event: &str| -> Vec<&Value> { lines.iter().filter(|l| l["event"] == event).collect() };
     for line in by_event("remote_requested") {
-        assert_eq!(keys(line), ["event", "reason", "requested_by", "tag", "target", "ts"], "{line}");
+        assert_eq!(
+            keys(line),
+            ["event", "reason", "requested_by", "tag", "target", "ts"],
+            "{line}"
+        );
         assert_eq!(keys(&line["requested_by"]), ["kind", "tag"], "{line}");
         assert_eq!(line["requested_by"]["kind"], "focus");
         assert_eq!(line["requested_by"]["tag"], TAG);
         assert_eq!(line["reason"], "Look at the scheduler log");
-        assert_eq!(keys(&line["target"]), ["environment", "project", "service", "shell_type"]);
+        assert_eq!(
+            keys(&line["target"]),
+            ["environment", "project", "service", "shell_type"]
+        );
     }
     for line in by_event("confirm_outcome") {
-        assert_eq!(keys(line), ["event", "outcome", "tag", "target", "ts"], "{line}");
+        assert_eq!(
+            keys(line),
+            ["event", "outcome", "tag", "target", "ts"],
+            "{line}"
+        );
         assert_eq!(line["outcome"], "connect");
     }
     for line in by_event("connect_started") {
         assert_eq!(keys(line), ["event", "tag", "target", "ts"], "{line}");
     }
     for line in by_event("connected") {
-        assert_eq!(keys(line), ["event", "kind", "pane_id", "tag", "target", "terminal_id", "ts"], "{line}");
+        assert_eq!(
+            keys(line),
+            [
+                "event",
+                "kind",
+                "pane_id",
+                "tag",
+                "target",
+                "terminal_id",
+                "ts"
+            ],
+            "{line}"
+        );
     }
     for line in by_event("connect_failed") {
-        assert_eq!(keys(line), ["event", "reason_code", "tag", "target", "ts"], "{line}");
+        assert_eq!(
+            keys(line),
+            ["event", "reason_code", "tag", "target", "ts"],
+            "{line}"
+        );
         assert_eq!(line["reason_code"], "no_running_task");
     }
     assert_eq!(by_event("remote_requested").len(), 2);
@@ -1486,21 +1799,35 @@ async fn the_audit_lines_carry_only_the_documented_fields() {
     // No command, no cluster, no account, no keystroke anywhere in the trail.
     let text = s.d.audit_text();
     for never in [
-        "execute-command", "/bin/bash", "php artisan", "fake-prod-ecs", "fake-prod-profile",
-        "production-fake-ap-scheduler", "us-east-2", "sso", "aws ", "keystroke",
+        "execute-command",
+        "/bin/bash",
+        "php artisan",
+        "fake-prod-ecs",
+        "fake-prod-profile",
+        "production-fake-ap-scheduler",
+        "us-east-2",
+        "sso",
+        "aws ",
+        "keystroke",
     ] {
-        assert!(!text.contains(never), "{never:?} in the audit trail:\n{text}");
+        assert!(
+            !text.contains(never),
+            "{never:?} in the audit trail:\n{text}"
+        );
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reason_longer_than_two_hundred_characters_is_cut_to_two_hundred_for_the_sheet_and_the_trail() {
+async fn a_reason_longer_than_two_hundred_characters_is_cut_to_two_hundred_for_the_sheet_and_the_trail(
+) {
     // The MCP tool refuses a longer reason, so go in through the same entry
     // point it uses.
     let s = Scene::start().await;
     let mut app = s.app;
     let api = TerminalAgentApi::new(Arc::clone(&s.d.terminals));
-    let long: String = (0..300).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    let long: String = (0..300)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
     let from = app.mark();
 
     let asking = tokio::spawn(async move {
@@ -1521,12 +1848,17 @@ async fn a_reason_longer_than_two_hundred_characters_is_cut_to_two_hundred_for_t
     let result = tokio::time::timeout(WAIT, asking).await.unwrap().unwrap();
     assert!(matches!(result, RemoteResult::Cancelled), "{result:?}");
 
-    let expected: String = (0..200).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
-    assert_eq!(confirm.reason.as_deref(), Some(expected.as_str()), "what the sheet shows");
-    let line = s
-        .d
-        .wait_audit("remote_requested", |l| l["event"] == "remote_requested")
-        .await;
+    let expected: String = (0..200)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    assert_eq!(
+        confirm.reason.as_deref(),
+        Some(expected.as_str()),
+        "what the sheet shows"
+    );
+    let line =
+        s.d.wait_audit("remote_requested", |l| l["event"] == "remote_requested")
+            .await;
     assert_eq!(line["reason"], expected.as_str(), "what the trail keeps");
 }
 
@@ -1539,7 +1871,9 @@ async fn a_request_without_a_reason_has_no_reason_on_the_sheet_or_in_the_trail()
     s.mcp.finish(call).await;
 
     assert_eq!(confirm.reason, None);
-    let line = s.d.wait_audit("remote_requested", |l| l["event"] == "remote_requested").await;
+    let line =
+        s.d.wait_audit("remote_requested", |l| l["event"] == "remote_requested")
+            .await;
     assert!(line.get("reason").is_none(), "{line}");
 }
 
@@ -1579,8 +1913,14 @@ async fn when_the_request_is_dropped_while_waiting_the_sheet_is_closed_and_the_s
     let resolved = app.wait_resolved(from, &confirm.request_id).await;
     assert_eq!(resolved.outcome, "cancelled");
     assert_eq!(resolved.reason.as_deref(), Some("requester_gone"));
-    s.d.wait_audit("abandoned", |l| l["event"] == "confirm_outcome" && l["outcome"] == "abandoned").await;
-    assert_eq!(s.d.remote_audit_names(), ["remote_requested", "confirm_outcome:abandoned"]);
+    s.d.wait_audit("abandoned", |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "abandoned"
+    })
+    .await;
+    assert_eq!(
+        s.d.remote_audit_names(),
+        ["remote_requested", "confirm_outcome:abandoned"]
+    );
     s.d.assert_nothing_opened("an abandoned request");
     // A late click on the closed sheet does nothing ...
     app.answer(&confirm.request_id, "connect").await;
@@ -1607,7 +1947,8 @@ async fn when_the_request_is_dropped_while_waiting_the_sheet_is_closed_and_the_s
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn when_the_agents_connection_closes_while_waiting_the_sheet_is_closed_and_the_request_is_abandoned() {
+async fn when_the_agents_connection_closes_while_waiting_the_sheet_is_closed_and_the_request_is_abandoned(
+) {
     let mut s = Scene::start().await;
     let from = s.app.mark();
     let (_call, confirm) = s.ask(args()).await;
@@ -1616,9 +1957,15 @@ async fn when_the_agents_connection_closes_while_waiting_the_sheet_is_closed_and
     drop(s.mcp);
 
     let resolved = s.app.wait_resolved(from, &confirm.request_id).await;
-    assert_eq!(resolved.outcome, "cancelled", "the sheet must not stay up for a caller that is gone");
+    assert_eq!(
+        resolved.outcome, "cancelled",
+        "the sheet must not stay up for a caller that is gone"
+    );
     assert_eq!(resolved.reason.as_deref(), Some("requester_gone"));
-    s.d.wait_audit("abandoned", |l| l["event"] == "confirm_outcome" && l["outcome"] == "abandoned").await;
+    s.d.wait_audit("abandoned", |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "abandoned"
+    })
+    .await;
     s.d.assert_nothing_opened("an abandoned request");
     // The slot is free: another agent can ask.
     s.d.init_focus(TAG2);
@@ -1636,11 +1983,16 @@ async fn when_the_agents_connection_closes_while_waiting_the_sheet_is_closed_and
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_network_driven_session_is_not_offered_the_remote_shell_tools_and_is_refused_if_it_calls_them() {
+async fn a_network_driven_session_is_not_offered_the_remote_shell_tools_and_is_refused_if_it_calls_them(
+) {
     let d = Daemon::start(&[Peer::App]).await;
     d.init_focus(TAG);
     d.init_focus(TAG2);
-    d.session_mgr.lock().unwrap().sensitive_tags().mark_network_driven(TAG);
+    d.session_mgr
+        .lock()
+        .unwrap()
+        .sensitive_tags()
+        .mark_network_driven(TAG);
     let mut app = d.app().await;
     let mut driven = d.mcp(Some(TAG)).await;
     let mut plain = d.mcp(Some(TAG2)).await;
@@ -1659,7 +2011,9 @@ async fn a_network_driven_session_is_not_offered_the_remote_shell_tools_and_is_r
     assert_eq!(resp["error"]["code"], json!(TOOL_FORBIDDEN_CODE), "{resp}");
     // The refusal is audited with the focus and the tool, and nothing else.
     let line = d
-        .wait_audit("a refused request", |l| l["event"] == "refused" && l["tool"] == REQUEST)
+        .wait_audit("a refused request", |l| {
+            l["event"] == "refused" && l["tool"] == REQUEST
+        })
         .await;
     assert_eq!(line["channel"], "mcp", "{line}");
     assert_eq!(line["op"], "remote_request", "{line}");
@@ -1705,14 +2059,20 @@ async fn every_remote_shell_client_frame_over_tcp_is_refused_audited_and_has_no_
         tcp.sync().await;
         let errors = tcp.errors_since(before);
         assert!(
-            errors.iter().any(|m| m.starts_with("requires_secure_connection")),
+            errors
+                .iter()
+                .any(|m| m.starts_with("requires_secure_connection")),
             "{frame:?}: {errors:?}; [{}]",
             tcp.summary()
         );
     }
 
     // No answer, no refusal frame: a TCP peer is told nothing about terminals.
-    assert!(tcp.remote_frames_since(start).is_empty(), "[{}]", tcp.summary());
+    assert!(
+        tcp.remote_frames_since(start).is_empty(),
+        "[{}]",
+        tcp.summary()
+    );
     assert!(tcp.refusals_since(start).is_empty());
     // Each is audited as refused on the tcp channel.
     let deadline = Instant::now() + WAIT;
@@ -1729,7 +2089,11 @@ async fn every_remote_shell_client_frame_over_tcp_is_refused_audited_and_has_no_
     let call = mcp.start_call(REQUEST, args()).await;
     let confirm = app.wait_confirm(from).await;
     app.answer(&confirm.request_id, "cancel").await;
-    assert_eq!(mcp.finish(call).await["error"], "cancelled", "not request_pending");
+    assert_eq!(
+        mcp.finish(call).await["error"],
+        "cancelled",
+        "not request_pending"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1792,7 +2156,10 @@ async fn a_tcp_client_subscribed_to_everything_never_receives_a_remote_shell_fra
         // everything offered before it has been delivered or dropped.
         let mark = c.mark();
         d.server.broadcast(ServerMsg::Pong);
-        c.wait_since(mark, "the control broadcast", |m| matches!(m, ServerMsg::Pong)).await;
+        c.wait_since(mark, "the control broadcast", |m| {
+            matches!(m, ServerMsg::Pong)
+        })
+        .await;
         c.sync().await;
         assert!(
             c.remote_frames_since(0).is_empty(),
@@ -1800,14 +2167,23 @@ async fn a_tcp_client_subscribed_to_everything_never_receives_a_remote_shell_fra
             c.summary()
         );
         assert!(
-            !c.log.iter().any(|m| matches!(m, ServerMsg::TerminalRefused { .. })),
+            !c.log
+                .iter()
+                .any(|m| matches!(m, ServerMsg::TerminalRefused { .. })),
             "{who}"
         );
     }
     // Controls: the app received all three frames the TCP peers must not.
     let kinds = app.remote_frames_since(from);
-    for want in ["remote_shell_targets", "remote_shell_confirm_request", "remote_shell_resolved"] {
-        assert!(kinds.iter().any(|k| k == want), "control: the app should have received {want}: {kinds:?}");
+    for want in [
+        "remote_shell_targets",
+        "remote_shell_confirm_request",
+        "remote_shell_resolved",
+    ] {
+        assert!(
+            kinds.iter().any(|k| k == want),
+            "control: the app should have received {want}: {kinds:?}"
+        );
     }
 }
 
@@ -1861,7 +2237,10 @@ async fn the_general_broadcast_never_carries_a_remote_shell_frame_to_any_local_c
     ] {
         let from = c.mark();
         d.server.broadcast(ServerMsg::Pong);
-        c.wait_since(from, "the control broadcast", |m| matches!(m, ServerMsg::Pong)).await;
+        c.wait_since(from, "the control broadcast", |m| {
+            matches!(m, ServerMsg::Pong)
+        })
+        .await;
         assert!(
             c.remote_frames_since(mark).is_empty(),
             "{who} was sent a remote-shell frame by the general broadcast: [{}]",
@@ -1885,9 +2264,14 @@ async fn cancelling_the_call_closes_the_sheet_abandons_the_request_and_the_conne
     let resolved = s.app.wait_resolved(from, &confirm.request_id).await;
     assert_eq!(resolved.outcome, "cancelled");
     assert_eq!(resolved.reason.as_deref(), Some("requester_gone"));
-    s.d.wait_audit("abandoned", |l| l["event"] == "confirm_outcome" && l["outcome"] == "abandoned")
-        .await;
-    assert_eq!(s.d.remote_audit_names(), ["remote_requested", "confirm_outcome:abandoned"]);
+    s.d.wait_audit("abandoned", |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "abandoned"
+    })
+    .await;
+    assert_eq!(
+        s.d.remote_audit_names(),
+        ["remote_requested", "confirm_outcome:abandoned"]
+    );
     s.d.assert_nothing_opened("a cancelled call");
     // A click on the closed sheet does nothing.
     s.app.answer(&confirm.request_id, "connect").await;
@@ -1915,7 +2299,10 @@ async fn cancelling_some_other_request_id_changes_nothing() {
     s.mcp.cancel(call + 1000).await;
     s.mcp.cancel(call - 1).await;
     s.mcp
-        .notify("notifications/cancelled", json!({"requestId": "not-a-number"}))
+        .notify(
+            "notifications/cancelled",
+            json!({"requestId": "not-a-number"}),
+        )
         .await;
     s.mcp.notify("notifications/cancelled", json!({})).await;
     s.app.sync().await;
@@ -1943,11 +2330,17 @@ async fn a_frame_sent_while_the_call_waits_is_answered_after_the_call_ends_in_or
     let pong = s.mcp.finish_raw(ping).await;
     assert!(pong.get("error").is_none(), "{pong}");
     let listed = s.mcp.finish_raw(tools).await;
-    assert!(listed["result"]["tools"].as_array().is_some_and(|t| !t.is_empty()), "{listed}");
+    assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()),
+        "{listed}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cancel_for_another_tool_call_is_not_taken_for_this_one_and_other_tools_are_not_cancellable() {
+async fn a_cancel_for_another_tool_call_is_not_taken_for_this_one_and_other_tools_are_not_cancellable(
+) {
     // Only the request tool is dropped on cancel; a list call is a quick
     // answer, and a cancel that arrives after it has ended is just ignored.
     let mut s = Scene::start().await;
@@ -1979,9 +2372,14 @@ async fn when_the_last_app_with_the_sheet_disconnects_the_request_ends_at_once_a
 
     let res = mcp.finish(call).await;
     assert_eq!(res["error"], "no_operator", "{res}");
-    d.wait_audit("operator_gone", |l| l["event"] == "confirm_outcome" && l["outcome"] == "operator_gone")
-        .await;
-    assert_eq!(d.remote_audit_names(), ["remote_requested", "confirm_outcome:operator_gone"]);
+    d.wait_audit("operator_gone", |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "operator_gone"
+    })
+    .await;
+    assert_eq!(
+        d.remote_audit_names(),
+        ["remote_requested", "confirm_outcome:operator_gone"]
+    );
     d.assert_nothing_opened("the operator left");
     // With an app back, a new request is asked as usual (and the old id is dead).
     let mut app = d.app().await;
@@ -1991,7 +2389,11 @@ async fn when_the_last_app_with_the_sheet_disconnects_the_request_ends_at_once_a
     assert_ne!(next.request_id, confirm.request_id);
     app.answer(&confirm.request_id, "connect").await;
     app.sync().await;
-    assert_eq!(d.launcher().calls(), 0, "the old request's id changes nothing");
+    assert_eq!(
+        d.launcher().calls(),
+        0,
+        "the old request's id changes nothing"
+    );
     app.answer(&next.request_id, "connect").await;
     let res = mcp.finish(call).await;
     assert_eq!(res["ok"], true, "{res}");
@@ -2003,20 +2405,27 @@ async fn when_the_app_stops_declaring_the_capability_the_request_ends_at_once_as
     let from = s.app.mark();
     let (call, confirm) = s.ask(args()).await;
 
-    s.app.resubscribe(vec![Topic::Terminal, Topic::Layout], &["terminal_ui"]).await;
+    s.app
+        .resubscribe(vec![Topic::Terminal, Topic::Layout], &["terminal_ui"])
+        .await;
 
     let res = s.mcp.finish(call).await;
     assert_eq!(res["error"], "no_operator", "{res}");
     // The sheet that was up is told it is over.
     s.app.wait_resolved(from, &confirm.request_id).await;
-    s.d.wait_audit("operator_gone", |l| l["event"] == "confirm_outcome" && l["outcome"] == "operator_gone")
-        .await;
+    s.d.wait_audit("operator_gone", |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "operator_gone"
+    })
+    .await;
     s.d.assert_nothing_opened("the capability was withdrawn");
     // It no longer counts for new requests either ...
     assert_eq!(s.mcp.call(REQUEST, args()).await["error"], "no_operator");
     // ... until it declares it again.
     s.app
-        .resubscribe(vec![Topic::Terminal, Topic::Layout], &["terminal_ui", CONFIRM_CAP])
+        .resubscribe(
+            vec![Topic::Terminal, Topic::Layout],
+            &["terminal_ui", CONFIRM_CAP],
+        )
         .await;
     s.app.sync().await;
     let (call, confirm) = s.ask(args()).await;
@@ -2091,9 +2500,21 @@ async fn a_verified_app_that_was_never_asked_cannot_answer_for_the_one_that_was(
 async fn the_reason_is_cleaned_before_the_sheet_and_the_audit_trail_see_it() {
     let mut s = Scene::start().await;
     let cases: Vec<(&str, String, Option<String>)> = vec![
-        ("a line break", "first\nsecond".into(), Some("first second".into())),
-        ("a tab and a carriage return", "a\tb\rc".into(), Some("a b c".into())),
-        ("a control character", "a\u{0007}b\u{001b}c".into(), Some("a b c".into())),
+        (
+            "a line break",
+            "first\nsecond".into(),
+            Some("first second".into()),
+        ),
+        (
+            "a tab and a carriage return",
+            "a\tb\rc".into(),
+            Some("a b c".into()),
+        ),
+        (
+            "a control character",
+            "a\u{0007}b\u{001b}c".into(),
+            Some("a b c".into()),
+        ),
         (
             "bidi overrides and isolates",
             "\u{202E}evil\u{2066}x\u{2067}y\u{2068}z\u{2069}".into(),
@@ -2104,39 +2525,60 @@ async fn the_reason_is_cleaned_before_the_sheet_and_the_audit_trail_see_it() {
             "a\u{200B}b\u{200C}c\u{200D}d\u{200E}e\u{200F}f\u{FEFF}g".into(),
             Some("abcdefg".into()),
         ),
-        ("surrounding whitespace", "  \n padded \t ".into(), Some("padded".into())),
+        (
+            "surrounding whitespace",
+            "  \n padded \t ".into(),
+            Some("padded".into()),
+        ),
         (
             "padding that takes the characters but not the text",
             format!("{}{}", "\u{200B}".repeat(100), "x".repeat(100)),
             Some("x".repeat(100)),
         ),
-        ("nothing but such characters", "\u{202E}\u{200B}\n \t\u{FEFF}".into(), None),
+        (
+            "nothing but such characters",
+            "\u{202E}\u{200B}\n \t\u{FEFF}".into(),
+            None,
+        ),
         ("only whitespace", "   ".into(), None),
-        ("an ordinary reason", "Check the scheduler log".into(), Some("Check the scheduler log".into())),
+        (
+            "an ordinary reason",
+            "Check the scheduler log".into(),
+            Some("Check the scheduler log".into()),
+        ),
     ];
 
     for (what, reason, expected) in cases {
-        let before = s.d.audit().iter().filter(|l| l["event"] == "remote_requested").count();
+        let before =
+            s.d.audit()
+                .iter()
+                .filter(|l| l["event"] == "remote_requested")
+                .count();
 
         let (call, confirm) = s.ask(args_with("reason", json!(reason))).await;
 
         assert_eq!(confirm.reason, expected, "{what}: what the sheet shows");
-        let line = s
-            .d
-            .wait_audit(what, |l| l["event"] == "remote_requested")
-            .await;
+        let line =
+            s.d.wait_audit(what, |l| l["event"] == "remote_requested")
+                .await;
         let _ = line;
-        let lines: Vec<Value> = s
-            .d
-            .audit()
-            .into_iter()
-            .filter(|l| l["event"] == "remote_requested")
-            .collect();
+        let lines: Vec<Value> =
+            s.d.audit()
+                .into_iter()
+                .filter(|l| l["event"] == "remote_requested")
+                .collect();
         assert_eq!(lines.len(), before + 1, "{what}");
         let line = lines.last().unwrap();
         match &expected {
-            Some(text) => assert_eq!(line["reason"], text.as_str(), "{what}: what the trail keeps"),
-            None => assert!(line.get("reason").is_none(), "{what}: no reason in the trail: {line}"),
+            Some(text) => assert_eq!(
+                line["reason"],
+                text.as_str(),
+                "{what}: what the trail keeps"
+            ),
+            None => assert!(
+                line.get("reason").is_none(),
+                "{what}: no reason in the trail: {line}"
+            ),
         }
         s.app.answer(&confirm.request_id, "cancel").await;
         assert_eq!(s.mcp.finish(call).await["error"], "cancelled", "{what}");
@@ -2144,7 +2586,11 @@ async fn the_reason_is_cleaned_before_the_sheet_and_the_audit_trail_see_it() {
     // No hidden character reached the trail at all.
     let text = s.d.audit_text();
     for hidden in ['\u{202E}', '\u{2066}', '\u{200B}', '\u{FEFF}', '\u{200F}'] {
-        assert!(!text.contains(hidden), "U+{:04X} in the audit trail", hidden as u32);
+        assert!(
+            !text.contains(hidden),
+            "U+{:04X} in the audit trail",
+            hidden as u32
+        );
     }
 }
 
@@ -2170,6 +2616,14 @@ async fn a_remote_shell_an_agent_asked_for_does_not_count_against_its_local_shel
     assert_eq!(res, json!({"error": "terminal_agent_quota_reached"}));
     // Three terminals: one remote, two local.
     let kinds: Vec<TerminalKind> = s.d.list().iter().map(|t| t.kind).collect();
-    assert_eq!(kinds.iter().filter(|k| **k == TerminalKind::Ecs).count(), 1, "{kinds:?}");
-    assert_eq!(kinds.iter().filter(|k| **k == TerminalKind::Local).count(), 2, "{kinds:?}");
+    assert_eq!(
+        kinds.iter().filter(|k| **k == TerminalKind::Ecs).count(),
+        1,
+        "{kinds:?}"
+    );
+    assert_eq!(
+        kinds.iter().filter(|k| **k == TerminalKind::Local).count(),
+        2,
+        "{kinds:?}"
+    );
 }

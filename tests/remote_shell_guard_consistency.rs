@@ -20,8 +20,8 @@
 use std::path::PathBuf;
 
 use nostromo::approvals::guard::{
-    evaluate, GuardVerdict, HookPayload, PaneInfo, PaneProbe, ProbeError, TmuxSocket,
-    RULE_COMMAND, RULE_TOOL_NAME,
+    evaluate, GuardVerdict, HookPayload, PaneInfo, PaneProbe, ProbeError, TmuxSocket, RULE_COMMAND,
+    RULE_TOOL_NAME,
 };
 use nostromo::mcp::tools::terminal::classify_terminal_attempt;
 use nostromo::mcp::tools::tool_descriptors;
@@ -141,7 +141,11 @@ fn the_guard_allows_the_request_tool_with_a_valid_request_whatever_the_reason_sa
 #[test]
 fn the_guard_allows_the_list_tool() {
     for name in [LIST, LIST_AS_SEEN_BY_THE_AGENT] {
-        assert_eq!(verdict(&pre_tool_use(name, json!({}))), GuardVerdict::Allow, "{name}");
+        assert_eq!(
+            verdict(&pre_tool_use(name, json!({}))),
+            GuardVerdict::Allow,
+            "{name}"
+        );
     }
 }
 
@@ -198,7 +202,10 @@ fn a_command_smuggled_into_the_request_tools_input_is_caught_by_the_guard_too() 
 #[test]
 fn together_the_two_layers_leave_only_the_request_path_open() {
     let open: Vec<&str> = [
-        ("Bash", json!({"command": "aws ecs execute-command --cluster c --task t --command bash"})),
+        (
+            "Bash",
+            json!({"command": "aws ecs execute-command --cluster c --task t --command bash"}),
+        ),
         ("mcp__nostromo__ecs_shell", json!({})),
         (REQUEST_AS_SEEN_BY_THE_AGENT, valid_request_input()),
         (LIST_AS_SEEN_BY_THE_AGENT, json!({})),
@@ -245,7 +252,10 @@ fn both_remote_shell_tools_are_registered() {
 #[test]
 fn no_terminal_or_shell_tool_has_a_field_a_command_could_go_in() {
     let tools = terminal_or_shell_tools();
-    assert!(tools.len() >= 3, "open_terminal and the two remote tools at least");
+    assert!(
+        tools.len() >= 3,
+        "open_terminal and the two remote tools at least"
+    );
 
     for tool in &tools {
         let name = tool["name"].as_str().unwrap();
@@ -256,7 +266,9 @@ fn no_terminal_or_shell_tool_has_a_field_a_command_could_go_in() {
             "{name}: the schema must refuse extra keys"
         );
         let properties = schema["properties"].as_object().expect("properties");
-        for forbidden in ["command", "cmd", "script", "args", "argv", "input", "keys", "text", "env"] {
+        for forbidden in [
+            "command", "cmd", "script", "args", "argv", "input", "keys", "text", "env",
+        ] {
             assert!(
                 !properties.contains_key(forbidden),
                 "{name} offers a `{forbidden}` field"
@@ -291,7 +303,10 @@ fn the_request_tool_takes_exactly_four_required_words_and_an_optional_reason() {
         .map(|v| v.as_str().unwrap())
         .collect();
     required.sort_unstable();
-    assert_eq!(required, ["environment", "project", "service", "shell_type"]);
+    assert_eq!(
+        required,
+        ["environment", "project", "service", "shell_type"]
+    );
     for (name, property) in schema["properties"].as_object().unwrap() {
         assert_eq!(property["type"], "string", "{name}");
     }
@@ -310,7 +325,12 @@ fn the_list_tool_takes_no_arguments() {
 
 #[test]
 fn neither_remote_shell_tool_looks_like_a_way_to_write_read_or_close_a_terminal() {
-    for name in [REQUEST, LIST, REQUEST_AS_SEEN_BY_THE_AGENT, LIST_AS_SEEN_BY_THE_AGENT] {
+    for name in [
+        REQUEST,
+        LIST,
+        REQUEST_AS_SEEN_BY_THE_AGENT,
+        LIST_AS_SEEN_BY_THE_AGENT,
+    ] {
         assert!(
             classify_terminal_attempt(name).is_none(),
             "{name} is classified as a terminal input/read/close attempt"

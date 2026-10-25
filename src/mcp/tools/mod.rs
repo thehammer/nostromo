@@ -634,7 +634,9 @@ fn forbidden(state: &McpSharedState, pty_id: Option<&str>, name: &str) -> ToolRe
         _ => None,
     };
     if let (Some(op), Some(daemon)) = (op, &state.daemon) {
-        daemon.terminals.audit_refusal(pty_id, op, name, "forbidden");
+        daemon
+            .terminals
+            .audit_refusal(pty_id, op, name, "forbidden");
     }
     ToolResult::Forbidden(name.to_string())
 }

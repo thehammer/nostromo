@@ -51,8 +51,10 @@ async fn an_unanswered_agent_request_times_out_opens_nothing_and_a_late_answer_i
     );
     // Nothing was opened or launched, and the outcome is audited.
     s.d.assert_nothing_opened("a timed-out request");
-    s.d.wait_audit("timed_out", |l| l["event"] == "confirm_outcome" && l["outcome"] == "timed_out")
-        .await;
+    s.d.wait_audit("timed_out", |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "timed_out"
+    })
+    .await;
     assert_eq!(
         s.d.remote_audit_names(),
         ["remote_requested", "confirm_outcome:timed_out"]
@@ -65,7 +67,13 @@ async fn an_unanswered_agent_request_times_out_opens_nothing_and_a_late_answer_i
     s.app.sync().await;
     assert_eq!(s.d.launcher().calls(), 0);
     s.d.assert_nothing_opened("a late answer");
-    assert!(s.app.log[after..].iter().all(|m| matches!(m, ServerMsg::Pong)), "{}", s.app.summary());
+    assert!(
+        s.app.log[after..]
+            .iter()
+            .all(|m| matches!(m, ServerMsg::Pong)),
+        "{}",
+        s.app.summary()
+    );
 
     // The slot is free: the next request is shown (and times out in its turn),
     // it is not turned away as pending.
@@ -83,7 +91,8 @@ async fn an_unanswered_request_of_the_users_own_times_out_quietly() {
     let mut app = d.app().await;
     let from = app.mark();
 
-    app.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"]).await;
+    app.open_remote(TAG, ["admin-portal", "production", "scheduler", "shell"])
+        .await;
     let confirm = app.wait_confirm(from).await;
     let resolved = app.wait_resolved(from, &confirm.request_id).await;
 
@@ -92,10 +101,19 @@ async fn an_unanswered_request_of_the_users_own_times_out_quietly() {
     d.assert_nothing_opened("a timed-out request");
     // A timeout is an outcome on the sheet, not a refusal.
     app.sync().await;
-    assert!(app.refusals_since(from).is_empty(), "{:?}", app.refusals_since(from));
-    d.wait_audit("timed_out", |l| l["event"] == "confirm_outcome" && l["outcome"] == "timed_out")
-        .await;
-    assert_eq!(d.remote_audit_names(), ["remote_requested", "confirm_outcome:timed_out"]);
+    assert!(
+        app.refusals_since(from).is_empty(),
+        "{:?}",
+        app.refusals_since(from)
+    );
+    d.wait_audit("timed_out", |l| {
+        l["event"] == "confirm_outcome" && l["outcome"] == "timed_out"
+    })
+    .await;
+    assert_eq!(
+        d.remote_audit_names(),
+        ["remote_requested", "confirm_outcome:timed_out"]
+    );
     let requested = d.remote_audit().remove(0);
     assert_eq!(requested["requested_by"], json!({"kind": "user"}));
 }

@@ -53,7 +53,9 @@ pub async fn request_shell(
     let object: Map<String, Value> = match arguments {
         None | Some(Value::Null) => Map::new(),
         Some(Value::Object(o)) => o.clone(),
-        Some(_) => return json!({ "error": "invalid_args", "detail": "arguments must be an object" }),
+        Some(_) => {
+            return json!({ "error": "invalid_args", "detail": "arguments must be an object" })
+        }
     };
     // Any key beyond the closed set (`command`, `cmd`, `script`, …) is refused
     // before anything else is looked at.

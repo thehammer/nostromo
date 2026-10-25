@@ -92,7 +92,10 @@ fn canonical_names_resolve_to_the_cluster_service_container_region_and_shell_com
         .resolve("admin-portal", "production", "scheduler", "shell")
         .expect("canonical names resolve");
 
-    assert_eq!(four(&t), ("admin-portal", "production", "scheduler", "shell"));
+    assert_eq!(
+        four(&t),
+        ("admin-portal", "production", "scheduler", "shell")
+    );
     assert_eq!(t.cluster, "fake-prod-ecs");
     assert_eq!(t.service_name, "production-fake-ap-scheduler");
     assert_eq!(t.container, "main");
@@ -137,11 +140,17 @@ fn words_are_matched_without_regard_to_case() {
         .resolve("AP", "PROD", "Scheduler", "SHELL")
         .expect("mixed case resolves");
 
-    assert_eq!(four(&t), ("admin-portal", "production", "scheduler", "shell"));
+    assert_eq!(
+        four(&t),
+        ("admin-portal", "production", "scheduler", "shell")
+    );
     let t = v
         .resolve("Admin-Portal", "Production", "SCHED", "Tinker")
         .expect("mixed case canonical and alias resolve");
-    assert_eq!(four(&t), ("admin-portal", "production", "scheduler", "tinker"));
+    assert_eq!(
+        four(&t),
+        ("admin-portal", "production", "scheduler", "tinker")
+    );
     assert_eq!(t.shell_command, "php artisan tinker");
 }
 
@@ -174,7 +183,12 @@ fn an_unknown_project_is_refused_listing_every_project() {
     assert_eq!(e.given, "billing");
     assert_eq!(
         e.valid,
-        strings(&["admin-portal", "family-portal", "payments", "referral-monitor"])
+        strings(&[
+            "admin-portal",
+            "family-portal",
+            "payments",
+            "referral-monitor"
+        ])
     );
 }
 
@@ -195,7 +209,10 @@ fn an_environment_with_no_region_is_not_offered_and_not_accepted() {
     let e = invalid(&v, "admin-portal", "qa", "portal", "shell");
 
     assert_eq!(e.field, TargetField::Environment);
-    assert_eq!(e.valid, strings(&["canada", "demo", "production", "staging"]));
+    assert_eq!(
+        e.valid,
+        strings(&["canada", "demo", "production", "staging"])
+    );
     let offered: Vec<String> = v
         .projects()
         .iter()
@@ -205,7 +222,10 @@ fn an_environment_with_no_region_is_not_offered_and_not_accepted() {
         .iter()
         .map(|e| e.name.clone())
         .collect();
-    assert_eq!(offered, strings(&["canada", "demo", "production", "staging"]));
+    assert_eq!(
+        offered,
+        strings(&["canada", "demo", "production", "staging"])
+    );
 }
 
 #[test]
@@ -283,7 +303,14 @@ fn an_oversized_rejected_word_is_quoted_back_only_in_part() {
 fn words_with_shell_syntax_are_just_unknown_words() {
     let v = vocab();
 
-    for bad in ["portal; rm -rf /", "$(id)", "`id`", "portal\nscheduler", "", " "] {
+    for bad in [
+        "portal; rm -rf /",
+        "$(id)",
+        "`id`",
+        "portal\nscheduler",
+        "",
+        " ",
+    ] {
         let e = invalid(&v, "admin-portal", "production", bad, "shell");
         assert_eq!(e.field, TargetField::Service, "{bad:?}");
     }
@@ -300,7 +327,12 @@ fn projects_lists_each_project_with_its_default_service_environments_and_service
     let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(
         names,
-        ["admin-portal", "family-portal", "payments", "referral-monitor"]
+        [
+            "admin-portal",
+            "family-portal",
+            "payments",
+            "referral-monitor"
+        ]
     );
     let ap = &projects[0];
     assert_eq!(ap.default_service.as_deref(), Some("portal"));
@@ -353,7 +385,11 @@ fn a_default_service_no_environment_has_is_not_offered() {
     let v = copy.load().unwrap();
 
     assert_eq!(v.default_service("payments"), None);
-    let payments = v.projects().into_iter().find(|p| p.name == "payments").unwrap();
+    let payments = v
+        .projects()
+        .into_iter()
+        .find(|p| p.name == "payments")
+        .unwrap();
     assert_eq!(payments.default_service, None);
 }
 
@@ -369,11 +405,17 @@ fn the_local_profile_overrides_the_shared_one_and_configure_me_means_none() {
     };
 
     // production: set in both, the local file wins.
-    assert_eq!(profile("production").as_deref(), Some("local-fake-prod-profile"));
+    assert_eq!(
+        profile("production").as_deref(),
+        Some("local-fake-prod-profile")
+    );
     // demo: only in config.json.
     assert_eq!(profile("demo").as_deref(), Some("fake-demo-profile"));
     // staging: CONFIGURE_ME in config.json, a real name in ecs-local.json.
-    assert_eq!(profile("staging").as_deref(), Some("local-fake-stg-profile"));
+    assert_eq!(
+        profile("staging").as_deref(),
+        Some("local-fake-stg-profile")
+    );
     // canada: CONFIGURE_ME and nothing local.
     assert_eq!(profile("canada"), None);
 }
@@ -399,7 +441,9 @@ fn an_unreadable_local_file_is_ignored_and_the_shared_profiles_apply() {
     let copy = Copy::new();
     copy.write("ecs-local.json", "{ this is not json");
 
-    let v = copy.load().expect("a broken ecs-local.json does not fail the load");
+    let v = copy
+        .load()
+        .expect("a broken ecs-local.json does not fail the load");
 
     let t = v
         .resolve("admin-portal", "production", "portal", "shell")
@@ -411,9 +455,10 @@ fn an_unreadable_local_file_is_ignored_and_the_shared_profiles_apply() {
 fn an_empty_profile_name_is_no_profile() {
     let copy = Copy::new();
     copy.write("ecs-local.json", r#"{"profiles": {"production": ""}}"#);
-    let edited = copy
-        .read("config.json")
-        .replace("\"production\": \"fake-prod-profile\"", "\"production\": \"\"");
+    let edited = copy.read("config.json").replace(
+        "\"production\": \"fake-prod-profile\"",
+        "\"production\": \"\"",
+    );
     copy.write("config.json", &edited);
 
     let v = copy.load().unwrap();
@@ -512,7 +557,10 @@ fn an_alias_block_with_a_line_that_is_not_a_plain_entry_gives_no_aliases_for_tha
     );
     // ... and the other two blocks still work.
     let t = v.resolve("ap", "production", "sched", "shell").unwrap();
-    assert_eq!(four(&t), ("admin-portal", "production", "scheduler", "shell"));
+    assert_eq!(
+        four(&t),
+        ("admin-portal", "production", "scheduler", "shell")
+    );
 }
 
 #[test]
@@ -535,11 +583,13 @@ fn alias_entries_that_are_not_plain_words_are_never_taken() {
         let v = copy.load().unwrap();
 
         assert!(
-            v.resolve("admin-portal", "evil", "portal", "shell").is_err(),
+            v.resolve("admin-portal", "evil", "portal", "shell")
+                .is_err(),
             "{entry}"
         );
         assert!(
-            v.resolve("admin-portal", "Evil", "portal", "shell").is_err(),
+            v.resolve("admin-portal", "Evil", "portal", "shell")
+                .is_err(),
             "{entry}"
         );
     }
@@ -605,7 +655,12 @@ fn a_missing_config_json_is_a_vocab_error_that_says_where_it_looked() {
 #[test]
 fn a_config_json_that_is_not_valid_json_is_a_vocab_error() {
     let copy = Copy::new();
-    for text in ["{ \"projects\": ", "not json", "[1, 2, 3]", "\"just a string\""] {
+    for text in [
+        "{ \"projects\": ",
+        "not json",
+        "[1, 2, 3]",
+        "\"just a string\"",
+    ] {
         copy.write("config.json", text);
 
         let e = copy.load().expect_err(text);
@@ -636,7 +691,10 @@ fn an_absurdly_large_config_json_is_refused_rather_than_read() {
     // Otherwise valid, but padded past any real file's size.
     let mut text = copy.read("config.json");
     let end = text.rfind('}').expect("closing brace");
-    text.insert_str(end, &format!(", \"pad\": \"{}\"", "x".repeat(5 * 1024 * 1024)));
+    text.insert_str(
+        end,
+        &format!(", \"pad\": \"{}\"", "x".repeat(5 * 1024 * 1024)),
+    );
     copy.write("config.json", &text);
 
     assert!(copy.load().is_err());
@@ -691,12 +749,20 @@ fn editing_the_data_between_two_loads_changes_the_second_result_and_not_the_firs
     let edited = copy
         .read("config.json")
         .replace("fake-demo-ecs", "fake-demo-ecs-v2")
-        .replace("\"scheduler\": { \"service\": \"demo-fake-ap-scheduler\", \"container\": \"main\" }", "\"cron\": { \"service\": \"demo-fake-ap-scheduler\", \"container\": \"main\" }");
-    assert_ne!(edited, copy.read("config.json"), "harness: the edit applied");
+        .replace(
+            "\"scheduler\": { \"service\": \"demo-fake-ap-scheduler\", \"container\": \"main\" }",
+            "\"cron\": { \"service\": \"demo-fake-ap-scheduler\", \"container\": \"main\" }",
+        );
+    assert_ne!(
+        edited,
+        copy.read("config.json"),
+        "harness: the edit applied"
+    );
     copy.write("config.json", &edited);
-    let aliases = copy
-        .read("ecs.sh")
-        .replace("    [prd]=\"production\"\n", "    [prd]=\"production\"\n    [live]=\"production\"\n");
+    let aliases = copy.read("ecs.sh").replace(
+        "    [prd]=\"production\"\n",
+        "    [prd]=\"production\"\n    [live]=\"production\"\n",
+    );
     copy.write("ecs.sh", &aliases);
     let after = copy.load().unwrap();
 

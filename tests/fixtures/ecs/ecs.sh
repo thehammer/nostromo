@@ -1,3 +1,5 @@
+# shellcheck shell=bash disable=SC2034
+# Test fixture: only the alias tables of the layer's ecs.sh. Read as text, never run.
 declare -A ECS_ENV_ALIASES=(
     [prod]="production"
     [prd]="production"
