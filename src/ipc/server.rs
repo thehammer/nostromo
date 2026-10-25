@@ -1720,9 +1720,28 @@ fn handle_client_msg(
                         tracing::warn!(tag = %tag, "focus removed but its PR pin could not be discarded: {e}")
                     }
                 }
-                // Its terminals go first (the manager locks the pane registry
-                // itself, so this must not run under the registry's lock).
-                lock_terminals(terminals).close_focus(tag);
+                // Only the verified app may end a focus's terminals (closing
+                // one is an operator act). Any other local peer's push still
+                // updates the registry, but cannot take a terminal or its pane
+                // with it: that focus keeps its layout, and the attempt is
+                // audited. The manager locks the pane registry itself, so none
+                // of this may run under the registry's lock.
+                {
+                    let mut mgr = lock_terminals(terminals);
+                    if cap.is_some() {
+                        mgr.close_focus(tag);
+                    } else if mgr.has_terminals(tag) {
+                        mgr.audit_refused(
+                            TerminalRefusalChannel::Ipc,
+                            "close",
+                            Some(terminal::forbidden_code("close")),
+                            None,
+                            peer.map(|p| p.pid),
+                            peer.map(|p| p.exe.display().to_string()),
+                        );
+                        continue;
+                    }
+                }
                 if let Some(reg) = &pane_registry {
                     if reg.lock().unwrap().remove_focus(tag) {
                         tracing::info!(tag = %tag, "focus removed — discarded its pane tree and bindings");

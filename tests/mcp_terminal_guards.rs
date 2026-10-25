@@ -1856,3 +1856,45 @@ async fn when_the_user_removes_a_focus_its_terminal_is_closed_and_other_focuses_
     let res = again.call("nostromo.reset_panes", json!({})).await;
     assert_eq!(res["ok"], true, "{res}");
 }
+
+#[tokio::test]
+async fn an_ordinary_local_process_cannot_remove_a_focus_to_take_its_terminal_with_it() {
+    let _turn = serial().await;
+    let mut live = Live::start().await;
+    let (id, pane, pid) = (live.id().to_string(), live.pane().to_string(), live.pid);
+    let mut impostor =
+        Ipc::connect(&live.env.ipc_sock, Some("mac_app"), vec![Topic::Terminal]).await;
+    assert!(impostor.nonce.is_none(), "an unverified peer gets no nonce");
+
+    // The focus is known (the app pushed it), then an agent's script pushes a
+    // registry that lacks it, twice (an empty push is no evidence of removal).
+    live.app
+        .send(&ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta(TAG)],
+        })
+        .await;
+    live.app.sync().await;
+    for _ in 0..2 {
+        impostor
+            .send(&ClientMsg::FocusRegistryPush {
+                focuses: vec![focus_meta("decoy")],
+            })
+            .await;
+        impostor.sync().await;
+    }
+
+    live.env
+        .audit_line("an ipc refusal of close", |l| {
+            l["event"] == "refused" && l["channel"] == "ipc" && l["op"] == "close"
+        })
+        .await;
+    tokio::time::sleep(QUIET).await;
+    assert!(is_alive(pid), "the shell must survive");
+    assert!(live.env.info(&id).is_some(), "the terminal is still known");
+    assert_eq!(live.env.terminal_leaves(TAG), vec![pane.clone()]);
+    assert!(
+        live.env.pane_ids(TAG).contains(&pane),
+        "the leaf is still there"
+    );
+    live.prove_responsive().await;
+}

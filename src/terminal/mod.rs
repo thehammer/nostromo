@@ -767,6 +767,11 @@ impl TerminalManager {
         });
     }
 
+    /// Does `tag` have any terminal, live or ended?
+    pub(crate) fn has_terminals(&self, tag: &str) -> bool {
+        self.terminals.values().any(|t| t.info.tag == tag)
+    }
+
     /// Whether `pane_id` in `tag` is a registered terminal leaf.
     pub fn is_terminal_leaf(&self, tag: &str, pane_id: &str) -> bool {
         self.lock_panes()
