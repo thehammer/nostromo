@@ -25,7 +25,7 @@ use super::audit::{AuditEvent, AuditLog, RefusalChannel};
 use super::fanout::Fanout;
 use super::session::{
     InputError, SignalOps, TerminalSession, MAX_INPUT_FRAME_BYTES, MAX_INPUT_QUEUED_BYTES,
-    RING_MAX_BYTES, RING_MAX_NEWLINES,
+    RING_MAX_BYTES, RING_MAX_NEWLINES, SCRUBBED_ENV,
 };
 use super::store::{self, TerminalRecord, TerminalStore};
 use super::{
@@ -530,6 +530,78 @@ fn the_child_gets_the_terminal_environment_and_any_extra_variables() {
         )
     });
     s.kill();
+}
+
+/// The names of the variables a child that ran `/usr/bin/env` (and nothing
+/// else) printed.
+fn printed_env_names(s: &TerminalSession) -> BTreeSet<String> {
+    assert!(s.wait_exit(WAIT).is_some(), "env exits");
+    wait_until("the reader to finish", WAIT, || s.reader_finished());
+    String::from_utf8_lossy(&s.ring_bytes())
+        .lines()
+        .filter_map(|l| l.trim_end_matches('\r').split_once('='))
+        .map(|(k, _)| k.to_string())
+        .collect()
+}
+
+#[test]
+fn an_observed_session_starts_its_child_with_only_the_environment_it_was_given() {
+    // A remote shell's helper runs the AWS CLI: it must not inherit the
+    // daemon's own variables (this test process has plenty: HOME, PATH,
+    // CARGO_*, NOSTROMO_CLAUDE_BIN, ...), nor the terminal's TERM extras.
+    let (_dir, cwd) = scratch_dir();
+    let s = TerminalSession::spawn_argv_observed(
+        &argv(&["/usr/bin/env"]),
+        &cwd,
+        &[
+            ("ONLY_THIS".to_string(), "given".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+        ],
+        80,
+        24,
+        Box::new(|_| {}),
+    )
+    .expect("spawn");
+
+    let names = printed_env_names(&s);
+
+    // `SHELL` is set by the pty library itself (from the login database, not
+    // from the daemon's environment); everything else is what was given.
+    let expected: BTreeSet<String> = ["ONLY_THIS", "TERM", "SHELL"]
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    assert_eq!(names, expected, "the child's whole environment");
+}
+
+#[test]
+fn an_ordinary_terminal_still_inherits_the_daemons_environment_minus_the_scrubbed_ones() {
+    let (_dir, cwd) = scratch_dir();
+    let s = TerminalSession::spawn_argv(
+        &argv(&["/usr/bin/env"]),
+        &cwd,
+        &[("ONLY_THIS".to_string(), "given".to_string())],
+        80,
+        24,
+    )
+    .expect("spawn");
+
+    let names = printed_env_names(&s);
+
+    assert!(names.contains("ONLY_THIS"), "{names:?}");
+    for kept in ["TERM", "COLORTERM", "TERM_PROGRAM", "PATH"] {
+        assert!(
+            names.contains(kept),
+            "{kept} is set for a terminal: {names:?}"
+        );
+    }
+    assert!(
+        names.iter().any(|n| n.starts_with("CARGO_")),
+        "the rest of the daemon's environment is inherited: {names:?}"
+    );
+    for scrubbed in SCRUBBED_ENV {
+        assert!(!names.contains(*scrubbed), "{scrubbed} must be scrubbed");
+    }
 }
 
 #[test]

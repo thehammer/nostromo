@@ -36,10 +36,11 @@ use nostromo::ipc::protocol::{
 };
 use nostromo::terminal::agent_api::AgentRemoteRequest;
 use nostromo::terminal::ecs::aws::AwsCliSource;
-use nostromo::terminal::ecs::AwsEcsLauncher;
+use nostromo::terminal::ecs::{AwsEcsLauncher, EcsPaths, EcsVocabulary, TargetPin};
 use nostromo::terminal::TerminalAgentApi;
 use remote_shell_support::*;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 /// The one task the fake reports.
@@ -63,6 +64,9 @@ enum Cli {
     Fake(&'static str),
     /// A tiny script that answers the helper calls as the test says.
     Stub(Stub),
+    /// A [`Stub`] that also behaves as [`Tuning`] says (slow, failing at the
+    /// shell, or unable to be started again).
+    Tuned(Stub, Tuning),
     /// A path where there is no executable.
     Missing,
 }
@@ -77,6 +81,19 @@ struct Stub {
     described: Vec<(&'static str, &'static str, bool)>,
 }
 
+/// What else a scripted `aws` does, beyond answering the helper calls.
+#[derive(Default)]
+struct Tuning {
+    /// Seconds `list-tasks` sleeps before it answers.
+    list_sleep: Option<&'static str>,
+    /// `execute-command` prints this (no single quotes) and exits 255 instead
+    /// of starting a session.
+    exec_fails_with: Option<&'static str>,
+    /// `describe-tasks` replaces this very script with one the kernel cannot
+    /// start, so the `execute-command` that follows cannot be spawned.
+    unspawnable_after_checks: bool,
+}
+
 const FAKE_TEMPLATE: &str = r#"#!/bin/sh
 [ "$1" = "--wrapper-probe" ] && exit 0
 case "$*" in *execute-command*) echo $$ >> '@PIDS@' ;; esac
@@ -88,17 +105,26 @@ const STUB_TEMPLATE: &str = r#"#!/bin/sh
 echo "$*" >> '@LOG@'
 case "$*" in
   *"sts get-caller-identity"*) @STS@ ;;
-  *"ecs list-tasks"*) printf '%s' '@LISTED@' ;;
-  *"ecs describe-tasks"*) printf '%s' '@DESCRIBED@' ;;
+  *"ecs list-tasks"*) @LIST_PRE@ printf '%s' '@LISTED@' ;;
+  *"ecs describe-tasks"*) @DESCRIBE_PRE@ printf '%s' '@DESCRIBED@' ;;
   *"ecs execute-command"*)
     echo $$ >> '@PIDS@'
-    printf '\nStarting session with SessionId: stub-1\n'
-    exec sleep 60 ;;
+    @EXEC@ ;;
   *) echo "stub: unsupported: $*" >&2; exit 252 ;;
 esac
 "#;
 
 fn stub_script(stub: &Stub, log: &Path, pids: &Path) -> String {
+    tuned_stub_script(stub, &Tuning::default(), Path::new("/unused"), log, pids)
+}
+
+fn tuned_stub_script(
+    stub: &Stub,
+    tuning: &Tuning,
+    wrapper: &Path,
+    log: &Path,
+    pids: &Path,
+) -> String {
     let sts = match stub.sts_stderr {
         None => r#"printf '%s' '{"Account":"1"}'"#.to_string(),
         Some(stderr) => format!("printf '%s\\n' '{stderr}' >&2; exit 255"),
@@ -119,7 +145,28 @@ fn stub_script(stub: &Stub, log: &Path, pids: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
+    let list_pre = tuning
+        .list_sleep
+        .map(|secs| format!("sleep {secs};"))
+        .unwrap_or_default();
+    let describe_pre = if tuning.unspawnable_after_checks {
+        let w = wrapper.display();
+        format!(
+            "printf '#!/nonexistent/interpreter\\n' > '{w}.new'; chmod 755 '{w}.new'; mv '{w}.new' '{w}';"
+        )
+    } else {
+        String::new()
+    };
+    let exec = match tuning.exec_fails_with {
+        Some(text) => format!("printf '%s\\n' '{text}'; exit 255"),
+        None => {
+            "printf '\\nStarting session with SessionId: stub-1\\n'\n    exec sleep 60".to_string()
+        }
+    };
     STUB_TEMPLATE
+        .replace("@LIST_PRE@", &list_pre)
+        .replace("@DESCRIBE_PRE@", &describe_pre)
+        .replace("@EXEC@", &exec)
         .replace("@LOG@", &log.display().to_string())
         .replace("@PIDS@", &pids.display().to_string())
         .replace("@STS@", &sts)
@@ -220,6 +267,13 @@ impl Rig {
             }
             Cli::Stub(stub) => {
                 write_exec(&wrapper, &stub_script(stub, &log, &pids));
+                AwsCliSource::only(&wrapper)
+            }
+            Cli::Tuned(stub, tuning) => {
+                write_exec(
+                    &wrapper,
+                    &tuned_stub_script(stub, tuning, &wrapper, &log, &pids),
+                );
                 AwsCliSource::only(&wrapper)
             }
         };
@@ -1264,8 +1318,8 @@ async fn an_environment_without_a_profile_is_reported_and_aws_is_never_run() {
 
 // ── when the checks themselves fail or find several tasks ────────────────────
 
-const TASK_A: &str = "arn:stub:task/aaaa";
-const TASK_B: &str = "arn:stub:task/bbbb";
+const TASK_A: &str = "arn:aws:ecs:us-east-2:123456789012:task/stub-cluster/aaaa";
+const TASK_B: &str = "arn:aws:ecs:us-east-2:123456789012:task/stub-cluster/bbbb";
 
 /// Connect against a stub `aws` and return the task its shell was started on.
 async fn task_picked(stub: Stub) -> String {
@@ -1343,7 +1397,8 @@ async fn when_no_listed_task_is_actually_running_the_service_has_no_running_task
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unrecognised_aws_error_is_reported_as_aws_error_with_its_first_line_only() {
+async fn an_unrecognised_aws_error_reaches_the_operator_as_its_first_line_and_the_agent_not_at_all()
+{
     let mut r = Rig::build(
         Cli::Stub(Stub {
             sts_stderr: Some("An error occurred (ThrottlingException) when calling the GetCallerIdentity operation: Rate exceeded\nsecond-line-of-noise"),
@@ -1356,9 +1411,26 @@ async fn an_unrecognised_aws_error_is_reported_as_aws_error_with_its_first_line_
 
     let a = r.failed(args(), "aws_error").await;
 
-    let detail = a.res["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains("ThrottlingException"), "{}", a.res);
-    assert!(!detail.contains("second-line-of-noise"), "{}", a.res);
+    // The agent: the code and the fixed remedy, and none of what AWS said.
+    let text = a.res.to_string();
+    assert!(a.res.get("detail").is_none(), "{text}");
+    for aws_text in [
+        "ThrottlingException",
+        "Rate exceeded",
+        "GetCallerIdentity",
+        "second-line",
+    ] {
+        assert!(
+            !text.contains(aws_text),
+            "{aws_text} reached the agent: {text}"
+        );
+    }
+    // The operator's app: the first line, sanitised, on the frame that closes
+    // the sheet.
+    let resolved = r.s.app.wait_resolved(a.from, &a.confirm.request_id).await;
+    let detail = resolved.detail.unwrap_or_default();
+    assert!(detail.contains("ThrottlingException"), "{detail}");
+    assert!(!detail.contains("second-line-of-noise"), "{detail}");
     assert_eq!(r.stub_lines().len(), 1, "it stopped at the failing check");
 }
 
@@ -1525,4 +1597,1114 @@ async fn a_failed_connect_is_audited_by_reason_code_in_order() {
     let failed = r.s.d.remote_audit().pop().unwrap();
     assert_eq!(failed["reason_code"], "no_running_task", "{failed}");
     assert_audit_has_no_content(&r.s.d, &[]);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Review fix-ups: shared helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Set the string at JSON `pointer` in one of the daemon's vocabulary files.
+fn set_json(r: &Rig, file: &str, pointer: &str, value: &str) {
+    r.s.d.edit_ecs(file, |text| {
+        let mut doc: Value = serde_json::from_str(&text).expect("valid json");
+        *doc.pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("{pointer} is in {file}")) = json!(value);
+        serde_json::to_string_pretty(&doc).unwrap()
+    });
+}
+
+fn restore_fixtures(r: &Rig) {
+    for name in ["config.json", "ecs-local.json"] {
+        std::fs::copy(fixture_dir().join(name), r.s.d.ecs_file(name)).expect("restore fixture");
+    }
+}
+
+fn file_bytes(r: &Rig, name: &str) -> Vec<u8> {
+    std::fs::read(r.s.d.ecs_file(name)).expect("read the vocabulary file")
+}
+
+/// What the usual request resolves to when the fixtures are untouched: the
+/// pin the daemon should record for it.
+fn fixture_pin() -> TargetPin {
+    let dir = fixture_dir();
+    EcsVocabulary::load(&EcsPaths::new(
+        dir.join("config.json"),
+        dir.join("ecs-local.json"),
+        dir.join("ecs.sh"),
+    ))
+    .expect("the fixtures load")
+    .resolve("admin-portal", "production", "scheduler", "shell")
+    .expect("the usual target resolves")
+    .pin
+}
+
+/// The audit lines of one kind, in order.
+fn audit_lines(r: &Rig, event: &str) -> Vec<Value> {
+    r.s.d
+        .audit()
+        .into_iter()
+        .filter(|l| l["event"] == event)
+        .collect()
+}
+
+fn sorted_keys(v: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = v.as_object().expect("an object").keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+/// Close a connected shell and wait for it to be gone.
+async fn close_shell(r: &mut Rig, c: &Connected) {
+    r.s.app
+        .send(&ClientMsg::TerminalClose {
+            terminal_id: c.terminal_id.clone(),
+        })
+        .await;
+    r.wait_closed(c.from, &c.terminal_id).await;
+}
+
+fn ok_stub() -> Stub {
+    Stub {
+        sts_stderr: None,
+        listed: vec![TASK_A],
+        described: vec![(TASK_A, "RUNNING", true)],
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// B1: values that could change what runs never reach the command line
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configuration_value_that_could_change_what_runs_is_refused_before_anyone_is_asked_and_aws_never_runs(
+) {
+    let mut r = Rig::start("ok").await;
+    // (the code the agent is told, the hostile value, the file and the place)
+    let cases = [
+        (
+            "unsafe_region",
+            "us-east-2; id",
+            "config.json",
+            "/regions/production",
+        ),
+        (
+            "unsafe_profile",
+            "--profile",
+            "ecs-local.json",
+            "/profiles/production",
+        ),
+        (
+            "unsafe_profile",
+            "x y",
+            "ecs-local.json",
+            "/profiles/production",
+        ),
+        (
+            "unsafe_cluster",
+            "$(touch /tmp/pwned)",
+            "config.json",
+            "/projects/admin-portal/environments/production/cluster",
+        ),
+        (
+            "unsafe_service_name",
+            "svc|id",
+            "config.json",
+            "/projects/admin-portal/environments/production/services/scheduler/service",
+        ),
+        (
+            "unsafe_container",
+            "-x",
+            "config.json",
+            "/projects/admin-portal/environments/production/services/scheduler/container",
+        ),
+        (
+            "unsafe_shell_command",
+            "/bin/bash; touch /tmp/pwned",
+            "config.json",
+            "/shell_types/shell",
+        ),
+        (
+            "unsafe_shell_command",
+            "/bin/b\u{0430}sh",
+            "config.json",
+            "/shell_types/shell",
+        ),
+    ];
+    for (code, value, file, pointer) in cases {
+        restore_fixtures(&r);
+        set_json(&r, file, pointer, value);
+        let from = r.s.app.mark();
+
+        let res = r.s.mcp.call(REQUEST, args()).await;
+
+        assert_eq!(
+            res,
+            json!({
+                "error": "remote_shells_not_configured",
+                "detail": format!("the ECS configuration for this target has an unusable value ({code})"),
+            }),
+            "{value:?} in {file}"
+        );
+        assert!(
+            !res.to_string().contains(value),
+            "the value is quoted back to the agent: {res}"
+        );
+        r.s.app
+            .assert_no_remote_frames(from, &format!("{code}: no sheet is sent"))
+            .await;
+        assert!(r.s.app.confirms_since(from).is_empty());
+        assert!(
+            r.calls().is_empty() && r.stub_lines().is_empty(),
+            "{code}: aws was run: {:?}",
+            r.calls()
+        );
+        assert!(!r.log.exists(), "{code}: the fake was started");
+        r.assert_nothing_remains(code);
+        assert!(
+            r.s.d.remote_audit().is_empty(),
+            "{code}: nothing was requested of the user: {:?}",
+            r.s.d.remote_audit_names()
+        );
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// B1: what the user was shown is what runs
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread")]
+async fn editing_the_data_while_the_sheet_is_up_changes_nothing_that_runs_and_the_audit_carries_the_original_digests(
+) {
+    let mut r = Rig::start("ok").await;
+    let original_config = file_bytes(&r, "config.json");
+    let original_local = file_bytes(&r, "ecs-local.json");
+    let pin = fixture_pin();
+    let (call, confirm) = r.s.ask(args()).await;
+    assert_eq!(confirm.shell_command.as_deref(), Some("/bin/bash"));
+    assert_eq!(confirm.cluster.as_deref(), Some("fake-prod-ecs"));
+    assert_eq!(confirm.profile.as_deref(), Some("local-fake-prod-profile"));
+
+    // The files change while the user is looking at the sheet: every word
+    // that reaches the command line.
+    set_json(&r, "config.json", "/shell_types/shell", "/bin/zsh");
+    set_json(
+        &r,
+        "config.json",
+        "/projects/admin-portal/environments/production/cluster",
+        "edited-cluster",
+    );
+    let service_at = "/projects/admin-portal/environments/production/services/scheduler";
+    set_json(
+        &r,
+        "config.json",
+        &format!("{service_at}/container"),
+        "edited-container",
+    );
+    set_json(
+        &r,
+        "config.json",
+        &format!("{service_at}/service"),
+        "edited-service",
+    );
+    set_json(&r, "config.json", "/regions/production", "eu-west-1");
+    set_json(
+        &r,
+        "ecs-local.json",
+        "/profiles/production",
+        "edited-profile",
+    );
+    let edited_config = file_bytes(&r, "config.json");
+    let edited_local = file_bytes(&r, "ecs-local.json");
+    assert_ne!(edited_config, original_config, "harness: the edit applied");
+    r.s.app.answer(&confirm.request_id, "connect").await;
+    let res = r.s.mcp.finish(call).await;
+    assert_eq!(res["ok"], true, "{res}");
+
+    // What aws was asked to do is the original, in every call.
+    let calls = r.calls();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    for call in &calls {
+        assert!(
+            has_pair(call, "--profile", "local-fake-prod-profile"),
+            "{call:?}"
+        );
+        assert!(
+            !call
+                .iter()
+                .any(|a| a.contains("edited") || a.contains("zsh") || a == "eu-west-1"),
+            "an edited value reached aws: {call:?}"
+        );
+    }
+    for call in &calls[1..3] {
+        assert!(has_pair(call, "--region", "us-east-2"), "{call:?}");
+        assert!(has_pair(call, "--cluster", "fake-prod-ecs"), "{call:?}");
+    }
+    assert!(has_pair(
+        &calls[1],
+        "--service-name",
+        "production-fake-ap-scheduler"
+    ));
+    let exec = &r.exec_calls()[0];
+    assert!(has_pair(exec, "--container", "main"), "{exec:?}");
+    assert!(has_pair(exec, "--command", "/bin/bash"), "{exec:?}");
+
+    // The audit records the digests of the original bytes, not of the edit.
+    for event in ["connect_started", "connected"] {
+        let lines = audit_lines(&r, event);
+        assert_eq!(lines.len(), 1, "{event}: {lines:?}");
+        let line = &lines[0];
+        assert_eq!(
+            line["config_sha256"],
+            sha256_hex(&original_config),
+            "{line}"
+        );
+        assert_eq!(line["local_sha256"], sha256_hex(&original_local), "{line}");
+        assert_eq!(line["argv_sha256"], pin.argv_sha256, "{line}");
+        assert_ne!(line["config_sha256"], sha256_hex(&edited_config), "{line}");
+        assert_ne!(line["local_sha256"], sha256_hex(&edited_local), "{line}");
+    }
+    assert_eq!(pin.config_sha256, sha256_hex(&original_config));
+    // Digests only: not the words they stand for.
+    assert_audit_has_no_content(
+        &r.s.d,
+        &[
+            "local-fake-prod-profile",
+            "fake-prod-ecs",
+            "/bin/bash",
+            "production-fake-ap-scheduler",
+            "us-east-2",
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_made_after_the_edit_sees_the_new_values_and_is_pinned_to_the_new_digests() {
+    let mut r = Rig::start("ok").await;
+    let first = r.connect_ok().await;
+    let first_config = file_bytes(&r, "config.json");
+    close_shell(&mut r, &first).await;
+
+    set_json(&r, "config.json", "/shell_types/shell", "/bin/zsh");
+    set_json(
+        &r,
+        "config.json",
+        "/projects/admin-portal/environments/production/cluster",
+        "edited-cluster",
+    );
+    let edited_config = file_bytes(&r, "config.json");
+    let second = r.connect_ok().await;
+
+    assert_eq!(second.confirm.shell_command.as_deref(), Some("/bin/zsh"));
+    assert_eq!(second.confirm.cluster.as_deref(), Some("edited-cluster"));
+    let exec = &r.exec_calls()[1];
+    assert!(has_pair(exec, "--command", "/bin/zsh"), "{exec:?}");
+    assert!(has_pair(exec, "--cluster", "edited-cluster"), "{exec:?}");
+    assert!(has_pair(&r.exec_calls()[0], "--command", "/bin/bash"));
+    let started = audit_lines(&r, "connect_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[0]["config_sha256"], sha256_hex(&first_config));
+    assert_eq!(started[1]["config_sha256"], sha256_hex(&edited_config));
+    assert_ne!(started[0]["config_sha256"], started[1]["config_sha256"]);
+    assert_ne!(started[0]["argv_sha256"], started[1]["argv_sha256"]);
+    assert_eq!(
+        started[0]["local_sha256"], started[1]["local_sha256"],
+        "the personal file did not change"
+    );
+    let connected = audit_lines(&r, "connected");
+    assert_eq!(connected[1]["config_sha256"], started[1]["config_sha256"]);
+    assert_eq!(connected[1]["argv_sha256"], started[1]["argv_sha256"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_connect_lines_carry_the_digests_as_flat_fields_and_a_failed_line_carries_only_its_reason(
+) {
+    let mut r = Rig::start("no_tasks").await;
+
+    r.failed(args(), "no_running_task").await;
+
+    let pin = fixture_pin();
+    let started = audit_lines(&r, "connect_started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        sorted_keys(&started[0]),
+        [
+            "argv_sha256",
+            "config_sha256",
+            "event",
+            "local_sha256",
+            "tag",
+            "target",
+            "ts"
+        ],
+        "{}",
+        started[0]
+    );
+    assert_eq!(started[0]["config_sha256"], pin.config_sha256);
+    assert_eq!(
+        started[0]["local_sha256"],
+        pin.local_sha256.clone().unwrap()
+    );
+    assert_eq!(started[0]["argv_sha256"], pin.argv_sha256);
+    for field in ["config_sha256", "local_sha256", "argv_sha256"] {
+        let digest = started[0][field].as_str().unwrap();
+        assert_eq!(digest.len(), 64, "{field}");
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "{field} is lowercase hex: {digest}"
+        );
+    }
+    let failed = audit_lines(&r, "connect_failed");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        sorted_keys(&failed[0]),
+        ["event", "reason_code", "tag", "target", "ts"],
+        "{}",
+        failed[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_an_ecs_local_json_the_audit_has_no_local_digest_and_the_shared_profile_runs() {
+    let mut r = Rig::start("ok").await;
+    r.s.d.remove_ecs("ecs-local.json");
+    let config = file_bytes(&r, "config.json");
+
+    let c = r.connect_ok().await;
+
+    assert_eq!(c.confirm.profile.as_deref(), Some("fake-prod-profile"));
+    for event in ["connect_started", "connected"] {
+        let lines = audit_lines(&r, event);
+        assert_eq!(lines.len(), 1, "{event}");
+        assert!(lines[0].get("local_sha256").is_none(), "{}", lines[0]);
+        assert_eq!(lines[0]["config_sha256"], sha256_hex(&config));
+        assert!(lines[0]["argv_sha256"].is_string());
+    }
+    assert!(has_pair(&r.calls()[0], "--profile", "fake-prod-profile"));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// B2: nothing the AWS CLI said reaches the agent
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The agent's result is `{error, reason, remedy}` with the fixed remedy for
+/// the reason, and none of the text AWS (or this machine) could have put in it.
+async fn agent_sees_only_fixed_text(
+    r: &mut Rig,
+    a: Value,
+    reason: &str,
+    remedy: Option<&str>,
+    aws_said: &[&str],
+) -> Asked {
+    let asked = r.failed(a, reason).await;
+    assert_agent_result_is_fixed_text(r, &asked, remedy, aws_said);
+    asked
+}
+
+fn assert_agent_result_is_fixed_text(
+    r: &Rig,
+    asked: &Asked,
+    remedy: Option<&str>,
+    aws_said: &[&str],
+) {
+    let reason = asked.res["reason"].as_str().unwrap_or_default();
+    let keys: Vec<String> = sorted_keys(&asked.res);
+    assert_eq!(keys, ["error", "reason", "remedy"], "{}", asked.res);
+    assert_eq!(
+        asked.res["remedy"],
+        remedy.map_or(Value::Null, |r| json!(r)),
+        "the remedy is the fixed one for {reason}"
+    );
+    let text = asked.res.to_string();
+    let work = r.work.path().display().to_string();
+    for leaked in [
+        "123456789012",
+        "arn:",
+        "/Users",
+        "/tmp",
+        "/var/",
+        "/home/",
+        "Exception",
+        "stderr",
+        "nonexistent",
+        work.as_str(),
+    ]
+    .iter()
+    .chain(aws_said)
+    {
+        assert!(
+            !text.contains(leaked),
+            "{leaked:?} reached the agent for {reason}: {text}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_the_aws_session_has_expired() {
+    let mut r = Rig::start("expired").await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "sso_expired",
+        Some("Run `aws sso login --sso-session fake-sso-session`"),
+        &["ExpiredToken", "security token", "GetCallerIdentity"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_no_task_is_running() {
+    let mut r = Rig::start("no_tasks").await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "no_running_task",
+        Some("Check that the service is up, or pick another service."),
+        &[],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_exec_is_not_enabled() {
+    let mut r = Rig::start("exec_disabled").await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "exec_not_enabled",
+        Some("Enable ECS Exec on the service and redeploy it, or pick another service."),
+        &[],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_the_session_manager_plugin_is_missing() {
+    let mut r = Rig::start("plugin_missing").await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "session_manager_plugin_missing",
+        Some("brew install --cask session-manager-plugin"),
+        &[
+            "SessionManagerPlugin",
+            "Documentation",
+            "docs.aws.amazon.com",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_there_is_no_profile_or_the_cli_does_not_know_it(
+) {
+    let mut r = Rig::start("ok").await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args_with("environment", json!("canada")),
+        "profile_not_configured",
+        Some(PROFILE_REMEDY),
+        &[],
+    )
+    .await;
+
+    let mut r = Rig::build(
+        Cli::Stub(Stub {
+            sts_stderr: Some("The config profile (fake-prod-profile) could not be found"),
+            listed: vec![],
+            described: vec![],
+        }),
+        None,
+    )
+    .await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "profile_not_configured",
+        Some(PROFILE_REMEDY),
+        &["could not be found", "config profile"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_the_aws_cli_is_missing() {
+    let mut r = Rig::build(Cli::Missing, None).await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "aws_cli_missing",
+        Some("Install the AWS CLI: brew install awscli"),
+        &["nowhere"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_the_session_never_begins() {
+    let mut r = Rig::build(Cli::Fake("hang"), Some(Duration::from_secs(1))).await;
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "connect_timeout",
+        Some("Check your network and your AWS session, then try again."),
+        &[],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_nothing_of_what_a_connection_that_dropped_before_it_began_printed() {
+    let mut r = Rig::build(
+        Cli::Tuned(
+            ok_stub(),
+            Tuning {
+                exec_fails_with: Some(
+                    "Something odd for 123456789012 arn:aws:iam::123456789012:role/x /Users/x/.aws/sso/cache `id` $(id) HOSTILE-WORDS",
+                ),
+                ..Tuning::default()
+            },
+        ),
+        None,
+    )
+    .await;
+
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "unknown",
+        None,
+        &["HOSTILE-WORDS", "Something odd", "$(id)"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_only_the_fixed_remedy_when_aws_denies_access_to_the_task() {
+    let mut r = Rig::build(
+        Cli::Tuned(
+            ok_stub(),
+            Tuning {
+                exec_fails_with: Some(
+                    "An error occurred (AccessDeniedException) when calling the ExecuteCommand operation: User: arn:aws:sts::123456789012:assumed-role/dev/me is not authorized to perform: ecs:ExecuteCommand (see /Users/x/.aws/sso/cache)",
+                ),
+                ..Tuning::default()
+            },
+        ),
+        None,
+    )
+    .await;
+
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "access_denied",
+        Some("Your AWS role is not allowed to exec into this service; ask an admin for access."),
+        &[
+            "AccessDenied",
+            "not authorized",
+            "ExecuteCommand",
+            "assumed-role",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_nothing_of_what_aws_said_when_the_task_is_not_ready_for_exec() {
+    let mut r = Rig::build(
+        Cli::Tuned(
+            ok_stub(),
+            Tuning {
+                exec_fails_with: Some(
+                    "An error occurred (TargetNotConnectedException) when calling the ExecuteCommand operation for 123456789012: internal error HOSTILE-WORDS",
+                ),
+                ..Tuning::default()
+            },
+        ),
+        None,
+    )
+    .await;
+
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "target_not_connected",
+        None,
+        &["TargetNotConnected", "internal error", "HOSTILE-WORDS"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_is_told_nothing_of_an_aws_error_with_an_account_an_arn_a_path_and_a_throttle() {
+    let mut r = Rig::build(
+        Cli::Stub(Stub {
+            sts_stderr: Some("An error occurred (ThrottlingException) when calling the GetCallerIdentity operation for account 123456789012 (arn:aws:iam::123456789012:user/me): see /Users/x/.aws/sso/cache"),
+            listed: vec![],
+            described: vec![],
+        }),
+        None,
+    )
+    .await;
+
+    agent_sees_only_fixed_text(
+        &mut r,
+        args(),
+        "aws_error",
+        None,
+        &["Throttling", "GetCallerIdentity", "sso/cache", "account"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aws_cli_that_cannot_be_started_for_the_shell_fails_with_a_fixed_code_no_path_and_no_pane(
+) {
+    // The script passes the checks and then cannot be executed (its
+    // interpreter is gone). A pty child that fails to exec is, to the daemon,
+    // a process that ended before the session began; either way the agent is
+    // told a fixed code and remedy, and nothing remains.
+    let mut r = Rig::build(
+        Cli::Tuned(
+            ok_stub(),
+            Tuning {
+                unspawnable_after_checks: true,
+                ..Tuning::default()
+            },
+        ),
+        None,
+    )
+    .await;
+
+    let asked = r.request(args()).await;
+
+    assert_eq!(asked.res["error"], "connect_failed", "{}", asked.res);
+    let reason = asked.res["reason"].as_str().unwrap_or_default();
+    assert!(
+        ["spawn_failed", "unknown"].contains(&reason),
+        "{}",
+        asked.res
+    );
+    assert_agent_result_is_fixed_text(
+        &r,
+        &asked,
+        None,
+        &["interpreter", "No such file", "os error", "aws"],
+    );
+    r.assert_nothing_remains("the shell could not be started");
+    r.s.d
+        .wait_audit("connect_failed", |l| l["event"] == "connect_failed")
+        .await;
+    assert!(
+        !r.stub_lines()
+            .iter()
+            .any(|l| l.starts_with("ecs execute-command")),
+        "the replaced script cannot have run"
+    );
+    assert!(audit_lines(&r, "connected").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operator_is_shown_a_sanitised_line_of_what_aws_said_and_the_audit_trail_never_is() {
+    let stderr: &'static str = Box::leak(
+        format!(
+            "\u{1b}[31mBad thing\u{1b}[0m \u{202e}reversed {}\nsecond-line-of-noise",
+            "y".repeat(500)
+        )
+        .into_boxed_str(),
+    );
+    let mut r = Rig::build(
+        Cli::Stub(Stub {
+            sts_stderr: Some(stderr),
+            listed: vec![],
+            described: vec![],
+        }),
+        None,
+    )
+    .await;
+
+    let a = r.failed(args(), "aws_error").await;
+
+    let resolved = r.s.app.wait_resolved(a.from, &a.confirm.request_id).await;
+    let detail = resolved.detail.expect("the operator is given the line");
+    assert!(detail.contains("Bad thing"), "{detail}");
+    assert!(!detail.contains("second-line-of-noise"), "{detail}");
+    assert!(
+        !detail.chars().any(|c| c.is_control() || c == '\u{202e}'),
+        "{detail:?}"
+    );
+    for line in detail.lines() {
+        assert!(
+            line.chars().count() <= 200,
+            "{} chars",
+            line.chars().count()
+        );
+    }
+    let audit = r.s.d.audit_text();
+    for said in ["Bad thing", "yyyyyyyy", "second-line", "reversed"] {
+        assert!(
+            !audit.contains(said),
+            "{said} is in the audit trail:\n{audit}"
+        );
+    }
+    assert!(!a.res.to_string().contains("Bad thing"), "{}", a.res);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn for_an_unknown_ending_the_operator_gets_the_last_lines_sanitised_and_nobody_else_does() {
+    let printed: &'static str = Box::leak(
+        format!(
+            "first-line-DROPPED\nsecond-line\n\u{1b}[31mthird line\u{1b}[0m \u{200b}zero\nfourth {}",
+            "z".repeat(500)
+        )
+        .into_boxed_str(),
+    );
+    let mut r = Rig::build(
+        Cli::Tuned(
+            ok_stub(),
+            Tuning {
+                exec_fails_with: Some(printed),
+                ..Tuning::default()
+            },
+        ),
+        None,
+    )
+    .await;
+
+    let a = r.failed(args(), "unknown").await;
+
+    let resolved = r.s.app.wait_resolved(a.from, &a.confirm.request_id).await;
+    let detail = resolved.detail.expect("the operator is given the lines");
+    assert!(detail.contains("third line"), "{detail}");
+    assert!(!detail.contains("first-line-DROPPED"), "{detail}");
+    assert!(
+        !detail.chars().any(|c| c.is_control() || c == '\u{200b}'),
+        "{detail:?}"
+    );
+    for part in detail.split(" / ") {
+        assert!(
+            part.chars().count() <= 200,
+            "{} chars",
+            part.chars().count()
+        );
+    }
+    let audit = r.s.d.audit_text();
+    for said in ["second-line", "third line", "zzzzzzzz"] {
+        assert!(
+            !audit.contains(said),
+            "{said} is in the audit trail:\n{audit}"
+        );
+    }
+    assert!(a.res.get("detail").is_none(), "{}", a.res);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_with_nothing_to_quote_gives_the_operator_no_detail() {
+    let mut r = Rig::start("no_tasks").await;
+
+    let a = r.failed(args(), "no_running_task").await;
+
+    let resolved = r.s.app.wait_resolved(a.from, &a.confirm.request_id).await;
+    assert_eq!(resolved.detail, None);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Should-fix: what the AWS CLI runs with
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Every name a child of the daemon may have: the ones the daemon passes on,
+/// the ones it sets, and what `/bin/sh` and python add by themselves, and what
+/// this test's wrapper sets.
+const ENV_ALLOWED: [&str; 22] = [
+    "HOME",
+    "USER",
+    "LANG",
+    "TMPDIR",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "PATH",
+    "TERM",
+    "AWS_PAGER",
+    "PWD",
+    "OLDPWD",
+    "SHLVL",
+    "_",
+    "LC_CTYPE",
+    "LC_ALL",
+    "PYTHONCOERCECLOCALE",
+    "PYTHONUTF8",
+    "__CF_USER_TEXT_ENCODING",
+    // Set by the pty library for the shell's child, from the login database.
+    "SHELL",
+    "FAKE_AWS_MODE",
+    "FAKE_AWS_LOG",
+    "FAKE_AWS_ENV_LOG",
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn neither_the_helper_calls_nor_the_shell_are_started_with_any_of_the_daemons_other_variables(
+) {
+    // This test process holds variables the daemon must not pass on: cargo's
+    // (CARGO_*) and the harness's own (NOSTROMO_*), at least.
+    let mut r = Rig::start("ok").await;
+    let c = r.connect_ok().await;
+
+    let dumps: Vec<Value> = std::fs::read_to_string(&r.env_log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        dumps.len(),
+        4,
+        "sts, list-tasks, describe-tasks, execute-command"
+    );
+    let subcommands = r.subcommands();
+    for (dump, what) in dumps.iter().zip(&subcommands) {
+        let env = dump["ENV"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{what}: no ENV in {dump}"));
+        for key in env.keys() {
+            let upper = key.to_ascii_uppercase();
+            assert!(!key.starts_with("NOSTROMO_"), "{what}: {key} was passed on");
+            assert!(
+                !key.starts_with("AWS_ENDPOINT_URL"),
+                "{what}: {key} was passed on"
+            );
+            assert!(!key.starts_with("CARGO_"), "{what}: {key} was passed on");
+            assert!(
+                ENV_ALLOWED.contains(&key.as_str())
+                    || !["TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
+                        .iter()
+                        .any(|w| upper.contains(w)),
+                "{what}: {key} looks like a secret"
+            );
+            assert!(
+                ENV_ALLOWED.contains(&key.as_str()),
+                "{what}: {key} is not one of the variables the daemon passes on: {:?}",
+                env.keys().collect::<Vec<_>>()
+            );
+        }
+        // And what it is meant to pass on is there.
+        assert_eq!(env["TERM"], "xterm-256color", "{what}");
+        assert_eq!(env["AWS_PAGER"], "", "{what}");
+        assert_eq!(
+            env["HOME"].as_str(),
+            std::env::var("HOME").ok().as_deref(),
+            "{what}: HOME is passed on"
+        );
+    }
+    close_shell(&mut r, &c).await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Should-fix: AWS's answers become argv only if they are task ARNs
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn long_arn(len: usize) -> &'static str {
+    let prefix = "arn:aws:ecs:us-east-2:123456789012:task/stub-cluster/";
+    Box::leak(format!("{prefix}{}", "a".repeat(len - prefix.len())).into_boxed_str())
+}
+
+/// Things that are not task ARNs, as `list-tasks` / `describe-tasks` might
+/// hand them over: safe to write into the stub (no single quote).
+fn not_task_arns() -> Vec<&'static str> {
+    vec![
+        "--evil",
+        "arn:aws:ecs:us-east-2:123456789012:task/c/x;touch",
+        "arn:aws:iam::123456789012:role/x",
+        "arn:aws:ecs:us-east-2:123456789012:task/c/a b",
+        "arn:aws:ecs:us-east-2:123456789012:task/c/a\\nb",
+        "arn:aws:ecs:us-east-2:123456789012:task/c/`id`",
+        "arn:aws:ecs:us-east-2:123456789012:task/c/$(id)",
+        "arn:aws:ecs:us-east-2:123456789012:task/c/a|b",
+        "ARN:AWS:ECS:us-east-2:123456789012:task/c/x",
+        " arn:aws:ecs:us-east-2:123456789012:task/c/x",
+        "",
+        long_arn(301),
+    ]
+}
+
+/// The connect is refused as `aws_error`, no shell is started, and the
+/// strange string is in no argv aws was run with and not in the agent's result.
+async fn assert_refused_as_unexpected_answer(stub: Stub, strange: &str) {
+    let mut r = Rig::build(Cli::Stub(stub), None).await;
+
+    let a = r.failed(args(), "aws_error").await;
+
+    let lines = r.stub_lines();
+    assert!(
+        !lines.iter().any(|l| l.starts_with("ecs execute-command")),
+        "{strange:?}: a shell was started: {lines:?}"
+    );
+    assert!(r.started_pids().is_empty(), "{strange:?}");
+    if !strange.is_empty() {
+        let unescaped = strange.replace("\\n", "\n");
+        for line in &lines {
+            assert!(
+                !line.contains(strange) && !line.contains(&unescaped),
+                "{strange:?} was passed to aws: {line}"
+            );
+        }
+        assert!(!a.res.to_string().contains(strange), "{}", a.res);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listed_task_that_is_not_a_task_arn_is_never_passed_on_and_no_shell_is_started() {
+    for strange in not_task_arns() {
+        assert_refused_as_unexpected_answer(
+            Stub {
+                sts_stderr: None,
+                listed: vec![strange],
+                described: vec![(TASK_A, "RUNNING", true)],
+            },
+            strange,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_strange_arn_among_good_ones_refuses_the_whole_answer() {
+    assert_refused_as_unexpected_answer(
+        Stub {
+            sts_stderr: None,
+            listed: vec![TASK_A, "--evil"],
+            described: vec![(TASK_A, "RUNNING", true)],
+        },
+        "--evil",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_described_task_that_is_not_a_task_arn_is_never_chosen_and_no_shell_is_started() {
+    for strange in not_task_arns() {
+        assert_refused_as_unexpected_answer(
+            Stub {
+                sts_stderr: None,
+                listed: vec![TASK_A],
+                described: vec![(strange, "RUNNING", true)],
+            },
+            strange,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn task_arns_of_every_real_shape_up_to_300_characters_still_connect() {
+    for arn in [
+        "arn:aws:ecs:ap-southeast-2:123456789012:task/my_cluster.v2-x/0123abcd",
+        "arn:aws:ecs:us-east-2:123456789012:task/0123456789abcdef0123456789abcdef",
+        long_arn(300),
+    ] {
+        let picked = task_picked(Stub {
+            sts_stderr: None,
+            listed: vec![arn],
+            described: vec![(arn, "RUNNING", true)],
+        })
+        .await;
+        assert_eq!(picked, arn);
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Should-fix: nobody is watching, nothing starts
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn slow_list_tasks() -> Cli {
+    Cli::Tuned(
+        ok_stub(),
+        Tuning {
+            list_sleep: Some("2"),
+            ..Tuning::default()
+        },
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn if_the_app_is_gone_by_the_time_the_task_is_found_no_shell_is_started() {
+    let mut r = Rig::build(slow_list_tasks(), None).await;
+    let (call, confirm) = r.s.ask(args()).await;
+    r.s.app.answer(&confirm.request_id, "connect").await;
+    eventually("the task lookup to begin", || {
+        r.stub_lines()
+            .iter()
+            .any(|l| l.starts_with("ecs list-tasks"))
+    })
+    .await;
+
+    // The user closes the app (a different, ordinary connection takes its
+    // place in the harness so the rest of the rig keeps working).
+    let stand_in = r.s.d.script(vec![], &[]).await;
+    drop(std::mem::replace(&mut r.s.app, stand_in));
+    let res = r.s.mcp.finish(call).await;
+
+    assert_eq!(res["error"], "connect_failed", "{res}");
+    assert_eq!(res["reason"], "operator_gone", "{res}");
+    assert_eq!(
+        res["remedy"], "Open Nostromo and request the shell again.",
+        "{res}"
+    );
+    assert!(res.get("detail").is_none(), "{res}");
+    let lines = r.stub_lines();
+    assert!(
+        !lines.iter().any(|l| l.starts_with("ecs execute-command")),
+        "a production shell was started with nobody watching: {lines:?}"
+    );
+    assert!(r.started_pids().is_empty());
+    r.assert_nothing_remains("the app went away before the shell started");
+    r.s.d
+        .wait_audit("connect_failed", |l| {
+            l["event"] == "connect_failed" && l["reason_code"] == "operator_gone"
+        })
+        .await;
+    assert!(audit_lines(&r, "connected").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_the_app_still_there_after_a_slow_task_lookup_the_shell_connects() {
+    let mut r = Rig::build(slow_list_tasks(), None).await;
+
+    let c = r.connect_ok().await;
+
+    assert!(r
+        .stub_lines()
+        .iter()
+        .any(|l| l.starts_with("ecs execute-command")));
+    assert_eq!(r.started_pids().len(), 1);
+    close_shell(&mut r, &c).await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Should-fix: a bare mention of a profile is not a missing profile
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_access_denied_that_names_the_profile_is_an_aws_error_and_not_a_missing_profile() {
+    let mut r = Rig::build(
+        Cli::Stub(Stub {
+            sts_stderr: Some("An error occurred (AccessDeniedException) when calling the DescribeTasks operation: User: arn:aws:sts::123456789012:assumed-role/dev/me is not authorized to perform: ecs:DescribeTasks using profile fake-prod-profile"),
+            listed: vec![],
+            described: vec![],
+        }),
+        None,
+    )
+    .await;
+
+    let a = r.failed(args(), "aws_error").await;
+
+    assert_ne!(a.res["remedy"], PROFILE_REMEDY, "{}", a.res);
+    assert_eq!(a.res["remedy"], Value::Null, "{}", a.res);
 }

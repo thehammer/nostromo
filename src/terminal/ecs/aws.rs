@@ -5,8 +5,8 @@
 //! `ecs describe-tasks`) run here; the interactive `execute-command` is started
 //! by [`super::connect`] as a terminal's process. Every call is an argv array
 //! (`tokio::process::Command`, never `sh -c`, T-2b-1), with `--output json`,
-//! `AWS_PAGER=""` and a `PATH` the daemon sets, because launchd gives
-//! `nostromd` almost none.
+//! an allowlisted environment ([`child_env`]) with `AWS_PAGER=""` and a `PATH`
+//! the daemon sets, because launchd gives `nostromd` almost none.
 //!
 //! Nothing here ever runs `aws sso login`: an expired session is reported, and
 //! the user logs in themselves.
@@ -20,7 +20,6 @@ use tokio::process::Command;
 
 use crate::config::TerminalConfig;
 use crate::terminal::launcher::ConnectFailure;
-use crate::terminal::session::SCRUBBED_ENV;
 
 /// How long one helper call may take.
 pub const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -35,6 +34,18 @@ const DEFAULT_CLIS: [&str; 3] = [
 /// What follows the CLI's own directory on the child's `PATH` (so
 /// `session-manager-plugin` is found).
 const FIXED_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+/// The only variables of the daemon's own environment the AWS CLI (and the
+/// session-manager plugin it starts) inherits. Everything else, `NOSTROMO_*`,
+/// `AWS_ENDPOINT_URL*`, credentials and tokens included, is left behind. The
+/// last two are passed only when the daemon itself already has them set.
+pub const INHERITED_ENV: [&str; 6] = [
+    "HOME",
+    "USER",
+    "LANG",
+    "TMPDIR",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+];
 /// `describe-tasks` takes at most this many tasks.
 const DESCRIBE_BATCH: usize = 100;
 /// The most of a helper's stderr that is kept.
@@ -57,6 +68,24 @@ impl AwsCli {
             exe,
         }
     }
+}
+
+/// The complete environment the CLI runs with: [`INHERITED_ENV`] as the daemon
+/// has it, and the `PATH`, `TERM` and `AWS_PAGER` the daemon sets.
+pub fn child_env(cli: &AwsCli) -> Vec<(String, String)> {
+    child_env_from(cli, |key| std::env::var(key).ok())
+}
+
+/// [`child_env`] with the daemon's environment given as `get`.
+pub fn child_env_from(cli: &AwsCli, get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = INHERITED_ENV
+        .iter()
+        .filter_map(|key| get(key).map(|v| ((*key).to_string(), v)))
+        .collect();
+    env.push(("PATH".into(), cli.child_path.clone()));
+    env.push(("AWS_PAGER".into(), String::new()));
+    env.push(("TERM".into(), "xterm-256color".into()));
+    env
 }
 
 /// Where the CLI may be: tried in order, the first executable file wins.
@@ -108,6 +137,7 @@ impl AwsCliSource {
                 reason_code: "aws_cli_missing".into(),
                 message: "The AWS CLI was not found.".into(),
                 remedy: Some("Install the AWS CLI: brew install awscli".into()),
+                detail: None,
             })
     }
 }
@@ -227,16 +257,12 @@ async fn run_json(cli: &AwsCli, args: &[&str]) -> Result<serde_json::Value, AwsR
     command
         .args(args)
         .args(["--output", "json"])
-        .env("PATH", &cli.child_path)
-        .env("AWS_PAGER", "")
+        .env_clear()
+        .envs(child_env(cli))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // The same variables the terminal's own child never inherits.
-    for key in SCRUBBED_ENV {
-        command.env_remove(key);
-    }
     let child = command
         .spawn()
         .map_err(|e| AwsRunError::Spawn(e.to_string()))?;

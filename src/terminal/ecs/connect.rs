@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use super::aws::{self, AwsCli, AwsCliSource, TaskInfo};
 use super::classify::{
     classify_helper_failure, connect_timeout, exec_not_enabled, execute_command_argv,
-    execute_command_env, no_running_task, profile_not_configured_failure,
+    execute_command_env, no_running_task, profile_not_configured_failure, unexpected_answer,
 };
 use super::vocab::EcsTarget;
 use super::watch::{ConnectEvent, RemoteWatch};
@@ -64,6 +64,7 @@ impl AwsEcsLauncher {
             reason_code: "daemon_stopping".into(),
             message: "The terminal manager is gone.".into(),
             remedy: None,
+            detail: None,
         })
     }
 }
@@ -91,8 +92,29 @@ impl RemoteLauncher for AwsEcsLauncher {
                 reason_code: e.code().into(),
                 message: "The pane could not be opened.".into(),
                 remedy: None,
+                detail: None,
             })?;
+        // The data was pinned when the user was asked; nothing may have
+        // changed what will run since.
+        if target.argv_sha256() != target.pin.argv_sha256 {
+            return Err(ConnectFailure::new(
+                "pin_mismatch",
+                "The command changed after it was confirmed.",
+                Some("Request the shell again."),
+            ));
+        }
         let task_arn = find_task(&cli, target, profile).await?;
+
+        // Finding the task takes a few AWS calls. If the app that said
+        // Connect is gone by now, nobody is watching a production session
+        // start: it is not started.
+        if !lock(&manager).operator_connected() {
+            return Err(ConnectFailure::new(
+                "operator_gone",
+                "The Nostromo app is no longer connected.",
+                Some("Open Nostromo and request the shell again."),
+            ));
+        }
 
         // From here a process and a pane exist until this returns.
         let (watch, mut events) = RemoteWatch::new(&target.sso_session);
@@ -105,10 +127,8 @@ impl RemoteLauncher for AwsEcsLauncher {
             store::DEFAULT_ROWS,
             Box::new(move |chunk| observer.observe(chunk)),
         )
-        .map_err(|e| ConnectFailure {
-            reason_code: "spawn_failed".into(),
-            message: format!("The AWS CLI could not be started: {e:#}"),
-            remedy: None,
+        .map_err(|_| {
+            ConnectFailure::new("spawn_failed", "The AWS CLI could not be started.", None)
         })?;
         let opened = lock(&manager).open_remote(
             OpenRemote {
@@ -129,6 +149,7 @@ impl RemoteLauncher for AwsEcsLauncher {
             reason_code: e.code().into(),
             message: "The pane could not be opened.".into(),
             remedy: None,
+            detail: None,
         })?;
 
         // If the requester goes away while the session is starting, the pane
@@ -172,6 +193,7 @@ impl AwsEcsLauncher {
                         reason_code: "unknown".into(),
                         message: "The connection ended unexpectedly.".into(),
                         remedy: None,
+                        detail: None,
                     }),
                 },
                 () = &mut deadline => {
@@ -232,6 +254,10 @@ async fn find_task(
     if arns.is_empty() {
         return Err(no_running_task());
     }
+    // AWS's answer is data, and it becomes argv: only task ARNs go further.
+    if !arns.iter().all(|a| is_task_arn(a)) {
+        return Err(unexpected_answer());
+    }
     let tasks = aws::describe_tasks(cli, profile, &target.region, &target.cluster, &arns)
         .await
         .map_err(failed)?;
@@ -248,10 +274,26 @@ fn pick_task(tasks: &[TaskInfo]) -> Result<String, ConnectFailure> {
     if running.peek().is_none() {
         return Err(no_running_task());
     }
-    running
+    let task = running
         .find(|t| t.exec_enabled)
-        .map(|t| t.arn.clone())
-        .ok_or_else(exec_not_enabled)
+        .ok_or_else(exec_not_enabled)?;
+    if !is_task_arn(&task.arn) {
+        return Err(unexpected_answer());
+    }
+    Ok(task.arn.clone())
+}
+
+/// The longest ECS task ARN accepted (real ones are about 100 characters).
+const MAX_TASK_ARN_LEN: usize = 300;
+
+/// Is `arn` an ECS ARN of the shape that is safe to hand to `--task`: the
+/// `arn:aws:ecs:` prefix, then letters, digits and `:/_.-` only.
+fn is_task_arn(arn: &str) -> bool {
+    arn.len() <= MAX_TASK_ARN_LEN
+        && arn.starts_with("arn:aws:ecs:")
+        && arn
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '_' | '.' | '-'))
 }
 
 fn lock(manager: &Arc<Mutex<TerminalManager>>) -> std::sync::MutexGuard<'_, TerminalManager> {

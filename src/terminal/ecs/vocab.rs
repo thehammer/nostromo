@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use crate::config::TerminalConfig;
@@ -26,6 +27,11 @@ pub const CONFIGURE_ME: &str = "CONFIGURE_ME";
 
 /// The most any of the data files may hold. The real files are a few KiB.
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Longest values `resolve` accepts for the words that reach the command line.
+const MAX_PROFILE_LEN: usize = 128;
+const MAX_REGION_LEN: usize = 32;
+const MAX_NAME_LEN: usize = 255;
+const MAX_COMMAND_LEN: usize = 256;
 /// How much of a rejected value an [`InvalidTarget`] quotes back.
 const MAX_GIVEN_CHARS: usize = 64;
 
@@ -112,6 +118,9 @@ pub enum TargetField {
     Environment,
     Service,
     ShellType,
+    /// A value in `config.json` / `ecs-local.json` that is not safe to put in
+    /// the command line (see [`InvalidTarget::unsafe_config`]).
+    Config,
 }
 
 impl TargetField {
@@ -121,6 +130,7 @@ impl TargetField {
             TargetField::Environment => "environment",
             TargetField::Service => "service",
             TargetField::ShellType => "shell_type",
+            TargetField::Config => "config",
         }
     }
 }
@@ -135,7 +145,26 @@ pub struct InvalidTarget {
 }
 
 impl InvalidTarget {
+    /// The data resolves but one of its values is not safe to run. `given`
+    /// is a fixed code (`unsafe_profile`, …), never the value itself.
+    fn unsafe_config(code: &'static str) -> Self {
+        Self {
+            field: TargetField::Config,
+            given: code.to_string(),
+            valid: Vec::new(),
+        }
+    }
+
+    /// The fixed code of an unsafe configuration value; `None` for a word
+    /// that is merely not in the vocabulary.
+    pub fn unsafe_config_code(&self) -> Option<&str> {
+        (self.field == TargetField::Config).then_some(self.given.as_str())
+    }
+
     pub fn detail(&self) -> String {
+        if let Some(code) = self.unsafe_config_code() {
+            return format!("the ECS configuration for this target has an unusable value ({code})");
+        }
         format!(
             "unknown {} '{}'; valid: {}",
             self.field.as_str(),
@@ -166,9 +195,64 @@ pub struct EcsTarget {
     pub sso_session: String,
     /// The command the shell runs (`/bin/bash`, `php artisan tinker`).
     pub shell_command: String,
+    /// What the data looked like when this target was resolved.
+    pub pin: TargetPin,
+}
+
+/// What a confirmed request is pinned to: the digests of the exact bytes of
+/// the two data files read for it, and of the command line they resolved to.
+/// Audited with the connect; the daemon never reloads between the confirm and
+/// the launch, so what the user saw is what runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPin {
+    /// Lowercase hex SHA-256 of `config.json` as read.
+    pub config_sha256: String,
+    /// The same for `ecs-local.json`; `None` when there was none to read.
+    pub local_sha256: Option<String>,
+    /// SHA-256 of [`EcsTarget::pinned_argv`].
+    pub argv_sha256: String,
 }
 
 impl EcsTarget {
+    /// The argv of the interactive session after the CLI itself (`aws`): the
+    /// one place it is built, so what is pinned and what runs cannot differ.
+    pub fn execute_command_args(&self, profile: &str, task_arn: &str) -> Vec<String> {
+        [
+            "ecs",
+            "execute-command",
+            "--profile",
+            profile,
+            "--region",
+            &self.region,
+            "--cluster",
+            &self.cluster,
+            "--task",
+            task_arn,
+            "--container",
+            &self.container,
+            "--interactive",
+            "--command",
+            &self.shell_command,
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    /// What the data decides about the commands that will run, with the task
+    /// (which AWS picks later) left as `<task>`: the session's argv after
+    /// `aws`, and the service name `list-tasks` is asked about.
+    pub fn pinned_argv(&self) -> Vec<String> {
+        let mut words = self.execute_command_args(self.profile.as_deref().unwrap_or(""), "<task>");
+        words.push("--service-name".into());
+        words.push(self.service_name.clone());
+        words
+    }
+
+    /// The digest [`TargetPin::argv_sha256`] holds, from the fields as they are now.
+    pub fn argv_sha256(&self) -> String {
+        sha256_hex(self.pinned_argv().join("\0").as_bytes())
+    }
+
     /// The four canonical words, as the wire and the audit trail name a target.
     pub fn terminal_target(&self) -> TerminalTarget {
         TerminalTarget {
@@ -178,6 +262,13 @@ impl EcsTarget {
             shell_type: self.shell_type.clone(),
         }
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // ── the files ────────────────────────────────────────────────────────────────
@@ -233,6 +324,10 @@ struct Aliases {
 #[derive(Debug, Clone)]
 pub struct EcsVocabulary {
     config: ConfigFile,
+    /// SHA-256 of the exact bytes of `config.json` that were parsed.
+    config_sha256: String,
+    /// The same for `ecs-local.json`, when it was read.
+    local_sha256: Option<String>,
     local_profiles: BTreeMap<String, String>,
     sso_session: Option<String>,
     aliases: Aliases,
@@ -250,7 +345,7 @@ impl EcsVocabulary {
                 join_paths(&paths.config)
             ))
         })?;
-        let raw = read_capped(config_path)
+        let (raw, config_sha256) = read_capped(config_path)
             .map_err(|e| VocabError::new(format!("cannot read {}: {e}", config_path.display())))?;
         let file: ConfigFile = serde_json::from_str(&raw)
             .map_err(|e| VocabError::new(format!("{} is not valid: {e}", config_path.display())))?;
@@ -261,15 +356,19 @@ impl EcsVocabulary {
             )));
         }
 
+        let mut local_sha256 = None;
         let local = EcsPaths::first_existing(&paths.local)
             .and_then(|p| match read_capped(p) {
-                Ok(raw) => match serde_json::from_str::<LocalFile>(&raw) {
-                    Ok(local) => Some(local),
-                    Err(e) => {
-                        warn!("ignoring {}: {e}", p.display());
-                        None
+                Ok((raw, sha)) => {
+                    local_sha256 = Some(sha);
+                    match serde_json::from_str::<LocalFile>(&raw) {
+                        Ok(local) => Some(local),
+                        Err(e) => {
+                            warn!("ignoring {}: {e}", p.display());
+                            None
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     warn!("ignoring {}: {e}", p.display());
                     None
@@ -288,7 +387,7 @@ impl EcsVocabulary {
 
         let aliases = match EcsPaths::first_existing(&paths.aliases_script) {
             Some(p) => match read_capped(p) {
-                Ok(text) => parse_aliases(&text),
+                Ok((text, _)) => parse_aliases(&text),
                 Err(e) => {
                     warn!("no ECS aliases: cannot read {}: {e}", p.display());
                     Aliases::default()
@@ -305,6 +404,8 @@ impl EcsVocabulary {
 
         Ok(Self {
             config: file,
+            config_sha256,
+            local_sha256,
             local_profiles,
             sso_session,
             aliases,
@@ -410,10 +511,36 @@ impl EcsVocabulary {
             ));
         };
 
-        Ok(EcsTarget {
+        let profile = self.profile_for(&env_name);
+        // Every value that ends up in the command line, checked before any
+        // of them is used. The code names the field, never the value.
+        let region = &self.config.regions[&env_name];
+        if !is_safe_token(region, MAX_REGION_LEN) {
+            return Err(InvalidTarget::unsafe_config("unsafe_region"));
+        }
+        if profile
+            .as_deref()
+            .is_some_and(|p| !is_safe_token(p, MAX_PROFILE_LEN))
+        {
+            return Err(InvalidTarget::unsafe_config("unsafe_profile"));
+        }
+        if !is_safe_token(&env_data.cluster, MAX_NAME_LEN) {
+            return Err(InvalidTarget::unsafe_config("unsafe_cluster"));
+        }
+        if !is_safe_token(&service_data.service, MAX_NAME_LEN) {
+            return Err(InvalidTarget::unsafe_config("unsafe_service_name"));
+        }
+        if !is_safe_token(&service_data.container, MAX_NAME_LEN) {
+            return Err(InvalidTarget::unsafe_config("unsafe_container"));
+        }
+        if !is_safe_shell_command(shell_command) {
+            return Err(InvalidTarget::unsafe_config("unsafe_shell_command"));
+        }
+
+        let mut target = EcsTarget {
             project: project_name,
-            region: self.config.regions[&env_name].clone(),
-            profile: self.profile_for(&env_name),
+            region: region.clone(),
+            profile,
             sso_session: self
                 .sso_session
                 .clone()
@@ -425,7 +552,14 @@ impl EcsVocabulary {
             service_name: service_data.service.clone(),
             container: service_data.container.clone(),
             shell_command: shell_command.clone(),
-        })
+            pin: TargetPin {
+                config_sha256: self.config_sha256.clone(),
+                local_sha256: self.local_sha256.clone(),
+                argv_sha256: String::new(),
+            },
+        };
+        target.pin.argv_sha256 = target.argv_sha256();
+        Ok(target)
     }
 
     fn has_region(&self, environment: &str) -> bool {
@@ -447,6 +581,30 @@ impl EcsVocabulary {
             .filter(|p| !p.is_empty() && p.as_str() != CONFIGURE_ME)
             .cloned()
     }
+}
+
+/// A single command-line word from the data: 1 to `max` characters of
+/// letters, digits and `-_./:@=`, and not starting with `-` (it would be read
+/// as an option). ASCII only, so look-alike letters are refused too.
+fn is_safe_token(value: &str, max: usize) -> bool {
+    (1..=max).contains(&value.len()) && !value.starts_with('-') && value.chars().all(is_safe_char)
+}
+
+/// The command the remote shell runs: words of [`is_safe_token`] characters
+/// separated by single spaces. No shell metacharacters (`;|&$` backtick
+/// `<>()` quotes, backslash, glob characters), no line breaks, no tabs, and
+/// no leading `-`.
+fn is_safe_shell_command(command: &str) -> bool {
+    (1..=MAX_COMMAND_LEN).contains(&command.len())
+        && !command.starts_with('-')
+        && command.chars().all(|c| is_safe_char(c) || c == ' ')
+        && !command.starts_with(' ')
+        && !command.ends_with(' ')
+        && !command.contains("  ")
+}
+
+fn is_safe_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '=')
 }
 
 /// An SSO session name: letters, digits, `.`, `_` and `-`, 1 to 64 of them.
@@ -471,14 +629,25 @@ fn invalid(field: TargetField, given: &str, valid: Vec<String>) -> InvalidTarget
     }
 }
 
-fn read_capped(path: &Path) -> std::io::Result<String> {
+/// The file's text, and the SHA-256 (lowercase hex) of the exact bytes read.
+fn read_capped(path: &Path) -> std::io::Result<(String, String)> {
     let len = std::fs::metadata(path)?.len();
     if len > MAX_FILE_BYTES {
         return Err(std::io::Error::other(format!(
             "file is {len} bytes (limit {MAX_FILE_BYTES})"
         )));
     }
-    std::fs::read_to_string(path)
+    let bytes = std::fs::read(path)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(std::io::Error::other(format!(
+            "file is {} bytes (limit {MAX_FILE_BYTES})",
+            bytes.len()
+        )));
+    }
+    let sha = sha256_hex(&bytes);
+    let text = String::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok((text, sha))
 }
 
 fn join_paths(paths: &[PathBuf]) -> String {

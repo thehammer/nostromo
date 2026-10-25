@@ -19,7 +19,9 @@ Environment:
     FAKE_AWS_LOG   a file; each invocation appends its argv as one JSON line
                    (the whole sys.argv, a JSON list).
     FAKE_AWS_ENV_LOG  optional file; each invocation appends one JSON line with
-                   the PATH, AWS_PAGER and TERM it was started with.
+                   the PATH, AWS_PAGER and TERM it was started with, and the
+                   whole environment it was started with under "ENV" (a JSON
+                   object), so a test can prove what the daemon did not pass on.
 
 Any `sso` subcommand is logged and refused: the daemon must never run one.
 """
@@ -88,7 +90,12 @@ def main(argv):
     append(os.environ.get("FAKE_AWS_LOG"), json.dumps(argv))
     append(
         os.environ.get("FAKE_AWS_ENV_LOG"),
-        json.dumps({k: os.environ.get(k) for k in ("PATH", "AWS_PAGER", "TERM")}),
+        json.dumps(
+            dict(
+                {k: os.environ.get(k) for k in ("PATH", "AWS_PAGER", "TERM")},
+                ENV=dict(os.environ),
+            )
+        ),
     )
     words = [a for a in argv[1:] if not a.startswith("--")]
     if "sso" in argv[1:2]:

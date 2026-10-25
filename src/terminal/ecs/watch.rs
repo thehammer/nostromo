@@ -1,11 +1,13 @@
 //! What the daemon watches in an ECS terminal's output: the marker that says
 //! the session began, the marker that says the remote side ended it, and the
-//! last few KiB, kept only to classify why the process ended.
+//! last few lines, kept only to classify why the process ended. Before the
+//! session begins that is what the AWS CLI printed; once it has begun it is
+//! the remote shell's output, so only a few hundred bytes of it are held.
 //!
 //! [`RemoteWatch::observe`] runs in the terminal's reader hook, under the
 //! screen lock, so it never touches the manager: it updates its own small state
 //! and queues a [`ConnectEvent`] for the launcher that is waiting. The text it
-//! holds is bounded ([`MAX_TAIL_BYTES`]), never audited, and dropped as soon
+//! holds is bounded ([`MAX_TAIL_BYTES`], then [`CLOSE_TAIL_BYTES`]), never audited, and dropped as soon
 //! as it has been classified (T-2b-2).
 
 use std::sync::{Arc, Mutex};
@@ -13,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use super::classify::{
-    classify_close, classify_connect_failure, CONNECTED_MARKER, MAX_TAIL_BYTES, REMOTE_EXIT_MARKER,
+    classify_close, classify_connect_failure, CLOSE_TAIL_BYTES, CONNECTED_MARKER, MAX_TAIL_BYTES,
+    REMOTE_EXIT_MARKER,
 };
 use crate::terminal::launcher::ConnectFailure;
 
@@ -29,7 +32,8 @@ pub enum ConnectEvent {
 
 #[derive(Default)]
 struct State {
-    /// The last [`MAX_TAIL_BYTES`] of output.
+    /// The last [`MAX_TAIL_BYTES`] of output; once the session has begun, the
+    /// last [`CLOSE_TAIL_BYTES`] (what the remote shell prints is not kept).
     tail: Vec<u8>,
     connected: bool,
     remote_exit: bool,
@@ -72,7 +76,12 @@ impl RemoteWatch {
         if !state.remote_exit && contains(&state.tail[from..], REMOTE_EXIT_MARKER) {
             state.remote_exit = true;
         }
-        let excess = state.tail.len().saturating_sub(MAX_TAIL_BYTES);
+        let keep = if state.connected {
+            CLOSE_TAIL_BYTES
+        } else {
+            MAX_TAIL_BYTES
+        };
+        let excess = state.tail.len().saturating_sub(keep);
         state.tail.drain(..excess);
     }
 
@@ -98,6 +107,12 @@ impl RemoteWatch {
     pub fn take_close_reason(&self) -> &'static str {
         let tail = self.take_tail();
         classify_close(&tail, self.lock().remote_exit)
+    }
+
+    /// How many bytes of output are held right now.
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.lock().tail.len()
     }
 
     fn take_tail(&self) -> String {

@@ -157,15 +157,23 @@ pub enum AuditEvent {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         invite_follow: bool,
     },
-    /// The user clicked Connect; the launcher was called.
-    ConnectStarted { tag: String, target: TerminalTarget },
-    /// The remote shell is open.
+    /// The user clicked Connect; the launcher was called. `pin` is what the
+    /// request was pinned to: the ECS data as it was when the user was asked.
+    ConnectStarted {
+        tag: String,
+        target: TerminalTarget,
+        #[serde(flatten)]
+        pin: AuditPin,
+    },
+    /// The remote shell is open (with the same `pin` as its `connect_started`).
     Connected {
         terminal_id: String,
         pane_id: String,
         tag: String,
         kind: TerminalKind,
         target: TerminalTarget,
+        #[serde(flatten)]
+        pin: AuditPin,
     },
     /// The launcher could not open the shell. No pane exists. Only a reason
     /// *code* is kept: what the AWS CLI printed is never audited.
@@ -179,6 +187,17 @@ pub enum AuditEvent {
     RefusalLimitReached { channel: RefusalChannel },
     /// How many of a channel's refusals the cap kept out of the log.
     RefusalsSuppressed { channel: RefusalChannel, count: u32 },
+}
+
+/// The digests a remote shell's request was pinned to (lowercase hex SHA-256):
+/// the exact bytes read of `config.json` and `ecs-local.json` (absent when
+/// there was no such file), and of the resolved command line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditPin {
+    pub config_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_sha256: Option<String>,
+    pub argv_sha256: String,
 }
 
 #[derive(Serialize)]

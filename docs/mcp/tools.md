@@ -1438,12 +1438,12 @@ The call blocks until the user answers or about 5 minutes pass. It is withheld f
 | `unknown_argument` | Any key other than the five above; `detail` is the key. |
 | `reason_too_long` / `invalid_args` | `reason` over 200 characters; a missing or non-string argument. |
 | `unknown_view` | No identifiable caller, or its focus is unknown to the daemon. |
-| `remote_shells_not_configured` | No ECS `config.json` (`detail` says why). |
+| `remote_shells_not_configured` | No ECS `config.json`, or a value in it is not safe to run (`detail` says why; an unsafe value is named by a fixed code, never quoted). |
 | `no_operator` | No Nostromo app that can show the sheet is connected (immediately; nothing was sent). |
 | `request_pending` | Another request is waiting for the user (immediately). |
 | `cancelled` / `dismissed` | The user cancelled or dismissed the sheet. No terminal exists. |
 | `timeout` | The user did not answer in time. |
-| `connect_failed` | The user connected but the shell could not be opened: `reason` (a code, e.g. `not_available`), `detail`, `remedy`. No pane exists. |
+| `connect_failed` | The user connected but the shell could not be opened: `reason` (a code, e.g. `not_available`) and `remedy` (fixed text for that code). Nothing the AWS CLI printed is returned: no `detail`. No pane exists. |
 | `not_supported` | Not hosted by `nostromo` (the daemon). |
 
 Source: `src/mcp/tools/remote_shell.rs`; flow in `src/terminal/remote_request.rs`. Both tool names are dotted like the rest (`nostromo.request_remote_shell`); the plan wrote them with underscores. The guard-consistency test checks both spellings.

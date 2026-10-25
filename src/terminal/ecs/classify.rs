@@ -2,11 +2,12 @@
 //! the AWS CLI's failures and endings mean.
 //!
 //! No I/O and no state here. The reason codes are a closed set: they go to the
-//! audit trail and the app. What the CLI printed never does (T-2b-2); at most a
-//! failure's `message` quotes a few sanitised lines of it, to the person who
-//! asked, and the daemon drops the captured text once it is classified.
+//! audit trail, the app and the agent, each with fixed message and remedy text.
+//! What the CLI printed never does (T-2b-2); at most a failure's `detail`
+//! quotes one sanitised line of it, and that goes to the operator's app alone.
+//! The daemon drops the captured text once it is classified.
 
-use super::aws::{AwsCli, AwsRunError};
+use super::aws::{child_env, AwsCli, AwsRunError};
 use super::vocab::EcsTarget;
 use crate::terminal::launcher::ConnectFailure;
 
@@ -16,72 +17,65 @@ pub const CONNECTED_MARKER: &str = "Starting session with SessionId";
 pub const REMOTE_EXIT_MARKER: &str = "Exiting session with sessionId";
 /// The most output the daemon holds to classify a connect or an ending.
 pub const MAX_TAIL_BYTES: usize = 4 * 1024;
+/// How much output is held once the session has begun: the last few lines,
+/// enough to tell how it ended. (It is the remote shell's output by then.)
+pub const CLOSE_TAIL_BYTES: usize = 512;
 
-/// How much of a quoted stderr/output line a message keeps.
+/// How much of a quoted stderr/output line a detail keeps.
 const MAX_LINE_CHARS: usize = 200;
-/// How many lines of unrecognised output an `unknown` failure quotes.
+/// How many lines of unrecognised output an `unknown` failure's detail quotes.
 const UNKNOWN_LINES: usize = 3;
 
 /// The argv of the interactive session. Element 0 is the resolved `aws`; there
 /// is no shell, and the shell command the user will get remotely is **one**
-/// element, the value of `--command` (T6).
+/// element, the value of `--command` (T6). Built by
+/// [`EcsTarget::execute_command_args`], the same words the request pinned.
 pub fn execute_command_argv(
     cli: &AwsCli,
     target: &EcsTarget,
     profile: &str,
     task_arn: &str,
 ) -> Vec<String> {
-    [
-        &cli.exe.display().to_string(),
-        "ecs",
-        "execute-command",
-        "--profile",
-        profile,
-        "--region",
-        &target.region,
-        "--cluster",
-        &target.cluster,
-        "--task",
-        task_arn,
-        "--container",
-        &target.container,
-        "--interactive",
-        "--command",
-        &target.shell_command,
-    ]
-    .map(String::from)
-    .to_vec()
+    let mut argv = vec![cli.exe.display().to_string()];
+    argv.extend(target.execute_command_args(profile, task_arn));
+    argv
 }
 
-/// The environment the session runs with, on top of the scrubbed daemon's.
+/// The complete environment the session runs with: [`child_env`], and
+/// nothing else of the daemon's.
 pub fn execute_command_env(cli: &AwsCli) -> Vec<(String, String)> {
-    vec![
-        ("PATH".into(), cli.child_path.clone()),
-        ("AWS_PAGER".into(), String::new()),
-        ("TERM".into(), "xterm-256color".into()),
-    ]
+    child_env(cli)
 }
 
 /// A helper call (sts, list-tasks, describe-tasks) that failed.
 pub fn classify_helper_failure(error: &AwsRunError, sso_session: &str) -> ConnectFailure {
     match error {
         AwsRunError::Failed { stderr } => classify_stderr(stderr, sso_session),
-        AwsRunError::Timeout => aws_error("The AWS CLI did not answer in time."),
-        AwsRunError::Spawn(e) => aws_error(&format!("The AWS CLI could not be started: {e}")),
-        AwsRunError::BadOutput(e) => {
-            aws_error(&format!("The AWS CLI gave an unexpected answer: {e}"))
-        }
+        AwsRunError::Timeout => aws_error("The AWS CLI did not answer in time.", None),
+        AwsRunError::Spawn(_) => aws_error("The AWS CLI could not be started.", None),
+        AwsRunError::BadOutput(_) => unexpected_answer(),
     }
+}
+
+/// The CLI answered with something that is not what the call returns (a task
+/// ARN that is not one, say). Nothing of it is quoted.
+pub fn unexpected_answer() -> ConnectFailure {
+    aws_error("The AWS CLI gave an unexpected answer.", None)
 }
 
 fn classify_stderr(stderr: &str, sso_session: &str) -> ConnectFailure {
     if is_expired(stderr) {
         return sso_expired(sso_session);
     }
-    if stderr.contains("could not be found") || stderr.contains("profile") {
+    // The CLI's own wording for a profile that is not in its config. A bare
+    // mention of "profile" is not enough: an AccessDenied can name one.
+    if stderr.contains("ProfileNotFound")
+        || stderr.contains("Missing profile ")
+        || (stderr.contains("The config profile (") && stderr.contains("could not be found"))
+    {
         return profile_not_configured_failure();
     }
-    aws_error(&first_line(stderr).unwrap_or_else(|| "The AWS CLI reported an error.".into()))
+    aws_error("The AWS CLI reported an error.", first_line(stderr))
 }
 
 /// The CLI's output while connecting, once it exited before the session began.
@@ -112,13 +106,14 @@ pub fn classify_connect_failure(tail: &str, sso_session: &str) -> ConnectFailure
             ),
         );
     }
+    let mut unknown = failure(
+        "unknown",
+        "The connection ended before the session began.",
+        None,
+    );
     let lines = last_lines(tail, UNKNOWN_LINES);
-    let message = if lines.is_empty() {
-        "The connection ended before the session began.".to_string()
-    } else {
-        lines.join(" / ")
-    };
-    failure("unknown", &message, None)
+    unknown.detail = (!lines.is_empty()).then(|| lines.join(" / "));
+    unknown
 }
 
 /// Why a session that was running ended: `remote_exit` (the remote side said
@@ -180,16 +175,16 @@ fn sso_expired(sso_session: &str) -> ConnectFailure {
     )
 }
 
-fn aws_error(message: &str) -> ConnectFailure {
-    failure("aws_error", message, None)
+/// `aws_error`: fixed `message`; `detail` is the CLI's own first line, for the
+/// operator's app.
+fn aws_error(message: &str, detail: Option<String>) -> ConnectFailure {
+    let mut failure = failure("aws_error", message, None);
+    failure.detail = detail;
+    failure
 }
 
 fn failure(code: &str, message: &str, remedy: Option<&str>) -> ConnectFailure {
-    ConnectFailure {
-        reason_code: code.into(),
-        message: message.into(),
-        remedy: remedy.map(String::from),
-    }
+    ConnectFailure::new(code, message, remedy)
 }
 
 fn is_expired(text: &str) -> bool {

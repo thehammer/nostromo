@@ -24,5 +24,6 @@ mod tests;
 
 pub use connect::AwsEcsLauncher;
 pub use vocab::{
-    EcsPaths, EcsTarget, EcsVocabulary, InvalidTarget, TargetField, VocabError, CONFIGURE_ME,
+    EcsPaths, EcsTarget, EcsVocabulary, InvalidTarget, TargetField, TargetPin, VocabError,
+    CONFIGURE_ME,
 };

@@ -140,6 +140,8 @@ struct SpawnOptions {
     hooks: Vec<ReaderHook>,
     /// Sweep the child's process group when it exits on its own.
     sweep_group_on_exit: bool,
+    /// Start the child with **only** `env` (no inherited daemon environment).
+    clean_env: bool,
 }
 
 #[derive(Default)]
@@ -237,6 +239,7 @@ impl TerminalSession {
         let options = SpawnOptions {
             hooks: vec![hook],
             sweep_group_on_exit: true,
+            clean_env: true,
         };
         Self::spawn(cmd, cwd, env, cols, rows, SignalOps::real(), options)
     }
@@ -250,14 +253,20 @@ impl TerminalSession {
         ops: SignalOps,
         options: SpawnOptions,
     ) -> Result<Arc<Self>> {
-        for key in SCRUBBED_ENV {
-            cmd.env_remove(key);
-        }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "Nostromo");
-        if cmd.get_env("LANG").is_none() {
-            cmd.env("LANG", "en_US.UTF-8");
+        if options.clean_env {
+            // A remote shell's helper gets exactly what the caller lists, not
+            // the daemon's environment minus a denylist.
+            cmd.env_clear();
+        } else {
+            for key in SCRUBBED_ENV {
+                cmd.env_remove(key);
+            }
+            cmd.env("TERM", "xterm-256color");
+            cmd.env("COLORTERM", "truecolor");
+            cmd.env("TERM_PROGRAM", "Nostromo");
+            if cmd.get_env("LANG").is_none() {
+                cmd.env("LANG", "en_US.UTF-8");
+            }
         }
         for (k, v) in env {
             cmd.env(k, v);

@@ -24,10 +24,27 @@ pub struct Placement {
 pub struct ConnectFailure {
     /// A short code for the audit trail and the app (`not_available`, …).
     pub reason_code: String,
-    /// What happened, in a sentence.
+    /// What happened, in a sentence. Fixed text per `reason_code`: nothing the
+    /// AWS CLI printed, so it may be shown to anyone, an agent included.
     pub message: String,
-    /// What the user can do about it.
+    /// What the user can do about it. Fixed per `reason_code` as well.
     pub remedy: Option<String>,
+    /// The first sanitised line the AWS CLI printed, for the person at the
+    /// app only: it goes on the operator's `remote_shell_resolved` frame and
+    /// nowhere else (not the agent, not the audit trail).
+    pub detail: Option<String>,
+}
+
+impl ConnectFailure {
+    /// A failure with fixed text and no AWS-derived detail.
+    pub fn new(reason_code: &str, message: &str, remedy: Option<&str>) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+            remedy: remedy.map(String::from),
+            detail: None,
+        }
+    }
 }
 
 /// Opens a remote shell. The returned terminal already has its pane.
@@ -63,6 +80,7 @@ impl RemoteLauncher for UnavailableLauncher {
             reason_code: "not_available".into(),
             message: "This version of Nostromo cannot open remote shells yet.".into(),
             remedy: Some("Update Nostromo and restart the daemon.".into()),
+            detail: None,
         })
     }
 }
@@ -154,6 +172,7 @@ pub mod testing {
                 reason_code: code.into(),
                 message: message.into(),
                 remedy: None,
+                detail: None,
             };
             let manager = self
                 .manager

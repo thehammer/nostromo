@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use super::aws::{AwsCli, AwsCliSource, AwsRunError};
+use super::aws::{child_env_from, AwsCli, AwsCliSource, AwsRunError};
 use super::classify::{
     classify_close, classify_connect_failure, classify_helper_failure, execute_command_argv,
     execute_command_env,
@@ -21,9 +21,11 @@ use crate::terminal::launcher::ConnectFailure;
 
 const STARTED: &str = "Starting session with SessionId";
 const EXITING: &str = "Exiting session with sessionId";
+const PROFILE_REMEDY: &str =
+    "Create ~/.claude/ecs-local.json with your AWS profiles (run ecs_setup in a shell)";
 
 fn target(shell_command: &str) -> EcsTarget {
-    EcsTarget {
+    let mut target = EcsTarget {
         project: "admin-portal".into(),
         environment: "production".into(),
         service: "scheduler".into(),
@@ -35,7 +37,14 @@ fn target(shell_command: &str) -> EcsTarget {
         profile: Some("fake-prod-profile".into()),
         sso_session: "carefeed".into(),
         shell_command: shell_command.into(),
-    }
+        pin: super::TargetPin {
+            config_sha256: "c".repeat(64),
+            local_sha256: None,
+            argv_sha256: String::new(),
+        },
+    };
+    target.pin.argv_sha256 = target.argv_sha256();
+    target
 }
 
 fn cli_at(exe: &str) -> AwsCli {
@@ -153,6 +162,132 @@ fn the_shell_runs_with_the_clis_path_an_empty_pager_and_an_xterm_terminal_type()
     );
     assert_eq!(env["AWS_PAGER"], "");
     assert_eq!(env["TERM"], "xterm-256color");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The environment the AWS CLI (and the plugin it starts) runs with
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A daemon environment as a function, so nothing here touches the real one
+/// (tests run in parallel in one process).
+fn daemon_env(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+    let map: std::collections::HashMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    move |key| map.get(key).cloned()
+}
+
+/// Variables the daemon may well have that an AWS session must never see.
+const CANARIES: [(&str, &str); 9] = [
+    ("NOSTROMO_PTY_ID", "pty-canary"),
+    ("NOSTROMO_AWS_CLI", "/canary/aws"),
+    ("AWS_ENDPOINT_URL", "http://127.0.0.1:1"),
+    ("AWS_ACCESS_KEY_ID", "AKIACANARY"),
+    ("AWS_SECRET_ACCESS_KEY", "secret-canary"),
+    ("GITHUB_TOKEN", "token-canary"),
+    ("SSH_AUTH_SOCK", "/canary/agent.sock"),
+    ("CLAUDECODE", "1"),
+    ("FOO_SECRET", "foo-canary"),
+];
+
+fn env_names(env: &[(String, String)]) -> std::collections::BTreeSet<String> {
+    env.iter().map(|(k, _)| k.clone()).collect()
+}
+
+#[test]
+fn the_child_gets_only_the_listed_variables_the_daemon_has_and_its_own_path_pager_and_terminal() {
+    let cli = cli_at("/opt/test-bin/aws");
+    let mut daemon = vec![
+        ("HOME", "/home/canary"),
+        ("USER", "canary-user"),
+        ("LANG", "en_US.UTF-8"),
+        ("TMPDIR", "/tmp/canary"),
+    ];
+    daemon.extend(CANARIES);
+
+    let env = child_env_from(&cli, daemon_env(&daemon));
+
+    let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        env_names(&env),
+        [
+            "AWS_PAGER",
+            "HOME",
+            "LANG",
+            "PATH",
+            "TERM",
+            "TMPDIR",
+            "USER"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        "{names:?}"
+    );
+    assert_eq!(names.len(), 7, "no variable twice: {names:?}");
+    let get = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    assert_eq!(get("HOME"), Some("/home/canary"));
+    assert_eq!(get("USER"), Some("canary-user"));
+    assert_eq!(get("LANG"), Some("en_US.UTF-8"));
+    assert_eq!(get("TMPDIR"), Some("/tmp/canary"));
+    assert_eq!(get("PATH"), Some(cli.child_path.as_str()));
+    assert_eq!(get("AWS_PAGER"), Some(""));
+    assert_eq!(get("TERM"), Some("xterm-256color"));
+}
+
+#[test]
+fn the_aws_config_and_credentials_files_are_passed_on_only_when_the_daemon_has_them_set() {
+    let cli = cli_at("/opt/test-bin/aws");
+
+    let without = child_env_from(&cli, daemon_env(&CANARIES));
+    let with_config = child_env_from(&cli, daemon_env(&[("AWS_CONFIG_FILE", "/x/config")]));
+    let with_both = child_env_from(
+        &cli,
+        daemon_env(&[
+            ("AWS_CONFIG_FILE", "/x/config"),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/x/credentials"),
+        ]),
+    );
+
+    assert_eq!(
+        env_names(&without),
+        ["AWS_PAGER", "PATH", "TERM"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    );
+    assert!(with_config.contains(&("AWS_CONFIG_FILE".into(), "/x/config".into())));
+    assert!(!env_names(&with_config).contains("AWS_SHARED_CREDENTIALS_FILE"));
+    assert!(with_both.contains(&("AWS_CONFIG_FILE".into(), "/x/config".into())));
+    assert!(with_both.contains(&(
+        "AWS_SHARED_CREDENTIALS_FILE".into(),
+        "/x/credentials".into()
+    )));
+}
+
+#[test]
+fn the_daemons_own_path_pager_and_terminal_never_replace_the_ones_the_child_is_given() {
+    let cli = cli_at("/opt/test-bin/aws");
+
+    let env = child_env_from(
+        &cli,
+        daemon_env(&[
+            ("PATH", "/evil/bin"),
+            ("AWS_PAGER", "less"),
+            ("TERM", "dumb"),
+        ]),
+    );
+
+    let all = |key: &str| -> Vec<&str> {
+        env.iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    };
+    assert_eq!(all("PATH"), [cli.child_path.as_str()]);
+    assert_eq!(all("AWS_PAGER"), [""]);
+    assert_eq!(all("TERM"), ["xterm-256color"]);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -316,6 +451,11 @@ fn a_profile_the_cli_cannot_find_is_profile_not_configured_with_the_ecs_setup_re
     }
 }
 
+/// The first line(s) the CLI printed, quoted for the operator's app only.
+fn detail(f: &ConnectFailure) -> String {
+    f.detail.clone().unwrap_or_default()
+}
+
 #[test]
 fn any_other_failure_is_aws_error_quoting_only_the_first_stderr_line() {
     let f = classify_helper_failure(
@@ -326,8 +466,17 @@ fn any_other_failure_is_aws_error_quoting_only_the_first_stderr_line() {
     );
 
     assert_eq!(reason_of(&f), "aws_error");
-    assert!(f.message.contains("ThrottlingException"), "{}", f.message);
-    assert!(!f.message.contains("second-line-of-noise"), "{}", f.message);
+    assert!(
+        !f.message.contains("ThrottlingException"),
+        "the message is fixed text: {}",
+        f.message
+    );
+    assert!(detail(&f).contains("ThrottlingException"), "{}", detail(&f));
+    assert!(
+        !detail(&f).contains("second-line-of-noise"),
+        "{}",
+        detail(&f)
+    );
 }
 
 #[test]
@@ -351,13 +500,160 @@ fn an_unreadable_error_line_is_quoted_without_control_characters_or_any_great_le
     let f = classify_helper_failure(&failed(&noisy), "carefeed");
 
     assert_eq!(reason_of(&f), "aws_error");
-    assert!(f.message.contains("badthing"), "{}", f.message);
-    assert!(!f.message.chars().any(char::is_control), "{:?}", f.message);
+    assert!(detail(&f).contains("badthing"), "{}", detail(&f));
     assert!(
-        f.message.chars().count() < 400,
-        "{}",
-        f.message.chars().count()
+        !detail(&f).chars().any(char::is_control),
+        "{:?}",
+        detail(&f)
     );
+    assert!(
+        detail(&f).chars().count() < 400,
+        "{}",
+        detail(&f).chars().count()
+    );
+}
+
+#[test]
+fn an_access_denied_that_merely_names_a_profile_is_aws_error_not_profile_not_configured() {
+    for stderr in [
+        "An error occurred (AccessDeniedException) when calling the DescribeTasks operation: User: arn:aws:sts::123456789012:assumed-role/dev/me is not authorized to perform: ecs:DescribeTasks using profile fake-prod-profile",
+        "An error occurred (AccessDenied) when calling the ListTasks operation: profile fake-prod-profile may not list tasks",
+        "Could not connect to the endpoint URL for profile fake-prod-profile",
+        "The profile you named has no access to this cluster",
+    ] {
+        let f = classify_helper_failure(&failed(stderr), "carefeed");
+
+        assert_eq!(reason_of(&f), "aws_error", "{stderr}");
+        assert_ne!(f.remedy.as_deref(), Some(PROFILE_REMEDY), "{stderr}");
+    }
+}
+
+#[test]
+fn each_of_the_clis_own_wordings_for_an_unknown_profile_is_profile_not_configured() {
+    for stderr in [
+        "ProfileNotFound: The config profile (fake-prod-profile) could not be found",
+        "botocore.exceptions.ProfileNotFound: x",
+        "Missing profile fake-prod-profile",
+        "\nThe config profile (fake-prod-profile) could not be found\n",
+    ] {
+        let f = classify_helper_failure(&failed(stderr), "carefeed");
+
+        assert_eq!(reason_of(&f), "profile_not_configured", "{stderr}");
+        assert_eq!(f.remedy.as_deref(), Some(PROFILE_REMEDY), "{stderr}");
+    }
+}
+
+#[test]
+fn half_of_the_config_profile_wording_is_not_enough_to_be_profile_not_configured() {
+    for stderr in [
+        "The config profile (fake-prod-profile) is not valid",
+        "A resource could not be found",
+    ] {
+        let f = classify_helper_failure(&failed(stderr), "carefeed");
+
+        assert_eq!(reason_of(&f), "aws_error", "{stderr}");
+    }
+}
+
+#[test]
+fn the_message_of_an_aws_error_is_fixed_text_whatever_the_cli_printed() {
+    let hostile_a = "ThrottlingException for 123456789012 arn:aws:iam::123456789012:user/me /Users/x/.aws/sso/cache";
+    let hostile_b = "Totally different: AKIA-CANARY \u{1b}[31mred\u{1b}[0m /var/folders/zz/tmp";
+    let pairs = [
+        (failed(hostile_a), failed(hostile_b)),
+        (
+            AwsRunError::Spawn(hostile_a.into()),
+            AwsRunError::Spawn(hostile_b.into()),
+        ),
+        (
+            AwsRunError::BadOutput(hostile_a.into()),
+            AwsRunError::BadOutput(hostile_b.into()),
+        ),
+    ];
+    for (one, other) in pairs {
+        let a = classify_helper_failure(&one, "carefeed");
+        let b = classify_helper_failure(&other, "carefeed");
+
+        assert_eq!(reason_of(&a), "aws_error", "{one:?}");
+        assert_eq!(a.message, b.message, "{one:?} vs {other:?}");
+        for text in [&a.message, &b.message] {
+            for leaked in [
+                "Throttling",
+                "123456789012",
+                "arn:",
+                "/Users",
+                "CANARY",
+                "/var/",
+                "Totally",
+            ] {
+                assert!(
+                    !text.contains(leaked),
+                    "{leaked} in the fixed message {text:?}"
+                );
+            }
+        }
+    }
+    let timeout = classify_helper_failure(&AwsRunError::Timeout, "carefeed");
+    assert_eq!(reason_of(&timeout), "aws_error");
+    assert!(!timeout.message.is_empty());
+}
+
+#[test]
+fn a_cli_that_cannot_be_started_says_so_in_fixed_words_without_the_path_or_the_os_error() {
+    let f = classify_helper_failure(
+        &AwsRunError::Spawn("No such file or directory (os error 2): /Users/x/bin/aws".into()),
+        "carefeed",
+    );
+
+    assert_eq!(reason_of(&f), "aws_error");
+    assert_eq!(f.message, "The AWS CLI could not be started.");
+    assert!(!f.message.contains("/Users"));
+    assert!(
+        !detail(&f).contains("/Users"),
+        "nor is the error passed on as detail"
+    );
+}
+
+#[test]
+fn the_message_of_an_unknown_connect_failure_is_fixed_text_whatever_the_cli_printed() {
+    let a = classify_connect_failure(
+        "boom 123456789012 arn:aws:iam::123456789012:role/x /Users/me/.aws/sso/cache \u{1b}[31m",
+        "carefeed",
+    );
+    let b = classify_connect_failure("quite another line: AKIA-CANARY\nand a second", "carefeed");
+
+    assert_eq!(reason_of(&a), "unknown");
+    assert_eq!(reason_of(&b), "unknown");
+    assert_eq!(a.message, b.message);
+    assert_eq!(a.message, "The connection ended before the session began.");
+    assert!(
+        detail(&a).contains("boom"),
+        "the operator still sees the line"
+    );
+}
+
+#[test]
+fn what_the_cli_printed_is_never_in_the_message_of_any_connect_failure() {
+    for tail in [
+        "SessionManagerPlugin is not found. CANARY-PRINT",
+        "ExpiredToken CANARY-PRINT",
+        "TargetNotConnectedException CANARY-PRINT",
+        "AccessDeniedException CANARY-PRINT",
+        "CANARY-PRINT",
+    ] {
+        let f = classify_connect_failure(tail, "carefeed");
+
+        assert!(!f.message.contains("CANARY-PRINT"), "{tail}: {}", f.message);
+        assert!(
+            !f.remedy
+                .clone()
+                .unwrap_or_default()
+                .contains("CANARY-PRINT"),
+            "{tail}: {:?}",
+            f.remedy
+        );
+        assert!(!f.reason_code.contains("CANARY-PRINT"), "{tail}");
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -425,9 +721,9 @@ fn anything_else_is_unknown_and_quotes_only_the_last_three_non_empty_lines() {
 
     assert_eq!(reason_of(&f), "unknown");
     for kept in ["bravo-2", "charlie-3", "delta-4"] {
-        assert!(f.message.contains(kept), "{}", f.message);
+        assert!(detail(&f).contains(kept), "{}", detail(&f));
     }
-    assert!(!f.message.contains("alpha-1"), "{}", f.message);
+    assert!(!detail(&f).contains("alpha-1"), "{}", detail(&f));
 }
 
 #[test]
@@ -438,10 +734,10 @@ fn the_quoted_lines_have_no_window_titles_and_no_text_reordering_characters() {
     let f = classify_connect_failure(tail, "carefeed");
 
     assert_eq!(reason_of(&f), "unknown");
-    assert!(!f.message.contains("pwned"), "{}", f.message);
-    assert!(!f.message.contains("http://x"), "{}", f.message);
+    assert!(!detail(&f).contains("pwned"), "{}", detail(&f));
+    assert!(!detail(&f).contains("http://x"), "{}", detail(&f));
     for kept in ["shown", "ABC", "link"] {
-        assert!(f.message.contains(kept), "{kept}: {}", f.message);
+        assert!(detail(&f).contains(kept), "{kept}: {}", detail(&f));
     }
 }
 
@@ -464,11 +760,15 @@ fn the_quoted_lines_have_no_escape_sequences_or_control_characters() {
 
     assert_eq!(reason_of(&f), "unknown");
     for kept in ["second", "red line", "ABC"] {
-        assert!(f.message.contains(kept), "{:?}", f.message);
+        assert!(detail(&f).contains(kept), "{:?}", detail(&f));
     }
-    assert!(!f.message.contains("FIRSTLINE"), "{:?}", f.message);
-    assert!(!f.message.contains("[31m"), "{:?}", f.message);
-    assert!(!f.message.chars().any(char::is_control), "{:?}", f.message);
+    assert!(!detail(&f).contains("FIRSTLINE"), "{:?}", detail(&f));
+    assert!(!detail(&f).contains("[31m"), "{:?}", detail(&f));
+    assert!(
+        !detail(&f).chars().any(char::is_control),
+        "{:?}",
+        detail(&f)
+    );
 }
 
 #[test]
@@ -476,11 +776,11 @@ fn a_very_long_line_is_clipped_not_dropped() {
     let f = classify_connect_failure(&format!("x{}", "x".repeat(10_000)), "carefeed");
 
     assert_eq!(reason_of(&f), "unknown");
-    assert!(f.message.contains('x'));
+    assert!(detail(&f).contains('x'));
     assert!(
-        f.message.chars().count() < 400,
+        detail(&f).chars().count() < 400,
         "{}",
-        f.message.chars().count()
+        detail(&f).chars().count()
     );
 }
 
@@ -709,9 +1009,164 @@ fn failing_the_watch_tells_the_waiting_launcher_why() {
         reason_code: "user_closed".into(),
         message: "closed".into(),
         remedy: None,
+        detail: None,
     };
 
     watch.fail(failure.clone());
 
     assert_eq!(rx.try_recv().unwrap(), ConnectEvent::Failed(failure));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// What the watch holds of the output, before and after the session began
+// ═════════════════════════════════════════════════════════════════════════════
+
+const MAX_TAIL: usize = 4096;
+const CLOSE_TAIL: usize = 512;
+
+/// A watch whose session has begun.
+fn connected_watch() -> (
+    std::sync::Arc<RemoteWatch>,
+    tokio::sync::mpsc::UnboundedReceiver<ConnectEvent>,
+) {
+    let (watch, rx) = RemoteWatch::new("carefeed");
+    watch.observe(format!("{STARTED}: ecs-execute-command-0123\n").as_bytes());
+    assert!(watch.connected());
+    (watch, rx)
+}
+
+#[test]
+fn once_the_session_began_no_more_than_the_last_512_bytes_are_held_whatever_the_chunk_size() {
+    for chunk in [1usize, 7, 100, 511, 512, 513, 2000, 5000] {
+        let (watch, _rx) = connected_watch();
+        let mut fed = 0;
+        while fed < 20_000 {
+            watch.observe(&vec![b'r'; chunk]);
+            fed += chunk;
+            assert!(
+                watch.retained_bytes() <= CLOSE_TAIL,
+                "chunk {chunk}: {} bytes held after {fed} fed",
+                watch.retained_bytes()
+            );
+        }
+        assert_eq!(
+            watch.retained_bytes(),
+            CLOSE_TAIL,
+            "chunk {chunk}: the last {CLOSE_TAIL} bytes are what is kept"
+        );
+    }
+}
+
+#[test]
+fn a_chunk_that_carries_the_start_marker_and_a_great_deal_after_it_is_trimmed_to_512_at_once() {
+    let (watch, mut rx) = RemoteWatch::new("carefeed");
+
+    let mut chunk = format!("{STARTED}: id\n").into_bytes();
+    chunk.extend(vec![b'r'; 3000]);
+    watch.observe(&chunk);
+
+    assert!(watch.connected());
+    assert_eq!(connected_events(&mut rx), 1);
+    assert!(
+        watch.retained_bytes() <= CLOSE_TAIL,
+        "{}",
+        watch.retained_bytes()
+    );
+}
+
+#[test]
+fn before_the_session_begins_up_to_4096_bytes_are_held_and_not_more() {
+    let (watch, _rx) = RemoteWatch::new("carefeed");
+    watch.observe(&vec![b'e'; MAX_TAIL - 1]);
+    assert_eq!(watch.retained_bytes(), MAX_TAIL - 1);
+    watch.observe(b"e");
+    assert_eq!(watch.retained_bytes(), MAX_TAIL);
+
+    watch.observe(&vec![b'e'; 10_000]);
+
+    assert_eq!(watch.retained_bytes(), MAX_TAIL);
+}
+
+#[test]
+fn a_long_cli_error_is_still_classified_from_the_last_4096_bytes_before_the_session() {
+    // The phrase is 4000 bytes from the end: inside the 4 KiB tail.
+    let (inside, _rx) = RemoteWatch::new("carefeed");
+    inside.observe(b"TargetNotConnectedException\n");
+    inside.observe(&vec![b'x'; MAX_TAIL - 100]);
+    assert_eq!(
+        inside.take_connect_failure().reason_code,
+        "target_not_connected"
+    );
+
+    // One more chunk pushes it out.
+    let (outside, _rx) = RemoteWatch::new("carefeed");
+    outside.observe(b"TargetNotConnectedException\n");
+    outside.observe(&vec![b'x'; MAX_TAIL]);
+    assert_eq!(outside.take_connect_failure().reason_code, "unknown");
+}
+
+#[test]
+fn a_dropped_connection_message_far_back_in_a_long_running_session_is_no_longer_seen() {
+    let (watch, _rx) = connected_watch();
+    watch.observe(b"\nCannot perform start session: EOF\n");
+    for _ in 0..8 {
+        watch.observe(&vec![b'r'; 1024]);
+    }
+
+    assert_eq!(watch.take_close_reason(), "unknown");
+}
+
+#[test]
+fn a_dropped_connection_message_among_the_last_512_bytes_is_still_network() {
+    let (watch, _rx) = connected_watch();
+    for _ in 0..8 {
+        watch.observe(&vec![b'r'; 1024]);
+    }
+    watch.observe(b"\nCannot perform start session: EOF\n");
+    watch.observe(&vec![b'r'; 300]);
+
+    assert_eq!(watch.take_close_reason(), "network");
+}
+
+#[test]
+fn the_remote_exit_marker_is_remembered_even_when_more_than_512_bytes_follow_it() {
+    let (watch, _rx) = connected_watch();
+    watch.observe(format!("\n\n{EXITING}: abc.\n").as_bytes());
+    for _ in 0..4 {
+        watch.observe(&vec![b'z'; 700]);
+    }
+
+    assert!(watch.retained_bytes() <= CLOSE_TAIL);
+    assert_eq!(watch.take_close_reason(), "remote_exit");
+}
+
+#[test]
+fn the_remote_exit_marker_split_across_two_chunks_after_the_session_began_is_still_seen() {
+    let (watch, _rx) = connected_watch();
+    watch.observe(&vec![b'r'; 5000]);
+
+    watch.observe(b"\nExiting sess");
+    watch.observe(b"ion with sessionId: abc.\n");
+    watch.observe(&vec![b'r'; 2000]);
+
+    assert_eq!(watch.take_close_reason(), "remote_exit");
+}
+
+#[test]
+fn the_start_marker_split_across_two_chunks_behind_a_full_tail_is_seen_and_then_the_tail_shrinks() {
+    let (watch, mut rx) = RemoteWatch::new("carefeed");
+    watch.observe(&vec![b'e'; MAX_TAIL + 500]);
+    assert_eq!(watch.retained_bytes(), MAX_TAIL);
+
+    watch.observe(b"Starting sess");
+    assert_eq!(connected_events(&mut rx), 0);
+    watch.observe(b"ion with SessionId: abc\n");
+
+    assert!(watch.connected());
+    assert_eq!(connected_events(&mut rx), 1);
+    assert!(
+        watch.retained_bytes() <= CLOSE_TAIL,
+        "{}",
+        watch.retained_bytes()
+    );
 }

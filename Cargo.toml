@@ -84,6 +84,8 @@ libc = "0.2"
 # Reads the enclosing .app's Info.plist to identify a socket peer (peer_verify).
 plist = "1"
 regex = "1"
+# Pins the ECS config a remote shell was confirmed against (terminal::ecs).
+sha2 = "0.10"
 
 # SQLite (Teri todos)
 rusqlite = { version = "0.32", features = ["bundled"] }

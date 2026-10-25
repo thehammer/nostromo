@@ -265,6 +265,7 @@ impl Terminal {
                 reason_code: reason_code.into(),
                 message: message.into(),
                 remedy: None,
+                detail: None,
             });
         }
     }
@@ -967,6 +968,11 @@ impl TerminalManager {
         }
     }
 
+    /// Is a verified app that can show the confirm sheet still connected?
+    pub(crate) fn operator_connected(&self) -> bool {
+        self.remote_confirm_conns().iter().any(|c| !c.is_closed())
+    }
+
     pub(crate) fn remote_confirm_conns(&self) -> Vec<mpsc::UnboundedSender<ServerMsg>> {
         self.operator_conns
             .values()
@@ -1175,6 +1181,7 @@ impl TerminalManager {
                     reason_code: watch.take_close_reason().into(),
                     message: "The session ended as soon as it began.".into(),
                     remedy: None,
+                    detail: None,
                 }
             } else {
                 watch.take_connect_failure()
