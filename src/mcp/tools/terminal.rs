@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 
 use crate::ipc::pane_registry::PaneError;
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
+use crate::terminal::TerminalError;
+
+const OPEN_TERMINAL: &str = super::OPEN_TERMINAL_TOOL;
 
 /// The one argument the tool takes.
 const WORKING_DIRECTORY: &str = "working_directory";
@@ -67,7 +70,15 @@ pub async fn open_terminal(
 
     match daemon.terminals.open_local(tag, cwd) {
         Ok(info) => json!({ "ok": true, "terminal_id": info.terminal_id, "pane_id": info.pane_id }),
-        Err(e) => json!({ "error": e.code() }),
+        Err(e) => {
+            // An agent over its quota is audited (the focus and the code only).
+            if e == TerminalError::AgentQuotaReached {
+                daemon
+                    .terminals
+                    .audit_refusal(Some(tag), "open", OPEN_TERMINAL, e.code());
+            }
+            json!({ "error": e.code() })
+        }
     }
 }
 
@@ -120,7 +131,10 @@ pub(crate) fn audit_pane_refusal(
 ) {
     if matches!(
         error,
-        PaneError::TerminalProtected | PaneError::ReservedPaneId
+        PaneError::TerminalProtected
+            | PaneError::ReservedPaneId
+            | PaneError::TerminalHidden
+            | PaneError::TerminalTooSmall
     ) {
         daemon
             .terminals

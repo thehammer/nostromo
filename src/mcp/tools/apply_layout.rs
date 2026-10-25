@@ -1086,7 +1086,7 @@ pub async fn apply_layout(state: &McpSharedState, args: &Value, pty_id: Option<&
         if !explicit_view {
             reg.get_or_init(&tag);
         }
-        reg.set_layout(&tag, &json!({ "tree": tree }))
+        reg.set_layout_from_agent(&tag, &json!({ "tree": tree }))
     };
     let tree = match set_result {
         Ok(t) => t,

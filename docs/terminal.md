@@ -70,6 +70,10 @@ Every `terminal_*` client frame is `NetworkPolicy::Refused` (`src/ipc/peer.rs`):
 | Input bytes queued for such a child | 1 MiB | `terminal_input_busy` |
 | Terminals per focus (live or ended) | 8 | `terminal_limit_reached` |
 | Terminals in the daemon | 32 | `terminal_limit_reached` |
+| Terminals agents opened, per focus (live or ended) | 2 | `terminal_agent_quota_reached` |
+| Terminals agents opened, in the daemon | 6 | `terminal_agent_quota_reached` |
+
+The agent limits are lower than the general ones on purpose: an agent in a loop (or a few agents) cannot use up the user's room, and only the user can close an agent's terminal to free its quota.
 
 Each terminal costs four threads, a replay ring of up to 4 MiB and a 10,000-row screen model, so the caps bound what a stuck or runaway client can pin. The input caps bound a stuck terminal's queue to about 1 MiB plus the one frame the writer holds. A client that needs to paste more sends it in frames of at most 256 KiB, waiting out `terminal_input_busy`.
 
@@ -83,6 +87,6 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 `~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
 
-Refused lines are capped at 120 a minute per channel, so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
+Refused lines are capped at 120 a minute per channel (one budget for the whole MCP channel, not one per focus), so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
 
 **The audit trail fails closed.** `AuditLog::open` creates the file at once, and each open checks the file can still be appended to. If it cannot (at start `nostromd` logs an error and runs with an unavailable log), `terminal_open_local` is refused with `terminal_audit_unavailable` and no process, pane or record is created. Terminals that already exist keep running.

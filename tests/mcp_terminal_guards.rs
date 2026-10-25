@@ -11,6 +11,13 @@
 //! * C11 Agent layout and content calls that would remove, replace or overwrite
 //!   a live terminal pane are refused; ratio-only changes are fine.
 //! * C12 Only the user (a verified operator connection) closes a terminal.
+//! * B1  Who may call `nostromo.open_terminal` at all: a plain agent session
+//!   only. A network-driven session, the picks session and an agent the
+//!   operator's tool policy denies it to are refused (-32001), audited without
+//!   arguments, and start nothing; a Mother worker has no focus.
+//! * S1  Agents have a lower quota than the user (`terminal_agent_quota_reached`).
+//! * N3  A layout call cannot hide a terminal behind a tab or squeeze it out
+//!   (`terminal_pane_hidden`, `terminal_pane_too_small`).
 //!
 //! The terminals here are real PTYs running the user's real login shell (the
 //! password-database shell: `portable-pty` 0.8 overwrites `$SHELL` with it, so
@@ -33,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use nostromo::data::work::picks::PICKS_TAG;
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::decisions::DecisionRegistry;
 use nostromo::ipc::pane_registry::PaneRegistry;
@@ -44,7 +52,7 @@ use nostromo::ipc::protocol::{
 };
 use nostromo::ipc::server::Server;
 use nostromo::ipc::SessionManager;
-use nostromo::mcp::server::TERMINAL_FORBIDDEN_CODE;
+use nostromo::mcp::server::{TERMINAL_FORBIDDEN_CODE, TOOL_FORBIDDEN_CODE};
 use nostromo::mcp::tools::terminal::classify_terminal_attempt;
 use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState};
 use nostromo::terminal::audit::AuditLog;
@@ -1896,5 +1904,516 @@ async fn an_ordinary_local_process_cannot_remove_a_focus_to_take_its_terminal_wi
         live.env.pane_ids(TAG).contains(&pane),
         "the leaf is still there"
     );
+    live.prove_responsive().await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// B1: who may call nostromo.open_terminal at all
+// ═════════════════════════════════════════════════════════════════════════════
+
+const OPEN_TERMINAL: &str = "nostromo.open_terminal";
+/// A second, ordinary agent focus.
+const PLAIN: &str = "cody-term-plain";
+
+/// A directory that exists and whose path can be found in a file by searching
+/// for its distinctive prefix: a refusal that leaked its arguments into the
+/// audit trail would show it.
+const DISTINCT_PREFIX: &str = "redd-distinct-cwd-";
+
+fn distinctive_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix(DISTINCT_PREFIX)
+        .tempdir()
+        .expect("tempdir")
+}
+
+/// What "nothing happened" is measured against: the trees of the focuses the
+/// call could have touched, and the child processes at that moment.
+struct Baseline {
+    trees: Vec<(String, Option<PaneTree>)>,
+    children: BTreeSet<u32>,
+}
+
+impl Baseline {
+    fn take(env: &Env, tags: &[&str]) -> Baseline {
+        Baseline {
+            trees: tags.iter().map(|t| (t.to_string(), env.tree(t))).collect(),
+            children: child_pids(),
+        }
+    }
+
+    /// No terminal, no leaf, no tree change, no new process, no `opened` line.
+    fn assert_nothing_happened(&self, env: &Env, what: &str) {
+        assert!(
+            env.all_terminals().is_empty(),
+            "{what}: a terminal was created"
+        );
+        for (tag, tree) in &self.trees {
+            assert!(
+                env.terminal_leaves(tag).is_empty(),
+                "{what}: a terminal leaf was registered in {tag}"
+            );
+            assert_eq!(&env.tree(tag), tree, "{what}: the tree of {tag} changed");
+        }
+        assert!(
+            new_children(&self.children).is_empty(),
+            "{what}: a process started"
+        );
+        assert!(
+            env.opened_lines().is_empty(),
+            "{what}: an `opened` audit line was written"
+        );
+    }
+}
+
+/// The refusal of `nostromo.open_terminal` as the agent sees it (a JSON-RPC
+/// `Forbidden`, -32001) and as the audit trail records it: one `refused` line,
+/// channel `mcp`, op `open`, code `forbidden`, naming the tool and the calling
+/// `focus`, and carrying nothing the caller passed.
+async fn assert_open_refused_as_forbidden(env: &Env, resp: &Value, focus: &str, secret: &str) {
+    assert_eq!(
+        resp["error"]["code"],
+        json!(TOOL_FORBIDDEN_CODE),
+        "expected a Forbidden error: {resp}"
+    );
+    assert_eq!(TOOL_FORBIDDEN_CODE, -32001);
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(OPEN_TERMINAL),
+        "{resp}"
+    );
+
+    let line = env
+        .audit_line("the refused open_terminal", |l| {
+            l["event"] == "refused" && l["channel"] == "mcp" && l["tool"] == OPEN_TERMINAL
+        })
+        .await;
+    assert_eq!(line["op"], "open", "{line}");
+    assert_eq!(line["code"], "forbidden", "{line}");
+    assert_eq!(
+        line["focus"], focus,
+        "the refusal must name the calling focus: {line}"
+    );
+    assert_content_free(env, &line, secret);
+    let refused: Vec<Value> = env
+        .audit()
+        .into_iter()
+        .filter(|l| l["event"] == "refused" && l["tool"] == OPEN_TERMINAL)
+        .collect();
+    assert_eq!(refused.len(), 1, "exactly one refusal line: {refused:?}");
+}
+
+/// The line and the whole audit file carry none of what the caller passed.
+fn assert_content_free(env: &Env, line: &Value, secret: &str) {
+    for key in ["working_directory", "arguments", "args", "cwd"] {
+        assert!(line.get(key).is_none(), "{key} in a refusal line: {line}");
+    }
+    let audit = std::fs::read_to_string(&env.audit_path).unwrap_or_default();
+    assert!(
+        !audit.contains(secret) && !audit.contains(DISTINCT_PREFIX),
+        "the audit trail must not contain the working_directory the caller passed: {audit}"
+    );
+}
+
+/// An operator's `~/.nostromo/tool-policy.yaml` (under the private `$HOME`),
+/// removed again when this drops, panic or not.
+struct PolicyFile(PathBuf);
+
+impl PolicyFile {
+    fn arm(yaml: &str) -> PolicyFile {
+        let path = nostromo::mcp::tool_policy::policy_path();
+        assert!(
+            path.starts_with(home_path()),
+            "the policy file must be under the private $HOME, not {}",
+            path.display()
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create ~/.nostromo");
+        let guard = PolicyFile(path.clone());
+        std::fs::write(&path, yaml).expect("write the policy");
+        guard
+    }
+}
+
+impl Drop for PolicyFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+const DENY_OPEN_TERMINAL_TO_CODY: &str =
+    "agents:\n  cody:\n    deny:\n      - nostromo.open_terminal\n";
+
+fn lists_open_terminal(tools: &[Value]) -> bool {
+    tools.iter().any(|t| t["name"] == OPEN_TERMINAL)
+}
+
+#[tokio::test]
+async fn open_terminal_is_refused_audited_and_hidden_for_a_network_driven_session() {
+    let _turn = serial().await;
+    let env = Env::start(&[]).await;
+    env.init_focus(TAG);
+    env.init_focus(PLAIN);
+    env.session_mgr
+        .lock()
+        .unwrap()
+        .sensitive_tags()
+        .mark_network_driven(TAG);
+    let mut driven = env.mcp(Some(TAG)).await;
+    let mut plain = env.mcp(Some(PLAIN)).await;
+    let work = distinctive_dir();
+    let secret = work.path().to_string_lossy().into_owned();
+
+    // The tool is not offered to the steered session, and is to an ordinary one.
+    assert!(
+        !lists_open_terminal(&driven.list_tools().await),
+        "a network-driven session must not be offered open_terminal"
+    );
+    assert!(
+        lists_open_terminal(&plain.list_tools().await),
+        "an ordinary agent session is offered open_terminal"
+    );
+
+    // Calling it by name anyway is refused.
+    let baseline = Baseline::take(&env, &[TAG, PLAIN]);
+    let resp = driven
+        .call_raw(OPEN_TERMINAL, json!({"working_directory": secret}))
+        .await;
+
+    assert_open_refused_as_forbidden(&env, &resp, TAG, &secret).await;
+    baseline.assert_nothing_happened(&env, "network-driven open_terminal");
+}
+
+#[tokio::test]
+async fn open_terminal_is_refused_and_audited_for_the_picks_session_which_has_no_focus() {
+    let _turn = serial().await;
+    let env = Env::start(&[]).await;
+    // Nothing is initialised for the picks tag: it is no focus, so an
+    // `unknown_view` answer would be the wrong reason to refuse.
+    assert!(env.tree(PICKS_TAG).is_none(), "harness: picks has no focus");
+    let mut picks = env.mcp(Some(PICKS_TAG)).await;
+    let work = distinctive_dir();
+    let secret = work.path().to_string_lossy().into_owned();
+    let baseline = Baseline::take(&env, &[PICKS_TAG]);
+
+    assert!(
+        !lists_open_terminal(&picks.list_tools().await),
+        "the picks session is offered its own tools only"
+    );
+    let resp = picks
+        .call_raw(OPEN_TERMINAL, json!({"working_directory": secret}))
+        .await;
+
+    assert_open_refused_as_forbidden(&env, &resp, PICKS_TAG, &secret).await;
+    baseline.assert_nothing_happened(&env, "picks open_terminal");
+}
+
+#[tokio::test]
+async fn open_terminal_is_refused_and_audited_for_an_agent_the_operators_policy_denies_it() {
+    let _turn = serial().await;
+    let env = Env::start(&[]).await;
+    env.init_focus(TAG);
+    // The focus is known to the daemon as an agent named `cody`.
+    env.session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(vec![focus_meta(TAG)]);
+    let _policy = PolicyFile::arm(DENY_OPEN_TERMINAL_TO_CODY);
+    let mut restricted = env.mcp(Some(TAG)).await;
+    let work = distinctive_dir();
+    let secret = work.path().to_string_lossy().into_owned();
+    let baseline = Baseline::take(&env, &[TAG]);
+
+    assert!(
+        !lists_open_terminal(&restricted.list_tools().await),
+        "harness: the policy must be in force for this agent"
+    );
+    let resp = restricted
+        .call_raw(OPEN_TERMINAL, json!({"working_directory": secret}))
+        .await;
+
+    assert_open_refused_as_forbidden(&env, &resp, TAG, &secret).await;
+    baseline.assert_nothing_happened(&env, "policy-denied open_terminal");
+}
+
+#[tokio::test]
+async fn a_mother_worker_with_no_focus_gets_unknown_view_from_open_terminal_and_nothing_opens() {
+    // A Mother worker is spawned by Mother, outside any Nostromo focus, so it
+    // has no NOSTROMO_PTY_ID. The MCP bridge then sends `pty_id: ""` (or none).
+    // That is the only way such a session reaches this surface: it is never
+    // `forbidden`, it simply has no focus to open a terminal in.
+    let _turn = serial().await;
+    let env = Env::start(&[]).await;
+    env.init_focus(TAG);
+    let work = distinctive_dir();
+    let secret = work.path().to_string_lossy().into_owned();
+    let baseline = Baseline::take(&env, &[TAG]);
+
+    for (what, mut worker) in [
+        ("an empty pty_id", env.mcp(Some("")).await),
+        ("no pty_id", env.mcp(None).await),
+    ] {
+        let res = worker
+            .call(OPEN_TERMINAL, json!({"working_directory": secret}))
+            .await;
+
+        assert_eq!(res["error"], "unknown_view", "{what}: {res}");
+        baseline.assert_nothing_happened(&env, what);
+    }
+}
+
+#[tokio::test]
+async fn open_terminal_is_allowed_for_a_plain_agent_session_and_audited_as_opened() {
+    let _turn = serial().await;
+    let env = Env::start(&[]).await;
+    env.init_focus(TAG);
+    env.session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(vec![focus_meta(TAG)]);
+    // A policy that withdraws the tool from some other agent changes nothing here.
+    let _policy = PolicyFile::arm("agents:\n  perri:\n    deny:\n      - nostromo.open_terminal\n");
+    let mut mcp = env.mcp(Some(TAG)).await;
+    let work = distinctive_dir();
+
+    assert!(lists_open_terminal(&mcp.list_tools().await));
+    let res = mcp
+        .call(
+            OPEN_TERMINAL,
+            json!({"working_directory": work.path().to_string_lossy()}),
+        )
+        .await;
+
+    assert_eq!(res["ok"], true, "{res}");
+    let opened = env.opened_lines();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["requested_by"], "focus", "{}", opened[0]);
+    assert_eq!(opened[0]["tag"], TAG, "{}", opened[0]);
+    assert!(
+        !env.audit()
+            .iter()
+            .any(|l| l["event"] == "refused" && l["tool"] == OPEN_TERMINAL),
+        "an allowed open is not a refusal"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// S1: agents have a smaller terminal quota than the user
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn user_open_msg(tag: &str, request_id: &str) -> ClientMsg {
+    ClientMsg::TerminalOpenLocal {
+        tag: tag.into(),
+        relative_to: None,
+        position: None,
+        cwd: None,
+        client_request_id: request_id.into(),
+    }
+}
+
+#[tokio::test]
+async fn the_third_open_terminal_in_a_focus_hits_the_agent_quota_while_the_user_can_still_open() {
+    let _turn = serial().await;
+    let env = Env::start(&[Peer::App]).await;
+    env.init_focus(TAG);
+    let mut app = env.app(vec![Topic::Terminal, Topic::Layout]).await;
+    let mut mcp = env.mcp(Some(TAG)).await;
+    let work = TempDir::new().expect("tempdir");
+    let before = child_pids();
+
+    for n in 1..=2 {
+        let res = mcp
+            .call(
+                OPEN_TERMINAL,
+                json!({"working_directory": work.path().to_string_lossy()}),
+            )
+            .await;
+        assert_eq!(res["ok"], true, "agent terminal {n}: {res}");
+    }
+    let leaves = env.pane_ids(TAG);
+    let shells = new_children(&before).len();
+    assert_eq!(shells, 2, "harness: two shells so far");
+
+    let distinct = distinctive_dir();
+    let secret = distinct.path().to_string_lossy().into_owned();
+    let res = mcp
+        .call(OPEN_TERMINAL, json!({"working_directory": secret}))
+        .await;
+
+    assert_eq!(res, json!({"error": "terminal_agent_quota_reached"}));
+    assert_eq!(env.opened_lines().len(), 2, "only two opens were audited");
+    assert_eq!(env.all_terminals().len(), 2);
+    assert_eq!(env.pane_ids(TAG), leaves, "no leaf was placed");
+    assert_eq!(new_children(&before).len(), shells, "no process started");
+    let line = env
+        .audit_line("the quota refusal", |l| {
+            l["event"] == "refused" && l["channel"] == "mcp" && l["tool"] == OPEN_TERMINAL
+        })
+        .await;
+    assert_eq!(line["op"], "open", "{line}");
+    assert_eq!(line["code"], "terminal_agent_quota_reached", "{line}");
+    assert_eq!(line["focus"], TAG, "{line}");
+    assert_content_free(&env, &line, &secret);
+
+    // The rest of the focus is the user's.
+    let from = app.mark();
+    app.send(&user_open_msg(TAG, "user-after-quota")).await;
+    let opened = app
+        .wait_for(from, "the user's terminal", |m| {
+            matches!(m, ServerMsg::TerminalState { terminal }
+                if terminal.opened_by_request.as_deref() == Some("user-after-quota"))
+                || matches!(m, ServerMsg::TerminalRefused { .. })
+        })
+        .await;
+    let ServerMsg::TerminalState { terminal } = opened else {
+        panic!("the user's open was refused: {opened:?}");
+    };
+    assert_eq!(terminal.tag, TAG);
+    assert_eq!(terminal.requested_by.kind, "user");
+    assert_eq!(env.all_terminals().len(), 3);
+    assert_eq!(env.opened_lines().len(), 3);
+
+    // The user's terminal did not free the agent's quota.
+    let res = mcp.call(OPEN_TERMINAL, json!({})).await;
+    assert_eq!(res, json!({"error": "terminal_agent_quota_reached"}));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// N3: a layout call cannot hide a terminal behind a tab or squeeze it out
+// ═════════════════════════════════════════════════════════════════════════════
+
+impl Live {
+    /// Like `assert_protected`, for a refusal that is not `terminal_pane_protected`.
+    async fn assert_layout_refused(&mut self, tool: &str, args: Value, code: &str) {
+        let tree_before = self.env.tree(TAG);
+        drain(&mut self.rx);
+        let since = self.app.mark();
+        let lines_before = self
+            .env
+            .audit()
+            .iter()
+            .filter(|l| l["event"] == "refused" && l["tool"] == tool && l["code"] == code)
+            .count();
+
+        let res = self.mcp.call(tool, args).await;
+
+        assert_eq!(res["error"], code, "{tool}: {res}");
+        let line = self
+            .env
+            .audit_line(&format!("a {code} refusal of {tool}"), |l| {
+                l["event"] == "refused"
+                    && l["channel"] == "mcp"
+                    && l["tool"] == tool
+                    && l["code"] == code
+            })
+            .await;
+        assert_eq!(line["op"], "layout", "{line}");
+        assert_eq!(line["focus"], TAG, "{line}");
+        let lines_after = self
+            .env
+            .audit()
+            .iter()
+            .filter(|l| l["event"] == "refused" && l["tool"] == tool && l["code"] == code)
+            .count();
+        assert_eq!(lines_after, lines_before + 1, "one new refusal line");
+        assert_eq!(self.env.tree(TAG), tree_before, "{tool}: the tree changed");
+        let after = drain(&mut self.rx);
+        assert!(
+            !after
+                .iter()
+                .any(|m| matches!(m, ServerMsg::FocusLayout { tag, .. } if tag == TAG)),
+            "{tool}: a refused call must not broadcast a layout: {after:?}"
+        );
+        self.assert_unchanged(since, tool).await;
+    }
+}
+
+#[tokio::test]
+async fn set_pane_layout_cannot_bury_a_terminal_in_an_inactive_tab_or_squeeze_it_out() {
+    let _turn = serial().await;
+    let mut live = Live::start().await;
+    let pane = live.pane().to_string();
+
+    // An inactive tab.
+    live.assert_layout_refused(
+        "nostromo.set_pane_layout",
+        json!({"view_id": TAG, "ratios": {
+            "kind": "split",
+            "direction": "horizontal",
+            "children": [
+                {"kind": "leaf", "pane_id": "repl"},
+                {"kind": "tabs", "children": [
+                    {"kind": "leaf", "pane_id": "notes"},
+                    {"kind": "leaf", "pane_id": pane}
+                ], "labels": ["Notes", "Shell"], "active": 0}
+            ],
+            "ratios": [0.5, 0.5]
+        }}),
+        "terminal_pane_hidden",
+    )
+    .await;
+
+    // A full tree giving it 5% of its split.
+    live.assert_layout_refused(
+        "nostromo.set_pane_layout",
+        json!({"view_id": TAG, "ratios": {
+            "kind": "split",
+            "direction": "horizontal",
+            "children": [
+                {"kind": "leaf", "pane_id": "repl"},
+                {"kind": "leaf", "pane_id": pane}
+            ],
+            "ratios": [0.95, 0.05]
+        }}),
+        "terminal_pane_too_small",
+    )
+    .await;
+
+    // The flat ratio map, to nothing.
+    live.assert_layout_refused(
+        "nostromo.set_pane_layout",
+        json!({"view_id": TAG, "ratios": {"repl": 1.0, pane.clone(): 0.0}}),
+        "terminal_pane_too_small",
+    )
+    .await;
+
+    live.prove_responsive().await;
+}
+
+#[tokio::test]
+async fn apply_layout_cannot_bury_a_terminal_in_an_inactive_tab_or_squeeze_it_out() {
+    let _turn = serial().await;
+    let mut live = Live::start().await;
+    let pane = live.pane().to_string();
+
+    live.assert_layout_refused(
+        "nostromo.apply_layout",
+        json!({"tree": {
+            "direction": "horizontal",
+            "ratios": [0.5, 0.5],
+            "children": [
+                {"pane": "repl"},
+                {"tabs": [
+                    {"pane": "notes", "label": "Notes"},
+                    {"pane": pane, "label": "Shell"}
+                ], "active": "notes"}
+            ]
+        }}),
+        "terminal_pane_hidden",
+    )
+    .await;
+
+    live.assert_layout_refused(
+        "nostromo.apply_layout",
+        json!({"tree": {
+            "direction": "horizontal",
+            "ratios": [0.95, 0.05],
+            "children": [{"pane": "repl"}, {"pane": pane}]
+        }}),
+        "terminal_pane_too_small",
+    )
+    .await;
+
     live.prove_responsive().await;
 }

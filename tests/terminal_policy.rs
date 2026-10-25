@@ -7,6 +7,13 @@
 //! terminals (`TerminalManager`), or the input verbs. This test reads every
 //! `.rs` file under `src/mcp/` as text and fails if any of them mentions one.
 //!
+//! The scan is a tripwire, not the guard: it catches a careless edit by name,
+//! and a determined one could alias around it (`use ... as`, a re-export, a
+//! macro). The real guard is structural: `TerminalAgentApi.manager` is a
+//! private field, so MCP code holds no `TerminalManager` and no
+//! `OperatorCap` unless some other module hands one over, and the only way to
+//! get a cap is `terminal::access::mint`, which the scan also names.
+//!
 //! The scan is a function over `(path, contents)` pairs, so the test also
 //! shows, against in-memory files, that it would fail the moment a forbidden
 //! token is added under `src/mcp/`.
@@ -15,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 /// Words no file under `src/mcp/` may contain (`TerminalAgentApi` is the one
 /// terminal name that is allowed there).
-const FORBIDDEN: [&str; 9] = [
+const FORBIDDEN: [&str; 11] = [
     "OperatorCap",
     "TerminalManager",
     "terminal_input",
@@ -28,6 +35,11 @@ const FORBIDDEN: [&str; 9] = [
     "register_terminal_leaf",
     "insert_terminal_leaf",
     "remove_terminal_leaf",
+    // `terminal::access::mint(PeerTrust::OperatorApp)` is `pub(crate)`, so it
+    // is reachable from `src/mcp/` and hands out the `OperatorCap` that
+    // unlocks input, attach and close. It contains none of the tokens above.
+    "access::",
+    "mint(",
 ];
 
 /// One forbidden token found in one file.
@@ -141,4 +153,43 @@ fn the_scan_lets_the_agent_api_and_ordinary_code_through() {
     let clean = "use crate::terminal::TerminalAgentApi;\nfn f(api: &TerminalAgentApi) { api.open_local(\"t\", None); }\nlet y = x.input; let z = inputs();\n";
 
     assert!(scan([("src/mcp/tools/ok.rs", clean)]).is_empty());
+}
+
+#[test]
+fn the_scan_reports_a_line_under_src_mcp_that_mints_an_operator_cap() {
+    // The realistic way to get a cap from `src/mcp/`: it names none of the
+    // older tokens (no `OperatorCap`, no `TerminalManager`), only the path.
+    let contents = "fn sneaky() {\n    let cap = crate::terminal::access::mint(PeerTrust::OperatorApp);\n    use_it(&cap);\n}\n";
+
+    let violations = scan([("src/mcp/tools/sneaky.rs", contents)]);
+
+    let mut tokens: Vec<&str> = violations.iter().map(|v| v.token).collect();
+    tokens.sort_unstable();
+    assert_eq!(
+        tokens,
+        vec!["access::", "mint("],
+        "both tokens of the mint call must be reported: {violations:#?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .all(|v| v.path == "src/mcp/tools/sneaky.rs" && v.line == 2),
+        "each must name the file and the line of the call: {violations:#?}"
+    );
+}
+
+#[test]
+fn the_real_src_mcp_tree_names_neither_the_access_module_nor_a_mint_call() {
+    let sources = mcp_sources();
+    assert!(sources.len() > 10, "expected the whole MCP tree");
+
+    let violations: Vec<_> = scan(sources.iter().map(|(p, c)| (p.as_str(), c.as_str())))
+        .into_iter()
+        .filter(|v| v.token == "access::" || v.token == "mint(")
+        .collect();
+
+    assert!(
+        violations.is_empty(),
+        "src/mcp/ must not reach the way to get an OperatorCap: {violations:#?}"
+    );
 }

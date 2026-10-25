@@ -74,6 +74,15 @@ pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
 pub const MAX_TERMINALS_PER_FOCUS: usize = 8;
 /// Terminals the daemon may have at once, across all focuses.
 pub const MAX_TERMINALS: usize = 32;
+/// Terminals agents may have opened, in one focus (live or ended). Lower than
+/// [`MAX_TERMINALS_PER_FOCUS`] so an agent in a loop cannot fill a focus: the
+/// rest is the user's.
+pub const MAX_AGENT_TERMINALS_PER_FOCUS: usize = 2;
+/// Terminals agents may have opened across the daemon. Lower than
+/// [`MAX_TERMINALS`], so a few agents cannot fill the daemon either.
+pub const MAX_AGENT_TERMINALS: usize = 6;
+/// `requested_by.kind` of a terminal an agent's focus opened.
+const AGENT_REQUESTER: &str = "focus";
 
 /// A verified operator-app connection, as the terminal manager knows it.
 pub struct OperatorConn {
@@ -98,6 +107,10 @@ pub enum TerminalError {
     InputTooLarge,
     /// [`MAX_TERMINALS_PER_FOCUS`] or [`MAX_TERMINALS`] terminals exist already.
     TooManyTerminals,
+    /// An agent has opened [`MAX_AGENT_TERMINALS_PER_FOCUS`] terminals in this
+    /// focus, or agents [`MAX_AGENT_TERMINALS`] in the daemon: the user can
+    /// still open more, and closes the agents' to free their quota.
+    AgentQuotaReached,
     /// The audit trail cannot be written, so no terminal is opened.
     AuditUnavailable,
     /// The daemon is stopping.
@@ -120,6 +133,7 @@ impl TerminalError {
             TerminalError::InputBusy => "terminal_input_busy",
             TerminalError::InputTooLarge => "terminal_input_too_large",
             TerminalError::TooManyTerminals => "terminal_limit_reached",
+            TerminalError::AgentQuotaReached => "terminal_agent_quota_reached",
             TerminalError::AuditUnavailable => "terminal_audit_unavailable",
             TerminalError::ShuttingDown => "daemon_shutting_down",
             TerminalError::InvalidWorkingDirectory => "invalid_working_directory",
@@ -353,7 +367,7 @@ impl TerminalManager {
             ..OpenLocal::default()
         };
         let requester = TerminalRequester {
-            kind: "focus".into(),
+            kind: AGENT_REQUESTER.into(),
             tag: Some(tag.to_string()),
         };
         self.open(req, requester)
@@ -381,6 +395,19 @@ impl TerminalManager {
                 >= MAX_TERMINALS_PER_FOCUS
         {
             return Err(TerminalError::TooManyTerminals);
+        }
+        if requested_by.kind == AGENT_REQUESTER {
+            let by_agents = || {
+                self.terminals
+                    .values()
+                    .filter(|t| t.info.requested_by.kind == AGENT_REQUESTER)
+            };
+            if by_agents().count() >= MAX_AGENT_TERMINALS
+                || by_agents().filter(|t| t.info.tag == req.tag).count()
+                    >= MAX_AGENT_TERMINALS_PER_FOCUS
+            {
+                return Err(TerminalError::AgentQuotaReached);
+            }
         }
         let cwd = resolve_cwd(req.cwd.as_deref())?;
         let position = SplitPosition::parse(req.position.as_deref().unwrap_or(DEFAULT_POSITION))

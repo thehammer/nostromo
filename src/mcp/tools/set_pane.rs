@@ -97,7 +97,7 @@ pub async fn set_pane_layout(state: &McpSharedState, args: &Value, pty_id: Optio
     if let Some(daemon) = &state.daemon {
         let result = {
             let mut reg = daemon.pane_registry.lock().unwrap();
-            reg.set_layout(&view_id, &ratios)
+            reg.set_layout_from_agent(&view_id, &ratios)
         };
         return match result {
             Ok(tree) => {
