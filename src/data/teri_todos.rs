@@ -172,7 +172,18 @@ impl TeriTodosNativeSource {
 
 fn db_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".teri").join("teri.db")
+    db_path_in(Path::new(&home))
+}
+
+/// Teri's store under `home`: `<home>/.teri/teri.db`.
+pub fn db_path_in(home: &Path) -> PathBuf {
+    home.join(".teri").join("teri.db")
+}
+
+/// One read-only read of the store at `db`, outside the watch loop (Huey's
+/// context reads todo titles whether or not Teri is enabled).
+pub fn read_snapshot(db: &Path) -> TeriTodosSnapshot {
+    fetch_once(db.to_path_buf())
 }
 
 async fn run(path: PathBuf, tx: watch::Sender<Option<TeriTodosSnapshot>>, refresh: Arc<Notify>) {

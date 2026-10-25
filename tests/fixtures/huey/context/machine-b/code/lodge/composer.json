@@ -1,0 +1,9 @@
+{
+  "name": "example/lodge",
+  "description": "Invoicing app for small lodges",
+  "homepage": "https://example.invalid/CANARY-MANIFEST-b-77e1",
+  "require": {
+    "php": "^8.2",
+    "laravel/framework": "^11.0"
+  }
+}
