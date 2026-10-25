@@ -247,8 +247,6 @@ final class MotherJobDetail: NSView {
     /// The stack currently inside `actionsContainer`; a stable object while the identity holds.
     private(set) var actionStack: NSStackView?
     private var actionIdentity: ActionIdentity?
-    /// RED-STATE STUB (replaced by the real scroll view in the next commit).
-    let contentScrollView = NSScrollView()
     private let logSectionLabel = NSTextField(labelWithString: "LOG TAIL")
     let logScrollView   = NSScrollView()
     let logTextView     = NSTextView()
