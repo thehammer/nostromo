@@ -42,35 +42,63 @@ struct FredView: View {
     private var authBannerSection: some View {
         if let prompt = store.fredMailbox?.authPrompt {
             Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Microsoft sign-in required", systemImage: "person.badge.key")
-                        .font(.headline)
-                        .foregroundStyle(.orange)
-
-                    Text("Visit the URL below and enter the code to authenticate.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-
-                    Link(prompt.verificationUri,
-                         destination: URL(string: prompt.verificationUri)!)
-                        .font(.caption)
-
-                    HStack {
-                        Text("Code:")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        Text(prompt.userCode)
-                            .font(.system(.title3, design: .monospaced).weight(.bold))
-                            .foregroundStyle(.primary)
-                    }
-
-                    Text("Expires \(expiryText(prompt.expiresAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                if prompt.isBrowserSignIn {
+                    browserSignInBanner(prompt)
+                } else {
+                    deviceCodeSignInBanner(prompt)
                 }
-                .padding(.vertical, 4)
             }
         }
+    }
+
+    /// Google sign-in redirects to 127.0.0.1 on the daemon's Mac, so it cannot be
+    /// completed from this device: no link, no code, just where to go.
+    private func browserSignInBanner(_ prompt: DeviceFlowPrompt) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(prompt.account.map { "Google sign-in required (\($0))" } ?? "Google sign-in required",
+                  systemImage: "person.badge.key")
+                .font(.headline)
+                .foregroundStyle(.orange)
+
+            Text("Open the Fred pane on the Mac running Nostromo to sign in.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func deviceCodeSignInBanner(_ prompt: DeviceFlowPrompt) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Microsoft sign-in required", systemImage: "person.badge.key")
+                .font(.headline)
+                .foregroundStyle(.orange)
+
+            Text("Visit the URL below and enter the code to authenticate.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if let url = URL(string: prompt.verificationUri) {
+                Link(prompt.verificationUri, destination: url)
+                    .font(.caption)
+            } else {
+                Text(prompt.verificationUri)
+                    .font(.caption)
+            }
+
+            HStack {
+                Text("Code:")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(prompt.userCode)
+                    .font(.system(.title3, design: .monospaced).weight(.bold))
+                    .foregroundStyle(.primary)
+            }
+
+            Text("Expires \(expiryText(prompt.expiresAt))")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 4)
     }
 
     // MARK: - Mailbox section

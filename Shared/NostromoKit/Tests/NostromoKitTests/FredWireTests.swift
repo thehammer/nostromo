@@ -223,6 +223,153 @@ final class FredWireTests: XCTestCase {
         XCTAssertNotNil(mailbox.items.first?.receivedAt,
                         "received_at with fractional seconds should parse to a Date")
     }
+
+    // MARK: - auth_prompt: kind, account and provider
+
+    private func decodePrompt(_ json: String) throws -> DeviceFlowPrompt {
+        try nostromo.decode(DeviceFlowPrompt.self, from: decode(json))
+    }
+
+    private func encodedKeys(_ prompt: DeviceFlowPrompt) throws -> Set<String> {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let object = try JSONSerialization.jsonObject(with: encoder.encode(prompt))
+        return Set(try XCTUnwrap(object as? [String: Any]).keys)
+    }
+
+    func testAPromptFromAnOlderDaemonDecodesAsADeviceCodePrompt() throws {
+        let prompt = try decodePrompt("""
+        {
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "user_code": "ABCD-1234",
+            "expires_at": "2026-06-08T09:30:00Z"
+        }
+        """)
+        XCTAssertEqual(prompt.kind, "device_code")
+        XCTAssertNil(prompt.account)
+        XCTAssertNil(prompt.provider)
+        XCTAssertFalse(prompt.isBrowserSignIn)
+        XCTAssertEqual(prompt.userCode, "ABCD-1234")
+    }
+
+    func testABrowserPromptDecodesItsKindAccountAndProvider() throws {
+        let uri = "https://accounts.google.com/o/oauth2/v2/auth?client_id=abc&state=xyz"
+        let prompt = try decodePrompt("""
+        {
+            "kind": "browser",
+            "account": "personal",
+            "provider": "google",
+            "verification_uri": "\(uri)",
+            "user_code": "",
+            "expires_at": "2026-06-08T09:30:00Z"
+        }
+        """)
+        XCTAssertEqual(prompt.kind, "browser")
+        XCTAssertEqual(prompt.account, "personal")
+        XCTAssertEqual(prompt.provider, "google")
+        XCTAssertTrue(prompt.isBrowserSignIn)
+        XCTAssertEqual(prompt.verificationUri, uri)
+        XCTAssertEqual(prompt.userCode, "")
+    }
+
+    func testADeviceCodePromptFromACurrentDaemonIsNotABrowserSignIn() throws {
+        let prompt = try decodePrompt("""
+        {
+            "kind": "device_code",
+            "provider": "microsoft",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "user_code": "ABCD-1234",
+            "expires_at": "2026-06-08T09:30:00Z"
+        }
+        """)
+        XCTAssertEqual(prompt.kind, "device_code")
+        XCTAssertEqual(prompt.provider, "microsoft")
+        XCTAssertNil(prompt.account)
+        XCTAssertFalse(prompt.isBrowserSignIn)
+    }
+
+    func testABrowserPromptRidesInsideAFredStateFrame() throws {
+        let json = """
+        {
+            "type": "fred_state",
+            "mailbox": {
+                "unread_count": 0, "items": [], "stale": false,
+                "auth_prompt": {
+                    "kind": "browser", "account": "personal", "provider": "google",
+                    "verification_uri": "https://accounts.google.com/o/oauth2/v2/auth?x=1",
+                    "user_code": "", "expires_at": "2026-06-08T09:30:00Z"
+                }
+            },
+            "calendar": {
+                "events": [], "sweater": "sage", "stale": false,
+                "auth_prompt": {
+                    "kind": "browser", "account": "work", "provider": "google",
+                    "verification_uri": "https://accounts.google.com/o/oauth2/v2/auth?x=2",
+                    "user_code": "", "expires_at": "2026-06-08T09:30:00Z"
+                }
+            }
+        }
+        """.data(using: .utf8)!
+        // NostromoKit's CalendarSnapshot does not decode `auth_prompt` (iOS shows the mailbox's);
+        // the calendar's prompt must still not break the frame.
+        guard case .fredState(let mailbox, _) = ServerMsg.decode(from: json) else {
+            return XCTFail("expected .fredState")
+        }
+        XCTAssertEqual(mailbox.authPrompt?.account, "personal")
+        XCTAssertEqual(mailbox.authPrompt?.isBrowserSignIn, true)
+    }
+
+    func testAPromptRoundTripsThroughEncodeAndDecodeWithItsOptionalFields() throws {
+        let expires = Date(timeIntervalSince1970: 1_780_000_000)
+        let original = DeviceFlowPrompt(verificationUri: "https://accounts.google.com/o/oauth2/v2/auth?x=1",
+                                        userCode: "", expiresAt: expires,
+                                        kind: "browser", account: "personal", provider: "google")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let back = try nostromo.decode(DeviceFlowPrompt.self, from: encoder.encode(original))
+        XCTAssertEqual(back, original)
+        XCTAssertEqual(back.kind, "browser")
+        XCTAssertEqual(back.account, "personal")
+        XCTAssertEqual(back.provider, "google")
+    }
+
+    func testAPromptRoundTripsThroughEncodeAndDecodeWithoutItsOptionalFields() throws {
+        let original = DeviceFlowPrompt(verificationUri: "https://microsoft.com/devicelogin",
+                                        userCode: "ABCD-1234",
+                                        expiresAt: Date(timeIntervalSince1970: 1_780_000_000))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let back = try nostromo.decode(DeviceFlowPrompt.self, from: encoder.encode(original))
+        XCTAssertEqual(back, original)
+        XCTAssertEqual(back.kind, "device_code", "the default kind for a prompt built the old way")
+        XCTAssertNil(back.account)
+        XCTAssertNil(back.provider)
+    }
+
+    func testEncodingAPromptWithoutAccountOrProviderOmitsThoseKeys() throws {
+        let prompt = DeviceFlowPrompt(verificationUri: "https://microsoft.com/devicelogin",
+                                      userCode: "ABCD-1234",
+                                      expiresAt: Date(timeIntervalSince1970: 1_780_000_000))
+        let keys = try encodedKeys(prompt)
+        XCTAssertFalse(keys.contains("account"))
+        XCTAssertFalse(keys.contains("provider"))
+        XCTAssertTrue(keys.isSuperset(of: ["verification_uri", "user_code", "expires_at"]))
+    }
+
+    func testEncodingAPromptWithAccountAndProviderIncludesThemUnderTheWireNames() throws {
+        let prompt = DeviceFlowPrompt(verificationUri: "https://accounts.google.com/o/oauth2/v2/auth?x=1",
+                                      userCode: "",
+                                      expiresAt: Date(timeIntervalSince1970: 1_780_000_000),
+                                      kind: "browser", account: "personal", provider: "google")
+        let keys = try encodedKeys(prompt)
+        XCTAssertTrue(keys.isSuperset(of: ["kind", "account", "provider"]))
+    }
+
+    func testThePromptInitStaysSourceCompatibleWithTheThreeArgumentForm() {
+        let prompt = DeviceFlowPrompt(verificationUri: "u", userCode: "c", expiresAt: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(prompt.kind, "device_code")
+        XCTAssertFalse(prompt.isBrowserSignIn)
+    }
 }
 
 final class WithheldWireTests: XCTestCase {

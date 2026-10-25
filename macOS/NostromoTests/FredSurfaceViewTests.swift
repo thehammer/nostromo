@@ -171,10 +171,18 @@ final class FredSurfaceViewTests: XCTestCase {
         var uri = "https://microsoft.com/devicelogin"
         var code = "ABCD-EFGH"
         var expires: Date
+        /// Emitted only when set: current calls model an older daemon that sends none of these.
+        var kind: String?
+        var account: String?
+        var provider: String?
     }
 
     private func promptJSON(_ p: Prompt) -> [String: Any] {
-        ["verification_uri": p.uri, "user_code": p.code, "expires_at": isoOut.string(from: p.expires)]
+        var o: [String: Any] = ["verification_uri": p.uri, "user_code": p.code, "expires_at": isoOut.string(from: p.expires)]
+        if let kind = p.kind { o["kind"] = kind }
+        if let account = p.account { o["account"] = account }
+        if let provider = p.provider { o["provider"] = provider }
+        return o
     }
 
     /// The Outlook link a list item carries.
@@ -196,6 +204,8 @@ final class FredSurfaceViewTests: XCTestCase {
         /// Defaults to `m-<index>`.
         var id: String?
         var link: Link = .standard
+        /// The config label of the account the item came from. Omitted from the wire when nil.
+        var account: String?
     }
 
     private func mailbox(state: String? = "fresh",
@@ -224,6 +234,7 @@ final class FredSurfaceViewTests: XCTestCase {
                 case .absent: break
                 case .custom(let url): o["web_link"] = url
                 }
+                if let account = m.account { o["account"] = account }
                 return o
             },
         ]
@@ -246,6 +257,8 @@ final class FredSurfaceViewTests: XCTestCase {
         /// Defaults to `e-<index>`.
         var id: String?
         var link: Link = .standard
+        /// The config label of the account the event came from. Omitted from the wire when nil.
+        var account: String?
     }
 
     private func calendar(state: String? = "fresh",
@@ -276,6 +289,7 @@ final class FredSurfaceViewTests: XCTestCase {
                 case .absent: break
                 case .custom(let url): o["web_link"] = url
                 }
+                if let account = e.account { o["account"] = account }
                 return o
             },
         ]
@@ -1029,6 +1043,148 @@ final class FredSurfaceViewTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), "WXYZ-1234", "Today's Copy code copies the code it displays")
     }
 
+    // MARK: - Sign-in (Google browser flow)
+
+    private static let googleAuthURL = "https://accounts.google.com/o/oauth2/v2/auth?client_id=1234.apps.googleusercontent.com"
+        + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A53682%2Fcallback&response_type=code"
+        + "&scope=https%3A%2F%2Fmail.google.com%2F%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly"
+        + "&code_challenge=abcdefghijklmnopqrstuvwxyz0123456789&code_challenge_method=S256&state=xyz"
+
+    /// What a current daemon sends for a Google account: no code, the whole auth URL.
+    private func browserPrompt(account: String? = "personal", expires: String = "09:42") -> Prompt {
+        Prompt(uri: Self.googleAuthURL, code: "", expires: at(expires),
+               kind: "browser", account: account, provider: "google")
+    }
+
+    private func unauthenticated(_ prompt: Prompt) throws -> (MailboxSnapshot, CalendarSnapshot) {
+        (try mailbox(state: "unauthenticated", unread: 0, prompt: prompt), try calendar(state: "unauthenticated"))
+    }
+
+    func testABrowserPromptOffersAGoogleSignInButtonInsteadOfAURLAndACode() throws {
+        let (m, c) = try unauthenticated(browserPrompt(account: "personal"))
+        makeView(mailbox: m, calendar: c)
+        for pane in ["inbox", "today"] {
+            XCTAssertTrue(isShown("fred.\(pane).signin"), "\(pane) shows the sign-in group")
+            XCTAssertEqual(try text("fred.\(pane).signin.intro"), "Sign in to Google (personal)")
+            let url: NSView = try requireView("fred.\(pane).signin.url")
+            XCTAssertTrue(visible(url))
+            XCTAssertEqual(stringOf(url), "Open Google sign-in")
+            XCTAssertEqual(url.accessibilityLabel(), "Open the Google sign-in page")
+            XCTAssertFalse(isShown("fred.\(pane).signin.code"), "\(pane): a browser sign-in has no code to show")
+            XCTAssertFalse(isShown("fred.\(pane).signin.copy"), "\(pane): and nothing to copy")
+            XCTAssertEqual(try text("fred.\(pane).signin.expiry"), "Link expires at 9:42 am")
+            XCTAssertNil(try bannerMessage("fred.\(pane).banner"), "the sign-in group replaces the generic banner")
+        }
+    }
+
+    func testTheLongGoogleAuthURLIsNeverShownToTheUser() throws {
+        let (m, c) = try unauthenticated(browserPrompt())
+        makeView(mailbox: m, calendar: c)
+        for shown in allText() {
+            XCTAssertFalse(shown.contains("accounts.google.com"), "visible text leaks the auth URL: \(shown)")
+            XCTAssertFalse(shown.contains("code_challenge"), "visible text leaks the auth URL: \(shown)")
+        }
+        let url: NSView = try requireView("fred.inbox.signin.url")
+        XCTAssertFalse((stringOf(url) ?? "").contains("google.com/o/oauth2"))
+    }
+
+    func testABrowserPromptWithoutAnAccountSaysJustSignInToGoogle() throws {
+        let (m, c) = try unauthenticated(browserPrompt(account: nil))
+        makeView(mailbox: m, calendar: c)
+        for pane in ["inbox", "today"] {
+            XCTAssertEqual(try text("fred.\(pane).signin.intro"), "Sign in to Google")
+            XCTAssertEqual(stringOf(try requireView("fred.\(pane).signin.url") as NSView), "Open Google sign-in")
+        }
+    }
+
+    func testTodayShowsItsOwnBrowserPromptAccount() throws {
+        makeView(mailbox: try mailbox(state: "unauthenticated", unread: 0, prompt: browserPrompt(account: "personal")),
+                 calendar: try calendar(state: "unauthenticated", prompt: browserPrompt(account: "work")))
+        XCTAssertEqual(try text("fred.inbox.signin.intro"), "Sign in to Google (personal)")
+        XCTAssertEqual(try text("fred.today.signin.intro"), "Sign in to Google (work)")
+    }
+
+    func testABrowserPromptExpiryReadsLinkExpiredOnceItIsPast() throws {
+        let (m, c) = try unauthenticated(browserPrompt(expires: "09:42"))
+        makeView(mailbox: m, calendar: c)
+        XCTAssertEqual(try text("fred.inbox.signin.expiry"), "Link expires at 9:42 am")
+        advance(to: at("09:50"))
+        XCTAssertEqual(try text("fred.inbox.signin.expiry"), "Link expired at 9:42 am; a new one will appear shortly")
+        XCTAssertEqual(try text("fred.today.signin.expiry"), "Link expired at 9:42 am; a new one will appear shortly")
+    }
+
+    func testABrowserPromptExpiryIsShownInTheInjectedTimeZone() throws {
+        makeView(mailbox: try mailbox(state: "unauthenticated", unread: 0, prompt: browserPrompt(expires: "09:42")),
+                 calendar: nil,
+                 timeZone: TimeZone(identifier: "America/New_York")!)
+        XCTAssertEqual(try text("fred.inbox.signin.expiry"), "Link expires at 10:42 am")
+    }
+
+    func testADeviceCodePromptWithAnExplicitKindLooksExactlyAsBefore() throws {
+        let p = Prompt(code: "ABCD-EFGH", expires: at("09:42"), kind: "device_code", provider: "microsoft")
+        let (m, c) = try unauthenticated(p)
+        makeView(mailbox: m, calendar: c)
+        for pane in ["inbox", "today"] {
+            XCTAssertEqual(try text("fred.\(pane).signin.intro"), "Sign in to Microsoft 365")
+            let url: NSView = try requireView("fred.\(pane).signin.url")
+            XCTAssertEqual(stringOf(url), "https://microsoft.com/devicelogin")
+            XCTAssertEqual(url.accessibilityLabel(), "Open the Microsoft sign-in page")
+            XCTAssertTrue(isShown("fred.\(pane).signin.code"))
+            XCTAssertTrue(try text("fred.\(pane).signin.code").contains("ABCD-EFGH"))
+            XCTAssertTrue(isShown("fred.\(pane).signin.copy"))
+            XCTAssertEqual(try text("fred.\(pane).signin.expiry"), "Expires at 9:42 am")
+        }
+    }
+
+    func testALegacyPromptWithoutAKindShowsTheMicrosoftDeviceCodeSignIn() throws {
+        let (m, c) = try unauthenticated(signInPrompt())
+        makeView(mailbox: m, calendar: c)
+        XCTAssertEqual(try text("fred.inbox.signin.intro"), "Sign in to Microsoft 365")
+        XCTAssertTrue(isShown("fred.inbox.signin.code"))
+        XCTAssertTrue(isShown("fred.inbox.signin.copy"))
+    }
+
+    func testRenderingADevicePromptAfterABrowserPromptRestoresTheCodeCopyAndMicrosoftIntro() throws {
+        let (bm, bc) = try unauthenticated(browserPrompt())
+        makeView(mailbox: bm, calendar: bc)
+        XCTAssertFalse(isShown("fred.inbox.signin.code"))
+        let (dm, dc) = try unauthenticated(signInPrompt(code: "WXYZ-1234"))
+        render(mailbox: dm, calendar: dc)
+        for pane in ["inbox", "today"] {
+            XCTAssertEqual(try text("fred.\(pane).signin.intro"), "Sign in to Microsoft 365")
+            let url: NSView = try requireView("fred.\(pane).signin.url")
+            XCTAssertEqual(stringOf(url), "https://microsoft.com/devicelogin")
+            XCTAssertEqual(url.accessibilityLabel(), "Open the Microsoft sign-in page")
+            XCTAssertTrue(isShown("fred.\(pane).signin.code"), "\(pane) shows the code again")
+            XCTAssertTrue(try text("fred.\(pane).signin.code").contains("WXYZ-1234"))
+            XCTAssertTrue(isShown("fred.\(pane).signin.copy"), "\(pane) shows Copy code again")
+            XCTAssertEqual(try text("fred.\(pane).signin.expiry"), "Expires at 9:42 am")
+        }
+    }
+
+    func testRenderingABrowserPromptAfterADevicePromptHidesTheCodeAndCopy() throws {
+        let (dm, dc) = try unauthenticated(signInPrompt())
+        makeView(mailbox: dm, calendar: dc)
+        XCTAssertTrue(isShown("fred.inbox.signin.code"))
+        let (bm, bc) = try unauthenticated(browserPrompt(account: "personal"))
+        render(mailbox: bm, calendar: bc)
+        for pane in ["inbox", "today"] {
+            XCTAssertEqual(try text("fred.\(pane).signin.intro"), "Sign in to Google (personal)")
+            XCTAssertEqual(stringOf(try requireView("fred.\(pane).signin.url") as NSView), "Open Google sign-in")
+            XCTAssertFalse(isShown("fred.\(pane).signin.code"))
+            XCTAssertFalse(isShown("fred.\(pane).signin.copy"))
+            XCTAssertEqual(try text("fred.\(pane).signin.expiry"), "Link expires at 9:42 am")
+        }
+    }
+
+    func testAnAccountLabelDoesNotLeakIntoTheNextBrowserPrompt() throws {
+        let (m1, c1) = try unauthenticated(browserPrompt(account: "personal"))
+        makeView(mailbox: m1, calendar: c1)
+        let (m2, c2) = try unauthenticated(browserPrompt(account: nil))
+        render(mailbox: m2, calendar: c2)
+        XCTAssertEqual(try text("fred.inbox.signin.intro"), "Sign in to Google")
+    }
+
     // MARK: - Disconnected
 
     func testDisconnectedShowsTheBannerDimsBothPanesAndKeepsTheRows() throws {
@@ -1133,6 +1289,60 @@ final class FredSurfaceViewTests: XCTestCase {
         }
         let withPrompt = try decode(CalendarSnapshot.self, json: "{\(prompt)}")
         XCTAssertEqual(withPrompt.authPrompt?.userCode, "C", "calendar snapshots now carry their own auth prompt")
+    }
+
+    // MARK: - Wire decoding: account label and prompt kind
+
+    func testAMailboxItemCarriesTheAccountLabelItCameFrom() throws {
+        let snapshot = try mailbox(items: [
+            Mail(from: "A <a@x.com>", subject: "s0", account: "personal"),
+            Mail(from: "B <b@x.com>", subject: "s1"),
+        ])
+        XCTAssertEqual(snapshot.items[0].account, "personal")
+        XCTAssertNil(snapshot.items[1].account, "an item from an older daemon has no account")
+    }
+
+    func testACalendarEventCarriesTheAccountLabelItCameFrom() throws {
+        let snapshot = try calendar(events: [
+            Ev(title: "t0", start: at("09:30"), end: at("10:00"), account: "work"),
+            Ev(title: "t1", start: at("11:00"), end: at("11:30")),
+        ])
+        XCTAssertEqual(snapshot.events[0].account, "work")
+        XCTAssertNil(snapshot.events[1].account)
+    }
+
+    func testAnAccountOnTheWireDoesNotChangeHowItemsAreOrderedOrShown() throws {
+        makeView(mailbox: try mailbox(items: [
+            Mail(from: "Older <a@x.com>", subject: "s0", ago: 3600, account: "personal"),
+            Mail(from: "Newer <b@x.com>", subject: "s1", ago: 60),
+        ]))
+        XCTAssertEqual(try column(inboxTable, "fred.row.sender"), ["Newer", "Older"])
+    }
+
+    func testALegacyPromptWithoutAKindDecodesAsADeviceCodePrompt() throws {
+        let prompt = try XCTUnwrap(try mailbox(state: "unauthenticated", unread: 0, prompt: signInPrompt()).authPrompt)
+        XCTAssertEqual(prompt.kind, "device_code")
+        XCTAssertFalse(prompt.isBrowserSignIn)
+        XCTAssertNil(prompt.account)
+        XCTAssertNil(prompt.provider)
+        XCTAssertEqual(prompt.userCode, "ABCD-EFGH")
+    }
+
+    func testABrowserPromptDecodesItsKindAccountAndProvider() throws {
+        let prompt = try XCTUnwrap(try mailbox(state: "unauthenticated", unread: 0, prompt: browserPrompt(account: "personal")).authPrompt)
+        XCTAssertEqual(prompt.kind, "browser")
+        XCTAssertTrue(prompt.isBrowserSignIn)
+        XCTAssertEqual(prompt.account, "personal")
+        XCTAssertEqual(prompt.provider, "google")
+        XCTAssertEqual(prompt.userCode, "")
+        XCTAssertEqual(prompt.verificationUri, Self.googleAuthURL)
+    }
+
+    func testACalendarPromptDecodesItsKindAccountAndProvider() throws {
+        let prompt = try XCTUnwrap(try calendar(state: "unauthenticated", prompt: browserPrompt(account: "work")).authPrompt)
+        XCTAssertTrue(prompt.isBrowserSignIn)
+        XCTAssertEqual(prompt.account, "work")
+        XCTAssertEqual(prompt.provider, "google")
     }
 
     // MARK: - Rate limiting: `retry_at` on the wire and in the banner
@@ -1456,14 +1666,24 @@ final class FredSurfaceViewTests: XCTestCase {
 
     private func customDetail(id: String, title: String = "Eng sync", fields: [[String]] = [],
                               markdown: String = "Agenda: roadmap",
-                              link: String? = "https://outlook.office.com/detail/event") throws -> WorkItemDetail {
-        try decode(WorkItemDetail.self, [
+                              link: String? = "https://outlook.office.com/detail/event",
+                              /// When set, replaces `link`: every (label, url) the detail carries, in order.
+                              links: [(label: String, url: String)]? = nil) throws -> WorkItemDetail {
+        let linkObjects: [[String: String]]
+        if let links {
+            linkObjects = links.map { entry in ["label": entry.label, "url": entry.url] }
+        } else if let link {
+            linkObjects = [["label": "Open in Outlook", "url": link]]
+        } else {
+            linkObjects = []
+        }
+        return try decode(WorkItemDetail.self, [
             "item_id": id,
             "title": title,
             "fields": fields,
             "markdown": markdown,
             "files": [String](),
-            "links": link.map { [["label": "Open in Outlook", "url": $0]] } ?? [],
+            "links": linkObjects,
         ])
     }
 
@@ -2025,6 +2245,142 @@ final class FredSurfaceViewTests: XCTestCase {
         fake.pendingDetails[0](.success(try mailDetail()))
         XCTAssertTrue(d.openButtonIsEnabled)
         XCTAssertNil(d.openButtonToolTip)
+    }
+
+    // MARK: - Google links: the same button, named for where it goes
+
+    private static let gmailURL = "https://mail.google.com/mail/?authuser=a%40gmail.com#all/abc"
+    private static let gcalURL = "https://calendar.google.com/calendar/event?eid=x"
+
+    private func googleEventView(_ fake: DetailFake, link: Link) throws {
+        makeView(calendar: try calendar(events: [Ev(title: "Eng sync", start: at("09:30"), end: at("10:00"),
+                                                    link: link, account: "personal")]),
+                 detail: fake.actions)
+    }
+
+    func testAGmailDetailLinkIsOpenedAndTheButtonSaysOpenInGmail() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in
+            .success(try! customDetail(id: id, fields: [["From", "A"]], link: nil,
+                                       links: [(label: "Open in Gmail", url: Self.gmailURL)]))
+        }
+        try mailView(fake, link: .custom("https://mail.google.com/mail/#inbox/from-the-list"))
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertTrue(d.openButtonIsEnabled)
+        XCTAssertNil(d.openButtonToolTip)
+        XCTAssertEqual(d.openButtonTitle, "Open in Gmail")
+        XCTAssertEqual(try openButton(d).title, "Open in Gmail", "the control shows what the property says")
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: Self.gmailURL)!])
+    }
+
+    func testAGoogleCalendarListLinkIsOpenedWhenTheDetailFailed() throws {
+        let fake = DetailFake()   // default: every detail request fails
+        try googleEventView(fake, link: .custom(Self.gcalURL))
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertNotNil(d.errorText)
+        XCTAssertTrue(d.openButtonIsEnabled)
+        XCTAssertEqual(d.openButtonTitle, "Open in Google Calendar")
+        XCTAssertEqual(try openButton(d).title, "Open in Google Calendar")
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: Self.gcalURL)!])
+    }
+
+    func testAGoogleCalendarListLinkIsOpenedWhenTheDetailHasNoLinks() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in .success(try! customDetail(id: id, link: nil)) }
+        try googleEventView(fake, link: .custom(Self.gcalURL))
+        sut.selectTodayRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertNil(d.errorText)
+        XCTAssertEqual(d.openButtonTitle, "Open in Google Calendar")
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: Self.gcalURL)!])
+    }
+
+    func testTheButtonIsNamedForTheListLinkBeforeTheDetailLoads() throws {
+        let fake = DetailFake()
+        fake.deferDetail = true
+        try mailView(fake, link: .custom(Self.gmailURL))
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertTrue(d.openButtonIsEnabled)
+        XCTAssertEqual(d.openButtonTitle, "Open in Gmail")
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: Self.gmailURL)!])
+    }
+
+    func testAnOutlookItemKeepsTheOpenInOutlookTitle() throws {
+        let fake = DetailFake()
+        let d = try loadedMailDetailView(fake)
+        XCTAssertEqual(d.openButtonTitle, "Open in Outlook")
+        XCTAssertEqual(try openButton(d).title, "Open in Outlook")
+    }
+
+    func testTheFirstSafeLabelledDetailLinkIsUsedEvenWhenAnEarlierOneIsUnsafe() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in
+            .success(try! customDetail(id: id, fields: [["From", "A"]], link: nil, links: [
+                (label: "Open in Outlook", url: "javascript:alert(1)"),
+                (label: "Open in Gmail", url: "https://mail.google.com.evil.com/"),
+                (label: "Open in Gmail", url: Self.gmailURL),
+            ]))
+        }
+        try mailView(fake, link: .absent)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertTrue(d.openButtonIsEnabled)
+        XCTAssertEqual(d.openButtonTitle, "Open in Gmail")
+        d.openInOutlook()
+        XCTAssertEqual(fake.opened, [URL(string: Self.gmailURL)!])
+    }
+
+    func testADetailLinkWithSomeOtherLabelIsNotUsedEvenIfItsURLIsSafe() throws {
+        let fake = DetailFake()
+        fake.detailResult = { [self] id in
+            .success(try! customDetail(id: id, fields: [["From", "A"]], link: nil,
+                                       links: [(label: "Attachment", url: Self.gmailURL)]))
+        }
+        try mailView(fake, link: .absent)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.openButtonIsEnabled)
+        d.openInOutlook()
+        XCTAssertTrue(fake.opened.isEmpty)
+    }
+
+    func testWithNoSafeLinkTheButtonIsDisabledNamedOpenInOutlookAndExplainsWhy() throws {
+        let unsafe = ["https://www.google.com/search?q=x", "https://mail.google.com.evil.com/",
+                      "http://mail.google.com/", "https://user@mail.google.com/", "https://mail.google.com:8443/"]
+        for bad in unsafe {
+            let fake = DetailFake()
+            fake.detailResult = { [self] id in
+                .success(try! customDetail(id: id, fields: [["From", "A"]], link: nil,
+                                           links: [(label: "Open in Gmail", url: bad)]))
+            }
+            try mailView(fake, link: .custom(bad))
+            sut.selectInboxRow(0)
+            let d = try XCTUnwrap(sut.detailView)
+            XCTAssertFalse(d.openButtonIsEnabled, bad)
+            XCTAssertEqual(d.openButtonTitle, "Open in Outlook", "with no URL the title is the default: \(bad)")
+            XCTAssertEqual(d.openButtonToolTip, "This item has no safe web link to open.", bad)
+            XCTAssertFalse(try openButton(d).isEnabled)
+            XCTAssertEqual(try openButton(d).toolTip, "This item has no safe web link to open.")
+            d.openInOutlook()
+            XCTAssertTrue(fake.opened.isEmpty, "nothing unsafe is opened: \(bad)")
+        }
+    }
+
+    func testAnItemWithNoLinkAtAllIsDisabledWithTheNewTooltip() throws {
+        let fake = DetailFake()
+        try mailView(fake, link: .absent)
+        sut.selectInboxRow(0)
+        let d = try XCTUnwrap(sut.detailView)
+        XCTAssertFalse(d.openButtonIsEnabled)
+        XCTAssertEqual(d.openButtonTitle, "Open in Outlook")
+        XCTAssertEqual(d.openButtonToolTip, "This item has no safe web link to open.")
     }
 
     // MARK: - F1 hardening: cancelled and all-day events

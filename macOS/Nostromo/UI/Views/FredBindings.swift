@@ -27,7 +27,7 @@ enum FredBindings {
     }
 
     /// Daemon-backed detail and seed requests (Unix socket only: the daemon
-    /// refuses both over TCP) and the Outlook opener. The bridge re-checks every
+    /// refuses both over TCP) and the web-link opener. The bridge re-checks every
     /// URL before `NSWorkspace` sees it.
     private static func detailActions(_ store: AppStore) -> FredDetailActions {
         FredDetailBridge.actions(

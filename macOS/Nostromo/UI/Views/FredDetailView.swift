@@ -38,17 +38,23 @@ enum FredDetailSubject {
     }
 }
 
-// MARK: - Outlook links
+// MARK: - Web links
 
-/// The only links the "Open in Outlook" button may open: `https` to a Microsoft
-/// Outlook web host. The link comes from a Graph response, i.e. from outside;
-/// `file:`, `javascript:`, `x-apple.systempreferences:` and lookalike hosts must
-/// never reach `NSWorkspace`.
-enum OutlookLink {
-    static let hosts = ["outlook.office.com", "outlook.office365.com", "outlook.live.com",
-                        "outlook.office365.us", "outlook.office365.de"]
+/// The only links the "Open in Outlook / Gmail / Google Calendar" button may
+/// open: `https` to a Microsoft Outlook web host, Gmail, or Google Calendar.
+/// The link comes from a Graph or Google response, i.e. from outside; `file:`,
+/// `javascript:`, `x-apple.systempreferences:` and lookalike hosts must never
+/// reach `NSWorkspace`.
+enum FredWebLink {
+    static let outlookHosts = ["outlook.office.com", "outlook.office365.com", "outlook.live.com",
+                               "outlook.office365.us", "outlook.office365.de"]
+    static let gmailHost = "mail.google.com"
+    static let calendarHost = "calendar.google.com"
+    /// Google Calendar's older links live under this host's `/calendar/` path; nothing else on it is allowed.
+    static let googleHost = "www.google.com"
+    static let googleCalendarPath = "/calendar/"
 
-    /// `link` as a URL, or nil when it is not a safe Outlook web link.
+    /// `link` as a URL, or nil when it is not a safe Outlook, Gmail or Google Calendar web link.
     static func url(from link: String?) -> URL? {
         guard let link, !link.isEmpty,
               link.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil,
@@ -62,7 +68,23 @@ enum OutlookLink {
               url.user == nil, url.password == nil,
               url.port == nil || url.port == 443,
               let host = url.host?.lowercased(), !host.isEmpty else { return false }
-        return hosts.contains { host == $0 || host.hasSuffix("." + $0) }
+        if host == googleHost { return url.path.hasPrefix(googleCalendarPath) }
+        return (outlookHosts + [gmailHost, calendarHost]).contains { matches(host, $0) }
+    }
+
+    /// The open button's title for an (already safe) `url`.
+    static func buttonTitle(for url: URL) -> String {
+        let host = url.host?.lowercased() ?? ""
+        if matches(host, gmailHost) { return "Open in Gmail" }
+        if matches(host, calendarHost) || host == googleHost { return "Open in Google Calendar" }
+        return "Open in Outlook"
+    }
+
+    /// The labels the daemon puts on a detail's web link, one per provider.
+    static let detailLinkLabels: Set<String> = ["Open in Outlook", "Open in Gmail", "Open in Google Calendar"]
+
+    private static func matches(_ host: String, _ allowed: String) -> Bool {
+        host == allowed || host.hasSuffix("." + allowed)
     }
 
     /// `https:///host/...`: parsers forgive the empty authority, a link to open must not rely on that.
@@ -108,7 +130,7 @@ enum FredDetailBridge {
                 send(.fredSeed(requestId: requestId, text: text))
             },
             open: { url in
-                if OutlookLink.isOpenable(url) { open(url) }
+                if FredWebLink.isOpenable(url) { open(url) }
             })
     }
 }
@@ -236,7 +258,7 @@ enum FredDetailPrompts {
 
 // MARK: - View
 
-/// Read-only detail of the selected message or event, with Open in Outlook and
+/// Read-only detail of the selected message or event, with Open in Outlook (or Gmail / Google Calendar) and
 /// Ask Fred… / Prep with Fred. The seed actions open an inline confirmation
 /// (editable prompt; Return sends, Esc cancels) and never send anything
 /// themselves: Fred's own agent panel receives the text.
@@ -257,6 +279,7 @@ final class FredDetailView: NSView {
 
     var openButtonIsEnabled: Bool { openButton.isEnabled }
     var openButtonToolTip: String? { openButton.toolTip }
+    var openButtonTitle: String { openButton.title }
     var seedButtonIsEnabled: Bool { seedButton.isEnabled }
     var seedButtonTitle: String { seedButton.title }
 
@@ -341,20 +364,25 @@ final class FredDetailView: NSView {
 
     /// Only ever called from the button (or ⌘O): nothing opens on load or selection.
     func openInOutlook() {
-        guard let url = safeOutlookURL else { return }
+        guard let url = safeWebURL else { return }
         actions.open(url)
     }
 
-    /// The detail's link, else the list item's, whichever is a real Outlook web link first.
-    private var safeOutlookURL: URL? {
-        let detailLink = detail?.links.first { $0.label == "Open in Outlook" }?.url
-        return OutlookLink.url(from: detailLink) ?? OutlookLink.url(from: subject.webLink)
+    /// The detail's web link, else the list item's, whichever is a real Outlook, Gmail
+    /// or Google Calendar web link first.
+    private var safeWebURL: URL? {
+        let detailURL = detail?.links.lazy
+            .filter { FredWebLink.detailLinkLabels.contains($0.label) }
+            .compactMap { FredWebLink.url(from: $0.url) }
+            .first
+        return detailURL ?? FredWebLink.url(from: subject.webLink)
     }
 
     private func refreshButtons() {
-        let url = safeOutlookURL
+        let url = safeWebURL
         openButton.isEnabled = url != nil
-        openButton.toolTip = url == nil ? "This item has no safe Outlook link to open." : nil
+        openButton.title = url.map(FredWebLink.buttonTitle(for:)) ?? "Open in Outlook"
+        openButton.toolTip = url == nil ? "This item has no safe web link to open." : nil
         seedButton.isEnabled = detail != nil && !isCancelled
         seedButton.toolTip = isCancelled ? "This meeting was cancelled." : nil
     }
