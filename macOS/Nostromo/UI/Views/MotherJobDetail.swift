@@ -191,6 +191,18 @@ private class PhaseRibbonView: NSView {
 
 // MARK: - MotherJobDetail
 
+/// The job detail's scroll document: flipped, so its top stays put as its content grows and
+/// the scroll position (measured from the top) survives updates.
+final class DetailDocumentView: NSView {
+    override var isFlipped: Bool { true }
+    var onLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
 final class MotherJobDetail: NSView {
 
     /// Everything the detail needs from the app. `AppStore` is the real host; tests pass a stub.
@@ -209,6 +221,15 @@ final class MotherJobDetail: NSView {
 
     // Stored once, toggled via isHidden
     private let emptyLabel = NSTextField(labelWithString: "Select a job")
+
+    /// Scrolls everything the detail shows. Its document is `content`, pinned to the clip's width.
+    let contentScrollView = NSScrollView()
+    private let content = DetailDocumentView()
+    /// The log never gets shorter than this, however much content is above it.
+    private static let minLogHeight: CGFloat = 160
+
+    /// The scroll content's coordinates run top-down (a test reads positions from the top edge).
+    override var isFlipped: Bool { true }
 
     // Content fields
     private let titleLabel      = EdgePinnedLabel(wrappingLabelWithString: "")
@@ -354,10 +375,41 @@ final class MotherJobDetail: NSView {
         planSectionLabel.font      = .systemFont(ofSize: 9, weight: .semibold)
         planSectionLabel.textColor = Theme.fgMuted
 
+        // Everything below the pane's edge lives in a flipped document view inside a vertical scroll
+        // view. The content's height is whatever it is (a 200-item plan, a 2,000-character option
+        // consequence); the pane's height is whatever the window gives it. Without the scroll view
+        // the content's required vertical chain became the window's demand, and a window that cannot
+        // grow (full screen) cut off its top.
+        content.translatesAutoresizingMaskIntoConstraints = false
+        contentScrollView.translatesAutoresizingMaskIntoConstraints = false
+        contentScrollView.hasVerticalScroller   = true
+        contentScrollView.hasHorizontalScroller = false
+        contentScrollView.autohidesScrollers    = true
+        contentScrollView.drawsBackground       = false
+        contentScrollView.borderType            = .noBorder
+        contentScrollView.documentView          = content
+        addSubview(contentScrollView)
+        let clip = contentScrollView.contentView
+        content.onLayout = { [weak self] in self?.clampContentScroll() }
+        NSLayoutConstraint.activate([
+            contentScrollView.topAnchor.constraint(equalTo: topAnchor),
+            contentScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentScrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contentScrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            // The document is as wide as the clip (never scrolls sideways), as tall as its content
+            // and at least as tall as the clip, so short content still fills the pane (the log
+            // takes the slack, as it always did).
+            content.topAnchor.constraint(equalTo: clip.topAnchor),
+            content.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
+            content.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
+        ])
+
         for v in [titleLabel, stateLabel, phaseRibbonView, crewSection, actionsContainer, todoStack, metaStack,
                   planSectionLabel, planChecklistView, logSectionLabel, logScrollView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(v)
+            content.addSubview(v)
         }
 
         // Ribbon height toggles between 0 (hidden) and 22 (visible)
@@ -381,56 +433,57 @@ final class MotherJobDetail: NSView {
         }
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            titleLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // A fitting-size pass would otherwise take the label's full text width for the pane's.
-            titleLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
-            stateLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
+            titleLabel.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
+            stateLabel.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
 
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-            stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            stateLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
 
             // Phase ribbon — sits between state label and actions; height is 0 when hidden
             phaseRibbonView.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 8),
-            phaseRibbonView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            phaseRibbonView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            phaseRibbonView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            phaseRibbonView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Crew section — between the ribbon and the actions; zero height without crew data
-            crewSection.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            crewSection.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            crewSection.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            crewSection.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Actions container — below the crew section (which is zero height, so directly
             // below the phase ribbon, when the job has no crew data)
             actionsContainer.topAnchor.constraint(equalTo: crewSection.bottomAnchor, constant: 8),
-            actionsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            actionsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            actionsContainer.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            actionsContainer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Todo stack — below actions, above meta rows
             todoStack.topAnchor.constraint(equalTo: actionsContainer.bottomAnchor, constant: 8),
-            todoStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            todoStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            todoStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            todoStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             metaStack.topAnchor.constraint(equalTo: todoStack.bottomAnchor, constant: 8),
-            metaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            metaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            metaStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            metaStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Plan checklist section — between meta and log
             planSectionLabel.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 12),
-            planSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            planSectionLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
 
             planChecklistView.topAnchor.constraint(equalTo: planSectionLabel.bottomAnchor, constant: 6),
-            planChecklistView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            planChecklistView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            planChecklistView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            planChecklistView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             logSectionLabel.topAnchor.constraint(equalTo: planChecklistView.bottomAnchor, constant: 12),
-            logSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            logSectionLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
 
             logScrollView.topAnchor.constraint(equalTo: logSectionLabel.bottomAnchor, constant: 6),
-            logScrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            logScrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            logScrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            logScrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            logScrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            logScrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            logScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minLogHeight),
         ])
 
         // Configure action widgets
@@ -570,6 +623,7 @@ final class MotherJobDetail: NSView {
         logTimer?.invalidate(); logTimer = nil
         currentJob   = job
         currentJobId = job?.id
+        scrollContentToTop()
         replyTextView.string = ""
         lastLogText = nil
         crewSection.collapseBreakdown()
@@ -647,6 +701,28 @@ final class MotherJobDetail: NSView {
     }
 
     // MARK: Private
+
+    /// A new subject starts at the top. Updates to the same job never call this: a flipped
+    /// document keeps its top where it is while content above or below changes, so the reader's
+    /// position survives them.
+    private func scrollContentToTop() {
+        let clip = contentScrollView.contentView
+        guard clip.bounds.origin != .zero else { return }
+        clip.scroll(to: .zero)
+        contentScrollView.reflectScrolledClipView(clip)
+    }
+
+    /// After a layout pass: keep the position inside the document (content shrinking under a
+    /// reader who had scrolled down), and never sideways.
+    private func clampContentScroll() {
+        let clip = contentScrollView.contentView
+        guard let doc = contentScrollView.documentView else { return }
+        let maxY = max(0, doc.frame.height - clip.bounds.height)
+        let y = min(max(clip.bounds.origin.y, 0), maxY)
+        guard y != clip.bounds.origin.y || clip.bounds.origin.x != 0 else { return }
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        contentScrollView.reflectScrolledClipView(clip)
+    }
 
     private func showEmpty() {
         [titleLabel, stateLabel, phaseRibbonView, crewSection, todoStack, metaStack, actionsContainer,
