@@ -43,8 +43,9 @@ use super::protocol::{PaneTree, ServerMsg, SplitDirection};
 /// The reserved pane id that is always present in a focus.
 pub const REPL_PANE_ID: &str = "repl";
 
-/// The least share of its split (after normalising) a layout call may leave a
-/// live terminal pane: below it the pane is as good as hidden.
+/// The least share of the layout (ratios normalised and multiplied down the
+/// tree) a layout call may leave a live terminal pane: below it the pane is as
+/// good as hidden.
 pub const MIN_TERMINAL_RATIO: f32 = 0.1;
 
 /// Supplies current pane content for attach replay (D8) — implemented over a
@@ -125,7 +126,7 @@ pub enum PaneError {
     /// user cannot see it.
     TerminalHidden,
     /// The layout would shrink a live terminal pane below
-    /// [`MIN_TERMINAL_RATIO`] of its split.
+    /// [`MIN_TERMINAL_RATIO`] of the layout.
     TerminalTooSmall,
 }
 
@@ -170,7 +171,7 @@ impl PaneError {
                  keep it a split child, or make it the active tab",
             ),
             PaneError::TerminalTooSmall => Some(
-                "a live terminal pane must keep at least 10% of its split: \
+                "a live terminal pane must keep at least 10% of the layout: \
                  give it a ratio of 0.1 or more",
             ),
             _ => None,
@@ -1063,8 +1064,8 @@ impl PaneRegistry {
     }
 
     /// `new_tree` must leave every registered terminal leaf of `tag` visible:
-    /// not an inactive tab, and with at least [`MIN_TERMINAL_RATIO`] of every
-    /// split on its way down. (Presence alone is [`Self::ensure_terminals_kept`].)
+    /// not an inactive tab, and with at least [`MIN_TERMINAL_RATIO`] of the
+    /// whole layout (its ratios multiplied down the tree). (Presence alone is [`Self::ensure_terminals_kept`].)
     fn ensure_terminals_visible(&self, tag: &str, new_tree: &PaneTree) -> Result<(), PaneError> {
         let Some(leaves) = self.terminal_leaves.get(tag) else {
             return Ok(());
@@ -1073,7 +1074,7 @@ impl PaneRegistry {
         if tree_hides_terminal(new_tree, &holds_terminal) {
             return Err(PaneError::TerminalHidden);
         }
-        if tree_squeezes_terminal(new_tree, &holds_terminal) {
+        if tree_squeezes_terminal(new_tree, 1.0, &holds_terminal) {
             return Err(PaneError::TerminalTooSmall);
         }
         Ok(())
@@ -1338,28 +1339,35 @@ fn tree_hides_terminal(node: &PaneTree, holds_terminal: &dyn Fn(&PaneTree) -> bo
     }
 }
 
-/// Does a split give a node holding a terminal under [`MIN_TERMINAL_RATIO`]
-/// of its (normalised) ratios?
-fn tree_squeezes_terminal(node: &PaneTree, holds_terminal: &dyn Fn(&PaneTree) -> bool) -> bool {
+/// Does the tree leave a node holding a terminal under [`MIN_TERMINAL_RATIO`]
+/// of the whole layout? `share` is `node`'s own share of it: the product of the
+/// normalised ratios on the way down (two 0.3 splits leave 0.09). A split that
+/// holds a terminal and carries a zero, negative or non-finite ratio is
+/// refused outright.
+fn tree_squeezes_terminal(
+    node: &PaneTree,
+    share: f32,
+    holds_terminal: &dyn Fn(&PaneTree) -> bool,
+) -> bool {
     match node {
         PaneTree::Leaf { .. } => false,
         PaneTree::Split {
             children, ratios, ..
         } => {
+            if holds_terminal(node) && ratios.iter().any(|r| !r.is_finite() || *r <= 0.0) {
+                return true;
+            }
             let total: f32 = ratios.iter().sum();
-            let squeezed = children.iter().zip(ratios).any(|(child, ratio)| {
-                // A zero or negative total gives no usable share at all.
-                let share = ratio / total;
-                holds_terminal(child) && (!share.is_finite() || share < MIN_TERMINAL_RATIO)
-            });
-            squeezed
-                || children
-                    .iter()
-                    .any(|c| tree_squeezes_terminal(c, holds_terminal))
+            children.iter().zip(ratios).any(|(child, ratio)| {
+                let child_share = share * ratio / total;
+                (holds_terminal(child) && child_share < MIN_TERMINAL_RATIO)
+                    || tree_squeezes_terminal(child, child_share, holds_terminal)
+            })
         }
+        // A tabs node's tabs each fill its whole region.
         PaneTree::Tabs { children, .. } => children
             .iter()
-            .any(|c| tree_squeezes_terminal(c, holds_terminal)),
+            .any(|c| tree_squeezes_terminal(c, share, holds_terminal)),
     }
 }
 
@@ -5154,5 +5162,43 @@ mod terminal_guard_tests {
             reg.set_layout(TAG, &json!({ "tree": tree.clone() })),
             Ok(tree)
         );
+    }
+
+    #[test]
+    fn the_shares_down_the_tree_multiply_so_nested_splits_cannot_squeeze_a_terminal() {
+        let mut reg = with_terminal();
+        // 0.3 of 0.3 of the layout is 0.09: each split alone looks fine.
+        let inner = split(vec![leaf("notes"), leaf(LEAF)], vec![0.7, 0.3]);
+        let nested = split(vec![leaf(REPL_PANE_ID), inner], vec![0.7, 0.3]);
+
+        assert_eq!(
+            reg.set_layout_from_agent(TAG, &json!({ "tree": nested })),
+            Err(PaneError::TerminalTooSmall)
+        );
+
+        // 0.4 of 0.5 is 0.2.
+        let inner = split(vec![leaf("notes"), leaf(LEAF)], vec![0.6, 0.4]);
+        let fine = split(vec![leaf(REPL_PANE_ID), inner], vec![0.5, 0.5]);
+        assert!(reg
+            .set_layout_from_agent(TAG, &json!({ "tree": fine }))
+            .is_ok());
+    }
+
+    #[test]
+    fn a_split_holding_a_terminal_with_a_negative_or_zero_ratio_is_refused() {
+        let mut reg = with_terminal();
+        for ratios in [vec![-1.0, 2.0], vec![0.0, 1.0], vec![1.0, 1.0, 0.0]] {
+            let mut children = vec![leaf(REPL_PANE_ID), leaf(LEAF)];
+            if ratios.len() == 3 {
+                children.push(leaf("notes"));
+            }
+            let tree = split(children, ratios.clone());
+
+            assert_eq!(
+                reg.set_layout_from_agent(TAG, &json!({ "tree": tree })),
+                Err(PaneError::TerminalTooSmall),
+                "{ratios:?}"
+            );
+        }
     }
 }
