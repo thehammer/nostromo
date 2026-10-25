@@ -163,12 +163,14 @@ mod agent_switch_tests {
         assert_eq!(names(&state), ["teri", "fred", "perri", "mother"]);
         state.enabled_agents = EnabledAgents {
             fred: true,
+            huey: true,
             perri: false,
             teri: true,
         };
         assert_eq!(names(&state), ["teri", "fred", "mother"]);
         state.enabled_agents = EnabledAgents {
             fred: false,
+            huey: true,
             perri: false,
             teri: false,
         };

@@ -95,6 +95,8 @@ async fn harness_with_feed(feed: JobsFeed) -> Harness {
             fred_calendar_rx: calendar_rx,
             teri_todos_rx: todos_rx,
             work_hub: None,
+            huey: None,
+            huey_rx: tokio::sync::watch::channel(nostromo::huey::HueyView::default()).1,
             enabled_agents: nostromo::agents::EnabledAgents::all(),
         },
     );

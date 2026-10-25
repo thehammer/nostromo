@@ -46,7 +46,7 @@ changing it.
 
 ### Agents
 
-Every built-in agent (Fred, Perri, Teri) is on by default, and Mother cannot be
+Every built-in agent (Fred, Huey, Perri, Teri) is on by default, and Mother cannot be
 turned off. To switch one off, give it a table in `config.toml`:
 
 ```toml
@@ -81,7 +81,7 @@ bindings saved before it was disabled, which are neither fetched nor replayed on
 attach), and, for Perri, the app's `PerriAction` requests.
 
 On the wire, the welcome's `enabled_agents` lists what is *running* (always
-including `mother`). A client infers "disabled" as its own switchable agents
+including `mother`; Huey appears as `huey`). A client infers "disabled" as its own switchable agents
 minus that list.
 
 The file is `~/Library/Application Support/nostromo/config.toml` on macOS and

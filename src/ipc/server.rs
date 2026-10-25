@@ -3308,6 +3308,7 @@ mod tests {
                     enabled_agents,
                     Some(vec![
                         "fred".into(),
+                        "huey".into(),
                         "mother".into(),
                         "perri".into(),
                         "teri".into()
@@ -3319,6 +3320,7 @@ mod tests {
         }
         mgr.configure_enabled_agents(crate::agents::EnabledAgents {
             fred: false,
+            huey: true,
             perri: true,
             teri: true,
         });
@@ -3330,7 +3332,12 @@ mod tests {
             } => {
                 assert_eq!(
                     enabled_agents,
-                    Some(vec!["mother".into(), "perri".into(), "teri".into()])
+                    Some(vec![
+                        "huey".into(),
+                        "mother".into(),
+                        "perri".into(),
+                        "teri".into()
+                    ])
                 );
                 assert_eq!(disabled_agents, Some(vec!["fred".to_string()]));
             }
@@ -3390,6 +3397,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let off = crate::agents::EnabledAgents {
             fred: true,
+            huey: true,
             perri: false,
             teri: true,
         };

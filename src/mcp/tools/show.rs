@@ -1016,6 +1016,7 @@ mod tests {
         let (mut state, _rx) = make_state();
         state.enabled_agents = crate::agents::EnabledAgents {
             fred: true,
+            huey: true,
             perri: false,
             teri: true,
         };
