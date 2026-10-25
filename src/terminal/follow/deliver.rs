@@ -190,4 +190,20 @@ mod tests {
             Decision::Pause { .. }
         ));
     }
+
+    #[test]
+    fn key_body_that_outlives_its_dropped_header_is_still_swallowed() {
+        let mut assembler = LineAssembler::new();
+        assembler.feed(b"-----BEGIN RSA PRIVATE KEY-----\n");
+        for i in 0..super::super::MAX_BUFFERED_ROWS + 5 {
+            assembler.feed(format!("KB{}\n", i % 10).as_bytes());
+        }
+        let (mut redactor, mut policy) = fresh();
+        let text = deliver(&mut assembler, &mut redactor, &mut policy)
+            .text()
+            .unwrap()
+            .to_owned();
+        assert!(!text.contains("KB"), "{text}");
+        assert!(text.contains("[redacted: private-key]"));
+    }
 }

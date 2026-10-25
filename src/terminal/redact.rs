@@ -856,12 +856,36 @@ fn floor_boundary(text: &str, mut idx: usize) -> usize {
     idx
 }
 
+/// Whether a private-key block is still open after `text`, given whether one
+/// was open before it. The assembler uses this on rows it has to drop, so a
+/// dropped `BEGIN` still reaches the redactor (see `LineAssembler`).
+pub(crate) fn private_key_open_after(text: &str, open: bool) -> bool {
+    let mut rest = text;
+    if open {
+        match PRIVATE_KEY_END.find(rest) {
+            Some(end) => rest = &rest[end.end()..],
+            None => return true,
+        }
+    }
+    while let Some(begin) = PRIVATE_KEY_BEGIN.find(rest) {
+        rest = &rest[begin.end()..];
+        match PRIVATE_KEY_END.find(rest) {
+            Some(end) => rest = &rest[end.end()..],
+            None => return true,
+        }
+    }
+    false
+}
+
 /// A span accepted for replacement.
 struct Span {
     end: usize,
     kind: RedactionKind,
     /// Index of the rule that produced it (lower wins).
     priority: usize,
+    /// Text around the span that stays readable around its marker: the whole
+    /// URL for a URL password, else the span itself.
+    context: Range<usize>,
 }
 
 /// Apply the pattern rules (everything except private keys) to `text`.
@@ -891,70 +915,101 @@ fn redact_plain(text: &str, out: &mut String, kinds: &mut Vec<RedactionKind>) {
     out.push_str(&text[cursor..]);
 }
 
-/// Add `hit` unless an accepted span already covers it.
+/// Add `hit` unless accepted spans already account for all of its text.
 ///
 /// A hit that only overlaps (it reaches beyond what is accepted) must not
 /// leave the overhang readable when the overhang holds text: the spans merge
-/// into one covering both, under the higher-priority kind. The exceptions are
-/// an overhang of quotes and punctuation (`TOKEN="ghp_…"`: the token's marker
-/// stays inside the quotes) and a URL password (the rest of the URL stays
-/// readable).
+/// into one covering both, under the highest-priority kind. Not counted as
+/// overhang: quotes and punctuation (`TOKEN="ghp_…"`: the token's marker stays
+/// inside the quotes) and the rest of a URL whose password was replaced
+/// (`DB_PASSWORD=postgres://u:pw@h/d` keeps the URL readable). Text beside the
+/// URL still counts (`password: hunter2 https://u:p@h`).
 fn accept(accepted: &mut BTreeMap<usize, Span>, text: &str, hit: Hit, priority: usize) {
     let Hit { range, kind } = hit;
     if range.is_empty() {
         return;
     }
-    let overlapped: Vec<(usize, usize)> = accepted
+    let context = if kind == RedactionKind::UrlPassword {
+        url_context(text, &range)
+    } else {
+        range.clone()
+    };
+    // Ordered by start, last first: accepted spans are disjoint.
+    let overlapped: Vec<usize> = accepted
         .range(..range.end)
         .rev()
         .take_while(|(_, span)| span.end > range.start)
-        .map(|(&start, span)| (start, span.end))
+        .map(|(&start, _)| start)
         .collect();
-    let (Some(&(first_start, _)), Some(&(_, last_end))) = (overlapped.last(), overlapped.first())
-    else {
+    let (Some(&first_start), Some(&last_start)) = (overlapped.last(), overlapped.first()) else {
         accepted.insert(
             range.start,
             Span {
                 end: range.end,
                 kind,
                 priority,
+                context,
             },
         );
         return;
     };
 
-    let overhang = |from: usize, to: usize| {
-        text.get(from..to)
-            .is_some_and(|piece| piece.chars().any(char::is_alphanumeric))
-    };
-    let has_text_overhang = overhang(range.start, first_start.max(range.start))
-        || overhang(last_end.min(range.end), range.end)
-        || overlapped
-            .windows(2)
-            .any(|w| overhang(w[1].1.max(range.start), w[0].0.min(range.end)));
-    let over_url = overlapped
-        .iter()
-        .any(|(start, _)| accepted[start].kind == RedactionKind::UrlPassword);
-    if !has_text_overhang || over_url {
+    // Walk the hit left to right over what the overlapped spans account for.
+    let mut cursor = range.start;
+    let mut has_text_overhang = false;
+    for start in overlapped.iter().rev() {
+        let covered = &accepted[start].context;
+        has_text_overhang |= holds_text(text, cursor, covered.start.min(range.end));
+        cursor = cursor.max(covered.end);
+    }
+    has_text_overhang |= holds_text(text, cursor, range.end);
+    if !has_text_overhang {
         return;
     }
 
     let (kind, priority) = overlapped
         .iter()
-        .map(|(start, _)| (accepted[start].kind, accepted[start].priority))
+        .map(|start| (accepted[start].kind, accepted[start].priority))
         .min_by_key(|&(_, p)| p)
         .unwrap_or((kind, priority));
-    for (start, _) in &overlapped {
+    let end = accepted[&last_start].end.max(range.end);
+    for start in &overlapped {
         accepted.remove(start);
     }
+    let start = first_start.min(range.start);
     accepted.insert(
-        first_start.min(range.start),
+        start,
         Span {
-            end: last_end.max(range.end),
+            end,
             kind,
             priority,
+            context: start..end,
         },
     );
+}
+
+/// Whether `text[from..to]` (empty when `from >= to`) has a letter or digit.
+fn holds_text(text: &str, from: usize, to: usize) -> bool {
+    text.get(from..to)
+        .is_some_and(|piece| piece.chars().any(char::is_alphanumeric))
+}
+
+/// The whole URL around a password span: back over `scheme://user:` and
+/// forward over the rest of the run.
+fn url_context(text: &str, password: &Range<usize>) -> Range<usize> {
+    let head = &text[..password.start];
+    let scheme_start = head.rfind("://").map_or(password.start, |i| {
+        head[..i]
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')))
+            .map_or(0, |(j, c)| j + c.len_utf8())
+    });
+    let tail = &text[password.end..];
+    let run = tail
+        .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>'))
+        .unwrap_or(tail.len());
+    scheme_start..password.end + run
 }
 
 // ───────────────────────────── truncation stubs ──────────────────────────────
@@ -1079,6 +1134,37 @@ mod tests {
                 assert_eq!(found, None, "{kept}");
             }
         }
+    }
+
+    #[test]
+    fn text_beside_a_url_is_not_hidden_by_the_url() {
+        for input in [
+            "password: hunter2 https://u:p@h/db",
+            "token=hunter2,https://u:p@h/db",
+        ] {
+            let (out, _) = Redactor::new().redact(input);
+            assert!(!out.contains("hunter2"), "{input} -> {out}");
+        }
+        let (out, _) = Redactor::new().redact("DB_PASSWORD=postgres://u:pw@h/d");
+        assert_eq!(out, "DB_PASSWORD=postgres://u:[redacted: url-password]@h/d");
+    }
+
+    #[test]
+    fn key_state_follows_dropped_text() {
+        assert!(private_key_open_after(
+            "x -----BEGIN RSA PRIVATE KEY-----",
+            false
+        ));
+        assert!(!private_key_open_after(
+            "-----END RSA PRIVATE KEY-----",
+            true
+        ));
+        assert!(!private_key_open_after(
+            "-----BEGIN PRIVATE KEY----- -----END PRIVATE KEY-----",
+            false
+        ));
+        assert!(private_key_open_after("body", true));
+        assert!(!private_key_open_after("body", false));
     }
 
     #[test]

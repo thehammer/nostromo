@@ -43,6 +43,8 @@
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 
+use crate::terminal::redact::private_key_open_after;
+
 /// Longest line, in columns (chars), that [`LineAssembler`] keeps. A longer
 /// line is cut and its last column is replaced by `…`.
 pub const MAX_LINE_COLUMNS: usize = 4096;
@@ -54,6 +56,11 @@ pub const MAX_BUFFERED_ROWS: usize = 8192;
 /// Most columns, summed over every buffered row (blank padding counts), kept
 /// between [`LineAssembler::take_committed`] calls.
 pub const MAX_BUFFERED_CELLS: usize = 512 * 1024;
+
+/// Synthetic line returned after the dropped-lines marker when the dropped rows
+/// ended inside a private-key block, so a redactor treats what follows as key
+/// material until the block's `END` line.
+pub const DROPPED_KEY_HEADER: &str = "-----BEGIN PRIVATE KEY-----";
 
 /// Cap on remembered CSI parameter bytes; anything longer is not a cursor
 /// movement we understand and the sequence is just skipped.
@@ -79,6 +86,9 @@ pub struct LineAssembler {
     cells_total: usize,
     /// Rows dropped by the caps since the last `take_committed`.
     dropped_rows: usize,
+    /// The dropped rows ended inside a private-key block (its `BEGIN` was
+    /// dropped, its body may still be buffered).
+    dropped_in_key: bool,
     #[cfg(test)]
     renders: std::sync::atomic::AtomicUsize,
 }
@@ -147,6 +157,7 @@ impl LineAssembler {
             partial: OnceLock::new(),
             cells_total: 0,
             dropped_rows: 0,
+            dropped_in_key: false,
             #[cfg(test)]
             renders: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -180,13 +191,20 @@ impl LineAssembler {
     /// to an agent any other way.
     ///
     /// If the buffer caps dropped rows since the last call, the first line is
-    /// `[… N lines dropped …]`.
+    /// `[… N lines dropped …]`, followed by [`DROPPED_KEY_HEADER`] when the
+    /// dropped rows opened a private-key block that is still open.
     pub fn take_committed(&mut self) -> Vec<String> {
         let take = self.cursor_row.min(self.rows.len() - 1);
         let mut lines = Vec::with_capacity(take + 1);
         if self.dropped_rows > 0 {
             lines.push(format!("[… {} lines dropped …]", self.dropped_rows));
             self.dropped_rows = 0;
+            if self.dropped_in_key {
+                // The `BEGIN` line went with the dropped rows but its body is
+                // still here: put a header back so the redactor swallows it.
+                lines.push(DROPPED_KEY_HEADER.to_owned());
+                self.dropped_in_key = false;
+            }
         }
         for row in self.rows.drain(..take) {
             self.cells_total = self.cells_total.saturating_sub(row.width());
@@ -422,6 +440,9 @@ impl LineAssembler {
             && self.rows.len() > 1
         {
             if let Some(row) = self.rows.pop_front() {
+                if row.may_hold_key_marker() {
+                    self.dropped_in_key = private_key_open_after(&row.text(), self.dropped_in_key);
+                }
                 self.cells_total = self.cells_total.saturating_sub(row.width());
                 self.dropped_rows += 1;
                 self.cursor_row = self.cursor_row.saturating_sub(1);
@@ -431,6 +452,25 @@ impl LineAssembler {
 }
 
 impl Row {
+    /// Whether the row has five dashes in a row (`-----BEGIN …`, `-----END …`),
+    /// checked on stored cells so a row of padding costs nothing.
+    fn may_hold_key_marker(&self) -> bool {
+        let mut run = 0;
+        let mut prev = None;
+        for &(col, c) in &self.cells {
+            run = match (c, prev) {
+                ('-', Some(p)) if p + 1 == col => run + 1,
+                ('-', _) => 1,
+                _ => 0,
+            };
+            if run >= 5 {
+                return true;
+            }
+            prev = (c == '-').then_some(col);
+        }
+        false
+    }
+
     /// Columns from 0 through the last non-blank cell.
     fn width(&self) -> usize {
         self.cells.last().map_or(0, |&(c, _)| usize::from(c) + 1)
@@ -604,5 +644,31 @@ mod tests {
             format!("[… {} lines dropped …]", rows + 1 - MAX_BUFFERED_ROWS)
         );
         assert_eq!(a.take_committed().len(), 0);
+    }
+
+    #[test]
+    fn a_dropped_key_header_is_put_back_for_the_redactor() {
+        let mut a = LineAssembler::new();
+        a.feed(b"-----BEGIN RSA PRIVATE KEY-----\n");
+        for i in 0..MAX_BUFFERED_ROWS + 5 {
+            a.feed(format!("BODY{i}\n").as_bytes());
+        }
+        let lines = a.take_committed();
+        assert!(lines[0].starts_with("[… "), "{:?}", lines[0]);
+        assert_eq!(lines[1], DROPPED_KEY_HEADER);
+        assert!(lines[2].starts_with("BODY"));
+        // Only once.
+        a.feed(b"x\n");
+        assert!(!a.take_committed().iter().any(|l| l == DROPPED_KEY_HEADER));
+    }
+
+    #[test]
+    fn a_dropped_closed_key_leaves_no_header_behind() {
+        let mut a = LineAssembler::new();
+        a.feed(b"-----BEGIN RSA PRIVATE KEY-----\nBODY\n-----END RSA PRIVATE KEY-----\n");
+        for i in 0..MAX_BUFFERED_ROWS + 5 {
+            a.feed(format!("line{i}\n").as_bytes());
+        }
+        assert!(!a.take_committed().iter().any(|l| l == DROPPED_KEY_HEADER));
     }
 }
