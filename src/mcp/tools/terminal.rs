@@ -162,7 +162,7 @@ const TERMINAL_WORDS: [&str; 5] = ["terminal", "shell", "pty", "tty", "console"]
 /// Verbs that write to a terminal, read from one, close one. Matched as
 /// substrings, deliberately wide: a miss lets a made-up tool name through as
 /// "unknown tool" without the audit line, a false hit only changes its code.
-const INPUT_VERBS: [&str; 14] = [
+const INPUT_VERBS: [&str; 16] = [
     "input",
     "write",
     "send",
@@ -177,8 +177,10 @@ const INPUT_VERBS: [&str; 14] = [
     "stdin",
     "typing",
     "command",
+    "resize",
+    "restart",
 ];
-const READ_VERBS: [&str; 8] = [
+const READ_VERBS: [&str; 13] = [
     "read",
     "output",
     "screen",
@@ -187,8 +189,21 @@ const READ_VERBS: [&str; 8] = [
     "capture",
     "snapshot",
     "follow",
+    "attach",
+    "history",
+    "contents",
+    "buffer",
+    "stream",
 ];
-const CLOSE_VERBS: [&str; 5] = ["close", "remove", "destroy", "detach", "stop"];
+const CLOSE_VERBS: [&str; 7] = [
+    "close",
+    "remove",
+    "destroy",
+    "detach",
+    "stop",
+    "terminate",
+    "exit",
+];
 
 /// Names that type into a terminal without saying which one.
 const BARE_INPUT_NAMES: [&str; 4] = ["send_key", "sendkey", "keystroke", "stdin"];
@@ -242,9 +257,11 @@ pub fn terminal_frame(frame: &Value) -> Option<TerminalFrame> {
         .and_then(Value::as_str);
     let methoded = frame.get("method").and_then(Value::as_str);
     let (named, verb) = [typed, methoded].into_iter().flatten().find_map(|named| {
+        // Case and `.`/`-` for `_` do not make a different frame.
+        let normal = named.to_ascii_lowercase().replace(['.', '-'], "_");
         ["terminal_", "pty_", "terminal/", "pty/"]
             .iter()
-            .find_map(|prefix| named.strip_prefix(prefix))
+            .find_map(|prefix| normal.strip_prefix(prefix).map(str::to_owned))
             .map(|verb| (named, verb))
     })?;
     let verb: String = verb
@@ -287,6 +304,12 @@ mod tests {
             ("nostromo_close_terminal", TerminalOp::Close),
             ("nostromo_read_terminal_output", TerminalOp::Read),
             ("pty_snapshot", TerminalOp::Read),
+            ("nostromo.terminal_attach", TerminalOp::Read),
+            ("get_terminal_buffer", TerminalOp::Read),
+            ("terminal_history", TerminalOp::Read),
+            ("terminal_resize", TerminalOp::Input),
+            ("terminate_shell", TerminalOp::Close),
+            ("Nostromo.Terminal_Exit", TerminalOp::Close),
         ] {
             assert_eq!(classify_terminal_attempt(name), Some(op), "{name}");
         }
@@ -324,6 +347,13 @@ mod tests {
         assert!(
             terminal_frame(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).is_none()
         );
+        for frame in [
+            json!({"type": "Terminal_Resize"}),
+            json!({"type": "terminal.resize"}),
+            json!({"type": "pty-attach"}),
+        ] {
+            assert!(terminal_frame(&frame).is_some(), "{frame}");
+        }
         assert!(terminal_frame(&json!({"type": "hello"})).is_none());
         // A JSON-RPC frame is judged by its method, not a stray `type`.
         assert!(terminal_frame(

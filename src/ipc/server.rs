@@ -1477,6 +1477,7 @@ fn handle_client_msg(
                 });
                 return;
             };
+            drop(mgr);
             let result = reg.lock().unwrap().close_tab(&tag, &pane_id);
             match result {
                 Ok(tree) => {
@@ -1490,6 +1491,17 @@ fn handle_client_msg(
                 }
                 Err(e) => {
                     warn!(conn_key, %tag, %pane_id, "ClosePane refused: {}", e.code());
+                    if e == crate::ipc::pane_registry::PaneError::TerminalProtected {
+                        // A terminal pane closes by closing its terminal.
+                        lock_terminals(terminals).audit_refused(
+                            TerminalRefusalChannel::Ipc,
+                            "close",
+                            Some(e.code()),
+                            None,
+                            peer.map(|p| p.pid),
+                            peer.map(|p| p.exe.display().to_string()),
+                        );
+                    }
                     let _ = targeted_tx.send(ServerMsg::Error {
                         message: format!("ClosePane failed: {}", e.code()),
                     });
@@ -1726,21 +1738,23 @@ fn handle_client_msg(
                 // with it: that focus keeps its layout, and the attempt is
                 // audited. The manager locks the pane registry itself, so none
                 // of this may run under the registry's lock.
-                {
-                    let mut mgr = lock_terminals(terminals);
-                    if cap.is_some() {
-                        mgr.close_focus(tag);
-                    } else if mgr.has_terminals(tag) {
-                        mgr.audit_refused(
-                            TerminalRefusalChannel::Ipc,
-                            "close",
-                            Some(terminal::forbidden_code("close")),
-                            None,
-                            peer.map(|p| p.pid),
-                            peer.map(|p| p.exe.display().to_string()),
-                        );
-                        continue;
-                    }
+                //
+                // The manager's lock is held through the pane removal, so a
+                // terminal opened in the focus meanwhile cannot slip between
+                // the two (manager first, registry second: the usual order).
+                let mut mgr = lock_terminals(terminals);
+                if cap.is_some() {
+                    mgr.close_focus(tag);
+                } else if mgr.has_terminals(tag) {
+                    mgr.audit_refused(
+                        TerminalRefusalChannel::Ipc,
+                        "close",
+                        Some(terminal::forbidden_code("close")),
+                        None,
+                        peer.map(|p| p.pid),
+                        peer.map(|p| p.exe.display().to_string()),
+                    );
+                    continue;
                 }
                 if let Some(reg) = &pane_registry {
                     if reg.lock().unwrap().remove_focus(tag) {

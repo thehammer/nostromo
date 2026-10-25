@@ -1008,13 +1008,14 @@ impl PaneRegistry {
         }
     }
 
-    /// `new_tree` must not name a `terminal-` pane that is not a registered
-    /// terminal leaf of `tag`: an agent cannot mint one.
+    /// `new_tree` must not introduce a `terminal-` pane that is not a registered
+    /// terminal leaf of `tag`: an agent cannot mint one. A leftover one already
+    /// in the layout (from before the prefix was reserved) may stay.
     fn ensure_no_reserved_ids(&self, tag: &str, new_tree: &PaneTree) -> Result<(), PaneError> {
-        let forged = new_tree
-            .pane_ids()
-            .iter()
-            .any(|id| is_reserved_pane_id(id) && !self.is_terminal_leaf(tag, id));
+        let current = self.pane_ids(tag);
+        let forged = new_tree.pane_ids().iter().any(|id| {
+            is_reserved_pane_id(id) && !self.is_terminal_leaf(tag, id) && !current.contains(id)
+        });
         if forged {
             Err(PaneError::ReservedPaneId)
         } else {
@@ -1034,6 +1035,21 @@ impl PaneRegistry {
     ) -> Result<PaneTree, PaneError> {
         self.get_or_init(tag);
         self.create_pane_unchecked(tag, pane_id, position, relative_to)
+    }
+
+    /// [`Self::insert_terminal_leaf`], registering the leaf in the same step so
+    /// the layout guards protect it from the moment it exists. Undo with
+    /// [`Self::unregister_terminal_leaf`] and [`Self::remove_terminal_leaf`].
+    pub fn insert_registered_terminal_leaf(
+        &mut self,
+        tag: &str,
+        relative_to: &str,
+        position: SplitPosition,
+        pane_id: &str,
+    ) -> Result<PaneTree, PaneError> {
+        let tree = self.insert_terminal_leaf(tag, relative_to, position, pane_id)?;
+        self.register_terminal_leaf(tag, pane_id);
+        Ok(tree)
     }
 
     /// Remove the leaf `pane_id` from `tag`'s tree wherever it is, collapsing
@@ -4358,6 +4374,40 @@ mod terminal_guard_tests {
         assert_eq!(tree, before);
         assert!(reg.is_terminal_leaf(TAG, LEAF));
         assert_unchanged(&reg, &before);
+    }
+
+    #[test]
+    fn the_manager_places_and_registers_a_leaf_in_one_step() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+
+        reg.insert_registered_terminal_leaf(TAG, REPL_PANE_ID, SplitPosition::Below, LEAF)
+            .expect("placed");
+
+        // Protected at once: a layout that drops it right now is refused.
+        assert!(reg.is_terminal_leaf(TAG, LEAF));
+        let err = reg
+            .set_layout(TAG, &json!({ "tree": leaf(REPL_PANE_ID) }))
+            .expect_err("dropping the new leaf is refused");
+        assert_eq!(err, PaneError::TerminalProtected);
+    }
+
+    #[test]
+    fn a_leftover_terminal_prefixed_pane_may_stay_but_a_new_one_is_still_refused() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus(TAG);
+        // From before the prefix was reserved: in the tree, never registered.
+        reg.insert_terminal_leaf(TAG, REPL_PANE_ID, SplitPosition::Right, "terminal-notes")
+            .expect("legacy pane");
+
+        let keep = side_by_side(&["terminal-notes"]);
+        assert!(reg.set_layout(TAG, &json!({ "tree": keep })).is_ok());
+
+        let forge = side_by_side(&["terminal-notes", "terminal-cafe0001"]);
+        assert_eq!(
+            reg.set_layout(TAG, &json!({ "tree": forge })).unwrap_err(),
+            PaneError::ReservedPaneId
+        );
     }
 
     fn assert_unchanged(reg: &PaneRegistry, before: &PaneTree) {

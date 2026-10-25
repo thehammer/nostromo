@@ -15,13 +15,19 @@ use std::path::{Path, PathBuf};
 
 /// Words no file under `src/mcp/` may contain (`TerminalAgentApi` is the one
 /// terminal name that is allowed there).
-const FORBIDDEN: [&str; 6] = [
+const FORBIDDEN: [&str; 9] = [
     "OperatorCap",
     "TerminalManager",
     "terminal_input",
     "TerminalInput",
     "write_input",
     ".input(",
+    // The pane registry's own terminal-leaf plumbing is `pub`: a handler that
+    // reached it through `pane_registry` would walk around every layout guard.
+    // (`unregister_terminal_leaf` contains the first.)
+    "register_terminal_leaf",
+    "insert_terminal_leaf",
+    "remove_terminal_leaf",
 ];
 
 /// One forbidden token found in one file.

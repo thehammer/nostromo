@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use super::{TerminalError, TerminalManager};
 use crate::ipc::protocol::TerminalInfo;
 
-/// Longest `tool` string an audit line keeps (it is whatever the caller sent).
-const MAX_TOOL_AUDIT_LEN: usize = 128;
+/// Longest `tool` or `focus` string an audit line keeps (both are whatever the
+/// caller sent: a tool name, and the `pty_id` it declared).
+const MAX_AUDIT_FIELD_LEN: usize = 128;
 
 /// What an agent's focus may do with terminals: open one, ask whether a pane
 /// is one, and record a refusal.
@@ -54,9 +55,10 @@ impl TerminalAgentApi {
     /// tried (`input`, `read`, `close`, `content`, `layout`, …), `tool` the
     /// tool or frame, `code` the refusal's code.
     pub fn audit_refusal(&self, focus: Option<&str>, op: &str, tool: &str, code: &str) {
-        let tool: String = tool.chars().take(MAX_TOOL_AUDIT_LEN).collect();
+        let clip = |s: &str| -> String { s.chars().take(MAX_AUDIT_FIELD_LEN).collect() };
+        let focus = focus.map(clip);
         self.lock()
-            .audit_refused_mcp(op, Some(code), None, focus, Some(&tool));
+            .audit_refused_mcp(op, Some(code), None, focus.as_deref(), Some(&clip(tool)));
     }
 
     fn lock(&self) -> MutexGuard<'_, TerminalManager> {

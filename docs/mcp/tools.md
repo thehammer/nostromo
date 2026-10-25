@@ -1356,6 +1356,8 @@ Open a terminal pane (the user's login shell) in the caller's own focus. The use
 
 `working_directory` must be an absolute path to an existing directory. Default: the focus session's working directory, else `$HOME`. There is no `command`, `args`, `env`, `initial_input` or `view_id`: the target is always the caller's own focus (its Hello `pty_id`).
 
+No Nostromo path lets an agent run anything in the terminal. The starting directory is the agent's choice, though, so anything the user's shell runs on its own in a directory (prompt hooks, a trusted `direnv`/`mise` file, `core.fsmonitor`) runs there as the user would expect it to in any terminal opened in that directory. Agent-opened terminals count against the same per-focus (8) and daemon-wide (32) limits as the user's.
+
 **Output**: `{ "ok": true, "terminal_id": "<uuid>", "pane_id": "terminal-<8 hex>" }`. The new leaf does not take keyboard focus. The open is audited (`opened`, `requested_by: focus`).
 
 | `error` | Meaning |
@@ -1374,7 +1376,7 @@ Source: `src/mcp/tools/terminal.rs`, `src/terminal/agent_api.rs`
 A request on the MCP socket that looks like writing to, reading from or closing a terminal gets its own JSON-RPC error code, **`-32002`** (`TERMINAL_FORBIDDEN_CODE`, `src/mcp/server.rs`), distinct from `-32601` (no such tool) and `-32001` (withdrawn by policy). The message is `terminal_<op>_forbidden: <name>` with `op` one of `input`, `read`, `close`. Each is audited as `refused {channel: "mcp", focus, op, tool}` and changes nothing.
 
 - `tools/call` with a name that mentions `terminal|shell|pty|tty|console` and an op verb (input: `input|write|send|key|paste|type|signal|kill|interrupt|exec|run|stdin`; read: `read|output|screen|scrollback|tail|capture|snapshot`; close: `close|remove|destroy|detach|stop`), or a bare `send_keys`/`stdin`-style name. No such tool is registered. A real tool that the classifier would match must be added to `EXEMPT_TOOL_NAMES` (`src/mcp/tools/terminal.rs`); a test fails if any registered name is classified.
-- A raw frame with no `jsonrpc` key whose `type` starts `terminal_`/`pty_`, or a request whose `method` starts `terminal/`/`pty/`.
+- A raw frame with no `jsonrpc` key whose `type` starts `terminal_`/`pty_`, or a request whose `method` starts `terminal/`/`pty/` (case, `.` and `-` for `_` are normalised).
 
 `src/mcp/` cannot name the terminal write path at all: `tests/terminal_policy.rs` scans it as text for `OperatorCap`, `TerminalManager`, the terminal-input message and `.input(`. Terminal I/O is only available to the verified Mac app over IPC ([`../terminal.md`](../terminal.md)).
 

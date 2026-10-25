@@ -393,7 +393,7 @@ impl TerminalManager {
         let tree = match self.lock_panes() {
             Some(mut panes) => Some(
                 panes
-                    .insert_terminal_leaf(&req.tag, relative_to, position, &pane_id)
+                    .insert_registered_terminal_leaf(&req.tag, relative_to, position, &pane_id)
                     .map_err(TerminalError::Pane)?,
             ),
             None => None,
@@ -406,9 +406,6 @@ impl TerminalManager {
                 return Err(TerminalError::OpenFailed);
             }
         };
-        if let Some(mut panes) = self.lock_panes() {
-            panes.register_terminal_leaf(&req.tag, &pane_id);
-        }
 
         let user_opened = requested_by.kind == "user";
         let info = TerminalInfo {
