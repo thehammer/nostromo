@@ -83,7 +83,7 @@ pub async fn open_terminal(
 }
 
 /// Does `tag` name a focus the daemon knows (a pane tree or a session)?
-fn focus_exists(state: &McpSharedState, tag: &str) -> bool {
+pub(super) fn focus_exists(state: &McpSharedState, tag: &str) -> bool {
     let Some(daemon) = &state.daemon else {
         return false;
     };

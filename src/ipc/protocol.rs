@@ -1638,6 +1638,32 @@ pub enum ClientMsg {
         op: String,
         channel: String,
     },
+
+    // ── remote shells (2a; every one refused over TCP) ────────────────────────
+    /// Ask for the remote-shell vocabulary (projects, environments, services,
+    /// shell types). Answered with a targeted `RemoteShellTargets`. Any local
+    /// peer may ask; it carries no profile, cluster or account.
+    RemoteShellTargetsRequest,
+    /// The user asks for a remote shell: the daemon runs the same confirm
+    /// flow an agent's request does, with `requested_by: {kind: "user"}`.
+    /// Operator app only.
+    RemoteShellOpen {
+        /// The focus the pane goes in.
+        tag: String,
+        project: String,
+        environment: String,
+        service: String,
+        shell_type: String,
+    },
+    /// The user's answer to a `RemoteShellConfirmRequest`: `decision` is
+    /// `connect`, `cancel` or `dismiss`. Operator app only.
+    RemoteShellAnswer {
+        request_id: String,
+        decision: String,
+        /// Parsed and audited; honoured by the follow slice.
+        #[serde(default)]
+        invite_follow: bool,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -1862,6 +1888,33 @@ pub struct TerminalRequester {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+}
+
+/// Who asked for a remote shell, as the confirm sheet shows it: `kind` is
+/// `user` or `focus`; an agent's request names its focus `tag` and `agent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteRequester {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+}
+
+/// One project in `RemoteShellTargets`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteShellProject {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_service: Option<String>,
+    pub environments: Vec<RemoteShellEnvironment>,
+}
+
+/// One environment of a project and the services it has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteShellEnvironment {
+    pub name: String,
+    pub services: Vec<String>,
 }
 
 /// A terminal's metadata. Never its bytes.
@@ -2442,6 +2495,47 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_id: Option<String>,
         code: String,
+    },
+
+    // ── remote shells (2a; all `LocalOnly`) ───────────────────────────────────
+    /// The remote-shell vocabulary, answering `RemoteShellTargetsRequest`
+    /// (targeted). Read from the layer's data at request time.
+    /// `configured: false` carries a `problem`.
+    RemoteShellTargets {
+        configured: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        problem: Option<String>,
+        #[serde(default)]
+        projects: Vec<RemoteShellProject>,
+        #[serde(default)]
+        shell_types: Vec<String>,
+    },
+    /// An agent (or the user) asks to open a remote shell; the app shows the
+    /// confirm sheet. Targeted to operator-app connections that declared
+    /// `remote_shell_confirm`, and to no one else.
+    RemoteShellConfirmRequest {
+        request_id: String,
+        /// The focus the pane would open in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        target: TerminalTarget,
+        requested_by: RemoteRequester,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// RFC 3339 UTC: when the daemon gives up waiting.
+        expires_at: String,
+    },
+    /// How a confirm request ended (the sheet closes). `outcome` is
+    /// `connected`, `cancelled`, `dismissed`, `timed_out` or `connect_failed`
+    /// (then `reason` is the failure's code and `remedy` what to do about it).
+    /// Targeted to the same connections as the request.
+    RemoteShellResolved {
+        request_id: String,
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remedy: Option<String>,
     },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.
@@ -6916,5 +7010,223 @@ mod terminal_wire_tests {
             }
             other => panic!("expected Subscribe, got {other:?}"),
         }
+    }
+
+    // ── 2a: remote shell frames ───────────────────────────────────────────────
+
+    fn wire_target() -> TerminalTarget {
+        TerminalTarget {
+            project: "admin-portal".into(),
+            environment: "production".into(),
+            service: "scheduler".into(),
+            shell_type: "shell".into(),
+        }
+    }
+
+    #[test]
+    fn remote_shell_client_messages_round_trip_with_their_wire_names() {
+        let v = round_trip_client(ClientMsg::RemoteShellTargetsRequest);
+        assert_eq!(v["type"], "remote_shell_targets_request");
+
+        let v = round_trip_client(ClientMsg::RemoteShellOpen {
+            tag: "core-1".into(),
+            project: "admin-portal".into(),
+            environment: "production".into(),
+            service: "scheduler".into(),
+            shell_type: "shell".into(),
+        });
+        assert_eq!(v["type"], "remote_shell_open");
+        assert_eq!(v["tag"], "core-1");
+        assert_eq!(v["project"], "admin-portal");
+        assert_eq!(v["environment"], "production");
+        assert_eq!(v["service"], "scheduler");
+        assert_eq!(v["shell_type"], "shell");
+
+        let v = round_trip_client(ClientMsg::RemoteShellAnswer {
+            request_id: "r1".into(),
+            decision: "connect".into(),
+            invite_follow: true,
+        });
+        assert_eq!(v["type"], "remote_shell_answer");
+        assert_eq!(v["request_id"], "r1");
+        assert_eq!(v["decision"], "connect");
+        assert_eq!(v["invite_follow"], true);
+    }
+
+    #[test]
+    fn a_remote_shell_answer_without_invite_follow_decodes_as_not_following() {
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"remote_shell_answer","request_id":"r1","decision":"cancel"}"#,
+        )
+        .unwrap();
+
+        match msg {
+            ClientMsg::RemoteShellAnswer {
+                request_id,
+                decision,
+                invite_follow,
+            } => {
+                assert_eq!(request_id, "r1");
+                assert_eq!(decision, "cancel");
+                assert!(!invite_follow, "invite_follow defaults to false");
+            }
+            other => panic!("expected RemoteShellAnswer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_remote_shell_targets_request_is_just_its_type() {
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"remote_shell_targets_request"}"#).unwrap();
+
+        assert!(matches!(msg, ClientMsg::RemoteShellTargetsRequest));
+    }
+
+    #[test]
+    fn remote_shell_targets_round_trips_and_leaves_out_what_is_absent() {
+        let v = round_trip_server(ServerMsg::RemoteShellTargets {
+            configured: true,
+            problem: None,
+            projects: vec![RemoteShellProject {
+                name: "admin-portal".into(),
+                default_service: Some("portal".into()),
+                environments: vec![
+                    RemoteShellEnvironment {
+                        name: "production".into(),
+                        services: vec!["portal".into(), "scheduler".into()],
+                    },
+                    RemoteShellEnvironment {
+                        name: "demo".into(),
+                        services: vec![],
+                    },
+                ],
+            }],
+            shell_types: vec!["shell".into(), "console".into(), "tinker".into()],
+        });
+        assert_eq!(v["type"], "remote_shell_targets");
+        assert_eq!(v["configured"], true);
+        assert!(v.get("problem").is_none(), "{v}");
+        assert_eq!(v["projects"][0]["name"], "admin-portal");
+        assert_eq!(v["projects"][0]["default_service"], "portal");
+        assert_eq!(v["projects"][0]["environments"][0]["name"], "production");
+        assert_eq!(
+            v["projects"][0]["environments"][0]["services"],
+            serde_json::json!(["portal", "scheduler"])
+        );
+        assert_eq!(
+            v["shell_types"],
+            serde_json::json!(["shell", "console", "tinker"])
+        );
+
+        let v = round_trip_server(ServerMsg::RemoteShellTargets {
+            configured: false,
+            problem: Some("no ECS config.json found".into()),
+            projects: vec![],
+            shell_types: vec![],
+        });
+        assert_eq!(v["configured"], false);
+        assert_eq!(v["problem"], "no ECS config.json found");
+        assert_eq!(v["projects"], serde_json::json!([]));
+
+        let v = round_trip_server(ServerMsg::RemoteShellTargets {
+            configured: true,
+            problem: None,
+            projects: vec![RemoteShellProject {
+                name: "p".into(),
+                default_service: None,
+                environments: vec![],
+            }],
+            shell_types: vec![],
+        });
+        assert!(v["projects"][0].get("default_service").is_none(), "{v}");
+    }
+
+    #[test]
+    fn remote_shell_targets_without_its_lists_still_decodes() {
+        let msg: ServerMsg =
+            serde_json::from_str(r#"{"type":"remote_shell_targets","configured":false}"#).unwrap();
+
+        match msg {
+            ServerMsg::RemoteShellTargets {
+                configured,
+                problem,
+                projects,
+                shell_types,
+            } => {
+                assert!(!configured);
+                assert_eq!(problem, None);
+                assert!(projects.is_empty() && shell_types.is_empty());
+            }
+            other => panic!("expected RemoteShellTargets, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_shell_confirm_request_round_trips_for_an_agent_and_for_the_user() {
+        let v = round_trip_server(ServerMsg::RemoteShellConfirmRequest {
+            request_id: "r1".into(),
+            tag: Some("core-1".into()),
+            target: wire_target(),
+            requested_by: RemoteRequester {
+                kind: "focus".into(),
+                tag: Some("core-1".into()),
+                agent: Some("cody".into()),
+            },
+            reason: Some("look at the scheduler".into()),
+            expires_at: "2026-10-25T12:00:00Z".into(),
+        });
+        assert_eq!(v["type"], "remote_shell_confirm_request");
+        assert_eq!(v["request_id"], "r1");
+        assert_eq!(v["tag"], "core-1");
+        assert_eq!(v["target"]["project"], "admin-portal");
+        assert_eq!(v["target"]["environment"], "production");
+        assert_eq!(v["target"]["service"], "scheduler");
+        assert_eq!(v["target"]["shell_type"], "shell");
+        assert_eq!(v["requested_by"]["kind"], "focus");
+        assert_eq!(v["requested_by"]["tag"], "core-1");
+        assert_eq!(v["requested_by"]["agent"], "cody");
+        assert_eq!(v["reason"], "look at the scheduler");
+        assert_eq!(v["expires_at"], "2026-10-25T12:00:00Z");
+
+        let v = round_trip_server(ServerMsg::RemoteShellConfirmRequest {
+            request_id: "r2".into(),
+            tag: None,
+            target: wire_target(),
+            requested_by: RemoteRequester {
+                kind: "user".into(),
+                tag: None,
+                agent: None,
+            },
+            reason: None,
+            expires_at: "2026-10-25T12:00:00Z".into(),
+        });
+        assert_eq!(v["requested_by"], serde_json::json!({"kind": "user"}));
+        assert!(v.get("reason").is_none(), "{v}");
+        assert!(v.get("tag").is_none(), "{v}");
+    }
+
+    #[test]
+    fn remote_shell_resolved_round_trips_with_and_without_a_reason() {
+        let v = round_trip_server(ServerMsg::RemoteShellResolved {
+            request_id: "r1".into(),
+            outcome: "connected".into(),
+            reason: None,
+            remedy: None,
+        });
+        assert_eq!(v["type"], "remote_shell_resolved");
+        assert_eq!(v["outcome"], "connected");
+        assert!(
+            v.get("reason").is_none() && v.get("remedy").is_none(),
+            "{v}"
+        );
+
+        let v = round_trip_server(ServerMsg::RemoteShellResolved {
+            request_id: "r1".into(),
+            outcome: "connect_failed".into(),
+            reason: Some("not_available".into()),
+            remedy: Some("Update Nostromo".into()),
+        });
+        assert_eq!(v["reason"], "not_available");
+        assert_eq!(v["remedy"], "Update Nostromo");
     }
 }

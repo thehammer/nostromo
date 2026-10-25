@@ -196,6 +196,11 @@ async fn main() -> Result<()> {
     {
         let mut terminals = terminals.lock().unwrap();
         terminals.set_sensitive_tags(session_mgr.lock().unwrap().sensitive_tags());
+        // Where the remote-shell vocabulary is read from (per request). The
+        // launcher stays `UnavailableLauncher` until remote shells can be opened.
+        terminals.set_ecs_paths(nostromo::terminal::ecs::EcsPaths::from_config(
+            &config.terminal,
+        ));
         terminals.reconcile();
     }
 

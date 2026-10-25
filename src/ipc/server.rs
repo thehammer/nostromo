@@ -791,6 +791,7 @@ where
                 terminal::OperatorConn {
                     stream: terminal_stream_tx.clone(),
                     capabilities,
+                    targeted: targeted_tx.clone(),
                 },
             );
             *cap = Some(granted);
@@ -1169,7 +1170,10 @@ where
                                 ClientMsg::TerminalOpenLocal { .. }
                                 | ClientMsg::TerminalAttach { .. }
                                 | ClientMsg::TerminalClose { .. }
-                                | ClientMsg::TerminalRestart { .. } => true,
+                                | ClientMsg::TerminalRestart { .. }
+                                // Connect is the act that opens a production shell.
+                                | ClientMsg::RemoteShellOpen { .. }
+                                | ClientMsg::RemoteShellAnswer { .. } => true,
                                 ClientMsg::TerminalInput { .. } | ClientMsg::TerminalResize { .. } => {
                                     cap_checked_at.elapsed() >= TERMINAL_RECHECK
                                 }
@@ -1365,6 +1369,16 @@ fn handle_client_msg(
         | ClientMsg::TerminalRestart { .. }
         | ClientMsg::TerminalRefusalReport { .. }) => {
             handle_terminal_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
+        }
+
+        // Remote shells: the vocabulary for anyone local; opening one and
+        // answering its confirm sheet are the operator app's alone.
+        ClientMsg::RemoteShellTargetsRequest => {
+            let paths = lock_terminals(terminals).ecs_paths().clone();
+            let _ = targeted_tx.send(terminal::remote_request::remote_targets_msg(&paths));
+        }
+        msg @ (ClientMsg::RemoteShellOpen { .. } | ClientMsg::RemoteShellAnswer { .. }) => {
+            handle_remote_shell_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
         }
 
         // Retired (R2): the daemon no longer hosts PTYs. The verbs still decode
@@ -2425,6 +2439,117 @@ fn handle_terminal_msg(
     }
 }
 
+/// `remote_shell_open` and `remote_shell_answer`. Without an [`OperatorCap`]
+/// they change nothing: the peer is told `terminal_refused` and the attempt is
+/// audited (`op: "control"`), so nothing but the verified app can say Connect.
+fn handle_remote_shell_msg(
+    msg: ClientMsg,
+    cap: Option<&OperatorCap>,
+    peer: Option<&PeerInfo>,
+    conn_key: &str,
+    terminals: &Arc<Mutex<TerminalManager>>,
+    targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
+) {
+    let op = terminal::op_of(&msg).unwrap_or("control");
+    let refuse = |code: &str| {
+        let _ = targeted_tx.send(ServerMsg::TerminalRefused {
+            op: op.to_string(),
+            terminal_id: None,
+            code: code.to_string(),
+        });
+    };
+    let Some(cap) = cap else {
+        let code = terminal::forbidden_code(op);
+        // Audited before the peer is told no.
+        lock_terminals(terminals).audit_refused(
+            TerminalRefusalChannel::Ipc,
+            op,
+            Some(code),
+            None,
+            peer.map(|p| p.pid),
+            peer.map(|p| p.exe.display().to_string()),
+        );
+        refuse(code);
+        return;
+    };
+    match msg {
+        ClientMsg::RemoteShellAnswer {
+            request_id,
+            decision,
+            invite_follow,
+        } => {
+            let Some(decision) = terminal::remote_request::Decision::parse(&decision) else {
+                refuse("invalid_decision");
+                return;
+            };
+            // A late or unknown answer, or one from a connection that was never
+            // shown the sheet, changes nothing.
+            let _applied = lock_terminals(terminals).remote_answer(
+                cap,
+                conn_key,
+                &request_id,
+                decision,
+                invite_follow,
+            );
+        }
+        ClientMsg::RemoteShellOpen {
+            tag,
+            project,
+            environment,
+            service,
+            shell_type,
+        } => {
+            // The same flow as an agent's request, on its own task: the sheet
+            // can wait for minutes and this connection keeps being served.
+            let terminals = Arc::clone(terminals);
+            let targeted_tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let result = terminal::remote_request::run(
+                    &terminals,
+                    terminal::remote_request::RemoteRequest {
+                        requested_by: crate::ipc::protocol::RemoteRequester {
+                            kind: "user".into(),
+                            tag: None,
+                            agent: None,
+                        },
+                        tag,
+                        project,
+                        environment,
+                        service,
+                        shell_type,
+                        reason: None,
+                        timeout: terminal::remote_request::DEFAULT_TIMEOUT,
+                        placement: terminal::launcher::Placement::default(),
+                    },
+                )
+                .await;
+                // A request that ended before any sheet was shown is reported
+                // to the asker; the rest is reported by `remote_shell_resolved`.
+                use terminal::remote_request::RemoteResult as R;
+                let code = match result {
+                    R::NotConfigured(_) => Some("remote_shells_not_configured"),
+                    R::InvalidTarget(_) => Some("invalid_target"),
+                    R::NoOperator => Some("no_operator"),
+                    R::RequestPending => Some("request_pending"),
+                    R::Connected(_)
+                    | R::Cancelled
+                    | R::Dismissed
+                    | R::TimedOut
+                    | R::ConnectFailed(_) => None,
+                };
+                if let Some(code) = code {
+                    let _ = targeted_tx.send(ServerMsg::TerminalRefused {
+                        op: "remote_open".into(),
+                        terminal_id: None,
+                        code: code.into(),
+                    });
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
 fn audit_focus_tag(tag: &str, sensitive: &SensitiveTags) -> String {
     if sensitive.tag_is_sensitive(tag) {
         sensitive.opaque_tag(tag)
@@ -3127,6 +3252,11 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         | ServerMsg::TerminalReplay { .. }
         | ServerMsg::TerminalRefused { .. }
         | ServerMsg::TerminalList { .. } => false,
+        // Remote shell frames name a production target and the agent's reason:
+        // each goes to chosen connections only, never to everyone.
+        ServerMsg::RemoteShellTargets { .. }
+        | ServerMsg::RemoteShellConfirmRequest { .. }
+        | ServerMsg::RemoteShellResolved { .. } => false,
         // This variant is TUI-internal; the daemon never produces it and should
         // never forward it even if it somehow appears.
         ServerMsg::DaemonReconnected => false,

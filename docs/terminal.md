@@ -48,6 +48,43 @@ Other `terminal_refused` codes: `unknown_terminal`, `terminal_not_ended`, `termi
 
 A terminal leaf's pane id is `terminal-<8 hex>`. The daemon also sends `pane_content` with `kind: "terminal"` (`terminal_id, label`, `environment` only for a remote shell) so a client that cannot attach can show a placeholder.
 
+## Remote shells: request, confirm, connect (slice 2a)
+
+An agent can **ask** for a shell on a remote ECS service; only a human click on the verified app **opens** one. The agent can never type into it (see `docs/production-shell-guard.md`: the `ecs_*` shell functions, `aws ecs execute-command` and tmux input into a remote pane stay blocked for agents; the request tool is the one open path, and it opens nothing by itself).
+
+**Vocabulary.** The daemon reads the carefeed layer's ECS data as data, afresh on every request and never cached: `config.json` (clusters, services, regions, shell commands), `~/.claude/ecs-local.json` (the user's profiles) and the three `declare -A ECS_{ENV,SERVICE,PROJECT}_ALIASES` tables of `ecs.sh`, scanned as **text** with a strict regex and never sourced or run (a block that holds anything but `[word]="word"` entries gives no aliases, with a warning). Paths: `[terminal] ecs_config`, `ecs_local`, `ecs_aliases_script` in `~/.config/nostromo/config.toml`; defaults are under `~/.claude/layers/carefeed/lib/services/ecs/` (then `~/.claude/lib/services/ecs/`). Resolution is lowercase, then alias, then validation of each level (project, environment, service, shell type); a word outside the vocabulary is an `invalid_target` that lists what is valid. An environment with no `regions` entry is not offered. A profile that is missing or still `CONFIGURE_ME` resolves to none. No `config.json` means remote shells are not configured.
+
+**Flow** (`src/terminal/remote_request.rs`):
+
+1. Resolve the four words. An unknown word returns at once; no one is asked.
+2. Only operator connections that sent `capabilities: ["remote_shell_confirm"]` in their `Subscribe` can be asked. None: `no_operator` at once. A verified app that does not declare the capability, a TCP client that renders decisions and any other local process do not count.
+3. At most one request waits at a time (`request_pending`).
+4. `remote_shell_confirm_request` goes to those connections and no one else.
+5. The daemon waits (300 s by default, clamped to 10-600 s) for `remote_shell_answer {decision: connect|cancel|dismiss}` from the operator app (`OperatorCap`).
+6. Only after Connect is the launcher called (`RemoteLauncher`; this daemon's is `UnavailableLauncher`, which fails with `not_available`, until the real launcher lands). Before that no process, pane or terminal exists.
+7. `remote_shell_resolved` goes to the same connections: `connected`, `cancelled`, `dismissed`, `timed_out` or `connect_failed` (with `reason` and `remedy`).
+8. Every step is audited.
+
+If the agent's MCP connection closes while the request waits, the request is abandoned: the sheet is closed (`remote_shell_resolved` `cancelled`, `reason: "requester_gone"`) and the slot is freed.
+
+| Client → daemon | Fields |
+|---|---|
+| `remote_shell_targets_request` | none; any local peer |
+| `remote_shell_open`* | `tag, project, environment, service, shell_type` (the user's own request; same confirm flow with `requested_by: {kind: "user"}`; failures before the sheet arrive as `terminal_refused {op: "remote_open", code}`) |
+| `remote_shell_answer`* | `request_id, decision, invite_follow?` (parsed and audited only; honoured by the follow slice) |
+
+| Daemon → client | Routing | Fields |
+|---|---|---|
+| `remote_shell_targets` | targeted | `configured, problem?, projects: [{name, default_service?, environments: [{name, services}]}], shell_types` (no profiles, clusters or accounts) |
+| `remote_shell_confirm_request` | targeted to operator connections with `remote_shell_confirm` | `request_id, tag?, target, requested_by: {kind, tag?, agent?}, reason?, expires_at` |
+| `remote_shell_resolved` | the same connections | `request_id, outcome, reason?, remedy?` |
+
+`remote_shell_open` and `remote_shell_answer` from anyone but the verified app (even a process claiming `client_kind: "mac_app"`) get `terminal_refused {op: "control", code: "terminal_control_forbidden"}` and an audited `refused`; the request stays pending. Over TCP they are refused by FND-1 like every terminal frame. All three server frames are `LocalOnly` and never broadcast.
+
+Audit events (`terminal.jsonl`): `remote_requested {tag, requested_by, target, reason (200 chars at most)}`, `confirm_outcome {tag, target, outcome: connect|cancelled|dismissed|timed_out|abandoned|no_operator|request_pending, invite_follow?}`, `connect_started`, `connected {terminal_id, pane_id, tag, kind, target}`, `connect_failed {reason_code}`. `no_operator` and `request_pending` lines share the per-channel refusal budget. No command, keystroke or output text is ever written.
+
+MCP tools: `nostromo.list_remote_shell_targets` and `nostromo.request_remote_shell` (`docs/mcp/tools.md`).
+
 ## Network peers (FND-1)
 
 Every `terminal_*` client frame is `NetworkPolicy::Refused` (`src/ipc/peer.rs`): over TCP it is answered with `requires_secure_connection` before dispatch and audited with `channel: "tcp"`. Every terminal server frame is `ServerClass::LocalOnly`: a TCP peer receives none of them, not even metadata.
@@ -85,7 +122,7 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 ## Audit
 
-`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell events above, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
 
 Refused lines are capped at 120 a minute per channel (one budget for the whole MCP channel, not one per focus), so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
 

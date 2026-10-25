@@ -19,6 +19,7 @@ pub mod nostromo_meta;
 pub mod perri;
 pub mod perri_mutators;
 pub mod refresh_pane;
+pub mod remote_shell;
 pub mod render_state;
 pub mod set_pane;
 pub mod show;
@@ -369,6 +370,27 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
+        json!({
+            "name": LIST_REMOTE_SHELL_TARGETS_TOOL,
+            "description": "List what you can ask for with nostromo.request_remote_shell: every project, its environments and the services in each (and the project's default service), plus the shell types. Read from the user's ECS configuration each time you call it. Takes no arguments. Returns { ok, projects: [{ name, default_service?, environments: [{ name, services }] }], shell_types }. Errors: remote_shells_not_configured (detail says why), unknown_argument.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": REQUEST_REMOTE_SHELL_TOOL,
+            "description": "Ask the user to open a shell on a remote (ECS) service, for example a production container. Use this instead of the ecs_* shell functions or tmux panes, which are blocked for agents. You name the project, environment, service and shell type (the names from nostromo.list_remote_shell_targets; common aliases such as 'prod' or 'sched' are accepted) and may add a short reason (at most 200 characters; the user sees it). The call blocks until the user decides: Nostromo shows a confirmation sheet and the user must click Connect themselves. Nothing is opened until they do, and you cannot click it for them. Once connected the user types in the shell: you can never type into it, and you cannot see its output unless the user later invites you to follow it. There is no command, script or argument field: you cannot choose what runs, and any other key is refused. Returns { ok, outcome: 'connected', terminal_id, pane_id } when the user connected. Errors: invalid_target (detail, valid: { field, values } lists the accepted values; nothing was shown to the user), unknown_argument (any key other than the five below, including command, cmd or script), reason_too_long, invalid_args, unknown_view, remote_shells_not_configured, no_operator (the Nostromo app is not open to confirm), request_pending (another request is waiting for the user; try later), cancelled, dismissed, timeout (the user did not answer in time), connect_failed (reason, detail, remedy).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project":     { "type": "string", "description": "Project, e.g. 'admin-portal' (alias 'ap')" },
+                    "environment": { "type": "string", "description": "Environment, e.g. 'production' (alias 'prod'), 'staging', 'demo', 'canada'" },
+                    "service":     { "type": "string", "description": "Service of that project in that environment, e.g. 'scheduler' (alias 'sched'), 'portal', 'queue'" },
+                    "shell_type":  { "type": "string", "description": "Shell type: 'shell', 'console' or 'tinker'" },
+                    "reason":      { "type": "string", "description": "Why you need the shell, at most 200 characters; shown to the user on the confirmation sheet" }
+                },
+                "required": ["project", "environment", "service", "shell_type"],
+                "additionalProperties": false
+            }
+        }),
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
@@ -581,24 +603,40 @@ fn is_picks_session(pty_id: Option<&str>) -> bool {
 /// must never get by steering an agent.
 fn is_network_withheld_tool(name: &str) -> bool {
     name == OPEN_TERMINAL_TOOL
+        || name == REQUEST_REMOTE_SHELL_TOOL
+        || name == LIST_REMOTE_SHELL_TARGETS_TOOL
         || ["fred.", "teri.", "mother."]
             .iter()
             .any(|prefix| name.starts_with(prefix))
 }
 
+/// Tools whose call waits for a person and must end when the agent that made
+/// it hangs up (the MCP connection handler drops the call). They clean up
+/// after themselves when dropped.
+pub fn cancels_on_disconnect(name: &str) -> bool {
+    name == REQUEST_REMOTE_SHELL_TOOL
+}
+
 /// The tool that opens a terminal pane.
 const OPEN_TERMINAL_TOOL: &str = "nostromo.open_terminal";
+/// The tool that asks the user for a remote shell.
+const REQUEST_REMOTE_SHELL_TOOL: &str = "nostromo.request_remote_shell";
+/// The tool that lists what a remote shell may be asked for.
+const LIST_REMOTE_SHELL_TARGETS_TOOL: &str = "nostromo.list_remote_shell_targets";
 
 /// `Forbidden` for `name`. A refused [`OPEN_TERMINAL_TOOL`] is also audited
 /// (`refused`, `op: "open"`, `code: "forbidden"`: the focus and tool name,
 /// never the arguments), whoever asked and whichever rule refused it.
 fn forbidden(state: &McpSharedState, pty_id: Option<&str>, name: &str) -> ToolResult {
-    if name == OPEN_TERMINAL_TOOL {
-        if let Some(daemon) = &state.daemon {
-            daemon
-                .terminals
-                .audit_refusal(pty_id, "open", name, "forbidden");
-        }
+    let op = match name {
+        OPEN_TERMINAL_TOOL => Some("open"),
+        REQUEST_REMOTE_SHELL_TOOL => Some("remote_request"),
+        _ => None,
+    };
+    if let (Some(op), Some(daemon)) = (op, &state.daemon) {
+        daemon
+            .terminals
+            .audit_refusal(pty_id, op, name, "forbidden");
     }
     ToolResult::Forbidden(name.to_string())
 }
@@ -915,6 +953,8 @@ async fn dispatch_inner(
             create_focus::create_focus(state, &args, pty_id).await
         }
         OPEN_TERMINAL_TOOL => terminal::open_terminal(state, arguments, pty_id).await,
+        LIST_REMOTE_SHELL_TARGETS_TOOL => remote_shell::list_targets(state, arguments).await,
+        REQUEST_REMOTE_SHELL_TOOL => remote_shell::request_shell(state, arguments, pty_id).await,
         "nostromo.apply_layout" => {
             let args = arguments.cloned().unwrap_or_default();
             apply_layout::apply_layout(state, &args, pty_id).await
