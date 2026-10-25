@@ -53,6 +53,10 @@ enum FredWebLink {
     /// Google Calendar's older links live under this host's `/calendar/` path; nothing else on it is allowed.
     static let googleHost = "www.google.com"
     static let googleCalendarPath = "/calendar/"
+    /// Hosts that are allowed along with their subdomains (`googleHost` is path-restricted, so not here).
+    private static let allowedHosts = outlookHosts + [gmailHost, calendarHost]
+    /// The labels the daemon puts on a detail's web link, one per provider.
+    static let detailLinkLabels: Set<String> = ["Open in Outlook", "Open in Gmail", "Open in Google Calendar"]
 
     /// `link` as a URL, or nil when it is not a safe Outlook, Gmail or Google Calendar web link.
     static func url(from link: String?) -> URL? {
@@ -68,8 +72,8 @@ enum FredWebLink {
               url.user == nil, url.password == nil,
               url.port == nil || url.port == 443,
               let host = url.host?.lowercased(), !host.isEmpty else { return false }
-        if host == googleHost { return url.path.hasPrefix(googleCalendarPath) }
-        return (outlookHosts + [gmailHost, calendarHost]).contains { matches(host, $0) }
+        if host == googleHost { return isCalendarPath(url.path) }
+        return allowedHosts.contains { matches(host, $0) }
     }
 
     /// The open button's title for an (already safe) `url`.
@@ -80,8 +84,13 @@ enum FredWebLink {
         return "Open in Outlook"
     }
 
-    /// The labels the daemon puts on a detail's web link, one per provider.
-    static let detailLinkLabels: Set<String> = ["Open in Outlook", "Open in Gmail", "Open in Google Calendar"]
+    /// `/calendar/...` with no dot segments. `URL.path` is percent-decoded but not
+    /// normalised, so `/calendar/../url` (or `%2e%2e`) would pass a prefix check
+    /// and the browser would land on another www.google.com page, e.g. its redirector.
+    private static func isCalendarPath(_ path: String) -> Bool {
+        path.hasPrefix(googleCalendarPath)
+            && !path.split(separator: "/", omittingEmptySubsequences: false).contains { $0 == "." || $0 == ".." }
+    }
 
     private static func matches(_ host: String, _ allowed: String) -> Bool {
         host == allowed || host.hasSuffix("." + allowed)

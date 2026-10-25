@@ -460,6 +460,11 @@ final class FredDetailHardeningTests: XCTestCase {
             "http://mail.google.com/",
             "https://user@mail.google.com/",
             "https://mail.google.com:8443/",
+            // A dot segment would let the browser leave /calendar/ for another www.google.com page.
+            "https://www.google.com/calendar/../url?q=https://evil.example/",
+            "https://www.google.com/calendar/%2e%2e/url?q=https://evil.example/",
+            "https://www.google.com/calendar/./event",
+            "https://www.google.com/calendarx/event",
         ]
         for link in rejected {
             XCTAssertNil(FredWebLink.url(from: link), "should reject \(link)")
