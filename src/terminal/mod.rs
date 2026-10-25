@@ -17,6 +17,8 @@ pub mod access;
 pub mod agent_api;
 pub mod audit;
 mod fanout;
+pub mod follow;
+pub mod redact;
 pub mod session;
 pub mod store;
 #[cfg(test)]
