@@ -71,13 +71,30 @@ final class MotherDetailScrollTests: XCTestCase {
                 ("last visible plan row", try XCTUnwrap(rows.last, file: file, line: line))]
     }
 
-    /// The reader is at the very end of the document, on the log tail. Returns what they see of it.
-    private func scrollToLogTail(_ rig: MDRig, file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
-        scrollAndConfirm(rig, toY: maxScrollY(rig), file: file, line: line)
+    /// The reader is on the log tail: `slack` pt above the very end of the document (0 is the end itself,
+    /// where a shrinking document clamps to the same place with or without an anchor; the slack makes a
+    /// shrink above the reader a real test). Returns what they see.
+    private func scrollToLogTail(_ rig: MDRig, slack: CGFloat = 0,
+                                 file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
+        scrollAndConfirm(rig, toY: maxScrollY(rig) - slack, file: file, line: line)
         let title = try XCTUnwrap(visibleLabels(rig, prefix: "LOG TAIL").first, "precondition: the LOG TAIL label is in view", file: file, line: line)
-        var anchors: [(String, NSView)] = [("LOG TAIL label", title), ("log scroll view", rig.detail.logScrollView)]
-        if let row = visibleLabels(rig, prefix: "PLAN-").last { anchors.append(("last visible plan row", row)) }
+        return [("LOG TAIL label", title), ("log scroll view", rig.detail.logScrollView)]
+    }
+
+    /// The same, with a plan row above the log that the reader can also see.
+    private func scrollToLogTailWithPlanRow(_ rig: MDRig, slack: CGFloat = 0,
+                                            file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
+        var anchors = try scrollToLogTail(rig, slack: slack, file: file, line: line)
+        let row = try XCTUnwrap(visibleLabels(rig, prefix: "PLAN-").last, "precondition: a plan row is in view above the log", file: file, line: line)
+        anchors.append(("last visible plan row", row))
         return anchors
+    }
+
+    /// `makeRig` ends by showing a short action error that clears itself 5 s later; wait for that, so a
+    /// shrink that is not part of the event under test cannot land in the middle of one.
+    private func waitForTheStartupErrorToClear(_ rig: MDRig, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(MD.pumpUntil(rig.window) { rig.renderedCount(prefix: "ERR") == 0 },
+                      "the startup action error never cleared", file: file, line: line)
     }
 
     private enum Change { case grows, shrinks, either }
@@ -200,6 +217,7 @@ final class MotherDetailScrollTests: XCTestCase {
 
     func testTheRowsInViewStayPutWhileTheSectionsAboveThePlanGrowAndShrink() throws {
         let rig = try MD.makeRig(self, long: [.planChecklist], index: 940)
+        waitForTheStartupErrorToClear(rig)
         // Everything the reader sees, kept across all the events: no re-scrolling in between.
         let anchors = try scrollIntoPlan(rig)
         for (name, change, event) in liveEvents(rig) {
@@ -208,11 +226,66 @@ final class MotherDetailScrollTests: XCTestCase {
     }
 
     func testTheLogTailInViewStaysPutWhileTheSectionsAboveItGrowAndShrink() throws {
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 941)
-        let anchors = try scrollToLogTail(rig)
-        for (name, change, event) in liveEvents(rig) {
-            try assertAnchorsHold(rig, name, change, anchors: anchors, event: event)
+        // At the very end of the document, and a little above it (where a shrink cannot hide in the clamp).
+        for (index, slack) in [(941, CGFloat(0)), (947, 150)] {
+            let rig = try MD.makeRig(self, long: [.planChecklist], index: index)
+            waitForTheStartupErrorToClear(rig)
+            let anchors = try scrollToLogTailWithPlanRow(rig, slack: slack)
+            for (name, change, event) in liveEvents(rig) {
+                try assertAnchorsHold(rig, "\(name) (\(slack) pt above the end)", change, anchors: anchors, event: event)
+            }
+            rig.close()
         }
+    }
+
+    func testTheLogTailInViewStaysPutWhileThePlanAboveItGrowsAndShrinks() throws {
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 948)
+        waitForTheStartupErrorToClear(rig)
+        let anchors = try scrollToLogTail(rig, slack: 150)
+        try assertAnchorsHold(rig, "the plan grows to 400 items", .grows, anchors: anchors) { try rig.setPlan(items: 400) }
+        try assertAnchorsHold(rig, "the plan shrinks to 200 items", .shrinks, anchors: anchors) { try rig.setPlan(items: 200) }
+    }
+
+    func testCrewDataArrivingForAJobThatHadNoneKeepsTheRowsInViewPut() throws {
+        // The crew section goes from zero height to its full height above the reader.
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 945, bare: true)
+        waitForTheStartupErrorToClear(rig)
+        let anchors = try scrollIntoPlan(rig)
+        rig.bare = false
+        try assertAnchorsHold(rig, "the first crew data arrives", .grows, anchors: anchors) { rig.setProgress(40) }
+    }
+
+    func testALiveUpdateNeverCarriesTheReaderToTheNextJob() throws {
+        // An update takes an anchor in the plan; a different job then opens: top, and still the top
+        // after everything has settled (a held anchor must not pull the new job back down).
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 946)
+        _ = try scrollIntoPlan(rig)
+        rig.sendPeek(todos: 60)
+        MD.pump(rig.window, seconds: 0.05)
+        try rig.selectOtherJob(planItems: 200)
+        XCTAssertEqual(originY(rig), 0, accuracy: tolerance, "a different job starts at the top")
+        MD.pump(rig.window, seconds: 0.5)
+        XCTAssertEqual(originY(rig), 0, accuracy: tolerance, "and stays there once layout has settled")
+    }
+
+    func testLiveUpdatesLeaveFocusAndTheDraftAloneAndWriteNothing() throws {
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 949)
+        waitForTheStartupErrorToClear(rig)
+        let reply = rig.detail.replyTextView
+        XCTAssertTrue(rig.window.makeFirstResponder(reply), "precondition: the guidance box can take focus")
+        reply.string = "half-written guidance"
+        let anchors = try scrollIntoPlan(rig)
+
+        // Not the state flips: leaving the awaiting state is meant to clear the draft.
+        for (name, change, event) in liveEvents(rig) where !name.contains("state") {
+            try assertAnchorsHold(rig, name, change, anchors: anchors, event: event)
+            XCTAssertTrue(rig.window.firstResponder === reply, "after \"\(name)\" the guidance box lost focus (\(String(describing: rig.window.firstResponder)))")
+            XCTAssertEqual(reply.string, "half-written guidance", "after \"\(name)\" the draft changed")
+        }
+        XCTAssertEqual(rig.host.writes, [], "reading a job's updates must not send, answer, cancel or retry anything")
+        let keyed = MD.allSubviews(rig.detail).compactMap { $0 as? NSButton }.filter { !$0.keyEquivalent.isEmpty }
+        XCTAssertTrue(keyed.isEmpty, "buttons with key equivalents: \(keyed.map(\.title))")
+        XCTAssertNil(rig.window.defaultButtonCell, "no button is the window's default")
     }
 
     func testAReaderInThePlanWhoScrollsOnIsAnchoredWhereTheyStopped() throws {
@@ -339,6 +412,9 @@ final class MotherDetailScrollTests: XCTestCase {
             XCTAssertTrue(sv.documentVisibleRect.contains(rect),
                           "\(button.title): at \(rect), not inside the viewport \(sv.documentVisibleRect) after scrolling to it")
             XCTAssertFalse(button.isHiddenOrHasHiddenAncestor, "\(button.title) is shown")
+            let content = try XCTUnwrap(rig.window.contentView)
+            XCTAssertTrue(content.bounds.contains(content.convert(button.bounds, from: button)),
+                          "\(button.title) is inside the window once scrolled to")
         }
     }
 }

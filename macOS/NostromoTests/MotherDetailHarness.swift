@@ -152,24 +152,28 @@ final class MDStubHost: MotherJobDetailHost {
     var motherPeeksPublisher: AnyPublisher<[String: MotherPeekPayload], Never> { peeksSubject.eraseToAnyPublisher() }
     func peek(for jobId: String) -> MotherPeekPayload? { payload }
 
+    /// Every call that would change something outside the view (answer, cancel, retry, ...): a
+    /// reader's updates must never produce one.
+    var writes: [String] = []
+
     var usesDefaultBroker = true
     func motherBinary() -> URL? { nil }
-    func answerJob(_ id: String, text: String) {}
+    func answerJob(_ id: String, text: String) { writes.append("answerJob") }
     /// True so a held job's options render as buttons with their consequences.
     var supportsAnswerOption = true
     var supportsAck = false
     private let decisionChanges = PassthroughSubject<Void, Never>()
     var motherDecisionChangesPublisher: AnyPublisher<Void, Never> { decisionChanges.eraseToAnyPublisher() }
     func motherDecisionState(jobId: String, decisionId: String) -> MotherDecisionSendState { .idle }
-    func beginMotherDecisionConfirm(jobId: String, decisionId: String, option: MotherDecisionOptionID) {}
+    func beginMotherDecisionConfirm(jobId: String, decisionId: String, option: MotherDecisionOptionID) { writes.append("beginConfirm") }
     func cancelMotherDecisionConfirm(jobId: String, decisionId: String) {}
-    func answerMotherDecision(jobId: String, decisionId: String, option: MotherDecisionOption, text: String) {}
-    func ackMotherAttention(jobId: String, reason: MotherAttentionReason) {}
-    func cancelJob(_ id: String) {}
-    func retryJob(_ id: String) {}
-    func forceStartJob(_ id: String) {}
-    func escalateJob(_ id: String) {}
-    func archiveJob(_ id: String) {}
+    func answerMotherDecision(jobId: String, decisionId: String, option: MotherDecisionOption, text: String) { writes.append("answerDecision") }
+    func ackMotherAttention(jobId: String, reason: MotherAttentionReason) { writes.append("ack") }
+    func cancelJob(_ id: String) { writes.append("cancelJob") }
+    func retryJob(_ id: String) { writes.append("retryJob") }
+    func forceStartJob(_ id: String) { writes.append("forceStartJob") }
+    func escalateJob(_ id: String) { writes.append("escalateJob") }
+    func archiveJob(_ id: String) { writes.append("archiveJob") }
     func openPlan(path: String) {}
     func clearMotherActionError() {}
 }
