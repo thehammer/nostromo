@@ -38,7 +38,7 @@ enum AppControlTracker {
             if case .section(let section) = row.content { heading = section.id }
             guard !row.key.hasPrefix(TrackerDeferral.movingPrefix), let item = row.item else { continue }
             if let heading { shownSection[item.id] = heading }
-            shownExpanded[item.id] = item.noteExpanded
+            shownExpanded[item.id] = item.noteIsCollapsible && item.noteExpanded
         }
         func fields(_ item: TrackerItemRow, _ hold: TrackerHold?, moving: Bool = false) -> [String: Any] {
             let section = modelSection[item.id]
@@ -48,7 +48,7 @@ enum AppControlTracker {
             let shown = moving ? section : (shownSection[item.id] ?? section)
             return ["held": state, "held_reason": reason, "model_section": section.map { $0 as Any } ?? NSNull(),
                     "shown_section": shown.map { $0 as Any } ?? NSNull(),
-                    "shown_expanded": shownExpanded[item.id] ?? item.noteExpanded]
+                    "shown_expanded": shownExpanded[item.id] ?? (item.noteIsCollapsible && item.noteExpanded)]
         }
 
         var sections: [[String: Any]] = []
@@ -156,7 +156,7 @@ enum AppControlTracker {
             "held_reason": state["held_reason"] ?? NSNull(),
             "model_section": state["model_section"] ?? NSNull(),
             "shown_section": state["shown_section"] ?? NSNull(),
-            "shown_expanded": state["shown_expanded"] ?? item.noteExpanded,
+            "shown_expanded": state["shown_expanded"] ?? (item.noteIsCollapsible && item.noteExpanded),
             "stub": stub.map { $0 as Any } ?? NSNull(),
             "conflict": NSNull(),
             "badge": NSNull(),
