@@ -27,12 +27,14 @@
 //! look up the caller in `McpSharedState::ptys` for every subsequent
 //! `tools/call`.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -150,15 +152,39 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
     debug!(pty_id = ?pty_id, "MCP: received Hello");
 
     // Step 2: JSON-RPC 2.0 loop.
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .context("read JSON-RPC frame")?;
-        if n == 0 {
-            break; // EOF
+    //
+    // The socket is read by a task of its own and the frames come through a
+    // channel, so a tool call that waits for a person can still see the
+    // agent hang up (or cancel) while it waits.
+    let (line_tx, mut lines) = mpsc::channel::<std::io::Result<String>>(LINE_QUEUE);
+    let _reader = AbortOnDrop(tokio::spawn(async move {
+        loop {
+            let mut next = String::new();
+            let read = reader.read_line(&mut next).await.map(|n| (n, next));
+            match read {
+                Ok((0, _)) => break, // EOF
+                Ok((_, next)) => {
+                    if line_tx.send(Ok(next)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = line_tx.send(Err(e)).await;
+                    break;
+                }
+            }
         }
+    }));
+    // Frames that arrived while a call was running: served next, in order.
+    let mut queued: VecDeque<String> = VecDeque::new();
+    loop {
+        line = match queued.pop_front() {
+            Some(queued) => queued,
+            None => match lines.recv().await {
+                Some(read) => read.context("read JSON-RPC frame")?,
+                None => break, // EOF
+            },
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -201,7 +227,25 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
             "notifications/initialized" => None, // notification; no response
             "ping" => id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
             "tools/list" => Some(handle_tools_list(id, &state, pty_id.as_deref()).await),
-            "tools/call" => Some(handle_tools_call(id, &req, &state, pty_id.as_deref()).await),
+            "tools/call" => {
+                let name = req.pointer("/params/name").and_then(Value::as_str);
+                let request_id = id.clone();
+                let call = handle_tools_call(id, &req, &state, pty_id.as_deref());
+                if name.is_some_and(tools::cancels_on_disconnect) {
+                    match run_until_cancelled(call, request_id.as_ref(), &mut lines, &mut queued)
+                        .await
+                    {
+                        CallEnd::Response(response) => Some(response),
+                        // Cancelled by the client: no response is owed.
+                        CallEnd::Cancelled => None,
+                        // The caller hung up: the call was dropped, and with
+                        // it whatever it was waiting for.
+                        CallEnd::HungUp => break,
+                    }
+                } else {
+                    Some(call.await)
+                }
+            }
             other => {
                 debug!("MCP: unknown method {other:?}");
                 id.map(|id| json_rpc_error(Some(id), -32601, "Method not found"))
@@ -214,6 +258,67 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
     }
 
     Ok(())
+}
+
+/// Frames read ahead of the one being served.
+const LINE_QUEUE: usize = 64;
+
+/// Stops its task when dropped.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// How a call that was watched for hang-up and cancellation ended.
+enum CallEnd {
+    Response(Value),
+    /// The client sent `notifications/cancelled` for this call.
+    Cancelled,
+    /// The client closed its end.
+    HungUp,
+}
+
+/// Run `call`, but drop it if the caller closes its end or cancels it first.
+/// Nothing else reads the socket while a tool runs, so without this a call that
+/// waits for a person (a remote shell request) would outlive the agent that
+/// made it. Other frames that arrive meanwhile are queued for the loop.
+async fn run_until_cancelled<F>(
+    call: F,
+    request_id: Option<&Value>,
+    lines: &mut mpsc::Receiver<std::io::Result<String>>,
+    queued: &mut VecDeque<String>,
+) -> CallEnd
+where
+    F: std::future::Future<Output = Value>,
+{
+    tokio::pin!(call);
+    loop {
+        tokio::select! {
+            response = &mut call => return CallEnd::Response(response),
+            // Stop reading ahead once the queue is full: the channel's own
+            // bound then holds the client back.
+            read = lines.recv(), if queued.len() < LINE_QUEUE => match read {
+                None | Some(Err(_)) => return CallEnd::HungUp,
+                Some(Ok(line)) if cancels(&line, request_id) => return CallEnd::Cancelled,
+                Some(Ok(line)) => queued.push_back(line),
+            },
+        }
+    }
+}
+
+/// Is `line` `notifications/cancelled` for the request `request_id`?
+fn cancels(line: &str, request_id: Option<&Value>) -> bool {
+    let Some(request_id) = request_id else {
+        return false;
+    };
+    let Ok(frame) = serde_json::from_str::<Value>(line.trim()) else {
+        return false;
+    };
+    frame.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
+        && frame.pointer("/params/requestId") == Some(request_id)
 }
 
 // ── method handlers ───────────────────────────────────────────────────────────

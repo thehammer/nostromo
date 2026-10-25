@@ -1,0 +1,125 @@
+{
+  "profiles": {
+    "production": "fake-prod-profile",
+    "demo": "fake-demo-profile",
+    "canada": "CONFIGURE_ME",
+    "staging": "CONFIGURE_ME"
+  },
+  "regions": {
+    "production": "us-east-2",
+    "demo": "us-east-2",
+    "canada": "ca-central-1",
+    "staging": "us-east-2"
+  },
+  "projects": {
+    "admin-portal": {
+      "repo_paths": ["~/Code/fake-admin-portal"],
+      "default_service": "portal",
+      "environments": {
+        "production": {
+          "cluster": "fake-prod-ecs",
+          "services": {
+            "portal": { "service": "production-fake-ap", "container": "main" },
+            "api": { "service": "production-fake-ap-api", "container": "main" },
+            "queue": { "service": "production-fake-ap-queue", "container": "main" },
+            "scheduler": { "service": "production-fake-ap-scheduler", "container": "main" },
+            "referral-intake": { "service": "production-fake-referral-intake", "container": "main" }
+          }
+        },
+        "demo": {
+          "cluster": "fake-demo-ecs",
+          "services": {
+            "portal": { "service": "demo-fake-ap", "container": "main" },
+            "queue": { "service": "demo-fake-ap-queue", "container": "main" },
+            "scheduler": { "service": "demo-fake-ap-scheduler", "container": "main" }
+          }
+        },
+        "staging": {
+          "cluster": "fake-stg-ecs",
+          "services": {
+            "portal": { "service": "staging-fake-ap", "container": "main" },
+            "scheduler": { "service": "staging-fake-ap-scheduler", "container": "main" }
+          }
+        },
+        "canada": {
+          "cluster": "fake-ca-ecs",
+          "services": {
+            "portal": { "service": "canada-fake-ap", "container": "main" },
+            "scheduler": { "service": "canada-fake-ap-scheduler", "container": "main" }
+          }
+        },
+        "qa": {
+          "cluster": "fake-qa-ecs",
+          "services": {
+            "portal": { "service": "qa-fake-ap", "container": "main" }
+          }
+        }
+      }
+    },
+    "family-portal": {
+      "repo_paths": ["~/Code/fake-family-portal"],
+      "default_service": "portal",
+      "environments": {
+        "production": {
+          "cluster": "fake-prod-ecs",
+          "services": {
+            "portal": { "service": "production-fake-fp", "container": "main" },
+            "scheduler": { "service": "production-fake-fp-scheduler", "container": "main" }
+          }
+        },
+        "demo": {
+          "cluster": "fake-demo-ecs",
+          "services": {
+            "portal": { "service": "demo-fake-fp", "container": "main" }
+          }
+        }
+      }
+    },
+    "referral-monitor": {
+      "repo_paths": ["~/Code/fake-referral-monitor"],
+      "default_service": "monitor",
+      "environments": {
+        "production": {
+          "cluster": "fake-prod-ecs",
+          "services": {
+            "monitor": { "service": "production-fake-rm", "container": "main" }
+          }
+        },
+        "demo": {
+          "cluster": "fake-demo-ecs",
+          "services": {
+            "monitor": { "service": "demo-fake-rm", "container": "main" }
+          }
+        }
+      }
+    },
+    "payments": {
+      "repo_paths": ["~/Code/fake-payments"],
+      "default_service": "api",
+      "environments": {
+        "production": {
+          "cluster": "fake-prod-ecs",
+          "services": {
+            "api": { "service": "production-fake-pay-api", "container": "main" }
+          }
+        },
+        "demo": {
+          "cluster": "fake-demo-ecs",
+          "services": {
+            "api": { "service": "demo-fake-pay-api", "container": "main" }
+          }
+        }
+      }
+    }
+  },
+  "shell_types": {
+    "shell": "/bin/bash",
+    "console": "/bin/bash",
+    "tinker": "php artisan tinker"
+  },
+  "project_shell_overrides": {
+    "referral-monitor": {
+      "shell": "/bin/sh"
+    }
+  }
+}

@@ -160,6 +160,28 @@ pub struct Config {
     /// that file, never in `Config` (which derives `Debug`).
     /// Default: `<config dir>/google-oauth-client.json`.
     pub google_oauth_client: Option<PathBuf>,
+
+    // ── Terminal panes ──────────────────────────────────────────────────────
+    /// `[terminal]`: where the remote-shell vocabulary is read from.
+    pub terminal: TerminalConfig,
+}
+
+/// `[terminal]` in `config.toml`. Every path is optional; a leading `~` is
+/// expanded. The remote-shell vocabulary is the carefeed layer's ECS data
+/// (see `crate::terminal::ecs`), read as data and never sourced.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// The layer's ECS `config.json` (default:
+    /// `~/.claude/layers/carefeed/lib/services/ecs/config.json`, then
+    /// `~/.claude/lib/services/ecs/config.json`).
+    pub ecs_config: Option<PathBuf>,
+    /// Personal overrides (`sso_session`, `profiles`; default:
+    /// `~/.claude/ecs-local.json`).
+    pub ecs_local: Option<PathBuf>,
+    /// The layer's `ecs.sh`, read as text for its three alias tables and never
+    /// run (default: next to the layer's `config.json`).
+    pub ecs_aliases_script: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -189,6 +211,7 @@ impl Default for Config {
             jira_site: None,
             jira_email: None,
             jira_credentials_path: None,
+            terminal: TerminalConfig::default(),
         }
     }
 }

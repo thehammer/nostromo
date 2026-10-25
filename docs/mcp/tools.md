@@ -1411,3 +1411,39 @@ Pane ids starting with `terminal-` are reserved: `nostromo.create_pane` with one
 | `nostromo.tracker` | Open a markdown task board and change it item by item (`open`, `upsert`, `status`, `remove`, `move`, `log`, `read`); edits made in an editor are picked up and attributed; deltas per session. | [`tracker.md`](tracker.md) |
 
 Source: `src/mcp/tools/tracker.rs`, `src/tracker/`
+
+### `nostromo.list_remote_shell_targets`
+
+What `nostromo.request_remote_shell` accepts, read from the user's ECS configuration on every call. No arguments (`additionalProperties: false`).
+
+**Output**: `{ "ok": true, "projects": [{ "name", "default_service?", "environments": [{ "name", "services": [...] }] }], "shell_types": [...] }`, or `{ "error": "remote_shells_not_configured", "detail": "<why>" }`. Any argument: `unknown_argument`. Withheld from a session an unauthenticated network peer is steering, like `nostromo.open_terminal`.
+
+### `nostromo.request_remote_shell`
+
+Ask the user to open a shell on a remote (ECS) service. **The agent only asks; the user decides.** Nostromo shows a confirmation sheet in the app and the shell opens only if the user clicks **Connect**. The agent can never type into the shell and cannot see its output unless the user invites it to follow (a later slice). Use this instead of the `ecs_*` shell functions or tmux panes, which the production-shell guard blocks for agents; the guard allows this tool (its name does not match, and it has no `command`, `cmd` or `script` field).
+
+**Input** (`additionalProperties: false`):
+```json
+{ "project": "admin-portal", "environment": "prod", "service": "sched", "shell_type": "shell", "reason": "check why the scheduler is stuck" }
+```
+`project`, `environment`, `service` and `shell_type` are required; common aliases (`prod`, `sched`, `ap`) are accepted, in any case. `reason` is optional, at most 200 characters, and is shown to the user. Any other key, including `command`, `cmd` and `script`, is `unknown_argument` (nothing is asked). The caller is always its own focus (its Hello `pty_id`); there is no `view_id`.
+
+The call blocks until the user answers or about 5 minutes pass. It is withheld from a network-driven session and the picks session, like `nostromo.open_terminal` (refused with `-32001`, audited `op: "remote_request"`). If the agent's connection closes while it waits, the request is abandoned and the sheet closes.
+
+**Output**: `{ "ok": true, "outcome": "connected", "terminal_id", "pane_id" }` once the user connected.
+
+| `error` | Meaning |
+|---|---|
+| `invalid_target` | A word is outside the vocabulary: `detail`, and `valid: { field, values }` lists what is accepted. Nobody was asked. |
+| `unknown_argument` | Any key other than the five above; `detail` is the key. |
+| `reason_too_long` / `invalid_args` | `reason` over 200 characters; a missing or non-string argument. |
+| `unknown_view` | No identifiable caller, or its focus is unknown to the daemon. |
+| `remote_shells_not_configured` | No ECS `config.json` (`detail` says why). |
+| `no_operator` | No Nostromo app that can show the sheet is connected (immediately; nothing was sent). |
+| `request_pending` | Another request is waiting for the user (immediately). |
+| `cancelled` / `dismissed` | The user cancelled or dismissed the sheet. No terminal exists. |
+| `timeout` | The user did not answer in time. |
+| `connect_failed` | The user connected but the shell could not be opened: `reason` (a code, e.g. `not_available`), `detail`, `remedy`. No pane exists. |
+| `not_supported` | Not hosted by `nostromo` (the daemon). |
+
+Source: `src/mcp/tools/remote_shell.rs`; flow in `src/terminal/remote_request.rs`. Both tool names are dotted like the rest (`nostromo.request_remote_shell`); the plan wrote them with underscores. The guard-consistency test checks both spellings.

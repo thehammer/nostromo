@@ -1,0 +1,7 @@
+{
+  "sso_session": "fake-sso-session",
+  "profiles": {
+    "production": "local-fake-prod-profile",
+    "staging": "local-fake-stg-profile"
+  }
+}
