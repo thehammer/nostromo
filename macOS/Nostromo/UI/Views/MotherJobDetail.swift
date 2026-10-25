@@ -191,6 +191,18 @@ private class PhaseRibbonView: NSView {
 
 // MARK: - MotherJobDetail
 
+/// The job detail's scroll document: flipped, so its top stays put as its content grows and
+/// the scroll position (measured from the top) survives updates.
+final class DetailDocumentView: NSView {
+    override var isFlipped: Bool { true }
+    var onLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
 final class MotherJobDetail: NSView {
 
     /// Everything the detail needs from the app. `AppStore` is the real host; tests pass a stub.
@@ -209,6 +221,31 @@ final class MotherJobDetail: NSView {
 
     // Stored once, toggled via isHidden
     private let emptyLabel = NSTextField(labelWithString: "Select a job")
+
+    /// Scrolls everything the detail shows. Its document is `content`, pinned to the clip's width.
+    let contentScrollView = NSScrollView()
+    private let content = DetailDocumentView()
+    /// The log never gets shorter than this, however much content is above it.
+    private static let minLogHeight: CGFloat = 160
+
+    /// Top-down, like the scroll document inside it (an existing test reads `isFlipped` to find a top edge).
+    override var isFlipped: Bool { true }
+
+    /// What the reader is looking at: the views from the outermost one at the top of the viewport
+    /// down to the innermost, each with the offset of its top edge from the viewport's top edge when
+    /// the reader last scrolled. Weak: a view that is rebuilt (a todo row, an action button) simply
+    /// stops counting, and the nearest surviving ancestor stands in for it.
+    private struct ScrollAnchor {
+        struct Entry { weak var view: NSView?; let offset: CGFloat }
+        var chain: [Entry] = []
+    }
+    private var scrollAnchor = ScrollAnchor()
+    /// An anchor was taken before a change and layout has not finished restoring it yet.
+    private var placeHeld = false
+    /// Layout ran at least once since the anchor was taken.
+    private var placeLaidOut = false
+    private var placeChecks = 0
+    private var placeRecheckScheduled = false
 
     // Content fields
     private let titleLabel      = EdgePinnedLabel(wrappingLabelWithString: "")
@@ -352,10 +389,46 @@ final class MotherJobDetail: NSView {
         planSectionLabel.font      = .systemFont(ofSize: 9, weight: .semibold)
         planSectionLabel.textColor = Theme.fgMuted
 
+        // Everything below the pane's edge lives in a flipped document view inside a vertical scroll
+        // view. The content's height is whatever it is (a 200-item plan, a 2,000-character option
+        // consequence); the pane's height is whatever the window gives it. Without the scroll view
+        // the content's required vertical chain became the window's demand, and a window that cannot
+        // grow (full screen) cut off its top.
+        content.translatesAutoresizingMaskIntoConstraints = false
+        contentScrollView.translatesAutoresizingMaskIntoConstraints = false
+        contentScrollView.hasVerticalScroller   = true
+        contentScrollView.hasHorizontalScroller = false
+        contentScrollView.autohidesScrollers    = true
+        contentScrollView.drawsBackground       = false
+        contentScrollView.borderType            = .noBorder
+        contentScrollView.documentView          = content
+        addSubview(contentScrollView)
+        let clip = contentScrollView.contentView
+        content.onLayout = { [weak self] in self?.contentDidLayout() }
+        // A person scrolling (wheel, trackpad, scroller) is the reader choosing a new place: let go of
+        // any anchor still waiting for layout to settle.
+        NotificationCenter.default.publisher(for: NSScrollView.willStartLiveScrollNotification, object: contentScrollView)
+            .sink { [weak self] _ in self?.placeHeld = false }
+            .store(in: &cancellables)
+        NSLayoutConstraint.activate([
+            contentScrollView.topAnchor.constraint(equalTo: topAnchor),
+            contentScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentScrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contentScrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            // The document is as wide as the clip (never scrolls sideways), as tall as its content
+            // and at least as tall as the clip, so short content still fills the pane (the log
+            // takes the slack, as it always did).
+            content.topAnchor.constraint(equalTo: clip.topAnchor),
+            content.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
+            content.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
+        ])
+
         for v in [titleLabel, stateLabel, phaseRibbonView, crewSection, actionsContainer, todoStack, metaStack,
                   planSectionLabel, planChecklistView, logSectionLabel, logScrollView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(v)
+            content.addSubview(v)
         }
 
         // Ribbon height toggles between 0 (hidden) and 22 (visible)
@@ -377,58 +450,61 @@ final class MotherJobDetail: NSView {
         planChecklistView.onItemsChanged = { [weak self] hasItems in
             self?.planSectionLabel.isHidden = !hasItems
         }
+        // The plan loads off the main thread: what it changes above the log lands later than `update`.
+        planChecklistView.onWillChange = { [weak self] in self?.holdReaderPlace() }
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            titleLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // A fitting-size pass would otherwise take the label's full text width for the pane's.
-            titleLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
-            stateLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
+            titleLabel.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
+            stateLabel.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
 
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-            stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            stateLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
 
             // Phase ribbon — sits between state label and actions; height is 0 when hidden
             phaseRibbonView.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 8),
-            phaseRibbonView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            phaseRibbonView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            phaseRibbonView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            phaseRibbonView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Crew section — between the ribbon and the actions; zero height without crew data
-            crewSection.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            crewSection.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            crewSection.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            crewSection.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Actions container — below the crew section (which is zero height, so directly
             // below the phase ribbon, when the job has no crew data)
             actionsContainer.topAnchor.constraint(equalTo: crewSection.bottomAnchor, constant: 8),
-            actionsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            actionsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            actionsContainer.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            actionsContainer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Todo stack — below actions, above meta rows
             todoStack.topAnchor.constraint(equalTo: actionsContainer.bottomAnchor, constant: 8),
-            todoStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            todoStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            todoStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            todoStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             metaStack.topAnchor.constraint(equalTo: todoStack.bottomAnchor, constant: 8),
-            metaStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            metaStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            metaStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            metaStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             // Plan checklist section — between meta and log
             planSectionLabel.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 12),
-            planSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            planSectionLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
 
             planChecklistView.topAnchor.constraint(equalTo: planSectionLabel.bottomAnchor, constant: 6),
-            planChecklistView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            planChecklistView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            planChecklistView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            planChecklistView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
             logSectionLabel.topAnchor.constraint(equalTo: planChecklistView.bottomAnchor, constant: 12),
-            logSectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            logSectionLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
 
             logScrollView.topAnchor.constraint(equalTo: logSectionLabel.bottomAnchor, constant: 6),
-            logScrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            logScrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            logScrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            logScrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            logScrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            logScrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            logScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minLogHeight),
         ])
 
         // Configure action widgets
@@ -475,6 +551,7 @@ final class MotherJobDetail: NSView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] peeks in
                 guard let self, let jobId = self.currentJobId else { return }
+                self.holdReaderPlace()
                 self.updateTodoList(peeks[jobId])
             }
             .store(in: &cancellables)
@@ -568,6 +645,7 @@ final class MotherJobDetail: NSView {
         logTimer?.invalidate(); logTimer = nil
         currentJob   = job
         currentJobId = job?.id
+        scrollContentToTop()
         replyTextView.string = ""
         lastLogText = nil
         crewSection.collapseBreakdown()
@@ -607,6 +685,7 @@ final class MotherJobDetail: NSView {
             select(job)
             return
         }
+        holdReaderPlace()
         currentJob = job
 
         if job.title != previous.title {
@@ -645,6 +724,121 @@ final class MotherJobDetail: NSView {
     }
 
     // MARK: Private
+
+    /// A new subject starts at the top. Updates to the same job never call this: they keep what the
+    /// reader is looking at where it is (`holdReaderPlace`).
+    private func scrollContentToTop() {
+        let clip = contentScrollView.contentView
+        if clip.bounds.origin != .zero {
+            clip.scroll(to: .zero)
+            contentScrollView.reflectScrolledClipView(clip)
+        }
+        // Nothing of the previous job is a place to hold on to.
+        scrollAnchor = ScrollAnchor()
+        placeHeld = false
+    }
+
+    /// Call right BEFORE anything that can change the height of what is above the reader (a todo
+    /// list, the crew panel, the actions, a banner, the plan). Takes the anchor from what is on
+    /// screen now; layout then puts it back where it was (`contentDidLayout`), however much the
+    /// content above grew or shrank, for as long as it takes layout to settle.
+    ///
+    /// The anchor is taken here and not on every scroll: while a pass is half done AppKit itself
+    /// moves the clip (a document that is briefly too short), and that is not the reader's place.
+    private func holdReaderPlace() {
+        recordScrollAnchor()
+        placeHeld = true
+        placeLaidOut = false
+        placeChecks = 0
+        schedulePlaceRecheck()
+    }
+
+    /// After a layout pass: put what the reader was looking at back where it was, and never let the
+    /// position leave the document or go sideways.
+    private func contentDidLayout() {
+        if placeHeld {
+            restoreScrollAnchor()
+            placeLaidOut = true
+        }
+        clampContentScroll()
+    }
+
+    /// A stack lays its rows out after this view does, so look again once layout is done; let go
+    /// of the anchor after that (a later layout, such as a window resize, is not an update).
+    private func schedulePlaceRecheck() {
+        guard !placeRecheckScheduled else { return }
+        placeRecheckScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.placeRecheckScheduled = false
+            guard self.placeHeld else { return }
+            self.restoreScrollAnchor()
+            self.clampContentScroll()
+            self.placeChecks += 1
+            if self.placeLaidOut || self.placeChecks >= 5 {
+                self.placeHeld = false
+            } else {
+                self.schedulePlaceRecheck()
+            }
+        }
+    }
+
+    /// Top edge of `view` in the document's coordinates, measured from the top of the viewport.
+    private func offsetFromViewportTop(_ view: NSView) -> CGFloat {
+        content.convert(view.bounds, from: view).minY - contentScrollView.contentView.bounds.minY
+    }
+
+    /// Take the anchor: from the document down, the first visible child that reaches the viewport's
+    /// top edge, and again inside it, until a leaf (a nested scroll view counts as one).
+    private func recordScrollAnchor() {
+        let clip = contentScrollView.contentView
+        var chain: [ScrollAnchor.Entry] = []
+        let top = clip.bounds.minY
+        var node: NSView = content
+        while clip.bounds.height > 0, !content.isHidden {
+            let reaching = node.subviews
+                .filter { !$0.isHidden && $0.frame.height > 0 }
+                .map { ($0, content.convert($0.bounds, from: $0)) }
+                .filter { $0.1.maxY > top }
+            guard let first = reaching.min(by: { $0.1.minY < $1.1.minY })?.0 else { break }
+            chain.append(.init(view: first, offset: offsetFromViewportTop(first)))
+            if first is NSScrollView { break }
+            node = first
+        }
+        scrollAnchor = ScrollAnchor(chain: chain)
+    }
+
+    /// Scroll so the innermost anchored view that still exists sits at its recorded offset from the
+    /// viewport's top. If none does (the whole section was rebuilt away), the clamp is all that applies.
+    private func restoreScrollAnchor() {
+        let clip = contentScrollView.contentView
+        guard clip.bounds.height > 0,
+              let entry = scrollAnchor.chain.last(where: {
+                  guard let view = $0.view else { return false }
+                  return view.isDescendant(of: content) && !view.isHiddenOrHasHiddenAncestor
+              }),
+              let view = entry.view
+        else { return }
+        let delta = offsetFromViewportTop(view) - entry.offset
+        guard abs(delta) > 0.5 else { return }
+        let maxY = max(0, content.frame.height - clip.bounds.height)
+        let y = min(max(clip.bounds.origin.y + delta, 0), maxY)
+        guard y != clip.bounds.origin.y else { return }
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        contentScrollView.reflectScrolledClipView(clip)
+    }
+
+    /// The position stays inside the document (content shrinking under a reader who had scrolled
+    /// down), and never sideways.
+    private func clampContentScroll() {
+        let clip = contentScrollView.contentView
+        guard let doc = contentScrollView.documentView else { return }
+        let maxY = max(0, doc.frame.height - clip.bounds.height)
+        let y = min(max(clip.bounds.origin.y, 0), maxY)
+        guard y != clip.bounds.origin.y || clip.bounds.origin.x != 0 else { return }
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        contentScrollView.reflectScrolledClipView(clip)
+    }
 
     private func showEmpty() {
         [titleLabel, stateLabel, phaseRibbonView, crewSection, todoStack, metaStack, actionsContainer,
@@ -712,6 +906,7 @@ final class MotherJobDetail: NSView {
     /// The host's send state or capabilities changed: bring the panel and the buttons along.
     private func hostDecisionStateChanged() {
         guard let job = currentJob else { return }
+        holdReaderPlace()
         updateCrewSection(job)
         if makeActionIdentity(for: job) != actionIdentity { rebuildActions(job) }
     }
@@ -1076,6 +1271,7 @@ final class MotherJobDetail: NSView {
 
     private func updateBrokerBanner(_ connected: Bool) {
         guard currentJob != nil else { return }
+        holdReaderPlace()
         brokerBanner.isHidden = connected
         for btn in [answerButton, cancelButton, retryButton, forceStartButton] {
             btn.isEnabled = connected
@@ -1087,10 +1283,12 @@ final class MotherJobDetail: NSView {
     }
 
     private func showActionError(_ message: String) {
+        holdReaderPlace()
         actionErrorLabel.stringValue = message
         actionErrorLabel.isHidden    = false
         actionErrorTimer?.invalidate()
         actionErrorTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            self?.holdReaderPlace()
             self?.actionErrorLabel.isHidden = true
             self?.actionErrorLabel.stringValue = ""
             self?.host.clearMotherActionError()
@@ -1447,6 +1645,8 @@ private class PlanChecklistView: NSView {
 
     /// Called on the main queue when items load or clear.  Parameter is `true` if items are present.
     var onItemsChanged: ((Bool) -> Void)?
+    /// Called on the main queue right before the rows are replaced or cleared.
+    var onWillChange: (() -> Void)?
 
     private let stack = NSStackView()
     private var heightConstraint: NSLayoutConstraint!
@@ -1496,6 +1696,7 @@ private class PlanChecklistView: NSView {
 
     private func collapse() {
         DispatchQueue.main.async { [weak self] in
+            self?.onWillChange?()
             self?.stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
             self?.heightConstraint.isActive = true
             self?.onItemsChanged?(false)
@@ -1503,6 +1704,7 @@ private class PlanChecklistView: NSView {
     }
 
     private func apply(_ items: [(done: Bool, text: String)]) {
+        onWillChange?()
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard !items.isEmpty else {
             heightConstraint.isActive = true

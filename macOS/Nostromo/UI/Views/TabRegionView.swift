@@ -10,6 +10,34 @@ import os
 /// diagnosable from the timeline instead of a screenshot.
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "panes")
 
+/// Pins a child into a container so that the child can never make its window taller.
+///
+/// A window's content size is held only at `NSLayoutConstraint.Priority.windowSizeStayPut` (500).
+/// A child whose own demand is stronger than that (a required chain of heights, an intrinsic
+/// height at the default compression resistance of 750) wins against the window, and a window
+/// that cannot grow (full screen) ends up with a content view taller than itself, its top cut
+/// off (2026-10-25: a Mother job detail 28 pt too tall, then any amount of content).
+///
+/// The child's top and sides are pinned to the container, its bottom is pinned at one point under
+/// the window's own priority and may not end above the container's bottom. So the child is exactly
+/// as tall as the container whenever its content allows, and taller (clipped, not demanded) when it
+/// does not. The container clips what overflows.
+enum VerticalDemandGuard {
+    static func pin(_ child: NSView, in container: NSView) {
+        container.wantsLayer = true
+        container.layer?.masksToBounds = true
+        let fill = child.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        fill.priority = NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.windowSizeStayPut.rawValue - 1)
+        NSLayoutConstraint.activate([
+            child.topAnchor.constraint(equalTo: container.topAnchor),
+            child.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            child.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            child.bottomAnchor.constraint(greaterThanOrEqualTo: container.bottomAnchor),
+            fill,
+        ])
+    }
+}
+
 /// Renders a `PaneTree.tabs` node: a tab strip over a stack of **resident**
 /// child views (W1 — curated-agent-views).
 ///
@@ -163,12 +191,7 @@ final class TabRegionView: NSView {
 
         tab.view.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.addSubview(tab.view)
-        NSLayoutConstraint.activate([
-            tab.view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
-            tab.view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-            tab.view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-            tab.view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
-        ])
+        VerticalDemandGuard.pin(tab.view, in: contentContainer)
     }
 
     /// 3pt top pad + 15pt label line + 13pt caption line + 3pt bottom pad =
