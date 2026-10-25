@@ -90,7 +90,7 @@ enum MDFixtures {
     /// gates, a review wave and meta values, each long or short as `long` says.
     static func job(id: String, long: Set<MDField>, state: String = "awaiting", planPath: String?,
                     decisionId: String = "d1", progressPct: Int? = nil,
-                    gateCount: Int? = nil, lensCount: Int? = nil) -> MotherJob {
+                    gateCount: Int? = nil, lensCount: Int? = nil, bare: Bool = false) -> MotherJob {
         func longIf(_ f: MDField, _ marker: String, _ short: String, lineBreakEvery: Int? = nil) -> String {
             long.contains(f) ? MDText.prose(marker, chars: longChars, lineBreakEvery: lineBreakEvery) : short
         }
@@ -134,7 +134,7 @@ enum MDFixtures {
                          pausedReason: nil,
                          adherenceStatus: longIf(.meta, "META-ADH", "green"),
                          currentTier: longIf(.meta, "META-TIER", "sonnet"),
-                         crew: crew)
+                         crew: bare ? MotherCrewState() : crew)
     }
 }
 
@@ -214,6 +214,8 @@ final class MDRig {
     var jobId: String
     var long: Set<MDField>
     var state = "awaiting"
+    /// A job with no crew data (no gates, no hold): the shortest a job detail gets.
+    var bare = false
     var progressPct: Int?
     var planItems: Int
     var planLong: Bool
@@ -243,7 +245,7 @@ final class MDRig {
     func currentJob() -> MotherJob {
         MDFixtures.job(id: jobId, long: long, state: state, planPath: planPath,
                        decisionId: "d\(decisionVersion)", progressPct: progressPct,
-                       gateCount: gateCount, lensCount: lensCount)
+                       gateCount: gateCount, lensCount: lensCount, bare: bare)
     }
 
     // MARK: Delivering data after the first layout
@@ -333,7 +335,8 @@ final class MDRig {
 
     func renderedCount(prefix: String, containing tag: String = "") -> Int {
         MD.allSubviews(detail).reduce(0) { n, view in
-            if let field = view as? NSTextField, field.stringValue.hasPrefix(prefix), field.stringValue.contains(tag) { return n + 1 }
+            if let field = view as? NSTextField, field.stringValue.hasPrefix(prefix),
+               tag.isEmpty || field.stringValue.contains(tag) { return n + 1 }
             return n
         }
     }
@@ -438,7 +441,7 @@ enum MD {
 
     /// A job detail as a tab of the Mother pane, showing a job whose `long` fields are long.
     /// The rig is closed when the test ends (call `close()` earlier to free a window mid-test).
-    static func makeRig(_ tc: XCTestCase, long: Set<MDField>, index: Int) throws -> MDRig {
+    static func makeRig(_ tc: XCTestCase, long: Set<MDField>, index: Int, bare: Bool = false) throws -> MDRig {
         let w = try makeWindow(tc, index: index)
         let dir = try makeTemp(tc)
         let host = MDStubHost()
@@ -462,8 +465,13 @@ enum MD {
 
         let rig = MDRig(w: w, detail: detail, host: host, dir: dir, jobId: jobId, long: long, planPath: plan.path)
         tc.addTeardownBlock { rig.close() }
+        rig.bare = bare
+        if bare { rig.state = "running" }
 
         detail.select(rig.currentJob())
+        // The detail also listens to the host's peeks publisher, whose first (empty) value is delivered
+        // on the main queue after `select`; it would clear the todos the stub's `peek(for:)` returned.
+        host.peeksSubject.send([jobId: host.payload!])
         rig.awaitRendered()
         // The log is read on a background queue too.
         let wantedLog = long.contains(.log) ? "LOG-\(logLines - 1) " : "LOG-0 "
@@ -520,7 +528,11 @@ enum MD {
 
     /// The window cannot grow (like a full-screen one): the layout must be exactly the window's content,
     /// not overflowing it, and not demanding more height than it has; the window must keep its size.
+    /// `checkFittingSize: false` is for tests that put a child with a demand of its own into the window (a
+    /// 5,000 pt tall one): the contract there is that the window and the layout's frame do not change, not
+    /// that the layout's *minimum* size ignores the child (a clipped child still has a fitting size).
     static func assertFits(_ w: MDWindow, detail: MotherJobDetail? = nil, _ label: String,
+                           checkFittingSize: Bool = true,
                            file: StaticString = #filePath, line: UInt = #line) {
         let content = w.contentSize
         XCTAssertEqual(w.layout.frame.height, content.height, accuracy: 1,
@@ -535,9 +547,11 @@ enum MD {
         XCTAssertEqual(w.window.frame.size, w.window.frameRect(forContentRect: NSRect(origin: .zero, size: MDWindow.size)).size,
                        "\(label): the window changed size\n\(diagnostics(w, detail: detail))",
                        file: file, line: line)
-        XCTAssertLessThanOrEqual(w.layout.fittingSize.height, content.height + 1,
-                                 "\(label): MainLayout demands \(w.layout.fittingSize.height) pt of height in a \(content.height) pt window\n\(diagnostics(w, detail: detail))",
-                                 file: file, line: line)
+        if checkFittingSize {
+            XCTAssertLessThanOrEqual(w.layout.fittingSize.height, content.height + 1,
+                                     "\(label): MainLayout demands \(w.layout.fittingSize.height) pt of height in a \(content.height) pt window\n\(diagnostics(w, detail: detail))",
+                                     file: file, line: line)
+        }
         if let detail {
             XCTAssertLessThanOrEqual(detail.frame.height, w.pane.bounds.height + 1,
                                      "\(label): the job detail is \(detail.frame.height) pt tall in a \(w.pane.bounds.height) pt pane\n\(diagnostics(w, detail: detail))",
@@ -545,7 +559,8 @@ enum MD {
         }
     }
 
-    static func assertFits(_ rig: MDRig, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
-        assertFits(rig.w, detail: rig.detail, label, file: file, line: line)
+    static func assertFits(_ rig: MDRig, _ label: String, checkFittingSize: Bool = true,
+                           file: StaticString = #filePath, line: UInt = #line) {
+        assertFits(rig.w, detail: rig.detail, label, checkFittingSize: checkFittingSize, file: file, line: line)
     }
 }

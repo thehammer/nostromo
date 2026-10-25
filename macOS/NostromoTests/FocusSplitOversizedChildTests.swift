@@ -96,7 +96,7 @@ final class FocusSplitOversizedChildTests: XCTestCase {
 
             XCTAssertTrue(w.pane.hasTab(paneId) && tall.isDescendant(of: w.layout), "precondition: the oversized tab is in the window")
             XCTAssertEqual(w.pane.activePaneId, paneId, "precondition: the oversized tab is frontmost")
-            MD.assertFits(w, "active oversized tab, \(shape.rawValue)")
+            MD.assertFits(w, "active oversized tab, \(shape.rawValue)", checkFittingSize: false)
             w.close()
         }
     }
@@ -114,15 +114,15 @@ final class FocusSplitOversizedChildTests: XCTestCase {
             MD.pump(w.window)
 
             XCTAssertEqual(w.pane.activePaneId, overview, "precondition: the oversized tab is not frontmost")
-            MD.assertFits(w, "inactive oversized tab, \(shape.rawValue)")
+            MD.assertFits(w, "inactive oversized tab, \(shape.rawValue)", checkFittingSize: false)
 
             w.pane.selectTab(paneId)
             MD.pump(w.window)
-            MD.assertFits(w, "oversized tab just selected, \(shape.rawValue)")
+            MD.assertFits(w, "oversized tab just selected, \(shape.rawValue)", checkFittingSize: false)
 
             w.pane.selectTab(overview)
             MD.pump(w.window)
-            MD.assertFits(w, "oversized tab deselected again, \(shape.rawValue)")
+            MD.assertFits(w, "oversized tab deselected again, \(shape.rawValue)", checkFittingSize: false)
             w.close()
         }
     }
@@ -147,7 +147,7 @@ final class FocusSplitOversizedChildTests: XCTestCase {
             MD.pump(w.window)
 
             XCTAssertTrue(tall.isDescendant(of: w.layout), "precondition: the oversized child is in the window")
-            MD.assertFits(w, "oversized child pinned inside the REPL region, \(shape.rawValue)")
+            MD.assertFits(w, "oversized child pinned inside the REPL region, \(shape.rawValue)", checkFittingSize: false)
             w.close()
         }
     }
@@ -161,11 +161,11 @@ final class FocusSplitOversizedChildTests: XCTestCase {
             let paneId = "oversized-\(n):\(shape.rawValue)"
             rig.w.pane.addTab(TabRegionView.Tab(paneId: paneId, label: "tall", view: makeTall(shape)))
             MD.pump(rig.window)
-            MD.assertFits(rig.w, detail: rig.detail, "oversized tab \(shape.rawValue) added beside the job detail")
+            MD.assertFits(rig.w, detail: rig.detail, "oversized tab \(shape.rawValue) added beside the job detail", checkFittingSize: false)
 
             rig.w.pane.selectTab("mother_job:\(rig.jobId)")
             MD.pump(rig.window)
-            MD.assertFits(rig, "back on the job detail with \(shape.rawValue) tab open")
+            MD.assertFits(rig, "back on the job detail with \(shape.rawValue) tab open", checkFittingSize: false)
         }
     }
 }

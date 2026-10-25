@@ -86,7 +86,9 @@ final class MotherDetailScrollTests: XCTestCase {
     }
 
     func testAShortJobDoesNotNeedToScroll() throws {
-        let rig = try MD.makeRig(self, long: [], index: 932)
+        // A job with no crew data and no hold: the fixture's usual short job (a hold with three options,
+        // gates and a review wave) is itself about as tall as the pane.
+        let rig = try MD.makeRig(self, long: [], index: 932, bare: true)
         XCTAssertEqual(maxScrollY(rig), 0, accuracy: tolerance, "short content: nothing to scroll to")
         XCTAssertEqual(originY(rig), 0, accuracy: tolerance)
         assertHorizontallyAtRest(rig, "short content")

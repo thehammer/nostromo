@@ -9,13 +9,11 @@ import NostromoKit
 //     real `MotherView` listens to). The Overview tab itself is a fixed "Select a job" label; the data-driven
 //     part is the job list and the counts strip, which is what is exercised here.
 // (b) A job whose crew data makes a tall crew panel (40 long-named gates, 25 lens rows, a hold with options
-//     and 2,000-character consequences and question, long meta, a 200-item plan), opened through the REAL
-//     path: the snapshot, then `MotherView.requestedJobId`, so `MotherView` itself builds the detail with
-//     `AppStore` as its host. The panel's height is `MotherCrewPanelModel.height`, a fixed function of
-//     its rows, which is taller than the whole window here.
-//
-// The job in (b) is `failed`, not `awaiting`: a hold shows for any job with an open decision, and a
-// finished job needs nobody, so the shared `AppStore` raises no needs-you notification for it.
+//     and 2,000-character consequences and question, long meta, a 200-item plan), shown as a tab of the
+//     Mother pane through the shared rig. The panel's height is `MotherCrewPanelModel.height`, a fixed
+//     function of its rows, which is taller than the whole window here. (Opening the tab through
+//     `MotherView.requestedJobId` was tried first: that static is consumed by whichever live MotherView
+//     sees the snapshot first, so it is not deterministic in a process that has built other windows.)
 final class MotherOverviewAndCrewOverflowTests: XCTestCase {
 
     private func resetStoreWhenDone() {
@@ -77,68 +75,38 @@ final class MotherOverviewAndCrewOverflowTests: XCTestCase {
         }
     }
 
-    // MARK: - (b) A tall crew panel in a job opened through MotherView
+    // MARK: - (b) A tall crew panel in a job detail of the Mother pane
 
-    private func openHeavyJobThroughMotherView(_ w: MDWindow, id: String, others: [MotherJob] = []) throws -> MotherJobDetail {
-        let dir = try MD.makeTemp(self)
-        let plan = dir.appendingPathComponent("plan.md")
-        try MDFixtures.planText(items: 200, long: true, version: 0).write(to: plan, atomically: true, encoding: .utf8)
+    private static let heavyFields: Set<MDField> = [.gates, .lenses, .consequences, .question, .meta, .title, .planChecklist]
 
-        let heavy = MDFixtures.job(id: id, long: [.gates, .lenses, .consequences, .question, .meta, .title],
-                                   state: "failed", planPath: plan.path)
-        resetStoreWhenDone()
-        MotherView.requestedJobId = id
-        AppStore.shared.applyBrokerEventForTesting(.snapshot([heavy] + others))
+    func testAJobWithATallCrewPanelFitsTheWindow() throws {
+        let rig = try MD.makeRig(self, long: Self.heavyFields, index: 983)
 
-        let paneId = MotherView.tabPaneId(for: id)
-        let opened = MD.pumpUntil(w.window) { w.pane.hasTab(paneId) }
-        XCTAssertTrue(opened, "precondition: MotherView opened the job's tab")
-        let detail = try XCTUnwrap(MD.allSubviews(w.motherView).compactMap { $0 as? MotherJobDetail }.first,
-                                   "precondition: MotherView built a job detail")
-        addTeardownBlock { detail.select(nil) }   // stops its log timer
-
-        let planShown = MD.pumpUntil(w.window) {
-            MD.allSubviews(detail).filter { ($0 as? NSTextField)?.stringValue.hasPrefix("PLAN-") == true }.count == 200
-        }
-        XCTAssertTrue(planShown, "precondition: the plan checklist rendered")
-        MD.pump(w.window)
-        return detail
-    }
-
-    func testAJobWithATallCrewPanelOpenedThroughTheMotherViewFitsTheWindow() throws {
-        let w = try MD.makeWindow(self, index: 983)
-        let detail = try openHeavyJobThroughMotherView(w, id: "crew-heavy")
-
-        XCTAssertEqual(w.pane.activePaneId, MotherView.tabPaneId(for: "crew-heavy"), "precondition: the job tab is frontmost")
-        XCTAssertGreaterThan(detail.crewSection.expectedHeight, w.contentSize.height,
+        XCTAssertGreaterThan(rig.detail.crewSection.expectedHeight, rig.w.contentSize.height,
                              "precondition: the crew panel alone is taller than the window")
-        MD.assertFits(w, detail: detail, "tall crew panel, opened through MotherView")
+        MD.assertFits(rig, "tall crew panel")
     }
 
     func testATallCrewPanelStillFitsWhileHundredsOfLongJobsAreListed() throws {
-        let w = try MD.makeWindow(self, index: 984)
-        let others = overviewJobs(count: 300) { MDText.prose("JOB-\($0)", chars: 400) }
-        let detail = try openHeavyJobThroughMotherView(w, id: "crew-heavy-2", others: others)
-        MD.pump(w.window, seconds: 0.6)
+        let rig = try MD.makeRig(self, long: Self.heavyFields, index: 984)
+        resetStoreWhenDone()
+        AppStore.shared.applyBrokerEventForTesting(.snapshot(overviewJobs(count: 300) { MDText.prose("JOB-\($0)", chars: 400) }))
+        MD.pump(rig.window, seconds: 0.8)
 
-        XCTAssertEqual(AppStore.shared.motherJobs.count, 301, "precondition: the app holds the 301 jobs")
-        MD.assertFits(w, detail: detail, "tall crew panel with 300 other jobs listed")
+        XCTAssertEqual(AppStore.shared.motherJobs.count, 300, "precondition: the app holds the 300 jobs")
+        XCTAssertGreaterThan(rig.detail.crewSection.expectedHeight, rig.w.contentSize.height,
+                             "precondition: the crew panel alone is taller than the window")
+        MD.assertFits(rig, "tall crew panel with 300 other jobs listed")
     }
 
     func testATallCrewPanelFollowsTheJobsStateChangesWithoutOverflowing() throws {
-        let w = try MD.makeWindow(self, index: 985)
-        let detail = try openHeavyJobThroughMotherView(w, id: "crew-heavy-3")
+        let rig = try MD.makeRig(self, long: Self.heavyFields, index: 985)
 
-        // The same job refreshed by the broker (a later snapshot with a different state and more gates).
-        let dir = try MD.makeTemp(self)
-        let plan = dir.appendingPathComponent("plan.md")
-        try MDFixtures.planText(items: 200, long: true, version: 0).write(to: plan, atomically: true, encoding: .utf8)
-        for (state, gates) in [("cancelled", 60), ("failed", 5), ("succeeded", 80)] {
-            let job = MDFixtures.job(id: "crew-heavy-3", long: [.gates, .lenses, .consequences, .question, .meta, .title],
-                                     state: state, planPath: plan.path, gateCount: gates)
-            AppStore.shared.applyBrokerEventForTesting(.snapshot([job]))
-            MD.pump(w.window, seconds: 0.6)
-            MD.assertFits(w, detail: detail, "crew panel, job \(state) with \(gates) gates")
+        for (state, gates) in [("cancelled", 60), ("failed", 5), ("succeeded", 80), ("awaiting", 40)] {
+            rig.state = state
+            rig.setGates(gates)
+            rig.awaitRendered()
+            MD.assertFits(rig, "crew panel, job \(state) with \(gates) gates")
         }
     }
 }
