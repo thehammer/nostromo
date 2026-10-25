@@ -17,6 +17,18 @@ import NostromoKit
 /// - Done folds, moves and removals of rows on screen are held by `TrackerDeferral` until those
 ///   rows leave the viewport (checked on every scroll), the pane is reopened, or the user clicks
 ///   the Done group; a row holding a text selection keeps its content until the selection clears.
+/// - A hold never outlives the reader's attention (the release rule): it is also released by the
+///   user collapsing a note ("less"), clearing the selection, clicking elsewhere, or the pane being
+///   idle for `idleReleaseDelay` (20 s with no pointer, scroll, mouse-button or key activity in it).
+///   None of those releases anything while a text selection exists, while the pointer is over a held
+///   row or while a mouse button is down (a release then waits for the button to come up and happens
+///   once if the conditions still hold); the idle check simply tries again one period later. The
+///   exception is "less" on a note: an explicit action, it releases everything held even with the
+///   pointer over a held row (that row included). "more" / "less" first clears the selection in
+///   that row, so the toggle always shows.
+///   Limits of the guards: the pointer guard covers held rows only, so an idle release can shift an
+///   unheld row under the pointer (the viewport anchor keeps the top visible row steady); a mouse-up
+///   anywhere in the pane outside the header counts as "clicking elsewhere", except on the scroller.
 /// - It never takes keyboard focus on its own, never shows `Loading` over content and never
 ///   blanks: before the first board it shows a quiet "Waiting for the tracker…" that the board
 ///   replaces once.
@@ -57,6 +69,10 @@ final class TrackerPaneView: NSView {
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private let timeZone: TimeZone
     private let tickInterval: TimeInterval?
+    private let idleReleaseDelay: TimeInterval
+    private let idleSchedule: (TimeInterval, @escaping () -> Void) -> Void
+    private let pointerLocation: (() -> NSPoint?)?
+    private let isMouseButtonDown: () -> Bool
 
     private var cancellables = Set<AnyCancellable>()
     private var observers: [NSObjectProtocol] = []
@@ -66,6 +82,12 @@ final class TrackerPaneView: NSView {
     private var selectedKey: String?
     /// The pane was out of any window for longer than a layout rebuild.
     private var wasAway = false
+    /// Bumped by pointer, scroll and key activity in the pane; the idle check compares it.
+    private var activityCount = 0
+    private var idleCheckArmed = false
+    private var clickMonitor: Any?
+    /// A release was due while a mouse button was down; it is tried again when the button comes up.
+    private var releasePending = false
 
     /// - Parameters:
     ///   - now: the clock relative times are drawn from.
@@ -73,6 +95,10 @@ final class TrackerPaneView: NSView {
     ///   - pasteboard: where Copy as Markdown writes.
     ///   - schedule: runs work after a delay (the highlight's end); tests pass their own.
     ///   - tickInterval: how often relative times refresh; nil for none (tests call `tick()`).
+    ///   - idleReleaseDelay: how long the pane must be idle before held rows are released.
+    ///   - idleSchedule: runs the idle check after a delay (separate from `schedule`); tests pass their own.
+    ///   - pointerLocation: the pointer in window coordinates; nil means the window's own.
+    ///   - isMouseButtonDown: whether any mouse button is down; nothing is released meanwhile.
     init(tag: String,
          store: TrackerStore = .shared,
          now: @escaping () -> Date = Date.init,
@@ -82,7 +108,13 @@ final class TrackerPaneView: NSView {
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
          timeZone: TimeZone = .current,
-         tickInterval: TimeInterval? = 30) {
+         tickInterval: TimeInterval? = 30,
+         idleReleaseDelay: TimeInterval = 20,
+         idleSchedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+         },
+         pointerLocation: (() -> NSPoint?)? = nil,
+         isMouseButtonDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 }) {
         self.focusTag = tag
         self.store = store
         self.now = now
@@ -91,6 +123,10 @@ final class TrackerPaneView: NSView {
         self.schedule = schedule
         self.timeZone = timeZone
         self.tickInterval = tickInterval
+        self.idleReleaseDelay = idleReleaseDelay
+        self.idleSchedule = idleSchedule
+        self.pointerLocation = pointerLocation
+        self.isMouseButtonDown = isMouseButtonDown
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 400))
         setUp()
         let myTag = tag
@@ -106,6 +142,7 @@ final class TrackerPaneView: NSView {
     deinit {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         tickTimer?.invalidate()
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
     }
 
     override var acceptsFirstResponder: Bool { false }
@@ -205,8 +242,16 @@ final class TrackerPaneView: NSView {
         render()
     }
 
+    /// The user clicked "more" or "less". A text selection in that row is cleared first (a selected
+    /// row keeps its content, which would swallow the toggle). Collapsing is also an explicit release:
+    /// whatever the board moved while the reader was looking folds away now.
     func toggleNote(item id: String) {
-        if folds.expandedNotes.remove(id) == nil { folds.expandedNotes.insert(id) }
+        clearSelection(inItem: id)
+        if folds.expandedNotes.remove(id) == nil {
+            folds.expandedNotes.insert(id)
+        } else {
+            deferral.releaseAll()
+        }
         render()
     }
 
@@ -233,6 +278,7 @@ final class TrackerPaneView: NSView {
         let result = deferral.resolve(displayed: displayedRows, target: target,
                                       visibleKeys: visible, selectedKey: currentSelectedKey())
         presentation = target
+        if deferral.hasHeld { armIdleCheck() }
 
         var updated = 0
         var changed: [TrackerRowView] = []
@@ -412,7 +458,120 @@ final class TrackerPaneView: NSView {
 
     private func viewportMoved() {
         guard !isApplying, deferral.hasHeld else { return }
+        activityCount &+= 1
         recommit()
+    }
+
+    // MARK: - Releasing holds
+
+    /// Pointer, scroll or key activity in the pane: the idle period starts over.
+    func registerActivity() {
+        activityCount &+= 1
+    }
+
+    /// A click in the pane: it counts as activity and, with no selection and the pointer not over a
+    /// held row, releases what is held.
+    func registerClick() {
+        registerActivity()
+        releaseHeldIfQuiet()
+    }
+
+    /// Release every hold unless a text selection exists or the pointer is over a held row. While a
+    /// mouse button is down nothing is released (rows would shift under a drag); the release waits
+    /// for the button to come up.
+    private func releaseHeldIfQuiet() {
+        guard deferral.hasHeld, currentSelectedKey() == nil, !isPointerOverHeldRow else { return }
+        guard !isMouseButtonDown() else {
+            releasePending = true
+            return
+        }
+        releasePending = false
+        deferral.releaseAll()
+        recommit()
+    }
+
+    /// While rows are held, check once per `idleReleaseDelay` whether the pane has been idle.
+    private func armIdleCheck() {
+        guard !idleCheckArmed else { return }
+        idleCheckArmed = true
+        let seen = activityCount
+        idleSchedule(idleReleaseDelay) { [weak self] in self?.idleCheckFired(activityWhenArmed: seen) }
+    }
+
+    private func idleCheckFired(activityWhenArmed: Int) {
+        idleCheckArmed = false
+        guard deferral.hasHeld else { return }
+        if activityCount == activityWhenArmed { releaseHeldIfQuiet() }
+        if deferral.hasHeld { armIdleCheck() }   // activity, a selection or the pointer: try again later
+    }
+
+    /// The pointer is on a row the view is holding (its frame in the visible part of the pane).
+    private var isPointerOverHeldRow: Bool {
+        guard window != nil, let location = pointerLocation?() ?? window?.mouseLocationOutsideOfEventStream else {
+            return false
+        }
+        let point = documentView.convert(location, from: nil)
+        guard clipView.bounds.contains(point) else { return false }
+        return deferral.held.contains { rowViews[$0.key]?.frame.contains(point) == true }
+    }
+
+    private func installClickMonitor() {
+        guard clickMonitor == nil else { return }
+        clickMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown, .keyDown]) { [weak self] event in
+            self?.observe(event)
+            return event
+        }
+    }
+
+    /// The local event monitor's entry point. `.mouseMoved` does not fire during a drag, so the
+    /// button going down and every drag step count as activity here: a drag that holds still is
+    /// not an idle pane.
+    func observe(_ event: NSEvent) {
+        guard let window, event.window === window else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let inContent = bounds.contains(point) && !header.frame.contains(point)
+        switch event.type {
+        case .keyDown:
+            if let responder = window.firstResponder as? NSView, responder.isDescendant(of: documentView) { registerActivity() }
+        case .leftMouseDown, .leftMouseDragged:
+            if inContent { registerActivity() }
+        case .leftMouseUp:
+            // A drag that began in the pane may end anywhere in the window.
+            if releasePending {
+                DispatchQueue.main.async { [weak self] in self?.releaseWhenButtonUp() }
+            }
+            guard inContent else { return }
+            registerActivity()
+            // The scroller is not "elsewhere": dragging its knob or clicking its track releases nothing.
+            guard !isOnScroller(event) else { return }
+            // After the event: a drag-select has started a selection by then.
+            DispatchQueue.main.async { [weak self] in self?.registerClick() }
+        default:
+            guard inContent else { return }
+            DispatchQueue.main.async { [weak self] in self?.registerClick() }
+        }
+    }
+
+    private func isOnScroller(_ event: NSEvent) -> Bool {
+        guard let scroller = scrollView.verticalScroller, !scroller.isHidden else { return false }
+        return scroller.bounds.contains(scroller.convert(event.locationInWindow, from: nil))
+    }
+
+    /// The button came up after a release was held back: try it again, once.
+    private func releaseWhenButtonUp() {
+        guard releasePending, currentSelectedKey() == nil else { return }
+        applySelectionCleared()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        registerActivity()
     }
 
     // MARK: - Selection
@@ -434,7 +593,35 @@ final class TrackerPaneView: NSView {
             selectedKey = key
         } else if key == selectedKey, rowViews[key]?.selectedTextView == nil {
             selectedKey = nil
-            if deferral.held.contains(where: { $0.kind == .selection }) { recommit() }
+            // The selection is gone: its held content applies, and so does everything else held,
+            // unless the pointer is still on a held row. Pressing the mouse in a selected row collapses
+            // its selection to a caret in the middle of a gesture: nothing moves until the button is up.
+            applySelectionCleared()
+        }
+    }
+
+    /// The selection's hold ends now (and so does everything else held, unless the pointer is on a
+    /// held row); with a mouse button down it waits for the button to come up.
+    private func applySelectionCleared() {
+        guard deferral.hasHeld else { return }
+        guard !isMouseButtonDown() else {
+            releasePending = true
+            return
+        }
+        releasePending = false
+        if !isPointerOverHeldRow { deferral.releaseAll() }
+        recommit()
+    }
+
+    /// Clear the text selection in an item's row (or its `moving:` copy), without the notification
+    /// path: the caller is about to change the row anyway.
+    private func clearSelection(inItem id: String) {
+        for key in [TrackerRow.itemKey(id), TrackerDeferral.movingPrefix + id] {
+            guard let view = rowViews[key] else { continue }
+            if key == selectedKey { selectedKey = nil }
+            for textView in view.allTextViews where textView.hasSelection {
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+            }
         }
     }
 
@@ -443,6 +630,12 @@ final class TrackerPaneView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         updateTickTimer()
+        if window != nil {
+            installClickMonitor()
+        } else if let clickMonitor {
+            NSEvent.removeMonitor(clickMonitor)
+            self.clickMonitor = nil
+        }
         guard window != nil else {
             // A layout rebuild detaches the reused pane and puts it back within the same turn of
             // the run loop; only a pane still out of a window after that was really away.

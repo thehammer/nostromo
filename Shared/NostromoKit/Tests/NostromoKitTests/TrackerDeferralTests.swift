@@ -565,4 +565,28 @@ final class TrackerDeferralInSectionTests: XCTestCase {
         let nextHeading = try XCTUnwrap(index("section:waiting-on-you", result.rows))
         XCTAssertTrue(heading < stubIndex && stubIndex < nextHeading, "the removed stub stays under Next")
     }
+
+    func testAHeldDoneRowFiledUnderAnotherSectionStaysUnderItsOldHeadingOnLaterResolves() throws {
+        // The held row shows the board's content, which carries the NEW section. A later pass (a clock
+        // tick, a toggled note) must still keep it where the reader saw it, not under that heading.
+        let before = TFx.present(try TFx.golden())
+        let target = TFx.present(try TFx.edited { edit in
+            try edit.moveItem("audit-1407", toSection: "done")
+            try edit.setStatus("audit-1407", "done")
+        })
+        let key = "item:audit-1407"
+        var deferral = TrackerDeferral()
+        let first = deferral.resolve(displayed: before.rows, target: target, visibleKeys: [key], selectedKey: nil)
+        XCTAssertEqual(first.held.map(\.kind), [.doneInPlace])
+        let oldHeading = try XCTUnwrap(index("section:next", first.rows))
+        let nextHeading = try XCTUnwrap(index("section:waiting-on-you", first.rows))
+        let firstIndex = try XCTUnwrap(index(key, first.rows))
+        XCTAssertTrue(oldHeading < firstIndex && firstIndex < nextHeading, "setup: held under its old section")
+
+        let second = deferral.resolve(displayed: first.rows, target: target, visibleKeys: [key], selectedKey: nil)
+        XCTAssertEqual(second.rows.map(\.key), first.rows.map(\.key), "the held row did not move")
+        XCTAssertTrue(second.applyNow.isEmpty)
+        let third = deferral.resolve(displayed: second.rows, target: target, visibleKeys: [key], selectedKey: nil)
+        XCTAssertEqual(third.rows.map(\.key), first.rows.map(\.key))
+    }
 }
