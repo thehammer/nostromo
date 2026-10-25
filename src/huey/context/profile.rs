@@ -137,6 +137,19 @@ fn and_list(items: &[&str]) -> String {
     }
 }
 
+/// Largest file the profile reads (manifests, settings, README).
+const MAX_READ_BYTES: u64 = 1024 * 1024;
+
+/// Read `path` only if it is a regular file (not a symlink, so a repository
+/// cannot point the profile at a file outside it) of at most 1 MiB.
+pub(crate) fn read_regular_file(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() > MAX_READ_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// A package name as compared: lower-case, `_` as `-`.
 pub fn normalize(name: &str) -> String {
     name.trim().to_lowercase().replace('_', "-")
@@ -218,7 +231,7 @@ pub fn dependencies(root: &Path) -> Vec<Dependency> {
     let mut set = BTreeSet::new();
     for manifest in manifest_files(root) {
         let path = root.join(&manifest);
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Some(text) = read_regular_file(&path) else {
             continue;
         };
         let file = Path::new(&manifest)
@@ -475,8 +488,7 @@ fn features(root: &Path, deps: &[Dependency]) -> Vec<String> {
         })
         .unwrap_or_default();
     let has_hooks = settings.iter().any(|p| {
-        std::fs::read_to_string(p)
-            .ok()
+        read_regular_file(p)
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| v.get("hooks").cloned())
             .is_some_and(|h| h.as_object().is_some_and(|o| !o.is_empty()))
@@ -504,7 +516,17 @@ fn features(root: &Path, deps: &[Dependency]) -> Vec<String> {
 /// Number of tracked files at HEAD containing `term` (fixed string), and the
 /// first repo-relative paths. `None` when git could not answer.
 pub(crate) fn grep_files(root: &Path, term: &str) -> Option<Vec<String>> {
-    let out = git(root, &["grep", "-F", "-l", "-I", "-e", term, "HEAD", "--"])?;
+    let out = git(root, &[
+            "grep",
+            "--no-textconv",
+            "-F",
+            "-l",
+            "-I",
+            "-e",
+            term,
+            "HEAD",
+            "--",
+        ])?;
     match out.code {
         0 => Some(
             String::from_utf8_lossy(&out.stdout)
@@ -522,6 +544,7 @@ fn env_names(root: &Path) -> Vec<String> {
         root,
         &[
             "grep",
+            "--no-textconv",
             "-I",
             "-h",
             "-o",
@@ -616,7 +639,7 @@ pub fn profile_cached(root: &Path, project: &str, cache_dir: Option<&Path>) -> P
 pub fn description(root: &Path) -> Option<String> {
     const MAX: usize = 160;
     let from_toml = |file: &str, path: &[&str]| -> Option<String> {
-        let text = std::fs::read_to_string(root.join(file)).ok()?;
+        let text = read_regular_file(&root.join(file))?;
         let table = toml::Value::Table(text.parse::<toml::Table>().ok()?);
         let mut cur = &table;
         for key in path {
@@ -625,7 +648,7 @@ pub fn description(root: &Path) -> Option<String> {
         cur.as_str().map(str::to_string)
     };
     let from_json = |file: &str| -> Option<String> {
-        let text = std::fs::read_to_string(root.join(file)).ok()?;
+        let text = read_regular_file(&root.join(file))?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
         v.get("description")?.as_str().map(str::to_string)
     };
@@ -640,7 +663,7 @@ pub fn description(root: &Path) -> Option<String> {
 fn readme_first_sentence(root: &Path) -> Option<String> {
     let text = ["README.md", "README", "readme.md", "README.markdown"]
         .iter()
-        .find_map(|f| std::fs::read_to_string(root.join(f)).ok())?;
+        .find_map(|f| read_regular_file(&root.join(f)))?;
     let mut paragraph = String::new();
     for line in text.lines() {
         let t = line.trim();
@@ -670,4 +693,22 @@ fn readme_first_sentence(root: &Path) -> Option<String> {
         None => paragraph.as_str(),
     };
     Some(sentence.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_readme_or_manifest_is_not_read() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "OUTSIDE-SECRET sentence. More.").unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&secret, repo.path().join("README.md")).unwrap();
+        std::os::unix::fs::symlink(&secret, repo.path().join("package.json")).unwrap();
+        assert_eq!(description(repo.path()), None);
+        assert!(dependencies(repo.path()).is_empty());
+    }
 }

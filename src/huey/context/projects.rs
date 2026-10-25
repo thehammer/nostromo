@@ -57,14 +57,24 @@ pub(crate) struct GitOutput {
 }
 
 /// Run `git -C <dir> <args>` with a fixed argv, no shell, no stdin, no pager,
-/// no optional locks and fsmonitor off (so a repository's own config cannot
-/// make a read start a program), killed after [`GIT_TIMEOUT`].
+/// no optional locks, no system config, and fsmonitor, signature display and
+/// hooks off (so a repository's own config cannot make a read start a
+/// program), killed after [`GIT_TIMEOUT`].
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Option<GitOutput> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", "core.fsmonitor=false", "--no-pager"])
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "log.showSignature=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "--no-pager",
+        ])
         .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())

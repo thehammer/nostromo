@@ -412,7 +412,7 @@ fn markdown_titles(dir: &Path, kind: &str) -> Vec<TitleEntry> {
 /// The first `# ` heading and the front matter's `created:` date. Stops at the
 /// first heading; reads at most the first 64 lines.
 fn head_facts(path: &Path) -> (Option<String>, Option<NaiveDate>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(text) = super::profile::read_regular_file(path) else {
         return (None, None);
     };
     let mut created = None;
