@@ -24,17 +24,36 @@
 //!   settles, not after every chunk.
 //! * Rows at or below the cursor row are held back by `take_committed`, since
 //!   a program that moved the cursor up may still rewrite them.
-//! * Columns are `char`s. Double-width (CJK) and combining characters are
-//!   counted as one column, so redraws over them can be off.
+//! * Columns are `char`s. Double-width (CJK, emoji) and combining characters
+//!   are counted as one column although a terminal shows two (or zero), so
+//!   cursor movement and `\r` redraws over them land a column off. The gap is
+//!   bounded: it only misplaces overwrites inside one line (never across
+//!   lines), a line never exceeds [`MAX_LINE_COLUMNS`] chars, and redaction
+//!   runs on the text this engine produces, so a misplaced column can change
+//!   what a line shows but never lets a secret past the redactor.
+//! * Memory is bounded: a row stores only its non-blank cells (padding from
+//!   cursor movement stays implicit), at most [`MAX_BUFFERED_ROWS`] rows and
+//!   [`MAX_BUFFERED_CELLS`] columns are buffered between
+//!   [`LineAssembler::take_committed`] calls, and beyond that the oldest rows
+//!   are dropped and reported as one `[… N lines dropped …]` line.
 //! * Only `A B C D G K P` (CSI) are interpreted. Every other sequence
 //!   (`H`, `J`, `L`, scroll regions, mode switches, …) is stripped and has no
 //!   effect.
 
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 /// Longest line, in columns (chars), that [`LineAssembler`] keeps. A longer
 /// line is cut and its last column is replaced by `…`.
 pub const MAX_LINE_COLUMNS: usize = 4096;
+
+/// Most rows buffered between [`LineAssembler::take_committed`] calls. Past it
+/// (or past [`MAX_BUFFERED_CELLS`]) the oldest rows are dropped.
+pub const MAX_BUFFERED_ROWS: usize = 8192;
+
+/// Most columns, summed over every buffered row (blank padding counts), kept
+/// between [`LineAssembler::take_committed`] calls.
+pub const MAX_BUFFERED_CELLS: usize = 512 * 1024;
 
 /// Cap on remembered CSI parameter bytes; anything longer is not a cursor
 /// movement we understand and the sequence is just skipped.
@@ -52,14 +71,24 @@ pub struct LineAssembler {
     parser: Parser,
     utf8: Utf8Decoder,
     suspended: bool,
-    /// Text of the cursor row with trailing spaces trimmed, refreshed at the
-    /// end of every `feed`; `None` when empty.
-    partial: Option<String>,
+    /// Text of the cursor row with trailing spaces trimmed, rendered on the
+    /// first [`current_partial`](Self::current_partial) after the row last
+    /// changed (so feeding never pays for it); `None` inside when empty.
+    partial: OnceLock<Option<String>>,
+    /// Sum of the widths of `rows`.
+    cells_total: usize,
+    /// Rows dropped by the caps since the last `take_committed`.
+    dropped_rows: usize,
+    #[cfg(test)]
+    renders: std::sync::atomic::AtomicUsize,
 }
 
+/// One buffered row. Only non-blank cells are stored (sorted by column);
+/// every other column up to the last one is an implicit space, so cursor
+/// movement can never allocate.
 #[derive(Debug, Default, Clone)]
 struct Row {
-    cells: Vec<char>,
+    cells: Vec<(u16, char)>,
     /// Characters were dropped because the row hit [`MAX_LINE_COLUMNS`].
     clipped: bool,
 }
@@ -115,7 +144,11 @@ impl LineAssembler {
             parser: Parser::new(),
             utf8: Utf8Decoder::default(),
             suspended: false,
-            partial: None,
+            partial: OnceLock::new(),
+            cells_total: 0,
+            dropped_rows: 0,
+            #[cfg(test)]
+            renders: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -125,6 +158,10 @@ impl LineAssembler {
         if self.suspended {
             return;
         }
+        if bytes.is_empty() {
+            return;
+        }
+        self.partial = OnceLock::new();
         for &b in bytes {
             let mut decoded = [None, None];
             self.utf8.push(b, &mut decoded);
@@ -132,23 +169,56 @@ impl LineAssembler {
                 self.handle_char(c);
             }
         }
-        self.refresh_partial();
     }
 
     /// Remove and return the finished lines, oldest first, with trailing
     /// spaces trimmed. Rows at or below the cursor row stay buffered (see the
     /// [module docs](self)); the live line is never returned.
+    ///
+    /// These lines are raw: not redacted and not capped. They are the input of
+    /// [`deliver`](super::deliver), which takes them itself; do not hand them
+    /// to an agent any other way.
+    ///
+    /// If the buffer caps dropped rows since the last call, the first line is
+    /// `[… N lines dropped …]`.
     pub fn take_committed(&mut self) -> Vec<String> {
         let take = self.cursor_row.min(self.rows.len() - 1);
-        let lines = self.rows.drain(..take).map(|row| row.text()).collect();
+        let mut lines = Vec::with_capacity(take + 1);
+        if self.dropped_rows > 0 {
+            lines.push(format!("[… {} lines dropped …]", self.dropped_rows));
+            self.dropped_rows = 0;
+        }
+        for row in self.rows.drain(..take) {
+            self.cells_total = self.cells_total.saturating_sub(row.width());
+            lines.push(row.text());
+        }
         self.cursor_row -= take;
         lines
     }
 
     /// The text on the cursor's row, trailing spaces trimmed; `None` when
     /// the row is empty. This is the "prompt line" while a shell waits.
+    /// Rendered on demand, not on every `feed`.
     pub fn current_partial(&self) -> Option<&str> {
-        self.partial.as_deref()
+        self.partial
+            .get_or_init(|| {
+                #[cfg(test)]
+                self.renders
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let text = self.rows[self.cursor_row].text();
+                (!text.is_empty()).then_some(text)
+            })
+            .as_deref()
+    }
+
+    /// Rows currently buffered (committed-but-untaken, plus the live row).
+    pub fn buffered_rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Columns currently buffered, summed over [`buffered_rows`](Self::buffered_rows).
+    pub fn buffered_cells(&self) -> usize {
+        self.cells_total
     }
 
     /// Stop interpreting input (an alternate-screen program is running).
@@ -163,7 +233,7 @@ impl LineAssembler {
         self.suspended = false;
         self.reset_parsers();
         self.cursor_row = self.rows.len() - 1;
-        self.refresh_partial();
+        self.partial = OnceLock::new();
     }
 
     /// Whether input is currently being discarded.
@@ -174,11 +244,6 @@ impl LineAssembler {
     fn reset_parsers(&mut self) {
         self.parser = Parser::new();
         self.utf8 = Utf8Decoder::default();
-    }
-
-    fn refresh_partial(&mut self) {
-        let text = self.rows[self.cursor_row].text();
-        self.partial = (!text.is_empty()).then_some(text);
     }
 
     fn handle_char(&mut self, c: char) {
@@ -294,10 +359,7 @@ impl LineAssembler {
             'K' => self.erase_in_line(n.unwrap_or(0)),
             'P' => {
                 let col = self.col;
-                let cells = &mut self.rows[self.cursor_row].cells;
-                if col < cells.len() {
-                    cells.drain(col..(col + count).min(cells.len()));
-                }
+                self.edit_row(|row| row.delete(col, count));
             }
             _ => {}
         }
@@ -305,16 +367,12 @@ impl LineAssembler {
 
     fn erase_in_line(&mut self, mode: usize) {
         let col = self.col;
-        let row = &mut self.rows[self.cursor_row];
-        match mode {
-            0 => row.cells.truncate(col),
-            1 => {
-                let end = (col + 1).min(row.cells.len());
-                row.cells[..end].fill(' ');
-            }
+        self.edit_row(|row| match mode {
+            0 => row.cells.retain(|&(c, _)| usize::from(c) < col),
+            1 => row.cells.retain(|&(c, _)| usize::from(c) > col),
             2 => row.cells.clear(),
             _ => {}
-        }
+        });
     }
 
     fn line_feed(&mut self) {
@@ -323,37 +381,101 @@ impl LineAssembler {
             self.rows.push_back(Row::default());
         }
         self.cursor_row += 1;
+        self.enforce_caps();
     }
 
     fn put(&mut self, c: char) {
         let col = self.col;
-        let row = &mut self.rows[self.cursor_row];
-        if col >= MAX_LINE_COLUMNS {
-            row.clipped = true;
-            row.cells.resize(MAX_LINE_COLUMNS, ' ');
-            row.cells[MAX_LINE_COLUMNS - 1] = '…';
-            return;
-        }
-        if col > row.cells.len() {
-            row.cells.resize(col, ' ');
-        }
-        if col == row.cells.len() {
-            row.cells.push(c);
-        } else {
-            row.cells[col] = c;
-        }
-        if row.clipped && col == MAX_LINE_COLUMNS - 1 {
+        self.edit_row(|row| {
+            if col >= MAX_LINE_COLUMNS {
+                row.clipped = true;
+                row.set(MAX_LINE_COLUMNS - 1, '…');
+                return;
+            }
             // Keep the clip marker visible if the last column was rewritten.
-            row.cells[col] = '…';
+            let c = if row.clipped && col == MAX_LINE_COLUMNS - 1 {
+                '…'
+            } else {
+                c
+            };
+            row.set(col, c);
+        });
+        if col < MAX_LINE_COLUMNS {
+            self.col += 1;
         }
-        self.col += 1;
+        self.enforce_caps();
+    }
+
+    /// Run `f` on the cursor row, keeping `cells_total` in step.
+    fn edit_row(&mut self, f: impl FnOnce(&mut Row)) {
+        let row = &mut self.rows[self.cursor_row];
+        let before = row.width();
+        f(row);
+        let after = row.width();
+        self.cells_total = (self.cells_total + after).saturating_sub(before);
+    }
+
+    /// Drop the oldest rows while more than [`MAX_BUFFERED_ROWS`] rows or
+    /// [`MAX_BUFFERED_CELLS`] columns are buffered.
+    fn enforce_caps(&mut self) {
+        while (self.rows.len() > MAX_BUFFERED_ROWS || self.cells_total > MAX_BUFFERED_CELLS)
+            && self.rows.len() > 1
+        {
+            if let Some(row) = self.rows.pop_front() {
+                self.cells_total = self.cells_total.saturating_sub(row.width());
+                self.dropped_rows += 1;
+                self.cursor_row = self.cursor_row.saturating_sub(1);
+            }
+        }
     }
 }
 
 impl Row {
+    /// Columns from 0 through the last non-blank cell.
+    fn width(&self) -> usize {
+        self.cells.last().map_or(0, |&(c, _)| usize::from(c) + 1)
+    }
+
+    /// Write `c` at `col` (`col < MAX_LINE_COLUMNS`). A space is a blank, so it
+    /// is never stored.
+    fn set(&mut self, col: usize, c: char) {
+        let col = col as u16;
+        match self.cells.binary_search_by_key(&col, |&(c, _)| c) {
+            Ok(i) if c == ' ' => {
+                self.cells.remove(i);
+            }
+            Ok(i) => self.cells[i].1 = c,
+            Err(_) if c == ' ' => {}
+            Err(i) => self.cells.insert(i, (col, c)),
+        }
+    }
+
+    /// Delete `count` cells at `col`, shifting the rest left.
+    fn delete(&mut self, col: usize, count: usize) {
+        if col >= self.width() {
+            return;
+        }
+        let end = col.saturating_add(count);
+        self.cells
+            .retain(|&(c, _)| !(col..end).contains(&usize::from(c)));
+        for (c, _) in self
+            .cells
+            .iter_mut()
+            .filter(|(c, _)| usize::from(*c) >= col)
+        {
+            *c -= count.min(usize::from(*c)) as u16;
+        }
+    }
+
     fn text(&self) -> String {
-        let text: String = self.cells.iter().collect();
-        text.trim_end_matches(' ').to_owned()
+        let mut text = String::with_capacity(self.width());
+        let mut next = 0;
+        for &(col, c) in &self.cells {
+            text.extend(std::iter::repeat_n(' ', usize::from(col) - next));
+            text.push(c);
+            next = usize::from(col) + 1;
+        }
+        text
     }
 }
 
@@ -423,5 +545,64 @@ impl Utf8Decoder {
         self.buf[0] = b;
         self.len = 1;
         self.need = need;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    #[test]
+    fn feeding_never_renders_the_partial_line() {
+        let mut a = LineAssembler::new();
+        for _ in 0..10_000 {
+            a.feed(b"x");
+        }
+        assert_eq!(a.renders.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            a.current_partial().map(|p| p.chars().count()),
+            Some(MAX_LINE_COLUMNS)
+        );
+        // Read again without feeding: cached, not rendered a second time.
+        let _ = a.current_partial();
+        assert_eq!(a.renders.load(Ordering::Relaxed), 1);
+        a.feed(b"y");
+        let _ = a.current_partial();
+        assert_eq!(a.renders.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn cursor_movement_stores_nothing() {
+        let mut a = LineAssembler::new();
+        a.feed(b"\x1b[4000C\x1b[4000D\x1b[2K");
+        assert_eq!(a.rows[0].cells.len(), 0);
+        a.feed(b"a\x1b[4000Cb");
+        assert_eq!(a.rows[0].cells.len(), 2, "two cells, however far apart");
+        assert_eq!(a.buffered_cells(), 4002);
+    }
+
+    #[test]
+    fn delete_shifts_later_cells_left_across_gaps() {
+        let mut a = LineAssembler::new();
+        a.feed(b"ab\x1b[5Ccd\r\x1b[2P\n");
+        assert_eq!(a.take_committed(), vec![format!("{}cd", " ".repeat(5))]);
+    }
+
+    #[test]
+    fn dropped_rows_are_reported_once_and_content_free() {
+        let mut a = LineAssembler::new();
+        let rows = MAX_BUFFERED_ROWS + 10;
+        for _ in 0..rows {
+            a.feed(b"secret-looking text\n");
+        }
+        assert!(a.buffered_rows() <= MAX_BUFFERED_ROWS);
+        let lines = a.take_committed();
+        assert_eq!(
+            lines[0],
+            format!("[… {} lines dropped …]", rows + 1 - MAX_BUFFERED_ROWS)
+        );
+        assert_eq!(a.take_committed().len(), 0);
     }
 }

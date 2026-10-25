@@ -1,5 +1,5 @@
 //! Behavioural tests for the pure text engine behind terminal "agent follow"
-//! (slice 3a): `LineAssembler`, `screen_snapshot`, `truncate`,
+//! (slice 3a): `LineAssembler`, `screen_snapshot`, `deliver`,
 //! `DeliveryPolicy` and `Redactor`.
 //!
 //! Traces to PRD `.claude/prds/terminal-pane.md` criteria 31 (plain text, no
@@ -18,8 +18,8 @@
 use std::time::{Duration, Instant};
 
 use nostromo::terminal::follow::{
-    screen_snapshot, truncate, Decision, DeliveryKind, DeliveryPolicy, LineAssembler, PauseReason,
-    Truncated, MAX_LINE_COLUMNS,
+    deliver, screen_snapshot, Decision, Delivery, DeliveryKind, DeliveryPolicy, LineAssembler,
+    PauseReason, MAX_LINE_COLUMNS,
 };
 use nostromo::terminal::redact::{RedactionKind, Redactor};
 
@@ -837,204 +837,6 @@ fn snapshot_has_no_colour_codes_and_keeps_wide_characters() {
 #[test]
 fn snapshot_keeps_leading_indentation() {
     assert_eq!(snapshot_of_bytes(3, 20, b"  indented"), "  indented");
-}
-
-// ───────────────────────────── truncate ──────────────────────────────────────
-
-const OMIT_PREFIX: &str = "[\u{2026} ";
-const OMIT_SUFFIX: &str = " lines omitted \u{2026}]";
-
-fn marker(n: usize) -> String {
-    format!("{OMIT_PREFIX}{n}{OMIT_SUFFIX}")
-}
-
-fn numbered(n: usize) -> Vec<String> {
-    (0..n).map(|i| format!("line {i}")).collect()
-}
-
-fn marker_lines(text: &str) -> Vec<&str> {
-    text.split('\n')
-        .filter(|l| l.starts_with(OMIT_PREFIX) && l.ends_with(OMIT_SUFFIX))
-        .collect()
-}
-
-/// Invariants that hold for every input.
-fn check_invariants(input: &[String], t: &Truncated) {
-    assert!(t.text.len() <= 16 * 1024, "text is {} bytes", t.text.len());
-    assert_eq!(t.lines_total, input.len());
-    let markers = marker_lines(&t.text);
-    if t.omitted > 0 {
-        assert_eq!(
-            markers,
-            vec![marker(t.omitted).as_str()],
-            "marker N must equal omitted"
-        );
-    } else {
-        assert!(
-            markers.is_empty(),
-            "no marker when nothing was omitted: {markers:?}"
-        );
-    }
-}
-
-#[test]
-fn small_output_is_unchanged() {
-    let input = numbered(3);
-    let t = truncate(input.clone());
-    assert_eq!(
-        t,
-        Truncated {
-            text: input.join("\n"),
-            lines_total: 3,
-            omitted: 0
-        }
-    );
-}
-
-#[test]
-fn empty_output_is_empty() {
-    let t = truncate(Vec::new());
-    assert_eq!(
-        t,
-        Truncated {
-            text: String::new(),
-            lines_total: 0,
-            omitted: 0
-        }
-    );
-}
-
-#[test]
-fn exactly_200_short_lines_are_unchanged() {
-    let input = numbered(200);
-    let t = truncate(input.clone());
-    assert_eq!(t.text, input.join("\n"));
-    assert_eq!(t.omitted, 0);
-    assert_eq!(t.lines_total, 200);
-}
-
-#[test]
-fn line_201_triggers_head_and_tail_truncation() {
-    let input = numbered(201);
-    let t = truncate(input.clone());
-    assert_eq!(t.lines_total, 201);
-    assert_eq!(t.omitted, 51);
-    let mut expected: Vec<String> = input[..50].to_vec();
-    expected.push(marker(51));
-    expected.extend_from_slice(&input[101..]);
-    assert_eq!(t.text, expected.join("\n"));
-}
-
-#[test]
-fn a_thousand_lines_keep_50_head_and_100_tail_with_a_marker() {
-    let input = numbered(1000);
-    let t = truncate(input.clone());
-    assert_eq!(t.lines_total, 1000);
-    assert_eq!(t.omitted, 850);
-    let mut expected: Vec<String> = input[..50].to_vec();
-    expected.push("[\u{2026} 850 lines omitted \u{2026}]".to_string());
-    expected.extend_from_slice(&input[900..]);
-    assert_eq!(t.text, expected.join("\n"));
-    assert_eq!(t.text.split('\n').count(), 151);
-}
-
-#[test]
-fn output_of_exactly_16_kib_within_200_lines_is_unchanged() {
-    let mut input: Vec<String> = (0..15)
-        .map(|i| format!("{i:02}{}", "x".repeat(1021)))
-        .collect();
-    input.push(format!("15{}", "x".repeat(1022)));
-    let joined = input.join("\n");
-    assert_eq!(joined.len(), 16 * 1024);
-    let t = truncate(input);
-    assert_eq!(t.text, joined);
-    assert_eq!(t.omitted, 0);
-}
-
-#[test]
-fn output_one_byte_over_16_kib_is_cut_back_under_the_cap() {
-    let mut input: Vec<String> = (0..15)
-        .map(|i| format!("{i:02}{}", "x".repeat(1021)))
-        .collect();
-    input.push(format!("15{}", "x".repeat(1023)));
-    assert_eq!(input.join("\n").len(), 16 * 1024 + 1);
-    let t = truncate(input.clone());
-    check_invariants(&input, &t);
-    assert!(
-        t.text.starts_with(&input[0]),
-        "head preserved from the start"
-    );
-    assert!(
-        t.text.ends_with(input.last().unwrap()),
-        "tail preserved to the end"
-    );
-}
-
-#[test]
-fn many_long_lines_shrink_head_and_tail_to_fit_the_byte_cap() {
-    for width in [200usize, 2000] {
-        let input: Vec<String> = (0..300)
-            .map(|i| format!("{i:04}{}", "x".repeat(width - 4)))
-            .collect();
-        let t = truncate(input.clone());
-        check_invariants(&input, &t);
-        assert!(t.omitted >= 150, "width {width}: omitted {}", t.omitted);
-        assert!(
-            t.text.starts_with(&input[0]),
-            "width {width}: head preserved"
-        );
-        assert!(
-            t.text.ends_with(input.last().unwrap()),
-            "width {width}: tail preserved"
-        );
-    }
-}
-
-#[test]
-fn a_single_huge_line_is_clipped_with_an_ellipsis_and_no_marker() {
-    let input = vec!["x".repeat(100 * 1024)];
-    let t = truncate(input.clone());
-    check_invariants(&input, &t);
-    assert_eq!(t.omitted, 0);
-    assert_eq!(t.lines_total, 1);
-    assert!(t.text.ends_with('\u{2026}'));
-    assert!(t.text.starts_with("xxxxxxxx"));
-    assert!(
-        t.text.len() > 8 * 1024,
-        "keeps most of the budget, not a token amount"
-    );
-}
-
-#[test]
-fn clipping_a_huge_multibyte_line_lands_on_a_character_boundary() {
-    for ch in ["\u{65e5}", "\u{1F600}", "\u{e9}"] {
-        let input = vec![ch.repeat(100 * 1024 / ch.len())];
-        let t = truncate(input.clone());
-        check_invariants(&input, &t);
-        assert_eq!(t.omitted, 0);
-        assert!(t.text.ends_with('\u{2026}'));
-        assert!(t.text.starts_with(ch));
-    }
-}
-
-#[test]
-fn two_huge_lines_still_fit_the_cap_and_the_marker_matches_omitted() {
-    let input = vec!["a".repeat(50 * 1024), "b".repeat(50 * 1024)];
-    let t = truncate(input.clone());
-    check_invariants(&input, &t);
-    assert!(t.text.starts_with("aaaa"));
-}
-
-#[test]
-fn a_thousand_lines_of_moderate_width_respect_the_cap_and_report_omitted_honestly() {
-    let input: Vec<String> = (0..1000)
-        .map(|i| format!("{i:04} {}", "y".repeat(120)))
-        .collect();
-    let t = truncate(input.clone());
-    check_invariants(&input, &t);
-    assert!(t.omitted >= 850);
-    assert!(t.text.starts_with(&input[0]));
-    assert!(t.text.ends_with(input.last().unwrap()));
 }
 
 // ───────────────────────────── DeliveryPolicy ────────────────────────────────
@@ -2205,18 +2007,26 @@ fn a_secret_split_by_a_carriage_return_redraw_is_judged_on_its_final_text() {
 }
 
 #[test]
-fn assembled_lines_then_truncate_end_to_end_for_a_noisy_command() {
+fn assembled_lines_then_deliver_end_to_end_for_a_noisy_command() {
     let mut raw = Vec::new();
     for i in 0..1000 {
         raw.extend_from_slice(format!("\x1b[32mrow {i}\x1b[0m\r\n").as_bytes());
     }
     let mut a = LineAssembler::new();
     a.feed(&raw);
-    let lines = a.take_committed();
-    assert_eq!(lines.len(), 1000);
-    let t = truncate(lines);
-    assert_eq!(t.omitted, 850);
-    assert!(t.text.starts_with("row 0\n"));
-    assert!(t.text.ends_with("row 999"));
-    assert!(!t.text.contains('\x1b'));
+    let Delivery::Text {
+        text,
+        lines_total,
+        omitted,
+        redactions,
+    } = deliver(&mut a, &mut Redactor::new(), &mut DeliveryPolicy::new())
+    else {
+        panic!("a plain command is never withheld");
+    };
+    assert_eq!(lines_total, 1000);
+    assert_eq!(omitted, 850);
+    assert!(redactions.is_empty());
+    assert!(text.starts_with("row 0\n"));
+    assert!(text.ends_with("row 999"));
+    assert!(!text.contains('\x1b'));
 }
