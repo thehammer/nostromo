@@ -835,6 +835,11 @@ impl TerminalManager {
         Arc::clone(&self.remote_launcher)
     }
 
+    /// Replace the clock the remote request cooldown and ceiling read.
+    pub fn set_remote_clock(&mut self, clock: remote_request::Clock) {
+        self.remote_requests.set_clock(clock);
+    }
+
     pub(crate) fn remote_requests_mut(&mut self) -> &mut RemoteRequests {
         &mut self.remote_requests
     }
