@@ -384,7 +384,7 @@ final class FredDetailHardeningTests: XCTestCase {
         XCTAssertTrue(FredDetailPrompts.prep(d, nonce: nonce).contains("<untrusted_agenda_\(nonce)>"))
     }
 
-    // MARK: - B. Outlook link validation
+    // MARK: - B. Web link validation (Outlook and Google)
 
     func testOnlyHTTPSLinksToTheOutlookWebHostsAreAccepted() {
         let accepted = [
@@ -398,9 +398,9 @@ final class FredDetailHardeningTests: XCTestCase {
             "https://outlook.office365.de/mail",
         ]
         for link in accepted {
-            let url = OutlookLink.url(from: link)
+            let url = FredWebLink.url(from: link)
             XCTAssertNotNil(url, "should accept \(link)")
-            if let url { XCTAssertTrue(OutlookLink.isOpenable(url), "isOpenable should accept \(link)") }
+            if let url { XCTAssertTrue(FredWebLink.isOpenable(url), "isOpenable should accept \(link)") }
         }
     }
 
@@ -427,17 +427,81 @@ final class FredDetailHardeningTests: XCTestCase {
             nil,
         ]
         for link in rejected {
-            XCTAssertNil(OutlookLink.url(from: link), "should reject \(link ?? "nil")")
+            XCTAssertNil(FredWebLink.url(from: link), "should reject \(link ?? "nil")")
             if let link, let url = URL(string: link) {
-                XCTAssertFalse(OutlookLink.isOpenable(url), "isOpenable should reject \(link)")
+                XCTAssertFalse(FredWebLink.isOpenable(url), "isOpenable should reject \(link)")
             }
         }
     }
 
     func testAnAcceptedLinkKeepsItsHostAndPath() throws {
-        let url = try XCTUnwrap(OutlookLink.url(from: "https://outlook.office.com/mail/id/AAA?x=1"))
+        let url = try XCTUnwrap(FredWebLink.url(from: "https://outlook.office.com/mail/id/AAA?x=1"))
         XCTAssertEqual(url.host?.lowercased(), "outlook.office.com")
         XCTAssertEqual(url.path, "/mail/id/AAA")
+    }
+
+    func testOnlyHTTPSLinksToGmailAndGoogleCalendarAreAccepted() {
+        let accepted = [
+            "https://mail.google.com/mail/?authuser=a%40gmail.com#all/abc",
+            "https://calendar.google.com/calendar/event?eid=x",
+            "https://www.google.com/calendar/event?eid=x",
+        ]
+        for link in accepted {
+            let url = FredWebLink.url(from: link)
+            XCTAssertNotNil(url, "should accept \(link)")
+            if let url { XCTAssertTrue(FredWebLink.isOpenable(url), "isOpenable should accept \(link)") }
+        }
+    }
+
+    func testGoogleHostsMatchExactlyButOutlookTenantSubdomainsStayAllowed() throws {
+        for link in ["https://evil.mail.google.com/mail/", "https://x.calendar.google.com/calendar/event"] {
+            XCTAssertNil(FredWebLink.url(from: link), "should reject \(link)")
+        }
+        XCTAssertNotNil(FredWebLink.url(from: "https://tenant.outlook.office.com/x"))
+    }
+
+    func testLookalikeAndNonServiceGoogleLinksAreRejected() {
+        let rejected = [
+            "https://www.google.com/search?q=x",
+            "https://mail.google.com.evil.com/",
+            "http://mail.google.com/",
+            "https://user@mail.google.com/",
+            "https://mail.google.com:8443/",
+            // A dot segment would let the browser leave /calendar/ for another www.google.com page.
+            "https://www.google.com/calendar/../url?q=https://evil.example/",
+            "https://www.google.com/calendar/%2e%2e/url?q=https://evil.example/",
+            "https://www.google.com/calendar/./event",
+            "https://www.google.com/calendarx/event",
+        ]
+        for link in rejected {
+            XCTAssertNil(FredWebLink.url(from: link), "should reject \(link)")
+            if let url = URL(string: link) {
+                XCTAssertFalse(FredWebLink.isOpenable(url), "isOpenable should reject \(link)")
+            }
+        }
+    }
+
+    func testAnAcceptedGoogleLinkKeepsItsHostPathQueryAndFragment() throws {
+        let url = try XCTUnwrap(FredWebLink.url(from: "https://mail.google.com/mail/?authuser=a%40gmail.com#all/abc"))
+        XCTAssertEqual(url.host?.lowercased(), "mail.google.com")
+        XCTAssertEqual(url.path, "/mail")  // Foundation drops the trailing slash from `path`
+        XCTAssertEqual(url.query, "authuser=a%40gmail.com")
+        XCTAssertEqual(url.fragment, "all/abc")
+    }
+
+    func testTheButtonTitleNamesTheServiceTheLinkOpens() throws {
+        let cases: [(link: String, title: String)] = [
+            ("https://mail.google.com/mail/?authuser=a%40gmail.com#all/abc", "Open in Gmail"),
+            ("https://calendar.google.com/calendar/event?eid=x", "Open in Google Calendar"),
+            ("https://www.google.com/calendar/event?eid=x", "Open in Google Calendar"),
+            ("https://outlook.office.com/mail/id/AAA", "Open in Outlook"),
+            ("https://outlook.office365.com/owa/?ItemID=x", "Open in Outlook"),
+            ("https://outlook.live.com/mail/0/", "Open in Outlook"),
+        ]
+        for c in cases {
+            let url = try XCTUnwrap(URL(string: c.link))
+            XCTAssertEqual(FredWebLink.buttonTitle(for: url), c.title, c.link)
+        }
     }
 
     // MARK: - D. The bridge over the real WorkStore
@@ -654,6 +718,22 @@ final class FredDetailHardeningTests: XCTestCase {
         let good = try XCTUnwrap(URL(string: "https://outlook.office.com/mail/id/AAA"))
         wire.actions.open(good)
         XCTAssertEqual(wire.opened, [good])
+    }
+
+    func testTheBridgeOpenerLetsGoogleLinksThroughAndStillRefusesLookalikes() throws {
+        let wire = Wire()
+        for bad in ["https://mail.google.com.evil.com/", "http://mail.google.com/", "https://user@mail.google.com/",
+                    "https://mail.google.com:8443/", "https://www.google.com/search?q=x",
+                    "https://evil.example/mail.google.com"] {
+            wire.actions.open(try XCTUnwrap(URL(string: bad)))
+        }
+        XCTAssertTrue(wire.opened.isEmpty, "nothing unsafe reaches the opener")
+
+        let gmail = try XCTUnwrap(URL(string: "https://mail.google.com/mail/?authuser=a%40gmail.com#all/abc"))
+        let calendar = try XCTUnwrap(URL(string: "https://calendar.google.com/calendar/event?eid=x"))
+        wire.actions.open(gmail)
+        wire.actions.open(calendar)
+        XCTAssertEqual(wire.opened, [gmail, calendar])
     }
 
     // MARK: - F. IME-safe Return

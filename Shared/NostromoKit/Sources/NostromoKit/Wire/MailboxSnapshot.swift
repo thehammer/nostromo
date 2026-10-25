@@ -9,23 +9,53 @@ import Foundation
 
 // MARK: - DeviceFlowPrompt
 
-/// Rendered when Microsoft Graph auth is required (device-flow sign-in).
+/// Rendered when a Fred source needs sign-in: Microsoft device flow
+/// (`kind == "device_code"`: URL + code) or Google loopback (`kind == "browser"`:
+/// the URL only works on the daemon's Mac, and there is no code).
 /// Mirrors `DeviceFlowPrompt` in `src/data/graph_client.rs`.
 public struct DeviceFlowPrompt: Codable, Equatable {
     public let verificationUri: String
     public let userCode:        String
     public let expiresAt:       Date
+    /// "device_code" or "browser". Older daemons omit it: decoded as "device_code".
+    public let kind:            String
+    /// The configured account label, in multi-account mode.
+    public let account:         String?
+    /// "microsoft" or "google", when the daemon says.
+    public let provider:        String?
+
+    public var isBrowserSignIn: Bool { kind == "browser" }
+    /// A Microsoft device-code prompt (URL + code). Anything else that is not a browser sign-in
+    /// (an unknown `kind`, or a Google prompt claiming to be a device code) is not rendered as one.
+    public var isDeviceCodeSignIn: Bool { kind == "device_code" && provider != "google" }
 
     enum CodingKeys: String, CodingKey {
         case verificationUri = "verification_uri"
         case userCode        = "user_code"
         case expiresAt       = "expires_at"
+        case kind
+        case account
+        case provider
     }
 
-    public init(verificationUri: String, userCode: String, expiresAt: Date) {
+    public init(verificationUri: String, userCode: String, expiresAt: Date,
+                kind: String = "device_code", account: String? = nil, provider: String? = nil) {
         self.verificationUri = verificationUri
         self.userCode        = userCode
         self.expiresAt       = expiresAt
+        self.kind            = kind
+        self.account         = account
+        self.provider        = provider
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c           = try decoder.container(keyedBy: CodingKeys.self)
+        verificationUri = try c.decode(String.self, forKey: .verificationUri)
+        userCode        = try c.decode(String.self, forKey: .userCode)
+        expiresAt       = try c.decode(Date.self,   forKey: .expiresAt)
+        kind            = try c.decodeIfPresent(String.self, forKey: .kind) ?? "device_code"
+        account         = try c.decodeIfPresent(String.self, forKey: .account)
+        provider        = try c.decodeIfPresent(String.self, forKey: .provider)
     }
 }
 

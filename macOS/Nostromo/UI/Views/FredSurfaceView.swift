@@ -646,7 +646,8 @@ private final class FredPane: NSView {
         trailingLabel.isHidden = !showsCountdown
         trailingLabel.setAccessibilityLabel(trailing)
 
-        if let prompt {
+        // An unknown kind gets the generic banner: no raw daemon URL is shown as a link.
+        if let prompt, prompt.isBrowserSignIn || prompt.isDeviceCodeSignIn {
             banner.clear()
             signIn.show(prompt: prompt, now: now, zone: zone)
             signIn.isHidden = false
@@ -665,9 +666,13 @@ private final class FredPane: NSView {
 
 // MARK: - Sign-in group
 
-/// The device-flow prompt: verification URL (a link), the one-time code, a
-/// Copy code button and the code's expiry.
-private final class FredSignInView: NSView {
+/// The sign-in prompt. Device code (Microsoft): verification URL (a link), the
+/// one-time code, a Copy code button and the code's expiry. Browser (Google
+/// loopback): an "Open Google sign-in" button and the link's expiry; the long
+/// auth URL is never shown and there is no code.
+final class FredSignInView: NSView {
+
+    typealias GesturePermit = (NSView) -> HumanGestureVerdict
 
     var onCopy: ((String) -> Void)?
 
@@ -676,18 +681,27 @@ private final class FredSignInView: NSView {
     private let codeLabel = NSTextField(labelWithString: "")
     private let copyButton = NSButton(title: "Copy code", target: nil, action: nil)
     private let expiryLabel = NSTextField(labelWithString: "")
+    private let codeRow: NSStackView
     private var url: URL?
     private var code = ""
+    private var isBrowser = false
+    private let permit: GesturePermit
+    private let opener: (URL) -> Void
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    /// `permit` and `opener` are seams for tests; the app uses the human-gesture check and `NSWorkspace`.
+    init(permit: GesturePermit? = nil, opener: ((URL) -> Void)? = nil) {
+        self.permit = permit ?? { HumanGesture.permit(NSApp.currentEvent, control: $0) }
+        self.opener = opener ?? { NSWorkspace.shared.open($0) }
+        codeRow = NSStackView(views: [codeLabel, copyButton])
+        super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.12, alpha: 1).cgColor
 
         intro.font = .systemFont(ofSize: 11)
         intro.textColor = Theme.fg
-        intro.lineBreakMode = .byWordWrapping
+        intro.lineBreakMode = .byTruncatingTail
         intro.maximumNumberOfLines = 1
+        intro.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         urlButton.isBordered = false
         urlButton.alignment = .left
@@ -708,8 +722,10 @@ private final class FredSignInView: NSView {
 
         expiryLabel.font = .systemFont(ofSize: 10)
         expiryLabel.textColor = Theme.fgMuted
+        expiryLabel.lineBreakMode = .byTruncatingTail
+        expiryLabel.maximumNumberOfLines = 1
+        expiryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let codeRow = NSStackView(views: [codeLabel, copyButton])
         codeRow.orientation = .horizontal
         codeRow.spacing = 10
         codeRow.alignment = .centerY
@@ -733,29 +749,53 @@ private final class FredSignInView: NSView {
 
     func setIdentifierPrefix(_ prefix: String) {
         setAccessibilityIdentifier(prefix)
+        intro.setAccessibilityIdentifier("\(prefix).intro")
         urlButton.setAccessibilityIdentifier("\(prefix).url")
         codeLabel.setAccessibilityIdentifier("\(prefix).code")
         copyButton.setAccessibilityIdentifier("\(prefix).copy")
         expiryLabel.setAccessibilityIdentifier("\(prefix).expiry")
     }
 
+    /// Every field is set on each call, so switching between the two kinds leaves nothing behind.
     func show(prompt: DeviceFlowPrompt, now: Date, zone: TimeZone) {
+        isBrowser = prompt.isBrowserSignIn
         url = URL(string: prompt.verificationUri)
-        code = prompt.userCode
+        code = isBrowser ? "" : prompt.userCode
         var attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12),
             .foregroundColor: Theme.cornflower,
             .underlineStyle: NSUnderlineStyle.single.rawValue,
         ]
-        if let url { attributes[.link] = url }
-        urlButton.attributedTitle = NSAttributedString(string: prompt.verificationUri, attributes: attributes)
-        codeLabel.stringValue = prompt.userCode
+        if let url, !isBrowser { attributes[.link] = url }
         let when = FredPresentation.clockText(prompt.expiresAt, in: zone)
-        expiryLabel.stringValue = prompt.expiresAt > now ? "Expires at \(when)" : "Code expired at \(when)"
+        let live = prompt.expiresAt > now
+        if isBrowser {
+            intro.stringValue = prompt.account.map { "Sign in to Google (\($0))" } ?? "Sign in to Google"
+            urlButton.attributedTitle = NSAttributedString(string: "Open Google sign-in", attributes: attributes)
+            urlButton.setAccessibilityLabel("Open the Google sign-in page")
+            codeLabel.stringValue = ""
+            expiryLabel.stringValue = live
+                ? "Link expires at \(when)"
+                : "Link expired at \(when); a new one will appear shortly"
+        } else {
+            intro.stringValue = "Sign in to Microsoft 365"
+            urlButton.attributedTitle = NSAttributedString(string: prompt.verificationUri, attributes: attributes)
+            urlButton.setAccessibilityLabel("Open the Microsoft sign-in page")
+            codeLabel.stringValue = prompt.userCode
+            expiryLabel.stringValue = live ? "Expires at \(when)" : "Code expired at \(when)"
+        }
+        codeRow.isHidden = isBrowser
     }
 
-    @objc private func openURL() {
-        if let url { NSWorkspace.shared.open(url) }
+    @objc func openURL() {
+        guard let url else { return }
+        // The browser sign-in URL comes from the daemon: only Google's own sign-in page may open,
+        // and only for a person (an app-control or AXPress press is refused).
+        if isBrowser {
+            guard FredWebLink.isGoogleSignIn(url) else { return }
+            guard case .human = permit(urlButton) else { return }
+        }
+        opener(url)
     }
 
     @objc private func copyPressed() {

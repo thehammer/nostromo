@@ -1006,17 +1006,43 @@ struct DeviceFlowPrompt: Decodable {
     let verificationUri: String
     let userCode:        String
     let expiresAt:       Date
+    /// "device_code" (Microsoft: show the URL and the code) or "browser"
+    /// (Google loopback: open the URL, no code). Older daemons omit it.
+    let kind:            String
+    /// The configured account label, in multi-account mode.
+    let account:         String?
+    /// "microsoft" or "google", when the daemon says.
+    let provider:        String?
+
+    var isBrowserSignIn: Bool { kind == "browser" }
+    /// A Microsoft device-code prompt (URL + code). Anything else that is not a browser sign-in
+    /// (an unknown `kind`, or a Google prompt claiming to be a device code) is not rendered as one.
+    var isDeviceCodeSignIn: Bool { kind == "device_code" && provider != "google" }
 
     enum CodingKeys: String, CodingKey {
         case verificationUri = "verification_uri"
         case userCode        = "user_code"
         case expiresAt       = "expires_at"
+        case kind
+        case account
+        case provider
+    }
+
+    init(from decoder: Decoder) throws {
+        let c           = try decoder.container(keyedBy: CodingKeys.self)
+        verificationUri = try c.decode(String.self, forKey: .verificationUri)
+        userCode        = try c.decode(String.self, forKey: .userCode)
+        expiresAt       = try c.decode(Date.self,   forKey: .expiresAt)
+        kind            = try c.decodeIfPresent(String.self, forKey: .kind) ?? "device_code"
+        account         = try c.decodeIfPresent(String.self, forKey: .account)
+        provider        = try c.decodeIfPresent(String.self, forKey: .provider)
     }
 }
 
 /// Mirrors `MailboxItem` in `src/data/fred_mailbox.rs`.
 struct MailboxItem: Decodable, Identifiable {
-    /// Graph message id; synthesised from the content for the legacy bash source.
+    /// Provider message id (`<label>:<native id>` in multi-account mode);
+    /// synthesised from the content for the legacy bash source.
     let id:         String
     let from:       String
     let subject:    String
@@ -1024,8 +1050,10 @@ struct MailboxItem: Decodable, Identifiable {
     let vip:        Bool
     let isInvite:   Bool
     let isRead:     Bool
-    /// Opens the message in Outlook on the web.
+    /// Opens the message in the provider's web client (Outlook or Gmail).
     let webLink:    String?
+    /// The configured account label the message came from, in multi-account mode.
+    let account:    String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -1036,6 +1064,7 @@ struct MailboxItem: Decodable, Identifiable {
         case isInvite   = "is_invite"
         case isRead     = "is_read"
         case webLink    = "web_link"
+        case account
     }
 
     init(from decoder: Decoder) throws {
@@ -1047,6 +1076,7 @@ struct MailboxItem: Decodable, Identifiable {
         isInvite   = try c.decodeIfPresent(Bool.self, forKey: .isInvite) ?? false
         isRead     = try c.decodeIfPresent(Bool.self, forKey: .isRead)   ?? false
         webLink    = try c.decodeIfPresent(String.self, forKey: .webLink)
+        account    = try c.decodeIfPresent(String.self, forKey: .account)
         let wireId = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
         id = wireId.isEmpty ? "\(from)|\(subject)|\(receivedAt?.timeIntervalSince1970 ?? 0)" : wireId
     }
@@ -1065,7 +1095,7 @@ struct MailboxSnapshot: Decodable {
     let state:        SourceState
     /// Last successful fetch.
     let updatedAt:    Date?
-    /// When `state` is `.rateLimited`: when the daemon will ask Microsoft again.
+    /// When `state` is `.rateLimited`: when the daemon will ask the provider again.
     let retryAt:      Date?
 
     enum CodingKeys: String, CodingKey {
@@ -1106,7 +1136,8 @@ struct MailboxSnapshot: Decodable {
 
 /// Mirrors `CalendarEvent` in `src/data/fred_calendar.rs`.
 struct CalendarEvent: Decodable, Identifiable {
-    /// Graph event id; synthesised from the content for the legacy bash source.
+    /// Provider event id (`<label>:<native id>` in multi-account mode);
+    /// synthesised from the content for the legacy bash source.
     let id:               String
     let start:            Date?
     let end:              Date?
@@ -1118,9 +1149,12 @@ struct CalendarEvent: Decodable, Identifiable {
     let onlineMeetingUrl: String?
     let organizer:        String?
     let isCancelled:      Bool
-    /// Raw Graph response ("accepted", "tentativelyAccepted", ...).
+    /// Response in Graph vocabulary ("accepted", "tentativelyAccepted", ...);
+    /// the daemon normalises Google's responses to the same words.
     let responseStatus:   String
     let isAllDay:         Bool
+    /// The configured account label the event came from, in multi-account mode.
+    let account:          String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -1136,6 +1170,7 @@ struct CalendarEvent: Decodable, Identifiable {
         case isCancelled      = "is_cancelled"
         case responseStatus   = "response_status"
         case isAllDay         = "is_all_day"
+        case account
     }
 
     init(from decoder: Decoder) throws {
@@ -1152,6 +1187,7 @@ struct CalendarEvent: Decodable, Identifiable {
         isCancelled      = try c.decodeIfPresent(Bool.self,   forKey: .isCancelled)      ?? false
         responseStatus   = try c.decodeIfPresent(String.self, forKey: .responseStatus)   ?? ""
         isAllDay         = try c.decodeIfPresent(Bool.self,   forKey: .isAllDay)         ?? false
+        account          = try c.decodeIfPresent(String.self, forKey: .account)
         let wireId       = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
         id = wireId.isEmpty ? "\(title)|\(start?.timeIntervalSince1970 ?? 0)" : wireId
     }
@@ -1180,9 +1216,9 @@ struct CalendarSnapshot: Decodable {
     let state:      SourceState
     /// Last successful fetch.
     let updatedAt:  Date?
-    /// The sign-in prompt while Microsoft sign-in is pending.
+    /// The sign-in prompt while a sign-in is pending.
     let authPrompt: DeviceFlowPrompt?
-    /// When `state` is `.rateLimited`: when the daemon will ask Microsoft again.
+    /// When `state` is `.rateLimited`: when the daemon will ask the provider again.
     let retryAt:    Date?
 
     enum CodingKeys: String, CodingKey {
