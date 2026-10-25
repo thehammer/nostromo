@@ -191,6 +191,55 @@ pub struct Turn {
     pub timestamp: Option<String>,
     pub blocks: Vec<TurnBlock>,
     pub is_complete: bool,
+    /// What opened the turn when it was not something the user typed: output
+    /// from a terminal the focus follows, or a follow notice. Derived from the
+    /// prompt's text, so a reloaded transcript gets it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TurnOrigin>,
+}
+
+/// Where a turn's prompt came from when the daemon wrote it (see
+/// [`parse_terminal_origin`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TurnOrigin {
+    /// Output from followed terminals (and any follow notices sent with it,
+    /// as items of kind `notice`), in the order the message has them.
+    TerminalDelivery { items: Vec<DeliveryItem> },
+    /// Follow notices only (following started, stopped, paused, resumed).
+    TerminalFollowNotice { items: Vec<NoticeItem> },
+}
+
+/// One `<nostromo-terminal-output>` element (or, with kind `notice`, one
+/// follow notice) of a [`TurnOrigin::TerminalDelivery`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryItem {
+    pub terminal_id: String,
+    pub pane: String,
+    /// `lines`, `screen`, `selection` or `notice`.
+    pub kind: String,
+    /// Lines the delivery had before the head/tail cap.
+    pub lines: usize,
+    /// Lines the cap left out.
+    pub omitted: usize,
+    /// Secrets replaced by a `[redacted: …]` marker.
+    pub redactions: usize,
+    /// A notice's event (`started`, `stopped`, `paused`, `resumed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// A notice's reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One `<nostromo-terminal-follow …/>` notice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeItem {
+    pub terminal_id: String,
+    pub pane: String,
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Summary fired by a `result` event.
@@ -709,6 +758,141 @@ pub fn strip_nostromo_note(text: &str) -> &str {
                 .map(|end| &rest[end + NOSTROMO_NOTE_CLOSE.len()..])
         })
         .unwrap_or(text)
+}
+
+/// Every element the daemon writes into a followed terminal's delivery or a
+/// follow notice starts with this.
+pub const TERMINAL_ELEMENT_PREFIX: &str = "<nostromo-terminal-";
+/// The element carrying one delivery of terminal output.
+pub const TERMINAL_OUTPUT_TAG: &str = "nostromo-terminal-output";
+/// The (empty) element of a follow notice.
+pub const TERMINAL_FOLLOW_TAG: &str = "nostromo-terminal-follow";
+
+/// What a prompt the daemon wrote for a followed terminal carries: one item
+/// per `<nostromo-terminal-output …>` element or `<nostromo-terminal-follow
+/// …/>` notice, read from their attributes. `None` unless `text` (the prompt
+/// after [`strip_nostromo_note`]) starts with [`TERMINAL_ELEMENT_PREFIX`], or
+/// when no element can be read.
+///
+/// Tolerant: attribute values are double-quoted with `&quot;`, `&amp;`,
+/// `&lt;` and `&gt;` unescaped; a missing or unreadable count is 0; an
+/// unknown element is skipped; reading stops at the first element with no
+/// closing `>`. A delivery's body cannot end the element early: the daemon
+/// escapes [`TERMINAL_ELEMENT_PREFIX`] inside it.
+pub fn parse_terminal_origin(text: &str) -> Option<TurnOrigin> {
+    if !text.starts_with(TERMINAL_ELEMENT_PREFIX) {
+        return None;
+    }
+    let mut items: Vec<DeliveryItem> = Vec::new();
+    let mut has_output = false;
+    let mut rest = text;
+    while let Some(start) = rest.find(TERMINAL_ELEMENT_PREFIX) {
+        let element = &rest[start + 1..];
+        let Some(close) = element.find('>') else {
+            break;
+        };
+        let head = &element[..close];
+        let name_end = head
+            .find(|c: char| c.is_whitespace() || c == '/')
+            .unwrap_or(head.len());
+        let attrs = parse_attributes(&head[name_end..]);
+        let attr = |key: &str| {
+            attrs
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        let count = |key: &str| attr(key).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let after_open = &element[close + 1..];
+        match &head[..name_end] {
+            TERMINAL_OUTPUT_TAG => {
+                has_output = true;
+                items.push(DeliveryItem {
+                    terminal_id: attr("terminal_id").unwrap_or_default(),
+                    pane: attr("pane").unwrap_or_default(),
+                    kind: attr("kind").unwrap_or_else(|| "lines".into()),
+                    lines: count("lines"),
+                    omitted: count("omitted"),
+                    redactions: count("redactions"),
+                    event: None,
+                    reason: None,
+                });
+                let end_tag = format!("</{TERMINAL_OUTPUT_TAG}>");
+                rest = after_open
+                    .find(&end_tag)
+                    .map_or("", |end| &after_open[end + end_tag.len()..]);
+            }
+            TERMINAL_FOLLOW_TAG => {
+                items.push(DeliveryItem {
+                    terminal_id: attr("terminal_id").unwrap_or_default(),
+                    pane: attr("pane").unwrap_or_default(),
+                    kind: "notice".into(),
+                    lines: 0,
+                    omitted: 0,
+                    redactions: 0,
+                    event: Some(attr("event").unwrap_or_default()),
+                    reason: attr("reason"),
+                });
+                rest = after_open;
+            }
+            _ => rest = after_open,
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(if has_output {
+        TurnOrigin::TerminalDelivery { items }
+    } else {
+        TurnOrigin::TerminalFollowNotice {
+            items: items
+                .into_iter()
+                .map(|i| NoticeItem {
+                    terminal_id: i.terminal_id,
+                    pane: i.pane,
+                    event: i.event.unwrap_or_default(),
+                    reason: i.reason,
+                })
+                .collect(),
+        }
+    })
+}
+
+/// `name="value"` pairs of an element's head, values unescaped. Stops at the
+/// first thing that is not one.
+fn parse_attributes(mut s: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    loop {
+        s = s.trim_start_matches(|c: char| c.is_whitespace() || c == '/');
+        let Some(eq) = s.find('=') else { break };
+        let name = s[..eq].trim();
+        let Some(value) = s[eq + 1..].trim_start().strip_prefix('"') else {
+            break;
+        };
+        let Some(end) = value.find('"') else { break };
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            break;
+        }
+        out.push((name.to_string(), unescape_attribute(&value[..end])));
+        s = &value[end + 1..];
+    }
+    out
+}
+
+/// Undo [`escape_attribute`].
+fn unescape_attribute(v: &str) -> String {
+    v.replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// An attribute value as the daemon writes it inside double quotes.
+pub fn escape_attribute(v: &str) -> String {
+    v.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn parse_content_block(b: &Value) -> Option<TurnBlock> {
@@ -1257,12 +1441,14 @@ impl SessionTranscript {
                 }
                 self.prompt_count += 1;
                 let id = self.alloc_id();
+                let origin = parse_terminal_origin(&text);
                 let turn = Turn {
                     id,
                     user_input: text,
                     timestamp,
                     blocks: std::mem::take(&mut self.orphan_notes),
                     is_complete: false,
+                    origin,
                 };
                 self.retained_bytes += turn_bytes(&turn);
                 self.turns.push(turn.clone());
@@ -1693,6 +1879,10 @@ pub fn load_scrollback(session_id: &str, max_turns: usize) -> SessionTranscript 
     }
     SessionTranscript::new()
 }
+
+#[cfg(test)]
+#[path = "stream_json_origin_tests.rs"]
+mod origin_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2244,6 +2434,7 @@ mod tests {
                     timestamp: None,
                     blocks: vec![],
                     is_complete: false,
+                    origin: None,
                 },
             },
             TurnDelta::BlockAppended {

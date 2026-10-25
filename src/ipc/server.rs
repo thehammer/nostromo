@@ -183,6 +183,8 @@ impl Server {
 
         // And the terminal manager (layout, pane content and terminal metadata).
         lock_terminals(&terminals).configure_broadcast(tx.clone());
+        // Agent follow delivers terminal output into the sessions' conversations.
+        terminal::follow::FollowManager::install_with_sessions(&terminals, &session_mgr);
 
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
@@ -1173,7 +1175,9 @@ where
                                 | ClientMsg::TerminalRestart { .. }
                                 // Connect is the act that opens a production shell.
                                 | ClientMsg::RemoteShellOpen { .. }
-                                | ClientMsg::RemoteShellAnswer { .. } => true,
+                                | ClientMsg::RemoteShellAnswer { .. }
+                                // An invite sends a terminal's output to a model.
+                                | ClientMsg::TerminalFollowInvite { .. } => true,
                                 ClientMsg::TerminalInput { .. } | ClientMsg::TerminalResize { .. } => {
                                     cap_checked_at.elapsed() >= TERMINAL_RECHECK
                                 }
@@ -1185,7 +1189,7 @@ where
                                 Err(e) => {
                                     warn!(conn_key, "terminal access revoked: {e}");
                                     if let Some(revoked) = cap.take() {
-                                        lock_terminals(&terminals).unregister_conn(&revoked, &conn_key);
+                                        unregister_operator(&terminals, &revoked, &conn_key);
                                         // Drop what was queued for the peer that failed.
                                         while terminal_stream_rx.try_recv().is_ok() {}
                                     }
@@ -1221,7 +1225,7 @@ where
         broker.app_disconnected(&conn_key);
     }
     if let Some(cap) = &cap {
-        lock_terminals(&terminals).unregister_conn(cap, &conn_key);
+        unregister_operator(&terminals, cap, &conn_key);
     }
     drop(terminal_stream_tx);
 
@@ -1379,6 +1383,13 @@ fn handle_client_msg(
         }
         msg @ (ClientMsg::RemoteShellOpen { .. } | ClientMsg::RemoteShellAnswer { .. }) => {
             handle_remote_shell_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
+        }
+
+        // Agent follow: invite, stop, resume. Operator app only.
+        msg @ (ClientMsg::TerminalFollowInvite { .. }
+        | ClientMsg::TerminalFollowStop { .. }
+        | ClientMsg::TerminalFollowResume { .. }) => {
+            handle_follow_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
         }
 
         // Retired (R2): the daemon no longer hosts PTYs. The verbs still decode
@@ -1757,8 +1768,10 @@ fn handle_client_msg(
                 // terminal opened in the focus meanwhile cannot slip between
                 // the two (manager first, registry second: the usual order).
                 let mut mgr = lock_terminals(terminals);
+                let mut follow = None;
                 if cap.is_some() {
                     mgr.close_focus(tag);
+                    follow = mgr.follow();
                 } else if mgr.has_terminals(tag) {
                     mgr.audit_refused(
                         TerminalRefusalChannel::Ipc,
@@ -1774,6 +1787,12 @@ fn handle_client_msg(
                     if reg.lock().unwrap().remove_focus(tag) {
                         tracing::info!(tag = %tag, "focus removed — discarded its pane tree and bindings");
                     }
+                }
+                drop(mgr);
+                // A removed focus follows nothing (not under the manager's lock:
+                // the follow manager takes it to broadcast).
+                if let Some(follow) = follow {
+                    follow.session_ended(tag);
                 }
             }
 
@@ -2547,6 +2566,95 @@ fn handle_remote_shell_msg(
             });
         }
         _ => {}
+    }
+}
+
+/// An operator connection is gone (closed, or its access revoked). When it was
+/// the last, every terminal follow ends: nobody is left who can see or stop one.
+fn unregister_operator(terminals: &Arc<Mutex<TerminalManager>>, cap: &OperatorCap, conn_key: &str) {
+    let follow = {
+        let mut mgr = lock_terminals(terminals);
+        mgr.unregister_conn(cap, conn_key);
+        (!mgr.has_operator_conns()).then(|| mgr.follow()).flatten()
+    };
+    // Not under the manager's lock: the follow manager takes it to broadcast.
+    if let Some(follow) = follow {
+        follow.app_closed();
+    }
+}
+
+/// `terminal_follow_invite`, `terminal_follow_stop` and
+/// `terminal_follow_resume`. Without an [`OperatorCap`] they change nothing:
+/// the peer is told `terminal_refused` and the attempt is audited. An invite
+/// also needs a connection that declared `terminal_follow_ui` (one that can
+/// show who follows and stop it).
+fn handle_follow_msg(
+    msg: ClientMsg,
+    cap: Option<&OperatorCap>,
+    peer: Option<&PeerInfo>,
+    conn_key: &str,
+    terminals: &Arc<Mutex<TerminalManager>>,
+    targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
+) {
+    let op = terminal::op_of(&msg).unwrap_or("control");
+    let terminal_id = terminal::terminal_id_of(&msg).map(str::to_string);
+    let refuse = |code: &str| {
+        let _ = targeted_tx.send(ServerMsg::TerminalRefused {
+            op: op.to_string(),
+            terminal_id: terminal_id.clone(),
+            code: code.to_string(),
+        });
+    };
+    let Some(cap) = cap else {
+        let code = terminal::forbidden_code(op);
+        // Audited before the peer is told no.
+        lock_terminals(terminals).audit_refused(
+            TerminalRefusalChannel::Ipc,
+            op,
+            Some(code),
+            terminal_id.as_deref(),
+            peer.map(|p| p.pid),
+            peer.map(|p| p.exe.display().to_string()),
+        );
+        refuse(code);
+        return;
+    };
+    let (follow, can_show) = {
+        let mgr = lock_terminals(terminals);
+        (
+            mgr.follow(),
+            mgr.conn_has_capability(conn_key, terminal::TERMINAL_FOLLOW_UI),
+        )
+    };
+    let Some(follow) = follow else {
+        refuse("follow_unavailable");
+        return;
+    };
+    // The terminal manager's lock is not held here: the follow manager takes it.
+    let result = match msg {
+        ClientMsg::TerminalFollowInvite {
+            terminal_id,
+            follower_tag,
+            include_screen,
+        } => {
+            if !can_show {
+                refuse("terminal_follow_ui_required");
+                return;
+            }
+            follow.invite(
+                cap,
+                &terminal_id,
+                &follower_tag,
+                include_screen,
+                terminal::follow::FollowVia::Control,
+            )
+        }
+        ClientMsg::TerminalFollowStop { terminal_id } => follow.stop(cap, &terminal_id),
+        ClientMsg::TerminalFollowResume { terminal_id } => follow.resume(cap, &terminal_id),
+        _ => return,
+    };
+    if let Err(e) = result {
+        refuse(e.code());
     }
 }
 
@@ -3676,6 +3784,7 @@ mod tests {
                 crate::ipc::stream_json::TurnBlock::text("hello"),
             ],
             is_complete: true,
+            origin: None,
         }
     }
 
