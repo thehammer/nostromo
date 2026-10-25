@@ -1,4 +1,5 @@
-//! Which built-in agents this daemon runs (`[agents.<name>]` in config.toml).
+//! Which built-in agents this daemon runs (`[agents.<name>]` in config.toml):
+//! Fred, Huey, Perri and Teri; Mother is always on.
 /// The agents that can be switched off. Mother is not one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Agent {
@@ -83,6 +84,7 @@ impl EnabledAgents {
     }
 
     /// Sorted lowercase names of every running built-in, "mother" always included.
+    /// This is the welcome's `enabled_agents` wire contract; Huey is `huey`.
     pub fn wire_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Agent::ALL
             .into_iter()

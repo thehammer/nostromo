@@ -81,8 +81,10 @@ async fn main() -> Result<()> {
         warn!("{w}");
     }
     let (huey_config, huey_warnings) = config.resolve_huey();
-    for w in &huey_warnings {
-        warn!("{w}");
+    if enabled_agents.huey {
+        for w in &huey_warnings {
+            warn!("{w}");
+        }
     }
     info!(enabled = ?enabled_agents.wire_names(), "agents");
 
