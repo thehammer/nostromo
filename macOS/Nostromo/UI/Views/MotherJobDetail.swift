@@ -228,6 +228,9 @@ final class MotherJobDetail: NSView {
     /// The log never gets shorter than this, however much content is above it.
     private static let minLogHeight: CGFloat = 160
 
+    /// Top-down, like the scroll document inside it (an existing test reads `isFlipped` to find a top edge).
+    override var isFlipped: Bool { true }
+
     /// What the reader is looking at: the views from the outermost one at the top of the viewport
     /// down to the innermost, each with the offset of its top edge from the viewport's top edge when
     /// the reader last scrolled. Weak: a view that is rebuilt (a todo row, an action button) simply
@@ -237,10 +240,12 @@ final class MotherJobDetail: NSView {
         var chain: [Entry] = []
     }
     private var scrollAnchor = ScrollAnchor()
-    /// True while this view itself moves the clip (restoring the anchor), so that move is not
-    /// mistaken for the reader scrolling and does not replace the anchor.
-    private var isRestoringAnchor = false
-    private var anchorRecheckScheduled = false
+    /// An anchor was taken before a change and layout has not finished restoring it yet.
+    private var placeHeld = false
+    /// Layout ran at least once since the anchor was taken.
+    private var placeLaidOut = false
+    private var placeChecks = 0
+    private var placeRecheckScheduled = false
 
     // Content fields
     private let titleLabel      = EdgePinnedLabel(wrappingLabelWithString: "")
@@ -400,14 +405,6 @@ final class MotherJobDetail: NSView {
         addSubview(contentScrollView)
         let clip = contentScrollView.contentView
         content.onLayout = { [weak self] in self?.contentDidLayout() }
-        // The reader scrolling (or the pane being resized) re-takes the anchor from what is on screen.
-        clip.postsBoundsChangedNotifications = true
-        NotificationCenter.default.publisher(for: NSView.boundsDidChangeNotification, object: clip)
-            .sink { [weak self] _ in
-                guard let self, !self.isRestoringAnchor else { return }
-                self.recordScrollAnchor()
-            }
-            .store(in: &cancellables)
         NSLayoutConstraint.activate([
             contentScrollView.topAnchor.constraint(equalTo: topAnchor),
             contentScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -448,6 +445,8 @@ final class MotherJobDetail: NSView {
         planChecklistView.onItemsChanged = { [weak self] hasItems in
             self?.planSectionLabel.isHidden = !hasItems
         }
+        // The plan loads off the main thread: what it changes above the log lands later than `update`.
+        planChecklistView.onWillChange = { [weak self] in self?.holdReaderPlace() }
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
@@ -547,6 +546,7 @@ final class MotherJobDetail: NSView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] peeks in
                 guard let self, let jobId = self.currentJobId else { return }
+                self.holdReaderPlace()
                 self.updateTodoList(peeks[jobId])
             }
             .store(in: &cancellables)
@@ -680,6 +680,7 @@ final class MotherJobDetail: NSView {
             select(job)
             return
         }
+        holdReaderPlace()
         currentJob = job
 
         if job.title != previous.title {
@@ -720,34 +721,60 @@ final class MotherJobDetail: NSView {
     // MARK: Private
 
     /// A new subject starts at the top. Updates to the same job never call this: they keep what the
-    /// reader is looking at where it is (`restoreScrollAnchor`).
+    /// reader is looking at where it is (`holdReaderPlace`).
     private func scrollContentToTop() {
         let clip = contentScrollView.contentView
         if clip.bounds.origin != .zero {
             clip.scroll(to: .zero)
             contentScrollView.reflectScrolledClipView(clip)
         }
-        // Nothing of the previous job is a place to hold on to; the next layout takes a fresh anchor.
+        // Nothing of the previous job is a place to hold on to.
         scrollAnchor = ScrollAnchor()
+        placeHeld = false
     }
 
-    /// After a layout pass: put what the reader was looking at back where it was (content above it
-    /// grew or shrank), and never let the position leave the document or go sideways.
+    /// Call right BEFORE anything that can change the height of what is above the reader (a todo
+    /// list, the crew panel, the actions, a banner, the plan). Takes the anchor from what is on
+    /// screen now; layout then puts it back where it was (`contentDidLayout`), however much the
+    /// content above grew or shrank, for as long as it takes layout to settle.
+    ///
+    /// The anchor is taken here and not on every scroll: while a pass is half done AppKit itself
+    /// moves the clip (a document that is briefly too short), and that is not the reader's place.
+    private func holdReaderPlace() {
+        recordScrollAnchor()
+        placeHeld = true
+        placeLaidOut = false
+        placeChecks = 0
+        schedulePlaceRecheck()
+    }
+
+    /// After a layout pass: put what the reader was looking at back where it was, and never let the
+    /// position leave the document or go sideways.
     private func contentDidLayout() {
-        if scrollAnchor.chain.isEmpty {
-            recordScrollAnchor()
-        } else {
+        if placeHeld {
             restoreScrollAnchor()
+            placeLaidOut = true
         }
         clampContentScroll()
-        // A stack lays its rows out after this view does; look once more when that is done.
-        guard !anchorRecheckScheduled else { return }
-        anchorRecheckScheduled = true
+    }
+
+    /// A stack lays its rows out after this view does, so look again once layout is done; let go
+    /// of the anchor after that (a later layout, such as a window resize, is not an update).
+    private func schedulePlaceRecheck() {
+        guard !placeRecheckScheduled else { return }
+        placeRecheckScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.anchorRecheckScheduled = false
+            self.placeRecheckScheduled = false
+            guard self.placeHeld else { return }
             self.restoreScrollAnchor()
             self.clampContentScroll()
+            self.placeChecks += 1
+            if self.placeLaidOut || self.placeChecks >= 5 {
+                self.placeHeld = false
+            } else {
+                self.schedulePlaceRecheck()
+            }
         }
     }
 
@@ -761,10 +788,9 @@ final class MotherJobDetail: NSView {
     private func recordScrollAnchor() {
         let clip = contentScrollView.contentView
         var chain: [ScrollAnchor.Entry] = []
-        guard clip.bounds.height > 0, !content.isHidden else { scrollAnchor = ScrollAnchor(); return }
         let top = clip.bounds.minY
         var node: NSView = content
-        while true {
+        while clip.bounds.height > 0, !content.isHidden {
             let reaching = node.subviews
                 .filter { !$0.isHidden && $0.frame.height > 0 }
                 .map { ($0, content.convert($0.bounds, from: $0)) }
@@ -793,10 +819,8 @@ final class MotherJobDetail: NSView {
         let maxY = max(0, content.frame.height - clip.bounds.height)
         let y = min(max(clip.bounds.origin.y + delta, 0), maxY)
         guard y != clip.bounds.origin.y else { return }
-        isRestoringAnchor = true
         clip.scroll(to: NSPoint(x: 0, y: y))
         contentScrollView.reflectScrolledClipView(clip)
-        isRestoringAnchor = false
     }
 
     /// The position stays inside the document (content shrinking under a reader who had scrolled
@@ -807,10 +831,8 @@ final class MotherJobDetail: NSView {
         let maxY = max(0, doc.frame.height - clip.bounds.height)
         let y = min(max(clip.bounds.origin.y, 0), maxY)
         guard y != clip.bounds.origin.y || clip.bounds.origin.x != 0 else { return }
-        isRestoringAnchor = true
         clip.scroll(to: NSPoint(x: 0, y: y))
         contentScrollView.reflectScrolledClipView(clip)
-        isRestoringAnchor = false
     }
 
     private func showEmpty() {
@@ -879,6 +901,7 @@ final class MotherJobDetail: NSView {
     /// The host's send state or capabilities changed: bring the panel and the buttons along.
     private func hostDecisionStateChanged() {
         guard let job = currentJob else { return }
+        holdReaderPlace()
         updateCrewSection(job)
         if makeActionIdentity(for: job) != actionIdentity { rebuildActions(job) }
     }
@@ -1243,6 +1266,7 @@ final class MotherJobDetail: NSView {
 
     private func updateBrokerBanner(_ connected: Bool) {
         guard currentJob != nil else { return }
+        holdReaderPlace()
         brokerBanner.isHidden = connected
         for btn in [answerButton, cancelButton, retryButton, forceStartButton] {
             btn.isEnabled = connected
@@ -1254,10 +1278,12 @@ final class MotherJobDetail: NSView {
     }
 
     private func showActionError(_ message: String) {
+        holdReaderPlace()
         actionErrorLabel.stringValue = message
         actionErrorLabel.isHidden    = false
         actionErrorTimer?.invalidate()
         actionErrorTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            self?.holdReaderPlace()
             self?.actionErrorLabel.isHidden = true
             self?.actionErrorLabel.stringValue = ""
             self?.host.clearMotherActionError()
@@ -1614,6 +1640,8 @@ private class PlanChecklistView: NSView {
 
     /// Called on the main queue when items load or clear.  Parameter is `true` if items are present.
     var onItemsChanged: ((Bool) -> Void)?
+    /// Called on the main queue right before the rows are replaced or cleared.
+    var onWillChange: (() -> Void)?
 
     private let stack = NSStackView()
     private var heightConstraint: NSLayoutConstraint!
@@ -1663,6 +1691,7 @@ private class PlanChecklistView: NSView {
 
     private func collapse() {
         DispatchQueue.main.async { [weak self] in
+            self?.onWillChange?()
             self?.stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
             self?.heightConstraint.isActive = true
             self?.onItemsChanged?(false)
@@ -1670,6 +1699,7 @@ private class PlanChecklistView: NSView {
     }
 
     private func apply(_ items: [(done: Bool, text: String)]) {
+        onWillChange?()
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard !items.isEmpty else {
             heightConstraint.isActive = true

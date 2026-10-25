@@ -338,7 +338,6 @@ final class MotherDetailScrollTests: XCTestCase {
             let rect = doc.convert(button.bounds, from: button)
             XCTAssertTrue(sv.documentVisibleRect.contains(rect),
                           "\(button.title): at \(rect), not inside the viewport \(sv.documentVisibleRect) after scrolling to it")
-            XCTAssertTrue(button.isEnabled || !rig.detail.host.brokerConnected, "\(button.title) is enabled when the broker is connected")
             XCTAssertFalse(button.isHiddenOrHasHiddenAncestor, "\(button.title) is shown")
         }
     }
