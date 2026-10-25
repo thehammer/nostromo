@@ -124,7 +124,7 @@ final class MotherDetailScrollTests: XCTestCase {
             XCTAssertTrue(anchor.1.isDescendant(of: rig.detail), "\(name): the \(anchor.0) is gone", file: file, line: line)
             let after = offsetFromViewportTop(rig, anchor.1)
             XCTAssertEqual(after, before[k], accuracy: tolerance,
-                           "after \"\(name)\" the \(anchor.0) moved from \(before[k]) to \(after) pt below the top of the viewport (document \(heightBefore) -> \(heightAfter), origin \(originY(rig))) TRACE: \(rig.detail.scrollTrace.suffix(14).joined(separator: " | "))",
+                           "after \"\(name)\" the \(anchor.0) moved from \(before[k]) to \(after) pt below the top of the viewport (document \(heightBefore) -> \(heightAfter), origin \(originY(rig)))",
                            file: file, line: line)
         }
         assertHorizontallyAtRest(rig, "after \"\(name)\"", file: file, line: line)

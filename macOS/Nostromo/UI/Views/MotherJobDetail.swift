@@ -246,8 +246,6 @@ final class MotherJobDetail: NSView {
     private var placeLaidOut = false
     private var placeChecks = 0
     private var placeRecheckScheduled = false
-    var scrollTrace: [String] = []   // TEMP-DIAG
-    private func trace(_ s: String) { scrollTrace.append(String(format: "%@ o=%.0f h=%.0f", s, contentScrollView.contentView.bounds.origin.y, content.frame.height)) }   // TEMP-DIAG
 
     // Content fields
     private let titleLabel      = EdgePinnedLabel(wrappingLabelWithString: "")
@@ -738,7 +736,6 @@ final class MotherJobDetail: NSView {
         // Nothing of the previous job is a place to hold on to.
         scrollAnchor = ScrollAnchor()
         placeHeld = false
-        trace("select/top")   // TEMP-DIAG
     }
 
     /// Call right BEFORE anything that can change the height of what is above the reader (a todo
@@ -750,7 +747,6 @@ final class MotherJobDetail: NSView {
     /// moves the clip (a document that is briefly too short), and that is not the reader's place.
     private func holdReaderPlace() {
         recordScrollAnchor()
-        trace("hold chain=\(scrollAnchor.chain.map { String(format: "%@:%.0f", String(describing: type(of: $0.view)), $0.offset) })")   // TEMP-DIAG
         placeHeld = true
         placeLaidOut = false
         placeChecks = 0
@@ -764,7 +760,6 @@ final class MotherJobDetail: NSView {
             restoreScrollAnchor()
             placeLaidOut = true
         }
-        trace("layout held=\(placeHeld)")   // TEMP-DIAG
         clampContentScroll()
     }
 
@@ -825,7 +820,6 @@ final class MotherJobDetail: NSView {
               let view = entry.view
         else { return }
         let delta = offsetFromViewportTop(view) - entry.offset
-        trace("restore \(type(of: view)) delta=\(delta)")   // TEMP-DIAG
         guard abs(delta) > 0.5 else { return }
         let maxY = max(0, content.frame.height - clip.bounds.height)
         let y = min(max(clip.bounds.origin.y + delta, 0), maxY)
@@ -842,7 +836,6 @@ final class MotherJobDetail: NSView {
         let maxY = max(0, doc.frame.height - clip.bounds.height)
         let y = min(max(clip.bounds.origin.y, 0), maxY)
         guard y != clip.bounds.origin.y || clip.bounds.origin.x != 0 else { return }
-        trace("CLAMP to \(y) doc=\(doc.frame.height) clip=\(clip.bounds.height)")   // TEMP-DIAG
         clip.scroll(to: NSPoint(x: 0, y: y))
         contentScrollView.reflectScrolledClipView(clip)
     }
