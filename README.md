@@ -88,6 +88,16 @@ The file is `~/Library/Application Support/nostromo/config.toml` on macOS and
 `~/.config/nostromo/config.toml` elsewhere. Restart `nostromd` after changing
 it; the app picks the change up on its next connection.
 
+### Google accounts (Fred)
+
+Fred can read Gmail and Google Calendar from one or more personal Google
+accounts, read-only, alongside or instead of Microsoft 365. Mail from every
+account is merged into one inbox, and events into one Today list. Each account
+is a `[[fred_accounts]]` table in `config.toml`, signed in once on the Mac
+running `nostromd`. The one-time Google Cloud setup, the config keys and the
+sign-in steps are in [`docs/google-setup.md`](docs/google-setup.md). With no
+`[[fred_accounts]]`, Fred behaves exactly as before (Microsoft only).
+
 ## Daemon
 
 `nostromd` is a daemon that runs in the background and serves the macOS and iOS
