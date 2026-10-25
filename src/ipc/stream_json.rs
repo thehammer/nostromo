@@ -796,12 +796,7 @@ pub fn parse_terminal_origin(text: &str) -> Option<TurnOrigin> {
             .find(|c: char| c.is_whitespace() || c == '/')
             .unwrap_or(head.len());
         let attrs = parse_attributes(&head[name_end..]);
-        let attr = |key: &str| {
-            attrs
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone())
-        };
+        let attr = |key: &str| attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
         let count = |key: &str| attr(key).and_then(|v| v.parse().ok()).unwrap_or(0);
         let after_open = &element[close + 1..];
         match &head[..name_end] {

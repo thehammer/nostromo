@@ -214,7 +214,8 @@ async fn consecutive_injections_while_busy_become_one_queued_item_joined_by_a_bl
 #[tokio::test]
 async fn an_injection_is_never_merged_into_a_user_message_already_queued() {
     let mut mgr = busy_session("u1");
-    mgr.send_user_message("u1", "typed by the user", &[]).unwrap();
+    mgr.send_user_message("u1", "typed by the user", &[])
+        .unwrap();
 
     mgr.inject("u1", "daemon text", "t-1".into()).unwrap();
 
@@ -231,7 +232,8 @@ async fn a_user_message_queued_between_injections_keeps_them_apart_and_in_order(
     let mut mgr = busy_session("u2");
 
     mgr.inject("u2", "before", "t-1".into()).unwrap();
-    mgr.send_user_message("u2", "typed by the user", &[]).unwrap();
+    mgr.send_user_message("u2", "typed by the user", &[])
+        .unwrap();
     mgr.inject("u2", "after one", "t-1".into()).unwrap();
     mgr.inject("u2", "after two", "t-1".into()).unwrap();
 
@@ -252,7 +254,8 @@ async fn a_user_message_is_never_merged_into_a_queued_injection() {
     let mut mgr = busy_session("u3");
     mgr.inject("u3", "daemon text", "t-1".into()).unwrap();
 
-    mgr.send_user_message("u3", "typed by the user", &[]).unwrap();
+    mgr.send_user_message("u3", "typed by the user", &[])
+        .unwrap();
 
     assert_eq!(
         queued(&mgr, "u3"),
@@ -268,7 +271,10 @@ async fn two_user_messages_while_busy_stay_two_queued_items() {
     mgr.send_user_message("u4", "one", &[]).unwrap();
     mgr.send_user_message("u4", "two", &[]).unwrap();
 
-    assert_eq!(queued(&mgr, "u4"), vec!["one".to_string(), "two".to_string()]);
+    assert_eq!(
+        queued(&mgr, "u4"),
+        vec!["one".to_string(), "two".to_string()]
+    );
     mgr.stop("u4");
 }
 
@@ -334,7 +340,10 @@ async fn a_merged_item_over_the_cap_leaves_out_middle_deliveries_and_says_how_ma
         "the newest part is never left out"
     );
     let k = omitted_count(text).expect("an omission line says how many were left out");
-    assert!(k >= 1, "80 KiB cannot fit in 48 KiB without leaving something out");
+    assert!(
+        k >= 1,
+        "80 KiB cannot fit in 48 KiB without leaving something out"
+    );
     assert_eq!(
         count(text, ELIDED_CLOSE),
         1,
@@ -402,12 +411,8 @@ async fn omitting_more_deliveries_later_keeps_a_single_running_omission_line() {
 #[tokio::test]
 async fn follow_notices_survive_the_cap_even_when_deliveries_around_them_are_left_out() {
     let mut mgr = busy_session("notice");
-    mgr.inject(
-        "notice",
-        &delivery("t-1", "<<P01>>", TEN_KIB),
-        "t-1".into(),
-    )
-    .unwrap();
+    mgr.inject("notice", &delivery("t-1", "<<P01>>", TEN_KIB), "t-1".into())
+        .unwrap();
     mgr.inject(
         "notice",
         &notice("t-1", "paused", "<<NOTICE>>"),
@@ -446,7 +451,11 @@ async fn the_first_and_the_newest_part_are_kept_even_when_they_alone_exceed_the_
     let text = queued(&mgr, "huge").remove(0);
     assert!(text.contains(&first), "the first part is whole");
     assert!(text.contains(&newest), "the newest part is whole");
-    assert_eq!(omitted_count(&text), None, "nothing was in the middle to leave out");
+    assert_eq!(
+        omitted_count(&text),
+        None,
+        "nothing was in the middle to leave out"
+    );
     mgr.stop("huge");
 }
 
@@ -489,7 +498,8 @@ async fn drop_injected_removes_an_item_left_with_nothing() {
 async fn drop_injected_leaves_user_messages_and_other_items_alone() {
     let mut mgr = busy_session("mix");
     mgr.inject("mix", "A1", "t-1".into()).unwrap();
-    mgr.send_user_message("mix", "typed by the user", &[]).unwrap();
+    mgr.send_user_message("mix", "typed by the user", &[])
+        .unwrap();
     mgr.inject("mix", "B1", "t-2".into()).unwrap();
 
     mgr.drop_injected("mix", "t-1");
@@ -554,7 +564,8 @@ async fn interrupt_drops_queued_injections_along_with_queued_user_messages() {
     mgr.send_user_message("stop", "first", &[]).unwrap();
     mgr.inject("stop", "<<QUEUED-INJECTION>>", "t-1".into())
         .unwrap();
-    mgr.send_user_message("stop", "<<QUEUED-USER>>", &[]).unwrap();
+    mgr.send_user_message("stop", "<<QUEUED-USER>>", &[])
+        .unwrap();
     assert_eq!(queued(&mgr, "stop").len(), 2, "precondition");
 
     mgr.interrupt("stop").unwrap();

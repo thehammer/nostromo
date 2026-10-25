@@ -461,9 +461,11 @@ impl Unix {
             terminal_id: id.clone(),
         })
         .await;
-        self.wait_since(from, "the replay", |m| {
-            matches!(m, ServerMsg::TerminalReplay { terminal_id, .. } if *terminal_id == id)
-        })
+        self.wait_since(
+            from,
+            "the replay",
+            |m| matches!(m, ServerMsg::TerminalReplay { terminal_id, .. } if *terminal_id == id),
+        )
         .await;
         self.wait_login_shell(&id).await;
         let n = next_marker();
@@ -536,9 +538,11 @@ impl Unix {
     /// The `TerminalRefused` that answers `op`, as `(terminal_id, code)`.
     async fn refused(&mut self, from: usize, op: &str) -> (Option<String>, String) {
         let (_, m) = self
-            .wait_since(from, &format!("terminal_refused for {op}"), |m| {
-                matches!(m, ServerMsg::TerminalRefused { op: o, .. } if o == op)
-            })
+            .wait_since(
+                from,
+                &format!("terminal_refused for {op}"),
+                |m| matches!(m, ServerMsg::TerminalRefused { op: o, .. } if o == op),
+            )
             .await;
         match m {
             ServerMsg::TerminalRefused {
@@ -1755,7 +1759,11 @@ async fn following_ends_quietly_when_the_session_ends(how: impl FnOnce(&mut Sess
     })
     .await;
     r.run("printf 'AFTER-SESSION-END\\n'").await;
-    assert!(r.app.wait_view_from(&id, 0, "AFTER-SESSION-END", WAIT).await);
+    assert!(
+        r.app
+            .wait_view_from(&id, 0, "AFTER-SESSION-END", WAIT)
+            .await
+    );
     tokio::time::sleep(QUIET).await;
     for text in r.a.texts().into_iter().skip(before) {
         assert!(

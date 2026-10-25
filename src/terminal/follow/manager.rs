@@ -247,13 +247,49 @@ impl Follow {
         self.unreported += bytes.len();
         let lines = bytes.iter().filter(|&&b| b == b'\n').count();
         if lines > 0 || self.alt_screen {
-            self.policy.on_output(now, std::mem::take(&mut self.unreported), lines);
+            self.policy
+                .on_output(now, std::mem::take(&mut self.unreported), lines);
         }
     }
 
     fn screen_text(&self) -> String {
         self.session.with_screen(screen_snapshot)
     }
+
+    /// What the policy makes of this tick: an overflowing pump pauses the
+    /// follow; otherwise a changed full-screen program is shown to the policy
+    /// first.
+    fn decide(&mut self) -> Decision {
+        if self.overflow.swap(false, Ordering::SeqCst) {
+            return Decision::Pause {
+                reason: PauseReason::TooMuchOutput,
+            };
+        }
+        if self.alt_screen && self.screen_dirty {
+            let text = self.screen_text();
+            self.policy.observe_screen(&text);
+            self.screen_dirty = false;
+        }
+        let cursor = self.assembler.current_partial();
+        self.policy.on_tick(now(), cursor, self.alt_screen)
+    }
+
+    /// Take the output of `kind` that is due, redacted and capped.
+    fn take_delivery(&mut self, kind: DeliveryKind) -> Delivery {
+        match kind {
+            DeliveryKind::Lines => {
+                deliver(&mut self.assembler, &mut self.redactor, &mut self.policy)
+            }
+            DeliveryKind::Screen => {
+                let lines = split_lines(&self.screen_text());
+                deliver_lines(lines, &mut self.redactor, &mut self.policy)
+            }
+        }
+    }
+}
+
+fn split_lines(text: &str) -> Vec<String> {
+    text.split('\n').map(str::to_owned).collect()
 }
 
 /// Where in `bytes` a switch to (`h`) or from (`l`) the alternate screen is:
@@ -431,8 +467,11 @@ impl FollowManager {
                 ),
             );
             if let Some(screen) = screen {
-                let lines: Vec<String> = screen.split('\n').map(str::to_owned).collect();
-                let delivery = deliver_lines(lines, &mut follow.redactor, &mut follow.policy);
+                let delivery = deliver_lines(
+                    split_lines(&screen),
+                    &mut follow.redactor,
+                    &mut follow.policy,
+                );
                 if let Some(element) =
                     self.delivery_element(terminal_id, &follow, DeliveryKind::Screen, &delivery)
                 {
@@ -520,11 +559,7 @@ impl FollowManager {
     pub fn screen_snapshot_redacted(&self, terminal_id: &str) -> Option<String> {
         let state = self.lock_state();
         let follow = state.follows.get(terminal_id)?;
-        let lines = follow
-            .screen_text()
-            .split('\n')
-            .map(str::to_owned)
-            .collect();
+        let lines = split_lines(&follow.screen_text());
         let delivery = deliver_lines(lines, &mut Redactor::new(), &mut DeliveryPolicy::new());
         delivery.text().map(str::to_owned)
     }
@@ -669,65 +704,14 @@ impl FollowManager {
             if follow.paused.is_some() {
                 return true;
             }
-            let decision = if follow.overflow.swap(false, Ordering::SeqCst) {
-                Decision::Pause {
-                    reason: PauseReason::TooMuchOutput,
-                }
-            } else {
-                if follow.alt_screen && follow.screen_dirty {
-                    let text = follow.screen_text();
-                    follow.policy.observe_screen(&text);
-                    follow.screen_dirty = false;
-                }
-                let cursor = follow.assembler.current_partial();
-                follow.policy.on_tick(now(), cursor, follow.alt_screen)
-            };
-            match decision {
+            match follow.decide() {
                 Decision::Wait => false,
                 Decision::Deliver { kind } => {
-                    let delivery = match kind {
-                        DeliveryKind::Lines => deliver(
-                            &mut follow.assembler,
-                            &mut follow.redactor,
-                            &mut follow.policy,
-                        ),
-                        DeliveryKind::Screen => {
-                            let lines = follow
-                                .screen_text()
-                                .split('\n')
-                                .map(str::to_owned)
-                                .collect();
-                            deliver_lines(lines, &mut follow.redactor, &mut follow.policy)
-                        }
-                    };
-                    let follow = &*follow;
-                    if let Some(element) =
-                        self.delivery_element(terminal_id, follow, kind, &delivery)
-                    {
-                        self.inject(follow, &element, terminal_id);
-                    }
+                    self.deliver_due(terminal_id, follow, kind);
                     false
                 }
                 Decision::Pause { reason } => {
-                    follow.paused = Some(reason);
-                    follow.discard_buffered();
-                    self.audit(AuditEvent::FollowPaused {
-                        terminal_id: terminal_id.to_string(),
-                        tag: self.audit_tag(&follow.terminal_tag),
-                        follower: self.audit_tag(&follow.follower),
-                        reason: pause_code(reason).to_string(),
-                    });
-                    let message = notice(
-                        terminal_id,
-                        &follow.pane,
-                        "paused",
-                        Some(pause_code(reason)),
-                        &format!(
-                            "Following {} paused itself: too much output. Nothing more is delivered until the user resumes it.",
-                            follow.pane
-                        ),
-                    );
-                    self.inject(follow, &message, terminal_id);
+                    self.pause(terminal_id, follow, reason);
                     true
                 }
             }
@@ -736,6 +720,37 @@ impl FollowManager {
             self.broadcast_state(terminal_id);
         }
         true
+    }
+
+    /// Under `state`: deliver the output that is due to the follower.
+    fn deliver_due(&self, terminal_id: &str, follow: &mut Follow, kind: DeliveryKind) {
+        let delivery = follow.take_delivery(kind);
+        if let Some(element) = self.delivery_element(terminal_id, follow, kind, &delivery) {
+            self.inject(follow, &element, terminal_id);
+        }
+    }
+
+    /// Under `state`: the follow pauses itself, and the follower is told.
+    fn pause(&self, terminal_id: &str, follow: &mut Follow, reason: PauseReason) {
+        follow.paused = Some(reason);
+        follow.discard_buffered();
+        self.audit(AuditEvent::FollowPaused {
+            terminal_id: terminal_id.to_string(),
+            tag: self.audit_tag(&follow.terminal_tag),
+            follower: self.audit_tag(&follow.follower),
+            reason: pause_code(reason).to_string(),
+        });
+        let message = notice(
+            terminal_id,
+            &follow.pane,
+            "paused",
+            Some(pause_code(reason)),
+            &format!(
+                "Following {} paused itself: too much output. Nothing more is delivered until the user resumes it.",
+                follow.pane
+            ),
+        );
+        self.inject(follow, &message, terminal_id);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

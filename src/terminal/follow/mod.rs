@@ -24,7 +24,7 @@ mod snapshot;
 mod truncate;
 
 pub use deliver::{deliver, Delivery, WITHHELD_MARKER};
-pub use manager::{FollowError, FollowManager, FollowSink, FollowVia};
 pub use lines::{LineAssembler, MAX_BUFFERED_CELLS, MAX_BUFFERED_ROWS, MAX_LINE_COLUMNS};
+pub use manager::{FollowError, FollowManager, FollowSink, FollowVia};
 pub use policy::{Decision, DeliveryKind, DeliveryPolicy, PauseReason};
 pub use snapshot::screen_snapshot;

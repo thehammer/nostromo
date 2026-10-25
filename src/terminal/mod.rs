@@ -361,11 +361,16 @@ impl TerminalManager {
     // ── reads ─────────────────────────────────────────────────────────────────
 
     pub fn list(&self) -> Vec<TerminalInfo> {
-        self.terminals.values().map(|t| self.described(&t.info)).collect()
+        self.terminals
+            .values()
+            .map(|t| self.described(&t.info))
+            .collect()
     }
 
     pub fn info(&self, terminal_id: &str) -> Option<TerminalInfo> {
-        self.terminals.get(terminal_id).map(|t| self.described(&t.info))
+        self.terminals
+            .get(terminal_id)
+            .map(|t| self.described(&t.info))
     }
 
     /// `info` with who follows the terminal now.

@@ -277,11 +277,7 @@ impl World {
         let ready = self.cwd.join(format!("ready-{}", self.sessions.len()));
         let script = control_script(preamble, &ready);
         let session = TerminalSession::spawn_argv(
-            &[
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                script,
-            ],
+            &["/bin/sh".to_string(), "-c".to_string(), script],
             &self.cwd,
             &[],
             80,
@@ -496,7 +492,10 @@ async fn the_screen_an_agent_reads_has_its_secrets_redacted() {
 
     let seen = w.follow.screen_snapshot_redacted(&t.id).expect("followed");
 
-    assert!(seen.contains("AWS_SECRET_ACCESS_KEY=[redacted: aws-secret-key]"), "{seen:?}");
+    assert!(
+        seen.contains("AWS_SECRET_ACCESS_KEY=[redacted: aws-secret-key]"),
+        "{seen:?}"
+    );
     assert!(!seen.contains("abcdFAKE"), "{seen:?}");
 }
 
@@ -532,7 +531,11 @@ async fn inviting_a_focus_whose_session_is_not_running_is_refused_and_nothing_fo
     assert_eq!(w.rec.events(), vec![]);
     w.run(&t, "printf 'x\\n'");
     advance_ms(5_000).await;
-    assert_eq!(w.rec.events(), vec![], "and nothing is delivered later either");
+    assert_eq!(
+        w.rec.events(),
+        vec![],
+        "and nothing is delivered later either"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -566,7 +569,10 @@ async fn resuming_is_refused_unless_following_is_paused() {
 #[test]
 fn the_error_codes_are_the_wire_names() {
     assert_eq!(FollowError::UnknownTerminal.code(), "unknown_terminal");
-    assert_eq!(FollowError::FollowerNotRunning.code(), "follower_not_running");
+    assert_eq!(
+        FollowError::FollowerNotRunning.code(),
+        "follower_not_running"
+    );
     assert_eq!(FollowError::NotFollowed.code(), "not_followed");
     assert_eq!(FollowError::NotPaused.code(), "not_paused");
 }
@@ -593,7 +599,11 @@ async fn an_invite_sends_one_started_notice_that_names_the_pane_and_nothing_else
         attr(notice, "pane"),
         Some(format!("local shell in {}", w.cwd.display()))
     );
-    assert_eq!(attr(notice, "reason"), None, "a started notice has no reason");
+    assert_eq!(
+        attr(notice, "reason"),
+        None,
+        "a started notice has no reason"
+    );
     assert!(
         notice.len() < text.len(),
         "the element is followed by a plain sentence"
@@ -625,16 +635,24 @@ async fn an_invite_that_includes_the_screen_sends_the_notice_and_one_screen_deli
     let Ev::Inject { text, .. } = &events[0] else {
         panic!("an injection");
     };
-    let started = text.find("<nostromo-terminal-follow event=\"started\"").expect("a notice");
+    let started = text
+        .find("<nostromo-terminal-follow event=\"started\"")
+        .expect("a notice");
     let screen = text
         .find("<nostromo-terminal-output ")
         .expect("a screen delivery");
     assert!(started < screen, "the notice comes first");
     assert_eq!(elements_in(text), 1, "exactly one delivery");
     assert_eq!(attr(&text[screen..], "kind").as_deref(), Some("screen"));
-    assert_eq!(attr(&text[screen..], "terminal_id").as_deref(), Some(t.id.as_str()));
+    assert_eq!(
+        attr(&text[screen..], "terminal_id").as_deref(),
+        Some(t.id.as_str())
+    );
     let body = body_lines(&text[screen..]);
-    assert_eq!(body, vec!["SCREEN-MARK-1".to_string(), "SCREEN-MARK-2".to_string()]);
+    assert_eq!(
+        body,
+        vec!["SCREEN-MARK-1".to_string(), "SCREEN-MARK-2".to_string()]
+    );
     assert_eq!(number(&text[screen..], "lines"), 2);
     assert_eq!(number(&text[screen..], "redactions"), 0);
 
@@ -717,7 +735,10 @@ async fn output_after_the_invite_is_delivered_once_it_settles_and_not_before() {
     assert_eq!(number(d, "lines"), 1);
     assert_eq!(number(d, "omitted"), 0);
     assert_eq!(number(d, "redactions"), 0);
-    assert!(d.contains(ADVISORY), "the untrusted-data line is part of every delivery");
+    assert!(
+        d.contains(ADVISORY),
+        "the untrusted-data line is part of every delivery"
+    );
     assert_eq!(body_lines(d), vec!["hello".to_string()]);
     assert!(
         d.trim_end().ends_with("</nostromo-terminal-output>"),
@@ -727,7 +748,10 @@ async fn output_after_the_invite_is_delivered_once_it_settles_and_not_before() {
     let Ev::Inject { key, .. } = events.last().unwrap() else {
         panic!("the last event is an injection");
     };
-    assert_eq!(key, &t.id, "keyed by the terminal, so stop can take it back");
+    assert_eq!(
+        key, &t.id,
+        "keyed by the terminal, so stop can take it back"
+    );
 
     advance_ms(30_000).await;
     assert_eq!(
@@ -790,7 +814,10 @@ async fn a_progress_bar_is_delivered_as_one_final_line_not_every_redraw() {
 
     let deliveries = w.rec.deliveries_for(A, mark);
     assert_eq!(deliveries.len(), 1);
-    assert_eq!(body_lines(&deliveries[0]), vec!["progress 100%".to_string()]);
+    assert_eq!(
+        body_lines(&deliveries[0]),
+        vec!["progress 100%".to_string()]
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -855,9 +882,16 @@ async fn a_thousand_lines_are_cut_to_head_and_tail_with_an_omitted_marker() {
     let deliveries = w.rec.deliveries_for(A, mark);
     assert_eq!(deliveries.len(), 1, "still one delivery");
     let d = &deliveries[0];
-    assert_eq!(number(d, "lines"), 1000, "lines counts what the command printed");
+    assert_eq!(
+        number(d, "lines"),
+        1000,
+        "lines counts what the command printed"
+    );
     let omitted = number(d, "omitted");
-    assert_eq!(omitted, 850, "a cap of 50 head + 100 tail lines leaves 850 out");
+    assert_eq!(
+        omitted, 850,
+        "a cap of 50 head + 100 tail lines leaves 850 out"
+    );
     let body = body_lines(d);
     let marker = format!("[… {omitted} lines omitted …]");
     let at = body
@@ -962,10 +996,7 @@ async fn sustained_output_is_batched_to_about_one_delivery_per_ten_seconds_with_
     assert!(deliveries.len() <= 4, "{}", deliveries.len());
     let delivered: Vec<String> = deliveries.iter().flat_map(|d| body_lines(d)).collect();
     let expected: Vec<String> = (0..50).map(|i| format!("tick-{i}")).collect();
-    assert_eq!(
-        delivered, expected,
-        "every line exactly once, in order"
-    );
+    assert_eq!(delivered, expected, "every line exactly once, in order");
     assert!(
         w.follower(&t).is_some_and(|f| !f.paused),
         "this is batching, not a flood"
@@ -997,10 +1028,9 @@ async fn a_flood_pauses_following_and_tells_the_agent_the_app_and_the_audit() {
     assert_eq!(attr(notice, "reason").as_deref(), Some("too_much_output"));
     assert_eq!(attr(notice, "terminal_id").as_deref(), Some(t.id.as_str()));
     assert!(
-        w.states()
-            .iter()
-            .any(|(id, f)| id == &t.id && f.as_ref().is_some_and(|f| f.paused
-                && f.pause_reason.as_deref() == Some("too_much_output"))),
+        w.states().iter().any(|(id, f)| id == &t.id
+            && f.as_ref()
+                .is_some_and(|f| f.paused && f.pause_reason.as_deref() == Some("too_much_output"))),
         "the app is told the follower paused"
     );
     let audit = w.audit_named("follow_paused");
@@ -1017,7 +1047,11 @@ async fn a_flood_pauses_following_and_tells_the_agent_the_app_and_the_audit() {
     );
     let after = w.rec.deliveries_for(A, mark).len();
     advance_ms(30_000).await;
-    assert_eq!(w.rec.deliveries_for(A, mark).len(), after, "nothing is delivered while paused");
+    assert_eq!(
+        w.rec.deliveries_for(A, mark).len(),
+        after,
+        "nothing is delivered while paused"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1055,7 +1089,10 @@ async fn resuming_delivers_only_what_is_produced_after_the_resume() {
     w.invite(&t, A, false);
     w.run(&t, "seq 1 6000");
     advance_ms(3_000).await;
-    assert!(w.follower(&t).is_some_and(|f| f.paused), "precondition: paused");
+    assert!(
+        w.follower(&t).is_some_and(|f| f.paused),
+        "precondition: paused"
+    );
     w.states();
 
     // Output while paused is thrown away, not saved up.
@@ -1234,7 +1271,11 @@ async fn inviting_a_second_focus_moves_the_follow_and_tells_the_first() {
 
     let mark = w.rec.mark();
     w.run_and_settle(&t, "printf 'AFTER-MOVE\\n'").await;
-    assert_eq!(w.rec.deliveries_for(A, mark), Vec::<String>::new(), "A hears nothing more");
+    assert_eq!(
+        w.rec.deliveries_for(A, mark),
+        Vec::<String>::new(),
+        "A hears nothing more"
+    );
     let b = w.rec.deliveries_for(B, mark);
     assert_eq!(b.len(), 1);
     assert_eq!(body_lines(&b[0]), vec!["AFTER-MOVE".to_string()]);
@@ -1485,7 +1526,11 @@ async fn deliveries_are_audited_as_counts_and_sizes_never_text() {
     let t = w.local("focus-1", "");
     w.invite(&t, A, false);
 
-    w.run_and_settle(&t, "printf 'CANARY-FOLLOW-91c2\\nsecond line\\nthird line\\n'").await;
+    w.run_and_settle(
+        &t,
+        "printf 'CANARY-FOLLOW-91c2\\nsecond line\\nthird line\\n'",
+    )
+    .await;
     w.run_and_settle(&t, "seq 1 1000").await;
     w.run_and_settle(
         &t,
@@ -1517,8 +1562,16 @@ async fn deliveries_are_audited_as_counts_and_sizes_never_text() {
     assert_eq!(audit[2]["redactions"], 1);
 
     let text = w.audit_text();
-    for needle in ["CANARY-FOLLOW-91c2", "second line", "abcdFAKE", "fakefakefake"] {
-        assert!(!text.contains(needle), "the audit holds no output: found {needle:?}");
+    for needle in [
+        "CANARY-FOLLOW-91c2",
+        "second line",
+        "abcdFAKE",
+        "fakefakefake",
+    ] {
+        assert!(
+            !text.contains(needle),
+            "the audit holds no output: found {needle:?}"
+        );
     }
 }
 
@@ -1556,7 +1609,10 @@ async fn every_change_of_follower_is_broadcast_as_terminal_state() {
 
     w.invite(&t, B, false);
     assert_eq!(
-        w.states().last().and_then(|(_, f)| f.clone()).map(|f| f.tag),
+        w.states()
+            .last()
+            .and_then(|(_, f)| f.clone())
+            .map(|f| f.tag),
         Some(B.to_string()),
         "a move is broadcast"
     );
@@ -1589,7 +1645,8 @@ async fn following_a_sensitive_focuss_terminal_makes_the_follower_sensitive_befo
         sensitive.tag_is_sensitive(A),
         "marked by the started notice, before any output"
     );
-    w.run_and_settle(&secret, "printf 'from-the-sensitive-focus\\n'").await;
+    w.run_and_settle(&secret, "printf 'from-the-sensitive-focus\\n'")
+        .await;
     assert_eq!(w.rec.deliveries_for(A, mark).len(), 1);
     assert!(sensitive.tag_is_sensitive(A));
 }
