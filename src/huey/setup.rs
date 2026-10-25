@@ -50,13 +50,62 @@ pub fn save(paths: &HueyPaths, record: &SetupRecord) -> std::io::Result<()> {
     write_atomic(&paths.setup_json(), &json)
 }
 
+/// Write `bytes` to `path` so that only the owner can read them: the parent
+/// directory is 0700 and the file 0600 on unix, both created with those modes
+/// (never chmod-after, so there is no window where they are wider). The bytes
+/// go to a uniquely named temp file in the same directory, then rename over
+/// `path`, so concurrent writers never share a temp file and readers never see
+/// a partial file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    create_private_dir(dir)?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    let result = opts
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        builder.mode(0o700);
+        builder.create(dir)?;
+        // A directory that already existed keeps its old mode; tighten it.
+        if std::fs::metadata(dir)?.permissions().mode() & 0o777 != 0o700 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    builder.create(dir)
 }
 
 #[cfg(test)]
@@ -85,5 +134,54 @@ mod tests {
         };
         save(&paths, &rec).unwrap();
         assert_eq!(load(&paths), rec);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_makes_the_directory_0700_and_the_file_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HueyPaths::new(dir.path());
+        save(&paths, &SetupRecord::default()).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(paths.root()), 0o700);
+        assert_eq!(mode(&paths.setup_json()), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_tightens_an_existing_loose_directory_and_replaces_a_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HueyPaths::new(dir.path());
+        std::fs::create_dir_all(paths.root()).unwrap();
+        std::fs::set_permissions(paths.root(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(paths.setup_json(), "{}").unwrap();
+        std::fs::set_permissions(paths.setup_json(), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        save(&paths, &SetupRecord::default()).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(paths.root()), 0o700);
+        assert_eq!(mode(&paths.setup_json()), 0o600);
+    }
+
+    #[test]
+    fn concurrent_saves_do_not_collide_and_leave_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = HueyPaths::new(dir.path());
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..20 {
+                        save(&paths, &SetupRecord::default()).unwrap();
+                    }
+                });
+            }
+        });
+        let names: Vec<_> = std::fs::read_dir(paths.root())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("setup.json")]);
     }
 }
