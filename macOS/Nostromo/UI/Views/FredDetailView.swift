@@ -53,8 +53,8 @@ enum FredWebLink {
     /// Google Calendar's older links live under this host's `/calendar/` path; nothing else on it is allowed.
     static let googleHost = "www.google.com"
     static let googleCalendarPath = "/calendar/"
-    /// Hosts that are allowed along with their subdomains (`googleHost` is path-restricted, so not here).
-    private static let allowedHosts = outlookHosts + [gmailHost, calendarHost]
+    /// Outlook hosts are allowed along with their subdomains (tenant hosts); the Google hosts must match exactly,
+    /// like Rust `is_google_web_link` (`googleHost` is path-restricted on top of that).
     /// The labels the daemon puts on a detail's web link, one per provider.
     static let detailLinkLabels: Set<String> = ["Open in Outlook", "Open in Gmail", "Open in Google Calendar"]
 
@@ -73,14 +73,21 @@ enum FredWebLink {
               url.port == nil || url.port == 443,
               let host = url.host?.lowercased(), !host.isEmpty else { return false }
         if host == googleHost { return isCalendarPath(url.path) }
-        return allowedHosts.contains { matches(host, $0) }
+        return host == gmailHost || host == calendarHost || outlookHosts.contains { matches(host, $0) }
+    }
+
+    /// The only page a Google browser sign-in may open: `https://accounts.google.com`, default port, no userinfo.
+    /// The URL comes from the daemon, so this is all that stands between it and `NSWorkspace`.
+    static func isGoogleSignIn(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" && url.host?.lowercased() == "accounts.google.com"
+            && url.user == nil && url.password == nil && (url.port == nil || url.port == 443)
     }
 
     /// The open button's title for an (already safe) `url`.
     static func buttonTitle(for url: URL) -> String {
         let host = url.host?.lowercased() ?? ""
-        if matches(host, gmailHost) { return "Open in Gmail" }
-        if matches(host, calendarHost) || host == googleHost { return "Open in Google Calendar" }
+        if host == gmailHost { return "Open in Gmail" }
+        if host == calendarHost || host == googleHost { return "Open in Google Calendar" }
         return "Open in Outlook"
     }
 

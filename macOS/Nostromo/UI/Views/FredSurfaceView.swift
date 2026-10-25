@@ -646,7 +646,8 @@ private final class FredPane: NSView {
         trailingLabel.isHidden = !showsCountdown
         trailingLabel.setAccessibilityLabel(trailing)
 
-        if let prompt {
+        // An unknown kind gets the generic banner: no raw daemon URL is shown as a link.
+        if let prompt, prompt.isBrowserSignIn || prompt.isDeviceCodeSignIn {
             banner.clear()
             signIn.show(prompt: prompt, now: now, zone: zone)
             signIn.isHidden = false
@@ -669,7 +670,9 @@ private final class FredPane: NSView {
 /// one-time code, a Copy code button and the code's expiry. Browser (Google
 /// loopback): an "Open Google sign-in" button and the link's expiry; the long
 /// auth URL is never shown and there is no code.
-private final class FredSignInView: NSView {
+final class FredSignInView: NSView {
+
+    typealias GesturePermit = (NSView) -> HumanGestureVerdict
 
     var onCopy: ((String) -> Void)?
 
@@ -682,17 +685,23 @@ private final class FredSignInView: NSView {
     private var url: URL?
     private var code = ""
     private var isBrowser = false
+    private let permit: GesturePermit
+    private let opener: (URL) -> Void
 
-    override init(frame frameRect: NSRect) {
+    /// `permit` and `opener` are seams for tests; the app uses the human-gesture check and `NSWorkspace`.
+    init(permit: GesturePermit? = nil, opener: ((URL) -> Void)? = nil) {
+        self.permit = permit ?? { HumanGesture.permit(NSApp.currentEvent, control: $0) }
+        self.opener = opener ?? { NSWorkspace.shared.open($0) }
         codeRow = NSStackView(views: [codeLabel, copyButton])
-        super.init(frame: frameRect)
+        super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.12, alpha: 1).cgColor
 
         intro.font = .systemFont(ofSize: 11)
         intro.textColor = Theme.fg
-        intro.lineBreakMode = .byWordWrapping
+        intro.lineBreakMode = .byTruncatingTail
         intro.maximumNumberOfLines = 1
+        intro.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         urlButton.isBordered = false
         urlButton.alignment = .left
@@ -713,6 +722,9 @@ private final class FredSignInView: NSView {
 
         expiryLabel.font = .systemFont(ofSize: 10)
         expiryLabel.textColor = Theme.fgMuted
+        expiryLabel.lineBreakMode = .byTruncatingTail
+        expiryLabel.maximumNumberOfLines = 1
+        expiryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         codeRow.orientation = .horizontal
         codeRow.spacing = 10
@@ -775,16 +787,15 @@ private final class FredSignInView: NSView {
         codeRow.isHidden = isBrowser
     }
 
-    @objc private func openURL() {
+    @objc func openURL() {
         guard let url else { return }
-        // The browser sign-in URL comes from the daemon: only Google's own sign-in page may open.
-        if isBrowser && !Self.isGoogleSignIn(url) { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    static func isGoogleSignIn(_ url: URL) -> Bool {
-        url.scheme?.lowercased() == "https" && url.host?.lowercased() == "accounts.google.com"
-            && url.user == nil && url.password == nil && (url.port == nil || url.port == 443)
+        // The browser sign-in URL comes from the daemon: only Google's own sign-in page may open,
+        // and only for a person (an app-control or AXPress press is refused).
+        if isBrowser {
+            guard FredWebLink.isGoogleSignIn(url) else { return }
+            guard case .human = permit(urlButton) else { return }
+        }
+        opener(url)
     }
 
     @objc private func copyPressed() {

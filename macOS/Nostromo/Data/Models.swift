@@ -1015,6 +1015,9 @@ struct DeviceFlowPrompt: Decodable {
     let provider:        String?
 
     var isBrowserSignIn: Bool { kind == "browser" }
+    /// A Microsoft device-code prompt (URL + code). Anything else that is not a browser sign-in
+    /// (an unknown `kind`, or a Google prompt claiming to be a device code) is not rendered as one.
+    var isDeviceCodeSignIn: Bool { kind == "device_code" && provider != "google" }
 
     enum CodingKeys: String, CodingKey {
         case verificationUri = "verification_uri"

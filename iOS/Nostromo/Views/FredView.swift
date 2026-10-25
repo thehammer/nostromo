@@ -44,8 +44,10 @@ struct FredView: View {
             Section {
                 if prompt.isBrowserSignIn {
                     browserSignInBanner(prompt)
-                } else {
+                } else if prompt.isDeviceCodeSignIn {
                     deviceCodeSignInBanner(prompt)
+                } else {
+                    genericSignInBanner
                 }
             }
         }
@@ -57,6 +59,19 @@ struct FredView: View {
         VStack(alignment: .leading, spacing: 8) {
             Label(prompt.account.map { "Google sign-in required (\($0))" } ?? "Google sign-in required",
                   systemImage: "person.badge.key")
+                .font(.headline)
+                .foregroundStyle(.orange)
+
+            Text("Open the Fred pane on the Mac running Nostromo to sign in.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var genericSignInBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Sign-in required", systemImage: "person.badge.key")
                 .font(.headline)
                 .foregroundStyle(.orange)
 

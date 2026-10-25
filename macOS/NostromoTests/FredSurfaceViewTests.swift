@@ -1345,6 +1345,96 @@ final class FredSurfaceViewTests: XCTestCase {
         XCTAssertEqual(prompt.provider, "google")
     }
 
+    // MARK: - Sign-in button gate, host check, unknown kind, truncation
+
+    /// A sign-in view fed one prompt, with a recording opener and a fixed gesture verdict.
+    private func signInView(uri: String, kind: String? = "browser", provider: String? = "google",
+                            verdict: HumanGestureVerdict) throws -> (view: FredSignInView, opened: () -> [URL], permitted: () -> Int) {
+        var opened: [URL] = []
+        var permitted = 0
+        let view = FredSignInView(permit: { _ in permitted += 1; return verdict },
+                                  opener: { opened.append($0) })
+        let prompt = try decode(DeviceFlowPrompt.self,
+                                promptJSON(Prompt(uri: uri, code: "", expires: at("09:42"),
+                                                  kind: kind, account: "personal", provider: provider)))
+        view.show(prompt: prompt, now: now, zone: Self.chicago)
+        return (view, { opened }, { permitted })
+    }
+
+    private let human = HumanGestureVerdict.human(sourcePid: nil, sourceState: nil)
+
+    func testARefusedGestureOpensNothingFromTheGoogleSignInButton() throws {
+        for reason in [HumanGestureRefusal.appControl, .accessibilityPress] {
+            let v = try signInView(uri: Self.googleAuthURL, verdict: .refused(reason: reason))
+            v.view.openURL()
+            XCTAssertEqual(v.opened(), [], "a \(reason) press must not open the OAuth page")
+            XCTAssertEqual(v.permitted(), 1, "the gesture check ran")
+        }
+    }
+
+    func testAHumanGestureOpensTheGoogleSignInPageOnce() throws {
+        let v = try signInView(uri: Self.googleAuthURL, verdict: human)
+        v.view.openURL()
+        XCTAssertEqual(v.opened(), [URL(string: Self.googleAuthURL)!])
+    }
+
+    func testANonGoogleURLOnABrowserPromptIsNeverOpenedEvenForAHuman() throws {
+        for uri in ["https://evil.example/o/oauth2/v2/auth", "https://accounts.google.com.evil.com/o/oauth2",
+                    "http://accounts.google.com/o/oauth2", "file:///etc/passwd", "javascript:alert(1)"] {
+            let v = try signInView(uri: uri, verdict: human)
+            v.view.openURL()
+            XCTAssertEqual(v.opened(), [], "\(uri) must not open")
+        }
+    }
+
+    func testTheGoogleSignInHostCheck() throws {
+        let accepted = ["https://accounts.google.com/o/oauth2/v2/auth?x=1", "HTTPS://ACCOUNTS.GOOGLE.COM/o/oauth2",
+                        "https://accounts.google.com:443/o/oauth2"]
+        for s in accepted {
+            XCTAssertTrue(FredWebLink.isGoogleSignIn(try XCTUnwrap(URL(string: s))), "should accept \(s)")
+        }
+        let rejected = ["https://accounts.google.com.evil.com/o/oauth2", "http://accounts.google.com/o/oauth2",
+                        "https://user@accounts.google.com/o/oauth2", "https://user:pw@accounts.google.com/",
+                        "https://accounts.google.com:8443/o/oauth2", "javascript:alert(1)", "file:///etc/passwd",
+                        "data:text/html,hi", "https://evil.example/accounts.google.com",
+                        "https://sub.accounts.google.com/", "https://google.com/"]
+        for s in rejected {
+            if let url = URL(string: s) {
+                XCTAssertFalse(FredWebLink.isGoogleSignIn(url), "should reject \(s)")
+            }
+        }
+    }
+
+    func testAnUnknownKindGetsTheGenericBannerNotAClickableRawURL() throws {
+        let raw = "https://evil.example/phish"
+        for (kind, provider) in [("mystery", nil), ("mystery", "google"), ("device_code", "google")] as [(String, String?)] {
+            let p = Prompt(uri: raw, code: "ZZZZ-9999", expires: at("09:42"), kind: kind, account: nil, provider: provider)
+            let (m, c) = try unauthenticated(p)
+            makeView(mailbox: m, calendar: c)
+            for pane in ["inbox", "today"] {
+                XCTAssertFalse(isShown("fred.\(pane).signin"), "\(kind)/\(provider ?? "-") \(pane): no sign-in group")
+                XCTAssertNotNil(try bannerMessage("fred.\(pane).banner"), "\(pane): the generic banner shows")
+            }
+            XCTAssertFalse(allText().contains { $0.contains("evil.example") }, "the raw URL is not shown")
+        }
+    }
+
+    func testLongSignInLabelsTruncateWithAnEllipsisAndGiveWayInANarrowPane() throws {
+        let long = String(repeating: "x", count: 32)
+        let (m, c) = try unauthenticated(browserPrompt(account: long, expires: "09:42"))
+        makeView(mailbox: m, calendar: c)
+        advance(to: at("09:50"))  // the long "Link expired at ...; a new one will appear shortly"
+        for pane in ["inbox", "today"] {
+            for id in ["intro", "expiry"] {
+                let label: NSTextField = try requireView("fred.\(pane).signin.\(id)")
+                XCTAssertEqual(label.lineBreakMode, .byTruncatingTail, "\(pane) \(id)")
+                XCTAssertEqual(label.maximumNumberOfLines, 1, "\(pane) \(id)")
+                XCTAssertLessThan(label.contentCompressionResistancePriority(for: .horizontal).rawValue,
+                                  NSLayoutConstraint.Priority.defaultHigh.rawValue, "\(pane) \(id)")
+            }
+        }
+    }
+
     // MARK: - Rate limiting: `retry_at` on the wire and in the banner
 
     /// The app's decoder (`NostromodClient`): ISO8601 with or without fractional seconds.

@@ -453,6 +453,13 @@ final class FredDetailHardeningTests: XCTestCase {
         }
     }
 
+    func testGoogleHostsMatchExactlyButOutlookTenantSubdomainsStayAllowed() throws {
+        for link in ["https://evil.mail.google.com/mail/", "https://x.calendar.google.com/calendar/event"] {
+            XCTAssertNil(FredWebLink.url(from: link), "should reject \(link)")
+        }
+        XCTAssertNotNil(FredWebLink.url(from: "https://tenant.outlook.office.com/x"))
+    }
+
     func testLookalikeAndNonServiceGoogleLinksAreRejected() {
         let rejected = [
             "https://www.google.com/search?q=x",
