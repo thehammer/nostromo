@@ -80,6 +80,10 @@ async fn main() -> Result<()> {
     for w in &agent_warnings {
         warn!("{w}");
     }
+    let (huey_config, huey_warnings) = config.resolve_huey();
+    for w in &huey_warnings {
+        warn!("{w}");
+    }
     info!(enabled = ?enabled_agents.wire_names(), "agents");
 
     // ── Orphan sweep ────────────────────────────────────────────────────────────
@@ -402,6 +406,11 @@ async fn main() -> Result<()> {
         session_mgr: Arc::clone(&session_mgr),
         broadcast_tx: broadcast_tx.clone(),
         republish_rx: server.subscribe_republish(),
+        state_root: socket_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf(),
+        huey_config,
     };
     let nostromo::agents::WiredAgents {
         perri_queue_rx,
@@ -413,6 +422,8 @@ async fn main() -> Result<()> {
         fred_calendar_rx,
         teri_todos_rx,
         work_hub,
+        huey,
+        huey_rx,
         parked,
     } = nostromo::agents::wire_agents(enabled_agents, &mut spawner);
     // Keep the parked senders of disabled agents alive for the daemon's lifetime.
@@ -509,6 +520,8 @@ async fn main() -> Result<()> {
                     fred_calendar_rx: fred_calendar_rx.clone(),
                     teri_todos_rx: teri_todos_rx.clone(),
                     work_hub: work_hub.clone(),
+                    huey: huey.clone(),
+                    huey_rx: huey_rx.clone(),
                     enabled_agents,
                 },
             );
@@ -876,9 +889,19 @@ struct RealAgentSpawner {
     session_mgr: Arc<Mutex<SessionManager>>,
     broadcast_tx: broadcast::Sender<ServerMsg>,
     republish_rx: tokio::sync::watch::Receiver<u64>,
+    /// The daemon's per-machine state root (beside the socket).
+    state_root: std::path::PathBuf,
+    huey_config: nostromo::huey::HueyConfig,
 }
 
 impl nostromo::agents::AgentSpawner for RealAgentSpawner {
+    fn start_huey(&mut self) -> nostromo::agents::HueySources {
+        nostromo::huey::HueyEngine::spawn(nostromo::huey::HueyDeps::production(
+            self.state_root.clone(),
+            self.huey_config.clone(),
+        ))
+    }
+
     fn start_perri(&mut self) -> nostromo::agents::PerriSources {
         let (queue_rx, queue_refresh_tx, queue_relay_tx) =
             PerriQueueNativeSource::spawn(self.config.clone());

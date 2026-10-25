@@ -733,6 +733,7 @@ mod tests {
         );
         state.enabled_agents = crate::agents::EnabledAgents {
             fred: true,
+            huey: true,
             perri: false,
             teri: true,
         };
@@ -752,6 +753,7 @@ mod tests {
         bind_pane(&state, "perri", "file", "nostromo.get_file");
         state.enabled_agents = crate::agents::EnabledAgents {
             fred: true,
+            huey: true,
             perri: false,
             teri: true,
         };

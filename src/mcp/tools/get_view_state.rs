@@ -67,6 +67,7 @@ mod agent_switch_tests {
         let mut state = McpSharedState::for_test();
         state.enabled_agents = EnabledAgents {
             fred: false,
+            huey: true,
             perri: true,
             teri: true,
         };

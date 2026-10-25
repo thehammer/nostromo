@@ -3,16 +3,18 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Agent {
     Fred,
+    Huey,
     Perri,
     Teri,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 3] = [Agent::Fred, Agent::Perri, Agent::Teri];
+    pub const ALL: [Agent; 4] = [Agent::Fred, Agent::Huey, Agent::Perri, Agent::Teri];
 
     pub fn name(self) -> &'static str {
         match self {
             Agent::Fred => "fred",
+            Agent::Huey => "huey",
             Agent::Perri => "perri",
             Agent::Teri => "teri",
         }
@@ -28,6 +30,7 @@ impl Agent {
     pub fn tool_prefix(self) -> &'static str {
         match self {
             Agent::Fred => "fred.",
+            Agent::Huey => "huey.",
             Agent::Perri => "perri.",
             Agent::Teri => "teri.",
         }
@@ -37,6 +40,7 @@ impl Agent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnabledAgents {
     pub fred: bool,
+    pub huey: bool,
     pub perri: bool,
     pub teri: bool,
 }
@@ -51,6 +55,7 @@ impl EnabledAgents {
     pub const fn all() -> Self {
         Self {
             fred: true,
+            huey: true,
             perri: true,
             teri: true,
         }
@@ -59,6 +64,7 @@ impl EnabledAgents {
     pub fn is_enabled(&self, a: Agent) -> bool {
         match a {
             Agent::Fred => self.fred,
+            Agent::Huey => self.huey,
             Agent::Perri => self.perri,
             Agent::Teri => self.teri,
         }
@@ -104,6 +110,7 @@ impl EnabledAgents {
     fn set(&mut self, a: Agent, on: bool) {
         match a {
             Agent::Fred => self.fred = on,
+            Agent::Huey => self.huey = on,
             Agent::Perri => self.perri = on,
             Agent::Teri => self.teri = on,
         }
@@ -142,7 +149,7 @@ impl ParkedSenders {
 /// `key` as it may be logged: control characters (newlines, escape sequences)
 /// written out as `\u{..}` escapes, so a config key cannot forge a log line or
 /// drive a terminal.
-fn escape_key(key: &str) -> String {
+pub(crate) fn escape_key(key: &str) -> String {
     key.chars()
         .map(|c| {
             if c.is_control() {
@@ -208,7 +215,7 @@ pub fn resolve(agents: Option<&toml::Value>) -> (EnabledAgents, Vec<String>) {
             enabled.set(a, on);
         } else {
             warnings.push(format!(
-                "unknown agent `{name}` in [agents]; ignoring (known: fred, perri, teri)"
+                "unknown agent `{name}` in [agents]; ignoring (known: fred, huey, perri, teri)"
             ));
         }
     }
@@ -246,6 +253,8 @@ pub struct TeriSources {
     pub work_hub: Option<Arc<WorkHub>>,
 }
 
+pub use crate::huey::HueySources;
+
 /// The side-effecting half of the daemon's agent wiring: starting pollers and
 /// broadcasters. `nostromd` implements it with the real sources; tests
 /// implement it with a recorder. [`wire_agents`] calls a method only for an
@@ -254,6 +263,7 @@ pub trait AgentSpawner {
     fn start_perri(&mut self) -> PerriSources;
     fn start_fred(&mut self) -> (MailboxRx, CalendarRx);
     fn start_teri(&mut self) -> TeriSources;
+    fn start_huey(&mut self) -> HueySources;
     fn start_perri_broadcaster(&mut self, queue_rx: PerriQueueRx, pr_rx: PerriPrRx);
     fn start_fred_broadcaster(&mut self, mailbox_rx: MailboxRx, calendar_rx: CalendarRx);
     fn start_teri_broadcaster(&mut self, todos_rx: TodosRx);
@@ -272,6 +282,8 @@ pub struct WiredAgents {
     pub fred_calendar_rx: CalendarRx,
     pub teri_todos_rx: TodosRx,
     pub work_hub: Option<Arc<WorkHub>>,
+    pub huey: Option<crate::huey::HueyHandle>,
+    pub huey_rx: watch::Receiver<crate::huey::HueyView>,
     pub parked: ParkedSenders,
 }
 
@@ -326,6 +338,13 @@ pub fn wire_agents(enabled: EnabledAgents, spawner: &mut dyn AgentSpawner) -> Wi
         (parked.channel::<Option<TeriTodosSnapshot>>(None), None)
     };
 
+    let (huey, huey_rx) = if enabled.huey {
+        let h = spawner.start_huey();
+        (Some(h.handle), h.view_rx)
+    } else {
+        (None, parked.channel(crate::huey::HueyView::default()))
+    };
+
     WiredAgents {
         perri_queue_rx,
         perri_queue_refresh_tx,
@@ -336,6 +355,8 @@ pub fn wire_agents(enabled: EnabledAgents, spawner: &mut dyn AgentSpawner) -> Wi
         fred_calendar_rx,
         teri_todos_rx,
         work_hub,
+        huey,
+        huey_rx,
         parked,
     }
 }
@@ -363,6 +384,7 @@ mod tests {
             e,
             EnabledAgents {
                 fred: false,
+                huey: true,
                 perri: true,
                 teri: true
             }
@@ -422,6 +444,9 @@ mod tests {
             "[agents.fred]\nenabled = \"no\"\n",
             "[agents.fred]\nenabled = 0\n",
             "[agents.teri]\nenabled = [false]\n",
+            "[agents]\nhuey = false\n",
+            "[agents.huey]\nenabled = \"no\"\n",
+            "[agents.huey]\nenabled = 0\n",
         ] {
             let (e, w) = r(src);
             assert_eq!(e, EnabledAgents::all(), "{src}");
@@ -442,6 +467,7 @@ mod tests {
             e,
             EnabledAgents {
                 fred: true,
+                huey: true,
                 perri: false,
                 teri: true
             }
@@ -506,6 +532,7 @@ mod tests {
     fn allows_tool_denies_only_disabled_prefixes() {
         let e = EnabledAgents {
             fred: false,
+            huey: true,
             perri: true,
             teri: true,
         };
@@ -520,13 +547,14 @@ mod tests {
     fn wire_names_always_has_mother_and_is_sorted() {
         let e = EnabledAgents {
             fred: false,
+            huey: false,
             perri: true,
             teri: false,
         };
         assert_eq!(e.wire_names(), vec!["mother", "perri"]);
         assert_eq!(
             EnabledAgents::all().wire_names(),
-            vec!["fred", "mother", "perri", "teri"]
+            vec!["fred", "huey", "mother", "perri", "teri"]
         );
     }
 
@@ -535,11 +563,25 @@ mod tests {
         assert!(EnabledAgents::all().disabled_names().is_empty());
         let e = EnabledAgents {
             fred: false,
+            huey: false,
             perri: true,
             teri: false,
         };
-        assert_eq!(e.disabled_names(), vec!["fred", "teri"]);
+        assert_eq!(e.disabled_names(), vec!["fred", "huey", "teri"]);
         assert!(!e.disabled_names().contains(&"mother".to_string()));
+    }
+
+    #[test]
+    fn huey_is_on_by_default_and_can_be_switched_off() {
+        assert!(r("").0.huey);
+        let (e, w) = r("[agents.huey]\nenabled = false\nreport_time = \"07:00\"\n");
+        assert!(!e.huey && e.fred && e.perri && e.teri);
+        assert!(
+            w.is_empty(),
+            "extra huey keys are not unknown agents: {w:?}"
+        );
+        assert!(!e.allows_tool("huey.get_state"));
+        assert_eq!(e.disabled_names(), vec!["huey"]);
     }
 
     #[test]

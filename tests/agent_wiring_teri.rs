@@ -27,6 +27,15 @@ impl WithHub {
 }
 
 impl AgentSpawner for WithHub {
+    fn start_huey(&mut self) -> nostromo::agents::HueySources {
+        let dir = tempfile::tempdir().unwrap();
+        let src = nostromo::huey::HueyEngine::spawn(nostromo::huey::HueyDeps::production(
+            dir.path().to_path_buf(),
+            nostromo::huey::HueyConfig::default(),
+        ));
+        self.keep.push(Box::new(dir));
+        src
+    }
     fn start_perri(&mut self) -> PerriSources {
         let (queue_refresh_tx, _r1) = mpsc::unbounded_channel();
         let (queue_relay_tx, _r2) = mpsc::unbounded_channel();
