@@ -8,8 +8,11 @@ import NostromoKit
 // reply box, which keep their own).
 //
 // The reader's place is theirs: data arriving for the job they are reading (a state change, a progress
-// tick, a todo list, log lines, gates, an error, a longer or shorter plan) must not move it, a document
-// that shrinks clamps it, and opening a different job starts at the top.
+// tick, a todo list, log lines, gates, an error, a longer or shorter plan) must not move what they are
+// looking at. That is measured on a row they can see (a `PLAN-n` row, the `LOG TAIL` label): its offset
+// from the viewport's top edge holds within 1 pt while the sections above it grow and shrink. The clip's
+// own origin is NOT the measure: it has to change when the content above changes height. A document that
+// shrinks clamps the position, and opening a different job starts at the top.
 final class MotherDetailScrollTests: XCTestCase {
 
     private let tolerance: CGFloat = 1
@@ -32,6 +35,104 @@ final class MotherDetailScrollTests: XCTestCase {
     }
 
     private func originY(_ rig: MDRig) -> CGFloat { scrollView(rig).contentView.bounds.origin.y }
+
+    private func documentHeight(_ rig: MDRig) -> CGFloat { scrollView(rig).documentView?.frame.height ?? 0 }
+
+    /// The top edge of `view` measured from the top edge of the viewport: what the reader sees.
+    private func offsetFromViewportTop(_ rig: MDRig, _ view: NSView) -> CGFloat {
+        let doc = scrollView(rig).documentView!
+        return doc.convert(view.bounds, from: view).minY - originY(rig)
+    }
+
+    private func labels(_ rig: MDRig, prefix: String) -> [NSTextField] {
+        MD.allSubviews(rig.detail).compactMap { $0 as? NSTextField }
+            .filter { $0.stringValue.hasPrefix(prefix) && !$0.isHiddenOrHasHiddenAncestor }
+    }
+
+    /// The labels starting with `prefix` that are entirely inside the viewport, top to bottom.
+    private func visibleLabels(_ rig: MDRig, prefix: String) -> [NSTextField] {
+        let sv = scrollView(rig)
+        let doc = sv.documentView!
+        return labels(rig, prefix: prefix)
+            .filter { sv.documentVisibleRect.contains(doc.convert($0.bounds, from: $0)) }
+            .sorted { offsetFromViewportTop(rig, $0) < offsetFromViewportTop(rig, $1) }
+    }
+
+    /// The reader is inside the plan: scrolled `below` pt past the plan's first row. Returns the first
+    /// and last plan rows they can see (what they are looking at).
+    private func scrollIntoPlan(_ rig: MDRig, below: CGFloat = 900,
+                                file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
+        let first = try XCTUnwrap(labels(rig, prefix: "PLAN-0 ").first, "the plan is rendered", file: file, line: line)
+        let planTop = scrollView(rig).documentView!.convert(first.bounds, from: first).minY
+        scrollAndConfirm(rig, toY: planTop + below, file: file, line: line)
+        let rows = visibleLabels(rig, prefix: "PLAN-")
+        XCTAssertGreaterThanOrEqual(rows.count, 2, "precondition: at least two plan rows are in view", file: file, line: line)
+        return [("first visible plan row", try XCTUnwrap(rows.first, file: file, line: line)),
+                ("last visible plan row", try XCTUnwrap(rows.last, file: file, line: line))]
+    }
+
+    /// The reader is at the very end of the document, on the log tail. Returns what they see of it.
+    private func scrollToLogTail(_ rig: MDRig, file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
+        scrollAndConfirm(rig, toY: maxScrollY(rig), file: file, line: line)
+        let title = try XCTUnwrap(visibleLabels(rig, prefix: "LOG TAIL").first, "precondition: the LOG TAIL label is in view", file: file, line: line)
+        var anchors: [(String, NSView)] = [("LOG TAIL label", title), ("log scroll view", rig.detail.logScrollView)]
+        if let row = visibleLabels(rig, prefix: "PLAN-").last { anchors.append(("last visible plan row", row)) }
+        return anchors
+    }
+
+    private enum Change { case grows, shrinks, either }
+
+    /// Runs `event` and asserts every anchor is still in the detail and still at the same distance from the
+    /// viewport's top edge (within 1 pt), and that the document changed the way the event says (so the
+    /// event really moved what is above the reader).
+    private func assertAnchorsHold(_ rig: MDRig, _ name: String, _ change: Change, anchors: [(String, NSView)],
+                                   file: StaticString = #filePath, line: UInt = #line,
+                                   event: () throws -> Void) rethrows {
+        let before = anchors.map { offsetFromViewportTop(rig, $0.1) }
+        let heightBefore = documentHeight(rig)
+        try event()
+        rig.awaitRendered(file: file, line: line)
+        let heightAfter = documentHeight(rig)
+        switch change {
+        case .grows:
+            XCTAssertGreaterThan(heightAfter, heightBefore + 1, "\(name): precondition: the document grows (\(heightBefore) -> \(heightAfter))", file: file, line: line)
+        case .shrinks:
+            XCTAssertLessThan(heightAfter, heightBefore - 1, "\(name): precondition: the document shrinks (\(heightBefore) -> \(heightAfter))", file: file, line: line)
+        case .either:
+            break
+        }
+        for (k, anchor) in anchors.enumerated() {
+            XCTAssertTrue(anchor.1.isDescendant(of: rig.detail), "\(name): the \(anchor.0) is gone", file: file, line: line)
+            let after = offsetFromViewportTop(rig, anchor.1)
+            XCTAssertEqual(after, before[k], accuracy: tolerance,
+                           "after \"\(name)\" the \(anchor.0) moved from \(before[k]) to \(after) pt below the top of the viewport (document \(heightBefore) -> \(heightAfter), origin \(originY(rig)))",
+                           file: file, line: line)
+        }
+        assertHorizontallyAtRest(rig, "after \"\(name)\"", file: file, line: line)
+    }
+
+    /// The events a running or held job delivers while someone reads it, each with how it moves the
+    /// sections above the plan and the log. The long action error clears itself after a few seconds
+    /// (the shrinking half of it); the rig waits for that, bounded.
+    private func liveEvents(_ rig: MDRig) -> [(String, Change, () throws -> Void)] {
+        [
+            ("60 long todos arrive", .grows, { rig.sendPeek(todos: 60) }),
+            ("the todo list shrinks to 5", .shrinks, { rig.sendPeek(todos: 5) }),
+            ("the todo list empties", .shrinks, { rig.sendPeek(todos: 0) }),
+            ("the todo list is back at 40", .grows, { rig.sendPeek(todos: 40) }),
+            ("gates grow to 40 rows", .either, { rig.setGates(40) }),
+            ("gates shrink to 3 rows", .either, { rig.setGates(3) }),
+            ("the job resumes (state running)", .either, { rig.setState("running") }),
+            ("a progress tick", .either, { rig.setProgress(40) }),
+            ("another progress tick", .either, { rig.setProgress(55) }),
+            ("the job holds again (state awaiting)", .either, { rig.setState("awaiting") }),
+            ("an action error arrives", .grows, { rig.host.errorSubject.send(MDFixtures.actionError(long: true)) }),
+            ("the action error clears itself", .shrinks, {
+                XCTAssertTrue(MD.pumpUntil(rig.window) { rig.renderedCount(prefix: "ERR") == 0 },
+                              "the action error never cleared")
+            }),
+        ]
+    }
 
     /// Scrolls to `y` and checks it took, so a later "still at `y`" proves something.
     private func scrollAndConfirm(_ rig: MDRig, toY y: CGFloat, file: StaticString = #filePath, line: UInt = #line) {
@@ -97,29 +198,54 @@ final class MotherDetailScrollTests: XCTestCase {
 
     // MARK: - The reader's place survives updates to the same job
 
-    func testTheScrollPositionSurvivesDataArrivingForTheJobBeingRead() throws {
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 933)
+    func testTheRowsInViewStayPutWhileTheSectionsAboveThePlanGrowAndShrink() throws {
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 940)
+        // Everything the reader sees, kept across all the events: no re-scrolling in between.
+        let anchors = try scrollIntoPlan(rig)
+        for (name, change, event) in liveEvents(rig) {
+            try assertAnchorsHold(rig, name, change, anchors: anchors, event: event)
+        }
+    }
 
-        let events: [(String, () throws -> Void)] = [
-            ("the job's state changes", { rig.setState("running") }),
-            ("a progress tick", { rig.setProgress(40) }),
-            ("a progress tick again", { rig.setProgress(55) }),
-            ("a new peek payload with 60 todos", { rig.sendPeek(todos: 60) }),
-            ("a new peek payload with 5 todos", { rig.sendPeek(todos: 5) }),
+    func testTheLogTailInViewStaysPutWhileTheSectionsAboveItGrowAndShrink() throws {
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 941)
+        let anchors = try scrollToLogTail(rig)
+        for (name, change, event) in liveEvents(rig) {
+            try assertAnchorsHold(rig, name, change, anchors: anchors, event: event)
+        }
+    }
+
+    func testAReaderInThePlanWhoScrollsOnIsAnchoredWhereTheyStopped() throws {
+        // The anchor follows the reader: after scrolling to a new place, the next update holds THAT place.
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 943)
+        for (k, below) in [CGFloat(2_400), 5_000].enumerated() {
+            let anchors = try scrollIntoPlan(rig, below: below)
+            try assertAnchorsHold(rig, "the todo list grows (stop \(k))", .grows, anchors: anchors) {
+                rig.sendPeek(todos: k == 0 ? 50 : 70)
+            }
+            try assertAnchorsHold(rig, "the todo list shrinks (stop \(k))", .shrinks, anchors: anchors) {
+                rig.sendPeek(todos: 3)
+            }
+        }
+    }
+
+    func testDataBelowTheReaderOrInsideTheLogLeavesTheScrollPositionAlone() throws {
+        // Nothing above the reader changes height, so the clip itself must not move either.
+        let rig = try MD.makeRig(self, long: [.planChecklist], index: 944)
+        let anchors = try scrollIntoPlan(rig)
+        let origin = originY(rig)
+        let logEvents: [(String, () throws -> Void)] = [
             ("the log tail refreshes", { rig.detail.setLogAttributed(MDFixtures.logText(lines: 120, long: true)) }),
             ("the log tail refreshes again", { rig.detail.setLogAttributed(MDFixtures.logText(lines: 40, long: false)) }),
-            ("gates grow to 40 rows", { rig.setGates(40) }),
-            ("gates shrink to 3 rows", { rig.setGates(3) }),
-            ("an action error arrives", { rig.host.errorSubject.send(MDFixtures.actionError(long: true)) }),
-            ("the job's state changes back", { rig.setState("awaiting") }),
         ]
-        for (name, event) in events {
-            scrollAndConfirm(rig, toY: 300)
-            try event()
-            rig.awaitRendered()
-            XCTAssertEqual(originY(rig), 300, accuracy: tolerance, "after \"\(name)\" the reader's place moved")
-            assertHorizontallyAtRest(rig, "after \"\(name)\"")
+        for (name, event) in logEvents {
+            try assertAnchorsHold(rig, name, .either, anchors: anchors, event: event)
+            XCTAssertEqual(originY(rig), origin, accuracy: tolerance, "after \"\(name)\" nothing above the reader changed, yet the clip moved")
         }
+        // The plan is replaced under the reader (its rows are new views): the plan's own top has not moved.
+        try rig.setPlan(items: 300)
+        rig.awaitRendered()
+        XCTAssertEqual(originY(rig), origin, accuracy: tolerance, "a longer plan replaced the rows in view and the reader's place moved")
     }
 
     func testTheScrollPositionStaysWhenTheDocumentGrowsBelowTheViewport() throws {
@@ -193,5 +319,27 @@ final class MotherDetailScrollTests: XCTestCase {
 
         XCTAssertGreaterThan(maxScrollY(rig), 500, "precondition: the other job scrolls too")
         XCTAssertEqual(originY(rig), 0, accuracy: tolerance, "an update naming a different job is a selection and starts at the top")
+    }
+
+    // MARK: - The actions scroll with the content and stay reachable
+
+    func testEveryDecisionButtonCanBeScrolledIntoViewWithLongConsequences() throws {
+        let rig = try MD.makeRig(self, long: [.consequences], index: 942)
+        let sv = scrollView(rig)
+        let doc = try XCTUnwrap(sv.documentView)
+        XCTAssertGreaterThan(doc.frame.height, sv.contentView.bounds.height, "precondition: three long consequences make the detail scroll")
+
+        let buttons = MD.allSubviews(rig.detail).compactMap { $0 as? NSButton }
+            .filter { ($0.identifier?.rawValue ?? "").hasPrefix("mother.option.") }
+        XCTAssertEqual(buttons.count, MDFixtures.optionCount, "the decision's options are buttons")
+        for button in buttons {
+            let top = doc.convert(button.bounds, from: button).minY
+            scroll(rig, toY: min(max(0, top - 20), maxScrollY(rig)))
+            let rect = doc.convert(button.bounds, from: button)
+            XCTAssertTrue(sv.documentVisibleRect.contains(rect),
+                          "\(button.title): at \(rect), not inside the viewport \(sv.documentVisibleRect) after scrolling to it")
+            XCTAssertTrue(button.isEnabled || !rig.detail.host.brokerConnected, "\(button.title) is enabled when the broker is connected")
+            XCTAssertFalse(button.isHiddenOrHasHiddenAncestor, "\(button.title) is shown")
+        }
     }
 }

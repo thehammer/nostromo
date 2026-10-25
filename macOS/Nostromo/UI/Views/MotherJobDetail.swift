@@ -228,8 +228,19 @@ final class MotherJobDetail: NSView {
     /// The log never gets shorter than this, however much content is above it.
     private static let minLogHeight: CGFloat = 160
 
-    /// The scroll content's coordinates run top-down (a test reads positions from the top edge).
-    override var isFlipped: Bool { true }
+    /// What the reader is looking at: the views from the outermost one at the top of the viewport
+    /// down to the innermost, each with the offset of its top edge from the viewport's top edge when
+    /// the reader last scrolled. Weak: a view that is rebuilt (a todo row, an action button) simply
+    /// stops counting, and the nearest surviving ancestor stands in for it.
+    private struct ScrollAnchor {
+        struct Entry { weak var view: NSView?; let offset: CGFloat }
+        var chain: [Entry] = []
+    }
+    private var scrollAnchor = ScrollAnchor()
+    /// True while this view itself moves the clip (restoring the anchor), so that move is not
+    /// mistaken for the reader scrolling and does not replace the anchor.
+    private var isRestoringAnchor = false
+    private var anchorRecheckScheduled = false
 
     // Content fields
     private let titleLabel      = EdgePinnedLabel(wrappingLabelWithString: "")
@@ -388,7 +399,15 @@ final class MotherJobDetail: NSView {
         contentScrollView.documentView          = content
         addSubview(contentScrollView)
         let clip = contentScrollView.contentView
-        content.onLayout = { [weak self] in self?.clampContentScroll() }
+        content.onLayout = { [weak self] in self?.contentDidLayout() }
+        // The reader scrolling (or the pane being resized) re-takes the anchor from what is on screen.
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.publisher(for: NSView.boundsDidChangeNotification, object: clip)
+            .sink { [weak self] _ in
+                guard let self, !self.isRestoringAnchor else { return }
+                self.recordScrollAnchor()
+            }
+            .store(in: &cancellables)
         NSLayoutConstraint.activate([
             contentScrollView.topAnchor.constraint(equalTo: topAnchor),
             contentScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -700,26 +719,98 @@ final class MotherJobDetail: NSView {
 
     // MARK: Private
 
-    /// A new subject starts at the top. Updates to the same job never call this: a flipped
-    /// document keeps its top where it is while content above or below changes, so the reader's
-    /// position survives them.
+    /// A new subject starts at the top. Updates to the same job never call this: they keep what the
+    /// reader is looking at where it is (`restoreScrollAnchor`).
     private func scrollContentToTop() {
         let clip = contentScrollView.contentView
-        guard clip.bounds.origin != .zero else { return }
-        clip.scroll(to: .zero)
-        contentScrollView.reflectScrolledClipView(clip)
+        if clip.bounds.origin != .zero {
+            clip.scroll(to: .zero)
+            contentScrollView.reflectScrolledClipView(clip)
+        }
+        // Nothing of the previous job is a place to hold on to; the next layout takes a fresh anchor.
+        scrollAnchor = ScrollAnchor()
     }
 
-    /// After a layout pass: keep the position inside the document (content shrinking under a
-    /// reader who had scrolled down), and never sideways.
+    /// After a layout pass: put what the reader was looking at back where it was (content above it
+    /// grew or shrank), and never let the position leave the document or go sideways.
+    private func contentDidLayout() {
+        if scrollAnchor.chain.isEmpty {
+            recordScrollAnchor()
+        } else {
+            restoreScrollAnchor()
+        }
+        clampContentScroll()
+        // A stack lays its rows out after this view does; look once more when that is done.
+        guard !anchorRecheckScheduled else { return }
+        anchorRecheckScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.anchorRecheckScheduled = false
+            self.restoreScrollAnchor()
+            self.clampContentScroll()
+        }
+    }
+
+    /// Top edge of `view` in the document's coordinates, measured from the top of the viewport.
+    private func offsetFromViewportTop(_ view: NSView) -> CGFloat {
+        content.convert(view.bounds, from: view).minY - contentScrollView.contentView.bounds.minY
+    }
+
+    /// Take the anchor: from the document down, the first visible child that reaches the viewport's
+    /// top edge, and again inside it, until a leaf (a nested scroll view counts as one).
+    private func recordScrollAnchor() {
+        let clip = contentScrollView.contentView
+        var chain: [ScrollAnchor.Entry] = []
+        guard clip.bounds.height > 0, !content.isHidden else { scrollAnchor = ScrollAnchor(); return }
+        let top = clip.bounds.minY
+        var node: NSView = content
+        while true {
+            let reaching = node.subviews
+                .filter { !$0.isHidden && $0.frame.height > 0 }
+                .map { ($0, content.convert($0.bounds, from: $0)) }
+                .filter { $0.1.maxY > top }
+            guard let first = reaching.min(by: { $0.1.minY < $1.1.minY })?.0 else { break }
+            chain.append(.init(view: first, offset: offsetFromViewportTop(first)))
+            if first is NSScrollView { break }
+            node = first
+        }
+        scrollAnchor = ScrollAnchor(chain: chain)
+    }
+
+    /// Scroll so the innermost anchored view that still exists sits at its recorded offset from the
+    /// viewport's top. If none does (the whole section was rebuilt away), the clamp is all that applies.
+    private func restoreScrollAnchor() {
+        let clip = contentScrollView.contentView
+        guard clip.bounds.height > 0,
+              let entry = scrollAnchor.chain.last(where: {
+                  guard let view = $0.view else { return false }
+                  return view.isDescendant(of: content) && !view.isHiddenOrHasHiddenAncestor
+              }),
+              let view = entry.view
+        else { return }
+        let delta = offsetFromViewportTop(view) - entry.offset
+        guard abs(delta) > 0.5 else { return }
+        let maxY = max(0, content.frame.height - clip.bounds.height)
+        let y = min(max(clip.bounds.origin.y + delta, 0), maxY)
+        guard y != clip.bounds.origin.y else { return }
+        isRestoringAnchor = true
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        contentScrollView.reflectScrolledClipView(clip)
+        isRestoringAnchor = false
+    }
+
+    /// The position stays inside the document (content shrinking under a reader who had scrolled
+    /// down), and never sideways.
     private func clampContentScroll() {
         let clip = contentScrollView.contentView
         guard let doc = contentScrollView.documentView else { return }
         let maxY = max(0, doc.frame.height - clip.bounds.height)
         let y = min(max(clip.bounds.origin.y, 0), maxY)
         guard y != clip.bounds.origin.y || clip.bounds.origin.x != 0 else { return }
+        isRestoringAnchor = true
         clip.scroll(to: NSPoint(x: 0, y: y))
         contentScrollView.reflectScrolledClipView(clip)
+        isRestoringAnchor = false
     }
 
     private func showEmpty() {
