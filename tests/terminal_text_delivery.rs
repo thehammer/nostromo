@@ -1010,3 +1010,290 @@ fn fuzz_pure_soup_never_panics_leaks_escapes_or_exceeds_the_cap() {
         assert!(total > 0);
     }
 }
+
+// ───────────────────────────── T3G: hidden and look-alike characters ─────────
+//
+// A secret dressed in zero-width, soft-hyphen, BOM, fullwidth or dash
+// look-alike characters must not reach the agent, end to end: the assembler
+// drops the invisible filler and the redactor (a second line of defence) reads
+// through whatever is left.
+
+const ZWSP: char = '\u{200b}';
+const ZWNJ: char = '\u{200c}';
+const ZWJ: char = '\u{200d}';
+const WORD_JOINER: char = '\u{2060}';
+const SOFT_HYPHEN: char = '\u{ad}';
+const BOM: char = '\u{feff}';
+
+/// What a reader sees: hidden characters gone, fullwidth forms and the dash
+/// look-alikes folded to ASCII. Only used to look for leaks.
+fn reader_view(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !matches!(c,
+                '\u{ad}' | '\u{34f}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+                | '\u{e0000}'..='\u{e007f}')
+        })
+        .map(|c| match c {
+            '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+            _ => c,
+        })
+        .collect()
+}
+
+fn wide(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                char::from_u32(c as u32 + 0xfee0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn splice(text: &str, at: usize, hidden: char) -> String {
+    format!("{}{hidden}{}", &text[..at], &text[at..])
+}
+
+/// One line carrying one dressed-up secret. `digits` are secrets made of
+/// digits (which the consonant scan cannot see) that must not be readable.
+struct Dressed {
+    name: String,
+    line: String,
+    digits: Vec<String>,
+}
+
+fn dressed_secrets() -> Vec<Dressed> {
+    let body = |seed: u64, n: usize| gen(seed, CONSONANTS, n);
+    let token = ["gh", "p_"].concat() + &body(601, 36);
+    let aws = ["AK", "IA"].concat() + &body(602, 16);
+    let value = body(603, 14);
+    let bearer = body(604, 24);
+    let basic = format!("{}==", body(605, 20));
+    let url_pw = body(606, 12);
+    let ssn = ["219", "09", "9999"].join("-");
+    let date = format!("{:02}/{}/{}", 3, 14, 1941);
+    let mut out = Vec::new();
+    let mut add = |name: String, line: String, digits: Vec<String>| {
+        out.push(Dressed { name, line, digits });
+    };
+    for hidden in [ZWSP, ZWNJ, ZWJ, WORD_JOINER, BOM, SOFT_HYPHEN] {
+        let u = hidden as u32;
+        add(
+            format!("token with U+{u:04X}"),
+            format!("see {} now", splice(&token, 7, hidden)),
+            vec![],
+        );
+        add(
+            format!("aws key with U+{u:04X}"),
+            format!("key {} used", splice(&aws, 4, hidden)),
+            vec![],
+        );
+        add(
+            format!("password name split by U+{u:04X}"),
+            format!("pass{hidden}word={value}"),
+            vec![],
+        );
+        add(
+            format!("bearer value split by U+{u:04X}"),
+            format!("sent Bearer {} ok", splice(&bearer, 9, hidden)),
+            vec![],
+        );
+        // Not covered on this path: `Bearer<filler>token`. The assembler drops
+        // the filler, which leaves `Bearertoken`, indistinguishable from an
+        // identifier (`BearerTokenAuthenticationFilter`). `Redactor::redact`
+        // on the raw text does cover it (it also reads the filler as a space).
+        add(
+            format!("url password split by U+{u:04X}"),
+            format!(
+                "postgres://app:{}@db.internal/main",
+                splice(&url_pw, 5, hidden)
+            ),
+            vec![],
+        );
+        add(
+            format!("basic credentials split by U+{u:04X}"),
+            format!("Authorization: Basic {}", splice(&basic, 8, hidden)),
+            vec![],
+        );
+        add(
+            format!("ssn split by U+{u:04X}"),
+            format!("SSN {} on file", splice(&ssn, 4, hidden)),
+            vec![ssn.clone(), "09-9999".into()],
+        );
+        add(
+            format!("ssn glued to its label by U+{u:04X}"),
+            format!("SSN{hidden}{ssn} on file"),
+            vec![ssn.clone(), "09-9999".into()],
+        );
+        add(
+            format!("dob label split by U+{u:04X}"),
+            format!("Resident D{hidden}OB: {date} on file"),
+            vec![date.clone(), "14/1941".into()],
+        );
+        add(
+            format!("dob date split by U+{u:04X}"),
+            format!("Resident DOB: {} on file", splice(&date, 3, hidden)),
+            vec![date.clone(), "14/1941".into()],
+        );
+    }
+    // Look-alikes the assembler leaves alone: the redactor has to cope.
+    add(
+        "fullwidth password name".into(),
+        format!("ｐａｓｓｗｏｒｄ={value}"),
+        vec![],
+    );
+    add(
+        "fullwidth password name and equals sign".into(),
+        format!("ｐａｓｓｗｏｒｄ＝{value}"),
+        vec![],
+    );
+    add(
+        "fullwidth colon".into(),
+        format!("password：{value}"),
+        vec![],
+    );
+    add(
+        "fullwidth token name".into(),
+        format!("ＧＩＴＨＵＢ_ＴＯＫＥＮ={value}"),
+        vec![],
+    );
+    add(
+        "fullwidth-digit ssn".into(),
+        format!("SSN {} on file", wide(&ssn)),
+        vec![ssn.clone(), "09-9999".into()],
+    );
+    for (name, dash) in [
+        ("en dash", "\u{2013}"),
+        ("em dash", "\u{2014}"),
+        ("minus sign", "\u{2212}"),
+        ("unicode hyphen", "\u{2010}"),
+    ] {
+        add(
+            format!("ssn with {name}s"),
+            format!("SSN {} on file", ssn.replace('-', dash)),
+            vec![ssn.clone(), "09-9999".into()],
+        );
+    }
+    add(
+        "fullwidth dob label".into(),
+        format!("Resident ＤＯＢ: {date} on file"),
+        vec![date.clone(), "14/1941".into()],
+    );
+    add(
+        "fullwidth dob digits".into(),
+        format!("Resident DOB: {} on file", wide(&date)),
+        vec![date.clone(), "14/1941".into()],
+    );
+    out
+}
+
+/// Why `text` still shows a dressed secret, if it does.
+fn dressed_leak(text: &str, dressed: &[&Dressed]) -> Option<String> {
+    let view = reader_view(text);
+    if let Some(found) = leaked(&view, None) {
+        return Some(format!("{found} readable in {text:?}"));
+    }
+    for d in dressed {
+        for digits in &d.digits {
+            if view.contains(digits.as_str()) {
+                return Some(format!("[{}] {digits:?} readable in {text:?}", d.name));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn a_secret_dressed_in_hidden_or_look_alike_characters_never_reaches_the_agent() {
+    let all = dressed_secrets();
+    assert!(all.len() >= 60, "only {} cases", all.len());
+    let mut failures = Vec::new();
+    for d in &all {
+        let out = deliver_lines(&[d.line.as_str()]);
+        if let Some(why) = dressed_leak(&out.text, &[d]) {
+            failures.push(format!("[{}] {:?}: {why}", d.name, d.line));
+        } else if !out.text.contains("[redacted: ") || out.redactions.is_empty() {
+            failures.push(format!(
+                "[{}] {:?} was not redacted: {:?}",
+                d.name, d.line, out.text
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} dressed secrets reached the agent:\n{}",
+        failures.len(),
+        all.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn dressed_secrets_fed_one_byte_at_a_time_in_one_delivery_never_reach_the_agent() {
+    let all = dressed_secrets();
+    let mut rig = Rig::new();
+    for d in &all {
+        for byte in d.line.as_bytes() {
+            rig.feed(std::slice::from_ref(byte));
+        }
+        rig.feed(b"\n");
+    }
+    let out = rig.deliver();
+    let refs: Vec<&Dressed> = all.iter().collect();
+    if let Some(why) = dressed_leak(&out.text, &refs) {
+        panic!("all dressed secrets at once: {why}");
+    }
+    assert!(
+        out.redactions.len() >= all.len(),
+        "{} redactions for {} secrets",
+        out.redactions.len(),
+        all.len()
+    );
+}
+
+#[test]
+fn ordinary_text_with_fullwidth_dashes_and_filler_loses_only_the_filler() {
+    let out = deliver_lines(&[
+        "Ｒｅｐｏｒｔ ＡＢＣ a–b zero\u{200b}width\u{feff} ok",
+        "range 2024–2025 — caf\u{e9} \u{65e5}\u{672c}\u{8a9e} \u{1F600}",
+    ]);
+    assert_eq!(
+        out.text,
+        "Ｒｅｐｏｒｔ ＡＢＣ a–b zerowidth ok\nrange 2024–2025 — caf\u{e9} \u{65e5}\u{672c}\u{8a9e} \u{1F600}"
+    );
+    assert!(out.redactions.is_empty());
+}
+
+// ───────────────────────────── review round: dropped key headers ─────────────
+
+#[test]
+fn a_key_header_with_look_alike_dashes_that_scrolls_out_of_the_buffer_still_swallows_its_body() {
+    use nostromo::terminal::follow::MAX_BUFFERED_ROWS;
+    let headers = [
+        "\u{2013}\u{2013}\u{2013}\u{2013}\u{2013}BEGIN RSA PRIVATE KEY",
+        "\u{ff0d}\u{ff0d}\u{ff0d}\u{ff0d}\u{ff0d}BEGIN RSA PRIVATE KEY",
+        "--\u{fe0f}---BEGIN RSA PRIVATE KEY",
+        "-\u{301}----BEGIN RSA PRIVATE KEY",
+    ];
+    for header in headers {
+        let mut assembler = LineAssembler::new();
+        assembler.feed(format!("{header}\n").as_bytes());
+        for i in 0..MAX_BUFFERED_ROWS + 5 {
+            assembler.feed(format!("KB{}\n", i % 10).as_bytes());
+        }
+        let text = deliver(
+            &mut assembler,
+            &mut Redactor::new(),
+            &mut DeliveryPolicy::new(),
+        )
+        .text()
+        .unwrap()
+        .to_owned();
+        assert!(!text.contains("KB"), "{header:?}: {text:?}");
+    }
+}

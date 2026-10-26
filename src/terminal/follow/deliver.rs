@@ -19,6 +19,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use super::lines::LineAssembler;
 use super::policy::DeliveryPolicy;
+use super::snapshot::snapshot_lines;
 use super::truncate::truncate;
 use crate::terminal::redact::{RedactionKind, Redactor};
 
@@ -77,6 +78,22 @@ pub fn deliver(
     policy: &mut DeliveryPolicy,
 ) -> Delivery {
     deliver_lines(assembler.take_committed(), redactor, policy)
+}
+
+/// Redact and cap the screen of a full-screen program: the public way from a
+/// raw [`screen_snapshot`](super::screen_snapshot) to agent text. It is the same pipeline as
+/// [`deliver`] (redact first, cap second, fail closed), and reports the
+/// delivery to `policy` the same way (a blank screen is not a delivery).
+///
+/// Rows the program wrapped are joined before redaction, so a secret that
+/// wrapped onto a second row is whole. A snapshot stands alone, so it is
+/// redacted with a fresh [`Redactor`]: a private-key block left open at the
+/// bottom of the screen neither carries into this terminal's later deliveries
+/// nor inherits state from them. The flip side: a screen scrolled into the
+/// middle of a key (the `BEGIN` line off-screen) has no marker to recognise,
+/// and its body lines are delivered as the text they are.
+pub fn deliver_snapshot(screen: &vt100::Screen, policy: &mut DeliveryPolicy) -> Delivery {
+    deliver_lines(snapshot_lines(screen), &mut Redactor::new(), policy)
 }
 
 /// [`deliver`] for lines that did not come from an assembler (a screen
