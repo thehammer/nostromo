@@ -21,6 +21,7 @@ use crate::data::work::untrusted::one_line;
 use crate::huey::budget::{self, Mode, PostureNote};
 use crate::huey::config::HueyConfig;
 use crate::huey::context::collectors::PrsInput;
+use crate::huey::context::digest::ProjectContext;
 use crate::huey::context::{self, build_digest, ContextEnv, Digest, LiveInputs};
 use crate::huey::interests::{self, Interests};
 use crate::huey::items::{cluster, Cluster, NewsItem, SourceClass};
@@ -621,10 +622,13 @@ pub fn fetch_failed(statuses: &[SourceStatus]) -> bool {
 }
 
 /// The footer's source lines (A7).
-pub fn base_footer(fetched: &FetchOutcome, in_flight: Vec<String>, posture: &PostureNote) -> Footer {
-    let answered = |s: &&SourceStatus| {
-        matches!(s.outcome, SourceOutcome::Ok { .. } | SourceOutcome::Quiet)
-    };
+pub fn base_footer(
+    fetched: &FetchOutcome,
+    in_flight: Vec<String>,
+    posture: &PostureNote,
+) -> Footer {
+    let answered =
+        |s: &&SourceStatus| matches!(s.outcome, SourceOutcome::Ok { .. } | SourceOutcome::Quiet);
     Footer {
         looked_at: fetched.items.len(),
         sources_read: fetched.statuses.iter().filter(answered).count(),
@@ -697,29 +701,54 @@ fn ledger_entries(report: &Report, frame: &ReportFrame) -> Vec<LedgerEntry> {
         out.extend(n.item_ids.iter().map(|id| entry(id, Section::AlsoNoted)));
     }
     if let Some(list) = &report.uncurated {
-        out.extend(list.lines.iter().map(|l| entry(&l.item_id, Section::Uncurated)));
+        out.extend(
+            list.lines
+                .iter()
+                .map(|l| entry(&l.item_id, Section::Uncurated)),
+        );
     }
     out
 }
 
 // ── The run ──────────────────────────────────────────────────────────────────
 
-/// One attempt at today's report.
-pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) -> RunOutcome {
-    if setup::load(&env.paths).state != SetupState::Confirmed || !env.paths.root().is_dir() {
-        return RunOutcome::Failed {
-            reason: FailReason::NotSetUp,
-        };
+/// One attempt's fixed inputs, with the steps that need them and the run log.
+struct Attempt<'a> {
+    env: &'a RunEnv,
+    trigger: Trigger,
+    now: DateTime<Utc>,
+    date: NaiveDate,
+    started: Instant,
+    store: Store,
+}
+
+/// The digest, and the in-flight projects it was built from.
+struct Gathered {
+    digest: Digest,
+    projects: Vec<ProjectContext>,
+}
+
+impl Gathered {
+    fn project_names(&self) -> BTreeMap<String, String> {
+        self.projects
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect()
     }
-    let started = Instant::now();
-    let now = env.clock.now();
-    let date = local_date(now, env.local_time.as_ref());
-    let store = Store::new(env.paths.clone());
-    let record = |mode: Option<Mode>, reason: Option<FailReason>, version: Option<u32>, fetch_ms| {
+}
+
+impl Attempt<'_> {
+    fn log(
+        &self,
+        mode: Option<Mode>,
+        reason: Option<FailReason>,
+        version: Option<u32>,
+        fetch_ms: u64,
+    ) {
         let rec = RunRecord {
-            at: now,
-            date,
-            trigger,
+            at: self.now,
+            date: self.date,
+            trigger: self.trigger,
             mode,
             outcome: if reason.is_some() {
                 RunResult::Failed
@@ -729,111 +758,98 @@ pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) ->
             reason,
             version,
             fetch_ms,
-            total_ms: started.elapsed().as_millis() as u64,
+            total_ms: self.started.elapsed().as_millis() as u64,
         };
-        if store.append_run(&rec).is_err() {
+        if self.store.append_run(&rec).is_err() {
             warn!("huey: run log could not be written");
         }
-    };
+    }
 
-    // 1. The window starts at the last curated report (D4).
-    let window_start = store
-        .last_curated_before(date)
-        .map(|m| m.generated_at)
-        .unwrap_or(now - Duration::days(FIRST_RUN_DAYS));
+    /// Log a failed attempt and say so.
+    fn fail(&self, mode: Option<Mode>, reason: FailReason, fetch_ms: u64) -> RunOutcome {
+        self.log(mode, Some(reason), None, fetch_ms);
+        RunOutcome::Failed { reason }
+    }
 
-    // 2. Fetch, or reuse today's frozen pool when regenerating.
-    let fetch_started = Instant::now();
-    let frozen = match trigger {
-        Trigger::Regenerate => load_pool(&env.paths.pool_dir(), date),
-        _ => None,
-    };
-    let fetched = match frozen {
-        Some(pool) => pool,
-        None => {
-            let (cfg, warnings) = load_file(&env.paths.sources_toml());
-            if !warnings.is_empty() {
-                warn!(count = warnings.len(), "huey: sources.toml warnings");
-            }
-            fetch_all(&cfg, &env.paths.state_dir(), window_start, now, &env.http).await
-        }
-    };
-    let fetch_ms = fetch_started.elapsed().as_millis() as u64;
-    if fetch_failed(&fetched.statuses) {
-        info!(sources = fetched.statuses.len(), "huey: fetch failed");
-        record(None, Some(FailReason::FetchFailed), None, fetch_ms);
-        return RunOutcome::Failed {
-            reason: FailReason::FetchFailed,
+    /// The window starts at the last curated report (D4).
+    fn window_start(&self) -> DateTime<Utc> {
+        self.store
+            .last_curated_before(self.date)
+            .map(|m| m.generated_at)
+            .unwrap_or(self.now - Duration::days(FIRST_RUN_DAYS))
+    }
+
+    /// Fetch, or reuse today's frozen pool when regenerating.
+    async fn fetch_or_pool(&self, window_start: DateTime<Utc>) -> FetchOutcome {
+        let paths = &self.env.paths;
+        let frozen = match self.trigger {
+            Trigger::Regenerate => load_pool(&paths.pool_dir(), self.date),
+            _ => None,
         };
+        if let Some(pool) = frozen {
+            return pool;
+        }
+        let (cfg, warnings) = load_file(&paths.sources_toml());
+        if !warnings.is_empty() {
+            warn!(count = warnings.len(), "huey: sources.toml warnings");
+        }
+        fetch_all(
+            &cfg,
+            &paths.state_dir(),
+            window_start,
+            self.now,
+            &self.env.http,
+        )
+        .await
     }
-    if save_pool(&env.paths.pool_dir(), date, &fetched).is_err() {
-        warn!("huey: pool could not be saved");
+
+    /// Gather the context and build the digest for this version.
+    async fn gather_digest(
+        &self,
+        interests: &Interests,
+        posture: &PostureNote,
+        version: u32,
+    ) -> Gathered {
+        let live = self.env.live.live(self.now).await;
+        let profiles = self.env.paths.state_dir().join("profiles");
+        let mut inputs = context::gather(
+            &self.env.context,
+            interests,
+            &live,
+            Some(&profiles),
+            self.now,
+        );
+        inputs.date = self.date;
+        inputs.version = version;
+        inputs.mode = Some(posture.mode_line());
+        Gathered {
+            digest: build_digest(&inputs),
+            projects: inputs.projects,
+        }
     }
 
-    // 3. Eligibility.
-    let interests = std::fs::read_to_string(env.paths.interests())
-        .map(|t| interests::parse(&t))
-        .unwrap_or_default();
-    let ledger = store.ledger();
-    let selection = select(&fetched, &interests, &ledger, date);
-
-    // 4. Context and digest; 5. mode.
-    let posture = budget::assess(&env.context.posture_file(), &env.config, now);
-    let mode = posture.mode;
-    let version = store.next_version(date);
-    let live = env.live.live(now).await;
-    let profiles = env.paths.state_dir().join("profiles");
-    let mut inputs = context::gather(&env.context, &interests, &live, Some(&profiles), now);
-    inputs.date = date;
-    inputs.version = version;
-    inputs.mode = Some(posture.mode_line());
-    let digest = build_digest(&inputs);
-    let project_names: BTreeMap<String, String> = inputs
-        .projects
-        .iter()
-        .map(|p| (p.id.clone(), p.name.clone()))
-        .collect();
-    let in_flight: Vec<String> = digest
-        .projects
-        .iter()
-        .map(|id| project_names.get(id).cloned().unwrap_or_else(|| id.clone()))
-        .collect();
-
-    let clusters = cluster(&selection.candidates);
-    let mut footer = base_footer(&fetched, in_flight, &posture);
-    footer.dropped = selection.hard_drops.clone();
-    let items: BTreeMap<String, NewsItem> = fetched
-        .items
-        .iter()
-        .chain(&selection.ain_eligible)
-        .map(|i| (i.id.clone(), i.clone()))
-        .collect();
-    let frame = ReportFrame {
-        date,
-        version,
-        mode,
-        clusters: clusters.clone(),
-        items,
-        source_names: fetched
-            .statuses
-            .iter()
-            .map(|s| (s.id.clone(), s.name.clone()))
-            .collect(),
-        project_names,
-        footer,
-    };
-
-    // 6. Curate, or list without a model.
-    let (report, model) = if mode.is_curated() {
-        if store
-            .write_report_file(date, version, "digest.md", digest.text.as_bytes())
+    /// The model pass. `None` when it failed; the version is discarded.
+    async fn curate(
+        &self,
+        frame: &ReportFrame,
+        selection: &Selection,
+        gathered: &Gathered,
+        ledger: &Ledger,
+    ) -> Option<(Report, String)> {
+        let (date, version, mode) = (frame.date, frame.version, frame.mode);
+        let config = &self.env.config;
+        if self
+            .store
+            .write_report_file(date, version, "digest.md", gathered.digest.text.as_bytes())
             .is_err()
         {
             warn!("huey: digest could not be written");
         }
-        let (model, max_budget_usd) = match mode {
-            Mode::Tight => (env.config.tight_model.clone(), env.config.tight_max_budget_usd),
-            _ => (env.config.model.clone(), env.config.max_budget_usd),
+        let tight = mode == Mode::Tight;
+        let (model, max_budget_usd) = if tight {
+            (config.tight_model.clone(), config.tight_max_budget_usd)
+        } else {
+            (config.model.clone(), config.max_budget_usd)
         };
         let input = CurateInput {
             date,
@@ -841,41 +857,159 @@ pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) ->
             mode,
             model: model.clone(),
             max_budget_usd,
-            max_picks: if mode == Mode::Tight {
-                TIGHT_MAX_PICKS
+            max_picks: if tight { TIGHT_MAX_PICKS } else { MAX_PICKS },
+            also_noted: !tight,
+            digest: gathered.digest.clone(),
+            candidates: if tight {
+                trim_for_tight(&frame.clusters)
             } else {
-                MAX_PICKS
-            },
-            also_noted: mode != Mode::Tight,
-            digest: digest.clone(),
-            candidates: if mode == Mode::Tight {
-                trim_for_tight(&clusters)
-            } else {
-                clusters
+                frame.clusters.clone()
             },
             ain_candidates: selection.ain_eligible.clone(),
             recent_shown: ledger.recent(date).cloned().collect(),
-            project_roots: inputs
+            project_roots: gathered
                 .projects
                 .iter()
                 .map(|p| (p.id.clone(), p.root.clone()))
                 .collect(),
-            report_dir: store.report_dir(date, version),
+            report_dir: self.store.report_dir(date, version),
             frame: frame.clone(),
         };
-        match env.curator.curate(&input).await {
-            Ok(publish) => (assemble_curated(&frame, &publish), Some(model)),
+        match self.env.curator.curate(&input).await {
+            Ok(publish) => Some((assemble_curated(frame, &publish), model)),
             Err(e) => {
                 info!(
                     unavailable = matches!(e, CurateError::Unavailable),
                     "huey: model failed"
                 );
-                store.discard_version(date, version);
-                record(Some(mode), Some(FailReason::ModelFailed), None, fetch_ms);
-                return RunOutcome::Failed {
-                    reason: FailReason::ModelFailed,
-                };
+                self.store.discard_version(date, version);
+                None
             }
+        }
+    }
+
+    /// Write the report, then record it in the ledger. `Err` when the report
+    /// could not be written; the version is discarded. The digest as shown
+    /// includes any checks the curator appended.
+    fn persist(
+        &self,
+        meta: &ReportMeta,
+        report: &Report,
+        frame: &ReportFrame,
+        digest_text: &str,
+    ) -> Result<(), ()> {
+        let markdown = render::render_markdown(report);
+        let files = ReportFiles {
+            meta,
+            report,
+            markdown: &markdown,
+            digest: digest_text,
+        };
+        if self.store.write_report(&files).is_err() {
+            warn!("huey: report could not be written");
+            self.store.discard_version(self.date, frame.version);
+            return Err(());
+        }
+        let mut ledger = self.store.ledger();
+        ledger.replace_date(self.date, ledger_entries(report, frame));
+        if self.store.save_ledger(&ledger).is_err() {
+            warn!("huey: ledger could not be written");
+        }
+        Ok(())
+    }
+}
+
+/// Everything a report renders from, besides the publish.
+fn build_frame(
+    date: NaiveDate,
+    version: u32,
+    mode: Mode,
+    fetched: &FetchOutcome,
+    selection: &Selection,
+    gathered: &Gathered,
+    posture: &PostureNote,
+) -> ReportFrame {
+    let project_names = gathered.project_names();
+    let in_flight = gathered
+        .digest
+        .projects
+        .iter()
+        .map(|id| project_names.get(id).cloned().unwrap_or_else(|| id.clone()))
+        .collect();
+    let mut footer = base_footer(fetched, in_flight, posture);
+    footer.dropped = selection.hard_drops.clone();
+    ReportFrame {
+        date,
+        version,
+        mode,
+        clusters: cluster(&selection.candidates),
+        items: fetched
+            .items
+            .iter()
+            .chain(&selection.ain_eligible)
+            .map(|i| (i.id.clone(), i.clone()))
+            .collect(),
+        source_names: fetched
+            .statuses
+            .iter()
+            .map(|s| (s.id.clone(), s.name.clone()))
+            .collect(),
+        project_names,
+        footer,
+    }
+}
+
+/// One attempt at today's report: window, fetch, select, digest, curate or
+/// list, persist.
+pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) -> RunOutcome {
+    if setup::load(&env.paths).state != SetupState::Confirmed || !env.paths.root().is_dir() {
+        return RunOutcome::Failed {
+            reason: FailReason::NotSetUp,
+        };
+    }
+    let now = env.clock.now();
+    let date = local_date(now, env.local_time.as_ref());
+    let attempt = Attempt {
+        env,
+        trigger,
+        now,
+        date,
+        started: Instant::now(),
+        store: Store::new(env.paths.clone()),
+    };
+    let store = &attempt.store;
+
+    let window_start = attempt.window_start();
+
+    let fetch_started = Instant::now();
+    let fetched = attempt.fetch_or_pool(window_start).await;
+    let fetch_ms = fetch_started.elapsed().as_millis() as u64;
+    if fetch_failed(&fetched.statuses) {
+        info!(sources = fetched.statuses.len(), "huey: fetch failed");
+        return attempt.fail(None, FailReason::FetchFailed, fetch_ms);
+    }
+    if save_pool(&env.paths.pool_dir(), date, &fetched).is_err() {
+        warn!("huey: pool could not be saved");
+    }
+
+    let interests = std::fs::read_to_string(env.paths.interests())
+        .map(|t| interests::parse(&t))
+        .unwrap_or_default();
+    let ledger = store.ledger();
+    let selection = select(&fetched, &interests, &ledger, date);
+
+    let posture = budget::assess(&env.context.posture_file(), &env.config, now);
+    let mode = posture.mode;
+    let version = store.next_version(date);
+    let gathered = attempt.gather_digest(&interests, &posture, version).await;
+    let frame = build_frame(
+        date, version, mode, &fetched, &selection, &gathered, &posture,
+    );
+
+    let (report, model) = if mode.is_curated() {
+        match attempt.curate(&frame, &selection, &gathered, &ledger).await {
+            Some((report, model)) => (report, Some(model)),
+            None => return attempt.fail(Some(mode), FailReason::ModelFailed, fetch_ms),
         }
     } else {
         (
@@ -884,11 +1018,9 @@ pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) ->
         )
     };
 
-    // 7. Render and persist. The digest as shown includes any checks the
-    // curator appended.
     let digest_text = store
         .load_digest(date, version)
-        .unwrap_or_else(|| digest.text.clone());
+        .unwrap_or_else(|| gathered.digest.text.clone());
     let meta = ReportMeta {
         date,
         version,
@@ -900,29 +1032,13 @@ pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) ->
         window_start,
         late_reason,
     };
-    let markdown = render::render_markdown(&report);
-    if store
-        .write_report(&ReportFiles {
-            meta: &meta,
-            report: &report,
-            markdown: &markdown,
-            digest: &digest_text,
-        })
+    if attempt
+        .persist(&meta, &report, &frame, &digest_text)
         .is_err()
     {
-        warn!("huey: report could not be written");
-        store.discard_version(date, version);
-        record(Some(mode), Some(FailReason::ModelFailed), None, fetch_ms);
-        return RunOutcome::Failed {
-            reason: FailReason::ModelFailed,
-        };
+        return attempt.fail(Some(mode), FailReason::ModelFailed, fetch_ms);
     }
-    let mut ledger = store.ledger();
-    ledger.replace_date(date, ledger_entries(&report, &frame));
-    if store.save_ledger(&ledger).is_err() {
-        warn!("huey: ledger could not be written");
-    }
-    record(Some(mode), None, Some(version), fetch_ms);
+    attempt.log(Some(mode), None, Some(version), fetch_ms);
     let pruned = store.prune(date);
     info!(
         version,

@@ -498,6 +498,14 @@ impl MissingReason {
             MissingReason::ModelFailed => "the model run failed",
         }
     }
+
+    /// Waiting is information; anything else is a warning.
+    fn banner_level(self) -> BannerLevel {
+        match self {
+            MissingReason::Pending => BannerLevel::Info,
+            _ => BannerLevel::Warning,
+        }
+    }
 }
 
 /// The banner for a report dated `shown` when today is `today`: `None` for
@@ -507,12 +515,8 @@ pub fn banner_for(shown: NaiveDate, today: NaiveDate, reason: MissingReason) -> 
     if shown == today {
         return None;
     }
-    let level = match reason {
-        MissingReason::Pending => BannerLevel::Info,
-        _ => BannerLevel::Warning,
-    };
     Some(Banner {
-        level,
+        level: reason.banner_level(),
         text: format!(
             "This is the report from {}. Today's report is missing: {}.",
             shown.format("%A, %b %-d, %Y"),
@@ -561,10 +565,7 @@ pub fn no_report_document(today: NaiveDate, reason: MissingReason) -> HueyDocume
     HueyDocument::from_markdown(
         title(today, 1),
         Some(Banner {
-            level: match reason {
-                MissingReason::Pending => BannerLevel::Info,
-                _ => BannerLevel::Warning,
-            },
+            level: reason.banner_level(),
             text: format!("There is no report yet: {}.", reason.text()),
         }),
         "No report yet.\n".to_string(),
