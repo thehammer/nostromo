@@ -372,7 +372,7 @@ impl ReportFrame {
         out
     }
 
-    fn source_name(&self, item: &NewsItem) -> String {
+    pub(crate) fn source_name(&self, item: &NewsItem) -> String {
         self.source_names
             .get(&item.source_id)
             .cloned()

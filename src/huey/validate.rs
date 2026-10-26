@@ -15,7 +15,7 @@ use crate::data::work::picks::shown_ids;
 use crate::huey::checks::{CheckResult, Probe};
 use crate::huey::interests::InterestSection;
 use crate::huey::render::{self, words};
-use crate::huey::run::{CurateInput, Publish, PublishCheck};
+use crate::huey::run::{CurateInput, Publish, PublishCheck, PublishPick};
 
 /// Also-noted lines per report (AC6); none in tight mode (AC32).
 pub const MAX_NOTED: usize = 5;
@@ -220,12 +220,30 @@ fn blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
-fn pick_rules(
+/// `which` names ids that are not candidate items of this run.
+fn non_candidate_rule(
     facts: &Facts<'_>,
-    n: usize,
-    pick: &crate::huey::run::PublishPick,
+    which: &str,
+    item_ids: &[String],
     add: &mut impl FnMut(Rule, String),
 ) {
+    let unknown: Vec<String> = item_ids
+        .iter()
+        .filter(|id| !facts.is_candidate(id))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        add(
+            Rule::UnknownItem,
+            format!(
+                "{which} names items that are not candidates in this run: {}",
+                shown_ids(&unknown)
+            ),
+        );
+    }
+}
+
+fn pick_rules(facts: &Facts<'_>, n: usize, pick: &PublishPick, add: &mut impl FnMut(Rule, String)) {
     let which = format!("pick {}", n + 1);
     let check_text = match &pick.check {
         PublishCheck::Checked { text, .. } | PublishCheck::ToCheck { text } => text,
@@ -247,21 +265,7 @@ fn pick_rules(
         );
     }
 
-    let unknown: Vec<String> = pick
-        .item_ids
-        .iter()
-        .filter(|id| !facts.is_candidate(id))
-        .cloned()
-        .collect();
-    if !unknown.is_empty() {
-        add(
-            Rule::UnknownItem,
-            format!(
-                "{which} names items that are not candidates in this run: {}",
-                shown_ids(&unknown)
-            ),
-        );
-    }
+    non_candidate_rule(facts, &which, &pick.item_ids, add);
 
     let project = pick.project.as_str();
     if !facts.input.digest.projects.iter().any(|p| p == project) {
@@ -427,21 +431,7 @@ fn noted_rules(facts: &Facts<'_>, publish: &Publish, add: &mut impl FnMut(Rule, 
         if noted.item_ids.is_empty() {
             add(Rule::UnknownItem, format!("{which} names no item"));
         }
-        let unknown: Vec<String> = noted
-            .item_ids
-            .iter()
-            .filter(|id| !facts.is_candidate(id))
-            .cloned()
-            .collect();
-        if !unknown.is_empty() {
-            add(
-                Rule::UnknownItem,
-                format!(
-                    "{which} names items that are not candidates in this run: {}",
-                    shown_ids(&unknown)
-                ),
-            );
-        }
+        non_candidate_rule(facts, &which, &noted.item_ids, add);
         if !facts.allowed_interests.contains(noted.interest.as_str()) {
             add(
                 Rule::BadInterest,
@@ -600,7 +590,7 @@ fn names_word(text: &str, term: &str) -> bool {
 
 fn drop_and_ignore_rules(facts: &Facts<'_>, publish: &Publish, add: &mut impl FnMut(Rule, String)) {
     let known = |id: &str| facts.is_candidate(id) || facts.ain_ids.contains(id);
-    let shown_ids_set: BTreeSet<&str> = publish
+    let used_ids: BTreeSet<&str> = publish
         .picks
         .iter()
         .flat_map(|p| p.item_ids.iter())
@@ -632,7 +622,7 @@ fn drop_and_ignore_rules(facts: &Facts<'_>, publish: &Publish, add: &mut impl Fn
         .dropped
         .iter()
         .map(|d| d.item_id.clone())
-        .filter(|id| shown_ids_set.contains(id.as_str()))
+        .filter(|id| used_ids.contains(id.as_str()))
         .collect();
     if !dropped_and_shown.is_empty() {
         add(
@@ -651,7 +641,7 @@ fn drop_and_ignore_rules(facts: &Facts<'_>, publish: &Publish, add: &mut impl Fn
     let ignored_used: Vec<String> = publish
         .ignored
         .iter()
-        .filter(|id| shown_ids_set.contains(id.as_str()) && Some(id.as_str()) != ain)
+        .filter(|id| used_ids.contains(id.as_str()) && Some(id.as_str()) != ain)
         .cloned()
         .collect();
     if !ignored_used.is_empty() {

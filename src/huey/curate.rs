@@ -26,6 +26,7 @@
 //!
 //! Nothing here logs digest text, news text or anything the model wrote (T5).
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ use crate::huey::budget::Mode;
 use crate::huey::checks::{self, CheckResult, Probe};
 use crate::huey::config::HueyConfig;
 use crate::huey::context::digest::append_checks;
-use crate::huey::items::NewsItem;
+use crate::huey::items::{NewsItem, SourceClass};
 use crate::huey::prompts;
 use crate::huey::render::date_prefix;
 use crate::huey::run::{CurateError, CurateInput, Curator, Publish};
@@ -110,12 +111,6 @@ pub fn default_huey_run_restrictions() -> SessionRestrictions {
 
 // ── the model input ──────────────────────────────────────────────────────────
 
-/// An id as the model input shows it: escaped to the safe charset. `None`
-/// for an id too long to escape (the item is left out).
-fn shown_id(id: &str) -> Option<String> {
-    escape_id(id)
-}
-
 fn when(item: &NewsItem) -> String {
     match item.published_at {
         Some(at) => format!("published {}", at.format("%Y-%m-%d %H:%M UTC")),
@@ -128,9 +123,9 @@ fn when(item: &NewsItem) -> String {
 
 fn class_label(item: &NewsItem) -> &'static str {
     match item.class {
-        crate::huey::items::SourceClass::FirstParty => "first-party",
-        crate::huey::items::SourceClass::Curated => "curated",
-        crate::huey::items::SourceClass::Aggregator => "aggregator",
+        SourceClass::FirstParty => "first-party",
+        SourceClass::Curated => "curated",
+        SourceClass::Aggregator => "aggregator",
     }
 }
 
@@ -141,18 +136,23 @@ fn class_label(item: &NewsItem) -> &'static str {
 /// only inside the fence (T4); links are never given (the daemon owns them).
 pub fn build_model_input(input: &CurateInput) -> String {
     let fence = NonceFence::new();
-    let frame = &input.frame;
-    let source = |item: &NewsItem| {
-        frame
-            .source_names
-            .get(&item.source_id)
-            .cloned()
-            .unwrap_or_else(|| item.source_id.clone())
-    };
     let mut out = String::new();
     out.push_str(prompts::CURATE);
     out.push('\n');
+    write_run_header(&mut out, input);
+    write_digest(&mut out, input);
+    let story_ids = write_candidates(&mut out, input, &fence);
+    write_ain_candidates(&mut out, input, &fence, &story_ids);
+    write_recent_reports(&mut out, input, &fence);
+    out
+}
 
+fn write_run_header(out: &mut String, input: &CurateInput) {
+    let limits = if input.mode == Mode::Tight {
+        LIMITS_TIGHT
+    } else {
+        LIMITS_NORMAL
+    };
     let _ = writeln!(out, "## This run");
     let _ = writeln!(
         out,
@@ -161,17 +161,11 @@ pub fn build_model_input(input: &CurateInput) -> String {
         input.version,
         input.mode.as_str()
     );
-    let _ = writeln!(
-        out,
-        "{}",
-        if input.mode == Mode::Tight {
-            LIMITS_TIGHT
-        } else {
-            LIMITS_NORMAL
-        }
-    );
+    let _ = writeln!(out, "{limits}");
     out.push('\n');
+}
 
+fn write_digest(out: &mut String, input: &CurateInput) {
     out.push_str(DIGEST_BEGIN);
     out.push_str(&input.digest.text);
     if !input.digest.text.ends_with('\n') {
@@ -179,17 +173,25 @@ pub fn build_model_input(input: &CurateInput) -> String {
     }
     out.push_str(DIGEST_END);
     out.push('\n');
+}
 
+/// Every candidate story; the ids of the items shown, for the
+/// Also-in-the-news section to point back to.
+fn write_candidates<'a>(
+    out: &mut String,
+    input: &'a CurateInput,
+    fence: &NonceFence,
+) -> BTreeSet<&'a str> {
     let _ = writeln!(
         out,
         "## Candidate news: {} stories, best source first in each",
         input.candidates.len()
     );
-    let mut story_ids = std::collections::BTreeSet::new();
+    let mut story_ids = BTreeSet::new();
     for (n, story) in input.candidates.iter().enumerate() {
         let _ = writeln!(out, "### Story {}", n + 1);
         for item in &story.items {
-            let Some(id) = shown_id(&item.id) else {
+            let Some(id) = escape_id(&item.id) else {
                 continue;
             };
             story_ids.insert(item.id.as_str());
@@ -197,7 +199,7 @@ pub fn build_model_input(input: &CurateInput) -> String {
                 out,
                 "- [{id}] {} · {} · {}",
                 class_label(item),
-                one_line(&source(item), 80),
+                one_line(&input.frame.source_name(item), 80),
                 when(item)
             );
             let _ = writeln!(out, "  Title: {}", fence.line(&item.title, TITLE_CHARS));
@@ -208,19 +210,27 @@ pub fn build_model_input(input: &CurateInput) -> String {
         let _ = writeln!(out, "(none)");
     }
     out.push('\n');
+    story_ids
+}
 
+fn write_ain_candidates(
+    out: &mut String,
+    input: &CurateInput,
+    fence: &NonceFence,
+    story_ids: &BTreeSet<&str>,
+) {
     let _ = writeln!(
         out,
         "## Also-in-the-news candidates (first-party, past 7 days)"
     );
     for item in &input.ain_candidates {
-        let Some(id) = shown_id(&item.id) else {
+        let Some(id) = escape_id(&item.id) else {
             continue;
         };
         let _ = writeln!(
             out,
             "- [{id}] {} · {}",
-            one_line(&source(item), 80),
+            one_line(&input.frame.source_name(item), 80),
             when(item)
         );
         let _ = writeln!(out, "  Title: {}", fence.line(&item.title, TITLE_CHARS));
@@ -235,16 +245,19 @@ pub fn build_model_input(input: &CurateInput) -> String {
         let _ = writeln!(out, "(none: publish also_in_the_news as null)");
     }
     out.push('\n');
+}
 
+fn write_recent_reports(out: &mut String, input: &CurateInput, fence: &NonceFence) {
     let _ = writeln!(
         out,
         "## Recent reports (last 14 days; use these ids for follow_up_of)"
     );
     for entry in &input.recent_shown {
-        let Some(id) = shown_id(&entry.item_id) else {
+        let Some(id) = escape_id(&entry.item_id) else {
             continue;
         };
-        let title = frame
+        let title = input
+            .frame
             .items
             .get(&entry.item_id)
             .map(|i| format!(": {}", fence.line(&i.title, TITLE_CHARS)))
@@ -254,7 +267,6 @@ pub fn build_model_input(input: &CurateInput) -> String {
     if input.recent_shown.is_empty() {
         let _ = writeln!(out, "(none)");
     }
-    out
 }
 
 // ── the bridge between the run and the MCP tools ─────────────────────────────
@@ -386,6 +398,18 @@ fn unescape_ids(mut publish: Publish) -> Publish {
     publish
 }
 
+/// Parse and validate a publish against the run; `Err` is the refusal reasons.
+fn judge_publish(run: &ActiveRun, args: &Value) -> Result<Publish, Vec<String>> {
+    match serde_json::from_value::<Publish>(args.clone()) {
+        Ok(publish) => validate::validate(&run.input, &unescape_ids(publish), &run.checks)
+            .map_err(|problems| problems.iter().map(ToString::to_string).collect()),
+        Err(e) => Err(vec![one_line(
+            &format!("the publish does not match the schema: {e}"),
+            300,
+        )]),
+    }
+}
+
 impl CurateBridge {
     pub fn new() -> Self {
         Self::default()
@@ -486,14 +510,7 @@ impl CurateBridge {
             return json!({ "ok": false, "error": "finished", "message": "this run is over; stop now" });
         }
         run.attempts += 1;
-        let verdict = match serde_json::from_value::<Publish>(args.clone()) {
-            Ok(publish) => validate::validate(&run.input, &unescape_ids(publish), &run.checks)
-                .map_err(|problems| problems.iter().map(ToString::to_string).collect::<Vec<_>>()),
-            Err(e) => Err(vec![one_line(
-                &format!("the publish does not match the schema: {e}"),
-                300,
-            )]),
-        };
+        let verdict = judge_publish(run, args);
         let left = MAX_PUBLISH_ATTEMPTS.saturating_sub(run.attempts);
         let (answer, end) = match verdict {
             Ok(publish) => (
