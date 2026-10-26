@@ -216,6 +216,31 @@ pub enum AuditEvent {
         tag: String,
         follower: String,
     },
+    /// A remote shell had no keystrokes for the warning time; it closes at
+    /// `closes_at` unless kept open.
+    IdleWarning {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        kind: TerminalKind,
+        closes_at: DateTime<Utc>,
+    },
+    /// After an idle warning the shell was kept open: `via` is `keystroke`
+    /// or `button`.
+    IdleKeptOpen {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        via: String,
+    },
+    /// A remote shell was closed for being idle (the `closed` line follows,
+    /// reason `idle_timeout`).
+    IdleClosed {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        kind: TerminalKind,
+    },
     /// One delivery into the follower's conversation: counts and sizes only.
     Delivery {
         terminal_id: String,

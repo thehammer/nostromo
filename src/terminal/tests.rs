@@ -28,6 +28,7 @@ use super::session::{
     RING_MAX_BYTES, RING_MAX_NEWLINES, SCRUBBED_ENV,
 };
 use super::store::{self, TerminalRecord, TerminalStore};
+use super::IdleState;
 use super::{
     OpenLocal, StreamBatch, Terminal, TerminalConfig, TerminalError, TerminalManager,
     MAX_AGENT_TERMINALS, MAX_AGENT_TERMINALS_PER_FOCUS, MAX_TERMINALS, MAX_TERMINALS_PER_FOCUS,
@@ -1164,6 +1165,7 @@ fn adopt(
         requested_by: requester(),
         opened_by_request: None,
         follower: None,
+        idle_closes_at: None,
     };
     let fanout = Fanout::idle(&terminal_id, Arc::new(Mutex::new(None)));
     mgr.terminals.insert(
@@ -1173,6 +1175,8 @@ fn adopt(
             session,
             fanout,
             remote: None,
+            opened_at: chrono::Utc::now(),
+            idle: IdleState::fresh(),
         },
     );
     terminal_id

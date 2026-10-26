@@ -1371,12 +1371,17 @@ fn handle_client_msg(
         | ClientMsg::TerminalResize { .. }
         | ClientMsg::TerminalClose { .. }
         | ClientMsg::TerminalRestart { .. }
+        | ClientMsg::TerminalKeepAlive { .. }
         | ClientMsg::TerminalRefusalReport { .. }) => {
             handle_terminal_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
         }
 
         // Remote shells: the vocabulary for anyone local; opening one and
         // answering its confirm sheet are the operator app's alone.
+        // Which remote shells are open (metadata only): the restart guard asks.
+        ClientMsg::TerminalRemoteSummaryRequest => {
+            let _ = targeted_tx.send(lock_terminals(terminals).remote_summary_msg());
+        }
         ClientMsg::RemoteShellTargetsRequest => {
             let paths = lock_terminals(terminals).ecs_paths().clone();
             let _ = targeted_tx.send(terminal::remote_request::remote_targets_msg(&paths));
@@ -2437,6 +2442,7 @@ fn handle_terminal_msg(
         } => mgr.resize(cap, &terminal_id, cols, rows),
         ClientMsg::TerminalClose { terminal_id } => mgr.close(cap, &terminal_id),
         ClientMsg::TerminalRestart { terminal_id } => mgr.restart(cap, &terminal_id).map(|_| ()),
+        ClientMsg::TerminalKeepAlive { terminal_id } => mgr.keep_alive(cap, &terminal_id),
         ClientMsg::TerminalRefusalReport {
             terminal_id,
             op,
@@ -3366,6 +3372,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::TerminalOutput { .. }
         | ServerMsg::TerminalReplay { .. }
         | ServerMsg::TerminalRefused { .. }
+        | ServerMsg::TerminalRemoteSummary { .. }
         | ServerMsg::TerminalList { .. } => false,
         // Remote shell frames name a production target and the agent's reason:
         // each goes to chosen connections only, never to everyone.

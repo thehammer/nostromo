@@ -19,9 +19,11 @@ pub mod audit;
 pub mod ecs;
 mod fanout;
 pub mod follow;
+pub mod idle;
 pub mod launcher;
 pub mod redact;
 pub mod remote_request;
+pub mod restart_guard;
 pub mod session;
 pub mod store;
 #[cfg(test)]
@@ -32,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 use uuid::Uuid;
@@ -42,6 +45,7 @@ use audit::{AuditEvent, AuditLog, RefusalChannel};
 use ecs::watch::RemoteWatch;
 use ecs::EcsPaths;
 use fanout::Fanout;
+use idle::{IdleAction, IdlePolicy};
 use launcher::{ConnectFailure, Placement, RemoteLauncher, UnavailableLauncher};
 use remote_request::{Decision, RemoteRequests};
 use session::{InputError, SignalOps, TerminalSession};
@@ -50,8 +54,8 @@ use store::{TerminalRecord, TerminalStore};
 use crate::ipc::pane_registry::{PaneError, PaneRegistry, SplitPosition};
 use crate::ipc::peer::SensitiveTags;
 use crate::ipc::protocol::{
-    ClientMsg, PaneContentWire, PaneTree, ServerMsg, TerminalClosedInfo, TerminalInfo,
-    TerminalKind, TerminalRequester, TerminalStatus, TerminalTarget,
+    ClientMsg, PaneContentWire, PaneTree, RemoteShellSummary, ServerMsg, TerminalClosedInfo,
+    TerminalInfo, TerminalKind, TerminalRequester, TerminalStatus, TerminalTarget,
 };
 
 /// Frames for one connection's terminal stream, queued together (a replay
@@ -232,6 +236,29 @@ struct Terminal {
     fanout: Arc<Fanout>,
     /// An ECS terminal's output watch.
     remote: Option<Arc<RemoteWatch>>,
+    /// When the shell was opened (reported to the restart guard).
+    opened_at: DateTime<Utc>,
+    /// The idle clock: only a keystroke or keep-alive from the operator app
+    /// resets it.
+    idle: IdleState,
+}
+
+/// A remote shell's idle clock.
+struct IdleState {
+    last_keystroke: tokio::time::Instant,
+    /// Wall-clock twin of `last_keystroke`, for `idle_closes_at`.
+    last_keystroke_utc: DateTime<Utc>,
+    warned: bool,
+}
+
+impl IdleState {
+    fn fresh() -> Self {
+        Self {
+            last_keystroke: tokio::time::Instant::now(),
+            last_keystroke_utc: Utc::now(),
+            warned: false,
+        }
+    }
 }
 
 pub struct TerminalManager {
@@ -259,6 +286,8 @@ pub struct TerminalManager {
     ecs_paths: EcsPaths,
     /// Agent follow, once the IPC server has wired it.
     follow: Option<Arc<follow::FollowManager>>,
+    /// When an idle remote shell is warned and closed.
+    idle_policy: IdlePolicy,
 }
 
 impl Terminal {
@@ -307,6 +336,7 @@ impl TerminalManager {
                 remote_launcher: Arc::new(UnavailableLauncher),
                 ecs_paths: EcsPaths::from_config(&crate::config::TerminalConfig::default()),
                 follow: None,
+                idle_policy: IdlePolicy::default(),
             })
         })
     }
@@ -384,6 +414,8 @@ impl TerminalManager {
                     session: None,
                     fanout,
                     remote: None,
+                    opened_at: Utc::now(),
+                    idle: IdleState::fresh(),
                 },
             );
         }
@@ -679,6 +711,7 @@ impl TerminalManager {
             requested_by,
             opened_by_request: req.client_request_id,
             follower: None,
+            idle_closes_at: None,
         };
         self.insert_live(info.clone(), session, remote);
         self.persist();
@@ -754,6 +787,8 @@ impl TerminalManager {
                 session: Some(session),
                 fanout,
                 remote,
+                opened_at: Utc::now(),
+                idle: IdleState::fresh(),
             },
         );
     }
@@ -834,11 +869,172 @@ impl TerminalManager {
             .filter(|s| t.info.status == TerminalStatus::Running && !s.is_exited())
             .ok_or(TerminalError::NotRunning)?;
         t.fanout.input_received();
-        session.write(bytes).map_err(|e| match e {
+        let written = session.write(bytes).map_err(|e| match e {
             InputError::TooLarge => TerminalError::InputTooLarge,
             InputError::Busy => TerminalError::InputBusy,
             InputError::Gone => TerminalError::NotRunning,
-        })
+        });
+        // Only the operator's keystrokes count as activity: this is the one
+        // place (with keep-alive) the idle clock is reset.
+        if written.is_ok() {
+            self.reset_idle(terminal_id, "keystroke");
+        }
+        written
+    }
+
+    /// Keep a remote shell open (the app's Keep open button): the idle clock
+    /// restarts and a pending warning is cleared. A local terminal is exempt
+    /// from the idle rule, so there is nothing to do for it.
+    pub fn keep_alive(
+        &mut self,
+        _cap: &OperatorCap,
+        terminal_id: &str,
+    ) -> Result<(), TerminalError> {
+        let t = self
+            .terminals
+            .get(terminal_id)
+            .ok_or(TerminalError::UnknownTerminal)?;
+        if t.info.status != TerminalStatus::Running && t.info.kind == TerminalKind::Ecs {
+            return Err(TerminalError::NotRunning);
+        }
+        self.reset_idle(terminal_id, "button");
+        Ok(())
+    }
+
+    /// Restart a remote shell's idle clock; if it had been warned, clear the
+    /// warning, audit `idle_kept_open {via}` and tell clients.
+    fn reset_idle(&mut self, terminal_id: &str, via: &str) {
+        let Some(t) = self.terminals.get_mut(terminal_id) else {
+            return;
+        };
+        if t.info.kind != TerminalKind::Ecs {
+            return;
+        }
+        let was_warned = t.idle.warned;
+        t.idle = IdleState::fresh();
+        if !was_warned {
+            return;
+        }
+        t.info.idle_closes_at = None;
+        let info = t.info.clone();
+        self.record(AuditEvent::IdleKeptOpen {
+            terminal_id: info.terminal_id.clone(),
+            pane_id: info.pane_id.clone(),
+            tag: self.audit_tag(&info.tag),
+            via: via.to_string(),
+        });
+        self.send(ServerMsg::TerminalState {
+            terminal: self.described(&info),
+        });
+    }
+
+    // ── idle ─────────────────────────────────────────────────────────────────
+
+    /// Replace the idle policy (the daemon resolves it once at start; tests).
+    pub fn set_idle_policy(&mut self, policy: IdlePolicy) {
+        self.idle_policy = policy;
+    }
+
+    /// Start the 1 s idle tick for `mgr`. It ends with the manager.
+    pub fn start_idle_monitor(mgr: &Arc<Mutex<TerminalManager>>) {
+        let weak = Arc::downgrade(mgr);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let Some(mgr) = weak.upgrade() else {
+                    return;
+                };
+                mgr.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .idle_tick(tokio::time::Instant::now());
+            }
+        });
+    }
+
+    /// Warn or close every running remote shell the policy says is due.
+    /// Output never counts as activity, so a busy but unattended shell closes.
+    pub(crate) fn idle_tick(&mut self, now: tokio::time::Instant) {
+        if self.shutting_down {
+            return;
+        }
+        let due: Vec<(String, IdleAction)> = self
+            .terminals
+            .iter()
+            .filter(|(_, t)| {
+                t.info.kind == TerminalKind::Ecs && t.info.status == TerminalStatus::Running
+            })
+            .map(|(id, t)| {
+                let action = self
+                    .idle_policy
+                    .evaluate(t.idle.last_keystroke, now, t.idle.warned);
+                (id.clone(), action)
+            })
+            .collect();
+        for (id, action) in due {
+            match action {
+                IdleAction::None => {}
+                IdleAction::Warn { .. } => self.idle_warn(&id),
+                IdleAction::Close => self.idle_close(&id),
+            }
+        }
+    }
+
+    fn idle_warn(&mut self, terminal_id: &str) {
+        let close_after = self.idle_policy.close_after;
+        let Some(t) = self.terminals.get_mut(terminal_id) else {
+            return;
+        };
+        t.idle.warned = true;
+        let closes_at = t.idle.last_keystroke_utc
+            + chrono::Duration::from_std(close_after).unwrap_or(chrono::Duration::zero());
+        t.info.idle_closes_at = Some(closes_at);
+        let info = t.info.clone();
+        self.record(AuditEvent::IdleWarning {
+            terminal_id: info.terminal_id.clone(),
+            pane_id: info.pane_id.clone(),
+            tag: self.audit_tag(&info.tag),
+            kind: info.kind,
+            closes_at,
+        });
+        self.send(ServerMsg::TerminalState {
+            terminal: self.described(&info),
+        });
+    }
+
+    fn idle_close(&mut self, terminal_id: &str) {
+        let Some(t) = self.terminals.remove(terminal_id) else {
+            return;
+        };
+        if let Some(session) = &t.session {
+            session.kill();
+        }
+        t.fanout.close();
+        self.record(AuditEvent::IdleClosed {
+            terminal_id: t.info.terminal_id.clone(),
+            pane_id: t.info.pane_id.clone(),
+            tag: self.audit_tag(&t.info.tag),
+            kind: t.info.kind,
+        });
+        self.finish_closed(t.info, "idle_timeout", None);
+    }
+
+    /// The open remote shells, as the restart guard asks for them: metadata
+    /// only, no output.
+    pub fn remote_summary_msg(&self) -> ServerMsg {
+        let shells = self
+            .terminals
+            .values()
+            .filter(|t| t.info.kind == TerminalKind::Ecs)
+            .filter_map(|t| {
+                Some(RemoteShellSummary {
+                    label: t.info.label.clone(),
+                    target: t.info.target.clone()?,
+                    opened_at: t.opened_at,
+                })
+            })
+            .collect();
+        ServerMsg::TerminalRemoteSummary { shells }
     }
 
     pub fn resize(
@@ -963,6 +1159,7 @@ impl TerminalManager {
             ended_reason: None,
             opened_by_request: None,
             follower: None,
+            idle_closes_at: None,
             ..old.info
         };
         self.insert_live(info.clone(), session, None);
@@ -1284,6 +1481,8 @@ impl TerminalManager {
             return None;
         }
         t.info.status = TerminalStatus::Running;
+        // The idle clock starts when the session does, not while it connects.
+        t.idle = IdleState::fresh();
         let info = t.info.clone();
         self.send(ServerMsg::TerminalState {
             terminal: info.clone(),
@@ -1430,6 +1629,7 @@ pub fn op_of(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::TerminalResize { .. } => "resize",
         ClientMsg::TerminalClose { .. } => "close",
         ClientMsg::TerminalRestart { .. } => "restart",
+        ClientMsg::TerminalKeepAlive { .. } => "keep_alive",
         ClientMsg::TerminalRefusalReport { .. } => "refusal_report",
         ClientMsg::TerminalFollowInvite { .. } => "follow_invite",
         ClientMsg::TerminalFollowStop { .. } => "follow_stop",
@@ -1451,6 +1651,7 @@ pub fn terminal_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::TerminalResize { terminal_id, .. }
         | ClientMsg::TerminalClose { terminal_id }
         | ClientMsg::TerminalRestart { terminal_id }
+        | ClientMsg::TerminalKeepAlive { terminal_id }
         | ClientMsg::TerminalFollowInvite { terminal_id, .. }
         | ClientMsg::TerminalFollowStop { terminal_id }
         | ClientMsg::TerminalFollowResume { terminal_id } => Some(terminal_id),
