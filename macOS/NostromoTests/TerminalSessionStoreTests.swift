@@ -523,8 +523,8 @@ final class TerminalSessionStoreTests: XCTestCase {
         store.expectKeyboardFocus(clientRequestId: "req-1", windowId: "w-mine")
 
         state(info(openedBy: "req-1"))
-        state(info(openedBy: "req-1", cols: 100))
-        state(info(openedBy: "req-1", cols: 110))
+        state(info(cols: 100, openedBy: "req-1"))
+        state(info(cols: 110, openedBy: "req-1"))
 
         XCTAssertEqual(mine.focusCount, 1)
     }
