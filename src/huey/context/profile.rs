@@ -29,14 +29,14 @@ const SKIP_DIRS: &[&str] = &[
     "DerivedData",
 ];
 
-/// Package names that are an Anthropic SDK (compared after [`normalize`]).
-const ANTHROPIC_SDKS: &[&str] = &[
-    "anthropic",
-    "@anthropic-ai/sdk",
-    "@anthropic-ai/claude-agent-sdk",
-    "claude-agent-sdk",
-    "github.com/anthropics/anthropic-sdk-go",
-];
+/// Is dependency `name` (already [`normalize`]d) an Anthropic SDK? A loose
+/// match on `anthropic`, `claude` or `misanthropy`, so Rust crates (`anthropic-ai-sdk`,
+/// `misanthropy`), Swift packages and the like are not reported as "no SDK".
+fn is_anthropic_sdk(name: &str) -> bool {
+    ["anthropic", "claude", "misanthropy"]
+        .iter()
+        .any(|needle| name.contains(needle))
+}
 
 /// Packages that make a project an MCP server.
 const MCP_SERVER_PACKAGES: &[&str] = &[
@@ -376,13 +376,19 @@ fn swift_package_names(text: &str) -> Vec<String> {
     // `.package(url: "https://github.com/org/name.git", …)` → `name`.
     let re = regex::Regex::new(r#"\.package\s*\(\s*(?:name:\s*"[^"]*"\s*,\s*)?url:\s*"([^"]+)""#)
         .expect("valid regex");
-    re.captures_iter(text)
+    let mut out: Vec<String> = re
+        .captures_iter(text)
         .filter_map(|c| {
             let url = c.get(1)?.as_str().trim_end_matches('/');
             let last = url.rsplit('/').next()?;
             Some(last.trim_end_matches(".git").to_string())
         })
-        .collect()
+        .collect();
+    // `.package(name: "X", path: …)` and `.product(name: "X", package: …)`.
+    let named = regex::Regex::new(r#"\.(?:package|product)\s*\(\s*name:\s*"([^"]+)""#)
+        .expect("valid regex");
+    out.extend(named.captures_iter(text).map(|c| c[1].to_string()));
+    out
 }
 
 fn go_mod_names(text: &str) -> Vec<String> {
@@ -513,23 +519,37 @@ fn features(root: &Path, deps: &[Dependency]) -> Vec<String> {
         .collect()
 }
 
+/// Pathspec excludes for obvious secret files; every `git grep` over tracked
+/// files carries them, so a secret's contents are never searched.
+const SECRET_EXCLUDES: &[&str] = &[
+    ":(exclude,glob,icase)**/.env",
+    ":(exclude,glob,icase)**/.env.*",
+    ":(exclude,glob,icase)**/*.pem",
+    ":(exclude,glob,icase)**/*.key",
+    ":(exclude,glob,icase)**/id_rsa*",
+    ":(exclude,glob,icase)**/id_ed25519*",
+    ":(exclude,glob,icase)**/*.p12",
+    ":(exclude,glob,icase)**/credentials*",
+    ":(exclude,glob,icase)**/*secret*",
+];
+
 /// Number of tracked files at HEAD containing `term` (fixed string), and the
 /// first repo-relative paths. `None` when git could not answer.
 pub(crate) fn grep_files(root: &Path, term: &str) -> Option<Vec<String>> {
-    let out = git(
-        root,
-        &[
-            "grep",
-            "--no-textconv",
-            "-F",
-            "-l",
-            "-I",
-            "-e",
-            term,
-            "HEAD",
-            "--",
-        ],
-    )?;
+    let mut args = vec![
+        "grep",
+        "--no-textconv",
+        "-F",
+        "-l",
+        "-I",
+        "-e",
+        term,
+        "HEAD",
+        "--",
+        ".",
+    ];
+    args.extend(SECRET_EXCLUDES);
+    let out = git(root, &args)?;
     match out.code {
         0 => Some(
             String::from_utf8_lossy(&out.stdout)
@@ -543,21 +563,21 @@ pub(crate) fn grep_files(root: &Path, term: &str) -> Option<Vec<String>> {
 }
 
 fn env_names(root: &Path) -> Vec<String> {
-    let Some(out) = git(
-        root,
-        &[
-            "grep",
-            "--no-textconv",
-            "-I",
-            "-h",
-            "-o",
-            "-E",
-            "-e",
-            "CLAUDE_CODE_[A-Z0-9_]+",
-            "HEAD",
-            "--",
-        ],
-    ) else {
+    let mut args = vec![
+        "grep",
+        "--no-textconv",
+        "-I",
+        "-h",
+        "-o",
+        "-E",
+        "-e",
+        "CLAUDE_CODE_[A-Z0-9_]+",
+        "HEAD",
+        "--",
+        ".",
+    ];
+    args.extend(SECRET_EXCLUDES);
+    let Some(out) = git(root, &args) else {
         return Vec::new();
     };
     if out.code != 0 {
@@ -576,10 +596,9 @@ pub fn profile(root: &Path) -> Profile {
     let head = head_sha(root);
     let manifests = manifest_files(root);
     let deps = dependencies(root);
-    let sdk_names: Vec<String> = ANTHROPIC_SDKS.iter().map(|s| normalize(s)).collect();
     let sdks: BTreeSet<String> = deps
         .iter()
-        .filter(|d| sdk_names.contains(&d.name))
+        .filter(|d| is_anthropic_sdk(&d.name))
         .map(|d| d.name.clone())
         .collect();
     let invocation = if head.is_some() {

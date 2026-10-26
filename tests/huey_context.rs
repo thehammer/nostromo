@@ -2785,6 +2785,107 @@ fn the_projects_note_says_the_description_is_read() {
 }
 
 #[test]
+fn the_text_probe_never_searches_obvious_secret_files() {
+    let dir = tempfile::tempdir().unwrap();
+    make_repo(
+        dir.path(),
+        &[
+            ("src/main.rs", "fn main() { /* VISIBLE-TOKEN */ }\n"),
+            (".env", "A=SECRET-ONLY-TOKEN\n"),
+            ("config/.env.production", "A=SECRET-ONLY-TOKEN\n"),
+            ("certs/server.pem", "SECRET-ONLY-TOKEN\n"),
+            ("certs/server.key", "SECRET-ONLY-TOKEN\n"),
+            ("home/id_rsa", "SECRET-ONLY-TOKEN\n"),
+            ("home/id_ed25519.pub", "SECRET-ONLY-TOKEN\n"),
+            ("home/store.p12", "SECRET-ONLY-TOKEN\n"),
+            ("aws/credentials", "SECRET-ONLY-TOKEN\n"),
+            ("docs/My-Secrets.txt", "SECRET-ONLY-TOKEN\n"),
+        ],
+    );
+    let secret = check(
+        "c1",
+        "x",
+        dir.path(),
+        &Probe::Text {
+            term: "SECRET-ONLY-TOKEN".into(),
+        },
+    )
+    .unwrap();
+    assert!(!secret.found, "{}", secret.line());
+    assert!(secret.paths.is_empty());
+    let visible = check(
+        "c2",
+        "x",
+        dir.path(),
+        &Probe::Text {
+            term: "VISIBLE-TOKEN".into(),
+        },
+    )
+    .unwrap();
+    assert!(visible.found, "{}", visible.line());
+    assert_eq!(visible.paths, vec!["src/main.rs".to_string()]);
+}
+
+#[test]
+fn rust_and_swift_anthropic_packages_are_detected_as_sdks() {
+    let cases: [(&str, &str); 4] = [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n[dependencies]\nanthropic-ai-sdk = \"0.2\"\n",
+        ),
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n[dependencies]\nmisanthropy = \"0.1\"\n",
+        ),
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n[dependencies]\nanthropic_sdk_rust = \"0.1\"\n",
+        ),
+        (
+            "Package.swift",
+            "let package = Package(name: \"X\", dependencies: [\n  .package(url: \"https://github.com/jamesrochabrun/SwiftAnthropic.git\", from: \"1.0.0\")\n])\n",
+        ),
+    ];
+    for (file, body) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        make_repo(dir.path(), &[(file, body)]);
+        let prof = profile::profile(dir.path());
+        assert!(prof.uses_anthropic_sdk(), "{file}: {body}: {}", prof.line());
+        let probe = check(
+            "c1",
+            "x",
+            dir.path(),
+            &Probe::Dependency {
+                name: prof.sdks[0].clone(),
+            },
+        )
+        .unwrap();
+        assert!(probe.found, "{}", probe.line());
+    }
+
+    // A Swift product name counts too, and `claude` matches as well.
+    let dir = tempfile::tempdir().unwrap();
+    make_repo(
+        dir.path(),
+        &[(
+            "Package.swift",
+            "let package = Package(name: \"X\", targets: [.target(name: \"X\", dependencies: [.product(name: \"ClaudeKit\", package: \"kit\")])])\n",
+        )],
+    );
+    assert!(profile::profile(dir.path()).uses_anthropic_sdk());
+
+    let dir = tempfile::tempdir().unwrap();
+    make_repo(
+        dir.path(),
+        &[(
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n",
+        )],
+    );
+    assert!(!profile::profile(dir.path()).uses_anthropic_sdk());
+}
+
+#[test]
 fn a_git_file_pointing_outside_the_code_root_is_not_probed_there() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().canonicalize().unwrap();
