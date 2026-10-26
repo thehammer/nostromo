@@ -104,16 +104,44 @@ pub fn verdict(shape: &Shape, output: &str, redactions: usize) -> Option<String>
     let view = reader_view(output);
     for secret in &shape.secrets {
         if let Some(piece) = readable_piece(&view, secret) {
-            return Some(format!("{piece:?} is readable in {output:?}"));
+            return Some(format!(
+                "{piece:?} is readable in {}",
+                excerpt(output, &view, &piece)
+            ));
         }
     }
     if !output.contains("[redacted: ") {
-        return Some(format!("no [redacted: ] marker in {output:?}"));
+        return Some(format!(
+            "no [redacted: ] marker in {}",
+            excerpt(output, output, "")
+        ));
     }
     if redactions == 0 {
-        return Some(format!("no redaction reported for {output:?}"));
+        return Some(format!(
+            "no redaction reported for {}",
+            excerpt(output, output, "")
+        ));
     }
     None
+}
+
+/// `output` as a failure message shows it: all of it when it is short, else the
+/// part of `view` around `around` (a megabyte of output must not end up in a
+/// panic message).
+fn excerpt(output: &str, view: &str, around: &str) -> String {
+    const SHORT: usize = 600;
+    if output.len() <= SHORT {
+        return format!("{output:?}");
+    }
+    let at = view.find(around).unwrap_or(0);
+    let before: Vec<char> = view[..at].chars().rev().take(200).collect();
+    let before: String = before.into_iter().rev().collect();
+    let after: String = view[at..].chars().take(400).collect();
+    format!(
+        "...{:?}... ({} bytes of output in all)",
+        before + &after,
+        output.len()
+    )
 }
 
 // ───────────────────────────── hidden separators ─────────────────────────────
@@ -1270,4 +1298,361 @@ pub fn curl_lookalike_negative_texts() -> Vec<(&'static str, String)> {
 /// quote is an ordinary character, so the rows after it are not curl's.
 pub fn unmatched_quote_negative_text() -> String {
     "curl \"https://h/x\nls\ndocker run -u 1000:1000 nginx".to_string()
+}
+
+// ───────────── review round 4: the combination budget is per row group ───────────
+//
+// Every hidden-run combination is read for each row group (a line, or the rows
+// of a continued command), however much other text the call carries: a
+// credential on a LATER line of a big call is read exactly as it is alone. A
+// group that is too big to read in every combination, or too many such groups in
+// one call, is redacted from its credential keyword to the end of the line.
+
+const ZWJ: &str = "\u{200d}";
+
+/// Credential lines with hidden runs at several seams of one line (the
+/// separator, the colon, inside the password). Each one is a single row.
+pub fn credentials_with_several_hidden_runs() -> Vec<Shape> {
+    let z = ZWSP;
+    let split = |seed: u64, at: usize| {
+        let pw = consonants(seed, 12);
+        let (head, tail) = (pw[..at].to_string(), pw[at..].to_string());
+        (pw, head, tail)
+    };
+    let (pw1, h1, t1) = split(911, 2);
+    let (pw2, h2, t2) = split(912, 4);
+    let (pw3, h3, t3) = split(913, 6);
+    let (pw4, h4, t4) = split(914, 3);
+    let (pw5, h5, t5) = split(915, 5);
+    let mut out = vec![
+        shape(
+            "--proxy-user with a hidden run at every seam",
+            format!("curl{z}--proxy-user{z}ops{z}:{z}{h1}{ZWJ}{t1} https://h/x"),
+            &[&pw1, &t1],
+        ),
+        shape(
+            "-u with a double-quoted user and a hidden run at every seam",
+            format!("curl{z}-u{z}\"admin\"{z}:{z}{h2}{ZWJ}{t2} https://h/x"),
+            &[&pw2, &t2],
+        ),
+        shape(
+            "--user with a single-quoted user and a hidden run at every seam",
+            format!("curl{z}--user{z}'ops'{z}:{z}{h3}{ZWJ}{t3} https://h/x"),
+            &[&pw3, &t3],
+        ),
+        shape(
+            "--password with a hidden run before and inside the value",
+            format!("tool{z}--password{z}{h4}{ZWJ}{t4} run"),
+            &[&pw4, &t4],
+        ),
+        shape(
+            "password= with a hidden run after the equals sign and inside the value",
+            format!("password={z}{h5}{ZWJ}{t5}"),
+            &[&pw5, &t5],
+        ),
+    ];
+    out.extend(credential_among_many_hidden_runs_shapes());
+    out.extend(credential_after_many_hidden_runs(z));
+    out.extend(separator_after_many_hidden_runs(z));
+    out
+}
+
+/// A continued `curl` command (rows joined with `\n`, two rows) whose rows both
+/// hold several hidden runs.
+pub fn continued_curl_with_several_hidden_runs_shapes() -> Vec<Shape> {
+    let z = ZWSP;
+    let pw = consonants(921, 12);
+    let (head, tail) = pw.split_at(4);
+    let pw2 = consonants(922, 12);
+    let (head2, tail2) = pw2.split_at(4);
+    vec![
+        shape(
+            "--user continued, hidden runs on both rows",
+            format!("curl{z}--user{z}\\\nad{z}min{z}:{z}{head}{ZWJ}{tail} https://h/x"),
+            &[&pw, tail],
+        ),
+        shape(
+            "-u continued, double-quoted user, hidden runs on both rows",
+            format!("curl{z}-u{z}\\\n\"admin\"{z}:{z}{head2}{ZWJ}{tail2}"),
+            &[&pw2, tail2],
+        ),
+    ]
+}
+
+/// What a block of padding rows is made of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Padding {
+    /// Ordinary ASCII lines.
+    Plain,
+    /// `ok<ZWSP>ok<ZWSP>...` rows: twenty hidden runs a row.
+    Hidden,
+    /// A thousand four-byte emoji a row (what a hostile program can emit in one
+    /// delivery: the assembler keeps 512K cells).
+    Emoji,
+    /// Emoji with a hidden character after each one.
+    EmojiHidden,
+}
+
+impl Padding {
+    pub fn label(self) -> &'static str {
+        match self {
+            Padding::Plain => "plain ASCII lines",
+            Padding::Hidden => "lines with hidden characters",
+            Padding::Emoji => "rows of emoji",
+            Padding::EmojiHidden => "rows of emoji with hidden characters",
+        }
+    }
+
+    /// Row `i` of the padding (no credential keyword, no secret).
+    pub fn row(self, i: usize) -> String {
+        match self {
+            Padding::Plain => format!("step {i}: compiled module m{i} with no warnings"),
+            Padding::Hidden => format!("ok{ZWSP}").repeat(20),
+            Padding::Emoji => "\u{1f600}".repeat(1000),
+            Padding::EmojiHidden => format!("\u{1f600}{ZWSP}").repeat(500),
+        }
+    }
+}
+
+/// Padding for the raw redactor: 1.25 MiB, so `text.len() << 1` is two and a
+/// half times the old budget (`1 << 20`).
+pub const PADDING_BYTES: usize = 5 << 18;
+
+/// Padding for one delivery. The assembler keeps at most 8192 rows and 512K
+/// cells, so this is as much as a plain or hidden-character row can add while
+/// everything stays buffered; it is still a third above the old budget's
+/// threshold (`text.len() << 1 > 1 << 20`, text over 512 KiB).
+pub const DELIVERY_PADDING_BYTES: usize = 700_000;
+
+/// Rows of `kind` until they hold at least `min_bytes` (a newline counts).
+pub fn padding_rows(kind: Padding, min_bytes: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    while bytes < min_bytes {
+        let row = kind.row(rows.len());
+        bytes += row.len() + 1;
+        rows.push(row);
+    }
+    rows
+}
+
+/// Where the credential rows go relative to the padding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    Before,
+    After,
+    Both,
+}
+
+impl Place {
+    pub const ALL: [Place; 3] = [Place::Before, Place::After, Place::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Place::Before => "before the padding",
+            Place::After => "after the padding",
+            Place::Both => "before and after the padding",
+        }
+    }
+
+    pub fn before(self) -> bool {
+        matches!(self, Place::Before | Place::Both)
+    }
+
+    pub fn after(self) -> bool {
+        matches!(self, Place::After | Place::Both)
+    }
+}
+
+/// Credential rows and padding rows. `shape` is all of them as one text (rows
+/// joined with `\n`) with every secret in it, so [`verdict`] reads the output.
+pub struct Padded {
+    pub shape: Shape,
+    pub credentials: Vec<String>,
+    pub padding: Vec<String>,
+    pub place: Place,
+}
+
+/// The credential lines of `group` (one row each) placed by `place` around
+/// `padding` (rows of `kind`).
+pub fn padded(group: &[Shape], kind: Padding, padding: &[String], place: Place) -> Padded {
+    let mut credentials = Vec::new();
+    let mut secrets: Vec<String> = Vec::new();
+    for s in group {
+        assert!(!s.line.contains('\n'), "[{}] is not one row", s.name);
+        credentials.push(s.line.clone());
+        for secret in &s.secrets {
+            if !secrets.contains(secret) {
+                secrets.push(secret.clone());
+            }
+        }
+    }
+    let mut out = Padded {
+        shape: Shape {
+            name: format!(
+                "{} credential row(s) {} {}",
+                group.len(),
+                place.label(),
+                kind.label()
+            ),
+            line: String::new(),
+            secrets,
+        },
+        credentials,
+        padding: padding.to_vec(),
+        place,
+    };
+    out.shape.line = out.rows().join("\n");
+    out
+}
+
+/// `rows` cut into rounds of at least `round_bytes` each. A short remainder (under
+/// half a round) joins the round before it, so every round but a lone one is
+/// big.
+fn split_into_rounds(rows: &[String], round_bytes: usize) -> Vec<Vec<String>> {
+    let mut rounds: Vec<Vec<String>> = Vec::new();
+    let mut round = Vec::new();
+    let mut bytes = 0;
+    for row in rows {
+        bytes += row.len() + 1;
+        round.push(row.clone());
+        if bytes >= round_bytes {
+            rounds.push(std::mem::take(&mut round));
+            bytes = 0;
+        }
+    }
+    if !round.is_empty() {
+        match rounds.last_mut() {
+            Some(last) if bytes < round_bytes / 2 => last.extend(round),
+            _ => rounds.push(round),
+        }
+    }
+    rounds
+}
+
+impl Padded {
+    /// Every row in order.
+    pub fn rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        if self.place.before() {
+            rows.extend(self.credentials.iter().cloned());
+        }
+        rows.extend(self.padding.iter().cloned());
+        if self.place.after() {
+            rows.extend(self.credentials.iter().cloned());
+        }
+        rows
+    }
+
+    /// The rows as separate calls or deliveries: the padding cut into rounds of
+    /// about `round_bytes`, and the credential rows either in a round of their
+    /// own before and/or after them (`apart`) or riding along in the first and/or
+    /// last round of padding.
+    pub fn rounds(&self, round_bytes: usize, apart: bool) -> Vec<Vec<String>> {
+        let mut rounds = split_into_rounds(&self.padding, round_bytes);
+        if apart {
+            if self.place.before() {
+                rounds.insert(0, self.credentials.clone());
+            }
+            if self.place.after() {
+                rounds.push(self.credentials.clone());
+            }
+            return rounds;
+        }
+        if self.place.after() {
+            if let Some(last) = rounds.last_mut() {
+                last.extend(self.credentials.iter().cloned());
+            }
+        }
+        if self.place.before() {
+            if let Some(first) = rounds.first_mut() {
+                first.splice(0..0, self.credentials.iter().cloned());
+            }
+        }
+        rounds
+    }
+
+    /// Credential rows in the text.
+    pub fn credential_row_count(&self) -> usize {
+        self.credentials.len()
+            * (usize::from(self.place.before()) + usize::from(self.place.after()))
+    }
+
+    /// Why `output` (the redacted text of all rows) is not good enough, if it
+    /// isn't: [`verdict`], and a marker for every credential row. Only for
+    /// outputs that still hold every credential row (a delivery's cap keeps the
+    /// first fifty and last hundred lines, and the credential rows are there).
+    pub fn verdict(&self, output: &str, redactions: usize) -> Option<String> {
+        if let Some(why) = verdict(&self.shape, output, redactions) {
+            return Some(why);
+        }
+        let markers = output.matches("[redacted: ").count();
+        let rows = self.credential_row_count();
+        (markers < rows).then(|| format!("{markers} markers for {rows} credential rows"))
+    }
+}
+
+/// Keyword lines with nine hidden runs each, enough of them to hold at least
+/// `min_bytes`. Every line has its own secret.
+pub fn flood_of_keyword_lines(min_bytes: usize) -> Vec<Shape> {
+    let z = ZWSP;
+    let mut out = Vec::new();
+    let mut bytes = 0;
+    while bytes < min_bytes {
+        let i = out.len();
+        let pw = consonants(10_000 + i as u64, 12);
+        let (head, tail) = pw.split_at(5);
+        let line = format!(
+            "x{z}y{z}z{z}curl{z}--proxy-user{z}ops{z}:{z}{head}{ZWJ}{tail} https://h/x{z}done"
+        );
+        bytes += line.len() + 1;
+        out.push(shape(format!("flood line {i}"), line, &[&pw, tail]));
+    }
+    out
+}
+
+/// ONE line of at least `min_bytes` (`a<ZWSP>` repeated) with a credential in
+/// the middle: one row group, however it is read.
+pub fn one_huge_line_with_a_credential_in_the_middle(min_bytes: usize) -> Vec<Shape> {
+    let z = ZWSP;
+    let side = format!("a{z}").repeat(min_bytes / 8);
+    let pw = consonants(931, 12);
+    let (head, tail) = pw.split_at(2);
+    let pw2 = consonants(932, 12);
+    let (head2, tail2) = pw2.split_at(5);
+    vec![
+        shape(
+            "curl --proxy-user in the middle of one huge line",
+            format!("{side} curl{z}--proxy-user{z}ops{z}:{z}{head}{ZWJ}{tail} https://h/x {side}"),
+            &[&pw, tail],
+        ),
+        shape(
+            "password= in the middle of one huge line",
+            format!("{side} password={z}{head2}{ZWJ}{tail2} {side}"),
+            &[&pw2, tail2],
+        ),
+    ]
+}
+
+/// Rows with many hidden runs (three sentences of eight) and no credential
+/// keyword, at least `min_bytes`. About 230 bytes a row, so a delivery of them
+/// stays under the assembler's 8192 rows.
+pub fn benign_rows_with_hidden_runs(min_bytes: usize) -> Vec<String> {
+    let z = ZWSP;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    while bytes < min_bytes {
+        let i = rows.len();
+        let sentence =
+            format!("compiled{z}module{z}m{i}{z}ok{z}in{z}{i}{z}ms{z}with{z}no{z}warnings");
+        let row = [sentence.as_str(); 3].join(" ");
+        bytes += row.len() + 1;
+        rows.push(row);
+    }
+    rows
+}
+
+/// ONE line of at least `min_bytes` (`a<ZWSP>` repeated) and no keyword.
+pub fn benign_huge_line(min_bytes: usize) -> String {
+    format!("a{ZWSP}").repeat(min_bytes / 4)
 }

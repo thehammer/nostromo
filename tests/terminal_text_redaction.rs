@@ -2292,8 +2292,18 @@ fn about_a_megabyte(unit: &str) -> String {
 }
 
 /// The bound a megabyte must stay under in a debug build on a busy CI runner.
-/// Ordinary text takes about a sixth of it, the slowest shape about half, and
-/// the quadratic scans these guard against took tens of seconds.
+///
+/// Measured (RWX sandbox, 4 vCPUs, debug build, one shape at a time):
+/// ordinary text takes 20 ms, the slowest guarded shapes (`curl -u a:b`
+/// followed by a hidden character and a newline, or by a backslash and a
+/// newline) 120-140 ms, every other guarded shape under 100 ms. With the
+/// machine kept busy (eight spinning threads on the 4 vCPUs, each test thread
+/// getting about half a core) the slowest took 330 ms, so the bound has 3x
+/// headroom there and about 7x on an idle machine. Before the scanners were
+/// gated and the views made cheap the same shapes took 0.4-0.9 s on the idle
+/// sandbox and 1.0-2.1 s on the loaded laptop where the review measured them;
+/// the quadratic scans these guard against took tens of seconds. A shape that
+/// creeps toward half the bound is a regression even though it still passes.
 const FAST_ENOUGH: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Held while a megabyte is timed: the tests of this file run on parallel
@@ -2654,5 +2664,322 @@ fn a_megabyte_of_quoted_curl_credentials_with_a_trailing_backslash_is_redacted_i
     assert_fast(
         "curl -u \"a:b\\<newline>",
         &about_a_megabyte("curl -u \"a:b\\\n"),
+    );
+}
+
+// ───────────── review round 4: the combination budget is per row group ───────────
+//
+// A hostile program (or just a long log) can put hundreds of kilobytes of text
+// in front of a credential in one call. The credential's hidden runs are read in
+// every combination whatever else the call carries, and a group too big for
+// that, or too many of them, fails closed.
+
+/// The old budget stopped reading combinations once `text.len() << 1` passed
+/// `1 << 20`; every text below is a clear margin above that.
+const OLD_BUDGET: usize = 1 << 20;
+
+fn assert_text_is_over_the_old_budget(text: &str) {
+    assert!(
+        (text.len() << 1) > OLD_BUDGET * 2,
+        "only {} bytes: not clearly over the old budget",
+        text.len()
+    );
+}
+
+/// Fails with every one of `failures` (one per line) if there are any.
+fn assert_no_failures(what: &str, failures: Vec<String>) {
+    assert!(
+        failures.is_empty(),
+        "{what}: {} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn credentials_with_several_hidden_runs_are_redacted_when_nothing_surrounds_them() {
+    // The control for the tests below: the same rows with no padding.
+    let all = shapes::credentials_with_several_hidden_runs();
+    assert!(all.len() >= 20, "only {} shapes", all.len());
+    assert_shapes_redacted(&all);
+}
+
+/// Every placement of the credential rows around padding of `kind`, as ONE call:
+/// the headline repro alone, then all the credential rows at once.
+fn assert_padded_text_redacted_in_one_call(kind: shapes::Padding) {
+    let rows = shapes::padding_rows(kind, shapes::PADDING_BYTES);
+    let credentials = shapes::credentials_with_several_hidden_runs();
+    let mut failures = Vec::new();
+    for place in shapes::Place::ALL {
+        for group in [&credentials[..1], &credentials[..]] {
+            let p = shapes::padded(group, kind, &rows, place);
+            assert_text_is_over_the_old_budget(&p.shape.line);
+            let (out, kinds) = redact(&p.shape.line);
+            if let Some(why) = p.verdict(&out, kinds.len()) {
+                failures.push(format!("[{}] {why}", p.shape.name));
+            }
+        }
+    }
+    assert_no_failures("one call", failures);
+}
+
+#[test]
+fn a_credential_with_several_hidden_runs_is_redacted_before_and_after_a_megabyte_of_plain_lines() {
+    assert_padded_text_redacted_in_one_call(shapes::Padding::Plain);
+}
+
+#[test]
+fn a_credential_with_several_hidden_runs_is_redacted_before_and_after_a_megabyte_of_lines_with_hidden_characters(
+) {
+    assert_padded_text_redacted_in_one_call(shapes::Padding::Hidden);
+}
+
+#[test]
+fn a_credential_with_several_hidden_runs_is_redacted_before_and_after_a_megabyte_of_emoji() {
+    assert_padded_text_redacted_in_one_call(shapes::Padding::Emoji);
+}
+
+/// Each call's text: its rows, every one with its newline (lines are whole).
+fn call_text(rows: &[String]) -> String {
+    let mut text = rows.join("\n");
+    text.push('\n');
+    text
+}
+
+/// The rounds one after another through ONE `Redactor`, each a call. The outputs
+/// are joined; the count is every redaction reported.
+fn redact_in_calls(rounds: &[Vec<String>]) -> (String, usize) {
+    let mut redactor = Redactor::new();
+    let mut out = String::new();
+    let mut redactions = 0;
+    for round in rounds {
+        let (text, kinds) = redactor.redact(&call_text(round));
+        out.push_str(&text);
+        redactions += kinds.len();
+    }
+    (out, redactions)
+}
+
+/// The text of `kind` padding cut into calls of `round_bytes`, with the
+/// credential rows in a call of their own (`apart`) or riding along.
+fn assert_padded_calls_redacted(kind: shapes::Padding, round_bytes: usize, apart: bool) {
+    let rows = shapes::padding_rows(kind, shapes::PADDING_BYTES);
+    let credentials = shapes::credentials_with_several_hidden_runs();
+    let mut failures = Vec::new();
+    for place in shapes::Place::ALL {
+        let p = shapes::padded(&credentials, kind, &rows, place);
+        let rounds = p.rounds(round_bytes, apart);
+        assert!(rounds.len() >= 2, "only {} calls", rounds.len());
+        if !apart {
+            for round in &rounds {
+                assert!(call_text(round).len() > 600_000, "a call is too small");
+            }
+        }
+        let (out, redactions) = redact_in_calls(&rounds);
+        if let Some(why) = p.verdict(&out, redactions) {
+            failures.push(format!(
+                "[{}] {} calls (credentials apart: {apart}): {why}",
+                p.shape.name,
+                rounds.len()
+            ));
+        }
+    }
+    assert_no_failures("split feeds", failures);
+}
+
+#[test]
+fn a_credential_in_a_later_call_than_the_padding_is_redacted_whatever_the_padding_is_made_of() {
+    // Calls of about 200 KB, the credential rows in a call of their own.
+    for kind in [
+        shapes::Padding::Plain,
+        shapes::Padding::Hidden,
+        shapes::Padding::Emoji,
+    ] {
+        assert_padded_calls_redacted(kind, 200_000, true);
+    }
+}
+
+#[test]
+fn a_credential_in_the_same_call_as_more_than_half_a_megabyte_of_padding_is_redacted_when_the_padding_came_in_several_calls(
+) {
+    // Calls of 640 KB, each over the old threshold on its own; the credential
+    // rows ride along in the first and/or last one.
+    for kind in [
+        shapes::Padding::Plain,
+        shapes::Padding::Hidden,
+        shapes::Padding::Emoji,
+    ] {
+        assert_padded_calls_redacted(kind, 640_000, false);
+    }
+}
+
+/// Row one of a continued command, row two, and how they are put into calls:
+/// `before` is padding in front of row one, `after` is padding behind row two.
+fn assert_continued_command_redacted_around_padding(kind: shapes::Padding) {
+    let rows = shapes::padding_rows(kind, shapes::PADDING_BYTES);
+    let mut all = shapes::continued_curl_with_several_hidden_runs_shapes();
+    all.extend(shapes::continued_curl_with_hidden_runs_on_both_rows());
+    let mut failures = Vec::new();
+    for s in &all {
+        let (first, second) = s.line.split_once('\n').expect("two rows");
+        let first = first.to_string();
+        let second = second.to_string();
+        let padding_then = |tail: &str| {
+            let mut rows = rows.clone();
+            rows.push(tail.to_string());
+            rows
+        };
+        let then_padding = |head: &str| {
+            let mut out = vec![head.to_string()];
+            out.extend(rows.iter().cloned());
+            out
+        };
+        let cases: Vec<(&str, Vec<Vec<String>>)> = vec![
+            (
+                "padding and row one, then row two",
+                vec![padding_then(&first), vec![second.clone()]],
+            ),
+            (
+                "row one, then row two and padding",
+                vec![vec![first.clone()], then_padding(&second)],
+            ),
+            (
+                "padding and row one, then row two and padding",
+                vec![padding_then(&first), then_padding(&second)],
+            ),
+        ];
+        for (what, rounds) in cases {
+            let (out, redactions) = redact_in_calls(&rounds);
+            if let Some(why) = shapes::verdict(s, &out, redactions) {
+                failures.push(format!("[{}] {what}: {why}", s.name));
+            }
+        }
+    }
+    assert_no_failures("continued command", failures);
+}
+
+#[test]
+fn a_continued_curl_across_two_calls_is_redacted_next_to_a_megabyte_of_plain_lines() {
+    assert_continued_command_redacted_around_padding(shapes::Padding::Plain);
+}
+
+#[test]
+fn a_continued_curl_across_two_calls_is_redacted_next_to_a_megabyte_of_lines_with_hidden_characters(
+) {
+    assert_continued_command_redacted_around_padding(shapes::Padding::Hidden);
+}
+
+// ───────────── too much to read in every combination: fail closed ────────────────
+
+#[test]
+fn a_credential_in_the_middle_of_one_line_over_a_megabyte_is_redacted() {
+    let all = shapes::one_huge_line_with_a_credential_in_the_middle(shapes::PADDING_BYTES);
+    let mut failures = Vec::new();
+    for s in &all {
+        assert_text_is_over_the_old_budget(&s.line);
+        assert!(!s.line.contains('\n'), "[{}] is more than one row", s.name);
+        let (out, kinds) = redact(&s.line);
+        if let Some(why) = shapes::verdict(s, &out, kinds.len()) {
+            failures.push(format!("[{}] {why}", s.name));
+        }
+    }
+    assert_no_failures("one huge line", failures);
+}
+
+#[test]
+fn a_flood_of_keyword_lines_with_hidden_runs_is_redacted_on_every_line_and_stays_fast() {
+    let all = shapes::flood_of_keyword_lines((1 << 20) + 4096);
+    let text = all
+        .iter()
+        .map(|s| s.line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_text_is_over_the_old_budget(&text);
+    let (out, kinds, took) = {
+        let _alone = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let started = std::time::Instant::now();
+        let (out, kinds) = redact(&text);
+        (out, kinds, started.elapsed())
+    };
+    eprintln!(
+        "flood of {} keyword lines: {} bytes in {took:?}",
+        all.len(),
+        text.len()
+    );
+    assert!(
+        took < FAST_ENOUGH,
+        "{} keyword lines ({} bytes) took {took:?}",
+        all.len(),
+        text.len()
+    );
+    let out_lines: Vec<&str> = out.split('\n').collect();
+    assert_eq!(out_lines.len(), all.len(), "the rows were merged or split");
+    let failures: Vec<String> = all
+        .iter()
+        .zip(&out_lines)
+        .filter_map(|(s, line)| {
+            shapes::verdict(s, line, kinds.len()).map(|why| format!("[{}] {why}", s.name))
+        })
+        .take(10)
+        .collect();
+    assert_no_failures("flood of keyword lines", failures);
+}
+
+#[test]
+fn a_megabyte_of_lines_with_hidden_runs_and_no_credential_keyword_comes_back_untouched() {
+    let mut texts = vec![
+        (
+            "rows of hidden-character padding",
+            shapes::padding_rows(shapes::Padding::Hidden, shapes::PADDING_BYTES).join("\n"),
+        ),
+        (
+            "rows with many hidden runs each",
+            shapes::benign_rows_with_hidden_runs(shapes::PADDING_BYTES).join("\n"),
+        ),
+        (
+            "one huge line of hidden runs",
+            shapes::benign_huge_line(shapes::PADDING_BYTES),
+        ),
+    ];
+    texts.push((
+        "hidden-character rows, emoji rows and plain rows together",
+        [
+            shapes::Padding::Hidden,
+            shapes::Padding::Emoji,
+            shapes::Padding::Plain,
+        ]
+        .into_iter()
+        .flat_map(|kind| shapes::padding_rows(kind, shapes::PADDING_BYTES / 3))
+        .collect::<Vec<_>>()
+        .join("\n"),
+    ));
+    for (name, text) in &texts {
+        assert_text_is_over_the_old_budget(text);
+        let (out, kinds) = redact(text);
+        assert!(
+            out == *text,
+            "[{name}] came back changed ({} bytes in, {} out)",
+            text.len(),
+            out.len()
+        );
+        assert!(kinds.is_empty(), "[{name}] reported {kinds:?}");
+    }
+}
+
+#[test]
+fn a_megabyte_of_password_assignments_with_a_hidden_character_is_redacted_in_under_a_second() {
+    assert_fast(
+        "password=<ZWSP>a ",
+        &about_a_megabyte("password=\u{200b}a "),
+    );
+}
+
+#[test]
+fn a_megabyte_of_curl_u_lines_with_a_hidden_character_is_redacted_in_under_a_second() {
+    assert_fast(
+        "curl -u a:b<ZWSP><newline>",
+        &about_a_megabyte("curl -u a:b\u{200b}\n"),
     );
 }
