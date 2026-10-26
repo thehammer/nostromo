@@ -100,6 +100,8 @@ octocrab = "0.41"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 serde_yaml = "0.9"
 url = "2"
+# Huey news feeds (Atom/RSS)
+feed-rs = "2"
 unicode-normalization = "0.1.25"
 # Private scratch dir for the model catalogue probe.
 tempfile = "3"

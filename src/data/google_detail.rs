@@ -394,7 +394,7 @@ static ON_WROTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^On .+ wrote:$"
 
 /// HTML reduced to text: script/style dropped, block ends become newlines,
 /// tags stripped, common entities decoded.
-fn html_to_text(html: &str) -> String {
+pub(crate) fn html_to_text(html: &str) -> String {
     let t = SCRIPT_STYLE.replace_all(html, "");
     let t = BREAKS.replace_all(&t, "\n");
     let t = TAGS.replace_all(&t, "");
