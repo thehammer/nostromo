@@ -253,6 +253,25 @@ pub enum AuditEvent {
         redactions: usize,
         truncated: bool,
     },
+    /// The user sent selected text to a focus, once: counts and sizes only.
+    SelectionSent {
+        terminal_id: String,
+        /// The terminal's own focus.
+        tag: String,
+        /// The focus the selection went to.
+        target: String,
+        lines: usize,
+        bytes: usize,
+        redactions: usize,
+    },
+    /// The agent following a terminal read its screen: counts and sizes only.
+    ScreenRead {
+        terminal_id: String,
+        /// The agent's focus.
+        focus: String,
+        lines: usize,
+        bytes: usize,
+    },
 }
 
 /// The digests a remote shell's request was pinned to (lowercase hex SHA-256):

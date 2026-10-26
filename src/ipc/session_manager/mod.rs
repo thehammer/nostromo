@@ -82,7 +82,7 @@ mod task_runtime;
 use control::ControlReply;
 pub use control::CONTROL_TIMEOUT;
 use inject::PendingOrigin;
-pub use inject::{SessionEndHook, INJECT_MERGE_CAP};
+pub use inject::{SessionEndHook, INJECT_MERGE_CAP, SELECTION_KEY_PREFIX};
 pub use login::{ResendOutcome, ResendTrigger};
 use model_switch::{
     emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,

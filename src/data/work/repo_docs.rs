@@ -1074,6 +1074,7 @@ fn build_item(
         priority: parsed.priority,
         severity: parsed.severity,
         environment: None,
+        assignee: None,
         created_at: filed,
         updated_at: meta.modified().ok().map(DateTime::<Utc>::from),
         due: None,

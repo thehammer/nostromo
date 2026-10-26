@@ -202,9 +202,10 @@ final class TeriViewStateTests: XCTestCase {
     func testAnUntouchedTabHasTheDefaultViewState() {
         let state = TeriViewState()
         XCTAssertNil(state.selectedTab)
-        XCTAssertEqual(state[.sentry], TeriTabViewState())
+        XCTAssertEqual(state[.todos], TeriTabViewState())
         XCTAssertEqual(state[.sentry].sort, .newest)
-        XCTAssertEqual(state[.sentry].filter, WorkFilter())
+        var mineOnly = WorkFilter(); mineOnly.assignees = ["me"]
+        XCTAssertEqual(state[.sentry].filter, mineOnly, "Sentry starts on Mine; every other tab starts unfiltered")
         XCTAssertTrue(state[.sentry].collapsedGroups.isEmpty)
         XCTAssertNil(state[.sentry].selectedItemId)
     }

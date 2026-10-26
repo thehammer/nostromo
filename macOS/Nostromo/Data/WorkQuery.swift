@@ -16,13 +16,14 @@ struct WorkFilter: Equatable, Codable {
     var projects: [String] = []
     var statuses: [String] = []
     var environments: [String] = []
+    var assignees: [String] = []
     /// `true`: only items that state a severity; `false`: only those that do not.
     var hasSeverity: Bool?
     /// Whitespace-separated terms; every term must match the title or body text.
     var query: String = ""
 
     enum CodingKeys: String, CodingKey {
-        case sources, kinds, repos, projects, statuses, environments, query
+        case sources, kinds, repos, projects, statuses, environments, assignees, query
         case hasSeverity = "has_severity"
     }
 
@@ -36,6 +37,7 @@ struct WorkFilter: Equatable, Codable {
         projects     = try c.decodeIfPresent([String].self, forKey: .projects) ?? []
         statuses     = try c.decodeIfPresent([String].self, forKey: .statuses) ?? []
         environments = try c.decodeIfPresent([String].self, forKey: .environments) ?? []
+        assignees    = try c.decodeIfPresent([String].self, forKey: .assignees) ?? []
         hasSeverity  = try c.decodeIfPresent(Bool.self, forKey: .hasSeverity)
         query        = try c.decodeIfPresent(String.self, forKey: .query) ?? ""
     }
@@ -55,7 +57,7 @@ enum WorkSortKey: String, Codable {
 
 /// A facet whose values are counted for filter chips.
 enum WorkFacet: String, Codable {
-    case source, kind, repo, project, status, environment
+    case source, kind, repo, project, status, environment, assignee
 }
 
 /// One group of the grouped list. `key` is nil for sources that are one flat list.
@@ -99,6 +101,7 @@ enum WorkQuery {
         case .project:     relaxed.projects = []
         case .status:      relaxed.statuses = []
         case .environment: relaxed.environments = []
+        case .assignee:    relaxed.assignees = []
         }
         let terms = searchTerms(relaxed.query)
         var counts: [String: Int] = [:]
@@ -111,6 +114,7 @@ enum WorkQuery {
             case .project:     value = item.project
             case .status:      value = item.status
             case .environment: value = item.environment
+            case .assignee:    value = item.assignee
             }
             if let value { counts[value, default: 0] += 1 }
         }
@@ -164,6 +168,7 @@ enum WorkQuery {
             && oneOf(f.projects, item.project)
             && oneOf(f.statuses, item.status)
             && oneOf(f.environments, item.environment)
+            && oneOf(f.assignees, item.assignee)
             && (f.hasSeverity.map { ($0) == (item.severity != nil) } ?? true)
     }
 

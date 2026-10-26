@@ -3,9 +3,11 @@
 #
 # Used first by `make install`, `install-daemon` and `uninstall-daemon`, which
 # restart the daemon: a restart ends every shell. Asks the running daemon
-# through `nostromd remote-shells` (exit 0: none open, 2: no daemon answers,
-# 3: some open). Open shells block unless FORCE=1 or
-# NOSTROMO_FORCE_DAEMON_RESTART=1. A crash or a raw SIGTERM cannot be guarded.
+# through `nostromd remote-shells` (exit 0: none open, 2: no daemon running,
+# 3: some open, 4: a daemon is running but gave no usable answer). Open shells
+# and code 4 (and any other code) block unless FORCE=1 or
+# NOSTROMO_FORCE_DAEMON_RESTART=1. Only code 2 and 0 proceed unforced. A crash
+# or a raw SIGTERM cannot be guarded.
 #
 # Exit 0: go ahead. Exit 1: refused.
 #
@@ -44,7 +46,11 @@ if [ "${FORCE:-}" = "1" ] || [ "${NOSTROMO_FORCE_DAEMON_RESTART:-}" = "1" ]; the
 fi
 
 case "$rc" in
-  0 | 2)
+  0)
+    exit 0
+    ;;
+  2)
+    echo "restart guard: no daemon is running; nothing to protect." >&2
     exit 0
     ;;
   3)
@@ -54,6 +60,16 @@ case "$rc" in
       exit 0
     fi
     echo "Remote shells are open; they will be closed. Re-run with FORCE=1 to proceed." >&2
+    exit 1
+    ;;
+  4)
+    msg="restart guard: a daemon is running but could not say whether remote shells are open (it timed out, answered badly, or is too old to know the summary request)."
+    if [ "$force" = "1" ]; then
+      echo "$msg Proceeding (forced)." >&2
+      exit 0
+    fi
+    echo "$msg" >&2
+    echo "restart guard: the first guarded install after this guard landed is expected to hit this once: the running daemon predates the summary request. Check no remote shell matters, then re-run with FORCE=1 (or NOSTROMO_FORCE_DAEMON_RESTART=1)." >&2
     exit 1
     ;;
   *)

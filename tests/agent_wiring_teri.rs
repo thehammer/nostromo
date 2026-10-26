@@ -29,9 +29,16 @@ impl WithHub {
 impl AgentSpawner for WithHub {
     fn start_huey(&mut self) -> nostromo::agents::HueySources {
         let dir = tempfile::tempdir().unwrap();
-        let src = nostromo::huey::HueyEngine::spawn(nostromo::huey::HueyDeps::production(
+        let context = nostromo::huey::context::ContextEnv::for_home(
+            dir.path(),
+            dir.path().join("code"),
+            dir.path().to_path_buf(),
+            "test".into(),
+        );
+        let src = nostromo::huey::HueyEngine::spawn(nostromo::huey::HueyDeps::new(
             dir.path().to_path_buf(),
             nostromo::huey::HueyConfig::default(),
+            context,
         ));
         self.keep.push(Box::new(dir));
         src

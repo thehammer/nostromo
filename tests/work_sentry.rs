@@ -668,6 +668,21 @@ async fn an_issue_in_both_queries_appears_once() {
 }
 
 #[tokio::test]
+async fn each_issue_is_tagged_with_the_search_that_found_it_and_mine_wins_when_both_do() {
+    let (_f, _e, _rx, _r, first) = fresh_source(issues(1..=2), vec![issue(2), issue(3)]).await;
+    assert_eq!(item(&first, "sentry:1").assignee.as_deref(), Some("me"));
+    assert_eq!(
+        item(&first, "sentry:2").assignee.as_deref(),
+        Some("me"),
+        "an issue both searches return is mine"
+    );
+    assert_eq!(
+        item(&first, "sentry:3").assignee.as_deref(),
+        Some("unassigned")
+    );
+}
+
+#[tokio::test]
 async fn it_asks_sentry_for_both_queries_with_the_bearer_token() {
     let (fake, _e, _rx, _r, _first) = fresh_source(issues(1..=1), issues(2..=2)).await;
     let reqs = fake.list_requests().await;

@@ -23,6 +23,7 @@ pub struct WorkFilter {
     pub projects: Vec<String>,
     pub statuses: Vec<String>,
     pub environments: Vec<String>,
+    pub assignees: Vec<String>,
     /// `Some(true)`: only items that state a severity; `Some(false)`: only those that do not.
     pub has_severity: Option<bool>,
     /// Whitespace-separated terms; every term must match `title` or `search_text`.
@@ -51,6 +52,7 @@ pub enum Facet {
     Project,
     Status,
     Environment,
+    Assignee,
 }
 
 /// One group of the grouped list. `key` is `None` for sources that are one flat list.
@@ -97,6 +99,7 @@ pub fn facet_counts(items: &[WorkItem], f: &WorkFilter, facet: Facet) -> BTreeMa
         Facet::Project => relaxed.projects.clear(),
         Facet::Status => relaxed.statuses.clear(),
         Facet::Environment => relaxed.environments.clear(),
+        Facet::Assignee => relaxed.assignees.clear(),
     }
     let terms = search_terms(&relaxed.query);
     let mut counts = BTreeMap::new();
@@ -111,6 +114,7 @@ pub fn facet_counts(items: &[WorkItem], f: &WorkFilter, facet: Facet) -> BTreeMa
             Facet::Project => item.project.clone(),
             Facet::Status => item.status.clone(),
             Facet::Environment => item.environment.clone(),
+            Facet::Assignee => item.assignee.clone(),
         };
         if let Some(value) = value {
             *counts.entry(value).or_insert(0) += 1;
@@ -144,6 +148,7 @@ fn matches_fields(item: &WorkItem, f: &WorkFilter) -> bool {
         && one_of(&f.projects, item.project.as_deref())
         && one_of(&f.statuses, item.status.as_deref())
         && one_of(&f.environments, item.environment.as_deref())
+        && one_of(&f.assignees, item.assignee.as_deref())
         && f.has_severity
             .is_none_or(|want| item.severity.is_some() == want)
 }

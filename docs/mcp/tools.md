@@ -1447,3 +1447,52 @@ The call blocks until the user answers or about 5 minutes pass. It is withheld f
 | `not_supported` | Not hosted by `nostromo` (the daemon). |
 
 Source: `src/mcp/tools/remote_shell.rs`; flow in `src/terminal/remote_request.rs`. Both tool names are dotted like the rest (`nostromo.request_remote_shell`); the plan wrote them with underscores. The guard-consistency test checks both spellings.
+
+### `nostromo.list_terminals`
+
+The terminals the caller can see: those in its own focus, and any other focus's terminal it is following. **Metadata only, never output.** No arguments (`additionalProperties: false`). The caller is always its own focus (its Hello `pty_id`); there is no `view_id`.
+
+**Output**: `{ "ok": true, "terminals": [{ "terminal_id", "label", "kind": "local" | "ecs", "status": "connecting" | "running" | "ended", "followed_by_you" }] }`. `followed_by_you` is true while the caller is the terminal's follower (active or paused). Errors: `unknown_argument`, `unknown_view`, `not_supported`. A refused call (the tool withheld from the caller's session, as for a network-driven one) is audited as `refused {channel: "mcp", op: "list", code: "forbidden", tool: "nostromo.list_terminals"}`.
+
+### `nostromo.request_follow`
+
+Ask the user to let the caller follow one of **its own focus's** terminals. **The agent only asks; the user decides.** Following means what the terminal prints is delivered into the agent's conversation (redacted, capped) and `nostromo.read_terminal_screen` works; the agent still cannot type into the terminal.
+
+**Input** (`additionalProperties: false`): `{ "terminal_id": "<from nostromo.list_terminals>", "reason": "why you want to follow it" }`. `terminal_id` is required; `reason` is optional, at most 200 characters, and is shown to the user (control and bidi characters stripped). Any other key is `unknown_argument` (nothing is asked).
+
+The call blocks (up to 5 minutes) on a decision sheet, answerable by the verified Nostromo app only (the decision flow's own rule: no other process can answer it). Prompt: `<agent> in <focus> asks to follow <pane>. Output will be sent to <agent>'s model.`; for a remote (`ecs`) pane it leads with `Output from <ENVIRONMENT, uppercased> will be sent to <agent>'s model.` Choices: `allow`, `deny`. Allow starts following (`via: "request"`, without the screen) from inside the call: if the call is dropped first (the agent's connection closes, or the session ends) the sheet is withdrawn (also when it is still queued behind another decision of the focus) and nothing follows. If the same terminal is already followed by another focus, the sheet says so (allowing moves it). It is withheld from a network-driven session and the picks session, like the other terminal tools.
+
+**Output**: `{ "ok": true, "outcome": "following" }` (also at once, with no sheet, when the caller already follows that terminal).
+
+| `error` | Meaning |
+|---|---|
+| `no_operator` | No verified app that can show the sheet **and** declared `terminal_follow_ui` (it can show who follows and stop it) is connected. Immediate (nothing was shown, nothing queued). Also returned if the app went away between its Allow and the invitation: nothing follows with no app left to show or stop it. |
+| `denied` / `dismissed` / `timeout` / `cancelled` | The user chose Deny / dismissed the sheet / did not answer in time / the agent's session ended while it waited. Nothing follows. |
+| `request_pending` | Another follow request from this focus is waiting for the user. |
+| `request_cooldown` | The user said no, dismissed the sheet or did not answer a request from this focus recently. Wait before asking again: 60 s after the first, doubling for each further one in a row to 15 minutes; an Allow clears it, and it is forgotten after an hour without a denial. Immediate: no sheet was shown. |
+| `request_limit` | This focus has asked 3 times in the last 10 minutes (whatever the answers). Immediate: no sheet was shown. |
+| `unknown_terminal` | Not a terminal of the caller's focus. The same answer for another focus's terminal and for one that does not exist. |
+| `terminal_not_running` | The terminal's shell has ended (or is still connecting). |
+| `follower_not_running` | The user allowed it but the caller's session was gone. (The follow engine's own refusal, after the Allow: the codes above are the tool's, made before anyone is asked. `unknown_terminal` is both.) |
+| `follow_unavailable` | Following is not set up in this daemon. |
+| `reason_too_long` / `invalid_args` / `unknown_argument` / `unknown_view` / `not_supported` | As for the other terminal tools. |
+
+### `nostromo.read_terminal_screen`
+
+The current screen of a terminal **the caller follows**, as plain text with secrets redacted (the same redaction and caps as a follow delivery; rows the program wrapped are joined first so a secret that wrapped is whole). Works while the follow is active or paused (reading while a follow is paused for flood is intended: it is the same redacted, capped screen the user invited the agent to see), for a shell and for a full-screen program; stops working the moment the user stops it, the terminal closes, or following moves to another focus.
+
+**Input** (`additionalProperties: false`): `{ "terminal_id": "..." }` (required).
+
+**Output**: `{ "ok": true, "text", "lines", "redactions" }`.
+
+| `error` | Meaning |
+|---|---|
+| `terminal_read_forbidden` | The caller does not follow that terminal. The same answer whether the terminal is unfollowed, followed by someone else, or does not exist. Audited as `refused {channel: "mcp", op: "read", tool: "nostromo.read_terminal_screen"}`. Nothing is injected anywhere. |
+| `read_too_soon` | The caller read again within 2 seconds of its last read. Nothing was read. Audited as `refused {channel: "mcp", op: "read", code: "read_too_soon"}`. |
+| `read_limit` | The caller has had 240 reads in the last hour. Nothing was read. Audited as `refused {channel: "mcp", op: "read", code: "read_limit"}`. |
+| `redaction_failed` | Redaction failed, so nothing is returned (fail closed). |
+| `invalid_args` / `unknown_argument` / `unknown_view` / `not_supported` | As above. |
+
+The limits are per follower (focus), and only a read of a terminal the caller follows counts towards them; they bound the redaction work and the audit growth a follower can cause. A successful read is audited as `screen_read {terminal_id, focus, lines, bytes}`: counts only, never the text.
+
+Source: `src/mcp/tools/terminal_follow.rs`; the methods on `TerminalAgentApi` in `src/terminal/agent_api.rs`. The classifier that refuses read-shaped terminal tool names (`-32002`) exempts exactly `nostromo.read_terminal_screen`; every other read-shaped name, including `nostromo_read_terminal_screen` and `nostromo.read_terminal_output`, is still refused. None of the three names matches the production-shell guard's tool-name rule and none has a `command`, `cmd` or `script` field (`tests/remote_shell_guard_consistency.rs`).

@@ -33,9 +33,16 @@ impl AgentSpawner for Recorder {
     fn start_huey(&mut self) -> HueySources {
         self.huey_calls += 1;
         let dir = tempfile::tempdir().unwrap();
-        let src = HueyEngine::spawn(HueyDeps::production(
+        let context = nostromo::huey::context::ContextEnv::for_home(
+            dir.path(),
+            dir.path().join("code"),
+            dir.path().to_path_buf(),
+            "test".into(),
+        );
+        let src = HueyEngine::spawn(HueyDeps::new(
             dir.path().to_path_buf(),
             HueyConfig::default(),
+            context,
         ));
         self.keep.push(Box::new(dir));
         src

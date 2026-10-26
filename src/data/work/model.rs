@@ -142,6 +142,10 @@ pub struct WorkItem {
     pub severity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// Sentry: who the issue is assigned to, as a bucket (`"me"` or `"unassigned"`).
+    /// Other sources leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

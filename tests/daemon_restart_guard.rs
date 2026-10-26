@@ -5,7 +5,8 @@
 //!
 //! * exit 3 with a line per open shell (project, environment, service, age),
 //! * exit 0 when no remote shell is open (a local shell does not count),
-//! * exit 2 when no daemon answers.
+//! * exit 2 when no daemon is running (no socket, or connection refused),
+//! * exit 4 when a daemon is there but gives no usable answer.
 //!
 //! The same answer is available on the wire as `terminal_remote_summary_request`
 //! -> `terminal_remote_summary`: any local process may ask, the reply carries
@@ -433,4 +434,109 @@ async fn a_network_peer_cannot_ask_which_remote_shells_are_open() {
         "a network peer learns nothing about open shells: [{}]",
         tcp.summary()
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Connected but no usable answer: exit 4, never 2 (which means "no daemon")
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// How a fake daemon misbehaves once a client connects.
+#[derive(Clone, Copy)]
+enum Fake {
+    /// Accepts and never answers.
+    Silent,
+    /// Answers the hello with bytes that are not a frame body.
+    Garbage,
+    /// Welcomes, then refuses the summary request like an old daemon would.
+    UnknownFrame,
+    /// Answers the hello with something other than a welcome.
+    NotWelcome,
+}
+
+async fn put(w: &mut (impl tokio::io::AsyncWrite + Unpin), body: &[u8]) {
+    nostromo::ipc::codec::write_frame(w, body)
+        .await
+        .expect("write");
+}
+
+/// Serve `fake` on a fresh socket for the test's lifetime; the socket path.
+fn fake_daemon(dir: &Path, fake: Fake) -> PathBuf {
+    let sock = dir.join("fake.sock");
+    let listener = tokio::net::UnixListener::bind(&sock).expect("bind");
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let (mut r, mut w) = tokio::io::split(stream);
+                if matches!(fake, Fake::Silent) {
+                    let _ = nostromo::ipc::codec::read_frame(&mut r).await;
+                    tokio::time::sleep(Duration::from_secs(120)).await;
+                    return;
+                }
+                let _ = nostromo::ipc::codec::read_frame(&mut r).await;
+                match fake {
+                    Fake::Garbage => put(&mut w, b"\xff not json").await,
+                    Fake::NotWelcome => put(&mut w, br#"{"type":"error","message":"nope"}"#).await,
+                    _ => {
+                        put(
+                            &mut w,
+                            br#"{"type":"welcome","protocol_version":1,"daemon_pid":1}"#,
+                        )
+                        .await;
+                        let _ = nostromo::ipc::codec::read_frame(&mut r).await; // subscribe
+                        let _ = nostromo::ipc::codec::read_frame(&mut r).await; // summary request
+                        put(&mut w, br#"{"type":"error","message":"unknown frame"}"#).await;
+                        tokio::time::sleep(Duration::from_secs(120)).await;
+                    }
+                }
+            });
+        }
+    });
+    sock
+}
+
+async fn exit_code_against(fake: Fake) -> Ran {
+    let dir = TempDir::new().expect("tempdir");
+    let sock = fake_daemon(dir.path(), fake);
+    nostromd(&sock, &["remote-shells"]).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_that_accepts_but_never_answers_exits_4() {
+    let ran = exit_code_against(Fake::Silent).await;
+    assert_eq!(ran.code, Some(4), "{ran:?}");
+    assert!(ran.stderr.contains("no usable answer"), "{ran:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_that_answers_garbage_exits_4() {
+    let ran = exit_code_against(Fake::Garbage).await;
+    assert_eq!(ran.code, Some(4), "{ran:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_that_is_not_a_welcome_exits_4() {
+    let ran = exit_code_against(Fake::NotWelcome).await;
+    assert_eq!(ran.code, Some(4), "{ran:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_that_does_not_know_the_summary_frame_exits_4() {
+    let ran = exit_code_against(Fake::UnknownFrame).await;
+    assert_eq!(ran.code, Some(4), "{ran:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_socket_and_a_dead_socket_both_still_exit_2() {
+    let dir = TempDir::new().expect("tempdir");
+    let missing = nostromd(&dir.path().join("none.sock"), &["remote-shells"]).await;
+    assert_eq!(missing.code, Some(2), "{missing:?}");
+
+    // A socket file nobody listens on: connection refused.
+    let dead = dir.path().join("dead.sock");
+    drop(std::os::unix::net::UnixListener::bind(&dead).expect("bind"));
+    let refused = nostromd(&dead, &["remote-shells"]).await;
+    assert_eq!(refused.code, Some(2), "{refused:?}");
 }

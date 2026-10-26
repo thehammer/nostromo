@@ -419,6 +419,9 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ── Mother jobs channel (spawned early so MCP state and Huey get the live list)
+    let jobs_feed = nostromo::mother::JobsFeed::new();
+
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // A disabled agent still hands its consumers a live `watch::Receiver`:
     // a dropped sender makes `changed()` fail at once, and
@@ -435,6 +438,7 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf(),
         huey_config,
+        jobs_feed: jobs_feed.clone(),
     };
     let nostromo::agents::WiredAgents {
         perri_queue_rx,
@@ -455,9 +459,6 @@ async fn main() -> Result<()> {
     let perri_queue_rx_for_mcp = perri_queue_rx.clone();
     let perri_pr_rx_for_mcp = perri_pr_rx.clone();
     let perri_pr_refresh_tx_for_mcp = perri_pr_refresh_tx.clone();
-
-    // ── Mother jobs channel (spawned early so MCP state gets live receiver) ─────
-    let jobs_feed = nostromo::mother::JobsFeed::new();
 
     // ── agent tracker ─────────────────────────────────────────────────────────
     // State lives beside the daemon's socket (`~/.nostromo`; a QA instance's own
@@ -916,6 +917,7 @@ struct RealAgentSpawner {
     /// The daemon's per-machine state root (beside the socket).
     state_root: std::path::PathBuf,
     huey_config: nostromo::huey::HueyConfig,
+    jobs_feed: nostromo::mother::JobsFeed,
 }
 
 impl nostromo::agents::AgentSpawner for RealAgentSpawner {
@@ -923,6 +925,10 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
         nostromo::huey::HueyEngine::spawn(nostromo::huey::HueyDeps::production(
             self.state_root.clone(),
             self.huey_config.clone(),
+            self.config.code_root_dir(),
+            std::sync::Arc::new(nostromo::huey::run::DaemonLive {
+                jobs: self.jobs_feed.clone(),
+            }),
         ))
     }
 
