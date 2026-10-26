@@ -1,13 +1,18 @@
-//! Setup state (`setup.json`): state load and save only. The scan, the draft
-//! and the confirm actions arrive in later jobs.
+//! Setup state (`setup.json`), the lazy setup scan and the draft interests
+//! file. The confirm actions arrive in a later job.
 //!
 //! Loading never fails and never creates anything: a missing or unreadable
-//! file is "not set up". Only `save` writes, and only when a caller asks.
+//! file is "not set up". [`scan`] reads the context in memory and writes
+//! nothing (D6). Only `save` and [`write_draft`] write, only when a caller
+//! asks, and only under the Huey root, never under `~/.claude` (D5).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::context::{self, profile, ContextEnv, ContextSource, LiveInputs};
+use super::interests::{self, InterestSection, Interests};
 use super::paths::HueyPaths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -106,6 +111,133 @@ pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     builder.create(dir)
+}
+
+/// Whether this machine already has an interests file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterestsStatus {
+    /// `<huey root>/interests.md` exists.
+    Existing,
+    Missing,
+    /// Missing, but an older file sits at this path (`~/.claude/huey/interests.md`)
+    /// and can be copied in once.
+    ImportableFrom(PathBuf),
+}
+
+/// One in-flight project as the setup step shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedProject {
+    pub id: String,
+    pub name: String,
+    pub how_it_runs: String,
+    /// Manifest description or the README's first sentence (≤ 160 chars).
+    pub description: Option<String>,
+}
+
+/// What the setup scan found. Held in memory only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupScan {
+    pub machine: String,
+    pub context_sources: Vec<ContextSource>,
+    /// In digest order (most recent activity first).
+    pub projects: Vec<ScannedProject>,
+    pub interests: InterestsStatus,
+}
+
+/// Where an interests file from before D5 may sit.
+pub fn legacy_interests(env: &ContextEnv) -> PathBuf {
+    env.claude_dir.join("huey").join("interests.md")
+}
+
+/// Read the context sources and list what Huey would use (D6). Writes
+/// nothing: no profile cache, no state, no draft.
+pub fn scan(
+    env: &ContextEnv,
+    paths: &HueyPaths,
+    live: &LiveInputs,
+    now: DateTime<Utc>,
+) -> SetupScan {
+    let existing = std::fs::read_to_string(paths.interests()).ok();
+    let legacy = legacy_interests(env);
+    let status = if existing.is_some() || paths.interests().exists() {
+        InterestsStatus::Existing
+    } else if legacy.is_file() {
+        InterestsStatus::ImportableFrom(legacy)
+    } else {
+        InterestsStatus::Missing
+    };
+    let parsed: Interests = existing
+        .as_deref()
+        .map(interests::parse)
+        .unwrap_or_default();
+    let mut inputs = context::gather(env, &parsed, live, None, now);
+    inputs.projects.sort_by(|a, b| {
+        b.last_activity
+            .cmp(&a.last_activity)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    SetupScan {
+        machine: env.machine.clone(),
+        context_sources: env.sources(paths),
+        projects: inputs
+            .projects
+            .iter()
+            .map(|p| ScannedProject {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                how_it_runs: p.how_it_runs.clone(),
+                description: profile::description(&p.root),
+            })
+            .collect(),
+        interests: status,
+    }
+}
+
+/// The draft interests file for `scan`: the four sections, one "What I care
+/// about" bullet per in-flight project, the others empty with a hint.
+pub fn draft_text(scan: &SetupScan) -> String {
+    let mut out = format!(
+        "# Huey interests ({})\n\nEdit this file to steer Huey. Changes apply from the next report.\n",
+        scan.machine
+    );
+    let hint = |section: InterestSection| {
+        match section {
+        InterestSection::Care => {
+            "One bullet per interest, with why it matters. These start as your projects in flight."
+        }
+        InterestSection::WantMore => "Kinds of news you want more of.",
+        InterestSection::WantLess => "Kinds of news you want less of.",
+        InterestSection::Ignore => {
+            "Topics or projects to drop. Exact terms in backticks are filters: any line with one is dropped."
+        }
+    }
+    };
+    for section in InterestSection::ALL {
+        out.push_str(&format!(
+            "\n## {}\n<!-- {} -->\n",
+            section.heading(),
+            hint(section)
+        ));
+        if section == InterestSection::Care {
+            for p in &scan.projects {
+                match &p.description {
+                    Some(d) => out.push_str(&format!("- **{}**: {d}\n", p.name)),
+                    None => out.push_str(&format!("- **{}**\n", p.name)),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Write the draft interests file when none exists. `Ok(true)` when written,
+/// `Ok(false)` when a file was already there (it is never overwritten).
+pub fn write_draft(paths: &HueyPaths, scan: &SetupScan) -> std::io::Result<bool> {
+    if paths.interests().exists() {
+        return Ok(false);
+    }
+    write_atomic(&paths.interests(), draft_text(scan).as_bytes())?;
+    Ok(true)
 }
 
 #[cfg(test)]

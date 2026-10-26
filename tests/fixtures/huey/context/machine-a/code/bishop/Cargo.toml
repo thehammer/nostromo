@@ -1,0 +1,10 @@
+[package]
+name = "bishop"
+version = "0.1.0"
+edition = "2021"
+description = "Budget advisor that watches usage pace and writes a posture file"
+repository = "https://example.invalid/CANARY-MANIFEST-a-bishop"
+
+[dependencies]
+anthropic = "0.1"
+serde = "1"
