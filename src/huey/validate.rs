@@ -175,8 +175,9 @@ pub fn validate(
             "at most one pick may end in \"To check\"; make the others Checked (cite a check or a how-it-runs fact) or move them to Also noted".into(),
         );
     }
-    noted_rules(&facts, publish, &mut add);
     let normalised = id_rules(&facts, publish, &mut add);
+    // After the move-up: a line that moved to Also in the news is judged there.
+    noted_rules(&facts, &normalised, &mut add);
     ain_rules(&facts, publish, &mut add);
     drop_and_ignore_rules(&facts, publish, &mut add);
     word_rules(input, &normalised, &mut add);
@@ -491,14 +492,8 @@ fn id_rules(facts: &Facts<'_>, publish: &Publish, add: &mut impl FnMut(Rule, Str
             claim(&mut used, Place::Pick(n), id);
         }
     }
-    // An Also-in-the-news item that is a pick is its own rule.
     if let Some(a) = &normalised.also_in_the_news {
-        if !matches!(
-            used.get(&facts.story(&a.item_id)),
-            Some((Place::Pick(_), _))
-        ) {
-            claim(&mut used, Place::Ain, &a.item_id);
-        }
+        claim(&mut used, Place::Ain, &a.item_id);
     }
     for (n, noted) in normalised.also_noted.iter().enumerate() {
         for id in &noted.item_ids {
