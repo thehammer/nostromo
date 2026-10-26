@@ -4,8 +4,10 @@
 //! [`run`] is one attempt. It reads its inputs, decides, and writes one
 //! report version plus the ledger and run log. Nothing runs, reads or
 //! writes until setup is confirmed. The model pass sits behind [`Curator`]:
-//! H4 ships [`NoCurator`], so every normal or tight run ends "model failed"
-//! until the hidden session lands; a critical run needs no model.
+//! the daemon runs [`crate::huey::curate::SessionCurator`] (a hidden,
+//! restricted session whose publish the validator checks); [`NoCurator`],
+//! the default without a daemon, fails every normal or tight run "model
+//! failed". A critical run needs no model.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

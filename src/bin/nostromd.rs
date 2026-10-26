@@ -922,14 +922,22 @@ struct RealAgentSpawner {
 
 impl nostromo::agents::AgentSpawner for RealAgentSpawner {
     fn start_huey(&mut self) -> nostromo::agents::HueySources {
-        nostromo::huey::HueyEngine::spawn(nostromo::huey::HueyDeps::production(
+        let mut deps = nostromo::huey::HueyDeps::production(
             self.state_root.clone(),
             self.huey_config.clone(),
             self.config.code_root_dir(),
             std::sync::Arc::new(nostromo::huey::run::DaemonLive {
                 jobs: self.jobs_feed.clone(),
             }),
-        ))
+        );
+        // Normal and tight runs curate in a hidden, restricted session.
+        deps.curator = std::sync::Arc::new(nostromo::huey::SessionCurator::new(
+            std::sync::Arc::new(nostromo::data::work::picks::SessionManagerHost::new(
+                Arc::clone(&self.session_mgr),
+            )),
+            deps.bridge.clone(),
+        ));
+        nostromo::huey::HueyEngine::spawn(deps)
     }
 
     fn start_perri(&mut self) -> nostromo::agents::PerriSources {
