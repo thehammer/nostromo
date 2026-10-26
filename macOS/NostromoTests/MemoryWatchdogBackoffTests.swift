@@ -568,4 +568,37 @@ final class MemoryWatchdogBackoffTests: XCTestCase {
         XCTAssertTrue(rig.shed(at: 0))
         XCTAssertEqual(rig.shedToasts.first?.detail.contains(Self.heldOutsidePhrase), true)
     }
+
+    // MARK: - Hysteresis and timeouts (review follow-ups)
+
+    /// A footprint hovering just under the line (1.5 GB, above 90% of it) is the same episode: the
+    /// back-off must survive it.
+    func testDippingJustUnderTheShedLineKeepsTheEpisodeAndItsBackOff() {
+        let rig = Rig()
+        XCTAssertTrue(rig.poll(at: 0))
+        rig.level = 1_500 * Self.mb
+        XCTAssertFalse(rig.poll(at: 40), "under the line there is nothing to shed")
+        rig.level = 2_000 * Self.mb
+        XCTAssertFalse(rig.poll(at: 70), "still the same episode, so the two-minute back-off holds")
+        XCTAssertFalse(rig.poll(at: 119))
+        XCTAssertTrue(rig.poll(at: 121))
+    }
+
+    /// A shed that finishes only via the completion timeout was measured on a stale "after": it
+    /// is neither counted as unhelpful nor described as "held outside the transcript".
+    func testAShedThatFinishesViaTheTimeoutIsInconclusiveAndDoesNotBackOff() {
+        let rig = Rig()
+        rig.holdCompletions = true
+        rig.watchdog.shedCompletionTimeout = 0.05
+        XCTAssertTrue(rig.poll(at: 0))
+
+        let settled = expectation(description: "the timeout finished the shed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settled.fulfill() }
+        wait(for: [settled], timeout: 5)
+
+        XCTAssertEqual(rig.shedToasts.count, 1)
+        XCTAssertFalse(rig.shedToasts[0].detail.contains(Self.heldOutsidePhrase))
+        rig.holdCompletions = false
+        XCTAssertTrue(rig.poll(at: 40), "no streak was recorded, so only the 30 s gap applies")
+    }
 }

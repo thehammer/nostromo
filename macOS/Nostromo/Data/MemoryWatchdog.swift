@@ -25,6 +25,10 @@ final class MemoryWatchdog {
     static let warningBytes: Int = 1_200 * 1_048_576   // 1.2 GB
     /// Shed retained content. Below the 2 GB ceiling, with headroom.
     static let shedBytes: Int    = 1_600 * 1_048_576   // 1.6 GB
+    /// An episode of sustained high memory ends only when the footprint falls below this (90% of
+    /// `shedBytes`). A footprint that hovers around the shed line, dipping to 1.59 GB between
+    /// polls, is still one episode and keeps its back-off.
+    static let episodeEndBytes: Int = shedBytes / 10 * 9
     static let pollInterval: TimeInterval = 30
 
     /// What a shed may take. A poll-triggered shed is housekeeping and asks for `.offscreenOnly`: it
@@ -64,7 +68,8 @@ final class MemoryWatchdog {
     /// without a running app or a real allocator.
     var footprint: () -> Int = { TranscriptDiagnostics.physicalFootprint() }
     var relievePressure: () -> Void = { malloc_zone_pressure_relief(nil, 0) }
-    var now: () -> Date = { Date() }
+    /// Monotonic: a wall-clock step (NTP, a manual change) must not shorten or stretch a back-off.
+    var now: () -> Date = { Date(timeIntervalSinceReferenceDate: ProcessInfo.processInfo.systemUptime) }
     /// Where the memory is, for the log line and the toast when a shed did not help. Never `heap`.
     var summarize: () -> MemorySummary = { MemorySummary.capture() }
 
@@ -113,10 +118,13 @@ final class MemoryWatchdog {
             // Refused (silently) while backed off: see `shed`.
             shed(reason: "Nostromo is holding \(Self.megabytes(bytes)) MB")
         } else {
-            // The episode is over. A footprint that stays over the line keeps the same episode, and with it
-            // the back-off, however many polls go by.
-            unhelpfulStreak = 0
-            toldAboutUnhelpfulShed = false
+            // The episode is over once the footprint is clearly below the line (`episodeEndBytes`). A
+            // footprint that stays at or near the line keeps the same episode, and with it the
+            // back-off, however many polls go by.
+            if bytes < Self.episodeEndBytes {
+                unhelpfulStreak = 0
+                toldAboutUnhelpfulShed = false
+            }
             if bytes >= Self.warningBytes {
                 warn(footprint: bytes, detail: "Nostromo is holding \(Self.megabytes(bytes)) MB.")
             } else {
@@ -189,7 +197,7 @@ final class MemoryWatchdog {
 
         let before = footprint()
         var finished = false
-        let finish: () -> Void = { [weak self] in
+        let finish: (Bool) -> Void = { [weak self] timedOut in
             guard let self, !finished else { return }
             finished = true
             self.isShedding = false
@@ -204,16 +212,21 @@ final class MemoryWatchdog {
             self.relievePressure()
 
             let after = self.footprint()
-            self.report(reason: reason, before: before, after: after)
+            if timedOut {
+                self.reportInconclusive(reason: reason, before: before, after: after)
+            } else {
+                self.report(reason: reason, before: before, after: after)
+            }
         }
+        let complete: () -> Void = { finish(false) }
 
         let scope: ShedScope = critical ? .everything : .offscreenOnly
         if let onShedScoped {
-            onShedScoped(scope, finish)
+            onShedScoped(scope, complete)
         } else if let onShed {
-            onShed(finish)
+            onShed(complete)
         } else {
-            finish()
+            complete()
             return
         }
 
@@ -230,7 +243,7 @@ final class MemoryWatchdog {
                     — measuring anyway
                     """)
             }
-            finish()
+            finish(true)
         }
     }
 
@@ -244,6 +257,20 @@ final class MemoryWatchdog {
     static func isHelpful(before: Int, after: Int) -> Bool {
         let freed = before - after
         return freed >= helpfulBytes && freed * helpfulFractionDivisor >= before
+    }
+
+    /// A shed that finished only because its completion timed out: the "after" reading may predate
+    /// the compaction, so it cannot say whether the shed helped. Report the figures, claim nothing,
+    /// and leave the back-off exactly where it was.
+    private func reportInconclusive(reason: String, before: Int, after: Int) {
+        let sentence = reason.prefix(1).uppercased() + reason.dropFirst()
+        log.error("""
+            shed did not finish in time: \(Self.megabytes(before))MB → \(Self.megabytes(after))MB \
+            (\(reason, privacy: .public)); result inconclusive
+            """)
+        onWarn?("Shed retained content",
+                "\(sentence). The shed was still running when it was measured, so its effect is "
+                + "not known yet. Footprint \(Self.megabytes(before)) → \(Self.megabytes(after)) MB.")
     }
 
     /// Log and toast what a finished shed did, and decide the next gap.
