@@ -39,7 +39,7 @@ use super::{
     deliver, screen_snapshot, Decision, Delivery, DeliveryKind, DeliveryPolicy, LineAssembler,
     PauseReason,
 };
-use crate::ipc::peer::SensitiveTags;
+use crate::ipc::peer::{SensitiveHold, SensitiveTags};
 use crate::ipc::protocol::{TerminalFollower, TerminalInfo, TerminalKind};
 use crate::ipc::stream_json::{escape_attribute, TERMINAL_ELEMENT_PREFIX};
 use crate::ipc::SessionManager;
@@ -133,6 +133,8 @@ impl FollowError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EndReason {
     UserStopped,
+    /// The focus now following, as it may be named to anyone who can read the
+    /// notice or the audit trail (its opaque tag when it is sensitive).
     MovedTo(String),
     PaneClosed,
     TerminalRestarted,
@@ -171,6 +173,20 @@ fn pause_code(reason: PauseReason) -> &'static str {
     }
 }
 
+fn pause_sentence(reason: PauseReason) -> &'static str {
+    match reason {
+        PauseReason::TooMuchOutput => "too much output",
+        PauseReason::TooManyDeliveries => "too many deliveries in the last hour",
+    }
+}
+
+fn kind_name(kind: DeliveryKind) -> &'static str {
+    match kind {
+        DeliveryKind::Lines => "lines",
+        DeliveryKind::Screen => "screen",
+    }
+}
+
 /// A chunk of terminal output, as the reader saw it.
 struct Chunk {
     bytes: Vec<u8>,
@@ -189,6 +205,10 @@ struct Follow {
     pane: String,
     session: Arc<TerminalSession>,
     paused: Option<PauseReason>,
+    /// Keeps the follower sensitive while it follows a remote shell (whose
+    /// redacted output must not reach a network peer through the follower's
+    /// turns); released when the follow is dropped.
+    _hold: Option<SensitiveHold>,
     assembler: LineAssembler,
     policy: DeliveryPolicy,
     redactor: Redactor,
@@ -406,13 +426,17 @@ impl FollowManager {
         if !self.sink.is_running(follower_tag) {
             return Err(FollowError::FollowerNotRunning);
         }
+        // Held before anything is said about the follower, so it is named
+        // as a sensitive focus from the first notice on.
+        let hold =
+            (info.kind == TerminalKind::Ecs).then(|| self.sensitive.hold_sensitive(follower_tag));
         {
             let mut state = self.lock_state();
             if let Some(previous) = state.follows.remove(terminal_id) {
                 previous.end();
                 if previous.follower != follower_tag {
                     self.sink.drop_injected(&previous.follower, terminal_id);
-                    let reason = EndReason::MovedTo(follower_tag.to_string());
+                    let reason = EndReason::MovedTo(self.audit_tag(follower_tag));
                     self.ended_with_notice(terminal_id, &previous, &reason);
                 }
             }
@@ -437,6 +461,7 @@ impl FollowManager {
                 pane,
                 session,
                 paused: None,
+                _hold: hold,
                 assembler: LineAssembler::new(),
                 policy: DeliveryPolicy::new(),
                 redactor: Redactor::new(),
@@ -466,6 +491,7 @@ impl FollowManager {
                     follow.pane
                 ),
             );
+            let mut screen_delivery = None;
             if let Some(screen) = screen {
                 let delivery = deliver_lines(
                     split_lines(&screen),
@@ -477,9 +503,14 @@ impl FollowManager {
                 {
                     message.push_str("\n\n");
                     message.push_str(&element);
+                    screen_delivery = Some(delivery);
                 }
             }
-            self.inject(&follow, &message, terminal_id);
+            if self.inject(&follow, &message, terminal_id) {
+                if let Some(delivery) = screen_delivery {
+                    self.audit_delivery(terminal_id, &follow, DeliveryKind::Screen, &delivery);
+                }
+            }
             state.follows.insert(terminal_id.to_string(), follow);
             self.spawn_pump(terminal_id, id, receiver);
         }
@@ -726,7 +757,9 @@ impl FollowManager {
     fn deliver_due(&self, terminal_id: &str, follow: &mut Follow, kind: DeliveryKind) {
         let delivery = follow.take_delivery(kind);
         if let Some(element) = self.delivery_element(terminal_id, follow, kind, &delivery) {
-            self.inject(follow, &element, terminal_id);
+            if self.inject(follow, &element, terminal_id) {
+                self.audit_delivery(terminal_id, follow, kind, &delivery);
+            }
         }
     }
 
@@ -746,8 +779,9 @@ impl FollowManager {
             "paused",
             Some(pause_code(reason)),
             &format!(
-                "Following {} paused itself: too much output. Nothing more is delivered until the user resumes it.",
-                follow.pane
+                "Following {} paused itself: {}. Nothing more is delivered until the user resumes it.",
+                follow.pane,
+                pause_sentence(reason)
             ),
         );
         self.inject(follow, &message, terminal_id);
@@ -755,8 +789,9 @@ impl FollowManager {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    /// A delivery as the element the follower reads, audited; `None` (and
-    /// nothing audited) when there is nothing to deliver or redaction failed.
+    /// A delivery as the element the follower reads; `None` when there is
+    /// nothing to deliver or redaction failed. Audit it with
+    /// [`Self::audit_delivery`] once it has been injected.
     fn delivery_element(
         &self,
         terminal_id: &str,
@@ -777,27 +812,43 @@ impl FollowManager {
         if text.is_empty() {
             return None;
         }
-        let kind = match kind {
-            DeliveryKind::Lines => "lines",
-            DeliveryKind::Screen => "screen",
+        Some(format!(
+            "<nostromo-terminal-output terminal_id=\"{}\" pane=\"{}\" kind=\"{}\" lines=\"{lines_total}\" omitted=\"{omitted}\" redactions=\"{}\">\n{ADVISORY}\n{}\n</nostromo-terminal-output>",
+            escape_attribute(terminal_id),
+            escape_attribute(&follow.pane),
+            kind_name(kind),
+            redactions.len(),
+            neutralize_elements(text),
+        ))
+    }
+
+    /// Audit a delivery that was injected: counts and sizes, never text.
+    fn audit_delivery(
+        &self,
+        terminal_id: &str,
+        follow: &Follow,
+        kind: DeliveryKind,
+        delivery: &Delivery,
+    ) {
+        let Delivery::Text {
+            text,
+            lines_total,
+            omitted,
+            redactions,
+        } = delivery
+        else {
+            return;
         };
         self.audit(AuditEvent::Delivery {
             terminal_id: terminal_id.to_string(),
             tag: self.audit_tag(&follow.terminal_tag),
             follower: self.audit_tag(&follow.follower),
-            kind: kind.to_string(),
+            kind: kind_name(kind).to_string(),
             lines: *lines_total,
             bytes: text.len(),
             redactions: redactions.len(),
             truncated: *omitted > 0,
         });
-        Some(format!(
-            "<nostromo-terminal-output terminal_id=\"{}\" pane=\"{}\" kind=\"{kind}\" lines=\"{lines_total}\" omitted=\"{omitted}\" redactions=\"{}\">\n{ADVISORY}\n{}\n</nostromo-terminal-output>",
-            escape_attribute(terminal_id),
-            escape_attribute(&follow.pane),
-            redactions.len(),
-            neutralize_elements(text),
-        ))
     }
 
     /// Under `state`: a follow that ended for `reason` is audited and, its
@@ -819,34 +870,34 @@ impl FollowManager {
     }
 
     fn audit_stopped(&self, terminal_id: &str, follow: &Follow, reason: &EndReason) {
-        let reason = match reason {
-            EndReason::MovedTo(tag) => format!("moved_to {}", self.audit_tag(tag)),
-            other => other.code(),
-        };
         self.audit(AuditEvent::FollowStopped {
             terminal_id: terminal_id.to_string(),
             tag: self.audit_tag(&follow.terminal_tag),
             follower: self.audit_tag(&follow.follower),
-            reason,
+            reason: reason.code(),
         });
     }
 
     /// Deliver into the follower's conversation. A session that cannot take
     /// it (it is down) loses it: following such a session ends with its end
-    /// hook.
+    /// hook. Whether it was injected.
     ///
     /// A sensitive focus's terminal makes its follower sensitive first, so its
     /// output never reaches a network peer through the follower's turns.
-    fn inject(&self, follow: &Follow, text: &str, terminal_id: &str) {
+    fn inject(&self, follow: &Follow, text: &str, terminal_id: &str) -> bool {
         if self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
             self.sensitive.mark_tag(&follow.follower);
         }
-        if let Err(e) = self.sink.inject(&follow.follower, text, terminal_id) {
-            debug!(
-                follower = %follow.follower,
-                terminal_id,
-                "follow delivery not injected: {e}"
-            );
+        match self.sink.inject(&follow.follower, text, terminal_id) {
+            Ok(()) => true,
+            Err(e) => {
+                debug!(
+                    follower = %follow.follower,
+                    terminal_id,
+                    "follow delivery not injected: {e}"
+                );
+                false
+            }
         }
     }
 
@@ -946,9 +997,11 @@ fn notice(
         .map(|r| format!(" reason=\"{}\"", escape_attribute(r)))
         .unwrap_or_default();
     format!(
-        "<nostromo-terminal-follow event=\"{event}\" terminal_id=\"{}\" pane=\"{}\"{reason_attr}/>\n{sentence}",
+        "<nostromo-terminal-follow event=\"{event}\" terminal_id=\"{}\" pane=\"{}\"{reason_attr}/>\n{}",
         escape_attribute(terminal_id),
         escape_attribute(pane),
+        // The sentence names the pane, whose text (a directory) is not ours.
+        neutralize_elements(sentence),
     )
 }
 

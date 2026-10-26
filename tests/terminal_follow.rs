@@ -1841,6 +1841,59 @@ follow_test! {
     }
 }
 
+follow_test! {
+    async fn a_followers_focus_removed_by_a_push_from_a_process_that_is_not_the_app_still_ends_following() {
+        let d = Daemon::start(&[Peer::App, Peer::Script]).await;
+        let mut app = d.app().await;
+        let mut script = d.script().await;
+        let a = d.session("cody-a", "cody").await;
+        let (_g, cwd) = canonical_tmp();
+        let t = app.open_control_terminal(&cwd).await;
+        let id = t.terminal_id.clone();
+        app.invite(&id, "cody-a", false).await;
+        a.wait_text(0, "the started notice", |t| notice_element(t, "started").is_some())
+            .await;
+        d.wait_idle("cody-a").await;
+        let before = a.count();
+
+        // The app's push is what puts cody-a in the registry.
+        app.send(&ClientMsg::FocusRegistryPush {
+            focuses: vec![focus_meta("cody-a"), focus_meta("cody-other")],
+        })
+        .await;
+        app.sync().await;
+        let from = app.mark();
+
+        // Then a process that may not close terminals pushes it absent, twice.
+        for _ in 0..2 {
+            script
+                .send(&ClientMsg::FocusRegistryPush {
+                    focuses: vec![focus_meta("cody-other")],
+                })
+                .await;
+            script.sync().await;
+        }
+
+        app.wait_since(from, "the follower to clear in terminal_state", |m| {
+            matches!(m, ServerMsg::TerminalState { terminal }
+                if terminal.terminal_id == id && terminal.follower.is_none())
+        })
+        .await;
+        assert_eq!(d.follower_of(&id), None);
+        d.wait_audit("follow_stopped session_ended", |l| {
+            l["event"] == "follow_stopped" && l["reason"] == "session_ended"
+        })
+        .await;
+        let notices: Vec<String> = a
+            .texts()
+            .into_iter()
+            .skip(before)
+            .filter(|t| notice_element(t, "stopped").is_some())
+            .collect();
+        assert!(notices.is_empty(), "a removed focus is told nothing: {notices:?}");
+    }
+}
+
 // ── the app's view ───────────────────────────────────────────────────────────
 
 follow_test! {
