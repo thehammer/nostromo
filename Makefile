@@ -69,6 +69,14 @@ clean:
 ## them. `install`, `install-daemon` and `uninstall-daemon` run this first. Override
 ## with FORCE=1 (or NOSTROMO_FORCE_DAEMON_RESTART=1). Crashes and a raw SIGTERM still
 ## end shells; this guards only the controlled paths. See docs/terminal.md.
+##
+## Ordering under `make -j`: the guard is deliberately NOT ordered after `release`.
+## It asks the *running* daemon through the installed nostromd, so it needs no fresh
+## build, and `uninstall-daemon` would otherwise compile for nothing. What matters
+## under -j is that the guard is never racing a build that rewrites
+## target/release/nostromd, so the builds wait for it (order-only, below).
+release daemon: | daemon-restart-guard
+
 daemon-restart-guard:
 	@FORCE="$(FORCE)" bin/nostromo-restart-guard
 

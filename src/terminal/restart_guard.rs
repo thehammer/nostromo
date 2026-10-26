@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use tokio::net::UnixStream;
 
@@ -21,20 +21,62 @@ pub const EXIT_NONE_OPEN: i32 = 0;
 pub const EXIT_NO_DAEMON: i32 = 2;
 /// At least one remote shell is open.
 pub const EXIT_SHELLS_OPEN: i32 = 3;
+/// Connected, but no usable answer (timeout, protocol error, a reply that is
+/// not a welcome, or a daemon too old to know the summary frame).
+pub const EXIT_NO_ANSWER: i32 = 4;
+
+/// Why [`fetch`] has no list of shells.
+#[derive(Debug)]
+pub enum FetchError {
+    /// Nothing listens on the socket (missing, or connection refused).
+    NoDaemon(anyhow::Error),
+    /// Something is there but gave no usable answer.
+    NoAnswer(anyhow::Error),
+}
+
+impl FetchError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            FetchError::NoDaemon(_) => EXIT_NO_DAEMON,
+            FetchError::NoAnswer(_) => EXIT_NO_ANSWER,
+        }
+    }
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::NoDaemon(e) => write!(f, "no daemon is running: {e:#}"),
+            FetchError::NoAnswer(e) => {
+                write!(f, "a daemon is running but gave no usable answer: {e:#}")
+            }
+        }
+    }
+}
 
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ask the daemon on `socket` for its open remote shells.
-pub async fn fetch(socket: &Path) -> Result<Vec<RemoteShellSummary>> {
-    tokio::time::timeout(ANSWER_TIMEOUT, ask(socket))
-        .await
-        .context("the daemon did not answer in time")?
+pub async fn fetch(socket: &Path) -> std::result::Result<Vec<RemoteShellSummary>, FetchError> {
+    let stream = UnixStream::connect(socket).await.map_err(|e| {
+        let kind = e.kind();
+        let e = anyhow::Error::new(e).context(format!("connecting to {}", socket.display()));
+        match kind {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                FetchError::NoDaemon(e)
+            }
+            _ => FetchError::NoAnswer(e),
+        }
+    })?;
+    match tokio::time::timeout(ANSWER_TIMEOUT, ask(stream)).await {
+        Ok(r) => r.map_err(FetchError::NoAnswer),
+        Err(_) => Err(FetchError::NoAnswer(anyhow::anyhow!(
+            "the daemon did not answer in time"
+        ))),
+    }
 }
 
-async fn ask(socket: &Path) -> Result<Vec<RemoteShellSummary>> {
-    let stream = UnixStream::connect(socket)
-        .await
-        .with_context(|| format!("connecting to {}", socket.display()))?;
+async fn ask(stream: UnixStream) -> Result<Vec<RemoteShellSummary>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let hello = ClientMsg::Hello {
         client_id: format!("remote-shells-{}", std::process::id()),
@@ -63,8 +105,13 @@ async fn ask(socket: &Path) -> Result<Vec<RemoteShellSummary>> {
     .await?;
     loop {
         let msg: ServerMsg = serde_json::from_slice(&read_frame(&mut reader).await?)?;
-        if let ServerMsg::TerminalRemoteSummary { shells } = msg {
-            return Ok(shells);
+        match msg {
+            ServerMsg::TerminalRemoteSummary { shells } => return Ok(shells),
+            // A daemon that predates the summary frame refuses it.
+            ServerMsg::Error { message } => {
+                bail!("the daemon does not know the summary request: {message}")
+            }
+            _ => {}
         }
     }
 }
@@ -135,8 +182,8 @@ pub async fn run(args: &[String], socket: &Path) -> i32 {
             exit_code(&shells)
         }
         Err(e) => {
-            eprintln!("no daemon answered: {e:#}");
-            EXIT_NO_DAEMON
+            eprintln!("{e}");
+            e.exit_code()
         }
     }
 }

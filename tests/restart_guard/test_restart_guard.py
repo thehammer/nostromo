@@ -3,7 +3,7 @@
 `make install`, `make install-daemon` and `make uninstall-daemon` restart the
 daemon, and a restart ends every open remote (ECS) shell. `bin/nostromo-restart-guard`
 asks the running daemon (`nostromd remote-shells`: exit 0 none open, 2 no daemon
-answers, 3 some open) and refuses to go ahead while shells are open, unless the
+running, 3 some open, 4 a daemon that gave no usable answer) and refuses to go ahead while shells are open, unless the
 operator forces it with FORCE=1 or NOSTROMO_FORCE_DAEMON_RESTART=1.
 
 Every test points the guard at a fake `nostromd` script in a temp dir
@@ -153,18 +153,71 @@ class NothingToProtectTests(GuardCase):
 
 
 class UnexpectedAnswerTests(GuardCase):
-    def test_an_unexpected_exit_code_refuses_unless_forced(self):
-        for code in (1, 4, 99, 127):
+    def test_every_exit_code_has_the_documented_outcome(self):
+        # code -> (proceeds unforced, proceeds forced)
+        table = {
+            0: (True, True),
+            1: (False, True),
+            2: (True, True),
+            3: (False, True),
+            4: (False, True),
+            99: (False, True),
+            127: (False, True),
+        }
+        for code, (plain, forced) in table.items():
+            with self.subTest(code=code, forced=False):
+                result = self.run_guard(self.fake_nostromd(code))
+                self.assertEqual(result.returncode, 0 if plain else 1, self.output(result))
+            with self.subTest(code=code, forced=True):
+                result = self.run_guard(self.fake_nostromd(code), force="1")
+                self.assertEqual(result.returncode, 0 if forced else 1, self.output(result))
+
+    def test_an_unexpected_exit_code_refuses_and_says_how_to_force(self):
+        for code in (1, 99, 127):
             with self.subTest(code=code):
                 result = self.run_guard(self.fake_nostromd(code))
                 self.assertEqual(result.returncode, 1, self.output(result))
                 self.assertIn("FORCE=1", self.output(result))
+                self.assertIn("exit %d" % code, self.output(result))
 
     def test_an_unexpected_exit_code_proceeds_when_forced(self):
         for kwargs in ({"force": "1"}, {"env_force": "1"}):
             with self.subTest(**kwargs):
                 result = self.run_guard(self.fake_nostromd(1), **kwargs)
                 self.assertEqual(result.returncode, 0, self.output(result))
+
+
+class NoUsableAnswerTests(GuardCase):
+    """Exit 4: a daemon is there but could not say. Fail closed."""
+
+    def test_code_4_refuses_and_says_why_and_how_to_force(self):
+        result = self.run_guard(self.fake_nostromd(4))
+
+        self.assertEqual(result.returncode, 1, self.output(result))
+        out = self.output(result)
+        self.assertIn("could not say whether remote shells are open", out)
+        self.assertIn("FORCE=1", out)
+        self.assertIn("NOSTROMO_FORCE_DAEMON_RESTART=1", out)
+
+    def test_code_4_says_the_first_guarded_install_is_expected_to_need_forcing(self):
+        out = self.output(self.run_guard(self.fake_nostromd(4)))
+
+        self.assertIn("first guarded install", out)
+        self.assertIn("predates the summary request", out)
+        self.assertIn("once", out)
+
+    def test_code_4_proceeds_when_forced_either_way(self):
+        for kwargs in ({"force": "1"}, {"env_force": "1"}):
+            with self.subTest(**kwargs):
+                result = self.run_guard(self.fake_nostromd(4), **kwargs)
+                self.assertEqual(result.returncode, 0, self.output(result))
+                self.assertIn("forced", self.output(result))
+
+    def test_code_2_is_not_treated_like_code_4(self):
+        result = self.run_guard(self.fake_nostromd(2))
+
+        self.assertEqual(result.returncode, 0, self.output(result))
+        self.assertNotIn("FORCE=1", self.output(result))
 
 
 class WhichNostromdIsAskedTests(GuardCase):
@@ -199,6 +252,11 @@ class WhichNostromdIsAskedTests(GuardCase):
         result = self.run_guard()
 
         self.assertEqual(result.returncode, 0, self.output(result))
+
+    def test_the_fail_open_case_says_so(self):
+        result = self.run_guard()
+
+        self.assertIn("not checking for open remote shells", self.output(result))
 
 
 def read_makefile():

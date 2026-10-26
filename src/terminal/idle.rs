@@ -46,7 +46,8 @@ impl IdlePolicy {
     /// the same 2/15 lead as the real 13/15 minutes).
     pub fn scaled(secs: u64) -> Self {
         let secs = secs.max(1);
-        let lead = secs * 2 / 15;
+        // Warn strictly before close, even for tiny values.
+        let lead = (secs * 2 / 15).max(1);
         Self {
             warn_after: Duration::from_secs(secs - lead),
             close_after: Duration::from_secs(secs),
@@ -140,6 +141,15 @@ mod tests {
         assert_eq!(p.warn_after, secs(13));
         let p = IdlePolicy::scaled(150);
         assert_eq!((p.warn_after, p.close_after), (secs(130), secs(150)));
+    }
+
+    #[test]
+    fn a_tiny_scaled_policy_still_warns_strictly_before_it_closes() {
+        for n in 1..=15 {
+            let p = IdlePolicy::scaled(n);
+            assert!(p.warn_after < p.close_after, "n={n}: {p:?}");
+        }
+        assert_eq!(IdlePolicy::scaled(1).warn_after, secs(0));
     }
 
     #[test]

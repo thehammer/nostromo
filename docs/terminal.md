@@ -149,9 +149,15 @@ QA: `NOSTROMO_QA_IDLE_SECS=<n>` scales the policy (warn at `n - 2n/15`, close at
 
 ### Guarded restart (slice 2e)
 
-A daemon restart ends every shell. The *controlled* restart paths therefore refuse while remote shells are open: `make install`, `make install-daemon` and `make uninstall-daemon` first run `daemon-restart-guard` (`bin/nostromo-restart-guard`), which runs `nostromd remote-shells` from the installed daemon (or `target/release/nostromd`) and, if any `ecs` terminal is open, prints it and stops with "Remote shells are open; they will be closed. Re-run with FORCE=1 to proceed." Override with `FORCE=1` or `NOSTROMO_FORCE_DAEMON_RESTART=1`. A binary that predates the subcommand is skipped (an old `nostromd` ignores arguments and would start a second daemon).
+A daemon restart ends every shell. The *controlled* restart paths therefore refuse while remote shells are open: `make install`, `make install-daemon` and `make uninstall-daemon` first run `daemon-restart-guard` (`bin/nostromo-restart-guard`), which runs `nostromd remote-shells` from the installed daemon (or `target/release/nostromd`) and, if any `ecs` terminal is open, prints it and stops with "Remote shells are open; they will be closed. Re-run with FORCE=1 to proceed." Override with `FORCE=1` or `NOSTROMO_FORCE_DAEMON_RESTART=1`. 
 
-`nostromd remote-shells [--json]` is a plain client of the daemon socket (`terminal_remote_summary_request`; no operator trust, metadata only). It lists each open `ecs` terminal (project, environment, service, age) and exits 0 (none open; local-only shells never count), 3 (some open) or 2 (no daemon answered, which the guard lets through).
+**Fail-open case.** The guard trusts `~/.local/bin/nostromd` or `target/release/nostromd` only if the binary contains `remote-shells`. When no qualifying binary exists it prints "not checking for open remote shells" and proceeds. The reason: a `nostromd` that predates the subcommand ignores its arguments and would start a second daemon instead of answering, so it must never be run. Nothing is checked in that case, so the guard cannot protect that restart.
+
+**First guarded install.** The daemon that is running when this lands predates the summary frame, so it cannot answer. The guard then sees exit 4 (below), fails closed and says so; forcing (`FORCE=1`) is expected exactly once, for that first install. After the new daemon runs, the guard answers normally.
+
+**Ordering under `make -j`.** The guard is not ordered after `release`: it asks the running daemon, needs no fresh build, and `uninstall-daemon` would compile for nothing. Instead `release` and `daemon` wait for the guard (order-only), so a parallel build never rewrites `target/release/nostromd` while the guard reads it.
+
+`nostromd remote-shells [--json]` is a plain client of the daemon socket (`terminal_remote_summary_request`; no operator trust, metadata only). It lists each open `ecs` terminal (project, environment, service, age) and exits 0 (none open; local-only shells never count), 3 (some open), 2 (no daemon is running: no socket or connection refused; the guard lets this through) or 4 (a daemon is there but gave no usable answer: timeout after 5 s, a protocol error, a reply that is not a welcome, or an old daemon that does not know the summary frame). The guard fails closed on 4 and on any other code: it needs `FORCE=1` / `NOSTROMO_FORCE_DAEMON_RESTART=1`.
 
 A crash or a raw SIGTERM cannot be guarded: those still end the shells, and the app shows it (`terminal_closed`, `daemon_stopped` on the next start).
 
