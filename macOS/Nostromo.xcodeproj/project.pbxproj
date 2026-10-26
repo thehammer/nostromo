@@ -400,6 +400,7 @@
 		PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000008 /* ActivityStreamModelTests.swift */; };
 		PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000010 /* ActivityTickerWiringTests.swift */; };
 		PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */; };
+		PP0000000000000000005B2 /* StatusBarPostureWindowsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP0000000000000000005B1 /* StatusBarPostureWindowsTests.swift */; };
 		PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP0000000000000000000001 /* TicketBlockDocumentTests.swift */; };
 
 		ZP0000000000000000000011 /* DisplayIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000001 /* DisplayIdentity.swift */; };
@@ -855,6 +856,7 @@
 		PP000000000000000000008 /* ActivityStreamModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamModelTests.swift; sourceTree = "<group>"; };
 		PP000000000000000000010 /* ActivityTickerWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerWiringTests.swift; sourceTree = "<group>"; };
 		PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarActivityRemovalTests.swift; sourceTree = "<group>"; };
+		PP0000000000000000005B1 /* StatusBarPostureWindowsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarPostureWindowsTests.swift; sourceTree = "<group>"; };
 		OO0000000000000000000001 /* TicketBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocument.swift; sourceTree = "<group>"; };
 		OO0000000000000000000002 /* TicketContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketContentView.swift; sourceTree = "<group>"; };
 
@@ -1361,6 +1363,7 @@
 				PP000000000000000000008 /* ActivityStreamModelTests.swift */,
 				PP000000000000000000010 /* ActivityTickerWiringTests.swift */,
 				PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */,
+				PP0000000000000000005B1 /* StatusBarPostureWindowsTests.swift */,
 				PP0000000000000000000001 /* TicketBlockDocumentTests.swift */,
 				RR0000000000000000000003 /* PRDetailCacheTests.swift */,
 				TT0000000000000000000000 /* ChatSessionDetachTests.swift */,
@@ -2026,6 +2029,7 @@
 				PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */,
 				PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */,
 				PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */,
+				PP0000000000000000005B2 /* StatusBarPostureWindowsTests.swift in Sources */,
 				PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */,
 				RR0000000000000000000102 /* PRDetailCache.swift in TestSources */,
 				RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */,

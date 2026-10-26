@@ -46,7 +46,6 @@ class AppStore: ObservableObject {
     @Published private(set) var motherDaemon:       MotherDaemonState = .unknown
 
     // Budget
-    @Published private(set) var rateLimits: RateLimits?     = nil
     @Published private(set) var posture:    PostureSnapshot? = nil
 
     // Activity — one assembled ActivityStreamModel per focus tag (keyed by
@@ -487,12 +486,7 @@ class AppStore: ObservableObject {
             .sink { [weak self] in self?.handle($0) }
             .store(in: &cancellables)
 
-        // File-backed data (rate limits, posture, perri queue)
-        FileWatchers.shared.rateLimits
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.rateLimits = $0 }
-            .store(in: &cancellables)
-
+        // File-backed data (posture, perri queue)
         FileWatchers.shared.posture
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.posture = $0 }
