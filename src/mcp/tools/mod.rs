@@ -406,7 +406,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": REQUEST_FOLLOW_TOOL,
-            "description": "Ask the user to let you follow one of your own focus's terminals: while you follow it, what it prints is delivered into your conversation and you can read its current screen with nostromo.read_terminal_screen. You still cannot type into it. The call blocks until the user decides: Nostromo shows an Allow/Deny sheet (naming this terminal, and for a remote shell the environment its output comes from) that only the user can answer. Add a short reason (at most 200 characters; the user sees it). Returns { ok, outcome: 'following' } once the user allowed it (also when you already follow that terminal). Errors: denied, dismissed, timeout (no answer in time), no_operator (the Nostromo app is not open to ask; nothing was shown), cancelled, request_pending (another request of yours is waiting for the user), unknown_terminal (not a terminal of your focus), terminal_not_running, follower_not_running, reason_too_long, invalid_args, unknown_view, unknown_argument.",
+            "description": "Ask the user to let you follow one of your own focus's terminals: while you follow it, what it prints is delivered into your conversation and you can read its current screen with nostromo.read_terminal_screen. You still cannot type into it. The call blocks until the user decides: Nostromo shows an Allow/Deny sheet (naming this terminal, and for a remote shell the environment its output comes from) that only the user can answer. Add a short reason (at most 200 characters; the user sees it). Returns { ok, outcome: 'following' } once the user allowed it (also when you already follow that terminal). Errors: denied, dismissed, timeout (no answer in time), no_operator (the Nostromo app is not open to ask; nothing was shown), cancelled, request_pending (another request of yours is waiting for the user), request_cooldown (the user recently said no or did not answer; wait before asking again, nothing was shown), request_limit (too many requests from this focus recently; nothing was shown), unknown_terminal (not a terminal of your focus), terminal_not_running, follower_not_running, reason_too_long, invalid_args, unknown_view, unknown_argument.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -419,7 +419,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": READ_TERMINAL_SCREEN_TOOL,
-            "description": "Read the current screen of a terminal you are following, as plain text with secrets redacted. Only works while you follow it (the user invited you, or allowed your nostromo.request_follow) and ends when the user stops it. Returns { ok, text, lines, redactions }. Errors: terminal_read_forbidden (you do not follow that terminal; audited), invalid_args, unknown_view, unknown_argument.",
+            "description": "Read the current screen of a terminal you are following, as plain text with secrets redacted. Only works while you follow it (the user invited you, or allowed your nostromo.request_follow) and ends when the user stops it. Returns { ok, text, lines, redactions }. Reads are limited: at most one every 2 seconds and 240 an hour per focus. Reading is allowed while a follow is paused for too much output. Errors: terminal_read_forbidden (you do not follow that terminal; audited), read_too_soon (you read again within 2 seconds), read_limit (you used your reads for the hour), redaction_failed, invalid_args, unknown_view, unknown_argument.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -678,6 +678,7 @@ fn forbidden(state: &McpSharedState, pty_id: Option<&str>, name: &str) -> ToolRe
     let op = match name {
         OPEN_TERMINAL_TOOL => Some("open"),
         REQUEST_REMOTE_SHELL_TOOL => Some("remote_request"),
+        LIST_TERMINALS_TOOL => Some("list"),
         REQUEST_FOLLOW_TOOL => Some("follow_request"),
         READ_TERMINAL_SCREEN_TOOL => Some("read"),
         _ => None,

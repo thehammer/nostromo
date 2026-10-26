@@ -118,6 +118,24 @@ pub enum SubmitRefused {
     Limit,
 }
 
+/// Why a focus may not ask now. Each is content-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LimitRefused {
+    /// The focus was denied recently and must wait.
+    Cooldown,
+    /// The focus has asked too often in the window.
+    Limit,
+}
+
+impl From<LimitRefused> for SubmitRefused {
+    fn from(refused: LimitRefused) -> Self {
+        match refused {
+            LimitRefused::Cooldown => Self::Cooldown,
+            LimitRefused::Limit => Self::Limit,
+        }
+    }
+}
+
 /// Where time comes from; tests inject their own.
 pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
@@ -141,6 +159,72 @@ impl FocusHistory {
     }
 }
 
+/// The cooldown and request ceiling an agent's focus is held to, for anything
+/// that asks the user for something (a remote shell, a follow): the cooldown
+/// after a denial (doubling per consecutive one, reset by an approval), and at
+/// most [`MAX_REQUESTS_PER_WINDOW`] requests per [`REQUEST_WINDOW`]. Each kind
+/// of request keeps its own instance, so a denied follow does not stop a shell
+/// request.
+#[derive(Default)]
+pub(crate) struct FocusLimits {
+    history: HashMap<String, FocusHistory>,
+}
+
+impl FocusLimits {
+    /// May `tag` ask now? Forgets focuses whose history has lapsed first.
+    pub(crate) fn check(&mut self, tag: &str, now: Instant) -> Result<(), LimitRefused> {
+        self.history.retain(|_, h| {
+            h.last_denial
+                .is_some_and(|d| now.saturating_duration_since(d) < STREAK_MEMORY)
+                || h.requests
+                    .back()
+                    .is_some_and(|r| now.saturating_duration_since(*r) < REQUEST_WINDOW)
+        });
+        let Some(h) = self.history.get_mut(tag) else {
+            return Ok(());
+        };
+        if h.cooldown_until.is_some_and(|until| now < until) {
+            return Err(LimitRefused::Cooldown);
+        }
+        while h
+            .requests
+            .front()
+            .is_some_and(|r| now.saturating_duration_since(*r) >= REQUEST_WINDOW)
+        {
+            h.requests.pop_front();
+        }
+        if h.requests.len() >= MAX_REQUESTS_PER_WINDOW {
+            return Err(LimitRefused::Limit);
+        }
+        Ok(())
+    }
+
+    /// `tag`'s request was accepted (and so counts towards the ceiling).
+    pub(crate) fn accepted(&mut self, tag: &str, now: Instant) {
+        self.history
+            .entry(tag.to_string())
+            .or_default()
+            .requests
+            .push_back(now);
+    }
+
+    /// The user said no (or did not answer): start or lengthen the cooldown.
+    pub(crate) fn denied(&mut self, tag: &str, now: Instant) {
+        let history = self.history.entry(tag.to_string()).or_default();
+        history.denials = history.denials.saturating_add(1);
+        history.cooldown_until = Some(now + FocusHistory::cooldown(history.denials));
+        history.last_denial = Some(now);
+    }
+
+    /// The user said yes: forget the denials.
+    pub(crate) fn approved(&mut self, tag: &str) {
+        let history = self.history.entry(tag.to_string()).or_default();
+        history.denials = 0;
+        history.cooldown_until = None;
+        history.last_denial = None;
+    }
+}
+
 /// What the registry keeps of a pending request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingRequest {
@@ -161,7 +245,7 @@ struct Slot {
 /// the rest find nothing pending.
 pub struct RemoteRequests {
     pending: Option<Slot>,
-    history: HashMap<String, FocusHistory>,
+    limits: FocusLimits,
     clock: Clock,
 }
 
@@ -175,7 +259,7 @@ impl RemoteRequests {
     pub fn with_clock(clock: Clock) -> Self {
         Self {
             pending: None,
-            history: HashMap::new(),
+            limits: FocusLimits::default(),
             clock,
         }
     }
@@ -199,29 +283,8 @@ impl RemoteRequests {
     ) -> Result<(String, oneshot::Receiver<RemoteOutcome>), SubmitRefused> {
         let now = (self.clock)();
         let agent = requested_by.kind != "user";
-        self.history.retain(|_, h| {
-            h.last_denial
-                .is_some_and(|d| now.saturating_duration_since(d) < STREAK_MEMORY)
-                || h.requests
-                    .back()
-                    .is_some_and(|r| now.saturating_duration_since(*r) < REQUEST_WINDOW)
-        });
         if agent {
-            if let Some(h) = self.history.get_mut(&tag) {
-                if h.cooldown_until.is_some_and(|until| now < until) {
-                    return Err(SubmitRefused::Cooldown);
-                }
-                while h
-                    .requests
-                    .front()
-                    .is_some_and(|r| now.saturating_duration_since(*r) >= REQUEST_WINDOW)
-                {
-                    h.requests.pop_front();
-                }
-                if h.requests.len() >= MAX_REQUESTS_PER_WINDOW {
-                    return Err(SubmitRefused::Limit);
-                }
-            }
+            self.limits.check(&tag, now).map_err(SubmitRefused::from)?;
         }
         if let Some(slot) = &self.pending {
             if agent || slot.request.requested_by.kind == "user" {
@@ -231,11 +294,7 @@ impl RemoteRequests {
             self.finish(&id, Some(RemoteOutcome::Superseded));
         }
         if agent {
-            self.history
-                .entry(tag.clone())
-                .or_default()
-                .requests
-                .push_back(now);
+            self.limits.accepted(&tag, now);
         }
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
@@ -300,17 +359,10 @@ impl RemoteRequests {
             return;
         }
         let now = (self.clock)();
-        let history = self.history.entry(request.tag.clone()).or_default();
         match outcome {
-            RemoteOutcome::Connect { .. } => {
-                history.denials = 0;
-                history.cooldown_until = None;
-                history.last_denial = None;
-            }
+            RemoteOutcome::Connect { .. } => self.limits.approved(&request.tag),
             RemoteOutcome::Cancelled | RemoteOutcome::Dismissed | RemoteOutcome::TimedOut => {
-                history.denials = history.denials.saturating_add(1);
-                history.cooldown_until = Some(now + FocusHistory::cooldown(history.denials));
-                history.last_denial = Some(now);
+                self.limits.denied(&request.tag, now)
             }
             RemoteOutcome::OperatorGone | RemoteOutcome::Superseded => {}
         }

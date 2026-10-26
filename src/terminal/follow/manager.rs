@@ -714,6 +714,14 @@ impl FollowManager {
 
     // ── reads (for TerminalInfo, and the agent's screen read) ─────────────────
 
+    /// Is `follower_tag` the focus following `terminal_id` (active or paused)?
+    pub fn is_follower(&self, follower_tag: &str, terminal_id: &str) -> bool {
+        self.lock_state()
+            .follows
+            .get(terminal_id)
+            .is_some_and(|f| f.follower == follower_tag)
+    }
+
     /// Who follows `terminal_id`, if anyone.
     pub fn current_follower(&self, terminal_id: &str) -> Option<TerminalFollower> {
         let state = self.lock_state();
@@ -806,7 +814,11 @@ impl FollowManager {
             .split('\n')
             .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
             .collect();
-        let delivery = deliver_lines(lines, &mut Redactor::new(), &mut DeliveryPolicy::new());
+        // A selection stands alone and may start in the middle of a private
+        // key (its BEGIN above the selection), so it is redacted as a fragment:
+        // down to the key's END, as a screen is.
+        let mut redactor = Redactor::for_screen(&lines, false);
+        let delivery = deliver_lines(lines, &mut redactor, &mut DeliveryPolicy::new());
         let Delivery::Text {
             text: redacted,
             lines_total,
@@ -825,8 +837,12 @@ impl FollowManager {
             neutralize_elements(&redacted),
         );
         // What the selection came from makes its recipient as sensitive as a
-        // follower of that terminal would be.
-        if self.sensitive.tag_is_sensitive(&info.tag) {
+        // follower of that terminal would be. Unlike a follower's, this lasts:
+        // the text stays in the recipient's conversation after the send, so a
+        // remote (ECS) terminal's, or a sensitive focus's, marks the recipient
+        // for good, before the text is written (redacted production text must
+        // not reach a network peer through the recipient's later turns).
+        if info.kind == TerminalKind::Ecs || self.sensitive.tag_is_sensitive(&info.tag) {
             self.sensitive.mark_tag(target_tag);
         }
         self.sink

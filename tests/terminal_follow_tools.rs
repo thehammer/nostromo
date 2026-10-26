@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use nostromo::data::work::picks::PICKS_TAG;
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::decisions::DecisionRegistry;
 use nostromo::ipc::pane_registry::PaneRegistry;
@@ -62,7 +63,7 @@ use nostromo::mcp::server::TERMINAL_FORBIDDEN_CODE;
 use nostromo::mcp::tools::terminal::{classify_terminal_attempt, TerminalOp};
 use nostromo::mcp::tools::tool_descriptors;
 use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState};
-use nostromo::terminal::agent_api::{AgentFollowRequest, FollowRequestResult};
+use nostromo::terminal::agent_api::{AgentFollowRequest, FollowRefusal, FollowRequestResult};
 use nostromo::terminal::audit::AuditLog;
 use nostromo::terminal::ecs::EcsPaths;
 use nostromo::terminal::launcher::testing::FakeLauncher;
@@ -287,6 +288,20 @@ struct Mcp {
     rx: mpsc::UnboundedReceiver<Value>,
     reader: tokio::task::JoinHandle<()>,
     next_id: i64,
+    /// The daemon's hand clock, when the connection came from a [`Daemon`].
+    clock: Option<HandClock>,
+}
+
+/// The daemon's agent-API clock (follow-request cooldown and ceiling, screen
+/// read limits), moved by hand. The wait for the user still runs on real time;
+/// only those limits read this.
+#[derive(Clone)]
+struct HandClock(Arc<Mutex<Duration>>);
+
+impl HandClock {
+    fn advance(&self, by: Duration) {
+        *self.0.lock().unwrap() += by;
+    }
 }
 
 impl Drop for Mcp {
@@ -316,6 +331,7 @@ impl Mcp {
             rx,
             reader,
             next_id: 100,
+            clock: None,
         };
         mcp.send(&hello).await;
         let init = mcp
@@ -913,6 +929,7 @@ struct Daemon {
     mcp_sock: PathBuf,
     tcp_port: u16,
     audit_path: PathBuf,
+    clock: HandClock,
     tmp: TempDir,
 }
 
@@ -990,7 +1007,11 @@ impl Daemon {
             Arc::clone(&decisions),
         );
 
-        let api = TerminalAgentApi::new(Arc::clone(&terminals));
+        let base = Instant::now();
+        let clock = HandClock(Arc::new(Mutex::new(Duration::ZERO)));
+        let reader = Arc::clone(&clock.0);
+        let api = TerminalAgentApi::new(Arc::clone(&terminals))
+            .with_clock(Arc::new(move || base + *reader.lock().unwrap()));
         let backend = DaemonMcpBackend {
             pane_registry: Arc::clone(&panes),
             session_mgr: Arc::clone(&sessions),
@@ -1019,6 +1040,7 @@ impl Daemon {
             mcp_sock,
             tcp_port,
             audit_path,
+            clock,
             tmp,
         }
     }
@@ -1091,7 +1113,9 @@ impl Daemon {
             Some(t) => json!({"type":"hello","pty_id": t}),
             None => json!({"type":"hello"}),
         };
-        Mcp::connect(&self.mcp_sock, hello).await
+        let mut mcp = Mcp::connect(&self.mcp_sock, hello).await;
+        mcp.clock = Some(self.clock.clone());
+        mcp
     }
 
     // ── sessions ─────────────────────────────────────────────────────────────
@@ -1552,6 +1576,15 @@ async fn read_screen_containing(mcp: &mut Mcp, terminal_id: &str, needle: &str) 
     let deadline = Instant::now() + WAIT;
     loop {
         let res = mcp.call(READ, json!({ "terminal_id": terminal_id })).await;
+        if res["error"] == "read_too_soon" {
+            // Reads are spaced by the daemon's hand clock: let two virtual
+            // seconds pass between polls.
+            mcp.clock
+                .as_ref()
+                .expect("a connection from the daemon")
+                .advance(READ_INTERVAL);
+            continue;
+        }
         if res["ok"] == true && res["text"].as_str().is_some_and(|t| t.contains(needle)) {
             return res;
         }
@@ -1564,6 +1597,10 @@ async fn read_screen_containing(mcp: &mut Mcp, terminal_id: &str, needle: &str) 
 }
 
 const FORBIDDEN_READ: &str = "terminal_read_forbidden";
+/// The spec'd limits on screen reads by one follower.
+const READ_INTERVAL: Duration = Duration::from_secs(2);
+const READS_PER_HOUR: usize = 240;
+const READ_HOUR: Duration = Duration::from_secs(60 * 60);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // The tool surface
@@ -1974,6 +2011,8 @@ follow_test! {
 
             r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
             assert_eq!(r.mcp.finish(call).await["error"], "denied", "{environment}");
+            // The next ask comes after the cooldown the Deny started.
+            r.d.clock.advance(Duration::from_secs(60));
         }
     }
 }
@@ -2178,7 +2217,9 @@ follow_test! {
         assert_eq!(r.d.follower_of(&id), None);
         assert!(r.d.invited().is_empty());
 
-        // The slot is free: the next request is asked, and its Allow works.
+        // The slot is free: once the timeout's cooldown is over the next
+        // request is asked, and its Allow works.
+        r.d.clock.advance(Duration::from_secs(60));
         let (call, sheet) = r.ask(None).await;
         r.app.answer_sheet(&sheet.request_id, Some("allow")).await;
         assert_eq!(r.mcp.finish(call).await["outcome"], "following");
@@ -2205,9 +2246,9 @@ follow_test! {
         let from = r.app.mark();
 
         let unknown = api.request_follow(req("no-such-terminal"), &decisions, &tx).await;
-        assert!(matches!(unknown, FollowRequestResult::Refused("unknown_terminal")));
+        assert!(matches!(unknown, FollowRequestResult::Refused(FollowRefusal::UnknownTerminal)));
         let other = api.request_follow(req(&theirs.terminal_id), &decisions, &tx).await;
-        assert!(matches!(other, FollowRequestResult::Refused("unknown_terminal")));
+        assert!(matches!(other, FollowRequestResult::Refused(FollowRefusal::UnknownTerminal)));
         r.app.assert_no_sheet_since(from, "refused requests").await;
 
         // One request at a time per focus.
@@ -2217,7 +2258,7 @@ follow_test! {
         });
         let sheet = r.app.wait_sheet(from).await;
         let pending = api.request_follow(req(&id), &decisions, &tx).await;
-        assert!(matches!(pending, FollowRequestResult::Refused("request_pending")));
+        assert!(matches!(pending, FollowRequestResult::Refused(FollowRefusal::RequestPending)));
         r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
         assert!(matches!(first.await.unwrap(), FollowRequestResult::Denied));
 
@@ -2367,6 +2408,8 @@ follow_test! {
         // The first one is untouched, and once it ends the focus may ask again.
         r.app.answer_sheet(&first.request_id, Some("deny")).await;
         assert_eq!(r.mcp.finish(first_call).await["error"], "denied");
+        // (after the cooldown the Deny started)
+        r.d.clock.advance(Duration::from_secs(60));
         let from = r.app.mark();
         let again = second_conn
             .start_call(FOLLOW, json!({ "terminal_id": ecs.terminal_id }))
@@ -2591,6 +2634,8 @@ follow_test! {
 
         // The slot is free: once the other decision is out of the way, a new request is asked.
         r.d.decisions.lock().unwrap().timeout_request(&blocker);
+        // (after the cooldown the timeout started)
+        r.d.clock.advance(Duration::from_secs(60));
         let (call, fresh) = r.ask(None).await;
         r.app.answer_sheet(&fresh.request_id, Some("deny")).await;
         assert_eq!(r.mcp.finish(call).await["error"], "denied", "not request_pending");
@@ -3268,7 +3313,10 @@ follow_test! {
             .await;
         assert_eq!(invited["via"], "sheet", "{invited}");
         assert_eq!(invited["include_screen"], false, "{invited}");
-        assert_eq!(invited["follower"], A, "{invited}");
+        // The follower of a remote terminal is a sensitive focus from the
+        // invite on, and the audit trail names it only by its opaque tag.
+        let follower = invited["follower"].as_str().unwrap_or_default();
+        assert!(follower.starts_with("focus-") && follower != A, "{invited}");
         assert_eq!(invited["terminal_id"], tid.as_str(), "{invited}");
 
         // It is a real follow: what the pane prints is delivered, and the agent may read the screen.
@@ -3484,7 +3532,9 @@ follow_test! {
         r.app.stop(&id).await;
         r.d.wait_idle(A).await;
 
-        // Door 2: Allow on the agent's request.
+        // Door 2: Allow on the agent's request (after the cooldown the Deny
+        // above started).
+        r.d.clock.advance(Duration::from_secs(60));
         let (call, sheet) = r.ask(None).await;
         r.app.answer_sheet(&sheet.request_id, Some("allow")).await;
         assert_eq!(r.mcp.finish(call).await["outcome"], "following");
@@ -3506,7 +3556,13 @@ follow_test! {
             .collect();
         assert_eq!(vias, ["control", "request", "sheet"], "{:#?}", r.d.invited());
         for line in r.d.invited() {
-            assert_eq!(line["follower"], A);
+            if line["via"] == "sheet" {
+                // A remote terminal's follower is sensitive: opaque in the trail.
+                let follower = line["follower"].as_str().unwrap_or_default();
+                assert!(follower.starts_with("focus-") && follower != A, "{line}");
+            } else {
+                assert_eq!(line["follower"], A, "{line}");
+            }
         }
     }
 }
@@ -3562,5 +3618,390 @@ follow_test! {
         }
         // Nor in the base64 a careless event might carry.
         assert!(find_sub(&audit, B64.encode(canary).as_bytes()).is_none());
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The cooldown and ceiling on follow requests (same numbers as a remote-shell
+// request: 60 s doubling to 15 min after a no, 3 asks per 10 minutes per focus)
+// ═════════════════════════════════════════════════════════════════════════════
+
+const ONE_SECOND: Duration = Duration::from_secs(1);
+
+fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
+
+/// The agent asks to follow the control terminal and the user answers
+/// `choice` (`None` dismisses the sheet); the call ends with `error`.
+async fn ask_and_answer(r: &mut Rig, choice: Option<&str>, error: &str) {
+    let (call, sheet) = r.ask(None).await;
+    r.app.answer_sheet(&sheet.request_id, choice).await;
+    let res = r.mcp.finish(call).await;
+    assert_eq!(res["error"], error, "{res}");
+}
+
+async fn ask_and_deny(r: &mut Rig) {
+    ask_and_answer(r, Some("deny"), "denied").await;
+}
+
+/// The agent asks to follow the control terminal and is refused with exactly
+/// `{"error": code}` while the user is shown nothing.
+async fn assert_follow_refused(r: &mut Rig, code: &str, what: &str) {
+    let id = r.id();
+    let from = r.app.mark();
+    let res = r.mcp.call(FOLLOW, json!({ "terminal_id": id })).await;
+    assert_eq!(res, json!({ "error": code }), "{what}");
+    r.app.assert_no_sheet_since(from, what).await;
+    assert_eq!(r.d.follower_of(&id), None, "{what}");
+}
+
+follow_test! {
+    async fn after_a_deny_the_agent_is_refused_request_cooldown_with_no_sheet_for_a_minute_and_the_next_deny_doubles_it() {
+        let mut r = rig().await;
+        ask_and_deny(&mut r).await;
+
+        assert_follow_refused(&mut r, "request_cooldown", "right after the Deny").await;
+        assert_follow_refused(&mut r, "request_cooldown", "asking again does not help").await;
+        r.d.clock.advance(secs(59));
+        assert_follow_refused(&mut r, "request_cooldown", "a second before the minute is up").await;
+
+        // The minute is up: the agent is asked about again.
+        r.d.clock.advance(ONE_SECOND);
+        ask_and_deny(&mut r).await;
+
+        // The second denial in a row costs two minutes.
+        r.d.clock.advance(secs(119));
+        assert_follow_refused(&mut r, "request_cooldown", "a second before the two minutes are up").await;
+        r.d.clock.advance(ONE_SECOND);
+        ask_and_deny(&mut r).await;
+
+        // ... and the third four.
+        r.d.clock.advance(secs(239));
+        assert_follow_refused(&mut r, "request_cooldown", "a second before the four minutes are up").await;
+        assert!(r.d.invited().is_empty());
+    }
+}
+
+follow_test! {
+    async fn a_dismissed_sheet_starts_the_cooldown_too() {
+        let mut r = rig().await;
+        ask_and_answer(&mut r, None, "dismissed").await;
+
+        assert_follow_refused(&mut r, "request_cooldown", "after a Dismiss").await;
+        r.d.clock.advance(secs(60));
+        ask_and_answer(&mut r, None, "dismissed").await;
+    }
+}
+
+follow_test! {
+    async fn the_cooldown_stops_growing_at_fifteen_minutes() {
+        let mut r = rig().await;
+        // Waits of 1, 2, 4, 8 minutes, each asked as soon as it is up; the
+        // ceiling is kept out of the way by letting the window pass first.
+        for wait in [60, 120, 240, 480] {
+            ask_and_deny(&mut r).await;
+            r.d.clock.advance(secs(wait));
+            r.d.clock.advance(secs(600));
+        }
+        // A fifth denial would be 16 minutes: it is held to 15.
+        ask_and_deny(&mut r).await;
+        r.d.clock.advance(secs(15 * 60 - 1));
+        assert_follow_refused(&mut r, "request_cooldown", "a second before the fifteen minutes").await;
+        r.d.clock.advance(ONE_SECOND);
+        ask_and_deny(&mut r).await;
+    }
+}
+
+follow_test! {
+    async fn an_allow_clears_the_cooldown_streak() {
+        let mut r = rig().await;
+        let id = r.id();
+        ask_and_deny(&mut r).await;
+        r.d.clock.advance(secs(60));
+        let (call, sheet) = r.ask(None).await;
+        r.app.answer_sheet(&sheet.request_id, Some("allow")).await;
+        let res = r.mcp.finish(call).await;
+        assert_eq!(res["ok"], true, "{res}");
+        r.app.stop(&id).await;
+        // Out of the request window, so only the streak is in play.
+        r.d.clock.advance(secs(600));
+
+        // No cooldown after an Allow: the agent can ask at once.
+        ask_and_deny(&mut r).await;
+        // The denial after it costs a minute, not two.
+        r.d.clock.advance(secs(59));
+        assert_follow_refused(&mut r, "request_cooldown", "a second early").await;
+        r.d.clock.advance(ONE_SECOND);
+        ask_and_deny(&mut r).await;
+    }
+}
+
+follow_test! {
+    async fn a_request_that_is_cancelled_because_the_agents_session_went_away_is_not_a_denial() {
+        let mut r = rig().await;
+        let (call, _sheet) = r.ask(None).await;
+        r.d.decisions.lock().unwrap().cancel_tag(A);
+        assert_eq!(r.mcp.finish(call).await["error"], "cancelled");
+
+        // No cooldown: the next ask goes straight to the user.
+        ask_and_deny(&mut r).await;
+    }
+}
+
+follow_test! {
+    async fn a_fourth_request_in_ten_minutes_is_refused_request_limit_with_no_sheet_until_the_first_ages_out() {
+        let mut r = rig().await;
+        // Three requests, each denied and each asked after its cooldown: at
+        // 0 s, 60 s and 180 s.
+        ask_and_deny(&mut r).await;
+        r.d.clock.advance(secs(60));
+        ask_and_deny(&mut r).await;
+        r.d.clock.advance(secs(120));
+        ask_and_deny(&mut r).await;
+
+        // At 420 s the third denial's 240 s are over, but the ceiling is not.
+        r.d.clock.advance(secs(240));
+        assert_follow_refused(&mut r, "request_limit", "a fourth request in the window").await;
+        // At 599 s the first request is still inside the window.
+        r.d.clock.advance(secs(179));
+        assert_follow_refused(&mut r, "request_limit", "a second before it ages out").await;
+
+        // At 600 s it has aged out.
+        r.d.clock.advance(ONE_SECOND);
+        ask_and_deny(&mut r).await;
+    }
+}
+
+follow_test! {
+    async fn one_focuss_cooldown_and_ceiling_do_not_hold_another_focus() {
+        let mut r = rig_two().await;
+        let (_g, cwd_b) = canonical_tmp();
+        let terminal_b = r.app.open_control_terminal(B, &cwd_b).await;
+        let mut mcp_b = r.d.mcp(Some(B)).await;
+
+        // A in cooldown ...
+        ask_and_deny(&mut r).await;
+        assert_follow_refused(&mut r, "request_cooldown", "A is cooling").await;
+        // ... B is asked about.
+        let from = r.app.mark();
+        let call = mcp_b
+            .start_call(FOLLOW, json!({ "terminal_id": terminal_b.terminal_id }))
+            .await;
+        let sheet = r.app.wait_sheet(from).await;
+        assert_eq!(sheet.tag, B);
+        r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
+        assert_eq!(mcp_b.finish(call).await["error"], "denied");
+
+        // A at its ceiling, B is still asked.
+        r.d.clock.advance(secs(60));
+        ask_and_deny(&mut r).await;
+        r.d.clock.advance(secs(120));
+        ask_and_deny(&mut r).await;
+        r.d.clock.advance(secs(240));
+        assert_follow_refused(&mut r, "request_limit", "A is at its ceiling").await;
+        let from = r.app.mark();
+        let call = mcp_b
+            .start_call(FOLLOW, json!({ "terminal_id": terminal_b.terminal_id }))
+            .await;
+        let sheet = r.app.wait_sheet(from).await;
+        assert_eq!(sheet.tag, B);
+        r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
+        assert_eq!(mcp_b.finish(call).await["error"], "denied");
+    }
+}
+
+follow_test! {
+    async fn a_denied_follow_does_not_cool_down_remote_shell_requests_and_the_other_way_round() {
+        let mut r = rig().await;
+
+        // A denied follow: the same focus may still ask for a remote shell.
+        ask_and_deny(&mut r).await;
+        let (call, request_id) = r.ask_remote(None).await;
+        r.app.answer_remote(&request_id, "cancel", false).await;
+        assert_eq!(r.mcp.finish(call).await["error"], "cancelled");
+
+        // A cancelled remote shell: the same focus may still ask to follow,
+        // once the follow's own cooldown is over.
+        r.d.clock.advance(secs(60));
+        let (call, sheet) = r.ask(None).await;
+        r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
+        assert_eq!(r.mcp.finish(call).await["error"], "denied");
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Limits on reading a followed screen
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn screen_reads_audited(d: &Daemon) -> usize {
+    d.audit()
+        .iter()
+        .filter(|l| l["event"] == "screen_read")
+        .count()
+}
+
+async fn read_ok(mcp: &mut Mcp, id: &str, what: &str) {
+    let res = mcp.call(READ, json!({ "terminal_id": id })).await;
+    assert_eq!(res["ok"], true, "{what}: {res}");
+}
+
+async fn assert_read_refused(r: &mut Rig, code: &str, what: &str) -> Value {
+    let id = r.id();
+    let reads_before = screen_reads_audited(&r.d);
+    let res = r.mcp.call(READ, json!({ "terminal_id": id })).await;
+    assert_eq!(res["error"], code, "{what}: {res}");
+    assert!(
+        res.get("text").is_none() && res.get("ok").is_none() && res.get("lines").is_none(),
+        "{what}: a refused read returns nothing: {res}"
+    );
+    assert_eq!(
+        screen_reads_audited(&r.d),
+        reads_before,
+        "{what}: nothing was read"
+    );
+    r.d.wait_audit(what, |l| {
+        l["event"] == "refused" && l["channel"] == "mcp" && l["op"] == "read" && l["code"] == code
+    })
+    .await
+}
+
+follow_test! {
+    async fn a_second_read_within_two_seconds_is_read_too_soon_reads_nothing_and_is_audited_without_content() {
+        let mut r = rig().await;
+        let id = r.id();
+        r.invite_a(false).await;
+        r.run("printf 'CANARY-TOO-SOON-31\\n'").await;
+        assert!(r.app.wait_view_from(&id, 0, "CANARY-TOO-SOON-31", WAIT).await);
+
+        read_ok(&mut r.mcp, &id, "the first read").await;
+        assert_eq!(screen_reads_audited(&r.d), 1);
+
+        let line = assert_read_refused(&mut r, "read_too_soon", "an immediate second read").await;
+        assert_eq!(line["focus"], A, "{line}");
+        assert_eq!(line["tool"], READ, "{line}");
+        assert!(line.get("text").is_none(), "{line}");
+        r.d.clock.advance(Duration::from_millis(1999));
+        assert_read_refused(&mut r, "read_too_soon", "a millisecond early").await;
+
+        r.d.clock.advance(Duration::from_millis(1));
+        read_ok(&mut r.mcp, &id, "two seconds after the last read").await;
+        assert_eq!(screen_reads_audited(&r.d), 2);
+        // Refusals are lines of their own, and none of them holds screen text.
+        assert!(find_sub(&r.d.audit_bytes(), b"CANARY-TOO-SOON-31").is_none());
+    }
+}
+
+follow_test! {
+    async fn a_follower_gets_240_reads_an_hour_and_the_next_is_read_limit_until_the_first_ages_out() {
+        let mut r = rig().await;
+        let id = r.id();
+        r.invite_a(false).await;
+
+        // 240 reads, as close together as the interval allows: at 0, 2, ... 478 s.
+        for n in 0..READS_PER_HOUR {
+            if n > 0 {
+                r.d.clock.advance(READ_INTERVAL);
+            }
+            read_ok(&mut r.mcp, &id, &format!("read {}", n + 1)).await;
+        }
+        assert_eq!(screen_reads_audited(&r.d), READS_PER_HOUR);
+
+        // At 480 s the interval is fine but the hour's reads are used up.
+        r.d.clock.advance(READ_INTERVAL);
+        let line = assert_read_refused(&mut r, "read_limit", "the 241st read").await;
+        assert_eq!(line["focus"], A, "{line}");
+        assert_eq!(line["tool"], READ, "{line}");
+        // At 3599 s the first read is still inside the hour (a refused read
+        // used none of it).
+        r.d.clock.advance(READ_HOUR - ONE_SECOND - READ_INTERVAL * 240);
+        assert_read_refused(&mut r, "read_limit", "a second before the first ages out").await;
+
+        // At 3600 s it has aged out: one more read, then the interval again.
+        r.d.clock.advance(ONE_SECOND);
+        read_ok(&mut r.mcp, &id, "an hour after the first read").await;
+        assert_read_refused(&mut r, "read_too_soon", "and the interval still holds").await;
+    }
+}
+
+follow_test! {
+    async fn attempts_to_read_a_terminal_nobody_follows_never_start_the_interval_or_use_up_reads() {
+        let mut r = rig().await;
+        let id = r.id();
+
+        // Not a follower: each attempt is the same refusal, never read_too_soon.
+        for _ in 0..3 {
+            let res = r.mcp.call(READ, json!({ "terminal_id": id })).await;
+            assert_eq!(res["error"], FORBIDDEN_READ, "{res}");
+        }
+
+        // The moment the user invites the agent, its first read is served.
+        r.invite_a(false).await;
+        read_ok(&mut r.mcp, &id, "the first read of a follower").await;
+    }
+}
+
+follow_test! {
+    async fn the_read_limits_are_per_follower_focus() {
+        let mut r = rig_two().await;
+        let id = r.id();
+        let (_g, cwd_b) = canonical_tmp();
+        let terminal_b = r.app.open_control_terminal(B, &cwd_b).await;
+        r.app.invite(&terminal_b.terminal_id, B, false).await;
+        r.invite_a(false).await;
+        let mut mcp_b = r.d.mcp(Some(B)).await;
+
+        read_ok(&mut r.mcp, &id, "A's read").await;
+        read_ok(&mut mcp_b, &terminal_b.terminal_id, "B's read right after A's").await;
+        assert_read_refused(&mut r, "read_too_soon", "A reads again").await;
+        let res = mcp_b
+            .call(READ, json!({ "terminal_id": terminal_b.terminal_id }))
+            .await;
+        assert_eq!(res["error"], "read_too_soon", "B reads again: {res}");
+    }
+}
+
+follow_test! {
+    async fn while_a_follow_is_paused_for_a_flood_reads_are_still_served_and_still_spaced() {
+        let mut r = rig().await;
+        let id = r.id();
+        r.invite_a(false).await;
+        r.run("seq 1 6000").await;
+        r.app
+            .wait_since(0, "a paused follower in terminal_state", |m| {
+                matches!(m, ServerMsg::TerminalState { terminal }
+                    if terminal.terminal_id == id && terminal.follower.as_ref().is_some_and(|f| f.paused))
+            })
+            .await;
+
+        read_ok(&mut r.mcp, &id, "a read while paused").await;
+        assert_read_refused(&mut r, "read_too_soon", "a second read while paused").await;
+        r.d.clock.advance(READ_INTERVAL);
+        read_ok(&mut r.mcp, &id, "two seconds later, still paused").await;
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A refused list_terminals is audited
+// ═════════════════════════════════════════════════════════════════════════════
+
+follow_test! {
+    async fn a_refused_list_terminals_is_audited_as_a_list_refusal_naming_the_tool() {
+        let d = Daemon::start(&[Peer::App]).await;
+        let mut picks = d.mcp(Some(PICKS_TAG)).await;
+
+        let resp = picks.call_raw(LIST, json!({})).await;
+
+        let text = resp.to_string();
+        assert!(!text.contains("\"terminals\""), "a refused list lists nothing: {text}");
+        let line = d
+            .wait_audit("the refused list_terminals", |l| {
+                l["event"] == "refused" && l["channel"] == "mcp" && l["op"] == "list"
+            })
+            .await;
+        assert_eq!(line["code"], "forbidden", "{line}");
+        assert_eq!(line["tool"], LIST, "{line}");
+        assert_eq!(line["focus"], PICKS_TAG, "{line}");
+        assert_eq!(d.mcp_refusals("list").len(), 1);
     }
 }

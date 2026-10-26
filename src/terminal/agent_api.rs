@@ -10,10 +10,10 @@
 //! `tests/terminal_policy.rs` keeps `src/mcp/` from naming anything more
 //! powerful.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
@@ -21,7 +21,9 @@ use super::ecs::{EcsVocabulary, VocabError};
 use super::follow::manager::{pane_name, FollowGrant, FOLLOW_ALLOW, FOLLOW_DENY};
 use super::follow::{FollowError, ScreenRead, ScreenReadError};
 use super::launcher::Placement;
-use super::remote_request::{self, clean_reason, RemoteRequest, RemoteResult};
+use super::remote_request::{
+    self, clean_reason, Clock, FocusLimits, LimitRefused, RemoteRequest, RemoteResult,
+};
 use super::{TerminalError, TerminalManager};
 use crate::ipc::decisions::{DecisionOutcome, DecisionRegistry};
 use crate::ipc::protocol::{
@@ -33,6 +35,18 @@ use crate::ipc::protocol::{
 pub const READ_SCREEN_TOOL: &str = "nostromo.read_terminal_screen";
 /// What an agent that tried to read a screen it may not read is told.
 pub const READ_FORBIDDEN: &str = "terminal_read_forbidden";
+
+/// The least time between two screen reads by one follower. A read inside it
+/// is refused as [`READ_TOO_SOON`], nothing is read and nothing but the refusal
+/// is audited.
+pub const MIN_READ_INTERVAL: Duration = Duration::from_secs(2);
+/// The most screen reads one follower gets in [`READ_WINDOW`]; the next is
+/// refused as [`READ_LIMIT`].
+pub const MAX_READS_PER_WINDOW: usize = 240;
+pub const READ_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// Refusal codes of the read limits.
+pub const READ_TOO_SOON: &str = "read_too_soon";
+pub const READ_LIMIT: &str = "read_limit";
 
 /// Longest `tool` or `focus` string an audit line keeps (both are whatever the
 /// caller sent: a tool name, and the `pty_id` it declared).
@@ -87,10 +101,45 @@ pub enum FollowRequestResult {
     NoOperator,
     /// The agent's session went away while it waited.
     Cancelled,
-    /// Nothing happened, for the reason this code names: `unknown_terminal`,
-    /// `terminal_not_running`, `request_pending`, `follower_not_running`,
-    /// `follow_unavailable`.
-    Refused(&'static str),
+    /// Nothing happened: see [`FollowRefusal`].
+    Refused(FollowRefusal),
+}
+
+/// Why [`TerminalAgentApi::request_follow`] changed nothing. The first six are
+/// this API's own refusals, made before anyone is asked (no sheet is shown for
+/// any of them); [`FollowRefusal::NotStarted`] is the follow engine's, after
+/// the user said Allow. Their codes ([`FollowRefusal::code`]) are distinct,
+/// except where the engine and the API name the same fact (`unknown_terminal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowRefusal {
+    /// Not a terminal of the asking focus (or no such terminal).
+    UnknownTerminal,
+    TerminalNotRunning,
+    /// The focus already has a request waiting for the user.
+    RequestPending,
+    /// The user recently said no (or did not answer): wait before asking again.
+    RequestCooldown,
+    /// The focus has asked too often in the window.
+    RequestLimit,
+    /// The daemon has no follow engine.
+    FollowUnavailable,
+    /// The user allowed it and following could not start.
+    NotStarted(FollowError),
+}
+
+impl FollowRefusal {
+    /// The code the agent is told.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::UnknownTerminal => "unknown_terminal",
+            Self::TerminalNotRunning => "terminal_not_running",
+            Self::RequestPending => "request_pending",
+            Self::RequestCooldown => "request_cooldown",
+            Self::RequestLimit => "request_limit",
+            Self::FollowUnavailable => "follow_unavailable",
+            Self::NotStarted(e) => e.code(),
+        }
+    }
 }
 
 /// What an agent is told about a terminal it can see: metadata, never output.
@@ -112,6 +161,11 @@ pub struct TerminalAgentApi {
     manager: Arc<Mutex<TerminalManager>>,
     /// Focuses with a follow request waiting for the user (one at a time each).
     asking: Arc<Mutex<HashSet<String>>>,
+    /// The cooldown and ceiling on follow requests, per focus.
+    follow_limits: Arc<Mutex<FocusLimits>>,
+    /// When each follower's screen reads were accepted, within [`READ_WINDOW`].
+    reads: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    clock: Clock,
 }
 
 impl TerminalAgentApi {
@@ -119,7 +173,17 @@ impl TerminalAgentApi {
         Self {
             manager,
             asking: Arc::default(),
+            follow_limits: Arc::default(),
+            reads: Arc::default(),
+            clock: Arc::new(Instant::now),
         }
+    }
+
+    /// Replace the clock the follow-request cooldown and ceiling and the screen
+    /// read limits read (tests move their own by hand).
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// A handle on a manager with no audit file, store or pane registry.
@@ -219,23 +283,38 @@ impl TerminalAgentApi {
         };
         // Another focus's terminal is answered like one that does not exist.
         let Some(info) = info.filter(|i| i.tag == request.tag) else {
-            return FollowRequestResult::Refused("unknown_terminal");
+            return FollowRequestResult::Refused(FollowRefusal::UnknownTerminal);
         };
         if info.follower.as_ref().is_some_and(|f| f.tag == request.tag) {
             return FollowRequestResult::Following;
         }
         if info.status != TerminalStatus::Running {
-            return FollowRequestResult::Refused("terminal_not_running");
+            return FollowRequestResult::Refused(FollowRefusal::TerminalNotRunning);
         }
         let Some(follow) = follow else {
-            return FollowRequestResult::Refused("follow_unavailable");
+            return FollowRequestResult::Refused(FollowRefusal::FollowUnavailable);
         };
         if !follow_ui || !lock(decisions).has_operator_for(sensitive) {
             return FollowRequestResult::NoOperator;
         }
         let Some(_asking) = Asking::start(&self.asking, &request.tag) else {
-            return FollowRequestResult::Refused("request_pending");
+            return FollowRequestResult::Refused(FollowRefusal::RequestPending);
         };
+        // Asked once, a request counts towards the ceiling whatever becomes of
+        // it; the user's no starts the cooldown (see below).
+        {
+            let now = (self.clock)();
+            let mut limits = lock(&self.follow_limits);
+            match limits.check(&request.tag, now) {
+                Ok(()) => limits.accepted(&request.tag, now),
+                Err(LimitRefused::Cooldown) => {
+                    return FollowRequestResult::Refused(FollowRefusal::RequestCooldown)
+                }
+                Err(LimitRefused::Limit) => {
+                    return FollowRequestResult::Refused(FollowRefusal::RequestLimit)
+                }
+            }
+        }
 
         let (request_id, mut rx, sheet) = lock(decisions).submit(
             request.tag.clone(),
@@ -281,13 +360,20 @@ impl TerminalAgentApi {
         withdraw.armed = false;
         drop(withdraw);
 
+        // The user's mind: an Allow clears the focus's cooldown; a no, a
+        // dismissal or silence starts (or lengthens) it. A request whose caller
+        // went away says nothing.
         if let Some(grant) = FollowGrant::from_decision(&outcome) {
+            lock(&self.follow_limits).approved(&request.tag);
             return match follow.invite_granted(grant, &request.terminal_id, &request.tag) {
                 Ok(()) => FollowRequestResult::Following,
                 // The app that said Allow is gone: nothing follows.
                 Err(FollowError::NoOperator) => FollowRequestResult::NoOperator,
-                Err(e) => FollowRequestResult::Refused(e.code()),
+                Err(e) => FollowRequestResult::Refused(FollowRefusal::NotStarted(e)),
             };
+        }
+        if !matches!(outcome, DecisionOutcome::Cancelled) {
+            lock(&self.follow_limits).denied(&request.tag, (self.clock)());
         }
         match outcome {
             DecisionOutcome::Dismissed => FollowRequestResult::Dismissed,
@@ -302,22 +388,55 @@ impl TerminalAgentApi {
     /// invited, stopped, someone else's, no such terminal) is one answer,
     /// [`ScreenReadRefused::Forbidden`], audited as `refused {channel: "mcp",
     /// op: "read"}`.
+    ///
+    /// A follower is also held to a minimum interval between reads
+    /// ([`MIN_READ_INTERVAL`]) and an hourly cap ([`MAX_READS_PER_WINDOW`]):
+    /// past either the read is refused ([`ScreenReadRefused::TooSoon`] /
+    /// [`ScreenReadRefused::Limit`], audited as a `refused` line with the code
+    /// and nothing else). Whether the follow is paused for flood does not
+    /// matter: a read of the current screen is allowed then, on purpose (it is
+    /// the same redacted, capped screen the follower was invited to see).
     pub fn read_screen_if_following(
         &self,
         focus_tag: &str,
         terminal_id: &str,
     ) -> Result<ScreenRead, ScreenReadRefused> {
         let follow = self.lock().follow();
+        // Anyone who does not follow the terminal gets the one answer, whatever
+        // the limits say; only a follower's reads are counted.
+        if !follow
+            .as_ref()
+            .is_some_and(|f| f.is_follower(focus_tag, terminal_id))
+        {
+            self.audit_refusal(Some(focus_tag), "read", READ_SCREEN_TOOL, READ_FORBIDDEN);
+            return Err(ScreenReadRefused::Forbidden);
+        }
+        // The limits bound the redaction work and the audit lines a follower can
+        // cause. They are held across the read so two calls cannot both pass.
+        let mut reads = lock(&self.reads);
+        if let Err(refused) = self.check_read_limits(&mut reads, focus_tag) {
+            drop(reads);
+            self.audit_refusal(Some(focus_tag), "read", READ_SCREEN_TOOL, refused.code());
+            return Err(refused);
+        }
         let read = follow
             .ok_or(ScreenReadError::NotFollowing)
             .and_then(|f| f.read_screen_as(focus_tag, terminal_id));
         match read {
-            Ok(screen) => Ok(screen),
+            Ok(screen) => {
+                self.note_read(&mut reads, focus_tag);
+                Ok(screen)
+            }
+            // The follow ended between the check and the read.
             Err(ScreenReadError::NotFollowing) => {
+                drop(reads);
                 self.audit_refusal(Some(focus_tag), "read", READ_SCREEN_TOOL, READ_FORBIDDEN);
                 Err(ScreenReadRefused::Forbidden)
             }
-            Err(ScreenReadError::Withheld) => Err(ScreenReadRefused::Withheld),
+            Err(ScreenReadError::Withheld) => {
+                self.note_read(&mut reads, focus_tag);
+                Err(ScreenReadRefused::Withheld)
+            }
         }
     }
 
@@ -339,6 +458,48 @@ impl TerminalAgentApi {
             .audit_refused_mcp(op, Some(code), None, focus.as_deref(), Some(&clip(tool)));
     }
 
+    /// May `focus_tag` read now? Not within [`MIN_READ_INTERVAL`] of its last
+    /// read, nor once it has had [`MAX_READS_PER_WINDOW`] in [`READ_WINDOW`].
+    /// Forgets followers whose reads have all aged out.
+    fn check_read_limits(
+        &self,
+        reads: &mut HashMap<String, VecDeque<Instant>>,
+        focus_tag: &str,
+    ) -> Result<(), ScreenReadRefused> {
+        let now = (self.clock)();
+        reads.retain(|_, times| {
+            times
+                .back()
+                .is_some_and(|t| now.saturating_duration_since(*t) < READ_WINDOW)
+        });
+        let Some(times) = reads.get_mut(focus_tag) else {
+            return Ok(());
+        };
+        while times
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= READ_WINDOW)
+        {
+            times.pop_front();
+        }
+        if times
+            .back()
+            .is_some_and(|t| now.saturating_duration_since(*t) < MIN_READ_INTERVAL)
+        {
+            return Err(ScreenReadRefused::TooSoon);
+        }
+        if times.len() >= MAX_READS_PER_WINDOW {
+            return Err(ScreenReadRefused::Limit);
+        }
+        Ok(())
+    }
+
+    fn note_read(&self, reads: &mut HashMap<String, VecDeque<Instant>>, focus_tag: &str) {
+        reads
+            .entry(focus_tag.to_string())
+            .or_default()
+            .push_back((self.clock)());
+    }
+
     fn lock(&self) -> MutexGuard<'_, TerminalManager> {
         self.manager.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -351,6 +512,11 @@ pub enum ScreenReadRefused {
     Forbidden,
     /// Redaction failed, so nothing was returned (fail closed).
     Withheld,
+    /// The follower read again within [`MIN_READ_INTERVAL`]. Nothing was read.
+    TooSoon,
+    /// The follower has used its [`MAX_READS_PER_WINDOW`] for the hour. Nothing
+    /// was read.
+    Limit,
 }
 
 impl ScreenReadRefused {
@@ -359,6 +525,8 @@ impl ScreenReadRefused {
         match self {
             Self::Forbidden => READ_FORBIDDEN,
             Self::Withheld => "redaction_failed",
+            Self::TooSoon => READ_TOO_SOON,
+            Self::Limit => READ_LIMIT,
         }
     }
 }

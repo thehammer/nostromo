@@ -89,7 +89,7 @@ pub async fn request_follow(
         FollowRequestResult::TimedOut => json!({ "error": "timeout" }),
         FollowRequestResult::NoOperator => json!({ "error": "no_operator" }),
         FollowRequestResult::Cancelled => json!({ "error": "cancelled" }),
-        FollowRequestResult::Refused(code) => json!({ "error": code }),
+        FollowRequestResult::Refused(refusal) => json!({ "error": refusal.code() }),
     }
 }
 
