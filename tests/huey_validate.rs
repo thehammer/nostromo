@@ -76,7 +76,14 @@ fn item(
 }
 
 fn first_party(key: &str, title: &str, hour: u32) -> NewsItem {
-    item("vendor-news", key, SourceClass::FirstParty, title, &[], hour)
+    item(
+        "vendor-news",
+        key,
+        SourceClass::FirstParty,
+        title,
+        &[],
+        hour,
+    )
 }
 
 const INTERESTS: &str = "\
@@ -207,7 +214,10 @@ fn fixture(mode: Mode) -> Fx {
         version: 1,
         mode: None,
         interests: parsed,
-        projects: vec![project("alpha", "Alpha", 1), project("beta", "Brightwater", 2)],
+        projects: vec![
+            project("alpha", "Alpha", 1),
+            project("beta", "Brightwater", 2),
+        ],
         prs_available: true,
         posture: None,
         mother_queue: None,
@@ -555,10 +565,17 @@ fn h5_3_tight_four_picks_are_refused_and_the_message_names_three() {
 fn h5_3_six_noted_lines_are_refused_and_the_message_names_the_cap() {
     let fx = fixture(Mode::Normal);
     let mut p = base();
-    p.also_noted = [vn("a6"), vn("a7"), vn("a8"), vn("a9"), vn("a10"), "blog:b1".to_string()]
-        .iter()
-        .map(|id| noted(id, "i1"))
-        .collect();
+    p.also_noted = [
+        vn("a6"),
+        vn("a7"),
+        vn("a8"),
+        vn("a9"),
+        vn("a10"),
+        "blog:b1".to_string(),
+    ]
+    .iter()
+    .map(|id| noted(id, "i1"))
+    .collect();
     let found = problems(fx.validate(&p));
     assert!(found.iter().any(|x| x.rule == Rule::TooManyNoted));
     assert!(
@@ -631,9 +648,11 @@ fn h5_3_an_item_id_the_run_never_issued_is_refused_wherever_it_appears() {
     refuses("pick", Rule::UnknownItem, |p| {
         p.picks[0].item_ids = vec![ghost.into()]
     });
-    refuses("pick with one good id and one ghost", Rule::UnknownItem, |p| {
-        p.picks[0].item_ids.push(ghost.into())
-    });
+    refuses(
+        "pick with one good id and one ghost",
+        Rule::UnknownItem,
+        |p| p.picks[0].item_ids.push(ghost.into()),
+    );
     refuses("noted", Rule::UnknownItem, |p| {
         p.also_noted[0].item_ids = vec![ghost.into()]
     });
@@ -763,8 +782,7 @@ fn h5_3_the_duplicate_message_names_the_id() {
 fn h5_3_a_news_line_that_is_also_noted_moves_up_and_leaves_the_noted_list() {
     let fx = fixture(Mode::Normal);
     let mut p = base();
-    p.also_noted
-        .push(noted(&vn("n1"), "i1")); // n1 is the news line
+    p.also_noted.push(noted(&vn("n1"), "i1")); // n1 is the news line
     let out = accepted(&fx, &p);
     assert_eq!(out.also_in_the_news.as_ref().unwrap().item_id, vn("n1"));
     assert!(
@@ -791,10 +809,14 @@ fn h5_3_an_ignored_id_used_in_the_report_is_refused() {
     refuses("ignored noted", Rule::IgnoredUsed, |p| {
         p.ignored.push("blog:b1".into())
     });
-    refuses("ignored in a story the pick covers", Rule::IgnoredUsed, |p| {
-        p.picks[0].item_ids = vec![vn("rel")];
-        p.ignored.push(vn("rel"));
-    });
+    refuses(
+        "ignored in a story the pick covers",
+        Rule::IgnoredUsed,
+        |p| {
+            p.picks[0].item_ids = vec![vn("rel")];
+            p.ignored.push(vn("rel"));
+        },
+    );
 }
 
 #[test]
@@ -1060,8 +1082,16 @@ fn h5_3_the_bad_interest_message_names_the_interest() {
 #[test]
 fn h5_3_the_news_line_may_not_name_a_project() {
     for (label, headline, what) in [
-        ("id in the headline", "Alpha ships a thing", "A new release."),
-        ("id in the text", "Vendor ships a thing", "Useful for beta users."),
+        (
+            "id in the headline",
+            "Alpha ships a thing",
+            "A new release.",
+        ),
+        (
+            "id in the text",
+            "Vendor ships a thing",
+            "Useful for beta users.",
+        ),
         (
             "display name in the headline",
             "Brightwater gets a feature",
@@ -1073,7 +1103,11 @@ fn h5_3_the_news_line_may_not_name_a_project() {
             "Works with Brightwater.",
         ),
         ("upper case", "ALPHA ships a thing", "A new release."),
-        ("mixed case", "Vendor ships a thing", "Made for bRiGhTwAtEr."),
+        (
+            "mixed case",
+            "Vendor ships a thing",
+            "Made for bRiGhTwAtEr.",
+        ),
     ] {
         refuses(label, Rule::AinNamesProject, |p| {
             p.also_in_the_news = Some(PublishAin {
@@ -1151,7 +1185,9 @@ fn h5_3_skipping_the_news_line_needs_no_reason_when_nothing_is_eligible() {
 
     // Everything eligible is already a pick or ignored.
     let mut fx = fixture(Mode::Normal);
-    fx.input.ain_candidates.retain(|i| i.id == vn("a7") || i.id == vn("n2"));
+    fx.input
+        .ain_candidates
+        .retain(|i| i.id == vn("a7") || i.id == vn("n2"));
     let mut p = base();
     p.also_in_the_news = None;
     p.picks[0].item_ids = vec![vn("a7")];
@@ -1274,7 +1310,10 @@ fn h5_3_the_footer_does_not_count_toward_the_quiet_body() {
     let under = quiet_with_filler(149 - counts.body);
     let counts = render::word_counts(&fx.input.render(&under));
     assert_eq!(counts.body, 149, "harness: tuned under the cap");
-    assert!(counts.total >= 150, "harness: the footer pushes the total over");
+    assert!(
+        counts.total >= 150,
+        "harness: the footer pushes the total over"
+    );
     accepted(&fx, &under);
 }
 

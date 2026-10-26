@@ -145,9 +145,8 @@ impl Site {
     fn respond(&self, request_path: &str) -> ResponseTemplate {
         let source = request_path.trim_start_matches("/feed/");
         match self.feeds.lock().unwrap().get(source) {
-            Some(entries) => {
-                ResponseTemplate::new(200).set_body_raw(atom(source, entries), "application/atom+xml")
-            }
+            Some(entries) => ResponseTemplate::new(200)
+                .set_body_raw(atom(source, entries), "application/atom+xml"),
             None => ResponseTemplate::new(404),
         }
     }
@@ -734,21 +733,12 @@ async fn rig_with(w: World, o: Opts) -> Rig {
     let curator: Arc<dyn Curator> = spy.clone();
     let src = if o.scheduled {
         w.confirm();
-        HueyEngine::spawn(w.deps(
-            curator,
-            bridge.clone(),
-            o.config,
-            Duration::from_millis(5),
-        ))
+        HueyEngine::spawn(w.deps(curator, bridge.clone(), o.config, Duration::from_millis(5)))
     } else {
         // The scheduler takes its first look before setup is confirmed and
         // then sleeps for an hour: only the test's own triggers run.
-        let src = HueyEngine::spawn(w.deps(
-            curator,
-            bridge.clone(),
-            o.config,
-            Duration::from_secs(3600),
-        ));
+        let src =
+            HueyEngine::spawn(w.deps(curator, bridge.clone(), o.config, Duration::from_secs(3600)));
         tokio::time::sleep(Duration::from_millis(100)).await;
         w.confirm();
         src
@@ -866,7 +856,9 @@ fn assert_only_fenced(text: &str, needle: &str) {
     for (at, _) in text.match_indices(needle) {
         found += 1;
         assert!(
-            ranges.iter().any(|(s, e)| *s <= at && at + needle.len() <= *e),
+            ranges
+                .iter()
+                .any(|(s, e)| *s <= at && at + needle.len() <= *e),
             "{needle:?} appears outside an untrusted fence, at byte {at}"
         );
     }
@@ -909,7 +901,9 @@ async fn h5_1_run() -> H51 {
             );
             let c2 = run
                 .bridge
-                .check_project(&json!({"project": "orchard", "kind": "dependency", "name": "serde"}))
+                .check_project(
+                    &json!({"project": "orchard", "kind": "dependency", "name": "serde"}),
+                )
                 .await;
             l.put("c2", c2);
             let r = publish(&run, &publish_of(&[1, 2, 3], Some(6))).await;
@@ -970,7 +964,10 @@ async fn h5_1_the_model_is_sent_the_digest_verbatim_and_each_check_is_appended_t
 
     // At the end: the original digest, the heading, one line per check.
     let expected = format!("{original}{CHECKS_HEADING}\n- {l1}\n- {l2}\n");
-    assert_eq!(fs::read_to_string(h.dir.join("digest.md")).unwrap(), expected);
+    assert_eq!(
+        fs::read_to_string(h.dir.join("digest.md")).unwrap(),
+        expected
+    );
     // ... and that is the digest the report keeps.
     assert_eq!(h.rig.w.store().load_digest(oct(26), 1), Some(expected));
 }
@@ -989,7 +986,10 @@ async fn h5_1_model_input_txt_is_written_before_the_send_and_starts_with_the_tex
 
     // Later tool calls were appended after it.
     let file = fs::read_to_string(h.dir.join("model-input.txt")).unwrap();
-    assert!(file.starts_with(&sent), "model-input.txt must start with the text sent");
+    assert!(
+        file.starts_with(&sent),
+        "model-input.txt must start with the text sent"
+    );
     assert!(file.len() > sent.len(), "the checks were appended");
     let (l1, l2) = (
         h.log.get("c1")["line"].as_str().unwrap().to_string(),
@@ -1174,7 +1174,13 @@ async fn h5_4_with_two_hundred_candidates_seven_picks_are_refused_naming_the_cap
         w.now() - days(2),
     );
     for n in 1..=100i64 {
-        w.item(VN, &format!("g{n}"), &format!("Gizmo story {n}"), w.now() - minutes(n), "");
+        w.item(
+            VN,
+            &format!("g{n}"),
+            &format!("Gizmo story {n}"),
+            w.now() - minutes(n),
+            "",
+        );
         w.item(
             DOCS.0,
             &format!("h{n}"),
@@ -1189,14 +1195,21 @@ async fn h5_4_with_two_hundred_candidates_seven_picks_are_refused_naming_the_cap
         let l = l.clone();
         async move {
             l.put("seven", publish(&run, &too_many_picks()).await);
-            l.put("five", publish(&run, &publish_of(&[1, 2, 3, 4, 5], None)).await);
+            l.put(
+                "five",
+                publish(&run, &publish_of(&[1, 2, 3, 4, 5], None)).await,
+            );
         }
     });
     let rig = rig(w, model).await;
     let outcome = rig.trigger(Trigger::Scheduled).await;
     let (date, version, _) = produced(&outcome);
 
-    assert_eq!(rig.spy.inputs()[0].candidates.len(), 200, "harness: 200 stories");
+    assert_eq!(
+        rig.spy.inputs()[0].candidates.len(),
+        200,
+        "harness: 200 stories"
+    );
 
     let seven = log.get("seven");
     assert_eq!(seven["ok"], false, "{seven}");
@@ -1222,7 +1235,13 @@ async fn h5_4_with_two_hundred_candidates_seven_picks_are_refused_naming_the_cap
     let headlines: Vec<&str> = report.picks.iter().map(|p| p.headline.as_str()).collect();
     assert_eq!(
         headlines,
-        ["Pick number 1", "Pick number 2", "Pick number 3", "Pick number 4", "Pick number 5"]
+        [
+            "Pick number 1",
+            "Pick number 2",
+            "Pick number 3",
+            "Pick number 4",
+            "Pick number 5"
+        ]
     );
 }
 
@@ -1251,7 +1270,10 @@ async fn h5_4_three_refusals_end_the_run_as_a_model_failure_without_waiting_for_
     let started = Instant::now();
     let outcome = rig.trigger(Trigger::Scheduled).await;
     assert_eq!(outcome, MODEL_FAILED);
-    assert!(started.elapsed() < Duration::from_secs(20), "ended on the refusal, not the deadline");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "ended on the refusal, not the deadline"
+    );
 
     let left: Vec<Value> = log
         .all("refused")
@@ -1259,14 +1281,22 @@ async fn h5_4_three_refusals_end_the_run_as_a_model_failure_without_waiting_for_
         .map(|r| r["attempts_left"].clone())
         .collect();
     assert_eq!(left, [json!(2), json!(1), json!(0)]);
-    assert!(log.all("refused").iter().all(|r| r["ok"] == false && r["error"] == "refused"));
+    assert!(log
+        .all("refused")
+        .iter()
+        .all(|r| r["ok"] == false && r["error"] == "refused"));
 
     assert!(matches!(rig.spy.results()[0], Err(CurateError::Failed(_))));
-    assert!(rig.w.store().dates().is_empty(), "no report from a failed run");
+    assert!(
+        rig.w.store().dates().is_empty(),
+        "no report from a failed run"
+    );
     assert!(!rig.bridge.is_active(), "the run is over");
     // The ended run answers nothing.
     assert_eq!(
-        rig.bridge.publish(&serde_json::to_value(publish_of(&[1], None)).unwrap()).await["error"],
+        rig.bridge
+            .publish(&serde_json::to_value(publish_of(&[1], None)).unwrap())
+            .await["error"],
         "no_run"
     );
 }
@@ -1281,7 +1311,10 @@ async fn h5_4_a_refused_publish_can_be_corrected_in_the_same_run() {
         async move {
             l.put("first", publish(&run, &too_many_picks()).await);
             l.put("second", publish(&run, &too_many_picks()).await);
-            l.put("third", publish(&run, &publish_of(&[1, 2, 3], Some(6))).await);
+            l.put(
+                "third",
+                publish(&run, &publish_of(&[1, 2, 3], Some(6))).await,
+            );
         }
     });
     let rig = rig(w, model).await;
@@ -1322,7 +1355,14 @@ fn story_item(
 
 #[test]
 fn h5_5_a_story_reported_by_release_blog_and_aggregator_leads_with_the_release() {
-    let release = story_item(VN, "rel-1", SourceClass::FirstParty, "Gizmo 9 released", &[], 3);
+    let release = story_item(
+        VN,
+        "rel-1",
+        SourceClass::FirstParty,
+        "Gizmo 9 released",
+        &[],
+        3,
+    );
     let post_links = [release.url.as_str()];
     let blog = story_item(
         "blog",
@@ -1456,7 +1496,10 @@ async fn h5_5_a_run_over_a_release_a_blog_post_and_an_aggregator_link_renders_th
 #[test]
 fn h5_6_the_run_session_contract_constants() {
     assert_eq!(HUEY_RUN_TAG, "huey-run");
-    assert_eq!(HUEY_RUN_TOOLS, ["huey.check_project", "huey.publish_report"]);
+    assert_eq!(
+        HUEY_RUN_TOOLS,
+        ["huey.check_project", "huey.publish_report"]
+    );
     assert_eq!(
         HUEY_RUN_MCP_TOOLS,
         [
@@ -1601,9 +1644,17 @@ async fn spawn_for_real(model: &str, budget: f64) -> (Vec<String>, PathBuf, Path
 #[track_caller]
 fn assert_boxed_in_argv(args: &[String], model: &str, budget: f64) {
     assert!(!has(args, "--dangerously-skip-permissions"), "{args:?}");
-    assert_eq!(value_of(args, "--permission-mode"), Some("dontAsk"), "{args:?}");
+    assert_eq!(
+        value_of(args, "--permission-mode"),
+        Some("dontAsk"),
+        "{args:?}"
+    );
     assert!(has(args, "--strict-mcp-config"), "{args:?}");
-    assert_eq!(value_of(args, "--setting-sources"), Some("project"), "{args:?}");
+    assert_eq!(
+        value_of(args, "--setting-sources"),
+        Some("project"),
+        "{args:?}"
+    );
     assert!(has(args, "--disable-slash-commands"), "{args:?}");
     assert_eq!(value_of(args, "--tools"), Some("ToolSearch"), "{args:?}");
     assert_eq!(
@@ -1733,8 +1784,14 @@ async fn h5_9_a_tight_run_refuses_a_fourth_pick_and_any_also_noted_line() {
     let model = script(move |run| {
         let l = l.clone();
         async move {
-            l.put("four", publish(&run, &publish_of(&[1, 2, 3, 4], Some(6))).await);
-            l.put("three", publish(&run, &publish_of(&[1, 2, 3], Some(6))).await);
+            l.put(
+                "four",
+                publish(&run, &publish_of(&[1, 2, 3, 4], Some(6))).await,
+            );
+            l.put(
+                "three",
+                publish(&run, &publish_of(&[1, 2, 3], Some(6))).await,
+            );
         }
     });
     let rig = rig(w, model).await;
@@ -1830,12 +1887,21 @@ async fn h5_8_two_timeouts_leave_yesterdays_report_on_screen_with_the_model_fail
     let store = rig.w.store();
 
     // Sunday: the 06:00 run produces the report.
-    wait_for("Sunday's report", || store.latest_version(oct(25)).is_some()).await;
+    wait_for("Sunday's report", || {
+        store.latest_version(oct(25)).is_some()
+    })
+    .await;
     rig.wait_for_attempts(1).await;
 
     // Monday: the model goes quiet. The 06:00 run times out ...
     model_up.store(false, Ordering::SeqCst);
-    rig.w.item(VN, "m1", "Gizmo Monday story", ts("2026-10-26T04:00:00Z"), "");
+    rig.w.item(
+        VN,
+        "m1",
+        "Gizmo Monday story",
+        ts("2026-10-26T04:00:00Z"),
+        "",
+    );
     rig.w.clock.set(ts("2026-10-26T06:00:00Z"));
     rig.wait_for_attempts(2).await;
     assert_eq!(rig.host.stops(), 2, "each attempt's session was stopped");
@@ -1844,7 +1910,11 @@ async fn h5_8_two_timeouts_leave_yesterdays_report_on_screen_with_the_model_fail
     // ... and so does the retry ten minutes later.
     rig.w.clock.set(ts("2026-10-26T06:09:00Z"));
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(rig.host.spawn_count(), 2, "no retry before the ten minutes are up");
+    assert_eq!(
+        rig.host.spawn_count(),
+        2,
+        "no retry before the ten minutes are up"
+    );
     rig.w.clock.set(ts("2026-10-26T06:10:00Z"));
     rig.wait_for_attempts(3).await;
     assert_eq!(rig.host.spawn_count(), 3);
@@ -1856,14 +1926,20 @@ async fn h5_8_two_timeouts_leave_yesterdays_report_on_screen_with_the_model_fail
     let doc = h.current_document();
     assert_eq!(doc.date, Some(oct(25)));
     assert_eq!(doc.title, "Huey, Sun Oct 25, 2026");
-    let banner = doc.banner.expect("a previous day's report carries a banner");
+    let banner = doc
+        .banner
+        .expect("a previous day's report carries a banner");
     assert_eq!(
         banner.text,
         render::banner_for(oct(25), oct(26), MissingReason::ModelFailed)
             .unwrap()
             .text
     );
-    assert!(banner.text.contains("the model run failed"), "{}", banner.text);
+    assert!(
+        banner.text.contains("the model run failed"),
+        "{}",
+        banner.text
+    );
     // And nothing more is attempted today.
     rig.w.clock.set(ts("2026-10-26T09:00:00Z"));
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1951,7 +2027,14 @@ async fn h5_12_when_the_model_never_answers_the_retry_ten_minutes_later_produces
 /// return the rig and the outcome.
 async fn run_for_cleanup(model: Script, timeout: Duration) -> (Rig, RunOutcome, Vec<PathBuf>) {
     let w = orchard_world(MONDAY).await;
-    let rig = rig_with(w, Opts { timeout, ..opts(model) }).await;
+    let rig = rig_with(
+        w,
+        Opts {
+            timeout,
+            ..opts(model)
+        },
+    )
+    .await;
     let projects = rig.projects_dir.path();
     let unrelated = projects.join("-home-someone-code-unrelated");
     fs::create_dir_all(&unrelated).unwrap();
@@ -1959,7 +2042,9 @@ async fn run_for_cleanup(model: Script, timeout: Duration) -> (Rig, RunOutcome, 
     // Another run's transcript (a different scratch dir with the same prefix).
     let other = transcript_dir_for(
         projects,
-        &rig.scratch_root.path().join("nostromo-huey-run-someone-else"),
+        &rig.scratch_root
+            .path()
+            .join("nostromo-huey-run-someone-else"),
     );
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("session.jsonl"), "{}\n").unwrap();
@@ -1970,14 +2055,21 @@ async fn run_for_cleanup(model: Script, timeout: Duration) -> (Rig, RunOutcome, 
 #[track_caller]
 fn assert_survivors(survivors: &[PathBuf]) {
     for dir in survivors {
-        assert!(dir.join("session.jsonl").is_file(), "{} was removed", dir.display());
+        assert!(
+            dir.join("session.jsonl").is_file(),
+            "{} was removed",
+            dir.display()
+        );
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn h5_10_after_a_successful_run_the_scratch_dir_and_transcript_are_gone() {
-    let (rig, outcome, survivors) =
-        run_for_cleanup(publishing(publish_of(&[1, 2], None)), Duration::from_secs(30)).await;
+    let (rig, outcome, survivors) = run_for_cleanup(
+        publishing(publish_of(&[1, 2], None)),
+        Duration::from_secs(30),
+    )
+    .await;
     produced(&outcome);
     rig.assert_cleaned_up();
     assert_survivors(&survivors);
@@ -2056,7 +2148,9 @@ async fn h5_bridge_a_refused_probe_issues_no_id_and_ids_follow_call_order() {
             l.put("first", first);
             let second = run
                 .bridge
-                .check_project(&json!({"project": "orchard", "kind": "dependency", "name": "serde"}))
+                .check_project(
+                    &json!({"project": "orchard", "kind": "dependency", "name": "serde"}),
+                )
                 .await;
             l.put("second", second);
             publish(&run, &publish_of(&[1, 2], None)).await;
@@ -2091,7 +2185,10 @@ async fn h5_bridge_a_publish_that_is_not_a_publish_is_refused_not_accepted() {
         let l = l.clone();
         async move {
             l.put("garbage", run.bridge.publish(&json!("not a publish")).await);
-            l.put("wrong_shape", run.bridge.publish(&json!({"picks": "nope"})).await);
+            l.put(
+                "wrong_shape",
+                run.bridge.publish(&json!({"picks": "nope"})).await,
+            );
             l.put("good", publish(&run, &publish_of(&[1, 2], None)).await);
         }
     });
@@ -2219,7 +2316,15 @@ async fn h5_7_with_huey_switched_off_the_run_tools_do_not_exist() {
 async fn h5_7_with_no_run_in_progress_the_run_tools_answer_no_run() {
     let (_root, state) = bare_state();
     let args = serde_json::to_value(publish_of(&[1], None)).unwrap();
-    let published = text_json(dispatch("huey.publish_report", Some(&args), &state, Some(HUEY_RUN_TAG)).await);
+    let published = text_json(
+        dispatch(
+            "huey.publish_report",
+            Some(&args),
+            &state,
+            Some(HUEY_RUN_TAG),
+        )
+        .await,
+    );
     assert_eq!(published["error"], "no_run", "{published}");
     let checked = text_json(
         dispatch(
@@ -2253,10 +2358,25 @@ async fn h5_7_inside_a_run_the_huey_tools_answer_through_dispatch_with_the_bridg
             )
             .await;
             l.put("check", text_json(check));
-            let other = dispatch("nostromo.get_self", Some(&json!({})), state, Some(HUEY_RUN_TAG)).await;
-            l.put("other_forbidden", json!(matches!(other, ToolResult::Forbidden(_))));
+            let other = dispatch(
+                "nostromo.get_self",
+                Some(&json!({})),
+                state,
+                Some(HUEY_RUN_TAG),
+            )
+            .await;
+            l.put(
+                "other_forbidden",
+                json!(matches!(other, ToolResult::Forbidden(_))),
+            );
             let args = serde_json::to_value(publish_of(&[1, 2, 3], Some(6))).unwrap();
-            let published = dispatch("huey.publish_report", Some(&args), state, Some(HUEY_RUN_TAG)).await;
+            let published = dispatch(
+                "huey.publish_report",
+                Some(&args),
+                state,
+                Some(HUEY_RUN_TAG),
+            )
+            .await;
             l.put("publish", text_json(published));
             drop(run);
         }
@@ -2290,10 +2410,22 @@ async fn h5_7_a_refused_publish_through_dispatch_carries_the_problems() {
         async move {
             let state = c.get().expect("the state is bound before the run");
             let args = serde_json::to_value(too_many_picks()).unwrap();
-            let refused = dispatch("huey.publish_report", Some(&args), state, Some(HUEY_RUN_TAG)).await;
+            let refused = dispatch(
+                "huey.publish_report",
+                Some(&args),
+                state,
+                Some(HUEY_RUN_TAG),
+            )
+            .await;
             l.put("refused", text_json(refused));
             let args = serde_json::to_value(publish_of(&[1, 2], None)).unwrap();
-            let accepted = dispatch("huey.publish_report", Some(&args), state, Some(HUEY_RUN_TAG)).await;
+            let accepted = dispatch(
+                "huey.publish_report",
+                Some(&args),
+                state,
+                Some(HUEY_RUN_TAG),
+            )
+            .await;
             l.put("accepted", text_json(accepted));
         }
     });
@@ -2306,7 +2438,9 @@ async fn h5_7_a_refused_publish_through_dispatch_carries_the_problems() {
     let refused = log.get("refused");
     assert_eq!(refused["ok"], false, "{refused}");
     assert_eq!(refused["error"], "refused");
-    assert!(refused["problems"].as_array().is_some_and(|p| !p.is_empty()));
+    assert!(refused["problems"]
+        .as_array()
+        .is_some_and(|p| !p.is_empty()));
     assert_eq!(log.get("accepted")["ok"], true);
 }
 
@@ -2328,7 +2462,12 @@ async fn h5_a_machine_that_is_not_set_up_never_starts_the_session() {
             timeout: Duration::from_millis(200),
         },
     ));
-    let src = HueyEngine::spawn(w.deps(curator, bridge, HueyConfig::default(), Duration::from_millis(5)));
+    let src = HueyEngine::spawn(w.deps(
+        curator,
+        bridge,
+        HueyConfig::default(),
+        Duration::from_millis(5),
+    ));
     w.clock.set(ts("2026-10-26T09:00:00Z"));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(src.handle.setup_state(), SetupState::NotSetUp);
