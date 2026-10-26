@@ -28,6 +28,9 @@ mod truncate;
 
 pub use deliver::{deliver, deliver_snapshot, Delivery, WITHHELD_MARKER};
 pub use lines::{LineAssembler, MAX_BUFFERED_CELLS, MAX_BUFFERED_ROWS, MAX_LINE_COLUMNS};
-pub use manager::{FollowError, FollowManager, FollowSink, FollowVia};
+pub use manager::{
+    FollowError, FollowManager, FollowSink, FollowVia, ScreenRead, ScreenReadError,
+    SELECTION_ADVISORY,
+};
 pub use policy::{Decision, DeliveryKind, DeliveryPolicy, PauseReason};
 pub use snapshot::screen_snapshot;

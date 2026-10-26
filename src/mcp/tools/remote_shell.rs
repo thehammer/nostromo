@@ -15,7 +15,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::mcp::state::McpSharedState;
+use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::terminal::agent_api::AgentRemoteRequest;
 use crate::terminal::ecs::InvalidTarget;
 use crate::terminal::remote_request::{RemoteResult, DEFAULT_TIMEOUT, MAX_REASON_CHARS};
@@ -87,13 +87,7 @@ pub async fn request_shell(
     if !super::terminal::focus_exists(state, tag) {
         return json!({ "error": "unknown_view" });
     }
-    let agent = daemon.session_mgr.lock().ok().and_then(|m| {
-        m.focus_registry()
-            .into_iter()
-            .find(|f| f.tag == tag)
-            .map(|f| f.agent_name)
-            .filter(|a| !a.is_empty())
-    });
+    let agent = agent_name(daemon, tag);
 
     let [project, environment, service, shell_type] = words;
     let result = daemon
@@ -110,6 +104,17 @@ pub async fn request_shell(
         })
         .await;
     result_json(result)
+}
+
+/// The name of the agent running in focus `tag`, for the sheet the user sees.
+pub(super) fn agent_name(daemon: &DaemonMcpBackend, tag: &str) -> Option<String> {
+    daemon.session_mgr.lock().ok().and_then(|m| {
+        m.focus_registry()
+            .into_iter()
+            .find(|f| f.tag == tag)
+            .map(|f| f.agent_name)
+            .filter(|a| !a.is_empty())
+    })
 }
 
 /// What each way a request can end looks like to the agent.

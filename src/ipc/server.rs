@@ -1176,8 +1176,9 @@ where
                                 // Connect is the act that opens a production shell.
                                 | ClientMsg::RemoteShellOpen { .. }
                                 | ClientMsg::RemoteShellAnswer { .. }
-                                // An invite sends a terminal's output to a model.
-                                | ClientMsg::TerminalFollowInvite { .. } => true,
+                                // An invite, or a selection, sends a terminal's output to a model.
+                                | ClientMsg::TerminalFollowInvite { .. }
+                                | ClientMsg::TerminalSendSelection { .. } => true,
                                 ClientMsg::TerminalInput { .. } | ClientMsg::TerminalResize { .. } => {
                                     cap_checked_at.elapsed() >= TERMINAL_RECHECK
                                 }
@@ -1388,7 +1389,8 @@ fn handle_client_msg(
         // Agent follow: invite, stop, resume. Operator app only.
         msg @ (ClientMsg::TerminalFollowInvite { .. }
         | ClientMsg::TerminalFollowStop { .. }
-        | ClientMsg::TerminalFollowResume { .. }) => {
+        | ClientMsg::TerminalFollowResume { .. }
+        | ClientMsg::TerminalSendSelection { .. }) => {
             handle_follow_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
         }
 
@@ -2586,11 +2588,11 @@ fn unregister_operator(terminals: &Arc<Mutex<TerminalManager>>, cap: &OperatorCa
     }
 }
 
-/// `terminal_follow_invite`, `terminal_follow_stop` and
-/// `terminal_follow_resume`. Without an [`OperatorCap`] they change nothing:
+/// `terminal_follow_invite`, `terminal_follow_stop`, `terminal_follow_resume`
+/// and `terminal_send_selection`. Without an [`OperatorCap`] they change nothing:
 /// the peer is told `terminal_refused` and the attempt is audited. An invite
 /// also needs a connection that declared `terminal_follow_ui` (one that can
-/// show who follows and stop it).
+/// show who follows and stop it); a selection does not (it starts nothing).
 fn handle_follow_msg(
     msg: ClientMsg,
     cap: Option<&OperatorCap>,
@@ -2654,6 +2656,11 @@ fn handle_follow_msg(
         }
         ClientMsg::TerminalFollowStop { terminal_id } => follow.stop(cap, &terminal_id),
         ClientMsg::TerminalFollowResume { terminal_id } => follow.resume(cap, &terminal_id),
+        ClientMsg::TerminalSendSelection {
+            terminal_id,
+            target_tag,
+            text,
+        } => follow.send_selection(cap, &terminal_id, &target_tag, &text),
         _ => return,
     };
     if let Err(e) = result {

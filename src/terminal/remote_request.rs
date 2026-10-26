@@ -27,10 +27,12 @@ use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::{mpsc, oneshot};
+use tracing::debug;
 use uuid::Uuid;
 
 use super::audit::{AuditEvent, AuditPin, AuditRequester, RefusalChannel};
 use super::ecs::{EcsTarget, EcsVocabulary, InvalidTarget};
+use super::follow::manager::FollowGrant;
 use super::launcher::{ConnectFailure, Placement, RemoteLauncher};
 use super::{OperatorCap, TerminalManager};
 use crate::ipc::protocol::{
@@ -468,7 +470,47 @@ pub(crate) async fn run(
         let _ = conn.send(resolved.clone());
     }
     guard.finished = true;
+
+    // 8. The shell is running and the user ticked "let the agent follow it":
+    //    the agent that asked follows it, from the start.
+    if let (RemoteResult::Connected(info), Some(grant)) =
+        (&result, FollowGrant::from_remote_answer(&outcome))
+    {
+        invite_requester(manager, &request, info, grant);
+    }
     result
+}
+
+/// Step 8. The user's own request ignores the follow box (nobody asked for an
+/// agent to follow it), and so does an app that cannot show who follows and
+/// stop it. A follower that is no longer there leaves the shell as it is.
+fn invite_requester(
+    manager: &Arc<Mutex<TerminalManager>>,
+    request: &RemoteRequest,
+    info: &TerminalInfo,
+    grant: FollowGrant,
+) {
+    if request.requested_by.kind != "focus" {
+        return;
+    }
+    let Some(follower) = request.requested_by.tag.as_deref() else {
+        return;
+    };
+    let follow = {
+        let m = lock(manager);
+        m.follow().filter(|_| m.follow_ui_connected())
+    };
+    // Not under the manager's lock: following takes it.
+    let Some(follow) = follow else {
+        debug!("follow box ticked but no app can show who follows: not following");
+        return;
+    };
+    if let Err(e) = follow.invite_granted(grant, &info.terminal_id, follower) {
+        debug!(
+            code = e.code(),
+            "follow box ticked but following did not start"
+        );
+    }
 }
 
 /// Steps 2-4: find the operators that can show the sheet, register the
@@ -633,7 +675,7 @@ async fn connect(
 /// (bidi overrides and isolates, zero-width characters, the byte-order mark)
 /// are dropped, then it is trimmed and cut to [`MAX_REASON_CHARS`]. `None`
 /// when nothing is left.
-fn clean_reason(reason: &str) -> Option<String> {
+pub(crate) fn clean_reason(reason: &str) -> Option<String> {
     let cleaned: String = reason
         .chars()
         .filter_map(|c| match c {
