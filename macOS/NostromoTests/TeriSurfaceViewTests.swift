@@ -1412,10 +1412,12 @@ final class TeriTabFilterBarLayoutTests: XCTestCase {
     }
 
     func testRepoDocsKeepsChipsThenSeverityToggleThenRepoMenuWithTheSortPopupTrailingMost() throws {
+        // Wider than the other tabs: five kind chips, the severity toggle, the Repo menu and
+        // the sort popup need about 650 pt, and this row has never shrunk to fit a narrower pane.
         let host = try makeHost(TeriRepoDocsTab.config, counts: [
             .kind: ["bug": 3, "feature": 1, "todo": 2],
             .repo: ["nostromo": 4, "callimachus": 2],
-        ])
+        ], width: 800)
 
         let chips = host.chips.map { host.frame(of: $0) }
         XCTAssertFalse(chips.isEmpty, "the kind chips are shown")

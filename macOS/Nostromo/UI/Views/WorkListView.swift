@@ -355,6 +355,11 @@ final class WorkListView: NSView {
             control.segmentDistribution = .fillProportionally
             control.setContentCompressionResistancePriority(
                 NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultLow.rawValue - 1), for: .horizontal)
+            // Squeezed, a control gives up its labels, never its whole width: without a floor
+            // the stack collapses whichever scope control it squeezes first to nothing.
+            let floor = control.widthAnchor.constraint(greaterThanOrEqualToConstant: 72)
+            floor.priority = NSLayoutConstraint.Priority(999)
+            floor.isActive = true
             scopeControls.append(control)
             controlsRow.addArrangedSubview(control)
         }
