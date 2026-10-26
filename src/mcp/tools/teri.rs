@@ -516,7 +516,7 @@ mod tests {
 
     // ── list_item: every field of an item, whichever source fills it ─────────
     //
-    // Not every source sets every field (no source fills `environment` in a list, for one), so the
+    // Not every source sets every field (Sentry fills `environment` with `production` only when a marker search saw the issue, for one), so the
     // integration tests cannot reach them all: this one hands `list_item` an item with all of them hostile.
 
     fn hostile(label: &str) -> String {

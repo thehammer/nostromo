@@ -140,9 +140,13 @@ pub struct WorkItem {
     pub priority: Option<Priority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<String>,
+    /// Sentry: `"production"` when the production search returned the issue
+    /// (an event in the last 14 days), otherwise unset. Unset means "not seen in
+    /// production in the window", not "non-production".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
-    /// Sentry: who the issue is assigned to, as a bucket (`"me"` or `"unassigned"`).
+    /// Sentry: who the issue is assigned to, as a bucket: `"me"`, `"unassigned"`
+    /// (`assignedTo` is null) or `"other"` (assigned to another user or a team).
     /// Other sources leave it unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
