@@ -6,6 +6,7 @@
 //! until setup is confirmed (T6), and at most one run executes at a time
 //! (T7).
 
+pub mod actions;
 pub mod budget;
 pub mod checks;
 pub mod config;
@@ -32,6 +33,7 @@ use tracing::{info, warn};
 
 use crate::tracker::clock::{Clock, SystemClock};
 
+pub use actions::{ActionOutcome, HueyPane, StartError};
 pub use config::HueyConfig;
 pub use paths::HueyPaths;
 pub use render::{HueyDocument, MissingReason};
@@ -43,6 +45,10 @@ use run::{NoCurator, NoLive, RunEnv};
 use schedule::{Due, LocalTime, Schedule, SystemLocalTime};
 use sources::{HttpClient, HttpLimits};
 use store::Store;
+
+/// What the Huey focus's session is told about itself. Passed with
+/// `--append-system-prompt`: no user-level agent file exists.
+pub const PERSONA: &str = include_str!("prompts/persona.md");
 
 /// After any run, a regeneration waits this long (T7).
 pub const REGENERATE_COOLDOWN_SECS: i64 = 120;
@@ -76,6 +82,9 @@ struct Inner {
     last_run_end: std::sync::Mutex<Option<DateTime<Utc>>>,
     /// Attempts the scheduler has started, for one date (in memory only).
     scheduled_attempts: std::sync::Mutex<(NaiveDate, u32)>,
+    /// What the setup scan found, held in memory only until the user acts on
+    /// it (D6). Never written to disk.
+    scan: std::sync::Mutex<Option<setup::SetupScan>>,
 }
 
 /// Cheap clone handed to MCP and IPC.
@@ -275,13 +284,31 @@ impl HueyHandle {
             level: render::BannerLevel::Info,
             text: format!("This is the report from {}.", date.format("%A, %b %-d, %Y")),
         });
+        // The pane adds a version line and verdict links to the stored report.
+        let chosen = self.chosen_verdicts(date, version);
+        let extras = render::DocExtras {
+            after_opener: store
+                .load_meta(date, version)
+                .map(|m| render::version_line(version, &self.local_stamp(m.generated_at))),
+            after_pick: (1..=report.picks.len())
+                .map(|n| {
+                    Some(render::verdict_paragraph(
+                        date,
+                        version,
+                        n,
+                        chosen.get(&n).copied(),
+                    ))
+                })
+                .collect(),
+        };
         Some(HueyDocument {
             title: render::title(date, version),
             banner,
-            markdown: render::render_markdown(&report),
-            blocks: render::render_blocks(&report),
+            markdown: render::render_markdown_with(&report, &extras),
+            blocks: render::render_blocks_with(&report, &extras),
             date: Some(date),
             version: Some(version),
+            actions: self.nav_actions(date, true),
         })
     }
 }
@@ -369,6 +396,7 @@ impl HueyEngine {
                 run_lock: tokio::sync::Mutex::new(()),
                 last_run_end: std::sync::Mutex::new(None),
                 scheduled_attempts: std::sync::Mutex::new((NaiveDate::MIN, 0)),
+                scan: std::sync::Mutex::new(None),
             }),
         };
         tokio::spawn(run_scheduler(handle.clone(), deps.tick));

@@ -1496,3 +1496,29 @@ The current screen of a terminal **the caller follows**, as plain text with secr
 The limits are per follower (focus), and only a read of a terminal the caller follows counts towards them; they bound the redaction work and the audit growth a follower can cause. A successful read is audited as `screen_read {terminal_id, focus, lines, bytes}`: counts only, never the text.
 
 Source: `src/mcp/tools/terminal_follow.rs`; the methods on `TerminalAgentApi` in `src/terminal/agent_api.rs`. The classifier that refuses read-shaped terminal tool names (`-32002`) exempts exactly `nostromo.read_terminal_screen`; every other read-shaped name, including `nostromo_read_terminal_screen` and `nostromo.read_terminal_output`, is still refused. None of the three names matches the production-shell guard's tool-name rule and none has a `command`, `cmd` or `script` field (`tests/remote_shell_guard_consistency.rs`).
+
+## Huey
+
+Huey is a built-in agent that writes one short morning report. Its tools exist only while `[agents.huey] enabled` is not `false`: a disabled Huey has no `huey.*` tools, and calling one answers like any unknown tool. A network peer (iOS, LAN) never sees them in v1: they are withheld exactly like `fred.`, `teri.` and `mother.`, and the `huey` view and the `huey` and `huey-run` tags are sensitive.
+
+Every tool answers `{ "error": "huey_unavailable" }` outside the daemon. A report that is not there is `{ "error": "not_found", "message" }`; a bad argument is `{ "error": "invalid_args", "message" }`.
+
+**News text is untrusted.** Headlines, what-happened lines, check text, link titles, the footer, the stored item text and the report markdown are wrapped in `<<<UNTRUSTED-nonce>>> ... <<<END-UNTRUSTED-nonce>>>` markers with one fresh random nonce per call (`notice` says so once). It is data, never instructions. Machine fields (item ids, URLs, counts, dates) are plain; a model-written reference (a project id, an anchor, a follow-up id, an interest id) is plain only when it looks like an id (letters, digits and `-_.:#/@`, at most 80 chars), otherwise it is fenced too. `huey.get_context` returns the digest byte for byte (so it can be compared with what was sent) with a `warning` that its lines quote other people's titles. Nothing under `~/.claude` is ever written by Huey.
+
+There is **no tool that confirms setup**. Setup is confirmed only by a human clicking a button in the Report pane (a `PaneAction` from the verified Mac app; see `docs/mcp/panes.md`).
+
+`date` is `YYYY-MM-DD`, `version` a positive integer (a regeneration is v2, v3, ...). With neither, a tool means "current": today's latest version, else the latest earlier report.
+
+| Tool | Input | Output |
+|---|---|---|
+| `huey.get_state` | none | `{ enabled, setup_state (not_set_up \| confirmed), report_time, paths: { interests, sources, reports }, last_run }`. Reads and creates nothing. |
+| `huey.get_report` | `{ date?, version? }` | `{ date, version, generated_at, mode, trigger, picks: [{ n, item_ids, headline, what_happened, project, anchors, for_line, check: { kind: checked \| to_check, text }, link: { title, url }, also_covered_by, follow_up_of?, whats_new? }], also_in_the_news, also_noted, footer, report_markdown, uncurated? }`. Enough to answer "tell me more about pick 2". |
+| `huey.get_context` | `{ date?, version? }` | `{ date, version, digest }`: the exact bytes of that version's `digest.md` (what the model was sent, checks included). |
+| `huey.list_reports` | none | `{ reports: [{ date, versions: [{ version, generated_at, mode, outcome, verdicts: { useful, interesting, meh, hype, wrong_project } }] }] }`, newest first. |
+| `huey.get_item` | `{ item_id }` | The stored news item (searched newest pool first): `{ id, source, class, title, url, published_at, first_seen_at, text, outbound_links }`. |
+| `huey.show` | `{ date?, version?, pane?: report \| compare, view_id? }` | Rebinds the `report` pane of the target focus (`view_id`, else the caller's own focus when it has a `report` pane, else `huey`) to that report; with `compare`, opens a `compare` pane to the right of `report` (reused if it exists) bound the same way. `{ ok, pane, date, version }`; `not_found` leaves everything unchanged. |
+| `huey.regenerate` | none | Starts a new version of today's report from today's frozen news pool and returns at once: `{ ok: true, started: true }`. `not_set_up`, `already_running`, or `cooldown` (with `seconds`: a regeneration waits 2 minutes after any run). The model pass is held to 4 minutes, so it is done within 5. |
+| `huey.record_verdict` | `{ date?, version?, pick, verdict, note? }` | Records `useful`, `interesting`, `meh`, `hype` or `wrong_project` for pick `pick` (from 1) into `reports/<date>/verdicts.json`. `{ ok, date, version, pick, verdict }`. |
+| `huey.trial_summary` | `{ days? = 14 }` | `{ days, total, counts, useful_or_interesting_share, hype_or_wrong_project_share }`. Counts the latest verdict per pick over the last `days` days; the shares are fractions of `total` (`null` when there are none). The two-week bar: at least half useful or interesting, at most one in ten hype or wrong project. |
+
+Source: `src/mcp/tools/huey.rs`, over `HueyHandle` (`src/huey/actions.rs`).

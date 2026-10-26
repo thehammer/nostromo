@@ -3299,7 +3299,11 @@ pub fn build_claude_args_with(
     // No name, no `--agent`: a restricted session carries its instructions in its
     // prompt, because a plugin agent's own `tools:` list overrides `--tools` and
     // leaves the session without the tools it needs.
-    if !agent_name.is_empty() {
+    if agent_name == "huey" {
+        // Huey ships with the repo: its persona is appended to the system prompt
+        // (no user-level agent file exists to name with `--agent`).
+        args.extend(["--append-system-prompt".into(), crate::huey::PERSONA.into()]);
+    } else if !agent_name.is_empty() {
         args.extend(["--agent".into(), agent_name.into()]);
     }
     args.extend(["-n".into(), view_name.into()]);
@@ -7981,6 +7985,123 @@ mod orphan_tests {
         assert!(
             !listed.contains(&cli),
             "the replaced CLI's pid must not stay listed: {listed:?}"
+        );
+    }
+}
+// ── H6-10: Huey's persona is appended to the system prompt ───────────────────
+
+#[cfg(test)]
+mod huey_persona_args_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn guard() -> String {
+        crate::approvals::guard::hook_settings_json(Path::new("/opt/x/nostromo-guard"))
+    }
+
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+        args.windows(2)
+            .filter(|w| w[0] == flag)
+            .map(|w| w[1].as_str())
+            .collect()
+    }
+
+    fn assert_huey_args(args: &[String]) {
+        assert_eq!(
+            value_after(args, "--append-system-prompt"),
+            vec![crate::huey::PERSONA],
+            "the persona follows --append-system-prompt exactly: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--agent"),
+            "no user-level agent file exists for Huey, so there is no --agent: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["-n", "Huey"]),
+            "the view name is still passed: {args:?}"
+        );
+    }
+
+    #[test]
+    fn h6_10_a_huey_session_gets_its_persona_and_no_agent_flag() {
+        assert_huey_args(&build_claude_args(
+            "huey",
+            "Huey",
+            false,
+            "sid",
+            false,
+            &guard(),
+        ));
+    }
+
+    #[test]
+    fn h6_10_a_resumed_huey_session_gets_it_too() {
+        let args = build_claude_args("huey", "Huey", false, "sid", true, &guard());
+        assert_huey_args(&args);
+        assert!(
+            args.windows(2).any(|w| w == ["--resume", "sid"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn h6_10_a_remote_control_huey_session_gets_it_too() {
+        assert_huey_args(&build_claude_args(
+            "huey",
+            "Huey",
+            true,
+            "sid",
+            false,
+            &guard(),
+        ));
+    }
+
+    #[test]
+    fn h6_10_build_claude_args_with_agrees_for_huey() {
+        let plain = build_claude_args("huey", "Huey", false, "sid", false, &guard());
+        let with = build_claude_args_with("huey", "Huey", false, "sid", false, None, &guard());
+        assert_eq!(plain, with);
+        assert_huey_args(&with);
+    }
+
+    #[test]
+    fn h6_10_other_agents_keep_agent_and_get_no_persona() {
+        for name in ["fred", "teri", "cody", "perri", "mother"] {
+            let args = build_claude_args(name, "View", false, "sid", false, &guard());
+            assert!(
+                args.windows(2).any(|w| w == ["--agent", name]),
+                "{name}: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|a| a == "--append-system-prompt"),
+                "{name} must not get Huey's persona: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn h6_10_the_persona_tells_huey_how_to_work() {
+        let persona = crate::huey::PERSONA;
+        assert!(
+            persona.contains("huey.get_report"),
+            "reads the report with the tool"
+        );
+        assert!(
+            persona.contains("huey.get_state"),
+            "finds the interests file with the tool"
+        );
+        assert!(persona.to_lowercase().contains("interests"));
+        assert!(
+            persona.to_lowercase().contains("untrusted"),
+            "report and news text is third-party data"
+        );
+        assert!(
+            persona.contains("ordinary session"),
+            "it says Huey's focus is an ordinary session"
+        );
+        assert!(
+            persona.to_lowercase().contains("project files"),
+            "and that it may read project files when asked"
         );
     }
 }

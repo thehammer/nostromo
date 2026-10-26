@@ -82,6 +82,10 @@ const FEATURE_APPROVALS: &str = "approvals_v1";
 const NOT_OPERATOR_APP_LOGIN: &str =
     "not_operator_app: only the verified Nostromo app may resend or discard a held message";
 
+/// The refusal a `PaneAction` from anyone but the verified Mac app gets. No content.
+const NOT_OPERATOR_APP_PANE_ACTION: &str =
+    "not_operator_app: only the verified Nostromo app may act on a document pane";
+
 /// What `SessionAnswerPermission` is answered with, from every peer.
 const ANSWER_PERMISSION_SUPERSEDED: &str =
     "session_answer_permission is superseded by approval_answer";
@@ -1155,6 +1159,7 @@ where
                             ClientMsg::DecisionAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ClaudeLoginAction { operator_nonce: sent, .. }
+                            | ClientMsg::PaneAction { operator_nonce: sent, .. }
                                 if trust == PeerTrust::OperatorApp =>
                             {
                                 Some(check_operator_answer(&origin, operator_nonce.as_deref(), sent.as_deref()).await)
@@ -1688,6 +1693,54 @@ fn handle_client_msg(
                     mgr.discard_held(&tag, hold_id.as_deref());
                 }
             }
+        }
+
+        ClientMsg::PaneAction {
+            tag,
+            pane_id,
+            action_id,
+            ..
+        } => {
+            // Same gate as `ClaudeLoginAction`: the verified Mac app, with the
+            // connection's nonce from a process still verified (checked by the
+            // caller). Anything else changes nothing and is told, with no content.
+            let refusal = if trust != PeerTrust::OperatorApp {
+                Some("not the verified Nostromo app".to_string())
+            } else {
+                match answer_check {
+                    Some(Ok(())) => None,
+                    Some(Err(why)) => Some(why),
+                    None => Some("PaneAction refused: not checked".to_string()),
+                }
+            };
+            if let Some(why) = refusal {
+                debug!(
+                    conn_key,
+                    ?trust,
+                    peer_pid = peer.map(|p| p.pid),
+                    "PaneAction refused: {why}"
+                );
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: NOT_OPERATOR_APP_PANE_ACTION.to_string(),
+                });
+                return;
+            }
+            let provider = session_mgr.lock().unwrap().pane_content_provider();
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let reply = match provider {
+                    Some(p) => p.pane_action(&tag, &pane_id, &action_id).await,
+                    None => ServerMsg::PaneActionResult {
+                        tag,
+                        pane_id,
+                        action_id,
+                        ok: false,
+                        message: Some("unknown_action".to_string()),
+                        open_url: None,
+                    },
+                };
+                let _ = tx.send(reply);
+            });
         }
 
         ClientMsg::ApprovalRefusalReport {

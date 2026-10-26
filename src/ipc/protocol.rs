@@ -767,6 +767,47 @@ pub enum PaneContentWire {
         /// name: "comment:<index>" }`.
         comments: Vec<TicketComment>,
     },
+    /// A daemon-rendered document (Huey's report, context and setup panes): a
+    /// title that always carries its date, an optional banner, markdown blocks
+    /// built server-side, and the actions the reader may take. An action is a
+    /// button here, or an inline link with the scheme `nostromo-action:<id>`;
+    /// either one is sent back as `ClientMsg::PaneAction`. A client opens only
+    /// `https:` links and `nostromo-action:` links and ignores the rest.
+    ///
+    /// Additive: `PROTOCOL_VERSION` stays 4, and an older client decodes the
+    /// new `kind` as `unknown`.
+    Document {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        banner: Option<DocBanner>,
+        blocks: Vec<MdBlock>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        actions: Vec<DocAction>,
+    },
+}
+
+/// How loudly a [`DocBanner`] speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocBannerLevel {
+    Info,
+    Warning,
+}
+
+/// A line above a document's body (for example why today's report is missing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocBanner {
+    pub level: DocBannerLevel,
+    pub text: String,
+}
+
+/// One button of a `Document`. `id` comes back in `ClientMsg::PaneAction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocAction {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub primary: bool,
 }
 
 // ── ticket sections/comments (W4 — curated-agent-views) ──────────────────────
@@ -1433,6 +1474,20 @@ pub enum ClientMsg {
         tag: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hold_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
+    /// The reader acted on a `Document` pane (a button, or a `nostromo-action:`
+    /// link): `action_id` is the id the document carried. Applied only from the
+    /// verified Mac app, which must echo the connection's `operator_nonce`
+    /// (the same check as `ClaudeLoginAction`); anyone else is refused with no
+    /// content and nothing changes. Answered with `ServerMsg::PaneActionResult`.
+    /// Refused for network peers.
+    PaneAction {
+        tag: String,
+        pane_id: String,
+        action_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
     },
@@ -2343,6 +2398,21 @@ pub enum ServerMsg {
         claude_bin: Option<String>,
         watch: ClaudeLoginWatch,
         sessions: Vec<ClaudeLoginSession>,
+    },
+
+    /// The answer to a `ClientMsg::PaneAction` (targeted). `message` is plain
+    /// English for the reader (why an action was refused, or what started).
+    /// `open_url` is for the Mac to open: only an `https:` URL, or a `file:`
+    /// URL inside the daemon's Huey folder. Local only.
+    PaneActionResult {
+        tag: String,
+        pane_id: String,
+        action_id: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_url: Option<String>,
     },
 
     /// A daemon-originated, tag-addressed, operator-facing notification (W5
@@ -7342,5 +7412,245 @@ mod terminal_wire_tests {
         assert_eq!(v["reason"], "not_available");
         assert_eq!(v["remedy"], "Update Nostromo");
         assert_eq!(v["detail"], "first line");
+    }
+}
+// ── H6-12: the Document pane content and the PaneAction messages ─────────────
+
+#[cfg(test)]
+mod huey_document_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn paragraph(text: &str) -> MdBlock {
+        MdBlock::Paragraph {
+            spans: vec![MdSpan::Text { text: text.into() }],
+        }
+    }
+
+    fn full_document() -> PaneContentWire {
+        PaneContentWire::Document {
+            title: "Huey, Mon Oct 26, 2026".into(),
+            banner: Some(DocBanner {
+                level: DocBannerLevel::Info,
+                text: "This is the report from Sunday.".into(),
+            }),
+            blocks: vec![paragraph("Hello")],
+            actions: vec![DocAction {
+                id: "report.today".into(),
+                label: "Today".into(),
+                primary: true,
+            }],
+        }
+    }
+
+    fn bare_document() -> PaneContentWire {
+        PaneContentWire::Document {
+            title: "Huey".into(),
+            banner: None,
+            blocks: vec![paragraph("Hello")],
+            actions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn h6_12_the_protocol_version_stays_four() {
+        assert_eq!(PROTOCOL_VERSION, 4);
+    }
+
+    #[test]
+    fn h6_12_a_document_with_a_banner_and_an_action_has_exactly_this_json() {
+        let json = serde_json::to_string(&full_document()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"document","title":"Huey, Mon Oct 26, 2026","banner":{"level":"info","text":"This is the report from Sunday."},"blocks":[{"kind":"paragraph","spans":[{"kind":"text","text":"Hello"}]}],"actions":[{"id":"report.today","label":"Today","primary":true}]}"#
+        );
+    }
+
+    #[test]
+    fn h6_12_a_document_with_nothing_optional_omits_banner_and_actions() {
+        let json = serde_json::to_string(&bare_document()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"document","title":"Huey","blocks":[{"kind":"paragraph","spans":[{"kind":"text","text":"Hello"}]}]}"#
+        );
+    }
+
+    #[test]
+    fn h6_12_a_warning_banner_is_spelled_warning() {
+        let doc = PaneContentWire::Document {
+            title: "t".into(),
+            banner: Some(DocBanner {
+                level: DocBannerLevel::Warning,
+                text: "w".into(),
+            }),
+            blocks: vec![],
+            actions: vec![],
+        };
+        let v = serde_json::to_value(&doc).unwrap();
+        assert_eq!(v["banner"], json!({"level": "warning", "text": "w"}));
+    }
+
+    #[test]
+    fn h6_12_documents_round_trip() {
+        for doc in [full_document(), bare_document()] {
+            let json = serde_json::to_string(&doc).unwrap();
+            let back: PaneContentWire = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, doc);
+        }
+    }
+
+    #[test]
+    fn h6_12_json_without_the_optional_fields_still_decodes() {
+        let old = r#"{"kind":"document","title":"Huey","blocks":[]}"#;
+        let doc: PaneContentWire = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            doc,
+            PaneContentWire::Document {
+                title: "Huey".into(),
+                banner: None,
+                blocks: vec![],
+                actions: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn h6_12_an_action_without_primary_is_not_primary() {
+        let json =
+            r#"{"kind":"document","title":"t","blocks":[],"actions":[{"id":"a","label":"A"}]}"#;
+        let doc: PaneContentWire = serde_json::from_str(json).unwrap();
+        let PaneContentWire::Document { actions, .. } = doc else {
+            panic!("expected a document");
+        };
+        assert_eq!(
+            actions,
+            vec![DocAction {
+                id: "a".into(),
+                label: "A".into(),
+                primary: false
+            }]
+        );
+    }
+
+    #[test]
+    fn h6_12_a_pane_content_frame_carries_the_document_and_round_trips() {
+        let msg = ServerMsg::PaneContent {
+            tag: "huey".into(),
+            pane_id: "report".into(),
+            content: full_document(),
+            freshness: None,
+            address: None,
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "pane_content");
+        assert_eq!(v["content"]["kind"], "document");
+        let back: ServerMsg = serde_json::from_value(v).unwrap();
+        match back {
+            ServerMsg::PaneContent {
+                tag,
+                pane_id,
+                content,
+                ..
+            } => {
+                assert_eq!((tag.as_str(), pane_id.as_str()), ("huey", "report"));
+                assert_eq!(content, full_document());
+            }
+            other => panic!("expected PaneContent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn h6_12_pane_action_has_exactly_this_json_and_omits_an_absent_nonce() {
+        let bare = ClientMsg::PaneAction {
+            tag: "huey".into(),
+            pane_id: "report".into(),
+            action_id: "report.prev".into(),
+            operator_nonce: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"type":"pane_action","tag":"huey","pane_id":"report","action_id":"report.prev"}"#
+        );
+        let with_nonce = ClientMsg::PaneAction {
+            tag: "huey".into(),
+            pane_id: "report".into(),
+            action_id: "report.prev".into(),
+            operator_nonce: Some("abc".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&with_nonce).unwrap(),
+            r#"{"type":"pane_action","tag":"huey","pane_id":"report","action_id":"report.prev","operator_nonce":"abc"}"#
+        );
+    }
+
+    #[test]
+    fn h6_12_pane_action_decodes_with_and_without_a_nonce() {
+        let without =
+            r#"{"type":"pane_action","tag":"huey","pane_id":"report","action_id":"setup.start"}"#;
+        match serde_json::from_str::<ClientMsg>(without).unwrap() {
+            ClientMsg::PaneAction {
+                tag,
+                pane_id,
+                action_id,
+                operator_nonce,
+            } => {
+                assert_eq!(
+                    (tag.as_str(), pane_id.as_str(), action_id.as_str()),
+                    ("huey", "report", "setup.start")
+                );
+                assert_eq!(operator_nonce, None);
+            }
+            other => panic!("expected PaneAction, got {other:?}"),
+        }
+        let with = r#"{"type":"pane_action","tag":"huey","pane_id":"report","action_id":"setup.start","operator_nonce":"n"}"#;
+        match serde_json::from_str::<ClientMsg>(with).unwrap() {
+            ClientMsg::PaneAction { operator_nonce, .. } => {
+                assert_eq!(operator_nonce.as_deref(), Some("n"))
+            }
+            other => panic!("expected PaneAction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn h6_12_pane_action_result_has_exactly_this_json_and_omits_absent_fields() {
+        let refused = ServerMsg::PaneActionResult {
+            tag: "huey".into(),
+            pane_id: "report".into(),
+            action_id: "report.prev".into(),
+            ok: false,
+            message: Some("unknown_action".into()),
+            open_url: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&refused).unwrap(),
+            r#"{"type":"pane_action_result","tag":"huey","pane_id":"report","action_id":"report.prev","ok":false,"message":"unknown_action"}"#
+        );
+        let opened = ServerMsg::PaneActionResult {
+            tag: "huey".into(),
+            pane_id: "report".into(),
+            action_id: "setup.open_interests".into(),
+            ok: true,
+            message: None,
+            open_url: Some("file:///tmp/huey/interests.md".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&opened).unwrap(),
+            r#"{"type":"pane_action_result","tag":"huey","pane_id":"report","action_id":"setup.open_interests","ok":true,"open_url":"file:///tmp/huey/interests.md"}"#
+        );
+        let back: ServerMsg =
+            serde_json::from_str(&serde_json::to_string(&opened).unwrap()).unwrap();
+        match back {
+            ServerMsg::PaneActionResult {
+                ok,
+                message,
+                open_url,
+                ..
+            } => {
+                assert!(ok);
+                assert_eq!(message, None);
+                assert_eq!(open_url.as_deref(), Some("file:///tmp/huey/interests.md"));
+            }
+            other => panic!("expected PaneActionResult, got {other:?}"),
+        }
     }
 }

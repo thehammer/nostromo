@@ -52,9 +52,25 @@ pub const MIN_TERMINAL_RATIO: f32 = 0.1;
 /// cloned `McpSharedState` in `crate::mcp::pane_sources`, and declared here
 /// (rather than in `mcp`) so `ipc` doesn't have to depend on `mcp` to thread
 /// this through `SessionManager`/`server.rs`.
+#[allow(clippy::double_must_use)]
+#[async_trait::async_trait]
 pub trait PaneContentProvider: Send + Sync {
     /// Current content for every live binding, for replay to a new client.
     fn bound_pane_contents(&self) -> Vec<ServerMsg>;
+
+    /// Carry out a document pane's action (`ClientMsg::PaneAction`), after the
+    /// server has checked the peer. Answers with the `ServerMsg::PaneActionResult`
+    /// to send back. The default knows no action.
+    async fn pane_action(&self, tag: &str, pane_id: &str, action_id: &str) -> ServerMsg {
+        ServerMsg::PaneActionResult {
+            tag: tag.to_string(),
+            pane_id: pane_id.to_string(),
+            action_id: action_id.to_string(),
+            ok: false,
+            message: Some("unknown_action".to_string()),
+            open_url: None,
+        }
+    }
 }
 
 /// Supplies the tracker frames (`TrackerBoard`, `TrackerSummary`) of every
@@ -779,8 +795,65 @@ impl PaneRegistry {
         };
         self.replace_tree(tag, tree.clone());
         self.prune_to_tree(tag);
+        self.bind_huey_panes(tag);
         self.persist();
         tree
+    }
+
+    /// Huey's seeded focus: its `report` and `context` panes are bound to the
+    /// daemon's `huey.report` / `huey.context` documents so they paint with no
+    /// agent turn. A no-op for any other tag, and for a pane the user already
+    /// bound (to another version, say).
+    fn bind_huey_panes(&mut self, tag: &str) {
+        use crate::mcp::views::tree::{HUEY_CONTEXT_PANE, HUEY_REPORT_PANE, HUEY_TAG};
+        if tag != HUEY_TAG {
+            return;
+        }
+        for (pane, source) in [
+            (HUEY_REPORT_PANE, crate::huey::HueyPane::REPORT_SOURCE),
+            (HUEY_CONTEXT_PANE, crate::huey::HueyPane::CONTEXT_SOURCE),
+        ] {
+            if self.binding_for(tag, pane).is_none() {
+                self.bind_source(tag, pane, source);
+            }
+        }
+    }
+
+    /// Bring a persisted `huey` focus up to date when Huey is enabled: a tree
+    /// that still holds both the `report` and `context` panes is kept as the
+    /// user left it (only missing bindings are added); anything else (a bare
+    /// REPL from before Huey had a surface) becomes the default Huey tree. A
+    /// focus with a live terminal keeps its tree. Returns whether anything
+    /// changed. No focus yet: nothing to do.
+    pub fn ensure_huey_focus(&mut self) -> bool {
+        use crate::mcp::views::tree::{
+            default_huey_tree, HUEY_CONTEXT_PANE, HUEY_REPORT_PANE, HUEY_TAG,
+        };
+        let Some(tree) = self.trees.get(HUEY_TAG) else {
+            return false;
+        };
+        let ids = tree.pane_ids();
+        let has_both = [HUEY_REPORT_PANE, HUEY_CONTEXT_PANE]
+            .iter()
+            .all(|p| ids.iter().any(|id| id == p));
+        let snapshot = |reg: &Self| {
+            (
+                reg.trees.get(HUEY_TAG).cloned(),
+                reg.bindings.get(HUEY_TAG).cloned(),
+            )
+        };
+        let before = snapshot(self);
+        if !has_both && !self.terminal_leaves.contains_key(HUEY_TAG) {
+            self.replace_tree(HUEY_TAG, default_huey_tree());
+            self.prune_to_tree(HUEY_TAG);
+        }
+        self.bind_huey_panes(HUEY_TAG);
+        let after = snapshot(self);
+        let changed = before != after;
+        if changed {
+            self.persist();
+        }
+        changed
     }
 
     /// Ensure `tag` has a tree (a REPL leaf if absent) and return a clone.
@@ -862,6 +935,7 @@ impl PaneRegistry {
             crate::mcp::views::tree::default_native_tree(tag).unwrap_or_else(PaneTree::repl_leaf);
         self.replace_tree(tag, tree.clone());
         self.prune_to_tree(tag);
+        self.bind_huey_panes(tag);
         self.persist();
         Ok(tree)
     }
@@ -5200,5 +5274,165 @@ mod terminal_guard_tests {
                 "{ratios:?}"
             );
         }
+    }
+}
+// ── H6-4: the daemon-seeded Huey focus ───────────────────────────────────────
+
+#[cfg(test)]
+mod huey_focus_tests {
+    use super::*;
+    use crate::mcp::views::tree::default_huey_tree;
+    use serde_json::json;
+
+    fn source_of(reg: &PaneRegistry, pane: &str) -> Option<String> {
+        reg.binding_for("huey", pane).map(|b| b.source.clone())
+    }
+
+    fn assert_both_bound_with_no_params(reg: &PaneRegistry) {
+        let report = reg.binding_for("huey", "report").expect("report is bound");
+        assert_eq!(report.source, "huey.report");
+        assert_eq!(report.params, None);
+        let context = reg
+            .binding_for("huey", "context")
+            .expect("context is bound");
+        assert_eq!(context.source, "huey.context");
+        assert_eq!(context.params, None);
+    }
+
+    /// A registry file as the daemon wrote it before Huey had a surface: the
+    /// `huey` focus is a bare REPL (the pre-params bare-map store format).
+    fn registry_with_a_bare_repl_huey() -> (tempfile::TempDir, PaneRegistry) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("panes.json");
+        let store = json!({ "huey": serde_json::to_value(PaneTree::repl_leaf()).unwrap() });
+        std::fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+        let reg = PaneRegistry::with_store_path(path);
+        assert_eq!(reg.get("huey"), Some(&PaneTree::repl_leaf()), "fixture");
+        (tmp, reg)
+    }
+
+    #[test]
+    fn h6_4_init_focus_huey_seeds_the_tree_and_binds_both_panes() {
+        let mut reg = PaneRegistry::in_memory();
+        let tree = reg.init_focus("huey");
+        assert_eq!(tree, default_huey_tree());
+        assert_eq!(reg.get("huey"), Some(&default_huey_tree()));
+        assert_both_bound_with_no_params(&reg);
+    }
+
+    #[test]
+    fn h6_4_other_focuses_get_no_huey_bindings() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("cody-1");
+        assert!(reg.all_bindings().is_empty());
+    }
+
+    #[test]
+    fn h6_4_ensure_does_nothing_when_there_is_no_huey_focus() {
+        let mut reg = PaneRegistry::in_memory();
+        assert!(!reg.ensure_huey_focus());
+        assert!(!reg.contains("huey"));
+        assert!(reg.all_bindings().is_empty());
+    }
+
+    #[test]
+    fn h6_4_ensure_replaces_a_bare_repl_with_the_default_tree_and_binds_it() {
+        let (tmp, mut reg) = registry_with_a_bare_repl_huey();
+        assert!(reg.ensure_huey_focus(), "a bare REPL is brought up to date");
+        assert_eq!(reg.get("huey"), Some(&default_huey_tree()));
+        assert_both_bound_with_no_params(&reg);
+
+        // It was saved: a restarted daemon sees the same.
+        let reloaded = PaneRegistry::with_store_path(tmp.path().join("panes.json"));
+        assert_eq!(reloaded.get("huey"), Some(&default_huey_tree()));
+        assert_both_bound_with_no_params(&reloaded);
+
+        assert!(!reg.ensure_huey_focus(), "a second pass changes nothing");
+    }
+
+    #[test]
+    fn h6_4_ensure_keeps_a_tree_that_has_both_panes_and_only_adds_missing_bindings() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("huey");
+        // The user's own layout: an extra pane beside the REPL.
+        reg.create_pane("huey", "notes", SplitPosition::Right, "repl")
+            .unwrap();
+        let user_tree = reg.get("huey").cloned().unwrap();
+        reg.unbind_source("huey", "report");
+        reg.unbind_source("huey", "context");
+
+        assert!(reg.ensure_huey_focus());
+        assert_eq!(
+            reg.get("huey"),
+            Some(&user_tree),
+            "a user-modified tree is never replaced"
+        );
+        assert!(reg.pane_ids("huey").contains(&"notes".to_string()));
+        assert_both_bound_with_no_params(&reg);
+        assert!(!reg.ensure_huey_focus());
+    }
+
+    #[test]
+    fn h6_4_ensure_never_replaces_an_existing_binding() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("huey");
+        let rebound = json!({"date": "2026-10-20", "version": 2});
+        reg.bind_source_with_params("huey", "report", "huey.report", Some(rebound.clone()));
+        reg.unbind_source("huey", "context");
+
+        assert!(
+            reg.ensure_huey_focus(),
+            "the missing context binding is added"
+        );
+        assert_eq!(
+            reg.binding_for("huey", "report").unwrap().params,
+            Some(rebound),
+            "the report pane stays on the version the user chose"
+        );
+        assert_eq!(source_of(&reg, "context").as_deref(), Some("huey.context"));
+        assert_eq!(reg.get("huey"), Some(&default_huey_tree()));
+    }
+
+    #[test]
+    fn h6_4_ensure_with_everything_in_place_reports_no_change() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("huey");
+        assert!(!reg.ensure_huey_focus());
+    }
+
+    #[test]
+    fn h6_4_reset_puts_the_huey_layout_and_its_bindings_back() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("huey");
+        reg.create_pane("huey", "notes", SplitPosition::Below, "repl")
+            .unwrap();
+        reg.bind_source("huey", "notes", "perri.list_pr_queue");
+        reg.unbind_source("huey", "report");
+        reg.unbind_source("huey", "context");
+
+        let tree = reg.reset("huey").unwrap();
+        assert_eq!(tree, default_huey_tree());
+        assert_eq!(reg.get("huey"), Some(&default_huey_tree()));
+        assert_both_bound_with_no_params(&reg);
+        assert_eq!(
+            reg.binding_for("huey", "notes"),
+            None,
+            "a pane the reset removed keeps no binding"
+        );
+    }
+
+    #[test]
+    fn h6_4_reset_leaves_both_panes_bound_to_huey_sources_even_when_one_was_rebound() {
+        let mut reg = PaneRegistry::in_memory();
+        reg.init_focus("huey");
+        reg.bind_source_with_params(
+            "huey",
+            "report",
+            "huey.report",
+            Some(json!({"date": "2026-10-20"})),
+        );
+        reg.reset("huey").unwrap();
+        assert_eq!(source_of(&reg, "report").as_deref(), Some("huey.report"));
+        assert_eq!(source_of(&reg, "context").as_deref(), Some("huey.context"));
     }
 }
