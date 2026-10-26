@@ -1670,7 +1670,9 @@ pub enum ClientMsg {
     RemoteShellAnswer {
         request_id: String,
         decision: String,
-        /// Parsed and audited; honoured by the follow slice.
+        /// The follow box on the confirm sheet: on Connect, an agent's request
+        /// has that agent follow the shell once it runs. Ignored for a shell the
+        /// user opened themselves and for any decision but `connect`.
         #[serde(default)]
         invite_follow: bool,
     },
@@ -1695,6 +1697,18 @@ pub enum ClientMsg {
     /// app only.
     TerminalFollowResume {
         terminal_id: String,
+    },
+
+    // ── send selection (3d; refused over TCP) ─────────────────────────────────
+    /// Send the text the user selected in a terminal to the focus
+    /// `target_tag`, once: the daemon redacts and caps it and writes it into
+    /// that focus's conversation as a `kind="selection"` terminal-output
+    /// element. It never starts following and works on any terminal.
+    /// Operator app only.
+    TerminalSendSelection {
+        terminal_id: String,
+        target_tag: String,
+        text: String,
     },
 }
 

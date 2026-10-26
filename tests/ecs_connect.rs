@@ -1500,6 +1500,12 @@ async fn when_the_agent_goes_away_while_the_session_starts_the_pane_and_the_aws_
     let confirm = r.s.app.wait_confirm(from).await;
     r.s.app.answer(&confirm.request_id, "connect").await;
     let t = r.wait_connecting().await;
+    // The fake CLI records its pid as it starts: abort only once it has, so the
+    // "no process ever started" check cannot race the launch.
+    eventually("the fake aws process to have started", || {
+        !r.started_pids().is_empty()
+    })
+    .await;
 
     asking.abort();
     let _ = asking.await;

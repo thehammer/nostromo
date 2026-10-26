@@ -1216,6 +1216,30 @@ impl Redactor {
         Self::default()
     }
 
+    /// A redactor for a screen of `lines` that stands alone, so its top may be
+    /// the middle of a private-key block whose `BEGIN` has scrolled off. Such a
+    /// screen is recognisable by an `END` line with no `BEGIN` above it, or by
+    /// `key_open`: the terminal's own stream was inside a block when the screen
+    /// was drawn (a key taller than the screen, still printing). Either way
+    /// the screen starts inside the block, so everything down to its `END`
+    /// (or the whole screen) is redacted.
+    pub(crate) fn for_screen(lines: &[String], key_open: bool) -> Self {
+        let text = lines.join("\n");
+        let scan = KeyScan::new(&text);
+        let end_first = match (
+            scan.find_from(&PRIVATE_KEY_END, 0),
+            scan.find_from(&PRIVATE_KEY_BEGIN, 0),
+        ) {
+            (Some(end), Some(begin)) => end.start < begin.start,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        Self {
+            inside_private_key: key_open || end_first,
+            swallowed: 0,
+        }
+    }
+
     /// Whether the previous call ended inside a private-key block.
     pub fn inside_private_key(&self) -> bool {
         self.inside_private_key

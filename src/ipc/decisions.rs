@@ -245,6 +245,35 @@ impl DecisionRegistry {
         }
     }
 
+    /// Withdraw `request_id` because nobody is waiting for it any more (its
+    /// asker timed out or went away): resolve it as timed out, whether it is
+    /// the tag's active request or still queued behind one (which
+    /// [`Self::timeout_request`] leaves alone). Returns the next queued
+    /// request for the same tag, promoted to active, if any — the caller must
+    /// broadcast it. A no-op (`None`) if `request_id` is already resolved.
+    pub fn withdraw(&mut self, request_id: &str) -> Option<ServerMsg> {
+        if self.active.contains_key(request_id) {
+            return self.timeout_request(request_id);
+        }
+        let (tag, at) = self.queues.iter().find_map(|(tag, queue)| {
+            queue
+                .iter()
+                .position(|q| {
+                    matches!(&q.msg, ServerMsg::DecisionRequest { request_id: id, .. } if id == request_id)
+                })
+                .map(|at| (tag.clone(), at))
+        })?;
+        let queue = self.queues.get_mut(&tag)?;
+        let queued = queue.remove(at)?;
+        if queue.is_empty() {
+            self.queues.remove(&tag);
+        }
+        self.resolved.insert(request_id.to_string());
+        self.notify_resolved(&tag, request_id, &DecisionOutcome::TimedOut);
+        let _ = queued.reply.send(DecisionOutcome::TimedOut);
+        None
+    }
+
     /// The owning session for `tag` died. Every request for that tag — the
     /// active one and everything queued behind it — resolves as
     /// [`DecisionOutcome::Cancelled`]. No promotion/broadcast happens: the
@@ -805,6 +834,47 @@ mod tests {
     }
 
     // ── 5. operator subscription ─────────────────────────────────────────────────
+
+    #[test]
+    fn withdrawing_a_queued_request_resolves_it_and_leaves_the_active_one_alone() {
+        let mut registry = DecisionRegistry::new();
+        let (active_id, mut active_rx, _) = submit_simple(&mut registry, "tag", "first");
+        let (queued_id, mut queued_rx, shown) = submit_simple(&mut registry, "tag", "second");
+        assert!(shown.is_none(), "the second one is queued");
+
+        // `timeout_request` only knows the active one.
+        assert!(registry.timeout_request(&queued_id).is_none());
+        assert!(queued_rx.try_recv().is_err(), "still waiting");
+
+        assert!(registry.withdraw(&queued_id).is_none());
+        assert_eq!(queued_rx.try_recv().unwrap(), DecisionOutcome::TimedOut);
+        assert_eq!(registry.queued_count("tag"), 0);
+        assert!(
+            active_rx.try_recv().is_err(),
+            "the active request is untouched"
+        );
+        assert_eq!(registry.active_request_id("tag"), Some(active_id));
+        // Withdrawn means resolved: a late answer is not forwarded.
+        assert!(matches!(
+            registry.answer(&queued_id, Some("approve".into())),
+            AnswerOutcome::AlreadyAnswered
+        ));
+    }
+
+    #[test]
+    fn withdrawing_the_active_request_promotes_the_next_one() {
+        let mut registry = DecisionRegistry::new();
+        let (active_id, mut active_rx, _) = submit_simple(&mut registry, "tag", "first");
+        let (next_id, _next_rx, _) = submit_simple(&mut registry, "tag", "second");
+
+        let promoted = registry
+            .withdraw(&active_id)
+            .expect("the next one is shown");
+
+        assert_eq!(active_rx.try_recv().unwrap(), DecisionOutcome::TimedOut);
+        assert_eq!(as_decision_request(&promoted, "promoted").1, next_id);
+        assert!(registry.withdraw("never-issued").is_none());
+    }
 
     #[test]
     fn has_operator_reflects_operator_add_and_remove() {

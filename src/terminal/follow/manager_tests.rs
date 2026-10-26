@@ -1832,6 +1832,164 @@ async fn following_a_local_terminal_never_makes_the_follower_sensitive() {
     assert!(!sensitive.tag_is_sensitive(A));
 }
 
+// ── a selection from a remote terminal, and reading its screen ────────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_selection_from_a_remote_terminal_makes_its_recipient_sensitive_before_the_text_is_written(
+) {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.rec.watch_sensitivity_of(&sensitive);
+    assert!(!sensitive.tag_is_sensitive(B));
+    let from = w.rec.mark();
+
+    w.follow
+        .send_selection(&cap(), &t.id, B, "SELECTED-FROM-PRODUCTION")
+        .expect("the selection is sent");
+
+    let told = w.rec.texts_for(B, from);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("SELECTED-FROM-PRODUCTION"));
+    assert_eq!(
+        w.rec.sensitive_at_each_inject(),
+        vec![true],
+        "the recipient was already sensitive when the session was handed the text"
+    );
+    assert!(sensitive.tag_is_sensitive(B));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recipient_of_a_remote_selection_stays_sensitive_as_time_passes_and_follows_end() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let remote = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.follow
+        .send_selection(&cap(), &remote.id, B, "SELECTED-FROM-PRODUCTION")
+        .expect("the selection is sent");
+
+    advance_ms(120_000).await;
+    assert!(
+        sensitive.tag_is_sensitive(B),
+        "the text stays in its conversation, so the mark is not a timed hold"
+    );
+
+    // A follow that comes and goes does not undo it either.
+    w.invite(&remote, B, false);
+    w.follow.stop(&cap(), &remote.id).unwrap();
+    assert!(sensitive.tag_is_sensitive(B));
+    assert!(
+        !sensitive.tag_is_sensitive(A),
+        "and nobody else was touched"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_selection_from_a_plain_local_terminal_leaves_its_recipient_as_it_was() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.local("focus-1", "");
+    w.rec.watch_sensitivity_of(&sensitive);
+    let from = w.rec.mark();
+
+    w.follow
+        .send_selection(&cap(), &t.id, B, "just some local text")
+        .expect("the selection is sent");
+
+    assert_eq!(w.rec.texts_for(B, from).len(), 1);
+    assert_eq!(w.rec.sensitive_at_each_inject(), vec![false]);
+    advance_ms(60_000).await;
+    assert!(!sensitive.tag_is_sensitive(B));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reading_a_remote_terminals_screen_happens_while_the_reader_is_sensitive_and_only_while_it_follows(
+) {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+
+    assert!(
+        sensitive.tag_is_sensitive(A),
+        "sensitive for the whole follow"
+    );
+    w.follow
+        .read_screen_as(A, &t.id)
+        .expect("a follower reads the screen");
+    assert!(sensitive.tag_is_sensitive(A), "still, after the read");
+
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(
+        !sensitive.tag_is_sensitive(A),
+        "the hold lapses with the follow"
+    );
+    assert!(
+        matches!(
+            w.follow.read_screen_as(A, &t.id),
+            Err(crate::terminal::follow::ScreenReadError::NotFollowing)
+        ),
+        "and with no follow there is nothing to read"
+    );
+}
+
+// ── a selection is redacted as a fragment ─────────────────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_selection_that_starts_inside_a_private_key_hides_the_key_down_to_its_end() {
+    let mut w = World::new();
+    let t = w.local("focus-1", "");
+    let from = w.rec.mark();
+    let selection = [
+        "MIIEowIBAAKCAQEAfragmentbodylineONE",
+        "q83kd92jfhs0aXfragmentbodylineTWO",
+        "ZZtop81kdfragmentbodylineTHREE",
+        "-----END RSA PRIVATE KEY-----",
+        "text-after-the-key",
+    ]
+    .join("\n");
+
+    w.follow
+        .send_selection(&cap(), &t.id, B, &selection)
+        .expect("the selection is sent");
+
+    let told = w.rec.texts_for(B, from);
+    assert_eq!(told.len(), 1, "{told:?}");
+    for body in ["bodylineONE", "bodylineTWO", "bodylineTHREE"] {
+        assert!(!told[0].contains(body), "{body} leaked: {}", told[0]);
+    }
+    assert!(told[0].contains("[redacted: private-key]"), "{}", told[0]);
+    assert!(told[0].contains("text-after-the-key"), "{}", told[0]);
+    assert!(!w.audit_text().contains("bodylineONE"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_selection_holding_a_whole_private_key_block_still_has_it_redacted_and_keeps_the_rest() {
+    let mut w = World::new();
+    let t = w.local("focus-1", "");
+    let from = w.rec.mark();
+    let selection = [
+        "before-the-key",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "MIIEowIBAAKCAQEAwholeblockbodyONE",
+        "wholeblockbodyTWO",
+        "-----END RSA PRIVATE KEY-----",
+        "after-the-key",
+    ]
+    .join("\n");
+
+    w.follow
+        .send_selection(&cap(), &t.id, B, &selection)
+        .expect("the selection is sent");
+
+    let told = w.rec.texts_for(B, from);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(!told[0].contains("wholeblockbody"), "{}", told[0]);
+    assert!(told[0].contains("[redacted: private-key]"), "{}", told[0]);
+    assert!(told[0].contains("before-the-key"), "{}", told[0]);
+    assert!(told[0].contains("after-the-key"), "{}", told[0]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_pause_notice_for_a_flood_says_too_much_output() {
     let mut w = World::new();

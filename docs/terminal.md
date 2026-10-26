@@ -74,7 +74,7 @@ If the agent's MCP connection closes while the request waits, the request is aba
 |---|---|
 | `remote_shell_targets_request` | none; any local peer |
 | `remote_shell_open`* | `tag, project, environment, service, shell_type` (the user's own request; same confirm flow with `requested_by: {kind: "user"}`; failures before the sheet arrive as `terminal_refused {op: "remote_open", code}`) |
-| `remote_shell_answer`* | `request_id, decision, invite_follow?` (parsed and audited only; honoured by the follow slice) |
+| `remote_shell_answer`* | `request_id, decision, invite_follow?` (`connect` with `invite_follow: true` on an agent's request: that agent follows the shell once it is running, `via: "sheet"`; see Agent follow) |
 
 | Daemon → client | Routing | Fields |
 |---|---|---|
@@ -113,8 +113,9 @@ A focus follows a terminal only when the user invites it. Output the terminal pr
 | `terminal_follow_invite`* | `terminal_id, follower_tag, include_screen?` (needs the connection's `terminal_follow_ui` capability, else `terminal_follow_ui_required`) |
 | `terminal_follow_stop`* | `terminal_id` |
 | `terminal_follow_resume`* | `terminal_id` (only a paused follow) |
+| `terminal_send_selection`* | `terminal_id, target_tag, text` (any terminal; no `terminal_follow_ui` needed) |
 
-Refusal codes: `terminal_control_forbidden` (not the operator app; audited), `unknown_terminal`, `follower_not_running`, `not_followed`, `not_paused`. `TerminalInfo.follower` is `{tag, paused, pause_reason?}` while a focus follows; each change is broadcast as `terminal_state`.
+Refusal codes: `terminal_control_forbidden` (not the operator app; audited), `unknown_terminal`, `follower_not_running`, `not_followed`, `not_paused`, `empty_selection`. `TerminalInfo.follower` is `{tag, paused, pause_reason?}` while a focus follows; each change is broadcast as `terminal_state`.
 
 - **One follower per terminal.** Inviting another focus moves the invitation: the previous follower is told it stopped (`moved_to <tag>`).
 - **Only output after the invite** is delivered, unless `include_screen`: then the visible screen goes first, in the same message as the `started` notice.
@@ -123,7 +124,12 @@ Refusal codes: `terminal_control_forbidden` (not the operator app; audited), `un
 - **Notices** (`<nostromo-terminal-follow event reason?/>` plus a sentence): `started`, `paused`, `resumed`, `stopped` with `user_stopped`, `moved_to <tag>`, `pane_closed`, `terminal_restarted`, `app_closed`.
 - **Ends** when the user stops it (output not yet delivered, buffered or still queued, is discarded), the pane closes or the terminal is restarted, the follower's session stops, restarts, starts a new session, crash-loops or its focus is removed (no notice), or the last operator-app connection goes. Nothing is persisted: a new daemon follows nothing.
 
-Audit events: `follow_invited {follower, include_screen, via}`, `follow_stopped {follower, reason}`, `follow_paused {follower, reason}`, `follow_resumed {follower}`, `delivery {follower, kind, lines, bytes, redactions, truncated}`. Counts and sizes only.
+- **Three ways in, and no others.** Following starts only by the pane's Follow control (`terminal_follow_invite`, `via: "control"`), by Connect with the follow box ticked on the remote-shell confirm sheet (`via: "sheet"`), or by Allow on an agent's `nostromo.request_follow` (`via: "request"`). The last two are the verified app's answer (`remote_shell_answer`, `decision_answer`), acted on by the call that waited for it (`FollowGrant`, crate-private; `src/mcp/` cannot name it): a request the agent gave up on, a user-opened shell, a failed connect, or no connected app with `terminal_follow_ui` follows nothing.
+- **Agent tools** (`nostromo.list_terminals`, `nostromo.request_follow`, `nostromo.read_terminal_screen`; see `docs/mcp/tools.md`). Reading is only for the current follower (active or paused; reading while a follow is paused for flood is intended); anyone else gets `terminal_read_forbidden`, audited, and no delivery. An agent's follow request is held to the remote-shell request rules (`FocusLimits` in `src/terminal/remote_request.rs`, one history per kind of request): after a Deny, dismissal or timeout `request_cooldown` for 60 s, doubling to 15 minutes, and at most 3 requests per 10 minutes per focus (`request_limit`); neither shows a sheet. Reads are limited per follower to one every 2 s (`read_too_soon`) and 240 an hour (`read_limit`), each refusal audited with its code only.
+- **Sensitivity.** A follower of an ECS terminal is held sensitive for as long as it follows (so its turns never reach a network peer, and the hold lapses with the follow); that covers `nostromo.read_terminal_screen`, which only the follower can call. A selection sent *from* an ECS terminal marks its recipient sensitive for good (as does one from a sensitive focus's terminal), before it is written, because the text stays in that conversation.
+- **Send selection.** `terminal_send_selection` redacts and caps the text (200 lines / 16 KiB, like a delivery; redacted as a fragment, so a selection that starts in the middle of a private key loses everything down to the key's `END`) and writes it once into `target_tag`'s conversation as `<nostromo-terminal-output … kind="selection" …>` with its own advisory line. It never starts following, works on any terminal, leaves another focus's follow alone, and is always a message of its own (never combined with deliveries, and under a key of its own, so stopping a follow never drops it).
+
+Audit events: `selection_sent {terminal_id, tag, target, lines, bytes, redactions}`, `screen_read {terminal_id, focus, lines, bytes}`, `follow_invited {follower, include_screen, via}`, `follow_stopped {follower, reason}`, `follow_paused {follower, reason}`, `follow_resumed {follower}`, `delivery {follower, kind, lines, bytes, redactions, truncated}`. Counts and sizes only.
 
 ### Connecting (slice 2b)
 
