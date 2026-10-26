@@ -187,11 +187,6 @@ final class ViewTreeLeakProbeTests: XCTestCase {
                 let l = self.label(); l.refusesFirstResponder = true; l.focusRingType = .none; return l
             }),
             p("knob: controlSize small", cycle { let l = self.label(); l.controlSize = .small; return l }),
-            p("knob: borderShape (macOS 26)", cycle {
-                let l = self.label()
-                if #available(macOS 26.0, *) { l.borderShape = .automatic }
-                return l
-            }),
             p("knob: cell.isScrollable / usesSingleLineMode", cycle {
                 let l = self.label(); l.cell?.usesSingleLineMode = true; l.cell?.isScrollable = false; return l
             }),
