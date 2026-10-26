@@ -16,6 +16,10 @@ enum ProbeCensus {
 
     /// Runs /usr/bin/heap against this very process (test-only; never in the app) and parses the class table.
     static func snapshot() -> Snapshot {
+        autoreleasepool { snapshotInner() }
+    }
+
+    private static func snapshotInner() -> Snapshot {
         var snap = Snapshot()
         let out = NSTemporaryDirectory() + "heap-\(UUID().uuidString).txt"
         FileManager.default.createFile(atPath: out, contents: nil)
@@ -46,17 +50,28 @@ enum ProbeCensus {
         return snap
     }
 
-    /// The biggest movers between two snapshots.
-    static func delta(_ a: Snapshot, _ b: Snapshot, top: Int = 9) -> String {
+    static let interesting = ["NSKeyValueDependency", "NSKeyValueDependencyContext", "__NSMallocBlock__",
+                              "__NSExactBlockVariable__", "NSISRestrictedToNonNegativeVariable",
+                              "NSMutableDictionary", "NSMutableArray", "CFDictionary", "NSTextFieldCell",
+                              "NSTextField", "CopyMenuTextFieldCell", "NSLayoutConstraint"]
+
+    /// Deltas of the classes that matter, then the biggest other movers.
+    static func delta(_ a: Snapshot, _ b: Snapshot, per n: Int) -> String {
         if !a.error.isEmpty || !b.error.isEmpty { return "heap error: \(a.error) / \(b.error)" }
-        var moves: [(String, Int)] = []
-        for key in Set(a.classes.keys).union(b.classes.keys) {
-            let d = (b.classes[key] ?? 0) - (a.classes[key] ?? 0)
-            if abs(d) >= 50 { moves.append((key, d)) }
+        func d(_ k: String) -> Int { (b.classes[k] ?? 0) - (a.classes[k] ?? 0) }
+        let key = d("NSKeyValueDependency")
+        var parts = interesting.compactMap { name -> String? in
+            let v = d(name)
+            return abs(v) >= 20 ? "\(name.replacingOccurrences(of: "NSKeyValue", with: "KV")) \(v >= 0 ? "+" : "")\(v)" : nil
         }
-        moves.sort { abs($0.1) > abs($1.1) }
-        return "heap[" + moves.prefix(top).map { "\($0.0) \($0.1 >= 0 ? "+" : "")\($0.1)" }.joined(separator: ", ")
-            + "] (total objects \(b.total))"
+        var others: [(String, Int)] = []
+        for k in Set(a.classes.keys).union(b.classes.keys) where !interesting.contains(k) {
+            let v = d(k)
+            if abs(v) >= max(100, n / 2) { others.append((k, v)) }
+        }
+        others.sort { abs($0.1) > abs($1.1) }
+        parts += others.prefix(3).map { "\($0.0) \($0.1 >= 0 ? "+" : "")\($0.1)" }
+        return String(format: "KVDependency/iter=%.2f", Double(key) / Double(n)) + " [" + parts.joined(separator: ", ") + "]"
     }
 }
 
@@ -66,10 +81,10 @@ final class ViewTreeLeakProbeTests: XCTestCase {
         override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     }
 
-    private static func blocksInUse() -> Int {
-        var stats = malloc_statistics_t()
-        malloc_zone_statistics(nil, &stats)
-        return Int(stats.blocks_in_use)
+    private final class PlainSub: NSTextField {}
+    private final class CellSubCell: NSTextFieldCell {}
+    private final class CellSub: NSTextField {
+        override class var cellClass: AnyClass? { get { CellSubCell.self } set { _ = newValue } }
     }
 
     private func settle(_ n: Int = 3) {
@@ -94,123 +109,128 @@ final class ViewTreeLeakProbeTests: XCTestCase {
         return l
     }
 
-    /// Runs `cycle` n times against a long-lived windowed host and reports what it left behind.
-    private func probe(_ name: String, n: Int = 500, destroyHostAfter: Bool = false,
-                       cycle: (_ host: NSView, _ window: NSWindow) -> Void) {
-        var window: NSWindow? = nil
-        var host: NSView? = nil
-        (window, host) = { let p = makeWindow(); return (Optional(p.0), Optional(p.1)) }()
-        addTeardownBlock { [weak w = window] in w?.orderOut(nil); w?.contentView = nil }
-        for _ in 0 ..< 30 { autoreleasepool { cycle(host!, window!) } }
-        settle()
-        let s0 = ProbeCensus.snapshot()
-        let b0 = Self.blocksInUse()
-        for _ in 0 ..< n { autoreleasepool { cycle(host!, window!) } }
-        settle(5)
-        let s1 = ProbeCensus.snapshot()
-        let b1 = Self.blocksInUse()
-        var tail = ""
-        if destroyHostAfter {
-            autoreleasepool {
-                host!.subviews.forEach { $0.removeFromSuperview() }
-                window!.orderOut(nil)
-                window!.contentView = nil
-                host = nil
-                window = nil
+    /// Chain of probes sharing one running snapshot: each reports the delta since the previous one ended.
+    private func chain(_ probes: [(name: String, n: Int, inWindow: Bool, cycle: (NSView) -> Void, after: (() -> Void)?)]) {
+        let (window, host) = makeWindow()
+        let nonWindowHost = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        addTeardownBlock { [weak window] in window?.orderOut(nil); window?.contentView = nil }
+        var last = ProbeCensus.snapshot()
+        for probe in probes {
+            let h = probe.inWindow ? host : nonWindowHost
+            for _ in 0 ..< 10 { autoreleasepool { probe.cycle(h) } }
+            settle()
+            let before = ProbeCensus.snapshot()
+            for _ in 0 ..< probe.n { autoreleasepool { probe.cycle(h) } }
+            settle(4)
+            var after = ProbeCensus.snapshot()
+            var tail = ""
+            if let cleanup = probe.after {
+                cleanup()
+                settle(4)
+                let post = ProbeCensus.snapshot()
+                tail = " | after cleanup: " + ProbeCensus.delta(after, post, per: probe.n)
+                after = post
             }
-            settle(8)
-            let d = Self.blocksInUse() - b1
-            tail = "; after destroying the host/window: blocks \(d >= 0 ? "+" : "")\(d)"
+            XCTFail("PROBE5 \(probe.name) n=\(probe.n): " + ProbeCensus.delta(before, after, per: probe.n) + tail)
+            host.subviews.forEach { $0.removeFromSuperview() }
+            nonWindowHost.subviews.forEach { $0.removeFromSuperview() }
+            last = after
         }
-        XCTFail("PROBE3 \(name) n=\(n): blocks +\(b1 - b0) (\(String(format: "%.1f", Double(b1 - b0) / Double(n)))/iter); "
-                + ProbeCensus.delta(s0, s1) + tail)
+        _ = last
     }
 
-    func testProbeNamesTheLeak() {
-        probe("plainLabel add/remove") { host, _ in
-            let v = self.label(); host.addSubview(v); v.removeFromSuperview()
-        }
-        probe("plainLabel add/remove, host+window destroyed afterwards", destroyHostAfter: true) { host, _ in
-            let v = self.label(); host.addSubview(v); v.removeFromSuperview()
-        }
-        probe("nsView add/remove (control: no leak expected)") { host, _ in
-            let v = NSView(); host.addSubview(v); v.removeFromSuperview()
-        }
-        probe("nsImageView add/remove") { host, _ in
-            let v = NSImageView(); host.addSubview(v); v.removeFromSuperview()
-        }
+    private typealias P = (name: String, n: Int, inWindow: Bool, cycle: (NSView) -> Void, after: (() -> Void)?)
+
+    private func p(_ name: String, n: Int = 300, inWindow: Bool = true, after: (() -> Void)? = nil,
+                   _ cycle: @escaping (NSView) -> Void) -> P {
+        (name, n, inWindow, cycle, after)
     }
 
-    func testProbeMitigations() {
-        probe("label created once, text updated in place (no re-parenting)") { host, _ in
-            if host.subviews.isEmpty { host.addSubview(self.label()) }
-            (host.subviews[0] as? NSTextField)?.stringValue = "tick \(Int.random(in: 0 ..< 1000))"
-        }
-        probe("label reparented between two long-lived views") { host, _ in
-            let a: NSView
-            if let existing = host.subviews.first { a = existing } else {
-                a = NSView(); host.addSubview(a)
-                let b = NSView(); host.addSubview(b)
-            }
-            let b = host.subviews[1]
-            let l = a.subviews.first ?? b.subviews.first ?? self.label()
-            (l.superview === a ? b : a).addSubview(l)
-        }
-        probe("label via removeFromSuperviewWithoutNeedingDisplay") { host, _ in
-            let v = self.label(); host.addSubview(v); v.removeFromSuperviewWithoutNeedingDisplay()
-        }
-        probe("label with cell.controlView cleared before removal") { host, _ in
-            let v = self.label(); host.addSubview(v); v.cell?.controlView = nil; v.removeFromSuperview()
-        }
-        probe("label added to a short-lived container that is NOT yet in the window (ChatTurnView build)") { host, _ in
-            let c = NSView(); c.addSubview(self.label()); c.addSubview(self.label())
-            host.addSubview(c); c.removeFromSuperview()
-        }
-        probe("label added to a short-lived container ALREADY in the window (streaming append)") { host, _ in
-            let c = NSView(); host.addSubview(c); c.addSubview(self.label()); c.addSubview(self.label())
-            c.removeFromSuperview()
-        }
-        probe("label in NSStackView arranged/removed (our render() pattern)") { host, _ in
-            let s: NSStackView
-            if let existing = host.subviews.first as? NSStackView { s = existing } else { s = NSStackView(); host.addSubview(s) }
-            s.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            s.addArrangedSubview(self.label()); s.addArrangedSubview(self.label())
-        }
-        probe("CopyMenuTextField add/remove") { host, _ in
-            let v = CopyMenuTextField(labelWithString: "hello world"); host.addSubview(v); v.removeFromSuperview()
-        }
+    // MARK: isolation: what event leaks?
+
+    func testIsolation() {
+        let reused = label()
+        var retained: [NSView] = []
+        var accumulated: [NSView] = []
+        chain([
+            p("iso: control created, never attached") { _ in _ = self.label() },
+            p("iso: nsView add/remove (baseline)") { h in let v = NSView(); h.addSubview(v); v.removeFromSuperview() },
+            p("iso: new label add+remove, window host") { h in let v = self.label(); h.addSubview(v); v.removeFromSuperview() },
+            p("iso: new label add+remove, NON-window host", inWindow: false) { h in
+                let v = self.label(); h.addSubview(v); v.removeFromSuperview()
+            },
+            p("iso: SAME label instance add+remove, window host") { h in h.addSubview(reused); reused.removeFromSuperview() },
+            p("iso: new label add only (kept attached), window host", after: { accumulated.forEach { $0.removeFromSuperview() }; accumulated = [] }) { h in
+                let v = self.label(); h.addSubview(v); accumulated.append(v)
+            },
+            p("iso: new label add+remove but instance retained (no dealloc)", after: { retained = [] }) { h in
+                let v = self.label(); h.addSubview(v); v.removeFromSuperview(); retained.append(v)
+            },
+        ])
     }
 
-    func testProbeRealViews() {
-        probe("measureIsland x3 on an ATTACHED TextBlockView (every remeasure of an on-screen column)", n: 300) { host, _ in
-            let block: TextBlockView
-            if let existing = host.subviews.first as? TextBlockView { block = existing } else {
-                block = TextBlockView(text: "Plain words " + String(repeating: "more ", count: 30))
-                host.addSubview(block)
-            }
-            for _ in 0 ..< 3 { _ = ChatTurnView.measureIsland(block, width: 600) }
+    // MARK: knobs: what makes a control not leak?
+
+    func testKnobs() {
+        func cycle(_ make: @escaping () -> NSView) -> (NSView) -> Void {
+            { h in let v = make(); h.addSubview(v); v.removeFromSuperview() }
         }
-        probe("measureIsland x3 on an ATTACHED UserBubbleView", n: 300) { host, _ in
-            let v: UserBubbleView
-            if let existing = host.subviews.first as? UserBubbleView { v = existing } else {
-                v = UserBubbleView(text: "a question the user asked")
-                host.addSubview(v)
-            }
-            for _ in 0 ..< 3 { _ = ChatTurnView.measureIsland(v, width: 600) }
-        }
-        var counter = 0
-        var turn = ChatTurn(userInput: "question", timestamp: Date(), blocks: [.text("alpha")], isComplete: false)
-        probe("live ChatTurnView: the streaming block's text replaced each delta (same length)", n: 300) { host, _ in
-            let view: ChatTurnView
-            if let existing = host.subviews.first as? ChatTurnView { view = existing } else {
-                view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState())
-                view.setIslandWidth(800)
-                host.addSubview(view)
-            }
-            counter += 1
-            turn.blocks = [.text(counter % 2 == 0 ? "alpha beta gamma delta" : "omega sigma theta lambda")]
-            view.update(turn: turn)
-            host.layoutSubtreeIfNeeded()
+        chain([
+            p("knob: plain NSTextField subclass (no custom cell)", cycle { let l = PlainSub(labelWithString: "hello"); return l }),
+            p("knob: NSTextField subclass with custom NSTextFieldCell subclass", cycle { let l = CellSub(labelWithString: "hello"); return l }),
+            p("knob: CopyMenuTextField", cycle { CopyMenuTextField(labelWithString: "hello") }),
+            p("knob: explicit label.appearance = darkAqua", cycle {
+                let l = self.label(); l.appearance = NSAppearance(named: .darkAqua); return l
+            }),
+            p("knob: wantsLayer", cycle { let l = self.label(); l.wantsLayer = true; return l }),
+            p("knob: refusesFirstResponder + focusRingType none", cycle {
+                let l = self.label(); l.refusesFirstResponder = true; l.focusRingType = .none; return l
+            }),
+            p("knob: controlSize small", cycle { let l = self.label(); l.controlSize = .small; return l }),
+            p("knob: borderShape (macOS 26)", cycle {
+                let l = self.label()
+                if #available(macOS 26.0, *) { l.borderShape = .automatic }
+                return l
+            }),
+            p("knob: cell.isScrollable / usesSingleLineMode", cycle {
+                let l = self.label(); l.cell?.usesSingleLineMode = true; l.cell?.isScrollable = false; return l
+            }),
+            p("knob: NSTextView as the label (not a control)", cycle {
+                let t = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 20)); t.string = "hello"; t.isEditable = false; return t
+            }),
+        ])
+    }
+
+    // MARK: our views
+
+    func testRealViews() {
+        chain([
+            p("real: UserBubbleView", n: 150, cycleOf { UserBubbleView(text: "a question the user asked") }),
+            p("real: TextBlockView plain", n: 150, cycleOf { TextBlockView(text: "Plain words " + String(repeating: "more ", count: 30)) }),
+            p("real: ToolCallView", n: 150, cycleOf {
+                ToolCallView(data: ToolCallData(toolName: "Bash", inputSummary: "ls -la /tmp", inputFull: "{}"))
+            }),
+            p("real: ChatTurnView (4 blocks + bubble)", n: 100, cycleOf {
+                let t = ChatTurn(userInput: "question about the thing", timestamp: Date(), blocks: [
+                    .text("A plain paragraph of text that wraps. " + String(repeating: "word ", count: 40)),
+                    .text("# Heading\n\nSome **markdown** with `code` and a list:\n\n- one\n- two"),
+                    .toolCall(ToolCallData(toolName: "Bash", inputSummary: "ls -la", inputFull: "{\"command\":\"ls -la\"}")),
+                    .text("Closing text."),
+                ], isComplete: true)
+                let v = ChatTurnView(turn: t, contentAvailable: true, interaction: TurnInteractionState())
+                v.setIslandWidth(800)
+                return v
+            }),
+        ])
+    }
+
+    private func cycleOf(_ make: @escaping () -> NSView) -> (NSView) -> Void {
+        { h in
+            let v = make()
+            v.frame = NSRect(x: 0, y: 0, width: 600, height: 100)
+            h.addSubview(v)
+            h.layoutSubtreeIfNeeded()
+            v.removeFromSuperview()
         }
     }
 }

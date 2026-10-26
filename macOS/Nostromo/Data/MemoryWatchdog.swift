@@ -77,6 +77,8 @@ final class MemoryWatchdog {
     var now: () -> Date = { Date(timeIntervalSinceReferenceDate: ProcessInfo.processInfo.systemUptime) }
     /// Where the memory is, for the log line and the toast when a shed did not help. Never `heap`.
     var summarize: () -> MemorySummary = { MemorySummary.capture() }
+    /// Where `summarize` runs. Off the main thread by default (see `report`); tests run it inline.
+    var summaryExecutor: (@escaping () -> Void) -> Void = { DispatchQueue.global(qos: .utility).async(execute: $0) }
 
     private var pressureSource: DispatchSourceMemoryPressure?
     private var pollTimer: DispatchSourceTimer?
@@ -321,7 +323,22 @@ final class MemoryWatchdog {
             return
         }
         toldAboutUnhelpfulShed = true
-        let summary = summarize()
+        // Where the memory is takes a VM region walk and a malloc-zone statistics call, which is about
+        // 90 ms with 3.5 million live blocks and 10,000 regions on a CI Mac (`MemorySummaryCostTests`)
+        // and grows with the heap: it is the wrong thing to do on the main thread of an app that is
+        // already at its memory limit. The toast follows when it is ready.
+        let summarize = self.summarize
+        summaryExecutor { [weak self] in
+            let summary = summarize()
+            let deliver = { self?.announceMemoryHeldOutsideTranscript(summary: summary, reason: reason, before: before,
+                                                                      after: after) }
+            if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
+        }
+    }
+
+    private func announceMemoryHeldOutsideTranscript(summary: MemorySummary, reason: String, before: Int, after: Int) {
+        let figures = "Footprint \(Self.megabytes(before)) → \(Self.megabytes(after)) MB."
+        let sentence = reason.prefix(1).uppercased() + reason.dropFirst()
         log.error("""
             shed did not help: \(Self.megabytes(before))MB → \(Self.megabytes(after))MB \
             (\(reason, privacy: .public)); \(summary.oneLine, privacy: .public); \

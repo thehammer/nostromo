@@ -86,6 +86,9 @@ final class MemoryWatchdogBackoffTests: XCTestCase {
             // use it to know, without sleeping, that a shed has run to its end.
             watchdog.relievePressure = { [unowned self] in self.finishedSheds += 1 }
             watchdog.summarize = { MemoryWatchdogBackoffTests.incidentSummary }
+            // The real watchdog summarizes off the main thread (`testTheMemorySummaryIsTakenOffTheMainThread...`);
+            // these tests read the toast straight after the shed, so they run it inline.
+            watchdog.summaryExecutor = { $0() }
             watchdog.onWarn = { [unowned self] title, detail in self.toasts.append((title, detail)) }
             // Long enough that a stray timeout never finishes anything inside a test.
             watchdog.shedCompletionTimeout = 60
@@ -842,5 +845,48 @@ final class MemoryWatchdogBackoffTests: XCTestCase {
         XCTAssertEqual(rig.scopes, [.offscreenOnly, .everything])
         XCTAssertFalse(rig.settled { rig.criticalShed(at: 50) }, "the 30 s minimum gap still applies")
         XCTAssertTrue(rig.settled { rig.criticalShed(at: 71) })
+    }
+
+    // MARK: - The memory summary is not taken on the main thread
+
+    /// Summarizing walks the VM regions and the malloc zones, which grows with the heap: the wrong
+    /// work for the main thread of an app that is already over its limit. With the real executor the
+    /// summary is taken elsewhere, and the toast still reaches the operator on the main thread.
+    func testTheMemorySummaryIsTakenOffTheMainThreadAndTheToastStillArrivesOnMain() throws {
+        let rig = Rig()
+        rig.watchdog.summaryExecutor = { DispatchQueue.global(qos: .utility).async(execute: $0) }
+
+        let lock = NSLock()
+        var summarizeRanOnMain: [Bool] = []
+        var warnings: [(title: String, detail: String, onMain: Bool)] = []
+        rig.watchdog.summarize = {
+            lock.lock(); summarizeRanOnMain.append(Thread.isMainThread); lock.unlock()
+            return MemoryWatchdogBackoffTests.incidentSummary
+        }
+        rig.watchdog.onWarn = { title, detail in
+            lock.lock(); warnings.append((title, detail, Thread.isMainThread)); lock.unlock()
+        }
+
+        XCTAssertTrue(rig.poll(at: 0), "a shed that frees nothing")
+
+        func heldOutsideToasts() -> [(title: String, detail: String, onMain: Bool)] {
+            lock.lock(); defer { lock.unlock() }
+            return warnings.filter { $0.detail.contains(Self.heldOutsidePhrase) }
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while heldOutsideToasts().isEmpty, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+
+        let toasts = heldOutsideToasts()
+        let toast = try XCTUnwrap(toasts.first, "the 'held outside the transcript' toast never arrived")
+        XCTAssertEqual(toasts.count, 1)
+        XCTAssertEqual(toast.title, Self.toastTitle)
+        XCTAssertTrue(toast.detail.contains("Malloc Small 1678 MB"), toast.detail)
+        XCTAssertTrue(toast.detail.contains("Footprint 2000 → 2000 MB."), toast.detail)
+        XCTAssertTrue(toast.onMain, "the operator-facing callback must run on the main thread")
+
+        lock.lock(); let ranOnMain = summarizeRanOnMain; lock.unlock()
+        XCTAssertEqual(ranOnMain, [false], "the summary must be taken once, and not on the main thread")
     }
 }
