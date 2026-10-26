@@ -37,8 +37,15 @@
 //!   [`LineAssembler::take_committed`] calls, and beyond that the oldest rows
 //!   are dropped and reported as one `[… N lines dropped …]` line.
 //! * Characters that render as nothing (zero-width space, joiners, word
-//!   joiner, soft hyphen, BOM) and bidi / tag controls are dropped, so a
-//!   secret cannot be split by them past the redactor.
+//!   joiner, soft hyphen, BOM) and bidi / tag controls are **kept** in the
+//!   lines [`LineAssembler::take_committed`] returns, so the redactor sees what
+//!   was sent: one of them can stand in for a space (`curl<ZWSP>-u user:pw`,
+//!   `--password<ZWSP>value`), and only the redactor knows whether it was
+//!   inside a word or between two. [`deliver`](super::deliver) strips them from
+//!   the text it hands out, after redaction. Like a combining character, one
+//!   takes a column here, although a terminal shows it zero columns wide.
+//!   [`LineAssembler::current_partial`] strips them (it is the prompt line, not
+//!   agent text).
 //! * Only `A B C D G K P` (CSI) are interpreted. Every other sequence
 //!   (`H`, `J`, `L`, scroll regions, mode switches, …) is stripped and has no
 //!   effect.
@@ -229,7 +236,9 @@ impl LineAssembler {
                 #[cfg(test)]
                 self.renders
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let text = self.rows[self.cursor_row].text();
+                let text = strip_hidden(&self.rows[self.cursor_row].text())
+                    .trim_end_matches(' ')
+                    .to_owned();
                 (!text.is_empty()).then_some(text)
             })
             .as_deref()
@@ -296,7 +305,7 @@ impl LineAssembler {
             '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => {
                 self.parser.state = State::Str { saw_escape: false }
             }
-            c if c.is_control() || is_spoofing(c) || is_filler(c) => {}
+            c if c.is_control() => {}
             c => self.put(c),
         }
     }
@@ -446,7 +455,7 @@ impl LineAssembler {
             && self.rows.len() > 1
         {
             if let Some(row) = self.rows.pop_front() {
-                if row.may_hold_key_marker() {
+                if row.may_hold_dash_run() {
                     self.dropped_in_key = private_key_open_after(&row.text(), self.dropped_in_key);
                 }
                 self.cells_total = self.cells_total.saturating_sub(row.width());
@@ -458,11 +467,12 @@ impl LineAssembler {
 }
 
 impl Row {
-    /// Whether the row may hold a key marker (`-----BEGIN …`, `-----END …`):
-    /// it has at least five cells that are a dash or not ASCII (a dash
-    /// look-alike, or an invisible character spliced into the dashes). Checked
-    /// on stored cells so a row of padding costs nothing.
-    fn may_hold_key_marker(&self) -> bool {
+    /// Cheap pre-filter for a key marker's five dashes (`-----BEGIN …`,
+    /// `-----END …`): whether the row has at least five cells that are `-` or
+    /// not ASCII (a dash look-alike, or an invisible character spliced into the
+    /// dashes). It says nothing about `BEGIN` or `PRIVATE KEY`; the redactor
+    /// decides. Checked on stored cells so a row of padding costs nothing.
+    fn may_hold_dash_run(&self) -> bool {
         self.cells
             .iter()
             .filter(|&&(_, c)| c == '-' || !c.is_ascii())
@@ -538,12 +548,25 @@ fn is_spoofing(c: char) -> bool {
 /// Characters that render as nothing and so can sit inside a token or a number
 /// without changing how it looks (`ghp_<ZWSP>…`, `219-<ZWSP>09-9999`): soft
 /// hyphen, combining grapheme joiner, zero-width space / non-joiner / joiner,
-/// the word joiner and invisible operators, and the byte-order mark. They are
-/// dropped before the text is stored, so the redactor sees the line as a
-/// reader does.
+/// the word joiner and invisible operators, and the byte-order mark. They stay
+/// in the committed lines for the redactor and are stripped by
+/// [`strip_hidden`] when text is shown.
 fn is_filler(c: char) -> bool {
     matches!(c,
         '\u{ad}' | '\u{34f}' | '\u{200b}'..='\u{200d}' | '\u{2060}'..='\u{2064}' | '\u{feff}')
+}
+
+/// `text` as a reader sees it: filler and bidi / tag controls removed (see the
+/// module docs). Trailing spaces left behind are trimmed, as the assembler
+/// trims them. Only for text that has already been redacted, or that is never
+/// sent to an agent.
+pub(crate) fn strip_hidden(text: &str) -> std::borrow::Cow<'_, str> {
+    let hidden = |c: char| is_spoofing(c) || is_filler(c);
+    if !text.chars().any(hidden) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let stripped: String = text.chars().filter(|&c| !hidden(c)).collect();
+    std::borrow::Cow::Owned(stripped.trim_end_matches(' ').to_owned())
 }
 
 /// Incremental UTF-8 decoder: split sequences are reassembled across calls

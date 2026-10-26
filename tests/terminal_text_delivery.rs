@@ -31,6 +31,9 @@ use nostromo::terminal::follow::{
 };
 use nostromo::terminal::redact::{RedactionKind, Redactor, MAX_UNTERMINATED_KEY_BYTES};
 
+#[path = "support/redaction_shapes.rs"]
+mod shapes;
+
 const CAP_BYTES: usize = DeliveryPolicy::CAP_BYTES;
 const CONSONANTS: &str = "BCDFGHJKLMNPQRSTVWXZ";
 const MIXED: &str = "AbCdEfGhJkLmNpQrStUvWxYz23456789";
@@ -763,6 +766,12 @@ const HOSTILE_PATTERNS: &[&str] = &[
     "https://u:",
     "-----BEGIN ",
     "curl ",
+    "curl -u '",
+    "curl -u ",
+    "curl|",
+    "curl -u \"",
+    "curl -u a:'",
+    "curl -u 'a:",
     "mysql -p ",
     "pass ",
     "123-45-6789-",
@@ -1015,8 +1024,9 @@ fn fuzz_pure_soup_never_panics_leaks_escapes_or_exceeds_the_cap() {
 //
 // A secret dressed in zero-width, soft-hyphen, BOM, fullwidth or dash
 // look-alike characters must not reach the agent, end to end: the assembler
-// drops the invisible filler and the redactor (a second line of defence) reads
-// through whatever is left.
+// keeps the invisible filler in the lines it commits (it can stand in for a
+// space) and the redactor reads it as a separator or as part of a word;
+// `deliver` strips the filler from the redacted text it hands out.
 
 const ZWSP: char = '\u{200b}';
 const ZWNJ: char = '\u{200c}';
@@ -1103,10 +1113,11 @@ fn dressed_secrets() -> Vec<Dressed> {
             format!("sent Bearer {} ok", splice(&bearer, 9, hidden)),
             vec![],
         );
-        // Not covered on this path: `Bearer<filler>token`. The assembler drops
-        // the filler, which leaves `Bearertoken`, indistinguishable from an
-        // identifier (`BearerTokenAuthenticationFilter`). `Redactor::redact`
-        // on the raw text does cover it (it also reads the filler as a space).
+        add(
+            format!("bearer glued to its token by U+{u:04X}"),
+            format!("sent Bearer{hidden}{bearer} ok"),
+            vec![],
+        );
         add(
             format!("url password split by U+{u:04X}"),
             format!(
@@ -1296,4 +1307,137 @@ fn a_key_header_with_look_alike_dashes_that_scrolls_out_of_the_buffer_still_swal
         .to_owned();
         assert!(!text.contains("KB"), "{header:?}: {text:?}");
     }
+}
+
+// ───────────────────────────── hidden separators and curl quoting ────────────
+//
+// Every shape in `tests/support/redaction_shapes.rs` goes through the delivery
+// path (bytes -> `LineAssembler` -> `deliver`), whole and one byte at a time.
+// `terminal_text_redaction.rs` runs the same shapes through `Redactor::redact`
+// alone: the redactor behind the assembler must be at least as strong as the
+// redactor on raw text, so a hidden character standing in for a space
+// (`curl<ZWSP>-u user:pw`, `Bearer<ZWSP>token`) cannot be a way past it.
+
+/// One line fed whole (`bytewise` false) or a byte at a time, then delivered.
+fn deliver_one(line: &str, bytewise: bool) -> Out {
+    let mut rig = Rig::new();
+    if bytewise {
+        for byte in line.as_bytes() {
+            rig.feed(std::slice::from_ref(byte));
+        }
+        rig.feed(b"\n");
+    } else {
+        rig.feed_lines(&[line]);
+    }
+    rig.deliver()
+}
+
+fn delivered_failures(all: &[shapes::Shape]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for s in all {
+        for bytewise in [false, true] {
+            let out = deliver_one(&s.line, bytewise);
+            if let Some(why) = shapes::verdict(s, &out.text, out.redactions.len()) {
+                let feed = if bytewise { "byte by byte" } else { "whole" };
+                failures.push(format!("[{}] ({feed}) input {:?}: {why}", s.name, s.line));
+            }
+        }
+    }
+    failures
+}
+
+fn assert_shapes_delivered_redacted(all: &[shapes::Shape]) {
+    let failures = delivered_failures(all);
+    assert!(
+        failures.is_empty(),
+        "{} of {} shapes leaked on the delivery path:\n{}",
+        failures.len(),
+        all.len() * 2,
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn a_hidden_character_standing_in_for_a_blank_never_hides_a_credential_on_the_delivery_path() {
+    let all: Vec<shapes::Shape> = shapes::separators()
+        .iter()
+        .flat_map(|(label, f)| shapes::filler_as_separator_shapes(label, f))
+        .collect();
+    assert!(all.len() >= 200, "only {} shapes", all.len());
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn curl_credentials_are_redacted_in_every_quoting_the_shell_allows_on_the_delivery_path() {
+    let all = shapes::curl_quote_shapes();
+    assert!(all.len() >= 15);
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn curl_credentials_in_every_quoting_are_redacted_behind_a_hidden_separator_on_the_delivery_path() {
+    let all: Vec<shapes::Shape> = shapes::separators()
+        .iter()
+        .flat_map(|(label, f)| {
+            shapes::curl_quote_shapes()
+                .iter()
+                .map(|s| shapes::with_filler_before_the_flag(s, label, f))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn the_delivery_path_is_at_least_as_strong_as_the_redactor_on_raw_text() {
+    // Whatever the raw redactor catches on a shape, the delivery path catches:
+    // checked shape by shape so a gap names the exact input.
+    let mut all = shapes::curl_quote_shapes();
+    for (label, f) in shapes::separators() {
+        all.extend(shapes::filler_as_separator_shapes(&label, &f));
+    }
+    let mut gaps = Vec::new();
+    for s in &all {
+        let (raw, raw_kinds) = Redactor::new().redact(&s.line);
+        if shapes::verdict(s, &raw, raw_kinds.len()).is_some() {
+            continue; // the raw redactor misses it: its own test reports that
+        }
+        let out = deliver_one(&s.line, false);
+        if let Some(why) = shapes::verdict(s, &out.text, out.redactions.len()) {
+            gaps.push(format!(
+                "[{}] raw text is redacted but delivery is not, input {:?}: {why}",
+                s.name, s.line
+            ));
+        }
+    }
+    assert!(gaps.is_empty(), "{}", gaps.join("\n"));
+}
+
+#[test]
+fn curl_without_a_password_and_ordinary_text_with_filler_are_delivered_intact_minus_the_filler() {
+    let mut lines: Vec<String> = shapes::curl_without_password_lines()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    for (_, f) in shapes::separators() {
+        lines.extend(shapes::ordinary_filler_lines(&f));
+    }
+    let mut failures = Vec::new();
+    for line in &lines {
+        for bytewise in [false, true] {
+            let out = deliver_one(line, bytewise);
+            let expected = shapes::without_filler(line);
+            if out.text != expected || !out.redactions.is_empty() {
+                failures.push(format!(
+                    "input {line:?} -> {:?} ({:?}), expected {expected:?}",
+                    out.text, out.redactions
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ordinary text was altered:\n{}",
+        failures.join("\n")
+    );
 }

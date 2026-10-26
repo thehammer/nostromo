@@ -404,22 +404,32 @@ fn other_c0_controls_are_dropped() {
 // ───────────────────────────── LineAssembler: unicode ────────────────────────
 
 #[test]
-fn bidi_and_tag_spoof_characters_are_dropped() {
-    let mut dropped: Vec<char> = Vec::new();
-    dropped.extend('\u{202A}'..='\u{202E}');
-    dropped.extend('\u{2066}'..='\u{2069}');
-    dropped.push('\u{200E}');
-    dropped.push('\u{200F}');
-    dropped.extend('\u{E0000}'..='\u{E007F}');
-    for c in dropped {
-        let input = format!("x{c}y\n");
-        assert_lines(input.as_bytes(), &["xy"]);
+fn bidi_and_tag_spoof_characters_stay_in_committed_lines_for_the_redactor() {
+    let mut hidden: Vec<char> = Vec::new();
+    hidden.extend('\u{202A}'..='\u{202E}');
+    hidden.extend('\u{2066}'..='\u{2069}');
+    hidden.push('\u{200E}');
+    hidden.push('\u{200F}');
+    hidden.extend('\u{E0000}'..='\u{E007F}');
+    for c in hidden {
+        // Kept: one of them can stand in for a space, and only the redactor
+        // can tell. `deliver` strips them from the text it hands out.
+        let line = format!("x{c}y");
+        assert_lines(format!("{line}\n").as_bytes(), &[line.as_str()]);
     }
 }
 
 #[test]
-fn a_filename_spoofed_with_a_right_to_left_override_is_shown_in_logical_order() {
-    assert_lines("invoice\u{202E}fdp.exe\n".as_bytes(), &["invoicefdp.exe"]);
+fn a_right_to_left_override_stays_in_the_committed_line_and_not_in_the_prompt_line() {
+    assert_lines(
+        "invoice\u{202E}fdp.exe\n".as_bytes(),
+        &["invoice\u{202E}fdp.exe"],
+    );
+    assert_assembled(
+        "invoice\u{202E}fdp.exe".as_bytes(),
+        &[],
+        Some("invoicefdp.exe"),
+    );
 }
 
 #[test]
@@ -431,7 +441,9 @@ fn ordinary_non_ascii_text_is_kept() {
 }
 
 /// Characters that draw nothing: they only exist to split a secret so a
-/// pattern cannot see it. The assembler drops them before text is committed.
+/// pattern cannot see it, or to stand in for a space. The assembler keeps them
+/// in the lines it commits (the redactor decides what they were); `deliver`
+/// strips them from the redacted text, and the prompt line never shows them.
 fn invisible_filler() -> Vec<char> {
     let mut chars = vec!['\u{ad}', '\u{34f}', '\u{200b}', '\u{200c}', '\u{200d}'];
     chars.extend('\u{2060}'..='\u{2064}');
@@ -440,28 +452,28 @@ fn invisible_filler() -> Vec<char> {
 }
 
 #[test]
-fn invisible_filler_characters_are_dropped_from_committed_lines() {
+fn invisible_filler_characters_stay_in_committed_lines() {
     for c in invisible_filler() {
-        let input = format!("x{c}y\n");
-        assert_lines(input.as_bytes(), &["xy"]);
+        let line = format!("x{c}y");
+        assert_lines(format!("{line}\n").as_bytes(), &[line.as_str()]);
     }
 }
 
 #[test]
-fn a_word_split_by_invisible_filler_is_one_word_again_whichever_way_the_bytes_arrive() {
+fn a_word_split_by_invisible_filler_is_kept_as_sent_whichever_way_the_bytes_arrive() {
     let split: String =
         ["pa", "ss", "wo", "rd"].join("\u{200b}\u{200d}\u{2060}\u{feff}\u{ad}\u{200c}");
     let input = format!("{split}=value\n");
     // `assert_lines` also feeds one byte at a time, so a character whose UTF-8
     // sequence is cut between feeds is covered too.
-    assert_lines(input.as_bytes(), &["password=value"]);
+    assert_lines(input.as_bytes(), &[format!("{split}=value").as_str()]);
 }
 
 #[test]
-fn a_line_of_nothing_but_invisible_filler_is_an_empty_line() {
+fn a_line_of_nothing_but_invisible_filler_is_a_line_of_filler() {
     assert_lines(
         "a\n\u{200b}\u{feff}\u{2060}\nb\n".as_bytes(),
-        &["a", "", "b"],
+        &["a", "\u{200b}\u{feff}\u{2060}", "b"],
     );
 }
 
@@ -472,6 +484,25 @@ fn invisible_filler_in_the_line_being_typed_is_not_shown_either() {
         &[],
         Some("prompt$ ls"),
     );
+}
+
+#[test]
+fn a_line_being_typed_shows_no_filler_but_commits_with_it_when_the_newline_arrives() {
+    for c in invisible_filler() {
+        let typed = format!("curl{c}-u admin:x");
+        let shown = "curl-u admin:x";
+        // Still on the cursor row: the prompt line has no filler.
+        assert_assembled(typed.as_bytes(), &[], Some(shown));
+        // The same text committed keeps it.
+        assert_lines(format!("{typed}\n").as_bytes(), &[typed.as_str()]);
+        // Typed first, committed after: what was hidden from view is still
+        // there for the redactor once the line is whole.
+        let mut a = LineAssembler::new();
+        a.feed(typed.as_bytes());
+        assert_eq!(a.current_partial(), Some(shown), "U+{:04X}", c as u32);
+        a.feed(b"\n");
+        assert_eq!(a.take_committed(), vec![typed], "U+{:04X}", c as u32);
+    }
 }
 
 #[test]
