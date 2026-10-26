@@ -58,6 +58,7 @@ pub(crate) async fn fetch(
     .await;
 
     let mut items = Vec::new();
+    let mut deferred = false;
     for slug in &slugs {
         let id = format!("{}:{slug}", src.id);
         let url = article_url(&origin, &src.link_prefix, slug);
@@ -67,7 +68,10 @@ pub(crate) async fn fetch(
         }
         let og = match read_now.iter().position(|s| *s == slug) {
             Some(i) => articles[i].clone(),
-            None if is_new(slug) && ctx.state.baseline_done => continue, // deferred
+            None if is_new(slug) && ctx.state.baseline_done => {
+                deferred = true;
+                continue;
+            }
             None => Og::default(),
         };
         items.extend(
@@ -82,10 +86,17 @@ pub(crate) async fn fetch(
             .into_item(src, ctx.now),
         );
     }
+    // With links still waiting, keep no validators: a 304 next run would
+    // return the stored list and the deferred articles would never be opened.
+    let (etag, last_modified) = if deferred {
+        (None, None)
+    } else {
+        (body.etag, body.last_modified)
+    };
     Ok(Some(Fetch {
         items,
-        etag: body.etag,
-        last_modified: body.last_modified,
+        etag,
+        last_modified,
     }))
 }
 
@@ -93,7 +104,7 @@ pub(crate) async fn fetch(
 /// `href="<prefix><slug>"`, relative or on the same page's host.
 pub fn parse_slugs(html: &str, prefix: &str) -> Vec<String> {
     let pattern = format!(
-        r#"href\s*=\s*["'](?:https?://[^/"']+)?{}([a-z0-9][a-z0-9-]*)/?(?:[?#][^"']*)?["']"#,
+        r#"href\s*=\s*["'](?:https?://[^/"']+)?{}([a-z0-9][a-z0-9-]{{0,99}})/?(?:[?#][^"']*)?["']"#,
         regex::escape(prefix)
     );
     let Ok(re) = Regex::new(&pattern) else {
@@ -187,6 +198,14 @@ mod tests {
             <a href="/news/b-post">again</a> <a href="/news/">index</a>
             <a href="/news/a/b">deeper</a> <a href="/careers/x">no</a>"#;
         assert_eq!(parse_slugs(html, "/news/"), ["b-post", "a-post", "c-post"]);
+    }
+
+    #[test]
+    fn an_oversized_slug_is_not_a_slug() {
+        let long = "a".repeat(101);
+        let ok = "a".repeat(100);
+        let html = format!(r#"<a href="/news/{long}">x</a> <a href="/news/{ok}">y</a>"#);
+        assert_eq!(parse_slugs(&html, "/news/"), [ok]);
     }
 
     #[test]

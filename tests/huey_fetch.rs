@@ -1569,6 +1569,102 @@ async fn serve_with_etag(server: &MockServer, p: &str, body: &str, etag: &str) {
         .await;
 }
 
+#[tokio::test]
+async fn a_304_after_links_were_deferred_does_not_strand_them() {
+    let server = MockServer::start().await;
+    let cfg = cfg(&[news_src(&server.uri())]);
+    let dir = tempfile::tempdir().unwrap();
+    mount_news(&server, &fixture("news-index.html")).await;
+    run(&cfg, dir.path(), window(), earlier()).await;
+
+    let fifteen: String = (1..=15)
+        .map(|n| format!("<li><a href=\"/news/story-{n:02}\">Story {n}</a></li>\n"))
+        .collect();
+    let index = fixture("news-index.html").replace("<ul>\n", &format!("<ul>\n{fifteen}"));
+    // From here on the index answers 304 to its own ETag.
+    server.reset().await;
+    serve_with_etag(&server, "/news", &index, "\"idx\"").await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/news/story-\d+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<meta property="og:title" content="A story"><meta property="og:description" content="Details.">"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let second = run(&cfg, dir.path(), window(), now()).await;
+    assert_eq!(second.items.len(), 10);
+    let third = run(&cfg, dir.path(), window(), ts("2026-10-25T13:00:00Z")).await;
+
+    assert_eq!(
+        third.items.len(),
+        15,
+        "the five deferred links are opened on the next run, not hidden by a 304"
+    );
+    assert_eq!(count_requests(&server, "/news/").await, 15);
+}
+
+#[tokio::test]
+async fn a_304_after_a_long_gap_still_returns_items_up_to_three_weeks_old() {
+    let server = MockServer::start().await;
+    let feed = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+        <title>t</title><id>urn:f</id><updated>2026-10-07T00:00:00Z</updated>
+        <entry><id>urn:old</id><title>An older post</title>
+          <updated>2026-10-07T12:00:00Z</updated><published>2026-10-07T12:00:00Z</published>
+          <link href="https://blog.example.test/old"/></entry></feed>"#;
+    serve_with_etag(&server, "/f.xml", feed, "\"f1\"").await;
+    let cfg = cfg(&[feed_src(
+        "oldfeed",
+        "curated",
+        &format!("{}/f.xml", server.uri()),
+    )]);
+    let dir = tempfile::tempdir().unwrap();
+    let long_window = ts("2026-10-01T00:00:00Z");
+
+    // The post is 18 days old when first read; the next report comes later
+    // and the server answers 304.
+    let first = run(&cfg, dir.path(), long_window, now()).await;
+    let later = run(&cfg, dir.path(), long_window, ts("2026-10-26T12:00:00Z")).await;
+
+    assert_eq!(ids(&first), ["oldfeed:urn:old"]);
+    assert_eq!(ids(&later), ids(&first));
+}
+
+#[tokio::test]
+async fn fetching_and_pooling_without_a_huey_root_create_nothing() {
+    let (_server, cfg) = notes_fixture().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("huey");
+
+    let out = run(&cfg, &root.join("state"), window(), now()).await;
+    assert!(save_pool(&root.join("pool"), day(2026, 10, 25), &out).is_err());
+
+    assert!(!root.exists(), "nothing is created when Huey is not set up");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn state_and_pool_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_server, cfg) = notes_fixture().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("huey");
+    std::fs::create_dir(&root).unwrap();
+
+    let out = run(&cfg, &root.join("state"), window(), now()).await;
+    save_pool(&root.join("pool"), day(2026, 10, 25), &out).unwrap();
+
+    let mode = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    for dir in ["state", "state/sources", "pool"] {
+        assert_eq!(mode(root.join(dir)), 0o700, "{dir}");
+    }
+    assert_eq!(mode(root.join("pool/2026-10-25.json")), 0o600);
+    assert_eq!(
+        mode(root.join("state/sources/claude-docs-release-notes.json")),
+        0o600
+    );
+}
+
 // ── GitHub releases and Hacker News ──────────────────────────────────────────
 
 #[tokio::test]
