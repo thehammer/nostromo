@@ -6,7 +6,8 @@ build:
 release:
 	cargo build --release
 
-install: daemon-restart-guard release
+install: release
+	@$(RESTART_GUARD)
 	cargo install --path .
 	@# The `nostromo` TUI binary no longer exists, and `cargo install` does not remove an old ~/.cargo/bin/nostromo.
 	@echo "installed nostromd, nostromo-mcp-bridge, nostromo-activity-hook, nostromo-guard, sensitive-text-scan, nostromo-google-auth to ~/.cargo/bin"
@@ -70,15 +71,14 @@ clean:
 ## with FORCE=1 (or NOSTROMO_FORCE_DAEMON_RESTART=1). Crashes and a raw SIGTERM still
 ## end shells; this guards only the controlled paths. See docs/terminal.md.
 ##
-## Ordering under `make -j`: the guard is deliberately NOT ordered after `release`.
-## It asks the *running* daemon through the installed nostromd, so it needs no fresh
-## build, and `uninstall-daemon` would otherwise compile for nothing. What matters
-## under -j is that the guard is never racing a build that rewrites
-## target/release/nostromd, so the builds wait for it (order-only, below).
-release daemon: | daemon-restart-guard
+## Ordering: the guard is NOT a prerequisite of anything, so build-only targets
+## (`make release`, `make daemon`) are never blocked by it, even order-only. The
+## install targets run it as the first recipe line, i.e. after their build
+## prerequisites finish (also under `make -j`); `uninstall-daemon` builds nothing.
+RESTART_GUARD = FORCE="$(FORCE)" bin/nostromo-restart-guard
 
 daemon-restart-guard:
-	@FORCE="$(FORCE)" bin/nostromo-restart-guard
+	@$(RESTART_GUARD)
 
 ## Build the nostromd daemon binary and its production-shell guard (release).
 daemon:
@@ -88,7 +88,8 @@ daemon:
 ##
 ## Installs nostromd to $HOME/.local/bin/nostromd and loads it as a launchd
 ## user agent so it starts automatically at login.
-install-daemon: daemon-restart-guard daemon
+install-daemon: daemon
+	@$(RESTART_GUARD)
 	@mkdir -p "$(HOME)/.local/bin"
 	@mkdir -p "$(HOME)/Library/LaunchAgents"
 	@mkdir -p "$(HOME)/.cache/nostromd/log"
@@ -137,7 +138,8 @@ install-daemon: daemon-restart-guard daemon
 	@echo "nostromd loaded — check status with: launchctl print gui/$$(id -u)/com.hammer.nostromd"
 
 ## Unload and remove the nostromd launchd agent and binary.
-uninstall-daemon: daemon-restart-guard
+uninstall-daemon:
+	@$(RESTART_GUARD)
 	launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \

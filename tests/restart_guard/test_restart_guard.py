@@ -290,23 +290,37 @@ def recipe(target):
 
 
 class MakefileWiringTests(unittest.TestCase):
-    def test_every_target_that_restarts_the_daemon_runs_the_guard_first(self):
-        for target in ("install", "install-daemon", "uninstall-daemon"):
+    def dry_run(self, target):
+        result = subprocess.run(
+            ["make", "-n", "-C", os.path.dirname(MAKEFILE), target],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_build_only_targets_never_mention_the_guard(self):
+        for target in ("release", "daemon"):
             with self.subTest(target=target):
-                prereqs = prerequisites(target)
-                self.assertTrue(prereqs, "%s has no prerequisites" % target)
-                self.assertEqual(
-                    prereqs[0],
-                    "daemon-restart-guard",
-                    "%s must run the guard before anything else; it runs %s"
-                    % (target, prereqs),
-                )
+                self.assertNotIn("nostromo-restart-guard", self.dry_run(target))
+                self.assertNotIn("daemon-restart-guard", prerequisites(target))
+
+    def test_install_targets_run_the_guard_after_the_build(self):
+        for target, build in (("install", "cargo build --release"),
+                              ("install-daemon", "cargo build --release --bin nostromd")):
+            with self.subTest(target=target):
+                out = self.dry_run(target)
+                self.assertIn("nostromo-restart-guard", out)
+                self.assertLess(out.index(build), out.index("nostromo-restart-guard"))
+
+    def test_uninstall_daemon_runs_the_guard_before_anything_else(self):
+        out = self.dry_run("uninstall-daemon")
+        self.assertIn("nostromo-restart-guard", out.lstrip().splitlines()[0])
 
     def test_the_guard_target_runs_the_script_and_passes_force_through(self):
-        body = "\n".join(recipe("daemon-restart-guard"))
+        out = self.dry_run("daemon-restart-guard")
 
-        self.assertIn("bin/nostromo-restart-guard", body)
-        self.assertIn("$(FORCE)", body)
+        self.assertIn("bin/nostromo-restart-guard", out)
+        self.assertIn("FORCE=", out)
 
     def test_the_guard_target_is_phony(self):
         phony = re.search(r"^\.PHONY:([^\n]*)$", read_makefile(), re.M)
